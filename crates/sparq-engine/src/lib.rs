@@ -1,24 +1,27 @@
 //! sparq-engine: a SPARQL query engine over [`sparq_core::Graph`].
 //!
-//! M1 scope: SELECT with Basic Graph Patterns, FILTER (a useful expression
-//! subset), DISTINCT/LIMIT/OFFSET, and projection. SPARQL syntax is parsed to
-//! the algebra by `spargebra`; we build the physical plan (greedy join order by
-//! cardinality, index-scan leaves, hash joins) and execute it over the
-//! dictionary-encoded permutation indexes. Later milestones add merge joins,
-//! worst-case-optimal joins, OPTIONAL/UNION, aggregation and property paths.
+//! Supported (M2): SELECT with Basic Graph Patterns evaluated by greedy
+//! cardinality-ordered sort-merge / hash joins over the permutation indexes;
+//! FILTER (a useful expression subset with XSD-numeric-aware comparisons);
+//! OPTIONAL, UNION, MINUS, BIND, VALUES; aggregation (COUNT/SUM/AVG/MIN/MAX/
+//! GROUP_CONCAT) with GROUP BY and HAVING (as a post-group FILTER); ORDER BY;
+//! DISTINCT/REDUCED/LIMIT/OFFSET; projection and sub-SELECT. SPARQL is parsed
+//! to algebra by `spargebra`. Values computed at query time (BIND, aggregates)
+//! are interned in a per-query local vocabulary. Later milestones add
+//! worst-case-optimal joins, a DP planner and property paths.
 
 mod exec;
 
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;
-use spargebra::Query;
+use spargebra::{Query, SparqlParser};
 
 /// Executes a SPARQL query string against a graph.
 pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
-    let q = Query::parse(sparql, None).map_err(|e| e.to_string())?;
+    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     match q {
         Query::Select { pattern, .. } => exec::eval_select(graph, &pattern),
-        _ => Err("M1 supports SELECT queries only".into()),
+        _ => Err("only SELECT queries are supported".into()),
     }
 }
 
@@ -155,6 +158,124 @@ mod tests {
         );
     }
 
+    #[test]
+    fn optional() {
+        // carol has no ex:knows -> OPTIONAL leaves ?k unbound for carol
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?k WHERE { ?s ex:age ?a . OPTIONAL { ?s ex:knows ?k } }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 3);
+        let unbound = r.rows.iter().filter(|row| row[1].is_none()).count();
+        assert_eq!(unbound, 1); // carol
+    }
+
+    #[test]
+    fn union() {
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?x WHERE { { ?x ex:age 30 } UNION { ?x ex:age 25 } }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 2); // alice, bob
+    }
+
+    #[test]
+    fn bind_and_arithmetic() {
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?next WHERE { ?s ex:age ?a . BIND(?a + 1 AS ?next) FILTER(?next > 31) }",
+        )
+        .unwrap();
+        // ages 30,25,35 -> next 31,26,36 -> >31 keeps carol(36)
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn minus() {
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . MINUS { ?s ex:knows ?k } }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1); // only carol has no knows
+    }
+
+    #[test]
+    fn aggregate_count_and_group() {
+        // total count
+        let r = query(&g(), "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }").unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "\"8\"^^<http://www.w3.org/2001/XMLSchema#integer>");
+
+        // group by predicate, count
+        let r = query(
+            &g(),
+            "SELECT ?p (COUNT(*) AS ?c) WHERE { ?s ?p ?o } GROUP BY ?p",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 3); // knows, age, name
+    }
+
+    #[test]
+    fn aggregate_sum_avg_min_max() {
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (SUM(?a) AS ?s)(AVG(?a) AS ?av)(MIN(?a) AS ?mn)(MAX(?a) AS ?mx) WHERE { ?x ex:age ?a }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1);
+        // sum 90, min 25, max 35
+        assert!(r.rows[0][0].as_ref().unwrap().to_string().contains("90"));
+        assert!(r.rows[0][2].as_ref().unwrap().to_string().contains("25"));
+        assert!(r.rows[0][3].as_ref().unwrap().to_string().contains("35"));
+    }
+
+    #[test]
+    fn order_by() {
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a } ORDER BY DESC(?a)",
+        )
+        .unwrap();
+        let ages: Vec<String> = r.rows.iter().map(|row| row[1].as_ref().unwrap().to_string()).collect();
+        // 35, 30, 25 descending
+        assert!(ages[0].contains("35") && ages[2].contains("25"));
+    }
+
+    #[test]
+    fn having() {
+        // group ?s, count its triples, keep groups with >= 3 triples
+        let r = query(
+            &g(),
+            "SELECT ?s (COUNT(*) AS ?c) WHERE { ?s ?p ?o } GROUP BY ?s HAVING (COUNT(*) >= 3)",
+        )
+        .unwrap();
+        // alice & bob have 3 triples each (knows,age,name); carol has 2
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn values_clause() {
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a . VALUES ?s { ex:alice ex:carol } }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 2); // alice(30), carol(35)
+    }
+
+    #[test]
+    fn sub_select() {
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { { SELECT ?s WHERE { ?s ex:age ?a } ORDER BY DESC(?a) LIMIT 1 } }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1); // carol (oldest)
+    }
+
     // Differential: the engine's join machinery (merge/hash/greedy ordering)
     // must agree with a brute-force nested-loop evaluator over a random graph,
     // for a chain query and a triangle (cyclic) query.
@@ -197,7 +318,7 @@ mod tests {
 
     fn naive_count_chain(e: &[(u32, u32)]) -> usize {
         let mut c = 0;
-        for &(a, b) in e {
+        for &(_, b) in e {
             for &(b2, _) in e {
                 if b == b2 {
                     c += 1;

@@ -1,18 +1,65 @@
-//! Physical execution for M1: BGP via greedy-ordered hash joins over the
-//! permutation indexes, FILTER, and the solution modifiers.
+//! Physical execution: BGP via greedy-ordered merge/hash joins over the
+//! permutation indexes, plus OPTIONAL / UNION / MINUS / BIND / VALUES,
+//! aggregation (GROUP BY / HAVING via Filter), ORDER BY, sub-SELECT and the
+//! solution modifiers. All intermediate results are id-level (`Bindings`);
+//! values computed at query time (BIND, aggregates) get ids in a per-query
+//! `LocalVocab`, mirroring QLever's local vocabulary.
 
 use crate::QueryResult;
-use oxrdf::{NamedNode, Term, Variable};
+use oxrdf::vocab::xsd;
+use oxrdf::{Literal, Term, Variable};
 use rustc_hash::FxHashMap;
-use sparq_core::dict::Id;
+use sparq_core::dict::{Id, NO_ID};
 use sparq_core::store::Pattern as IdPattern;
 use sparq_core::Graph;
-use spargebra::algebra::{Expression, GraphPattern};
-use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
+use spargebra::algebra::{
+    AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
+};
+use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern};
+use std::cmp::Ordering;
 
-/// Intermediate result: a set of rows, each an id per `vars[i]`.
-/// `sorted_by` records the variable the rows are currently sorted on (if any),
-/// so the planner can use a merge join instead of building a hash table.
+/// Ids at or above this base index into the per-query [`LocalVocab`] instead of
+/// the graph dictionary. (M2 uses `u32` ids; the tagged 64-bit ValueId of M4
+/// removes this watermark split.)
+const LOCAL_BASE: Id = 1 << 31;
+
+#[inline]
+fn is_local(id: Id) -> bool {
+    id >= LOCAL_BASE
+}
+
+/// Per-query vocabulary for terms produced during evaluation (BIND, aggregates)
+/// that are not in the graph dictionary.
+#[derive(Default)]
+pub struct LocalVocab {
+    terms: Vec<Term>,
+}
+
+impl LocalVocab {
+    fn intern(&mut self, t: Term) -> Id {
+        let id = LOCAL_BASE + self.terms.len() as Id;
+        self.terms.push(t);
+        id
+    }
+    fn term(&self, id: Id) -> &Term {
+        &self.terms[(id - LOCAL_BASE) as usize]
+    }
+}
+
+/// Resolves an id to its term (graph dictionary or local vocab); `NO_ID` -> None.
+fn term_of(graph: &Graph, local: &LocalVocab, id: Id) -> Option<Term> {
+    if id == NO_ID {
+        None
+    } else if is_local(id) {
+        Some(local.term(id).clone())
+    } else {
+        Some(graph.dict.term(id).clone())
+    }
+}
+
+/// Intermediate result: rows of one id per `vars[i]` (`NO_ID` = unbound).
+/// `sorted_by` records the variable the rows are sorted on (if any), enabling a
+/// merge join instead of a hash table.
 struct Bindings {
     vars: Vec<Variable>,
     rows: Vec<Vec<Id>>,
@@ -23,129 +70,150 @@ impl Bindings {
     fn col(&self, v: &Variable) -> Option<usize> {
         self.vars.iter().position(|x| x == v)
     }
+    fn unsorted(vars: Vec<Variable>, rows: Vec<Vec<Id>>) -> Self {
+        Bindings { vars, rows, sorted_by: None }
+    }
 }
 
-/// Solution row exposed to callers (kept minimal for now).
-pub type Solution = Vec<Option<Term>>;
-
 pub fn eval_select(graph: &Graph, pattern: &GraphPattern) -> Result<QueryResult, String> {
-    // Peel solution modifiers (Project/Distinct/Reduced/Slice), then evaluate
-    // the conjunctive core (Join/Filter/Bgp).
-    let mut project: Option<Vec<Variable>> = None;
-    let mut distinct = false;
-    let mut offset = 0usize;
-    let mut limit: Option<usize> = None;
-    let mut core = pattern;
+    let mut local = LocalVocab::default();
+    let bindings = eval_modified(graph, &mut local, pattern)?;
 
-    loop {
-        match core {
-            GraphPattern::Project { inner, variables } => {
-                if project.is_none() {
-                    project = Some(variables.clone());
-                }
-                core = inner;
-            }
-            GraphPattern::Distinct { inner } => {
-                distinct = true;
-                core = inner;
-            }
-            GraphPattern::Reduced { inner } => {
-                core = inner;
-            }
-            GraphPattern::Slice { inner, start, length } => {
-                offset = *start;
-                limit = *length;
-                core = inner;
-            }
-            _ => break,
-        }
-    }
+    // SELECT * exposes only real variables, never synthetic blank-node variables.
+    let out_vars: Vec<Variable> = bindings
+        .vars
+        .iter()
+        .filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX))
+        .cloned()
+        .collect();
 
-    // Collect the conjunctive BGP + filters.
-    let mut patterns: Vec<TriplePattern> = Vec::new();
-    let mut filters: Vec<Expression> = Vec::new();
-    collect_conjunction(core, &mut patterns, &mut filters)?;
-
-    let mut bindings = eval_bgp(graph, &patterns)?;
-
-    for f in &filters {
-        apply_filter(graph, &mut bindings, f)?;
-    }
-
-    // Projection variable order. SELECT * exposes only real query variables,
-    // never the synthetic variables we use for query blank nodes.
-    let out_vars: Vec<Variable> = match project {
-        Some(v) => v,
-        None => bindings
-            .vars
-            .iter()
-            .filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX))
-            .cloned()
-            .collect(),
-    };
-
-    // Map each output row to terms.
     let col_of: Vec<Option<usize>> = out_vars.iter().map(|v| bindings.col(v)).collect();
     let mut rows: Vec<Vec<Option<Term>>> = Vec::with_capacity(bindings.rows.len());
     for row in &bindings.rows {
-        let out: Vec<Option<Term>> = col_of
-            .iter()
-            .map(|c| c.map(|i| graph.dict.term(row[i]).clone()))
-            .collect();
-        rows.push(out);
+        rows.push(col_of.iter().map(|c| c.and_then(|i| term_of(graph, &local, row[i]))).collect());
     }
-
-    if distinct {
-        dedup_rows(&mut rows);
-    }
-
-    // OFFSET / LIMIT.
-    if offset > 0 {
-        rows.drain(0..offset.min(rows.len()));
-    }
-    if let Some(l) = limit {
-        rows.truncate(l);
-    }
-
     Ok(QueryResult { vars: out_vars, rows })
 }
 
-/// Flattens a tree of Join/Filter/Bgp into a triple-pattern set + filter list.
-/// Anything else (OPTIONAL/UNION/paths/...) is deferred to a later milestone.
-fn collect_conjunction(
-    p: &GraphPattern,
-    patterns: &mut Vec<TriplePattern>,
-    filters: &mut Vec<Expression>,
-) -> Result<(), String> {
+// ---- Algebra dispatch ---------------------------------------------------------
+
+fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
     match p {
-        GraphPattern::Bgp { patterns: tps } => {
-            patterns.extend(tps.iter().cloned());
-            Ok(())
+        GraphPattern::Project { inner, variables } => {
+            let b = eval_modified(graph, local, inner)?;
+            Ok(project_bindings(b, variables))
         }
-        GraphPattern::Join { left, right } => {
-            collect_conjunction(left, patterns, filters)?;
-            collect_conjunction(right, patterns, filters)
+        GraphPattern::Distinct { inner } => {
+            let mut b = eval_modified(graph, local, inner)?;
+            distinct_bindings(&mut b);
+            Ok(b)
         }
-        GraphPattern::Filter { expr, inner } => {
-            collect_conjunction(inner, patterns, filters)?;
-            filters.push(expr.clone());
-            Ok(())
+        GraphPattern::Reduced { inner } => eval_modified(graph, local, inner),
+        GraphPattern::Slice { inner, start, length } => {
+            let mut b = eval_modified(graph, local, inner)?;
+            slice_bindings(&mut b, *start, *length);
+            Ok(b)
         }
-        other => Err(format!("M1 does not support this pattern yet: {other:?}")),
+        GraphPattern::OrderBy { inner, expression } => {
+            let mut b = eval_modified(graph, local, inner)?;
+            order_bindings(graph, local, &mut b, expression)?;
+            Ok(b)
+        }
+        GraphPattern::Group { inner, variables, aggregates } => {
+            let b = eval_graph_pattern(graph, local, inner)?;
+            group_aggregate(graph, local, b, variables, aggregates)
+        }
+        other => eval_graph_pattern(graph, local, other),
     }
 }
 
-/// Evaluates a BGP into bindings using greedy join ordering and hash joins.
+fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+    if is_conjunctive(p) {
+        let mut patterns = Vec::new();
+        let mut filters = Vec::new();
+        flatten_conjunction(p, &mut patterns, &mut filters);
+        let mut b = eval_bgp(graph, &patterns)?;
+        for f in &filters {
+            apply_filter(graph, local, &mut b, f)?;
+        }
+        return Ok(b);
+    }
+    match p {
+        GraphPattern::Bgp { patterns } => eval_bgp(graph, patterns),
+        GraphPattern::Filter { expr, inner } => {
+            let mut b = eval_graph_pattern(graph, local, inner)?;
+            apply_filter(graph, local, &mut b, expr)?;
+            Ok(b)
+        }
+        GraphPattern::Join { left, right } => {
+            let l = eval_graph_pattern(graph, local, left)?;
+            let r = eval_graph_pattern(graph, local, right)?;
+            Ok(join_bindings(l, r))
+        }
+        GraphPattern::LeftJoin { left, right, expression } => {
+            let l = eval_graph_pattern(graph, local, left)?;
+            let r = eval_graph_pattern(graph, local, right)?;
+            left_outer_join(graph, local, l, r, expression.as_ref())
+        }
+        GraphPattern::Union { left, right } => {
+            let l = eval_graph_pattern(graph, local, left)?;
+            let r = eval_graph_pattern(graph, local, right)?;
+            Ok(union_bindings(l, r))
+        }
+        GraphPattern::Extend { inner, variable, expression } => {
+            let b = eval_graph_pattern(graph, local, inner)?;
+            extend_bindings(graph, local, b, variable, expression)
+        }
+        GraphPattern::Minus { left, right } => {
+            let l = eval_graph_pattern(graph, local, left)?;
+            let r = eval_graph_pattern(graph, local, right)?;
+            Ok(minus_bindings(l, r))
+        }
+        GraphPattern::Values { variables, bindings } => Ok(values_bindings(graph, local, variables, bindings)),
+        GraphPattern::Graph { inner, .. } => eval_graph_pattern(graph, local, inner),
+        GraphPattern::Project { .. }
+        | GraphPattern::Distinct { .. }
+        | GraphPattern::Reduced { .. }
+        | GraphPattern::Slice { .. }
+        | GraphPattern::OrderBy { .. }
+        | GraphPattern::Group { .. } => eval_modified(graph, local, p),
+        other => Err(format!("unsupported graph pattern: {other:?}")),
+    }
+}
+
+fn is_conjunctive(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::Bgp { .. } => true,
+        GraphPattern::Filter { inner, .. } => is_conjunctive(inner),
+        GraphPattern::Join { left, right } => is_conjunctive(left) && is_conjunctive(right),
+        _ => false,
+    }
+}
+
+fn flatten_conjunction(p: &GraphPattern, patterns: &mut Vec<TriplePattern>, filters: &mut Vec<Expression>) {
+    match p {
+        GraphPattern::Bgp { patterns: tps } => patterns.extend(tps.iter().cloned()),
+        GraphPattern::Join { left, right } => {
+            flatten_conjunction(left, patterns, filters);
+            flatten_conjunction(right, patterns, filters);
+        }
+        GraphPattern::Filter { expr, inner } => {
+            flatten_conjunction(inner, patterns, filters);
+            filters.push(expr.clone());
+        }
+        _ => unreachable!(),
+    }
+}
+
+// ---- BGP via greedy merge/hash joins -----------------------------------------
+
 fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
     if patterns.is_empty() {
-        // One empty solution (the join identity).
         return Ok(Bindings { vars: vec![], rows: vec![vec![]], sorted_by: None });
     }
 
-    // Resolve each pattern to (id-pattern, var layout) and its estimate.
     struct Prepared {
         id_pat: IdPattern,
-        // variable at each of the 3 positions (None if bound/constant)
         pos_vars: [Option<Variable>; 3],
         est: usize,
         unsatisfiable: bool,
@@ -156,25 +224,18 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
         let est = if unsat { 0 } else { graph.store.estimate(&id_pat) };
         prepared.push(Prepared { id_pat, pos_vars, est, unsatisfiable: unsat });
     }
-
-    // Any unsatisfiable (bound term not in dict) pattern -> empty result.
     if prepared.iter().any(|p| p.unsatisfiable) {
-        let vars = collect_vars(patterns);
-        return Ok(Bindings { vars, rows: vec![], sorted_by: None });
+        return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
 
-    // The position (0/1/2) of variable `v` in prepared pattern `i`, if present.
     let var_pos = |i: usize, v: &Variable| -> Option<usize> {
         prepared[i].pos_vars.iter().position(|pv| pv.as_ref() == Some(v))
     };
 
-    // Greedy seed: the smallest pattern.
     let mut order: Vec<usize> = (0..prepared.len()).collect();
     order.sort_by_key(|&i| prepared[i].est);
     let first = order[0];
 
-    // Seed sort variable: a variable shared with another pattern (so the next
-    // join can be a merge), preferring the seed's own first variable.
     let seed_join_var = prepared[first]
         .pos_vars
         .iter()
@@ -188,25 +249,22 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
     done[first] = true;
 
     for _ in 1..prepared.len() {
-        // Prefer a connected pattern that can MERGE on the current sort variable
-        // (no hashing); else the smallest connected; else smallest disconnected.
-        let mut mergeable: Option<usize> = None;
-        let mut connected: Option<usize> = None;
-        let mut any: Option<usize> = None;
+        let mut mergeable = None;
+        let mut connected = None;
+        let mut any = None;
         for &i in &order {
             if done[i] {
                 continue;
             }
-            if any.is_none() {
-                any = Some(i);
-            }
-            let shares = prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v));
-            if shares && connected.is_none() {
+            any.get_or_insert(i);
+            if connected.is_none() && prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v)) {
                 connected = Some(i);
             }
-            if let Some(sv) = &result.sorted_by {
-                if var_pos(i, sv).is_some() && mergeable.is_none() {
-                    mergeable = Some(i);
+            if mergeable.is_none() {
+                if let Some(sv) = &result.sorted_by {
+                    if var_pos(i, sv).is_some() {
+                        mergeable = Some(i);
+                    }
                 }
             }
         }
@@ -231,17 +289,13 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
             break;
         }
     }
-
     Ok(result)
 }
 
 fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
     let mut vars = Vec::new();
     for tp in patterns {
-        for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)]
-            .into_iter()
-            .flatten()
-        {
+        for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)].into_iter().flatten() {
             if !vars.contains(&v) {
                 vars.push(v);
             }
@@ -250,30 +304,27 @@ fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
     vars
 }
 
-/// Resolves a triple pattern to an id-pattern + per-position variables.
-/// Returns `unsatisfiable=true` if a bound term is absent from the dictionary.
-fn prepare_pattern(
-    graph: &Graph,
-    tp: &TriplePattern,
-) -> Result<(IdPattern, [Option<Variable>; 3], bool), String> {
+fn prepare_pattern(graph: &Graph, tp: &TriplePattern) -> Result<(IdPattern, [Option<Variable>; 3], bool), String> {
     let mut id_pat: IdPattern = [None, None, None];
     let mut pos_vars: [Option<Variable>; 3] = [None, None, None];
     let mut unsat = false;
 
-    // subject
-    match &tp.subject {
-        TermPattern::Variable(v) => pos_vars[0] = Some(v.clone()),
-        // A blank node in a BGP is an existential variable, scoped to the query.
-        TermPattern::BlankNode(b) => pos_vars[0] = Some(bnode_var(b)),
-        other => {
-            let t = term_pattern_to_term(other)?;
-            match graph.id_of(&t) {
-                Some(id) => id_pat[0] = Some(id),
+    // Resolves one (subject/object) position: variable -> pos_vars; blank node ->
+    // synthetic variable; concrete term -> dictionary id (absent term => unsat).
+    let mut bind_term = |slot: usize, tp: &TermPattern| -> Result<(), String> {
+        match tp {
+            TermPattern::Variable(v) => pos_vars[slot] = Some(v.clone()),
+            TermPattern::BlankNode(b) => pos_vars[slot] = Some(bnode_var(b)),
+            other => match graph.id_of(&term_pattern_to_term(other)?) {
+                Some(id) => id_pat[slot] = Some(id),
                 None => unsat = true,
-            }
+            },
         }
-    }
-    // predicate
+        Ok(())
+    };
+    bind_term(0, &tp.subject)?;
+    bind_term(2, &tp.object)?;
+
     match &tp.predicate {
         NamedNodePattern::Variable(v) => pos_vars[1] = Some(v.clone()),
         NamedNodePattern::NamedNode(n) => match graph.id_of(&Term::NamedNode(n.clone())) {
@@ -281,32 +332,10 @@ fn prepare_pattern(
             None => unsat = true,
         },
     }
-    // object
-    match &tp.object {
-        TermPattern::Variable(v) => pos_vars[2] = Some(v.clone()),
-        TermPattern::BlankNode(b) => pos_vars[2] = Some(bnode_var(b)),
-        other => {
-            let t = term_pattern_to_term(other)?;
-            match graph.id_of(&t) {
-                Some(id) => id_pat[2] = Some(id),
-                None => unsat = true,
-            }
-        }
-    }
     Ok((id_pat, pos_vars, unsat))
 }
 
-/// Scans a single pattern into bindings (handles a variable repeated across
-/// positions by keeping only rows where those positions are equal). `sort_col`,
-/// when given, requests a permutation whose output is sorted by that canonical
-/// triple column, so the result can drive a merge join.
-fn scan_to_bindings(
-    graph: &Graph,
-    id_pat: &IdPattern,
-    pos_vars: &[Option<Variable>; 3],
-    sort_col: Option<usize>,
-) -> Bindings {
-    // Distinct variables in position order, with the positions each occupies.
+fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3], sort_col: Option<usize>) -> Bindings {
     let mut vars: Vec<Variable> = Vec::new();
     let mut var_positions: Vec<Vec<usize>> = Vec::new();
     for (pos, v) in pos_vars.iter().enumerate() {
@@ -319,20 +348,14 @@ fn scan_to_bindings(
             }
         }
     }
-
     let scan = match sort_col {
         Some(c) => graph.store.scan_sorted(id_pat, c),
         None => graph.store.scan(id_pat),
     };
-    // The result is sorted by `sort_col` only if no repeated-variable filtering
-    // reorders/removes rows in a way that breaks the order — equality filtering
-    // preserves order, so the sort holds. Map sort_col -> the variable at it.
     let sorted_by = sort_col.and_then(|c| pos_vars[c].clone());
-
     let mut rows: Vec<Vec<Id>> = Vec::with_capacity(scan.rows.len());
     for row in scan.rows {
         let spo = scan.to_spo(row);
-        // Enforce equality for repeated variables.
         let mut ok = true;
         let mut out = Vec::with_capacity(vars.len());
         for positions in &var_positions {
@@ -350,88 +373,90 @@ fn scan_to_bindings(
     Bindings { vars, rows, sorted_by }
 }
 
-/// Sort-merge join of two bindings that are both sorted by `jv` (a single shared
-/// join variable). O(|left| + |right| + |output|), no hash table. Result is
-/// sorted by `jv`. Other shared variables (if any) are checked per matched pair.
 fn merge_join(left: Bindings, right: Bindings, jv: &Variable) -> Bindings {
     let lk = left.col(jv).unwrap();
     let rk = right.col(jv).unwrap();
-
-    // Output layout: left vars, then right-only vars; record additional shared
-    // variables (besides jv) that must match on each emitted pair.
     let mut out_vars = left.vars.clone();
     let mut right_only: Vec<usize> = Vec::new();
-    let mut extra_shared: Vec<(usize, usize)> = Vec::new(); // (left col, right col)
+    let mut extra_shared: Vec<(usize, usize)> = Vec::new();
     for (ri, v) in right.vars.iter().enumerate() {
         match left.col(v) {
-            Some(li) => {
-                if v != jv {
-                    extra_shared.push((li, ri));
-                }
-            }
+            Some(li) if v != jv => extra_shared.push((li, ri)),
+            Some(_) => {}
             None => {
                 out_vars.push(v.clone());
                 right_only.push(ri);
             }
         }
     }
-
-    let l = &left.rows;
-    let r = &right.rows;
-    let mut rows: Vec<Vec<Id>> = Vec::new();
-    let (mut i, mut j) = (0usize, 0usize);
+    let (l, r) = (&left.rows, &right.rows);
+    let mut rows = Vec::new();
+    let (mut i, mut j) = (0, 0);
     while i < l.len() && j < r.len() {
-        let lv = l[i][lk];
-        let rv = r[j][rk];
-        if lv < rv {
-            i += 1;
-        } else if lv > rv {
-            j += 1;
-        } else {
-            // Equal-key runs on both sides -> cross product (with extra-shared check).
-            let mut i2 = i;
-            while i2 < l.len() && l[i2][lk] == lv {
-                i2 += 1;
-            }
-            let mut j2 = j;
-            while j2 < r.len() && r[j2][rk] == rv {
-                j2 += 1;
-            }
-            for li in i..i2 {
-                for rj in j..j2 {
-                    if extra_shared.iter().all(|&(lc, rc)| l[li][lc] == r[rj][rc]) {
-                        let mut row = l[li].clone();
-                        for &rc in &right_only {
-                            row.push(r[rj][rc]);
+        let (lv, rv) = (l[i][lk], r[j][rk]);
+        match lv.cmp(&rv) {
+            Ordering::Less => i += 1,
+            Ordering::Greater => j += 1,
+            Ordering::Equal => {
+                let mut i2 = i;
+                while i2 < l.len() && l[i2][lk] == lv {
+                    i2 += 1;
+                }
+                let mut j2 = j;
+                while j2 < r.len() && r[j2][rk] == rv {
+                    j2 += 1;
+                }
+                for li in i..i2 {
+                    for rj in j..j2 {
+                        if extra_shared.iter().all(|&(lc, rc)| l[li][lc] == r[rj][rc]) {
+                            let mut row = l[li].clone();
+                            for &rc in &right_only {
+                                row.push(r[rj][rc]);
+                            }
+                            rows.push(row);
                         }
-                        rows.push(row);
                     }
                 }
+                i = i2;
+                j = j2;
             }
-            i = i2;
-            j = j2;
         }
     }
     Bindings { vars: out_vars, rows, sorted_by: Some(jv.clone()) }
 }
 
-/// Hash join of two bindings on their shared variables.
+/// Layout for combining two bindings: shared (left col, right col) pairs and the
+/// right-only columns appended after left's vars.
+fn join_layout(left: &Bindings, right: &Bindings) -> (Vec<Variable>, Vec<(usize, usize)>, Vec<usize>) {
+    let mut out_vars = left.vars.clone();
+    let mut shared = Vec::new();
+    let mut right_only = Vec::new();
+    for (ri, v) in right.vars.iter().enumerate() {
+        match left.col(v) {
+            Some(li) => shared.push((li, ri)),
+            None => {
+                out_vars.push(v.clone());
+                right_only.push(ri);
+            }
+        }
+    }
+    (out_vars, shared, right_only)
+}
+
 fn hash_join(left: Bindings, right: Bindings) -> Bindings {
-    // Build on the smaller side.
+    // Build the hash table on the smaller side.
     let (build, probe) = if left.rows.len() <= right.rows.len() {
         (left, right)
     } else {
         (right, left)
     };
-
+    // Shared vars relative to (build, probe).
     let shared: Vec<(usize, usize)> = build
         .vars
         .iter()
         .enumerate()
         .filter_map(|(bi, v)| probe.col(v).map(|pi| (bi, pi)))
         .collect();
-
-    // Output variable layout: build vars, then probe-only vars.
     let mut out_vars = build.vars.clone();
     let probe_only: Vec<usize> = probe
         .vars
@@ -443,21 +468,17 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
             i
         })
         .collect();
-
-    // Hash table: key (build's shared values) -> build row indices.
     let mut table: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
     for (ri, row) in build.rows.iter().enumerate() {
         let key: Vec<Id> = shared.iter().map(|&(bi, _)| row[bi]).collect();
         table.entry(key).or_default().push(ri);
     }
-
-    let mut rows: Vec<Vec<Id>> = Vec::new();
+    let mut rows = Vec::new();
     for prow in &probe.rows {
         let key: Vec<Id> = shared.iter().map(|&(_, pi)| prow[pi]).collect();
         if let Some(matches) = table.get(&key) {
             for &bi in matches {
-                let brow = &build.rows[bi];
-                let mut combined = brow.clone();
+                let mut combined = build.rows[bi].clone();
                 for &pi in &probe_only {
                     combined.push(prow[pi]);
                 }
@@ -465,7 +486,7 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
             }
         }
     }
-    Bindings { vars: out_vars, rows, sorted_by: None }
+    Bindings::unsorted(out_vars, rows)
 }
 
 fn cross_product(left: Bindings, right: Bindings) -> Bindings {
@@ -479,26 +500,321 @@ fn cross_product(left: Bindings, right: Bindings) -> Bindings {
             rows.push(row);
         }
     }
-    Bindings { vars: out_vars, rows, sorted_by: None }
+    Bindings::unsorted(out_vars, rows)
 }
 
-fn dedup_rows(rows: &mut Vec<Vec<Option<Term>>>) {
-    let mut seen = std::collections::HashSet::new();
-    rows.retain(|r| {
-        let key: Vec<String> = r
+/// Generic join used for Join of non-conjunctive sub-results: merge if the two
+/// share a variable both are sorted by, else hash, else cross product.
+fn join_bindings(left: Bindings, right: Bindings) -> Bindings {
+    let shares = left.vars.iter().any(|v| right.col(v).is_some());
+    if !shares {
+        return cross_product(left, right);
+    }
+    if let (Some(lv), Some(rv)) = (&left.sorted_by, &right.sorted_by) {
+        if lv == rv && right.col(lv).is_some() {
+            let jv = lv.clone();
+            return merge_join(left, right, &jv);
+        }
+    }
+    hash_join(left, right)
+}
+
+// ---- OPTIONAL / UNION / MINUS / VALUES / BIND --------------------------------
+
+fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right: Bindings, expr: Option<&Expression>) -> Result<Bindings, String> {
+    let (out_vars, shared, right_only) = join_layout(&left, &right);
+    // Hash the right side on shared variables.
+    let mut table: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
+    for (ri, row) in right.rows.iter().enumerate() {
+        let key: Vec<Id> = shared.iter().map(|&(_, rc)| row[rc]).collect();
+        table.entry(key).or_default().push(ri);
+    }
+    let n_right_only = right_only.len();
+    let mut rows = Vec::new();
+    for lrow in &left.rows {
+        let key: Vec<Id> = shared.iter().map(|&(lc, _)| lrow[lc]).collect();
+        let mut matched = false;
+        if let Some(cands) = table.get(&key) {
+            for &ri in cands {
+                let rrow = &right.rows[ri];
+                let mut combined = lrow.clone();
+                for &rc in &right_only {
+                    combined.push(rrow[rc]);
+                }
+                // OPTIONAL's filter is evaluated on the combined row.
+                let keep = match expr {
+                    None => true,
+                    Some(e) => {
+                        let tmp = Bindings { vars: out_vars.clone(), rows: vec![], sorted_by: None };
+                        effective_boolean(&eval_expr(graph, local, &tmp, &combined, e)?)
+                    }
+                };
+                if keep {
+                    rows.push(combined);
+                    matched = true;
+                }
+            }
+        }
+        if !matched {
+            let mut combined = lrow.clone();
+            combined.extend(std::iter::repeat(NO_ID).take(n_right_only));
+            rows.push(combined);
+        }
+    }
+    Ok(Bindings::unsorted(out_vars, rows))
+}
+
+fn union_bindings(left: Bindings, right: Bindings) -> Bindings {
+    let mut out_vars = left.vars.clone();
+    for v in &right.vars {
+        if !out_vars.contains(v) {
+            out_vars.push(v.clone());
+        }
+    }
+    let mut rows = Vec::with_capacity(left.rows.len() + right.rows.len());
+    let map_row = |src_vars: &[Variable], row: &[Id], out_vars: &[Variable]| -> Vec<Id> {
+        out_vars
             .iter()
-            .map(|t| t.as_ref().map(|t| t.to_string()).unwrap_or_default())
-            .collect();
-        seen.insert(key)
-    });
+            .map(|v| src_vars.iter().position(|x| x == v).map(|i| row[i]).unwrap_or(NO_ID))
+            .collect()
+    };
+    for row in &left.rows {
+        rows.push(map_row(&left.vars, row, &out_vars));
+    }
+    for row in &right.rows {
+        rows.push(map_row(&right.vars, row, &out_vars));
+    }
+    Bindings::unsorted(out_vars, rows)
 }
 
-// ---- FILTER (a useful subset) -------------------------------------------------
+fn minus_bindings(left: Bindings, right: Bindings) -> Bindings {
+    // Shared variables; a left row is removed if it is compatible with some right
+    // row on all shared variables that are bound in both (SPARQL MINUS).
+    let shared: Vec<(usize, usize)> = left
+        .vars
+        .iter()
+        .enumerate()
+        .filter_map(|(li, v)| right.col(v).map(|ri| (li, ri)))
+        .collect();
+    if shared.is_empty() {
+        return left; // no shared vars -> MINUS removes nothing
+    }
+    let mut table: FxHashMap<Vec<Id>, ()> = FxHashMap::default();
+    for row in &right.rows {
+        let key: Vec<Id> = shared.iter().map(|&(_, rc)| row[rc]).collect();
+        table.insert(key, ());
+    }
+    let rows: Vec<Vec<Id>> = left
+        .rows
+        .into_iter()
+        .filter(|row| {
+            let key: Vec<Id> = shared.iter().map(|&(lc, _)| row[lc]).collect();
+            !table.contains_key(&key)
+        })
+        .collect();
+    Bindings { vars: left.vars, rows, sorted_by: left.sorted_by }
+}
 
-fn apply_filter(graph: &Graph, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
+fn values_bindings(graph: &Graph, local: &mut LocalVocab, variables: &[Variable], bindings: &[Vec<Option<GroundTerm>>]) -> Bindings {
+    let rows = bindings
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| match cell {
+                    None => NO_ID,
+                    Some(gt) => {
+                        // Resolve against the graph dictionary so the id joins with
+                        // BGP results; a term absent from the graph gets a local id
+                        // (it can only match other VALUES, never the data).
+                        let t = ground_to_term(gt);
+                        graph.id_of(&t).unwrap_or_else(|| local.intern(t))
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    Bindings::unsorted(variables.to_vec(), rows)
+}
+
+fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: &Variable, expr: &Expression) -> Result<Bindings, String> {
+    let mut col = Vec::with_capacity(b.rows.len());
+    for row in &b.rows {
+        let v = eval_expr(graph, local, &b, row, expr)?;
+        col.push(value_to_id(graph, local, &v));
+    }
+    b.vars.push(var.clone());
+    for (row, id) in b.rows.iter_mut().zip(col) {
+        row.push(id);
+    }
+    b.sorted_by = None;
+    Ok(b)
+}
+
+// ---- Aggregation --------------------------------------------------------------
+
+fn group_aggregate(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    b: Bindings,
+    group_vars: &[Variable],
+    aggregates: &[(Variable, AggregateExpression)],
+) -> Result<Bindings, String> {
+    let key_cols: Vec<usize> = group_vars.iter().map(|v| b.col(v).expect("group var present")).collect();
+
+    // Group rows by the group-key id tuple, preserving first-seen order.
+    let mut groups: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
+    let mut order: Vec<Vec<Id>> = Vec::new();
+    for (ri, row) in b.rows.iter().enumerate() {
+        let key: Vec<Id> = key_cols.iter().map(|&c| row[c]).collect();
+        groups.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            Vec::new()
+        });
+        groups.get_mut(&key).unwrap().push(ri);
+    }
+    // Whole-dataset aggregate with no GROUP BY: one (empty) group, even if input is empty.
+    if group_vars.is_empty() && order.is_empty() {
+        order.push(vec![]);
+        groups.insert(vec![], vec![]);
+    }
+
+    let mut out_vars: Vec<Variable> = group_vars.to_vec();
+    for (v, _) in aggregates {
+        out_vars.push(v.clone());
+    }
+
+    let mut rows = Vec::with_capacity(order.len());
+    for key in &order {
+        let members = &groups[key];
+        let mut row = key.clone();
+        for (_, agg) in aggregates {
+            let v = eval_aggregate(graph, local, &b, members, agg)?;
+            row.push(value_to_id(graph, local, &v));
+        }
+        rows.push(row);
+    }
+    Ok(Bindings::unsorted(out_vars, rows))
+}
+
+fn eval_aggregate(graph: &Graph, local: &mut LocalVocab, b: &Bindings, members: &[usize], agg: &AggregateExpression) -> Result<Value, String> {
+    match agg {
+        AggregateExpression::CountSolutions { distinct } => {
+            let n = if *distinct {
+                let mut seen = std::collections::HashSet::new();
+                members.iter().filter(|&&ri| seen.insert(b.rows[ri].clone())).count()
+            } else {
+                members.len()
+            };
+            Ok(Value::Num(n as f64))
+        }
+        AggregateExpression::FunctionCall { name, expr, distinct } => {
+            // Collect the per-member values of `expr`.
+            let mut vals: Vec<Value> = Vec::with_capacity(members.len());
+            for &ri in members {
+                let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
+                if !matches!(v, Value::Unbound) {
+                    vals.push(v);
+                }
+            }
+            if *distinct {
+                dedup_values(&mut vals);
+            }
+            match name {
+                AggregateFunction::Count => Ok(Value::Num(vals.len() as f64)),
+                AggregateFunction::Sum => Ok(Value::Num(vals.iter().filter_map(as_num).sum())),
+                AggregateFunction::Avg => {
+                    let nums: Vec<f64> = vals.iter().filter_map(as_num).collect();
+                    Ok(if nums.is_empty() { Value::Num(0.0) } else { Value::Num(nums.iter().sum::<f64>() / nums.len() as f64) })
+                }
+                AggregateFunction::Min => Ok(vals.into_iter().min_by(|a, c| compare_values(a, c).unwrap_or(Ordering::Equal)).unwrap_or(Value::Unbound)),
+                AggregateFunction::Max => Ok(vals.into_iter().max_by(|a, c| compare_values(a, c).unwrap_or(Ordering::Equal)).unwrap_or(Value::Unbound)),
+                AggregateFunction::GroupConcat { separator } => {
+                    let sep = separator.clone().unwrap_or_else(|| " ".to_string());
+                    let joined = vals.iter().filter_map(value_str).collect::<Vec<_>>().join(&sep);
+                    Ok(Value::Term(Term::Literal(Literal::new_simple_literal(joined))))
+                }
+                _ => Err("M2: unsupported aggregate".into()),
+            }
+        }
+    }
+}
+
+fn dedup_values(vals: &mut Vec<Value>) {
+    let mut seen = std::collections::HashSet::new();
+    vals.retain(|v| seen.insert(value_key(v)));
+}
+
+fn value_key(v: &Value) -> String {
+    match v {
+        Value::Term(t) => format!("T{t}"),
+        Value::Num(n) => format!("N{n}"),
+        Value::Bool(b) => format!("B{b}"),
+        Value::Unbound => "U".to_string(),
+    }
+}
+
+// ---- Modifiers ----------------------------------------------------------------
+
+fn project_bindings(b: Bindings, vars: &[Variable]) -> Bindings {
+    let cols: Vec<Option<usize>> = vars.iter().map(|v| b.col(v)).collect();
+    let rows = b
+        .rows
+        .iter()
+        .map(|row| cols.iter().map(|c| c.map(|i| row[i]).unwrap_or(NO_ID)).collect())
+        .collect();
+    let sorted_by = b.sorted_by.filter(|sv| vars.contains(sv));
+    Bindings { vars: vars.to_vec(), rows, sorted_by }
+}
+
+fn distinct_bindings(b: &mut Bindings) {
+    let mut seen = std::collections::HashSet::new();
+    b.rows.retain(|r| seen.insert(r.clone()));
+}
+
+fn slice_bindings(b: &mut Bindings, start: usize, length: Option<usize>) {
+    if start > 0 {
+        b.rows.drain(0..start.min(b.rows.len()));
+    }
+    if let Some(l) = length {
+        b.rows.truncate(l);
+    }
+}
+
+fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[OrderExpression]) -> Result<(), String> {
+    // Precompute the sort key (vector of (descending, Value)) for each row.
+    let mut keyed: Vec<(Vec<(bool, Value)>, Vec<Id>)> = Vec::with_capacity(b.rows.len());
+    for row in &b.rows {
+        let mut key = Vec::with_capacity(exprs.len());
+        for oe in exprs {
+            let (desc, e) = match oe {
+                OrderExpression::Asc(e) => (false, e),
+                OrderExpression::Desc(e) => (true, e),
+            };
+            key.push((desc, eval_expr(graph, local, b, row, e)?));
+        }
+        keyed.push((key, row.clone()));
+    }
+    keyed.sort_by(|a, c| {
+        for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
+            let ord = compare_values(av, cv).unwrap_or(Ordering::Equal);
+            let ord = if *desc { ord.reverse() } else { ord };
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        Ordering::Equal
+    });
+    b.rows = keyed.into_iter().map(|(_, r)| r).collect();
+    b.sorted_by = None;
+    Ok(())
+}
+
+// ---- FILTER + expression evaluation ------------------------------------------
+
+fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
     let mut keep = Vec::with_capacity(b.rows.len());
     for row in &b.rows {
-        keep.push(eval_bool(graph, b, row, expr)?);
+        keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
     }
     let mut i = 0;
     b.rows.retain(|_| {
@@ -509,14 +825,14 @@ fn apply_filter(graph: &Graph, b: &mut Bindings, expr: &Expression) -> Result<()
     Ok(())
 }
 
-/// Evaluate an expression to its SPARQL effective boolean value (EBV). A type
-/// error / unbound value is false in our subset (FILTER removes the row).
-fn eval_bool(graph: &Graph, b: &Bindings, row: &[Id], e: &Expression) -> Result<bool, String> {
-    Ok(effective_boolean(&eval_expr(graph, b, row, e)?))
+#[derive(Clone, Debug)]
+enum Value {
+    Bool(bool),
+    Num(f64),
+    Term(Term),
+    Unbound,
 }
 
-/// SPARQL effective boolean value: xsd:boolean -> its value; numeric -> != 0 and
-/// not NaN; xsd:string / plain literal -> non-empty; everything else -> false.
 fn effective_boolean(v: &Value) -> bool {
     match v {
         Value::Bool(b) => *b,
@@ -524,13 +840,11 @@ fn effective_boolean(v: &Value) -> bool {
         Value::Unbound => false,
         Value::Term(Term::Literal(l)) => {
             let dt = l.datatype().as_str();
-            if dt == "http://www.w3.org/2001/XMLSchema#boolean" {
+            if dt == xsd::BOOLEAN.as_str() {
                 matches!(l.value(), "true" | "1")
             } else if is_numeric_dt(l) {
                 l.value().parse::<f64>().map(|n| n != 0.0 && !n.is_nan()).unwrap_or(false)
-            } else if dt == "http://www.w3.org/2001/XMLSchema#string"
-                || dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
-            {
+            } else if dt == xsd::STRING.as_str() || dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" {
                 !l.value().is_empty()
             } else {
                 false
@@ -540,112 +854,162 @@ fn effective_boolean(v: &Value) -> bool {
     }
 }
 
-#[derive(Clone, Debug)]
-enum Value {
-    Bool(bool),
-    Num(f64),
-    Term(Term),
-    Unbound,
-}
-
-fn eval_expr(graph: &Graph, b: &Bindings, row: &[Id], e: &Expression) -> Result<Value, String> {
+fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Result<Value, String> {
     use Expression::*;
     match e {
         Variable(v) => match b.col(v) {
-            Some(c) => Ok(Value::Term(graph.dict.term(row[c]).clone())),
-            None => Ok(Value::Unbound),
+            Some(c) if row[c] != NO_ID => Ok(Value::Term(term_of(graph, local, row[c]).unwrap())),
+            _ => Ok(Value::Unbound),
         },
         NamedNode(n) => Ok(Value::Term(Term::NamedNode(n.clone()))),
         Literal(l) => Ok(Value::Term(Term::Literal(l.clone()))),
-        And(a, c) => Ok(Value::Bool(
-            eval_bool(graph, b, row, a)? && eval_bool(graph, b, row, c)?,
-        )),
-        Or(a, c) => Ok(Value::Bool(
-            eval_bool(graph, b, row, a)? || eval_bool(graph, b, row, c)?,
-        )),
-        Not(a) => Ok(Value::Bool(!eval_bool(graph, b, row, a)?)),
-        Equal(a, c) => cmp(graph, b, row, a, c, |o| o == std::cmp::Ordering::Equal),
+        And(a, c) => Ok(Value::Bool(eval_bool(graph, local, b, row, a)? && eval_bool(graph, local, b, row, c)?)),
+        Or(a, c) => Ok(Value::Bool(eval_bool(graph, local, b, row, a)? || eval_bool(graph, local, b, row, c)?)),
+        Not(a) => Ok(Value::Bool(!eval_bool(graph, local, b, row, a)?)),
+        Equal(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o == Ordering::Equal),
         SameTerm(a, c) => {
-            let x = eval_expr(graph, b, row, a)?;
-            let y = eval_expr(graph, b, row, c)?;
-            Ok(Value::Bool(value_term_eq(&x, &y)))
+            let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
+            Ok(Value::Bool(matches!((&x, &y), (Value::Term(p), Value::Term(q)) if p == q)))
         }
-        Greater(a, c) => cmp(graph, b, row, a, c, |o| o == std::cmp::Ordering::Greater),
-        GreaterOrEqual(a, c) => cmp(graph, b, row, a, c, |o| o != std::cmp::Ordering::Less),
-        Less(a, c) => cmp(graph, b, row, a, c, |o| o == std::cmp::Ordering::Less),
-        LessOrEqual(a, c) => cmp(graph, b, row, a, c, |o| o != std::cmp::Ordering::Greater),
-        Bound(v) => Ok(Value::Bool(b.col(v).map(|c| row[c] != 0).unwrap_or(false))),
-        FunctionCall(_, _) => Err("M1: unsupported FILTER function".into()),
-        other => Err(format!("M1: unsupported FILTER expression: {other:?}")),
+        Greater(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o == Ordering::Greater),
+        GreaterOrEqual(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o != Ordering::Less),
+        Less(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o == Ordering::Less),
+        LessOrEqual(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o != Ordering::Greater),
+        Add(a, c) => arith(graph, local, b, row, a, c, |x, y| x + y),
+        Subtract(a, c) => arith(graph, local, b, row, a, c, |x, y| x - y),
+        Multiply(a, c) => arith(graph, local, b, row, a, c, |x, y| x * y),
+        Divide(a, c) => arith(graph, local, b, row, a, c, |x, y| x / y),
+        UnaryPlus(a) => eval_expr(graph, local, b, row, a),
+        UnaryMinus(a) => {
+            let v = eval_expr(graph, local, b, row, a)?;
+            Ok(as_num(&v).map(|n| Value::Num(-n)).unwrap_or(Value::Unbound))
+        }
+        Bound(v) => Ok(Value::Bool(b.col(v).map(|c| row[c] != NO_ID).unwrap_or(false))),
+        If(cond, t, f) => {
+            if eval_bool(graph, local, b, row, cond)? {
+                eval_expr(graph, local, b, row, t)
+            } else {
+                eval_expr(graph, local, b, row, f)
+            }
+        }
+        Coalesce(es) => {
+            for e in es {
+                let v = eval_expr(graph, local, b, row, e)?;
+                if !matches!(v, Value::Unbound) {
+                    return Ok(v);
+                }
+            }
+            Ok(Value::Unbound)
+        }
+        In(a, list) => {
+            let x = eval_expr(graph, local, b, row, a)?;
+            for c in list {
+                let y = eval_expr(graph, local, b, row, c)?;
+                if compare_values(&x, &y) == Some(Ordering::Equal) {
+                    return Ok(Value::Bool(true));
+                }
+            }
+            Ok(Value::Bool(false))
+        }
+        other => Err(format!("M2: unsupported expression: {other:?}")),
     }
 }
 
-fn cmp(
-    graph: &Graph,
-    b: &Bindings,
-    row: &[Id],
-    a: &Expression,
-    c: &Expression,
-    f: impl Fn(std::cmp::Ordering) -> bool,
-) -> Result<Value, String> {
-    let x = eval_expr(graph, b, row, a)?;
-    let y = eval_expr(graph, b, row, c)?;
-    match compare_values(&x, &y) {
-        Some(o) => Ok(Value::Bool(f(o))),
-        None => Ok(Value::Bool(false)),
-    }
+fn eval_bool(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Result<bool, String> {
+    Ok(effective_boolean(&eval_expr(graph, local, b, row, e)?))
+}
+
+fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(Ordering) -> bool) -> Result<Value, String> {
+    let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
+    Ok(Value::Bool(compare_values(&x, &y).map(f).unwrap_or(false)))
+}
+
+fn arith(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(f64, f64) -> f64) -> Result<Value, String> {
+    let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
+    Ok(match (as_num(&x), as_num(&y)) {
+        (Some(a), Some(b)) => Value::Num(f(a, b)),
+        _ => Value::Unbound,
+    })
 }
 
 fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Num(n) => Some(*n),
-        Value::Term(Term::Literal(l)) => l.value().parse::<f64>().ok().filter(|_| is_numeric_dt(l)),
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
         _ => None,
     }
 }
 
-fn is_numeric_dt(l: &oxrdf::Literal) -> bool {
+fn is_numeric_dt(l: &Literal) -> bool {
     let dt = l.datatype().as_str();
-    matches!(
-        dt,
-        "http://www.w3.org/2001/XMLSchema#integer"
-            | "http://www.w3.org/2001/XMLSchema#decimal"
-            | "http://www.w3.org/2001/XMLSchema#double"
-            | "http://www.w3.org/2001/XMLSchema#float"
-            | "http://www.w3.org/2001/XMLSchema#long"
-            | "http://www.w3.org/2001/XMLSchema#int"
-            | "http://www.w3.org/2001/XMLSchema#short"
-            | "http://www.w3.org/2001/XMLSchema#byte"
-            | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger"
-            | "http://www.w3.org/2001/XMLSchema#positiveInteger"
-    )
+    dt == xsd::INTEGER.as_str()
+        || dt == xsd::DECIMAL.as_str()
+        || dt == xsd::DOUBLE.as_str()
+        || dt == xsd::FLOAT.as_str()
+        || dt == xsd::LONG.as_str()
+        || dt == xsd::INT.as_str()
+        || dt == xsd::SHORT.as_str()
+        || dt == xsd::BYTE.as_str()
+        || dt == xsd::NON_NEGATIVE_INTEGER.as_str()
+        || dt == xsd::POSITIVE_INTEGER.as_str()
+        || dt == xsd::UNSIGNED_INT.as_str()
+        || dt == xsd::UNSIGNED_LONG.as_str()
 }
 
-fn compare_values(x: &Value, y: &Value) -> Option<std::cmp::Ordering> {
+fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
     if let (Some(a), Some(b)) = (as_num(x), as_num(y)) {
         return a.partial_cmp(&b);
     }
-    // Fall back to lexical comparison of the term string for strings/IRIs.
-    let xs = value_str(x)?;
-    let ys = value_str(y)?;
-    Some(xs.cmp(&ys))
+    Some(value_str(x)?.cmp(&value_str(y)?))
 }
 
 fn value_str(v: &Value) -> Option<String> {
     match v {
         Value::Term(Term::Literal(l)) => Some(l.value().to_string()),
         Value::Term(Term::NamedNode(n)) => Some(n.as_str().to_string()),
+        Value::Term(Term::BlankNode(b)) => Some(b.as_str().to_string()),
         Value::Bool(b) => Some(b.to_string()),
-        Value::Num(n) => Some(n.to_string()),
-        _ => None,
+        Value::Num(n) => Some(fmt_num(*n)),
+        Value::Unbound => None,
+        Value::Term(_) => None,
     }
 }
 
-fn value_term_eq(x: &Value, y: &Value) -> bool {
-    matches!((x, y), (Value::Term(a), Value::Term(b)) if a == b)
+fn fmt_num(n: f64) -> String {
+    if n.fract() == 0.0 && n.is_finite() {
+        format!("{}", n as i64)
+    } else {
+        n.to_string()
+    }
 }
 
-// ---- spargebra term helpers ---------------------------------------------------
+/// Converts an evaluated value into an id. Computed terms are resolved against
+/// the graph dictionary first (so they join and deduplicate against the data);
+/// terms not already present get a per-query local id.
+fn value_to_id(graph: &Graph, local: &mut LocalVocab, v: &Value) -> Id {
+    let term = match v {
+        Value::Unbound => return NO_ID,
+        Value::Bool(b) => Term::Literal(Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN)),
+        Value::Num(n) => Term::Literal(if n.fract() == 0.0 && n.is_finite() {
+            Literal::new_typed_literal((*n as i64).to_string(), xsd::INTEGER)
+        } else {
+            Literal::new_typed_literal(n.to_string(), xsd::DOUBLE)
+        }),
+        Value::Term(t) => t.clone(),
+    };
+    graph.id_of(&term).unwrap_or_else(|| local.intern(term))
+}
+
+// ---- spargebra term helpers --------------------------------------------------
+
+fn ground_to_term(g: &GroundTerm) -> Term {
+    match g {
+        GroundTerm::NamedNode(n) => Term::NamedNode(n.clone()),
+        GroundTerm::Literal(l) => Term::Literal(l.clone()),
+        other => panic!("unsupported ground term: {other:?}"),
+    }
+}
 
 fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
     match tp {
@@ -657,17 +1021,12 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
     }
 }
 
-/// Prefix marking synthetic variables that stand in for query blank nodes.
 const BNODE_VAR_PREFIX: &str = "__bn_";
 
-/// The synthetic variable for a query blank node (repeated labels -> same var,
-/// so they behave like a repeated variable, per SPARQL semantics).
 fn bnode_var(b: &oxrdf::BlankNode) -> Variable {
     Variable::new_unchecked(format!("{BNODE_VAR_PREFIX}{}", b.as_str()))
 }
 
-/// The variable a term pattern contributes (a real variable, or the synthetic
-/// variable of a blank node), if any.
 fn tp_var(tp: &TermPattern) -> Option<Variable> {
     match tp {
         TermPattern::Variable(v) => Some(v.clone()),
@@ -682,7 +1041,3 @@ fn nnp_var(p: &NamedNodePattern) -> Option<Variable> {
         _ => None,
     }
 }
-
-// Re-export to silence unused warnings for NamedNode import used in signatures.
-#[allow(unused_imports)]
-use NamedNode as _NamedNode;
