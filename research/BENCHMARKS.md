@@ -62,9 +62,52 @@ dictionary.)
   permutations — but see the caveat above; the real memory test is vs QLever's
   compressed columns, and column compression (M3) is the lever there.
 
-## Next
+## The real target: QLever (primary benchmark for M3+M4)
 
-- Compare against QLever and (where feasible) RDFox on the public benchmark
-  datasets and query sets from docs.qlever.dev/benchmarks.
+Oxigraph is the *embeddable first gate* — it links as a crate, so it gives a
+continuous correctness + perf check on every commit. It is **not** the engine to
+beat. **QLever (ad-freiburg) is dramatically faster than Oxigraph** (often
+orders of magnitude on large datasets), and is the benchmark that matters:
+
+- QLever wiki perf comparison:
+  <https://github.com/ad-freiburg/qlever/wiki/QLever-performance-evaluation-and-comparison-to-other-SPARQL-engines>
+- Benchmark datasets/queries: <https://docs.qlever.dev/benchmarks>
+
+Beating Oxigraph 2–5× says nothing about beating QLever. **M3+M4 must benchmark
+against QLever directly** and study its architecture closely.
+
+### What makes QLever fast (to match or beat)
+
+- **Compressed permutation indexes** — block-compressed column storage (prefix /
+  PForDelta-style), not flat `Vec<[u32;3]>`. This is the big memory + scan win
+  → our M3.
+- **Tagged ValueIds** — datatype + value packed inline (numerics, dates), so
+  numeric filters/joins never touch the dictionary → our M4.
+- **Compressed on-disk vocabulary** with an in-memory cache (prefix/front-coding).
+- **Lazy / streaming block-based operators** — results flow in blocks; early
+  LIMIT/ASK stop work. We currently fully materialise — a streaming executor is
+  needed to compete on first-result latency and memory.
+- **External-memory parallel index build**; highly tuned merge joins.
+
+### Our potential genuine edge
+
+- **WCOJ (Leapfrog Triejoin)** for cyclic / skewed BGPs — QLever uses binary
+  joins, so triangle/cycle-heavy queries are a place we can win asymptotically
+  (already implemented; needs to be shown on a skewed benchmark).
+- **Memory-bounded streaming** as a first-class design goal.
+
+### Plan
+
+1. Stand up QLever (Docker image or source build) + load a standard dataset
+   (start with SP2Bench or WatDiv; then a WDBench/Wikidata subset).
+2. Run the standard query sets through sparq and QLever; report per-query latency
+   (cold + warm), QMpH, peak RSS, and index size.
+3. Profile the gaps; drive M3 (column compression) and M4 (tagged ValueIds,
+   streaming operators, property paths, vectorization) from the measured deltas.
+4. Honest reporting: where we win, where we lose, by how much — no unverified
+   victory claims. Out-competing QLever broadly is a serious, multi-stage effort.
+
+## Other next steps
+
 - Larger scales; cold-cache and QMpH (queries/hour) metrics.
 - Re-measure memory against QLever (compressed) and after M3 column compression.
