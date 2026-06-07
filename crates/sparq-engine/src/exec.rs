@@ -216,9 +216,28 @@ fn flatten_conjunction(p: &GraphPattern, patterns: &mut Vec<TriplePattern>, filt
     }
 }
 
-// ---- BGP via greedy merge/hash joins -----------------------------------------
+// ---- BGP evaluation ----------------------------------------------------------
 
+/// Evaluates a basic graph pattern, dispatching between a binary join plan and a
+/// worst-case-optimal (Leapfrog Triejoin) plan. Cyclic BGPs — where binary plans
+/// can blow up to an intermediate result far larger than the final answer (e.g.
+/// triangles) — go to WCOJ, which runs in time `Õ(AGM bound)` and so is provably
+/// optimal in the worst case. Acyclic (tree-shaped) BGPs use binary joins, which
+/// are optimal for them and avoid LFTJ's per-tuple overhead. Both paths are
+/// differentially tested to produce identical results.
 fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
+    if patterns.is_empty() {
+        return Ok(Bindings { vars: vec![], rows: vec![vec![]], sorted_by: None });
+    }
+    if patterns.len() >= 3 && bgp_is_cyclic(patterns) {
+        return eval_bgp_wcoj(graph, patterns);
+    }
+    eval_bgp_binary(graph, patterns)
+}
+
+/// Binary-join BGP plan: greedy cardinality ordering with sort-merge joins on the
+/// current sort variable (falling back to hash, then cross product).
+fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
     if patterns.is_empty() {
         return Ok(Bindings { vars: vec![], rows: vec![vec![]], sorted_by: None });
     }
@@ -313,6 +332,371 @@ fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
         }
     }
     vars
+}
+
+// ---- Worst-case-optimal join: Leapfrog Triejoin ------------------------------
+//
+// LFTJ (Veldhuizen 2014) evaluates a BGP one *variable* at a time in a fixed
+// global order. At each variable it intersects, via the "leapfrog" galloping
+// search, the sorted value streams of every pattern that mentions that variable,
+// then recurses. Each pattern is a trie of its variable columns (projected from a
+// permutation index, sorted in the global variable order). The total work is
+// bounded by the AGM fractional-edge-cover bound on the BGP, so for cyclic
+// queries it cannot produce the asymptotically-large intermediates a binary plan
+// would. See research/ARCHITECTURE.md §4.
+
+/// A pattern's relation projected onto its variables (in global order) as sorted,
+/// deduplicated tuples — the trie that LFTJ navigates level by level.
+struct Trie {
+    tuples: Vec<Vec<Id>>,
+}
+
+/// One open level of a [`TrieIter`]: `hi` bounds the current key's subtree (rows
+/// sharing all already-fixed columns), `cur` is the cursor within it.
+struct Frame {
+    hi: usize,
+    cur: usize,
+}
+
+/// A cursor over a [`Trie`], using Veldhuizen's open-on-entry semantics: it starts
+/// *above* the root, and `open()` descends one column, resetting the cursor to the
+/// start of that subtree. This reset is what makes non-contiguous variable
+/// participation correct — re-entering a level re-opens (rewinds) the iterator.
+struct TrieIter<'a> {
+    trie: &'a Trie,
+    frames: Vec<Frame>,
+}
+
+impl<'a> TrieIter<'a> {
+    fn new(trie: &'a Trie) -> Self {
+        TrieIter { trie, frames: Vec::new() }
+    }
+    /// The column currently being iterated (valid once at least one `open`).
+    #[inline]
+    fn col(&self) -> usize {
+        self.frames.len() - 1
+    }
+    #[inline]
+    fn at_end(&self) -> bool {
+        let f = self.frames.last().unwrap();
+        f.cur >= f.hi
+    }
+    #[inline]
+    fn key(&self) -> Id {
+        let col = self.col();
+        let f = self.frames.last().unwrap();
+        self.trie.tuples[f.cur][col]
+    }
+    /// Advances to the next distinct value in the current column.
+    fn next(&mut self) {
+        let col = self.col();
+        let f = self.frames.last_mut().unwrap();
+        let val = self.trie.tuples[f.cur][col];
+        let mut i = f.cur + 1;
+        while i < f.hi && self.trie.tuples[i][col] == val {
+            i += 1;
+        }
+        f.cur = i;
+    }
+    /// Galloping seek: first value `>= x` in the current column.
+    fn seek(&mut self, x: Id) {
+        let col = self.col();
+        let f = self.frames.last_mut().unwrap();
+        let (mut a, mut b) = (f.cur, f.hi);
+        while a < b {
+            let m = a + (b - a) / 2;
+            if self.trie.tuples[m][col] < x {
+                a = m + 1;
+            } else {
+                b = m;
+            }
+        }
+        f.cur = a;
+    }
+    /// Descends one column: into the subtree of the parent's current key (or, at
+    /// the root, the whole relation), with the cursor reset to its start.
+    fn open(&mut self) {
+        match self.frames.last() {
+            None => {
+                self.frames.push(Frame { hi: self.trie.tuples.len(), cur: 0 });
+            }
+            Some(p) => {
+                let pcol = self.frames.len() - 1;
+                let (plo, phi) = (p.cur, p.hi);
+                let val = self.trie.tuples[plo][pcol];
+                let mut i = plo + 1;
+                while i < phi && self.trie.tuples[i][pcol] == val {
+                    i += 1;
+                }
+                self.frames.push(Frame { hi: i, cur: plo });
+            }
+        }
+    }
+    fn up(&mut self) {
+        self.frames.pop();
+    }
+}
+
+/// Leapfrog intersection of the participating iterators at one level.
+struct Leapfrog {
+    order: Vec<usize>, // participant indices, kept in cyclic key order
+    p: usize,
+    ended: bool,
+    key: Id,
+}
+
+impl Leapfrog {
+    fn init(iters: &mut [TrieIter], parts: &[usize]) -> Self {
+        let mut lf = Leapfrog { order: parts.to_vec(), p: 0, ended: false, key: 0 };
+        if parts.iter().any(|&i| iters[i].at_end()) {
+            lf.ended = true;
+            return lf;
+        }
+        lf.order.sort_by_key(|&i| iters[i].key());
+        lf.search(iters);
+        lf
+    }
+    fn search(&mut self, iters: &mut [TrieIter]) {
+        let k = self.order.len();
+        loop {
+            let max = iters[self.order[(self.p + k - 1) % k]].key();
+            let min = iters[self.order[self.p]].key();
+            if min == max {
+                self.key = min;
+                return;
+            }
+            iters[self.order[self.p]].seek(max);
+            if iters[self.order[self.p]].at_end() {
+                self.ended = true;
+                return;
+            }
+            self.p = (self.p + 1) % k;
+        }
+    }
+    fn next(&mut self, iters: &mut [TrieIter]) {
+        let k = self.order.len();
+        iters[self.order[self.p]].next();
+        if iters[self.order[self.p]].at_end() {
+            self.ended = true;
+            return;
+        }
+        self.p = (self.p + 1) % k;
+        self.search(iters);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lftj_recurse(
+    iters: &mut [TrieIter],
+    parts_at_level: &[Vec<usize>],
+    level: usize,
+    n_levels: usize,
+    current: &mut [Id],
+    out: &mut Vec<Vec<Id>>,
+) {
+    if level == n_levels {
+        out.push(current.to_vec());
+        return;
+    }
+    let parts = &parts_at_level[level];
+    // Open-on-entry: descend each relevant iterator into this level (rewinding it).
+    for &i in parts {
+        iters[i].open();
+    }
+    let mut lf = Leapfrog::init(iters, parts);
+    while !lf.ended {
+        current[level] = lf.key;
+        lftj_recurse(iters, parts_at_level, level + 1, n_levels, current, out);
+        lf.next(iters);
+    }
+    for &i in parts {
+        iters[i].up();
+    }
+}
+
+/// Builds a pattern's trie of projected variable tuples, plus the global levels
+/// of those variables (sorted ascending). Repeated-variable patterns keep only
+/// rows where all positions of a variable agree.
+fn build_trie(
+    graph: &Graph,
+    id_pat: &IdPattern,
+    pos_vars: &[Option<Variable>; 3],
+    var_levels: &FxHashMap<Variable, usize>,
+) -> (Trie, Vec<usize>) {
+    let mut var_positions: Vec<(Variable, Vec<usize>)> = Vec::new();
+    for (pos, ov) in pos_vars.iter().enumerate() {
+        if let Some(v) = ov {
+            if let Some(e) = var_positions.iter_mut().find(|(x, _)| x == v) {
+                e.1.push(pos);
+            } else {
+                var_positions.push((v.clone(), vec![pos]));
+            }
+        }
+    }
+    var_positions.sort_by_key(|(v, _)| var_levels[v]);
+    let levels: Vec<usize> = var_positions.iter().map(|(v, _)| var_levels[v]).collect();
+
+    let scan = graph.store.scan(id_pat);
+    let mut tuples: Vec<Vec<Id>> = Vec::with_capacity(scan.rows.len());
+    for row in scan.rows {
+        let spo = scan.to_spo(row);
+        let mut tup = Vec::with_capacity(var_positions.len());
+        let mut ok = true;
+        for (_, positions) in &var_positions {
+            let v0 = spo[positions[0]];
+            if positions.iter().any(|&p| spo[p] != v0) {
+                ok = false;
+                break;
+            }
+            tup.push(v0);
+        }
+        if ok {
+            tuples.push(tup);
+        }
+    }
+    tuples.sort_unstable();
+    tuples.dedup();
+    (Trie { tuples }, levels)
+}
+
+fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
+    // Prepare patterns; an unsatisfiable constant makes the whole BGP empty.
+    let mut prepared: Vec<(IdPattern, [Option<Variable>; 3])> = Vec::with_capacity(patterns.len());
+    for tp in patterns {
+        let (id_pat, pos_vars, unsat) = prepare_pattern(graph, tp)?;
+        if unsat {
+            return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
+        }
+        prepared.push((id_pat, pos_vars));
+    }
+
+    // Global variable order: most-constrained first (highest degree, then most
+    // selective). Constant-only patterns contribute no variables but must match.
+    let all_vars = collect_vars(patterns);
+    let degree = |v: &Variable| prepared.iter().filter(|(_, pv)| pv.iter().flatten().any(|x| x == v)).count();
+    let min_est = |v: &Variable| {
+        prepared
+            .iter()
+            .filter(|(_, pv)| pv.iter().flatten().any(|x| x == v))
+            .map(|(ip, _)| graph.store.estimate(ip))
+            .min()
+            .unwrap_or(usize::MAX)
+    };
+    let mut order_vars = all_vars.clone();
+    order_vars.sort_by(|a, b| degree(b).cmp(&degree(a)).then(min_est(a).cmp(&min_est(b))));
+    let n_levels = order_vars.len();
+
+    let var_levels: FxHashMap<Variable, usize> =
+        order_vars.iter().enumerate().map(|(i, v)| (v.clone(), i)).collect();
+
+    // Build a trie per pattern that has variables; check constant-only patterns
+    // for existence (empty range => empty BGP).
+    let mut tries: Vec<Trie> = Vec::new();
+    let mut trie_levels: Vec<Vec<usize>> = Vec::new();
+    for (id_pat, pos_vars) in &prepared {
+        if pos_vars.iter().all(|v| v.is_none()) {
+            if graph.store.estimate(id_pat) == 0 {
+                return Ok(Bindings::unsorted(order_vars, vec![]));
+            }
+            continue;
+        }
+        let (trie, levels) = build_trie(graph, id_pat, pos_vars, &var_levels);
+        if trie.tuples.is_empty() {
+            return Ok(Bindings::unsorted(order_vars, vec![]));
+        }
+        tries.push(trie);
+        trie_levels.push(levels);
+    }
+
+    // No variables: BGP is a ground check that already succeeded.
+    if n_levels == 0 {
+        return Ok(Bindings { vars: vec![], rows: vec![vec![]], sorted_by: None });
+    }
+
+    // Participating tries per global level.
+    let mut parts_at_level: Vec<Vec<usize>> = vec![Vec::new(); n_levels];
+    for (ti, levels) in trie_levels.iter().enumerate() {
+        for &lvl in levels {
+            parts_at_level[lvl].push(ti);
+        }
+    }
+
+    let mut iters: Vec<TrieIter> = tries.iter().map(TrieIter::new).collect();
+    let mut out: Vec<Vec<Id>> = Vec::new();
+    let mut current = vec![NO_ID; n_levels];
+    lftj_recurse(&mut iters, &parts_at_level, 0, n_levels, &mut current, &mut out);
+
+    // Output rows are produced in global-order lexicographic order.
+    let sorted_by = order_vars.first().cloned();
+    Ok(Bindings { vars: order_vars, rows: out, sorted_by })
+}
+
+/// α-acyclicity test via GYO reduction: repeatedly drop variables that occur in
+/// only one pattern and patterns whose variable set is contained in another.
+/// A BGP is cyclic iff anything remains. Cyclic BGPs benefit from WCOJ.
+fn bgp_is_cyclic(patterns: &[TriplePattern]) -> bool {
+    let mut next_id = 0u32;
+    let mut ids: FxHashMap<Variable, u32> = FxHashMap::default();
+    let mut edges: Vec<std::collections::HashSet<u32>> = Vec::new();
+    for tp in patterns {
+        let mut e = std::collections::HashSet::new();
+        for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)].into_iter().flatten() {
+            let id = *ids.entry(v).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+            e.insert(id);
+        }
+        if !e.is_empty() {
+            edges.push(e);
+        }
+    }
+
+    loop {
+        let mut changed = false;
+
+        // Drop variables occurring in exactly one edge.
+        let mut count: FxHashMap<u32, usize> = FxHashMap::default();
+        for e in &edges {
+            for &v in e {
+                *count.entry(v).or_default() += 1;
+            }
+        }
+        for e in edges.iter_mut() {
+            let before = e.len();
+            e.retain(|v| count[v] > 1);
+            if e.len() != before {
+                changed = true;
+            }
+        }
+        let before = edges.len();
+        edges.retain(|e| !e.is_empty());
+        if edges.len() != before {
+            changed = true;
+        }
+
+        // Drop an edge contained in a distinct edge (also removes duplicates).
+        let mut removed = None;
+        'outer: for i in 0..edges.len() {
+            for j in 0..edges.len() {
+                if i != j && edges[i].is_subset(&edges[j]) {
+                    removed = Some(i);
+                    break 'outer;
+                }
+            }
+        }
+        if let Some(i) = removed {
+            edges.remove(i);
+            changed = true;
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    !edges.is_empty()
 }
 
 fn prepare_pattern(graph: &Graph, tp: &TriplePattern) -> Result<(IdPattern, [Option<Variable>; 3], bool), String> {
@@ -1133,5 +1517,127 @@ fn nnp_var(p: &NamedNodePattern) -> Option<Variable> {
     match p {
         NamedNodePattern::Variable(v) => Some(v.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod wcoj_tests {
+    use super::*;
+    use spargebra::SparqlParser;
+
+    /// Extracts the BGP triple patterns from a simple `SELECT * WHERE { ... }`.
+    fn bgp(sparql: &str) -> Vec<TriplePattern> {
+        let q = SparqlParser::new().parse_query(sparql).unwrap();
+        let spargebra::Query::Select { pattern, .. } = q else { panic!() };
+        let mut patterns = Vec::new();
+        let mut filters = Vec::new();
+        // unwrap Project -> inner
+        fn inner_of(p: &GraphPattern) -> &GraphPattern {
+            match p {
+                GraphPattern::Project { inner, .. }
+                | GraphPattern::Distinct { inner }
+                | GraphPattern::Slice { inner, .. } => inner_of(inner),
+                other => other,
+            }
+        }
+        flatten_conjunction(inner_of(&pattern), &mut patterns, &mut filters);
+        patterns
+    }
+
+    /// Sorted set of result rows from a Bindings, for order-independent equality.
+    fn rowset(b: &Bindings) -> Vec<Vec<(String, Id)>> {
+        let mut rows: Vec<Vec<(String, Id)>> = b
+            .rows
+            .iter()
+            .map(|r| {
+                let mut kv: Vec<(String, Id)> =
+                    b.vars.iter().zip(r).map(|(v, &id)| (v.as_str().to_string(), id)).collect();
+                kv.sort();
+                kv
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    fn random_graph(seed0: u64, n_nodes: u32, n_edges: usize) -> Graph {
+        let mut seed = seed0;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for _ in 0..n_edges {
+            let a = next() % n_nodes;
+            let b = next() % n_nodes;
+            ttl.push_str(&format!("ex:n{a} ex:e ex:n{b} .\n"));
+        }
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
+    /// The binary and WCOJ BGP plans must return identical result sets.
+    fn assert_plans_agree(sparql: &str, graph: &Graph) {
+        let patterns = bgp(sparql);
+        let binary = eval_bgp_binary(graph, &patterns).unwrap();
+        let wcoj = eval_bgp_wcoj(graph, &patterns).unwrap();
+        assert_eq!(
+            rowset(&binary),
+            rowset(&wcoj),
+            "binary vs WCOJ disagree for `{sparql}` (binary {} rows, wcoj {} rows)",
+            binary.rows.len(),
+            wcoj.rows.len()
+        );
+    }
+
+    #[test]
+    fn cyclicity_classification() {
+        assert!(!bgp_is_cyclic(&bgp("PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }")));
+        assert!(bgp_is_cyclic(&bgp(
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?a }"
+        )));
+        assert!(bgp_is_cyclic(&bgp(
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?d . ?d ex:e ?a }"
+        )));
+        // star is acyclic
+        assert!(!bgp_is_cyclic(&bgp(
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?a ex:e ?c . ?a ex:e ?d }"
+        )));
+    }
+
+    #[test]
+    fn wcoj_matches_binary_over_random_graphs() {
+        for seed in [0x1111u64, 0xACE1, 0xDEADBEEF, 0x5EED] {
+            let g = random_graph(seed, 25, 120);
+            // chain (acyclic)
+            assert_plans_agree("PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }", &g);
+            // triangle (cyclic) — the canonical WCOJ win
+            assert_plans_agree(
+                "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?a }",
+                &g,
+            );
+            // 4-cycle
+            assert_plans_agree(
+                "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?d . ?d ex:e ?a }",
+                &g,
+            );
+            // square with a diagonal (denser cycle)
+            assert_plans_agree(
+                "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?a . ?a ex:e ?d . ?d ex:e ?c }",
+                &g,
+            );
+        }
+    }
+
+    #[test]
+    fn wcoj_repeated_variable_pattern() {
+        // self-loops: ?x ex:e ?x  — repeated-variable handling in build_trie.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:e ex:a . ex:a ex:e ex:b . ex:b ex:e ex:b .",
+            "turtle",
+        )
+        .unwrap();
+        let patterns = bgp("PREFIX ex: <http://ex/> SELECT * WHERE { ?x ex:e ?x }");
+        let wcoj = eval_bgp_wcoj(&g, &patterns).unwrap();
+        assert_eq!(wcoj.rows.len(), 2); // a and b
     }
 }
