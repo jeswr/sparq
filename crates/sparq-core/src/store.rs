@@ -112,10 +112,43 @@ impl TripleStore {
         &self.perms[perm as usize]
     }
 
+    /// Like [`choose`], but among the permutations whose sort order places every
+    /// bound position as a prefix, prefers one whose first *unbound* column is
+    /// `sort_col` (a position 0..3 into a canonical triple). This makes the scan
+    /// output sorted by that column, enabling a merge join on it.
+    fn choose_sorted(pattern: &Pattern, sort_col: usize) -> (Perm, usize) {
+        let bound = |i: usize| pattern[i].is_some();
+        let total_bound = (0..3).filter(|&i| bound(i)).count();
+        // Prefer: bound positions form the leading prefix AND column `sort_col`
+        // is the first column after the prefix.
+        for perm in Perm::ALL {
+            let order = perm.order();
+            let mut lead = 0;
+            while lead < 3 && bound(order[lead]) {
+                lead += 1;
+            }
+            if lead == total_bound && lead < 3 && order[lead] == sort_col {
+                return (perm, lead);
+            }
+        }
+        Self::choose(pattern)
+    }
+
     /// Returns the contiguous slice of rows (in `perm` order) matching the bound
     /// prefix of the pattern, together with the chosen permutation.
     pub fn scan(&self, pattern: &Pattern) -> Scan<'_> {
         let (perm, lead) = Self::choose(pattern);
+        self.scan_with(pattern, perm, lead)
+    }
+
+    /// Scans choosing a permutation whose output is sorted by canonical column
+    /// `sort_col` (when possible), for merge joins.
+    pub fn scan_sorted(&self, pattern: &Pattern, sort_col: usize) -> Scan<'_> {
+        let (perm, lead) = Self::choose_sorted(pattern, sort_col);
+        self.scan_with(pattern, perm, lead)
+    }
+
+    fn scan_with(&self, pattern: &Pattern, perm: Perm, lead: usize) -> Scan<'_> {
         let order = perm.order();
         let rows = self.index(perm);
 

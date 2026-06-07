@@ -11,9 +11,12 @@ use spargebra::algebra::{Expression, GraphPattern};
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 
 /// Intermediate result: a set of rows, each an id per `vars[i]`.
+/// `sorted_by` records the variable the rows are currently sorted on (if any),
+/// so the planner can use a merge join instead of building a hash table.
 struct Bindings {
     vars: Vec<Variable>,
     rows: Vec<Vec<Id>>,
+    sorted_by: Option<Variable>,
 }
 
 impl Bindings {
@@ -135,7 +138,8 @@ fn collect_conjunction(
 /// Evaluates a BGP into bindings using greedy join ordering and hash joins.
 fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
     if patterns.is_empty() {
-        return Ok(Bindings { vars: vec![], rows: vec![vec![]] }); // one empty solution
+        // One empty solution (the join identity).
+        return Ok(Bindings { vars: vec![], rows: vec![vec![]], sorted_by: None });
     }
 
     // Resolve each pattern to (id-pattern, var layout) and its estimate.
@@ -156,50 +160,73 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
     // Any unsatisfiable (bound term not in dict) pattern -> empty result.
     if prepared.iter().any(|p| p.unsatisfiable) {
         let vars = collect_vars(patterns);
-        return Ok(Bindings { vars, rows: vec![] });
+        return Ok(Bindings { vars, rows: vec![], sorted_by: None });
     }
 
-    // Greedy: start with the smallest pattern.
+    // The position (0/1/2) of variable `v` in prepared pattern `i`, if present.
+    let var_pos = |i: usize, v: &Variable| -> Option<usize> {
+        prepared[i].pos_vars.iter().position(|pv| pv.as_ref() == Some(v))
+    };
+
+    // Greedy seed: the smallest pattern.
     let mut order: Vec<usize> = (0..prepared.len()).collect();
     order.sort_by_key(|&i| prepared[i].est);
-
     let first = order[0];
-    let mut result = scan_to_bindings(graph, &prepared[first].id_pat, &prepared[first].pos_vars);
 
+    // Seed sort variable: a variable shared with another pattern (so the next
+    // join can be a merge), preferring the seed's own first variable.
+    let seed_join_var = prepared[first]
+        .pos_vars
+        .iter()
+        .flatten()
+        .find(|v| (0..prepared.len()).any(|j| j != first && var_pos(j, v).is_some()))
+        .cloned();
+    let seed_sort_col = seed_join_var.as_ref().and_then(|v| var_pos(first, v));
+
+    let mut result = scan_to_bindings(graph, &prepared[first].id_pat, &prepared[first].pos_vars, seed_sort_col);
     let mut done = vec![false; prepared.len()];
     done[first] = true;
 
     for _ in 1..prepared.len() {
-        // Choose the next pattern: smallest estimate that shares a variable with
-        // the current result (fall back to smallest remaining if disconnected).
-        let mut best: Option<usize> = None;
-        let mut best_connected = false;
+        // Prefer a connected pattern that can MERGE on the current sort variable
+        // (no hashing); else the smallest connected; else smallest disconnected.
+        let mut mergeable: Option<usize> = None;
+        let mut connected: Option<usize> = None;
+        let mut any: Option<usize> = None;
         for &i in &order {
             if done[i] {
                 continue;
             }
-            let connected = prepared[i]
-                .pos_vars
-                .iter()
-                .flatten()
-                .any(|v| result.vars.contains(v));
-            if connected {
-                best = Some(i);
-                best_connected = true;
-                break;
+            if any.is_none() {
+                any = Some(i);
             }
-            if best.is_none() {
-                best = Some(i);
+            let shares = prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v));
+            if shares && connected.is_none() {
+                connected = Some(i);
+            }
+            if let Some(sv) = &result.sorted_by {
+                if var_pos(i, sv).is_some() && mergeable.is_none() {
+                    mergeable = Some(i);
+                }
             }
         }
-        let i = best.unwrap();
-        done[i] = true;
-        let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars);
-        result = if best_connected {
-            hash_join(result, rhs)
+
+        if let Some(i) = mergeable {
+            done[i] = true;
+            let jv = result.sorted_by.clone().unwrap();
+            let col = var_pos(i, &jv).unwrap();
+            let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, Some(col));
+            result = merge_join(result, rhs, &jv);
+        } else if let Some(i) = connected {
+            done[i] = true;
+            let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, None);
+            result = hash_join(result, rhs);
         } else {
-            cross_product(result, rhs)
-        };
+            let i = any.unwrap();
+            done[i] = true;
+            let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, None);
+            result = cross_product(result, rhs);
+        }
         if result.rows.is_empty() {
             break;
         }
@@ -270,8 +297,15 @@ fn prepare_pattern(
 }
 
 /// Scans a single pattern into bindings (handles a variable repeated across
-/// positions by keeping only rows where those positions are equal).
-fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3]) -> Bindings {
+/// positions by keeping only rows where those positions are equal). `sort_col`,
+/// when given, requests a permutation whose output is sorted by that canonical
+/// triple column, so the result can drive a merge join.
+fn scan_to_bindings(
+    graph: &Graph,
+    id_pat: &IdPattern,
+    pos_vars: &[Option<Variable>; 3],
+    sort_col: Option<usize>,
+) -> Bindings {
     // Distinct variables in position order, with the positions each occupies.
     let mut vars: Vec<Variable> = Vec::new();
     let mut var_positions: Vec<Vec<usize>> = Vec::new();
@@ -286,7 +320,15 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         }
     }
 
-    let scan = graph.store.scan(id_pat);
+    let scan = match sort_col {
+        Some(c) => graph.store.scan_sorted(id_pat, c),
+        None => graph.store.scan(id_pat),
+    };
+    // The result is sorted by `sort_col` only if no repeated-variable filtering
+    // reorders/removes rows in a way that breaks the order — equality filtering
+    // preserves order, so the sort holds. Map sort_col -> the variable at it.
+    let sorted_by = sort_col.and_then(|c| pos_vars[c].clone());
+
     let mut rows: Vec<Vec<Id>> = Vec::with_capacity(scan.rows.len());
     for row in scan.rows {
         let spo = scan.to_spo(row);
@@ -305,7 +347,72 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
             rows.push(out);
         }
     }
-    Bindings { vars, rows }
+    Bindings { vars, rows, sorted_by }
+}
+
+/// Sort-merge join of two bindings that are both sorted by `jv` (a single shared
+/// join variable). O(|left| + |right| + |output|), no hash table. Result is
+/// sorted by `jv`. Other shared variables (if any) are checked per matched pair.
+fn merge_join(left: Bindings, right: Bindings, jv: &Variable) -> Bindings {
+    let lk = left.col(jv).unwrap();
+    let rk = right.col(jv).unwrap();
+
+    // Output layout: left vars, then right-only vars; record additional shared
+    // variables (besides jv) that must match on each emitted pair.
+    let mut out_vars = left.vars.clone();
+    let mut right_only: Vec<usize> = Vec::new();
+    let mut extra_shared: Vec<(usize, usize)> = Vec::new(); // (left col, right col)
+    for (ri, v) in right.vars.iter().enumerate() {
+        match left.col(v) {
+            Some(li) => {
+                if v != jv {
+                    extra_shared.push((li, ri));
+                }
+            }
+            None => {
+                out_vars.push(v.clone());
+                right_only.push(ri);
+            }
+        }
+    }
+
+    let l = &left.rows;
+    let r = &right.rows;
+    let mut rows: Vec<Vec<Id>> = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < l.len() && j < r.len() {
+        let lv = l[i][lk];
+        let rv = r[j][rk];
+        if lv < rv {
+            i += 1;
+        } else if lv > rv {
+            j += 1;
+        } else {
+            // Equal-key runs on both sides -> cross product (with extra-shared check).
+            let mut i2 = i;
+            while i2 < l.len() && l[i2][lk] == lv {
+                i2 += 1;
+            }
+            let mut j2 = j;
+            while j2 < r.len() && r[j2][rk] == rv {
+                j2 += 1;
+            }
+            for li in i..i2 {
+                for rj in j..j2 {
+                    if extra_shared.iter().all(|&(lc, rc)| l[li][lc] == r[rj][rc]) {
+                        let mut row = l[li].clone();
+                        for &rc in &right_only {
+                            row.push(r[rj][rc]);
+                        }
+                        rows.push(row);
+                    }
+                }
+            }
+            i = i2;
+            j = j2;
+        }
+    }
+    Bindings { vars: out_vars, rows, sorted_by: Some(jv.clone()) }
 }
 
 /// Hash join of two bindings on their shared variables.
@@ -358,7 +465,7 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
             }
         }
     }
-    Bindings { vars: out_vars, rows }
+    Bindings { vars: out_vars, rows, sorted_by: None }
 }
 
 fn cross_product(left: Bindings, right: Bindings) -> Bindings {
@@ -372,7 +479,7 @@ fn cross_product(left: Bindings, right: Bindings) -> Bindings {
             rows.push(row);
         }
     }
-    Bindings { vars: out_vars, rows }
+    Bindings { vars: out_vars, rows, sorted_by: None }
 }
 
 fn dedup_rows(rows: &mut Vec<Vec<Option<Term>>>) {

@@ -110,6 +110,41 @@ mod tests {
     }
 
     #[test]
+    fn chain_join_three_patterns() {
+        // ?a knows ?b, ?b knows ?c : alice->bob->carol
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:knows ?c }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn star_join_merge() {
+        // star on ?s: all three patterns share ?s -> merge joins on ?s
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . ?s ex:name ?n . ?s ex:knows ?k }",
+        )
+        .unwrap();
+        // only alice and bob have knows+age+name
+        assert_eq!(r.len(), 2);
+    }
+
+    // Differential check: merge-join path must agree with a forced hash-only path
+    // across many random small graphs would be ideal; here we cross-check that
+    // join result counts are order-independent on a few shapes.
+    #[test]
+    fn join_two_shared_vars() {
+        // ?x ex:knows ?y . ?y ex:knows ?x  (symmetric knows? none here) -> 0
+        assert_eq!(
+            count("PREFIX ex: <http://ex/> SELECT * WHERE { ?x ex:knows ?y . ?y ex:knows ?x }"),
+            0
+        );
+    }
+
+    #[test]
     fn filter_ebv_boolean_and_string() {
         // FILTER(true) keeps all; numeric/string EBV
         assert_eq!(count("SELECT ?s WHERE { ?s <http://ex/age> ?a . FILTER(true) }"), 3);
@@ -118,5 +153,71 @@ mod tests {
             count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:name ?n . FILTER(?n) }"),
             3
         );
+    }
+
+    // Differential: the engine's join machinery (merge/hash/greedy ordering)
+    // must agree with a brute-force nested-loop evaluator over a random graph,
+    // for a chain query and a triangle (cyclic) query.
+    #[test]
+    fn differential_vs_naive() {
+        // Deterministic pseudo-random graph (seeded LCG, no external randomness).
+        let mut seed: u64 = 0x1234_5678;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let n_nodes = 40u32;
+        let mut edges: Vec<(u32, u32)> = Vec::new();
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for _ in 0..200 {
+            let a = next() % n_nodes;
+            let b = next() % n_nodes;
+            edges.push((a, b));
+            ttl.push_str(&format!("ex:n{a} ex:e ex:n{b} .\n"));
+        }
+        edges.sort_unstable();
+        edges.dedup();
+
+        let graph = Graph::load_str(&ttl, "turtle").unwrap();
+
+        // Chain: ?a e ?b . ?b e ?c
+        let chain = naive_count_chain(&edges);
+        let q = query(&graph, "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }").unwrap();
+        assert_eq!(q.len(), chain, "chain join count mismatch");
+
+        // Triangle: ?a e ?b . ?b e ?c . ?c e ?a  (cyclic)
+        let tri = naive_count_triangle(&edges);
+        let q = query(
+            &graph,
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?a }",
+        )
+        .unwrap();
+        assert_eq!(q.len(), tri, "triangle join count mismatch");
+    }
+
+    fn naive_count_chain(e: &[(u32, u32)]) -> usize {
+        let mut c = 0;
+        for &(a, b) in e {
+            for &(b2, _) in e {
+                if b == b2 {
+                    c += 1;
+                }
+            }
+        }
+        c
+    }
+
+    fn naive_count_triangle(e: &[(u32, u32)]) -> usize {
+        use std::collections::HashSet;
+        let set: HashSet<(u32, u32)> = e.iter().copied().collect();
+        let mut c = 0;
+        for &(a, b) in e {
+            for &(b2, cc) in e {
+                if b == b2 && set.contains(&(cc, a)) {
+                    c += 1;
+                }
+            }
+        }
+        c
     }
 }
