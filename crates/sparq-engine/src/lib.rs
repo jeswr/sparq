@@ -276,6 +276,70 @@ mod tests {
         assert_eq!(r.len(), 1); // carol (oldest)
     }
 
+    #[test]
+    fn values_undef_is_wildcard() {
+        // VALUES with UNDEF for ?s must join with every binding, not just an
+        // (impossible) "unbound" id. Expect all three people.
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a . VALUES ?s { UNDEF } }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn optional_then_join_unbound_compatible() {
+        // "Non-well-designed" nested OPTIONAL (Pérez–Arenas–Gutierrez): ?k is
+        // introduced in the first OPTIONAL and reused in the second. Under the
+        // SPARQL bottom-up algebra, carol's UNBOUND ?k is compatible with EVERY
+        // `?k ex:name ?kn` row, so the second LeftJoin pairs carol with all three
+        // names. This (surprising) count of 5 is the spec-correct answer and
+        // exercises the unbound-as-wildcard path in the compatibility join.
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?kn WHERE { \
+               ?s ex:age ?a . \
+               OPTIONAL { ?s ex:knows ?k } \
+               OPTIONAL { ?k ex:name ?kn } }",
+        )
+        .unwrap();
+        // alice->\"Bob\", bob->\"Carol\", carol-><\"Alice\",\"Bob\",\"Carol\"> = 5
+        assert_eq!(r.len(), 5);
+        assert!(r.rows.iter().all(|row| row[1].is_some())); // every ?kn ends up bound
+    }
+
+    #[test]
+    fn computed_values_dedup() {
+        // Two distinct ages (30,35,25) all map via floor()-like BIND to a constant
+        // computed literal; DISTINCT must collapse them to one row, proving equal
+        // computed terms share a local id.
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT DISTINCT ?c WHERE { ?s ex:age ?a . BIND(1 AS ?c) }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn named_graph_unsupported() {
+        let e = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { GRAPH ?g { ?s ex:age ?a } }",
+        );
+        assert!(e.is_err());
+    }
+
+    #[test]
+    fn bnode_prefix_does_not_collide() {
+        // A user variable that looks like the old synthetic prefix must be a real,
+        // projected SELECT * variable now that synthetic vars use an illegal char.
+        let r = query(&g(), "SELECT * WHERE { ?__bn_x <http://ex/age> ?a }").unwrap();
+        assert_eq!(r.len(), 3);
+        assert_eq!(r.vars.len(), 2); // both ?__bn_x and ?a are visible
+    }
+
     // Differential: the engine's join machinery (merge/hash/greedy ordering)
     // must agree with a brute-force nested-loop evaluator over a random graph,
     // for a chain query and a triangle (cyclic) query.

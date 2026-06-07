@@ -33,12 +33,19 @@ fn is_local(id: Id) -> bool {
 #[derive(Default)]
 pub struct LocalVocab {
     terms: Vec<Term>,
+    ids: FxHashMap<Term, Id>,
 }
 
 impl LocalVocab {
+    /// Interns a term, returning a stable id: equal terms get the same id so
+    /// DISTINCT, GROUP BY, joins and equality work on computed values.
     fn intern(&mut self, t: Term) -> Id {
+        if let Some(&id) = self.ids.get(&t) {
+            return id;
+        }
         let id = LOCAL_BASE + self.terms.len() as Id;
-        self.terms.push(t);
+        self.terms.push(t.clone());
+        self.ids.insert(t, id);
         id
     }
     fn term(&self, id: Id) -> &Term {
@@ -170,7 +177,11 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
             Ok(minus_bindings(l, r))
         }
         GraphPattern::Values { variables, bindings } => Ok(values_bindings(graph, local, variables, bindings)),
-        GraphPattern::Graph { inner, .. } => eval_graph_pattern(graph, local, inner),
+        GraphPattern::Graph { .. } => {
+            // The store is a single default graph; evaluating a named-graph
+            // pattern against it would silently return wrong matches.
+            Err("named graphs (GRAPH) are not yet supported".into())
+        }
         GraphPattern::Project { .. }
         | GraphPattern::Distinct { .. }
         | GraphPattern::Reduced { .. }
@@ -443,6 +454,35 @@ fn join_layout(left: &Bindings, right: &Bindings) -> (Vec<Variable>, Vec<(usize,
     (out_vars, shared, right_only)
 }
 
+/// SPARQL solution compatibility on the shared columns: an unbound (`NO_ID`)
+/// value never conflicts; two bound values must be equal.
+fn compatible(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)]) -> bool {
+    shared.iter().all(|&(lc, rc)| {
+        let (a, b) = (lrow[lc], rrow[rc]);
+        a == NO_ID || b == NO_ID || a == b
+    })
+}
+
+/// Combines two compatible rows: left's row extended with the right-only columns,
+/// filling any shared column that was unbound on the left from the right side.
+fn merge_rows(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)], right_only: &[usize]) -> Vec<Id> {
+    let mut row = lrow.to_vec();
+    for &(lc, rc) in shared {
+        if row[lc] == NO_ID {
+            row[lc] = rrow[rc];
+        }
+    }
+    for &rc in right_only {
+        row.push(rrow[rc]);
+    }
+    row
+}
+
+/// Whether any row leaves any of the given columns unbound.
+fn any_unbound(rows: &[Vec<Id>], cols: &[usize]) -> bool {
+    rows.iter().any(|r| cols.iter().any(|&c| r[c] == NO_ID))
+}
+
 fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     // Build the hash table on the smaller side.
     let (build, probe) = if left.rows.len() <= right.rows.len() {
@@ -503,56 +543,83 @@ fn cross_product(left: Bindings, right: Bindings) -> Bindings {
     Bindings::unsorted(out_vars, rows)
 }
 
-/// Generic join used for Join of non-conjunctive sub-results: merge if the two
-/// share a variable both are sorted by, else hash, else cross product.
+/// Generic join used for Join of non-conjunctive sub-results. With fully-bound
+/// shared columns it takes the fast path (merge if both are sorted on the join
+/// var, else hash); when a shared column can be unbound (from OPTIONAL / UNION /
+/// VALUES UNDEF), it falls back to a correct solution-compatibility nested loop.
 fn join_bindings(left: Bindings, right: Bindings) -> Bindings {
-    let shares = left.vars.iter().any(|v| right.col(v).is_some());
-    if !shares {
+    let (out_vars, shared, right_only) = join_layout(&left, &right);
+    if shared.is_empty() {
         return cross_product(left, right);
     }
-    if let (Some(lv), Some(rv)) = (&left.sorted_by, &right.sorted_by) {
-        if lv == rv && right.col(lv).is_some() {
-            let jv = lv.clone();
-            return merge_join(left, right, &jv);
+    let lcols: Vec<usize> = shared.iter().map(|&(lc, _)| lc).collect();
+    let rcols: Vec<usize> = shared.iter().map(|&(_, rc)| rc).collect();
+    if !any_unbound(&left.rows, &lcols) && !any_unbound(&right.rows, &rcols) {
+        if let (Some(lv), Some(rv)) = (&left.sorted_by, &right.sorted_by) {
+            if lv == rv && right.col(lv).is_some() {
+                let jv = lv.clone();
+                return merge_join(left, right, &jv);
+            }
+        }
+        return hash_join(left, right);
+    }
+    let mut rows = Vec::new();
+    for lrow in &left.rows {
+        for rrow in &right.rows {
+            if compatible(lrow, rrow, &shared) {
+                rows.push(merge_rows(lrow, rrow, &shared, &right_only));
+            }
         }
     }
-    hash_join(left, right)
+    Bindings::unsorted(out_vars, rows)
 }
 
 // ---- OPTIONAL / UNION / MINUS / VALUES / BIND --------------------------------
 
 fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right: Bindings, expr: Option<&Expression>) -> Result<Bindings, String> {
     let (out_vars, shared, right_only) = join_layout(&left, &right);
-    // Hash the right side on shared variables.
-    let mut table: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
-    for (ri, row) in right.rows.iter().enumerate() {
-        let key: Vec<Id> = shared.iter().map(|&(_, rc)| row[rc]).collect();
-        table.entry(key).or_default().push(ri);
-    }
     let n_right_only = right_only.len();
+
+    // Hash the right side by its shared-variable key when those columns are fully
+    // bound; otherwise fall back to a compatibility scan (shared vars may be
+    // unbound, in which case they act as wildcards).
+    let lcols: Vec<usize> = shared.iter().map(|&(lc, _)| lc).collect();
+    let rcols: Vec<usize> = shared.iter().map(|&(_, rc)| rc).collect();
+    let table: Option<FxHashMap<Vec<Id>, Vec<usize>>> =
+        if !shared.is_empty() && !any_unbound(&left.rows, &lcols) && !any_unbound(&right.rows, &rcols) {
+            let mut t: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
+            for (ri, row) in right.rows.iter().enumerate() {
+                t.entry(rcols.iter().map(|&c| row[c]).collect()).or_default().push(ri);
+            }
+            Some(t)
+        } else {
+            None
+        };
+
     let mut rows = Vec::new();
     for lrow in &left.rows {
-        let key: Vec<Id> = shared.iter().map(|&(lc, _)| lrow[lc]).collect();
+        let candidates: Vec<usize> = match &table {
+            Some(t) => {
+                let key: Vec<Id> = lcols.iter().map(|&c| lrow[c]).collect();
+                t.get(&key).cloned().unwrap_or_default()
+            }
+            None => (0..right.rows.len()).filter(|&ri| compatible(lrow, &right.rows[ri], &shared)).collect(),
+        };
         let mut matched = false;
-        if let Some(cands) = table.get(&key) {
-            for &ri in cands {
-                let rrow = &right.rows[ri];
-                let mut combined = lrow.clone();
-                for &rc in &right_only {
-                    combined.push(rrow[rc]);
+        for ri in candidates {
+            let combined = merge_rows(lrow, &right.rows[ri], &shared, &right_only);
+            // OPTIONAL's filter is part of the join condition (evaluated on the
+            // combined row); a row that fails it does not count as a match.
+            let keep = match expr {
+                None => true,
+                Some(e) => {
+                    let tmp = Bindings { vars: out_vars.clone(), rows: vec![], sorted_by: None };
+                    effective_boolean(&eval_expr(graph, local, &tmp, &combined, e)?)
                 }
-                // OPTIONAL's filter is evaluated on the combined row.
-                let keep = match expr {
-                    None => true,
-                    Some(e) => {
-                        let tmp = Bindings { vars: out_vars.clone(), rows: vec![], sorted_by: None };
-                        effective_boolean(&eval_expr(graph, local, &tmp, &combined, e)?)
-                    }
-                };
-                if keep {
-                    rows.push(combined);
-                    matched = true;
-                }
+            };
+            if keep {
+                rows.push(combined);
+                matched = true;
             }
         }
         if !matched {
@@ -588,8 +655,9 @@ fn union_bindings(left: Bindings, right: Bindings) -> Bindings {
 }
 
 fn minus_bindings(left: Bindings, right: Bindings) -> Bindings {
-    // Shared variables; a left row is removed if it is compatible with some right
-    // row on all shared variables that are bound in both (SPARQL MINUS).
+    // SPARQL MINUS: drop a left row iff some right row is *compatible* with it AND
+    // their bound domains overlap on at least one shared variable. (Disjoint
+    // domains never remove anything.)
     let shared: Vec<(usize, usize)> = left
         .vars
         .iter()
@@ -597,21 +665,43 @@ fn minus_bindings(left: Bindings, right: Bindings) -> Bindings {
         .filter_map(|(li, v)| right.col(v).map(|ri| (li, ri)))
         .collect();
     if shared.is_empty() {
-        return left; // no shared vars -> MINUS removes nothing
+        return left; // disjoint domains -> MINUS removes nothing
     }
-    let mut table: FxHashMap<Vec<Id>, ()> = FxHashMap::default();
-    for row in &right.rows {
-        let key: Vec<Id> = shared.iter().map(|&(_, rc)| row[rc]).collect();
-        table.insert(key, ());
+    let lcols: Vec<usize> = shared.iter().map(|&(lc, _)| lc).collect();
+    let rcols: Vec<usize> = shared.iter().map(|&(_, rc)| rc).collect();
+
+    // Fast path: shared columns fully bound -> compatibility is exact-key equality
+    // and the domains always overlap, so membership in a hash set suffices.
+    if !any_unbound(&left.rows, &lcols) && !any_unbound(&right.rows, &rcols) {
+        let mut table: FxHashMap<Vec<Id>, ()> = FxHashMap::default();
+        for row in &right.rows {
+            table.insert(rcols.iter().map(|&c| row[c]).collect(), ());
+        }
+        let rows: Vec<Vec<Id>> = left
+            .rows
+            .into_iter()
+            .filter(|row| !table.contains_key(&lcols.iter().map(|&c| row[c]).collect::<Vec<_>>()))
+            .collect();
+        return Bindings { vars: left.vars, rows, sorted_by: left.sorted_by };
     }
-    let rows: Vec<Vec<Id>> = left
-        .rows
-        .into_iter()
-        .filter(|row| {
-            let key: Vec<Id> = shared.iter().map(|&(lc, _)| row[lc]).collect();
-            !table.contains_key(&key)
+
+    // General path: per-row compatibility with a bound-domain-overlap check.
+    let keep = |lrow: &Vec<Id>| -> bool {
+        !right.rows.iter().any(|rrow| {
+            let mut overlap = false;
+            for &(lc, rc) in &shared {
+                let (a, b) = (lrow[lc], rrow[rc]);
+                if a != NO_ID && b != NO_ID {
+                    if a != b {
+                        return false; // incompatible
+                    }
+                    overlap = true;
+                }
+            }
+            overlap
         })
-        .collect();
+    };
+    let rows: Vec<Vec<Id>> = left.rows.iter().filter(|r| keep(r)).cloned().collect();
     Bindings { vars: left.vars, rows, sorted_by: left.sorted_by }
 }
 
@@ -1021,7 +1111,11 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
     }
 }
 
-const BNODE_VAR_PREFIX: &str = "__bn_";
+/// Prefix for the synthetic variables that stand in for blank nodes (which are
+/// existential variables in a query). `#` cannot appear in a SPARQL `VARNAME`,
+/// so these can never collide with a user variable, and the `SELECT *` filter on
+/// this prefix can never hide a real one.
+const BNODE_VAR_PREFIX: &str = "#bn#";
 
 fn bnode_var(b: &oxrdf::BlankNode) -> Variable {
     Variable::new_unchecked(format!("{BNODE_VAR_PREFIX}{}", b.as_str()))
