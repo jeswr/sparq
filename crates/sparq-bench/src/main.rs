@@ -1,0 +1,241 @@
+//! Benchmark + differential harness: runs the same dataset and queries through
+//! `sparq` and through Oxigraph (a mature Rust SPARQL engine), checks that they
+//! return the same number of solutions (a correctness cross-check against an
+//! independent implementation), and reports load/query timings and memory.
+//!
+//! Usage:
+//!   sparq-bench [--scale N] [--iters K]      # compare both engines (default)
+//!   sparq-bench --mem sparq|oxigraph --scale N
+//!       # internal: build one engine, print peak RSS (used by the orchestrator)
+
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+mod dataset;
+
+/// The query workload. Each exercises a different plan shape.
+const QUERIES: &[(&str, &str)] = &[
+    ("scan-type", "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s a ex:Person }"),
+    (
+        "star-3",
+        "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n . ?s ex:age ?ag . ?s ex:city ?c }",
+    ),
+    (
+        "chain-2",
+        "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:follows ?b . ?b ex:follows ?c }",
+    ),
+    (
+        "triangle",
+        "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:follows ?b . ?b ex:follows ?c . ?c ex:follows ?a }",
+    ),
+    ("filter-age", "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a > 70) }"),
+    ("count-edges", "PREFIX ex: <http://ex/> SELECT (COUNT(*) AS ?c) WHERE { ?s ex:follows ?o }"),
+    (
+        "optional",
+        "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:age ?a } }",
+    ),
+];
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let scale: u32 = arg_val(&args, "--scale").and_then(|s| s.parse().ok()).unwrap_or(20_000);
+    let iters: usize = arg_val(&args, "--iters").and_then(|s| s.parse().ok()).unwrap_or(5);
+
+    if let Some(engine) = arg_val(&args, "--mem") {
+        mem_subprocess(&engine, scale);
+        return;
+    }
+    compare(scale, iters);
+}
+
+fn arg_val(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+}
+
+// ---- comparison --------------------------------------------------------------
+
+fn compare(scale: u32, iters: usize) {
+    eprintln!("generating dataset (scale={scale} entities)…");
+    let ttl = dataset::generate(scale);
+    let n_triples = ttl.lines().filter(|l| l.trim_end().ends_with('.')).count();
+    println!(
+        "# sparq vs oxigraph — {scale} entities, ~{:.1}M triples, {} bytes turtle, {iters} iters (min time)\n",
+        n_triples as f64 / 1e6,
+        ttl.len()
+    );
+
+    // ---- load ----
+    let t = Instant::now();
+    let g = sparq_core::Graph::load_str(&ttl, "turtle").expect("sparq load");
+    let sparq_load = t.elapsed();
+
+    let t = Instant::now();
+    let store = oxigraph::store::Store::new().expect("oxi store");
+    store
+        .load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes())
+        .expect("oxi load");
+    let oxi_load = t.elapsed();
+
+    println!("{:<14} {:>12} {:>12} {:>9}", "stage", "sparq", "oxigraph", "speedup");
+    println!("{}", "-".repeat(50));
+    println!(
+        "{:<14} {:>12} {:>12} {:>8.2}x",
+        "load",
+        fmt_dur(sparq_load),
+        fmt_dur(oxi_load),
+        oxi_load.as_secs_f64() / sparq_load.as_secs_f64()
+    );
+    println!("(triples loaded: sparq={}, oxi={})\n", g.len(), store.len().unwrap());
+
+    // ---- queries ----
+    println!(
+        "{:<14} {:>9} {:>9} {:>6} {:>12} {:>12} {:>9}",
+        "query", "sparq#", "oxi#", "match", "sparq", "oxigraph", "speedup"
+    );
+    println!("{}", "-".repeat(76));
+    let mut mismatches = 0;
+    for (name, q) in QUERIES {
+        let (sd, srows) = time_min(iters, || sparq_engine::query(&g, q).expect("sparq query").len());
+        let (od, orows) = time_min(iters, || oxi_count(&store, q));
+        let ok = srows == orows;
+        if !ok {
+            mismatches += 1;
+        }
+        println!(
+            "{:<14} {:>9} {:>9} {:>6} {:>12} {:>12} {:>8.2}x",
+            name,
+            srows,
+            orows,
+            if ok { "ok" } else { "DIFF" },
+            fmt_dur(sd),
+            fmt_dur(od),
+            od.as_secs_f64() / sd.as_secs_f64()
+        );
+    }
+
+    // ---- memory (separate subprocesses for clean peak RSS) ----
+    println!("\nmemory (peak process RSS, includes the parse buffer — approximate):");
+    let sparq_mem = measure_mem_subprocess("sparq", scale);
+    let oxi_mem = measure_mem_subprocess("oxigraph", scale);
+    println!(
+        "  sparq    {:>10}   (store self-estimate {})",
+        fmt_bytes(sparq_mem),
+        fmt_bytes(g.heap_bytes())
+    );
+    println!("  oxigraph {:>10}", fmt_bytes(oxi_mem));
+    if sparq_mem > 0 && oxi_mem > 0 {
+        println!("  ratio    {:.2}x (oxi/sparq)", oxi_mem as f64 / sparq_mem as f64);
+    }
+
+    if mismatches > 0 {
+        eprintln!("\nWARNING: {mismatches} query result-count mismatch(es) vs oxigraph");
+        std::process::exit(1);
+    } else {
+        println!("\nall {} queries agree with oxigraph ✓", QUERIES.len());
+    }
+}
+
+fn time_min(iters: usize, mut f: impl FnMut() -> usize) -> (Duration, usize) {
+    let mut best = Duration::MAX;
+    let mut rows = 0;
+    for _ in 0..iters.max(1) {
+        let t = Instant::now();
+        rows = f();
+        best = best.min(t.elapsed());
+    }
+    (best, rows)
+}
+
+fn oxi_count(store: &oxigraph::store::Store, q: &str) -> usize {
+    match store.query(q).expect("oxi query") {
+        oxigraph::sparql::QueryResults::Solutions(s) => s.count(),
+        oxigraph::sparql::QueryResults::Boolean(_) => 1,
+        oxigraph::sparql::QueryResults::Graph(g) => g.count(),
+    }
+}
+
+// ---- memory subprocess -------------------------------------------------------
+
+fn mem_subprocess(engine: &str, scale: u32) {
+    let ttl = dataset::generate(scale);
+    // Measure peak RSS right after load — before any result-materialising query —
+    // so the figure reflects store + parse, not a large intermediate result.
+    let footprint;
+    match engine {
+        "sparq" => {
+            let g = sparq_core::Graph::load_str(&ttl, "turtle").unwrap();
+            footprint = g.heap_bytes();
+            let rss = peak_rss_bytes();
+            std::hint::black_box(&g);
+            println!("{rss} {footprint}");
+        }
+        "oxigraph" => {
+            let store = oxigraph::store::Store::new().unwrap();
+            store.load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes()).unwrap();
+            let rss = peak_rss_bytes();
+            std::hint::black_box(&store);
+            println!("{rss} 0");
+        }
+        other => panic!("unknown engine {other}"),
+    }
+}
+
+fn measure_mem_subprocess(engine: &str, scale: u32) -> usize {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let out = Command::new(exe)
+        .args(["--mem", engine, "--scale", &scale.to_string()])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn peak_rss_bytes() -> usize {
+    unsafe {
+        let mut ru: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &mut ru) != 0 {
+            return 0;
+        }
+        let m = ru.ru_maxrss as usize;
+        // macOS reports bytes; Linux/BSD report kilobytes.
+        if cfg!(target_os = "macos") {
+            m
+        } else {
+            m * 1024
+        }
+    }
+}
+
+// ---- formatting --------------------------------------------------------------
+
+fn fmt_dur(d: Duration) -> String {
+    let us = d.as_secs_f64() * 1e6;
+    if us < 1000.0 {
+        format!("{us:.1}µs")
+    } else if us < 1e6 {
+        format!("{:.2}ms", us / 1e3)
+    } else {
+        format!("{:.3}s", us / 1e6)
+    }
+}
+
+fn fmt_bytes(b: usize) -> String {
+    let b = b as f64;
+    if b < 1024.0 {
+        format!("{b:.0}B")
+    } else if b < 1024.0 * 1024.0 {
+        format!("{:.1}KiB", b / 1024.0)
+    } else if b < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1}MiB", b / 1024.0 / 1024.0)
+    } else {
+        format!("{:.2}GiB", b / 1024.0 / 1024.0 / 1024.0)
+    }
+}

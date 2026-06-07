@@ -79,4 +79,16 @@ impl Dict {
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty()
     }
+
+    /// A rough estimate of the dictionary's heap footprint in bytes (for
+    /// benchmarking). Counts the `terms` vector, the lexical-key strings stored in
+    /// the hash map (the dominant cost), and the map's bucket array.
+    pub fn heap_bytes(&self) -> usize {
+        let term_slots = self.terms.capacity() * std::mem::size_of::<Term>();
+        // Each interned term keeps a String key (its N-Triples form) plus an id.
+        let key_bytes: usize = self.ids.keys().map(|k| k.len() + std::mem::size_of::<String>()).sum();
+        // FxHashMap bucket overhead (hashbrown): ~ (capacity) * (entry + control byte).
+        let buckets = self.ids.capacity() * (std::mem::size_of::<(String, Id)>() + 1);
+        term_slots + key_bytes + buckets
+    }
 }

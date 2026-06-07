@@ -1,0 +1,17 @@
+[package]
+name = "sparq-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sparq-core = { path = "../sparq-core" }
+sparq-engine = { path = "../sparq-engine" }
+# Reference engine to compare against (in-memory; no RocksDB).
+oxigraph = { version = "0.5", default-features = false, features = ["rdf-12"] }
+libc = "0.2"
+
+[[bin]]
+name = "sparq-bench"
+path = "src/main.rs"

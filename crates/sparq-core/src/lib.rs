@@ -75,6 +75,12 @@ impl Graph {
         self.store.is_empty()
     }
 
+    /// A rough estimate of the graph's in-memory footprint in bytes (dictionary +
+    /// the six permutation indexes), for benchmarking.
+    pub fn heap_bytes(&self) -> usize {
+        self.dict.heap_bytes() + self.store.heap_bytes()
+    }
+
     /// Resolves a term to its id, or `None` if the term is absent (so a pattern
     /// bound to it cannot match).
     pub fn id_of(&self, term: &Term) -> Option<Id> {

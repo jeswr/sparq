@@ -86,6 +86,11 @@ impl TripleStore {
         self.perms[0].is_empty()
     }
 
+    /// Heap footprint of the six permutation indexes in bytes (for benchmarking).
+    pub fn heap_bytes(&self) -> usize {
+        self.perms.iter().map(|p| p.capacity() * std::mem::size_of::<[Id; 3]>()).sum()
+    }
+
     /// Chooses the permutation whose sort order places all bound pattern
     /// positions as a contiguous prefix, so the matches form one range. Returns
     /// the permutation and the number of leading bound columns.
