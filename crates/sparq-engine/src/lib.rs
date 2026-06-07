@@ -323,6 +323,25 @@ mod tests {
     }
 
     #[test]
+    fn minus_undef_domain_overlap() {
+        // Left has ?k possibly UNBOUND (via OPTIONAL); right binds ?k. MINUS must
+        // exercise the general compatibility+domain-overlap path:
+        //   alice(k=bob)   -> right has k=bob   -> compatible & overlap -> REMOVED
+        //   bob(k=carol)   -> right has k=carol -> compatible & overlap -> REMOVED
+        //   carol(k=UNDEF) -> compatible with all, but NO bound overlap -> KEPT
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { \
+               ?s ex:age ?a . \
+               OPTIONAL { ?s ex:knows ?k } \
+               MINUS { ?x ex:knows ?k } }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1); // only carol survives
+        assert!(r.rows[0][0].as_ref().unwrap().to_string().contains("carol"));
+    }
+
+    #[test]
     fn named_graph_unsupported() {
         let e = query(
             &g(),
