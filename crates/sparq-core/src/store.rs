@@ -9,6 +9,7 @@
 //! optionally memory-mapped columns.
 
 use crate::dict::Id;
+use rayon::prelude::*;
 
 /// The six permutations. Each names the order of (subject, predicate, object)
 /// columns as stored.
@@ -52,10 +53,12 @@ pub struct TripleStore {
 }
 
 impl TripleStore {
-    /// Builds the six permutation indexes from canonical [s,p,o] triples.
+    /// Builds the six permutation indexes from canonical [s,p,o] triples. The
+    /// SPO permutation is sorted (in parallel) and deduplicated first; the other
+    /// five permutations are independent and are built and sorted concurrently.
     pub fn from_triples(mut triples: Vec<[Id; 3]>) -> Self {
         // Deduplicate via the SPO ordering first.
-        triples.sort_unstable();
+        triples.par_sort_unstable();
         triples.dedup();
 
         let build = |order: [usize; 3]| -> Vec<[Id; 3]> {
@@ -67,13 +70,22 @@ impl TripleStore {
             v
         };
 
+        // The five non-SPO permutations are mutually independent — build them on
+        // the rayon pool (each its own sequential sort) for 5-way parallelism.
+        let mut others: Vec<Vec<[Id; 3]>> = [Perm::Sop, Perm::Pso, Perm::Pos, Perm::Osp, Perm::Ops]
+            .par_iter()
+            .map(|p| build(p.order()))
+            .collect();
+
+        // Canonical order is [Spo, Sop, Pso, Pos, Osp, Ops]; `others` holds the
+        // last five, and `triples` is the already-sorted Spo.
         let perms = [
-            triples.clone(), // Spo is already sorted as [s,p,o]
-            build(Perm::Sop.order()),
-            build(Perm::Pso.order()),
-            build(Perm::Pos.order()),
-            build(Perm::Osp.order()),
-            build(Perm::Ops.order()),
+            triples,
+            std::mem::take(&mut others[0]),
+            std::mem::take(&mut others[1]),
+            std::mem::take(&mut others[2]),
+            std::mem::take(&mut others[3]),
+            std::mem::take(&mut others[4]),
         ];
         TripleStore { perms }
     }
