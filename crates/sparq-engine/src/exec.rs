@@ -69,10 +69,16 @@ pub fn eval_select(graph: &Graph, pattern: &GraphPattern) -> Result<QueryResult,
         apply_filter(graph, &mut bindings, f)?;
     }
 
-    // Projection variable order.
+    // Projection variable order. SELECT * exposes only real query variables,
+    // never the synthetic variables we use for query blank nodes.
     let out_vars: Vec<Variable> = match project {
         Some(v) => v,
-        None => bindings.vars.clone(),
+        None => bindings
+            .vars
+            .iter()
+            .filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX))
+            .cloned()
+            .collect(),
     };
 
     // Map each output row to terms.
@@ -205,7 +211,7 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
 fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
     let mut vars = Vec::new();
     for tp in patterns {
-        for v in [term_var(&tp.subject), nnp_var(&tp.predicate), term_var(&tp.object)]
+        for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)]
             .into_iter()
             .flatten()
         {
@@ -230,6 +236,8 @@ fn prepare_pattern(
     // subject
     match &tp.subject {
         TermPattern::Variable(v) => pos_vars[0] = Some(v.clone()),
+        // A blank node in a BGP is an existential variable, scoped to the query.
+        TermPattern::BlankNode(b) => pos_vars[0] = Some(bnode_var(b)),
         other => {
             let t = term_pattern_to_term(other)?;
             match graph.id_of(&t) {
@@ -249,6 +257,7 @@ fn prepare_pattern(
     // object
     match &tp.object {
         TermPattern::Variable(v) => pos_vars[2] = Some(v.clone()),
+        TermPattern::BlankNode(b) => pos_vars[2] = Some(bnode_var(b)),
         other => {
             let t = term_pattern_to_term(other)?;
             match graph.id_of(&t) {
@@ -393,9 +402,35 @@ fn apply_filter(graph: &Graph, b: &mut Bindings, expr: &Expression) -> Result<()
     Ok(())
 }
 
-/// Evaluate an expression to an effective boolean value for a row.
+/// Evaluate an expression to its SPARQL effective boolean value (EBV). A type
+/// error / unbound value is false in our subset (FILTER removes the row).
 fn eval_bool(graph: &Graph, b: &Bindings, row: &[Id], e: &Expression) -> Result<bool, String> {
-    Ok(matches!(eval_expr(graph, b, row, e)?, Value::Bool(true)))
+    Ok(effective_boolean(&eval_expr(graph, b, row, e)?))
+}
+
+/// SPARQL effective boolean value: xsd:boolean -> its value; numeric -> != 0 and
+/// not NaN; xsd:string / plain literal -> non-empty; everything else -> false.
+fn effective_boolean(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Num(n) => *n != 0.0 && !n.is_nan(),
+        Value::Unbound => false,
+        Value::Term(Term::Literal(l)) => {
+            let dt = l.datatype().as_str();
+            if dt == "http://www.w3.org/2001/XMLSchema#boolean" {
+                matches!(l.value(), "true" | "1")
+            } else if is_numeric_dt(l) {
+                l.value().parse::<f64>().map(|n| n != 0.0 && !n.is_nan()).unwrap_or(false)
+            } else if dt == "http://www.w3.org/2001/XMLSchema#string"
+                || dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+            {
+                !l.value().is_empty()
+            } else {
+                false
+            }
+        }
+        Value::Term(_) => false,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -515,9 +550,21 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
     }
 }
 
-fn term_var(tp: &TermPattern) -> Option<Variable> {
+/// Prefix marking synthetic variables that stand in for query blank nodes.
+const BNODE_VAR_PREFIX: &str = "__bn_";
+
+/// The synthetic variable for a query blank node (repeated labels -> same var,
+/// so they behave like a repeated variable, per SPARQL semantics).
+fn bnode_var(b: &oxrdf::BlankNode) -> Variable {
+    Variable::new_unchecked(format!("{BNODE_VAR_PREFIX}{}", b.as_str()))
+}
+
+/// The variable a term pattern contributes (a real variable, or the synthetic
+/// variable of a blank node), if any.
+fn tp_var(tp: &TermPattern) -> Option<Variable> {
     match tp {
         TermPattern::Variable(v) => Some(v.clone()),
+        TermPattern::BlankNode(b) => Some(bnode_var(b)),
         _ => None,
     }
 }

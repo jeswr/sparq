@@ -94,4 +94,29 @@ mod tests {
     fn unsatisfiable_absent_term() {
         assert_eq!(count("SELECT ?s WHERE { ?s <http://ex/nope> ?o }"), 0);
     }
+
+    #[test]
+    fn blank_node_is_existential_variable() {
+        // _:x acts as a variable: matches any subject with ex:age. SELECT *
+        // must not expose the blank-node variable.
+        let r = query(&g(), "SELECT * WHERE { _:x <http://ex/age> ?a }").unwrap();
+        assert_eq!(r.len(), 3);
+        assert_eq!(r.vars.len(), 1); // only ?a, not _:x
+        // repeated blank label behaves like a repeated variable (no self-knows here)
+        assert_eq!(
+            count("PREFIX ex: <http://ex/> SELECT * WHERE { _:x ex:knows _:x }"),
+            0
+        );
+    }
+
+    #[test]
+    fn filter_ebv_boolean_and_string() {
+        // FILTER(true) keeps all; numeric/string EBV
+        assert_eq!(count("SELECT ?s WHERE { ?s <http://ex/age> ?a . FILTER(true) }"), 3);
+        // string EBV: ?n is a non-empty string for all
+        assert_eq!(
+            count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:name ?n . FILTER(?n) }"),
+            3
+        );
+    }
 }
