@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Term model + parsers (best-in-class; we build the store + engine ourselves).
+oxrdf = { version = "0.3", features = ["rdf-12"] }
+oxttl = { version = "0.2", features = ["rdf-12"] }
+# SPARQL syntax -> algebra (we build the planner + physical execution ourselves).
+spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
+# Fast hashing / maps.
+rustc-hash = "2"
+hashbrown = "0.15"
+# Parallelism.
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# A profile for benchmarking that keeps symbols for profiling.
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

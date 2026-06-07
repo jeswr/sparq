@@ -1,0 +1,12 @@
+[package]
+name = "sparq-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxrdf.workspace = true
+oxttl.workspace = true
+rustc-hash.workspace = true
+hashbrown.workspace = true
+rayon.workspace = true

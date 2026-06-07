@@ -1,0 +1,11 @@
+[package]
+name = "sparq-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sparq-core = { path = "../sparq-core" }
+oxrdf.workspace = true
+spargebra.workspace = true
+rustc-hash.workspace = true
