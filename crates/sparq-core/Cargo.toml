@@ -4,9 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Parallel index construction via rayon. On by default for native builds; turn it
+# off (e.g. for wasm, which has no threads by default) for a smaller, simpler build.
+default = ["parallel"]
+parallel = ["dep:rayon"]
+
 [dependencies]
 oxrdf.workspace = true
 oxttl.workspace = true
 rustc-hash.workspace = true
 hashbrown.workspace = true
-rayon.workspace = true
+rayon = { workspace = true, optional = true }

@@ -9,6 +9,7 @@
 //! optionally memory-mapped columns.
 
 use crate::dict::Id;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 /// The six permutations. Each names the order of (subject, predicate, object)
@@ -58,7 +59,10 @@ impl TripleStore {
     /// five permutations are independent and are built and sorted concurrently.
     pub fn from_triples(mut triples: Vec<[Id; 3]>) -> Self {
         // Deduplicate via the SPO ordering first.
+        #[cfg(feature = "parallel")]
         triples.par_sort_unstable();
+        #[cfg(not(feature = "parallel"))]
+        triples.sort_unstable();
         triples.dedup();
 
         let build = |order: [usize; 3]| -> Vec<[Id; 3]> {
@@ -70,12 +74,13 @@ impl TripleStore {
             v
         };
 
-        // The five non-SPO permutations are mutually independent — build them on
-        // the rayon pool (each its own sequential sort) for 5-way parallelism.
-        let mut others: Vec<Vec<[Id; 3]>> = [Perm::Sop, Perm::Pso, Perm::Pos, Perm::Osp, Perm::Ops]
-            .par_iter()
-            .map(|p| build(p.order()))
-            .collect();
+        // The five non-SPO permutations are mutually independent. Build them
+        // concurrently on the rayon pool when available, else sequentially.
+        let others_orders = [Perm::Sop, Perm::Pso, Perm::Pos, Perm::Osp, Perm::Ops];
+        #[cfg(feature = "parallel")]
+        let mut others: Vec<Vec<[Id; 3]>> = others_orders.par_iter().map(|p| build(p.order())).collect();
+        #[cfg(not(feature = "parallel"))]
+        let mut others: Vec<Vec<[Id; 3]>> = others_orders.iter().map(|p| build(p.order())).collect();
 
         // Canonical order is [Spo, Sop, Pso, Pos, Osp, Ops]; `others` holds the
         // last five, and `triples` is the already-sorted Spo.
