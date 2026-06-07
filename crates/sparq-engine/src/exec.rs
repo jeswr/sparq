@@ -387,16 +387,22 @@ impl<'a> TrieIter<'a> {
         let f = self.frames.last().unwrap();
         self.trie.tuples[f.cur][col]
     }
+    /// End (exclusive) of the run of rows in `[start, hi)` whose `col` equals the
+    /// value at `start`. The slice is sorted, so this is a binary search — O(log n)
+    /// rather than a linear scan of the (possibly large) run.
+    #[inline]
+    fn run_end(&self, col: usize, start: usize, hi: usize, val: Id) -> usize {
+        start + self.trie.tuples[start..hi].partition_point(|row| row[col] <= val)
+    }
     /// Advances to the next distinct value in the current column.
     fn next(&mut self) {
         let col = self.col();
-        let f = self.frames.last_mut().unwrap();
-        let val = self.trie.tuples[f.cur][col];
-        let mut i = f.cur + 1;
-        while i < f.hi && self.trie.tuples[i][col] == val {
-            i += 1;
-        }
-        f.cur = i;
+        let (cur, hi) = {
+            let f = self.frames.last().unwrap();
+            (f.cur, f.hi)
+        };
+        let val = self.trie.tuples[cur][col];
+        self.frames.last_mut().unwrap().cur = self.run_end(col, cur, hi, val);
     }
     /// Galloping seek: first value `>= x` in the current column.
     fn seek(&mut self, x: Id) {
@@ -420,15 +426,11 @@ impl<'a> TrieIter<'a> {
             None => {
                 self.frames.push(Frame { hi: self.trie.tuples.len(), cur: 0 });
             }
-            Some(p) => {
+            Some(&Frame { cur: plo, hi: phi }) => {
                 let pcol = self.frames.len() - 1;
-                let (plo, phi) = (p.cur, p.hi);
                 let val = self.trie.tuples[plo][pcol];
-                let mut i = plo + 1;
-                while i < phi && self.trie.tuples[i][pcol] == val {
-                    i += 1;
-                }
-                self.frames.push(Frame { hi: i, cur: plo });
+                let end = self.run_end(pcol, plo, phi, val);
+                self.frames.push(Frame { hi: end, cur: plo });
             }
         }
     }
