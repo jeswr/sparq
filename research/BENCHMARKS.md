@@ -407,6 +407,15 @@ this with a tiny chunk that forces many runs + merge, including dedup of a dupli
 line). The 100M index opens and answers `COUNT(*) = 99,999,990` (100M − 10 dups) and a
 real join in <0.1 ms, with the perms entirely mmap'd.
 
+**Parallel parse (−45%).** The external build first parsed single-threaded (oxttl
+streaming) while the in-memory load already used the parallel custom byte parser.
+Measured: parse+intern is ~64% of the external build (8.2 s of ~12.9 s at 10M) — the
+bottleneck, and exactly the "parallelise parsing of the file" requested for large files.
+N-Triples is now streamed in newline-aligned ~64 MiB blocks, each parsed + interned in
+parallel (per-chunk partial dicts merged into the running dict) before spilling — still
+one block resident at a time. **10M external build 12.9 s → 6.6 s (−45%)**, output still
+byte-identical (the byte-identity unit test now exercises the parallel path).
+
 Net: a 16 GB machine can now both **construct** and **query** a 100M–1B-triple index
 whose permutations are far larger than its RAM — the "billions" end of the range.
 
