@@ -236,9 +236,45 @@ fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<
     }
 }
 
-/// COUNT(*) over a single-pattern, filter-free, no-repeated-variable BGP equals
-/// the scan range size — returned without materialising any solution. Returns
-/// `None` (fall back to full evaluation) for anything more complex.
+/// Distinct (non-repeated) variable positions of a prepared pattern, or `None` if
+/// a variable repeats (e.g. `?x p ?x`), which would make range counts over-count.
+fn distinct_pattern_vars(pos_vars: &[Option<Variable>; 3]) -> bool {
+    let vars: Vec<&Variable> = pos_vars.iter().flatten().collect();
+    let mut sorted = vars.clone();
+    sorted.sort();
+    sorted.dedup();
+    sorted.len() == vars.len()
+}
+
+/// Group sizes per value of canonical column `v_pos`, from a sorted index scan —
+/// streamed, no rows materialised. Returns `(value, count)` ascending by value.
+fn group_counts(graph: &Graph, id_pat: &IdPattern, v_pos: usize) -> Vec<(Id, usize)> {
+    let scan = graph.store.scan_sorted(id_pat, v_pos);
+    let mut out: Vec<(Id, usize)> = Vec::new();
+    let mut last: Option<Id> = None;
+    let mut cnt = 0usize;
+    for row in scan.rows {
+        let v = scan.to_spo(row)[v_pos];
+        if last == Some(v) {
+            cnt += 1;
+        } else {
+            if let Some(lv) = last {
+                out.push((lv, cnt));
+            }
+            last = Some(v);
+            cnt = 1;
+        }
+    }
+    if let Some(lv) = last {
+        out.push((lv, cnt));
+    }
+    out
+}
+
+/// Exact solution count of a filter-free conjunctive BGP without materialising the
+/// result, for the common shapes: a single pattern (range size) and a two-pattern
+/// join on a single shared variable (`Σ_v c1(v)·c2(v)` over group sizes). Returns
+/// `None` (fall back to full evaluation) otherwise.
 fn count_pushdown(graph: &Graph, inner: &GraphPattern) -> Option<usize> {
     if !is_conjunctive(inner) {
         return None;
@@ -246,22 +282,55 @@ fn count_pushdown(graph: &Graph, inner: &GraphPattern) -> Option<usize> {
     let mut patterns = Vec::new();
     let mut filters = Vec::new();
     flatten_conjunction(inner, &mut patterns, &mut filters);
-    if !filters.is_empty() || patterns.len() != 1 {
+    if !filters.is_empty() {
         return None;
     }
-    let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0]).ok()?;
-    if unsat {
-        return Some(0);
+    match patterns.len() {
+        1 => {
+            let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0]).ok()?;
+            if unsat {
+                return Some(0);
+            }
+            distinct_pattern_vars(&pos_vars).then(|| graph.store.estimate(&id_pat))
+        }
+        2 => {
+            let (ip0, pv0, u0) = prepare_pattern(graph, &patterns[0]).ok()?;
+            let (ip1, pv1, u1) = prepare_pattern(graph, &patterns[1]).ok()?;
+            if u0 || u1 {
+                return Some(0);
+            }
+            if !distinct_pattern_vars(&pv0) || !distinct_pattern_vars(&pv1) {
+                return None;
+            }
+            // Exactly one shared variable; each pattern's other variables are free,
+            // so the count is the product of group sizes summed over that variable.
+            let shared: Vec<(usize, usize)> = pv0
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| v.as_ref().and_then(|v| pv1.iter().position(|x| x.as_ref() == Some(v)).map(|j| (i, j))))
+                .collect();
+            if shared.len() != 1 {
+                return None;
+            }
+            let (p0, p1) = shared[0];
+            let g0 = group_counts(graph, &ip0, p0);
+            let g1 = group_counts(graph, &ip1, p1);
+            let (mut i, mut j, mut total) = (0usize, 0usize, 0usize);
+            while i < g0.len() && j < g1.len() {
+                match g0[i].0.cmp(&g1[j].0) {
+                    Ordering::Less => i += 1,
+                    Ordering::Greater => j += 1,
+                    Ordering::Equal => {
+                        total += g0[i].1 * g1[j].1;
+                        i += 1;
+                        j += 1;
+                    }
+                }
+            }
+            Some(total)
+        }
+        _ => None,
     }
-    // A repeated variable (e.g. `?x p ?x`) makes the range size an over-count.
-    let vars: Vec<&Variable> = pos_vars.iter().flatten().collect();
-    let mut sorted = vars.clone();
-    sorted.sort();
-    sorted.dedup();
-    if sorted.len() != vars.len() {
-        return None;
-    }
-    Some(graph.store.estimate(&id_pat))
 }
 
 fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {

@@ -384,6 +384,39 @@ mod tests {
     }
 
     #[test]
+    fn lazy_count_matches_materialized() {
+        // The lazy count() (single-pattern range size, two-pattern group-count
+        // join) must equal the materialised result length.
+        let cases = [
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a }", // single pattern
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:age ?age }", // chain join
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:age ?a . ?s ex:name ?n }", // subject-shared
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?x ex:knows ?x }",               // repeated var
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:knows ?c }", // chain
+        ];
+        for q in cases {
+            assert_eq!(super::count(&g(), q).unwrap(), query(&g(), q).unwrap().len(), "count mismatch: {q}");
+        }
+    }
+
+    #[test]
+    fn lazy_count_join_vs_naive_random() {
+        // Two-pattern group-count join vs the materialised count over a random graph.
+        let mut seed = 0xBEEF_1234u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for _ in 0..140 {
+            ttl.push_str(&format!("ex:n{} ex:e ex:n{} .\n", next() % 18, next() % 18));
+        }
+        let g = Graph::load_str(&ttl, "turtle").unwrap();
+        let q = "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c }";
+        assert_eq!(super::count(&g, q).unwrap(), query(&g, q).unwrap().len());
+    }
+
+    #[test]
     fn limit_early_termination() {
         // LIMIT over a single-pattern scan (early-terminating path).
         assert_eq!(count("SELECT * WHERE { ?s ?p ?o } LIMIT 5"), 5);
