@@ -75,14 +75,17 @@ compact prefix-factored dictionary + byte-level parser as native:
 | triples | mode | store | B/triple | browser ceiling |
 |--:|---|--:|--:|---|
 | 2.1 M | `load` (raw) | 140 MB | 67 | ~30 M @2 GB / ~60 M @4 GB |
-| 2.1 M | `loadCompressed` | 61 MB | **29** | **~69 M @2 GB / ~138 M @4 GB** |
+| 2.1 M | `loadCompressed` | 56 MB | **27** | **~75 M @2 GB / ~150 M @4 GB** |
 
-So a browser tab holds roughly **30 M triples** raw, or **~69 M with `loadCompressed`** —
+So a browser tab holds roughly **30 M triples** raw, or **~75 M with `loadCompressed`** —
 which (a) BLOCK-COMPRESSES the three permutations (delta + LEB128-varint, decoded per
-touched block) and (b) compacts the dictionary's id→term storage into a single blob (no
-per-term `Box<str>`). Together they cut the total from 67 → 29 B/triple (**−57%**, i.e.
-~2.3× more triples in the same tab) for a small per-scan decode (identical results).
-`loadCompressed` is the right default when the tab's RAM, not its CPU, is the constraint. The byte-level parser keeps load throughput high (~1.5 M/s, single-threaded —
+touched block), (b) compacts the dictionary's id→term storage into a single blob (no
+per-term `Box<str>`), and (c) makes the numeric-value cache SPARSE (most terms are
+IRIs/strings, and small integers inline — so the dense f64-per-term cache is mostly NaN;
+only real numeric literals are kept). Together they cut the total from 67 → 27 B/triple
+(**−60%**, i.e. ~2.5× more triples in the same tab) for a small per-scan decode (identical
+results). `loadCompressed` is the right default when the tab's RAM, not its CPU, is the
+constraint. The byte-level parser keeps load throughput high (~1.5 M/s, single-threaded —
 wasm has no rayon) without allocating an `oxrdf::Term` per term. Correctness of the
 reduced-permutation + compressed engine is held to the same bar as native (differential
 fuzz cases vs Oxigraph with `compact-index` AND the compressed store). The native build

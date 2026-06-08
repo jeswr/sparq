@@ -28,16 +28,39 @@ pub struct Graph {
     numerics: NumData,
 }
 
-/// Backing storage for the numeric-value cache: owned in RAM (after a load/build) or,
-/// with the `mmap` feature, memory-mapped from disk — so the out-of-core open path
-/// neither recomputes it (re-parsing every term) nor holds it resident.
+/// Backing storage for the numeric-value cache (`numerics[id-1]` = f64 value of term
+/// `id`, NaN for non-numeric): owned dense in RAM, mmap'd from disk (out-of-core), or
+/// SPARSE — only the numeric terms in a hash map. Most RDF terms are IRIs/strings (NaN),
+/// and small integers inline (carrying their own value, never cached), so the dense
+/// cache is mostly — often entirely — NaN; the sparse form stores only the few real
+/// numeric literals, the right shape for the memory-bound browser store.
 enum NumData {
     Owned(Vec<f64>),
     #[cfg(feature = "mmap")]
     Mapped(memmap2::Mmap),
+    Sparse(rustc_hash::FxHashMap<Id, f64>),
 }
 
 impl NumData {
+    /// The cached numeric value of a 1-based dictionary id, or `None` if it is not a
+    /// (cached) numeric literal. The engine's O(1) numeric fast path.
+    #[inline]
+    fn lookup(&self, id: Id) -> Option<f64> {
+        match self {
+            NumData::Sparse(m) => m.get(&id).copied(),
+            _ => {
+                let v = *self.as_slice().get((id - 1) as usize)?;
+                if v.is_nan() {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
+        }
+    }
+
+    /// The dense f64 slice — valid only for the Owned/Mapped backings (the ones `save`
+    /// persists); the sparse backing is never written to disk.
     #[inline]
     fn as_slice(&self) -> &[f64] {
         match self {
@@ -49,6 +72,7 @@ impl NumData {
                 // page-aligned (>= the 8-byte f64 alignment).
                 unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<f64>(), n) }
             }
+            NumData::Sparse(_) => unreachable!("as_slice on a sparse numeric cache"),
         }
     }
 
@@ -59,7 +83,31 @@ impl NumData {
             NumData::Owned(v) => v.capacity() * std::mem::size_of::<f64>(),
             #[cfg(feature = "mmap")]
             NumData::Mapped(_) => 0,
+            // hashbrown: ~(8-byte key + 8-byte f64 + 1 control byte) per slot.
+            NumData::Sparse(m) => m.capacity() * 17,
         }
+    }
+
+    /// Converts a dense cache into the sparse form when it is mostly NaN (≥ 3/4 of terms
+    /// non-numeric — almost always true), keeping only the real numeric literals. A no-op
+    /// (kept dense) when numeric values are common enough that the map would not save.
+    fn into_sparse_if_worthwhile(self) -> NumData {
+        let dense = match &self {
+            NumData::Owned(v) => v,
+            _ => return self, // mmap'd/already-sparse: leave as is
+        };
+        let numeric = dense.iter().filter(|x| !x.is_nan()).count();
+        if numeric * 4 > dense.len() {
+            return self; // numeric-dense: the Vec is the better representation
+        }
+        let mut m: rustc_hash::FxHashMap<Id, f64> = rustc_hash::FxHashMap::default();
+        m.reserve(numeric);
+        for (i, &v) in dense.iter().enumerate() {
+            if !v.is_nan() {
+                m.insert(i as Id + 1, v);
+            }
+        }
+        NumData::Sparse(m)
     }
 }
 
@@ -245,7 +293,9 @@ impl Graph {
         Graph {
             store: TripleStore::from_triples_compressed(triples),
             dict: self.dict.into_blob(),
-            numerics: self.numerics,
+            // The numeric cache is mostly (often entirely) NaN — keep only the real
+            // numeric literals when sparse, freeing the dense f64-per-term Vec.
+            numerics: self.numerics.into_sparse_if_worthwhile(),
         }
     }
 
@@ -401,12 +451,7 @@ impl Graph {
         if dict::is_inline(id) {
             return Some((id - dict::INLINE_BASE) as f64);
         }
-        let v = *self.numerics.as_slice().get((id - 1) as usize)?;
-        if v.is_nan() {
-            None
-        } else {
-            Some(v)
-        }
+        self.numerics.lookup(id)
     }
 
     /// The lexical form of a term id IF it is an exact-valued numeric literal (an
