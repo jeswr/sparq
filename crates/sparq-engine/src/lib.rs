@@ -26,6 +26,18 @@ pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
     }
 }
 
+/// Executes a SELECT and serialises it directly to a SPARQL 1.1 JSON results string,
+/// skipping the intermediate `QueryResult` and its per-cell `oxrdf::Term` allocation
+/// (the dictionary case is formatted straight from the stored prefix/suffix). This is
+/// the fast path for the actual end-use — returning results to the CLI / browser.
+pub fn query_json(graph: &Graph, sparql: &str) -> Result<String, String> {
+    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    match q {
+        Query::Select { pattern, .. } => exec::eval_select_json(graph, &pattern),
+        _ => Err("only SELECT queries are supported".into()),
+    }
+}
+
 /// Counts the solutions of a SELECT query *without* materialising the result
 /// terms (the id-level row count equals the solution count). Used to measure
 /// engine compute in isolation from result serialisation.
@@ -582,6 +594,26 @@ mod tests {
         let cm = |q: &str| query(&gm, &format!("PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s ex:v ?v . FILTER({q}) }}")).unwrap().len();
         assert_eq!(cm("?v > 90"), 2); // 95 (inline) AND 200 (xsd:int, non-inline) — both kept
         assert_eq!(cm("?v < 60"), 2); // 50 and -10
+    }
+
+    #[test]
+    fn query_json_matches_materialized_json() {
+        // The direct id->JSON path must produce byte-identical output to building the
+        // QueryResult (Terms) then serialising — across IRIs (prefix-factored), inline
+        // integers, language tags, OPTIONAL-unbound cells, and computed aggregates.
+        let queries = [
+            "SELECT * WHERE { ?s ?p ?o }",
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }",
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:knows ?k } }",
+            "PREFIX ex: <http://ex/> SELECT (AVG(?a) AS ?avg) WHERE { ?s ex:age ?a }",
+            "PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n } ORDER BY ?n",
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a > 28) }",
+        ];
+        for q in queries {
+            let direct = query_json(&g(), q).unwrap();
+            let via_result = json::to_sparql_json(&query(&g(), q).unwrap());
+            assert_eq!(direct, via_result, "json mismatch for: {q}");
+        }
     }
 
     #[test]

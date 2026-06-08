@@ -84,6 +84,15 @@ enum Stored {
     Blank(Box<str>),
 }
 
+/// A borrowed view of a dictionary term's string components (no allocation), for
+/// serialising results directly from ids. An IRI is its namespace prefix + local
+/// suffix; a literal its lexical value, datatype IRI and optional language.
+pub enum TermParts<'a> {
+    Iri { prefix: &'a str, suffix: &'a str },
+    Lit { value: &'a str, datatype: &'a str, lang: Option<&'a str> },
+    Blank(&'a str),
+}
+
 // ---- Content hashing ---------------------------------------------------------
 // A term's hash must be identical whether computed from an `oxrdf::Term`, from parsed
 // byte slices, or from the compact `Stored` arena form — so interning and rehashing
@@ -347,6 +356,20 @@ impl Dict {
             .find(hash, |&id| stored_eq_term(&self.terms[(id - 1) as usize], term, &self.prefixes, &self.datatypes))
             .copied()
             .unwrap_or(NO_ID)
+    }
+
+    /// Borrows a dictionary term's components WITHOUT reconstructing an `oxrdf::Term`
+    /// (no allocation) — for serialising results straight from ids. Only valid for a
+    /// real dictionary id (`1..INLINE_BASE`); the caller handles inline / local ids.
+    #[inline]
+    pub fn term_parts(&self, id: Id) -> TermParts<'_> {
+        match &self.terms[(id - 1) as usize] {
+            Stored::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[*prefix as usize], suffix },
+            Stored::Lit { value, datatype, lang } => {
+                TermParts::Lit { value, datatype: self.datatypes[*datatype as usize].as_str(), lang: lang.as_deref() }
+            }
+            Stored::Blank(b) => TermParts::Blank(b),
+        }
     }
 
     /// Returns the term for an id. Inline-integer ids are decoded directly; others are

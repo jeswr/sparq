@@ -47,8 +47,9 @@ impl Store {
     /// index without materialising — all of which matter even more in the browser,
     /// where memory and main-thread time are scarce.
     pub fn query(&self, sparql: &str) -> Result<String, JsError> {
-        let res = sparq_engine::query(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
-        Ok(sparq_engine::json::to_sparql_json(&res))
+        // Serialise straight from ids to SPARQL-JSON — no intermediate oxrdf::Term per
+        // cell (the allocator-bound cost of returning a large result in the browser).
+        sparq_engine::query_json(&self.graph, sparql).map_err(|e| JsError::new(&e))
     }
 
     /// Counts the solutions of a SELECT query *without* materialising them — for a

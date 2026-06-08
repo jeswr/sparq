@@ -226,10 +226,10 @@ fn cmd_bench(args: &[String]) {
             let t = Instant::now();
             let r: Result<usize, String> = match mode {
                 "count" => sparq_engine::count(&g, &sparql),
-                "json" => sparq_engine::query(&g, &sparql).map(|r| {
-                    let s = sparq_engine::json::to_sparql_json(&r);
-                    std::hint::black_box(&s);
-                    r.len()
+                "json" => sparq_engine::query_json(&g, &sparql).map(|s| {
+                    let n = s.len();
+                    std::hint::black_box(s);
+                    n
                 }),
                 _ => sparq_engine::query(&g, &sparql).map(|r| r.len()),
             };

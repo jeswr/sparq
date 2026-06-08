@@ -137,6 +137,94 @@ pub fn eval_select(graph: &Graph, pattern: &GraphPattern) -> Result<QueryResult,
     Ok(QueryResult { vars: out_vars, rows })
 }
 
+/// Writes one binding's JSON value directly from its id — no intermediate `oxrdf::Term`
+/// for the common (dictionary) case, which is the allocator-bound cost of materialising.
+#[inline]
+fn write_id_json(graph: &Graph, local: &LocalVocab, id: Id, s: &mut String) {
+    if dict::is_inline(id) {
+        crate::json::inline_int_json(s, id - dict::INLINE_BASE);
+    } else if is_local(id) {
+        // Computed terms (BIND / aggregates) are rare; reconstruct just these.
+        crate::json::term_to_json(s, local.term(id));
+    } else {
+        crate::json::parts_to_json(s, graph.dict.term_parts(id));
+    }
+}
+
+/// Evaluates a SELECT and serialises it straight to SPARQL-JSON, skipping the
+/// `QueryResult` (and its per-cell `oxrdf::Term` allocation). On native the per-row
+/// fragments are built in parallel; the wasm build is sequential. Order-preserving.
+pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String, String> {
+    let mut local = LocalVocab::default();
+    let bindings = eval_modified(graph, &mut local, pattern)?;
+
+    let out_vars: Vec<&Variable> = bindings.vars.iter().filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX)).collect();
+    let col_of: Vec<Option<usize>> = out_vars.iter().map(|v| bindings.col(v)).collect();
+
+    let mut head = String::from("{\"head\":{\"vars\":[");
+    for (i, v) in out_vars.iter().enumerate() {
+        if i > 0 {
+            head.push(',');
+        }
+        head.push('"');
+        crate::json::escape_into(&mut head, v.as_str());
+        head.push('"');
+    }
+    head.push_str("]},\"results\":{\"bindings\":[");
+
+    let write_row = |row: &Row, s: &mut String| {
+        s.push('{');
+        let mut first = true;
+        for (vi, &col) in col_of.iter().enumerate() {
+            let Some(ci) = col else { continue };
+            let id = row[ci];
+            if id == NO_ID {
+                continue; // unbound (e.g. OPTIONAL) — omitted from the binding
+            }
+            if !first {
+                s.push(',');
+            }
+            first = false;
+            s.push('"');
+            crate::json::escape_into(s, out_vars[vi].as_str());
+            s.push_str("\":");
+            write_id_json(graph, &local, id, s);
+        }
+        s.push('}');
+    };
+
+    let mut s = head;
+    #[cfg(feature = "parallel")]
+    if bindings.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        let frags: Vec<String> = bindings
+            .rows
+            .par_iter()
+            .map(|row| {
+                let mut f = String::new();
+                write_row(row, &mut f);
+                f
+            })
+            .collect();
+        for (i, f) in frags.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(f);
+        }
+        s.push_str("]}}");
+        return Ok(s);
+    }
+    for (i, row) in bindings.rows.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        write_row(row, &mut s);
+    }
+    s.push_str("]}}");
+    Ok(s)
+}
+
 /// Evaluates a SELECT but returns only the solution count. When the count can be
 /// derived without materialising the result (a single-pattern scan, possibly under
 /// projection / LIMIT — like QLever's lazy count) it short-circuits; otherwise it
