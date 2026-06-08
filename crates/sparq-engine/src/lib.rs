@@ -399,6 +399,10 @@ mod tests {
             "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:age ?a . ?s ex:name ?n . ?s ex:knows ex:bob }",
             // 3-pattern CHAIN — NOT a star; must fall back to materialised count (still correct).
             "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:age ?x }",
+            // OPTIONAL — lazy left-join count Σ_s c_left(s)·max(1, c_right(s)).
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:age ?a } }",
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:knows ?k } }",
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:age ?a OPTIONAL { ?s ex:knows ?k } }",
         ];
         for q in cases {
             assert_eq!(super::count(&g(), q).unwrap(), query(&g(), q).unwrap().len(), "count mismatch: {q}");

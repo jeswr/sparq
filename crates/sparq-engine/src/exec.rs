@@ -140,9 +140,77 @@ fn try_count(graph: &Graph, p: &GraphPattern) -> Option<usize> {
             let after_offset = n.saturating_sub(*start);
             length.map_or(after_offset, |l| after_offset.min(l))
         }),
+        // OPTIONAL: count the left join without materialising (Σ over the join var).
+        GraphPattern::LeftJoin { left, right, expression } => {
+            count_leftjoin(graph, left, right, expression.as_ref())
+        }
         // A single-pattern, filter-free BGP: the range size is the exact count.
         _ => count_pushdown(graph, p),
     }
+}
+
+/// The single triple pattern of a filter-free one-pattern BGP, else `None`.
+fn single_pattern(p: &GraphPattern) -> Option<TriplePattern> {
+    if !is_conjunctive(p) {
+        return None;
+    }
+    let mut patterns = Vec::new();
+    let mut filters = Vec::new();
+    flatten_conjunction(p, &mut patterns, &mut filters);
+    (patterns.len() == 1 && filters.is_empty()).then(|| patterns.pop().unwrap())
+}
+
+/// Exact solution count of `left OPTIONAL right` for the common shape — `left` and
+/// `right` each a single filter-free pattern sharing exactly one variable `v`, with
+/// no OPTIONAL filter — as `Σ_v c_left(v)·max(1, c_right(v))`, streamed from the
+/// sorted indexes (each left binding survives, joined with its ≥1 right matches or
+/// kept once with the right vars unbound). Returns `None` otherwise.
+fn count_leftjoin(
+    graph: &Graph,
+    left: &GraphPattern,
+    right: &GraphPattern,
+    expression: Option<&Expression>,
+) -> Option<usize> {
+    if expression.is_some() {
+        return None; // an OPTIONAL filter changes which right rows are compatible.
+    }
+    let (lp, rp) = (single_pattern(left)?, single_pattern(right)?);
+    let (lip, lpv, lu) = prepare_pattern(graph, &lp).ok()?;
+    if lu {
+        return Some(0); // no left bindings at all.
+    }
+    if !distinct_pattern_vars(&lpv) {
+        return None;
+    }
+    let (rip, rpv, ru) = prepare_pattern(graph, &rp).ok()?;
+    if !distinct_pattern_vars(&rpv) {
+        return None;
+    }
+    // Exactly one shared variable, at positions (lpos, rpos).
+    let shared: Vec<(usize, usize)> = lpv
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| v.as_ref().and_then(|v| rpv.iter().position(|x| x.as_ref() == Some(v)).map(|j| (i, j))))
+        .collect();
+    let [(lpos, rpos)] = shared[..] else {
+        return None;
+    };
+    let gl = group_counts(graph, &lip, lpos);
+    // Right unsatisfiable: every left binding is kept once with the right unbound.
+    if ru {
+        return Some(gl.iter().map(|(_, c)| c).sum());
+    }
+    let gr = group_counts(graph, &rip, rpos);
+    let mut j = 0usize;
+    let mut total = 0usize;
+    for &(v, cl) in &gl {
+        while j < gr.len() && gr[j].0 < v {
+            j += 1;
+        }
+        let cr = if j < gr.len() && gr[j].0 == v { gr[j].1 } else { 0 };
+        total += cl * cr.max(1);
+    }
+    Some(total)
 }
 
 // ---- Algebra dispatch ---------------------------------------------------------
