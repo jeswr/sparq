@@ -215,18 +215,22 @@ queries, and still behind on `q06` (numeric filter — small absolute numbers) a
 
 ### Next (driven by the remaining deltas)
 
-1. **OPTIONAL / left-join** (`q10` 0.35×) and the **medal join** (`q07`) — reduce
-   per-row hashing/allocation in `left_outer_join` and the hash-join key building.
+After filter pushdown + merge left-join, the remaining 10M gaps are
+scan/materialisation bound: **q02 full-scan-materialise (0.23×)**, **q04 5M-row
+join (0.29×)**, **q03 star (0.64×)**. These point at:
+
+1. **Columnar result buffer** — `Bindings` is `Vec<Row>` (a `SmallVec` per row); a
+   single-column result of 1.25M rows wastes ~8× vs a flat `Vec<Id>` column. A
+   column-major intermediate (one `Vec<Id>` per variable) cuts materialisation
+   bandwidth and enables vectorisation — the q02/q04 lever.
 2. **Full tagged ValueIds** — inline numerics/dates in the id itself (extends the
-   numeric cache); closes more of the `q06` filter gap and speeds numeric joins.
-3. **Flat columnar buffer** — a single `Vec<Id>` + width per intermediate (beyond
-   SmallVec) for full vectorisation; and morsel/parallel execution.
-2. **M3 column compression + vectorised/block scan** — close the ~3× general
-   compute gap and the memory gap.
-3. Native QLever (not Docker) + **larger datasets** (SP2Bench/WatDiv, then a
-   100M+ WDBench/Wikidata subset) for the decisive, fair fight — and to test
-   QLever's out-of-core regime where sparq must learn to bound memory.
-4. Show the **WCOJ edge** on a skew/cycle-heavy benchmark (QLever uses binary
+   numeric cache + the pushdown), removing the gather entirely.
+3. **M3 column compression** (PForDelta + front-coded vocab) + **parallel bulk
+   load** — the memory lever and the Wikidata-ingestion lever (bz2 decompression
+   is the current ingest bottleneck).
+4. **Larger datasets** (SP2Bench/WatDiv, then a 100M+ WDBench/Wikidata subset) to
+   test QLever's out-of-core regime where sparq must learn to bound memory.
+5. Show the **WCOJ edge** on a skew/cycle-heavy benchmark (QLever uses binary
    joins) — our one likely asymptotic win.
 
 ## Scaling: 10M triples — the gap WIDENS (the key honest finding)
