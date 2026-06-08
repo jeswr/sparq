@@ -74,6 +74,10 @@ pub struct Dict {
     datatype_ids: FxHashMap<Box<str>, u32>,   // datatype IRI -> id
     terms: Vec<Stored>,                       // id-1 -> compact term
     table: HashTable<Id>,                     // hash(term) -> id (bare ids, compared via the arena)
+    // When `Some` (after `open_mmap`), term(id)/term_parts/lookup are served from mmap'd
+    // files and `terms`/`table` are empty — the out-of-core, minimal-RAM dictionary.
+    #[cfg(feature = "mmap")]
+    mapped: Option<MappedDict>,
 }
 
 /// The compact per-term storage. An IRI is `(prefix id, suffix)`; a literal is
@@ -229,6 +233,137 @@ fn reconstruct(s: &Stored, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> Te
     }
 }
 
+// ---- Memory-mapped (out-of-core) dictionary --------------------------------------
+// The in-memory `Dict` holds `terms: Vec<Stored>` (~1 GB+ at 100M terms) plus the
+// lookup `HashTable`, and rebuilds both on open. For querying a dataset whose indexes
+// are already mmap'd, that resident RAM (and the rebuild time) is the last big cost.
+// `MappedDict` instead serves term(id)/term_parts/lookup straight from mmap'd files —
+// nothing big is resident, and open is just `mmap` (no parse, no table rebuild).
+
+/// A borrowed view of a compact stored term, parsed zero-copy from the mmap'd blob (or
+/// from an in-RAM `Stored`). Mirrors [`Stored`] but with `&str` slices.
+#[cfg(feature = "mmap")]
+enum StoredRef<'a> {
+    Iri { prefix: u32, suffix: &'a str },
+    Lit { value: &'a str, datatype: u32, lang: Option<&'a str> },
+    Blank(&'a str),
+}
+
+#[cfg(feature = "mmap")]
+#[inline]
+fn rd_u32(b: &[u8], p: &mut usize) -> u32 {
+    let v = u32::from_le_bytes([b[*p], b[*p + 1], b[*p + 2], b[*p + 3]]);
+    *p += 4;
+    v
+}
+
+#[cfg(feature = "mmap")]
+#[inline]
+fn rd_str<'a>(b: &'a [u8], p: &mut usize) -> &'a str {
+    let n = rd_u32(b, p) as usize;
+    let s = &b[*p..*p + n];
+    *p += n;
+    // SAFETY: written from a `&str` in `save_mmap`; the blob is immutable.
+    unsafe { std::str::from_utf8_unchecked(s) }
+}
+
+/// Parses one term record (in the [`save_mmap`](Dict::save_mmap) format) at `b[0..]`.
+#[cfg(feature = "mmap")]
+#[inline]
+fn parse_stored_ref(b: &[u8]) -> StoredRef<'_> {
+    let mut p = 1;
+    match b[0] {
+        0 => {
+            let prefix = rd_u32(b, &mut p);
+            StoredRef::Iri { prefix, suffix: rd_str(b, &mut p) }
+        }
+        1 => {
+            let value = rd_str(b, &mut p);
+            let datatype = rd_u32(b, &mut p);
+            let lang = if b[p] == 1 {
+                p += 1;
+                Some(rd_str(b, &mut p))
+            } else {
+                None
+            };
+            StoredRef::Lit { value, datatype, lang }
+        }
+        _ => StoredRef::Blank(rd_str(b, &mut p)),
+    }
+}
+
+#[cfg(feature = "mmap")]
+fn reconstruct_ref(s: &StoredRef, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> Term {
+    match *s {
+        StoredRef::Iri { prefix, suffix } => {
+            let p = &prefixes[prefix as usize];
+            let mut iri = String::with_capacity(p.len() + suffix.len());
+            iri.push_str(p);
+            iri.push_str(suffix);
+            Term::NamedNode(NamedNode::new_unchecked(iri))
+        }
+        StoredRef::Lit { value, datatype, lang } => Term::Literal(match lang {
+            Some(l) => Literal::new_language_tagged_literal_unchecked(value.to_string(), l.to_string()),
+            None => Literal::new_typed_literal(value.to_string(), datatypes[datatype as usize].clone()),
+        }),
+        StoredRef::Blank(b) => Term::BlankNode(oxrdf::BlankNode::new_unchecked(b.to_string())),
+    }
+}
+
+#[cfg(feature = "mmap")]
+fn stored_ref_eq_term(s: &StoredRef, q: &Term, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> bool {
+    match (s, q) {
+        (StoredRef::Iri { prefix, suffix }, Term::NamedNode(n)) => {
+            let p = &prefixes[*prefix as usize];
+            let iri = n.as_str();
+            iri.len() == p.len() + suffix.len() && iri.starts_with(p.as_ref()) && iri[p.len()..] == **suffix
+        }
+        (StoredRef::Lit { value, datatype, lang }, Term::Literal(l)) => {
+            *value == l.value() && lang.as_deref() == l.language() && datatypes[*datatype as usize].as_str() == l.datatype().as_str()
+        }
+        (StoredRef::Blank(x), Term::BlankNode(b)) => *x == b.as_str(),
+        _ => false,
+    }
+}
+
+/// The mmap-backed term store + lookup index (out-of-core dictionary).
+#[cfg(feature = "mmap")]
+struct MappedDict {
+    blob: memmap2::Mmap,    // concatenated term records (the format `save_mmap` writes)
+    offsets: memmap2::Mmap, // [u64; n] byte offset of each term record in `blob`
+    hashes: memmap2::Mmap,  // [u64; n] content hashes, SORTED (for lookup)
+    hashids: memmap2::Mmap, // [u32; n] term ids parallel to `hashes`
+    len: usize,
+}
+
+#[cfg(feature = "mmap")]
+impl MappedDict {
+    #[inline]
+    fn slice_u64(m: &memmap2::Mmap) -> &[u64] {
+        // SAFETY: written as little-endian u64; mmap base is page-aligned (>= 8).
+        unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<u64>(), m.len() / 8) }
+    }
+    #[inline]
+    fn offsets(&self) -> &[u64] {
+        Self::slice_u64(&self.offsets)
+    }
+    #[inline]
+    fn hashes(&self) -> &[u64] {
+        Self::slice_u64(&self.hashes)
+    }
+    #[inline]
+    fn hashids(&self) -> &[u32] {
+        // SAFETY: written as little-endian u32; mmap base is page-aligned (>= 4).
+        unsafe { std::slice::from_raw_parts(self.hashids.as_ptr().cast::<u32>(), self.hashids.len() / 4) }
+    }
+    /// The parsed term record for a 1-based id.
+    #[inline]
+    fn stored(&self, id: Id) -> StoredRef<'_> {
+        let off = self.offsets()[(id - 1) as usize] as usize;
+        parse_stored_ref(&self.blob[off..])
+    }
+}
+
 impl Dict {
     pub fn new() -> Self {
         Dict::default()
@@ -352,6 +487,22 @@ impl Dict {
             return id;
         }
         let hash = hash_term(term);
+        #[cfg(feature = "mmap")]
+        if let Some(m) = &self.mapped {
+            // Binary-search the sorted hash index, then verify each equal-hash candidate
+            // against the actual term (content hashes can collide).
+            let hashes = m.hashes();
+            let mut i = hashes.partition_point(|&h| h < hash);
+            let ids = m.hashids();
+            while i < hashes.len() && hashes[i] == hash {
+                let id = ids[i];
+                if stored_ref_eq_term(&m.stored(id), term, &self.prefixes, &self.datatypes) {
+                    return id;
+                }
+                i += 1;
+            }
+            return NO_ID;
+        }
         self.table
             .find(hash, |&id| stored_eq_term(&self.terms[(id - 1) as usize], term, &self.prefixes, &self.datatypes))
             .copied()
@@ -363,6 +514,18 @@ impl Dict {
     /// real dictionary id (`1..INLINE_BASE`); the caller handles inline / local ids.
     #[inline]
     pub fn term_parts(&self, id: Id) -> TermParts<'_> {
+        #[cfg(feature = "mmap")]
+        if let Some(m) = &self.mapped {
+            // The &str slices borrow the mmap blob / the in-RAM prefix+datatype tables,
+            // all owned by `self` for `'_`, so this stays zero-copy.
+            return match m.stored(id) {
+                StoredRef::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[prefix as usize], suffix },
+                StoredRef::Lit { value, datatype, lang } => {
+                    TermParts::Lit { value, datatype: self.datatypes[datatype as usize].as_str(), lang }
+                }
+                StoredRef::Blank(b) => TermParts::Blank(b),
+            };
+        }
         match &self.terms[(id - 1) as usize] {
             Stored::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[*prefix as usize], suffix },
             Stored::Lit { value, datatype, lang } => {
@@ -378,10 +541,13 @@ impl Dict {
     #[inline]
     pub fn term(&self, id: Id) -> Term {
         if is_inline(id) {
-            Term::Literal(Literal::new_typed_literal((id - INLINE_BASE).to_string(), xsd::INTEGER))
-        } else {
-            reconstruct(&self.terms[(id - 1) as usize], &self.prefixes, &self.datatypes)
+            return Term::Literal(Literal::new_typed_literal((id - INLINE_BASE).to_string(), xsd::INTEGER));
         }
+        #[cfg(feature = "mmap")]
+        if let Some(m) = &self.mapped {
+            return reconstruct_ref(&m.stored(id), &self.prefixes, &self.datatypes);
+        }
+        reconstruct(&self.terms[(id - 1) as usize], &self.prefixes, &self.datatypes)
     }
 
     /// Merges another (partial) dictionary into this one, returning the remap from the
@@ -501,10 +667,105 @@ impl Dict {
                 t1.elapsed().as_secs_f64(),
             );
         }
-        Ok(Dict { prefixes, prefix_ids, datatypes, datatype_ids, terms, table })
+        Ok(Dict {
+            prefixes,
+            prefix_ids,
+            datatypes,
+            datatype_ids,
+            terms,
+            table,
+            #[cfg(feature = "mmap")]
+            mapped: None,
+        })
+    }
+
+    /// Serialises the dictionary for the MEMORY-MAPPED, out-of-core open path: a small
+    /// meta file (prefixes + datatypes) plus four mmap-friendly blobs — the term records,
+    /// their byte offsets, and a hash-sorted `(hash, id)` lookup index. Opened by
+    /// [`open_mmap`](Self::open_mmap) with NOTHING large resident and no table rebuild.
+    #[cfg(feature = "mmap")]
+    pub fn save_mmap(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        std::fs::create_dir_all(dir)?;
+        let n = self.terms.len();
+
+        // meta: prefixes, datatypes, term count.
+        let mut meta = std::io::BufWriter::new(std::fs::File::create(dir.join("dict-meta.bin"))?);
+        meta.write_all(&(self.prefixes.len() as u32).to_le_bytes())?;
+        for p in &self.prefixes {
+            write_str(&mut meta, p)?;
+        }
+        meta.write_all(&(self.datatypes.len() as u32).to_le_bytes())?;
+        for d in &self.datatypes {
+            write_str(&mut meta, d.as_str())?;
+        }
+        meta.write_all(&(n as u64).to_le_bytes())?;
+        meta.flush()?;
+
+        // term blob + per-term byte offsets; collect (hash, id) for the lookup index.
+        let mut blob = std::io::BufWriter::new(std::fs::File::create(dir.join("dict-terms.bin"))?);
+        let mut offsets: Vec<u64> = Vec::with_capacity(n);
+        let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(n);
+        let mut pos: u64 = 0;
+        for (i, t) in self.terms.iter().enumerate() {
+            offsets.push(pos);
+            pos += write_record(&mut blob, t)?;
+            pairs.push((hash_stored(t, &self.prefixes, &self.datatypes), (i as u32) + 1));
+        }
+        blob.flush()?;
+        write_pod_slice(&dir.join("dict-offs.bin"), &offsets)?;
+
+        // hash-sorted parallel arrays (binary-searchable lookup).
+        pairs.sort_unstable_by_key(|&(h, _)| h);
+        let hashes: Vec<u64> = pairs.iter().map(|&(h, _)| h).collect();
+        let ids: Vec<u32> = pairs.iter().map(|&(_, id)| id).collect();
+        write_pod_slice(&dir.join("dict-hash.bin"), &hashes)?;
+        write_pod_slice(&dir.join("dict-hid.bin"), &ids)?;
+        Ok(())
+    }
+
+    /// Opens a dictionary written by [`save_mmap`](Self::save_mmap) with the term store +
+    /// lookup index MEMORY-MAPPED: open is just `mmap` (no term parse, no table rebuild),
+    /// and the large data stays off-heap. Only the small prefix/datatype tables are read
+    /// into RAM. Read-only (no further interning).
+    #[cfg(feature = "mmap")]
+    pub fn open_mmap(dir: &std::path::Path) -> std::io::Result<Dict> {
+        use std::io::Read;
+        let mut r = std::io::BufReader::new(std::fs::File::open(dir.join("dict-meta.bin"))?);
+        let np = read_u32(&mut r)? as usize;
+        let mut prefixes = Vec::with_capacity(np);
+        for _ in 0..np {
+            prefixes.push(read_str(&mut r)?);
+        }
+        let nd = read_u32(&mut r)? as usize;
+        let mut datatypes = Vec::with_capacity(nd);
+        for _ in 0..nd {
+            datatypes.push(NamedNode::new_unchecked(String::from(read_str(&mut r)?)));
+        }
+        let mut nbuf = [0u8; 8];
+        r.read_exact(&mut nbuf)?;
+        let len = u64::from_le_bytes(nbuf) as usize;
+
+        let map = |name: &str| -> std::io::Result<memmap2::Mmap> {
+            let f = std::fs::File::open(dir.join(name))?;
+            // SAFETY: read-only mapping of a file owned by this dict for its lifetime.
+            unsafe { memmap2::Mmap::map(&f) }
+        };
+        let mapped = MappedDict {
+            blob: map("dict-terms.bin")?,
+            offsets: map("dict-offs.bin")?,
+            hashes: map("dict-hash.bin")?,
+            hashids: map("dict-hid.bin")?,
+            len,
+        };
+        Ok(Dict { prefixes, datatypes, mapped: Some(mapped), ..Default::default() })
     }
 
     pub fn len(&self) -> usize {
+        #[cfg(feature = "mmap")]
+        if let Some(m) = &self.mapped {
+            return m.len;
+        }
         self.terms.len()
     }
 
@@ -516,6 +777,14 @@ impl Dict {
     /// benchmarking). Counts the compact `terms` arena (slots + suffix/value/lang
     /// bytes), the shared prefix + datatype tables, and the hash table (bare ids).
     pub fn heap_bytes(&self) -> usize {
+        // A memory-mapped dictionary keeps only the small prefix/datatype tables resident;
+        // the term blob + offsets + lookup index are mmap'd (OS page cache, not the heap).
+        #[cfg(feature = "mmap")]
+        if self.mapped.is_some() {
+            let prefix_bytes: usize = self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum();
+            let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
+            return prefix_bytes + dt_bytes;
+        }
         let term_slots = self.terms.capacity() * std::mem::size_of::<Stored>();
         let owned: usize = self.terms.iter().map(stored_owned_bytes).sum();
         let prefix_bytes: usize =
@@ -531,6 +800,51 @@ impl Dict {
 fn write_str(w: &mut impl std::io::Write, s: &str) -> std::io::Result<()> {
     w.write_all(&(s.len() as u32).to_le_bytes())?;
     w.write_all(s.as_bytes())
+}
+
+/// Writes one compact term record (the format `parse_stored_ref` reads) and returns the
+/// number of bytes written — for building the mmap term blob + its offset index.
+#[cfg(feature = "mmap")]
+fn write_record(w: &mut impl std::io::Write, t: &Stored) -> std::io::Result<u64> {
+    Ok(match t {
+        Stored::Iri { prefix, suffix } => {
+            w.write_all(&[0])?;
+            w.write_all(&prefix.to_le_bytes())?;
+            write_str(w, suffix)?;
+            1 + 4 + 4 + suffix.len() as u64
+        }
+        Stored::Lit { value, datatype, lang } => {
+            w.write_all(&[1])?;
+            write_str(w, value)?;
+            w.write_all(&datatype.to_le_bytes())?;
+            let lang_bytes = match lang {
+                Some(l) => {
+                    w.write_all(&[1])?;
+                    write_str(w, l)?;
+                    1 + 4 + l.len() as u64
+                }
+                None => {
+                    w.write_all(&[0])?;
+                    1
+                }
+            };
+            1 + (4 + value.len() as u64) + 4 + lang_bytes
+        }
+        Stored::Blank(b) => {
+            w.write_all(&[2])?;
+            write_str(w, b)?;
+            1 + 4 + b.len() as u64
+        }
+    })
+}
+
+/// Writes a slice of plain-old-data (u32/u64) as raw little-endian bytes (for the mmap
+/// offset / hash / id arrays). Little-endian is assumed on read (all target platforms).
+#[cfg(feature = "mmap")]
+fn write_pod_slice<T: Copy>(path: &std::path::Path, data: &[T]) -> std::io::Result<()> {
+    // SAFETY: T is u32/u64 (POD); we only read its bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) };
+    std::fs::write(path, bytes)
 }
 
 fn read_u32(r: &mut impl std::io::Read) -> std::io::Result<u32> {

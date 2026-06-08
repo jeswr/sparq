@@ -236,7 +236,7 @@ impl Graph {
     pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         self.store.save(dir)?;
-        self.dict.save(&dir.join("dict.bin"))?;
+        self.dict.save_mmap(dir)?;
         write_numerics(&dir.join("numerics.bin"), self.numerics.as_slice())
     }
 
@@ -249,7 +249,7 @@ impl Graph {
     #[cfg(feature = "mmap")]
     pub fn open(dir: &std::path::Path) -> std::io::Result<Graph> {
         let store = TripleStore::open(dir)?;
-        let dict = Dict::open(&dir.join("dict.bin"))?;
+        let dict = Dict::open_mmap(dir)?;
         let np = dir.join("numerics.bin");
         let numerics = match std::fs::File::open(&np) {
             Ok(f) if f.metadata()?.len() as usize == dict.len() * std::mem::size_of::<f64>() => {
@@ -355,7 +355,7 @@ impl Graph {
             }
         }
 
-        dict.save(&dir.join("dict.bin")).map_err(|e| e.to_string())?;
+        dict.save_mmap(dir).map_err(|e| e.to_string())?;
         // Persist the numeric-value cache so `open` mmaps it instead of recomputing.
         write_numerics(&dir.join("numerics.bin"), &numerics_of(&dict)).map_err(|e| e.to_string())?;
         std::fs::remove_dir_all(&tmp).ok();

@@ -223,6 +223,17 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         // With SPARQ_FUZZ_COMPRESS=1, validate the BLOCK-COMPRESSED store end-to-end:
         // identical results to Oxigraph prove the compressed scan path is correct.
         let g = if std::env::var("SPARQ_FUZZ_COMPRESS").is_ok() { g.into_compressed() } else { g };
+        // With SPARQ_FUZZ_MMAP=1, save the graph and reopen it MEMORY-MAPPED (perms +
+        // numeric cache + the mmap dictionary) — validates the out-of-core read paths
+        // (mmap'd term lookup + materialisation) against Oxigraph. One reused temp dir,
+        // overwritten each seed (the prior `g2` has dropped, releasing its mmaps).
+        let g = if std::env::var("SPARQ_FUZZ_MMAP").is_ok() {
+            let dir = std::env::temp_dir().join(format!("sparq_fuzz_mmap_{}", std::process::id()));
+            g.save(&dir).expect("save");
+            sparq_core::Graph::open(&dir).expect("open")
+        } else {
+            g
+        };
         let store = Store::new().unwrap();
         if let Err(e) = store.load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes()) {
             // Both engines parse the same Turtle; a divergence here is itself a bug.
