@@ -468,6 +468,8 @@ impl Dict {
             datatype_ids.insert(d.clone(), i as u32);
             datatypes.push(NamedNode::new_unchecked(String::from(d)));
         }
+        let timing = std::env::var("SPARQ_DICT_TIMING").is_ok();
+        let t0 = std::time::Instant::now();
         let nt = read_u32(&mut r)? as usize;
         let mut terms = Vec::with_capacity(nt);
         for _ in 0..nt {
@@ -483,12 +485,21 @@ impl Dict {
                 other => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad term tag {other}"))),
             });
         }
+        let t_parse = t0.elapsed();
         // Rebuild the hash table from the arena.
+        let t1 = std::time::Instant::now();
         let mut table = HashTable::with_capacity(nt);
         for (i, t) in terms.iter().enumerate() {
             let id = (i as Id) + 1;
             let hash = hash_stored(t, &prefixes, &datatypes);
             table.insert_unique(hash, id, |&j| hash_stored(&terms[(j - 1) as usize], &prefixes, &datatypes));
+        }
+        if timing {
+            eprintln!(
+                "[dict open] {nt} terms: read+parse {:.2}s, hashtable rebuild {:.2}s",
+                t_parse.as_secs_f64(),
+                t1.elapsed().as_secs_f64(),
+            );
         }
         Ok(Dict { prefixes, prefix_ids, datatypes, datatype_ids, terms, table })
     }
