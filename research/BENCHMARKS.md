@@ -496,6 +496,33 @@ would cut it (future work). **Correctness:** identical results to the raw store 
 store-level pattern/estimate/pred_stat equality test, **20,000 differential cases vs
 Oxigraph through the compressed store** (0 mismatches), and wasm `load==loadCompressed`.
 
+### Measure-first: why NOT a succinct / move-structure permutation index (yet)
+
+The recurring "billions in the browser" idea is a repetition-aware succinct index
+(move-r / BWT self-index) that stores the permutations near their entropy with O(1)
+random access. Before building one (a multi-week research effort), measure the headroom.
+On the 10M SPO permutation:
+
+| | B/triple | properties |
+|---|--:|---|
+| raw | 12.0 | |
+| **delta+varint (shipped)** | **4.94** | lightweight, no dep, random-access, 40–320 M/s decode |
+| zstd −19 | 3.55 | ~100 KB+ decoder, block-framed, slower |
+| xz −9e (LZMA) | 2.51 | very heavy decoder |
+
+So there *is* entropy headroom — but three measured facts make a heavier index not worth
+it **now**: (1) this is synthetic data (sequential ids — pathologically LZMA-compressible);
+on **real Wikidata** delta+varint is already 3.69 B/triple, so the real gap is far smaller.
+(2) After `Dict::into_blob`, the **permutations are no longer the floor** — in the
+compressed wasm store they are ~6 B/triple of ~29–39 total; the dictionary blob + offsets
++ the f64 numeric cache dominate. A succinct *perm* index would shrink <10% of total. (3)
+Capturing the headroom needs either a ~100 KB+ zstd/LZMA decoder in the bundle (which
+costs browser memory + download — self-defeating) or the move-r research build, for that
+<10% gain. The lightweight delta+varint is the right tradeoff for a small-bundle,
+fast-decode, randomly-accessible browser index; the next memory levers (if pursued) are
+the dict blob (FSST measured at only −20% on real Wikidata — rejected) and a sparse
+numeric cache, both modest. Recorded so the succinct index isn't built on intuition.
+
 ### Negative result: a block-decode cache for compressed bind joins did NOT help
 
 The compressed join's +33% comes from the bind join re-decoding the inner pattern's
