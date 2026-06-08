@@ -151,10 +151,115 @@ fn write_id_json(graph: &Graph, local: &LocalVocab, id: Id, s: &mut String) {
     }
 }
 
+/// Writes one binding value's JSON directly from a STORE id (never a local-vocab id,
+/// so no `LocalVocab` needed) — for the streaming single-pattern scan path.
+#[inline]
+fn write_store_id_json(graph: &Graph, id: Id, s: &mut String) {
+    if dict::is_inline(id) {
+        crate::json::inline_int_json(s, id - dict::INLINE_BASE);
+    } else {
+        crate::json::parts_to_json(s, graph.dict.term_parts(id));
+    }
+}
+
+/// Streaming fast path: `SELECT ... WHERE { <one triple pattern> }` (optionally
+/// projected) serialised straight from the index scan to SPARQL-JSON — no `Bindings`,
+/// no per-row `Row`, no `Term`. Returns `None` if the query is not this shape (the
+/// caller falls back to the general evaluator). The vector-at-a-time idea for the most
+/// common (single-pattern) browser query.
+fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<String> {
+    let (proj, bgp): (Option<&[Variable]>, &GraphPattern) = match pattern {
+        GraphPattern::Project { inner, variables } => (Some(variables), inner),
+        other => (None, other),
+    };
+    let patterns = match bgp {
+        GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns,
+        _ => return None,
+    };
+    let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0]).ok()?;
+    if !distinct_pattern_vars(&pos_vars) {
+        return None; // a repeated variable needs the consistency check — use the general path
+    }
+    let out_vars: Vec<Variable> = match proj {
+        Some(vs) => vs.iter().filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX)).cloned().collect(),
+        None => pos_vars.iter().flatten().filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX)).cloned().collect(),
+    };
+    let cols: Vec<Option<usize>> = out_vars.iter().map(|v| pos_vars.iter().position(|x| x.as_ref() == Some(v))).collect();
+
+    let mut head = String::from("{\"head\":{\"vars\":[");
+    for (i, v) in out_vars.iter().enumerate() {
+        if i > 0 {
+            head.push(',');
+        }
+        head.push('"');
+        crate::json::escape_into(&mut head, v.as_str());
+        head.push('"');
+    }
+    head.push_str("]},\"results\":{\"bindings\":[");
+    if unsat {
+        head.push_str("]}}");
+        return Some(head);
+    }
+
+    let scan = graph.store.scan(&id_pat);
+    let write_row = |row: &[Id; 3], s: &mut String| {
+        let spo = scan.to_spo(row);
+        s.push('{');
+        let mut first = true;
+        for (vi, &col) in cols.iter().enumerate() {
+            let Some(c) = col else { continue };
+            if !first {
+                s.push(',');
+            }
+            first = false;
+            s.push('"');
+            crate::json::escape_into(s, out_vars[vi].as_str());
+            s.push_str("\":");
+            write_store_id_json(graph, spo[c], s);
+        }
+        s.push('}');
+    };
+
+    let mut s = head;
+    #[cfg(feature = "parallel")]
+    if scan.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        let frags: Vec<String> = scan
+            .rows
+            .par_iter()
+            .map(|row| {
+                let mut f = String::new();
+                write_row(row, &mut f);
+                f
+            })
+            .collect();
+        for (i, f) in frags.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(f);
+        }
+        s.push_str("]}}");
+        return Some(s);
+    }
+    for (i, row) in scan.rows.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        write_row(row, &mut s);
+    }
+    s.push_str("]}}");
+    Some(s)
+}
+
 /// Evaluates a SELECT and serialises it straight to SPARQL-JSON, skipping the
 /// `QueryResult` (and its per-cell `oxrdf::Term` allocation). On native the per-row
 /// fragments are built in parallel; the wasm build is sequential. Order-preserving.
 pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String, String> {
+    // Streaming fast path for a single-pattern SELECT — no Bindings materialised at all.
+    if let Some(json) = single_pattern_scan_json(graph, pattern) {
+        return Ok(json);
+    }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
 
