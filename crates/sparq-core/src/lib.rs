@@ -159,18 +159,22 @@ impl Graph {
         #[cfg(feature = "parallel")]
         let numerics: Vec<f64> = {
             use rayon::prelude::*;
-            (0..n).into_par_iter().map(|i| numeric_of(dict.term(i as Id + 1))).collect()
+            (0..n).into_par_iter().map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
         };
         #[cfg(not(feature = "parallel"))]
-        let numerics: Vec<f64> = (0..n).map(|i| numeric_of(dict.term(i as Id + 1))).collect();
+        let numerics: Vec<f64> = (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect();
 
         Graph { dict, store, numerics }
     }
 
-    /// The numeric value of a dictionary term id, or `None` if it is not a numeric
-    /// literal. O(1), no allocation — the engine's fast path for numeric filters.
+    /// The numeric value of a term id, or `None` if it is not a numeric literal.
+    /// O(1), no allocation — the engine's fast path for numeric filters. An inline
+    /// integer id carries its value directly (no lookup); other ids use the cache.
     #[inline]
     pub fn numeric_value(&self, id: Id) -> Option<f64> {
+        if dict::is_inline(id) {
+            return Some((id - dict::INLINE_BASE) as f64);
+        }
         let v = *self.numerics.get((id - 1) as usize)?;
         if v.is_nan() {
             None

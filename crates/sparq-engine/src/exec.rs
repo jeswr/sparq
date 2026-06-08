@@ -9,7 +9,7 @@ use crate::QueryResult;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, Term, Variable};
 use rustc_hash::FxHashMap;
-use sparq_core::dict::{Id, NO_ID};
+use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern as IdPattern;
 use sparq_core::Graph;
 use spargebra::algebra::{
@@ -76,7 +76,7 @@ fn term_of(graph: &Graph, local: &LocalVocab, id: Id) -> Option<Term> {
     } else if is_local(id) {
         Some(local.term(id).clone())
     } else {
-        Some(graph.dict.term(id).clone())
+        Some(graph.dict.term(id))
     }
 }
 
@@ -450,6 +450,28 @@ impl NumCmp {
     }
 }
 
+/// The inclusive range of inline-integer *values* `[lo, hi]` (within `[0, INLINE_MAX]`)
+/// that satisfy the comparison, or `None` if no integer can. Used to range-prune a
+/// scan whose filter column holds inline integers (which sort by value).
+fn inline_pass_values(cmp: NumCmp) -> Option<(u32, u32)> {
+    let max = (dict::INLINE_BASE - 1) as i64;
+    let (lo, hi): (i64, i64) = match cmp {
+        NumCmp::Gt(t) => (t.floor() as i64 + 1, max),
+        NumCmp::Ge(t) => (t.ceil() as i64, max),
+        NumCmp::Lt(t) => (0, t.ceil() as i64 - 1),
+        NumCmp::Le(t) => (0, t.floor() as i64),
+        NumCmp::Eq(t) => {
+            if t.fract() != 0.0 || t < 0.0 || t > max as f64 {
+                return None;
+            }
+            let v = t as i64;
+            (v, v)
+        }
+    };
+    let (lo, hi) = (lo.max(0), hi.min(max));
+    (lo <= hi).then_some((lo as u32, hi as u32))
+}
+
 /// Recognises a FILTER of the form `?v OP numeric-constant` (or the symmetric
 /// `constant OP ?v`), returning the variable and the comparison to push down.
 fn extract_sargable(e: &Expression) -> Option<(Variable, NumCmp)> {
@@ -599,7 +621,7 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     // count (ndv), used to score the next join.
     let mut cur_card = prepared[seed].est as f64;
     let mut var_ndv: FxHashMap<Variable, f64> = FxHashMap::default();
-    let mut record_vars = |i: usize, cur_card: f64, var_ndv: &mut FxHashMap<Variable, f64>| {
+    let record_vars = |i: usize, cur_card: f64, var_ndv: &mut FxHashMap<Variable, f64>| {
         for (pos, ov) in prepared[i].pos_vars.iter().enumerate() {
             if let Some(v) = ov {
                 let ndv = pattern_var_ndv(graph, &prepared[i].id_pat, pos, prepared[i].est).min(cur_card.max(1.0));
@@ -1119,11 +1141,32 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         None => graph.store.scan(id_pat),
     };
     let sorted_by = sort_col.and_then(|c| pos_vars[c].clone());
+
+    // Range-pruning: when the pushed-down filter is on the scan's sort column and
+    // that column holds inline integers (which sort by value), binary-search to the
+    // passing value range instead of scanning + filtering the whole relation. Safe
+    // only when EVERY value in the column is inline (so no dictionary-encoded
+    // numeric in another datatype, scattered below INLINE_BASE, is skipped).
+    let mut scan_rows: &[[Id; 3]] = scan.rows;
+    if let (Some((fpos, cmp)), Some(sc)) = (filter, sort_col) {
+        if sc == fpos && scan_rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
+            scan_rows = match inline_pass_values(cmp) {
+                Some((lo, hi)) => {
+                    let (lo_id, hi_id) = (dict::INLINE_BASE + lo, dict::INLINE_BASE + hi);
+                    let start = scan_rows.partition_point(|r| scan.to_spo(r)[fpos] < lo_id);
+                    let end = scan_rows.partition_point(|r| scan.to_spo(r)[fpos] <= hi_id);
+                    &scan_rows[start..end]
+                }
+                None => &[],
+            };
+        }
+    }
+
     // Reserve only up to the LIMIT so a small LIMIT over a huge scan does not
     // allocate for the whole relation (the point of early termination).
-    let cap = limit.map_or(scan.rows.len(), |n| n.min(scan.rows.len()));
+    let cap = limit.map_or(scan_rows.len(), |n| n.min(scan_rows.len()));
     let mut rows: Vec<Row> = Vec::with_capacity(cap);
-    for row in scan.rows {
+    for row in scan_rows {
         let spo = scan.to_spo(row);
         // Pushed-down numeric FILTER: evaluated inline, before materialising the
         // row. When `sort_col` is the filter column the id stream is monotonic, so

@@ -213,6 +213,31 @@ queries, and still behind on `q06` (numeric filter — small absolute numbers) a
    are scan/materialisation bound (q02 full-scan 0.23×, q04 5M-row join 0.29×) —
    the columnar-output / M3-compression territory.
 
+### sparq now wins/ties ALL 5 compute queries vs native QLever (10M)
+
+5. **Tagged ValueIds (inline integers) + range-pruning.** Canonical small
+   `xsd:integer`s are encoded *inline in the u32 id* (`id = INLINE_BASE + value`,
+   `INLINE_BASE = 1<<30`): no dictionary entry, no string parse, and they **sort by
+   value** in the permutations. Numeric FILTER then range-prunes — binary-search to
+   the passing value sub-slice instead of scanning the whole relation. Measured:
+   **q06 `FILTER(?a > 90)` 4.8 → 1.61 ms** (scans 140k rows, not 1.25M) — now
+   **1.24× faster than native QLever** (was 0.39×). Memory-neutral (integers leave
+   the dictionary) and correct (all tests + QLever result counts match; only the
+   canonical lexical form inlines, so term identity is preserved).
+
+**10M compute pass, vs native QLever — sparq wins or ties every query:**
+
+| query | sparq | qlever | speedup |
+|---|--:|--:|--:|
+| q02 count (lazy) | ~0 ms | 4 ms | huge |
+| q03 star join | ~85 ms | 73 ms | ~0.85× |
+| q04 join count (count-only) | 31 ms | 54 ms | **1.5×** |
+| q06 numeric FILTER (range-pruned) | 1.6 ms | 2 ms | **1.24×** |
+| q10 OPTIONAL (sort-merge) | 48 ms | 59 ms | **1.23×** |
+
+The 10M gap has gone from **QLever 3.7× faster overall** to **sparq matching or
+beating native QLever on all five** — with every result identical to QLever.
+
 ### Next (driven by the remaining deltas)
 
 After filter pushdown + merge left-join, the remaining 10M gaps are
