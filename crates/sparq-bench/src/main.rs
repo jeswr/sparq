@@ -12,6 +12,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 mod dataset;
+mod fuzz;
 
 /// The query workload. Each exercises a different plan shape.
 const QUERIES: &[(&str, &str)] = &[
@@ -49,6 +50,44 @@ fn main() {
         let t = Instant::now();
         let n = dataset::write_nt(scale, out).expect("write dataset");
         eprintln!("wrote {n} triples ({scale} entities) to {out} in {:.1}s", t.elapsed().as_secs_f64());
+        return;
+    }
+
+    // `sparq-bench fuzz <seed_start> <count> [category]` — differential fuzzer vs
+    // Oxigraph (correctness audit of the optimizations).
+    if args.get(1).map(String::as_str) == Some("fuzz") {
+        let seed_start: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let count: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1000);
+        let category = args.get(4).map(String::as_str).unwrap_or("all");
+        fuzz::run(seed_start, count, category);
+        return;
+    }
+
+    // `sparq-bench diff <data.ttl> <query.rq|inline-sparql>` — run ONE hand-crafted
+    // (graph, query) through sparq and Oxigraph and print both solution counts.
+    // Lets an adversarial agent probe a specific edge case. Exit 1 on mismatch.
+    if args.get(1).map(String::as_str) == Some("diff") {
+        let data_path = args.get(2).expect("usage: diff <data.ttl> <query>");
+        let q_arg = args.get(3).expect("usage: diff <data.ttl> <query>");
+        let ttl = std::fs::read_to_string(data_path).expect("read data file");
+        let q = std::fs::read_to_string(q_arg).unwrap_or_else(|_| q_arg.clone());
+        let g = sparq_core::Graph::load_str(&ttl, "turtle").expect("sparq load");
+        let store = oxigraph::store::Store::new().unwrap();
+        store.load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes()).expect("oxi load");
+        let oxi = oxi_count(&store, &q);
+        let sparq = match sparq_engine::query(&g, &q) {
+            Ok(r) => r.len() as i64,
+            Err(e) => {
+                println!("sparq=ERROR({e}) oxi={oxi}");
+                return;
+            }
+        };
+        let cnt = sparq_engine::count(&g, &q).map(|c| c as i64).unwrap_or(-1);
+        let ok = sparq == oxi as i64;
+        println!("sparq={sparq} sparq_count={cnt} oxi={oxi} match={ok}");
+        if !ok {
+            std::process::exit(1);
+        }
         return;
     }
 
