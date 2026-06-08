@@ -581,6 +581,27 @@ mod tests {
     }
 
     #[test]
+    fn logical_error_propagation_and_short_circuit() {
+        // Roborev follow-ups to the type-error fix: IF must propagate a condition
+        // error (not select the else branch); && / || must short-circuit on the
+        // dominating value; IN must reuse `=` semantics. Two rows: 50 and "hi".
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:s1 ex:v 50 . ex:s2 ex:v \"hi\" .",
+            "turtle",
+        )
+        .unwrap();
+        let cnt = |q: &str| query(&g, q).unwrap().len();
+        // IF(error, _, _) is an error -> the "hi" row is excluded (NOT the else branch).
+        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(IF(?v > -1, true, true)) }"), 1);
+        // `false && error` = false (short-circuit) -> excludes both rows.
+        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER((?v = \"no\") && (?v > -1)) }"), 0);
+        // `true || error` = true (short-circuit) -> keeps both rows.
+        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER((?v != \"no\") || (?v > -1)) }"), 2);
+        // IN reuses `=`: only the numeric matches the numeric list entry.
+        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v IN (50)) }"), 1);
+    }
+
+    #[test]
     fn named_graph_unsupported() {
         let e = query(
             &g(),
