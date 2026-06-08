@@ -1169,6 +1169,17 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
     let (out_vars, shared, right_only) = join_layout(&left, &right);
     let n_right_only = right_only.len();
 
+    // Sort-merge left outer join for the common case — exactly one shared variable,
+    // fully bound on both sides (the typical `?s p ?o OPTIONAL { ?s q ?r }`). It
+    // avoids building a hash table over the entire right side (which dominates on
+    // large OPTIONALs); QLever uses the same sorted-merge strategy here.
+    if shared.len() == 1 {
+        let (lk, rk) = shared[0];
+        if !any_unbound(&left.rows, &[lk]) && !any_unbound(&right.rows, &[rk]) {
+            return left_outer_merge(graph, local, left, right, lk, rk, &shared, &right_only, n_right_only, out_vars, expr);
+        }
+    }
+
     // Hash the right side by its shared-variable key when those columns are fully
     // bound; otherwise fall back to a compatibility scan (shared vars may be
     // unbound, in which case they act as wildcards).
@@ -1221,6 +1232,72 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
         }
     }
     Ok(Bindings::unsorted(out_vars, rows))
+}
+
+/// Sort-merge left outer join on a single shared variable (`lk`/`rk` columns).
+#[allow(clippy::too_many_arguments)]
+fn left_outer_merge(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    mut left: Bindings,
+    mut right: Bindings,
+    lk: usize,
+    rk: usize,
+    shared: &[(usize, usize)],
+    right_only: &[usize],
+    n_right_only: usize,
+    out_vars: Vec<Variable>,
+    expr: Option<&Expression>,
+) -> Result<Bindings, String> {
+    // Both sides come from index scans that are usually already key-sorted, so
+    // these sorts are near-linear (pattern-defeating quicksort detects sortedness).
+    left.rows.sort_unstable_by_key(|r| r[lk]);
+    right.rows.sort_unstable_by_key(|r| r[rk]);
+    let (l, r) = (&left.rows, &right.rows);
+    let mut rows: Vec<Row> = Vec::with_capacity(l.len());
+    let mut j = 0usize;
+    let mut i = 0usize;
+    while i < l.len() {
+        let key = l[i][lk];
+        let mut i2 = i + 1;
+        while i2 < l.len() && l[i2][lk] == key {
+            i2 += 1;
+        }
+        while j < r.len() && r[j][rk] < key {
+            j += 1;
+        }
+        let mut j2 = j;
+        while j2 < r.len() && r[j2][rk] == key {
+            j2 += 1;
+        }
+        for li in i..i2 {
+            let mut matched = false;
+            for rj in j..j2 {
+                let combined = merge_rows(&l[li], &r[rj], shared, right_only);
+                let keep = match expr {
+                    None => true,
+                    Some(e) => {
+                        let tmp = Bindings { vars: out_vars.clone(), rows: vec![], sorted_by: None };
+                        effective_boolean(&eval_expr(graph, local, &tmp, &combined, e)?)
+                    }
+                };
+                if keep {
+                    rows.push(combined);
+                    matched = true;
+                }
+            }
+            if !matched {
+                let mut combined = l[li].clone();
+                combined.extend(std::iter::repeat(NO_ID).take(n_right_only));
+                rows.push(combined);
+            }
+        }
+        i = i2;
+        j = j2;
+    }
+    // Output is ordered by the join variable (at column lk of out_vars).
+    let sorted_by = out_vars.get(lk).cloned();
+    Ok(Bindings { vars: out_vars, rows, sorted_by })
 }
 
 fn union_bindings(left: Bindings, right: Bindings) -> Bindings {

@@ -203,6 +203,16 @@ queries, and still behind on `q06` (numeric filter — small absolute numbers) a
    bounded piece of M4; the full tagged-ValueId columnar layout is the larger
    architectural follow-on (it removes the gather entirely).
 
+4. **Sort-merge left outer join (OPTIONAL).** OPTIONAL used a hash left-join whose
+   table build over the whole right side dominated. For the common single-shared-
+   variable case it now sorts both sides (near-linear — the scans are already
+   key-sorted) and merges, like QLever. Measured: **10M q10 324 → 48 ms (6.75×)** —
+   now **faster than native QLever** (58 ms, 1.21×); olympics 17.5 → 8.3 ms.
+   10M compute-pass geomean vs native QLever: **0.39× → 0.49×** (QLever's lead
+   3.7× → ~2×; sparq now wins q10 and is near-parity on q06). Remaining 10M gaps
+   are scan/materialisation bound (q02 full-scan 0.23×, q04 5M-row join 0.29×) —
+   the columnar-output / M3-compression territory.
+
 ### Next (driven by the remaining deltas)
 
 1. **OPTIONAL / left-join** (`q10` 0.35×) and the **medal join** (`q07`) — reduce
