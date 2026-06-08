@@ -42,19 +42,26 @@ OFFSET, sub-SELECT.
 ### Streaming wins carry over to the browser
 
 The same engine optimisations apply in WASM, where memory and main-thread time are
-scarcest. Measured in Node over a 400k-triple graph (`test/perf.cjs`):
+scarcest. The whole `count()` family is **lazy** — counted straight from the sorted
+indexes with no result row built per solution — so "how many?" UI queries stay on the
+main thread without jank. Measured in Node over a 400k-triple graph (`test/perf.cjs`,
+2020 M1 MacBook Air):
 
 | query | time |
 |---|--:|
-| `SELECT * … LIMIT 10` (early-termination, no full scan) | **0.026 ms** |
-| `count(?s a Person)` (lazy, index range size) | **0.010 ms** |
-| `count(follows · name)` (count-only join, no row materialise) | 1.5 ms |
-| `FILTER(?a > 90)` (pushed into the sorted scan) | 2.3 ms |
-| `OPTIONAL` (sort-merge left join) | 64 ms |
+| `SELECT * … LIMIT 10` (early-termination, no full scan) | **0.06 ms** |
+| `count(?s a Person)` (lazy, index range size) | **0.02 ms** |
+| `count(follows · name)` (count-only 2-pattern join) | 4.2 ms |
+| `count(name·age·city)` (lazy **N-pattern star** count, Σ_s Π c_i(s)) | **2.5 ms** |
+| `count(FILTER(?a > 90))` (binary-searched range size on inline ints) | **0.07 ms** |
+| `count(name OPTIONAL age)` (lazy left-join, Σ_s c_l·max(1,c_r)) | **2.1 ms** |
+| `FILTER(?a > 90)` **materialise** (same predicate, builds rows) | 7.0 ms |
+| `OPTIONAL` **materialise** (sort-merge left join, builds rows) | 167 ms |
 
-`store.count(sparql)` exposes the lazy count directly (a single-pattern scan or a
-two-pattern join is counted from the index with no result rows built) — ideal for
-"how many?" UI queries on a memory-constrained device.
+The lazy-count wins built for the native engine carry over unchanged (same
+`sparq-core`/`sparq-engine`): counting a filtered pattern is **~95× faster** than
+materialising it (0.07 vs 7 ms), and counting an OPTIONAL is **~80× faster** than
+materialising it (2.1 vs 167 ms) — a large saving on a memory-constrained device.
 
 ## Bundle size (release, wasm-opt -Oz)
 

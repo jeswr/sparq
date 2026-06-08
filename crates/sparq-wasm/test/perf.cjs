@@ -61,4 +61,25 @@ const opt = time("OPTIONAL materialise", () =>
   JSON.parse(store.query("PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:age ?a } }")));
 assert.equal(opt.results.bindings.length, N);
 
+// --- The native lazy-count wins carry over to the browser (shared core/engine). ---
+// These count() the SAME queries that materialise above, but without building a row
+// per solution — the win is the gap between each pair.
+
+// N-pattern STAR count: Σ_s Π c_i(s), no 50k wide rows materialised.
+const cStar = time("count(name·age·city star)", () =>
+  store.count("PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n . ?s ex:age ?a . ?s ex:city ?c }"));
+assert.equal(cStar, N);
+
+// Filtered single-pattern count: binary-searched range size on the inline-integer
+// column — compare to the FILTER materialise above (same predicate).
+const cFilt = time("count(FILTER(?a > 90))", () =>
+  store.count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a > 90) }"));
+assert.equal(cFilt, filt.results.bindings.length);
+
+// Lazy OPTIONAL (left-join) count: Σ_s c_left·max(1,c_right) — compare to the
+// OPTIONAL materialise above.
+const cOpt = time("count(name OPTIONAL age)", () =>
+  store.count("PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:age ?a } }"));
+assert.equal(cOpt, N);
+
 console.log("\nall WASM streaming assertions passed ✓");
