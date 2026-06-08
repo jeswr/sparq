@@ -236,9 +236,14 @@ impl TripleStore {
     pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         for (i, p) in self.perms.iter().enumerate() {
-            let slice = p.as_slice();
+            // Raw modes borrow zero-copy; a compressed perm is decoded back to raw rows so
+            // `save` is total (e.g. a `load_str_compressed` graph can still be persisted).
+            let rows: std::borrow::Cow<[[Id; 3]]> = match p {
+                PermData::Compressed(c) => std::borrow::Cow::Owned(c.decode_all()),
+                _ => std::borrow::Cow::Borrowed(p.as_slice()),
+            };
             // SAFETY: reinterpret the contiguous [u32;3] rows as bytes for writing.
-            let bytes = unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), std::mem::size_of_val(slice)) };
+            let bytes = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<u8>(), std::mem::size_of_val(rows.as_ref())) };
             std::fs::write(dir.join(format!("perm{i}.bin")), bytes)?;
         }
         self.save_pred_stats(dir)
