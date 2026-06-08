@@ -1348,30 +1348,15 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
     use Expression::*;
     match e {
         Variable(v) => match b.col(v) {
-            Some(c) if row[c] != NO_ID => {
-                let id = row[c];
-                // Fast path: a numeric literal from the data resolves to its value
-                // straight from the cache — no term clone, no string parse. This is
-                // the hot path for numeric FILTER / comparison / ORDER BY.
-                if !is_local(id) {
-                    if let Some(n) = graph.numeric_value(id) {
-                        return Ok(Value::Num(n));
-                    }
-                }
-                Ok(Value::Term(term_of(graph, local, id).unwrap()))
-            }
+            // Always return the original term so term identity is preserved
+            // (sameTerm, BIND passthrough, STR, etc.). The numeric fast path that
+            // skips this materialisation lives in `eval_numeric`, used only by the
+            // arithmetic / comparison operators where only the value matters.
+            Some(c) if row[c] != NO_ID => Ok(Value::Term(term_of(graph, local, row[c]).unwrap())),
             _ => Ok(Value::Unbound),
         },
         NamedNode(n) => Ok(Value::Term(Term::NamedNode(n.clone()))),
-        Literal(l) => {
-            // A numeric constant resolves to its value once, not per row.
-            if is_numeric_dt(l) {
-                if let Ok(n) = l.value().parse::<f64>() {
-                    return Ok(Value::Num(n));
-                }
-            }
-            Ok(Value::Term(Term::Literal(l.clone())))
-        }
+        Literal(l) => Ok(Value::Term(Term::Literal(l.clone()))),
         And(a, c) => Ok(Value::Bool(eval_bool(graph, local, b, row, a)? && eval_bool(graph, local, b, row, c)?)),
         Or(a, c) => Ok(Value::Bool(eval_bool(graph, local, b, row, a)? || eval_bool(graph, local, b, row, c)?)),
         Not(a) => Ok(Value::Bool(!eval_bool(graph, local, b, row, a)?)),
@@ -1428,12 +1413,50 @@ fn eval_bool(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
     Ok(effective_boolean(&eval_expr(graph, local, b, row, e)?))
 }
 
+/// Fast numeric evaluation that never materialises a term: a numeric variable
+/// resolves to its value via the dictionary cache, a numeric literal via one
+/// parse, and arithmetic recurses. Returns `None` for anything non-numeric, so
+/// the caller falls back to the full (identity-preserving) `eval_expr` path.
+/// Used only where the value — not the term — matters (comparison / arithmetic).
+fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<f64> {
+    use Expression::*;
+    match e {
+        Variable(v) => {
+            let c = b.col(v)?;
+            let id = row[c];
+            if id == NO_ID {
+                None
+            } else if is_local(id) {
+                // Computed values are rare; resolve through the local vocab term.
+                as_num(&Value::Term(local.term(id).clone()))
+            } else {
+                graph.numeric_value(id)
+            }
+        }
+        Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
+        Add(a, c) => Some(eval_numeric(graph, local, b, row, a)? + eval_numeric(graph, local, b, row, c)?),
+        Subtract(a, c) => Some(eval_numeric(graph, local, b, row, a)? - eval_numeric(graph, local, b, row, c)?),
+        Multiply(a, c) => Some(eval_numeric(graph, local, b, row, a)? * eval_numeric(graph, local, b, row, c)?),
+        Divide(a, c) => Some(eval_numeric(graph, local, b, row, a)? / eval_numeric(graph, local, b, row, c)?),
+        UnaryPlus(a) => eval_numeric(graph, local, b, row, a),
+        UnaryMinus(a) => Some(-eval_numeric(graph, local, b, row, a)?),
+        _ => None,
+    }
+}
+
 fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(Ordering) -> bool) -> Result<Value, String> {
+    // Fast path: both sides numeric -> compare f64 directly, no term materialised.
+    if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
+        return Ok(Value::Bool(x.partial_cmp(&y).map(&f).unwrap_or(false)));
+    }
     let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
     Ok(Value::Bool(compare_values(&x, &y).map(f).unwrap_or(false)))
 }
 
 fn arith(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(f64, f64) -> f64) -> Result<Value, String> {
+    if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
+        return Ok(Value::Num(f(x, y)));
+    }
     let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
     Ok(match (as_num(&x), as_num(&y)) {
         (Some(a), Some(b)) => Value::Num(f(a, b)),

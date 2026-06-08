@@ -257,6 +257,51 @@ mod tests {
     }
 
     #[test]
+    fn sameterm_numeric_identity() {
+        // sameTerm on a numeric variable with itself is true — the numeric fast
+        // path must not discard term identity (regression for roborev 1271).
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(sameTerm(?a, ?a)) }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn bind_preserves_numeric_lexical_form() {
+        // BIND(?x AS ?y) must re-emit the ORIGINAL term, not a canonicalised number
+        // (regression for roborev 1271): "1.0"^^decimal must stay "1.0"^^decimal.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:score \"1.0\"^^<http://www.w3.org/2001/XMLSchema#decimal> .",
+            "turtle",
+        )
+        .unwrap();
+        let r = query(
+            &g,
+            "PREFIX ex: <http://ex/> SELECT ?d WHERE { ?s ex:score ?sc . BIND(?sc AS ?d) }",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            r.rows[0][0].as_ref().unwrap().to_string(),
+            "\"1.0\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+        );
+    }
+
+    #[test]
+    fn filter_numeric_still_fast_path() {
+        // The numeric comparison fast path still gives correct results.
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a + 1 > 31) }",
+        )
+        .unwrap();
+        // ages 30,25,35 -> +1 = 31,26,36 -> >31 keeps only carol(36)
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
     fn having() {
         // group ?s, count its triples, keep groups with >= 3 triples
         let r = query(
