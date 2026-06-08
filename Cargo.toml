@@ -17,6 +17,8 @@ spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
 # Fast hashing / maps.
 rustc-hash = "2"
 hashbrown = "0.15"
+# Inline small rows (avoid a heap allocation per solution row).
+smallvec = "1"
 # Parallelism.
 rayon = "1"
 

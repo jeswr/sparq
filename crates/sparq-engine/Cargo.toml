@@ -15,3 +15,4 @@ sparq-core = { path = "../sparq-core", default-features = false }
 oxrdf.workspace = true
 spargebra.workspace = true
 rustc-hash.workspace = true
+smallvec.workspace = true

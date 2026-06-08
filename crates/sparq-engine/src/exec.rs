@@ -15,8 +15,14 @@ use sparq_core::Graph;
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
 };
+use smallvec::SmallVec;
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern};
 use std::cmp::Ordering;
+
+/// One solution row: the ids bound to each of a [`Bindings`]' variables. Inlined
+/// up to 4 columns (the common case) so a join produces no heap allocation per
+/// row — the dominant cost on large join results.
+type Row = SmallVec<[Id; 4]>;
 
 /// Ids at or above this base index into the per-query [`LocalVocab`] instead of
 /// the graph dictionary. (M2 uses `u32` ids; the tagged 64-bit ValueId of M4
@@ -69,7 +75,7 @@ fn term_of(graph: &Graph, local: &LocalVocab, id: Id) -> Option<Term> {
 /// merge join instead of a hash table.
 struct Bindings {
     vars: Vec<Variable>,
-    rows: Vec<Vec<Id>>,
+    rows: Vec<Row>,
     sorted_by: Option<Variable>,
 }
 
@@ -77,7 +83,7 @@ impl Bindings {
     fn col(&self, v: &Variable) -> Option<usize> {
         self.vars.iter().position(|x| x == v)
     }
-    fn unsorted(vars: Vec<Variable>, rows: Vec<Vec<Id>>) -> Self {
+    fn unsorted(vars: Vec<Variable>, rows: Vec<Row>) -> Self {
         Bindings { vars, rows, sorted_by: None }
     }
 }
@@ -235,7 +241,7 @@ fn flatten_conjunction(p: &GraphPattern, patterns: &mut Vec<TriplePattern>, filt
 /// differentially tested to produce identical results.
 fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
     if patterns.is_empty() {
-        return Ok(Bindings { vars: vec![], rows: vec![vec![]], sorted_by: None });
+        return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
     }
     if patterns.len() >= 3 && bgp_is_cyclic(patterns) {
         return eval_bgp_wcoj(graph, patterns);
@@ -247,7 +253,7 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
 /// current sort variable (falling back to hash, then cross product).
 fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
     if patterns.is_empty() {
-        return Ok(Bindings { vars: vec![], rows: vec![vec![]], sorted_by: None });
+        return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
     }
 
     struct Prepared {
@@ -502,10 +508,10 @@ fn lftj_recurse(
     level: usize,
     n_levels: usize,
     current: &mut [Id],
-    out: &mut Vec<Vec<Id>>,
+    out: &mut Vec<Row>,
 ) {
     if level == n_levels {
-        out.push(current.to_vec());
+        out.push(Row::from_slice(current));
         return;
     }
     let parts = &parts_at_level[level];
@@ -620,7 +626,7 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
 
     // No variables: BGP is a ground check that already succeeded.
     if n_levels == 0 {
-        return Ok(Bindings { vars: vec![], rows: vec![vec![]], sorted_by: None });
+        return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
     }
 
     // Participating tries per global level.
@@ -632,7 +638,7 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
     }
 
     let mut iters: Vec<TrieIter> = tries.iter().map(TrieIter::new).collect();
-    let mut out: Vec<Vec<Id>> = Vec::new();
+    let mut out: Vec<Row> = Vec::new();
     let mut current = vec![NO_ID; n_levels];
     lftj_recurse(&mut iters, &parts_at_level, 0, n_levels, &mut current, &mut out);
 
@@ -758,11 +764,11 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         None => graph.store.scan(id_pat),
     };
     let sorted_by = sort_col.and_then(|c| pos_vars[c].clone());
-    let mut rows: Vec<Vec<Id>> = Vec::with_capacity(scan.rows.len());
+    let mut rows: Vec<Row> = Vec::with_capacity(scan.rows.len());
     for row in scan.rows {
         let spo = scan.to_spo(row);
         let mut ok = true;
-        let mut out = Vec::with_capacity(vars.len());
+        let mut out = Row::with_capacity(vars.len());
         for positions in &var_positions {
             let v0 = spo[positions[0]];
             if positions.iter().any(|&p| spo[p] != v0) {
@@ -859,8 +865,8 @@ fn compatible(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)]) -> bool {
 
 /// Combines two compatible rows: left's row extended with the right-only columns,
 /// filling any shared column that was unbound on the left from the right side.
-fn merge_rows(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)], right_only: &[usize]) -> Vec<Id> {
-    let mut row = lrow.to_vec();
+fn merge_rows(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)], right_only: &[usize]) -> Row {
+    let mut row = Row::from_slice(lrow);
     for &(lc, rc) in shared {
         if row[lc] == NO_ID {
             row[lc] = rrow[rc];
@@ -873,7 +879,7 @@ fn merge_rows(lrow: &[Id], rrow: &[Id], shared: &[(usize, usize)], right_only: &
 }
 
 /// Whether any row leaves any of the given columns unbound.
-fn any_unbound(rows: &[Vec<Id>], cols: &[usize]) -> bool {
+fn any_unbound(rows: &[Row], cols: &[usize]) -> bool {
     rows.iter().any(|r| cols.iter().any(|&c| r[c] == NO_ID))
 }
 
@@ -1032,8 +1038,8 @@ fn union_bindings(left: Bindings, right: Bindings) -> Bindings {
             out_vars.push(v.clone());
         }
     }
-    let mut rows = Vec::with_capacity(left.rows.len() + right.rows.len());
-    let map_row = |src_vars: &[Variable], row: &[Id], out_vars: &[Variable]| -> Vec<Id> {
+    let mut rows: Vec<Row> = Vec::with_capacity(left.rows.len() + right.rows.len());
+    let map_row = |src_vars: &[Variable], row: &[Id], out_vars: &[Variable]| -> Row {
         out_vars
             .iter()
             .map(|v| src_vars.iter().position(|x| x == v).map(|i| row[i]).unwrap_or(NO_ID))
@@ -1071,7 +1077,7 @@ fn minus_bindings(left: Bindings, right: Bindings) -> Bindings {
         for row in &right.rows {
             table.insert(rcols.iter().map(|&c| row[c]).collect(), ());
         }
-        let rows: Vec<Vec<Id>> = left
+        let rows: Vec<Row> = left
             .rows
             .into_iter()
             .filter(|row| !table.contains_key(&lcols.iter().map(|&c| row[c]).collect::<Vec<_>>()))
@@ -1080,7 +1086,7 @@ fn minus_bindings(left: Bindings, right: Bindings) -> Bindings {
     }
 
     // General path: per-row compatibility with a bound-domain-overlap check.
-    let keep = |lrow: &Vec<Id>| -> bool {
+    let keep = |lrow: &Row| -> bool {
         !right.rows.iter().any(|rrow| {
             let mut overlap = false;
             for &(lc, rc) in &shared {
@@ -1095,7 +1101,7 @@ fn minus_bindings(left: Bindings, right: Bindings) -> Bindings {
             overlap
         })
     };
-    let rows: Vec<Vec<Id>> = left.rows.iter().filter(|r| keep(r)).cloned().collect();
+    let rows: Vec<Row> = left.rows.iter().filter(|r| keep(r)).cloned().collect();
     Bindings { vars: left.vars, rows, sorted_by: left.sorted_by }
 }
 
@@ -1167,10 +1173,10 @@ fn group_aggregate(
         out_vars.push(v.clone());
     }
 
-    let mut rows = Vec::with_capacity(order.len());
+    let mut rows: Vec<Row> = Vec::with_capacity(order.len());
     for key in &order {
         let members = &groups[key];
-        let mut row = key.clone();
+        let mut row = Row::from_slice(key);
         for (_, agg) in aggregates {
             let v = eval_aggregate(graph, local, &b, members, agg)?;
             row.push(value_to_id(graph, local, &v));
@@ -1266,7 +1272,7 @@ fn slice_bindings(b: &mut Bindings, start: usize, length: Option<usize>) {
 
 fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[OrderExpression]) -> Result<(), String> {
     // Precompute the sort key (vector of (descending, Value)) for each row.
-    let mut keyed: Vec<(Vec<(bool, Value)>, Vec<Id>)> = Vec::with_capacity(b.rows.len());
+    let mut keyed: Vec<(Vec<(bool, Value)>, Row)> = Vec::with_capacity(b.rows.len());
     for row in &b.rows {
         let mut key = Vec::with_capacity(exprs.len());
         for oe in exprs {

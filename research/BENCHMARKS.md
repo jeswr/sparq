@@ -159,24 +159,47 @@ covered by the end-to-end pass only.
 QLever's engine is genuinely faster; closing that gap is what M3/M4 are for. No
 "we beat QLever" claim — the opposite, on the metric that matters (compute).
 
-### Progress
+### Progress — compute gap closed from 3.2× to 1.2× with two targeted changes
 
-- **Numeric value cache (partial M4, commit pending).** A dictionary-parallel
-  `Vec<f64>` of every term's numeric value (NaN = non-numeric) lets numeric
-  FILTER / comparison / ORDER BY skip the per-row term materialisation + string
-  parse; numeric literal constants in the query are folded the same way. Result:
-  **q06 filter 14.15 ms → 5.22 ms** (compute), its gap to QLever **14× → ~5×**,
-  and the compute-pass geomean **0.31× → 0.41×** (QLever's lead 3.2× → 2.4×). The
-  join-bound queries are unchanged — they are limited by the `Vec<Vec<Id>>`
-  per-row-allocation intermediate, which the flat/columnar work targets next.
+Driven by the measured deltas, in order:
 
-### Next (driven by these deltas)
+1. **Numeric value cache (partial M4).** A dictionary-parallel `Vec<f64>` of every
+   term's numeric value (NaN = non-numeric) lets numeric FILTER / comparison /
+   ORDER BY skip the per-row term materialisation + string parse; numeric literal
+   constants are folded the same way. → q06 filter 14.15 → 5.22 ms; compute
+   geomean **0.31× → 0.41×**.
+2. **Inline rows (`SmallVec<[Id;4]>`).** Replaced the per-row `Vec<Vec<Id>>` — one
+   heap allocation per solution row — with rows inlined up to 4 columns, so joins
+   produce no per-row heap allocation. This was the dominant join cost. →
+   q04 40.8 → 13.5 ms, q05 53.4 → 19.3 ms, q02 4.7 → 1.2 ms; compute geomean
+   **0.41× → 0.81×**.
 
-1. **Flat/columnar Bindings** — replace the per-row `Vec<Vec<Id>>` (one heap
-   allocation per solution row) with a single flat `Vec<Id>` + width; this is the
-   biggest remaining compute gap on the join queries (q04/q05/q10).
+Compute pass now (Olympics, min-of-7 cold; QLever in Docker-on-macOS):
+
+| query | sparq | qlever | speedup |
+|---|--:|--:|--:|
+| q02 type-scan | 1.21 ms | 3 ms | **2.48×** |
+| q03 star-4 | 17.3 ms | 17 ms | 0.98× |
+| q04 athlete-age | 13.4 ms | 13 ms | 0.97× |
+| q05 result-star-3 | 19.6 ms | 19 ms | 0.97× |
+| q06 filter | 3.87 ms | 1 ms | 0.26× |
+| q07 medal join | 14.5 ms | 10 ms | 0.69× |
+| q08 label-age | 6.96 ms | 9 ms | **1.29×** |
+| q10 OPTIONAL | 25.9 ms | 9 ms | 0.35× |
+| **geomean** | | | **0.81×** |
+
+sparq is now at parity-or-better with (Dockerized) QLever on the scan/star/chain
+queries, and still behind on `q06` (numeric filter — small absolute numbers) and
+`q10` (OPTIONAL/left-join overhead). Result counts remain identical to QLever.
+
+### Next (driven by the remaining deltas)
+
+1. **OPTIONAL / left-join** (`q10` 0.35×) and the **medal join** (`q07`) — reduce
+   per-row hashing/allocation in `left_outer_join` and the hash-join key building.
 2. **Full tagged ValueIds** — inline numerics/dates in the id itself (extends the
-   numeric cache); also speeds numeric joins.
+   numeric cache); closes more of the `q06` filter gap and speeds numeric joins.
+3. **Flat columnar buffer** — a single `Vec<Id>` + width per intermediate (beyond
+   SmallVec) for full vectorisation; and morsel/parallel execution.
 2. **M3 column compression + vectorised/block scan** — close the ~3× general
    compute gap and the memory gap.
 3. Native QLever (not Docker) + **larger datasets** (SP2Bench/WatDiv, then a
