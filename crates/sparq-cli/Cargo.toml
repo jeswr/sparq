@@ -14,8 +14,11 @@ sparq-core = { path = "../sparq-core", features = ["mmap"] }
 sparq-engine = { path = "../sparq-engine" }
 oxttl.workspace = true
 oxrdf.workspace = true
-# Streaming decompression for the ingest experiment (gzip + bzip2).
+# Streaming decompression: gzip + bzip2, and zstd (the fast, parallel-friendly bulk
+# format — ~12x faster to decompress than bzip2, so decompression stops being the
+# ingestion bottleneck; recompress a .bz2 source once with `zstd -9 -T0`).
 flate2 = "1"
 bzip2 = "0.5"
+zstd = "0.13"
 # Direct mmap for the compression probe (measure-first sizing of permutation indexes).
 memmap2 = { workspace = true }

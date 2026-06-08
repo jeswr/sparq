@@ -64,6 +64,13 @@ fn cmd_ingest(args: &[String]) {
         Box::new(bzip2::read::MultiBzDecoder::new(file))
     } else if path.ends_with(".gz") {
         Box::new(flate2::read::MultiGzDecoder::new(file))
+    } else if path.ends_with(".zst") || path.ends_with(".zstd") {
+        // zstd decompresses ~12x faster than bzip2, so it stops being the ingestion
+        // bottleneck; recompress a .bz2 source once with `zstd -9 -T0` to use it.
+        Box::new(zstd::stream::read::Decoder::new(file).unwrap_or_else(|e| {
+            eprintln!("zstd decode {path}: {e}");
+            std::process::exit(1);
+        }))
     } else {
         Box::new(file)
     };
@@ -190,6 +197,13 @@ fn cmd_build(args: &[String]) {
         Box::new(bzip2::read::MultiBzDecoder::new(file))
     } else if path.ends_with(".gz") {
         Box::new(flate2::read::MultiGzDecoder::new(file))
+    } else if path.ends_with(".zst") || path.ends_with(".zstd") {
+        // zstd decompresses ~12x faster than bzip2, so it stops being the ingestion
+        // bottleneck; recompress a .bz2 source once with `zstd -9 -T0` to use it.
+        Box::new(zstd::stream::read::Decoder::new(file).unwrap_or_else(|e| {
+            eprintln!("zstd decode {path}: {e}");
+            std::process::exit(1);
+        }))
     } else {
         Box::new(file)
     };
