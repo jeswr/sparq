@@ -168,14 +168,27 @@ fn write_store_id_json(graph: &Graph, id: Id, s: &mut String) {
 /// caller falls back to the general evaluator). The vector-at-a-time idea for the most
 /// common (single-pattern) browser query.
 fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<String> {
-    let (proj, bgp): (Option<&[Variable]>, &GraphPattern) = match pattern {
+    let (proj, inner): (Option<&[Variable]>, &GraphPattern) = match pattern {
         GraphPattern::Project { inner, variables } => (Some(variables), inner),
         other => (None, other),
     };
-    let patterns = match bgp {
-        GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns,
-        _ => return None,
-    };
+    if !is_conjunctive(inner) {
+        return None;
+    }
+    let mut patterns = Vec::new();
+    let mut filters = Vec::new();
+    flatten_conjunction(inner, &mut patterns, &mut filters);
+    if patterns.len() != 1 {
+        return None;
+    }
+    // Only pushed-down sargable numeric FILTER(s); a residual filter needs the general
+    // expression evaluator.
+    let (pat_filters, residual) = split_sargable(&patterns, &filters);
+    if !residual.is_empty() {
+        return None;
+    }
+    let filt: Option<(usize, NumCmp)> = pat_filters[0];
+
     let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0]).ok()?;
     if !distinct_pattern_vars(&pos_vars) {
         return None; // a repeated variable needs the consistency check — use the general path
@@ -201,7 +214,35 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
         return Some(head);
     }
 
-    let scan = graph.store.scan(&id_pat);
+    let scan = match filt {
+        Some((c, _)) => graph.store.scan_sorted(&id_pat, c),
+        None => graph.store.scan(&id_pat),
+    };
+    // Range-prune an all-inline filter column (identical to scan_to_bindings) so the
+    // order matches the general path exactly (byte-identical output).
+    let mut scan_rows: &[[Id; 3]] = scan.rows;
+    if let Some((fpos, cmp)) = filt {
+        let actual_sort = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none());
+        if actual_sort == Some(fpos) && scan_rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
+            scan_rows = match inline_pass_values(cmp) {
+                Some((lo, hi)) => {
+                    let (lo_id, hi_id) = (dict::INLINE_BASE + lo, dict::INLINE_BASE + hi);
+                    let start = scan_rows.partition_point(|r| scan.to_spo(r)[fpos] < lo_id);
+                    let end = scan_rows.partition_point(|r| scan.to_spo(r)[fpos] <= hi_id);
+                    &scan_rows[start..end]
+                }
+                None => &[],
+            };
+        }
+    }
+    // Per-row check: a no-op on a fully range-pruned slice; required for a mixed-datatype
+    // column where pruning was skipped.
+    let passes = |row: &[Id; 3]| -> bool {
+        match filt {
+            Some((fpos, cmp)) => graph.numeric_value(scan.to_spo(row)[fpos]).is_some_and(|x| cmp.test(x)),
+            None => true,
+        }
+    };
     let write_row = |row: &[Id; 3], s: &mut String| {
         let spo = scan.to_spo(row);
         s.push('{');
@@ -222,15 +263,17 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
 
     let mut s = head;
     #[cfg(feature = "parallel")]
-    if scan.rows.len() >= PAR_THRESHOLD {
+    if scan_rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
-        let frags: Vec<String> = scan
-            .rows
+        let frags: Vec<String> = scan_rows
             .par_iter()
-            .map(|row| {
+            .filter_map(|row| {
+                if !passes(row) {
+                    return None;
+                }
                 let mut f = String::new();
                 write_row(row, &mut f);
-                f
+                Some(f)
             })
             .collect();
         for (i, f) in frags.iter().enumerate() {
@@ -242,10 +285,15 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
         s.push_str("]}}");
         return Some(s);
     }
-    for (i, row) in scan.rows.iter().enumerate() {
-        if i > 0 {
+    let mut wrote = false;
+    for row in scan_rows {
+        if !passes(row) {
+            continue;
+        }
+        if wrote {
             s.push(',');
         }
+        wrote = true;
         write_row(row, &mut s);
     }
     s.push_str("]}}");
