@@ -8,7 +8,7 @@ license.workspace = true
 # Forwards sparq-core's parallel index build. Default on for native; the wasm
 # crate disables defaults so rayon is never pulled into the bundle.
 default = ["parallel"]
-parallel = ["sparq-core/parallel"]
+parallel = ["dep:rayon", "sparq-core/parallel"]
 
 [dependencies]
 sparq-core = { path = "../sparq-core", default-features = false }
@@ -16,3 +16,4 @@ oxrdf.workspace = true
 spargebra.workspace = true
 rustc-hash.workspace = true
 smallvec.workspace = true
+rayon = { workspace = true, optional = true }

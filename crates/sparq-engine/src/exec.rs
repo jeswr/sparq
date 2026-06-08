@@ -24,6 +24,13 @@ use std::cmp::Ordering;
 /// row — the dominant cost on large join results.
 type Row = SmallVec<[Id; 4]>;
 
+/// Result sizes at/above which the embarrassingly-parallel materialisation steps
+/// (row building, term reconstruction) are worth handing to rayon; below it the
+/// thread hand-off costs more than it saves. Native only (the wasm build has no
+/// `parallel` feature, so these paths compile to the sequential loops).
+#[cfg(feature = "parallel")]
+const PAR_THRESHOLD: usize = 50_000;
+
 /// A join / group key (the ids of the shared or grouping columns). Inlined up to
 /// 2 columns — most joins are on one or two variables — so building a hash table
 /// or probing it allocates nothing per key.
@@ -111,10 +118,22 @@ pub fn eval_select(graph: &Graph, pattern: &GraphPattern) -> Result<QueryResult,
         .collect();
 
     let col_of: Vec<Option<usize>> = out_vars.iter().map(|v| bindings.col(v)).collect();
-    let mut rows: Vec<Vec<Option<Term>>> = Vec::with_capacity(bindings.rows.len());
-    for row in &bindings.rows {
-        rows.push(col_of.iter().map(|c| c.and_then(|i| term_of(graph, &local, row[i]))).collect());
-    }
+    // Materialise each solution row's terms. This reconstructs an `oxrdf::Term` (an
+    // IRI/string allocation) per cell and is the dominant cost of returning a large
+    // result — but every row is independent, so do it in parallel on native (the wasm
+    // build has no threads and keeps the sequential path). Order is preserved.
+    let materialise = |row: &Row| -> Vec<Option<Term>> {
+        col_of.iter().map(|c| c.and_then(|i| term_of(graph, &local, row[i]))).collect()
+    };
+    #[cfg(feature = "parallel")]
+    let rows: Vec<Vec<Option<Term>>> = if bindings.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        bindings.rows.par_iter().map(materialise).collect()
+    } else {
+        bindings.rows.iter().map(materialise).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let rows: Vec<Vec<Option<Term>>> = bindings.rows.iter().map(materialise).collect();
     Ok(QueryResult { vars: out_vars, rows })
 }
 
@@ -1337,32 +1356,40 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         }
     }
 
+    // Per-row builder: apply the pushed-down filter, then project (with the
+    // repeated-variable consistency check); `None` drops the row.
+    let build_row = |row: &[Id; 3]| -> Option<Row> {
+        let spo = scan.to_spo(row);
+        if let Some((fpos, cmp)) = filter {
+            if !graph.numeric_value(spo[fpos]).is_some_and(|x| cmp.test(x)) {
+                return None;
+            }
+        }
+        let mut out = Row::with_capacity(vars.len());
+        for positions in &var_positions {
+            let v0 = spo[positions[0]];
+            if positions.iter().any(|&p| spo[p] != v0) {
+                return None;
+            }
+            out.push(v0);
+        }
+        Some(out)
+    };
+
+    // No LIMIT and a large relation: build the rows in parallel (order-preserving).
+    #[cfg(feature = "parallel")]
+    if limit.is_none() && scan_rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        let rows: Vec<Row> = scan_rows.par_iter().filter_map(build_row).collect();
+        return Bindings { vars, rows, sorted_by };
+    }
+
     // Reserve only up to the LIMIT so a small LIMIT over a huge scan does not
     // allocate for the whole relation (the point of early termination).
     let cap = limit.map_or(scan_rows.len(), |n| n.min(scan_rows.len()));
     let mut rows: Vec<Row> = Vec::with_capacity(cap);
     for row in scan_rows {
-        let spo = scan.to_spo(row);
-        // Pushed-down numeric FILTER: evaluated inline, before materialising the
-        // row. When `sort_col` is the filter column the id stream is monotonic, so
-        // `numeric_value` reads sequentially instead of as a random gather.
-        if let Some((fpos, cmp)) = filter {
-            match graph.numeric_value(spo[fpos]) {
-                Some(x) if cmp.test(x) => {}
-                _ => continue,
-            }
-        }
-        let mut ok = true;
-        let mut out = Row::with_capacity(vars.len());
-        for positions in &var_positions {
-            let v0 = spo[positions[0]];
-            if positions.iter().any(|&p| spo[p] != v0) {
-                ok = false;
-                break;
-            }
-            out.push(v0);
-        }
-        if ok {
+        if let Some(out) = build_row(row) {
             rows.push(out);
             // LIMIT early-termination: stop scanning once we have enough rows.
             if let Some(n) = limit {
