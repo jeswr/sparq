@@ -135,6 +135,31 @@ impl CompressedPerm {
         out
     }
 
+    /// Exact count of rows in `[lo, hi]` without materializing the range: decode at most
+    /// the two boundary blocks (the interior blocks are full and wholly inside the range),
+    /// so this is O(block) regardless of how many rows the range spans — the planner's
+    /// cheap cardinality estimate.
+    pub fn count_range(&self, lo: [Id; 3], hi: [Id; 3]) -> usize {
+        if self.dir.is_empty() || lo > hi {
+            return 0;
+        }
+        let first = self.dir.partition_point(|&(k, _)| k <= lo).saturating_sub(1);
+        let last = self.dir.partition_point(|&(k, _)| k <= hi).saturating_sub(1).max(first);
+        let mut buf = Vec::with_capacity(BLOCK);
+        self.decode_block_at(self.dir[first].1 as usize, &mut buf);
+        if first == last {
+            let s = buf.partition_point(|r| *r < lo);
+            let e = buf.partition_point(|r| *r <= hi);
+            return e - s;
+        }
+        // First block: rows >= lo. Interior blocks: full (BLOCK each). Last block: rows <= hi.
+        let first_count = buf.len() - buf.partition_point(|r| *r < lo);
+        buf.clear();
+        self.decode_block_at(self.dir[last].1 as usize, &mut buf);
+        let last_count = buf.partition_point(|r| *r <= hi);
+        first_count + (last - first - 1) * BLOCK + last_count
+    }
+
     /// Returns the rows in `[lo, hi]` (inclusive, comparing full triples) by decoding
     /// only the blocks that span that key range, then trimming. The result is sorted —
     /// identical to a binary-search range over the raw permutation.

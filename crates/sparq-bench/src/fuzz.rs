@@ -220,6 +220,9 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
                 continue;
             }
         };
+        // With SPARQ_FUZZ_COMPRESS=1, validate the BLOCK-COMPRESSED store end-to-end:
+        // identical results to Oxigraph prove the compressed scan path is correct.
+        let g = if std::env::var("SPARQ_FUZZ_COMPRESS").is_ok() { g.into_compressed() } else { g };
         let store = Store::new().unwrap();
         if let Err(e) = store.load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes()) {
             // Both engines parse the same Turtle; a divergence here is itself a bug.

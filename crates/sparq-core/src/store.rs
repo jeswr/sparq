@@ -64,7 +64,7 @@ use rustc_hash::FxHashMap;
 /// Per-predicate statistics for cardinality estimation (a characteristic-set-lite
 /// summary): how many triples use the predicate, and how many *distinct* subjects
 /// and objects it relates. Lets the planner estimate join result sizes.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct PredStat {
     pub count: usize,
     pub ndv_subj: usize,
@@ -78,6 +78,9 @@ enum PermData {
     Owned(Vec<[Id; 3]>),
     #[cfg(feature = "mmap")]
     Mapped(memmap2::Mmap),
+    /// Block-compressed (~4-6 B/triple vs 12). The memory-bound storage mode for the
+    /// browser: scans decode only the blocks the key-range touches. See [`compress`].
+    Compressed(crate::compress::CompressedPerm),
 }
 
 impl Default for PermData {
@@ -87,6 +90,9 @@ impl Default for PermData {
 }
 
 impl PermData {
+    /// Borrows the rows as a contiguous slice. Valid only for the raw (Owned/Mapped)
+    /// modes — the compressed mode has no flat layout, so callers that may hold a
+    /// compressed perm must go through [`rows_in`](Self::rows_in) instead.
     #[inline]
     fn as_slice(&self) -> &[[Id; 3]] {
         match self {
@@ -99,6 +105,44 @@ impl PermData {
                 // an mmap is page-aligned (>= the 4-byte alignment of `u32`).
                 unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<[Id; 3]>(), n) }
             }
+            PermData::Compressed(_) => unreachable!("as_slice on a compressed permutation"),
+        }
+    }
+
+    /// The rows matching the inclusive key range `[lo, hi]`, sorted. Raw modes binary-
+    /// search and BORROW a sub-slice (no allocation); the compressed mode decodes only
+    /// the spanning blocks and returns an OWNED `Vec`. Either way the operators above
+    /// receive a `&[[Id;3]]` (via the `Cow`), so their algorithms are unchanged.
+    #[inline]
+    fn rows_in(&self, lo: [Id; 3], hi: [Id; 3]) -> std::borrow::Cow<'_, [[Id; 3]]> {
+        match self {
+            PermData::Compressed(c) => std::borrow::Cow::Owned(c.range(lo, hi)),
+            _ => {
+                let rows = self.as_slice();
+                let s = lower_bound(rows, &lo);
+                let e = upper_bound(rows, &hi);
+                std::borrow::Cow::Borrowed(&rows[s..e])
+            }
+        }
+    }
+
+    /// Cheap count of rows in `[lo, hi]` (for the planner) — no full materialization.
+    #[inline]
+    fn count_in(&self, lo: [Id; 3], hi: [Id; 3]) -> usize {
+        match self {
+            PermData::Compressed(c) => c.count_range(lo, hi),
+            _ => {
+                let rows = self.as_slice();
+                upper_bound(rows, &hi) - lower_bound(rows, &lo)
+            }
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            PermData::Compressed(c) => c.len(),
+            _ => self.as_slice().len(),
         }
     }
 
@@ -107,6 +151,7 @@ impl PermData {
             PermData::Owned(v) => v.capacity() * std::mem::size_of::<[Id; 3]>(),
             #[cfg(feature = "mmap")]
             PermData::Mapped(_) => 0, // resident pages are charged to the OS page cache, not the heap
+            PermData::Compressed(c) => c.heap_bytes(),
         }
     }
 }
@@ -123,7 +168,35 @@ impl TripleStore {
     /// Builds the [`BUILT`] permutation indexes from canonical [s,p,o] triples (all
     /// six by default; just SPO/POS/OSP under `compact-index`). SPO is sorted (in
     /// parallel) and deduplicated first; the rest are independent and built concurrently.
-    pub fn from_triples(mut triples: Vec<[Id; 3]>) -> Self {
+    pub fn from_triples(triples: Vec<[Id; 3]>) -> Self {
+        let perms = Self::build_raw_perms(triples);
+        let pred_stats = Self::compute_pred_stats(&perms);
+        TripleStore { perms, pred_stats }
+    }
+
+    /// Like [`from_triples`](Self::from_triples) but stores each permutation
+    /// BLOCK-COMPRESSED (~4-6 B/triple vs 12) — the memory-bound storage mode for the
+    /// browser, where holding 2.5x more triples in the same RAM matters more than the
+    /// per-scan decode cost. Cardinality stats are computed from the raw perms *before*
+    /// encoding (so neither the build nor the planner ever decodes a whole index).
+    pub fn from_triples_compressed(triples: Vec<[Id; 3]>) -> Self {
+        let raw = Self::build_raw_perms(triples);
+        let pred_stats = Self::compute_pred_stats(&raw);
+        let mut perms: [PermData; 6] = std::array::from_fn(|_| PermData::default());
+        for (i, pd) in raw.into_iter().enumerate() {
+            if let PermData::Owned(v) = pd {
+                if !v.is_empty() {
+                    perms[i] = PermData::Compressed(crate::compress::CompressedPerm::encode(&v));
+                }
+            }
+        }
+        TripleStore { perms, pred_stats }
+    }
+
+    /// Builds the [`BUILT`] raw permutation indexes from canonical [s,p,o] triples (all
+    /// six by default; just SPO/POS/OSP under `compact-index`). SPO is sorted (in
+    /// parallel) and deduplicated first; the rest are independent and built concurrently.
+    fn build_raw_perms(mut triples: Vec<[Id; 3]>) -> [PermData; 6] {
         // Deduplicate via the SPO ordering first.
         #[cfg(feature = "parallel")]
         triples.par_sort_unstable();
@@ -153,8 +226,7 @@ impl TripleStore {
         for (p, v) in to_build.into_iter().zip(built) {
             perms[p as usize] = PermData::Owned(v);
         }
-        let pred_stats = Self::compute_pred_stats(&perms);
-        TripleStore { perms, pred_stats }
+        perms
     }
 
     /// Persists the permutation indexes to `dir` (one raw little-endian `[u32;3]` file
@@ -238,11 +310,11 @@ impl TripleStore {
     }
 
     pub fn len(&self) -> usize {
-        self.perms[0].as_slice().len()
+        self.perms[0].len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.perms[0].as_slice().is_empty()
+        self.perms[0].len() == 0
     }
 
     /// Heap footprint of the permutation indexes in bytes (for benchmarking). Memory-
@@ -271,10 +343,6 @@ impl TripleStore {
             }
         }
         (Perm::Spo, 0)
-    }
-
-    fn index(&self, perm: Perm) -> &[[Id; 3]] {
-        self.perms[perm as usize].as_slice()
     }
 
     /// Like [`choose`], but among the permutations whose sort order places every
@@ -313,11 +381,10 @@ impl TripleStore {
         self.scan_with(pattern, perm, lead)
     }
 
-    fn scan_with(&self, pattern: &Pattern, perm: Perm, lead: usize) -> Scan<'_> {
+    /// The inclusive [lo, hi] key bounds for a pattern's bound prefix in `perm` order.
+    #[inline]
+    fn bounds(pattern: &Pattern, perm: Perm, lead: usize) -> ([Id; 3], [Id; 3]) {
         let order = perm.order();
-        let rows = self.index(perm);
-
-        // Build the inclusive lower/upper prefix bounds from the bound columns.
         let mut lo = [Id::MIN; 3];
         let mut hi = [Id::MAX; 3];
         for k in 0..lead {
@@ -325,26 +392,32 @@ impl TripleStore {
             lo[k] = v;
             hi[k] = v;
         }
-        // Lower columns beyond the prefix stay MIN/MAX.
-        let start = lower_bound(rows, &lo);
-        let end = upper_bound(rows, &hi);
+        (lo, hi)
+    }
+
+    fn scan_with(&self, pattern: &Pattern, perm: Perm, lead: usize) -> Scan<'_> {
+        let (lo, hi) = Self::bounds(pattern, perm, lead);
         Scan {
-            rows: &rows[start..end],
+            rows: self.perms[perm as usize].rows_in(lo, hi),
             perm,
         }
     }
 
-    /// Estimated number of matches for a pattern (the range length) — the M1
-    /// cardinality estimate used by the greedy planner.
+    /// Estimated number of matches for a pattern (the range length) — the cardinality
+    /// estimate used by the greedy planner. Cheap for every storage mode: raw modes
+    /// subtract binary-search bounds; the compressed mode counts via the block directory
+    /// decoding at most two boundary blocks (never the whole range).
     pub fn estimate(&self, pattern: &Pattern) -> usize {
-        let s = self.scan(pattern);
-        s.rows.len()
+        let (perm, lead) = Self::choose(pattern);
+        let (lo, hi) = Self::bounds(pattern, perm, lead);
+        self.perms[perm as usize].count_in(lo, hi)
     }
 }
 
-/// A range of rows in a permutation's column order.
+/// A range of rows in a permutation's column order. Borrowed from the raw index, or
+/// owned when decoded from a compressed permutation — uniformly a `&[[Id;3]]` to callers.
 pub struct Scan<'a> {
-    pub rows: &'a [[Id; 3]],
+    pub rows: std::borrow::Cow<'a, [[Id; 3]]>,
     pub perm: Perm,
 }
 
@@ -370,4 +443,57 @@ fn lower_bound(rows: &[[Id; 3]], key: &[Id; 3]) -> usize {
 /// First index where `rows[i] > key` (MAX acts as +inf).
 fn upper_bound(rows: &[[Id; 3]], key: &[Id; 3]) -> usize {
     rows.partition_point(|row| row <= key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The compressed store must answer EVERY triple pattern with the exact same rows
+    /// (and the same `estimate`) as the raw store — across all bound/unbound shapes and
+    /// many key ranges, including misses and the boundaries of the id space.
+    #[test]
+    fn compressed_scans_match_raw() {
+        // A few-predicate, clustered-subject, sparse-object graph spanning many blocks.
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        let mut st = 0x12345677u32;
+        let mut rng = || {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            st
+        };
+        for _ in 0..40_000 {
+            triples.push([1 + rng() % 800, 1 + rng() % 12, 1 + rng() % 5000]);
+        }
+        let raw = TripleStore::from_triples(triples.clone());
+        let cmp = TripleStore::from_triples_compressed(triples);
+        assert_eq!(raw.len(), cmp.len());
+
+        let dump = |s: &Scan| {
+            let mut v: Vec<[Id; 3]> = s.rows.iter().map(|r| s.to_spo(r)).collect();
+            v.sort_unstable();
+            v
+        };
+        // Probe values: present ids, absent ids, and the id-space boundaries.
+        let svals = [None, Some(1), Some(400), Some(801), Some(Id::MAX)];
+        let pvals = [None, Some(1), Some(6), Some(13)];
+        let ovals = [None, Some(1), Some(2500), Some(5001)];
+        for &s in &svals {
+            for &p in &pvals {
+                for &o in &ovals {
+                    let pat: Pattern = [s, p, o];
+                    let rs = raw.scan(&pat);
+                    let cs = cmp.scan(&pat);
+                    assert_eq!(dump(&rs), dump(&cs), "rows differ for pattern {pat:?}");
+                    // estimate() must equal the true match count for both modes.
+                    assert_eq!(cmp.estimate(&pat), dump(&rs).len(), "estimate wrong for {pat:?}");
+                }
+            }
+        }
+        // Per-predicate stats must be identical (computed from raw before encoding).
+        for p in 1..=13 {
+            assert_eq!(raw.pred_stat(p), cmp.pred_stat(p), "pred_stat differs for {p}");
+        }
+    }
 }

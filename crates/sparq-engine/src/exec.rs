@@ -220,7 +220,7 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
     };
     // Range-prune an all-inline filter column (identical to scan_to_bindings) so the
     // order matches the general path exactly (byte-identical output).
-    let mut scan_rows: &[[Id; 3]] = scan.rows;
+    let mut scan_rows: &[[Id; 3]] = scan.rows.as_ref();
     if let Some((fpos, cmp)) = filt {
         let actual_sort = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none());
         if actual_sort == Some(fpos) && scan_rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
@@ -1382,7 +1382,7 @@ fn build_trie(
 
     let scan = graph.store.scan(id_pat);
     let mut tuples: Vec<Vec<Id>> = Vec::with_capacity(scan.rows.len());
-    for row in scan.rows {
+    for row in scan.rows.iter() {
         let spo = scan.to_spo(row);
         let mut tup = Vec::with_capacity(var_positions.len());
         let mut ok = true;
@@ -1604,7 +1604,7 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
     // passing value range instead of scanning + filtering the whole relation. Safe
     // only when EVERY value in the column is inline (so no dictionary-encoded
     // numeric in another datatype, scattered below INLINE_BASE, is skipped).
-    let mut scan_rows: &[[Id; 3]] = scan.rows;
+    let mut scan_rows: &[[Id; 3]] = scan.rows.as_ref();
     if let Some((fpos, cmp)) = filter {
         if actual_sort == Some(fpos) && scan_rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
             scan_rows = match inline_pass_values(cmp) {
@@ -1867,7 +1867,7 @@ fn bind_join(
         let mut bound = *id_pat;
         bound[pp] = Some(val);
         let scan = graph.store.scan(&bound);
-        for prow in scan.rows {
+        for prow in scan.rows.iter() {
             let pspo = scan.to_spo(prow);
             if let Some((fpos, cmp)) = filt {
                 if !graph.numeric_value(pspo[fpos]).is_some_and(|x| cmp.test(x)) {

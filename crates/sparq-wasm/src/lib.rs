@@ -28,6 +28,18 @@ impl Store {
         Ok(Store { graph })
     }
 
+    /// Like [`load`](Self::load) but stores the index BLOCK-COMPRESSED (~4-6 B/triple vs
+    /// 12 — roughly half the index memory, measured −49% on the 6-perm set / −60% on the
+    /// 3-perm compact set the browser uses). Query results are identical; scans pay a
+    /// bounded per-block decode (+10–33% on large materialised queries). The right default
+    /// when the device's RAM, not its CPU, is the binding constraint — i.e. fitting a
+    /// bigger graph in the tab.
+    #[wasm_bindgen(js_name = loadCompressed)]
+    pub fn load_compressed(text: &str, format: &str) -> Result<Store, JsError> {
+        let graph = Graph::load_str_compressed(text, format).map_err(|e| JsError::new(&e))?;
+        Ok(Store { graph })
+    }
+
     /// The number of (deduplicated) triples in the store.
     #[wasm_bindgen(getter)]
     pub fn size(&self) -> usize {
@@ -105,5 +117,22 @@ mod tests {
         let r = sparq_engine::query(&g, "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:knows ?o }").unwrap();
         let json = sparq_engine::json::to_sparql_json(&r);
         assert!(json.contains("\"type\":\"uri\",\"value\":\"http://ex/bob\""));
+    }
+
+    #[test]
+    fn compressed_matches_raw() {
+        // The compressed browser store must return byte-identical JSON to the raw store,
+        // and report a smaller footprint.
+        let raw = Store::load(DATA, "turtle").unwrap();
+        let cmp = Store::load_compressed(DATA, "turtle").unwrap();
+        assert_eq!(raw.size(), cmp.size());
+        for q in [
+            "PREFIX ex: <http://ex/> SELECT ?n ?a WHERE { ?s ex:name ?n . ?s ex:age ?a } ORDER BY ?a",
+            "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+            "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:knows ?o }",
+        ] {
+            assert_eq!(raw.query(q).unwrap(), cmp.query(q).unwrap(), "compressed JSON differs for: {q}");
+        }
+        assert!(cmp.heap_bytes() <= raw.heap_bytes());
     }
 }

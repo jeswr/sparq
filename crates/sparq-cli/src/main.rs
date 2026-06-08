@@ -27,6 +27,7 @@ fn main() {
         Some("build") => cmd_build(&args),
         Some("query-mmap") => cmd_query_mmap(&args),
         Some("probe-compress") => cmd_probe_compress(&args),
+        Some("compare-compress") => cmd_compare_compress(&args),
         _ => {
             eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir>          # build + persist indexes to disk\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
@@ -294,6 +295,74 @@ fn cmd_probe_compress(args: &[String]) {
     } else {
         println!("  gzip(raw)         : skipped (>200 MB; delta+varint is the fast, random-accessible scheme anyway)");
     }
+}
+
+/// `compare-compress <data-file> <format> [<sparql>]` — load a dataset both raw and
+/// block-compressed, report the in-RAM index footprint of each, and (if a query is given)
+/// the query latency of each — the memory-vs-decode tradeoff that decides the browser
+/// storage mode.
+fn cmd_compare_compress(args: &[String]) {
+    let (path, format) = match (args.get(2), args.get(3)) {
+        (Some(p), Some(f)) => (p.as_str(), f.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli compare-compress <data-file> <format> [<sparql>]");
+            std::process::exit(2);
+        }
+    };
+    let sparql = args.get(4).map(String::as_str);
+
+    let raw = load(path, format);
+    let raw_heap = raw.heap_bytes();
+    let raw_store = raw.store.heap_bytes();
+    // Re-encode the same store compressed (keeps the dict + numeric cache).
+    let t = Instant::now();
+    let cmp = raw.into_compressed();
+    let enc_s = t.elapsed().as_secs_f64();
+    let cmp_heap = cmp.heap_bytes();
+    let cmp_store = cmp.store.heap_bytes();
+
+    println!("=== index footprint (in-RAM) ===");
+    println!("  triples            : {}", cmp.len());
+    println!("  raw   perms        : {:>7.2} MB ({:.1} B/triple)", raw_store as f64 / 1e6, raw_store as f64 / cmp.len().max(1) as f64);
+    println!(
+        "  compressed perms   : {:>7.2} MB ({:.1} B/triple, {:.0}% of raw)  [encoded in {:.2}s]",
+        cmp_store as f64 / 1e6,
+        cmp_store as f64 / cmp.len().max(1) as f64,
+        100.0 * cmp_store as f64 / raw_store.max(1) as f64,
+        enc_s,
+    );
+    println!(
+        "  total graph (perms+dict+numerics): raw {:.2} GB -> compressed {:.2} GB",
+        raw_heap as f64 / 1e9,
+        cmp_heap as f64 / 1e9,
+    );
+
+    if let Some(q) = sparql {
+        // Materialise to SPARQL JSON — the heaviest path, which actually scans + (for the
+        // compressed store) decodes the blocks the query touches.
+        println!("\n=== query latency, MATERIALISED to JSON (min of 5) ===");
+        let bench = |g: &sparq_core::Graph| -> (usize, f64) {
+            let mut best = f64::MAX;
+            let mut len = 0;
+            for _ in 0..5 {
+                let t = Instant::now();
+                len = sparq_engine::query_json(g, q).map(|s| s.len()).unwrap_or(0);
+                best = best.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            (len, best)
+        };
+        let (rn, rt) = bench(&raw_reload(path, format));
+        let (cn, ct) = bench(&cmp);
+        println!("  raw        : {rn} bytes of JSON in {rt:.3} ms");
+        println!("  compressed : {cn} bytes of JSON in {ct:.3} ms  ({:.2}x raw)", ct / rt);
+        assert_eq!(rn, cn, "compressed returned different JSON length!");
+    }
+}
+
+/// Reloads a fresh raw graph (the original was consumed by `into_compressed`).
+fn raw_reload(path: &str, format: &str) -> sparq_core::Graph {
+    let text = std::fs::read_to_string(path).unwrap();
+    sparq_core::Graph::load_str(&text, format).unwrap()
 }
 
 /// `query-mmap <dir> <sparql>` — open a saved dataset with memory-mapped indexes and

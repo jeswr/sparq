@@ -206,6 +206,29 @@ impl Graph {
         Graph { dict, store, numerics }
     }
 
+    /// Like [`load_str`](Self::load_str) but stores the permutation indexes
+    /// BLOCK-COMPRESSED (~4-6 B/triple vs 12) — the memory-bound build for the browser,
+    /// trading a bounded per-scan decode for ~2.5x more triples per byte of RAM. Query
+    /// results are identical to the raw build.
+    pub fn load_str_compressed(text: &str, format: &str) -> Result<Graph, String> {
+        let g = Self::load_str(text, format)?;
+        Ok(g.into_compressed())
+    }
+
+    /// Re-encodes the store's permutations into the block-compressed storage mode,
+    /// keeping the dictionary + numeric cache. (Rebuilds the indexes from the SPO scan.)
+    pub fn into_compressed(self) -> Graph {
+        let triples: Vec<[Id; 3]> = {
+            let scan = self.store.scan(&[None, None, None]);
+            scan.rows.iter().map(|r| scan.to_spo(r)).collect()
+        };
+        Graph {
+            store: TripleStore::from_triples_compressed(triples),
+            dict: self.dict,
+            numerics: self.numerics,
+        }
+    }
+
     /// Persists the graph to `dir` (the permutation indexes + the dictionary) so it can
     /// later be QUERIED with the indexes MEMORY-MAPPED via [`open`](Self::open) — the
     /// out-of-core path for datasets larger than RAM.
