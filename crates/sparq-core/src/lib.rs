@@ -336,6 +336,13 @@ impl Graph {
                 }
             }
             _ => {
+                // N-Triples is the billion-scale bulk format: parse it with the custom
+                // byte parser over PARALLEL buffers (per-buffer partial dicts merged into
+                // the running dict), the user-requested "parallelise parsing of the file".
+                // Still bounded-memory: one ~64 MiB buffer + its partials at a time.
+                #[cfg(feature = "parallel")]
+                build_external_ntriples_parallel(reader, &mut dict, &mut buf, &mut runs, &tmp, chunk)?;
+                #[cfg(not(feature = "parallel"))]
                 for t in NTriplesParser::new().for_reader(reader) {
                     let t = t.map_err(|e| e.to_string())?;
                     push_triple!(&t.subject, &t.predicate, &t.object);
@@ -557,6 +564,87 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
         all.extend(ptriples.into_iter().map(|[s, p, o]| [map(s), map(p), map(o)]));
     }
     Ok((global, all))
+}
+
+/// Streams N-Triples from `reader` in newline-aligned ~64 MiB blocks, parsing+interning
+/// each block IN PARALLEL (the custom byte parser, per-block partial dicts merged into
+/// the running `dict`), and spilling SPO runs — the parallel-parse path for the external
+/// (billion-scale, bounded-memory) build. Only one block + its partials are resident.
+#[cfg(all(feature = "mmap", feature = "parallel"))]
+fn build_external_ntriples_parallel<R: std::io::Read>(
+    mut reader: R,
+    dict: &mut Dict,
+    buf: &mut Vec<[Id; 3]>,
+    runs: &mut Vec<std::path::PathBuf>,
+    tmp: &std::path::Path,
+    chunk: usize,
+) -> Result<(), String> {
+    const BLOCK: usize = 64 << 20; // 64 MiB
+    let mut readbuf = vec![0u8; BLOCK];
+    let mut carry: Vec<u8> = Vec::new();
+    loop {
+        // Fill the read buffer (a single read may return less than requested).
+        let mut filled = 0;
+        while filled < BLOCK {
+            let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        if filled == 0 {
+            // EOF: a final line that lacked a trailing newline lives in `carry`.
+            if !carry.is_empty() {
+                parse_block_into(&carry, dict, buf, runs, tmp, chunk)?;
+            }
+            return Ok(());
+        }
+        // Parse `carry + readbuf[..filled]` up to the last newline; carry the remainder
+        // (a partial line split across the read boundary) into the next block.
+        let mut block = std::mem::take(&mut carry);
+        block.extend_from_slice(&readbuf[..filled]);
+        let cut = block.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+        parse_block_into(&block[..cut], dict, buf, runs, tmp, chunk)?;
+        carry = block[cut..].to_vec();
+    }
+}
+
+/// Parses one (complete-line) N-Triples byte block in parallel, merges each chunk's
+/// partial dictionary into `dict`, and spills SPO runs as `buf` fills.
+#[cfg(all(feature = "mmap", feature = "parallel"))]
+fn parse_block_into(
+    bytes: &[u8],
+    dict: &mut Dict,
+    buf: &mut Vec<[Id; 3]>,
+    runs: &mut Vec<std::path::PathBuf>,
+    tmp: &std::path::Path,
+    chunk: usize,
+) -> Result<(), String> {
+    use rayon::prelude::*;
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 4096 + 1);
+    let bounds = newline_chunk_bounds(bytes, target);
+    let partials: Vec<(Dict, Vec<[Id; 3]>)> = bounds
+        .par_iter()
+        .map(|&(s, e)| {
+            let mut d = Dict::new();
+            let t = nt::parse_chunk(&bytes[s..e], &mut d)?;
+            Ok::<_, String>((d, t))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (pd, ptriples) in partials {
+        let remap = dict.merge_remap(&pd);
+        let map = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
+        for [s, p, o] in ptriples {
+            buf.push([map(s), map(p), map(o)]);
+            if buf.len() >= chunk {
+                extsort::spill_run(buf, runs, tmp).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
