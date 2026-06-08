@@ -2693,12 +2693,113 @@ fn sig_digits(s: &str) -> usize {
     }
 }
 
+/// An EXACT fixed-point decimal: `mant * 10^-scale`. Used to evaluate `+ - *` on
+/// integer / `xsd:decimal` operands without f64 rounding (`0.1 + 0.2` is exactly `0.3`),
+/// which the f64 arithmetic path gets wrong. Within `i128` range; overflow → `None` →
+/// the caller falls back to f64. Division and `xsd:double`/`float` stay f64.
+#[derive(Clone, Copy)]
+struct Dec {
+    mant: i128,
+    scale: u32,
+}
+
+impl Dec {
+    /// Parses an integer / decimal lexical (`[+-]?digits(.digits)?`), `None` otherwise.
+    fn parse(s: &str) -> Option<Dec> {
+        let (neg, int, frac) = split_decimal(s)?;
+        let scale = frac.len() as u32;
+        let mut mag: i128 = 0;
+        for &ch in int.as_bytes().iter().chain(frac.as_bytes()) {
+            mag = mag.checked_mul(10)?.checked_add((ch - b'0') as i128)?;
+        }
+        Some(Dec { mant: if neg { -mag } else { mag }, scale })
+    }
+
+    /// Both mantissas scaled to the common (max) scale, or `None` on overflow.
+    fn align(self, o: Dec) -> Option<(i128, i128)> {
+        let scale = self.scale.max(o.scale);
+        let a = self.mant.checked_mul(10i128.checked_pow(scale - self.scale)?)?;
+        let b = o.mant.checked_mul(10i128.checked_pow(scale - o.scale)?)?;
+        Some((a, b))
+    }
+
+    fn checked_add(self, o: Dec) -> Option<Dec> {
+        let (a, b) = self.align(o)?;
+        Some(Dec { mant: a.checked_add(b)?, scale: self.scale.max(o.scale) })
+    }
+    fn checked_sub(self, o: Dec) -> Option<Dec> {
+        let (a, b) = self.align(o)?;
+        Some(Dec { mant: a.checked_sub(b)?, scale: self.scale.max(o.scale) })
+    }
+    fn checked_mul(self, o: Dec) -> Option<Dec> {
+        Some(Dec { mant: self.mant.checked_mul(o.mant)?, scale: self.scale.checked_add(o.scale)? })
+    }
+    fn cmp(self, o: Dec) -> Option<Ordering> {
+        let (a, b) = self.align(o)?;
+        Some(a.cmp(&b))
+    }
+}
+
+/// `true` if the expression performs arithmetic (`+ - *` / unary sign), so a comparison
+/// over it must be evaluated EXACTLY rather than via f64 — the only case where f64 can
+/// produce a wrong ordering for integer/decimal data (value comparison is monotonic;
+/// arithmetic introduces flippable rounding error).
+fn expr_has_arith(e: &Expression) -> bool {
+    use Expression::*;
+    match e {
+        Add(..) | Subtract(..) | Multiply(..) => true,
+        UnaryPlus(a) | UnaryMinus(a) => expr_has_arith(a),
+        _ => false,
+    }
+}
+
+/// Evaluates an expression EXACTLY as a fixed-point decimal, for integer/decimal operands
+/// and `+ - *`. `None` for anything not exactly representable this way (division, doubles,
+/// non-numeric operands, overflow) — the caller then uses the f64 path.
+fn eval_dec(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<Dec> {
+    use Expression::*;
+    match e {
+        Variable(v) => {
+            let id = row[b.col(v)?];
+            if id == NO_ID {
+                None
+            } else if is_local(id) {
+                exact_lexical_of_term(&local.term(id)).and_then(|s| Dec::parse(&s))
+            } else {
+                Dec::parse(&graph.exact_numeric_lexical(id)?)
+            }
+        }
+        Literal(l) if sparq_core::is_integer_datatype(l.datatype().as_str()) || l.datatype() == xsd::DECIMAL => {
+            Dec::parse(l.value())
+        }
+        Add(a, c) => eval_dec(graph, local, b, row, a)?.checked_add(eval_dec(graph, local, b, row, c)?),
+        Subtract(a, c) => eval_dec(graph, local, b, row, a)?.checked_sub(eval_dec(graph, local, b, row, c)?),
+        Multiply(a, c) => eval_dec(graph, local, b, row, a)?.checked_mul(eval_dec(graph, local, b, row, c)?),
+        UnaryPlus(a) => eval_dec(graph, local, b, row, a),
+        UnaryMinus(a) => {
+            let d = eval_dec(graph, local, b, row, a)?;
+            Some(Dec { mant: d.mant.checked_neg()?, scale: d.scale })
+        }
+        _ => None,
+    }
+}
+
 /// An ORDERING comparison (`<`, `>`, `<=`, `>=`). SPARQL only orders operands of
 /// compatible types (numeric vs numeric, boolean vs boolean, or two literals of the
 /// same datatype); anything else is a TYPE ERROR (`Value::Error`), which a FILTER
 /// turns into "excluded". (Distinct from the lenient total order `compare_values`
 /// used by ORDER BY / MIN / MAX, which must order across every type.)
 fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(Ordering) -> bool) -> Result<Value, String> {
+    // EXACT path: integer/decimal arithmetic (`+ - *`) must not round through f64, which
+    // can flip an ordering (`0.1 + 0.2` < `0.3` in f64). Only attempted when arithmetic is
+    // present (the common, arithmetic-free comparison keeps the f64 fast path below).
+    if expr_has_arith(a) || expr_has_arith(c) {
+        if let (Some(da), Some(db)) = (eval_dec(graph, local, b, row, a), eval_dec(graph, local, b, row, c)) {
+            if let Some(o) = da.cmp(db) {
+                return Ok(Value::Bool(f(o)));
+            }
+        }
+    }
     // Fast path: both sides numeric -> compare f64 directly, no term materialised.
     // Reaching here means BOTH operands are numeric, so a `None` partial_cmp is a
     // NaN value (op:numeric ordering of NaN is false) — NOT a cross-type error.
@@ -2724,6 +2825,14 @@ fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Exp
 
 /// SPARQL `=` (and, negated, `!=`). See [`values_equal`].
 fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression) -> Result<Value, String> {
+    // EXACT integer/decimal arithmetic equality (see `cmp_expr`) — `0.1 + 0.2 = 0.3`.
+    if expr_has_arith(a) || expr_has_arith(c) {
+        if let (Some(da), Some(db)) = (eval_dec(graph, local, b, row, a), eval_dec(graph, local, b, row, c)) {
+            if let Some(o) = da.cmp(db) {
+                return Ok(Value::Bool(o == Ordering::Equal));
+            }
+        }
+    }
     // Fast path: both numeric (NaN == NaN is false, matching op:numeric-equal).
     if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
         // Re-check exactly when f64 says equal (see `cmp_expr`): distinct integers > 2^53
@@ -2970,6 +3079,27 @@ fn nnp_var(p: &NamedNodePattern) -> Option<Variable> {
 #[cfg(test)]
 mod exact_decimal_tests {
     use super::*;
+
+    #[test]
+    fn dec_arithmetic_is_exact() {
+        use std::cmp::Ordering::*;
+        let d = |s: &str| Dec::parse(s).unwrap();
+        // The classic: 0.1 + 0.2 == 0.3 exactly (false in f64).
+        assert_eq!(d("0.1").checked_add(d("0.2")).unwrap().cmp(d("0.3")), Some(Equal));
+        // 0.3 - 0.1 == 0.2 exactly.
+        assert_eq!(d("0.3").checked_sub(d("0.1")).unwrap().cmp(d("0.2")), Some(Equal));
+        // Mixed scales + integer/decimal.
+        assert_eq!(d("1").checked_add(d("0.5")).unwrap().cmp(d("1.5")), Some(Equal));
+        assert_eq!(d("83").checked_mul(d("0.5")).unwrap().cmp(d("41.5")), Some(Equal));
+        assert_eq!(d("0.1").checked_mul(d("0.1")).unwrap().cmp(d("0.01")), Some(Equal));
+        // Ordering across scales and signs.
+        assert_eq!(d("0.30000000000000001").cmp(d("0.3")), Some(Greater));
+        assert_eq!(d("-2.5").checked_add(d("1")).unwrap().cmp(d("-1.5")), Some(Equal));
+        // Large integers beyond 2^53 stay exact.
+        assert_eq!(d("9007199254740992").checked_add(d("1")).unwrap().cmp(d("9007199254740993")), Some(Equal));
+        // Non-decimal lexical (exponent) -> not parseable here -> None.
+        assert!(Dec::parse("1e5").is_none());
+    }
 
     #[test]
     fn cmp_decimal_str_is_exact() {

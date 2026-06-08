@@ -102,6 +102,29 @@ mod tests {
     }
 
     #[test]
+    fn exact_decimal_arithmetic_filter() {
+        // Arithmetic on integer/decimal operands must be EXACT (not f64): `0.1 + 0.2`
+        // is 0.3 exactly, `0.3 - 0.1` is 0.2, integers past 2^53 stay distinct. The f64
+        // arithmetic path gets all of these wrong.
+        let data = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:a ex:v "0.1"^^xsd:decimal .
+            ex:b ex:v "0.2"^^xsd:decimal .
+            ex:c ex:v "0.3"^^xsd:decimal .
+            ex:d ex:v "9007199254740993"^^xsd:integer ."#;
+        let gg = Graph::load_str(data, "turtle").unwrap();
+        let n = |q: &str| query(&gg, q).unwrap().len();
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        // 0.2 + 0.1 = 0.3 exactly -> the 0.2 row passes.
+        assert_eq!(n(&format!("{pfx}SELECT ?s WHERE {{ ?s ex:v ?v FILTER((?v + \"0.1\"^^xsd:decimal) = \"0.3\"^^xsd:decimal) }}")), 1);
+        // 0.3 - 0.1 = 0.2 exactly.
+        assert_eq!(n(&format!("{pfx}SELECT ?s WHERE {{ ?s ex:v ?v FILTER((?v - \"0.1\"^^xsd:decimal) = \"0.2\"^^xsd:decimal) }}")), 1);
+        // 0.1 * 0.1 = 0.01 (none equal, but ordering exact): values < 0.25 are a,b (0.1,0.2).
+        assert_eq!(n(&format!("{pfx}SELECT ?s WHERE {{ ?s ex:v ?v FILTER((?v + ?v) <= \"0.4\"^^xsd:decimal) }}")), 2);
+        // Integer arithmetic beyond 2^53 stays exact: (n - 1) = 2^53+2 is false for n=2^53+3.
+        assert_eq!(n(&format!("{pfx}SELECT ?s WHERE {{ ?s ex:v ?v FILTER((?v - 1) = \"9007199254740992\"^^xsd:integer) }}")), 1);
+    }
+
+    #[test]
     fn filter_numeric() {
         let r = query(
             &g(),
