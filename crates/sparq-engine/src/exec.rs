@@ -578,6 +578,60 @@ fn distinct_pattern_vars(pos_vars: &[Option<Variable>; 3]) -> bool {
     sorted.len() == vars.len()
 }
 
+/// A lazy stream of `(value, group-size)` pairs ascending by value, for the group
+/// column `v_pos` of a pattern — the streaming form of [`group_counts`]. When the chosen
+/// permutation already delivers `v_pos` order (the 6-perm case) it run-length-groups
+/// directly over the borrowed scan rows, materialising NOTHING; otherwise it collects +
+/// sorts the column once (reduced-permutation fallback). Lets a multi-pattern star COUNT
+/// be summed by k-way merge with O(k) memory instead of one group vector per pattern.
+struct GroupStream<'a> {
+    scan: sparq_core::store::Scan<'a>,
+    v_pos: usize,
+    i: usize,
+    sorted_vals: Option<Vec<Id>>,
+}
+
+impl<'a> GroupStream<'a> {
+    fn new(graph: &'a Graph, id_pat: &IdPattern, v_pos: usize) -> Self {
+        let scan = graph.store.scan_sorted(id_pat, v_pos);
+        let sorted = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none()) == Some(v_pos);
+        let sorted_vals = (!sorted).then(|| {
+            let mut v: Vec<Id> = scan.rows.iter().map(|r| scan.to_spo(r)[v_pos]).collect();
+            v.sort_unstable();
+            v
+        });
+        GroupStream { scan, v_pos, i: 0, sorted_vals }
+    }
+
+    /// The next `(value, run-length)` in ascending value order, or `None` at the end.
+    fn next(&mut self) -> Option<(Id, usize)> {
+        if let Some(vals) = &self.sorted_vals {
+            if self.i >= vals.len() {
+                return None;
+            }
+            let v = vals[self.i];
+            let mut c = 0;
+            while self.i < vals.len() && vals[self.i] == v {
+                self.i += 1;
+                c += 1;
+            }
+            Some((v, c))
+        } else {
+            let rows = &self.scan.rows;
+            if self.i >= rows.len() {
+                return None;
+            }
+            let v = self.scan.to_spo(&rows[self.i])[self.v_pos];
+            let mut c = 0;
+            while self.i < rows.len() && self.scan.to_spo(&rows[self.i])[self.v_pos] == v {
+                self.i += 1;
+                c += 1;
+            }
+            Some((v, c))
+        }
+    }
+}
+
 /// Group sizes per value of canonical column `v_pos`. Returns `(value, count)`
 /// ascending by value. Streams from the index when it is sorted by `v_pos` (the usual
 /// case with all six permutations); otherwise — when a reduced permutation set could
@@ -673,26 +727,6 @@ fn count_single_filtered(
     Some(total)
 }
 
-/// Intersect two ascending `(value, count)` lists, MULTIPLYING the counts of equal
-/// values — the core step of a star-join count (`Σ_v Π_i c_i(v)`). Result stays
-/// ascending so intersections chain.
-fn intersect_mul(a: &[(Id, usize)], b: &[(Id, usize)]) -> Vec<(Id, usize)> {
-    let mut out = Vec::with_capacity(a.len().min(b.len()));
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < a.len() && j < b.len() {
-        match a[i].0.cmp(&b[j].0) {
-            Ordering::Less => i += 1,
-            Ordering::Greater => j += 1,
-            Ordering::Equal => {
-                out.push((a[i].0, a[i].1 * b[j].1));
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    out
-}
-
 /// Exact solution count of a filter-free conjunctive BGP without materialising the
 /// result, for two shapes: a single pattern (index range size) and an N-pattern STAR
 /// — every pattern sharing one common variable `v*`, with every other variable local
@@ -758,23 +792,49 @@ fn count_pushdown(graph: &Graph, inner: &GraphPattern) -> Option<usize> {
         return None;
     }
 
-    // Product of per-pattern group counts on the centre variable, intersected on value.
-    let mut acc: Option<Vec<(Id, usize)>> = None;
+    // Σ_v Π_i c_i(v) over the centre value v, computed by k-way INTERSECTION MERGE of the
+    // per-pattern group-count streams — only values present in EVERY pattern contribute.
+    // O(k) memory: no per-pattern group vector is materialised (the dominant memory of a
+    // star COUNT at scale), just one cursor per pattern.
+    let mut streams: Vec<GroupStream> = Vec::with_capacity(prepared.len());
     for (ip, pv) in &prepared {
         let cpos = pv.iter().position(|v| v.as_ref() == Some(center))?;
-        let g = group_counts(graph, ip, cpos);
-        acc = Some(match acc {
-            None => g,
-            Some(prev) => {
-                let merged = intersect_mul(&prev, &g);
-                if merged.is_empty() {
-                    return Some(0);
-                }
-                merged
-            }
-        });
+        streams.push(GroupStream::new(graph, ip, cpos));
     }
-    Some(acc?.iter().map(|(_, c)| c).sum())
+    let mut heads: Vec<(Id, usize)> = Vec::with_capacity(streams.len());
+    for s in &mut streams {
+        match s.next() {
+            Some(h) => heads.push(h),
+            None => return Some(0), // a pattern with no rows → empty intersection.
+        }
+    }
+    let mut total = 0usize;
+    loop {
+        let max_v = heads.iter().map(|(v, _)| *v).max().unwrap();
+        // Advance every cursor up to `max_v`; track whether all reach exactly it.
+        let mut all_equal = true;
+        for (i, head) in heads.iter_mut().enumerate() {
+            while head.0 < max_v {
+                match streams[i].next() {
+                    Some(h) => *head = h,
+                    None => return Some(total), // this pattern exhausted → done.
+                }
+            }
+            if head.0 != max_v {
+                all_equal = false;
+            }
+        }
+        if all_equal {
+            let prod: usize = heads.iter().map(|(_, c)| *c).product();
+            total += prod;
+            for (i, head) in heads.iter_mut().enumerate() {
+                match streams[i].next() {
+                    Some(h) => *head = h,
+                    None => return Some(total),
+                }
+            }
+        }
+    }
 }
 
 fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
