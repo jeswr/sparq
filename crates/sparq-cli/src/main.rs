@@ -24,6 +24,7 @@ fn main() {
         Some("bench") => cmd_bench(&args),
         Some("ingest") => cmd_ingest(&args),
         Some("save") => cmd_save(&args),
+        Some("build") => cmd_build(&args),
         Some("query-mmap") => cmd_query_mmap(&args),
         _ => {
             eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir>          # build + persist indexes to disk\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
@@ -159,6 +160,47 @@ fn cmd_save(args: &[String]) {
         std::process::exit(1);
     });
     eprintln!("saved {} triples to {dir} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
+}
+
+/// `build <file[.gz|.bz2]> <format> <dir> [chunk_millions]` — EXTERNAL-MEMORY build:
+/// stream the (optionally compressed) document straight to on-disk, memory-mapped indexes
+/// via disk-backed sort/merge, so a dataset whose indexes exceed RAM can be constructed on
+/// a small machine. `chunk_millions` (default 16) sets the in-memory run size (16M triples
+/// ≈ 192 MB of ids); lower it to cap memory further. Query the result with `query-mmap`.
+fn cmd_build(args: &[String]) {
+    let (path, format, dir) = match (args.get(2), args.get(3), args.get(4)) {
+        (Some(p), Some(f), Some(d)) => (p.as_str(), f.as_str(), d.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli build <file[.gz|.bz2]> <format> <dir> [chunk_millions]");
+            std::process::exit(2);
+        }
+    };
+    let chunk = args.get(5).and_then(|s| s.parse::<usize>().ok()).unwrap_or(16) * 1_000_000;
+
+    let file = std::fs::File::open(path).unwrap_or_else(|e| {
+        eprintln!("open {path}: {e}");
+        std::process::exit(1);
+    });
+    let decoded: Box<dyn Read> = if path.ends_with(".bz2") {
+        Box::new(bzip2::read::MultiBzDecoder::new(file))
+    } else if path.ends_with(".gz") {
+        Box::new(flate2::read::MultiGzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let reader = std::io::BufReader::with_capacity(1 << 22, decoded);
+
+    let t = Instant::now();
+    sparq_core::Graph::build_external(reader, format, std::path::Path::new(dir), chunk)
+        .unwrap_or_else(|e| {
+            eprintln!("build error: {e}");
+            std::process::exit(1);
+        });
+    eprintln!(
+        "built on-disk indexes in {dir} in {:.1}s (external-memory, {}M-triple runs)",
+        t.elapsed().as_secs_f64(),
+        chunk / 1_000_000,
+    );
 }
 
 /// `query-mmap <dir> <sparql>` — open a saved dataset with memory-mapped indexes and

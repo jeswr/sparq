@@ -5,6 +5,8 @@
 //! is built from an RDF document via the bulk loader.
 
 pub mod dict;
+#[cfg(feature = "mmap")]
+pub mod extsort;
 mod nt;
 pub mod store;
 
@@ -187,6 +189,105 @@ impl Graph {
         let dict = Dict::open(&dir.join("dict.bin"))?;
         let numerics = numerics_of(&dict);
         Ok(Graph { dict, store, numerics })
+    }
+
+    /// EXTERNAL-MEMORY build: streams an RDF document and writes the on-disk permutation
+    /// indexes + dictionary directly, sorting the triples through disk-backed runs so the
+    /// dataset's indexes can be CONSTRUCTED without ever holding them all in RAM. Only one
+    /// `chunk`-sized buffer of triples (plus the growing dictionary) is resident at a time;
+    /// the rest lives in sorted run files that are k-way merged. The result is identical to
+    /// `save()` of an in-memory `load`, but bounded-memory — the billion-scale ingest path.
+    /// Open it with [`open`](Self::open).
+    ///
+    /// `chunk` is the number of triples per in-memory run (e.g. 8_000_000 ≈ 96 MB of ids).
+    #[cfg(feature = "mmap")]
+    pub fn build_external<R: std::io::Read>(
+        reader: R,
+        format: &str,
+        dir: &std::path::Path,
+        chunk: usize,
+    ) -> Result<(), String> {
+        use store::{Perm, BUILT};
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let tmp = dir.join("tmp");
+        std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+
+        let mut dict = Dict::new();
+        let mut buf: Vec<[Id; 3]> = Vec::with_capacity(chunk);
+        let mut runs: Vec<std::path::PathBuf> = Vec::new();
+
+        // Stream-parse + intern, spilling SPO-sorted runs to disk whenever the buffer fills.
+        macro_rules! push_triple {
+            ($s:expr, $p:expr, $o:expr) => {{
+                let s = dict.intern(&subject_term($s));
+                let p = dict.intern(&Term::NamedNode($p.clone()));
+                let o = dict.intern($o);
+                buf.push([s, p, o]);
+                if buf.len() >= chunk {
+                    extsort::spill_run(&mut buf, &mut runs, &tmp).map_err(|e| e.to_string())?;
+                }
+            }};
+        }
+        match format {
+            "nquads" | "n-quads" => {
+                for q in NQuadsParser::new().for_reader(reader) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
+            "trig" | "application/trig" => {
+                for q in TriGParser::new().for_reader(reader) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
+            "turtle" | "ttl" => {
+                for t in TurtleParser::new().for_reader(reader) {
+                    let t = t.map_err(|e| e.to_string())?;
+                    push_triple!(&t.subject, &t.predicate, &t.object);
+                }
+            }
+            _ => {
+                for t in NTriplesParser::new().for_reader(reader) {
+                    let t = t.map_err(|e| e.to_string())?;
+                    push_triple!(&t.subject, &t.predicate, &t.object);
+                }
+            }
+        }
+        extsort::spill_run(&mut buf, &mut runs, &tmp).map_err(|e| e.to_string())?;
+        buf.shrink_to_fit();
+
+        // Merge the SPO runs into the SPO permutation file (deduplicating).
+        let spo_path = dir.join(format!("perm{}.bin", Perm::Spo as usize));
+        extsort::kway_merge(&runs, &spo_path).map_err(|e| e.to_string())?;
+        for r in &runs {
+            std::fs::remove_file(r).ok();
+        }
+
+        // Build the other BUILT permutations by external-sorting the SPO file into each
+        // order (re-reading it memory-mapped, so this stays bounded-memory too).
+        let (map, n) = extsort::map_perm(&spo_path).map_err(|e| e.to_string())?;
+        // SAFETY: perm0 is a whole number of [u32;3] rows written above; map outlives the loop.
+        let spo: &[[Id; 3]] =
+            unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[Id; 3]>(), n) };
+        for &perm in BUILT.iter().filter(|&&p| p != Perm::Spo) {
+            let out = dir.join(format!("perm{}.bin", perm as usize));
+            extsort::external_sort(spo.iter().copied(), perm.order(), &out, &tmp, chunk)
+                .map_err(|e| e.to_string())?;
+        }
+        drop(map);
+
+        // Empty files for the unbuilt permutations so `open` finds all six slots.
+        for i in 0..6 {
+            let p = dir.join(format!("perm{i}.bin"));
+            if !p.exists() {
+                std::fs::File::create(&p).map_err(|e| e.to_string())?;
+            }
+        }
+
+        dict.save(&dir.join("dict.bin")).map_err(|e| e.to_string())?;
+        std::fs::remove_dir_all(&tmp).ok();
+        Ok(())
     }
 
     /// The numeric value of a term id, or `None` if it is not a numeric literal.
@@ -376,6 +477,65 @@ mod tests {
         };
         assert_eq!(dump(&g), dump(&g2), "mmap-reopened store differs");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn build_external_matches_in_memory() {
+        // External-memory build with a TINY chunk so the triples spill across many runs
+        // and exercise the k-way merge + per-permutation re-sort. The on-disk result must
+        // be byte-for-byte identical to an in-memory load → save (same dedup, same order).
+        let mut nt = String::new();
+        for i in 0..5000u32 {
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 173,
+                i % 7,
+                i % 400
+            ));
+        }
+        // A duplicate line (must be deduped) + a non-integer literal with a language tag.
+        nt.push_str("<http://ex/n0> <http://ex/p0> \"0\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n");
+        nt.push_str("<http://ex/n0> <http://ex/name> \"caf\\u00e9\"@fr .\n");
+
+        let base = std::env::temp_dir().join(format!("sparq_ext_{}", std::process::id()));
+        let mem_dir = base.join("mem");
+        let ext_dir = base.join("ext");
+
+        // In-memory load → save (reference), vs streaming external build (chunk = 256).
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        g.save(&mem_dir).unwrap();
+        Graph::build_external(nt.as_bytes(), "ntriples", &ext_dir, 256).unwrap();
+
+        let mem = Graph::open(&mem_dir).unwrap();
+        let ext = Graph::open(&ext_dir).unwrap();
+        assert_eq!(mem.len(), ext.len(), "triple count differs");
+        assert_eq!(mem.dict.len(), ext.dict.len(), "dict size differs");
+
+        // Every BUILT permutation file must be byte-identical (same sort, same dedup).
+        for &perm in store::BUILT {
+            let f = format!("perm{}.bin", perm as usize);
+            let a = std::fs::read(mem_dir.join(&f)).unwrap();
+            let b = std::fs::read(ext_dir.join(&f)).unwrap();
+            assert_eq!(a, b, "permutation {f} differs between in-memory and external build");
+        }
+
+        // And the data round-trips through terms.
+        let dump = |gg: &Graph| {
+            let scan = gg.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(dump(&mem), dump(&ext), "external-built store differs");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
