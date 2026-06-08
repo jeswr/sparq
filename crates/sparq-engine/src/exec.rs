@@ -271,10 +271,80 @@ fn group_counts(graph: &Graph, id_pat: &IdPattern, v_pos: usize) -> Vec<(Id, usi
     out
 }
 
+/// Counts the solutions of a single triple pattern constrained by sargable numeric
+/// FILTER(s), WITHOUT materialising a row per solution. Returns `None` (fall back) if
+/// any filter is not a sargable numeric comparison on a variable of the pattern.
+fn count_single_filtered(
+    graph: &Graph,
+    id_pat: &IdPattern,
+    pos_vars: &[Option<Variable>; 3],
+    filters: &[Expression],
+) -> Option<usize> {
+    // Resolve every filter to (canonical position, comparison); all must be sargable.
+    let mut cmps: Vec<(usize, NumCmp)> = Vec::with_capacity(filters.len());
+    for f in filters {
+        let (var, cmp) = extract_sargable(f)?;
+        let pos = pos_vars.iter().position(|v| v.as_ref() == Some(&var))?;
+        cmps.push((pos, cmp));
+    }
+
+    // Fast path: one filter on an all-inline column -> binary-searched range size
+    // (the same value-sorted slice range-pruning uses, but we only need its length).
+    if let [(fpos, cmp)] = cmps[..] {
+        let scan = graph.store.scan_sorted(id_pat, fpos);
+        if scan.rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
+            return Some(match inline_pass_values(cmp) {
+                Some((lo, hi)) => {
+                    let (lo_id, hi_id) = (dict::INLINE_BASE + lo, dict::INLINE_BASE + hi);
+                    let start = scan.rows.partition_point(|r| scan.to_spo(r)[fpos] < lo_id);
+                    let end = scan.rows.partition_point(|r| scan.to_spo(r)[fpos] <= hi_id);
+                    end - start
+                }
+                None => 0,
+            });
+        }
+    }
+
+    // General: scan once, count rows passing ALL comparisons via the numeric cache.
+    // No solution row is built.
+    let scan = graph.store.scan(id_pat);
+    let total = scan
+        .rows
+        .iter()
+        .filter(|row| {
+            let spo = scan.to_spo(row);
+            cmps.iter().all(|(pos, cmp)| graph.numeric_value(spo[*pos]).map(|v| cmp.test(v)).unwrap_or(false))
+        })
+        .count();
+    Some(total)
+}
+
+/// Intersect two ascending `(value, count)` lists, MULTIPLYING the counts of equal
+/// values — the core step of a star-join count (`Σ_v Π_i c_i(v)`). Result stays
+/// ascending so intersections chain.
+fn intersect_mul(a: &[(Id, usize)], b: &[(Id, usize)]) -> Vec<(Id, usize)> {
+    let mut out = Vec::with_capacity(a.len().min(b.len()));
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            Ordering::Less => i += 1,
+            Ordering::Greater => j += 1,
+            Ordering::Equal => {
+                out.push((a[i].0, a[i].1 * b[j].1));
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Exact solution count of a filter-free conjunctive BGP without materialising the
-/// result, for the common shapes: a single pattern (range size) and a two-pattern
-/// join on a single shared variable (`Σ_v c1(v)·c2(v)` over group sizes). Returns
-/// `None` (fall back to full evaluation) otherwise.
+/// result, for two shapes: a single pattern (index range size) and an N-pattern STAR
+/// — every pattern sharing one common variable `v*`, with every other variable local
+/// to a single pattern — counted as `Σ_v Π_i c_i(v)` over per-pattern group sizes,
+/// streamed from the sorted indexes. Returns `None` (fall back to full evaluation)
+/// for non-star shapes (e.g. 3+-pattern chains, where the product formula overcounts).
 fn count_pushdown(graph: &Graph, inner: &GraphPattern) -> Option<usize> {
     if !is_conjunctive(inner) {
         return None;
@@ -282,55 +352,75 @@ fn count_pushdown(graph: &Graph, inner: &GraphPattern) -> Option<usize> {
     let mut patterns = Vec::new();
     let mut filters = Vec::new();
     flatten_conjunction(inner, &mut patterns, &mut filters);
+
+    if patterns.len() == 1 {
+        let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0]).ok()?;
+        if unsat {
+            return Some(0);
+        }
+        if !distinct_pattern_vars(&pos_vars) {
+            return None;
+        }
+        if filters.is_empty() {
+            return Some(graph.store.estimate(&id_pat));
+        }
+        // Single pattern + sargable numeric FILTER(s): count the passing rows without
+        // materialising — a binary-searched range size on an all-inline column, else a
+        // count-scan (still no Row built per solution).
+        return count_single_filtered(graph, &id_pat, &pos_vars, &filters);
+    }
+
+    // Multi-pattern star count is filter-free (a pushed filter changes the per-value
+    // group counts; leave that to full evaluation).
     if !filters.is_empty() {
         return None;
     }
-    match patterns.len() {
-        1 => {
-            let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0]).ok()?;
-            if unsat {
-                return Some(0);
-            }
-            distinct_pattern_vars(&pos_vars).then(|| graph.store.estimate(&id_pat))
+
+    // Prepare every pattern; each must have distinct in-pattern vars (no repeated var,
+    // so a group-count per value is well defined).
+    let mut prepared: Vec<(IdPattern, [Option<Variable>; 3])> = Vec::with_capacity(patterns.len());
+    for p in &patterns {
+        let (ip, pv, unsat) = prepare_pattern(graph, p).ok()?;
+        if unsat {
+            return Some(0);
         }
-        2 => {
-            let (ip0, pv0, u0) = prepare_pattern(graph, &patterns[0]).ok()?;
-            let (ip1, pv1, u1) = prepare_pattern(graph, &patterns[1]).ok()?;
-            if u0 || u1 {
-                return Some(0);
-            }
-            if !distinct_pattern_vars(&pv0) || !distinct_pattern_vars(&pv1) {
-                return None;
-            }
-            // Exactly one shared variable; each pattern's other variables are free,
-            // so the count is the product of group sizes summed over that variable.
-            let shared: Vec<(usize, usize)> = pv0
-                .iter()
-                .enumerate()
-                .filter_map(|(i, v)| v.as_ref().and_then(|v| pv1.iter().position(|x| x.as_ref() == Some(v)).map(|j| (i, j))))
-                .collect();
-            if shared.len() != 1 {
-                return None;
-            }
-            let (p0, p1) = shared[0];
-            let g0 = group_counts(graph, &ip0, p0);
-            let g1 = group_counts(graph, &ip1, p1);
-            let (mut i, mut j, mut total) = (0usize, 0usize, 0usize);
-            while i < g0.len() && j < g1.len() {
-                match g0[i].0.cmp(&g1[j].0) {
-                    Ordering::Less => i += 1,
-                    Ordering::Greater => j += 1,
-                    Ordering::Equal => {
-                        total += g0[i].1 * g1[j].1;
-                        i += 1;
-                        j += 1;
-                    }
-                }
-            }
-            Some(total)
+        if !distinct_pattern_vars(&pv) {
+            return None;
         }
-        _ => None,
+        prepared.push((ip, pv));
     }
+
+    // Star test: find a variable in EVERY pattern; require every OTHER variable to
+    // occur in exactly one pattern (so the only join is on the centre — otherwise the
+    // product formula would overcount a second shared variable).
+    let mut occ: FxHashMap<&Variable, usize> = FxHashMap::default();
+    for (_, pv) in &prepared {
+        for v in pv.iter().flatten() {
+            *occ.entry(v).or_insert(0) += 1;
+        }
+    }
+    let center = *occ.iter().find(|(_, &n)| n == prepared.len()).map(|(v, _)| v)?;
+    if occ.iter().any(|(v, &n)| *v != center && n != 1) {
+        return None;
+    }
+
+    // Product of per-pattern group counts on the centre variable, intersected on value.
+    let mut acc: Option<Vec<(Id, usize)>> = None;
+    for (ip, pv) in &prepared {
+        let cpos = pv.iter().position(|v| v.as_ref() == Some(center))?;
+        let g = group_counts(graph, ip, cpos);
+        acc = Some(match acc {
+            None => g,
+            Some(prev) => {
+                let merged = intersect_mul(&prev, &g);
+                if merged.is_empty() {
+                    return Some(0);
+                }
+                merged
+            }
+        });
+    }
+    Some(acc?.iter().map(|(_, c)| c).sum())
 }
 
 fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {

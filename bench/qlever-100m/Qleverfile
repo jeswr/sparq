@@ -1,0 +1,21 @@
+# Qleverfile for the 100M synthetic scaling dataset (sparq-bench dump).
+[data]
+NAME             = synthetic100m
+DESCRIPTION      = Synthetic scaling dataset (sparq-bench dump), 100M triples
+TEXT_DESCRIPTION =
+
+[index]
+INPUT_FILES     = synthetic100m.nt
+CAT_INPUT_FILES = cat ${INPUT_FILES}
+SETTINGS_JSON   = { "ascii-prefixes-only": false, "num-triples-per-batch": 5000000 }
+
+[server]
+PORT               = 7030
+ACCESS_TOKEN       = synthetic100m_token
+MEMORY_FOR_QUERIES = 10G
+CACHE_MAX_SIZE     = 2G
+TIMEOUT            = 300s
+
+[runtime]
+SYSTEM = native
+IMAGE  = docker.io/adfreiburg/qlever:latest

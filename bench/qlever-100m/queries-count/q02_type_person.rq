@@ -1,0 +1,2 @@
+PREFIX ex: <http://ex/>
+SELECT (COUNT(*) AS ?c) WHERE { ?s a ex:Person }

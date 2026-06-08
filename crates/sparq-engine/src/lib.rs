@@ -393,6 +393,12 @@ mod tests {
             "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:age ?a . ?s ex:name ?n }", // subject-shared
             "PREFIX ex: <http://ex/> SELECT * WHERE { ?x ex:knows ?x }",               // repeated var
             "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:knows ?c }", // chain
+            // 3-pattern STAR on ?s — the N-star count path (Σ_s Πc_i(s)).
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:age ?a . ?s ex:name ?n . ?s ex:knows ?k }",
+            // star with a constant-object pattern mixed in.
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:age ?a . ?s ex:name ?n . ?s ex:knows ex:bob }",
+            // 3-pattern CHAIN — NOT a star; must fall back to materialised count (still correct).
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:age ?x }",
         ];
         for q in cases {
             assert_eq!(super::count(&g(), q).unwrap(), query(&g(), q).unwrap().len(), "count mismatch: {q}");
