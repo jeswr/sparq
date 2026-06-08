@@ -358,6 +358,10 @@ impl Graph {
         dict.save_mmap(dir).map_err(|e| e.to_string())?;
         // Persist the numeric-value cache so `open` mmaps it instead of recomputing.
         write_numerics(&dir.join("numerics.bin"), &numerics_of(&dict)).map_err(|e| e.to_string())?;
+        // Compute per-predicate stats once (a one-time POS/PSO scan) and persist them so
+        // query-open never re-scans those indexes — keeping out-of-core open fast + small.
+        let store = TripleStore::open(dir).map_err(|e| e.to_string())?;
+        store.save_pred_stats(dir).map_err(|e| e.to_string())?;
         std::fs::remove_dir_all(&tmp).ok();
         Ok(())
     }
@@ -572,6 +576,21 @@ mod tests {
         // A non-numeric term (the language-tagged literal) must be None in both.
         if let Some(id) = g.id_of(&Term::Literal(Literal::new_language_tagged_literal("café", "fr").unwrap())) {
             assert_eq!(g2.numeric_value(id), None);
+        }
+        // The dictionary is memory-mapped (zero resident term storage) and lookup still
+        // round-trips: every term resolves to the same id and back to the same term.
+        assert!(dir.join("dict-terms.bin").exists(), "mmap dict not persisted");
+        for s in 0..50u32 {
+            let t = Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/n{}", s % 211)));
+            assert_eq!(g.id_of(&t), g2.id_of(&t), "mmap dict lookup differs for {t}");
+        }
+        // Per-predicate stats are persisted (no POS/PSO re-scan on open) and identical.
+        assert!(dir.join("predstats.bin").exists(), "pred stats not persisted");
+        for p in 0..13u32 {
+            let pred = NamedNode::new_unchecked(format!("http://ex/p{p}"));
+            if let Some(pid) = g.id_of(&Term::NamedNode(pred)) {
+                assert_eq!(g.store.pred_stat(pid), g2.store.pred_stat(pid), "pred_stat differs for p{p}");
+            }
         }
         std::fs::remove_dir_all(&dir).ok();
     }

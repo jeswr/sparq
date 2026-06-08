@@ -241,7 +241,48 @@ impl TripleStore {
             let bytes = unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), std::mem::size_of_val(slice)) };
             std::fs::write(dir.join(format!("perm{i}.bin")), bytes)?;
         }
-        Ok(())
+        self.save_pred_stats(dir)
+    }
+
+    /// Persists the per-predicate stats so `open` need not RE-SCAN the POS/PSO indexes
+    /// (a ~2-permutation read — the dominant out-of-core open cost + resident RSS once the
+    /// dict is mmap'd). Small: a handful of fields per distinct predicate.
+    #[cfg(feature = "mmap")]
+    pub fn save_pred_stats(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(dir.join("predstats.bin"))?);
+        w.write_all(&(self.pred_stats.len() as u64).to_le_bytes())?;
+        for (&p, s) in &self.pred_stats {
+            w.write_all(&p.to_le_bytes())?;
+            w.write_all(&(s.count as u64).to_le_bytes())?;
+            w.write_all(&(s.ndv_subj as u64).to_le_bytes())?;
+            w.write_all(&(s.ndv_obj as u64).to_le_bytes())?;
+        }
+        w.flush()
+    }
+
+    /// Loads persisted per-predicate stats (written by [`save_pred_stats`]); `None` if the
+    /// file is absent (an older saved dir) so the caller falls back to recomputing.
+    #[cfg(feature = "mmap")]
+    fn load_pred_stats(dir: &std::path::Path) -> Option<FxHashMap<Id, PredStat>> {
+        use std::io::Read;
+        let mut r = std::io::BufReader::new(std::fs::File::open(dir.join("predstats.bin")).ok()?);
+        let mut buf8 = [0u8; 8];
+        let mut rd = || -> Option<u64> {
+            r.read_exact(&mut buf8).ok()?;
+            Some(u64::from_le_bytes(buf8))
+        };
+        let n = rd()? as usize;
+        let mut stats = FxHashMap::default();
+        stats.reserve(n);
+        for _ in 0..n {
+            let p = rd()? as Id;
+            let count = rd()? as usize;
+            let ndv_subj = rd()? as usize;
+            let ndv_obj = rd()? as usize;
+            stats.insert(p, PredStat { count, ndv_subj, ndv_obj });
+        }
+        Some(stats)
     }
 
     /// Opens a store whose permutations are MEMORY-MAPPED from `dir` (written by
@@ -260,7 +301,9 @@ impl TripleStore {
             // SAFETY: the file is owned by this store for its lifetime and is not mutated.
             *slot = PermData::Mapped(unsafe { memmap2::Mmap::map(&file)? });
         }
-        let pred_stats = Self::compute_pred_stats(&perms);
+        // Use the persisted stats if present (no POS/PSO re-scan — keeps open fast and the
+        // resident set small); else recompute (backward compatible with older saved dirs).
+        let pred_stats = Self::load_pred_stats(dir).unwrap_or_else(|| Self::compute_pred_stats(&perms));
         Ok(TripleStore { perms, pred_stats })
     }
 
