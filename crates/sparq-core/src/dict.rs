@@ -53,8 +53,10 @@ pub fn is_inline(id: Id) -> bool {
 pub struct Dict {
     // id (1-based) -> term
     terms: Vec<Term>,
-    // term lexical key -> id
-    ids: FxHashMap<String, Id>,
+    // term -> id. Keyed on the `Term` itself (which is `Hash + Eq` with exactly the
+    // term-identity semantics we want — same kind, same lexical value, same datatype,
+    // same language) so interning never serialises a term to a String on the hot path.
+    ids: FxHashMap<Term, Id>,
 }
 
 impl Dict {
@@ -72,13 +74,6 @@ impl Dict {
         }
     }
 
-    /// Canonical lexical key for a term (its N-Triples form), used as the
-    /// dictionary key so equal terms map to one id.
-    #[inline]
-    fn key(term: &Term) -> String {
-        term.to_string()
-    }
-
     /// Interns a term, returning its id (creating it if new). Canonical small
     /// `xsd:integer`s are encoded inline and never stored.
     #[inline]
@@ -86,8 +81,7 @@ impl Dict {
         if let Some(id) = try_inline(term) {
             return id;
         }
-        let key = Self::key(term);
-        if let Some(&id) = self.ids.get(&key) {
+        if let Some(&id) = self.ids.get(term) {
             return id;
         }
         let id = (self.terms.len() as Id) + 1; // 1-based
@@ -98,7 +92,7 @@ impl Dict {
         // loudly rather than corrupt (widen `Id` to u64 to lift it).
         assert!(id < INLINE_BASE, "dictionary exceeded the inline-id capacity (2^30 distinct non-integer terms); widen Id to u64");
         self.terms.push(term.clone());
-        self.ids.insert(key, id);
+        self.ids.insert(term.clone(), id);
         id
     }
 
@@ -108,7 +102,7 @@ impl Dict {
         if let Some(id) = try_inline(term) {
             return id;
         }
-        self.ids.get(&Self::key(term)).copied().unwrap_or(NO_ID)
+        self.ids.get(term).copied().unwrap_or(NO_ID)
     }
 
     /// Returns the term for an id. Inline-integer ids are decoded directly; others
@@ -131,15 +125,27 @@ impl Dict {
     }
 
     /// A rough estimate of the dictionary's heap footprint in bytes (for
-    /// benchmarking). Counts the `terms` vector, the lexical-key strings stored in
-    /// the hash map (the dominant cost), and the map's bucket array.
+    /// benchmarking). Counts the `terms` vector (slots + owned string data), the
+    /// `Term` keys held in the hash map, and the map's bucket array.
     pub fn heap_bytes(&self) -> usize {
         let term_slots = self.terms.capacity() * std::mem::size_of::<Term>();
-        // Each interned term keeps a String key (its N-Triples form) plus an id.
-        let key_bytes: usize = self.ids.keys().map(|k| k.len() + std::mem::size_of::<String>()).sum();
+        let value_owned: usize = self.terms.iter().map(term_owned_bytes).sum();
+        // The map keys are `Term`s too (own their string data once more).
+        let key_owned: usize = self.ids.keys().map(term_owned_bytes).sum();
         // FxHashMap bucket overhead (hashbrown): ~ (capacity) * (entry + control byte).
-        let buckets = self.ids.capacity() * (std::mem::size_of::<(String, Id)>() + 1);
-        term_slots + key_bytes + buckets
+        let buckets = self.ids.capacity() * (std::mem::size_of::<(Term, Id)>() + 1);
+        term_slots + value_owned + key_owned + buckets
+    }
+}
+
+/// The owned heap bytes of a term's string content (IRI / lexical value / datatype /
+/// language / blank-node label) — the part that lives outside the fixed `Term` slot.
+fn term_owned_bytes(t: &Term) -> usize {
+    match t {
+        Term::NamedNode(n) => n.as_str().len(),
+        Term::BlankNode(b) => b.as_str().len(),
+        Term::Literal(l) => l.value().len() + l.datatype().as_str().len() + l.language().map_or(0, str::len),
+        _ => 0,
     }
 }
 
