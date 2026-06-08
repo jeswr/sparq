@@ -56,7 +56,8 @@ for (const entities of [25_000, 100_000, 300_000]) {
 
 console.log(
   `\nThe wasm build uses the 3-permutation compact index (~36 B/triple of permutations) +\n` +
-  `the prefix-factored dictionary. \`loadCompressed\` block-compresses the permutations,\n` +
+  `the prefix-factored dictionary. \`loadCompressed\` BLOCK-compresses the permutations AND\n` +
+  `compacts the dictionary id->term storage into a single blob (no per-term Box<str>),\n` +
   `cutting the total from ~${rawBpt.toFixed(0)} to ~${cmpBpt.toFixed(0)} B/triple (-${(100 * (1 - cmpBpt / rawBpt)).toFixed(0)}%) for a small per-scan decode —\n` +
   `i.e. it fits ~${(rawBpt / cmpBpt).toFixed(1)}x more triples in the same tab. Results are identical. all assertions passed ✓`,
 );

@@ -233,8 +233,10 @@ impl Graph {
         Ok(g.into_compressed())
     }
 
-    /// Re-encodes the store's permutations into the block-compressed storage mode,
-    /// keeping the dictionary + numeric cache. (Rebuilds the indexes from the SPO scan.)
+    /// Re-encodes into the memory-bound storage mode: the permutations BLOCK-COMPRESSED and
+    /// the dictionary's id→term storage compacted to a single BLOB (no per-term `Box<str>`).
+    /// Keeps the numeric cache and term ids. The browser/RAM-constrained path; identical
+    /// query results, a small per-scan decode.
     pub fn into_compressed(self) -> Graph {
         let triples: Vec<[Id; 3]> = {
             let scan = self.store.scan(&[None, None, None]);
@@ -242,7 +244,7 @@ impl Graph {
         };
         Graph {
             store: TripleStore::from_triples_compressed(triples),
-            dict: self.dict,
+            dict: self.dict.into_blob(),
             numerics: self.numerics,
         }
     }

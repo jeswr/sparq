@@ -72,8 +72,13 @@ pub struct Dict {
     prefix_ids: FxHashMap<Box<str>, u32>,     // prefix -> id
     datatypes: Vec<NamedNode>,                // id -> literal datatype (a small set)
     datatype_ids: FxHashMap<Box<str>, u32>,   // datatype IRI -> id
-    terms: Vec<Stored>,                       // id-1 -> compact term
+    terms: Vec<Stored>,                       // id-1 -> compact term (empty once compacted)
     table: HashTable<Id>,                     // hash(term) -> id (bare ids, compared via the arena)
+    // When `Some` (after `into_blob`), id->term is served from a single concatenated term
+    // BLOB + per-term offsets instead of `Vec<Stored>` — no per-term `Box<str>` allocation
+    // overhead, ~half the resident dict bytes. `table` is kept (lookup verifies via the
+    // blob); `terms` is empty. The memory-bound (browser) storage mode for the dictionary.
+    blob: Option<(Vec<u8>, Vec<u32>)>,
     // When `Some` (after `open_mmap`), term(id)/term_parts/lookup are served from mmap'd
     // files and `terms`/`table` are empty — the out-of-core, minimal-RAM dictionary.
     #[cfg(feature = "mmap")]
@@ -240,16 +245,15 @@ fn reconstruct(s: &Stored, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> Te
 // `MappedDict` instead serves term(id)/term_parts/lookup straight from mmap'd files —
 // nothing big is resident, and open is just `mmap` (no parse, no table rebuild).
 
-/// A borrowed view of a compact stored term, parsed zero-copy from the mmap'd blob (or
-/// from an in-RAM `Stored`). Mirrors [`Stored`] but with `&str` slices.
-#[cfg(feature = "mmap")]
+/// A borrowed view of a compact stored term, parsed zero-copy from a term BLOB (the
+/// concatenated record format shared by the in-memory compacted dict and the mmap'd
+/// out-of-core dict). Mirrors [`Stored`] but with `&str` slices into the blob.
 enum StoredRef<'a> {
     Iri { prefix: u32, suffix: &'a str },
     Lit { value: &'a str, datatype: u32, lang: Option<&'a str> },
     Blank(&'a str),
 }
 
-#[cfg(feature = "mmap")]
 #[inline]
 fn rd_u32(b: &[u8], p: &mut usize) -> u32 {
     let v = u32::from_le_bytes([b[*p], b[*p + 1], b[*p + 2], b[*p + 3]]);
@@ -257,7 +261,6 @@ fn rd_u32(b: &[u8], p: &mut usize) -> u32 {
     v
 }
 
-#[cfg(feature = "mmap")]
 #[inline]
 fn rd_str<'a>(b: &'a [u8], p: &mut usize) -> &'a str {
     let n = rd_u32(b, p) as usize;
@@ -267,8 +270,7 @@ fn rd_str<'a>(b: &'a [u8], p: &mut usize) -> &'a str {
     unsafe { std::str::from_utf8_unchecked(s) }
 }
 
-/// Parses one term record (in the [`save_mmap`](Dict::save_mmap) format) at `b[0..]`.
-#[cfg(feature = "mmap")]
+/// Parses one term record (the blob record format) at `b[0..]`.
 #[inline]
 fn parse_stored_ref(b: &[u8]) -> StoredRef<'_> {
     let mut p = 1;
@@ -292,7 +294,6 @@ fn parse_stored_ref(b: &[u8]) -> StoredRef<'_> {
     }
 }
 
-#[cfg(feature = "mmap")]
 fn reconstruct_ref(s: &StoredRef, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> Term {
     match *s {
         StoredRef::Iri { prefix, suffix } => {
@@ -310,7 +311,6 @@ fn reconstruct_ref(s: &StoredRef, prefixes: &[Box<str>], datatypes: &[NamedNode]
     }
 }
 
-#[cfg(feature = "mmap")]
 fn stored_ref_eq_term(s: &StoredRef, q: &Term, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> bool {
     match (s, q) {
         (StoredRef::Iri { prefix, suffix }, Term::NamedNode(n)) => {
@@ -503,6 +503,14 @@ impl Dict {
             }
             return NO_ID;
         }
+        // Compacted (blob) mode keeps the hash table; verify candidates against the blob.
+        if self.blob.is_some() {
+            return self
+                .table
+                .find(hash, |&id| stored_ref_eq_term(&self.blob_ref(id).unwrap(), term, &self.prefixes, &self.datatypes))
+                .copied()
+                .unwrap_or(NO_ID);
+        }
         self.table
             .find(hash, |&id| stored_eq_term(&self.terms[(id - 1) as usize], term, &self.prefixes, &self.datatypes))
             .copied()
@@ -519,6 +527,15 @@ impl Dict {
             // The &str slices borrow the mmap blob / the in-RAM prefix+datatype tables,
             // all owned by `self` for `'_`, so this stays zero-copy.
             return match m.stored(id) {
+                StoredRef::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[prefix as usize], suffix },
+                StoredRef::Lit { value, datatype, lang } => {
+                    TermParts::Lit { value, datatype: self.datatypes[datatype as usize].as_str(), lang }
+                }
+                StoredRef::Blank(b) => TermParts::Blank(b),
+            };
+        }
+        if let Some(r) = self.blob_ref(id) {
+            return match r {
                 StoredRef::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[prefix as usize], suffix },
                 StoredRef::Lit { value, datatype, lang } => {
                     TermParts::Lit { value, datatype: self.datatypes[datatype as usize].as_str(), lang }
@@ -547,7 +564,47 @@ impl Dict {
         if let Some(m) = &self.mapped {
             return reconstruct_ref(&m.stored(id), &self.prefixes, &self.datatypes);
         }
+        if let Some(r) = self.blob_ref(id) {
+            return reconstruct_ref(&r, &self.prefixes, &self.datatypes);
+        }
         reconstruct(&self.terms[(id - 1) as usize], &self.prefixes, &self.datatypes)
+    }
+
+    /// The parsed term record for an id from the in-memory blob, if the dict is compacted.
+    #[inline]
+    fn blob_ref(&self, id: Id) -> Option<StoredRef<'_>> {
+        let (blob, offs) = self.blob.as_ref()?;
+        Some(parse_stored_ref(&blob[offs[(id - 1) as usize] as usize..]))
+    }
+
+    /// Compacts the id→term storage into a single concatenated BLOB + per-term `u32`
+    /// offsets, freeing the `Vec<Stored>` (with its per-term `Box<str>` allocations). The
+    /// hash table is kept (lookup verifies candidates against the blob). Roughly halves
+    /// the resident dictionary bytes — the memory-bound (browser) storage mode. A no-op if
+    /// already compacted, memory-mapped, or empty.
+    pub fn into_blob(mut self) -> Dict {
+        #[cfg(feature = "mmap")]
+        if self.mapped.is_some() {
+            return self;
+        }
+        if self.blob.is_some() || self.terms.is_empty() {
+            return self;
+        }
+        let mut blob: Vec<u8> = Vec::with_capacity(self.terms.len() * 8);
+        let mut offsets: Vec<u32> = Vec::with_capacity(self.terms.len());
+        for t in &self.terms {
+            assert!(
+                blob.len() <= u32::MAX as usize,
+                "dictionary term blob exceeds 4 GiB; use the mmap dict (u64 offsets) at this scale"
+            );
+            offsets.push(blob.len() as u32);
+            // Writing to a `Vec<u8>` is infallible.
+            let _ = write_record(&mut blob, t);
+        }
+        blob.shrink_to_fit();
+        self.blob = Some((blob, offsets));
+        self.terms = Vec::new(); // free the Stored arena (the win)
+        self
     }
 
     /// Merges another (partial) dictionary into this one, returning the remap from the
@@ -674,6 +731,7 @@ impl Dict {
             datatype_ids,
             terms,
             table,
+            blob: None,
             #[cfg(feature = "mmap")]
             mapped: None,
         })
@@ -766,11 +824,14 @@ impl Dict {
         if let Some(m) = &self.mapped {
             return m.len;
         }
+        if let Some((_, offs)) = &self.blob {
+            return offs.len();
+        }
         self.terms.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.terms.is_empty()
+        self.len() == 0
     }
 
     /// A rough estimate of the dictionary's heap footprint in bytes (for
@@ -784,6 +845,14 @@ impl Dict {
             let prefix_bytes: usize = self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum();
             let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
             return prefix_bytes + dt_bytes;
+        }
+        // Compacted (blob) mode: the term blob + u32 offsets + the kept hash table, plus
+        // the small prefix/datatype tables — no per-`Stored` slot or per-`Box<str>` term.
+        if let Some((blob, offs)) = &self.blob {
+            let prefix_bytes: usize = self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum::<usize>() * 2;
+            let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
+            let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
+            return blob.capacity() + offs.capacity() * 4 + table + prefix_bytes + dt_bytes;
         }
         let term_slots = self.terms.capacity() * std::mem::size_of::<Stored>();
         let owned: usize = self.terms.iter().map(stored_owned_bytes).sum();
@@ -804,7 +873,6 @@ fn write_str(w: &mut impl std::io::Write, s: &str) -> std::io::Result<()> {
 
 /// Writes one compact term record (the format `parse_stored_ref` reads) and returns the
 /// number of bytes written — for building the mmap term blob + its offset index.
-#[cfg(feature = "mmap")]
 fn write_record(w: &mut impl std::io::Write, t: &Stored) -> std::io::Result<u64> {
     Ok(match t {
         Stored::Iri { prefix, suffix } => {
@@ -898,6 +966,40 @@ mod tests {
             assert_eq!(d.lookup(&int(&v.to_string())), id, "lookup agrees with intern");
         }
         assert_eq!(d.len(), 0, "no inline integer is stored in the dictionary");
+    }
+
+    #[test]
+    fn into_blob_roundtrips() {
+        // Build a dict spanning all term kinds (prefixed IRIs, typed/lang/plain literals,
+        // a blank node, an inline integer), then compact it and verify every term still
+        // round-trips: term(id), term_parts(id), and lookup(term)->id are unchanged, and
+        // a non-present term still misses.
+        let mut d = Dict::new();
+        let terms = vec![
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/alice")),
+            Term::NamedNode(NamedNode::new_unchecked("http://ex/bob")),
+            Term::NamedNode(NamedNode::new_unchecked("http://other.org/x#y")),
+            Term::Literal(Literal::new_simple_literal("a plain string")),
+            Term::Literal(Literal::new_language_tagged_literal_unchecked("café", "fr")),
+            Term::Literal(Literal::new_typed_literal("1.5", xsd::DECIMAL)),
+            Term::BlankNode(oxrdf::BlankNode::new_unchecked("b0")),
+            int("42"),       // inline
+            int("99999999"), // also inline (within range)
+        ];
+        let ids: Vec<Id> = terms.iter().map(|t| d.intern(t)).collect();
+        let before_len = d.len();
+
+        let d = d.into_blob();
+        assert_eq!(d.len(), before_len, "len unchanged after compaction");
+        for (t, &id) in terms.iter().zip(&ids) {
+            assert_eq!(d.term(id), *t, "term({id}) round-trips");
+            assert_eq!(d.lookup(t), id, "lookup round-trips");
+        }
+        // A term that was never interned must still miss.
+        assert_eq!(d.lookup(&Term::NamedNode(NamedNode::new_unchecked("http://ex/absent"))), NO_ID);
+        // Compaction is idempotent.
+        let d = d.into_blob();
+        assert_eq!(d.term(ids[0]), terms[0]);
     }
 
     #[test]
