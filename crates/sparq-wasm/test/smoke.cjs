@@ -20,6 +20,10 @@ const tri = JSON.parse(
 );
 assert.equal(tri.results.bindings.length, 3, "expected 3 triangle solutions");
 
+// Lazy count(): single-pattern scan and two-pattern join, counted from the index.
+assert.equal(store.count(`PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a }`), 3);
+assert.equal(store.count(`PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:age ?x }`), 2);
+
 // Aggregation: AVG(30,25,35) = 30.
 const agg = JSON.parse(store.query(`PREFIX ex: <http://ex/> SELECT (AVG(?a) AS ?avg) WHERE { ?s ex:age ?a }`));
 assert.deepEqual(agg.head.vars, ["avg"]);

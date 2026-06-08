@@ -5,7 +5,8 @@
 const assert = require("node:assert/strict");
 const { Store } = require("../pkg-node/sparq_wasm.js");
 
-// Deterministic ~250k-triple graph (50k people, each with name/age/city + 4 follows).
+// Deterministic ~400k-triple graph (50k people, 8 triples each: type/name/age/city
+// + 4 follows).
 const N = 50_000;
 let seed = 0x9e3779b9 >>> 0;
 const rng = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) % N);
