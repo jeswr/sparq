@@ -1280,7 +1280,13 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
                 OrderExpression::Asc(e) => (false, e),
                 OrderExpression::Desc(e) => (true, e),
             };
-            key.push((desc, eval_expr(graph, local, b, row, e)?));
+            // Numeric sort keys use the cache (no per-comparison reparse); other
+            // expressions fall back to the identity-preserving term evaluation.
+            let v = match eval_numeric(graph, local, b, row, e) {
+                Some(n) => Value::Num(n),
+                None => eval_expr(graph, local, b, row, e)?,
+            };
+            key.push((desc, v));
         }
         keyed.push((key, row.clone()));
     }
