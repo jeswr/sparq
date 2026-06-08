@@ -151,11 +151,51 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             Ok(b)
         }
         GraphPattern::Group { inner, variables, aggregates } => {
+            // COUNT(*) pushdown: a whole-dataset COUNT over a single pattern is the
+            // scan range size — no need to materialise the solutions just to count
+            // them (QLever counts lazily too; this is the q02-style win).
+            if variables.is_empty() && aggregates.len() == 1 {
+                if let (av, AggregateExpression::CountSolutions { distinct: false }) = (&aggregates[0].0, &aggregates[0].1) {
+                    if let Some(n) = count_pushdown(graph, inner) {
+                        let id = value_to_id(graph, local, &Value::Num(n as f64));
+                        let row: Row = std::iter::once(id).collect();
+                        return Ok(Bindings { vars: vec![av.clone()], rows: vec![row], sorted_by: None });
+                    }
+                }
+            }
             let b = eval_graph_pattern(graph, local, inner)?;
             group_aggregate(graph, local, b, variables, aggregates)
         }
         other => eval_graph_pattern(graph, local, other),
     }
+}
+
+/// COUNT(*) over a single-pattern, filter-free, no-repeated-variable BGP equals
+/// the scan range size — returned without materialising any solution. Returns
+/// `None` (fall back to full evaluation) for anything more complex.
+fn count_pushdown(graph: &Graph, inner: &GraphPattern) -> Option<usize> {
+    if !is_conjunctive(inner) {
+        return None;
+    }
+    let mut patterns = Vec::new();
+    let mut filters = Vec::new();
+    flatten_conjunction(inner, &mut patterns, &mut filters);
+    if !filters.is_empty() || patterns.len() != 1 {
+        return None;
+    }
+    let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0]).ok()?;
+    if unsat {
+        return Some(0);
+    }
+    // A repeated variable (e.g. `?x p ?x`) makes the range size an over-count.
+    let vars: Vec<&Variable> = pos_vars.iter().flatten().collect();
+    let mut sorted = vars.clone();
+    sorted.sort();
+    sorted.dedup();
+    if sorted.len() != vars.len() {
+        return None;
+    }
+    Some(graph.store.estimate(&id_pat))
 }
 
 fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
