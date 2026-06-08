@@ -628,12 +628,25 @@ mod tests {
         let cnt = |q: &str| query(&g, q).unwrap().len();
         // IF(error, _, _) is an error -> the "hi" row is excluded (NOT the else branch).
         assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(IF(?v > -1, true, true)) }"), 1);
-        // `false && error` = false (short-circuit) -> excludes both rows.
-        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER((?v = \"no\") && (?v > -1)) }"), 0);
-        // `true || error` = true (short-circuit) -> keeps both rows.
-        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER((?v != \"no\") || (?v > -1)) }"), 2);
         // IN reuses `=`: only the numeric matches the numeric list entry.
         assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v IN (50)) }"), 1);
+
+        // Short-circuit, proven rigorously: STRLEN is UNSUPPORTED, so evaluating the
+        // right operand returns Err and `query` would fail. The query SUCCEEDING is
+        // proof the dominating left operand skipped the right (not just that the
+        // truth table tolerates an error).
+        let g1 = Graph::load_str("@prefix ex: <http://ex/> . ex:s1 ex:v 50 .", "turtle").unwrap();
+        let r1 = query(&g1, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER((?v = 99) && (STRLEN(?v) > 0)) }");
+        assert_eq!(r1.expect("false && _ must short-circuit, not error").len(), 0);
+        let r2 = query(&g1, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER((?v = 50) || (STRLEN(?v) > 0)) }");
+        assert_eq!(r2.expect("true || _ must short-circuit, not error").len(), 1);
+
+        // IN preserves a type error (unbound operand): `!(?k IN (ex:x))` with ?k
+        // unbound is error -> false -> excluded, NOT `!(false)` = true -> included.
+        assert_eq!(
+            cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v OPTIONAL { ?s ex:nomatch ?k } FILTER(!(?k IN (<http://ex/x>))) }"),
+            0
+        );
     }
 
     #[test]
