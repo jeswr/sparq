@@ -413,8 +413,11 @@ Measured: parse+intern is ~64% of the external build (8.2 s of ~12.9 s at 10M) �
 bottleneck, and exactly the "parallelise parsing of the file" requested for large files.
 N-Triples is now streamed in newline-aligned ~64 MiB blocks, each parsed + interned in
 parallel (per-chunk partial dicts merged into the running dict) before spilling — still
-one block resident at a time. **10M external build 12.9 s → 6.6 s (−45%)**, output still
-byte-identical (the byte-identity unit test now exercises the parallel path).
+one block resident at a time. **10M external build 12.9 s → 6.6 s (−45%); 100M
+175–206 s → 113.7 s (−40%)**, with peak memory *lower* than the sequential build
+(2.59 GB vs 3.68 GB — the 64 MiB block + transient partials replace the streaming-parser
+buffer). Output stays byte-identical (the byte-identity unit test now exercises the
+parallel path) and the 100M index opens + answers `COUNT(*) = 99,999,990`.
 
 Net: a 16 GB machine can now both **construct** and **query** a 100M–1B-triple index
 whose permutations are far larger than its RAM — the "billions" end of the range.
