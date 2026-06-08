@@ -302,6 +302,23 @@ pushdown) and M4 (tagged ValueIds), plus out-of-core for the billion-triple
 regime where the current in-memory store would OOM. Micro-optimisation got sparq
 to parity on small in-RAM data; scaling needs the structural work.
 
+## Negative result: streaming a 2-pattern join to JSON did NOT help
+
+After the streaming single-pattern scan→JSON path won (q02 71→61 ms by skipping the
+`Bindings`), the natural next step was to stream a 2-pattern join (hash-join the two
+scans, emit JSON per match, no `Bindings`). Implemented and validated correct (90k
+differential fuzz cases vs the general path, via an order-independent **bindings-multiset**
+check now kept permanently in `sparq-bench fuzz`). But **q04 json stayed at 1517 ms,
+unchanged** — so it was reverted (keep-only-if-it-helps, the same discipline that reverted
+the flat buffer).
+
+The lesson: for a *join*, the `Bindings` intermediate is NOT the bottleneck — the join
+compute (hash build + probe) and the result serialisation (q04 is **701 MB** of JSON)
+dominate, so fusing away the intermediate `Vec<Row>` saves nothing measurable. Streaming
+only pays where the per-row materialisation is a real fraction of the work — i.e. the
+*single-pattern* (scan / scan+filter) case, which is kept. Further materialise gains need
+faster join compute or smaller output, not removing the intermediate.
+
 ## Correctness validation (differential vs Oxigraph) + known limitations
 
 The optimizations were audited two ways against Oxigraph (an independent, mature

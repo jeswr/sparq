@@ -266,6 +266,17 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
             }
         }
 
+        // JSON-path differential: serialising directly from ids (query_json, incl. the
+        // streaming single-pattern / 2-pattern-join paths) must yield the SAME multiset
+        // of bindings as building the QueryResult then serialising. Order-independent.
+        if let Ok(qj) = sparq_engine::query_json(&g, &q) {
+            let via_result = sparq_engine::json::to_sparql_json(&sparq_engine::query(&g, &q).unwrap());
+            if bindings_multiset(&qj) != bindings_multiset(&via_result) {
+                full_mismatch += 1;
+                report_repro(&mut first_repro, seed, &q, &ttl, "query_json bindings multiset != to_sparql_json(query())");
+            }
+        }
+
         // Count-path differential: the lazy/count-only count must equal the
         // materialized solution count.
         if let Ok(c) = sparq_engine::count(&g, &q) {
@@ -291,6 +302,28 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         println!("\nFIRST FAILING CASE:\n{r}");
         std::process::exit(1);
     }
+}
+
+/// Parses SPARQL-JSON results into a canonical, order-independent multiset of bindings
+/// (each binding's keys sorted; the rows sorted) so two serialisations can be compared
+/// regardless of row / key order.
+fn bindings_multiset(json: &str) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(json).expect("valid SPARQL JSON");
+    let mut rows: Vec<String> = v["results"]["bindings"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|b| {
+                    let mut kv: Vec<(String, String)> =
+                        b.as_object().unwrap().iter().map(|(k, val)| (k.clone(), val.to_string())).collect();
+                    kv.sort();
+                    format!("{kv:?}")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rows.sort();
+    rows
 }
 
 fn report_repro(slot: &mut Option<String>, seed: u64, q: &str, ttl: &str, msg: &str) {

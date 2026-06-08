@@ -302,9 +302,9 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
 
 /// Evaluates a SELECT and serialises it straight to SPARQL-JSON, skipping the
 /// `QueryResult` (and its per-cell `oxrdf::Term` allocation). On native the per-row
-/// fragments are built in parallel; the wasm build is sequential. Order-preserving.
+/// fragments are built in parallel; the wasm build is sequential.
 pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String, String> {
-    // Streaming fast path for a single-pattern SELECT — no Bindings materialised at all.
+    // Streaming fast paths — no Bindings materialised at all.
     if let Some(json) = single_pattern_scan_json(graph, pattern) {
         return Ok(json);
     }
