@@ -1,16 +1,18 @@
 //! Term dictionary: bijection between RDF terms and dense `u32` ids.
 //!
 //! Dictionary encoding is the foundation of every fast triplestore (RDF-3X,
-//! QLever, RDFox): triples are stored and joined as fixed-width integers, and
-//! the (large, string-heavy) terms live once in the dictionary. M1 keeps the
-//! dictionary fully in memory; later milestones add front-coding / on-disk
-//! vocabularies and inline-encoded numeric ids (QLever's value ids).
+//! QLever, RDFox): triples are stored and joined as fixed-width integers, and the
+//! (large, string-heavy) terms live once in the dictionary. Terms are stored COMPACT
+//! and prefix-factored (IRIs share a namespace table); the interner is single-storage
+//! (the hash table holds only ids) and content-addressed by a hash reproducible from
+//! either an `oxrdf::Term` or the parsed byte components — so a byte-level parser can
+//! intern straight from slices with no intermediate `Term`.
 
 use hashbrown::HashTable;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 
 /// A dense term id. `u32` (≤ 4.29 B distinct terms) keeps index entries small
 /// and cache-friendly; the id space is widened to `u64` only if a dataset needs
@@ -29,20 +31,27 @@ pub const NO_ID: Id = 0;
 pub const INLINE_BASE: Id = 1 << 30;
 const INLINE_MAX: u32 = INLINE_BASE - 1;
 
-/// If `term` is a canonical non-negative `xsd:integer` in range, its inline id.
-fn try_inline(term: &Term) -> Option<Id> {
-    if let Term::Literal(l) = term {
-        if l.datatype() == xsd::INTEGER {
-            if let Ok(v) = l.value().parse::<u32>() {
-                // Only the canonical lexical form (no leading zeros / sign) inlines,
-                // so "030"^^integer stays a distinct dictionary term.
-                if v <= INLINE_MAX && v.to_string() == l.value() {
-                    return Some(INLINE_BASE + v);
-                }
+/// If a literal `value`/`datatype` is a canonical non-negative `xsd:integer` in
+/// range, its inline id. Only the canonical lexical form (no leading zeros / sign)
+/// inlines, so `"030"^^integer` stays a distinct dictionary term.
+#[inline]
+fn try_inline_lit(value: &str, datatype: &str) -> Option<Id> {
+    if datatype == xsd::INTEGER.as_str() {
+        if let Ok(v) = value.parse::<u32>() {
+            if v <= INLINE_MAX && v.to_string() == value {
+                return Some(INLINE_BASE + v);
             }
         }
     }
     None
+}
+
+/// If `term` is a canonical non-negative `xsd:integer` in range, its inline id.
+fn try_inline(term: &Term) -> Option<Id> {
+    match term {
+        Term::Literal(l) => try_inline_lit(l.value(), l.datatype().as_str()),
+        _ => None,
+    }
 }
 
 /// Whether an id encodes an inline integer value.
@@ -75,13 +84,73 @@ enum Stored {
     Blank(Box<str>),
 }
 
-/// A deterministic hash of a term (FxHasher has no random seed, so the same term
-/// always hashes the same — required for the rehash-from-arena table).
+// ---- Content hashing ---------------------------------------------------------
+// A term's hash must be identical whether computed from an `oxrdf::Term`, from parsed
+// byte slices, or from the compact `Stored` arena form — so interning and rehashing
+// never build a `Term` or concatenate an IRI. FxHasher is deterministic (no seed).
+
+#[inline]
+fn hash_iri_parts(prefix: &str, suffix: &str) -> u64 {
+    // Length-prefix the prefix and make hash_iri route through here on the SAME split,
+    // so the two paths issue an identical sequence of writes — FxHasher is word-chunked,
+    // so `write(a); write(b)` does NOT equal `write(a++b)`; identical call sequences do.
+    let mut h = rustc_hash::FxHasher::default();
+    h.write_u8(0);
+    h.write_usize(prefix.len());
+    h.write(prefix.as_bytes());
+    h.write(suffix.as_bytes());
+    h.finish()
+}
+
+#[inline]
+fn hash_iri(iri: &str) -> u64 {
+    let (prefix, suffix) = split_iri(iri);
+    hash_iri_parts(prefix, suffix)
+}
+
+#[inline]
+fn hash_lit(value: &str, datatype: &str, lang: Option<&str>) -> u64 {
+    let mut h = rustc_hash::FxHasher::default();
+    h.write_u8(1);
+    h.write_usize(value.len());
+    h.write(value.as_bytes());
+    h.write_usize(datatype.len());
+    h.write(datatype.as_bytes());
+    match lang {
+        Some(l) => {
+            h.write_u8(1);
+            h.write(l.as_bytes());
+        }
+        None => h.write_u8(0),
+    }
+    h.finish()
+}
+
+#[inline]
+fn hash_blank(label: &str) -> u64 {
+    let mut h = rustc_hash::FxHasher::default();
+    h.write_u8(2);
+    h.write(label.as_bytes());
+    h.finish()
+}
+
 #[inline]
 fn hash_term(t: &Term) -> u64 {
-    let mut h = rustc_hash::FxHasher::default();
-    t.hash(&mut h);
-    h.finish()
+    match t {
+        Term::NamedNode(n) => hash_iri(n.as_str()),
+        Term::Literal(l) => hash_lit(l.value(), l.datatype().as_str(), l.language()),
+        Term::BlankNode(b) => hash_blank(b.as_str()),
+        _ => 0,
+    }
+}
+
+#[inline]
+fn hash_stored(s: &Stored, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> u64 {
+    match s {
+        Stored::Iri { prefix, suffix } => hash_iri_parts(&prefixes[*prefix as usize], suffix),
+        Stored::Lit { value, datatype, lang } => hash_lit(value, datatypes[*datatype as usize].as_str(), lang.as_deref()),
+        Stored::Blank(b) => hash_blank(b),
+    }
 }
 
 /// Splits an IRI into (namespace prefix, local suffix) at the last `#` or `/`, the
@@ -92,28 +161,48 @@ fn split_iri(iri: &str) -> (&str, &str) {
     iri.split_at(cut)
 }
 
-/// Whether a stored term equals a query term, WITHOUT reconstructing it (the hot-path
-/// comparison): compare the IRI prefix+suffix / literal components directly.
-fn stored_eq(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> bool {
-    match (s, q) {
-        (Stored::Iri { prefix, suffix }, Term::NamedNode(n)) => {
+// ---- Stored vs query-component equality (no reconstruction on the hot path) ---
+
+#[inline]
+fn stored_is_iri(s: &Stored, iri: &str, prefixes: &[Box<str>]) -> bool {
+    match s {
+        Stored::Iri { prefix, suffix } => {
             let p = &prefixes[*prefix as usize];
-            let iri = n.as_str();
-            iri.len() == p.len() + suffix.len()
-                && iri.as_bytes().starts_with(p.as_bytes())
-                && iri[p.len()..] == **suffix
+            iri.len() == p.len() + suffix.len() && iri.as_bytes().starts_with(p.as_bytes()) && iri[p.len()..] == **suffix
         }
-        (Stored::Lit { value, datatype, lang }, Term::Literal(l)) => {
-            **value == *l.value()
-                && lang.as_deref() == l.language()
-                && datatypes[*datatype as usize].as_ref() == l.datatype()
-        }
-        (Stored::Blank(b), Term::BlankNode(bn)) => **b == *bn.as_str(),
         _ => false,
     }
 }
 
-/// Rebuilds a full `Term` from its compact storage (for `term()` and table rehashing).
+#[inline]
+fn stored_is_iri_parts(s: &Stored, prefix: &str, suffix: &str, prefixes: &[Box<str>]) -> bool {
+    match s {
+        Stored::Iri { prefix: pid, suffix: suf } => prefixes[*pid as usize].as_ref() == prefix && **suf == *suffix,
+        _ => false,
+    }
+}
+
+#[inline]
+fn stored_is_lit(s: &Stored, value: &str, datatype: &str, lang: Option<&str>, datatypes: &[NamedNode]) -> bool {
+    match s {
+        Stored::Lit { value: v, datatype: dt, lang: lg } => {
+            **v == *value && lg.as_deref() == lang && datatypes[*dt as usize].as_str() == datatype
+        }
+        _ => false,
+    }
+}
+
+#[inline]
+fn stored_eq_term(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> bool {
+    match q {
+        Term::NamedNode(n) => stored_is_iri(s, n.as_str(), prefixes),
+        Term::Literal(l) => stored_is_lit(s, l.value(), l.datatype().as_str(), l.language(), datatypes),
+        Term::BlankNode(b) => matches!(s, Stored::Blank(x) if **x == *b.as_str()),
+        _ => false,
+    }
+}
+
+/// Rebuilds a full `Term` from its compact storage (for `term()`).
 fn reconstruct(s: &Stored, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> Term {
     match s {
         Stored::Iri { prefix, suffix } => {
@@ -144,7 +233,6 @@ impl Dict {
         }
     }
 
-    /// Interns an IRI namespace prefix, returning its (small) id.
     #[inline]
     fn intern_prefix(&mut self, prefix: &str) -> u32 {
         if let Some(&id) = self.prefix_ids.get(prefix) {
@@ -157,62 +245,95 @@ impl Dict {
         id
     }
 
-    /// Interns a literal datatype, returning its (small) id.
     #[inline]
-    fn intern_datatype(&mut self, dt: oxrdf::NamedNodeRef<'_>) -> u32 {
-        if let Some(&id) = self.datatype_ids.get(dt.as_str()) {
+    fn intern_datatype(&mut self, dt: &str) -> u32 {
+        if let Some(&id) = self.datatype_ids.get(dt) {
             return id;
         }
         let id = self.datatypes.len() as u32;
-        self.datatypes.push(dt.into_owned());
-        self.datatype_ids.insert(dt.as_str().into(), id);
+        self.datatypes.push(NamedNode::new_unchecked(dt));
+        self.datatype_ids.insert(dt.into(), id);
         id
     }
 
-    /// Builds the compact storage for a term, interning its prefix / datatype.
+    /// Assigns the next id to a freshly built `Stored` and indexes it.
     #[inline]
-    fn store_term(&mut self, term: &Term) -> Stored {
-        match term {
-            Term::NamedNode(n) => {
-                let (p, suffix) = split_iri(n.as_str());
-                let prefix = self.intern_prefix(p);
-                Stored::Iri { prefix, suffix: suffix.into() }
-            }
-            Term::Literal(l) => {
-                let datatype = self.intern_datatype(l.datatype());
-                Stored::Lit { value: l.value().into(), datatype, lang: l.language().map(Into::into) }
-            }
-            Term::BlankNode(b) => Stored::Blank(b.as_str().into()),
-            other => unreachable!("non-triple term in dictionary: {other:?}"),
-        }
+    fn push(&mut self, hash: u64, stored: Stored) -> Id {
+        let id = (self.terms.len() as Id) + 1; // 1-based
+        // Enforced in release too: once the (non-inline) dictionary reaches INLINE_BASE
+        // distinct terms, new ids would collide with the inline-integer range and decode
+        // as integers — silent corruption. 2^30 ≈ 1.07B distinct non-integer terms is a
+        // hard capacity limit of the u32 inline scheme; fail loudly (widen Id to u64).
+        assert!(id < INLINE_BASE, "dictionary exceeded the inline-id capacity (2^30 distinct non-integer terms); widen Id to u64");
+        self.terms.push(stored);
+        let (terms, prefixes, datatypes) = (&self.terms, &self.prefixes, &self.datatypes);
+        self.table.insert_unique(hash, id, |&i| hash_stored(&terms[(i - 1) as usize], prefixes, datatypes));
+        id
     }
 
-    /// Interns a term, returning its id (creating it if new). Canonical small
-    /// `xsd:integer`s are encoded inline and never stored.
+    /// Interns an IRI term from its string, returning its id.
     #[inline]
-    pub fn intern(&mut self, term: &Term) -> Id {
-        if let Some(id) = try_inline(term) {
+    pub fn intern_iri(&mut self, iri: &str) -> Id {
+        let hash = hash_iri(iri);
+        if let Some(&id) = self.table.find(hash, |&id| stored_is_iri(&self.terms[(id - 1) as usize], iri, &self.prefixes)) {
             return id;
         }
-        let hash = hash_term(term);
+        let (p, suffix) = split_iri(iri);
+        let prefix = self.intern_prefix(p);
+        self.push(hash, Stored::Iri { prefix, suffix: suffix.into() })
+    }
+
+    /// Interns an IRI already split into (prefix, suffix) — used by the parallel-load
+    /// merge, where the canonical split is already known (no re-split, no concat).
+    #[inline]
+    fn intern_iri_parts(&mut self, prefix: &str, suffix: &str) -> Id {
+        let hash = hash_iri_parts(prefix, suffix);
         if let Some(&id) =
-            self.table.find(hash, |&id| stored_eq(&self.terms[(id - 1) as usize], term, &self.prefixes, &self.datatypes))
+            self.table.find(hash, |&id| stored_is_iri_parts(&self.terms[(id - 1) as usize], prefix, suffix, &self.prefixes))
         {
             return id;
         }
-        let id = (self.terms.len() as Id) + 1; // 1-based
-        // Enforced in release too: once the (non-inline) dictionary reaches
-        // INLINE_BASE distinct terms, new ids would collide with the inline-integer
-        // range and decode as integers — silent corruption. 2^30 ≈ 1.07B distinct
-        // non-integer terms is a hard capacity limit of the u32 inline scheme; fail
-        // loudly rather than corrupt (widen `Id` to u64 to lift it).
-        assert!(id < INLINE_BASE, "dictionary exceeded the inline-id capacity (2^30 distinct non-integer terms); widen Id to u64");
-        let stored = self.store_term(term);
-        self.terms.push(stored);
-        let (terms, prefixes, datatypes) = (&self.terms, &self.prefixes, &self.datatypes);
-        self.table
-            .insert_unique(hash, id, |&i| hash_term(&reconstruct(&terms[(i - 1) as usize], prefixes, datatypes)));
-        id
+        let prefix = self.intern_prefix(prefix);
+        self.push(hash, Stored::Iri { prefix, suffix: suffix.into() })
+    }
+
+    /// Interns a literal from its components, returning its id. Canonical small
+    /// `xsd:integer`s are encoded inline and never stored.
+    #[inline]
+    pub fn intern_lit(&mut self, value: &str, datatype: &str, lang: Option<&str>) -> Id {
+        if let Some(id) = try_inline_lit(value, datatype) {
+            return id;
+        }
+        let hash = hash_lit(value, datatype, lang);
+        if let Some(&id) =
+            self.table.find(hash, |&id| stored_is_lit(&self.terms[(id - 1) as usize], value, datatype, lang, &self.datatypes))
+        {
+            return id;
+        }
+        let datatype = self.intern_datatype(datatype);
+        self.push(hash, Stored::Lit { value: value.into(), datatype, lang: lang.map(Into::into) })
+    }
+
+    /// Interns a blank node from its label, returning its id.
+    #[inline]
+    pub fn intern_blank(&mut self, label: &str) -> Id {
+        let hash = hash_blank(label);
+        if let Some(&id) = self.table.find(hash, |&id| matches!(&self.terms[(id - 1) as usize], Stored::Blank(b) if **b == *label)) {
+            return id;
+        }
+        self.push(hash, Stored::Blank(label.into()))
+    }
+
+    /// Interns a term, returning its id (creating it if new). Dispatches to the
+    /// component interners so the `Term` and byte-slice paths share one code path.
+    #[inline]
+    pub fn intern(&mut self, term: &Term) -> Id {
+        match term {
+            Term::NamedNode(n) => self.intern_iri(n.as_str()),
+            Term::Literal(l) => self.intern_lit(l.value(), l.datatype().as_str(), l.language()),
+            Term::BlankNode(b) => self.intern_blank(b.as_str()),
+            other => unreachable!("non-triple term in dictionary: {other:?}"),
+        }
     }
 
     /// Returns the id for a term if present, else `NO_ID`.
@@ -223,7 +344,7 @@ impl Dict {
         }
         let hash = hash_term(term);
         self.table
-            .find(hash, |&id| stored_eq(&self.terms[(id - 1) as usize], term, &self.prefixes, &self.datatypes))
+            .find(hash, |&id| stored_eq_term(&self.terms[(id - 1) as usize], term, &self.prefixes, &self.datatypes))
             .copied()
             .unwrap_or(NO_ID)
     }
@@ -240,25 +361,25 @@ impl Dict {
         }
     }
 
-    /// Merges another (partial) dictionary into this one, returning the remap from
-    /// the other's local ids to this dictionary's global ids: `remap[local - 1]` is
-    /// the global id for the other's 1-based local id `local`. Used by the parallel
-    /// bulk loader, where each thread builds a partial dictionary and the partials are
-    /// merged into one. Inline-integer ids are NOT in any dictionary and pass through
-    /// unchanged (the caller checks `is_inline`).
+    /// Merges another (partial) dictionary into this one, returning the remap from the
+    /// other's local ids to this dictionary's global ids: `remap[local - 1]` is the
+    /// global id for the other's 1-based local id `local`. Used by the parallel bulk
+    /// loader. Interns each of the other's terms directly from its compact components —
+    /// no `Term` reconstruction, no IRI concatenation.
     pub fn merge_remap(&mut self, other: &Dict) -> Vec<Id> {
         self.terms.reserve(other.terms.len());
         {
             let (terms, prefixes, datatypes) = (&self.terms, &self.prefixes, &self.datatypes);
             self.table
-                .reserve(other.terms.len(), |&i| hash_term(&reconstruct(&terms[(i - 1) as usize], prefixes, datatypes)));
+                .reserve(other.terms.len(), |&i| hash_stored(&terms[(i - 1) as usize], prefixes, datatypes));
         }
-        // Reconstruct each of the other dictionary's terms and re-intern (which rebuilds
-        // this dictionary's prefix / datatype tables), giving a local->global id remap.
-        (0..other.terms.len())
-            .map(|k| {
-                let t = reconstruct(&other.terms[k], &other.prefixes, &other.datatypes);
-                self.intern(&t)
+        other
+            .terms
+            .iter()
+            .map(|s| match s {
+                Stored::Iri { prefix, suffix } => self.intern_iri_parts(&other.prefixes[*prefix as usize], suffix),
+                Stored::Lit { value, datatype, lang } => self.intern_lit(value, other.datatypes[*datatype as usize].as_str(), lang.as_deref()),
+                Stored::Blank(b) => self.intern_blank(b),
             })
             .collect()
     }
@@ -307,8 +428,6 @@ mod tests {
     #[test]
     fn inline_integer_roundtrip_and_boundaries() {
         let mut d = Dict::new();
-        // Canonical non-negative integers inline; the id carries the value and never
-        // touches the dictionary.
         for v in [0u32, 1, 42, INLINE_MAX] {
             let id = d.intern(&int(&v.to_string()));
             assert!(is_inline(id), "{v} should inline");
@@ -322,20 +441,38 @@ mod tests {
     #[test]
     fn non_canonical_and_out_of_range_do_not_inline() {
         let mut d = Dict::new();
-        // Leading zero, explicit sign, and negative are NOT the canonical form, so
-        // they stay DISTINCT dictionary terms (term identity preserved).
         for s in ["05", "+5", "-3", "007"] {
             let id = d.intern(&int(s));
             assert!(!is_inline(id), "{s:?} must not inline");
         }
-        // "05" and "5" are different terms with different ids (one inline, one not).
         assert_ne!(d.intern(&int("05")), d.intern(&int("5")));
-        // A non-integer datatype with an integer lexical form does not inline.
         let typed = Term::Literal(Literal::new_typed_literal("5", xsd::INT));
         assert!(!is_inline(d.intern(&typed)));
-        // INLINE_MAX inlines but INLINE_MAX + 1 (= INLINE_BASE) is out of range.
         assert!(is_inline(d.intern(&int(&INLINE_MAX.to_string()))));
         assert!(!is_inline(d.intern(&int(&(INLINE_BASE).to_string()))));
+    }
+
+    #[test]
+    fn iri_prefix_factoring_roundtrips() {
+        // IRIs sharing a namespace dedupe the prefix; every term round-trips exactly,
+        // and lookup agrees with intern (the content hash matches across paths).
+        let mut d = Dict::new();
+        let iris = ["http://ex/a", "http://ex/b", "http://www.w3.org/2001/XMLSchema#date", "urn:x"];
+        let ids: Vec<Id> = iris.iter().map(|i| d.intern(&Term::NamedNode(NamedNode::new_unchecked(*i)))).collect();
+        for (iri, id) in iris.iter().zip(&ids) {
+            let t = Term::NamedNode(NamedNode::new_unchecked(*iri));
+            assert_eq!(d.term(*id), t);
+            assert_eq!(d.lookup(&t), *id);
+        }
+        // Distinct IRIs get distinct ids; re-interning is idempotent.
+        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), iris.len());
+        assert_eq!(d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a"))), ids[0]);
+        // A language-tagged literal and a typed literal round-trip with their components.
+        let lang = Term::Literal(Literal::new_language_tagged_literal_unchecked("hi", "en"));
+        let dec = Term::Literal(Literal::new_typed_literal("1.0", xsd::DECIMAL));
+        let (lid, did) = (d.intern(&lang), d.intern(&dec));
+        assert_eq!(d.term(lid), lang);
+        assert_eq!(d.term(did), dec);
     }
 
     #[test]
