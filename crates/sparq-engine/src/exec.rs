@@ -1031,7 +1031,10 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         None => graph.store.scan(id_pat),
     };
     let sorted_by = sort_col.and_then(|c| pos_vars[c].clone());
-    let mut rows: Vec<Row> = Vec::with_capacity(scan.rows.len());
+    // Reserve only up to the LIMIT so a small LIMIT over a huge scan does not
+    // allocate for the whole relation (the point of early termination).
+    let cap = limit.map_or(scan.rows.len(), |n| n.min(scan.rows.len()));
+    let mut rows: Vec<Row> = Vec::with_capacity(cap);
     for row in scan.rows {
         let spo = scan.to_spo(row);
         // Pushed-down numeric FILTER: evaluated inline, before materialising the
