@@ -23,7 +23,7 @@ dump and the actual sparq release binary (except where marked "est").
 | **1** | **Parallel decompression** — `lbzip2 -dc` (bzip2 is block-based → ~7×, ~21 min) or recompress source to **zstd** once (`bzcat \| zstd -9 -T8`, ~16 min, parallelizable) | E2E decompress 147 → ~16–21 min | Low | **TODO** (needs `lbzip2` install or one-time recompress) |
 | **2** | **Overlap decompress with parse** — decompress on its own thread feeding a bounded channel, so it runs concurrently with parse+spill instead of additively | hides the parse under the decompress | Low | **DONE** (commit 48b9c22 — `build_external_ntriples_parallel`; measured ~0.39 → ~0.96 M/s on a `.bz2`, ~2.4×) |
 | **3** | **Radix sort** the permutations (MSD on the leading u32 — ids are dense) instead of serial `sort_unstable` in `build_raw_perms`/`external_sort` | build stage 2–4× | Medium | TODO |
-| **4** | **Parallelize `external_sort`** across the 5 sibling permutations (and `par_sort` each run); start sibling sorts before the SPO merge completes | build 2–3× more (eff. cores 1.4 → 8) | Medium | TODO |
+| **4** | **Parallelize `external_sort`** across the 5 sibling permutations (each in its own tmp subdir, sharing the chunk budget) | build stage faster (eff. cores → ~5) | Medium | **DONE** (commit c391dde — external build 10M from `.nt` 6.8s → 4.4s, −35%) |
 
 `lbzip2`/zstd (#1) is the single biggest win — bzip2 is 70% of E2E wall-time and ~7×
 parallelizable. #2 (done) overlaps the rest. #3–#4 then stop the build stage from being
