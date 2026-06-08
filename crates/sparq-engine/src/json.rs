@@ -137,17 +137,64 @@ pub(crate) fn term_to_json(s: &mut String, t: &Term) {
     }
 }
 
-/// Appends `s` to `out` with JSON string escaping.
+/// Appends `s` to `out` with JSON string escaping. Bulk-copies maximal runs of
+/// already-safe text and only handles the rare escape byte individually — the common
+/// (no-escape) value is a single `push_str`, which matters when serialising millions of
+/// result cells. Byte-level is safe: every escaped byte is ASCII (< 0x80), so UTF-8
+/// multi-byte sequences (all bytes ≥ 0x80) are never split and pass through in a run.
 pub(crate) fn escape_into(out: &mut String, s: &str) {
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let esc: &str = match b {
+            b'"' => "\\\"",
+            b'\\' => "\\\\",
+            b'\n' => "\\n",
+            b'\r' => "\\r",
+            b'\t' => "\\t",
+            0x00..=0x1f => {
+                // Other control character → \u00XX.
+                out.push_str(&s[start..i]);
+                out.push_str("\\u00");
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0xf) as usize] as char);
+                start = i + 1;
+                continue;
+            }
+            _ => continue,
+        };
+        out.push_str(&s[start..i]);
+        out.push_str(esc);
+        start = i + 1;
+    }
+    out.push_str(&s[start..]);
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::escape_into;
+
+    fn esc(s: &str) -> String {
+        let mut out = String::new();
+        escape_into(&mut out, s);
+        out
+    }
+
+    #[test]
+    fn escapes_match_json_semantics() {
+        assert_eq!(esc(""), "");
+        assert_eq!(esc("plain text 123"), "plain text 123");
+        assert_eq!(esc("a\"b"), "a\\\"b");
+        assert_eq!(esc("a\\b"), "a\\\\b");
+        assert_eq!(esc("a\nb\tc\rd"), "a\\nb\\tc\\rd");
+        // Other control characters → \u00XX (lowercase hex).
+        assert_eq!(esc("\u{0}\u{1f}\u{7}"), "\\u0000\\u001f\\u0007");
+        // Multi-byte UTF-8 passes through untouched (bytes are all >= 0x80).
+        assert_eq!(esc("café — 日本語 😀"), "café — 日本語 😀");
+        // Mixed: clean run, escape, clean run.
+        assert_eq!(esc("http://ex/a\"x/é"), "http://ex/a\\\"x/é");
+        // DEL (0x7f) is NOT a JSON-required escape — passes through.
+        assert_eq!(esc("\u{7f}"), "\u{7f}");
     }
 }

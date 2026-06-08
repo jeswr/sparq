@@ -528,8 +528,31 @@ The lesson: for a *join*, the `Bindings` intermediate is NOT the bottleneck — 
 compute (hash build + probe) and the result serialisation (q04 is **701 MB** of JSON)
 dominate, so fusing away the intermediate `Vec<Row>` saves nothing measurable. Streaming
 only pays where the per-row materialisation is a real fraction of the work — i.e. the
-*single-pattern* (scan / scan+filter) case, which is kept. Further materialise gains need
-faster join compute or smaller output, not removing the intermediate.
+*single-pattern* (scan / scan+filter) case, which is kept.
+
+### The materialise path is OUTPUT-bound, not compute-bound (so "columnar execution" wouldn't help it)
+
+Measured q04 (5M result rows, 10M dataset) across modes — *same join*, different output:
+
+| mode | q04 time | what it does |
+|---|--:|---|
+| count | **23.5 ms** | lazy join cardinality (Σ over the join var) |
+| materialise → Terms | 1127 ms | builds 5M rows + 15M `oxrdf::Term`s |
+| query_json | 1276 ms | builds 5M rows + **701 MB** of JSON |
+
+The join *compute* is 23 ms; the 1100+ ms is **producing and serialising 15M output
+cells** — inherent to a 5M×3 result, independent of the join algorithm. So the
+oft-named "columnar/vectorised execution" lever (a *compute* optimisation) would not move
+the materialise path here — it is output-bound, and the output is what the query asked
+for. The only real lever is output-conversion efficiency.
+
+**Bounded win taken there:** the JSON string escaper (`escape_into`, called once per
+output cell — 15M times for q04) pushed char-by-char; rewritten to bulk-copy maximal
+already-safe runs and only handle the rare escape byte individually (byte-level, safe for
+UTF-8 since every escaped byte is ASCII). **q04 JSON 1276 → 1034 ms (−19%)**, validated by
+50k differential cases (incl. the `query_json` multiset check) + an escaper unit test.
+Further materialise gains need a more compact result *format* (an API change) or faster
+output — not a columnar *engine*.
 
 ## Correctness validation (differential vs Oxigraph) + known limitations
 
