@@ -41,10 +41,22 @@ impl Store {
     }
 
     /// Runs a SELECT query and returns the results as a SPARQL 1.1 JSON string
-    /// (`application/sparql-results+json`).
+    /// (`application/sparql-results+json`). Benefits from the engine's streaming
+    /// optimisations: LIMIT stops the scan early, numeric FILTERs are pushed into
+    /// the scan, OPTIONAL uses a sort-merge join, and COUNT(*) is computed from the
+    /// index without materialising — all of which matter even more in the browser,
+    /// where memory and main-thread time are scarce.
     pub fn query(&self, sparql: &str) -> Result<String, JsError> {
         let res = sparq_engine::query(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
         Ok(sparq_engine::json::to_sparql_json(&res))
+    }
+
+    /// Counts the solutions of a SELECT query *without* materialising them — for a
+    /// single-pattern scan or a two-pattern join the count is read straight from
+    /// the index (no result rows built). Ideal for "how many?" UI queries on a
+    /// memory-constrained device.
+    pub fn count(&self, sparql: &str) -> Result<usize, JsError> {
+        sparq_engine::count(&self.graph, sparql).map_err(|e| JsError::new(&e))
     }
 }
 

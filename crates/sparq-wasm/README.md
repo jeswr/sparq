@@ -31,11 +31,30 @@ store.heapBytes();      // rough in-memory footprint
 
 const json = store.query("SELECT * WHERE { ?s ?p ?o } LIMIT 10");
 const { head, results } = JSON.parse(json); // SPARQL 1.1 JSON results
+
+const n = store.count("SELECT ?s WHERE { ?s a <http://ex/Person> }"); // lazy, no materialise
 ```
 
 `query` supports the M2 surface: BGPs (binary + WCOJ), FILTER, OPTIONAL, UNION,
 MINUS, BIND, VALUES, aggregation (GROUP BY / HAVING), ORDER BY, DISTINCT/LIMIT/
 OFFSET, sub-SELECT.
+
+### Streaming wins carry over to the browser
+
+The same engine optimisations apply in WASM, where memory and main-thread time are
+scarcest. Measured in Node over a 400k-triple graph (`test/perf.cjs`):
+
+| query | time |
+|---|--:|
+| `SELECT * … LIMIT 10` (early-termination, no full scan) | **0.026 ms** |
+| `count(?s a Person)` (lazy, index range size) | **0.010 ms** |
+| `count(follows · name)` (count-only join, no row materialise) | 1.5 ms |
+| `FILTER(?a > 90)` (pushed into the sorted scan) | 2.3 ms |
+| `OPTIONAL` (sort-merge left join) | 64 ms |
+
+`store.count(sparql)` exposes the lazy count directly (a single-pattern scan or a
+two-pattern join is counted from the index with no result rows built) — ideal for
+"how many?" UI queries on a memory-constrained device.
 
 ## Bundle size (release, wasm-opt -Oz)
 
