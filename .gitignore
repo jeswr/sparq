@@ -2,3 +2,4 @@
 Cargo.lock
 /.qlever-venv
 /bench/native-qlever/
+/dist

@@ -1,0 +1,51 @@
+# Build hardware-tiered sparq-cli release binaries on NATIVE runners.
+#
+# Each tier is compiled on a runner of its own architecture (no cross-toolchain needed),
+# which is the robust path: aarch64 builds on macos-14 (Apple silicon), x86-64 tiers on
+# ubuntu. Microarch tiers exist only where they pay off — see
+# research/hardware/optimization-findings.md (target-cpu=native is a NO-OP on Apple
+# silicon, so darwin ships a single binary).
+#
+# Triggers: version tags (v*) and manual dispatch only — never on ordinary pushes.
+name: dist
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.tier }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple silicon: ONE binary, no target-cpu (Darwin baseline already enables
+          # every Apple-silicon feature; native unlocks zero new instructions).
+          - { tier: arm64-darwin,  os: macos-14,      target: aarch64-apple-darwin,       cpu: "" }
+          # x86-64 server tiers: baseline (runs anywhere) + v3 (AVX2/BMI2/FMA, ~95% of
+          # live servers) + v4 (AVX-512, newest). A launcher picks by /proc/cpuinfo.
+          - { tier: x64-baseline,  os: ubuntu-latest, target: x86_64-unknown-linux-gnu,   cpu: x86-64 }
+          - { tier: x64-v3,        os: ubuntu-latest, target: x86_64-unknown-linux-gnu,   cpu: x86-64-v3 }
+          - { tier: x64-v4,        os: ubuntu-latest, target: x86_64-unknown-linux-gnu,   cpu: x86-64-v4 }
+          # Generic aarch64 server (Graviton/Ampere): neoverse-n1 + LSE atomics.
+          - { tier: arm64-linux,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, cpu: neoverse-n1 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust + target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+      - name: Build (${{ matrix.cpu || 'default-cpu' }})
+        run: |
+          FLAGS=""
+          [ -n "${{ matrix.cpu }}" ] && FLAGS="-Ctarget-cpu=${{ matrix.cpu }}"
+          [ "${{ matrix.tier }}" = "arm64-linux" ] && FLAGS="$FLAGS -Ctarget-feature=+lse"
+          RUSTFLAGS="$FLAGS" cargo build --release -p sparq-cli --target ${{ matrix.target }}
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/sparq-cli dist/sparq-cli-${{ matrix.tier }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sparq-cli-${{ matrix.tier }}
+          path: dist/sparq-cli-${{ matrix.tier }}

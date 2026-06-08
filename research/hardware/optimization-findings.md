@@ -60,16 +60,30 @@ keys are already contiguous. Standalone, it's an uncertain win; the right sequen
 columnar-execution first, *then* the SIMD kernel falls out naturally. Measure-first verdict:
 do not hand-write the kernel against the current row-major layout.
 
-## 3. PGO / BOLT
+## 3. PGO / BOLT — MEASURED: marginal, below adoption threshold
 
-- **PGO: worth one try (~3–8%), low effort.** Branchy planner code (`eval_bgp_binary`,
-  `NumCmp::test`, `term`/`term_parts` match arms) is where PGO's branch-layout wins land.
-  ```
-  RUSTFLAGS="-Cprofile-generate=/tmp/pgo" cargo build --release -p sparq-cli
-  ./target/release/sparq-cli bench …/synthetic.nt ntriples …/queries 5 json   # train (JSON touches joins+materialise+escape)
-  llvm-profdata merge -o /tmp/pgo/merged.profdata /tmp/pgo/*.profraw
-  RUSTFLAGS="-Cprofile-use=/tmp/pgo/merged.profdata" cargo build --release -p sparq-cli
-  ```
+**PGO tried end-to-end on this M1 (`llvm-tools-preview`, instrument → train on the 10M
+synthetic with `bench … json` → merge → rebuild → interleaved best-of-5 A/B). Result: net
+−2.0% query time, noisy and mixed — NOT worth defaulting.**
+
+| query | base µs | pgo µs | Δ |
+|---|--:|--:|--:|
+| q04_follows_name (1.36 s — dominant join) | 1364771 | 1384785 | **+1.5%** |
+| q03_star3 | 418993 | 340708 | −18.7% |
+| q10_optional_age | 308759 | 327260 | **+6.0%** |
+| q02_type_person | 83568 | 81379 | −2.6% |
+| q06_filter_age | 20386 | 19271 | −5.5% |
+| q09_count_edges (100 µs — noise) | 597 | 116 | −80.5% |
+| **TOTAL query µs** | 2197074 | 2153519 | **−2.0%** |
+
+The **dominant** query (q04, 62% of the total) is flat-to-worse, and two heavy queries
+(q04, q10) regress — so the −2.0% net is within run-to-run noise and below the ≥5% keep
+bar. This **confirms §1**: the engine is bandwidth/latency-bound, so PGO's branch-layout
+wins have little surface area on M1. **Verdict: do NOT make PGO the default** (it needs
+training data + two builds + `llvm-tools`, for a sub-threshold non-robust gain). It is kept
+as an **opt-in** `PGO=1 scripts/build-dist.sh <tier>` for users to try on their own x86
+hardware/workload, where branchy planner code (`eval_bgp_binary`, `NumCmp::test`,
+`term`/`term_parts` match arms) has more to gain.
 - **BOLT: skip** — Mach-O unsupported; D-cache/bandwidth-bound anyway.
 
 ## 4. Distribution strategy for hardware-optimised builds
@@ -82,11 +96,21 @@ enables every feature). Tiering is real only on x86-64 / generic aarch64-linux.
 - **x86-64: ship microarch tiers** — `x86-64` baseline + **`x86-64-v3`** (AVX2/BMI2/FMA,
   ~95% of live servers; AVX2 genuinely unlocks the autovectorized loops) + optional v4.
 - **aarch64-linux: one `neoverse-n1`/`+lse` build** (LSE atomics help contended rayon).
-- **Mechanism: pre-built tiers** (3–4 CI artifacts; a launcher picks the x86 tier from
-  `/proc/cpuinfo`) **+ the `multiversion` crate on JUST the intersection kernel** (a few KB)
-  so a single binary picks NEON/AVX2 vs scalar at runtime. Don't multiversion
-  whole-program (bloats `.text` for no gain on bandwidth-bound bulk). `target-cpu=native`
-  per-machine only for self-compiling power users on Linux/x86.
+- **Mechanism — now IMPLEMENTED** (this is the deliverable for "distribute builds optimised
+  to particular hardware"):
+  - **`.github/workflows/dist.yml`** — builds all 5 tiers on **native** runners (no
+    cross-toolchain): `arm64-darwin` (macos-14), `x64-baseline/v3/v4` (ubuntu),
+    `arm64-linux` neoverse+lse (ubuntu-arm). Triggers on `v*` tags + manual dispatch only.
+  - **`scripts/build-dist.sh`** — host-aware local builder (`PGO=1` for the opt-in
+    profile-guided variant); builds host-native tiers, prints recipes for the rest.
+  - **`scripts/sparq-launch.sh`** — the runtime dispatcher: reads `/proc/cpuinfo` and
+    exec's the richest tier the CPU advertises (v4→v3→baseline), with fallback. Ship it as
+    the "fat package" so one download self-selects the optimal binary.
+  - **Future** `multiversion` crate on JUST the intersection kernel (a few KB) once that
+    NEON/AVX2 kernel exists (coupled to the columnar layout, §2) — so a single binary picks
+    SIMD-vs-scalar at runtime. Don't multiversion whole-program (bloats `.text` for no gain
+    on bandwidth-bound bulk). `target-cpu=native` per-machine only for self-compiling power
+    users on Linux/x86.
 
 ## 5. Cache / memory (128-byte lines)
 
@@ -107,9 +131,11 @@ enables every feature). Tiering is real only on x86-64 / generic aarch64-linux.
 2. ONE NEON kernel: sorted-set intersection for merge-join/LFTJ (1.6–2.8×), multiversioned
    for the Linux/x86 build.
 3. Prefetch the hash-probe + binary search (1.2–1.6×, low risk).
-4. PGO once (JSON training set); keep if ≥5%. No BOLT.
-5. Distribution: single arm64-darwin binary; tiered `x86-64-v3`/baseline + `neoverse`
-   Linux; runtime-detect only the intersection kernel.
+4. PGO: **tried, net −2.0% (noisy, below the ≥5% bar) — not default.** Kept as `PGO=1`
+   opt-in in `build-dist.sh` for x86/own-workload users. No BOLT.
+5. Distribution: **implemented** — `dist.yml` (5 tiers on native runners) + `build-dist.sh`
+   + `sparq-launch.sh` (runtime `/proc/cpuinfo` tier dispatch). Single arm64-darwin binary;
+   tiered `x86-64-v3`/`v4`/baseline + `neoverse` Linux. (Per-kernel multiversion later.)
 
 The structural wins (column compression, tagged ValueIds — M3/M4) remain far larger than
 anything here.
