@@ -24,7 +24,42 @@ pub struct Graph {
     /// non-numeric terms). Lets the engine evaluate numeric filters / comparisons
     /// / ORDER BY without materialising the term and parsing its string each time
     /// — a lightweight, u32-id-preserving stand-in for QLever's inline ValueIds.
-    numerics: Vec<f64>,
+    numerics: NumData,
+}
+
+/// Backing storage for the numeric-value cache: owned in RAM (after a load/build) or,
+/// with the `mmap` feature, memory-mapped from disk — so the out-of-core open path
+/// neither recomputes it (re-parsing every term) nor holds it resident.
+enum NumData {
+    Owned(Vec<f64>),
+    #[cfg(feature = "mmap")]
+    Mapped(memmap2::Mmap),
+}
+
+impl NumData {
+    #[inline]
+    fn as_slice(&self) -> &[f64] {
+        match self {
+            NumData::Owned(v) => v,
+            #[cfg(feature = "mmap")]
+            NumData::Mapped(m) => {
+                let n = m.len() / std::mem::size_of::<f64>();
+                // SAFETY: numerics.bin is a whole number of f64; the mmap base is
+                // page-aligned (>= the 8-byte f64 alignment).
+                unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<f64>(), n) }
+            }
+        }
+    }
+
+    /// Resident heap bytes (a memory-mapped cache contributes 0 — it is page cache).
+    #[inline]
+    fn heap_bytes(&self) -> usize {
+        match self {
+            NumData::Owned(v) => v.capacity() * std::mem::size_of::<f64>(),
+            #[cfg(feature = "mmap")]
+            NumData::Mapped(_) => 0,
+        }
+    }
 }
 
 /// The f64 value of a term if it is a numeric XSD literal, else NaN.
@@ -166,7 +201,7 @@ impl Graph {
     /// string and streaming loaders).
     fn build(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         let store = TripleStore::from_triples(triples);
-        let numerics = numerics_of(&dict);
+        let numerics = NumData::Owned(numerics_of(&dict));
         Graph { dict, store, numerics }
     }
 
@@ -177,17 +212,28 @@ impl Graph {
     pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         self.store.save(dir)?;
-        self.dict.save(&dir.join("dict.bin"))
+        self.dict.save(&dir.join("dict.bin"))?;
+        write_numerics(&dir.join("numerics.bin"), self.numerics.as_slice())
     }
 
-    /// Opens a graph saved by [`save`](Self::save) with its permutation indexes
-    /// MEMORY-MAPPED (paged in on demand). The dictionary is loaded into RAM and the
-    /// numeric cache recomputed; the large permutation indexes stay on disk.
+    /// Opens a graph saved by [`save`](Self::save) with its permutation indexes AND
+    /// numeric-value cache MEMORY-MAPPED (paged in on demand) — so a large out-of-core
+    /// dataset opens near-instantly without re-parsing every term, and the cache stays
+    /// off the heap. The dictionary is loaded into RAM; the big indexes stay on disk. If
+    /// `numerics.bin` is absent or stale (a graph saved before this cache existed), the
+    /// cache is recomputed, preserving backward compatibility.
     #[cfg(feature = "mmap")]
     pub fn open(dir: &std::path::Path) -> std::io::Result<Graph> {
         let store = TripleStore::open(dir)?;
         let dict = Dict::open(&dir.join("dict.bin"))?;
-        let numerics = numerics_of(&dict);
+        let np = dir.join("numerics.bin");
+        let numerics = match std::fs::File::open(&np) {
+            Ok(f) if f.metadata()?.len() as usize == dict.len() * std::mem::size_of::<f64>() => {
+                // SAFETY: the file is owned by this graph for its lifetime and not mutated.
+                NumData::Mapped(unsafe { memmap2::Mmap::map(&f)? })
+            }
+            _ => NumData::Owned(numerics_of(&dict)),
+        };
         Ok(Graph { dict, store, numerics })
     }
 
@@ -286,6 +332,8 @@ impl Graph {
         }
 
         dict.save(&dir.join("dict.bin")).map_err(|e| e.to_string())?;
+        // Persist the numeric-value cache so `open` mmaps it instead of recomputing.
+        write_numerics(&dir.join("numerics.bin"), &numerics_of(&dict)).map_err(|e| e.to_string())?;
         std::fs::remove_dir_all(&tmp).ok();
         Ok(())
     }
@@ -298,7 +346,7 @@ impl Graph {
         if dict::is_inline(id) {
             return Some((id - dict::INLINE_BASE) as f64);
         }
-        let v = *self.numerics.get((id - 1) as usize)?;
+        let v = *self.numerics.as_slice().get((id - 1) as usize)?;
         if v.is_nan() {
             None
         } else {
@@ -317,7 +365,7 @@ impl Graph {
     /// A rough estimate of the graph's in-memory footprint in bytes (dictionary +
     /// the six permutation indexes), for benchmarking.
     pub fn heap_bytes(&self) -> usize {
-        self.dict.heap_bytes() + self.store.heap_bytes() + self.numerics.capacity() * std::mem::size_of::<f64>()
+        self.dict.heap_bytes() + self.store.heap_bytes() + self.numerics.heap_bytes()
     }
 
     /// Resolves a term to its id, or `None` if the term is absent (so a pattern
@@ -368,6 +416,15 @@ fn numerics_of(dict: &Dict) -> Vec<f64> {
     {
         (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
     }
+}
+
+/// Writes the numeric-value cache to disk (raw little-endian f64) so it can be
+/// memory-mapped on open instead of recomputed.
+#[cfg(feature = "mmap")]
+fn write_numerics(path: &std::path::Path, nums: &[f64]) -> std::io::Result<()> {
+    // SAFETY: reinterpret the contiguous f64 cache as bytes for writing.
+    let bytes = unsafe { std::slice::from_raw_parts(nums.as_ptr().cast::<u8>(), std::mem::size_of_val(nums)) };
+    std::fs::write(path, bytes)
 }
 
 fn subject_term(s: &oxrdf::NamedOrBlankNode) -> Term {
@@ -476,6 +533,22 @@ mod tests {
             v
         };
         assert_eq!(dump(&g), dump(&g2), "mmap-reopened store differs");
+
+        // The numeric-value cache must round-trip through its memory-mapped form: every
+        // numeric literal resolves to the same f64 (and non-numerics to None) as before.
+        assert!(dir.join("numerics.bin").exists(), "numerics cache not persisted");
+        assert!(matches!(g2.numerics, NumData::Mapped(_)), "numerics not mmap'd on open");
+        for v in [0u32, 1, 42, 250, 499] {
+            let lit = Term::Literal(Literal::new_typed_literal(v.to_string(), xsd::INTEGER));
+            if let Some(id) = g.id_of(&lit) {
+                assert_eq!(g.numeric_value(id), Some(v as f64));
+                assert_eq!(g2.numeric_value(id), Some(v as f64), "mmap'd numeric differs for {v}");
+            }
+        }
+        // A non-numeric term (the language-tagged literal) must be None in both.
+        if let Some(id) = g.id_of(&Term::Literal(Literal::new_language_tagged_literal("café", "fr").unwrap())) {
+            assert_eq!(g2.numeric_value(id), None);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
