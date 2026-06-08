@@ -24,6 +24,11 @@ use std::cmp::Ordering;
 /// row — the dominant cost on large join results.
 type Row = SmallVec<[Id; 4]>;
 
+/// A join / group key (the ids of the shared or grouping columns). Inlined up to
+/// 2 columns — most joins are on one or two variables — so building a hash table
+/// or probing it allocates nothing per key.
+type Key = SmallVec<[Id; 2]>;
+
 /// Ids at or above this base index into the per-query [`LocalVocab`] instead of
 /// the graph dictionary. (M2 uses `u32` ids; the tagged 64-bit ValueId of M4
 /// removes this watermark split.)
@@ -908,14 +913,14 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
             i
         })
         .collect();
-    let mut table: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
+    let mut table: FxHashMap<Key, Vec<usize>> = FxHashMap::default();
     for (ri, row) in build.rows.iter().enumerate() {
-        let key: Vec<Id> = shared.iter().map(|&(bi, _)| row[bi]).collect();
+        let key: Key = shared.iter().map(|&(bi, _)| row[bi]).collect();
         table.entry(key).or_default().push(ri);
     }
     let mut rows = Vec::new();
     for prow in &probe.rows {
-        let key: Vec<Id> = shared.iter().map(|&(_, pi)| prow[pi]).collect();
+        let key: Key = shared.iter().map(|&(_, pi)| prow[pi]).collect();
         if let Some(matches) = table.get(&key) {
             for &bi in matches {
                 let mut combined = build.rows[bi].clone();
@@ -985,9 +990,9 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
     // unbound, in which case they act as wildcards).
     let lcols: Vec<usize> = shared.iter().map(|&(lc, _)| lc).collect();
     let rcols: Vec<usize> = shared.iter().map(|&(_, rc)| rc).collect();
-    let table: Option<FxHashMap<Vec<Id>, Vec<usize>>> =
+    let table: Option<FxHashMap<Key, Vec<usize>>> =
         if !shared.is_empty() && !any_unbound(&left.rows, &lcols) && !any_unbound(&right.rows, &rcols) {
-            let mut t: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
+            let mut t: FxHashMap<Key, Vec<usize>> = FxHashMap::default();
             for (ri, row) in right.rows.iter().enumerate() {
                 t.entry(rcols.iter().map(|&c| row[c]).collect()).or_default().push(ri);
             }
@@ -998,10 +1003,13 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
 
     let mut rows = Vec::new();
     for lrow in &left.rows {
-        let candidates: Vec<usize> = match &table {
+        // Inline (no heap alloc per left row): an OPTIONAL key usually has 0–1
+        // matches. The hashed branch copies the matching indices by value rather
+        // than cloning the table's Vec.
+        let candidates: SmallVec<[usize; 4]> = match &table {
             Some(t) => {
-                let key: Vec<Id> = lcols.iter().map(|&c| lrow[c]).collect();
-                t.get(&key).cloned().unwrap_or_default()
+                let key: Key = lcols.iter().map(|&c| lrow[c]).collect();
+                t.get(&key).map(|v| v.iter().copied().collect()).unwrap_or_default()
             }
             None => (0..right.rows.len()).filter(|&ri| compatible(lrow, &right.rows[ri], &shared)).collect(),
         };
@@ -1073,14 +1081,14 @@ fn minus_bindings(left: Bindings, right: Bindings) -> Bindings {
     // Fast path: shared columns fully bound -> compatibility is exact-key equality
     // and the domains always overlap, so membership in a hash set suffices.
     if !any_unbound(&left.rows, &lcols) && !any_unbound(&right.rows, &rcols) {
-        let mut table: FxHashMap<Vec<Id>, ()> = FxHashMap::default();
+        let mut table: FxHashMap<Key, ()> = FxHashMap::default();
         for row in &right.rows {
             table.insert(rcols.iter().map(|&c| row[c]).collect(), ());
         }
         let rows: Vec<Row> = left
             .rows
             .into_iter()
-            .filter(|row| !table.contains_key(&lcols.iter().map(|&c| row[c]).collect::<Vec<_>>()))
+            .filter(|row| !table.contains_key(&lcols.iter().map(|&c| row[c]).collect::<Key>()))
             .collect();
         return Bindings { vars: left.vars, rows, sorted_by: left.sorted_by };
     }
@@ -1152,10 +1160,10 @@ fn group_aggregate(
     let key_cols: Vec<usize> = group_vars.iter().map(|v| b.col(v).expect("group var present")).collect();
 
     // Group rows by the group-key id tuple, preserving first-seen order.
-    let mut groups: FxHashMap<Vec<Id>, Vec<usize>> = FxHashMap::default();
-    let mut order: Vec<Vec<Id>> = Vec::new();
+    let mut groups: FxHashMap<Key, Vec<usize>> = FxHashMap::default();
+    let mut order: Vec<Key> = Vec::new();
     for (ri, row) in b.rows.iter().enumerate() {
-        let key: Vec<Id> = key_cols.iter().map(|&c| row[c]).collect();
+        let key: Key = key_cols.iter().map(|&c| row[c]).collect();
         groups.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
             Vec::new()
@@ -1164,8 +1172,8 @@ fn group_aggregate(
     }
     // Whole-dataset aggregate with no GROUP BY: one (empty) group, even if input is empty.
     if group_vars.is_empty() && order.is_empty() {
-        order.push(vec![]);
-        groups.insert(vec![], vec![]);
+        order.push(Key::new());
+        groups.insert(Key::new(), vec![]);
     }
 
     let mut out_vars: Vec<Variable> = group_vars.to_vec();
