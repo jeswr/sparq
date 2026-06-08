@@ -71,6 +71,10 @@ fn cmd_bench(args: &[String]) {
     };
     let iters: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(5);
     let mode = args.get(6).map(String::as_str).unwrap_or("materialize");
+    if !matches!(mode, "count" | "materialize" | "json") {
+        eprintln!("unknown mode `{mode}`; expected count | materialize | json");
+        std::process::exit(2);
+    }
     let g = load(path, format);
 
     // Collect *.rq files, sorted by name.

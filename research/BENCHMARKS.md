@@ -116,24 +116,29 @@ workloads). Reproduce:
 ```sh
 cd bench/qlever-olympics
 ../../.qlever-venv/bin/qlever setup-config olympics && qlever get-data && qlever index && qlever start
-../../.qlever-venv/bin/python compare.py 5 queries        json         # fair end-to-end
-../../.qlever-venv/bin/python compare.py 5 queries-count  materialize  # fair compute-only
+../../.qlever-venv/bin/python compare.py 5 endtoend   # fair end-to-end (both serialise JSON)
+../../.qlever-venv/bin/python compare.py 5 compute    # fair compute-only
 ```
 
 Min of 5 **cold** runs each (QLever cache cleared every run; sparq has no query
-cache). **All 10 queries returned result sizes identical to QLever** — a strong
-correctness cross-check against an independent engine.
+cache). **All 10 queries returned result sizes identical to QLever**, and in the
+compute pass sparq's solution counts equal QLever's `COUNT(*)` values exactly — a
+strong correctness cross-check against an independent engine.
 
 **Two measurements, because output serialisation dominates and must be matched:**
 
-| pass | what both do | geomean (qlever/sparq) | winner |
-|---|---|--:|---|
-| end-to-end (full SPARQL JSON) | compute **+ serialise all rows to JSON** | 2.71× | sparq faster |
-| **compute only** (COUNT-wrapped) | compute the join, return 1 row | **0.32×** | **QLever ~3× faster** |
+| pass | what both do | queries | geomean (qlever/sparq) | winner |
+|---|---|--:|--:|---|
+| end-to-end (full SPARQL JSON) | compute **+ serialise all rows to JSON** | 10 | 2.56× | sparq faster |
+| **compute only** (COUNT-wrapped) | compute the join, return the count | 8† | **0.31×** | **QLever ~3.2× faster** |
+
+† the 8 BGP/scan/filter/OPTIONAL queries; the two queries that are themselves
+aggregates (`q01 count-all`, `q09 group-by`) have no COUNT-wrapped form and are
+covered by the end-to-end pass only.
 
 ### The honest reading
 
-- **QLever's query *engine* is ~3× faster than sparq** on these joins/scans
+- **QLever's query *engine* is ~3.2× faster than sparq** on these joins/scans
   (compute-only pass), winning every query — and most dramatically the numeric
   **FILTER (q06): 14× faster**. sparq evaluates a filter by materialising each id
   to a term and parsing the number per row; QLever's tagged ValueIds + columnar
