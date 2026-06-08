@@ -17,3 +17,5 @@ oxrdf.workspace = true
 # Streaming decompression for the ingest experiment (gzip + bzip2).
 flate2 = "1"
 bzip2 = "0.5"
+# Direct mmap for the compression probe (measure-first sizing of permutation indexes).
+memmap2 = { workspace = true }

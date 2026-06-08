@@ -26,6 +26,7 @@ fn main() {
         Some("save") => cmd_save(&args),
         Some("build") => cmd_build(&args),
         Some("query-mmap") => cmd_query_mmap(&args),
+        Some("probe-compress") => cmd_probe_compress(&args),
         _ => {
             eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir>          # build + persist indexes to disk\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
@@ -201,6 +202,98 @@ fn cmd_build(args: &[String]) {
         t.elapsed().as_secs_f64(),
         chunk / 1_000_000,
     );
+}
+
+/// `probe-compress <perm-file>` — MEASURE-FIRST probe (no engine change): how small can a
+/// sorted permutation index get? Reports raw vs a lexicographic delta + LEB128-varint
+/// encoding (the natural columnar scheme for sorted triples) vs gzip, in bytes/triple, so
+/// we can decide whether a block-compressed backend is worth building before building it.
+fn cmd_probe_compress(args: &[String]) {
+    let path = match args.get(2) {
+        Some(p) => p.as_str(),
+        None => {
+            eprintln!("usage: sparq-cli probe-compress <perm-file>");
+            std::process::exit(2);
+        }
+    };
+    let file = std::fs::File::open(path).unwrap_or_else(|e| {
+        eprintln!("open {path}: {e}");
+        std::process::exit(1);
+    });
+    // SAFETY: read-only mmap of a file held open for the call.
+    let map = unsafe { memmap2::Mmap::map(&file) }.unwrap();
+    let n = map.len() / 12;
+    // SAFETY: a permutation file is a whole number of [u32;3] rows.
+    let rows: &[[u32; 3]] = unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[u32; 3]>(), n) };
+    if n == 0 {
+        eprintln!("empty permutation");
+        return;
+    }
+
+    // LEB128 byte length of a u64.
+    let vlen = |mut x: u64| -> usize {
+        let mut b = 1;
+        while x >= 0x80 {
+            x >>= 7;
+            b += 1;
+        }
+        b
+    };
+
+    // Lexicographic delta: per row emit 3 varints (d0, x1, x2). When the higher column
+    // changes the lower one is absolute; otherwise it is a (non-negative) delta. Exactly
+    // decodable from the previous row — the standard sorted-triple columnar encoding.
+    let t = Instant::now();
+    let mut delta_bytes = 0usize;
+    let mut prev = [0u32; 3];
+    for &r in rows {
+        if r[0] != prev[0] {
+            delta_bytes += vlen((r[0] - prev[0]) as u64) + vlen(r[1] as u64) + vlen(r[2] as u64);
+        } else if r[1] != prev[1] {
+            delta_bytes += 1 + vlen((r[1] - prev[1]) as u64) + vlen(r[2] as u64);
+        } else {
+            delta_bytes += 1 + 1 + vlen(r[2].wrapping_sub(prev[2]) as u64);
+        }
+        prev = r;
+    }
+    let dscan = t.elapsed().as_secs_f64();
+
+    // Block-directory overhead for random access: one (12-byte key + 8-byte offset) entry
+    // per block of `B` triples.
+    let block_dir = |b: usize| -> f64 { (n.div_ceil(b) * 20) as f64 / n as f64 };
+
+    println!("permutation: {path}");
+    println!("  triples           : {n}");
+    println!("  raw               : {:>6.2} B/triple ({:.2} GB)", 12.0, map.len() as f64 / 1e9);
+    println!(
+        "  delta+varint      : {:>6.2} B/triple ({:.2} GB, {:.0}% of raw)  [{:.2} M/s decode-cost scan]",
+        delta_bytes as f64 / n as f64,
+        delta_bytes as f64 / 1e9,
+        100.0 * delta_bytes as f64 / map.len() as f64,
+        n as f64 / 1e6 / dscan,
+    );
+    println!(
+        "  + block dir (B=128): +{:.2} B/triple  => {:.2} B/triple usable random-access",
+        block_dir(128),
+        delta_bytes as f64 / n as f64 + block_dir(128),
+    );
+
+    // gzip the raw bytes as a general-purpose ceiling — only for smaller files (it is slow).
+    if map.len() <= 200_000_000 {
+        use std::io::Write;
+        let tg = Instant::now();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&map).unwrap();
+        let gz = enc.finish().unwrap().len();
+        println!(
+            "  gzip(raw)         : {:>6.2} B/triple ({:.0}% of raw)  [{:.2} M/s]",
+            gz as f64 / n as f64,
+            100.0 * gz as f64 / map.len() as f64,
+            n as f64 / 1e6 / tg.elapsed().as_secs_f64(),
+        );
+    } else {
+        println!("  gzip(raw)         : skipped (>200 MB; delta+varint is the fast, random-accessible scheme anyway)");
+    }
 }
 
 /// `query-mmap <dir> <sparql>` — open a saved dataset with memory-mapped indexes and
