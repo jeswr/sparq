@@ -14,6 +14,7 @@
 //!
 //! `format`: turtle | ntriples | nquads | trig.
 
+use std::io::Read;
 use std::time::Instant;
 
 fn main() {
@@ -21,10 +22,122 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("query") => cmd_query(&args),
         Some("bench") => cmd_bench(&args),
+        Some("ingest") => cmd_ingest(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]");
             std::process::exit(2);
         }
+    }
+}
+
+/// Streaming-ingest throughput experiment (for the Wikidata-vs-RDFox comparison).
+/// Decompresses (.gz/.bz2) and parses N-Triples from a stream, never holding the
+/// whole document on disk or in memory:
+///   parse  — decompress + parse + count only (constant memory, unbounded): the
+///            raw front-end ceiling.
+///   intern — + dictionary interning (memory grows with distinct terms); capped.
+///   full   — + collect triples and build the six permutation indexes; capped.
+/// Reports triples/s and extrapolates to full Wikidata truthy (~8.0B triples).
+fn cmd_ingest(args: &[String]) {
+    let path = match args.get(2) {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("usage: sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]");
+            std::process::exit(2);
+        }
+    };
+    let mode = args.get(3).map(String::as_str).unwrap_or("parse");
+    let cap: u64 = args.get(4).and_then(|s| s.parse::<u64>().ok()).map(|m| m * 1_000_000).unwrap_or(u64::MAX);
+
+    let file = std::fs::File::open(&path).unwrap_or_else(|e| {
+        eprintln!("open {path}: {e}");
+        std::process::exit(1);
+    });
+    let decoded: Box<dyn Read> = if path.ends_with(".bz2") {
+        Box::new(bzip2::read::MultiBzDecoder::new(file))
+    } else if path.ends_with(".gz") {
+        Box::new(flate2::read::MultiGzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let reader = std::io::BufReader::with_capacity(1 << 22, decoded);
+
+    let mut dict = sparq_core::dict::Dict::new();
+    let mut triples: Vec<[u32; 3]> = Vec::new();
+    let mut n: u64 = 0u64;
+    let t0 = Instant::now();
+    let mut last = 0u64;
+    let mut last_t = Instant::now();
+
+    eprintln!("ingest mode={mode} cap={} from {path}", if cap == u64::MAX { "none".into() } else { format!("{}M", cap / 1_000_000) });
+
+    for triple in oxttl::NTriplesParser::new().for_reader(reader) {
+        let t = match triple {
+            Ok(t) => t,
+            Err(e) => {
+                // A truncated prefix (we only downloaded part of the dump) ends in
+                // a decode/parse error — expected; stop cleanly.
+                eprintln!("(stream ended after {n} triples: {e})");
+                break;
+            }
+        };
+        if mode != "parse" {
+            let s = dict.intern(&subject_to_term(&t.subject));
+            let p = dict.intern(&oxrdf::Term::NamedNode(t.predicate.clone()));
+            let o = dict.intern(&t.object);
+            if mode == "full" {
+                triples.push([s, p, o]);
+            }
+        }
+        n += 1;
+        if n - last >= 5_000_000 {
+            let dt = last_t.elapsed().as_secs_f64();
+            eprintln!(
+                "  {n:>12} triples  |  {:.2} M/s (window)  |  {:.2} M/s (avg)  |  {} distinct terms",
+                (n - last) as f64 / 1e6 / dt,
+                n as f64 / 1e6 / t0.elapsed().as_secs_f64(),
+                dict.len()
+            );
+            last = n;
+            last_t = Instant::now();
+        }
+        if n >= cap {
+            eprintln!("(reached cap of {} triples)", cap);
+            break;
+        }
+    }
+
+    let parse_secs = t0.elapsed().as_secs_f64();
+    let mut build_secs = 0.0;
+    if mode == "full" && !triples.is_empty() {
+        let tb = Instant::now();
+        let store = sparq_core::store::TripleStore::from_triples(triples);
+        build_secs = tb.elapsed().as_secs_f64();
+        std::hint::black_box(&store);
+    }
+
+    let total = parse_secs + build_secs;
+    let rate = n as f64 / total.max(1e-9);
+    println!("\n=== ingest summary ({mode}) ===");
+    println!("triples ingested : {n}");
+    if mode != "parse" {
+        println!("distinct terms   : {}", dict.len());
+    }
+    println!("decompress+parse : {parse_secs:.1}s");
+    if mode == "full" {
+        println!("index build      : {build_secs:.1}s (6 permutations)");
+    }
+    println!("total            : {total:.1}s");
+    println!("throughput       : {:.2} M triples/s", rate / 1e6);
+    // Extrapolate to full Wikidata truthy (~8.0B triples).
+    let wikidata = 8.0e9;
+    println!("extrapolated full Wikidata truthy (~8.0B triples): {:.0} min ({:.1} h) at this rate", wikidata / rate / 60.0, wikidata / rate / 3600.0);
+}
+
+fn subject_to_term(s: &oxrdf::NamedOrBlankNode) -> oxrdf::Term {
+    match s {
+        oxrdf::NamedOrBlankNode::NamedNode(n) => oxrdf::Term::NamedNode(n.clone()),
+        oxrdf::NamedOrBlankNode::BlankNode(b) => oxrdf::Term::BlankNode(b.clone()),
     }
 }
 

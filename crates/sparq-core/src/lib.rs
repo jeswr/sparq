@@ -97,6 +97,61 @@ impl Graph {
             }
         }
 
+        Ok(Self::build(dict, triples))
+    }
+
+    /// Streaming loader: parses an RDF document incrementally from a reader (so a
+    /// gzip / bzip2 decompression stream can be ingested without holding the whole
+    /// document in memory). Same formats as [`load_str`](Self::load_str). The
+    /// dictionary and triple buffer still grow in memory, so the full store only
+    /// fits for datasets that fit in RAM; the streaming ingest *throughput*,
+    /// however, is measurable on arbitrarily large inputs (see `sparq-cli ingest`).
+    pub fn load_reader<R: std::io::Read>(reader: R, format: &str) -> Result<Graph, String> {
+        let mut dict = Dict::new();
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+
+        macro_rules! push_triple {
+            ($s:expr, $p:expr, $o:expr) => {{
+                let s = dict.intern(&subject_term($s));
+                let p = dict.intern(&Term::NamedNode($p.clone()));
+                let o = dict.intern($o);
+                triples.push([s, p, o]);
+            }};
+        }
+
+        match format {
+            "nquads" | "n-quads" => {
+                for q in NQuadsParser::new().for_reader(reader) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
+            "trig" | "application/trig" => {
+                for q in TriGParser::new().for_reader(reader) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
+            "turtle" | "ttl" => {
+                for t in TurtleParser::new().for_reader(reader) {
+                    let t = t.map_err(|e| e.to_string())?;
+                    push_triple!(&t.subject, &t.predicate, &t.object);
+                }
+            }
+            _ => {
+                for t in NTriplesParser::new().for_reader(reader) {
+                    let t = t.map_err(|e| e.to_string())?;
+                    push_triple!(&t.subject, &t.predicate, &t.object);
+                }
+            }
+        }
+
+        Ok(Self::build(dict, triples))
+    }
+
+    /// Builds the store + numeric cache from interned triples (shared by the
+    /// string and streaming loaders).
+    fn build(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         let store = TripleStore::from_triples(triples);
 
         // Precompute the numeric value of every dictionary term (one parse each).
@@ -109,7 +164,7 @@ impl Graph {
         #[cfg(not(feature = "parallel"))]
         let numerics: Vec<f64> = (0..n).map(|i| numeric_of(dict.term(i as Id + 1))).collect();
 
-        Ok(Graph { dict, store, numerics })
+        Graph { dict, store, numerics }
     }
 
     /// The numeric value of a dictionary term id, or `None` if it is not a numeric
