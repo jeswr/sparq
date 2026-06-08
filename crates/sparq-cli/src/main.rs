@@ -151,7 +151,20 @@ fn load(path: &str, format: &str) -> sparq_core::Graph {
         eprintln!("parse error: {e}");
         std::process::exit(1);
     });
-    eprintln!("loaded {} triples in {:.3}s", g.len(), t.elapsed().as_secs_f64());
+    let secs = t.elapsed().as_secs_f64();
+    let heap = g.heap_bytes();
+    let dict = g.dict.heap_bytes();
+    eprintln!(
+        "loaded {} triples in {:.3}s ({:.2} M/s) | store ~{:.2} GB ({:.0} B/triple), dict ~{:.2} GB ({} terms, {:.0} B/term)",
+        g.len(),
+        secs,
+        g.len() as f64 / 1e6 / secs,
+        heap as f64 / 1e9,
+        heap as f64 / g.len().max(1) as f64,
+        dict as f64 / 1e9,
+        g.dict.len(),
+        dict as f64 / g.dict.len().max(1) as f64,
+    );
     g
 }
 

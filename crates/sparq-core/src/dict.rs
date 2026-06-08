@@ -6,9 +6,10 @@
 //! dictionary fully in memory; later milestones add front-coding / on-disk
 //! vocabularies and inline-encoded numeric ids (QLever's value ids).
 
+use hashbrown::HashTable;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, Term};
-use rustc_hash::FxHashMap;
+use std::hash::{Hash, Hasher};
 
 /// A dense term id. `u32` (≤ 4.29 B distinct terms) keeps index entries small
 /// and cache-friendly; the id space is widened to `u64` only if a dataset needs
@@ -49,28 +50,37 @@ pub fn is_inline(id: Id) -> bool {
     (INLINE_BASE..INLINE_BASE << 1).contains(&id)
 }
 
+/// A single-storage term interner: the `terms` arena holds every (non-inline) term
+/// exactly ONCE; the hash table stores only its `Id` and rehashes by looking the term
+/// back up in the arena. This avoids the second copy a `HashMap<Term, Id>` would keep
+/// as its key — roughly halving the dictionary's hash-side memory — while still never
+/// serialising a term to a String on the hot path.
 #[derive(Default)]
 pub struct Dict {
-    // id (1-based) -> term
+    // id (1-based) -> term (the single copy of each non-inline term).
     terms: Vec<Term>,
-    // term -> id. Keyed on the `Term` itself (which is `Hash + Eq` with exactly the
-    // term-identity semantics we want — same kind, same lexical value, same datatype,
-    // same language) so interning never serialises a term to a String on the hot path.
-    ids: FxHashMap<Term, Id>,
+    // hash(term) -> id; entries are bare `Id`s compared against `terms`.
+    table: HashTable<Id>,
+}
+
+/// A deterministic hash of a term (FxHasher has no random seed, so the same term
+/// always hashes the same — required for the rehash-from-arena table).
+#[inline]
+fn hash_term(t: &Term) -> u64 {
+    let mut h = rustc_hash::FxHasher::default();
+    t.hash(&mut h);
+    h.finish()
 }
 
 impl Dict {
     pub fn new() -> Self {
-        Dict {
-            terms: Vec::new(),
-            ids: FxHashMap::default(),
-        }
+        Dict::default()
     }
 
     pub fn with_capacity(n: usize) -> Self {
         Dict {
             terms: Vec::with_capacity(n),
-            ids: FxHashMap::with_capacity_and_hasher(n, Default::default()),
+            table: HashTable::with_capacity(n),
         }
     }
 
@@ -81,7 +91,8 @@ impl Dict {
         if let Some(id) = try_inline(term) {
             return id;
         }
-        if let Some(&id) = self.ids.get(term) {
+        let hash = hash_term(term);
+        if let Some(&id) = self.table.find(hash, |&id| &self.terms[(id - 1) as usize] == term) {
             return id;
         }
         let id = (self.terms.len() as Id) + 1; // 1-based
@@ -92,7 +103,8 @@ impl Dict {
         // loudly rather than corrupt (widen `Id` to u64 to lift it).
         assert!(id < INLINE_BASE, "dictionary exceeded the inline-id capacity (2^30 distinct non-integer terms); widen Id to u64");
         self.terms.push(term.clone());
-        self.ids.insert(term.clone(), id);
+        let terms = &self.terms;
+        self.table.insert_unique(hash, id, |&i| hash_term(&terms[(i - 1) as usize]));
         id
     }
 
@@ -102,7 +114,8 @@ impl Dict {
         if let Some(id) = try_inline(term) {
             return id;
         }
-        self.ids.get(term).copied().unwrap_or(NO_ID)
+        let hash = hash_term(term);
+        self.table.find(hash, |&id| &self.terms[(id - 1) as usize] == term).copied().unwrap_or(NO_ID)
     }
 
     /// Returns the term for an id. Inline-integer ids are decoded directly; others
@@ -124,6 +137,8 @@ impl Dict {
     /// unchanged (the caller checks `is_inline`).
     pub fn merge_remap(&mut self, other: &Dict) -> Vec<Id> {
         self.terms.reserve(other.terms.len());
+        let terms = &self.terms;
+        self.table.reserve(other.terms.len(), |&i| hash_term(&terms[(i - 1) as usize]));
         other.terms.iter().map(|t| self.intern(t)).collect()
     }
 
@@ -136,16 +151,14 @@ impl Dict {
     }
 
     /// A rough estimate of the dictionary's heap footprint in bytes (for
-    /// benchmarking). Counts the `terms` vector (slots + owned string data), the
-    /// `Term` keys held in the hash map, and the map's bucket array.
+    /// benchmarking). Counts the `terms` arena (slots + owned string data, the single
+    /// copy of each term) and the hash table (bare ids + a control byte each).
     pub fn heap_bytes(&self) -> usize {
         let term_slots = self.terms.capacity() * std::mem::size_of::<Term>();
-        let value_owned: usize = self.terms.iter().map(term_owned_bytes).sum();
-        // The map keys are `Term`s too (own their string data once more).
-        let key_owned: usize = self.ids.keys().map(term_owned_bytes).sum();
-        // FxHashMap bucket overhead (hashbrown): ~ (capacity) * (entry + control byte).
-        let buckets = self.ids.capacity() * (std::mem::size_of::<(Term, Id)>() + 1);
-        term_slots + value_owned + key_owned + buckets
+        let owned: usize = self.terms.iter().map(term_owned_bytes).sum();
+        // The table holds only `Id`s now (no duplicated `Term` keys).
+        let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
+        term_slots + owned + table
     }
 }
 
