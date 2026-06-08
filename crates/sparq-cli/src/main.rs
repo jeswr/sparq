@@ -22,6 +22,7 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("query") => cmd_query(&args),
         Some("bench") => cmd_bench(&args),
+        Some("bench-mmap") => cmd_bench_mmap(&args),
         Some("ingest") => cmd_ingest(&args),
         Some("save") => cmd_save(&args),
         Some("build") => cmd_build(&args),
@@ -459,8 +460,35 @@ fn cmd_bench(args: &[String]) {
         std::process::exit(2);
     }
     let g = load(path, format);
+    run_query_suite(&g, dir, iters, mode);
+}
 
-    // Collect *.rq files, sorted by name.
+/// `bench-mmap <dir> <queries-dir> [iters] [count|materialize|json]` — same as `bench`
+/// but OPENS the dataset out-of-core (memory-mapped), so the compute of a >RAM index can
+/// be measured without loading it into RAM. Used to compare sparq's compute against the
+/// stored QLever baselines at 100M+ on a 16 GB machine.
+fn cmd_bench_mmap(args: &[String]) {
+    let (dir, qdir) = match (args.get(2), args.get(3)) {
+        (Some(d), Some(q)) => (d.as_str(), q.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli bench-mmap <index-dir> <queries-dir> [iters] [count|materialize|json]");
+            std::process::exit(2);
+        }
+    };
+    let iters: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
+    let mode = args.get(5).map(String::as_str).unwrap_or("count");
+    let t = Instant::now();
+    let g = sparq_core::Graph::open(std::path::Path::new(dir)).unwrap_or_else(|e| {
+        eprintln!("open error: {e}");
+        std::process::exit(1);
+    });
+    eprintln!("opened {} triples (mmap) in {:.3}s | committed heap ~{:.3} GB", g.len(), t.elapsed().as_secs_f64(), g.heap_bytes() as f64 / 1e9);
+    run_query_suite(&g, qdir, iters, mode);
+}
+
+/// Runs every `*.rq` in `dir` (sorted) `iters` times in `mode`, printing one TSV line
+/// per query: `<name>\t<rows>\t<min_micros>`.
+fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| {
             eprintln!("error reading {dir}: {e}");
@@ -475,20 +503,19 @@ fn cmd_bench(args: &[String]) {
     for path in entries {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         let sparql = std::fs::read_to_string(&path).unwrap();
-        // Warm + measure min over `iters` runs in the requested mode.
         let mut best = f64::INFINITY;
         let mut rows = 0;
         let mut err = None;
         for _ in 0..iters {
             let t = Instant::now();
             let r: Result<usize, String> = match mode {
-                "count" => sparq_engine::count(&g, &sparql),
-                "json" => sparq_engine::query_json(&g, &sparql).map(|s| {
+                "count" => sparq_engine::count(g, &sparql),
+                "json" => sparq_engine::query_json(g, &sparql).map(|s| {
                     let n = s.len();
                     std::hint::black_box(s);
                     n
                 }),
-                _ => sparq_engine::query(&g, &sparql).map(|r| r.len()),
+                _ => sparq_engine::query(g, &sparql).map(|r| r.len()),
             };
             match r {
                 Ok(n) => {

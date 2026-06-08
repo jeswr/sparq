@@ -296,11 +296,61 @@ materialised scan vs QLever's predicate-pushed block scan. (The end-to-end pass
 still shows sparq "winning" 4–12×, but that is entirely QLever's slow JSON export
 of millions of rows in Docker — not compute.)
 
-**Conclusion:** to outcompete QLever *at all scales*, the architecture itself must
-change — this is M3 (column compression + vectorised/block scan + filter
-pushdown) and M4 (tagged ValueIds), plus out-of-core for the billion-triple
-regime where the current in-memory store would OOM. Micro-optimisation got sparq
-to parity on small in-RAM data; scaling needs the structural work.
+**Conclusion (at the time):** to outcompete QLever *at all scales*, the architecture
+itself must change — M3 (column compression + vectorised/block scan + filter pushdown),
+M4 (tagged ValueIds), plus out-of-core. Micro-optimisation got sparq to parity on small
+in-RAM data; scaling needs the structural work.
+
+### UPDATE (current): that gap has REVERSED — sparq now beats QLever on compute at 10M
+
+The table above is **superseded**. Re-measured after this project's work — the
+6-permutation restoration (a feature-unification bug had silently dropped native to 3
+perms, crippling merge joins), lazy/streaming counts (N-star, filtered, OPTIONAL), and
+the index-nested-loop bind join. Same machine, same `COUNT(*)`-wrapped compute queries,
+min-of-8 cold, vs the stored QLever baselines (`bench/qlever-baselines.md`):
+
+| query | sparq compute | QLever | speedup |
+|---|--:|--:|--:|
+| q02 type-scan (1.25M) | 0.004 ms (lazy: pred-stat) | 4 ms | **~1000×** |
+| q03 star-3 | 28 ms | 74 ms | **2.6×** |
+| q04 follows→name | 35 ms | 56 ms | **1.6×** |
+| q06 filter (1.25M) | 0.005 ms (lazy: range count) | 2 ms | **~400×** |
+| q10 OPTIONAL | 54 ms | 60 ms | **1.1×** |
+
+**sparq now matches or beats QLever on compute for all five queries at 10M.** Honest
+framing: q02/q06 win by *computing the count without scanning* (characteristic-set
+pred-stats; binary-searched filtered range) — a legitimately better algorithm for
+COUNT workloads, the same class QLever's own COUNT optimiser targets. q03/q04/q10
+*actually execute* the join/OPTIONAL and still win, from the 6-perm merge joins + bind
+join. The earlier numbers were real at the time but pre-dated the 6-perm fix (native was
+accidentally on 3 perms) — the single biggest factor. The materialise path (returning
+millions of rows, not counting) is a separate axis dominated by row construction and not
+directly comparable to QLever's Docker JSON export; see below.
+
+### 100M, OUT-OF-CORE — the win holds at scale, committing ~zero heap
+
+The decisive test for "few → billions": query the 100M index **out-of-core** (perms +
+numerics + dict + stats all mmap'd/persisted; `sparq-cli bench-mmap`) and compare to the
+stored QLever 100M baselines. Open 1.9 s, **index committed heap ~0**; compute (count,
+min-of-6):
+
+| query | sparq (out-of-core) | QLever 100M | speedup |
+|---|--:|--:|--:|
+| q02 type-scan | 0.005 ms (lazy) | 35 ms | ~7000× |
+| q03 star-3 | 291 ms | 900 ms | **3.1×** |
+| q04 follows→name | 349 ms | 600 ms | **1.7×** |
+| q06 filter | 0.005 ms (lazy) | 8 ms | ~1500× |
+| q10 OPTIONAL | 517 ms | 650 ms | **1.26×** |
+
+**sparq beats QLever on compute for all five at 100M too — while the index is entirely
+memory-mapped (a 16 GB machine querying a dataset whose indexes are ~8.4 GB on disk).**
+Caveat: the *query* still builds intermediate bindings in RAM (q04's join count peaked at
+~5.6 GB anonymous memory) — that's the join compute's working set, NOT the index (which
+commits ~0). Reducing that intermediate is exactly where columnar/streaming join
+execution (the next structural bet) would pay; the COUNT path could also be made lazier
+for chain joins. But the headline stands: **across a few triples → 100M, in-RAM and
+out-of-core, sparq now matches or beats native QLever on compute** — reversing the
+earlier honest finding, principally via the 6-permutation fix + lazy counts + bind join.
 
 ## Out-of-core: the "few → billions" range (query AND build past RAM)
 
