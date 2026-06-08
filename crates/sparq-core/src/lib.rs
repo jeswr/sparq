@@ -5,6 +5,7 @@
 //! is built from an RDF document via the bulk loader.
 
 pub mod dict;
+mod nt;
 pub mod store;
 
 use dict::{Dict, Id};
@@ -81,9 +82,10 @@ impl Graph {
                     return Ok(Self::build(d, t));
                 }
                 #[cfg(not(feature = "parallel"))]
-                for t in NTriplesParser::new().for_slice(bytes) {
-                    let t = t.map_err(|e| e.to_string())?;
-                    push_triple!(&t.subject, &t.predicate, &t.object);
+                {
+                    let mut d = Dict::new();
+                    let t = nt::parse_chunk(bytes, &mut d)?;
+                    return Ok(Self::build(d, t));
                 }
             }
             "nquads" | "n-quads" => {
@@ -283,14 +285,7 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
         .par_iter()
         .map(|&(s, e)| {
             let mut dict = Dict::new();
-            let mut triples = Vec::new();
-            for t in NTriplesParser::new().for_slice(&bytes[s..e]) {
-                let t = t.map_err(|err| err.to_string())?;
-                let sid = dict.intern(&subject_term(&t.subject));
-                let pid = dict.intern(&Term::NamedNode(t.predicate.clone()));
-                let oid = dict.intern(&t.object);
-                triples.push([sid, pid, oid]);
-            }
+            let triples = nt::parse_chunk(&bytes[s..e], &mut dict)?;
             Ok::<_, String>((dict, triples))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -333,6 +328,15 @@ mod tests {
                 i % 500
             ));
         }
+        // The byte-level parser's risky paths, cross-checked against oxttl: escapes
+        // (quote / backslash / newline / \\u), language tags, typed + simple literals,
+        // a comment, and a different IRI namespace.
+        nt.push_str("# a comment line\n");
+        nt.push_str("<http://ex/s> <http://other.org/p> \"a \\\"q\\\" b\\nc \\\\ d \\u00e9\" .\n");
+        nt.push_str("<http://ex/s> <http://ex/name> \"caf\\u00e9\"@fr .\n");
+        nt.push_str("<http://ex/s> <http://ex/v> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n");
+        nt.push_str("<http://ex/s> <http://ex/plain> \"just a string\" .\n");
+        nt.push_str("<http://ex/s> <http://ex/big> \"\\U0001F600 grin\" .\n");
         let par = Graph::load_str(&nt, "ntriples").unwrap(); // parallel (when feature on)
         let seq = Graph::load_reader(nt.as_bytes(), "ntriples").unwrap(); // sequential
         assert_eq!(par.len(), seq.len());
