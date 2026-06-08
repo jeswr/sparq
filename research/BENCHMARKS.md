@@ -302,7 +302,34 @@ pushdown) and M4 (tagged ValueIds), plus out-of-core for the billion-triple
 regime where the current in-memory store would OOM. Micro-optimisation got sparq
 to parity on small in-RAM data; scaling needs the structural work.
 
+## Correctness validation (differential vs Oxigraph) + known limitations
+
+The optimizations were audited two ways against Oxigraph (an independent, mature
+SPARQL engine): a random differential fuzzer (`sparq-bench fuzz`, 800k+ cases over
+bgp/filter/equality/optional/union/minus/limit/distinct/order, checking solution
+count, the lazy `count()` path, and ORDER BY sequence) and an adversarial agent
+panel (`sparq-bench diff`, hand-crafted edge cases). The audit **found and fixed a
+real bug**: numeric ordering FILTERs against a non-numeric operand (`?v > -1` with
+`?v` a string/IRI/boolean) were doing a lexical comparison instead of raising a
+SPARQL type error — it hid on the non-sargable residual path (negative thresholds),
+which positive-threshold fuzzing never reached. Fixed by modelling SPARQL type
+errors (`Value::Error`) + 3-valued `&&`/`||`/`!`; the fuzzer now generates signed
+thresholds and a cross-type `=`/`!=` category so it can't regress.
+
+**Known limitation — f64 numeric model (an honest, deliberate gap).** sparq holds
+numeric values as `f64` (the cache + inline-ValueId fast path that powers
+range-pruning). This is exact for `|integer| ≤ 2^53` and f64-representable values —
+i.e. essentially all real RDF data — but diverges from exact SPARQL/QLever for:
+- integers beyond 2^53 (`"9007199254740993"` compares equal to `2^53`), and
+- exact `xsd:decimal` arithmetic (`0.1 + 0.2 = 0.3` is false in f64).
+
+The correct fix is a numeric tower (`i128` / decimal in the comparison path, keeping
+f64 only for the inline-integer scan where values ≤ 2^30 are exact). Deferred to M4:
+it is a structural change with its own cost, and the f64 fast path is load-bearing
+for the measured filter wins. Flagged here rather than silently shipped.
+
 ## Other next steps
 
+- Numeric tower (M4) to close the >2^53-integer / exact-decimal conformance gap.
 - Native QLever (not Docker) for the fairest fight; cold-cache and QMpH metrics.
 - Re-measure memory against QLever (compressed) and after M3 column compression.
