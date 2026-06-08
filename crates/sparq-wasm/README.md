@@ -63,6 +63,25 @@ The lazy-count wins built for the native engine carry over unchanged (same
 materialising it (0.07 vs 7 ms), and counting an OPTIONAL is **~80× faster** than
 materialising it (2.1 vs 167 ms) — a large saving on a memory-constrained device.
 
+## Browser memory bound (the scale ceiling)
+
+The browser is the memory-constrained target — wasm32 linear memory caps at 4 GB and a
+real tab is happier under ~2 GB. Measured in Node over synthetic N-Triples (`test/mem.cjs`,
+M1), loaded with the **same compact prefix-factored dictionary + byte-level parser** as
+the native engine:
+
+| triples | load | throughput | store | B/triple | browser ceiling |
+|--:|--:|--:|--:|--:|---|
+| 175 k | 132 ms | 1.3 M/s | 16 MB | 93 | ~22 M @2 GB / ~43 M @4 GB |
+| 2.1 M | 1.59 s | 1.3 M/s | 216 MB | 103 | ~19 M @2 GB / ~39 M @4 GB |
+
+So a browser tab holds roughly **20–40 M triples** today. The figure is dominated by the
+**six u32 permutation indexes at 72 B/triple**; the prefix-factored dictionary is the rest.
+The byte-level N-Triples parser keeps load throughput high (~1.4 M/s, single-threaded — wasm
+has no rayon) without allocating an `oxrdf::Term` per term. The clear next browser-specific
+lever is a **reduced-permutation build** (e.g. 3 orders → ~36 B/triple), trading some
+merge-join order coverage to ~double the in-tab triple ceiling.
+
 ## Bundle size (release, wasm-opt -Oz)
 
 | artifact | raw | gzip | brotli |
