@@ -29,6 +29,11 @@ type Row = SmallVec<[Id; 4]>;
 /// or probing it allocates nothing per key.
 type Key = SmallVec<[Id; 2]>;
 
+/// A hash-table posting list (row indices sharing a key). Inlined up to 2 — many
+/// join keys (and almost all OPTIONAL keys) match only one or two rows — so the
+/// build allocates nothing per bucket in the common case.
+type Posting = SmallVec<[usize; 2]>;
+
 /// Ids at or above this base index into the per-query [`LocalVocab`] instead of
 /// the graph dictionary. (M2 uses `u32` ids; the tagged 64-bit ValueId of M4
 /// removes this watermark split.)
@@ -913,7 +918,7 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
             i
         })
         .collect();
-    let mut table: FxHashMap<Key, Vec<usize>> = FxHashMap::default();
+    let mut table: FxHashMap<Key, Posting> = FxHashMap::default();
     for (ri, row) in build.rows.iter().enumerate() {
         let key: Key = shared.iter().map(|&(bi, _)| row[bi]).collect();
         table.entry(key).or_default().push(ri);
@@ -990,9 +995,9 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
     // unbound, in which case they act as wildcards).
     let lcols: Vec<usize> = shared.iter().map(|&(lc, _)| lc).collect();
     let rcols: Vec<usize> = shared.iter().map(|&(_, rc)| rc).collect();
-    let table: Option<FxHashMap<Key, Vec<usize>>> =
+    let table: Option<FxHashMap<Key, Posting>> =
         if !shared.is_empty() && !any_unbound(&left.rows, &lcols) && !any_unbound(&right.rows, &rcols) {
-            let mut t: FxHashMap<Key, Vec<usize>> = FxHashMap::default();
+            let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
             for (ri, row) in right.rows.iter().enumerate() {
                 t.entry(rcols.iter().map(|&c| row[c]).collect()).or_default().push(ri);
             }
