@@ -417,10 +417,26 @@ impl Graph {
         // SAFETY: perm0 is a whole number of [u32;3] rows written above; map outlives the loop.
         let spo: &[[Id; 3]] =
             unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[Id; 3]>(), n) };
-        for &perm in BUILT.iter().filter(|&&p| p != Perm::Spo) {
+        let siblings: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
+        let sib_sort = |perm: Perm, sub: &std::path::Path, per: usize| -> Result<(), String> {
+            std::fs::create_dir_all(sub).map_err(|e| e.to_string())?;
             let out = dir.join(format!("perm{}.bin", perm as usize));
-            extsort::external_sort(spo.iter().copied(), perm.order(), &out, &tmp, chunk)
-                .map_err(|e| e.to_string())?;
+            extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+        };
+        // The sibling sorts are independent — run them CONCURRENTLY (each in its own tmp
+        // subdir, so run files don't collide), sharing the chunk budget so total resident
+        // memory stays ~`chunk`. The shared SPO mmap is read-only (paged, no extra RAM).
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let per = (chunk / siblings.len().max(1)).max(1 << 16);
+            siblings
+                .par_iter()
+                .try_for_each(|&perm| sib_sort(perm, &tmp.join(format!("p{}", perm as usize)), per))?;
+        }
+        #[cfg(not(feature = "parallel"))]
+        for &perm in &siblings {
+            sib_sort(perm, &tmp, chunk)?;
         }
         drop(map);
 
