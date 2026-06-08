@@ -1,4 +1,4 @@
-/* downloads + dump */
+# downloads + dump
 *.bz2
 *.gz
 *.nt
