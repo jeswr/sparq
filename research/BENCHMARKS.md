@@ -192,6 +192,17 @@ sparq is now at parity-or-better with (Dockerized) QLever on the scan/star/chain
 queries, and still behind on `q06` (numeric filter — small absolute numbers) and
 `q10` (OPTIONAL/left-join overhead). Result counts remain identical to QLever.
 
+3. **Numeric FILTER pushdown + sorted-column scan (M4 first step).** The hardware
+   research measured q06's bottleneck as a *random gather* into the `Vec<f64>`
+   numeric cache (8–15× slower than contiguous). Fix: push a sargable `?v OP const`
+   FILTER into the pattern scan, scanning via that column's permutation so the
+   numeric access is *sequential*, and apply the predicate inline so failing rows
+   are never materialised. Measured: **olympics q06 3.4 → 0.27 ms (12.5×)**;
+   **10M synthetic q06 42 → 3.9 ms (10.7×)** — its gap to native QLever went from
+   20× to ~2× (0.05× → 0.51×). Results identical to QLever. This is the first,
+   bounded piece of M4; the full tagged-ValueId columnar layout is the larger
+   architectural follow-on (it removes the gather entirely).
+
 ### Next (driven by the remaining deltas)
 
 1. **OPTIONAL / left-join** (`q10` 0.35×) and the **medal join** (`q07`) — reduce

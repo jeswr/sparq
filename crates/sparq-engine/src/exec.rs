@@ -163,8 +163,15 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
         let mut patterns = Vec::new();
         let mut filters = Vec::new();
         flatten_conjunction(p, &mut patterns, &mut filters);
-        let mut b = eval_bgp(graph, &patterns)?;
-        for f in &filters {
+        // Push sargable numeric FILTERs down into the binary-plan scans (the WCOJ
+        // path applies them afterwards); apply the rest normally.
+        let (mut b, residual) = if bgp_uses_binary(&patterns) {
+            let (pat_filters, residual) = split_sargable(&patterns, &filters);
+            (eval_bgp_binary(graph, &patterns, &pat_filters)?, residual)
+        } else {
+            (eval_bgp(graph, &patterns)?, filters)
+        };
+        for f in &residual {
             apply_filter(graph, local, &mut b, f)?;
         }
         return Ok(b);
@@ -240,6 +247,104 @@ fn flatten_conjunction(p: &GraphPattern, patterns: &mut Vec<TriplePattern>, filt
     }
 }
 
+// ---- Sargable numeric filters (pushed into the scan) -------------------------
+
+/// A numeric comparison `value OP threshold` that can be pushed down into a
+/// pattern scan (FILTER predicate evaluated inline, in the column's sorted order,
+/// so the numeric access is sequential rather than a random dictionary gather —
+/// the layout fix the hardware research measured as an 8–15× win).
+#[derive(Clone, Copy)]
+enum NumCmp {
+    Gt(f64),
+    Ge(f64),
+    Lt(f64),
+    Le(f64),
+    Eq(f64),
+}
+
+impl NumCmp {
+    #[inline]
+    fn test(&self, x: f64) -> bool {
+        match *self {
+            NumCmp::Gt(t) => x > t,
+            NumCmp::Ge(t) => x >= t,
+            NumCmp::Lt(t) => x < t,
+            NumCmp::Le(t) => x <= t,
+            NumCmp::Eq(t) => x == t,
+        }
+    }
+}
+
+/// Recognises a FILTER of the form `?v OP numeric-constant` (or the symmetric
+/// `constant OP ?v`), returning the variable and the comparison to push down.
+fn extract_sargable(e: &Expression) -> Option<(Variable, NumCmp)> {
+    fn lit_num(e: &Expression) -> Option<f64> {
+        match e {
+            Expression::Literal(l) if is_numeric_dt(l) => l.value().parse().ok(),
+            _ => None,
+        }
+    }
+    fn var_of(e: &Expression) -> Option<Variable> {
+        match e {
+            Expression::Variable(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+    // (left, right, cmp-if-var-on-left, cmp-if-var-on-right)
+    let (l, r, on_left, on_right): (&Expression, &Expression, fn(f64) -> NumCmp, fn(f64) -> NumCmp) = match e {
+        Expression::Greater(l, r) => (l, r, NumCmp::Gt, NumCmp::Lt),
+        Expression::GreaterOrEqual(l, r) => (l, r, NumCmp::Ge, NumCmp::Le),
+        Expression::Less(l, r) => (l, r, NumCmp::Lt, NumCmp::Gt),
+        Expression::LessOrEqual(l, r) => (l, r, NumCmp::Le, NumCmp::Ge),
+        Expression::Equal(l, r) => (l, r, NumCmp::Eq, NumCmp::Eq),
+        _ => return None,
+    };
+    if let (Some(v), Some(c)) = (var_of(l), lit_num(r)) {
+        return Some((v, on_left(c)));
+    }
+    if let (Some(c), Some(v)) = (lit_num(l), var_of(r)) {
+        return Some((v, on_right(c)));
+    }
+    None
+}
+
+/// The canonical position (0=subject, 1=predicate, 2=object) of a variable in a
+/// triple pattern, if it occurs there.
+fn pattern_var_pos(tp: &TriplePattern, var: &Variable) -> Option<usize> {
+    if matches!(&tp.subject, TermPattern::Variable(v) if v == var) {
+        return Some(0);
+    }
+    if matches!(&tp.predicate, NamedNodePattern::Variable(v) if v == var) {
+        return Some(1);
+    }
+    if matches!(&tp.object, TermPattern::Variable(v) if v == var) {
+        return Some(2);
+    }
+    None
+}
+
+/// Splits FILTERs into per-pattern sargable numeric predicates (pushed into the
+/// scan of the first pattern that binds the variable) and the residual filters
+/// (applied normally afterwards).
+fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, NumCmp)>>, Vec<Expression>) {
+    let mut pat_filters: Vec<Option<(usize, NumCmp)>> = vec![None; patterns.len()];
+    let mut residual = Vec::new();
+    for f in filters {
+        if let Some((var, cmp)) = extract_sargable(f) {
+            if let Some((i, pos)) = patterns
+                .iter()
+                .enumerate()
+                .find_map(|(i, tp)| pattern_var_pos(tp, &var).filter(|_| pat_filters[i].is_none()).map(|pos| (i, pos)))
+            {
+                pat_filters[i] = Some((pos, cmp));
+                continue;
+            }
+        }
+        residual.push(f.clone());
+    }
+    (pat_filters, residual)
+}
+
 // ---- BGP evaluation ----------------------------------------------------------
 
 /// Evaluates a basic graph pattern, dispatching between a binary join plan and a
@@ -256,15 +361,24 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
     if patterns.len() >= 3 && bgp_is_cyclic(patterns) {
         return eval_bgp_wcoj(graph, patterns);
     }
-    eval_bgp_binary(graph, patterns)
+    eval_bgp_binary(graph, patterns, &[])
+}
+
+/// Whether this conjunctive BGP would be routed to the worst-case-optimal plan
+/// (so the caller knows whether sargable-filter pushdown into the binary scan
+/// applies).
+fn bgp_uses_binary(patterns: &[TriplePattern]) -> bool {
+    !(patterns.len() >= 3 && bgp_is_cyclic(patterns))
 }
 
 /// Binary-join BGP plan: greedy cardinality ordering with sort-merge joins on the
-/// current sort variable (falling back to hash, then cross product).
-fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
+/// current sort variable (falling back to hash, then cross product). `pat_filters`
+/// holds an optional pushed-down numeric FILTER per pattern (by original index).
+fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Option<(usize, NumCmp)>]) -> Result<Bindings, String> {
     if patterns.is_empty() {
         return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
     }
+    let pfilter = |i: usize| -> Option<(usize, NumCmp)> { pat_filters.get(i).copied().flatten() };
 
     struct Prepared {
         id_pat: IdPattern,
@@ -298,9 +412,11 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings
         .flatten()
         .find(|v| (0..prepared.len()).any(|j| j != seed && var_pos(j, v).is_some()))
         .cloned();
-    let seed_sort_col = seed_join_var.as_ref().and_then(|v| var_pos(seed, v));
+    // A pushed-down filter scans in its own column's order (sequential numeric
+    // access); otherwise sort by the join variable to enable a merge join.
+    let seed_sort_col = pfilter(seed).map(|(c, _)| c).or_else(|| seed_join_var.as_ref().and_then(|v| var_pos(seed, v)));
 
-    let mut result = scan_to_bindings(graph, &prepared[seed].id_pat, &prepared[seed].pos_vars, seed_sort_col);
+    let mut result = scan_to_bindings(graph, &prepared[seed].id_pat, &prepared[seed].pos_vars, seed_sort_col, pfilter(seed));
     let mut done = vec![false; prepared.len()];
     done[seed] = true;
 
@@ -359,18 +475,20 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings
         };
         done[i] = true;
 
-        // Execute: sort-merge if the result is already sorted on a shared variable,
-        // else hash join, else (disconnected) cross product.
+        // Execute: a pushed-down filter forces the scan into its own column order
+        // (and filters inline); otherwise sort by the join variable for a merge.
+        let filt = pfilter(i);
         let merge_var = result.sorted_by.clone().filter(|sv| var_pos(i, sv).is_some());
-        if let Some(jv) = merge_var {
-            let col = var_pos(i, &jv).unwrap();
-            let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, Some(col));
+        let scan_sort = filt.map(|(c, _)| c).or_else(|| merge_var.as_ref().map(|jv| var_pos(i, jv).unwrap()));
+        let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, scan_sort, filt);
+        let connected = prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v));
+        // Merge only when both sides are sorted on the join variable (a filter may
+        // have forced the scan into a different order).
+        if let Some(jv) = merge_var.filter(|jv| rhs.sorted_by.as_ref() == Some(jv)) {
             result = merge_join(result, rhs, &jv);
-        } else if prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v)) {
-            let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, None);
+        } else if connected {
             result = hash_join(result, rhs);
         } else {
-            let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, None);
             result = cross_product(result, rhs);
         }
         record_vars(i, cur_card, &mut var_ndv);
@@ -808,7 +926,7 @@ fn prepare_pattern(graph: &Graph, tp: &TriplePattern) -> Result<(IdPattern, [Opt
     Ok((id_pat, pos_vars, unsat))
 }
 
-fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3], sort_col: Option<usize>) -> Bindings {
+fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3], sort_col: Option<usize>, filter: Option<(usize, NumCmp)>) -> Bindings {
     let mut vars: Vec<Variable> = Vec::new();
     let mut var_positions: Vec<Vec<usize>> = Vec::new();
     for (pos, v) in pos_vars.iter().enumerate() {
@@ -829,6 +947,15 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
     let mut rows: Vec<Row> = Vec::with_capacity(scan.rows.len());
     for row in scan.rows {
         let spo = scan.to_spo(row);
+        // Pushed-down numeric FILTER: evaluated inline, before materialising the
+        // row. When `sort_col` is the filter column the id stream is monotonic, so
+        // `numeric_value` reads sequentially instead of as a random gather.
+        if let Some((fpos, cmp)) = filter {
+            match graph.numeric_value(spo[fpos]) {
+                Some(x) if cmp.test(x) => {}
+                _ => continue,
+            }
+        }
         let mut ok = true;
         let mut out = Row::with_capacity(vars.len());
         for positions in &var_positions {
@@ -1707,7 +1834,7 @@ mod wcoj_tests {
     /// The binary and WCOJ BGP plans must return identical result sets.
     fn assert_plans_agree(sparql: &str, graph: &Graph) {
         let patterns = bgp(sparql);
-        let binary = eval_bgp_binary(graph, &patterns).unwrap();
+        let binary = eval_bgp_binary(graph, &patterns, &[]).unwrap();
         let wcoj = eval_bgp_wcoj(graph, &patterns).unwrap();
         assert_eq!(
             rowset(&binary),

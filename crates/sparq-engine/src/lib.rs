@@ -302,6 +302,29 @@ mod tests {
     }
 
     #[test]
+    fn filter_pushdown_with_join() {
+        // A numeric FILTER on a variable that is also a join variable: the filter
+        // is pushed into that pattern's scan, then joined. Must stay correct.
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?k WHERE { ?s ex:age ?a . ?s ex:knows ?k . FILTER(?a > 28) }",
+        )
+        .unwrap();
+        // ages: alice 30, bob 25, carol 35. >28 keeps alice, carol. knows: alice->bob,
+        // bob->carol. After filter+join on ?s: only alice(30)->bob (carol has no knows).
+        assert_eq!(r.len(), 1);
+        assert!(r.rows[0][0].as_ref().unwrap().to_string().contains("alice"));
+    }
+
+    #[test]
+    fn filter_pushdown_boundaries() {
+        // >=, <=, = pushed-down comparisons.
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a >= 30) }"), 2);
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a <= 30) }"), 2);
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a = 25) }"), 1);
+    }
+
+    #[test]
     fn planner_four_pattern_multi_predicate() {
         // 4 patterns over predicates of different selectivity (knows/age/name) —
         // exercises the cost-based GOO planner's candidate scoring. Result must be
