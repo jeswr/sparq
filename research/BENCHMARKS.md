@@ -384,6 +384,27 @@ would cut it (future work). **Correctness:** identical results to the raw store 
 store-level pattern/estimate/pred_stat equality test, **20,000 differential cases vs
 Oxigraph through the compressed store** (0 mismatches), and wasm `load==loadCompressed`.
 
+### Negative result: a block-decode cache for compressed bind joins did NOT help
+
+The compressed join's +33% comes from the bind join re-decoding the inner pattern's
+block per outer key. The obvious fix: sort the distinct join keys (so the inner scans
+walk the permutation monotonically) and reuse a one-block-span decode cache across
+consecutive keys. Built it behind an A/B env toggle and measured on the 10M set:
+
+| join (compressed) | with cache | without cache |
+|---|--:|--:|
+| follows·name (93 MB out) | 294 ms | 297 ms (neutral) |
+| follows·city (476 MB out) | 873 ms | **752 ms** (cache 16% *slower*) |
+
+Reverted (keep-only-if-it-helps). Two reasons it loses: (1) sorting ~1.25M distinct
+keys costs more than the re-decode it saves, since (2) a compressed block decode is
+already cheap (~128 varints) and these large joins are dominated by *building the
+output* (hundreds of MB of JSON), not by inner-scan decode. A cache only pays when
+inner-scan decode is a real fraction of the work *and* keys cluster tightly enough to
+amortise the sort — not the case here. The compressed join's overhead is best left as
+the measured, accepted cost of the memory win; a future win would need cheaper output
+materialisation, not a scan cache.
+
 ### Honest correction: the persisted-numerics open is *lighter*, not *faster*
 
 A separate change persists + mmaps the numeric-value cache (`numerics.bin`) so `open`
