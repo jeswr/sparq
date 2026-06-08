@@ -9,6 +9,10 @@ license.workspace = true
 # off (e.g. for wasm, which has no threads by default) for a smaller, simpler build.
 default = ["parallel"]
 parallel = ["dep:rayon"]
+# Build only THREE permutation indexes (SPO, POS, OSP) instead of six. Every triple
+# pattern is still answered by one of them, but some merge joins fall back to hashing.
+# ~halves index memory (36 vs 72 B/triple) — for the memory-constrained browser target.
+compact-index = []
 
 [dependencies]
 oxrdf.workspace = true

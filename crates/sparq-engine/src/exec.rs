@@ -314,15 +314,22 @@ fn distinct_pattern_vars(pos_vars: &[Option<Variable>; 3]) -> bool {
     sorted.len() == vars.len()
 }
 
-/// Group sizes per value of canonical column `v_pos`, from a sorted index scan —
-/// streamed, no rows materialised. Returns `(value, count)` ascending by value.
+/// Group sizes per value of canonical column `v_pos`. Returns `(value, count)`
+/// ascending by value. Streams from the index when it is sorted by `v_pos` (the usual
+/// case with all six permutations); otherwise — when a reduced permutation set could
+/// not deliver that order — it collects the column and sorts it first, so the result is
+/// always correct.
 fn group_counts(graph: &Graph, id_pat: &IdPattern, v_pos: usize) -> Vec<(Id, usize)> {
     let scan = graph.store.scan_sorted(id_pat, v_pos);
+    let sorted_by_v = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none()) == Some(v_pos);
+    let mut vals: Vec<Id> = scan.rows.iter().map(|r| scan.to_spo(r)[v_pos]).collect();
+    if !sorted_by_v {
+        vals.sort_unstable();
+    }
     let mut out: Vec<(Id, usize)> = Vec::new();
     let mut last: Option<Id> = None;
     let mut cnt = 0usize;
-    for row in scan.rows {
-        let v = scan.to_spo(row)[v_pos];
+    for v in vals {
         if last == Some(v) {
             cnt += 1;
         } else {
@@ -358,9 +365,13 @@ fn count_single_filtered(
 
     // Fast path: one filter on an all-inline column -> binary-searched range size
     // (the same value-sorted slice range-pruning uses, but we only need its length).
+    // Requires the scan to be ACTUALLY sorted by the filter column (a reduced
+    // permutation set may not deliver that order, in which case we fall through to the
+    // count-scan below).
     if let [(fpos, cmp)] = cmps[..] {
         let scan = graph.store.scan_sorted(id_pat, fpos);
-        if scan.rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
+        let sorted_by_f = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none()) == Some(fpos);
+        if sorted_by_f && scan.rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
             return Some(match inline_pass_values(cmp) {
                 Some((lo, hi)) => {
                     let (lo_id, hi_id) = (dict::INLINE_BASE + lo, dict::INLINE_BASE + hi);
@@ -1298,16 +1309,22 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         Some(c) => graph.store.scan_sorted(id_pat, c),
         None => graph.store.scan(id_pat),
     };
-    let sorted_by = sort_col.and_then(|c| pos_vars[c].clone());
+    // The TRUE sort column is the first unbound canonical column in the chosen
+    // permutation's order — NOT necessarily the requested `sort_col`: with fewer than
+    // six permutations the store may not have the requested order, in which case the
+    // engine must report the real one so merge joins fall back to hash and range-
+    // pruning is skipped (both keyed off the truthful `sorted_by` / `actual_sort`).
+    let actual_sort = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none());
+    let sorted_by = actual_sort.and_then(|c| pos_vars[c].clone());
 
-    // Range-pruning: when the pushed-down filter is on the scan's sort column and
+    // Range-pruning: when the pushed-down filter is on the scan's ACTUAL sort column and
     // that column holds inline integers (which sort by value), binary-search to the
     // passing value range instead of scanning + filtering the whole relation. Safe
     // only when EVERY value in the column is inline (so no dictionary-encoded
     // numeric in another datatype, scattered below INLINE_BASE, is skipped).
     let mut scan_rows: &[[Id; 3]] = scan.rows;
-    if let (Some((fpos, cmp)), Some(sc)) = (filter, sort_col) {
-        if sc == fpos && scan_rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
+    if let Some((fpos, cmp)) = filter {
+        if actual_sort == Some(fpos) && scan_rows.first().is_some_and(|r| dict::is_inline(scan.to_spo(r)[fpos])) {
             scan_rows = match inline_pass_values(cmp) {
                 Some((lo, hi)) => {
                     let (lo_id, hi_id) = (dict::INLINE_BASE + lo, dict::INLINE_BASE + hi);

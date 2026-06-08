@@ -24,6 +24,16 @@ pub enum Perm {
     Ops,
 }
 
+/// The permutations actually built and searched. The full six give every triple
+/// pattern a sorted scan in the order any merge join wants. The `compact-index` set
+/// {SPO, POS, OSP} still answers EVERY triple pattern from one index (SPO→S*/SP*,
+/// POS→P*/PO*, OSP→O*/OS*) at half the memory, at the cost of some merge joins (and
+/// some lazy-count fast paths) falling back to hashing / sorting.
+#[cfg(not(feature = "compact-index"))]
+pub const BUILT: &[Perm] = &[Perm::Spo, Perm::Sop, Perm::Pso, Perm::Pos, Perm::Osp, Perm::Ops];
+#[cfg(feature = "compact-index")]
+pub const BUILT: &[Perm] = &[Perm::Spo, Perm::Pos, Perm::Osp];
+
 impl Perm {
     pub const ALL: [Perm; 6] = [Perm::Spo, Perm::Sop, Perm::Pso, Perm::Pos, Perm::Osp, Perm::Ops];
 
@@ -68,9 +78,9 @@ pub struct TripleStore {
 }
 
 impl TripleStore {
-    /// Builds the six permutation indexes from canonical [s,p,o] triples. The
-    /// SPO permutation is sorted (in parallel) and deduplicated first; the other
-    /// five permutations are independent and are built and sorted concurrently.
+    /// Builds the [`BUILT`] permutation indexes from canonical [s,p,o] triples (all
+    /// six by default; just SPO/POS/OSP under `compact-index`). SPO is sorted (in
+    /// parallel) and deduplicated first; the rest are independent and built concurrently.
     pub fn from_triples(mut triples: Vec<[Id; 3]>) -> Self {
         // Deduplicate via the SPO ordering first.
         #[cfg(feature = "parallel")]
@@ -88,65 +98,59 @@ impl TripleStore {
             v
         };
 
-        // The five non-SPO permutations are mutually independent. Build them
-        // concurrently on the rayon pool when available, else sequentially.
-        let others_orders = [Perm::Sop, Perm::Pso, Perm::Pos, Perm::Osp, Perm::Ops];
+        // Build every BUILT permutation except SPO (which is the deduped `triples`).
+        let to_build: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
         #[cfg(feature = "parallel")]
-        let mut others: Vec<Vec<[Id; 3]>> = others_orders.par_iter().map(|p| build(p.order())).collect();
+        let built: Vec<Vec<[Id; 3]>> = to_build.par_iter().map(|p| build(p.order())).collect();
         #[cfg(not(feature = "parallel"))]
-        let mut others: Vec<Vec<[Id; 3]>> = others_orders.iter().map(|p| build(p.order())).collect();
+        let built: Vec<Vec<[Id; 3]>> = to_build.iter().map(|p| build(p.order())).collect();
 
-        // Canonical order is [Spo, Sop, Pso, Pos, Osp, Ops]; `others` holds the
-        // last five, and `triples` is the already-sorted Spo.
-        let perms = [
-            triples,
-            std::mem::take(&mut others[0]),
-            std::mem::take(&mut others[1]),
-            std::mem::take(&mut others[2]),
-            std::mem::take(&mut others[3]),
-            std::mem::take(&mut others[4]),
-        ];
-        let pred_stats = Self::compute_pred_stats(&perms[2], &perms[3]);
+        // Place each built permutation at its canonical slot; the rest stay empty.
+        let mut perms: [Vec<[Id; 3]>; 6] = std::array::from_fn(|_| Vec::new());
+        perms[Perm::Spo as usize] = triples;
+        for (p, v) in to_build.into_iter().zip(built) {
+            perms[p as usize] = v;
+        }
+        let pred_stats = Self::compute_pred_stats(&perms);
         TripleStore { perms, pred_stats }
     }
 
-    /// Per-predicate stats from the PSO (P,S,O) and POS (P,O,S) permutations: one
-    /// linear pass each, counting triples + distinct subjects (from PSO) and
-    /// distinct objects (from POS) within each predicate run.
-    fn compute_pred_stats(pso: &[[Id; 3]], pos: &[[Id; 3]]) -> FxHashMap<Id, PredStat> {
+    /// Per-predicate stats: count + distinct objects from POS (always built), and
+    /// distinct subjects from PSO when it is built (the full six-permutation index),
+    /// else approximated by the count (under `compact-index`, where PSO is absent —
+    /// the planner then treats subjects as non-selective, which is safe for ordering).
+    fn compute_pred_stats(perms: &[Vec<[Id; 3]>; 6]) -> FxHashMap<Id, PredStat> {
+        let pos = &perms[Perm::Pos as usize]; // [P, O, S]
+        let pso = &perms[Perm::Pso as usize]; // [P, S, O], empty under compact-index
         let mut stats: FxHashMap<Id, PredStat> = FxHashMap::default();
-        // PSO rows are [P, S, O]; distinct S per P + total count per P.
-        let mut i = 0;
-        while i < pso.len() {
-            let p = pso[i][0];
-            let (mut count, mut ndv_s) = (0usize, 0usize);
-            let mut last_s = None;
-            while i < pso.len() && pso[i][0] == p {
-                count += 1;
-                if last_s != Some(pso[i][1]) {
-                    ndv_s += 1;
-                    last_s = Some(pso[i][1]);
-                }
-                i += 1;
-            }
-            let e = stats.entry(p).or_default();
-            e.count = count;
-            e.ndv_subj = ndv_s;
-        }
-        // POS rows are [P, O, S]; distinct O per P.
+        // POS: count + distinct O per P. ndv_subj defaults to count (refined below).
         let mut i = 0;
         while i < pos.len() {
             let p = pos[i][0];
-            let mut ndv_o = 0usize;
-            let mut last_o = None;
+            let (mut count, mut ndv_o, mut last_o) = (0usize, 0usize, None);
             while i < pos.len() && pos[i][0] == p {
+                count += 1;
                 if last_o != Some(pos[i][1]) {
                     ndv_o += 1;
                     last_o = Some(pos[i][1]);
                 }
                 i += 1;
             }
-            stats.entry(p).or_default().ndv_obj = ndv_o;
+            stats.insert(p, PredStat { count, ndv_subj: count, ndv_obj: ndv_o });
+        }
+        // PSO (when built): exact distinct S per P.
+        let mut i = 0;
+        while i < pso.len() {
+            let p = pso[i][0];
+            let (mut ndv_s, mut last_s) = (0usize, None);
+            while i < pso.len() && pso[i][0] == p {
+                if last_s != Some(pso[i][1]) {
+                    ndv_s += 1;
+                    last_s = Some(pso[i][1]);
+                }
+                i += 1;
+            }
+            stats.entry(p).or_default().ndv_subj = ndv_s;
         }
         stats
     }
@@ -175,7 +179,7 @@ impl TripleStore {
     fn choose(pattern: &Pattern) -> (Perm, usize) {
         // Prefer an order where every bound position precedes every unbound one.
         let bound = |i: usize| pattern[i].is_some();
-        for perm in Perm::ALL {
+        for &perm in BUILT {
             let order = perm.order();
             // count leading bound columns
             let mut lead = 0;
@@ -204,7 +208,7 @@ impl TripleStore {
         let total_bound = (0..3).filter(|&i| bound(i)).count();
         // Prefer: bound positions form the leading prefix AND column `sort_col`
         // is the first column after the prefix.
-        for perm in Perm::ALL {
+        for &perm in BUILT {
             let order = perm.order();
             let mut lead = 0;
             while lead < 3 && bound(order[lead]) {
