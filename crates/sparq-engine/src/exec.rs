@@ -141,6 +141,19 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
         }
         GraphPattern::Reduced { inner } => eval_modified(graph, local, inner),
         GraphPattern::Slice { inner, start, length } => {
+            // LIMIT early-termination: a bare LIMIT over a single-pattern scan
+            // (no ORDER BY / DISTINCT / aggregation / join, which all need the full
+            // result) can stop after start+length rows instead of materialising the
+            // whole relation — true streaming. LIMIT-without-ORDER-BY is
+            // order-insensitive so any rows are valid.
+            if let Some(len) = length {
+                if let Some(cap) = start.checked_add(*len) {
+                    if let Some(mut b) = try_capped(graph, inner, cap)? {
+                        slice_bindings(&mut b, *start, *length);
+                        return Ok(b);
+                    }
+                }
+            }
             let mut b = eval_modified(graph, local, inner)?;
             slice_bindings(&mut b, *start, *length);
             Ok(b)
@@ -167,6 +180,40 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             group_aggregate(graph, local, b, variables, aggregates)
         }
         other => eval_graph_pattern(graph, local, other),
+    }
+}
+
+/// Evaluates a pattern producing at most `cap` rows by stopping the scan early,
+/// when that is safe: a single-pattern scan (optionally with a pushed-down
+/// sargable numeric filter) under projection. Returns `None` for anything that
+/// needs the full result first (joins, ORDER BY, DISTINCT, aggregation, residual
+/// filters), so the caller falls back to full evaluation.
+fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<Bindings>, String> {
+    match inner {
+        GraphPattern::Project { inner, variables } => {
+            Ok(try_capped(graph, inner, cap)?.map(|b| project_bindings(b, variables)))
+        }
+        GraphPattern::Reduced { inner } => try_capped(graph, inner, cap),
+        p if is_conjunctive(p) => {
+            let mut patterns = Vec::new();
+            let mut filters = Vec::new();
+            flatten_conjunction(p, &mut patterns, &mut filters);
+            if patterns.len() != 1 {
+                return Ok(None);
+            }
+            let (pat_filters, residual) = split_sargable(&patterns, &filters);
+            if !residual.is_empty() {
+                return Ok(None);
+            }
+            let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0])?;
+            if unsat {
+                return Ok(Some(Bindings::unsorted(collect_vars(&patterns), vec![])));
+            }
+            let filt = pat_filters[0];
+            let sort_col = filt.map(|(c, _)| c);
+            Ok(Some(scan_to_bindings(graph, &id_pat, &pos_vars, sort_col, filt, Some(cap))))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -456,7 +503,7 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     // access); otherwise sort by the join variable to enable a merge join.
     let seed_sort_col = pfilter(seed).map(|(c, _)| c).or_else(|| seed_join_var.as_ref().and_then(|v| var_pos(seed, v)));
 
-    let mut result = scan_to_bindings(graph, &prepared[seed].id_pat, &prepared[seed].pos_vars, seed_sort_col, pfilter(seed));
+    let mut result = scan_to_bindings(graph, &prepared[seed].id_pat, &prepared[seed].pos_vars, seed_sort_col, pfilter(seed), None);
     let mut done = vec![false; prepared.len()];
     done[seed] = true;
 
@@ -520,7 +567,7 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         let filt = pfilter(i);
         let merge_var = result.sorted_by.clone().filter(|sv| var_pos(i, sv).is_some());
         let scan_sort = filt.map(|(c, _)| c).or_else(|| merge_var.as_ref().map(|jv| var_pos(i, jv).unwrap()));
-        let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, scan_sort, filt);
+        let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, scan_sort, filt, None);
         let connected = prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v));
         // Merge only when both sides are sorted on the join variable (a filter may
         // have forced the scan into a different order).
@@ -966,7 +1013,7 @@ fn prepare_pattern(graph: &Graph, tp: &TriplePattern) -> Result<(IdPattern, [Opt
     Ok((id_pat, pos_vars, unsat))
 }
 
-fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3], sort_col: Option<usize>, filter: Option<(usize, NumCmp)>) -> Bindings {
+fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3], sort_col: Option<usize>, filter: Option<(usize, NumCmp)>, limit: Option<usize>) -> Bindings {
     let mut vars: Vec<Variable> = Vec::new();
     let mut var_positions: Vec<Vec<usize>> = Vec::new();
     for (pos, v) in pos_vars.iter().enumerate() {
@@ -1008,6 +1055,12 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         }
         if ok {
             rows.push(out);
+            // LIMIT early-termination: stop scanning once we have enough rows.
+            if let Some(n) = limit {
+                if rows.len() >= n {
+                    break;
+                }
+            }
         }
     }
     Bindings { vars, rows, sorted_by }

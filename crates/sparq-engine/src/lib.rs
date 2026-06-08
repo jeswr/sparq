@@ -384,6 +384,32 @@ mod tests {
     }
 
     #[test]
+    fn limit_early_termination() {
+        // LIMIT over a single-pattern scan (early-terminating path).
+        assert_eq!(count("SELECT * WHERE { ?s ?p ?o } LIMIT 5"), 5);
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } LIMIT 2"), 2);
+        // OFFSET + LIMIT.
+        assert_eq!(count("SELECT * WHERE { ?s ?p ?o } LIMIT 3 OFFSET 2"), 3);
+        // LIMIT larger than the result is fine.
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a } LIMIT 100"), 3);
+        // LIMIT with a pushed-down sargable filter.
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(?a > 20) } LIMIT 1"), 1);
+    }
+
+    #[test]
+    fn limit_with_order_by_is_correct() {
+        // ORDER BY before LIMIT must NOT early-terminate — it returns the globally
+        // smallest, not just the first scanned.
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a } ORDER BY ?a LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1);
+        assert!(r.rows[0][1].as_ref().unwrap().to_string().contains("25")); // bob, youngest
+    }
+
+    #[test]
     fn having() {
         // group ?s, count its triples, keep groups with >= 3 triples
         let r = query(
