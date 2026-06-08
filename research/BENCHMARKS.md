@@ -474,20 +474,25 @@ which positive-threshold fuzzing never reached. Fixed by modelling SPARQL type
 errors (`Value::Error`) + 3-valued `&&`/`||`/`!`; the fuzzer now generates signed
 thresholds and a cross-type `=`/`!=` category so it can't regress.
 
-**Known limitation — f64 numeric model (an honest, deliberate gap).** sparq holds
-numeric values as `f64` (the cache + inline-ValueId fast path that powers
-range-pruning). This is exact for `|integer| ≤ 2^53` and f64-representable values —
-i.e. essentially all real RDF data — but diverges from exact SPARQL/QLever for:
-- integers beyond 2^53 (`"9007199254740993"` compares equal to `2^53`), and
-- exact `xsd:decimal` arithmetic (`0.1 + 0.2 = 0.3` is false in f64).
+**Integers beyond 2^53 — fixed (exact i128 comparison).** sparq holds numeric values
+as `f64` (the cache + inline-ValueId fast path that powers range-pruning), which is
+exact for `|integer| ≤ 2^53` and all f64-representable values — i.e. essentially all
+real RDF data. The fuzzer had never exercised larger integers (values were `< 120`);
+extending it to near-2^53 integers surfaced **11 mismatches / 30k** (e.g.
+`"9007199254740992"` vs `"…993"`). Now closed: `Graph::integer_value` gives an exact
+`i128` for integer-typed terms, and `cmp_expr`/`equal_expr`/`value_compare_strict`
+re-check exactly **only when a value reaches 2^53** (the sub-2^53 f64 fast path is
+untouched — zero regression); `extract_sargable` declines `≥ 2^53` thresholds so those
+filters take the exact path. Re-measured: **80,000 differential cases vs Oxigraph incl.
+near-2^53 integers, 0 mismatches**, and the fuzzer now generates them permanently.
 
-The correct fix is a numeric tower (`i128` / decimal in the comparison path, keeping
-f64 only for the inline-integer scan where values ≤ 2^30 are exact). Deferred to M4:
-it is a structural change with its own cost, and the f64 fast path is load-bearing
-for the measured filter wins. Flagged here rather than silently shipped.
+**Remaining (deliberate) gap — exact `xsd:decimal` arithmetic.** `0.1 + 0.2 = 0.3` is
+false in f64. This needs a decimal type in the arithmetic path; deferred (sparq does no
+decimal arithmetic in the measured workloads, and the f64 fast path is load-bearing for
+the filter wins). Even rarer than the integer case — flagged, not silently shipped.
 
 ## Other next steps
 
-- Numeric tower (M4) to close the >2^53-integer / exact-decimal conformance gap.
+- Decimal arithmetic type to close the exact-`xsd:decimal` conformance gap.
 - Native QLever (not Docker) for the fairest fight; cold-cache and QMpH metrics.
 - Re-measure memory against QLever (compressed) and after M3 column compression.
