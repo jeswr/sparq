@@ -908,10 +908,10 @@ fn extract_sargable(e: &Expression) -> Option<(Variable, NumCmp)> {
         match e {
             Expression::Literal(l) if is_numeric_dt(l) => {
                 let v: f64 = l.value().parse().ok()?;
-                // Beyond f64 integer precision the sargable f64 threshold is unsafe (it
-                // can't distinguish adjacent integers). Decline, so the filter falls back
-                // to the exact general comparison path (`cmp_expr`/`equal_expr`).
-                if v.abs() >= F64_EXACT_INT {
+                // A threshold f64 can't represent precisely (> 15 significant digits —
+                // large integers or high-precision decimals) makes the sargable f64 scan
+                // unsafe; decline so the filter takes the exact general comparison path.
+                if sig_digits(l.value()) > 15 {
                     None
                 } else {
                     Some(v)
@@ -2530,15 +2530,11 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
     }
 }
 
-/// 2^53 — the largest magnitude where every integer is exactly representable as f64.
-/// Beyond it the f64 numeric fast path may compare distinct integers as equal, so the
-/// comparison operators re-check exactly via [`eval_int`].
-const F64_EXACT_INT: f64 = 9_007_199_254_740_992.0;
-
-/// The EXACT integer value of an expression, or `None` if it is not an integer-typed
-/// operand. Used only to disambiguate comparisons of integers beyond f64 precision —
-/// the common (sub-2^53) path never calls this.
-fn eval_int(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<i128> {
+/// The lexical form of an expression IF it is an exact-valued numeric operand (an
+/// integer subtype or xsd:decimal — NOT float/double). Used to re-check comparisons that
+/// the f64 fast path collapsed (integers > 2^53, high-precision decimals). Only reached
+/// when the f64 comparison was equal, so the allocation is rare.
+fn eval_exact_lexical(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<String> {
     use Expression::*;
     match e {
         Variable(v) => {
@@ -2546,24 +2542,100 @@ fn eval_int(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Exp
             if id == NO_ID {
                 None
             } else if is_local(id) {
-                int_of_lit_term(&local.term(id))
+                exact_lexical_of_term(&local.term(id))
             } else {
-                graph.integer_value(id)
+                graph.exact_numeric_lexical(id)
             }
         }
-        Literal(l) if sparq_core::is_integer_datatype(l.datatype().as_str()) => l.value().parse::<i128>().ok(),
-        UnaryPlus(a) => eval_int(graph, local, b, row, a),
-        UnaryMinus(a) => eval_int(graph, local, b, row, a)?.checked_neg(),
+        Literal(_) => exact_lexical_of_term(&eval_expr(graph, local, b, row, e).ok().and_then(|v| match v {
+            Value::Term(t) => Some(t),
+            _ => None,
+        })?),
+        UnaryPlus(a) => eval_exact_lexical(graph, local, b, row, a),
+        UnaryMinus(a) => eval_exact_lexical(graph, local, b, row, a).map(|s| match s.strip_prefix('-') {
+            Some(r) => r.to_string(),
+            None => format!("-{s}"),
+        }),
         _ => None,
     }
 }
 
-fn int_of_lit_term(t: &Term) -> Option<i128> {
+fn exact_lexical_of_term(t: &Term) -> Option<String> {
     match t {
-        Term::Literal(l) if l.language().is_none() && sparq_core::is_integer_datatype(l.datatype().as_str()) => {
-            l.value().parse::<i128>().ok()
+        Term::Literal(l)
+            if l.language().is_none()
+                && (sparq_core::is_integer_datatype(l.datatype().as_str()) || l.datatype() == xsd::DECIMAL) =>
+        {
+            Some(l.value().to_string())
         }
         _ => None,
+    }
+}
+
+/// Exact comparison of two `xsd:decimal` / integer lexical forms (no f64). `None` if
+/// either is not a well-formed decimal. Integers are decimals with an empty fraction.
+fn cmp_decimal_str(a: &str, b: &str) -> Option<Ordering> {
+    let (na, ia, fa) = split_decimal(a)?;
+    let (nb, ib, fb) = split_decimal(b)?;
+    let a_zero = ia.is_empty() && fa.is_empty();
+    let b_zero = nb_is_zero(ib, fb);
+    if a_zero && b_zero {
+        return Some(Ordering::Equal);
+    }
+    let mag = ia
+        .len()
+        .cmp(&ib.len())
+        .then_with(|| ia.cmp(ib))
+        .then_with(|| {
+            let n = fa.len().max(fb.len());
+            // Compare fractional digits with implicit trailing-zero padding.
+            (0..n)
+                .map(|i| (fa.as_bytes().get(i).copied().unwrap_or(b'0'), fb.as_bytes().get(i).copied().unwrap_or(b'0')))
+                .find_map(|(x, y)| (x != y).then(|| x.cmp(&y)))
+                .unwrap_or(Ordering::Equal)
+        });
+    let neg_a = na && !a_zero;
+    let neg_b = nb && !b_zero;
+    Some(match (neg_a, neg_b) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => mag,
+        (true, true) => mag.reverse(),
+    })
+}
+
+fn nb_is_zero(int: &str, frac: &str) -> bool {
+    int.is_empty() && frac.is_empty()
+}
+
+/// Splits a decimal lexical into (negative, integer-digits, fraction-digits), normalised
+/// (no leading zeros on the integer part, no trailing zeros on the fraction). `None` if
+/// the lexical is not digits with at most one `.`.
+fn split_decimal(s: &str) -> Option<(bool, &str, &str)> {
+    let s = s.trim();
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+    if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((neg, int.trim_start_matches('0'), frac.trim_end_matches('0')))
+}
+
+/// Significant decimal digits in a numeric lexical — used to decide whether the f64
+/// sargable path is precision-safe (<= 15 digits round-trips through f64 unambiguously).
+fn sig_digits(s: &str) -> usize {
+    let (_, int, frac) = match split_decimal(s) {
+        Some(p) => p,
+        None => return usize::MAX,
+    };
+    if int.is_empty() {
+        // 0.00123 -> significant digits start at the first non-zero fraction digit.
+        frac.trim_start_matches('0').len()
+    } else {
+        int.len() + frac.len()
     }
 }
 
@@ -2577,11 +2649,14 @@ fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Exp
     // Reaching here means BOTH operands are numeric, so a `None` partial_cmp is a
     // NaN value (op:numeric ordering of NaN is false) — NOT a cross-type error.
     if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
-        // f64 is exact for |v| < 2^53; only above it might two distinct integers collide,
-        // so re-check those exactly as i128 (when both operands are integer-typed).
-        if x.abs() >= F64_EXACT_INT || y.abs() >= F64_EXACT_INT {
-            if let (Some(a), Some(b)) = (eval_int(graph, local, b, row, a), eval_int(graph, local, b, row, c)) {
-                return Ok(Value::Bool(f(a.cmp(&b))));
+        // f64 rounding is monotonic — it only ever COLLAPSES distinct values to equal,
+        // never flips an ordering. So re-check exactly ONLY when f64 says equal (catches
+        // integers > 2^53 and high-precision decimals that share an f64).
+        if x == y {
+            if let (Some(la), Some(lb)) = (eval_exact_lexical(graph, local, b, row, a), eval_exact_lexical(graph, local, b, row, c)) {
+                if let Some(ord) = cmp_decimal_str(&la, &lb) {
+                    return Ok(Value::Bool(f(ord)));
+                }
             }
         }
         return Ok(Value::Bool(x.partial_cmp(&y).map(&f).unwrap_or(false)));
@@ -2597,10 +2672,13 @@ fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Exp
 fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression) -> Result<Value, String> {
     // Fast path: both numeric (NaN == NaN is false, matching op:numeric-equal).
     if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
-        // Re-check exactly when a value exceeds f64 integer precision (see `cmp_expr`).
-        if x.abs() >= F64_EXACT_INT || y.abs() >= F64_EXACT_INT {
-            if let (Some(a), Some(b)) = (eval_int(graph, local, b, row, a), eval_int(graph, local, b, row, c)) {
-                return Ok(Value::Bool(a == b));
+        // Re-check exactly when f64 says equal (see `cmp_expr`): distinct integers > 2^53
+        // or high-precision decimals can share an f64 and must not be reported equal.
+        if x == y {
+            if let (Some(la), Some(lb)) = (eval_exact_lexical(graph, local, b, row, a), eval_exact_lexical(graph, local, b, row, c)) {
+                if let Some(ord) = cmp_decimal_str(&la, &lb) {
+                    return Ok(Value::Bool(ord == Ordering::Equal));
+                }
             }
         }
         return Ok(Value::Bool(x == y));
@@ -2638,10 +2716,13 @@ fn values_equal(x: &Value, y: &Value) -> Option<bool> {
 /// when the operands are value-comparable (both numeric, both boolean, or two
 /// literals of the same datatype and language), else `None` (a type error).
 fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
-    // Exact when both operands are integer-typed literals (no f64 precision loss > 2^53).
+    // Exact when both operands are integer/decimal literals (no f64 precision loss for
+    // integers > 2^53 or high-precision decimals).
     if let (Value::Term(p), Value::Term(q)) = (x, y) {
-        if let (Some(a), Some(b)) = (int_of_lit_term(p), int_of_lit_term(q)) {
-            return Some(a.cmp(&b));
+        if let (Some(la), Some(lb)) = (exact_lexical_of_term(p), exact_lexical_of_term(q)) {
+            if let Some(o) = cmp_decimal_str(&la, &lb) {
+                return Some(o);
+            }
         }
     }
     if let (Some(a), Some(b)) = (strict_num(x), strict_num(y)) {
@@ -2829,6 +2910,46 @@ fn nnp_var(p: &NamedNodePattern) -> Option<Variable> {
     match p {
         NamedNodePattern::Variable(v) => Some(v.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod exact_decimal_tests {
+    use super::*;
+
+    #[test]
+    fn cmp_decimal_str_is_exact() {
+        use std::cmp::Ordering::*;
+        // Integers beyond f64 precision, and high-precision decimals that share an f64.
+        assert_eq!(cmp_decimal_str("9007199254740992", "9007199254740993"), Some(Less));
+        assert_eq!(cmp_decimal_str("0.123456789012345678", "0.123456789012345679"), Some(Less));
+        // Equality incl. non-canonical zeros / trailing zeros / signed zero.
+        assert_eq!(cmp_decimal_str("1.50", "1.5"), Some(Equal));
+        assert_eq!(cmp_decimal_str("007", "7"), Some(Equal));
+        assert_eq!(cmp_decimal_str("-0", "0"), Some(Equal));
+        assert_eq!(cmp_decimal_str("0.0", "-0.0"), Some(Equal));
+        // Sign + magnitude.
+        assert_eq!(cmp_decimal_str("-3", "2"), Some(Less));
+        assert_eq!(cmp_decimal_str("-2", "-3"), Some(Greater));
+        assert_eq!(cmp_decimal_str("10", "9"), Some(Greater));
+        assert_eq!(cmp_decimal_str("1.1", "1.09"), Some(Greater));
+        assert_eq!(cmp_decimal_str("0.1", "0.2"), Some(Less));
+        // Integer vs decimal of equal value.
+        assert_eq!(cmp_decimal_str("5", "5.0"), Some(Equal));
+        assert_eq!(cmp_decimal_str("5", "5.0000000000000001"), Some(Less));
+        // Malformed -> None (falls back to f64).
+        assert_eq!(cmp_decimal_str("1.2.3", "1"), None);
+        assert_eq!(cmp_decimal_str("1e5", "1"), None);
+    }
+
+    #[test]
+    fn sig_digits_counts() {
+        assert_eq!(sig_digits("120"), 3);
+        assert_eq!(sig_digits("0.5"), 1);
+        assert_eq!(sig_digits("9007199254740992"), 16);
+        assert_eq!(sig_digits("0.123456789012345679"), 18);
+        assert_eq!(sig_digits("0.00123"), 3); // leading fraction zeros are not significant
+        assert_eq!(sig_digits("100.0"), 3);
     }
 }
 

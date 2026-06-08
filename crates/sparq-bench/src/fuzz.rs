@@ -59,7 +59,10 @@ fn gen_graph(rng: &mut Rng) -> String {
         }
         // ex:val — MIXED datatype column.
         if rng.chance(3, 4) {
-            let v = match rng.below(8) {
+            // High-precision decimals (>15 sig. digits) where two distinct values can
+            // share an f64 — the decimal analogue of the >2^53 integer case.
+            let hp_dec = ["0.123456789012345678", "0.123456789012345679", "1.000000000000000001", "0.299999999999999999"];
+            let v = match rng.below(9) {
                 0 => format!("{}", rng.below(120)),                 // canonical integer (inline)
                 1 => format!("\"{}\"^^xsd:int", rng.below(120)),    // xsd:int (not inline)
                 2 => format!("\"{}.5\"^^xsd:decimal", rng.below(120)), // decimal
@@ -67,6 +70,7 @@ fn gen_graph(rng: &mut Rng) -> String {
                 4 => format!("\"0{}\"^^xsd:integer", 1 + rng.below(9)), // non-canonical (leading zero)
                 5 => format!("\"{}.0\"^^xsd:double", rng.below(120)),   // double
                 6 => format!("\"{}\"^^xsd:integer", 9007199254740990u64 + rng.below(6) as u64), // near 2^53 — f64-inexact
+                7 => format!("\"{}\"^^xsd:decimal", hp_dec[rng.below(4) as usize]), // high-precision decimal
                 _ => format!("\"s{}\"", rng.below(5)),                  // plain string (non-numeric)
             };
             s.push_str(&format!("{subj} ex:val {v} .\n"));
@@ -135,13 +139,14 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
             // `=` / `!=` against a constant of a possibly-different type, over the
             // MIXED column — exercises RDFterm-equal (known-different vs type error).
             let op = if rng.chance(1, 2) { "=" } else { "!=" };
-            let rhs = match rng.below(7) {
+            let rhs = match rng.below(8) {
                 0 => format!("{}", rng.below(120)),                 // integer
                 1 => format!("\"s{}\"", rng.below(5)),              // plain string
                 2 => "ex:n0".to_string(),                          // IRI
                 3 => "\"true\"^^xsd:boolean".to_string(),          // boolean
                 4 => format!("\"{}\"^^xsd:int", rng.below(120)),   // xsd:int
                 5 => format!("\"{}\"^^xsd:integer", 9007199254740990u64 + rng.below(6) as u64), // near 2^53
+                6 => format!("\"{}\"^^xsd:decimal", ["0.123456789012345678", "0.123456789012345679", "0.299999999999999999"][rng.below(3) as usize]), // high-precision decimal
                 _ => format!("\"{}.5\"^^xsd:decimal", rng.below(120)), // decimal
             };
             let var = if rng.chance(1, 2) { ("?v", "ex:val") } else { ("?a", "ex:age") };

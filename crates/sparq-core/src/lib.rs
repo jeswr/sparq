@@ -400,17 +400,20 @@ impl Graph {
         }
     }
 
-    /// The EXACT integer value of a term id, or `None` if it is not an integer-typed
-    /// literal. Used only to disambiguate comparisons of integers beyond 2^53, where the
-    /// f64 fast path ([`numeric_value`](Self::numeric_value)) loses precision — so it may
-    /// parse the lexical form (the common, small case never reaches here).
-    pub fn integer_value(&self, id: Id) -> Option<i128> {
+    /// The lexical form of a term id IF it is an exact-valued numeric literal (an
+    /// `xsd:integer` subtype or `xsd:decimal` — NOT float/double, whose value IS its f64).
+    /// Used to disambiguate comparisons that the f64 fast path collapses (integers > 2^53,
+    /// high-precision decimals); only reached when the f64 values compared equal, so the
+    /// allocation is rare. Inline-integer ids format their value directly.
+    pub fn exact_numeric_lexical(&self, id: Id) -> Option<String> {
         if dict::is_inline(id) {
-            return Some((id - dict::INLINE_BASE) as i128);
+            return Some((id - dict::INLINE_BASE).to_string());
         }
         match self.dict.term_parts(id) {
-            dict::TermParts::Lit { value, datatype, lang: None } if is_integer_datatype(datatype) => {
-                value.parse::<i128>().ok()
+            dict::TermParts::Lit { value, datatype, lang: None }
+                if is_integer_datatype(datatype) || datatype == xsd::DECIMAL.as_str() =>
+            {
+                Some(value.to_string())
             }
             _ => None,
         }
