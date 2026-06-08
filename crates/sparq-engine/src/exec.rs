@@ -1101,6 +1101,28 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         };
         done[i] = true;
 
+        // Index-nested-loop (bind) join: when the running result is MUCH smaller than
+        // the next pattern and exactly one variable connects them, look up each result
+        // join value in the pattern's index (a bound scan) instead of scanning the whole
+        // (large) relation and merge/hash-joining. This is the win on a selective join —
+        // e.g. a chain whose far end is selective — where the merge would scan millions
+        // of rows to match a few thousand. Same result, validated differentially.
+        let connecting: Vec<Variable> = result.vars.iter().filter(|v| var_pos(i, v).is_some()).cloned().collect();
+        if connecting.len() == 1
+            && distinct_pattern_vars(&prepared[i].pos_vars)
+            && result.rows.len().saturating_mul(8) < prepared[i].est
+        {
+            let jv = &connecting[0];
+            let rk = result.col(jv).unwrap();
+            let pp = var_pos(i, jv).unwrap();
+            result = bind_join(graph, result, &prepared[i].id_pat, &prepared[i].pos_vars, rk, pp, pfilter(i));
+            record_vars(i, cur_card, &mut var_ndv);
+            if result.rows.is_empty() {
+                break;
+            }
+            continue;
+        }
+
         // Execute: a pushed-down filter forces the scan into its own column order
         // (and filters inline); otherwise sort by the join variable for a merge.
         let filt = pfilter(i);
@@ -1810,6 +1832,57 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         emit(prow, &mut rows);
     }
     Bindings::unsorted(out_vars, rows)
+}
+
+/// Index-nested-loop join of a (small) `result` with a single triple pattern on one
+/// shared variable: groups the result by the join value, and for each distinct value
+/// looks up the pattern's matches with that variable BOUND (a binary-search range on a
+/// permutation index) — so a large, selective pattern is never fully scanned. The
+/// pattern must have distinct variables; a pushed-down sargable filter is applied inline.
+fn bind_join(
+    graph: &Graph,
+    result: Bindings,
+    id_pat: &IdPattern,
+    pos_vars: &[Option<Variable>; 3],
+    rk: usize,
+    pp: usize,
+    filt: Option<(usize, NumCmp)>,
+) -> Bindings {
+    // The pattern's NEW variable columns (every variable position except the join one;
+    // the only shared variable is the join variable, so the rest are new).
+    let new_positions: Vec<usize> = (0..3).filter(|&p| p != pp && pos_vars[p].is_some()).collect();
+    let mut out_vars = result.vars.clone();
+    for &p in &new_positions {
+        out_vars.push(pos_vars[p].clone().unwrap());
+    }
+
+    // Group result rows by the join value so each distinct value is looked up once.
+    let mut groups: FxHashMap<Id, Vec<usize>> = FxHashMap::default();
+    for (ri, row) in result.rows.iter().enumerate() {
+        groups.entry(row[rk]).or_default().push(ri);
+    }
+
+    let mut out_rows: Vec<Row> = Vec::new();
+    for (val, ris) in groups {
+        let mut bound = *id_pat;
+        bound[pp] = Some(val);
+        let scan = graph.store.scan(&bound);
+        for prow in scan.rows {
+            let pspo = scan.to_spo(prow);
+            if let Some((fpos, cmp)) = filt {
+                if !graph.numeric_value(pspo[fpos]).is_some_and(|x| cmp.test(x)) {
+                    continue;
+                }
+            }
+            let new_vals: SmallVec<[Id; 4]> = new_positions.iter().map(|&p| pspo[p]).collect();
+            for &ri in &ris {
+                let mut combined = result.rows[ri].clone();
+                combined.extend(new_vals.iter().copied());
+                out_rows.push(combined);
+            }
+        }
+    }
+    Bindings::unsorted(out_vars, out_rows)
 }
 
 fn cross_product(left: Bindings, right: Bindings) -> Bindings {
