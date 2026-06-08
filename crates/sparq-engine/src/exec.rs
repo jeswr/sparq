@@ -118,12 +118,31 @@ pub fn eval_select(graph: &Graph, pattern: &GraphPattern) -> Result<QueryResult,
     Ok(QueryResult { vars: out_vars, rows })
 }
 
-/// Evaluates a SELECT but returns only the solution count, skipping the id->term
-/// materialisation (the number of id-level rows equals the number of solutions).
+/// Evaluates a SELECT but returns only the solution count. When the count can be
+/// derived without materialising the result (a single-pattern scan, possibly under
+/// projection / LIMIT — like QLever's lazy count) it short-circuits; otherwise it
+/// evaluates and counts the rows.
 pub fn count_select(graph: &Graph, pattern: &GraphPattern) -> Result<usize, String> {
+    if let Some(n) = try_count(graph, pattern) {
+        return Ok(n);
+    }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
     Ok(bindings.rows.len())
+}
+
+/// The solution count without materialising, for shapes whose count is exact from
+/// the index: a single-pattern BGP (range size) under projection / OFFSET-LIMIT.
+fn try_count(graph: &Graph, p: &GraphPattern) -> Option<usize> {
+    match p {
+        GraphPattern::Project { inner, .. } | GraphPattern::Reduced { inner } => try_count(graph, inner),
+        GraphPattern::Slice { inner, start, length } => try_count(graph, inner).map(|n| {
+            let after_offset = n.saturating_sub(*start);
+            length.map_or(after_offset, |l| after_offset.min(l))
+        }),
+        // A single-pattern, filter-free BGP: the range size is the exact count.
+        _ => count_pushdown(graph, p),
+    }
 }
 
 // ---- Algebra dispatch ---------------------------------------------------------
