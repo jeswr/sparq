@@ -4,6 +4,7 @@
 //! term [`Dict`]ionary and the [`TripleStore`] (six sorted permutations), and
 //! is built from an RDF document via the bulk loader.
 
+pub mod compress;
 pub mod dict;
 #[cfg(feature = "mmap")]
 pub mod extsort;
