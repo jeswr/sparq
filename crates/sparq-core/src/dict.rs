@@ -91,7 +91,12 @@ impl Dict {
             return id;
         }
         let id = (self.terms.len() as Id) + 1; // 1-based
-        debug_assert!(id < INLINE_BASE, "dictionary exceeded the inline-id base");
+        // Enforced in release too: once the (non-inline) dictionary reaches
+        // INLINE_BASE distinct terms, new ids would collide with the inline-integer
+        // range and decode as integers — silent corruption. 2^30 ≈ 1.07B distinct
+        // non-integer terms is a hard capacity limit of the u32 inline scheme; fail
+        // loudly rather than corrupt (widen `Id` to u64 to lift it).
+        assert!(id < INLINE_BASE, "dictionary exceeded the inline-id capacity (2^30 distinct non-integer terms); widen Id to u64");
         self.terms.push(term.clone());
         self.ids.insert(key, id);
         id
@@ -135,5 +140,58 @@ impl Dict {
         // FxHashMap bucket overhead (hashbrown): ~ (capacity) * (entry + control byte).
         let buckets = self.ids.capacity() * (std::mem::size_of::<(String, Id)>() + 1);
         term_slots + key_bytes + buckets
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn int(s: &str) -> Term {
+        Term::Literal(Literal::new_typed_literal(s, xsd::INTEGER))
+    }
+
+    #[test]
+    fn inline_integer_roundtrip_and_boundaries() {
+        let mut d = Dict::new();
+        // Canonical non-negative integers inline; the id carries the value and never
+        // touches the dictionary.
+        for v in [0u32, 1, 42, INLINE_MAX] {
+            let id = d.intern(&int(&v.to_string()));
+            assert!(is_inline(id), "{v} should inline");
+            assert_eq!(id, INLINE_BASE + v);
+            assert_eq!(d.term(id), int(&v.to_string()), "round-trips to the canonical term");
+            assert_eq!(d.lookup(&int(&v.to_string())), id, "lookup agrees with intern");
+        }
+        assert_eq!(d.len(), 0, "no inline integer is stored in the dictionary");
+    }
+
+    #[test]
+    fn non_canonical_and_out_of_range_do_not_inline() {
+        let mut d = Dict::new();
+        // Leading zero, explicit sign, and negative are NOT the canonical form, so
+        // they stay DISTINCT dictionary terms (term identity preserved).
+        for s in ["05", "+5", "-3", "007"] {
+            let id = d.intern(&int(s));
+            assert!(!is_inline(id), "{s:?} must not inline");
+        }
+        // "05" and "5" are different terms with different ids (one inline, one not).
+        assert_ne!(d.intern(&int("05")), d.intern(&int("5")));
+        // A non-integer datatype with an integer lexical form does not inline.
+        let typed = Term::Literal(Literal::new_typed_literal("5", xsd::INT));
+        assert!(!is_inline(d.intern(&typed)));
+        // INLINE_MAX inlines but INLINE_MAX + 1 (= INLINE_BASE) is out of range.
+        assert!(is_inline(d.intern(&int(&INLINE_MAX.to_string()))));
+        assert!(!is_inline(d.intern(&int(&(INLINE_BASE).to_string()))));
+    }
+
+    #[test]
+    fn non_integer_terms_get_dictionary_ids_below_inline_base() {
+        let mut d = Dict::new();
+        let iri = Term::NamedNode(oxrdf::NamedNode::new("http://ex/x").unwrap());
+        let id = d.intern(&iri);
+        assert!(id >= 1 && id < INLINE_BASE);
+        assert!(!is_inline(id));
+        assert_eq!(d.term(id), iri);
     }
 }

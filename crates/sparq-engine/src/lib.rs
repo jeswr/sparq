@@ -540,6 +540,41 @@ mod tests {
     }
 
     #[test]
+    fn range_pruning_boundaries_and_mixed_columns() {
+        // Inline-integer range-pruning: an all-canonical-integer column binary-searches
+        // to the passing value range. Check every operator at exact boundaries, plus
+        // out-of-range and empty cases. Ages 10,20,30,40,50.
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:age 10 . ex:b ex:age 20 . ex:c ex:age 30 . ex:d ex:age 40 . ex:e ex:age 50 .",
+            "turtle",
+        )
+        .unwrap();
+        let c = |q: &str| query(&g, &format!("PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s ex:age ?a . FILTER({q}) }}")).unwrap().len();
+        assert_eq!(c("?a > 30"), 2); // 40,50
+        assert_eq!(c("?a >= 30"), 3); // 30,40,50
+        assert_eq!(c("?a < 30"), 2); // 10,20
+        assert_eq!(c("?a <= 30"), 3);
+        assert_eq!(c("?a = 30"), 1);
+        assert_eq!(c("?a != 30"), 4);
+        assert_eq!(c("?a > 50"), 0); // above max -> empty
+        assert_eq!(c("?a < 10"), 0); // below min -> empty
+        assert_eq!(c("?a >= 0"), 5); // all
+        assert_eq!(c("?a > -100"), 5); // negative threshold (non-sargable) -> all
+
+        // MIXED column: the range-pruning guard must fall back to a full scan so a
+        // non-inline numeric (xsd:int) that passes the filter is NOT dropped.
+        let gm = Graph::load_str(
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . \
+             ex:a ex:v 50 . ex:b ex:v \"200\"^^xsd:int . ex:c ex:v \"95\"^^xsd:integer . ex:d ex:v \"-10\"^^xsd:integer .",
+            "turtle",
+        )
+        .unwrap();
+        let cm = |q: &str| query(&gm, &format!("PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s ex:v ?v . FILTER({q}) }}")).unwrap().len();
+        assert_eq!(cm("?v > 90"), 2); // 95 (inline) AND 200 (xsd:int, non-inline) — both kept
+        assert_eq!(cm("?v < 60"), 2); // 50 and -10
+    }
+
+    #[test]
     fn relational_type_error_semantics() {
         // A numeric ordering comparison against a NON-numeric term is a SPARQL type
         // error -> the row is excluded (NOT a string comparison). Regression for the
