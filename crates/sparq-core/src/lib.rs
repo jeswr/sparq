@@ -71,6 +71,24 @@ fn numeric_of(term: &Term) -> f64 {
     }
 }
 
+/// True for `xsd:integer` and its derived integer subtypes (NOT decimal/double/float) —
+/// the datatypes whose values are exact integers (parseable as `i128`).
+pub fn is_integer_datatype(dt: &str) -> bool {
+    dt == xsd::INTEGER.as_str()
+        || dt == xsd::LONG.as_str()
+        || dt == xsd::INT.as_str()
+        || dt == xsd::SHORT.as_str()
+        || dt == xsd::BYTE.as_str()
+        || dt == xsd::NON_NEGATIVE_INTEGER.as_str()
+        || dt == xsd::POSITIVE_INTEGER.as_str()
+        || dt == xsd::NON_POSITIVE_INTEGER.as_str()
+        || dt == xsd::NEGATIVE_INTEGER.as_str()
+        || dt == xsd::UNSIGNED_INT.as_str()
+        || dt == xsd::UNSIGNED_LONG.as_str()
+        || dt == xsd::UNSIGNED_SHORT.as_str()
+        || dt == xsd::UNSIGNED_BYTE.as_str()
+}
+
 fn is_numeric_dt(l: &Literal) -> bool {
     let dt = l.datatype().as_str();
     dt == xsd::INTEGER.as_str()
@@ -379,6 +397,22 @@ impl Graph {
             None
         } else {
             Some(v)
+        }
+    }
+
+    /// The EXACT integer value of a term id, or `None` if it is not an integer-typed
+    /// literal. Used only to disambiguate comparisons of integers beyond 2^53, where the
+    /// f64 fast path ([`numeric_value`](Self::numeric_value)) loses precision — so it may
+    /// parse the lexical form (the common, small case never reaches here).
+    pub fn integer_value(&self, id: Id) -> Option<i128> {
+        if dict::is_inline(id) {
+            return Some((id - dict::INLINE_BASE) as i128);
+        }
+        match self.dict.term_parts(id) {
+            dict::TermParts::Lit { value, datatype, lang: None } if is_integer_datatype(datatype) => {
+                value.parse::<i128>().ok()
+            }
+            _ => None,
         }
     }
 

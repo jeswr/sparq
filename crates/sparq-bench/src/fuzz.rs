@@ -59,13 +59,14 @@ fn gen_graph(rng: &mut Rng) -> String {
         }
         // ex:val — MIXED datatype column.
         if rng.chance(3, 4) {
-            let v = match rng.below(7) {
+            let v = match rng.below(8) {
                 0 => format!("{}", rng.below(120)),                 // canonical integer (inline)
                 1 => format!("\"{}\"^^xsd:int", rng.below(120)),    // xsd:int (not inline)
                 2 => format!("\"{}.5\"^^xsd:decimal", rng.below(120)), // decimal
                 3 => format!("\"-{}\"^^xsd:integer", rng.below(60)),   // negative integer (not inline)
                 4 => format!("\"0{}\"^^xsd:integer", 1 + rng.below(9)), // non-canonical (leading zero)
                 5 => format!("\"{}.0\"^^xsd:double", rng.below(120)),   // double
+                6 => format!("\"{}\"^^xsd:integer", 9007199254740990u64 + rng.below(6) as u64), // near 2^53 — f64-inexact
                 _ => format!("\"s{}\"", rng.below(5)),                  // plain string (non-numeric)
             };
             s.push_str(&format!("{subj} ex:val {v} .\n"));
@@ -94,6 +95,11 @@ fn gen_filter(rng: &mut Rng, var: &str) -> String {
     // Signed threshold straddling the data range AND zero — negative thresholds are
     // non-sargable (parsed as UnaryMinus), forcing the residual compare path that a
     // non-numeric operand must turn into a type error, not a string comparison.
+    // 1-in-6: a threshold near 2^53, where an f64 numeric model loses integer precision.
+    if rng.chance(1, 6) {
+        let t = 9007199254740990u64 + rng.below(6) as u64;
+        return format!("FILTER({var} {op} {t})");
+    }
     let t = rng.below(160) as i64 - 40; // -40..119
     format!("FILTER({var} {op} {t})")
 }
@@ -129,12 +135,13 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
             // `=` / `!=` against a constant of a possibly-different type, over the
             // MIXED column — exercises RDFterm-equal (known-different vs type error).
             let op = if rng.chance(1, 2) { "=" } else { "!=" };
-            let rhs = match rng.below(6) {
+            let rhs = match rng.below(7) {
                 0 => format!("{}", rng.below(120)),                 // integer
                 1 => format!("\"s{}\"", rng.below(5)),              // plain string
                 2 => "ex:n0".to_string(),                          // IRI
                 3 => "\"true\"^^xsd:boolean".to_string(),          // boolean
                 4 => format!("\"{}\"^^xsd:int", rng.below(120)),   // xsd:int
+                5 => format!("\"{}\"^^xsd:integer", 9007199254740990u64 + rng.below(6) as u64), // near 2^53
                 _ => format!("\"{}.5\"^^xsd:decimal", rng.below(120)), // decimal
             };
             let var = if rng.chance(1, 2) { ("?v", "ex:val") } else { ("?a", "ex:age") };

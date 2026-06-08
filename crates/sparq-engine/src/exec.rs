@@ -906,7 +906,17 @@ fn inline_pass_values(cmp: NumCmp) -> Option<(u32, u32)> {
 fn extract_sargable(e: &Expression) -> Option<(Variable, NumCmp)> {
     fn lit_num(e: &Expression) -> Option<f64> {
         match e {
-            Expression::Literal(l) if is_numeric_dt(l) => l.value().parse().ok(),
+            Expression::Literal(l) if is_numeric_dt(l) => {
+                let v: f64 = l.value().parse().ok()?;
+                // Beyond f64 integer precision the sargable f64 threshold is unsafe (it
+                // can't distinguish adjacent integers). Decline, so the filter falls back
+                // to the exact general comparison path (`cmp_expr`/`equal_expr`).
+                if v.abs() >= F64_EXACT_INT {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
             _ => None,
         }
     }
@@ -2520,6 +2530,43 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
     }
 }
 
+/// 2^53 — the largest magnitude where every integer is exactly representable as f64.
+/// Beyond it the f64 numeric fast path may compare distinct integers as equal, so the
+/// comparison operators re-check exactly via [`eval_int`].
+const F64_EXACT_INT: f64 = 9_007_199_254_740_992.0;
+
+/// The EXACT integer value of an expression, or `None` if it is not an integer-typed
+/// operand. Used only to disambiguate comparisons of integers beyond f64 precision —
+/// the common (sub-2^53) path never calls this.
+fn eval_int(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<i128> {
+    use Expression::*;
+    match e {
+        Variable(v) => {
+            let id = row[b.col(v)?];
+            if id == NO_ID {
+                None
+            } else if is_local(id) {
+                int_of_lit_term(&local.term(id))
+            } else {
+                graph.integer_value(id)
+            }
+        }
+        Literal(l) if sparq_core::is_integer_datatype(l.datatype().as_str()) => l.value().parse::<i128>().ok(),
+        UnaryPlus(a) => eval_int(graph, local, b, row, a),
+        UnaryMinus(a) => eval_int(graph, local, b, row, a)?.checked_neg(),
+        _ => None,
+    }
+}
+
+fn int_of_lit_term(t: &Term) -> Option<i128> {
+    match t {
+        Term::Literal(l) if l.language().is_none() && sparq_core::is_integer_datatype(l.datatype().as_str()) => {
+            l.value().parse::<i128>().ok()
+        }
+        _ => None,
+    }
+}
+
 /// An ORDERING comparison (`<`, `>`, `<=`, `>=`). SPARQL only orders operands of
 /// compatible types (numeric vs numeric, boolean vs boolean, or two literals of the
 /// same datatype); anything else is a TYPE ERROR (`Value::Error`), which a FILTER
@@ -2530,6 +2577,13 @@ fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Exp
     // Reaching here means BOTH operands are numeric, so a `None` partial_cmp is a
     // NaN value (op:numeric ordering of NaN is false) — NOT a cross-type error.
     if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
+        // f64 is exact for |v| < 2^53; only above it might two distinct integers collide,
+        // so re-check those exactly as i128 (when both operands are integer-typed).
+        if x.abs() >= F64_EXACT_INT || y.abs() >= F64_EXACT_INT {
+            if let (Some(a), Some(b)) = (eval_int(graph, local, b, row, a), eval_int(graph, local, b, row, c)) {
+                return Ok(Value::Bool(f(a.cmp(&b))));
+            }
+        }
         return Ok(Value::Bool(x.partial_cmp(&y).map(&f).unwrap_or(false)));
     }
     let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
@@ -2543,6 +2597,12 @@ fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Exp
 fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression) -> Result<Value, String> {
     // Fast path: both numeric (NaN == NaN is false, matching op:numeric-equal).
     if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
+        // Re-check exactly when a value exceeds f64 integer precision (see `cmp_expr`).
+        if x.abs() >= F64_EXACT_INT || y.abs() >= F64_EXACT_INT {
+            if let (Some(a), Some(b)) = (eval_int(graph, local, b, row, a), eval_int(graph, local, b, row, c)) {
+                return Ok(Value::Bool(a == b));
+            }
+        }
         return Ok(Value::Bool(x == y));
     }
     let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
@@ -2578,6 +2638,12 @@ fn values_equal(x: &Value, y: &Value) -> Option<bool> {
 /// when the operands are value-comparable (both numeric, both boolean, or two
 /// literals of the same datatype and language), else `None` (a type error).
 fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
+    // Exact when both operands are integer-typed literals (no f64 precision loss > 2^53).
+    if let (Value::Term(p), Value::Term(q)) = (x, y) {
+        if let (Some(a), Some(b)) = (int_of_lit_term(p), int_of_lit_term(q)) {
+            return Some(a.cmp(&b));
+        }
+    }
     if let (Some(a), Some(b)) = (strict_num(x), strict_num(y)) {
         return a.partial_cmp(&b);
     }
