@@ -1,0 +1,12 @@
+# Generated/downloaded data + QLever index + logs (regenerate with `qlever get-data`,
+# `qlever index`). Only the harness (Qleverfile, queries*, compare.py, README) is tracked.
+olympics.nt
+olympics.zip
+olympics.index*
+olympics.internal*
+olympics.vocabulary*
+olympics.meta-data.json
+olympics.prefixes
+olympics.*-log.txt
+*.server-log.txt
+.last-output

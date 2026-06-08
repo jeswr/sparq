@@ -11,16 +11,28 @@
 //! worst-case-optimal joins, a DP planner and property paths.
 
 mod exec;
+pub mod json;
 
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;
 use spargebra::{Query, SparqlParser};
 
-/// Executes a SPARQL query string against a graph.
+/// Executes a SPARQL query string against a graph, materialising the solutions.
 pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     match q {
         Query::Select { pattern, .. } => exec::eval_select(graph, &pattern),
+        _ => Err("only SELECT queries are supported".into()),
+    }
+}
+
+/// Counts the solutions of a SELECT query *without* materialising the result
+/// terms (the id-level row count equals the solution count). Used to measure
+/// engine compute in isolation from result serialisation.
+pub fn count(graph: &Graph, sparql: &str) -> Result<usize, String> {
+    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    match q {
+        Query::Select { pattern, .. } => exec::count_select(graph, &pattern),
         _ => Err("only SELECT queries are supported".into()),
     }
 }

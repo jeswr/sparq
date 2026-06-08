@@ -102,6 +102,14 @@ pub fn eval_select(graph: &Graph, pattern: &GraphPattern) -> Result<QueryResult,
     Ok(QueryResult { vars: out_vars, rows })
 }
 
+/// Evaluates a SELECT but returns only the solution count, skipping the id->term
+/// materialisation (the number of id-level rows equals the number of solutions).
+pub fn count_select(graph: &Graph, pattern: &GraphPattern) -> Result<usize, String> {
+    let mut local = LocalVocab::default();
+    let bindings = eval_modified(graph, &mut local, pattern)?;
+    Ok(bindings.rows.len())
+}
+
 // ---- Algebra dispatch ---------------------------------------------------------
 
 fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {

@@ -107,6 +107,65 @@ against QLever directly** and study its architecture closely.
 4. Honest reporting: where we win, where we lose, by how much — no unverified
    victory claims. Out-competing QLever broadly is a serious, multi-stage effort.
 
+## Measured: sparq vs QLever — Olympics (~1.78M triples), first run
+
+Harness in `bench/qlever-olympics/` (`qlever` CLI builds + serves QLever in
+Docker; `compare.py` runs both engines; `queries/` and `queries-count/` are the
+workloads). Reproduce:
+
+```sh
+cd bench/qlever-olympics
+../../.qlever-venv/bin/qlever setup-config olympics && qlever get-data && qlever index && qlever start
+../../.qlever-venv/bin/python compare.py 5 queries        json         # fair end-to-end
+../../.qlever-venv/bin/python compare.py 5 queries-count  materialize  # fair compute-only
+```
+
+Min of 5 **cold** runs each (QLever cache cleared every run; sparq has no query
+cache). **All 10 queries returned result sizes identical to QLever** — a strong
+correctness cross-check against an independent engine.
+
+**Two measurements, because output serialisation dominates and must be matched:**
+
+| pass | what both do | geomean (qlever/sparq) | winner |
+|---|---|--:|---|
+| end-to-end (full SPARQL JSON) | compute **+ serialise all rows to JSON** | 2.71× | sparq faster |
+| **compute only** (COUNT-wrapped) | compute the join, return 1 row | **0.32×** | **QLever ~3× faster** |
+
+### The honest reading
+
+- **QLever's query *engine* is ~3× faster than sparq** on these joins/scans
+  (compute-only pass), winning every query — and most dramatically the numeric
+  **FILTER (q06): 14× faster**. sparq evaluates a filter by materialising each id
+  to a term and parsing the number per row; QLever's tagged ValueIds + columnar
+  scan avoid both. This is the single clearest signal pointing at **M4 (tagged
+  ValueIds)** and **M3 (column compression + vectorised scan)**.
+- sparq only "wins" the **end-to-end** pass because **QLever's JSON export is slow
+  in this setup** (Docker-on-macOS), not because sparq computes faster. When both
+  serialise, sparq's hand-rolled JSON writer happens to be quicker here — but
+  that says nothing about engine quality.
+- **This setup *handicaps* QLever** and still it wins on compute: it runs in
+  Docker-on-macOS (VM syscall/IO overhead, slow mmap of its disk index), on a
+  tiny dataset that fits entirely in RAM — sparq's home turf. QLever is engineered
+  for **billion-triple, out-of-core** workloads where sparq would simply OOM.
+- Pure aggregates over a full scan (`q01 count-all`, `q09 group-by-gender`) go to
+  QLever even end-to-end (0.16×, 0.34×) — its columnar count is hard to beat.
+
+**Conclusion:** beating Oxigraph said nothing about QLever, exactly as expected.
+QLever's engine is genuinely faster; closing that gap is what M3/M4 are for. No
+"we beat QLever" claim — the opposite, on the metric that matters (compute).
+
+### Next (driven by these deltas)
+
+1. **M4 tagged ValueIds** first — q06's 14× filter gap is the highest-leverage,
+   self-contained win; inline numerics also speed numeric joins/ORDER BY.
+2. **M3 column compression + vectorised/block scan** — close the ~3× general
+   compute gap and the memory gap.
+3. Native QLever (not Docker) + **larger datasets** (SP2Bench/WatDiv, then a
+   100M+ WDBench/Wikidata subset) for the decisive, fair fight — and to test
+   QLever's out-of-core regime where sparq must learn to bound memory.
+4. Show the **WCOJ edge** on a skew/cycle-heavy benchmark (QLever uses binary
+   joins) — our one likely asymptotic win.
+
 ## Other next steps
 
 - Larger scales; cold-cache and QMpH (queries/hour) metrics.
