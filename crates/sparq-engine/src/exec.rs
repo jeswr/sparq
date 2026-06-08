@@ -1342,11 +1342,30 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
     use Expression::*;
     match e {
         Variable(v) => match b.col(v) {
-            Some(c) if row[c] != NO_ID => Ok(Value::Term(term_of(graph, local, row[c]).unwrap())),
+            Some(c) if row[c] != NO_ID => {
+                let id = row[c];
+                // Fast path: a numeric literal from the data resolves to its value
+                // straight from the cache — no term clone, no string parse. This is
+                // the hot path for numeric FILTER / comparison / ORDER BY.
+                if !is_local(id) {
+                    if let Some(n) = graph.numeric_value(id) {
+                        return Ok(Value::Num(n));
+                    }
+                }
+                Ok(Value::Term(term_of(graph, local, id).unwrap()))
+            }
             _ => Ok(Value::Unbound),
         },
         NamedNode(n) => Ok(Value::Term(Term::NamedNode(n.clone()))),
-        Literal(l) => Ok(Value::Term(Term::Literal(l.clone()))),
+        Literal(l) => {
+            // A numeric constant resolves to its value once, not per row.
+            if is_numeric_dt(l) {
+                if let Ok(n) = l.value().parse::<f64>() {
+                    return Ok(Value::Num(n));
+                }
+            }
+            Ok(Value::Term(Term::Literal(l.clone())))
+        }
         And(a, c) => Ok(Value::Bool(eval_bool(graph, local, b, row, a)? && eval_bool(graph, local, b, row, c)?)),
         Or(a, c) => Ok(Value::Bool(eval_bool(graph, local, b, row, a)? || eval_bool(graph, local, b, row, c)?)),
         Not(a) => Ok(Value::Bool(!eval_bool(graph, local, b, row, a)?)),

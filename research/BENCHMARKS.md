@@ -159,10 +159,24 @@ covered by the end-to-end pass only.
 QLever's engine is genuinely faster; closing that gap is what M3/M4 are for. No
 "we beat QLever" claim — the opposite, on the metric that matters (compute).
 
+### Progress
+
+- **Numeric value cache (partial M4, commit pending).** A dictionary-parallel
+  `Vec<f64>` of every term's numeric value (NaN = non-numeric) lets numeric
+  FILTER / comparison / ORDER BY skip the per-row term materialisation + string
+  parse; numeric literal constants in the query are folded the same way. Result:
+  **q06 filter 14.15 ms → 5.22 ms** (compute), its gap to QLever **14× → ~5×**,
+  and the compute-pass geomean **0.31× → 0.41×** (QLever's lead 3.2× → 2.4×). The
+  join-bound queries are unchanged — they are limited by the `Vec<Vec<Id>>`
+  per-row-allocation intermediate, which the flat/columnar work targets next.
+
 ### Next (driven by these deltas)
 
-1. **M4 tagged ValueIds** first — q06's 14× filter gap is the highest-leverage,
-   self-contained win; inline numerics also speed numeric joins/ORDER BY.
+1. **Flat/columnar Bindings** — replace the per-row `Vec<Vec<Id>>` (one heap
+   allocation per solution row) with a single flat `Vec<Id>` + width; this is the
+   biggest remaining compute gap on the join queries (q04/q05/q10).
+2. **Full tagged ValueIds** — inline numerics/dates in the id itself (extends the
+   numeric cache); also speeds numeric joins.
 2. **M3 column compression + vectorised/block scan** — close the ~3× general
    compute gap and the memory gap.
 3. Native QLever (not Docker) + **larger datasets** (SP2Bench/WatDiv, then a

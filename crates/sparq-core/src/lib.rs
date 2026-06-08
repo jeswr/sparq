@@ -8,7 +8,8 @@ pub mod dict;
 pub mod store;
 
 use dict::{Dict, Id};
-use oxrdf::{NamedNode, Term};
+use oxrdf::vocab::xsd;
+use oxrdf::{Literal, NamedNode, Term};
 use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
 use store::{Pattern, TripleStore};
 
@@ -16,6 +17,39 @@ use store::{Pattern, TripleStore};
 pub struct Graph {
     pub dict: Dict,
     pub store: TripleStore,
+    /// Parallel to the dictionary: the f64 value of each numeric literal (NaN for
+    /// non-numeric terms). Lets the engine evaluate numeric filters / comparisons
+    /// / ORDER BY without materialising the term and parsing its string each time
+    /// — a lightweight, u32-id-preserving stand-in for QLever's inline ValueIds.
+    numerics: Vec<f64>,
+}
+
+/// The f64 value of a term if it is a numeric XSD literal, else NaN.
+fn numeric_of(term: &Term) -> f64 {
+    match term {
+        Term::Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+        _ => f64::NAN,
+    }
+}
+
+fn is_numeric_dt(l: &Literal) -> bool {
+    let dt = l.datatype().as_str();
+    dt == xsd::INTEGER.as_str()
+        || dt == xsd::DECIMAL.as_str()
+        || dt == xsd::DOUBLE.as_str()
+        || dt == xsd::FLOAT.as_str()
+        || dt == xsd::LONG.as_str()
+        || dt == xsd::INT.as_str()
+        || dt == xsd::SHORT.as_str()
+        || dt == xsd::BYTE.as_str()
+        || dt == xsd::NON_NEGATIVE_INTEGER.as_str()
+        || dt == xsd::POSITIVE_INTEGER.as_str()
+        || dt == xsd::NON_POSITIVE_INTEGER.as_str()
+        || dt == xsd::NEGATIVE_INTEGER.as_str()
+        || dt == xsd::UNSIGNED_INT.as_str()
+        || dt == xsd::UNSIGNED_LONG.as_str()
+        || dt == xsd::UNSIGNED_SHORT.as_str()
+        || dt == xsd::UNSIGNED_BYTE.as_str()
 }
 
 impl Graph {
@@ -64,7 +98,30 @@ impl Graph {
         }
 
         let store = TripleStore::from_triples(triples);
-        Ok(Graph { dict, store })
+
+        // Precompute the numeric value of every dictionary term (one parse each).
+        let n = dict.len();
+        #[cfg(feature = "parallel")]
+        let numerics: Vec<f64> = {
+            use rayon::prelude::*;
+            (0..n).into_par_iter().map(|i| numeric_of(dict.term(i as Id + 1))).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let numerics: Vec<f64> = (0..n).map(|i| numeric_of(dict.term(i as Id + 1))).collect();
+
+        Ok(Graph { dict, store, numerics })
+    }
+
+    /// The numeric value of a dictionary term id, or `None` if it is not a numeric
+    /// literal. O(1), no allocation — the engine's fast path for numeric filters.
+    #[inline]
+    pub fn numeric_value(&self, id: Id) -> Option<f64> {
+        let v = *self.numerics.get((id - 1) as usize)?;
+        if v.is_nan() {
+            None
+        } else {
+            Some(v)
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -78,7 +135,7 @@ impl Graph {
     /// A rough estimate of the graph's in-memory footprint in bytes (dictionary +
     /// the six permutation indexes), for benchmarking.
     pub fn heap_bytes(&self) -> usize {
-        self.dict.heap_bytes() + self.store.heap_bytes()
+        self.dict.heap_bytes() + self.store.heap_bytes() + self.numerics.capacity() * std::mem::size_of::<f64>()
     }
 
     /// Resolves a term to its id, or `None` if the term is absent (so a pattern
