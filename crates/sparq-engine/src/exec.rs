@@ -1619,8 +1619,9 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
         let key: Key = shared.iter().map(|&(bi, _)| row[bi]).collect();
         table.entry(key).or_default().push(ri);
     }
-    let mut rows = Vec::new();
-    for prow in &probe.rows {
+    // Emit the output rows for one probe row (its matches, each combined with the
+    // probe-only columns).
+    let emit = |prow: &Row, out: &mut Vec<Row>| {
         let key: Key = shared.iter().map(|&(_, pi)| prow[pi]).collect();
         if let Some(matches) = table.get(&key) {
             for &bi in matches {
@@ -1628,9 +1629,32 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
                 for &pi in &probe_only {
                     combined.push(prow[pi]);
                 }
-                rows.push(combined);
+                out.push(combined);
             }
         }
+    };
+    // The probe is read-only over a shared table, so for a large probe side build the
+    // output in parallel on native (the output is unordered, so any interleaving is
+    // fine). The build side stays sequential (concurrent map inserts would need locks).
+    #[cfg(feature = "parallel")]
+    if probe.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        let rows: Vec<Row> = probe
+            .rows
+            .par_iter()
+            .fold(Vec::new, |mut acc, prow| {
+                emit(prow, &mut acc);
+                acc
+            })
+            .reduce(Vec::new, |mut a, mut b| {
+                a.append(&mut b);
+                a
+            });
+        return Bindings::unsorted(out_vars, rows);
+    }
+    let mut rows = Vec::new();
+    for prow in &probe.rows {
+        emit(prow, &mut rows);
     }
     Bindings::unsorted(out_vars, rows)
 }
