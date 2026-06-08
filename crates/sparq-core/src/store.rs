@@ -46,11 +46,25 @@ impl Perm {
 /// bound.
 pub type Pattern = [Option<Id>; 3];
 
+use rustc_hash::FxHashMap;
+
+/// Per-predicate statistics for cardinality estimation (a characteristic-set-lite
+/// summary): how many triples use the predicate, and how many *distinct* subjects
+/// and objects it relates. Lets the planner estimate join result sizes.
+#[derive(Clone, Copy, Default)]
+pub struct PredStat {
+    pub count: usize,
+    pub ndv_subj: usize,
+    pub ndv_obj: usize,
+}
+
 pub struct TripleStore {
     // Each permutation as a flat row-major array of [keyed columns], sorted.
     // Stored in the permutation's column order (so binary search on a prefix is
     // a plain lexicographic comparison of the leading columns).
     perms: [Vec<[Id; 3]>; 6],
+    // Per-predicate stats keyed by predicate id (for the cost-based planner).
+    pred_stats: FxHashMap<Id, PredStat>,
 }
 
 impl TripleStore {
@@ -92,7 +106,54 @@ impl TripleStore {
             std::mem::take(&mut others[3]),
             std::mem::take(&mut others[4]),
         ];
-        TripleStore { perms }
+        let pred_stats = Self::compute_pred_stats(&perms[2], &perms[3]);
+        TripleStore { perms, pred_stats }
+    }
+
+    /// Per-predicate stats from the PSO (P,S,O) and POS (P,O,S) permutations: one
+    /// linear pass each, counting triples + distinct subjects (from PSO) and
+    /// distinct objects (from POS) within each predicate run.
+    fn compute_pred_stats(pso: &[[Id; 3]], pos: &[[Id; 3]]) -> FxHashMap<Id, PredStat> {
+        let mut stats: FxHashMap<Id, PredStat> = FxHashMap::default();
+        // PSO rows are [P, S, O]; distinct S per P + total count per P.
+        let mut i = 0;
+        while i < pso.len() {
+            let p = pso[i][0];
+            let (mut count, mut ndv_s) = (0usize, 0usize);
+            let mut last_s = None;
+            while i < pso.len() && pso[i][0] == p {
+                count += 1;
+                if last_s != Some(pso[i][1]) {
+                    ndv_s += 1;
+                    last_s = Some(pso[i][1]);
+                }
+                i += 1;
+            }
+            let e = stats.entry(p).or_default();
+            e.count = count;
+            e.ndv_subj = ndv_s;
+        }
+        // POS rows are [P, O, S]; distinct O per P.
+        let mut i = 0;
+        while i < pos.len() {
+            let p = pos[i][0];
+            let mut ndv_o = 0usize;
+            let mut last_o = None;
+            while i < pos.len() && pos[i][0] == p {
+                if last_o != Some(pos[i][1]) {
+                    ndv_o += 1;
+                    last_o = Some(pos[i][1]);
+                }
+                i += 1;
+            }
+            stats.entry(p).or_default().ndv_obj = ndv_o;
+        }
+        stats
+    }
+
+    /// Stats for a predicate id (for the cost-based planner), if present.
+    pub fn pred_stat(&self, predicate: Id) -> Option<PredStat> {
+        self.pred_stats.get(&predicate).copied()
     }
 
     pub fn len(&self) -> usize {

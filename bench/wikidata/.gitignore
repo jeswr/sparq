@@ -1,0 +1,7 @@
+/* downloads + dump */
+*.bz2
+*.gz
+*.nt
+wikidata.index*
+wikidata.vocab*
+*.log

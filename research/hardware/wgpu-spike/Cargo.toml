@@ -1,0 +1,17 @@
+[package]
+name = "wgpu-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone (NOT part of the sparq workspace) so it can't perturb the engine build.
+[workspace]
+
+[dependencies]
+wgpu = "22"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+rayon = "1"
+
+[profile.release]
+opt-level = 3

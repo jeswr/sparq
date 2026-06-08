@@ -302,6 +302,65 @@ mod tests {
     }
 
     #[test]
+    fn planner_four_pattern_multi_predicate() {
+        // 4 patterns over predicates of different selectivity (knows/age/name) —
+        // exercises the cost-based GOO planner's candidate scoring. Result must be
+        // correct regardless of the order it picks.
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?k ?ka WHERE { \
+               ?s ex:knows ?k . ?s ex:age ?a . ?s ex:name ?n . ?k ex:age ?ka }",
+        )
+        .unwrap();
+        // alice->bob(25), bob->carol(35); carol has no knows
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn planner_path_vs_naive() {
+        // 3-hop path ?a e ?b . ?b e ?c . ?c e ?d over a random graph, checked
+        // against a brute-force count — the planner orders 3 candidates and the
+        // result must match a naive evaluator.
+        let mut seed = 0x00C0FFEEu64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let n = 22u32;
+        let mut edges: Vec<(u32, u32)> = Vec::new();
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for _ in 0..130 {
+            let (a, b) = (next() % n, next() % n);
+            edges.push((a, b));
+            ttl.push_str(&format!("ex:n{a} ex:e ex:n{b} .\n"));
+        }
+        edges.sort_unstable();
+        edges.dedup();
+        let graph = Graph::load_str(&ttl, "turtle").unwrap();
+
+        // naive 3-hop path count: a->b, b->c, c->d
+        let mut naive = 0usize;
+        for &(_, b) in &edges {
+            for &(b2, c) in &edges {
+                if b2 != b {
+                    continue;
+                }
+                for &(c2, _) in &edges {
+                    if c2 == c {
+                        naive += 1;
+                    }
+                }
+            }
+        }
+        let q = query(
+            &graph,
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:e ?b . ?b ex:e ?c . ?c ex:e ?d }",
+        )
+        .unwrap();
+        assert_eq!(q.len(), naive);
+    }
+
+    #[test]
     fn having() {
         // group ?s, count its triples, keep groups with >= 3 triples
         let r = query(

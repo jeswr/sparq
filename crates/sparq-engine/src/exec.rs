@@ -286,64 +286,116 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings
         prepared[i].pos_vars.iter().position(|pv| pv.as_ref() == Some(v))
     };
 
-    let mut order: Vec<usize> = (0..prepared.len()).collect();
-    order.sort_by_key(|&i| prepared[i].est);
-    let first = order[0];
-
-    let seed_join_var = prepared[first]
+    // Cost-based greedy (GOO): seed with the smallest single-pattern cardinality,
+    // then repeatedly add the connected pattern that yields the smallest *estimated
+    // join result*, using the per-predicate characteristic stats (distinct
+    // subjects/objects) to estimate join selectivity. The join order only affects
+    // performance (the result is identical for any order — differentially tested).
+    let seed = (0..prepared.len()).min_by_key(|&i| prepared[i].est).unwrap();
+    let seed_join_var = prepared[seed]
         .pos_vars
         .iter()
         .flatten()
-        .find(|v| (0..prepared.len()).any(|j| j != first && var_pos(j, v).is_some()))
+        .find(|v| (0..prepared.len()).any(|j| j != seed && var_pos(j, v).is_some()))
         .cloned();
-    let seed_sort_col = seed_join_var.as_ref().and_then(|v| var_pos(first, v));
+    let seed_sort_col = seed_join_var.as_ref().and_then(|v| var_pos(seed, v));
 
-    let mut result = scan_to_bindings(graph, &prepared[first].id_pat, &prepared[first].pos_vars, seed_sort_col);
+    let mut result = scan_to_bindings(graph, &prepared[seed].id_pat, &prepared[seed].pos_vars, seed_sort_col);
     let mut done = vec![false; prepared.len()];
-    done[first] = true;
+    done[seed] = true;
+
+    // Running estimate of the result cardinality and the per-variable distinct
+    // count (ndv), used to score the next join.
+    let mut cur_card = prepared[seed].est as f64;
+    let mut var_ndv: FxHashMap<Variable, f64> = FxHashMap::default();
+    let mut record_vars = |i: usize, cur_card: f64, var_ndv: &mut FxHashMap<Variable, f64>| {
+        for (pos, ov) in prepared[i].pos_vars.iter().enumerate() {
+            if let Some(v) = ov {
+                let ndv = pattern_var_ndv(graph, &prepared[i].id_pat, pos, prepared[i].est).min(cur_card.max(1.0));
+                let e = var_ndv.entry(v.clone()).or_insert(ndv);
+                *e = e.min(ndv);
+            }
+        }
+    };
+    record_vars(seed, cur_card, &mut var_ndv);
 
     for _ in 1..prepared.len() {
-        let mut mergeable = None;
-        let mut connected = None;
-        let mut any = None;
-        for &i in &order {
+        // Pick the connected candidate with the smallest estimated output.
+        let mut best: Option<(usize, f64)> = None;
+        for i in 0..prepared.len() {
             if done[i] {
                 continue;
             }
-            any.get_or_insert(i);
-            if connected.is_none() && prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v)) {
-                connected = Some(i);
-            }
-            if mergeable.is_none() {
-                if let Some(sv) = &result.sorted_by {
-                    if var_pos(i, sv).is_some() {
-                        mergeable = Some(i);
+            let mut sel = 1.0f64;
+            let mut shared = false;
+            for (pos, ov) in prepared[i].pos_vars.iter().enumerate() {
+                if let Some(v) = ov {
+                    if let Some(&rndv) = var_ndv.get(v) {
+                        shared = true;
+                        let pndv = pattern_var_ndv(graph, &prepared[i].id_pat, pos, prepared[i].est);
+                        sel /= rndv.max(pndv).max(1.0);
                     }
                 }
             }
+            if !shared {
+                continue;
+            }
+            let out = cur_card * prepared[i].est as f64 * sel;
+            if best.map_or(true, |(_, bc)| out < bc) {
+                best = Some((i, out));
+            }
         }
+        let i = match best {
+            Some((i, out)) => {
+                cur_card = out.max(0.0);
+                i
+            }
+            None => {
+                // Disconnected: smallest-cardinality remaining (cross product).
+                let i = (0..prepared.len()).filter(|&j| !done[j]).min_by_key(|&j| prepared[j].est).unwrap();
+                cur_card *= prepared[i].est as f64;
+                i
+            }
+        };
+        done[i] = true;
 
-        if let Some(i) = mergeable {
-            done[i] = true;
-            let jv = result.sorted_by.clone().unwrap();
+        // Execute: sort-merge if the result is already sorted on a shared variable,
+        // else hash join, else (disconnected) cross product.
+        let merge_var = result.sorted_by.clone().filter(|sv| var_pos(i, sv).is_some());
+        if let Some(jv) = merge_var {
             let col = var_pos(i, &jv).unwrap();
             let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, Some(col));
             result = merge_join(result, rhs, &jv);
-        } else if let Some(i) = connected {
-            done[i] = true;
+        } else if prepared[i].pos_vars.iter().flatten().any(|v| result.vars.contains(v)) {
             let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, None);
             result = hash_join(result, rhs);
         } else {
-            let i = any.unwrap();
-            done[i] = true;
             let rhs = scan_to_bindings(graph, &prepared[i].id_pat, &prepared[i].pos_vars, None);
             result = cross_product(result, rhs);
         }
+        record_vars(i, cur_card, &mut var_ndv);
+
         if result.rows.is_empty() {
             break;
         }
     }
     Ok(result)
+}
+
+/// Estimated number of distinct values of the variable at canonical position
+/// `pos` in a pattern, from the per-predicate characteristic stats. Falls back to
+/// the pattern's cardinality (an upper bound) when the predicate is unbound or the
+/// other terminal is bound (so the column is effectively keyed).
+fn pattern_var_ndv(graph: &Graph, id_pat: &IdPattern, pos: usize, est: usize) -> f64 {
+    let est = (est as f64).max(1.0);
+    let stat = id_pat[1].and_then(|pid| graph.store.pred_stat(pid));
+    match (pos, stat) {
+        // subject var, predicate bound, object unbound -> distinct subjects of P
+        (0, Some(s)) if id_pat[2].is_none() => (s.ndv_subj as f64).clamp(1.0, est),
+        // object var, predicate bound, subject unbound -> distinct objects of P
+        (2, Some(s)) if id_pat[0].is_none() => (s.ndv_obj as f64).clamp(1.0, est),
+        _ => est,
+    }
 }
 
 fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
