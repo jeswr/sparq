@@ -336,12 +336,41 @@ this with a tiny chunk that forces many runs + merge, including dedup of a dupli
 line). The 100M index opens and answers `COUNT(*) = 99,999,990` (100M − 10 dups) and a
 real join in <0.1 ms, with the perms entirely mmap'd.
 
-**Honest caveat.** The external build keeps the triples on disk but the *dictionary*
-still grows in RAM (the 100M build's 3.68 GB peak is dominated by the ~1.45 GB live
-dict, not the 7.2 GB of perms). For the rare dataset whose term dictionary alone
-exceeds RAM, an external dict is a further step; real Wikidata's dict (~1.5 GB) fits.
 Net: a 16 GB machine can now both **construct** and **query** a 100M–1B-triple index
 whose permutations are far larger than its RAM — the "billions" end of the range.
+
+**Query with ~zero committed RAM (mmap dict + persisted stats).** Initially the
+out-of-core *query* still held two things resident: the dictionary (`Vec<Stored>` +
+its lookup table, **1.45 GB at 100M**, rebuilt on open — measured at 100M: term parse
+1.39 s + table rebuild 2.40 s) and the per-predicate stats, which `open` recomputed by
+**scanning the full POS+PSO permutations** (~2 perms faulted in). Both are now off-heap:
+
+- **Memory-mapped dictionary.** `save_mmap` writes the term-record blob, per-term byte
+  offsets, and a hash-**sorted** `(hash,id)` index; `open_mmap` mmaps them. `term(id)`
+  parses a record zero-copy from the blob (a borrowed `StoredRef`); `lookup` binary-
+  searches the sorted hash index and verifies candidates. Open is just `mmap` — no parse,
+  no table rebuild — and the term store is off-heap.
+- **Persisted per-predicate stats** (`predstats.bin`), computed once at build, so `open`
+  loads them instead of re-scanning POS/PSO.
+
+Each fix exposed the next bottleneck in the measurement: mmap'ing the dict dropped open
+7.95 s → 3.77 s, which revealed the stats scan; persisting the stats dropped it to
+**1.9 s**. The decisive figure is **committed memory** (macOS "peak memory footprint",
+which excludes evictable file-backed mmap pages):
+
+| open + query a dataset out-of-core | committed memory (peak footprint) |
+|---|--:|
+| 10M (720 MB of perms) | **1.28 MB** |
+| 100M (7.2 GB of perms + ~1.2 GB dict) | **2.48 MB** |
+
+Committed memory is **~constant at a few MB regardless of dataset size** — everything
+large (perms, numeric cache, dictionary, stats) is mmap'd or persisted, so the process
+commits almost no anonymous memory. (The *RSS* still shows GBs, but that is evictable OS
+page cache — file-backed mmap pages, warm from the build — not committed heap; under
+memory pressure the OS reclaims them.) Validated: 12,000 differential cases vs Oxigraph
+through the mmap dict (lookup + materialisation), 0 mismatches. This closes the earlier
+caveat — the dictionary no longer has to fit in RAM, so the out-of-core query path scales
+to datasets whose dict *and* perms exceed RAM, committing only a few MB.
 
 ## Block-compressed permutation index (the browser-memory lever)
 
