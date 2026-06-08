@@ -343,6 +343,56 @@ exceeds RAM, an external dict is a further step; real Wikidata's dict (~1.5 GB) 
 Net: a 16 GB machine can now both **construct** and **query** a 100M–1B-triple index
 whose permutations are far larger than its RAM — the "billions" end of the range.
 
+## Block-compressed permutation index (the browser-memory lever)
+
+The permutation indexes are the dominant memory (72 B/triple = 6 × `[u32;3]`). A
+sorted permutation is highly compressible because consecutive triples share prefixes.
+`sparq-cli probe-compress` measured the ceiling on real data before any engine change:
+a **lexicographic-delta + LEB128-varint** encoding (decodable per 128-triple block, so
+scans stay random-accessible) lands at:
+
+| permutation | synthetic 100M | **real Wikidata 20M** |
+|---|--:|--:|
+| SPO | 5.40 B/triple (45%) | **3.69 B/triple (31%)** |
+| POS | 5.00 B/triple (42%) | 5.56 B/triple (46%) |
+| OSP | 5.00 B/triple (42%) | 5.00 B/triple (42%) |
+
+i.e. **−55% to −69%**, close to gzip (37%) but ~30× faster to decode (40–320 M/s) and
+randomly accessible (+0.16 B/triple for a block directory). Real Wikidata compresses
+*better* than synthetic (higher subject/predicate locality).
+
+Built it as an opt-in storage mode (`PermData::Compressed`): scans decode only the
+blocks their key-range touches, returning an owned range; the operators are unchanged
+(`Scan.rows` became a `Cow` — raw modes still borrow a zero-copy sub-slice). The native
+in-memory default stays raw (no decode cost); compressed is for the **memory-bound
+browser** and out-of-core.
+
+**Measured end-to-end (10M synthetic, full 6-perm set):**
+
+| | raw | compressed |
+|---|--:|--:|
+| perm memory | 720 MB (72 B/triple) | **367 MB (36.8 B/triple, −49%)** |
+| total graph (perms+dict+numerics) | 0.95 GB | 0.60 GB |
+| scan 2M rows → JSON | 222 ms | 243 ms (+10%) |
+| scan+filter → JSON | 109 ms | 130 ms (+19%) |
+| 2-pattern join 1M → JSON | 212 ms | 281 ms (+33%) |
+
+The browser's 3-perm compact set compresses **−60%** (2.5× more triples per byte of
+tab RAM). The latency cost is bounded per-scan decode; the join's +33% is from the bind
+join re-decoding the inner pattern's range per outer row — a per-permutation block cache
+would cut it (future work). **Correctness:** identical results to the raw store across a
+store-level pattern/estimate/pred_stat equality test, **20,000 differential cases vs
+Oxigraph through the compressed store** (0 mismatches), and wasm `load==loadCompressed`.
+
+### Honest correction: the persisted-numerics open is *lighter*, not *faster*
+
+A separate change persists + mmaps the numeric-value cache (`numerics.bin`) so `open`
+no longer recomputes it. It does cut RAM (the 100M cache is 210 MB, ~2 GB at 1B, now
+off-heap). But the 100M open time was **unchanged (~6.7 s)** — it is dominated by
+*dictionary* deserialization + hash-table rebuild, not the numeric recompute. The
+commit framed it as "faster"; the measured truth is "lighter, same speed." Faster
+out-of-core open would need a persisted dict lookup structure (a later lever).
+
 ## Negative result: streaming a 2-pattern join to JSON did NOT help
 
 After the streaming single-pattern scan→JSON path won (q02 71→61 ms by skipping the
