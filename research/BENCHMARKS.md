@@ -474,25 +474,30 @@ which positive-threshold fuzzing never reached. Fixed by modelling SPARQL type
 errors (`Value::Error`) + 3-valued `&&`/`||`/`!`; the fuzzer now generates signed
 thresholds and a cross-type `=`/`!=` category so it can't regress.
 
-**Integers beyond 2^53 — fixed (exact i128 comparison).** sparq holds numeric values
-as `f64` (the cache + inline-ValueId fast path that powers range-pruning), which is
-exact for `|integer| ≤ 2^53` and all f64-representable values — i.e. essentially all
-real RDF data. The fuzzer had never exercised larger integers (values were `< 120`);
-extending it to near-2^53 integers surfaced **11 mismatches / 30k** (e.g.
-`"9007199254740992"` vs `"…993"`). Now closed: `Graph::integer_value` gives an exact
-`i128` for integer-typed terms, and `cmp_expr`/`equal_expr`/`value_compare_strict`
-re-check exactly **only when a value reaches 2^53** (the sub-2^53 f64 fast path is
-untouched — zero regression); `extract_sargable` declines `≥ 2^53` thresholds so those
-filters take the exact path. Re-measured: **80,000 differential cases vs Oxigraph incl.
-near-2^53 integers, 0 mismatches**, and the fuzzer now generates them permanently.
+**Exact numeric COMPARISON beyond f64 precision — fixed.** sparq holds numeric values
+as `f64` (the cache + inline-ValueId fast path that powers range-pruning), exact for
+`|integer| ≤ 2^53` and ≤15-significant-digit decimals — i.e. essentially all real RDF
+data. The fuzzer had never exercised the edges (values were `< 120`); extending it to
+near-2^53 integers and >15-digit decimals surfaced mismatches (11/30k then 25/40k) —
+e.g. `"9007199254740992" = "…993"` and `"0.123456789012345678" = "…679"` (each pair
+shares one f64). Now closed with a single exact path. The key property: **f64 rounding
+is monotonic, so it only ever collapses distinct values to equal — it never flips an
+ordering.** So `cmp_expr`/`equal_expr` re-check exactly **only when the f64 result is
+equal** (rare), via `cmp_decimal_str` on the operands' lexical forms (exact for integers
+and `xsd:decimal` at any precision); `extract_sargable` declines thresholds with >15
+significant digits. Everything f64 orders distinctly is untouched — **zero regression**.
+Re-measured: **100,000 differential cases vs Oxigraph** (near-2^53 integers +
+high-precision decimals + all categories), **0 mismatches**; the fuzzer generates both
+permanently, and `cmp_decimal_str` has its own edge-case unit tests.
 
-**Remaining (deliberate) gap — exact `xsd:decimal` arithmetic.** `0.1 + 0.2 = 0.3` is
-false in f64. This needs a decimal type in the arithmetic path; deferred (sparq does no
-decimal arithmetic in the measured workloads, and the f64 fast path is load-bearing for
-the filter wins). Even rarer than the integer case — flagged, not silently shipped.
+**Remaining (deliberate) gap — exact `xsd:decimal` ARITHMETIC.** `0.1 + 0.2 = 0.3` is
+false in f64. Comparison is now exact, but arithmetic (`Add`/`Subtract`/… in
+`eval_numeric`) is still f64. A full fix needs a decimal type in the arithmetic path;
+deferred (sparq does no decimal arithmetic in the measured workloads, and the f64 path
+is load-bearing for the filter wins). The narrowest remaining numeric gap — flagged.
 
 ## Other next steps
 
-- Decimal arithmetic type to close the exact-`xsd:decimal` conformance gap.
+- Decimal arithmetic type to close the exact-`xsd:decimal` *arithmetic* gap.
 - Native QLever (not Docker) for the fairest fight; cold-cache and QMpH metrics.
 - Re-measure memory against QLever (compressed) and after M3 column compression.
