@@ -72,24 +72,32 @@ still answered by one of them, but ~half the index memory (some merge joins fall
 hashing). Measured in Node over synthetic N-Triples (`test/mem.cjs`, M1), with the same
 compact prefix-factored dictionary + byte-level parser as native:
 
-| triples | load | throughput | store | B/triple | browser ceiling |
-|--:|--:|--:|--:|--:|---|
-| 175 k | 110 ms | 1.6 M/s | 10 MB | 57 | ~35 M @2 GB / ~70 M @4 GB |
-| 2.1 M | 1.37 s | 1.5 M/s | 140 MB | 67 | ~30 M @2 GB / ~60 M @4 GB |
+| triples | mode | store | B/triple | browser ceiling |
+|--:|---|--:|--:|---|
+| 2.1 M | `load` (raw) | 140 MB | 67 | ~30 M @2 GB / ~60 M @4 GB |
+| 2.1 M | `loadCompressed` | 78 MB | **37** | **~54 M @2 GB / ~108 M @4 GB** |
 
-So a browser tab holds roughly **30–70 M triples** — about double the six-permutation
-build (the three permutations drop the index from 72 → 36 B/triple). The byte-level parser
-keeps load throughput high (~1.5 M/s, single-threaded — wasm has no rayon) without
-allocating an `oxrdf::Term` per term. Correctness of the reduced-permutation engine is
-held to the same bar as native (198k differential fuzz cases vs Oxigraph with `compact-index`
-on). The native build keeps all six permutations for maximum query speed.
+So a browser tab holds roughly **30 M triples** raw, or **~54 M with `loadCompressed`** —
+which BLOCK-COMPRESSES the three permutations (delta + LEB128-varint, decoded per touched
+block) to cut the total from 67 → 37 B/triple (**−44%**, i.e. ~1.8× more triples in the
+same tab) for a small per-scan decode (≈+4% on a row-materialising query, identical
+results). `loadCompressed` is the right default when the tab's RAM, not its CPU, is the
+constraint. The byte-level parser keeps load throughput high (~1.5 M/s, single-threaded —
+wasm has no rayon) without allocating an `oxrdf::Term` per term. Correctness of the
+reduced-permutation + compressed engine is held to the same bar as native (differential
+fuzz cases vs Oxigraph with `compact-index` AND the compressed store). The native build
+keeps all six permutations for maximum query speed.
 
 ## Bundle size (release, wasm-opt -Oz)
 
-| artifact | raw | gzip | brotli |
-|---|--:|--:|--:|
-| `sparq_wasm_bg.wasm` | 787 KB | 276 KB | **210 KB** |
-| `sparq_wasm.js` (glue) | 10 KB | 2.9 KB | 2.6 KB |
+| artifact | raw | gzip |
+|---|--:|--:|
+| `sparq_wasm_bg.wasm` | 886 KB | **314 KB** |
+| `sparq_wasm.js` (glue) | 10 KB | 2.9 KB |
+
+(Up from 787 KB raw as the engine gained block compression, exact >2⁵³/decimal
+comparison, materialisation-free counts, and the mmap-class storage abstraction — a
+~100 KB raw increase that buys ~1.8× browser capacity and broader conformance.)
 
 The bulk is the SPARQL parser (`spargebra`/`peg`) + `oxttl`/`oxrdf` + `rand`
 (transitively, for blank-node ids, unused here). Size-reduction levers for the

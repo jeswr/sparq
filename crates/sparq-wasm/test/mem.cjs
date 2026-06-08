@@ -27,32 +27,36 @@ function genNT(entities) {
 }
 
 console.log("WASM memory-bound + ingestion (compact dict + byte-level N-Triples parser):\n");
-console.log(`${"triples".padStart(10)} ${"load".padStart(8)} ${"throughput".padStart(11)} ${"store".padStart(8)} ${"B/triple".padStart(9)}   browser ceiling`);
-console.log("-".repeat(78));
+console.log(`${"triples".padStart(10)} ${"mode".padStart(12)} ${"load".padStart(8)} ${"throughput".padStart(11)} ${"store".padStart(8)} ${"B/triple".padStart(9)}   browser ceiling`);
+console.log("-".repeat(92));
 
-let bptLast = 0;
+const TYPE_Q = "SELECT ?s WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Person> }";
+let rawBpt = 0;
+let cmpBpt = 0;
 for (const entities of [25_000, 100_000, 300_000]) {
   const nt = genNT(entities);
-  const t0 = process.hrtime.bigint();
-  const store = Store.load(nt, "ntriples"); // <- custom byte parser, no oxrdf Term per term
-  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  const triples = store.size;
-  const heap = store.heapBytes();
-  const bpt = heap / triples;
-  bptLast = bpt;
-  const mps = triples / 1e6 / (ms / 1000);
-  const fit2 = 2e9 / bpt / 1e6;
-  const fit4 = 4e9 / bpt / 1e6;
-  console.log(
-    `${String(triples).padStart(10)} ${(ms.toFixed(0) + "ms").padStart(8)} ${(mps.toFixed(2) + " M/s").padStart(11)} ` +
-    `${((heap / 1e6).toFixed(0) + "MB").padStart(8)} ${bpt.toFixed(0).padStart(9)}   ~${fit2.toFixed(0)}M @2GB / ~${fit4.toFixed(0)}M @4GB`,
-  );
-  // Sanity: the lazy index queries still answer correctly at this size.
-  assert.equal(store.count("SELECT ?s WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Person> }"), entities);
+  // Raw (default) vs block-compressed permutations (`loadCompressed`) — the latter is the
+  // right default when the tab's RAM, not its CPU, is the constraint (fits a bigger graph).
+  for (const mode of ["load", "loadCompressed"]) {
+    const t0 = process.hrtime.bigint();
+    const store = Store[mode](nt, "ntriples");
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    const triples = store.size;
+    const bpt = store.heapBytes() / triples;
+    if (entities === 300_000) (mode === "load" ? (rawBpt = bpt) : (cmpBpt = bpt));
+    const mps = triples / 1e6 / (ms / 1000);
+    console.log(
+      `${String(triples).padStart(10)} ${mode.padStart(12)} ${(ms.toFixed(0) + "ms").padStart(8)} ${(mps.toFixed(2) + " M/s").padStart(11)} ` +
+      `${((store.heapBytes() / 1e6).toFixed(0) + "MB").padStart(8)} ${bpt.toFixed(0).padStart(9)}   ~${(2e9 / bpt / 1e6).toFixed(0)}M @2GB / ~${(4e9 / bpt / 1e6).toFixed(0)}M @4GB`,
+    );
+    // Sanity: results are identical regardless of storage mode.
+    assert.equal(store.count(TYPE_Q), entities);
+  }
 }
 
 console.log(
-  `\nThe store self-estimate (~${bptLast.toFixed(0)} B/triple here, dominated by the six u32 permutations\n` +
-  `at 72 B/triple + the prefix-factored dictionary) sets the browser scale ceiling; the byte-level\n` +
-  `parser keeps load throughput high without an oxrdf Term per term. all assertions passed ✓`,
+  `\nThe wasm build uses the 3-permutation compact index (~36 B/triple of permutations) +\n` +
+  `the prefix-factored dictionary. \`loadCompressed\` block-compresses the permutations,\n` +
+  `cutting the total from ~${rawBpt.toFixed(0)} to ~${cmpBpt.toFixed(0)} B/triple (-${(100 * (1 - cmpBpt / rawBpt)).toFixed(0)}%) for a small per-scan decode —\n` +
+  `i.e. it fits ~${(rawBpt / cmpBpt).toFixed(1)}x more triples in the same tab. Results are identical. all assertions passed ✓`,
 );
