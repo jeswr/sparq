@@ -44,6 +44,22 @@ codegen changes are inconsequential here.
 
 **Net: implement exactly ONE NEON kernel — sorted-set intersection for merge-join/LFTJ.**
 
+**Caveat found when scoping it (refines the 1.6–2.8× estimate).** That speedup assumes two
+**contiguous `&[u32]`** key arrays. But sparq's actual hot loops do not have that layout:
+- `merge_join` (`exec.rs`) operates on **row-major `Bindings`** (`Vec<SmallVec<[Id;4]>>`); the
+  join key is `row[col]` — *strided by the row width*, not contiguous.
+- `GroupStream`/the store scans operate on **interleaved `[[u32;3]]`**; the join column is
+  every 3rd `u32` — also strided.
+
+So plugging in the SIMD intersection requires first **extracting the key column into a
+contiguous `u32` buffer** (a deinterleave/gather), then intersecting, then mapping indices
+back. On the **bandwidth-bound** M1 that extra gather pass plausibly eats the SIMD gain.
+Conclusion: the NEON intersection is **not a bounded drop-in** — its real payoff is coupled
+to a **columnar Bindings / columnar scan** representation (the M3 structural bet), where the
+keys are already contiguous. Standalone, it's an uncertain win; the right sequencing is
+columnar-execution first, *then* the SIMD kernel falls out naturally. Measure-first verdict:
+do not hand-write the kernel against the current row-major layout.
+
 ## 3. PGO / BOLT
 
 - **PGO: worth one try (~3–8%), low effort.** Branchy planner code (`eval_bgp_binary`,
