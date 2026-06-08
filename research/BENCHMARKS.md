@@ -302,6 +302,47 @@ pushdown) and M4 (tagged ValueIds), plus out-of-core for the billion-triple
 regime where the current in-memory store would OOM. Micro-optimisation got sparq
 to parity on small in-RAM data; scaling needs the structural work.
 
+## Out-of-core: the "few → billions" range (query AND build past RAM)
+
+The scaling section's conclusion named "out-of-core for the billion-triple regime
+where the current in-memory store would OOM" as required for *all scales*. That is
+now implemented in two halves, both measured.
+
+**Query past RAM (mmap'd indexes).** The permutation indexes (72 B/triple — the
+dominant memory) are persisted as raw `[u32;3]` files and memory-mapped on open, so
+the OS pages in only the working set. The dictionary stays in RAM; the large indexes
+do not. CLI: `save` then `query-mmap`.
+
+| 10M, follows·name join | in-memory | out-of-core (mmap) |
+|---|--:|--:|
+| peak RSS | 2.09 GB | **499 MB** (−76%) |
+| query time | 30.8 ms | 30.8 ms (same) |
+
+**Build past RAM (external-memory sort/merge).** `save()` of an in-memory load still
+needed the whole index in RAM. `Graph::build_external` (CLI `build`) instead sorts
+the triples *through disk*: stream-parse + intern → spill `chunk`-sized SPO-sorted
+runs → k-way merge (min-heap over mmap'd runs) into the SPO index, dedup → build the
+other 5 permutations by external-sorting the SPO file into each order. Peak RAM is one
+chunk buffer + the merge heap + the dictionary — not the dataset.
+
+| build | in-memory `save` | external `build` |
+|---|--:|--:|
+| 10M, peak RSS | 2.02 GB | **486 MB** (−76%), chunk=2M |
+| 100M (7.2 GB of perms) | ~10 GB (would thrash/OOM a 16 GB box) | **3.68 GB**, chunk=8M |
+
+The external build's output is **byte-identical** to the in-memory `save` (all six
+`perm*.bin` + `dict.bin` sha256-identical on the real 10M set; a unit test asserts
+this with a tiny chunk that forces many runs + merge, including dedup of a duplicate
+line). The 100M index opens and answers `COUNT(*) = 99,999,990` (100M − 10 dups) and a
+real join in <0.1 ms, with the perms entirely mmap'd.
+
+**Honest caveat.** The external build keeps the triples on disk but the *dictionary*
+still grows in RAM (the 100M build's 3.68 GB peak is dominated by the ~1.45 GB live
+dict, not the 7.2 GB of perms). For the rare dataset whose term dictionary alone
+exceeds RAM, an external dict is a further step; real Wikidata's dict (~1.5 GB) fits.
+Net: a 16 GB machine can now both **construct** and **query** a 100M–1B-triple index
+whose permutations are far larger than its RAM — the "billions" end of the range.
+
 ## Negative result: streaming a 2-pattern join to JSON did NOT help
 
 After the streaming single-pattern scan→JSON path won (q02 71→61 ms by skipping the
