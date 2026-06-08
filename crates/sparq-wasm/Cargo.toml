@@ -10,11 +10,11 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# No-default-features => no rayon: the wasm build has no threads and we keep the
-# bundle minimal. `compact-index` builds only 3 permutation indexes (~half the index
-# memory) — the right trade for the memory-constrained browser. Same store + engine
-# code as native otherwise, single-threaded.
-sparq-core = { path = "../sparq-core", default-features = false, features = ["compact-index"] }
+# No-default-features => no rayon: the wasm build has no threads and we keep the bundle
+# minimal. The 3-permutation compact index (~half the index memory) is selected
+# automatically for wasm via `cfg(target_arch = "wasm32")` in sparq-core — no feature
+# needed (which avoids leaking that choice to the native build via feature unification).
+sparq-core = { path = "../sparq-core", default-features = false }
 sparq-engine = { path = "../sparq-engine", default-features = false }
 oxrdf.workspace = true
 wasm-bindgen = "0.2"

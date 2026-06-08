@@ -23,8 +23,10 @@ fn main() {
         Some("query") => cmd_query(&args),
         Some("bench") => cmd_bench(&args),
         Some("ingest") => cmd_ingest(&args),
+        Some("save") => cmd_save(&args),
+        Some("query-mmap") => cmd_query_mmap(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir>          # build + persist indexes to disk\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
         }
     }
@@ -138,6 +140,57 @@ fn subject_to_term(s: &oxrdf::NamedOrBlankNode) -> oxrdf::Term {
     match s {
         oxrdf::NamedOrBlankNode::NamedNode(n) => oxrdf::Term::NamedNode(n.clone()),
         oxrdf::NamedOrBlankNode::BlankNode(b) => oxrdf::Term::BlankNode(b.clone()),
+    }
+}
+
+/// `save <data> <format> <dir>` — build the store and persist its indexes to disk.
+fn cmd_save(args: &[String]) {
+    let (path, format, dir) = match (args.get(2), args.get(3), args.get(4)) {
+        (Some(p), Some(f), Some(d)) => (p.as_str(), f.as_str(), d.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli save <data-file> <format> <dir>");
+            std::process::exit(2);
+        }
+    };
+    let g = load(path, format);
+    let t = Instant::now();
+    g.save(std::path::Path::new(dir)).unwrap_or_else(|e| {
+        eprintln!("save error: {e}");
+        std::process::exit(1);
+    });
+    eprintln!("saved {} triples to {dir} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
+}
+
+/// `query-mmap <dir> <sparql>` — open a saved dataset with memory-mapped indexes and
+/// run a query. Reports load time + the store self-estimate (≈0 GB heap for the
+/// mmap'd permutations — they live in the OS page cache, not the process heap).
+fn cmd_query_mmap(args: &[String]) {
+    let (dir, sparql) = match (args.get(2), args.get(3)) {
+        (Some(d), Some(q)) => (d.as_str(), q.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli query-mmap <dir> <sparql>");
+            std::process::exit(2);
+        }
+    };
+    let t = Instant::now();
+    let g = sparq_core::Graph::open(std::path::Path::new(dir)).unwrap_or_else(|e| {
+        eprintln!("open error: {e}");
+        std::process::exit(1);
+    });
+    eprintln!(
+        "opened {} triples (indexes MEMORY-MAPPED) in {:.3}s | store-heap ~{:.2} GB (mmap'd perms not counted), dict ~{:.2} GB",
+        g.len(),
+        t.elapsed().as_secs_f64(),
+        g.heap_bytes() as f64 / 1e9,
+        g.dict.heap_bytes() as f64 / 1e9,
+    );
+    let t = Instant::now();
+    match sparq_engine::count(&g, sparql) {
+        Ok(n) => println!("{n} solutions in {:.3}ms", t.elapsed().as_secs_f64() * 1e3),
+        Err(e) => {
+            eprintln!("query error: {e}");
+            std::process::exit(1);
+        }
     }
 }
 

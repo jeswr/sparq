@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Out-of-core querying (memory-mapped on-disk indexes) — on by default for the CLI.
+default = ["mmap"]
+mmap = ["sparq-core/mmap"]
+
 [dependencies]
-sparq-core = { path = "../sparq-core" }
+sparq-core = { path = "../sparq-core", features = ["mmap"] }
 sparq-engine = { path = "../sparq-engine" }
 oxttl.workspace = true
 oxrdf.workspace = true

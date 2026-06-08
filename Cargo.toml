@@ -21,6 +21,9 @@ hashbrown = "0.15"
 smallvec = "1"
 # Parallelism.
 rayon = "1"
+# Memory-mapped on-disk indexes (out-of-core, native only) — query datasets larger
+# than RAM by letting the OS page in only the working set.
+memmap2 = "0.9"
 
 [profile.release]
 opt-level = 3

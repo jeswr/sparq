@@ -407,6 +407,92 @@ impl Dict {
             .collect()
     }
 
+    /// Serialises the dictionary (prefixes, datatypes, compact terms) to `path` in a
+    /// compact binary format. The hash table is NOT written — it is rebuilt on `open`.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+        w.write_all(&(self.prefixes.len() as u32).to_le_bytes())?;
+        for p in &self.prefixes {
+            write_str(&mut w, p)?;
+        }
+        w.write_all(&(self.datatypes.len() as u32).to_le_bytes())?;
+        for d in &self.datatypes {
+            write_str(&mut w, d.as_str())?;
+        }
+        w.write_all(&(self.terms.len() as u32).to_le_bytes())?;
+        for t in &self.terms {
+            match t {
+                Stored::Iri { prefix, suffix } => {
+                    w.write_all(&[0])?;
+                    w.write_all(&prefix.to_le_bytes())?;
+                    write_str(&mut w, suffix)?;
+                }
+                Stored::Lit { value, datatype, lang } => {
+                    w.write_all(&[1])?;
+                    write_str(&mut w, value)?;
+                    w.write_all(&datatype.to_le_bytes())?;
+                    match lang {
+                        Some(l) => {
+                            w.write_all(&[1])?;
+                            write_str(&mut w, l)?;
+                        }
+                        None => w.write_all(&[0])?,
+                    }
+                }
+                Stored::Blank(b) => {
+                    w.write_all(&[2])?;
+                    write_str(&mut w, b)?;
+                }
+            }
+        }
+        w.flush()
+    }
+
+    /// Loads a dictionary written by [`save`](Self::save), rebuilding the hash table.
+    pub fn open(path: &std::path::Path) -> std::io::Result<Dict> {
+        let mut r = std::io::BufReader::new(std::fs::File::open(path)?);
+        let np = read_u32(&mut r)? as usize;
+        let mut prefixes = Vec::with_capacity(np);
+        let mut prefix_ids = FxHashMap::default();
+        for i in 0..np {
+            let p = read_str(&mut r)?;
+            prefix_ids.insert(p.clone(), i as u32);
+            prefixes.push(p);
+        }
+        let nd = read_u32(&mut r)? as usize;
+        let mut datatypes = Vec::with_capacity(nd);
+        let mut datatype_ids = FxHashMap::default();
+        for i in 0..nd {
+            let d = read_str(&mut r)?;
+            datatype_ids.insert(d.clone(), i as u32);
+            datatypes.push(NamedNode::new_unchecked(String::from(d)));
+        }
+        let nt = read_u32(&mut r)? as usize;
+        let mut terms = Vec::with_capacity(nt);
+        for _ in 0..nt {
+            terms.push(match read_u8(&mut r)? {
+                0 => Stored::Iri { prefix: read_u32(&mut r)?, suffix: read_str(&mut r)? },
+                1 => {
+                    let value = read_str(&mut r)?;
+                    let datatype = read_u32(&mut r)?;
+                    let lang = if read_u8(&mut r)? == 1 { Some(read_str(&mut r)?) } else { None };
+                    Stored::Lit { value, datatype, lang }
+                }
+                2 => Stored::Blank(read_str(&mut r)?),
+                other => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad term tag {other}"))),
+            });
+        }
+        // Rebuild the hash table from the arena.
+        let mut table = HashTable::with_capacity(nt);
+        for (i, t) in terms.iter().enumerate() {
+            let id = (i as Id) + 1;
+            let hash = hash_stored(t, &prefixes, &datatypes);
+            table.insert_unique(hash, id, |&j| hash_stored(&terms[(j - 1) as usize], &prefixes, &datatypes));
+        }
+        Ok(Dict { prefixes, prefix_ids, datatypes, datatype_ids, terms, table })
+    }
+
     pub fn len(&self) -> usize {
         self.terms.len()
     }
@@ -427,6 +513,34 @@ impl Dict {
         let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
         term_slots + owned + prefix_bytes + dt_bytes + table
     }
+}
+
+// ---- (de)serialisation helpers for save/open --------------------------------
+
+fn write_str(w: &mut impl std::io::Write, s: &str) -> std::io::Result<()> {
+    w.write_all(&(s.len() as u32).to_le_bytes())?;
+    w.write_all(s.as_bytes())
+}
+
+fn read_u32(r: &mut impl std::io::Read) -> std::io::Result<u32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(u32::from_le_bytes(b))
+}
+
+fn read_u8(r: &mut impl std::io::Read) -> std::io::Result<u8> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b)?;
+    Ok(b[0])
+}
+
+fn read_str(r: &mut impl std::io::Read) -> std::io::Result<Box<str>> {
+    let n = read_u32(r)? as usize;
+    let mut buf = vec![0u8; n];
+    r.read_exact(&mut buf)?;
+    String::from_utf8(buf)
+        .map(String::into_boxed_str)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid utf-8 in dictionary"))
 }
 
 /// The owned heap bytes of a compact stored term's string content (suffix / value /

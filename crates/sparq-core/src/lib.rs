@@ -164,18 +164,29 @@ impl Graph {
     /// string and streaming loaders).
     fn build(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         let store = TripleStore::from_triples(triples);
-
-        // Precompute the numeric value of every dictionary term (one parse each).
-        let n = dict.len();
-        #[cfg(feature = "parallel")]
-        let numerics: Vec<f64> = {
-            use rayon::prelude::*;
-            (0..n).into_par_iter().map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
-        };
-        #[cfg(not(feature = "parallel"))]
-        let numerics: Vec<f64> = (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect();
-
+        let numerics = numerics_of(&dict);
         Graph { dict, store, numerics }
+    }
+
+    /// Persists the graph to `dir` (the permutation indexes + the dictionary) so it can
+    /// later be QUERIED with the indexes MEMORY-MAPPED via [`open`](Self::open) — the
+    /// out-of-core path for datasets larger than RAM.
+    #[cfg(feature = "mmap")]
+    pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        self.store.save(dir)?;
+        self.dict.save(&dir.join("dict.bin"))
+    }
+
+    /// Opens a graph saved by [`save`](Self::save) with its permutation indexes
+    /// MEMORY-MAPPED (paged in on demand). The dictionary is loaded into RAM and the
+    /// numeric cache recomputed; the large permutation indexes stay on disk.
+    #[cfg(feature = "mmap")]
+    pub fn open(dir: &std::path::Path) -> std::io::Result<Graph> {
+        let store = TripleStore::open(dir)?;
+        let dict = Dict::open(&dir.join("dict.bin"))?;
+        let numerics = numerics_of(&dict);
+        Ok(Graph { dict, store, numerics })
     }
 
     /// The numeric value of a term id, or `None` if it is not a numeric literal.
@@ -240,6 +251,21 @@ impl Graph {
         };
         let o = resolve(o)?;
         Some([s, p, o])
+    }
+}
+
+/// The numeric-value cache for a dictionary: `numerics[id-1]` is the f64 value of term
+/// `id` (NaN for non-numeric). Parallel when the `parallel` feature is on.
+fn numerics_of(dict: &Dict) -> Vec<f64> {
+    let n = dict.len();
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..n).into_par_iter().map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..n).map(|i| numeric_of(&dict.term(i as Id + 1))).collect()
     }
 }
 
@@ -313,6 +339,44 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn save_open_mmap_roundtrip() {
+        // Build a graph, persist it, re-open with the indexes memory-mapped, and check
+        // the store + dictionary are structurally identical (every triple round-trips).
+        let mut nt = String::new();
+        for i in 0..3000u32 {
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 211,
+                i % 13,
+                i % 500
+            ));
+        }
+        nt.push_str("<http://ex/n0> <http://ex/name> \"caf\\u00e9\"@fr .\n");
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        let dir = std::env::temp_dir().join(format!("sparq_mmap_test_{}", std::process::id()));
+        g.save(&dir).unwrap();
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g.len(), g2.len());
+        assert_eq!(g.dict.len(), g2.dict.len());
+        let dump = |gg: &Graph| {
+            let scan = gg.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(dump(&g), dump(&g2), "mmap-reopened store differs");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn ntriples_parallel_matches_sequential() {
