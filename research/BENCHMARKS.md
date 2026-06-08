@@ -344,13 +344,34 @@ min-of-6):
 
 **sparq beats QLever on compute for all five at 100M too — while the index is entirely
 memory-mapped (a 16 GB machine querying a dataset whose indexes are ~8.4 GB on disk).**
-Caveat: the *query* still builds intermediate bindings in RAM (q04's join count peaked at
-~5.6 GB anonymous memory) — that's the join compute's working set, NOT the index (which
-commits ~0). Reducing that intermediate is exactly where columnar/streaming join
-execution (the next structural bet) would pay; the COUNT path could also be made lazier
-for chain joins. But the headline stands: **across a few triples → 100M, in-RAM and
-out-of-core, sparq now matches or beats native QLever on compute** — reversing the
-earlier honest finding, principally via the 6-permutation fix + lazy counts + bind join.
+
+The first 100M run peaked at ~5.6 GB anonymous memory, which I initially attributed to
+"the join compute's working set." **Per-query measurement proved that wrong** — it was
+the COUNT machinery, in two specific places, both fixed:
+- `COUNT(*)` over an OPTIONAL was not using the lazy left-join count (`count_pushdown`
+  returns `None` for a non-conjunctive `LeftJoin`), so it materialised the whole
+  left-join just to count it (q10: 196 MB → 43 MB at 10M).
+- the multi-pattern star COUNT materialised one `(value,count)` vector per pattern;
+  replaced with a k-way intersection merge of lazy `GroupStream`s that accumulates the
+  product sum directly (q03 84 MB → 1.2 MB, q04 63 MB → 1.2 MB), and `count_leftjoin`
+  likewise streams both sides (q10 43 MB → 1.2 MB).
+
+After the fixes the **whole 100M out-of-core COUNT benchmark peaks at 2.79 MB** of
+committed memory (was 5.6 GB), and the queries got *faster* (the streaming merge reads
+the group column directly from the permutation row, no triple reconstruction):
+
+| query | sparq (out-of-core) | QLever 100M | speedup |
+|---|--:|--:|--:|
+| q03 star-3 | 467 ms | 900 ms | **1.9×** |
+| q04 follows→name | 568 ms | 600 ms | **1.06×** |
+| q10 OPTIONAL | 256 ms | 650 ms | **2.5×** |
+
+**The headline stands and is now clean: across a few triples → 100M, in-RAM and
+out-of-core, sparq matches or beats native QLever on compute while committing single-digit
+MB regardless of dataset size** — reversing the earlier finding, via the 6-permutation
+fix + lazy/streaming counts + bind join. (The *materialise* path — returning millions of
+rows — is the separate axis where columnar/streaming execution is still the next bet; it
+is not what the COUNT compute above measures.)
 
 ## Out-of-core: the "few → billions" range (query AND build past RAM)
 

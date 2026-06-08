@@ -455,19 +455,32 @@ fn count_leftjoin(
     let [(lpos, rpos)] = shared[..] else {
         return None;
     };
-    let gl = group_counts(graph, &lip, lpos);
+    // Σ_v c_left(v)·max(1, c_right(v)), streamed by merging the two sorted group-count
+    // streams — left drives, right advances to match — so neither side is materialised.
+    let mut left = GroupStream::new(graph, &lip, lpos);
     // Right unsatisfiable: every left binding is kept once with the right unbound.
     if ru {
-        return Some(gl.iter().map(|(_, c)| c).sum());
-    }
-    let gr = group_counts(graph, &rip, rpos);
-    let mut j = 0usize;
-    let mut total = 0usize;
-    for &(v, cl) in &gl {
-        while j < gr.len() && gr[j].0 < v {
-            j += 1;
+        let mut total = 0usize;
+        while let Some((_, cl)) = left.next() {
+            total += cl;
         }
-        let cr = if j < gr.len() && gr[j].0 == v { gr[j].1 } else { 0 };
+        return Some(total);
+    }
+    let mut right = GroupStream::new(graph, &rip, rpos);
+    let mut rhead = right.next();
+    let mut total = 0usize;
+    while let Some((v, cl)) = left.next() {
+        while let Some((rv, _)) = rhead {
+            if rv < v {
+                rhead = right.next();
+            } else {
+                break;
+            }
+        }
+        let cr = match rhead {
+            Some((rv, rc)) if rv == v => rc,
+            _ => 0,
+        };
         total += cl * cr.max(1);
     }
     Some(total)
@@ -586,7 +599,10 @@ fn distinct_pattern_vars(pos_vars: &[Option<Variable>; 3]) -> bool {
 /// be summed by k-way merge with O(k) memory instead of one group vector per pattern.
 struct GroupStream<'a> {
     scan: sparq_core::store::Scan<'a>,
-    v_pos: usize,
+    /// The STORED column (into the permutation's row layout) holding the group value —
+    /// precomputed so the hot loop reads `row[col]` directly instead of rebuilding the
+    /// canonical triple per row.
+    col: usize,
     i: usize,
     sorted_vals: Option<Vec<Id>>,
 }
@@ -594,85 +610,48 @@ struct GroupStream<'a> {
 impl<'a> GroupStream<'a> {
     fn new(graph: &'a Graph, id_pat: &IdPattern, v_pos: usize) -> Self {
         let scan = graph.store.scan_sorted(id_pat, v_pos);
-        let sorted = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none()) == Some(v_pos);
+        let order = scan.perm.order();
+        // Canonical column `v_pos` is stored at this position in the permutation's rows.
+        let col = order.iter().position(|&c| c == v_pos).unwrap();
+        let sorted = order.into_iter().find(|&c| id_pat[c].is_none()) == Some(v_pos);
         let sorted_vals = (!sorted).then(|| {
-            let mut v: Vec<Id> = scan.rows.iter().map(|r| scan.to_spo(r)[v_pos]).collect();
+            let mut v: Vec<Id> = scan.rows.iter().map(|r| r[col]).collect();
             v.sort_unstable();
             v
         });
-        GroupStream { scan, v_pos, i: 0, sorted_vals }
+        GroupStream { scan, col, i: 0, sorted_vals }
     }
 
     /// The next `(value, run-length)` in ascending value order, or `None` at the end.
     fn next(&mut self) -> Option<(Id, usize)> {
-        if let Some(vals) = &self.sorted_vals {
-            if self.i >= vals.len() {
-                return None;
+        let (slice, col): (&[[Id; 3]], usize) = match &self.sorted_vals {
+            // The fallback stores bare values in column 0 of a 1-wide logical view; reuse
+            // the same run-length code by treating the Vec as the source.
+            Some(vals) => {
+                if self.i >= vals.len() {
+                    return None;
+                }
+                let v = vals[self.i];
+                let mut c = 0;
+                while self.i < vals.len() && vals[self.i] == v {
+                    self.i += 1;
+                    c += 1;
+                }
+                return Some((v, c));
             }
-            let v = vals[self.i];
-            let mut c = 0;
-            while self.i < vals.len() && vals[self.i] == v {
-                self.i += 1;
-                c += 1;
-            }
-            Some((v, c))
-        } else {
-            let rows = &self.scan.rows;
-            if self.i >= rows.len() {
-                return None;
-            }
-            let v = self.scan.to_spo(&rows[self.i])[self.v_pos];
-            let mut c = 0;
-            while self.i < rows.len() && self.scan.to_spo(&rows[self.i])[self.v_pos] == v {
-                self.i += 1;
-                c += 1;
-            }
-            Some((v, c))
+            None => (&self.scan.rows, self.col),
+        };
+        if self.i >= slice.len() {
+            return None;
         }
+        let v = slice[self.i][col];
+        let mut c = 0;
+        while self.i < slice.len() && slice[self.i][col] == v {
+            self.i += 1;
+            c += 1;
+        }
+        Some((v, c))
     }
-}
-
-/// Group sizes per value of canonical column `v_pos`. Returns `(value, count)`
-/// ascending by value. Streams from the index when it is sorted by `v_pos` (the usual
-/// case with all six permutations); otherwise — when a reduced permutation set could
-/// not deliver that order — it collects the column and sorts it first, so the result is
-/// always correct.
-fn group_counts(graph: &Graph, id_pat: &IdPattern, v_pos: usize) -> Vec<(Id, usize)> {
-    let scan = graph.store.scan_sorted(id_pat, v_pos);
-    let sorted_by_v = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none()) == Some(v_pos);
-    let mut out: Vec<(Id, usize)> = Vec::new();
-    let mut last: Option<Id> = None;
-    let mut cnt = 0usize;
-    let mut push = |v: Id, last: &mut Option<Id>, cnt: &mut usize, out: &mut Vec<(Id, usize)>| {
-        if *last == Some(v) {
-            *cnt += 1;
-        } else {
-            if let Some(lv) = *last {
-                out.push((lv, *cnt));
-            }
-            *last = Some(v);
-            *cnt = 1;
-        }
-    };
-    if sorted_by_v {
-        // The scan is already ascending by the group column — stream the run-length
-        // grouping directly over the rows, NEVER collecting a per-row value vector (which
-        // was the dominant memory of a multi-pattern COUNT: ~one Id per matched triple).
-        for r in scan.rows.iter() {
-            push(scan.to_spo(r)[v_pos], &mut last, &mut cnt, &mut out);
-        }
-    } else {
-        // Reduced-permutation fallback: the order is not delivered, so collect + sort.
-        let mut vals: Vec<Id> = scan.rows.iter().map(|r| scan.to_spo(r)[v_pos]).collect();
-        vals.sort_unstable();
-        for v in vals {
-            push(v, &mut last, &mut cnt, &mut out);
-        }
-    }
-    if let Some(lv) = last {
-        out.push((lv, cnt));
-    }
-    out
 }
 
 /// Counts the solutions of a single triple pattern constrained by sargable numeric
