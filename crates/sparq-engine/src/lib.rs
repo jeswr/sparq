@@ -540,6 +540,47 @@ mod tests {
     }
 
     #[test]
+    fn relational_type_error_semantics() {
+        // A numeric ordering comparison against a NON-numeric term is a SPARQL type
+        // error -> the row is excluded (NOT a string comparison). Regression for the
+        // adversarial-audit finding: `?v > -1` with ?v a string wrongly passed via a
+        // lexical-byte comparison. A negative threshold is non-sargable, so this runs
+        // the residual compare path. Cross-checks several non-numeric term kinds.
+        let g = Graph::load_str(
+            r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+               ex:s1 ex:v 50 .
+               ex:s2 ex:v "hi" .
+               ex:s3 ex:v ex:thing .
+               ex:s4 ex:v "true"^^xsd:boolean .
+               ex:s5 ex:v "bonjour"@fr ."#,
+            "turtle",
+        )
+        .unwrap();
+        let cnt = |q: &str| query(&g, q).unwrap().len();
+        // Only the number 50 satisfies an ordering comparison; every non-numeric is a
+        // type error -> excluded.
+        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v > -1) }"), 1);
+        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v < 100) }"), 1);
+        // `=` / `!=` are NOT type errors across recognised types: term-distinct values
+        // are KNOWN different, so `!= 5` is true for all four non-numerics + (50!=5).
+        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v != 5) }"), 5);
+        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v = 5) }"), 0);
+        // Value equality across integer datatypes still holds.
+        let g2 = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:a ex:v \"05\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+            "turtle",
+        )
+        .unwrap();
+        assert_eq!(query(&g2, "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v = 5) }").unwrap().len(), 1);
+        // 3-valued OR: `(?v > -1) || (?v = "hi")` — s1 true via >, s2 ("hi") true via =,
+        // the rest error||false = false. So 2 rows.
+        assert_eq!(
+            cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER((?v > -1) || (?v = \"hi\")) }"),
+            2
+        );
+    }
+
+    #[test]
     fn named_graph_unsupported() {
         let e = query(
             &g(),

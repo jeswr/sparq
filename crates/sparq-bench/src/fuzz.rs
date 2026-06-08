@@ -91,7 +91,10 @@ fn gen_graph(rng: &mut Rng) -> String {
 /// boundary cases of range-pruning are exercised).
 fn gen_filter(rng: &mut Rng, var: &str) -> String {
     let op = ["<", "<=", ">", ">=", "=", "!="][rng.below(6) as usize];
-    let t = rng.below(125); // 0..124, straddles the 0..119 data range incl. boundaries
+    // Signed threshold straddling the data range AND zero — negative thresholds are
+    // non-sargable (parsed as UnaryMinus), forcing the residual compare path that a
+    // non-numeric operand must turn into a type error, not a string comparison.
+    let t = rng.below(160) as i64 - 40; // -40..119
     format!("FILTER({var} {op} {t})")
 }
 
@@ -100,7 +103,7 @@ fn gen_filter(rng: &mut Rng, var: &str) -> String {
 fn gen_query(rng: &mut Rng, category: &str) -> String {
     let pfx = "PREFIX ex: <http://ex/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n";
     // Pick an effective category (when "all", choose one at random).
-    let cats = ["bgp", "filter", "optional", "union", "minus", "limit", "distinct", "order"];
+    let cats = ["bgp", "filter", "equality", "optional", "union", "minus", "limit", "distinct", "order"];
     let cat = if category == "all" { cats[rng.below(cats.len() as u64) as usize] } else { category };
 
     let body = match cat {
@@ -122,6 +125,21 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
             1 => "?s ex:age ?a OPTIONAL { ?s ex:p ?o }".to_string(),
             _ => "?s ex:name ?n OPTIONAL { ?s ex:age ?a . FILTER(?a > 50) }".to_string(),
         },
+        "equality" => {
+            // `=` / `!=` against a constant of a possibly-different type, over the
+            // MIXED column — exercises RDFterm-equal (known-different vs type error).
+            let op = if rng.chance(1, 2) { "=" } else { "!=" };
+            let rhs = match rng.below(6) {
+                0 => format!("{}", rng.below(120)),                 // integer
+                1 => format!("\"s{}\"", rng.below(5)),              // plain string
+                2 => "ex:n0".to_string(),                          // IRI
+                3 => "\"true\"^^xsd:boolean".to_string(),          // boolean
+                4 => format!("\"{}\"^^xsd:int", rng.below(120)),   // xsd:int
+                _ => format!("\"{}.5\"^^xsd:decimal", rng.below(120)), // decimal
+            };
+            let var = if rng.chance(1, 2) { ("?v", "ex:val") } else { ("?a", "ex:age") };
+            return format!("{pfx}SELECT ?s WHERE {{ ?s {} {} FILTER({} {op} {rhs}) }}", var.1, var.0, var.0);
+        }
         "union" => "{ ?s ex:age ?a } UNION { ?s ex:name ?a }".to_string(),
         "minus" => "?s ex:name ?n MINUS { ?s ex:age ?a }".to_string(),
         "limit" => {

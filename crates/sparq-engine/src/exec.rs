@@ -1698,7 +1698,7 @@ fn eval_aggregate(graph: &Graph, local: &mut LocalVocab, b: &Bindings, members: 
             let mut vals: Vec<Value> = Vec::with_capacity(members.len());
             for &ri in members {
                 let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
-                if !matches!(v, Value::Unbound) {
+                if !matches!(v, Value::Unbound | Value::Error) {
                     vals.push(v);
                 }
             }
@@ -1736,6 +1736,7 @@ fn value_key(v: &Value) -> String {
         Value::Num(n) => format!("N{n}"),
         Value::Bool(b) => format!("B{b}"),
         Value::Unbound => "U".to_string(),
+        Value::Error => "E".to_string(),
     }
 }
 
@@ -1823,13 +1824,17 @@ enum Value {
     Num(f64),
     Term(Term),
     Unbound,
+    /// A SPARQL type error (e.g. an ordering comparison between incompatible
+    /// types). Its effective boolean value is false, it propagates through the
+    /// logical operators by the SPARQL 3-valued rules, and a BIND of it is unbound.
+    Error,
 }
 
 fn effective_boolean(v: &Value) -> bool {
     match v {
         Value::Bool(b) => *b,
         Value::Num(n) => *n != 0.0 && !n.is_nan(),
-        Value::Unbound => false,
+        Value::Unbound | Value::Error => false,
         Value::Term(Term::Literal(l)) => {
             let dt = l.datatype().as_str();
             if dt == xsd::BOOLEAN.as_str() {
@@ -1859,10 +1864,23 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
         },
         NamedNode(n) => Ok(Value::Term(Term::NamedNode(n.clone()))),
         Literal(l) => Ok(Value::Term(Term::Literal(l.clone()))),
-        And(a, c) => Ok(Value::Bool(eval_bool(graph, local, b, row, a)? && eval_bool(graph, local, b, row, c)?)),
-        Or(a, c) => Ok(Value::Bool(eval_bool(graph, local, b, row, a)? || eval_bool(graph, local, b, row, c)?)),
-        Not(a) => Ok(Value::Bool(!eval_bool(graph, local, b, row, a)?)),
-        Equal(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o == Ordering::Equal),
+        And(a, c) => {
+            // SPARQL 3-valued logic: false dominates, so `false && error` = false.
+            let x = ebv3(&eval_expr(graph, local, b, row, a)?);
+            let y = ebv3(&eval_expr(graph, local, b, row, c)?);
+            Ok(and3(x, y))
+        }
+        Or(a, c) => {
+            // SPARQL 3-valued logic: true dominates, so `true || error` = true.
+            let x = ebv3(&eval_expr(graph, local, b, row, a)?);
+            let y = ebv3(&eval_expr(graph, local, b, row, c)?);
+            Ok(or3(x, y))
+        }
+        Not(a) => Ok(match ebv3(&eval_expr(graph, local, b, row, a)?) {
+            Some(v) => Value::Bool(!v),
+            None => Value::Error, // !error = error
+        }),
+        Equal(a, c) => equal_expr(graph, local, b, row, a, c),
         SameTerm(a, c) => {
             let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
             Ok(Value::Bool(matches!((&x, &y), (Value::Term(p), Value::Term(q)) if p == q)))
@@ -1889,19 +1907,27 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
             }
         }
         Coalesce(es) => {
+            // Returns the first argument that evaluates without error (unbound and
+            // type errors are both skipped).
             for e in es {
                 let v = eval_expr(graph, local, b, row, e)?;
-                if !matches!(v, Value::Unbound) {
+                if !matches!(v, Value::Unbound | Value::Error) {
                     return Ok(v);
                 }
             }
             Ok(Value::Unbound)
         }
         In(a, list) => {
+            // `?x IN (..)` is the disjunction of `?x = e`; reuse the SPARQL `=`
+            // semantics (value equality, else term identity), ignoring type errors.
             let x = eval_expr(graph, local, b, row, a)?;
             for c in list {
                 let y = eval_expr(graph, local, b, row, c)?;
-                if compare_values(&x, &y) == Some(Ordering::Equal) {
+                let eq = match value_compare_strict(&x, &y) {
+                    Some(o) => o == Ordering::Equal,
+                    None => matches!((&x, &y), (Value::Term(p), Value::Term(q)) if p == q),
+                };
+                if eq {
                     return Ok(Value::Bool(true));
                 }
             }
@@ -1946,13 +1972,115 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
     }
 }
 
+/// An ORDERING comparison (`<`, `>`, `<=`, `>=`). SPARQL only orders operands of
+/// compatible types (numeric vs numeric, boolean vs boolean, or two literals of the
+/// same datatype); anything else is a TYPE ERROR (`Value::Error`), which a FILTER
+/// turns into "excluded". (Distinct from the lenient total order `compare_values`
+/// used by ORDER BY / MIN / MAX, which must order across every type.)
 fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(Ordering) -> bool) -> Result<Value, String> {
     // Fast path: both sides numeric -> compare f64 directly, no term materialised.
     if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
-        return Ok(Value::Bool(x.partial_cmp(&y).map(&f).unwrap_or(false)));
+        return Ok(x.partial_cmp(&y).map(|o| Value::Bool(f(o))).unwrap_or(Value::Error));
     }
     let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
-    Ok(Value::Bool(compare_values(&x, &y).map(f).unwrap_or(false)))
+    Ok(match value_compare_strict(&x, &y) {
+        Some(o) => Value::Bool(f(o)),
+        None => Value::Error,
+    })
+}
+
+/// SPARQL `=` (and, negated, `!=`). Tries value comparison; otherwise term
+/// equality decides KNOWN-different cases (false), and two value-incomparable
+/// literals are a type error.
+fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression) -> Result<Value, String> {
+    if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
+        return Ok(x.partial_cmp(&y).map(|o| Value::Bool(o == Ordering::Equal)).unwrap_or(Value::Error));
+    }
+    let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
+    if let Some(o) = value_compare_strict(&x, &y) {
+        return Ok(Value::Bool(o == Ordering::Equal));
+    }
+    // Value comparison does not apply. Identical RDF terms are equal; an unbound or
+    // errored operand is an error; otherwise the two terms are KNOWN to be different
+    // -> false (so `!=` across recognised-but-incomparable types is true, matching
+    // RDFterm-equal: unlike the ordering operators, `=`/`!=` do not type-error here).
+    if let (Value::Term(p), Value::Term(q)) = (&x, &y) {
+        if p == q {
+            return Ok(Value::Bool(true));
+        }
+    }
+    Ok(if matches!(x, Value::Unbound | Value::Error) || matches!(y, Value::Unbound | Value::Error) {
+        Value::Error
+    } else {
+        Value::Bool(false)
+    })
+}
+
+/// Strict SPARQL value comparison for relational operators: `Some(ordering)` only
+/// when the operands are value-comparable (both numeric, both boolean, or two
+/// literals of the same datatype and language), else `None` (a type error).
+fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
+    if let (Some(a), Some(b)) = (strict_num(x), strict_num(y)) {
+        return a.partial_cmp(&b);
+    }
+    if let (Some(a), Some(b)) = (as_bool_val(x), as_bool_val(y)) {
+        return Some(a.cmp(&b));
+    }
+    if let (Value::Term(Term::Literal(a)), Value::Term(Term::Literal(c))) = (x, y) {
+        // Same datatype (and language) literals — incl. xsd:string and dateTime —
+        // compare by code point / lexical value.
+        if a.datatype() == c.datatype() && a.language() == c.language() {
+            return Some(a.value().cmp(c.value()));
+        }
+    }
+    None
+}
+
+/// A numeric value for STRICT comparison — only genuine numeric literals (NOT
+/// booleans, which are a separate, incomparable type in SPARQL relational ops).
+fn strict_num(v: &Value) -> Option<f64> {
+    match v {
+        Value::Num(n) => Some(*n),
+        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn as_bool_val(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        Value::Term(Term::Literal(l)) if l.datatype() == xsd::BOOLEAN => match l.value() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Three-valued effective boolean: `None` is a SPARQL error (type error or unbound),
+/// used by the logical operators to implement SPARQL's 3-valued `&&` / `||` / `!`.
+fn ebv3(v: &Value) -> Option<bool> {
+    match v {
+        Value::Error | Value::Unbound => None,
+        other => Some(effective_boolean(other)),
+    }
+}
+
+fn and3(x: Option<bool>, y: Option<bool>) -> Value {
+    match (x, y) {
+        (Some(false), _) | (_, Some(false)) => Value::Bool(false),
+        (Some(true), Some(true)) => Value::Bool(true),
+        _ => Value::Error,
+    }
+}
+
+fn or3(x: Option<bool>, y: Option<bool>) -> Value {
+    match (x, y) {
+        (Some(true), _) | (_, Some(true)) => Value::Bool(true),
+        (Some(false), Some(false)) => Value::Bool(false),
+        _ => Value::Error,
+    }
 }
 
 fn arith(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(f64, f64) -> f64) -> Result<Value, String> {
@@ -2005,7 +2133,7 @@ fn value_str(v: &Value) -> Option<String> {
         Value::Term(Term::BlankNode(b)) => Some(b.as_str().to_string()),
         Value::Bool(b) => Some(b.to_string()),
         Value::Num(n) => Some(fmt_num(*n)),
-        Value::Unbound => None,
+        Value::Unbound | Value::Error => None,
         Value::Term(_) => None,
     }
 }
@@ -2023,7 +2151,7 @@ fn fmt_num(n: f64) -> String {
 /// terms not already present get a per-query local id.
 fn value_to_id(graph: &Graph, local: &mut LocalVocab, v: &Value) -> Id {
     let term = match v {
-        Value::Unbound => return NO_ID,
+        Value::Unbound | Value::Error => return NO_ID,
         Value::Bool(b) => Term::Literal(Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN)),
         Value::Num(n) => Term::Literal(if n.fract() == 0.0 && n.is_finite() {
             Literal::new_typed_literal((*n as i64).to_string(), xsd::INTEGER)
