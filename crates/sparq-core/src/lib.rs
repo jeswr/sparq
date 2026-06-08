@@ -341,7 +341,7 @@ impl Graph {
     ///
     /// `chunk` is the number of triples per in-memory run (e.g. 8_000_000 ≈ 96 MB of ids).
     #[cfg(feature = "mmap")]
-    pub fn build_external<R: std::io::Read>(
+    pub fn build_external<R: std::io::Read + Send>(
         reader: R,
         format: &str,
         dir: &std::path::Path,
@@ -616,44 +616,70 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
 /// Streams N-Triples from `reader` in newline-aligned ~64 MiB blocks, parsing+interning
 /// each block IN PARALLEL (the custom byte parser, per-block partial dicts merged into
 /// the running `dict`), and spilling SPO runs — the parallel-parse path for the external
-/// (billion-scale, bounded-memory) build. Only one block + its partials are resident.
+/// (billion-scale, bounded-memory) build.
+///
+/// DECOMPRESSION is PIPELINED onto its own thread feeding a bounded channel, so it OVERLAPS
+/// parsing+spilling instead of running additively. For a `.bz2` ingest — where the (slow,
+/// single-stream) decompress dominates wall-time — this hides the parse cost under the
+/// decompress, the largest measured ingest win. At most a few 64 MiB blocks are in flight,
+/// so memory stays bounded.
 #[cfg(all(feature = "mmap", feature = "parallel"))]
-fn build_external_ntriples_parallel<R: std::io::Read>(
-    mut reader: R,
+fn build_external_ntriples_parallel<R: std::io::Read + Send>(
+    reader: R,
     dict: &mut Dict,
     buf: &mut Vec<[Id; 3]>,
     runs: &mut Vec<std::path::PathBuf>,
     tmp: &std::path::Path,
     chunk: usize,
 ) -> Result<(), String> {
+    use std::sync::mpsc::sync_channel;
     const BLOCK: usize = 64 << 20; // 64 MiB
-    let mut readbuf = vec![0u8; BLOCK];
-    let mut carry: Vec<u8> = Vec::new();
-    loop {
-        // Fill the read buffer (a single read may return less than requested).
-        let mut filled = 0;
-        while filled < BLOCK {
-            let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
+    let (tx, rx) = sync_channel::<Vec<u8>>(3);
+
+    std::thread::scope(|scope| -> Result<(), String> {
+        // Producer: decompress + read on its own thread, emitting newline-aligned blocks.
+        let producer = scope.spawn(move || -> Result<(), String> {
+            let mut reader = reader;
+            let mut readbuf = vec![0u8; BLOCK];
+            let mut carry: Vec<u8> = Vec::new();
+            loop {
+                // Fill the read buffer (a single read may return less than requested).
+                let mut filled = 0;
+                while filled < BLOCK {
+                    let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                if filled == 0 {
+                    // EOF: a final line without a trailing newline lives in `carry`.
+                    if !carry.is_empty() {
+                        let _ = tx.send(std::mem::take(&mut carry));
+                    }
+                    return Ok(());
+                }
+                // Emit `carry + readbuf[..filled]` up to the last newline; carry the
+                // remainder (a partial line split across the read boundary) to the next.
+                let mut block = std::mem::take(&mut carry);
+                block.extend_from_slice(&readbuf[..filled]);
+                let cut = block.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+                carry = block[cut..].to_vec();
+                block.truncate(cut);
+                if tx.send(block).is_err() {
+                    return Ok(()); // the consumer hit an error and dropped the receiver
+                }
             }
-            filled += n;
+        });
+
+        // Consumer: parse+intern+spill each block (itself rayon-parallel) as it arrives.
+        for block in rx {
+            parse_block_into(&block, dict, buf, runs, tmp, chunk)?;
         }
-        if filled == 0 {
-            // EOF: a final line that lacked a trailing newline lives in `carry`.
-            if !carry.is_empty() {
-                parse_block_into(&carry, dict, buf, runs, tmp, chunk)?;
-            }
-            return Ok(());
-        }
-        // Parse `carry + readbuf[..filled]` up to the last newline; carry the remainder
-        // (a partial line split across the read boundary) into the next block.
-        let mut block = std::mem::take(&mut carry);
-        block.extend_from_slice(&readbuf[..filled]);
-        let cut = block.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
-        parse_block_into(&block[..cut], dict, buf, runs, tmp, chunk)?;
-        carry = block[cut..].to_vec();
-    }
+        // Surface a decompression error (the producer ends → channel closes → loop above
+        // exits cleanly, and the error is here).
+        producer.join().map_err(|_| "decompression thread panicked".to_string())?
+    })
 }
 
 /// Parses one (complete-line) N-Triples byte block in parallel, merges each chunk's

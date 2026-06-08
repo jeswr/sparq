@@ -59,7 +59,8 @@ fn cmd_ingest(args: &[String]) {
         eprintln!("open {path}: {e}");
         std::process::exit(1);
     });
-    let decoded: Box<dyn Read> = if path.ends_with(".bz2") {
+    // `+ Send` so the build can run decompression on its own (overlapping) thread.
+    let decoded: Box<dyn Read + Send> = if path.ends_with(".bz2") {
         Box::new(bzip2::read::MultiBzDecoder::new(file))
     } else if path.ends_with(".gz") {
         Box::new(flate2::read::MultiGzDecoder::new(file))
@@ -184,7 +185,8 @@ fn cmd_build(args: &[String]) {
         eprintln!("open {path}: {e}");
         std::process::exit(1);
     });
-    let decoded: Box<dyn Read> = if path.ends_with(".bz2") {
+    // `+ Send` so the build can run decompression on its own (overlapping) thread.
+    let decoded: Box<dyn Read + Send> = if path.ends_with(".bz2") {
         Box::new(bzip2::read::MultiBzDecoder::new(file))
     } else if path.ends_with(".gz") {
         Box::new(flate2::read::MultiGzDecoder::new(file))
