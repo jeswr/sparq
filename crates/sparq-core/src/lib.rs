@@ -72,6 +72,15 @@ impl Graph {
 
         match format {
             "ntriples" | "n-triples" => {
+                // N-Triples is one statement per line, so the input can be split at
+                // newline boundaries and parsed + interned in parallel (each thread
+                // builds a partial dictionary, then the partials are merged).
+                #[cfg(feature = "parallel")]
+                {
+                    let (d, t) = parse_ntriples_parallel(bytes)?;
+                    return Ok(Self::build(d, t));
+                }
+                #[cfg(not(feature = "parallel"))]
                 for t in NTriplesParser::new().for_slice(bytes) {
                     let t = t.map_err(|e| e.to_string())?;
                     push_triple!(&t.subject, &t.predicate, &t.object);
@@ -239,9 +248,112 @@ fn subject_term(s: &oxrdf::NamedOrBlankNode) -> Term {
     }
 }
 
+/// Splits a byte buffer into ~`target` ranges, each ending on a newline so no
+/// (single-line) N-Triples statement is split across a boundary.
+#[cfg(feature = "parallel")]
+fn newline_chunk_bounds(bytes: &[u8], target: usize) -> Vec<(usize, usize)> {
+    let mut bounds = Vec::with_capacity(target);
+    let chunk = (bytes.len() / target.max(1)).max(1);
+    let mut start = 0;
+    while start < bytes.len() {
+        let mut end = (start + chunk).min(bytes.len());
+        if end < bytes.len() {
+            match bytes[end..].iter().position(|&b| b == b'\n') {
+                Some(p) => end += p + 1,
+                None => end = bytes.len(),
+            }
+        }
+        bounds.push((start, end));
+        start = end;
+    }
+    bounds
+}
+
+/// Parses + interns N-Triples in parallel: each chunk builds a partial dictionary +
+/// local-id triples, then the partials are merged into one global dictionary with the
+/// local ids remapped. Interning is per-thread (no shared lock); the merge is linear.
+#[cfg(feature = "parallel")]
+fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
+    use rayon::prelude::*;
+    // A few chunks per thread for load balancing (terms are not uniformly dense).
+    let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 4096 + 1);
+    let bounds = newline_chunk_bounds(bytes, target);
+
+    let partials: Vec<(Dict, Vec<[Id; 3]>)> = bounds
+        .par_iter()
+        .map(|&(s, e)| {
+            let mut dict = Dict::new();
+            let mut triples = Vec::new();
+            for t in NTriplesParser::new().for_slice(&bytes[s..e]) {
+                let t = t.map_err(|err| err.to_string())?;
+                let sid = dict.intern(&subject_term(&t.subject));
+                let pid = dict.intern(&Term::NamedNode(t.predicate.clone()));
+                let oid = dict.intern(&t.object);
+                triples.push([sid, pid, oid]);
+            }
+            Ok::<_, String>((dict, triples))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let total: usize = partials.iter().map(|(_, t)| t.len()).sum();
+    let cap = partials.iter().map(|(d, _)| d.len()).max().unwrap_or(0);
+    let mut global = Dict::with_capacity(cap);
+    let mut all = Vec::with_capacity(total);
+    for (pd, ptriples) in partials {
+        let remap = global.merge_remap(&pd);
+        // Dictionary ids are 1-based and below INLINE_BASE; inline-integer ids carry
+        // their value and pass through unchanged.
+        let map = |id: Id| {
+            if id >= dict::INLINE_BASE {
+                id
+            } else {
+                remap[(id - 1) as usize]
+            }
+        };
+        all.extend(ptriples.into_iter().map(|[s, p, o]| [map(s), map(p), map(o)]));
+    }
+    Ok((global, all))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ntriples_parallel_matches_sequential() {
+        // >4KB so the input spans multiple parallel chunks; subjects/predicates repeat
+        // across chunks (exercising the partial-dict merge) and the objects are inline
+        // integers (exercising the inline-id passthrough in the remap).
+        let mut nt = String::new();
+        for i in 0..2000u32 {
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 137,
+                i % 11,
+                i % 500
+            ));
+        }
+        let par = Graph::load_str(&nt, "ntriples").unwrap(); // parallel (when feature on)
+        let seq = Graph::load_reader(nt.as_bytes(), "ntriples").unwrap(); // sequential
+        assert_eq!(par.len(), seq.len());
+        assert_eq!(par.dict.len(), seq.dict.len());
+        // Full structural equality independent of id-assignment order: map every stored
+        // triple back to its terms, sort, compare.
+        let dump = |g: &Graph| {
+            let scan = g.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(dump(&par), dump(&seq));
+    }
 
     #[test]
     fn load_and_scan() {

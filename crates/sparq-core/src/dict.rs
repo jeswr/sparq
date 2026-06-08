@@ -116,6 +116,17 @@ impl Dict {
         }
     }
 
+    /// Merges another (partial) dictionary into this one, returning the remap from
+    /// the other's local ids to this dictionary's global ids: `remap[local - 1]` is
+    /// the global id for the other's 1-based local id `local`. Used by the parallel
+    /// bulk loader, where each thread builds a partial dictionary and the partials are
+    /// merged into one. Inline-integer ids are NOT in any dictionary and pass through
+    /// unchanged (the caller checks `is_inline`).
+    pub fn merge_remap(&mut self, other: &Dict) -> Vec<Id> {
+        self.terms.reserve(other.terms.len());
+        other.terms.iter().map(|t| self.intern(t)).collect()
+    }
+
     pub fn len(&self) -> usize {
         self.terms.len()
     }
