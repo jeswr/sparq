@@ -217,12 +217,26 @@ queries, and still behind on `q06` (numeric filter — small absolute numbers) a
 
 After filter pushdown + merge left-join, the remaining 10M gaps are
 scan/materialisation bound: **q02 full-scan-materialise (0.23×)**, **q04 5M-row
-join (0.29×)**, **q03 star (0.64×)**. These point at:
+join (0.29×)**, **q03 star (0.64×)**.
 
-1. **Columnar result buffer** — `Bindings` is `Vec<Row>` (a `SmallVec` per row); a
-   single-column result of 1.25M rows wastes ~8× vs a flat `Vec<Id>` column. A
-   column-major intermediate (one `Vec<Id>` per variable) cuts materialisation
-   bandwidth and enables vectorisation — the q02/q04 lever.
+> **Measured negative result (don't repeat): a flat `Vec<Id>` row buffer.** The
+> hypothesis was that `Bindings`' `Vec<SmallVec<[Id;4]>>` (32 B/row) wastes ~8× on
+> narrow results vs a flat `Vec<Id>`+width. Implemented and measured: it **regressed**
+> q02 13→17.6 ms and q04 158→204 ms, and was reverted. Reason: `SmallVec` rows are
+> *inline* (no per-row heap allocation), so `Vec<SmallVec>` is already cheap to
+> build (one 32 B memcpy/row); the flat buffer adds a *second* copy (build a temp
+> row, then `extend_from_slice` into the buffer). The memory saving only pays if
+> rows are read many times downstream, not for build-once-count/materialise. The
+> real q02/q04 lever is therefore **lazy/streaming execution** (count/aggregate
+> without materialising the full result — what QLever's lazy operators do), a
+> larger redesign, **not** the row storage layout.
+
+These point at:
+
+1. **Lazy / streaming operators** — evaluate count/aggregate/LIMIT without
+   materialising the whole intermediate (QLever's block-based lazy model); the
+   real q02/q04 lever. (COUNT(\*) over a single pattern is already pushed down to
+   the range size.)
 2. **Full tagged ValueIds** — inline numerics/dates in the id itself (extends the
    numeric cache + the pushdown), removing the gather entirely.
 3. **M3 column compression** (PForDelta + front-coded vocab) + **parallel bulk
