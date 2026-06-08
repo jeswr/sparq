@@ -516,7 +516,11 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             // them (QLever counts lazily too; this is the q02-style win).
             if variables.is_empty() && aggregates.len() == 1 {
                 if let (av, AggregateExpression::CountSolutions { distinct: false }) = (&aggregates[0].0, &aggregates[0].1) {
-                    if let Some(n) = count_pushdown(graph, inner) {
+                    // COUNT(*) == the inner pattern's solution count. Use `try_count`, not
+                    // just `count_pushdown`: it also covers OPTIONAL (lazy left-join count,
+                    // Σ over the join var) and LIMIT/OFFSET — so `COUNT(*)` over an OPTIONAL
+                    // no longer materialises the whole left-join just to count it.
+                    if let Some(n) = try_count(graph, inner) {
                         let id = value_to_id(graph, local, &Value::Num(n as f64));
                         let row: Row = std::iter::once(id).collect();
                         return Ok(Bindings { vars: vec![av.clone()], rows: vec![row], sorted_by: None });
@@ -582,22 +586,33 @@ fn distinct_pattern_vars(pos_vars: &[Option<Variable>; 3]) -> bool {
 fn group_counts(graph: &Graph, id_pat: &IdPattern, v_pos: usize) -> Vec<(Id, usize)> {
     let scan = graph.store.scan_sorted(id_pat, v_pos);
     let sorted_by_v = scan.perm.order().into_iter().find(|&c| id_pat[c].is_none()) == Some(v_pos);
-    let mut vals: Vec<Id> = scan.rows.iter().map(|r| scan.to_spo(r)[v_pos]).collect();
-    if !sorted_by_v {
-        vals.sort_unstable();
-    }
     let mut out: Vec<(Id, usize)> = Vec::new();
     let mut last: Option<Id> = None;
     let mut cnt = 0usize;
-    for v in vals {
-        if last == Some(v) {
-            cnt += 1;
+    let mut push = |v: Id, last: &mut Option<Id>, cnt: &mut usize, out: &mut Vec<(Id, usize)>| {
+        if *last == Some(v) {
+            *cnt += 1;
         } else {
-            if let Some(lv) = last {
-                out.push((lv, cnt));
+            if let Some(lv) = *last {
+                out.push((lv, *cnt));
             }
-            last = Some(v);
-            cnt = 1;
+            *last = Some(v);
+            *cnt = 1;
+        }
+    };
+    if sorted_by_v {
+        // The scan is already ascending by the group column — stream the run-length
+        // grouping directly over the rows, NEVER collecting a per-row value vector (which
+        // was the dominant memory of a multi-pattern COUNT: ~one Id per matched triple).
+        for r in scan.rows.iter() {
+            push(scan.to_spo(r)[v_pos], &mut last, &mut cnt, &mut out);
+        }
+    } else {
+        // Reduced-permutation fallback: the order is not delivered, so collect + sort.
+        let mut vals: Vec<Id> = scan.rows.iter().map(|r| scan.to_spo(r)[v_pos]).collect();
+        vals.sort_unstable();
+        for v in vals {
+            push(v, &mut last, &mut cnt, &mut out);
         }
     }
     if let Some(lv) = last {
