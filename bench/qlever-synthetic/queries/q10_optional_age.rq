@@ -1,0 +1,2 @@
+PREFIX ex: <http://ex/>
+SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:age ?a } }

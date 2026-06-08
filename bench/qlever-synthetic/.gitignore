@@ -1,0 +1,9 @@
+# Generated dataset + QLever index (regenerate: sparq-bench dump 1250000 synthetic.nt; qlever index)
+synthetic.nt
+synthetic.index*
+synthetic.internal*
+synthetic.vocabulary*
+synthetic.meta-data.json
+synthetic.prefixes
+synthetic.*-log.txt
+*.server-log.txt

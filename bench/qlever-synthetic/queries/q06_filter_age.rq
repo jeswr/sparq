@@ -1,0 +1,2 @@
+PREFIX ex: <http://ex/>
+SELECT ?s ?a WHERE { ?s ex:age ?a . FILTER(?a > 90) }

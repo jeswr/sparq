@@ -1,0 +1,2 @@
+PREFIX ex: <http://ex/>
+SELECT * WHERE { ?s ex:follows ?o . ?o ex:name ?n }

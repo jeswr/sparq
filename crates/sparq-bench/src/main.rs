@@ -41,6 +41,17 @@ fn main() {
     let scale: u32 = arg_val(&args, "--scale").and_then(|s| s.parse().ok()).unwrap_or(20_000);
     let iters: usize = arg_val(&args, "--iters").and_then(|s| s.parse().ok()).unwrap_or(5);
 
+    // `sparq-bench dump <scale> <out.nt>` — write the synthetic dataset for the
+    // larger-scale QLever comparison.
+    if args.get(1).map(String::as_str) == Some("dump") {
+        let scale: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(scale);
+        let out = args.get(3).map(String::as_str).unwrap_or("synthetic.nt");
+        let t = Instant::now();
+        let n = dataset::write_nt(scale, out).expect("write dataset");
+        eprintln!("wrote {n} triples ({scale} entities) to {out} in {:.1}s", t.elapsed().as_secs_f64());
+        return;
+    }
+
     if let Some(engine) = arg_val(&args, "--mem") {
         mem_subprocess(&engine, scale);
         return;

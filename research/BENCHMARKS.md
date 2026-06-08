@@ -208,7 +208,37 @@ queries, and still behind on `q06` (numeric filter — small absolute numbers) a
 4. Show the **WCOJ edge** on a skew/cycle-heavy benchmark (QLever uses binary
    joins) — our one likely asymptotic win.
 
+## Scaling: 10M triples — the gap WIDENS (the key honest finding)
+
+`bench/qlever-synthetic/` runs the same two-pass comparison on a 10M-triple
+synthetic graph (`sparq-bench dump 1250000 synthetic.nt`). All result sizes still
+match QLever exactly. Compute pass (min-of-5 cold):
+
+| query | sparq | qlever | speedup |
+|---|--:|--:|--:|
+| q02 type-scan (1.25M) | 12.8 ms | 7 ms | 0.55× |
+| q03 star-3 | 88 ms | 90 ms | 1.02× |
+| q04 follows→name (5M rows) | 163 ms | 54 ms | 0.33× |
+| q06 filter (1.25M scan) | 42.5 ms | 2 ms | **0.05×** |
+| q10 OPTIONAL | 338 ms | 56 ms | 0.17× |
+| **geomean** | | | **0.27×** |
+
+**At 10M, QLever is ~3.7× faster on compute — and the gap GREW from the 1.8M
+olympics result (0.80×).** sparq's parity at small scale did **not** hold:
+in-memory flat `Vec<[u32;3]>` permutations and full-scan filters lose to QLever's
+**compressed columnar blocks, lazy/block scan, and tagged ValueIds** as data
+grows. The numeric FILTER is now **20× slower** (q06 0.05×) — a full 1.25M-row
+materialised scan vs QLever's predicate-pushed block scan. (The end-to-end pass
+still shows sparq "winning" 4–12×, but that is entirely QLever's slow JSON export
+of millions of rows in Docker — not compute.)
+
+**Conclusion:** to outcompete QLever *at all scales*, the architecture itself must
+change — this is M3 (column compression + vectorised/block scan + filter
+pushdown) and M4 (tagged ValueIds), plus out-of-core for the billion-triple
+regime where the current in-memory store would OOM. Micro-optimisation got sparq
+to parity on small in-RAM data; scaling needs the structural work.
+
 ## Other next steps
 
-- Larger scales; cold-cache and QMpH (queries/hour) metrics.
+- Native QLever (not Docker) for the fairest fight; cold-cache and QMpH metrics.
 - Re-measure memory against QLever (compressed) and after M3 column compression.
