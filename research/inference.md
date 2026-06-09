@@ -50,11 +50,14 @@ brother, hasValue/someValuesFrom restrictions, intersectionOf) + end-to-end CLI.
 rules use spec eq-rep substitution; union-find canonicalization is a future optimization.
 **Consistency** ✅ — `sparq_reason::inconsistencies` detects cax-dw (`disjointWith`), cls-com
 (`complementOf`), eq-diff (`sameAs`∩`differentFrom`), cls-nothing (`owl:Nothing`) clashes
-post-materialization; the CLI reports them under `--reason owl`. **Remaining for full RL:**
-cardinality (`maxCardinality` 0/1, `maxQualifiedCardinality`), `hasKey`, and the remaining
-schema rules (scm-* for full class/property-hierarchy completeness).
+post-materialization; the CLI reports them under `--reason owl`. **Cardinality + keys** ✅ —
+cls-maxc2 (`maxCardinality 1` ⊢ the ≤1 values are `sameAs`), cls-maxc1 (`maxCardinality 0`
+with a value ⊢ clash), prp-key (`owl:hasKey` ⊢ individuals agreeing on all key values are
+`sameAs`). **Remaining for full RL:** `maxQualifiedCardinality`/`onClass`, and the schema
+rules scm-* for full class/property-hierarchy completeness (mostly redundant with the direct
+type/subClassOf rules already implemented).
 
-### ▢ OWL — remaining (cardinality, hasKey, scm-*)
+### ▢ OWL — remaining (qualified cardinality, scm-*)
 OWL 2 **RL** is the materialization-friendly profile (the others — EL, QL — target different
 algorithms; full OWL DL is undecidable for forward chaining). RL extends the same fixpoint
 engine with property and class axioms, all expressible as datalog-style rules over ids:

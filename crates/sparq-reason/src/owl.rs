@@ -52,6 +52,8 @@ struct Owl {
     different_from: Id,   // owl:differentFrom
     complement_of: Id,    // owl:complementOf
     nothing: Id,          // owl:Nothing
+    has_key: Id,          // owl:hasKey
+    max_cardinality: Id,  // owl:maxCardinality
     rdf_first: Id,
     rdf_rest: Id,
     rdf_nil: Id,
@@ -81,10 +83,24 @@ impl Owl {
             different_from: i("differentFrom"),
             complement_of: i("complementOf"),
             nothing: i("Nothing"),
+            has_key: i("hasKey"),
+            max_cardinality: i("maxCardinality"),
             rdf_first: dict.intern_iri(&format!("{RDF}first")),
             rdf_rest: dict.intern_iri(&format!("{RDF}rest")),
             rdf_nil: dict.intern_iri(&format!("{RDF}nil")),
         }
+    }
+}
+
+/// The integer value of a literal id (inline ints are direct; else parse the lexical form).
+/// Used for `owl:maxCardinality` thresholds.
+fn lit_int(dict: &Dict, id: Id) -> Option<i64> {
+    if sparq_core::dict::is_inline(id) {
+        return Some((id - sparq_core::dict::INLINE_BASE) as i64);
+    }
+    match dict.term(id) {
+        oxrdf::Term::Literal(l) => l.value().parse().ok(),
+        _ => None,
     }
 }
 
@@ -236,6 +252,8 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
         let mut by_pred: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
         let mut type_subj: FxHashMap<Id, Vec<Id>> = FxHashMap::default(); // class -> subjects
         let mut subj_types: FxHashMap<Id, Vec<Id>> = FxHashMap::default(); // subject -> classes
+        let mut max_card: FxHashMap<Id, i64> = FxHashMap::default(); // restriction -> maxCardinality
+        let mut keys: FxHashMap<Id, Vec<Id>> = FxHashMap::default(); // class -> hasKey property list
         for &[s, p, obj] in &all {
             by_pred.entry(p).or_default().entry(s).or_default().push(obj);
             if p == v.ty {
@@ -249,6 +267,14 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
                 avf.insert(s, obj);
             } else if p == o.has_value {
                 hv.insert(s, obj);
+            } else if p == o.max_cardinality {
+                if let Some(n) = lit_int(dict, obj) {
+                    max_card.insert(s, n);
+                }
+            } else if p == o.has_key {
+                if let Some(l) = lists.get(&obj) {
+                    keys.insert(s, l.clone());
+                }
             } else if p == o.property_chain {
                 if let Some(l) = lists.get(&obj) {
                     chains.insert(s, l.clone());
@@ -264,6 +290,55 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
             }
         }
         let has_type = |x: Id, c: Id| subj_types.get(&x).is_some_and(|cs| cs.contains(&c));
+
+        // cls-maxc2 — maxCardinality 1: the (≤1) values of `p` on an x∈R are all sameAs.
+        for (&r, &n) in &max_card {
+            if n == 1 {
+                if let (Some(&p), Some(xs)) = (on_prop.get(&r), type_subj.get(&r)) {
+                    if let Some(adj) = by_pred.get(&p) {
+                        for &x in xs {
+                            if let Some(ys) = adj.get(&x) {
+                                for i in 0..ys.len() {
+                                    for j in (i + 1)..ys.len() {
+                                        cand.push([ys[i], o.same_as, ys[j]]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // prp-key — owl:hasKey: individuals of a class agreeing on all key-property values are
+        // the same. (Single-value-per-key common case: group by the key-value tuple.)
+        for (&c, kprops) in &keys {
+            if kprops.is_empty() {
+                continue;
+            }
+            if let Some(individuals) = type_subj.get(&c) {
+                let mut by_tuple: FxHashMap<Vec<Id>, Id> = FxHashMap::default();
+                for &x in individuals {
+                    let mut tuple = Vec::with_capacity(kprops.len());
+                    let mut complete = true;
+                    for &kp in kprops {
+                        match by_pred.get(&kp).and_then(|adj| adj.get(&x)).and_then(|vs| vs.first()) {
+                            Some(&val) => tuple.push(val),
+                            None => {
+                                complete = false;
+                                break;
+                            }
+                        }
+                    }
+                    if complete {
+                        if let Some(&y) = by_tuple.get(&tuple) {
+                            cand.push([x, o.same_as, y]);
+                        } else {
+                            by_tuple.insert(tuple, x);
+                        }
+                    }
+                }
+            }
+        }
 
         // prp-spo2 — property chain: (x p1 y1)…(y_{n-1} pn z) ⊢ (x p z).
         for (&p, chain) in &chains {
@@ -392,10 +467,15 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
     let same_as = look(format!("{OWL}sameAs"));
     let different_from = look(format!("{OWL}differentFrom"));
     let nothing = look(format!("{OWL}Nothing"));
+    let on_property = look(format!("{OWL}onProperty"));
+    let max_cardinality = look(format!("{OWL}maxCardinality"));
     let all: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
     let mut subj_types: FxHashMap<Id, FxHashSet<Id>> = FxHashMap::default();
     let mut same: FxHashSet<(Id, Id)> = FxHashSet::default();
     let (mut disjoint, mut complement, mut different) = (Vec::new(), Vec::new(), Vec::new());
+    let mut on_prop: FxHashMap<Id, Id> = FxHashMap::default();
+    let mut max_card0: FxHashSet<Id> = FxHashSet::default();
+    let mut prop_subj: FxHashSet<(Id, Id)> = FxHashSet::default(); // (property, subject-with-a-value)
     for &[s, p, ob] in &all {
         if p == ty {
             subj_types.entry(s).or_default().insert(ob);
@@ -407,7 +487,12 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
             same.insert((s.min(ob), s.max(ob)));
         } else if p == different_from {
             different.push((s, ob));
+        } else if p == on_property {
+            on_prop.insert(s, ob);
+        } else if p == max_cardinality && lit_int(dict, ob) == Some(0) {
+            max_card0.insert(s);
         }
+        prop_subj.insert((p, s));
     }
     let mut out = Vec::new();
     let term = |id: Id| dict.term(id).to_string();
@@ -430,6 +515,16 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
         for (x, ts) in &subj_types {
             if ts.contains(&nothing) {
                 out.push(format!("{} is typed owl:Nothing", term(*x)));
+            }
+        }
+    }
+    // cls-maxc1: x typed a maxCardinality-0 restriction on p, yet x has a p-value.
+    for &r in &max_card0 {
+        if let Some(&p) = on_prop.get(&r) {
+            for (x, ts) in &subj_types {
+                if ts.contains(&r) && prop_subj.contains(&(p, *x)) {
+                    out.push(format!("{} has a {} value but is maxCardinality 0 on it", term(*x), term(p)));
+                }
             }
         }
     }
@@ -607,6 +702,50 @@ mod tests {
         assert!(has(&dict, &set, "http://ex/x", "http://ex/status", "http://ex/active"), "cls-hv1");
         // x is in R2 because it has a Dog pet:
         assert!(set.contains(&[x, ty, r2]), "cls-svf1");
+    }
+
+    #[test]
+    fn has_key_identifies() {
+        // :Person owl:hasKey ( :ssn ) ; a,b both :Person with the same :ssn ⊢ a sameAs b.
+        let mut dict = Dict::new();
+        let (person, ssn, a, b) = (ex(&mut dict, "Person"), ex(&mut dict, "ssn"), ex(&mut dict, "a"), ex(&mut dict, "b"));
+        let ty = rdf(&mut dict, "type");
+        let hk = owl(&mut dict, "hasKey");
+        let v = dict.intern_lit("123", "http://www.w3.org/2001/XMLSchema#string", None);
+        let mut triples = vec![[a, ty, person], [a, ssn, v], [b, ty, person], [b, ssn, v]];
+        let keylist = list(&mut dict, &mut triples, &[ssn]);
+        triples.push([person, hk, keylist]);
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        let sa = owl(&mut dict, "sameAs");
+        assert!(set.contains(&[a, sa, b]) || set.contains(&[b, sa, a]), "prp-key ⊢ sameAs");
+    }
+
+    #[test]
+    fn max_cardinality_one_and_zero() {
+        // maxCardinality 1: the two spouses of :a are sameAs.
+        let mut dict = Dict::new();
+        let (spouse, a, x, y) = (ex(&mut dict, "spouse"), ex(&mut dict, "a"), ex(&mut dict, "x"), ex(&mut dict, "y"));
+        let r = dict.intern_blank("_R1");
+        let ty = rdf(&mut dict, "type");
+        let (onp, mc) = (owl(&mut dict, "onProperty"), owl(&mut dict, "maxCardinality"));
+        let one = dict.intern_lit("1", "http://www.w3.org/2001/XMLSchema#integer", None);
+        let mut triples = vec![[r, onp, spouse], [r, mc, one], [a, ty, r], [a, spouse, x], [a, spouse, y]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        let sa = owl(&mut dict, "sameAs");
+        assert!(set.contains(&[x, sa, y]) || set.contains(&[y, sa, x]), "cls-maxc2 ⊢ sameAs");
+
+        // maxCardinality 0: :b typed a no-child restriction yet has a child ⊢ inconsistent.
+        let mut d2 = Dict::new();
+        let (child, b) = (ex(&mut d2, "child"), ex(&mut d2, "b"));
+        let r2 = d2.intern_blank("_R0");
+        let ty = rdf(&mut d2, "type");
+        let (onp, mc) = (owl(&mut d2, "onProperty"), owl(&mut d2, "maxCardinality"));
+        let zero = d2.intern_lit("0", "http://www.w3.org/2001/XMLSchema#integer", None);
+        let mut t2 = vec![[r2, onp, child], [r2, mc, zero], [b, ty, r2], [b, child, ex(&mut d2, "kid")]];
+        materialize_owl_rl(&mut d2, &mut t2);
+        assert!(!inconsistencies(&d2, &t2).is_empty(), "cls-maxc1 clash detected");
     }
 
     #[test]
