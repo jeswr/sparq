@@ -309,10 +309,7 @@ impl Graph {
         fn flush(global: &mut Dict, all: &mut Vec<[Id; 3]>, bytes: &[u8]) -> Result<(), String> {
             let (pd, pt) = parse_ntriples_parallel(bytes)?;
             let remap = global.merge_remap(&pd);
-            all.extend(pt.into_iter().map(|[s, p, o]| {
-                let m = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
-                [m(s), m(p), m(o)]
-            }));
+            remap_extend(all, pt, &remap);
             Ok(())
         }
         loop {
@@ -719,6 +716,59 @@ fn newline_chunk_bounds(bytes: &[u8], target: usize) -> Vec<(usize, usize)> {
 /// local-id triples, then the partials are merged into one global dictionary with the
 /// local ids remapped. Interning is per-thread (no shared lock); the merge is linear.
 #[cfg(feature = "parallel")]
+/// Per-ISA software prefetch-for-read hint (x86 `prefetcht0`, aarch64 `prfm pldl1keep`, a no-op
+/// elsewhere). Correctness-neutral — a prefetch never faults and never changes architectural
+/// state; it only asks the CPU to pull a cache line in early.
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn prefetch_read<T>(p: *const T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: _mm_prefetch is defined for any address (the hint is dropped on a bad one).
+    unsafe {
+        core::arch::x86_64::_mm_prefetch(p as *const i8, core::arch::x86_64::_MM_HINT_T0);
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: prfm is a hint — it cannot fault or write memory/registers.
+    unsafe {
+        core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, preserves_flags));
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = p;
+}
+
+/// Append `triples`, remapped from a partial dict's ids to the merged global ids
+/// (`remap[id-1]`; inline-integer ids pass through). The `remap` gather is latency-bound on a
+/// large global dictionary (the build-path bottleneck — triple-remap measured at ~3s/50M), so
+/// each iteration software-prefetches the gather targets of a triple `DIST` ahead. Hardware-
+/// specific (per-ISA prefetch) but correctness-neutral; the prefetch is just a hint.
+#[cfg(feature = "parallel")]
+fn remap_extend(out: &mut Vec<[Id; 3]>, triples: Vec<[Id; 3]>, remap: &[Id]) {
+    const DIST: usize = 32;
+    let n = triples.len();
+    let base = remap.as_ptr();
+    let lut = |id: Id| -> Id {
+        if id >= dict::INLINE_BASE {
+            id
+        } else {
+            remap[(id - 1) as usize]
+        }
+    };
+    out.reserve(n);
+    for i in 0..n {
+        if i + DIST < n {
+            for &id in &triples[i + DIST] {
+                if id < dict::INLINE_BASE {
+                    // SAFETY: id-1 < remap.len() for every dictionary id; prefetch is hint-only.
+                    prefetch_read(unsafe { base.add((id - 1) as usize) });
+                }
+            }
+        }
+        let [s, p, o] = triples[i];
+        out.push([lut(s), lut(p), lut(o)]);
+    }
+}
+
+#[cfg(feature = "parallel")]
 fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
     use rayon::prelude::*;
     // A few chunks per thread for load balancing (terms are not uniformly dense).
@@ -740,16 +790,9 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
     let mut all = Vec::with_capacity(total);
     for (pd, ptriples) in partials {
         let remap = global.merge_remap(&pd);
-        // Dictionary ids are 1-based and below INLINE_BASE; inline-integer ids carry
-        // their value and pass through unchanged.
-        let map = |id: Id| {
-            if id >= dict::INLINE_BASE {
-                id
-            } else {
-                remap[(id - 1) as usize]
-            }
-        };
-        all.extend(ptriples.into_iter().map(|[s, p, o]| [map(s), map(p), map(o)]));
+        // Dictionary ids are 1-based and below INLINE_BASE; inline-integer ids carry their
+        // value and pass through unchanged. Prefetches the remap gather (see remap_extend).
+        remap_extend(&mut all, ptriples, &remap);
     }
     Ok((global, all))
 }
@@ -970,8 +1013,7 @@ fn parse_turtle_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
     let mut all = Vec::with_capacity(total);
     for (pd, ptriples) in partials {
         let remap = global.merge_remap(&pd);
-        let map = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
-        all.extend(ptriples.into_iter().map(|[s, p, o]| [map(s), map(p), map(o)]));
+        remap_extend(&mut all, ptriples, &remap);
     }
     Ok((global, all))
 }
@@ -1067,7 +1109,19 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
                 build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 let t_remap = std::time::Instant::now();
                 let map = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
-                for [s, p, o] in ptriples {
+                // Prefetch the remap gather DIST triples ahead — the large-global-dict gather
+                // is the build-path bottleneck (per-ISA hint, correctness-neutral).
+                let base = remap.as_ptr();
+                for i in 0..ptriples.len() {
+                    if i + 32 < ptriples.len() {
+                        for &id in &ptriples[i + 32] {
+                            if id < dict::INLINE_BASE {
+                                // SAFETY: id-1 < remap.len(); prefetch is hint-only.
+                                prefetch_read(unsafe { base.add((id - 1) as usize) });
+                            }
+                        }
+                    }
+                    let [s, p, o] = ptriples[i];
                     buf.push([map(s), map(p), map(o)]);
                     if buf.len() >= chunk {
                         extsort::spill_run(buf, runs, tmp).map_err(|e| e.to_string())?;
