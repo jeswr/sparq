@@ -2535,6 +2535,76 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
 
 // ---- Aggregation --------------------------------------------------------------
 
+/// Group row indexes by their group-key, preserving FIRST-SEEN order: `order[i]` is the i-th
+/// distinct key in row order and `members[i]` its row indexes (ascending). Above PAR_THRESHOLD the
+/// build is radix-partitioned (Tier-1 of research/parallelism-scaling.md): a parallel pass tags
+/// each row with its key-hash partition, each partition then builds its private map lock-free
+/// (within a partition rows are scanned in ascending index, so a group's first row IS its min),
+/// and the global first-seen order is re-imposed by sorting groups on min row index — exactly the
+/// serial first-seen order, so output stays byte-identical.
+fn build_groups(b: &Bindings, key_cols: &[usize]) -> (Vec<Key>, Vec<Vec<usize>>) {
+    #[cfg(feature = "parallel")]
+    if b.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        use std::hash::{Hash, Hasher};
+        const P: usize = 64;
+        // Pass 1 (parallel): partition tag per row.
+        let parts: Vec<u8> = b
+            .rows
+            .par_iter()
+            .map(|row| {
+                let mut h = rustc_hash::FxHasher::default();
+                for &c in key_cols {
+                    row[c].hash(&mut h);
+                }
+                (h.finish() % P as u64) as u8
+            })
+            .collect();
+        // Pass 2 (parallel over partitions): private per-partition group builds. Each partition
+        // scans the cheap tag vector and only constructs keys for its own rows.
+        let per: Vec<Vec<(Key, usize, Vec<usize>)>> = (0..P)
+            .into_par_iter()
+            .map(|p| {
+                let mut idx: FxHashMap<Key, usize> = FxHashMap::default();
+                let mut out: Vec<(Key, usize, Vec<usize>)> = Vec::new(); // (key, min_ri, members)
+                for (ri, row) in b.rows.iter().enumerate() {
+                    if parts[ri] as usize != p {
+                        continue;
+                    }
+                    let key: Key = key_cols.iter().map(|&c| row[c]).collect();
+                    match idx.get(&key) {
+                        Some(&i) => out[i].2.push(ri),
+                        None => {
+                            idx.insert(key.clone(), out.len());
+                            out.push((key, ri, vec![ri]));
+                        }
+                    }
+                }
+                out
+            })
+            .collect();
+        // Pass 3: merge + re-impose the global first-seen order via min row index.
+        let mut all: Vec<(Key, usize, Vec<usize>)> = per.into_iter().flatten().collect();
+        all.par_sort_unstable_by_key(|&(_, min_ri, _)| min_ri);
+        return all.into_iter().map(|(k, _, m)| (k, m)).unzip();
+    }
+    let mut idx: FxHashMap<Key, usize> = FxHashMap::default();
+    let mut order: Vec<Key> = Vec::new();
+    let mut members: Vec<Vec<usize>> = Vec::new();
+    for (ri, row) in b.rows.iter().enumerate() {
+        let key: Key = key_cols.iter().map(|&c| row[c]).collect();
+        match idx.get(&key) {
+            Some(&i) => members[i].push(ri),
+            None => {
+                idx.insert(key.clone(), order.len());
+                order.push(key);
+                members.push(vec![ri]);
+            }
+        }
+    }
+    (order, members)
+}
+
 fn group_aggregate(
     graph: &Graph,
     local: &mut LocalVocab,
@@ -2544,21 +2614,12 @@ fn group_aggregate(
 ) -> Result<Bindings, String> {
     let key_cols: Vec<usize> = group_vars.iter().map(|v| b.col(v).expect("group var present")).collect();
 
-    // Group rows by the group-key id tuple, preserving first-seen order.
-    let mut groups: FxHashMap<Key, Vec<usize>> = FxHashMap::default();
-    let mut order: Vec<Key> = Vec::new();
-    for (ri, row) in b.rows.iter().enumerate() {
-        let key: Key = key_cols.iter().map(|&c| row[c]).collect();
-        groups.entry(key.clone()).or_insert_with(|| {
-            order.push(key.clone());
-            Vec::new()
-        });
-        groups.get_mut(&key).unwrap().push(ri);
-    }
+    // Group rows by the group-key id tuple, preserving first-seen order (parallel ≥ threshold).
+    let (mut order, mut members) = build_groups(&b, &key_cols);
     // Whole-dataset aggregate with no GROUP BY: one (empty) group, even if input is empty.
     if group_vars.is_empty() && order.is_empty() {
         order.push(Key::new());
-        groups.insert(Key::new(), vec![]);
+        members.push(Vec::new());
     }
 
     let mut out_vars: Vec<Variable> = group_vars.to_vec();
@@ -2575,10 +2636,9 @@ fn group_aggregate(
         use rayon::prelude::*;
         let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
         let bref = &b;
-        order
+        members
             .par_iter()
-            .map(|key| {
-                let members = &groups[key];
+            .map(|members| {
                 aggregates
                     .iter()
                     .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg))
@@ -2586,10 +2646,9 @@ fn group_aggregate(
             })
             .collect::<Result<Vec<_>, String>>()?
     } else {
-        order
+        members
             .iter()
-            .map(|key| {
-                let members = &groups[key];
+            .map(|members| {
                 aggregates
                     .iter()
                     .map(|(_, agg)| eval_aggregate(graph, local, &b, members, agg))
@@ -2598,10 +2657,9 @@ fn group_aggregate(
             .collect::<Result<Vec<_>, String>>()?
     };
     #[cfg(not(feature = "parallel"))]
-    let agg_values: Vec<Vec<Value>> = order
+    let agg_values: Vec<Vec<Value>> = members
         .iter()
-        .map(|key| {
-            let members = &groups[key];
+        .map(|members| {
             aggregates
                 .iter()
                 .map(|(_, agg)| eval_aggregate(graph, local, &b, members, agg))
