@@ -213,9 +213,19 @@ impl Graph {
                 }
             }
             _ => {
-                for t in TurtleParser::new().for_slice(bytes) {
-                    let t = t.map_err(|e| e.to_string())?;
-                    push_triple!(&t.subject, &t.predicate, &t.object);
+                // Turtle is not line-oriented, but it splits at top-level statement
+                // terminators (with the @prefix preamble shared into each chunk), parsed in
+                // parallel with a serial fallback on any mis-split — see parse_turtle_parallel.
+                #[cfg(feature = "parallel")]
+                {
+                    return parse_turtle_parallel(bytes);
+                }
+                #[cfg(not(feature = "parallel"))]
+                {
+                    for t in TurtleParser::new().for_slice(bytes) {
+                        let t = t.map_err(|e| e.to_string())?;
+                        push_triple!(&t.subject, &t.predicate, &t.object);
+                    }
                 }
             }
         }
@@ -701,6 +711,228 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
     Ok((global, all))
 }
 
+/// Serial Turtle parse of `bytes` into `dict` — the fallback and the per-chunk worker.
+#[cfg(feature = "parallel")]
+fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
+    let mut triples = Vec::new();
+    for t in TurtleParser::new().for_slice(bytes) {
+        let t = t.map_err(|e| e.to_string())?;
+        let s = dict.intern(&subject_term(&t.subject));
+        let p = dict.intern(&Term::NamedNode(t.predicate.clone()));
+        let o = dict.intern(&t.object);
+        triples.push([s, p, o]);
+    }
+    Ok(triples)
+}
+
+/// Skip whitespace and `#`-comments from `i`, returning the next significant byte offset.
+#[cfg(feature = "parallel")]
+fn skip_ws_comments(bytes: &[u8], mut i: usize) -> usize {
+    let n = bytes.len();
+    loop {
+        while i < n && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+            i += 1;
+        }
+        if i < n && bytes[i] == b'#' {
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else {
+            return i;
+        }
+    }
+}
+
+/// Is the token at `k` a SPARQL-style `PREFIX`/`BASE` directive (keyword + whitespace)?
+#[cfg(feature = "parallel")]
+fn is_sparql_directive_start(bytes: &[u8], k: usize) -> bool {
+    let m = |kw: &[u8]| {
+        bytes.len() > k + kw.len()
+            && bytes[k..k + kw.len()].eq_ignore_ascii_case(kw)
+            && matches!(bytes.get(k + kw.len()), Some(b' ' | b'\t' | b'\n' | b'\r'))
+    };
+    m(b"prefix") || m(b"base")
+}
+
+/// Scan from `start` (in the top-level/normal Turtle state) to the next statement-terminating
+/// `.` (one followed by whitespace/EOF/comment, i.e. not a decimal point or PN_LOCAL dot),
+/// skipping over IRIs `<...>`, string literals (all four quote forms, with `\` escapes), and
+/// `#` comments. Returns the offset just past the `.`, or `None` if EOF is reached first
+/// (malformed/incomplete → caller falls back to the serial parser).
+///
+/// Sets `*saw_bnode` if a blank node syntax (`[`, `(` collection, or `_:`) is seen in the normal
+/// state: blank-node identity is document-scoped, so independently-parsed chunks would restart
+/// blank-node numbering and collide on merge — the caller must then fall back to serial.
+#[cfg(feature = "parallel")]
+fn next_terminator(bytes: &[u8], start: usize, saw_bnode: &mut bool) -> Option<usize> {
+    let n = bytes.len();
+    let mut i = start;
+    while i < n {
+        match bytes[i] {
+            b'[' | b'(' => {
+                *saw_bnode = true;
+                i += 1;
+            }
+            b'_' if bytes.get(i + 1) == Some(&b':') => {
+                *saw_bnode = true;
+                i += 2;
+            }
+            b'#' => {
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'<' => {
+                i += 1;
+                while i < n && bytes[i] != b'>' {
+                    i += 1;
+                }
+                if i >= n {
+                    return None;
+                }
+                i += 1;
+            }
+            q @ (b'"' | b'\'') => {
+                let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
+                if triple {
+                    i += 3;
+                    loop {
+                        if i >= n {
+                            return None;
+                        }
+                        if bytes[i] == b'\\' {
+                            i += 2;
+                        } else if bytes[i] == q && i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q {
+                            i += 3;
+                            break;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    i += 1;
+                    while i < n && bytes[i] != q {
+                        i += if bytes[i] == b'\\' { 2 } else { 1 };
+                    }
+                    if i >= n {
+                        return None;
+                    }
+                    i += 1;
+                }
+            }
+            b'.' => {
+                match bytes.get(i + 1) {
+                    None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'#') => return Some(i + 1),
+                    _ => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Split Turtle `bytes` into independently-parseable chunks for parallel parsing, or `None` to
+/// fall back to serial. Fast-paths the overwhelmingly common shape: a leading run of `@prefix`/
+/// `@base` directives followed by triple statements. Each chunk is `preamble + a run of
+/// statements`, so the prefixes are in scope in every chunk. Bails (→ serial) on SPARQL-style
+/// `PREFIX`/`BASE`, directives interspersed among the triples, or anything it cannot scan.
+#[cfg(feature = "parallel")]
+fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
+    let n = bytes.len();
+    let mut saw_bnode = false;
+    // Phase 1: consume the leading @-directive preamble.
+    let mut i = skip_ws_comments(bytes, 0);
+    while i < n && bytes[i] == b'@' {
+        i = next_terminator(bytes, i, &mut saw_bnode)?;
+        i = skip_ws_comments(bytes, i);
+    }
+    if i < n && is_sparql_directive_start(bytes, i) {
+        return None; // SPARQL-style preamble — not fast-pathed
+    }
+    let pre_end = i;
+
+    // Phase 2: collect the body's top-level terminators; bail on any interspersed directive
+    // or any blank node (document-scoped identity can't be parsed chunk-independently).
+    let mut terms: Vec<usize> = Vec::new();
+    let mut j = pre_end;
+    loop {
+        let k = skip_ws_comments(bytes, j);
+        if k >= n {
+            break;
+        }
+        if bytes[k] == b'@' || is_sparql_directive_start(bytes, k) {
+            return None;
+        }
+        let t = next_terminator(bytes, k, &mut saw_bnode)?;
+        if saw_bnode {
+            return None;
+        }
+        terms.push(t);
+        j = t;
+    }
+    if terms.len() < 2 {
+        return None;
+    }
+
+    // Partition the body terminators into ~target contiguous groups.
+    let preamble = &bytes[..pre_end];
+    let per = (terms.len() / target.max(1)).max(1);
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut body_start = pre_end;
+    let mut idx = 0;
+    while idx < terms.len() {
+        let end_i = (idx + per).min(terms.len());
+        let body_end = terms[end_i - 1];
+        let mut chunk = Vec::with_capacity(preamble.len() + (body_end - body_start) + 1);
+        chunk.extend_from_slice(preamble);
+        chunk.push(b'\n');
+        chunk.extend_from_slice(&bytes[body_start..body_end]);
+        chunks.push(chunk);
+        body_start = body_end;
+        idx = end_i;
+    }
+    Some(chunks)
+}
+
+/// Parse Turtle in parallel by statement-boundary chunking (see [`turtle_chunks`]). If the input
+/// is not safely splittable, OR any chunk fails to parse (an over-eager split), it falls back to
+/// the serial parser — so the result is always identical to a plain serial Turtle parse.
+#[cfg(feature = "parallel")]
+fn parse_turtle_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
+    use rayon::prelude::*;
+    let serial = || {
+        let mut dict = Dict::new();
+        parse_turtle_chunk(bytes, &mut dict).map(|t| (dict, t))
+    };
+    let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 8192 + 1).max(1);
+    let chunks = match turtle_chunks(bytes, target) {
+        Some(c) if c.len() > 1 => c,
+        _ => return serial(),
+    };
+    let partials: Result<Vec<(Dict, Vec<[Id; 3]>)>, String> = chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut dict = Dict::new();
+            parse_turtle_chunk(chunk, &mut dict).map(|t| (dict, t))
+        })
+        .collect();
+    let partials = match partials {
+        Ok(p) => p,
+        Err(_) => return serial(), // an over-eager split produced invalid Turtle — redo serially
+    };
+    let total: usize = partials.iter().map(|(_, t)| t.len()).sum();
+    let cap = partials.iter().map(|(d, _)| d.len()).max().unwrap_or(0);
+    let mut global = Dict::with_capacity(cap);
+    let mut all = Vec::with_capacity(total);
+    for (pd, ptriples) in partials {
+        let remap = global.merge_remap(&pd);
+        let map = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
+        all.extend(ptriples.into_iter().map(|[s, p, o]| [map(s), map(p), map(o)]));
+    }
+    Ok((global, all))
+}
+
 /// Streams N-Triples from `reader` in newline-aligned ~64 MiB blocks, parsing+interning
 /// each block IN PARALLEL (the custom byte parser, per-block partial dicts merged into
 /// the running `dict`), and spilling SPO runs — the parallel-parse path for the external
@@ -967,6 +1199,48 @@ mod build_timing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_matches_serial() {
+        let decoded = |d: &Dict, t: &[[Id; 3]]| -> Vec<String> {
+            let mut v: Vec<String> =
+                t.iter().map(|&[s, p, o]| format!("{}|{}|{}", d.term(s), d.term(p), d.term(o))).collect();
+            v.sort();
+            v
+        };
+        // Blank-node-FREE doc (exercises the parallel statement-split path), >8 KiB so it fans
+        // out, with edge cases that stress the terminator scan: decimals, dots inside strings &
+        // IRIs, escaped quotes, multi-line ;/, statements, triple-quoted strings with `.`+
+        // newlines, and trailing comments.
+        let mut ttl = String::from(
+            "@prefix : <http://ex/> .\n@prefix ex: <http://example.org/foo.bar#> .\n# header . comment\n",
+        );
+        for i in 0..500 {
+            ttl.push_str(&format!(
+                ":s{i} :dec {i}.5 ; :s \"a.b.c\" , \"x\\\"y.z\" ; :iri ex:rel{i} .\n\
+                 :s{i} ex:m \"\"\"l1 . still\nl2.\"\"\" ; :p <http://x.y/a.b.{i}> . # trailing . c\n",
+            ));
+        }
+        assert!(ttl.len() > 8192);
+        assert!(turtle_chunks(ttl.as_bytes(), 32).is_some(), "blank-node-free doc should fan out");
+        let (pd, pt) = parse_turtle_parallel(ttl.as_bytes()).unwrap();
+        let mut sd = Dict::new();
+        let st = parse_turtle_chunk(ttl.as_bytes(), &mut sd).unwrap();
+        assert_eq!(decoded(&pd, &pt), decoded(&sd, &st), "parallel split must equal serial");
+        assert!(pt.len() >= 1500);
+
+        // Blank nodes ([ ], ( ), _:label) must BAIL to the serial parser (chunk-independent
+        // parsing would collide their document-scoped identity). We can't compare anonymous
+        // blank-node labels across two parses (oxttl mints fresh ones each run), so we assert
+        // the bail itself plus a matching triple count.
+        let bn = "@prefix : <http://ex/> .\n:a :p [ :q :r ] .\n:x :y ( :i1 :i2 ) .\n_:b :z :w .\n".repeat(300);
+        assert!(turtle_chunks(bn.as_bytes(), 32).is_none(), "blank nodes must bail to serial");
+        let (_, bt) = parse_turtle_parallel(bn.as_bytes()).unwrap();
+        let mut bsd = Dict::new();
+        let bst = parse_turtle_chunk(bn.as_bytes(), &mut bsd).unwrap();
+        assert_eq!(bt.len(), bst.len(), "blank-node doc triple count must match serial");
+    }
 
     #[cfg(feature = "mmap")]
     #[test]
