@@ -54,10 +54,12 @@ post-materialization; the CLI reports them under `--reason owl`. **Cardinality +
 cls-maxc2 (`maxCardinality 1` ⊢ the ≤1 values are `sameAs`), cls-maxc1 (`maxCardinality 0`
 with a value ⊢ clash), prp-key (`owl:hasKey` ⊢ individuals agreeing on all key values are
 `sameAs`); `maxQualifiedCardinality 1` + `onClass` (cls-maxqc — the ≤1 qualifying values are
-`sameAs`). **Remaining for full RL:** the schema rules scm-* for full class/property-hierarchy
-completeness — mostly redundant with the direct type/subClassOf rules already implemented.
+`sameAs`). **Schema rules** scm-eqc/eqp (equivalence ⊢ subClassOf/subPropertyOf both ways),
+scm-int/uni (intersectionOf/unionOf ⊢ subClassOf) make the class/property hierarchy explicit
+(queryable). **Remaining for full RL:** scm-dom/rng (domain/range propagation through
+subPropertyOf — the ABox *effect* is already derived via rdfs7→rdfs2/3).
 
-### ▢ OWL — remaining (scm-* schema rules, largely redundant)
+### ▢ OWL — remaining (scm-dom/rng, ABox effect already covered)
 OWL 2 **RL** is the materialization-friendly profile (the others — EL, QL — target different
 algorithms; full OWL DL is undecidable for forward chaining). RL extends the same fixpoint
 engine with property and class axioms, all expressible as datalog-style rules over ids:
@@ -83,8 +85,10 @@ implement and the OWL test suite the validation set. Sizeable but mechanical.
 - **Forward-chaining engine** (`n3/mod.rs`) — fixpoint applying `{premise} => {conclusion}`
   rules with variable binding (conjunctive premise = nested-loop join over facts), chaining
   rules to closure, then interning the ground result into the dict. **Backward rules `<=`**
-  are supported for the closure (`A <= B` ≡ `B => A`, reversed into a forward rule); true
-  goal-directed backward chaining + proof output is a later addition. **Path syntax** `!`/`^`
+  are supported for the closure (`A <= B` ≡ `B => A`, reversed into a forward rule). **Proof
+  output** (`reason_n3_proof` / CLI `--proof`) records a derivation step per newly-entailed
+  triple — the rule index + the supporting ground premises — the EYE `--proof` analogue (true
+  goal-directed backward chaining is a later addition). **Path syntax** `!`/`^`
   (`?x!:p` = the `:p`-object of `?x`; `?x^:p` = the `:p`-subject reaching `?x`) is desugared
   into fresh-variable triples that join in the premise.
 - **Builtins:** `math:` comparison (`greaterThan`/`lessThan`/`notGreaterThan`/`notLessThan`/

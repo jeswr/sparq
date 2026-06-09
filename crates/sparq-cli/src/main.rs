@@ -470,6 +470,29 @@ fn cmd_reason(args: &[String]) {
             std::process::exit(2);
         }
     };
+    // N3 proof output (EYE --proof analogue): print each derivation step.
+    if profile.eq_ignore_ascii_case("n3") && args.iter().any(|a| a == "--proof") {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("error reading {path}: {e}");
+            std::process::exit(1);
+        });
+        let mut dict = sparq_core::dict::Dict::new();
+        let (closure, proof) = sparq_reason::reason_n3_proof(&mut dict, &text).unwrap_or_else(|e| {
+            eprintln!("n3 reasoning error: {e}");
+            std::process::exit(1);
+        });
+        let t = |id| dict.term(id).to_string();
+        println!("{} triples in closure; {} derivation step(s):", closure.len(), proof.len());
+        for (i, step) in proof.iter().enumerate() {
+            let c = step.conclusion;
+            println!("  [{}] {} {} {} .", i + 1, t(c[0]), t(c[1]), t(c[2]));
+            println!("      ⊢ by rule #{} from:", step.rule);
+            for p in &step.premises {
+                println!("        {} {} {} .", t(p[0]), t(p[1]), t(p[2]));
+            }
+        }
+        return;
+    }
     let g = load_with_reasoning(path, format, profile);
     println!("{} triples after {profile} reasoning", g.len());
     if let Some(out) = args.get(5) {

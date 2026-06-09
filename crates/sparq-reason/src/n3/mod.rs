@@ -26,30 +26,57 @@ const STRING: &str = "http://www.w3.org/2000/10/swap/string#";
 const LIST: &str = "http://www.w3.org/2000/10/swap/list#";
 const TIME: &str = "http://www.w3.org/2000/10/swap/time#";
 
+/// One derivation step: a `conclusion` triple was produced by rule `rule` (its index in the
+/// document's rule order) from the ground `premises` (the supporting facts under the binding).
+pub struct ProofStep {
+    pub conclusion: [Id; 3],
+    pub rule: usize,
+    pub premises: Vec<[Id; 3]>,
+}
+
 /// Parse N3 `src`, run the rule closure, and return the entailed GROUND triples interned into
 /// `dict`. The rules/formulae/variables are consumed by reasoning; only ground facts remain.
 pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
+    Ok(reason_n3_proof(dict, src)?.0)
+}
+
+/// As [`reason_n3`], but also return the derivation (a [`ProofStep`] for each NEWLY-derived
+/// triple, in derivation order) — the EYE `--proof` analogue.
+pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     let parsed = parser::parse(src)?;
     let mut facts: FxHashSet<[Term; 3]> = parsed.facts.into_iter().collect();
+    // Derivation steps at the term level (interned to ids once at the end).
+    let mut steps: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
 
     // Semi-naive-ish fixpoint: re-run every rule against the full fact set until no rule
     // produces a new fact. (Rule sets are small; the data join dominates.)
     loop {
-        let mut produced: Vec<[Term; 3]> = Vec::new();
-        for rule in &parsed.rules {
+        let mut produced: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
+        for (ri, rule) in parsed.rules.iter().enumerate() {
             for b in match_premise(&rule.premise, &facts) {
                 for c in &rule.conclusion {
                     if let Some(g) = ground_triple(c, &b) {
                         if !facts.contains(&g) {
-                            produced.push(g);
+                            // The supporting facts: the premise patterns instantiated under b
+                            // that are actual facts (excludes builtins / list structure).
+                            let prem: Vec<[Term; 3]> = rule
+                                .premise
+                                .iter()
+                                .filter_map(|p| ground_triple(p, &b))
+                                .filter(|t| facts.contains(t))
+                                .collect();
+                            produced.push((g, ri, prem));
                         }
                     }
                 }
             }
         }
         let mut changed = false;
-        for t in produced {
-            changed |= facts.insert(t);
+        for (g, ri, prem) in produced {
+            if facts.insert(g.clone()) {
+                changed = true;
+                steps.push((g, ri, prem));
+            }
         }
         if !changed {
             break;
@@ -61,7 +88,17 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
     for t in &facts {
         out.push([intern(dict, &t[0])?, intern(dict, &t[1])?, intern(dict, &t[2])?]);
     }
-    Ok(out)
+    // Intern the proof steps.
+    let mut proof = Vec::with_capacity(steps.len());
+    for (g, ri, prem) in &steps {
+        let it = |t: &[Term; 3], d: &mut Dict| -> Result<[Id; 3], String> {
+            Ok([intern(d, &t[0])?, intern(d, &t[1])?, intern(d, &t[2])?])
+        };
+        let conclusion = it(g, dict)?;
+        let premises = prem.iter().map(|p| it(p, dict)).collect::<Result<Vec<_>, _>>()?;
+        proof.push(ProofStep { conclusion, rule: *ri, premises });
+    }
+    Ok((out, proof))
 }
 
 type Binding = HashMap<String, Term>;
@@ -557,6 +594,27 @@ mod tests {
     fn has(dict: &Dict, set: &FxHashSet<[Id; 3]>, s: &str, p: &str, o: &str) -> bool {
         let (a, b, c) = (id(dict, s), id(dict, p), id(dict, o));
         a != 0 && b != 0 && c != 0 && set.contains(&[a, b, c])
+    }
+
+    #[test]
+    fn proof_records_derivations() {
+        // Chained rules: each derived triple should have a proof step naming its premise.
+        let src = r#"
+            @prefix : <http://ex/> .
+            :Socrates a :Man .
+            { ?x a :Man } => { ?x a :Mortal } .
+            { ?x a :Mortal } => { ?x a :Being } .
+        "#;
+        let mut dict = Dict::new();
+        let (_triples, proof) = reason_n3_proof(&mut dict, src).unwrap();
+        // Two derivations: Socrates a Mortal (from Socrates a Man), Socrates a Being (from Mortal).
+        assert_eq!(proof.len(), 2, "two derivation steps");
+        let mortal = dict.intern_iri("http://ex/Mortal");
+        let man = dict.intern_iri("http://ex/Man");
+        let socrates = dict.intern_iri("http://ex/Socrates");
+        let ty = dict.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+        let step = proof.iter().find(|s| s.conclusion == [socrates, ty, mortal]).expect("Mortal step");
+        assert_eq!(step.premises, vec![[socrates, ty, man]], "Mortal derived from (Socrates a Man)");
     }
 
     #[test]

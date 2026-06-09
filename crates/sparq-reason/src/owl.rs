@@ -185,6 +185,14 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
                     cand.extend(eqc.iter().map(|&d| [s, v.ty, d])); // cax-eqc1/2
                 }
             }
+            // --- scm-eqc/eqp: equivalence ⊢ subClassOf/subPropertyOf both ways ---------
+            if p == o.equiv_class {
+                cand.push([s, v.sub_class, obj]);
+                cand.push([obj, v.sub_class, s]);
+            } else if p == o.equiv_prop {
+                cand.push([s, v.sub_prop, obj]);
+                cand.push([obj, v.sub_prop, s]);
+            }
         }
 
         // --- joins that need an adjacency index (prp-trp / prp-fp / prp-ifp) ----------
@@ -466,6 +474,15 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
                     cand.extend(xs.iter().map(|&x| [x, v.ty, c]));
                 }
             }
+        }
+        // scm-int / scm-uni (schema level): intersectionOf c ⊢ c subClassOf each member;
+        // unionOf c ⊢ each member subClassOf c. Makes the class hierarchy explicit (queryable),
+        // complementing the type-level cls-int2/scm-uni rules above.
+        for (&c, members) in &inters {
+            cand.extend(members.iter().map(|&m| [c, v.sub_class, m]));
+        }
+        for (&c, members) in &unions {
+            cand.extend(members.iter().map(|&m| [m, v.sub_class, c]));
         }
 
         let mut changed = false;
@@ -824,6 +841,26 @@ mod tests {
         let mut t2 = vec![[cat, dw, dog], [felix, ty, cat]];
         materialize_owl_rl(&mut dict2, &mut t2);
         assert!(inconsistencies(&dict2, &t2).is_empty(), "consistent graph reports no clash");
+    }
+
+    #[test]
+    fn scm_schema_subclass() {
+        // equivalentClass ⊢ subClassOf both ways; intersectionOf ⊢ c subClassOf each member.
+        let mut dict = Dict::new();
+        let (human, person, mother, woman, parent) = (
+            ex(&mut dict, "Human"), ex(&mut dict, "Person"),
+            ex(&mut dict, "Mother"), ex(&mut dict, "Woman"), ex(&mut dict, "Parent"),
+        );
+        let (eqc, io) = (owl(&mut dict, "equivalentClass"), owl(&mut dict, "intersectionOf"));
+        let sco = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+        let mut triples = vec![[human, eqc, person]];
+        let l = list(&mut dict, &mut triples, &[woman, parent]);
+        triples.push([mother, io, l]);
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[human, sco, person]), "scm-eqc forward");
+        assert!(set.contains(&[person, sco, human]), "scm-eqc backward");
+        assert!(set.contains(&[mother, sco, woman]) && set.contains(&[mother, sco, parent]), "scm-int");
     }
 
     #[test]
