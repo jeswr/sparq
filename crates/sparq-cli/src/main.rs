@@ -31,6 +31,7 @@ fn main() {
         Some("probe-compress") => cmd_probe_compress(&args),
         Some("compare-compress") => cmd_compare_compress(&args),
         Some("bench-remap") => cmd_bench_remap(&args),
+        Some("scaling") => cmd_scaling(&args),
         _ => {
             eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir>          # build + persist indexes to disk\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
@@ -50,6 +51,125 @@ fn cmd_bench_remap(args: &[String]) {
     let ms = sparq_core::bench_remap(n, dict, iters);
     let mtps = (n as f64) / (ms / 1e3) / 1e6;
     println!("remap\tn={n}\tdict={dict}\tprefetch={pf}\tbest_ms={ms:.2}\tMtriples_s={mtps:.2}");
+}
+
+/// Per-subsystem parallel SCALING harness (roadmap T8). Builds fixed-size rayon thread pools
+/// (1,2,4,8,…) and runs each subsystem inside `pool.install()`, so the engine's `par_iter`/
+/// `par_chunks` (which size off `rayon::current_num_threads()`) use exactly that many threads —
+/// sweeping the thread count in ONE process. Reports best time, speedup vs the smallest pool, and
+/// parallel EFFICIENCY (speedup ÷ thread-ratio; 1.0 = perfectly linear) per subsystem, so you can
+/// see precisely where each part plateaus. On a many-core box pass e.g. `1,2,4,8,16,32,64,128,192`.
+///   sparq-cli scaling <data-file> <format> <queries-dir> [threads=auto] [iters=3]
+fn cmd_scaling(args: &[String]) {
+    let (path, format, qdir) = match (args.get(2), args.get(3), args.get(4)) {
+        (Some(p), Some(f), Some(d)) => (p.clone(), f.clone(), d.clone()),
+        _ => {
+            eprintln!("usage: sparq-cli scaling <data-file> <format> <queries-dir> [threads=1,2,4,8,…] [iters=3]");
+            std::process::exit(2);
+        }
+    };
+    let threads: Vec<usize> = match args.get(5) {
+        Some(s) => {
+            let mut v: Vec<usize> = s.split(',').filter_map(|t| t.trim().parse().ok()).filter(|&n| n >= 1).collect();
+            v.dedup();
+            v
+        }
+        None => {
+            let max = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+            let mut v = vec![1usize];
+            let mut n = 2;
+            while n < max {
+                v.push(n);
+                n *= 2;
+            }
+            if *v.last().unwrap() != max {
+                v.push(max);
+            }
+            v
+        }
+    };
+    let iters: usize = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(3);
+    if threads.is_empty() {
+        eprintln!("no valid thread counts");
+        std::process::exit(2);
+    }
+    let base = threads[0];
+    eprintln!(
+        "scaling sweep: threads={threads:?} iters={iters}  (efficiency = speedup ÷ (threads/{base}); 1.0 = linear)"
+    );
+    let pool = |n: usize| rayon::ThreadPoolBuilder::new().num_threads(n).build().expect("rayon pool");
+
+    println!("subsystem\tthreads\tbest_ms\tspeedup\tefficiency");
+
+    // LOAD subsystem — re-load the file inside each pool size (parse + dict-merge + 6 perms).
+    {
+        let mut t_base = 0.0f64;
+        for (i, &n) in threads.iter().enumerate() {
+            let p = pool(n);
+            let mut best = f64::INFINITY;
+            for _ in 0..iters {
+                let t = Instant::now();
+                let g = p.install(|| load_quiet(&path, &format));
+                best = best.min(t.elapsed().as_secs_f64() * 1e3);
+                std::hint::black_box(&g);
+            }
+            if i == 0 {
+                t_base = best;
+            }
+            let sp = t_base / best;
+            let eff = sp / (n as f64 / base as f64);
+            println!("load\t{n}\t{best:.1}\t{sp:.2}\t{eff:.2}");
+        }
+    }
+
+    // QUERY subsystems — load once, run each query at each pool size in `materialize` form (compute
+    // all bindings, no serialization): that is the parallel compute we want to scale.
+    let g = load(&path, &format);
+    let mut queries: Vec<(String, String)> = std::fs::read_dir(&qdir)
+        .unwrap_or_else(|e| {
+            eprintln!("read {qdir}: {e}");
+            std::process::exit(1);
+        })
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "rq").unwrap_or(false))
+        .filter_map(|p| {
+            let name = p.file_stem()?.to_string_lossy().into_owned();
+            Some((name, std::fs::read_to_string(&p).ok()?))
+        })
+        .collect();
+    queries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, sparql) in &queries {
+        let mut t_base = 0.0f64;
+        let mut ok = true;
+        for (i, &n) in threads.iter().enumerate() {
+            let p = pool(n);
+            let mut best = f64::INFINITY;
+            for _ in 0..iters {
+                let t = Instant::now();
+                match p.install(|| sparq_engine::query(&g, sparql).map(|r| r.len())) {
+                    Ok(rows) => {
+                        best = best.min(t.elapsed().as_secs_f64() * 1e3);
+                        std::hint::black_box(rows);
+                    }
+                    Err(e) => {
+                        eprintln!("{name}: query error: {e}");
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                break;
+            }
+            if i == 0 {
+                t_base = best;
+            }
+            let sp = t_base / best;
+            let eff = sp / (n as f64 / base as f64);
+            println!("{name}\t{n}\t{best:.1}\t{sp:.2}\t{eff:.2}");
+        }
+    }
 }
 
 /// Streaming-ingest throughput experiment (for the Wikidata-vs-RDFox comparison).
@@ -574,15 +694,16 @@ fn open_reader(path: &str) -> std::io::Result<Box<dyn std::io::Read>> {
     })
 }
 
-fn load(path: &str, format: &str) -> sparq_core::Graph {
+/// Load without the timing/size summary line — used by the scaling harness, which loads many
+/// times and prints its own table.
+fn load_quiet(path: &str, format: &str) -> sparq_core::Graph {
     let die = |e: String| -> ! {
         eprintln!("error loading {path}: {e}");
         std::process::exit(1);
     };
-    let t = Instant::now();
     // N-Triples streams block-by-block (parallel parse, no full decompressed copy in RAM); other
     // formats need the whole document buffered for the parallel statement-splitter.
-    let g = if matches!(format, "ntriples" | "n-triples") {
+    if matches!(format, "ntriples" | "n-triples") {
         let reader = open_reader(path).unwrap_or_else(|e| die(e.to_string()));
         sparq_core::Graph::load_reader_parallel(reader, format).unwrap_or_else(|e| die(e))
     } else {
@@ -590,7 +711,12 @@ fn load(path: &str, format: &str) -> sparq_core::Graph {
         let mut text = String::new();
         open_reader(path).and_then(|mut r| r.read_to_string(&mut text)).unwrap_or_else(|e| die(e.to_string()));
         sparq_core::Graph::load_str(&text, format).unwrap_or_else(|e| die(e))
-    };
+    }
+}
+
+fn load(path: &str, format: &str) -> sparq_core::Graph {
+    let t = Instant::now();
+    let g = load_quiet(path, format);
     let secs = t.elapsed().as_secs_f64();
     let heap = g.heap_bytes();
     let dict = g.dict.heap_bytes();
