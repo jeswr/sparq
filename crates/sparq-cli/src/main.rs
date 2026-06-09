@@ -408,38 +408,60 @@ fn load_reasoned(path: &str, format: &str, profile: sparq_reason::Profile) -> sp
     sparq_core::Graph::from_parts(dict, triples)
 }
 
-/// Pull an optional `--reason <profile>` flag out of the argument list.
-fn reason_flag(args: &[String]) -> Option<sparq_reason::Profile> {
+/// Pull an optional `--reason <profile>` flag (rdfs | owl | n3) out of the argument list.
+fn reason_flag(args: &[String]) -> Option<String> {
     let i = args.iter().position(|a| a == "--reason")?;
-    let name = args.get(i + 1).unwrap_or_else(|| {
-        eprintln!("--reason needs a profile (e.g. rdfs)");
+    Some(
+        args.get(i + 1)
+            .unwrap_or_else(|| {
+                eprintln!("--reason needs a profile (rdfs | owl | n3)");
+                std::process::exit(2);
+            })
+            .clone(),
+    )
+}
+
+/// Load a graph applying the named reasoning profile. `rdfs`/`owl` materialize over the
+/// parsed triples; `n3` parses the file as Notation3 (rules + facts) and forward-chains.
+fn load_with_reasoning(path: &str, format: &str, profile: &str) -> sparq_core::Graph {
+    if profile.eq_ignore_ascii_case("n3") {
+        return load_n3(path);
+    }
+    let prof = sparq_reason::Profile::parse(profile).unwrap_or_else(|| {
+        eprintln!("unknown reasoning profile '{profile}' (known: rdfs | owl | n3)");
         std::process::exit(2);
     });
-    Some(sparq_reason::Profile::parse(name).unwrap_or_else(|| {
-        eprintln!("unknown reasoning profile '{name}' (known: rdfs)");
-        std::process::exit(2);
-    }))
+    load_reasoned(path, format, prof)
+}
+
+/// Parse a Notation3 document (facts + `{…}=>{…}` rules), run the rule closure, build a graph.
+fn load_n3(path: &str) -> sparq_core::Graph {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("error reading {path}: {e}");
+        std::process::exit(1);
+    });
+    let mut dict = sparq_core::dict::Dict::new();
+    let t = Instant::now();
+    let triples = sparq_reason::reason_n3(&mut dict, &text).unwrap_or_else(|e| {
+        eprintln!("n3 reasoning error: {e}");
+        std::process::exit(1);
+    });
+    eprintln!("reasoned [N3]: {} ground triples in closure in {:.3}s", triples.len(), t.elapsed().as_secs_f64());
+    sparq_core::Graph::from_parts(dict, triples)
 }
 
 /// `reason <data-file> <format> <profile> [out.nt]` — materialize the entailed closure and
 /// report the expansion; with `out.nt`, write the full closure as N-Triples.
 fn cmd_reason(args: &[String]) {
     let (path, format, profile) = match (args.get(2), args.get(3), args.get(4)) {
-        (Some(p), Some(f), Some(pr)) => (
-            p,
-            f.as_str(),
-            sparq_reason::Profile::parse(pr).unwrap_or_else(|| {
-                eprintln!("unknown reasoning profile '{pr}' (known: rdfs)");
-                std::process::exit(2);
-            }),
-        ),
+        (Some(p), Some(f), Some(pr)) => (p.as_str(), f.as_str(), pr.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli reason <data-file> <format> <profile=rdfs> [out.nt]");
+            eprintln!("usage: sparq-cli reason <data-file> <format> <rdfs|owl|n3> [out.nt]");
             std::process::exit(2);
         }
     };
-    let g = load_reasoned(path, format, profile);
-    println!("{} triples after {:?} materialization", g.len(), profile);
+    let g = load_with_reasoning(path, format, profile);
+    println!("{} triples after {profile} reasoning", g.len());
     if let Some(out) = args.get(5) {
         use std::io::Write;
         let mut w = std::io::BufWriter::new(std::fs::File::create(out).unwrap_or_else(|e| {
@@ -525,7 +547,7 @@ fn cmd_query(args: &[String]) {
         }
     };
     let g = match reason_flag(args) {
-        Some(profile) => load_reasoned(path, format, profile),
+        Some(profile) => load_with_reasoning(path, format, &profile),
         None => load(path, format),
     };
     let t = Instant::now();

@@ -17,8 +17,10 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
+pub mod n3;
 mod owl;
 mod rdfs;
+pub use n3::reason_n3;
 pub use owl::materialize_owl_rl;
 pub use rdfs::materialize_rdfs;
 pub(crate) use rdfs::rdfs_round;

@@ -66,7 +66,37 @@ canonicalization is the one structurally new piece (union-find over ids, then re
 W3C OWL 2 RL/RDF rules table (`prp-*`, `cls-*`, `cax-*`, `eq-*`, `scm-*`) is the spec to
 implement and the OWL test suite the validation set. Sizeable but mechanical.
 
-### ▢ Notation3 / EYE parity — the large subsystem (separate design)
+### ◐ Notation3 / EYE parity — FOUNDATION DONE, builtins expanding
+`sparq_reason::n3` (`--reason n3` / `reason <f> n3 n3`). The core subsystem is in place:
+- **Parser** (`n3/parser.rs`) — hand-rolled recursive descent (oxttl can't do N3): `@prefix`/
+  `@base`, prefixed names, `<iri>`, `a`, literals (string/typed/lang/int/decimal/double/
+  bool), `_:blank`, `?var`, `{ … }` formulae, `( … )` collections → rdf:List, `[ … ]` bnode
+  property lists, `;`/`,`, and the `=>` (log:implies) / `=` (sameAs) sugar.
+- **Forward-chaining engine** (`n3/mod.rs`) — fixpoint applying `{premise} => {conclusion}`
+  rules with variable binding (conjunctive premise = nested-loop join over facts), chaining
+  rules to closure, then interning the ground result into the dict.
+- **Builtins (v1):** comparison/equality — `math:greaterThan`/`lessThan`/`notGreaterThan`/
+  `notLessThan`/`equalTo`/`notEqualTo`, `log:equalTo`/`notEqualTo` (premise filters).
+- Tested: the canonical Man⊢Mortal rule, a recursive transitive rule (fixpoint), a
+  `math:greaterThan` age filter, and end-to-end chained rules (`age>17 ⊢ Adult ⊢ canVote`).
+
+**Toward full EYE parity (ongoing, incremental — builtin-by-builtin against EYE's suite):**
+1. **Functional builtins** — `math:sum`/`difference`/`product`/`quotient` (list-subject
+   arithmetic, compute the object), `string:concatenation`/`string:contains`/etc.,
+   `list:*`, `time:*`. These need in-rule list resolution (the `( )` collection is parsed;
+   the builtin must read its members from the rule, not the data).
+2. **`log:` builtins** beyond equality: `log:includes`/`log:notIncludes` (scoped negation),
+   `log:collectAllIn`, `log:semantics`.
+3. **Quantification & scope** — explicit `@forAll`/`@forSome`, nested formulae as data,
+   `=>` with bound formula bodies; existentials in conclusions → fresh blank nodes.
+4. **Backward chaining / proof** — EYE's Euler-path resolution + proof (`--pass`/`--proof`)
+   output; needed for goal-directed queries and parity on the proof tests.
+5. **Validation = EYE's own test suite.** Run EYE's `cases/` (the `eye`/`eye-js` repos)
+   differentially: same N3 input → compare our ground closure to EYE's `--pass` output. Each
+   passing case is a parity checkpoint; the failing ones drive the next builtin/feature. This
+   is the parity gate the user specified.
+
+### ▢ Notation3 / EYE — internals roadmap (original design notes)
 N3 is a **superset of Turtle** adding: graph-term literals `{ … }`, rules
 `{ premise } => { conclusion }` (log:implies), quantification (`@forAll`/`@forSome`,
 universals via `?x`), and a large **builtin** library (`math:`, `string:`, `list:`, `log:`,
