@@ -12,6 +12,8 @@
 
 mod exec;
 pub mod json;
+mod update;
+pub use update::update;
 
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;
