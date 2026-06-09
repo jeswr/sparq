@@ -7,10 +7,14 @@
 //! binding and a growing set of builtins. Coverage expands builtin-by-builtin, validated
 //! against EYE's own test cases (see the `eye_cases` tests).
 //!
-//! v1 builtins: comparison/equality (`math:greaterThan`/`lessThan`/`notGreaterThan`/
-//! `notLessThan`/`equalTo`/`notEqualTo`, `log:equalTo`/`notEqualTo`). Functional builtins with
-//! list arguments (`math:sum`/`difference`/`product`/`quotient` over `( … )`) are the next
-//! increment (need in-rule list resolution).
+//! Builtins implemented (roadmap T12 — growing toward EYE parity):
+//!   * `math:` comparisons (greaterThan/lessThan/notGreaterThan/notLessThan/equalTo/notEqualTo)
+//!     and functional (sum/difference/product/quotient/max/min/exponentiation/negation/
+//!     absoluteValue/rounded/floor/ceiling) over `( … )` list arguments;
+//!   * `string:` concatenation/length/contains/startsWith/endsWith/greaterThan/lessThan;
+//!   * `list:` length;  `time:` year/month/day/hours/minutes/seconds;  `log:` equalTo/notEqualTo.
+//! Next increments (T12): `list:` member/first/append, more `string:` (matches/replace),
+//! `log:` includes/conjunction, backward chaining (`<=`).
 
 mod model;
 mod parser;
@@ -540,8 +544,9 @@ enum Func {
     Max,
     Min,
     Exponentiation,
-    Concat, // string:concatenation
-    Length, // list:length
+    Concat,    // string:concatenation
+    Length,    // list:length
+    StrLength, // string:length (Unicode scalar count)
     // single-value-arg (unary math)
     Negation,
     AbsoluteValue,
@@ -589,6 +594,7 @@ fn functional_builtin(p: &Term) -> Option<Func> {
     }
     match (i.strip_prefix(STRING), i.strip_prefix(LIST)) {
         (Some("concatenation"), _) => Some(Func::Concat),
+        (Some("length"), _) => Some(Func::StrLength),
         (_, Some("length")) => Some(Func::Length),
         _ => None,
     }
@@ -623,6 +629,7 @@ fn eval_functional(
             Term::Lit(s, "http://www.w3.org/2001/XMLSchema#string".into(), None)
         }
         Func::Length => number_term(args.len() as f64),
+        Func::StrLength => number_term(lex(&args[0])?.chars().count() as f64),
         Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds => {
             number_term(datetime_part(lex(&args[0])?, f)? as f64)
         }
@@ -807,6 +814,20 @@ mod tests {
         let half_id = d.intern_lit("9", int, None); // 4+5
         assert!(s.contains(&[id(&d, "http://ex/rect"), id(&d, "http://ex/area"), area_id]), "math:product 4*5=20");
         assert!(s.contains(&[id(&d, "http://ex/rect"), id(&d, "http://ex/perimeterHalf"), half_id]), "math:sum 4+5=9");
+    }
+
+    #[test]
+    fn functional_string_length() {
+        // ?w string:length ?n  — Unicode scalar count (T12).
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :a :word "hello" .
+            { ?x :word ?w . ?w string:length ?n } => { ?x :wordLen ?n } .
+        "#;
+        let (mut d, s) = closure(src);
+        let five = d.intern_lit("5", "http://www.w3.org/2001/XMLSchema#integer", None);
+        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/wordLen"), five]), "string:length(hello)=5");
     }
 
     #[test]

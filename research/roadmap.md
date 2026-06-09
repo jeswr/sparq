@@ -50,13 +50,26 @@ decode cost in the hot loop. Source: `term-index-compression.md`, `bit-level-enc
 `dict-compression-measured.md`.
 
 ### T5 — Inference completion  *(sparq-reason; isolated crate)*
-- **T5.1 (#27):** OWL-RL single-pass extension — push the monotone OWL subset out of the semi-naive
-  fixpoint; parallelise the fixpoint commit (currently serial per-round `all.insert`). Source:
-  `inference-sota.md`, `inference.md`.
-- **T5.2:** finish N3 builtins beyond v1 (parser marks log:implies/formulae "not supported beyond
-  parse", `n3/parser.rs:184`); remaining OWL features.
+- **T5.1 (#27): DONE** — OWL-RL single-pass extension (monotone subset out of the fixpoint, ~6.5×).
 - **Independent:** `sparq-reason` depends on `sparq-core` but **not** on `exec.rs` → does not
   conflict with T1/T3/T4.
+
+### T12 — Inference FEATURE COMPLETENESS  *(sparq-reason; isolated; user-requested)*
+The goal is **feature-complete inference**, especially **Notation3 toward EYE-reasoner parity**.
+Current state: the N3 forward chainer executes `{ premise } => { conclusion }` rules to a fixpoint
+(semi-naive, FactIndex-accelerated) with variables + formulae, and the v1 builtins are the
+*comparison* family (`math:greaterThan/lessThan/notGreaterThan/notLessThan/equalTo/notEqualTo`,
+`log:equalTo/notEqualTo`). The completeness work is **builtin coverage**, added batch-by-batch and
+each validated against EYE's own test cases (`sparq-reason/tests/eye_cases.rs`):
+- **T12.1 — `math:` functional** (`sum`/`difference`/`product`/`quotient`/`negation`/`abs`/`exponentiation`,
+  rounding) over `( … )` list arguments (needs in-rule list resolution).
+- **T12.2 — `string:`** (`concatenation`, `contains`, `startsWith`, `endsWith`, `matches`, `replace`,
+  case, `length`), **`list:`** (`member`, `length`, `append`, `in`), and more **`log:`**
+  (`includes`, `notIncludes`, `conjunction`).
+- **T12.3 — full OWL-RL** rule set audit (any rules still missing vs the spec) + RDFS edge cases.
+- **T12.4 — N3 syntax** completeness (quoting/paths/`@forAll`/`@forSome` as needed) + proof output.
+- **Discipline:** each builtin batch ships with EYE-validated tests; differential against the prior
+  closure to guarantee no regression. `sparq-reason` only — conflict-free with the engine threads.
 
 ### T6 — RDF 1.2 / SPARQL 1.2
 Source: `rdf12-parser.md`, `rdf12-indexing.md`, `sparql12-engine.md`.
