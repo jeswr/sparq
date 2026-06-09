@@ -70,11 +70,37 @@ type Binding = HashMap<String, Term>;
 /// rule-local list STRUCTURE (rdf:first/rest over fresh bnodes), not data to match — they are
 /// extracted up front and consumed by the functional builtins (e.g. `math:sum`).
 fn match_premise(premise: &[[Term; 3]], facts: &FxHashSet<[Term; 3]>) -> Vec<Binding> {
+    match_premise_seeded(premise, facts, &Binding::new())
+}
+
+/// Match `premise` starting from an existing partial binding `seed` (used to recurse into
+/// `log:includes`/`log:notIncludes` sub-formulae under the current bindings).
+fn match_premise_seeded(premise: &[[Term; 3]], facts: &FxHashSet<[Term; 3]>, seed: &Binding) -> Vec<Binding> {
     let lists = extract_lists(premise);
-    let mut bindings: Vec<Binding> = vec![Binding::new()];
+    let mut bindings: Vec<Binding> = vec![seed.clone()];
     for pat in premise {
         if is_list_struct(pat, &lists) {
             continue; // structural, handled by list resolution
+        }
+        // log:includes / log:notIncludes — does the object formula hold (scoped negation as
+        // failure for notIncludes)? The subject formula is treated as the current store.
+        if let Some(is_not) = scoped_negation(&pat[1]) {
+            let inner: &[[Term; 3]] = match &pat[2] {
+                Term::Formula(t) => t,
+                _ => &[],
+            };
+            bindings.retain(|b| {
+                let holds = !match_premise_seeded(inner, facts, b).is_empty();
+                if is_not {
+                    !holds
+                } else {
+                    holds
+                }
+            });
+            if bindings.is_empty() {
+                break;
+            }
+            continue;
         }
         if let Some(gen) = list_generator(&pat[1]) {
             // list:member / list:in — generate one binding per list member.
@@ -298,6 +324,16 @@ fn list_generator(p: &Term) -> Option<ListGen> {
     match i.strip_prefix(LIST) {
         Some("member") => Some(ListGen::Member),
         Some("in") => Some(ListGen::In),
+        _ => None,
+    }
+}
+
+/// `log:includes` (→ `Some(false)`) / `log:notIncludes` (→ `Some(true)`, negation as failure).
+fn scoped_negation(p: &Term) -> Option<bool> {
+    let Term::Iri(i) = p else { return None };
+    match i.strip_prefix(LOG) {
+        Some("includes") => Some(false),
+        Some("notIncludes") => Some(true),
         _ => None,
     }
 }
@@ -535,6 +571,23 @@ mod tests {
             s.iter().any(|[a, p, _]| *a == id(&d, "http://ex/mary") && *p == id(&d, "http://ex/hasChildNamed")),
             "backward path ^ derived mary :hasChildNamed"
         );
+    }
+
+    #[test]
+    fn scoped_negation_not_includes() {
+        // log:notIncludes — negation as failure: a Person with no recorded email is :NoEmail.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :alice a :Person .
+            :bob a :Person .
+            :bob :hasEmail "bob@x" .
+            { ?x a :Person . { } log:notIncludes { ?x :hasEmail ?e } } => { ?x a :NoEmail } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/alice", ty, "http://ex/NoEmail"), "alice has no email → NoEmail");
+        assert!(!has(&d, &s, "http://ex/bob", ty, "http://ex/NoEmail"), "bob has email → excluded");
     }
 
     #[test]

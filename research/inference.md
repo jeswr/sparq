@@ -87,7 +87,8 @@ implement and the OWL test suite the validation set. Sizeable but mechanical.
 - **Builtins:** `math:` comparison (`greaterThan`/`lessThan`/`notGreaterThan`/`notLessThan`/
   `equalTo`/`notEqualTo`) + functional (`sum`/`difference`/`product`/`quotient`/`max`/`min`);
   `string:` (`concatenation` + `contains`/`startsWith`/`endsWith`/`greaterThan`/`lessThan`);
-  `list:` (`member`/`in` generators, `length`); `log:equalTo`/`notEqualTo`.
+  `list:` (`member`/`in` generators, `length`); `log:equalTo`/`notEqualTo` and
+  `log:includes`/`notIncludes` (scoped negation-as-failure via recursive sub-formula match).
 - Tested: the canonical Man⊢Mortal rule, a recursive transitive rule (fixpoint), a
   `math:greaterThan` age filter, and end-to-end chained rules (`age>17 ⊢ Adult ⊢ canVote`).
 
