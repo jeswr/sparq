@@ -736,6 +736,21 @@ fn prefetch_read<T>(p: *const T) {
     let _ = p;
 }
 
+/// Compile-time default for the dict-remap software prefetch, chosen per hardware from measured
+/// A/B results (the `bench-remap` micro-benchmark, prefetch on vs off; the hint helps or *hurts*
+/// depending on the core's hardware prefetcher):
+///   x86_64 (Intel/AMD; incl. AWS c7i Sapphire Rapids):   +7.5%  -> ON
+///   aarch64 + macOS (Apple M-series):                    +22%   -> ON
+///   aarch64 + Linux (AWS Graviton3 / Neoverse-V1, etc.): -10%   -> OFF — the HW prefetcher
+///       already saturates the gather, so explicit `prfm` hints only add instruction overhead.
+/// Overridable at runtime for re-tuning on new silicon: `SPARQ_PREFETCH=1` forces on,
+/// `SPARQ_NO_PREFETCH=1` forces off.
+#[cfg(feature = "parallel")]
+const PREFETCH_DEFAULT: bool = cfg!(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", target_os = "macos"),
+));
+
 /// Append `triples`, remapped from a partial dict's ids to the merged global ids
 /// (`remap[id-1]`; inline-integer ids pass through). The `remap` gather is latency-bound on a
 /// large global dictionary (the build-path bottleneck — triple-remap measured at ~3s/50M), so
@@ -746,6 +761,16 @@ fn remap_extend(out: &mut Vec<[Id; 3]>, triples: Vec<[Id; 3]>, remap: &[Id]) {
     const DIST: usize = 32;
     let n = triples.len();
     let base = remap.as_ptr();
+    // Per-hardware default (PREFETCH_DEFAULT, measured), with a runtime override. The getenv runs
+    // once per merged-dict load — which then processes millions of triples — so it is free.
+    let do_prefetch = match (
+        std::env::var("SPARQ_PREFETCH").as_deref(),
+        std::env::var("SPARQ_NO_PREFETCH").as_deref(),
+    ) {
+        (Ok("1"), _) => true,
+        (_, Ok("1")) => false,
+        _ => PREFETCH_DEFAULT,
+    };
     let lut = |id: Id| -> Id {
         if id >= dict::INLINE_BASE {
             id
@@ -755,7 +780,7 @@ fn remap_extend(out: &mut Vec<[Id; 3]>, triples: Vec<[Id; 3]>, remap: &[Id]) {
     };
     out.reserve(n);
     for i in 0..n {
-        if i + DIST < n {
+        if do_prefetch && i + DIST < n {
             for &id in &triples[i + DIST] {
                 if id < dict::INLINE_BASE {
                     // SAFETY: id-1 < remap.len() for every dictionary id; prefetch is hint-only.
@@ -766,6 +791,40 @@ fn remap_extend(out: &mut Vec<[Id; 3]>, triples: Vec<[Id; 3]>, remap: &[Id]) {
         let [s, p, o] = triples[i];
         out.push([lut(s), lut(p), lut(o)]);
     }
+}
+
+/// Isolated micro-benchmark of the latency-bound `remap_extend` gather (the build-path
+/// bottleneck the per-ISA prefetch targets). Builds `n` synthetic triples whose ids scatter
+/// randomly across a `dict_size`-entry remap table (so the gather misses cache like a real large
+/// global dictionary), then times `remap_extend` over `iters` runs and returns the best (ms).
+/// Honours `SPARQ_NO_PREFETCH=1`. Used to measure the prefetch's effect per hardware in isolation,
+/// undiluted by parsing. Not part of the query/build path.
+#[cfg(feature = "parallel")]
+pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
+    // Cheap deterministic LCG scatter (no rand dep, no Date/Random harness restrictions).
+    let mut x: u64 = 0x9E3779B97F4A7C15;
+    let mut next = || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x };
+    let ds = dict_size.max(1) as u64;
+    let mut triples: Vec<[Id; 3]> = Vec::with_capacity(n);
+    for _ in 0..n {
+        // ids in [1, dict_size], scattered, so the gather misses cache.
+        let s = (1 + (next() % ds)) as Id;
+        let p = (1 + (next() % ds)) as Id;
+        let o = (1 + (next() % ds)) as Id;
+        triples.push([s, p, o]);
+    }
+    // Identity remap of the right size (values irrelevant to the gather's latency).
+    let remap: Vec<Id> = (1..=dict_size as Id).collect();
+    let mut best = f64::INFINITY;
+    for _ in 0..iters.max(1) {
+        let mut out: Vec<[Id; 3]> = Vec::new();
+        let t = std::time::Instant::now();
+        remap_extend(&mut out, triples.clone(), &remap);
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        std::hint::black_box(&out);
+        if ms < best { best = ms; }
+    }
+    best
 }
 
 #[cfg(feature = "parallel")]

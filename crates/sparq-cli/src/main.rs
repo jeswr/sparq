@@ -30,11 +30,26 @@ fn main() {
         Some("query-mmap") => cmd_query_mmap(&args),
         Some("probe-compress") => cmd_probe_compress(&args),
         Some("compare-compress") => cmd_compare_compress(&args),
+        Some("bench-remap") => cmd_bench_remap(&args),
         _ => {
             eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir>          # build + persist indexes to disk\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
         }
     }
+}
+
+/// Isolated micro-benchmark of the latency-bound dict-remap gather, to measure the per-ISA
+/// software prefetch in isolation (undiluted by parsing) on each hardware target.
+///   sparq-cli bench-remap [n_triples] [dict_size] [iters]
+/// Run twice — once normally, once with SPARQ_NO_PREFETCH=1 — to get the prefetch delta.
+fn cmd_bench_remap(args: &[String]) {
+    let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20_000_000);
+    let dict: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(50_000_000);
+    let iters: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
+    let pf = std::env::var("SPARQ_NO_PREFETCH").as_deref() != Ok("1");
+    let ms = sparq_core::bench_remap(n, dict, iters);
+    let mtps = (n as f64) / (ms / 1e3) / 1e6;
+    println!("remap\tn={n}\tdict={dict}\tprefetch={pf}\tbest_ms={ms:.2}\tMtriples_s={mtps:.2}");
 }
 
 /// Streaming-ingest throughput experiment (for the Wikidata-vs-RDFox comparison).
