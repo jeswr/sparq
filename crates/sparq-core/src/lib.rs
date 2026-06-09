@@ -289,6 +289,49 @@ impl Graph {
         Ok(Self::build(dict, triples))
     }
 
+    /// Streaming PARALLEL load: reads the (already-decompressed) `reader` in newline-aligned
+    /// ~32 MiB blocks and parses each block in parallel, so the full decompressed document is
+    /// NEVER materialised in memory — only one block plus the growing dictionary/triples. (The
+    /// store itself must fit in RAM; this removes the redundant full-text copy a read-to-string
+    /// load would hold alongside it.) For N-Triples; other formats defer to the serial streaming
+    /// [`load_reader`].
+    #[cfg(feature = "parallel")]
+    pub fn load_reader_parallel<R: std::io::Read>(mut reader: R, format: &str) -> Result<Graph, String> {
+        if !matches!(format, "ntriples" | "n-triples") {
+            return Self::load_reader(reader, format);
+        }
+        const BLOCK: usize = 32 << 20;
+        let mut global = Dict::new();
+        let mut all: Vec<[Id; 3]> = Vec::new();
+        let mut carry: Vec<u8> = Vec::new();
+        let mut chunk = vec![0u8; BLOCK];
+        // Parse one newline-aligned block in parallel and merge its partial dict into the global.
+        fn flush(global: &mut Dict, all: &mut Vec<[Id; 3]>, bytes: &[u8]) -> Result<(), String> {
+            let (pd, pt) = parse_ntriples_parallel(bytes)?;
+            let remap = global.merge_remap(&pd);
+            all.extend(pt.into_iter().map(|[s, p, o]| {
+                let m = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
+                [m(s), m(p), m(o)]
+            }));
+            Ok(())
+        }
+        loop {
+            let n = reader.read(&mut chunk).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            carry.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = carry.iter().rposition(|&b| b == b'\n') {
+                flush(&mut global, &mut all, &carry[..=pos])?;
+                carry.drain(..=pos);
+            }
+        }
+        if !carry.is_empty() {
+            flush(&mut global, &mut all, &carry)?;
+        }
+        Ok(Self::build(global, all))
+    }
+
     /// Builds the store + numeric cache from interned triples (shared by the
     /// string and streaming loaders).
     fn build(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {

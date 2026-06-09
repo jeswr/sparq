@@ -544,35 +544,38 @@ fn cmd_query_mmap(args: &[String]) {
     }
 }
 
-/// Reads a (possibly compressed) RDF document fully into a string. `.gz`/`.bz2`/`.zst[d]` are
-/// decompressed transparently; the decompressed text then flows through the parallel parser.
-fn read_source(path: &str) -> std::io::Result<String> {
-    use std::io::Read;
+/// Opens a (possibly compressed) RDF document as a streaming reader. `.gz`/`.bz2`/`.zst[d]` are
+/// decompressed transparently on the fly — the decompressed bytes are never all held at once.
+fn open_reader(path: &str) -> std::io::Result<Box<dyn std::io::Read>> {
     let file = std::fs::File::open(path)?;
-    let mut s = String::new();
-    if path.ends_with(".gz") {
-        flate2::read::MultiGzDecoder::new(file).read_to_string(&mut s)?;
+    Ok(if path.ends_with(".gz") {
+        Box::new(flate2::read::MultiGzDecoder::new(file))
     } else if path.ends_with(".bz2") {
-        bzip2::read::MultiBzDecoder::new(file).read_to_string(&mut s)?;
+        Box::new(bzip2::read::MultiBzDecoder::new(file))
     } else if path.ends_with(".zst") || path.ends_with(".zstd") {
-        zstd::stream::read::Decoder::new(file)?.read_to_string(&mut s)?;
+        Box::new(zstd::stream::read::Decoder::new(file)?)
     } else {
-        let mut f = file;
-        f.read_to_string(&mut s)?;
-    }
-    Ok(s)
+        Box::new(file)
+    })
 }
 
 fn load(path: &str, format: &str) -> sparq_core::Graph {
-    let text = read_source(path).unwrap_or_else(|e| {
-        eprintln!("error reading {path}: {e}");
+    let die = |e: String| -> ! {
+        eprintln!("error loading {path}: {e}");
         std::process::exit(1);
-    });
+    };
     let t = Instant::now();
-    let g = sparq_core::Graph::load_str(&text, format).unwrap_or_else(|e| {
-        eprintln!("parse error: {e}");
-        std::process::exit(1);
-    });
+    // N-Triples streams block-by-block (parallel parse, no full decompressed copy in RAM); other
+    // formats need the whole document buffered for the parallel statement-splitter.
+    let g = if matches!(format, "ntriples" | "n-triples") {
+        let reader = open_reader(path).unwrap_or_else(|e| die(e.to_string()));
+        sparq_core::Graph::load_reader_parallel(reader, format).unwrap_or_else(|e| die(e))
+    } else {
+        use std::io::Read;
+        let mut text = String::new();
+        open_reader(path).and_then(|mut r| r.read_to_string(&mut text)).unwrap_or_else(|e| die(e.to_string()));
+        sparq_core::Graph::load_str(&text, format).unwrap_or_else(|e| die(e))
+    };
     let secs = t.elapsed().as_secs_f64();
     let heap = g.heap_bytes();
     let dict = g.dict.heap_bytes();
