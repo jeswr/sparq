@@ -24,8 +24,99 @@
 //! is an opt-in build-time step, never on the query hot path.
 
 use crate::{Schema, Vocab};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
+
+/// Incremental indexes for SEMI-NAIVE RDFS materialization: a new triple joins only against
+/// the relevant index (not a full scan), and each rule is fired once per newly-derived fact
+/// (the `delta`). Both directions of every join are covered so transitivity (rdfs5/11)
+/// closes correctly. Without this the naive fixpoint is O(N³) on deep hierarchies (the O(N²)
+/// subclass closure re-derived O(N) rounds).
+#[derive(Default)]
+struct RdfsIndex {
+    sc_super: FxHashMap<Id, Vec<Id>>, // c -> super-classes d (c subClassOf d)
+    sc_sub: FxHashMap<Id, Vec<Id>>,   // d -> sub-classes c
+    sp_super: FxHashMap<Id, Vec<Id>>, // p -> super-properties q
+    sp_sub: FxHashMap<Id, Vec<Id>>,   // q -> sub-properties p
+    domain: FxHashMap<Id, Vec<Id>>,   // p -> domain classes
+    range: FxHashMap<Id, Vec<Id>>,    // p -> range classes
+    type_sub: FxHashMap<Id, Vec<Id>>, // c -> subjects typed c
+    po: FxHashMap<Id, Vec<(Id, Id)>>, // predicate -> (subject, object) assertions
+}
+
+impl RdfsIndex {
+    fn insert(&mut self, [s, p, o]: [Id; 3], v: &Vocab) {
+        if p == v.sub_class {
+            self.sc_super.entry(s).or_default().push(o);
+            self.sc_sub.entry(o).or_default().push(s);
+        } else if p == v.sub_prop {
+            self.sp_super.entry(s).or_default().push(o);
+            self.sp_sub.entry(o).or_default().push(s);
+        } else if p == v.domain {
+            self.domain.entry(s).or_default().push(o);
+        } else if p == v.range {
+            self.range.entry(s).or_default().push(o);
+        } else if p == v.ty {
+            self.type_sub.entry(o).or_default().push(s);
+        }
+        self.po.entry(p).or_default().push((s, o));
+    }
+
+    /// All immediate RDFS consequences of `[s,p,o]` joining against the current index, pushed
+    /// into `out`. Each rule appears in BOTH delta directions (this triple as either premise).
+    fn derive(&self, [s, p, o]: [Id; 3], v: &Vocab, out: &mut Vec<[Id; 3]>) {
+        if p == v.sub_class {
+            // rdfs11 (s sc o)(o sc x)⊢(s sc x) and (c sc s)(s sc o)⊢(c sc o)
+            if let Some(xs) = self.sc_super.get(&o) {
+                out.extend(xs.iter().map(|&x| [s, v.sub_class, x]));
+            }
+            if let Some(cs) = self.sc_sub.get(&s) {
+                out.extend(cs.iter().map(|&c| [c, v.sub_class, o]));
+            }
+            // rdfs9 (y type s)(s sc o)⊢(y type o)
+            if let Some(ys) = self.type_sub.get(&s) {
+                out.extend(ys.iter().map(|&y| [y, v.ty, o]));
+            }
+        } else if p == v.sub_prop {
+            // rdfs5 transitivity (both directions)
+            if let Some(xs) = self.sp_super.get(&o) {
+                out.extend(xs.iter().map(|&x| [s, v.sub_prop, x]));
+            }
+            if let Some(cs) = self.sp_sub.get(&s) {
+                out.extend(cs.iter().map(|&c| [c, v.sub_prop, o]));
+            }
+            // rdfs7 (x s y)(s sp o)⊢(x o y)
+            if let Some(pairs) = self.po.get(&s) {
+                out.extend(pairs.iter().map(|&(x, y)| [x, o, y]));
+            }
+        } else if p == v.ty {
+            // rdfs9 (s type o)(o sc d)⊢(s type d)
+            if let Some(ds) = self.sc_super.get(&o) {
+                out.extend(ds.iter().map(|&d| [s, v.ty, d]));
+            }
+        } else if p == v.domain {
+            // rdfs2 (x s y)(s domain o)⊢(x type o)
+            if let Some(pairs) = self.po.get(&s) {
+                out.extend(pairs.iter().map(|&(x, _)| [x, v.ty, o]));
+            }
+        } else if p == v.range {
+            // rdfs3 (x s y)(s range o)⊢(y type o)
+            if let Some(pairs) = self.po.get(&s) {
+                out.extend(pairs.iter().map(|&(_, y)| [y, v.ty, o]));
+            }
+        }
+        // For the OTHER delta direction of rdfs7/2/3: this (s p o) as the data triple.
+        if let Some(qs) = self.sp_super.get(&p) {
+            out.extend(qs.iter().map(|&q| [s, q, o]));
+        }
+        if let Some(cs) = self.domain.get(&p) {
+            out.extend(cs.iter().map(|&c| [s, v.ty, c]));
+        }
+        if let Some(cs) = self.range.get(&p) {
+            out.extend(cs.iter().map(|&c| [o, v.ty, c]));
+        }
+    }
+}
 
 /// Expand `triples` in place with the RDFS closure. Returns the number of NEW triples added.
 pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
@@ -36,17 +127,28 @@ pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     // duplicate-free closure either way).
     let mut all: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
 
-    loop {
-        let schema = Schema::build(&all, &v);
-        let mut cand: Vec<[Id; 3]> = Vec::new();
-        rdfs_round(&all, &v, &schema, &mut cand);
-        let mut changed = false;
-        for t in cand {
-            changed |= all.insert(t);
+    // SEMI-NAIVE fixpoint with incremental indexes: each round derives only from the previous
+    // round's NEW facts (`delta`), joining against the index — never re-scanning the whole
+    // closure. Linear in the number of derivations instead of the naive O(rounds × closure).
+    let mut idx = RdfsIndex::default();
+    for &t in &all {
+        idx.insert(t, &v);
+    }
+    let mut delta: Vec<[Id; 3]> = all.iter().copied().collect();
+    let mut cand: Vec<[Id; 3]> = Vec::new();
+    while !delta.is_empty() {
+        cand.clear();
+        for &t in &delta {
+            idx.derive(t, &v, &mut cand);
         }
-        if !changed {
-            break;
+        let mut next: Vec<[Id; 3]> = Vec::new();
+        for &t in &cand {
+            if all.insert(t) {
+                idx.insert(t, &v);
+                next.push(t);
+            }
         }
+        delta = next;
     }
 
     // Rebuild `triples` as the (duplicate-free) closure, preserving the original triples'
