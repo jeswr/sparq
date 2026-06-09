@@ -42,14 +42,17 @@ substitution); **property** prp-inv1/2 (`owl:inverseOf`), prp-symp (`SymmetricPr
 prp-trp (`TransitiveProperty`), prp-eqp1/2 (`equivalentProperty`), prp-fp/ifp
 (`Functional`/`InverseFunctionalProperty` → `sameAs`); **class** cax-eqc1/2
 (`equivalentClass`). Includes the RDFS rules (RL subsumes them, via the shared `rdfs_round`).
-3 unit tests + end-to-end CLI (`--reason owl` transitively closes `ancestorOf`). **Still to
-add** (roadmap): class-expression rules (cls-* `someValuesFrom`/`allValuesFrom`/`hasValue`/
-`intersectionOf` — need `owl:Restriction` + RDF-list decoding), `prp-spo2`
-(`propertyChainAxiom`), and consistency/clash rules (cax-dw `disjointWith`, eq-diff
-`differentFrom`). The `sameAs` rules use spec eq-rep substitution; union-find canonicalization
-is a future optimization for large `sameAs` cliques.
+Now ALSO covers (via an RDF-list decoder + restriction/class-list extraction): **prp-spo2**
+(`owl:propertyChainAxiom` — n-ary property-chain join) and the **class-expression rules**
+cls-svf1 (`someValuesFrom`), cls-avf1 (`allValuesFrom`), cls-hv1/hv2 (`hasValue`), cls-int1/2
+(`intersectionOf`), scm-uni (`unionOf`). 6 unit tests (incl. property chain uncle = parent∘
+brother, hasValue/someValuesFrom restrictions, intersectionOf) + end-to-end CLI. The `sameAs`
+rules use spec eq-rep substitution; union-find canonicalization is a future optimization.
+**Remaining for full RL:** consistency/clash detection (cax-dw `disjointWith`, eq-diff
+`differentFrom`, prp-pdw → report inconsistency rather than materialize), cardinality
+(`maxCardinality` 0/1), `hasKey`, and the remaining schema rules (scm-*).
 
-### ▢ OWL — remaining (class expressions, chains, consistency)
+### ▢ OWL — remaining (consistency/clashes, cardinality, hasKey)
 OWL 2 **RL** is the materialization-friendly profile (the others — EL, QL — target different
 algorithms; full OWL DL is undecidable for forward chaining). RL extends the same fixpoint
 engine with property and class axioms, all expressible as datalog-style rules over ids:

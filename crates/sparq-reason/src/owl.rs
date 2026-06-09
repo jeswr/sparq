@@ -29,6 +29,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
+const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 struct Owl {
     same_as: Id,
@@ -39,6 +40,17 @@ struct Owl {
     equiv_class: Id,      // owl:equivalentClass
     functional: Id,       // owl:FunctionalProperty
     inv_functional: Id,   // owl:InverseFunctionalProperty
+    property_chain: Id,   // owl:propertyChainAxiom
+    on_property: Id,      // owl:onProperty
+    some_values: Id,      // owl:someValuesFrom
+    all_values: Id,       // owl:allValuesFrom
+    has_value: Id,        // owl:hasValue
+    intersection: Id,     // owl:intersectionOf
+    union: Id,            // owl:unionOf
+    thing: Id,            // owl:Thing
+    rdf_first: Id,
+    rdf_rest: Id,
+    rdf_nil: Id,
 }
 
 impl Owl {
@@ -53,8 +65,50 @@ impl Owl {
             equiv_class: i("equivalentClass"),
             functional: i("FunctionalProperty"),
             inv_functional: i("InverseFunctionalProperty"),
+            property_chain: i("propertyChainAxiom"),
+            on_property: i("onProperty"),
+            some_values: i("someValuesFrom"),
+            all_values: i("allValuesFrom"),
+            has_value: i("hasValue"),
+            intersection: i("intersectionOf"),
+            union: i("unionOf"),
+            thing: i("Thing"),
+            rdf_first: dict.intern_iri(&format!("{RDF}first")),
+            rdf_rest: dict.intern_iri(&format!("{RDF}rest")),
+            rdf_nil: dict.intern_iri(&format!("{RDF}nil")),
         }
     }
+}
+
+/// Decode every RDF list (`rdf:first`/`rdf:rest`/`rdf:nil`) reachable in `all` into
+/// `head node -> [members]`. Used for `propertyChainAxiom`, `intersectionOf`, `unionOf`.
+fn decode_lists(all: &FxHashSet<[Id; 3]>, o: &Owl) -> FxHashMap<Id, Vec<Id>> {
+    let mut first: FxHashMap<Id, Id> = FxHashMap::default();
+    let mut rest: FxHashMap<Id, Id> = FxHashMap::default();
+    for &[s, p, obj] in all {
+        if p == o.rdf_first {
+            first.insert(s, obj);
+        } else if p == o.rdf_rest {
+            rest.insert(s, obj);
+        }
+    }
+    let mut lists: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for (&head, _) in first.iter() {
+        let mut members = Vec::new();
+        let mut cur = head;
+        for _ in 0..first.len() + 1 {
+            match first.get(&cur) {
+                Some(&m) => members.push(m),
+                None => break,
+            }
+            match rest.get(&cur) {
+                Some(&n) if n != o.rdf_nil => cur = n,
+                _ => break,
+            }
+        }
+        lists.insert(head, members);
+    }
+    lists
 }
 
 /// Expand `triples` in place with the OWL 2 RL (+ RDFS) closure. Returns NEW triple count.
@@ -157,6 +211,142 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // --- list/restriction rules (prp-spo2, cls-svf/avf/hv, cls-int, scm-uni) ------
+        // Decode RDF lists + restrictions + class lists once, plus the adjacency / type
+        // indexes the rules join over.
+        let lists = decode_lists(&all, &o);
+        let mut on_prop: FxHashMap<Id, Id> = FxHashMap::default();
+        let (mut svf, mut avf, mut hv) =
+            (FxHashMap::<Id, Id>::default(), FxHashMap::<Id, Id>::default(), FxHashMap::<Id, Id>::default());
+        let mut chains: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let (mut inters, mut unions) =
+            (FxHashMap::<Id, Vec<Id>>::default(), FxHashMap::<Id, Vec<Id>>::default());
+        let mut by_pred: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
+        let mut type_subj: FxHashMap<Id, Vec<Id>> = FxHashMap::default(); // class -> subjects
+        let mut subj_types: FxHashMap<Id, Vec<Id>> = FxHashMap::default(); // subject -> classes
+        for &[s, p, obj] in &all {
+            by_pred.entry(p).or_default().entry(s).or_default().push(obj);
+            if p == v.ty {
+                type_subj.entry(obj).or_default().push(s);
+                subj_types.entry(s).or_default().push(obj);
+            } else if p == o.on_property {
+                on_prop.insert(s, obj);
+            } else if p == o.some_values {
+                svf.insert(s, obj);
+            } else if p == o.all_values {
+                avf.insert(s, obj);
+            } else if p == o.has_value {
+                hv.insert(s, obj);
+            } else if p == o.property_chain {
+                if let Some(l) = lists.get(&obj) {
+                    chains.insert(s, l.clone());
+                }
+            } else if p == o.intersection {
+                if let Some(l) = lists.get(&obj) {
+                    inters.insert(s, l.clone());
+                }
+            } else if p == o.union {
+                if let Some(l) = lists.get(&obj) {
+                    unions.insert(s, l.clone());
+                }
+            }
+        }
+        let has_type = |x: Id, c: Id| subj_types.get(&x).is_some_and(|cs| cs.contains(&c));
+
+        // prp-spo2 — property chain: (x p1 y1)…(y_{n-1} pn z) ⊢ (x p z).
+        for (&p, chain) in &chains {
+            if chain.is_empty() {
+                continue;
+            }
+            let mut paths: Vec<(Id, Id)> = Vec::new();
+            if let Some(adj) = by_pred.get(&chain[0]) {
+                for (&s, os) in adj {
+                    paths.extend(os.iter().map(|&z| (s, z)));
+                }
+            }
+            for &pi in &chain[1..] {
+                let mut next = Vec::new();
+                if let Some(adj) = by_pred.get(&pi) {
+                    for &(start, mid) in &paths {
+                        if let Some(os) = adj.get(&mid) {
+                            next.extend(os.iter().map(|&z| (start, z)));
+                        }
+                    }
+                }
+                paths = next;
+                if paths.is_empty() {
+                    break;
+                }
+            }
+            cand.extend(paths.into_iter().map(|(x, z)| [x, p, z]));
+        }
+
+        // cls-svf1 — someValuesFrom: (x p u),(u type c) ⊢ (x type R)   [c = owl:Thing ⇒ any u]
+        for (&r, &c) in &svf {
+            if let Some(&p) = on_prop.get(&r) {
+                if let Some(adj) = by_pred.get(&p) {
+                    for (&x, us) in adj {
+                        if us.iter().any(|&u| c == o.thing || has_type(u, c)) {
+                            cand.push([x, v.ty, r]);
+                        }
+                    }
+                }
+            }
+        }
+        // cls-avf1 — allValuesFrom: (x type R),(x p u) ⊢ (u type c)
+        for (&r, &c) in &avf {
+            if let (Some(&p), Some(xs)) = (on_prop.get(&r), type_subj.get(&r)) {
+                if let Some(adj) = by_pred.get(&p) {
+                    for &x in xs {
+                        if let Some(us) = adj.get(&x) {
+                            cand.extend(us.iter().map(|&u| [u, v.ty, c]));
+                        }
+                    }
+                }
+            }
+        }
+        // cls-hv1/hv2 — hasValue: (x type R) ⊢ (x p w) and (x p w) ⊢ (x type R)
+        for (&r, &w) in &hv {
+            if let Some(&p) = on_prop.get(&r) {
+                if let Some(xs) = type_subj.get(&r) {
+                    cand.extend(xs.iter().map(|&x| [x, p, w])); // cls-hv1
+                }
+                if let Some(adj) = by_pred.get(&p) {
+                    for (&x, os) in adj {
+                        if os.contains(&w) {
+                            cand.push([x, v.ty, r]); // cls-hv2
+                        }
+                    }
+                }
+            }
+        }
+        // cls-int1/int2 — intersectionOf: x type all members ⇔ x type c.
+        for (&c, members) in &inters {
+            if members.is_empty() {
+                continue;
+            }
+            if let Some(xs) = type_subj.get(&c) {
+                for &x in xs {
+                    cand.extend(members.iter().map(|&m| [x, v.ty, m])); // int2
+                }
+            }
+            if let Some(first) = type_subj.get(&members[0]) {
+                for &x in first {
+                    if members.iter().all(|&m| has_type(x, m)) {
+                        cand.push([x, v.ty, c]); // int1
+                    }
+                }
+            }
+        }
+        // scm-uni — unionOf: x type member ⊢ x type c.
+        for (&c, members) in &unions {
+            for &m in members {
+                if let Some(xs) = type_subj.get(&m) {
+                    cand.extend(xs.iter().map(|&x| [x, v.ty, c]));
                 }
             }
         }
@@ -295,6 +485,78 @@ mod tests {
             "prp-fp ⊢ sameAs"
         );
         assert!(has(&dict, &set, "http://ex/s2", "http://ex/p", "http://ex/marker"), "eq-rep substitution");
+    }
+
+    fn rdf(dict: &mut Dict, frag: &str) -> Id {
+        dict.intern_iri(&format!("http://www.w3.org/1999/02/22-rdf-syntax-ns#{frag}"))
+    }
+    /// Build an RDF list of `items` into `triples`, returning the head node id.
+    fn list(dict: &mut Dict, triples: &mut Vec<[Id; 3]>, items: &[Id]) -> Id {
+        let (first, rest, nil) = (rdf(dict, "first"), rdf(dict, "rest"), rdf(dict, "nil"));
+        let mut head = nil;
+        for (k, &it) in items.iter().enumerate().rev() {
+            let node = dict.intern_blank(&format!("_l{k}_{it}"));
+            triples.push([node, first, it]);
+            triples.push([node, rest, head]);
+            head = node;
+        }
+        head
+    }
+
+    #[test]
+    fn property_chain() {
+        // :uncleOf owl:propertyChainAxiom ( :parentOf :brotherOf ) ; a parentOf b ; b brotherOf c
+        // ⊢ a uncleOf c.
+        let mut dict = Dict::new();
+        let (uncle, parent, brother, a, b, c) = (
+            ex(&mut dict, "uncleOf"), ex(&mut dict, "parentOf"), ex(&mut dict, "brotherOf"),
+            ex(&mut dict, "a"), ex(&mut dict, "b"), ex(&mut dict, "c"),
+        );
+        let pca = owl(&mut dict, "propertyChainAxiom");
+        let mut triples = vec![[a, parent, b], [b, brother, c]];
+        let chain = list(&mut dict, &mut triples, &[parent, brother]);
+        triples.push([uncle, pca, chain]);
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(has(&dict, &set, "http://ex/a", "http://ex/uncleOf", "http://ex/c"), "prp-spo2 property chain");
+    }
+
+    #[test]
+    fn restriction_has_value_and_some_values() {
+        // hasValue: R1 = [onProperty :status; hasValue :active]; x a R1 ⊢ x :status :active.
+        // someValuesFrom: R2 = [onProperty :hasPet; someValuesFrom :Dog]; x hasPet d, d a Dog ⊢ x a R2.
+        let mut dict = Dict::new();
+        let (status, active, haspet, dog, x, d) = (
+            ex(&mut dict, "status"), ex(&mut dict, "active"), ex(&mut dict, "hasPet"),
+            ex(&mut dict, "Dog"), ex(&mut dict, "x"), ex(&mut dict, "d"),
+        );
+        let (r1, r2) = (dict.intern_blank("_R1"), dict.intern_blank("_R2"));
+        let ty = rdf(&mut dict, "type");
+        let (onp, hv, svf) = (owl(&mut dict, "onProperty"), owl(&mut dict, "hasValue"), owl(&mut dict, "someValuesFrom"));
+        let mut triples = vec![
+            [r1, onp, status], [r1, hv, active], [x, ty, r1],
+            [r2, onp, haspet], [r2, svf, dog], [x, haspet, d], [d, ty, dog],
+        ];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(has(&dict, &set, "http://ex/x", "http://ex/status", "http://ex/active"), "cls-hv1");
+        // x is in R2 because it has a Dog pet:
+        assert!(set.contains(&[x, ty, r2]), "cls-svf1");
+    }
+
+    #[test]
+    fn intersection_of() {
+        // :Mother owl:intersectionOf ( :Woman :Parent ) ; x a Woman ; x a Parent ⊢ x a Mother.
+        let mut dict = Dict::new();
+        let (mother, woman, parent, x) =
+            (ex(&mut dict, "Mother"), ex(&mut dict, "Woman"), ex(&mut dict, "Parent"), ex(&mut dict, "x"));
+        let (ty, io) = (rdf(&mut dict, "type"), owl(&mut dict, "intersectionOf"));
+        let mut triples = vec![[x, ty, woman], [x, ty, parent]];
+        let l = list(&mut dict, &mut triples, &[woman, parent]);
+        triples.push([mother, io, l]);
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[x, ty, mother]), "cls-int1 intersection membership");
     }
 
     #[test]
