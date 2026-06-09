@@ -35,7 +35,21 @@ transitivity, domain/range typing, subproperty entailment, the rdfs7→rdfs2 int
 idempotency, and end-to-end via the CLI (`query … --reason rdfs` returns the entailed
 answers; 0 without).
 
-### ▢ OWL — NEXT (OWL 2 RL profile, materialization)
+### ◐ OWL 2 RL — core subset DONE (materialization)
+`sparq_reason::materialize_owl_rl` (`--reason owl`). Same forward-chaining fixpoint, adding
+the W3C OWL 2 RL/RDF rules: **equality** eq-sym/eq-trans/eq-rep-s,p,o (`owl:sameAs` closure +
+substitution); **property** prp-inv1/2 (`owl:inverseOf`), prp-symp (`SymmetricProperty`),
+prp-trp (`TransitiveProperty`), prp-eqp1/2 (`equivalentProperty`), prp-fp/ifp
+(`Functional`/`InverseFunctionalProperty` → `sameAs`); **class** cax-eqc1/2
+(`equivalentClass`). Includes the RDFS rules (RL subsumes them, via the shared `rdfs_round`).
+3 unit tests + end-to-end CLI (`--reason owl` transitively closes `ancestorOf`). **Still to
+add** (roadmap): class-expression rules (cls-* `someValuesFrom`/`allValuesFrom`/`hasValue`/
+`intersectionOf` — need `owl:Restriction` + RDF-list decoding), `prp-spo2`
+(`propertyChainAxiom`), and consistency/clash rules (cax-dw `disjointWith`, eq-diff
+`differentFrom`). The `sameAs` rules use spec eq-rep substitution; union-find canonicalization
+is a future optimization for large `sameAs` cliques.
+
+### ▢ OWL — remaining (class expressions, chains, consistency)
 OWL 2 **RL** is the materialization-friendly profile (the others — EL, QL — target different
 algorithms; full OWL DL is undecidable for forward chaining). RL extends the same fixpoint
 engine with property and class axioms, all expressible as datalog-style rules over ids:

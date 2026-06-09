@@ -38,41 +38,8 @@ pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
 
     loop {
         let schema = Schema::build(&all, &v);
-        // Collect this round's candidate derivations, then fold them in; `changed` tracks
-        // whether any were genuinely new (fixpoint reached when none are).
         let mut cand: Vec<[Id; 3]> = Vec::new();
-        for &[s, p, o] in &all {
-            // rdfs11 — subClassOf transitivity: (s subClassOf o), (o subClassOf x) ⊢ (s sc x)
-            if p == v.sub_class {
-                if let Some(sup) = schema.sub_class.get(&o) {
-                    cand.extend(sup.iter().map(|&x| [s, v.sub_class, x]));
-                }
-            }
-            // rdfs5 — subPropertyOf transitivity
-            if p == v.sub_prop {
-                if let Some(sup) = schema.sub_prop.get(&o) {
-                    cand.extend(sup.iter().map(|&x| [s, v.sub_prop, x]));
-                }
-            }
-            // rdfs9 — type propagation up the class hierarchy: (s type o), (o sc d) ⊢ (s type d)
-            if p == v.ty {
-                if let Some(sup) = schema.sub_class.get(&o) {
-                    cand.extend(sup.iter().map(|&d| [s, v.ty, d]));
-                }
-            }
-            // rdfs7 — subproperty entailment: (s p o), (p sp q) ⊢ (s q o)
-            if let Some(sup) = schema.sub_prop.get(&p) {
-                cand.extend(sup.iter().map(|&q| [s, q, o]));
-            }
-            // rdfs2 — domain typing: (s p o), (p domain c) ⊢ (s type c)
-            if let Some(cs) = schema.domain.get(&p) {
-                cand.extend(cs.iter().map(|&c| [s, v.ty, c]));
-            }
-            // rdfs3 — range typing: (s p o), (p range c) ⊢ (o type c)
-            if let Some(cs) = schema.range.get(&p) {
-                cand.extend(cs.iter().map(|&c| [o, v.ty, c]));
-            }
-        }
+        rdfs_round(&all, &v, &schema, &mut cand);
         let mut changed = false;
         for t in cand {
             changed |= all.insert(t);
@@ -92,6 +59,44 @@ pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     triples.extend(original_in_order(&original));
     triples.extend(derived);
     triples.len() - before
+}
+
+/// Applies one round of the RDFS rules (rdfs2/3/5/7/9/11) to `all` using `schema`, pushing
+/// every immediate consequence into `cand`. Shared by the RDFS and OWL 2 RL materializers
+/// (RL subsumes RDFS). Deduplication / fixpoint control is the caller's.
+pub(crate) fn rdfs_round(all: &FxHashSet<[Id; 3]>, v: &Vocab, schema: &Schema, cand: &mut Vec<[Id; 3]>) {
+    for &[s, p, o] in all {
+        // rdfs11 — subClassOf transitivity: (s sc o), (o sc x) ⊢ (s sc x)
+        if p == v.sub_class {
+            if let Some(sup) = schema.sub_class.get(&o) {
+                cand.extend(sup.iter().map(|&x| [s, v.sub_class, x]));
+            }
+        }
+        // rdfs5 — subPropertyOf transitivity
+        if p == v.sub_prop {
+            if let Some(sup) = schema.sub_prop.get(&o) {
+                cand.extend(sup.iter().map(|&x| [s, v.sub_prop, x]));
+            }
+        }
+        // rdfs9 — type propagation up the class hierarchy: (s type o), (o sc d) ⊢ (s type d)
+        if p == v.ty {
+            if let Some(sup) = schema.sub_class.get(&o) {
+                cand.extend(sup.iter().map(|&d| [s, v.ty, d]));
+            }
+        }
+        // rdfs7 — subproperty entailment: (s p o), (p sp q) ⊢ (s q o)
+        if let Some(sup) = schema.sub_prop.get(&p) {
+            cand.extend(sup.iter().map(|&q| [s, q, o]));
+        }
+        // rdfs2 — domain typing: (s p o), (p domain c) ⊢ (s type c)
+        if let Some(cs) = schema.domain.get(&p) {
+            cand.extend(cs.iter().map(|&c| [s, v.ty, c]));
+        }
+        // rdfs3 — range typing: (s p o), (p range c) ⊢ (o type c)
+        if let Some(cs) = schema.range.get(&p) {
+            cand.extend(cs.iter().map(|&c| [o, v.ty, c]));
+        }
+    }
 }
 
 /// The original triples, deduplicated but in a deterministic (sorted) order. (We do not have

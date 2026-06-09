@@ -17,8 +17,11 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
+mod owl;
 mod rdfs;
+pub use owl::materialize_owl_rl;
 pub use rdfs::materialize_rdfs;
+pub(crate) use rdfs::rdfs_round;
 
 /// Which entailment regime to materialize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,13 +29,17 @@ pub enum Profile {
     /// RDFS (subset rdfs2,3,5,7,9,11 — subclass/subproperty/domain/range; no axiomatic or
     /// reflexive triples, which add no useful inferences and explode the store).
     Rdfs,
+    /// OWL 2 RL (a useful subset: equality/sameAs, inverseOf, Symmetric/Transitive/
+    /// Functional/InverseFunctional properties, equivalentClass/Property) — includes RDFS.
+    OwlRl,
 }
 
 impl Profile {
-    /// Parse a CLI/profile name (`"rdfs"`).
+    /// Parse a CLI/profile name (`"rdfs"`, `"owl"`/`"owl-rl"`).
     pub fn parse(s: &str) -> Option<Profile> {
         match s.to_ascii_lowercase().as_str() {
             "rdfs" => Some(Profile::Rdfs),
+            "owl" | "owl-rl" | "owlrl" => Some(Profile::OwlRl),
             _ => None,
         }
     }
@@ -44,6 +51,7 @@ impl Profile {
 pub fn materialize(profile: Profile, dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     match profile {
         Profile::Rdfs => materialize_rdfs(dict, triples),
+        Profile::OwlRl => materialize_owl_rl(dict, triples),
     }
 }
 
