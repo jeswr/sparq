@@ -405,6 +405,16 @@ fn load_reasoned(path: &str, format: &str, profile: sparq_reason::Profile) -> sp
         triples.len(),
         t.elapsed().as_secs_f64()
     );
+    // OWL: report any detected inconsistency (cax-dw/cls-com/eq-diff/cls-nothing clashes).
+    if profile == sparq_reason::Profile::OwlRl {
+        let clashes = sparq_reason::inconsistencies(&dict, &triples);
+        if !clashes.is_empty() {
+            eprintln!("INCONSISTENT — {} clash(es) detected:", clashes.len());
+            for c in &clashes {
+                eprintln!("  - {c}");
+            }
+        }
+    }
     sparq_core::Graph::from_parts(dict, triples)
 }
 

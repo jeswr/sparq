@@ -48,11 +48,13 @@ cls-svf1 (`someValuesFrom`), cls-avf1 (`allValuesFrom`), cls-hv1/hv2 (`hasValue`
 (`intersectionOf`), scm-uni (`unionOf`). 6 unit tests (incl. property chain uncle = parent∘
 brother, hasValue/someValuesFrom restrictions, intersectionOf) + end-to-end CLI. The `sameAs`
 rules use spec eq-rep substitution; union-find canonicalization is a future optimization.
-**Remaining for full RL:** consistency/clash detection (cax-dw `disjointWith`, eq-diff
-`differentFrom`, prp-pdw → report inconsistency rather than materialize), cardinality
-(`maxCardinality` 0/1), `hasKey`, and the remaining schema rules (scm-*).
+**Consistency** ✅ — `sparq_reason::inconsistencies` detects cax-dw (`disjointWith`), cls-com
+(`complementOf`), eq-diff (`sameAs`∩`differentFrom`), cls-nothing (`owl:Nothing`) clashes
+post-materialization; the CLI reports them under `--reason owl`. **Remaining for full RL:**
+cardinality (`maxCardinality` 0/1, `maxQualifiedCardinality`), `hasKey`, and the remaining
+schema rules (scm-* for full class/property-hierarchy completeness).
 
-### ▢ OWL — remaining (consistency/clashes, cardinality, hasKey)
+### ▢ OWL — remaining (cardinality, hasKey, scm-*)
 OWL 2 **RL** is the materialization-friendly profile (the others — EL, QL — target different
 algorithms; full OWL DL is undecidable for forward chaining). RL extends the same fixpoint
 engine with property and class axioms, all expressible as datalog-style rules over ids:
@@ -77,7 +79,9 @@ implement and the OWL test suite the validation set. Sizeable but mechanical.
   property lists, `;`/`,`, and the `=>` (log:implies) / `=` (sameAs) sugar.
 - **Forward-chaining engine** (`n3/mod.rs`) — fixpoint applying `{premise} => {conclusion}`
   rules with variable binding (conjunctive premise = nested-loop join over facts), chaining
-  rules to closure, then interning the ground result into the dict.
+  rules to closure, then interning the ground result into the dict. **Backward rules `<=`**
+  are supported for the closure (`A <= B` ≡ `B => A`, reversed into a forward rule); true
+  goal-directed backward chaining + proof output is a later addition.
 - **Builtins (v1):** comparison/equality — `math:greaterThan`/`lessThan`/`notGreaterThan`/
   `notLessThan`/`equalTo`/`notEqualTo`, `log:equalTo`/`notEqualTo` (premise filters).
 - Tested: the canonical Man⊢Mortal rule, a recursive transitive rule (fixpoint), a

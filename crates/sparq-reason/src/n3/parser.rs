@@ -19,6 +19,7 @@ pub const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 pub const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 pub const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 pub const LOG_IMPLIES: &str = "http://www.w3.org/2000/10/swap/log#implies";
+pub const LOG_IMPLIED_BY: &str = "http://www.w3.org/2000/10/swap/log#impliedBy";
 pub const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
 pub const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 pub const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
@@ -40,7 +41,14 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
     let mut rules = Vec::new();
     for [s, pred, o] in stmts {
         match (&pred, &s, &o) {
+            // { premise } => { conclusion }
             (Term::Iri(i), Term::Formula(prem), Term::Formula(concl)) if i == LOG_IMPLIES => {
+                rules.push(Rule { premise: prem.clone(), conclusion: concl.clone() });
+            }
+            // { conclusion } <= { premise } — for the deductive CLOSURE this is exactly
+            // `premise => conclusion`, so we reverse it into a forward rule. (True
+            // goal-directed backward chaining + proof output is a later addition.)
+            (Term::Iri(i), Term::Formula(concl), Term::Formula(prem)) if i == LOG_IMPLIED_BY => {
                 rules.push(Rule { premise: prem.clone(), conclusion: concl.clone() });
             }
             _ => facts.push([s, pred, o]),

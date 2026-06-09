@@ -21,7 +21,7 @@ pub mod n3;
 mod owl;
 mod rdfs;
 pub use n3::reason_n3;
-pub use owl::materialize_owl_rl;
+pub use owl::{inconsistencies, materialize_owl_rl};
 pub use rdfs::materialize_rdfs;
 pub(crate) use rdfs::rdfs_round;
 

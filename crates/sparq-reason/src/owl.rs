@@ -48,6 +48,10 @@ struct Owl {
     intersection: Id,     // owl:intersectionOf
     union: Id,            // owl:unionOf
     thing: Id,            // owl:Thing
+    disjoint_with: Id,    // owl:disjointWith
+    different_from: Id,   // owl:differentFrom
+    complement_of: Id,    // owl:complementOf
+    nothing: Id,          // owl:Nothing
     rdf_first: Id,
     rdf_rest: Id,
     rdf_nil: Id,
@@ -73,6 +77,10 @@ impl Owl {
             intersection: i("intersectionOf"),
             union: i("unionOf"),
             thing: i("Thing"),
+            disjoint_with: i("disjointWith"),
+            different_from: i("differentFrom"),
+            complement_of: i("complementOf"),
+            nothing: i("Nothing"),
             rdf_first: dict.intern_iri(&format!("{RDF}first")),
             rdf_rest: dict.intern_iri(&format!("{RDF}rest")),
             rdf_nil: dict.intern_iri(&format!("{RDF}nil")),
@@ -371,6 +379,63 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
     triples.len() - before
 }
 
+/// Detect OWL 2 RL inconsistencies (clashes) in a triple set — run it AFTER materialization
+/// so entailed types are present. Returns human-readable clash descriptions (empty = no
+/// detected inconsistency). Covers cax-dw (disjointWith), cls-com (complementOf), eq-diff
+/// (sameAs ∩ differentFrom), and cls-nothing (owl:Nothing instances).
+pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
+    use oxrdf::{NamedNode, Term as OTerm};
+    let look = |iri: String| dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(iri)));
+    let ty = look(oxrdf::vocab::rdf::TYPE.as_str().to_string());
+    let disjoint_with = look(format!("{OWL}disjointWith"));
+    let complement_of = look(format!("{OWL}complementOf"));
+    let same_as = look(format!("{OWL}sameAs"));
+    let different_from = look(format!("{OWL}differentFrom"));
+    let nothing = look(format!("{OWL}Nothing"));
+    let all: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+    let mut subj_types: FxHashMap<Id, FxHashSet<Id>> = FxHashMap::default();
+    let mut same: FxHashSet<(Id, Id)> = FxHashSet::default();
+    let (mut disjoint, mut complement, mut different) = (Vec::new(), Vec::new(), Vec::new());
+    for &[s, p, ob] in &all {
+        if p == ty {
+            subj_types.entry(s).or_default().insert(ob);
+        } else if p == disjoint_with {
+            disjoint.push((s, ob));
+        } else if p == complement_of {
+            complement.push((s, ob));
+        } else if p == same_as {
+            same.insert((s.min(ob), s.max(ob)));
+        } else if p == different_from {
+            different.push((s, ob));
+        }
+    }
+    let mut out = Vec::new();
+    let term = |id: Id| dict.term(id).to_string();
+    // cax-dw / cls-com: an individual typed by two disjoint/complementary classes.
+    for (c1, c2) in disjoint.iter().chain(complement.iter()) {
+        for (x, ts) in &subj_types {
+            if ts.contains(c1) && ts.contains(c2) {
+                out.push(format!("{} is both {} and disjoint/complement {}", term(*x), term(*c1), term(*c2)));
+            }
+        }
+    }
+    // eq-diff: x sameAs y but also differentFrom y.
+    for (x, y) in &different {
+        if same.contains(&((*x).min(*y), (*x).max(*y))) {
+            out.push(format!("{} is both sameAs and differentFrom {}", term(*x), term(*y)));
+        }
+    }
+    // cls-nothing: anything typed owl:Nothing.
+    if nothing != 0 {
+        for (x, ts) in &subj_types {
+            if ts.contains(&nothing) {
+                out.push(format!("{} is typed owl:Nothing", term(*x)));
+            }
+        }
+    }
+    out
+}
+
 /// OWL axiom maps (the TBox), rebuilt each fixpoint round.
 #[derive(Default)]
 struct Axioms {
@@ -542,6 +607,28 @@ mod tests {
         assert!(has(&dict, &set, "http://ex/x", "http://ex/status", "http://ex/active"), "cls-hv1");
         // x is in R2 because it has a Dog pet:
         assert!(set.contains(&[x, ty, r2]), "cls-svf1");
+    }
+
+    #[test]
+    fn consistency_disjoint_clash() {
+        // :Cat owl:disjointWith :Dog ; :felix a :Cat ; :felix a :Dog  → inconsistent.
+        let mut dict = Dict::new();
+        let (cat, dog, felix) = (ex(&mut dict, "Cat"), ex(&mut dict, "Dog"), ex(&mut dict, "felix"));
+        let ty = rdf(&mut dict, "type");
+        let dw = owl(&mut dict, "disjointWith");
+        let mut triples = vec![[cat, dw, dog], [felix, ty, cat], [felix, ty, dog]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let clashes = inconsistencies(&dict, &triples);
+        assert!(!clashes.is_empty(), "disjointWith clash should be detected");
+
+        // A consistent variant (felix only a Cat) must report none.
+        let mut dict2 = Dict::new();
+        let (cat, dog, felix) = (ex(&mut dict2, "Cat"), ex(&mut dict2, "Dog"), ex(&mut dict2, "felix"));
+        let ty = rdf(&mut dict2, "type");
+        let dw = owl(&mut dict2, "disjointWith");
+        let mut t2 = vec![[cat, dw, dog], [felix, ty, cat]];
+        materialize_owl_rl(&mut dict2, &mut t2);
+        assert!(inconsistencies(&dict2, &t2).is_empty(), "consistent graph reports no clash");
     }
 
     #[test]

@@ -369,6 +369,18 @@ mod tests {
     }
 
     #[test]
+    fn backward_rule_arrow() {
+        // `{ conclusion } <= { premise }` — same closure as `premise => conclusion`.
+        let src = r#"
+            @prefix : <http://ex/> .
+            :Socrates a :Man .
+            { ?x a :Mortal } <= { ?x a :Man } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(has(&d, &s, "http://ex/Socrates", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Mortal"));
+    }
+
+    #[test]
     fn transitive_via_rule() {
         // Define transitivity with an N3 rule and close a chain.
         let src = r#"
