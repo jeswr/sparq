@@ -544,8 +544,27 @@ fn cmd_query_mmap(args: &[String]) {
     }
 }
 
+/// Reads a (possibly compressed) RDF document fully into a string. `.gz`/`.bz2`/`.zst[d]` are
+/// decompressed transparently; the decompressed text then flows through the parallel parser.
+fn read_source(path: &str) -> std::io::Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut s = String::new();
+    if path.ends_with(".gz") {
+        flate2::read::MultiGzDecoder::new(file).read_to_string(&mut s)?;
+    } else if path.ends_with(".bz2") {
+        bzip2::read::MultiBzDecoder::new(file).read_to_string(&mut s)?;
+    } else if path.ends_with(".zst") || path.ends_with(".zstd") {
+        zstd::stream::read::Decoder::new(file)?.read_to_string(&mut s)?;
+    } else {
+        let mut f = file;
+        f.read_to_string(&mut s)?;
+    }
+    Ok(s)
+}
+
 fn load(path: &str, format: &str) -> sparq_core::Graph {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+    let text = read_source(path).unwrap_or_else(|e| {
         eprintln!("error reading {path}: {e}");
         std::process::exit(1);
     });
