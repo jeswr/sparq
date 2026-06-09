@@ -2084,6 +2084,18 @@ fn any_unbound(rows: &[Row], cols: &[usize]) -> bool {
     rows.iter().any(|r| cols.iter().any(|&c| r[c] == NO_ID))
 }
 
+/// Number of radix partitions for the parallel hash-join build. 64 spreads well at high thread
+/// counts while keeping the per-partition tag-scan cheap.
+const JOIN_PARTS: usize = 64;
+
+/// The partition/lookup hash for a join key — build and probe must agree on it.
+fn key_hash(key: &Key) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    key.hash(&mut h);
+    h.finish()
+}
+
 fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     // Build the hash table on the smaller side.
     let (build, probe) = if left.rows.len() <= right.rows.len() {
@@ -2109,15 +2121,53 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
             i
         })
         .collect();
-    let mut table: FxHashMap<Key, Posting> = FxHashMap::default();
-    for (ri, row) in build.rows.iter().enumerate() {
-        let key: Key = shared.iter().map(|&(bi, _)| row[bi]).collect();
-        table.entry(key).or_default().push(ri);
-    }
+    // Build phase. Above PAR_THRESHOLD the build is radix-partitioned (Tier-1 #5 of
+    // research/parallelism-scaling.md): rows are tagged with their key-hash partition in
+    // parallel, then each partition builds its private map lock-free. Within a partition rows
+    // are scanned in ascending index, so each posting list stays in ascending build-row order —
+    // exactly the serial build — and the probe output is byte-identical.
+    let build_key = |row: &Row| -> Key { shared.iter().map(|&(bi, _)| row[bi]).collect() };
+    #[cfg(feature = "parallel")]
+    let tables: Vec<FxHashMap<Key, Posting>> = if build.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        let parts: Vec<u8> = build
+            .rows
+            .par_iter()
+            .map(|row| (key_hash(&build_key(row)) % JOIN_PARTS as u64) as u8)
+            .collect();
+        (0..JOIN_PARTS)
+            .into_par_iter()
+            .map(|p| {
+                let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
+                for (ri, row) in build.rows.iter().enumerate() {
+                    if parts[ri] as usize == p {
+                        t.entry(build_key(row)).or_default().push(ri);
+                    }
+                }
+                t
+            })
+            .collect()
+    } else {
+        let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
+        for (ri, row) in build.rows.iter().enumerate() {
+            t.entry(build_key(row)).or_default().push(ri);
+        }
+        vec![t]
+    };
+    #[cfg(not(feature = "parallel"))]
+    let tables: Vec<FxHashMap<Key, Posting>> = {
+        let mut t: FxHashMap<Key, Posting> = FxHashMap::default();
+        for (ri, row) in build.rows.iter().enumerate() {
+            t.entry(build_key(row)).or_default().push(ri);
+        }
+        vec![t]
+    };
     // Emit the output rows for one probe row (its matches, each combined with the
     // probe-only columns).
     let emit = |prow: &Row, out: &mut Vec<Row>| {
         let key: Key = shared.iter().map(|&(_, pi)| prow[pi]).collect();
+        let table =
+            if tables.len() == 1 { &tables[0] } else { &tables[(key_hash(&key) % JOIN_PARTS as u64) as usize] };
         if let Some(matches) = table.get(&key) {
             for &bi in matches {
                 let mut combined = build.rows[bi].clone();
@@ -2128,9 +2178,8 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
             }
         }
     };
-    // The probe is read-only over a shared table, so for a large probe side build the
-    // output in parallel on native (the output is unordered, so any interleaving is
-    // fine). The build side stays sequential (concurrent map inserts would need locks).
+    // The probe is read-only over the (partitioned) table, so for a large probe side build the
+    // output in parallel on native.
     #[cfg(feature = "parallel")]
     if probe.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
