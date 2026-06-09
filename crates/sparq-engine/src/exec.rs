@@ -2294,12 +2294,40 @@ fn group_aggregate(
         out_vars.push(v.clone());
     }
 
+    // Evaluate each group's aggregates (the expensive part — `eval_expr` over every member of
+    // every group) in parallel: it is read-only (`&LocalVocab`) and independent across groups.
+    // Interning the results (`value_to_id`, needs `&mut LocalVocab`) stays serial and in `order`,
+    // so the output is byte-identical to the serial path.
+    let agg_values: Vec<Vec<Value>> = if b.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
+        let bref = &b;
+        order
+            .par_iter()
+            .map(|key| {
+                let members = &groups[key];
+                aggregates
+                    .iter()
+                    .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg))
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        order
+            .iter()
+            .map(|key| {
+                let members = &groups[key];
+                aggregates
+                    .iter()
+                    .map(|(_, agg)| eval_aggregate(graph, local, &b, members, agg))
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    };
     let mut rows: Vec<Row> = Vec::with_capacity(order.len());
-    for key in &order {
-        let members = &groups[key];
+    for (key, vals) in order.iter().zip(agg_values) {
         let mut row = Row::from_slice(key);
-        for (_, agg) in aggregates {
-            let v = eval_aggregate(graph, local, &b, members, agg)?;
+        for v in vals {
             row.push(value_to_id(graph, local, &v));
         }
         rows.push(row);
@@ -2307,7 +2335,7 @@ fn group_aggregate(
     Ok(Bindings::unsorted(out_vars, rows))
 }
 
-fn eval_aggregate(graph: &Graph, local: &mut LocalVocab, b: &Bindings, members: &[usize], agg: &AggregateExpression) -> Result<Value, String> {
+fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[usize], agg: &AggregateExpression) -> Result<Value, String> {
     match agg {
         AggregateExpression::CountSolutions { distinct } => {
             let n = if *distinct {
