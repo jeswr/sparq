@@ -2392,26 +2392,36 @@ fn slice_bindings(b: &mut Bindings, start: usize, length: Option<usize>) {
 }
 
 fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[OrderExpression]) -> Result<(), String> {
-    // Precompute the sort key (vector of (descending, Value)) for each row.
-    let mut keyed: Vec<(Vec<(bool, Value)>, Row)> = Vec::with_capacity(b.rows.len());
-    for row in &b.rows {
+    // The sort key (vector of (descending, Value)) for one row. Numeric keys use the cache (no
+    // per-comparison reparse); other expressions fall back to identity-preserving evaluation.
+    let key_of = |row: &Row| -> Result<Vec<(bool, Value)>, String> {
         let mut key = Vec::with_capacity(exprs.len());
         for oe in exprs {
             let (desc, e) = match oe {
                 OrderExpression::Asc(e) => (false, e),
                 OrderExpression::Desc(e) => (true, e),
             };
-            // Numeric sort keys use the cache (no per-comparison reparse); other
-            // expressions fall back to the identity-preserving term evaluation.
             let v = match eval_numeric(graph, local, b, row, e) {
                 Some(n) => Value::Num(n),
                 None => eval_expr(graph, local, b, row, e)?,
             };
             key.push((desc, v));
         }
-        keyed.push((key, row.clone()));
-    }
-    keyed.sort_by(|a, c| {
+        Ok(key)
+    };
+    // Precompute the keys (independent, read-only) — in parallel for large result sets.
+    #[cfg(feature = "parallel")]
+    let mut keyed: Vec<(Vec<(bool, Value)>, Row)> = if b.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        b.rows.par_iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
+    } else {
+        b.rows.iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
+    };
+    #[cfg(not(feature = "parallel"))]
+    let mut keyed: Vec<(Vec<(bool, Value)>, Row)> =
+        b.rows.iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?;
+
+    let cmp = |a: &(Vec<(bool, Value)>, Row), c: &(Vec<(bool, Value)>, Row)| {
         for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
             let ord = compare_values(av, cv).unwrap_or(Ordering::Equal);
             let ord = if *desc { ord.reverse() } else { ord };
@@ -2420,7 +2430,17 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
             }
         }
         Ordering::Equal
-    });
+    };
+    #[cfg(feature = "parallel")]
+    if keyed.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        keyed.par_sort_by(cmp);
+    } else {
+        keyed.sort_by(cmp);
+    }
+    #[cfg(not(feature = "parallel"))]
+    keyed.sort_by(cmp);
+
     b.rows = keyed.into_iter().map(|(_, r)| r).collect();
     b.sorted_by = None;
     Ok(())
