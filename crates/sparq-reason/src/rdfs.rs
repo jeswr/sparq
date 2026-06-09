@@ -118,45 +118,220 @@ impl RdfsIndex {
     }
 }
 
+/// Below this many input triples the ABox sweep runs single-threaded (rayon fan-out is not
+/// worth the overhead).
+const PAR_THRESHOLD: usize = 4096;
+
+/// Transitive closure of a directed relation (`node -> direct successors`): returns
+/// `node -> ALL reachable successors`. BFS per source — the schema graph (subClassOf /
+/// subPropertyOf) is small relative to the data, even when deep.
+fn transitive_closure(direct: &FxHashMap<Id, Vec<Id>>) -> FxHashMap<Id, Vec<Id>> {
+    let mut closure: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for (&start, succ0) in direct {
+        let mut seen: FxHashSet<Id> = FxHashSet::default();
+        let mut stack: Vec<Id> = succ0.clone();
+        while let Some(n) = stack.pop() {
+            if seen.insert(n) {
+                if let Some(succ) = direct.get(&n) {
+                    stack.extend(succ.iter().copied());
+                }
+            }
+        }
+        closure.insert(start, seen.into_iter().collect());
+    }
+    closure
+}
+
+/// For each property, the full set of typing classes implied by `dr` (its domain or range
+/// triples), gathered over the property AND all its super-properties, each closed upward through
+/// the subclass closure. So in one pass `(s p o)` yields `(s type c)` / `(o type c)` for every
+/// `c` here — no fixpoint over rdfs2/3 ⋈ rdfs7 ⋈ rdfs9 needed.
+fn close_dr(
+    dr: &FxHashMap<Id, Vec<Id>>,
+    sp_closure: &FxHashMap<Id, Vec<Id>>,
+    sc_closure: &FxHashMap<Id, Vec<Id>>,
+) -> FxHashMap<Id, Vec<Id>> {
+    let props: FxHashSet<Id> = dr.keys().chain(sp_closure.keys()).copied().collect();
+    let mut out: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for p in props {
+        let mut classes: FxHashSet<Id> = FxHashSet::default();
+        let supers = sp_closure.get(&p).map(|v| v.as_slice()).unwrap_or(&[]);
+        for &q in std::iter::once(&p).chain(supers) {
+            if let Some(cs) = dr.get(&q) {
+                for &c in cs {
+                    classes.insert(c);
+                    if let Some(up) = sc_closure.get(&c) {
+                        classes.extend(up.iter().copied());
+                    }
+                }
+            }
+        }
+        if !classes.is_empty() {
+            out.insert(p, classes.into_iter().collect());
+        }
+    }
+    out
+}
+
+/// All RDFS consequences of one asserted triple against the (already fully-closed) schema.
+fn emit_consequences(
+    [s, p, o]: [Id; 3],
+    v: &Vocab,
+    sc_closure: &FxHashMap<Id, Vec<Id>>,
+    sp_closure: &FxHashMap<Id, Vec<Id>>,
+    dom_full: &FxHashMap<Id, Vec<Id>>,
+    rng_full: &FxHashMap<Id, Vec<Id>>,
+    out: &mut Vec<[Id; 3]>,
+) {
+    if p == v.ty {
+        // rdfs9: (s type o), (o sc* d) ⊢ (s type d)
+        if let Some(ds) = sc_closure.get(&o) {
+            out.extend(ds.iter().map(|&d| [s, v.ty, d]));
+        }
+    } else {
+        // rdfs7: (s p o), (p sp* q) ⊢ (s q o)
+        if let Some(qs) = sp_closure.get(&p) {
+            out.extend(qs.iter().map(|&q| [s, q, o]));
+        }
+        // rdfs2 + rdfs9: domain typing through all super-properties, closed up subclass
+        if let Some(cs) = dom_full.get(&p) {
+            out.extend(cs.iter().map(|&c| [s, v.ty, c]));
+        }
+        // rdfs3 + rdfs9: range typing
+        if let Some(cs) = rng_full.get(&p) {
+            out.extend(cs.iter().map(|&c| [o, v.ty, c]));
+        }
+    }
+}
+
+/// Run [`emit_consequences`] over every asserted triple. With the `parallel` feature the sweep
+/// fans out over rayon (read-only on the schema closures) into per-thread buffers.
+#[cfg(feature = "parallel")]
+fn sweep(
+    triples: &[[Id; 3]],
+    v: &Vocab,
+    sc: &FxHashMap<Id, Vec<Id>>,
+    sp: &FxHashMap<Id, Vec<Id>>,
+    dom: &FxHashMap<Id, Vec<Id>>,
+    rng: &FxHashMap<Id, Vec<Id>>,
+) -> Vec<[Id; 3]> {
+    use rayon::prelude::*;
+    if triples.len() < PAR_THRESHOLD {
+        let mut out = Vec::new();
+        for &t in triples {
+            emit_consequences(t, v, sc, sp, dom, rng, &mut out);
+        }
+        return out;
+    }
+    triples
+        .par_iter()
+        .fold(Vec::new, |mut acc, &t| {
+            emit_consequences(t, v, sc, sp, dom, rng, &mut acc);
+            acc
+        })
+        .reduce(Vec::new, |mut a, mut b| {
+            a.append(&mut b);
+            a
+        })
+}
+#[cfg(not(feature = "parallel"))]
+fn sweep(
+    triples: &[[Id; 3]],
+    v: &Vocab,
+    sc: &FxHashMap<Id, Vec<Id>>,
+    sp: &FxHashMap<Id, Vec<Id>>,
+    dom: &FxHashMap<Id, Vec<Id>>,
+    rng: &FxHashMap<Id, Vec<Id>>,
+) -> Vec<[Id; 3]> {
+    let mut out = Vec::new();
+    for &t in triples {
+        emit_consequences(t, v, sc, sp, dom, rng, &mut out);
+    }
+    out
+}
+
+/// Drop the candidates already asserted, de-duplicate the rest, and return them sorted (so the
+/// materialized output is deterministic). With the `parallel` feature the filter + sort run on
+/// rayon — a one-shot dedup, unlike the per-round HashSet churn of the old fixpoint.
+#[cfg(feature = "parallel")]
+fn dedup_derived(emitted: Vec<[Id; 3]>, original: &FxHashSet<[Id; 3]>) -> Vec<[Id; 3]> {
+    use rayon::prelude::*;
+    if emitted.len() < PAR_THRESHOLD {
+        let mut set: FxHashSet<[Id; 3]> = FxHashSet::default();
+        for t in emitted {
+            if !original.contains(&t) {
+                set.insert(t);
+            }
+        }
+        let mut d: Vec<[Id; 3]> = set.into_iter().collect();
+        d.sort_unstable();
+        return d;
+    }
+    let mut d: Vec<[Id; 3]> = emitted.into_par_iter().filter(|t| !original.contains(t)).collect();
+    d.par_sort_unstable();
+    d.dedup();
+    d
+}
+#[cfg(not(feature = "parallel"))]
+fn dedup_derived(emitted: Vec<[Id; 3]>, original: &FxHashSet<[Id; 3]>) -> Vec<[Id; 3]> {
+    let mut set: FxHashSet<[Id; 3]> = FxHashSet::default();
+    for t in emitted {
+        if !original.contains(&t) {
+            set.insert(t);
+        }
+    }
+    let mut d: Vec<[Id; 3]> = set.into_iter().collect();
+    d.sort_unstable();
+    d
+}
+
 /// Expand `triples` in place with the RDFS closure. Returns the number of NEW triples added.
+///
+/// Strategy: SATURATE THE SCHEMA (TBox) once — subClassOf / subPropertyOf transitive closures
+/// and the domain/range typing sets closed through them — then do a SINGLE data-parallel sweep
+/// of the assertions (ABox). Because the schema is fully closed, every assertion's RDFS
+/// consequences are independent and need no fixpoint, so the sweep is embarrassingly parallel.
 pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let v = Vocab::intern(dict);
     let before = triples.len();
-
-    // Dedup set seeded with the input (the input may itself contain duplicates; we return a
-    // duplicate-free closure either way).
-    let mut all: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-
-    // SEMI-NAIVE fixpoint with incremental indexes: each round derives only from the previous
-    // round's NEW facts (`delta`), joining against the index — never re-scanning the whole
-    // closure. Linear in the number of derivations instead of the naive O(rounds × closure).
-    let mut idx = RdfsIndex::default();
-    for &t in &all {
-        idx.insert(t, &v);
-    }
-    let mut delta: Vec<[Id; 3]> = all.iter().copied().collect();
-    let mut cand: Vec<[Id; 3]> = Vec::new();
-    while !delta.is_empty() {
-        cand.clear();
-        for &t in &delta {
-            idx.derive(t, &v, &mut cand);
-        }
-        let mut next: Vec<[Id; 3]> = Vec::new();
-        for &t in &cand {
-            if all.insert(t) {
-                idx.insert(t, &v);
-                next.push(t);
-            }
-        }
-        delta = next;
-    }
-
-    // Rebuild `triples` as the (duplicate-free) closure, preserving the original triples'
-    // relative order at the front for determinism, then the newly-derived ones sorted (so
-    // the materialized output is deterministic regardless of HashSet iteration order).
     let original: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-    let mut derived: Vec<[Id; 3]> = all.iter().copied().filter(|t| !original.contains(t)).collect();
-    derived.sort_unstable();
+
+    // 1. Raw schema maps from the input.
+    let mut sc: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    let mut sp: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    let mut dom: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    let mut rng: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for &[s, p, o] in &original {
+        if p == v.sub_class {
+            sc.entry(s).or_default().push(o);
+        } else if p == v.sub_prop {
+            sp.entry(s).or_default().push(o);
+        } else if p == v.domain {
+            dom.entry(s).or_default().push(o);
+        } else if p == v.range {
+            rng.entry(s).or_default().push(o);
+        }
+    }
+
+    // 2. Saturate the schema (small, serial).
+    let sc_closure = transitive_closure(&sc);
+    let sp_closure = transitive_closure(&sp);
+    let dom_full = close_dr(&dom, &sp_closure, &sc_closure);
+    let rng_full = close_dr(&rng, &sp_closure, &sc_closure);
+
+    // 3. Single parallel ABox sweep + the schema-closure triples (rdfs11 / rdfs5).
+    let asserted: Vec<[Id; 3]> = original.iter().copied().collect();
+    let mut emitted = sweep(&asserted, &v, &sc_closure, &sp_closure, &dom_full, &rng_full);
+    for (&c, ds) in &sc_closure {
+        emitted.extend(ds.iter().map(|&d| [c, v.sub_class, d]));
+    }
+    for (&p, qs) in &sp_closure {
+        emitted.extend(qs.iter().map(|&q| [p, v.sub_prop, q]));
+    }
+
+    // 4. De-duplicate the derived facts, drop those already asserted, sort for determinism.
+    let derived = dedup_derived(emitted, &original);
+
     triples.clear();
     triples.extend(original_in_order(&original));
     triples.extend(derived);

@@ -9,7 +9,14 @@ license.workspace = true
 # by default — reasoning is engaged only by depending on / invoking this crate (e.g. the CLI
 # `--reason` flag), preserving the default build's performance and memory profile.
 
+[features]
+# Parallel materialization via rayon (the fixpoint's rule-firing + dedup). On by default for
+# native builds; disable (default-features = false) for single-threaded / wasm targets.
+default = ["parallel"]
+parallel = ["dep:rayon", "sparq-core/parallel"]
+
 [dependencies]
 sparq-core = { path = "../sparq-core", default-features = false }
 oxrdf.workspace = true
 rustc-hash.workspace = true
+rayon = { workspace = true, optional = true }
