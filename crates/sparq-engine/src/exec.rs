@@ -2562,6 +2562,7 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                     let joined = vals.iter().filter_map(value_str).collect::<Vec<_>>().join(&sep);
                     Ok(Value::Term(Term::Literal(Literal::new_simple_literal(joined))))
                 }
+                AggregateFunction::Sample => Ok(vals.into_iter().next().unwrap_or(Value::Unbound)),
                 _ => Err("M2: unsupported aggregate".into()),
             }
         }
@@ -3369,6 +3370,34 @@ fn eval_function(
         F::Ceil => as_num(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
         F::Floor => as_num(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
         F::Round => as_num(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
+        // STRDT(lexical, datatypeIRI) -> typed literal.
+        F::StrDt => match (value_str(&ev(0)?), ev(1)?) {
+            (Some(lex), Value::Term(Term::NamedNode(dt))) => {
+                Value::Term(Term::Literal(Literal::new_typed_literal(lex, dt)))
+            }
+            _ => Value::Error,
+        },
+        // STRLANG(lexical, langTag) -> language-tagged literal.
+        F::StrLang => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
+            (Some(lex), Some(lang)) => match Literal::new_language_tagged_literal(lex, lang) {
+                Ok(l) => Value::Term(Term::Literal(l)),
+                Err(_) => Value::Error,
+            },
+            _ => Value::Error,
+        },
+        // LANGMATCHES(tag, range) — RFC 4647 basic filtering (`*` matches any non-empty tag).
+        F::LangMatches => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
+            (Some(tag), Some(range)) => {
+                let (tag, range) = (tag.to_ascii_lowercase(), range.to_ascii_lowercase());
+                let m = if range == "*" {
+                    !tag.is_empty()
+                } else {
+                    tag == range || tag.starts_with(&format!("{range}-"))
+                };
+                Value::Bool(m)
+            }
+            _ => Value::Error,
+        },
         #[cfg(feature = "regex")]
         F::Regex => {
             let (text, pat) = match (value_str(&ev(0)?), value_str(&ev(1)?)) {
@@ -3727,6 +3756,31 @@ mod function_tests {
         assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(isLiteral(?n)) }"), 3);
         assert_eq!(n("SELECT ?s WHERE { ?s <http://ex/name> ?n FILTER(isIRI(?s)) }"), 3);
         assert_eq!(n("SELECT ?a WHERE { ?s <http://ex/age> ?a FILTER(FLOOR(?a) = ?a) }"), 2);
+    }
+
+    #[test]
+    fn lang_typed_and_sample() {
+        let g = Graph::load_str(
+            "@prefix : <http://ex/> . :a :name \"Alice\"@en . :b :name \"Bob\"@fr . :c :name \"X\" .",
+            "turtle",
+        )
+        .unwrap();
+        let q = |s: &str| crate::query(&g, s).unwrap().len();
+        // LANGMATCHES: "en" matches the en literal; "*" matches any non-empty tag (en, fr; not X).
+        assert_eq!(q("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(LANGMATCHES(LANG(?n), \"en\")) }"), 1);
+        assert_eq!(q("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(LANGMATCHES(LANG(?n), \"*\")) }"), 2);
+        // STRLANG / STRDT construct literals (exercised via BIND — all 3 rows).
+        assert_eq!(q("SELECT ?x WHERE { ?s <http://ex/name> ?n BIND(STRLANG(STR(?n), \"de\") AS ?x) }"), 3);
+        assert_eq!(
+            q("SELECT ?x WHERE { ?s <http://ex/name> ?n BIND(STRDT(STR(?n), <http://www.w3.org/2001/XMLSchema#string>) AS ?x) }"),
+            3
+        );
+        // SAMPLE: one row per group.
+        let g2 = Graph::load_str("@prefix : <http://ex/> . :a :p :x . :a :p :y . :b :p :z .", "turtle").unwrap();
+        assert_eq!(
+            crate::query(&g2, "SELECT ?s (SAMPLE(?o) AS ?v) WHERE { ?s <http://ex/p> ?o } GROUP BY ?s").unwrap().len(),
+            2
+        );
     }
 
     #[cfg(feature = "regex")]
