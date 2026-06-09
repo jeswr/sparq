@@ -2429,10 +2429,30 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
 // ---- FILTER + expression evaluation ------------------------------------------
 
 fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
-    let mut keep = Vec::with_capacity(b.rows.len());
-    for row in &b.rows {
-        keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
-    }
+    // Per-row FILTER evaluation is independent and read-only over the graph/bindings, so a
+    // large residual (non-pushed-down) filter is evaluated in parallel on native.
+    #[cfg(feature = "parallel")]
+    let keep: Vec<bool> = if b.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        b.rows
+            .par_iter()
+            .map(|row| Ok(effective_boolean(&eval_expr(graph, local, b, row, expr)?)))
+            .collect::<Result<Vec<bool>, String>>()?
+    } else {
+        let mut keep = Vec::with_capacity(b.rows.len());
+        for row in &b.rows {
+            keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
+        }
+        keep
+    };
+    #[cfg(not(feature = "parallel"))]
+    let keep: Vec<bool> = {
+        let mut keep = Vec::with_capacity(b.rows.len());
+        for row in &b.rows {
+            keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
+        }
+        keep
+    };
     let mut i = 0;
     b.rows.retain(|_| {
         let k = keep[i];
