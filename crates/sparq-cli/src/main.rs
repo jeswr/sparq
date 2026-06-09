@@ -717,7 +717,12 @@ fn load_quiet(path: &str, format: &str) -> sparq_core::Graph {
         use std::io::Read;
         let mut text = String::new();
         open_reader(path).and_then(|mut r| r.read_to_string(&mut text)).unwrap_or_else(|e| die(e.to_string()));
-        sparq_core::Graph::load_str(&text, format).unwrap_or_else(|e| die(e))
+        // N-Quads / TriG carry named graphs — load them as a dataset so GRAPH queries work.
+        if matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
+            sparq_core::Graph::load_dataset(&text, format).unwrap_or_else(|e| die(e))
+        } else {
+            sparq_core::Graph::load_str(&text, format).unwrap_or_else(|e| die(e))
+        }
     }
 }
 

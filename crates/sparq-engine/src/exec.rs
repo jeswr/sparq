@@ -838,6 +838,67 @@ fn count_pushdown(graph: &Graph, inner: &GraphPattern) -> Option<usize> {
     }
 }
 
+/// Evaluate `GRAPH <name> { inner }`. Each named graph is a self-contained sub-`Graph` with its own
+/// dictionary, so we evaluate `inner` against it and then TRANSLATE the result ids into the outer
+/// graph's id space (materialise each term in the sub-graph, re-intern in the outer dict / local
+/// vocab) — so the bindings join and serialise correctly. `GRAPH ?g { … }` unions over every named
+/// graph, prepending the graph-name binding.
+fn eval_graph_named(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    name: &NamedNodePattern,
+    inner: &GraphPattern,
+) -> Result<Bindings, String> {
+    fn eval_translated(graph: &Graph, local: &mut LocalVocab, sub: &Graph, inner: &GraphPattern) -> Result<Bindings, String> {
+        let mut sub_local = LocalVocab::default();
+        let b = eval_graph_pattern(sub, &mut sub_local, inner)?;
+        let rows: Vec<Row> = b
+            .rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|&id| match term_of(sub, &sub_local, id) {
+                        Some(t) => value_to_id(graph, local, &Value::Term(t)),
+                        None => NO_ID,
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(Bindings::unsorted(b.vars, rows))
+    }
+    match name {
+        NamedNodePattern::NamedNode(n) => {
+            let target = Term::NamedNode(n.clone());
+            match graph.named.iter().find(|(t, _)| *t == target) {
+                Some((_, sub)) => eval_translated(graph, local, sub, inner),
+                // The named graph is absent → no solutions, but with `inner`'s variable schema
+                // (evaluate against an empty graph to get the right columns).
+                None => {
+                    let empty = Graph::load_str("", "ntriples").map_err(|e| e.to_string())?;
+                    let mut el = LocalVocab::default();
+                    eval_graph_pattern(&empty, &mut el, inner)
+                }
+            }
+        }
+        NamedNodePattern::Variable(v) => {
+            let mut acc: Option<Bindings> = None;
+            for (gname, sub) in &graph.named {
+                let mut b = eval_translated(graph, local, sub, inner)?;
+                let gid = value_to_id(graph, local, &Value::Term(gname.clone()));
+                b.vars.insert(0, v.clone());
+                for row in &mut b.rows {
+                    row.insert(0, gid);
+                }
+                acc = Some(match acc {
+                    None => b,
+                    Some(a) => union_bindings(a, b),
+                });
+            }
+            Ok(acc.unwrap_or_else(|| Bindings::unsorted(vec![v.clone()], Vec::new())))
+        }
+    }
+}
+
 fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
     if is_conjunctive(p) {
         let mut patterns = Vec::new();
@@ -889,11 +950,7 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
         }
         GraphPattern::Values { variables, bindings } => Ok(values_bindings(graph, local, variables, bindings)),
         GraphPattern::Path { subject, path, object } => eval_path(graph, subject, path, object),
-        GraphPattern::Graph { .. } => {
-            // The store is a single default graph; evaluating a named-graph
-            // pattern against it would silently return wrong matches.
-            Err("named graphs (GRAPH) are not yet supported".into())
-        }
+        GraphPattern::Graph { name, inner } => eval_graph_named(graph, local, name, inner),
         GraphPattern::Project { .. }
         | GraphPattern::Distinct { .. }
         | GraphPattern::Reduced { .. }
@@ -3875,5 +3932,25 @@ mod path_tests {
         assert_eq!(n("SELECT ?x WHERE { :d ^:p+ ?x }"), 3); // c,b,a
         // NegatedPropertySet: edges not via :p  ->  only a -q-> x.
         assert_eq!(n("SELECT ?x ?y WHERE { ?x !:p ?y }"), 1);
+    }
+
+    #[test]
+    fn named_graphs() {
+        // One default-graph triple + two named graphs (g1 has 2, g2 has 1).
+        let nq = "<http://ex/a> <http://ex/p> <http://ex/x> .\n\
+                  <http://ex/b> <http://ex/p> <http://ex/y> <http://ex/g1> .\n\
+                  <http://ex/c> <http://ex/p> <http://ex/z> <http://ex/g1> .\n\
+                  <http://ex/d> <http://ex/p> <http://ex/w> <http://ex/g2> .\n";
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+        let n = |q: &str| crate::query(&g, q).unwrap().len();
+        // The default graph holds ONLY default triples (named graphs are not folded in).
+        assert_eq!(n("SELECT * WHERE { ?s ?p ?o }"), 1);
+        assert_eq!(n("SELECT * WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }"), 2);
+        assert_eq!(n("SELECT * WHERE { GRAPH <http://ex/g2> { ?s ?p ?o } }"), 1);
+        // GRAPH ?g ranges over both named graphs (3 triples), binding ?g; an absent graph -> 0.
+        assert_eq!(n("SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }"), 3);
+        assert_eq!(n("SELECT * WHERE { GRAPH <http://ex/absent> { ?s ?p ?o } }"), 0);
+        // Result ids are translated to the outer dict, so a join across GRAPH works.
+        assert_eq!(n("SELECT ?o WHERE { GRAPH ?g { <http://ex/b> <http://ex/p> ?o } }"), 1);
     }
 }

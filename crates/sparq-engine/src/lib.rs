@@ -717,12 +717,15 @@ mod tests {
     }
 
     #[test]
-    fn named_graph_unsupported() {
-        let e = query(
+    fn named_graph_query_over_default_only_is_empty() {
+        // A graph loaded without named graphs: GRAPH ?g matches nothing (no error). Named-graph
+        // querying over an actual dataset is covered in exec::path_tests::named_graphs.
+        let r = query(
             &g(),
             "PREFIX ex: <http://ex/> SELECT ?s WHERE { GRAPH ?g { ?s ex:age ?a } }",
-        );
-        assert!(e.is_err());
+        )
+        .unwrap();
+        assert_eq!(r.len(), 0);
     }
 
     #[test]

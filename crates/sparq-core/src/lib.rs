@@ -26,6 +26,10 @@ pub struct Graph {
     /// / ORDER BY without materialising the term and parsing its string each time
     /// — a lightweight, u32-id-preserving stand-in for QLever's inline ValueIds.
     numerics: NumData,
+    /// Named graphs (each a self-contained `Graph`), keyed by their name term. Empty for the
+    /// usual single-default-graph load; populated by [`load_dataset`](Self::load_dataset) from
+    /// N-Quads / TriG so the engine can evaluate `GRAPH <iri> { … }` / `GRAPH ?g { … }`.
+    pub named: Vec<(Term, Graph)>,
 }
 
 /// Backing storage for the numeric-value cache (`numerics[id-1]` = f64 value of term
@@ -233,6 +237,54 @@ impl Graph {
         Ok((dict, triples))
     }
 
+    /// Load an RDF DATASET (N-Quads / TriG) preserving NAMED GRAPHS as separate sub-graphs, so the
+    /// engine can evaluate `GRAPH <iri> { … }` / `GRAPH ?g { … }`. Default-graph triples form the
+    /// main graph; each named graph becomes a [`named`](Self::named) entry. Formats without named
+    /// graphs defer to [`load_str`](Self::load_str). In-memory only (the mmap path is triple-only).
+    pub fn load_dataset(text: &str, format: &str) -> Result<Graph, String> {
+        use oxrdf::GraphName;
+        use std::collections::HashMap;
+        if !matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
+            return Self::load_str(text, format);
+        }
+        let bytes = text.as_bytes();
+        let mut groups: HashMap<Option<Term>, Vec<[Term; 3]>> = HashMap::new();
+        macro_rules! group {
+            ($parser:expr) => {
+                for q in $parser.for_slice(bytes) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    let g = match q.graph_name {
+                        GraphName::DefaultGraph => None,
+                        GraphName::NamedNode(n) => Some(Term::NamedNode(n)),
+                        GraphName::BlankNode(b) => Some(Term::BlankNode(b)),
+                    };
+                    groups
+                        .entry(g)
+                        .or_default()
+                        .push([subject_term(&q.subject), Term::NamedNode(q.predicate), q.object]);
+                }
+            };
+        }
+        match format {
+            "nquads" | "n-quads" => group!(NQuadsParser::new()),
+            _ => group!(TriGParser::new()),
+        }
+        let build_terms = |triples: &[[Term; 3]]| -> Graph {
+            let mut dict = Dict::new();
+            let ids: Vec<[Id; 3]> =
+                triples.iter().map(|[s, p, o]| [dict.intern(s), dict.intern(p), dict.intern(o)]).collect();
+            Self::build(dict, ids)
+        };
+        let default = groups.remove(&None).unwrap_or_default();
+        let mut g = build_terms(&default);
+        for (name, triples) in groups {
+            if let Some(name) = name {
+                g.named.push((name, build_terms(&triples)));
+            }
+        }
+        Ok(g)
+    }
+
     /// Builds a graph from an already-interned dictionary + triple set (e.g. after opt-in
     /// reasoning materialized additional triples). Public counterpart of the internal
     /// [`build`](Self::build).
@@ -334,7 +386,7 @@ impl Graph {
     fn build(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         let store = TripleStore::from_triples(triples);
         let numerics = NumData::Owned(numerics_of(&dict));
-        Graph { dict, store, numerics }
+        Graph { dict, store, numerics, named: Vec::new() }
     }
 
     /// Like [`load_str`](Self::load_str) but stores the permutation indexes
@@ -361,6 +413,7 @@ impl Graph {
             // The numeric cache is mostly (often entirely) NaN — keep only the real
             // numeric literals when sparse, freeing the dense f64-per-term Vec.
             numerics: self.numerics.into_sparse_if_worthwhile(),
+            named: self.named,
         }
     }
 
@@ -393,7 +446,7 @@ impl Graph {
             }
             _ => NumData::Owned(numerics_of(&dict)),
         };
-        Ok(Graph { dict, store, numerics })
+        Ok(Graph { dict, store, numerics, named: Vec::new() })
     }
 
     /// EXTERNAL-MEMORY build: streams an RDF document and writes the on-disk permutation
