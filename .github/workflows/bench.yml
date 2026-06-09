@@ -1,0 +1,49 @@
+name: Benchmarks
+
+# Cross-commit performance tracking (roadmap G2). On every push to main, run the engine over a
+# synthetic dataset, emit per-subsystem latencies, and store them with github-action-benchmark so
+# the trend is graphed across commits and a large regression raises an alert/comment. Runs on free
+# GitHub-hosted runners (no EC2 → no cost). Heavy/long benches that need real hardware are in the
+# separate cost-capped bench-ec2.yml (G3).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # github-action-benchmark pushes the results to the benchmark-data branch
+  deployments: write
+
+# Do NOT cancel an in-progress benchmark run (it would corrupt the stored series).
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: run + track benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --release -p sparq-cli -p sparq-bench
+      - name: Run benchmarks
+        run: bash scripts/ci-bench.sh 200000 bench-results.json
+      - name: Store + compare against history
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: sparq engine
+          tool: customSmallerIsBetter
+          output-file-path: bench-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: benchmark-data
+          benchmark-data-dir-path: dev/bench
+          # GitHub-hosted runners are noisy, so only flag a *large* regression and don't hard-fail
+          # the build on it — the value is the tracked trend + the alert comment for review.
+          alert-threshold: '200%'
+          comment-on-alert: true
+          fail-on-alert: false
+          alert-comment-cc-users: '@jeswr'
