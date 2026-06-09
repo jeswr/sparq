@@ -547,6 +547,8 @@ enum Func {
     Concat,    // string:concatenation
     Length,    // list:length
     StrLength, // string:length (Unicode scalar count)
+    First,     // list:first
+    Last,      // list:last
     // single-value-arg (unary math)
     Negation,
     AbsoluteValue,
@@ -596,6 +598,8 @@ fn functional_builtin(p: &Term) -> Option<Func> {
         (Some("concatenation"), _) => Some(Func::Concat),
         (Some("length"), _) => Some(Func::StrLength),
         (_, Some("length")) => Some(Func::Length),
+        (_, Some("first")) => Some(Func::First),
+        (_, Some("last")) => Some(Func::Last),
         _ => None,
     }
 }
@@ -630,6 +634,8 @@ fn eval_functional(
         }
         Func::Length => number_term(args.len() as f64),
         Func::StrLength => number_term(lex(&args[0])?.chars().count() as f64),
+        Func::First => args.first()?.clone(),
+        Func::Last => args.last()?.clone(),
         Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds => {
             number_term(datetime_part(lex(&args[0])?, f)? as f64)
         }
@@ -828,6 +834,19 @@ mod tests {
         let (mut d, s) = closure(src);
         let five = d.intern_lit("5", "http://www.w3.org/2001/XMLSchema#integer", None);
         assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/wordLen"), five]), "string:length(hello)=5");
+    }
+
+    #[test]
+    fn functional_list_first_last() {
+        // ( … ) list:first / list:last over a rule-local collection (T12).
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            { ( :a :b :c ) list:first ?f . ( :a :b :c ) list:last ?z } => { :s :first ?f . :s :last ?z } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(has(&d, &s, "http://ex/s", "http://ex/first", "http://ex/a"));
+        assert!(has(&d, &s, "http://ex/s", "http://ex/last", "http://ex/c"));
     }
 
     #[test]
