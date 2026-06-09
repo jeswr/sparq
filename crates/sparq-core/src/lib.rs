@@ -387,36 +387,59 @@ impl Graph {
                 }
             }};
         }
-        match format {
-            "nquads" | "n-quads" => {
-                for q in NQuadsParser::new().for_reader(reader) {
-                    let q = q.map_err(|e| e.to_string())?;
-                    push_triple!(&q.subject, &q.predicate, &q.object);
-                }
+
+        // Opt-in (`SPARQ_SHARDED_DICT`) PARALLEL sharded-dict ingest for N-Triples: interns
+        // through N hash-shards (no serial `merge_remap`), spilling temporary sharded ids
+        // that an order-preserving remap turns into final dense ids after the SPO sort. When
+        // not selected (or for other formats / non-parallel builds), the normal path runs.
+        #[cfg(all(feature = "mmap", feature = "parallel"))]
+        let sharded = matches!(format, "ntriples" | "n-triples") && std::env::var("SPARQ_SHARDED_DICT").is_ok();
+        #[cfg(not(all(feature = "mmap", feature = "parallel")))]
+        let sharded = false;
+        let mut sharded_remap: Option<(Vec<u64>, u32)> = None;
+
+        if sharded {
+            #[cfg(all(feature = "mmap", feature = "parallel"))]
+            {
+                let n_shards = (rayon::current_num_threads() * 2).clamp(4, 64);
+                let mut sd = dict::ShardedDict::new(n_shards);
+                build_external_ntriples_sharded(reader, &mut sd, &mut buf, &mut runs, &tmp, chunk)?;
+                let (merged, base, stride) = sd.into_merged();
+                dict = merged;
+                sharded_remap = Some((base, stride));
             }
-            "trig" | "application/trig" => {
-                for q in TriGParser::new().for_reader(reader) {
-                    let q = q.map_err(|e| e.to_string())?;
-                    push_triple!(&q.subject, &q.predicate, &q.object);
+        } else {
+            match format {
+                "nquads" | "n-quads" => {
+                    for q in NQuadsParser::new().for_reader(reader) {
+                        let q = q.map_err(|e| e.to_string())?;
+                        push_triple!(&q.subject, &q.predicate, &q.object);
+                    }
                 }
-            }
-            "turtle" | "ttl" => {
-                for t in TurtleParser::new().for_reader(reader) {
-                    let t = t.map_err(|e| e.to_string())?;
-                    push_triple!(&t.subject, &t.predicate, &t.object);
+                "trig" | "application/trig" => {
+                    for q in TriGParser::new().for_reader(reader) {
+                        let q = q.map_err(|e| e.to_string())?;
+                        push_triple!(&q.subject, &q.predicate, &q.object);
+                    }
                 }
-            }
-            _ => {
-                // N-Triples is the billion-scale bulk format: parse it with the custom
-                // byte parser over PARALLEL buffers (per-buffer partial dicts merged into
-                // the running dict), the user-requested "parallelise parsing of the file".
-                // Still bounded-memory: one ~64 MiB buffer + its partials at a time.
-                #[cfg(feature = "parallel")]
-                build_external_ntriples_parallel(reader, &mut dict, &mut buf, &mut runs, &tmp, chunk)?;
-                #[cfg(not(feature = "parallel"))]
-                for t in NTriplesParser::new().for_reader(reader) {
-                    let t = t.map_err(|e| e.to_string())?;
-                    push_triple!(&t.subject, &t.predicate, &t.object);
+                "turtle" | "ttl" => {
+                    for t in TurtleParser::new().for_reader(reader) {
+                        let t = t.map_err(|e| e.to_string())?;
+                        push_triple!(&t.subject, &t.predicate, &t.object);
+                    }
+                }
+                _ => {
+                    // N-Triples is the billion-scale bulk format: parse it with the custom
+                    // byte parser over PARALLEL buffers (per-buffer partial dicts merged into
+                    // the running dict), the user-requested "parallelise parsing of the file".
+                    // Still bounded-memory: one ~64 MiB buffer + its partials at a time.
+                    #[cfg(feature = "parallel")]
+                    build_external_ntriples_parallel(reader, &mut dict, &mut buf, &mut runs, &tmp, chunk)?;
+                    #[cfg(not(feature = "parallel"))]
+                    for t in NTriplesParser::new().for_reader(reader) {
+                        let t = t.map_err(|e| e.to_string())?;
+                        push_triple!(&t.subject, &t.predicate, &t.object);
+                    }
                 }
             }
         }
@@ -436,6 +459,13 @@ impl Graph {
         }
         for r in &runs {
             std::fs::remove_file(r).ok();
+        }
+        // Sharded build: the SPO perm holds TEMPORARY sharded ids — remap them to final dense
+        // ids in place (order-preserving, so it stays sorted+deduped) BEFORE the sibling sorts
+        // read it, so the permutations and the merged dictionary agree on ids.
+        #[cfg(all(feature = "mmap", feature = "parallel"))]
+        if let Some((base, stride)) = &sharded_remap {
+            remap_perm_file(&spo_path, base, *stride)?;
         }
 
         // Build the other BUILT permutations by external-sorting the SPO file into each
@@ -775,6 +805,113 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
         parser.join().map_err(|_| "parse thread panicked".to_string())??;
         producer.join().map_err(|_| "decompression thread panicked".to_string())?
     })
+}
+
+/// SHARDED variant of the parallel ingest: same decompress→parse stages, but the merge stage
+/// interns into a hash-sharded dictionary (`ShardedDict`) so the dominant dict work runs in
+/// parallel across shards instead of through one serial `merge_remap`. Triples are spilled
+/// with TEMPORARY sharded ids (`shard*STRIDE+local`); `ShardedDict::into_merged` + an
+/// order-preserving `remap_perm_file` pass turn them into final dense ids after the sort.
+#[cfg(all(feature = "mmap", feature = "parallel"))]
+fn build_external_ntriples_sharded<R: std::io::Read + Send>(
+    reader: R,
+    sharded: &mut dict::ShardedDict,
+    buf: &mut Vec<[Id; 3]>,
+    runs: &mut Vec<std::path::PathBuf>,
+    tmp: &std::path::Path,
+    chunk: usize,
+) -> Result<(), String> {
+    use std::sync::mpsc::sync_channel;
+    const BLOCK: usize = 64 << 20;
+    let (tx, rx) = sync_channel::<Vec<u8>>(3);
+    type Partials = Vec<(Dict, Vec<[Id; 3]>)>;
+    let (ptx, prx) = sync_channel::<Partials>(2);
+
+    std::thread::scope(|scope| -> Result<(), String> {
+        // Stage 1 — decompress (identical to the non-sharded pipeline).
+        let producer = scope.spawn(move || -> Result<(), String> {
+            let mut reader = reader;
+            let mut readbuf = vec![0u8; BLOCK];
+            let mut carry: Vec<u8> = Vec::new();
+            loop {
+                let mut filled = 0;
+                while filled < BLOCK {
+                    let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                if filled == 0 {
+                    if !carry.is_empty() {
+                        let _ = tx.send(std::mem::take(&mut carry));
+                    }
+                    return Ok(());
+                }
+                let mut block = std::mem::take(&mut carry);
+                block.extend_from_slice(&readbuf[..filled]);
+                let cut = block.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+                carry = block[cut..].to_vec();
+                block.truncate(cut);
+                if tx.send(block).is_err() {
+                    return Ok(());
+                }
+            }
+        });
+        // Stage 2 — parse (identical).
+        let parser = scope.spawn(move || -> Result<(), String> {
+            for block in rx {
+                if block.is_empty() {
+                    continue;
+                }
+                let partials = parse_block(&block)?;
+                if ptx.send(partials).is_err() {
+                    return Ok(());
+                }
+            }
+            Ok(())
+        });
+        // Stage 3 — SHARDED merge: route each partial's (non-inline) terms to shards and
+        // intern in parallel (component-based, no Term alloc), then remap triples to temp ids.
+        for partials in prx {
+            let t_merge = std::time::Instant::now();
+            let remaps = sharded.intern_partials(&partials);
+            build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            let t_remap = std::time::Instant::now();
+            for (pidx, (_, ptriples)) in partials.iter().enumerate() {
+                let rm = &remaps[pidx];
+                let map = |id: Id| if id >= dict::INLINE_BASE { id } else { rm[id as usize] };
+                for &[s, p, o] in ptriples {
+                    buf.push([map(s), map(p), map(o)]);
+                    if buf.len() >= chunk {
+                        extsort::spill_run(buf, runs, tmp).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            build_timing::REMAP_NS.fetch_add(t_remap.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        parser.join().map_err(|_| "parse thread panicked".to_string())??;
+        producer.join().map_err(|_| "decompression thread panicked".to_string())?
+    })
+}
+
+/// Rewrite a permutation file in place, remapping every temporary sharded id to its final
+/// dense id (`dict::remap_sharded`). Order-preserving (temp ids sort like final ids), so the
+/// already-sorted, deduplicated file stays sorted — no re-sort needed.
+#[cfg(all(feature = "mmap", feature = "parallel"))]
+fn remap_perm_file(path: &std::path::Path, base: &[u64], stride: u32) -> Result<(), String> {
+    let f = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| e.to_string())?;
+    let len = f.metadata().map_err(|e| e.to_string())?.len() as usize;
+    if len == 0 {
+        return Ok(());
+    }
+    // SAFETY: read-write mapping of a freshly-written perm file of whole [u32;3] rows.
+    let mut mmap = unsafe { memmap2::MmapMut::map_mut(&f) }.map_err(|e| e.to_string())?;
+    let ids: &mut [u32] = unsafe { std::slice::from_raw_parts_mut(mmap.as_mut_ptr().cast::<u32>(), len / 4) };
+    use rayon::prelude::*;
+    ids.par_iter_mut().for_each(|id| *id = dict::remap_sharded(*id, base, stride));
+    mmap.flush().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Parses one (complete-line) N-Triples byte block in parallel into per-chunk partial

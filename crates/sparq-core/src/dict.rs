@@ -162,6 +162,17 @@ fn hash_term(t: &Term) -> u64 {
     }
 }
 
+/// Content hash of a borrowed term — same value as `hash_term` for the same term, computed
+/// from already-split components (no `Term`, no IRI concat). Used to route the sharded
+/// interner without reconstructing a `Term` per occurrence.
+fn hash_termparts(tp: &TermParts) -> u64 {
+    match tp {
+        TermParts::Iri { prefix, suffix } => hash_iri_parts(prefix, suffix),
+        TermParts::Lit { value, datatype, lang } => hash_lit(value, datatype, *lang),
+        TermParts::Blank(b) => hash_blank(b),
+    }
+}
+
 #[inline]
 fn hash_stored(s: &Stored, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> u64 {
     match s {
@@ -477,6 +488,17 @@ impl Dict {
             Term::Literal(l) => self.intern_lit(l.value(), l.datatype().as_str(), l.language()),
             Term::BlankNode(b) => self.intern_blank(b.as_str()),
             other => unreachable!("non-triple term in dictionary: {other:?}"),
+        }
+    }
+
+    /// Interns a borrowed term (already-split components) without building a `Term` or
+    /// concatenating the IRI — the fast path used by the sharded parallel merge.
+    #[inline]
+    fn intern_parts(&mut self, tp: &TermParts) -> Id {
+        match tp {
+            TermParts::Iri { prefix, suffix } => self.intern_iri_parts(prefix, suffix),
+            TermParts::Lit { value, datatype, lang } => self.intern_lit(value, datatype, *lang),
+            TermParts::Blank(b) => self.intern_blank(b),
         }
     }
 
@@ -947,6 +969,215 @@ fn stored_owned_bytes(s: &Stored) -> usize {
     }
 }
 
+// ---- Hash-sharded dictionary for PARALLEL bulk interning --------------------------
+// The external-memory build's serial `merge_remap` (re-interning every parsed term into one
+// global dict) is the ingest bottleneck — it's latency-bound on the single growing global
+// hash table. `ShardedDict` splits it into N independent shards (a term routes to
+// `hash % N`), so the interning parallelises with NO cross-shard contention. A term gets a
+// TEMPORARY id `shard*STRIDE + shard_local_id` (STRIDE = INLINE_BASE/N ≥ max shard size);
+// these temp ids sort in the SAME order as the final dense ids `base[shard] + local`
+// (base = prefix-sum of shard sizes, monotonic), so the externally-sorted permutations need
+// only an order-preserving remap — no re-sort. `into_merged` consumes the shards into one
+// regular `Dict` (MOVING the term strings; only the small prefix/datatype id fields are
+// remapped to unified tables), reusing the existing `save_mmap`/`numerics_of` path. Inline
+// integer ids (≥ INLINE_BASE) are global and never enter a shard.
+
+/// A hash-sharded interner — see the module comment above.
+pub struct ShardedDict {
+    shards: Vec<Dict>,
+    stride: u32,
+}
+
+impl ShardedDict {
+    pub fn new(n: usize) -> ShardedDict {
+        let n = n.max(1);
+        ShardedDict { shards: (0..n).map(|_| Dict::new()).collect(), stride: INLINE_BASE / n as u32 }
+    }
+
+    pub fn n(&self) -> usize {
+        self.shards.len()
+    }
+
+    /// Route + intern a batch of `(tag, idx, term)` items (the terms must be NON-inline —
+    /// inline integers are handled by the caller), returning `(tag, idx, temp-id)`. The
+    /// per-shard interning runs in parallel (each shard is single-writer → no contention).
+    pub fn intern_terms(&mut self, items: Vec<(u32, Id, Term)>) -> Vec<(u32, Id, Id)> {
+        let n = self.shards.len();
+        let stride = self.stride;
+        let mut buckets: Vec<Vec<(u32, Id, Term)>> = (0..n).map(|_| Vec::new()).collect();
+        for (tag, idx, t) in items {
+            let s = (hash_term(&t) % n as u64) as usize;
+            buckets[s].push((tag, idx, t));
+        }
+        let intern_bucket = |s: usize, shard: &mut Dict, bucket: Vec<(u32, Id, Term)>| -> Vec<(u32, Id, Id)> {
+            bucket
+                .into_iter()
+                .map(|(tag, idx, t)| {
+                    let lid = shard.intern(&t);
+                    debug_assert!(lid < stride, "shard {s} exceeded STRIDE — raise shard count / widen Id");
+                    (tag, idx, (s as u32) * stride + lid)
+                })
+                .collect()
+        };
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            self.shards
+                .par_iter_mut()
+                .zip(buckets)
+                .enumerate()
+                .map(|(s, (shard, bucket))| intern_bucket(s, shard, bucket))
+                .flatten()
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            self.shards
+                .iter_mut()
+                .zip(buckets)
+                .enumerate()
+                .flat_map(|(s, (shard, bucket))| intern_bucket(s, shard, bucket))
+                .collect()
+        }
+    }
+
+    /// The fast bulk-merge path: route every (non-inline) term of each parsed partial dict to
+    /// its shard and intern it IN PARALLEL across shards — interning straight from the
+    /// partial's borrowed components (`term_parts`), so there is no `Term` allocation, no IRI
+    /// concat, and the cheaper part-based hashing is reused (mirrors the serial `merge_remap`
+    /// per-term cost, but parallel and contention-free). Returns a per-partial remap:
+    /// `remap[p][local_id] = temp_id` (`remap[p][0]` unused).
+    pub fn intern_partials(&mut self, partials: &[(Dict, Vec<[Id; 3]>)]) -> Vec<Vec<Id>> {
+        let n = self.shards.len();
+        let stride = self.stride;
+        // Route each term to its shard (serial scan — cheap part-based hashing).
+        let mut buckets: Vec<Vec<(u32, Id, TermParts)>> = (0..n).map(|_| Vec::new()).collect();
+        for (pidx, (pd, _)) in partials.iter().enumerate() {
+            for i in 1..=pd.len() as Id {
+                let tp = pd.term_parts(i);
+                let s = (hash_termparts(&tp) % n as u64) as usize;
+                buckets[s].push((pidx as u32, i, tp));
+            }
+        }
+        // Intern each shard's bucket in parallel (single-writer per shard → no contention).
+        let intern_bucket = |s: usize, shard: &mut Dict, bucket: Vec<(u32, Id, TermParts)>| -> Vec<(u32, Id, Id)> {
+            bucket
+                .into_iter()
+                .map(|(pidx, i, tp)| {
+                    let lid = shard.intern_parts(&tp);
+                    debug_assert!(lid < stride, "shard {s} exceeded STRIDE — raise shard count / widen Id");
+                    (pidx, i, (s as u32) * stride + lid)
+                })
+                .collect()
+        };
+        let resolved: Vec<(u32, Id, Id)> = {
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                self.shards
+                    .par_iter_mut()
+                    .zip(buckets)
+                    .enumerate()
+                    .map(|(s, (shard, bucket))| intern_bucket(s, shard, bucket))
+                    .flatten()
+                    .collect()
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                self.shards
+                    .iter_mut()
+                    .zip(buckets)
+                    .enumerate()
+                    .flat_map(|(s, (shard, bucket))| intern_bucket(s, shard, bucket))
+                    .collect()
+            }
+        };
+        let mut remaps: Vec<Vec<Id>> = partials.iter().map(|(pd, _)| vec![0 as Id; pd.len() + 1]).collect();
+        for (pidx, i, temp) in resolved {
+            remaps[pidx as usize][i as usize] = temp;
+        }
+        remaps
+    }
+
+    /// `base[s]` = number of terms in shards `< s` (the final id of shard `s`'s local 1 is
+    /// `base[s] + 1`).
+    fn bases(&self) -> Vec<u64> {
+        let mut base = Vec::with_capacity(self.shards.len() + 1);
+        let mut acc = 0u64;
+        base.push(0);
+        for sh in &self.shards {
+            acc += sh.terms.len() as u64;
+            base.push(acc);
+        }
+        base
+    }
+
+    /// Consume the shards into one merged `Dict` (final dense ids in shard order) + the
+    /// `(base, stride)` to remap temp ids → final ids. Moves term strings; only the small
+    /// prefix/datatype id fields are remapped to the unified tables.
+    pub fn into_merged(self) -> (Dict, Vec<u64>, u32) {
+        let base = self.bases();
+        let stride = self.stride;
+        // Unify prefix + datatype tables; build per-shard local-id -> unified-id remaps.
+        let (mut uni_prefixes, mut pidx): (Vec<Box<str>>, FxHashMap<Box<str>, u32>) = Default::default();
+        let (mut uni_dts, mut didx): (Vec<NamedNode>, FxHashMap<Box<str>, u32>) = Default::default();
+        let mut prefix_remap: Vec<Vec<u32>> = Vec::with_capacity(self.shards.len());
+        let mut dt_remap: Vec<Vec<u32>> = Vec::with_capacity(self.shards.len());
+        for sh in &self.shards {
+            let pr = sh
+                .prefixes
+                .iter()
+                .map(|p| {
+                    *pidx.entry(p.clone()).or_insert_with(|| {
+                        uni_prefixes.push(p.clone());
+                        (uni_prefixes.len() - 1) as u32
+                    })
+                })
+                .collect();
+            prefix_remap.push(pr);
+            let dr = sh
+                .datatypes
+                .iter()
+                .map(|d| {
+                    *didx.entry(d.as_str().into()).or_insert_with(|| {
+                        uni_dts.push(d.clone());
+                        (uni_dts.len() - 1) as u32
+                    })
+                })
+                .collect();
+            dt_remap.push(dr);
+        }
+        // Build the merged arena by MOVING each shard's Stored (only the id field remaps).
+        let total: usize = self.shards.iter().map(|s| s.terms.len()).sum();
+        let mut terms: Vec<Stored> = Vec::with_capacity(total);
+        for (s, sh) in self.shards.into_iter().enumerate() {
+            let (pr, dr) = (&prefix_remap[s], &dt_remap[s]);
+            for stored in sh.terms {
+                terms.push(match stored {
+                    Stored::Iri { prefix, suffix } => Stored::Iri { prefix: pr[prefix as usize], suffix },
+                    Stored::Lit { value, datatype, lang } => Stored::Lit { value, datatype: dr[datatype as usize], lang },
+                    Stored::Blank(b) => Stored::Blank(b),
+                });
+            }
+        }
+        let prefix_ids = uni_prefixes.iter().enumerate().map(|(i, p)| (p.clone(), i as u32)).collect();
+        let datatype_ids = uni_dts.iter().enumerate().map(|(i, d)| (d.as_str().into(), i as u32)).collect();
+        let merged = Dict { prefixes: uni_prefixes, prefix_ids, datatypes: uni_dts, datatype_ids, terms, ..Default::default() };
+        (merged, base, stride)
+    }
+}
+
+/// Remap a temporary sharded id to its final dense id (inline ids pass through unchanged).
+#[inline]
+pub fn remap_sharded(id: Id, base: &[u64], stride: u32) -> Id {
+    if id >= INLINE_BASE {
+        return id; // inline integer — global, never sharded
+    }
+    let shard = (id / stride) as usize;
+    let local = (id % stride) as u64;
+    (base[shard] + local) as Id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,6 +1231,52 @@ mod tests {
         // Compaction is idempotent.
         let d = d.into_blob();
         assert_eq!(d.term(ids[0]), terms[0]);
+    }
+
+    #[test]
+    fn sharded_dict_roundtrips_and_preserves_order() {
+        // Intern terms (with cross-shard duplicates) through the sharded interner, merge,
+        // and verify: distinct count, every term round-trips via remap→term, duplicates get
+        // the same temp id, and temp-id order == final-id order (the no-re-sort invariant).
+        let mut sd = ShardedDict::new(4);
+        let mk = |i: usize| -> Term {
+            let v = (i / 3) % 30; // value decorrelated from the type selector (i % 3)
+            match i % 3 {
+                0 => Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/n{v}"))),
+                1 => Term::Literal(Literal::new_simple_literal(format!("lit{v}"))),
+                _ => Term::BlankNode(oxrdf::BlankNode::new_unchecked(format!("b{v}"))),
+            }
+        };
+        let terms: Vec<Term> = (0..300).map(mk).collect();
+        let items: Vec<(u32, Id, Term)> = terms.iter().enumerate().map(|(j, t)| (0, (j + 1) as Id, t.clone())).collect();
+        let resolved = sd.intern_terms(items);
+        let mut temp_of: std::collections::HashMap<Id, Id> = std::collections::HashMap::new();
+        for (_, j, temp) in &resolved {
+            temp_of.insert(*j, *temp);
+        }
+        let (merged, base, stride) = sd.into_merged();
+        // 90 distinct terms: 30 IRIs + 30 literals + 30 blanks.
+        assert_eq!(merged.len(), 90, "distinct term count");
+        // Every term round-trips through remap→term.
+        for (j, t) in terms.iter().enumerate() {
+            let temp = temp_of[&((j + 1) as Id)];
+            let fin = remap_sharded(temp, &base, stride);
+            assert_eq!(merged.term(fin), *t, "term {j} round-trips");
+        }
+        // Duplicates (same content) share a temp id.
+        assert_eq!(temp_of[&1], temp_of[&91], "j=0 and j=90 are the same term (n0)");
+        // Order preservation: sorting distinct temp ids == sorting their final ids.
+        let mut temps: Vec<Id> = temp_of.values().copied().collect();
+        temps.sort_unstable();
+        temps.dedup();
+        let mut prev = 0;
+        for &temp in &temps {
+            let fin = remap_sharded(temp, &base, stride);
+            assert!(fin > prev, "final ids strictly increase with temp ids (no re-sort needed)");
+            prev = fin;
+        }
+        // Final ids are dense [1, 90].
+        assert_eq!(prev, 90, "final ids are dense and 1-based");
     }
 
     #[test]

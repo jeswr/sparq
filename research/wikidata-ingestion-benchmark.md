@@ -96,11 +96,21 @@ profile). This is exactly what the sharded parallel dict must eliminate.
      separate stages so the parse of block N+1 overlaps the merge of block N (previously
      sequential per block). Measured real 50 M `.zst`, interleaved best-of-4: 38.77 s →
      36.66 s (**−5.4 %**, every pair new<old). Modest because it only *hides the parse* under
-     the merge; the merge itself is still serial. **2b (the full win) remains:** parallelize
-     `merge_remap` itself via a concurrent/sharded dict — larger change (unsafe concurrent
-     arena or a finalization remap that breaks the streaming-sort spill; touches the
-     id-contiguity invariants in the blob/mmap-dict/numerics formats), scoped as a dedicated
-     fuzz-gated effort.
+     the merge; the merge itself is still serial.
+   - **2b DONE (`SPARQ_SHARDED_DICT=1`): hash-sharded parallel dictionary.** `ShardedDict` —
+     N independent `Dict` shards (term routes to `hash%N`) so the dominant dict work runs in
+     parallel, contention-free. A term gets a temp id `shard*STRIDE+local` (STRIDE=
+     INLINE_BASE/N); these sort in the SAME order as the final dense ids `base[shard]+local`
+     (base = prefix-sum of shard sizes), so the externally-sorted SPO needs only an
+     order-preserving `remap_perm_file` pass — no re-sort. `into_merged` consumes the shards
+     into one regular `Dict` (moving term strings, only remapping the small prefix/datatype id
+     fields), reusing the existing `save_mmap`/`numerics_of`; the merge interns straight from
+     the partials' borrowed components (`term_parts`) — no `Term` alloc. Measured real 50M
+     `.zst`, interleaved best-of-4: **36.3 s → 29.9 s (−17.6%**, every pair faster). Validated:
+     identical query answers vs the non-sharded build on the synthetic (q02=1.25M, q04=5M,
+     q06=140625, … all match) + COUNT 49,951,624 on real 50M + a roundtrip/order/dense-id unit
+     test. NOT byte-identical (different but dense ids), so opt-in (env-gated) pending soak
+     before defaulting.
 3. **[real win, dual benefit] Extend inline tagged ValueIds beyond small ints** to dateTime,
    decimal/double, boolean, short langString. Much of Wikidata's 42%-distinct mass is
    dates/quantities/coords that pack inline and **never enter the dict** — shrinks *both* the
