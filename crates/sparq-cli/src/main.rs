@@ -17,6 +17,13 @@
 use std::io::Read;
 use std::time::Instant;
 
+// T1.0 scaling lever: replace the system allocator (whose per-thread arena locks contend under
+// rayon's many-worker per-row allocation) with mimalloc (sharded, lock-light). Compile-time;
+// `--no-default-features --features mmap` builds with the system allocator for A/B.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {

@@ -6,8 +6,11 @@ license.workspace = true
 
 [features]
 # Out-of-core querying (memory-mapped on-disk indexes) — on by default for the CLI.
-default = ["mmap"]
+# mimalloc: the global allocator (T1.0). On by default; `--no-default-features --features mmap`
+# falls back to the system allocator for A/B measurement of allocator contention.
+default = ["mmap", "mimalloc"]
 mmap = ["sparq-core/mmap"]
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 sparq-core = { path = "../sparq-core", features = ["mmap"] }
@@ -15,6 +18,9 @@ sparq-engine = { path = "../sparq-engine" }
 # Direct dep so the `scaling` harness can build fixed-size rayon pools (ThreadPoolBuilder) and
 # sweep RAYON thread counts in one process — the per-subsystem parallel-efficiency instrument.
 rayon = "1"
+# Global allocator (T1.0): the system allocator's per-thread arena contention is a measured
+# scaling bottleneck under rayon (per-row SmallVec spills). mimalloc is lock-light + sharded.
+mimalloc = { version = "0.1", optional = true }
 # Opt-in reasoning (RDFS/OWL-RL materialization) — engaged only by `--reason` / the `reason`
 # subcommand; the default query/build path never touches it.
 sparq-reason = { path = "../sparq-reason" }
