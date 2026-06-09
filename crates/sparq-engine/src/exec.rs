@@ -2649,6 +2649,7 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
             }
             Ok(if errored { Value::Error } else { Value::Bool(false) })
         }
+        FunctionCall(f, args) => eval_function(graph, local, b, row, f, args),
         other => Err(format!("M2: unsupported expression: {other:?}")),
     }
 }
@@ -3093,6 +3094,120 @@ fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
         return a.partial_cmp(&b);
     }
     Some(value_str(x)?.cmp(&value_str(y)?))
+}
+
+/// SPARQL built-in function calls (`STR`, `LANG`, `CONCAT`, `SUBSTR`, type tests, numeric, …).
+/// Unsupported functions (hashes, dateTime, REGEX, BNODE/RAND/UUID) return a clear error rather
+/// than a silent wrong answer. SPARQL type errors map to `Value::Error` (EBV false; unbound on BIND).
+fn eval_function(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    row: &[Id],
+    f: &spargebra::algebra::Function,
+    args: &[Expression],
+) -> Result<Value, String> {
+    use spargebra::algebra::Function as F;
+    let ev = |i: usize| eval_expr(graph, local, b, row, &args[i]);
+    let simple = |s: String| Value::Term(Term::Literal(Literal::new_simple_literal(s)));
+    // Both operands as lexical strings, or `Value::Error` on a type error.
+    let str2 = |a: Value, c: Value, g: &dyn Fn(&str, &str) -> bool| match (value_str(&a), value_str(&c)) {
+        (Some(x), Some(y)) => Value::Bool(g(&x, &y)),
+        _ => Value::Error,
+    };
+    Ok(match f {
+        F::Str => value_str(&ev(0)?).map(simple).unwrap_or(Value::Error),
+        F::StrLen => value_str(&ev(0)?).map(|s| Value::Num(s.chars().count() as f64)).unwrap_or(Value::Error),
+        F::UCase => value_str(&ev(0)?).map(|s| simple(s.to_uppercase())).unwrap_or(Value::Error),
+        F::LCase => value_str(&ev(0)?).map(|s| simple(s.to_lowercase())).unwrap_or(Value::Error),
+        F::Lang => match ev(0)? {
+            Value::Term(Term::Literal(l)) => simple(l.language().unwrap_or("").to_string()),
+            Value::Num(_) | Value::Bool(_) => simple(String::new()),
+            _ => Value::Error,
+        },
+        F::Datatype => match ev(0)? {
+            Value::Term(Term::Literal(l)) => Value::Term(Term::NamedNode(l.datatype().into_owned())),
+            Value::Num(n) if n.fract() == 0.0 && n.is_finite() => Value::Term(Term::NamedNode(xsd::INTEGER.into_owned())),
+            Value::Num(_) => Value::Term(Term::NamedNode(xsd::DOUBLE.into_owned())),
+            Value::Bool(_) => Value::Term(Term::NamedNode(xsd::BOOLEAN.into_owned())),
+            _ => Value::Error,
+        },
+        F::Concat => {
+            let mut s = String::new();
+            for i in 0..args.len() {
+                match value_str(&ev(i)?) {
+                    Some(p) => s.push_str(&p),
+                    None => return Ok(Value::Error),
+                }
+            }
+            simple(s)
+        }
+        F::Contains => str2(ev(0)?, ev(1)?, &|a, c| a.contains(c)),
+        F::StrStarts => str2(ev(0)?, ev(1)?, &|a, c| a.starts_with(c)),
+        F::StrEnds => str2(ev(0)?, ev(1)?, &|a, c| a.ends_with(c)),
+        F::StrBefore => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
+            (Some(a), Some(c)) => a.find(&c).map(|i| simple(a[..i].to_string())).unwrap_or_else(|| simple(String::new())),
+            _ => Value::Error,
+        },
+        F::StrAfter => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
+            (Some(a), Some(c)) => a.find(&c).map(|i| simple(a[i + c.len()..].to_string())).unwrap_or_else(|| simple(String::new())),
+            _ => Value::Error,
+        },
+        F::SubStr => {
+            let s = match value_str(&ev(0)?) {
+                Some(s) => s,
+                None => return Ok(Value::Error),
+            };
+            let start = match as_num(&ev(1)?) {
+                Some(n) => n as i64,
+                None => return Ok(Value::Error),
+            };
+            let chars: Vec<char> = s.chars().collect();
+            let from = (start.max(1) - 1) as usize; // SPARQL SUBSTR is 1-indexed by codepoint
+            if args.len() >= 3 {
+                let len = match as_num(&ev(2)?) {
+                    Some(n) => n.max(0.0) as usize,
+                    None => return Ok(Value::Error),
+                };
+                simple(chars.iter().skip(from).take(len).collect())
+            } else {
+                simple(chars.iter().skip(from).collect())
+            }
+        }
+        F::EncodeForUri => value_str(&ev(0)?).map(|s| simple(encode_for_uri(&s))).unwrap_or(Value::Error),
+        F::Iri => match value_str(&ev(0)?) {
+            Some(s) => oxrdf::NamedNode::new(s).map(|n| Value::Term(Term::NamedNode(n))).unwrap_or(Value::Error),
+            None => Value::Error,
+        },
+        F::IsIri => Value::Bool(matches!(ev(0)?, Value::Term(Term::NamedNode(_)))),
+        F::IsBlank => Value::Bool(matches!(ev(0)?, Value::Term(Term::BlankNode(_)))),
+        F::IsLiteral => Value::Bool(matches!(ev(0)?, Value::Term(Term::Literal(_)) | Value::Num(_) | Value::Bool(_))),
+        F::IsNumeric => Value::Bool(match ev(0)? {
+            Value::Num(_) => true,
+            Value::Term(Term::Literal(l)) => is_numeric_dt(&l),
+            _ => false,
+        }),
+        F::Abs => as_num(&ev(0)?).map(|n| Value::Num(n.abs())).unwrap_or(Value::Error),
+        F::Ceil => as_num(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
+        F::Floor => as_num(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
+        F::Round => as_num(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
+        other => return Err(format!("unsupported SPARQL function: {other:?}")),
+    })
+}
+
+/// SPARQL `ENCODE_FOR_URI`: percent-encode everything except the unreserved set (RFC 3986
+/// ALPHA / DIGIT / `-` `.` `_` `~`).
+fn encode_for_uri(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn value_str(v: &Value) -> Option<String> {
