@@ -16,9 +16,67 @@ mod model;
 mod parser;
 
 pub use model::{Rule, Term};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 use std::collections::HashMap;
+
+/// Facts + access indexes, so a rule-body join atom is an O(1)/O(matches) lookup instead of a
+/// full scan. Indexed by (predicate, subject)→objects, (predicate, object)→subjects, and
+/// predicate→facts — the patterns that arise when a rule atom's predicate (and often one
+/// argument) is already bound. Maintained incrementally as the closure grows. Without this,
+/// even semi-naive evaluation degrades to O(N²) on recursive rule chains (DeepTaxonomy).
+#[derive(Default)]
+struct FactIndex {
+    all: FxHashSet<[Term; 3]>,
+    ps: FxHashMap<(Term, Term), Vec<Term>>, // (pred, subj) -> objects
+    po: FxHashMap<(Term, Term), Vec<Term>>, // (pred, obj) -> subjects
+    p: FxHashMap<Term, Vec<[Term; 3]>>,     // pred -> facts (predicate-only-bound)
+}
+
+impl FactIndex {
+    fn from_iter(facts: impl IntoIterator<Item = [Term; 3]>) -> FactIndex {
+        let mut ix = FactIndex::default();
+        for f in facts {
+            ix.insert(f);
+        }
+        ix
+    }
+    fn contains(&self, t: &[Term; 3]) -> bool {
+        self.all.contains(t)
+    }
+    fn len(&self) -> usize {
+        self.all.len()
+    }
+    fn insert(&mut self, t: [Term; 3]) -> bool {
+        if !self.all.insert(t.clone()) {
+            return false;
+        }
+        let [s, p, o] = &t;
+        self.ps.entry((p.clone(), s.clone())).or_default().push(o.clone());
+        self.po.entry((p.clone(), o.clone())).or_default().push(s.clone());
+        self.p.entry(p.clone()).or_default().push(t.clone());
+        true
+    }
+    /// Candidate facts matching a (partially-ground) pattern, via the most selective index.
+    fn candidates(&self, s: &Term, p: &Term, o: &Term) -> Vec<[Term; 3]> {
+        let (sg, pg, og) = (s.is_ground(), p.is_ground(), o.is_ground());
+        if pg && sg {
+            self.ps
+                .get(&(p.clone(), s.clone()))
+                .map(|os| os.iter().map(|ob| [s.clone(), p.clone(), ob.clone()]).collect())
+                .unwrap_or_default()
+        } else if pg && og {
+            self.po
+                .get(&(p.clone(), o.clone()))
+                .map(|ss| ss.iter().map(|sb| [sb.clone(), p.clone(), o.clone()]).collect())
+                .unwrap_or_default()
+        } else if pg {
+            self.p.get(p).cloned().unwrap_or_default()
+        } else {
+            self.all.iter().cloned().collect() // predicate unbound — rare; fall back to scan
+        }
+    }
+}
 
 const MATH: &str = "http://www.w3.org/2000/10/swap/math#";
 const LOG: &str = "http://www.w3.org/2000/10/swap/log#";
@@ -44,21 +102,55 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
 /// triple, in derivation order) — the EYE `--proof` analogue.
 pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     let parsed = parser::parse(src)?;
-    let mut facts: FxHashSet<[Term; 3]> = parsed.facts.into_iter().collect();
+    let mut facts = FactIndex::from_iter(parsed.facts);
     // Derivation steps at the term level (interned to ids once at the end).
     let mut steps: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
 
-    // Semi-naive-ish fixpoint: re-run every rule against the full fact set until no rule
-    // produces a new fact. (Rule sets are small; the data join dominates.)
+    // SEMI-NAIVE fixpoint: each round, a positive rule only fires on bindings that involve at
+    // least one NEWLY-derived fact (the `delta`) — run once per join-atom position, with that
+    // atom restricted to `delta` and the rest to all facts. This avoids re-deriving the whole
+    // closure every round (the naive blow-up on recursive rule chains). Rules with scoped
+    // negation are non-monotonic, so they re-evaluate against ALL facts each round (correct,
+    // matches the prior behaviour); pure-builtin rules (no join atom) fire only in round 0.
+    let rule_meta: Vec<(Vec<usize>, bool)> = parsed
+        .rules
+        .iter()
+        .map(|r| {
+            let lists = extract_lists(&r.premise);
+            let joins: Vec<usize> =
+                r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p, &lists)).map(|(i, _)| i).collect();
+            let has_neg = r.premise.iter().any(|p| scoped_negation(&p[1]).is_some());
+            (joins, has_neg)
+        })
+        .collect();
+
+    let mut delta: FxHashSet<[Term; 3]> = facts.all.clone(); // round 0: every fact is "new"
+    let mut first_round = true;
     loop {
         let mut produced: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
         for (ri, rule) in parsed.rules.iter().enumerate() {
-            for b in match_premise(&rule.premise, &facts) {
+            let (joins, has_neg) = &rule_meta[ri];
+            let bindings: Vec<Binding> = if *has_neg || joins.is_empty() {
+                // non-monotonic / constant rule: full evaluation (negation) or round-0 only.
+                if *has_neg || first_round {
+                    match_premise(&rule.premise, &facts)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                // Semi-naive: union over delta-at-each-join-position (dedup via facts.insert).
+                let mut bs = Vec::new();
+                for &k in joins {
+                    bs.extend(match_premise_seeded(&rule.premise, &facts, &Binding::new(), Some((&delta, k))));
+                }
+                bs
+            };
+            for b in bindings {
                 for c in &rule.conclusion {
                     if let Some(g) = ground_triple(c, &b) {
                         if !facts.contains(&g) {
-                            // The supporting facts: the premise patterns instantiated under b
-                            // that are actual facts (excludes builtins / list structure).
+                            // The supporting facts: premise patterns instantiated under b that
+                            // are actual facts (excludes builtins / list structure).
                             let prem: Vec<[Term; 3]> = rule
                                 .premise
                                 .iter()
@@ -71,21 +163,23 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
                 }
             }
         }
-        let mut changed = false;
+        let mut new_delta: FxHashSet<[Term; 3]> = FxHashSet::default();
         for (g, ri, prem) in produced {
             if facts.insert(g.clone()) {
-                changed = true;
+                new_delta.insert(g.clone());
                 steps.push((g, ri, prem));
             }
         }
-        if !changed {
+        first_round = false;
+        if new_delta.is_empty() {
             break;
         }
+        delta = new_delta;
     }
 
     // Intern the ground closure into the dictionary.
     let mut out = Vec::with_capacity(facts.len());
-    for t in &facts {
+    for t in &facts.all {
         out.push([intern(dict, &t[0])?, intern(dict, &t[1])?, intern(dict, &t[2])?]);
     }
     // Intern the proof steps.
@@ -107,13 +201,43 @@ type Binding = HashMap<String, Term>;
 /// evaluating builtins as filters/computations). N3 collections `( … )` in the premise are
 /// rule-local list STRUCTURE (rdf:first/rest over fresh bnodes), not data to match — they are
 /// extracted up front and consumed by the functional builtins (e.g. `math:sum`).
-fn match_premise(premise: &[[Term; 3]], facts: &FxHashSet<[Term; 3]>) -> Vec<Binding> {
-    match_premise_seeded(premise, facts, &Binding::new())
+fn match_premise(premise: &[[Term; 3]], facts: &FactIndex) -> Vec<Binding> {
+    match_premise_seeded(premise, facts, &Binding::new(), None)
 }
 
-/// Match `premise` starting from an existing partial binding `seed` (used to recurse into
-/// `log:includes`/`log:notIncludes` sub-formulae under the current bindings).
-fn match_premise_seeded(premise: &[[Term; 3]], facts: &FxHashSet<[Term; 3]>, seed: &Binding) -> Vec<Binding> {
+/// Match `premise` starting from an existing partial binding `seed`. For SEMI-NAIVE
+/// evaluation, `delta_at = Some((delta, k))` restricts the join atom at premise index `k` to
+/// match only the `delta` set (the newly-derived facts) rather than the full `facts` — so the
+/// driver, by running once per join-atom index, considers only bindings that involve ≥1 new
+/// fact. `None` = naive (every join atom matches all facts); also used for the negation
+/// sub-formula recursion.
+fn match_premise_seeded(
+    premise: &[[Term; 3]],
+    facts: &FactIndex,
+    seed: &Binding,
+    delta_at: Option<(&FxHashSet<[Term; 3]>, usize)>,
+) -> Vec<Binding> {
+    // Semi-naive: seed from the DELTA atom first (delta is small → most selective), then
+    // evaluate the rest against the index. Doing the delta atom first makes it prune early
+    // instead of letting a non-delta atom do a full predicate-index scan.
+    if let Some((delta, k)) = delta_at {
+        let mut seeds = Vec::new();
+        for fact in delta {
+            if let Some(nb) = unify(&premise[k], fact, seed) {
+                seeds.push(nb);
+            }
+        }
+        if seeds.is_empty() {
+            return Vec::new();
+        }
+        let rest: Vec<[Term; 3]> =
+            premise.iter().enumerate().filter(|&(i, _)| i != k).map(|(_, p)| p.clone()).collect();
+        let mut out = Vec::new();
+        for s in &seeds {
+            out.extend(match_premise_seeded(&rest, facts, s, None));
+        }
+        return out;
+    }
     let lists = extract_lists(premise);
     let mut bindings: Vec<Binding> = vec![seed.clone()];
     for pat in premise {
@@ -128,7 +252,7 @@ fn match_premise_seeded(premise: &[[Term; 3]], facts: &FxHashSet<[Term; 3]>, see
                 _ => &[],
             };
             bindings.retain(|b| {
-                let holds = !match_premise_seeded(inner, facts, b).is_empty();
+                let holds = !match_premise_seeded(inner, facts, b, None).is_empty();
                 if is_not {
                     !holds
                 } else {
@@ -168,9 +292,11 @@ fn match_premise_seeded(premise: &[[Term; 3]], facts: &FxHashSet<[Term; 3]>, see
         } else if let Some(op) = builtin(&pat[1]) {
             bindings.retain(|b| eval_builtin(op, &pat[0], &pat[2], b));
         } else {
+            // Join atom: selective FactIndex lookup (no full scan) for each current binding.
             let mut next = Vec::new();
             for b in &bindings {
-                for fact in facts {
+                let cands = facts.candidates(&apply(&pat[0], b), &apply(&pat[1], b), &apply(&pat[2], b));
+                for fact in &cands {
                     if let Some(nb) = unify(pat, fact, b) {
                         next.push(nb);
                     }
@@ -183,6 +309,16 @@ fn match_premise_seeded(premise: &[[Term; 3]], facts: &FxHashSet<[Term; 3]>, see
         }
     }
     bindings
+}
+
+/// Whether a premise pattern is a JOIN atom (matched against facts), as opposed to a builtin,
+/// list generator/structure, or scoped-negation atom.
+fn is_join_atom(pat: &[Term; 3], lists: &HashMap<Term, Vec<Term>>) -> bool {
+    builtin(&pat[1]).is_none()
+        && functional_builtin(&pat[1]).is_none()
+        && list_generator(&pat[1]).is_none()
+        && scoped_negation(&pat[1]).is_none()
+        && !is_list_struct(pat, lists)
 }
 
 /// Resolve every list node in `premise` (rooted at an rdf:first) to its member sequence.
