@@ -1,5 +1,6 @@
 /target
-Cargo.lock
 /.qlever-venv
 /bench/native-qlever/
 /dist
+# Local AWS hwbench scratch (keys/results) — never committed.
+/.sparq-hwbench/
