@@ -2298,6 +2298,7 @@ fn group_aggregate(
     // every group) in parallel: it is read-only (`&LocalVocab`) and independent across groups.
     // Interning the results (`value_to_id`, needs `&mut LocalVocab`) stays serial and in `order`,
     // so the output is byte-identical to the serial path.
+    #[cfg(feature = "parallel")]
     let agg_values: Vec<Vec<Value>> = if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
@@ -2324,6 +2325,17 @@ fn group_aggregate(
             })
             .collect::<Result<Vec<_>, String>>()?
     };
+    #[cfg(not(feature = "parallel"))]
+    let agg_values: Vec<Vec<Value>> = order
+        .iter()
+        .map(|key| {
+            let members = &groups[key];
+            aggregates
+                .iter()
+                .map(|(_, agg)| eval_aggregate(graph, local, &b, members, agg))
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let mut rows: Vec<Row> = Vec::with_capacity(order.len());
     for (key, vals) in order.iter().zip(agg_values) {
         let mut row = Row::from_slice(key);
