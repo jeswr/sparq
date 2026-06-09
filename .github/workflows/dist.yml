@@ -21,31 +21,43 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple silicon: ONE binary, no target-cpu (Darwin baseline already enables
-          # every Apple-silicon feature; native unlocks zero new instructions).
-          - { tier: arm64-darwin,  os: macos-14,      target: aarch64-apple-darwin,       cpu: "" }
-          # x86-64 server tiers: baseline (runs anywhere) + v3 (AVX2/BMI2/FMA, ~95% of
-          # live servers) + v4 (AVX-512, newest). A launcher picks by /proc/cpuinfo.
-          - { tier: x64-baseline,  os: ubuntu-latest, target: x86_64-unknown-linux-gnu,   cpu: x86-64 }
-          - { tier: x64-v3,        os: ubuntu-latest, target: x86_64-unknown-linux-gnu,   cpu: x86-64-v3 }
-          - { tier: x64-v4,        os: ubuntu-latest, target: x86_64-unknown-linux-gnu,   cpu: x86-64-v4 }
-          # Generic aarch64 server (Graviton/Ampere): neoverse-n1 + LSE atomics.
-          - { tier: arm64-linux,   os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, cpu: neoverse-n1 }
+          # ---- Apple ----
+          # Apple silicon (M1–M4): ONE binary, no target-cpu (Darwin baseline already enables
+          # every Apple-silicon feature; native unlocks zero new instructions — measured).
+          - { tier: arm64-darwin,     os: macos-14,         target: aarch64-apple-darwin,      cpu: "",          ext: "" }
+          # Intel Macs: x86-64-v3 (every Intel Mac since ~2015 / Haswell has AVX2).
+          - { tier: x64-darwin,       os: macos-13,         target: x86_64-apple-darwin,       cpu: x86-64-v3,   ext: "" }
+          # ---- x86-64 Linux (servers + the launcher's fat package) ----
+          # baseline (SSE2, runs anywhere) + v2 (SSE4.2, ~2009+) + v3 (AVX2/BMI2/FMA, common
+          # modern) + v4 (AVX-512, newest). The launcher picks by /proc/cpuinfo.
+          - { tier: x64-baseline,     os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64,      ext: "" }
+          - { tier: x64-v2,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v2,   ext: "" }
+          - { tier: x64-v3,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v3,   ext: "" }
+          - { tier: x64-v4,           os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  cpu: x86-64-v4,   ext: "" }
+          # Generic aarch64 Linux (Graviton/Ampere servers, Raspberry Pi 4+): neoverse-n1 + LSE.
+          - { tier: arm64-linux,      os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, cpu: neoverse-n1, ext: "" }
+          # ---- Windows (the largest consumer desktop platform) ----
+          - { tier: win-x64-baseline, os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64,      ext: ".exe" }
+          - { tier: win-x64-v3,       os: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64-v3,   ext: ".exe" }
+          # Windows on ARM (Surface Pro X, Snapdragon X Elite) — cross-compiled from the x64 runner.
+          - { tier: win-arm64,        os: windows-latest,   target: aarch64-pc-windows-msvc,   cpu: "",          ext: ".exe" }
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust + target
+        shell: bash
         run: |
           rustup toolchain install stable --profile minimal
           rustup target add ${{ matrix.target }}
       - name: Build (${{ matrix.cpu || 'default-cpu' }})
+        shell: bash
         run: |
           FLAGS=""
           [ -n "${{ matrix.cpu }}" ] && FLAGS="-Ctarget-cpu=${{ matrix.cpu }}"
           [ "${{ matrix.tier }}" = "arm64-linux" ] && FLAGS="$FLAGS -Ctarget-feature=+lse"
           RUSTFLAGS="$FLAGS" cargo build --release -p sparq-cli --target ${{ matrix.target }}
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/sparq-cli dist/sparq-cli-${{ matrix.tier }}
+          cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}"
       - uses: actions/upload-artifact@v4
         with:
           name: sparq-cli-${{ matrix.tier }}
-          path: dist/sparq-cli-${{ matrix.tier }}
+          path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}

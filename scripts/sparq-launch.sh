@@ -19,6 +19,8 @@ pick=""
 case "$os/$arch" in
   Darwin/arm64|Darwin/aarch64)
     pick=arm64-darwin ;;                       # one binary — native unlocks nothing extra
+  Darwin/x86_64)
+    pick=x64-darwin ;;                         # Intel Mac (Haswell+ → AVX2/v3)
   Linux/aarch64|Linux/arm64)
     pick=arm64-linux ;;                        # neoverse/+lse build runs on all armv8.2+
   Linux/x86_64|*/x86_64|*/amd64)
@@ -28,7 +30,9 @@ case "$os/$arch" in
     if has avx512f && has avx512bw && has avx512vl && has avx512dq && has avx512cd; then
       pick=x64-v4                              # x86-64-v4
     elif has avx2 && has bmi2 && has fma && has movbe; then
-      pick=x64-v3                              # x86-64-v3 — the common server tier
+      pick=x64-v3                              # x86-64-v3 — the common modern tier
+    elif has sse4_2 && has popcnt; then
+      pick=x64-v2                              # x86-64-v2 — ~2009+ CPUs
     else
       pick=x64-baseline                        # SSE2 — runs anywhere
     fi ;;
@@ -37,8 +41,8 @@ esac
 
 bin="$DIST/sparq-cli-$pick"
 if [ ! -x "$bin" ]; then
-  # Fall back to baseline if the chosen tier wasn't shipped.
-  for fb in "$pick" x64-baseline arm64-linux arm64-darwin; do
+  # Fall back down the compatibility ladder if the chosen tier wasn't shipped.
+  for fb in "$pick" x64-v3 x64-v2 x64-baseline arm64-linux arm64-darwin; do
     [ -x "$DIST/sparq-cli-$fb" ] && { bin="$DIST/sparq-cli-$fb"; pick="$fb"; break; }
   done
 fi
