@@ -31,6 +31,14 @@ done
 loadbest=$(sort -n "$TMP/loads" | head -1)
 [ -n "${loadbest:-}" ] && add load_s s "$loadbest"
 
+# Memory regression metrics (DETERMINISTIC — not runner-noise) from the load summary line
+# "store ~X GB (W B/triple), dict ~Y GB (… Z B/term)". These directly track memory efficiency
+# across commits, satisfying the "no regressions in memory usage" requirement.
+btriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
+[ -n "${btriple:-}" ] && add store_bytes_per_triple bytes "$btriple"
+bterm=$(grep -oE '[0-9]+ B/term' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
+[ -n "${bterm:-}" ] && add dict_bytes_per_term bytes "$bterm"
+
 # query latencies — bench reports min-of-iters micros per query (TSV: name<TAB>rows<TAB>micros).
 for mode in count materialize json; do
   "$CLI" bench "$TMP/data.nt" ntriples "$Q" 3 "$mode" 2>/dev/null > "$TMP/o" || true
