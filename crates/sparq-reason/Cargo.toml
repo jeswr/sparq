@@ -20,3 +20,5 @@ sparq-core = { path = "../sparq-core", default-features = false }
 oxrdf.workspace = true
 rustc-hash.workspace = true
 rayon = { workspace = true, optional = true }
+# string:matches N3 builtin (regex). sparq-reason is native-only — never in the wasm graph.
+regex = "1"

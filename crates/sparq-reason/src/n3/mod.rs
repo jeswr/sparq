@@ -425,6 +425,7 @@ enum Builtin {
     StrEnds,
     StrGt,
     StrLt,
+    StrMatches, // string:matches (regex)
 }
 
 fn builtin(p: &Term) -> Option<Builtin> {
@@ -454,6 +455,7 @@ fn builtin(p: &Term) -> Option<Builtin> {
             "endsWith" => Builtin::StrEnds,
             "greaterThan" => Builtin::StrGt,
             "lessThan" => Builtin::StrLt,
+            "matches" => Builtin::StrMatches,
             _ => return None,
         });
     }
@@ -465,7 +467,12 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
     match op {
         Builtin::LogEq => s == o,
         Builtin::LogNe => s != o,
-        Builtin::StrContains | Builtin::StrStarts | Builtin::StrEnds | Builtin::StrGt | Builtin::StrLt => {
+        Builtin::StrContains
+        | Builtin::StrStarts
+        | Builtin::StrEnds
+        | Builtin::StrGt
+        | Builtin::StrLt
+        | Builtin::StrMatches => {
             let (Some(x), Some(y)) = (lex(&s), lex(&o)) else { return false };
             match op {
                 Builtin::StrContains => x.contains(y),
@@ -473,6 +480,7 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
                 Builtin::StrEnds => x.ends_with(y),
                 Builtin::StrGt => x > y,
                 Builtin::StrLt => x < y,
+                Builtin::StrMatches => regex::Regex::new(y).map(|re| re.is_match(x)).unwrap_or(false),
                 _ => unreachable!(),
             }
         }
@@ -852,6 +860,19 @@ mod tests {
         let (mut d, s) = closure(src);
         let five = d.intern_lit("5", "http://www.w3.org/2001/XMLSchema#integer", None);
         assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/wordLen"), five]), "string:length(hello)=5");
+    }
+
+    #[test]
+    fn string_matches_regex() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :a :code "AB-123" . :b :code "xyz" .
+            { ?x :code ?c . ?c string:matches "^[A-Z]+-[0-9]+$" } => { ?x a :Valid } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(has(&d, &s, "http://ex/a", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Valid"));
+        assert!(!has(&d, &s, "http://ex/b", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Valid"));
     }
 
     #[test]
