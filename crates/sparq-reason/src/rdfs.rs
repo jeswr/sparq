@@ -173,7 +173,27 @@ fn close_dr(
     out
 }
 
-/// All RDFS consequences of one asserted triple against the (already fully-closed) schema.
+/// The MONOTONE OWL-RL property layer that can be saturated in the single pass: for each
+/// property `p`, the full set of `(r, swapped)` pairs reachable from `p` by composing
+/// `rdfs:subPropertyOf` (rdfs7), `owl:inverseOf` (prp-inv), `owl:SymmetricProperty`
+/// (prp-symp), and `owl:equivalentProperty` (= bidirectional subPropertyOf). `swapped=false`
+/// keeps the subject/object orientation; `swapped=true` transposes it. Closed once over the
+/// (small, TBox-only) property-orientation graph — the property analogue of `sc_closure`.
+///
+/// When present this REPLACES the plain `sp_closure` rewrite in [`emit_consequences`]: an
+/// asserted `(x p y)` then emits `(x r y)` for every `(r,false)` and `(y r x)` for every
+/// `(r,true)`, and the domain/range typing of `r` is applied with that orientation. Every
+/// emitted edge is an OWL-RL entailment (each composition step is a valid rule), and the BFS
+/// closure is complete, so the result is byte-identical to the fixpoint over this subset.
+#[derive(Default)]
+pub(crate) struct PropExpand {
+    /// `p -> [(r, swapped)]` — derived predicate `r` and whether subject/object are transposed.
+    map: FxHashMap<Id, Vec<(Id, bool)>>,
+}
+
+/// All RDFS consequences of one asserted triple against the (already fully-closed) schema,
+/// optionally extended by the monotone-OWL property-orientation closure `px`.
+#[allow(clippy::too_many_arguments)]
 fn emit_consequences(
     [s, p, o]: [Id; 3],
     v: &Vocab,
@@ -181,12 +201,28 @@ fn emit_consequences(
     sp_closure: &FxHashMap<Id, Vec<Id>>,
     dom_full: &FxHashMap<Id, Vec<Id>>,
     rng_full: &FxHashMap<Id, Vec<Id>>,
+    px: Option<&PropExpand>,
     out: &mut Vec<[Id; 3]>,
 ) {
     if p == v.ty {
         // rdfs9: (s type o), (o sc* d) ⊢ (s type d)
         if let Some(ds) = sc_closure.get(&o) {
             out.extend(ds.iter().map(|&d| [s, v.ty, d]));
+        }
+    } else if let Some(px) = px {
+        // Monotone-OWL path: rewrite the predicate AND orient through inverse/symmetric, then
+        // type via domain/range of the (oriented) derived predicate.
+        if let Some(rs) = px.map.get(&p) {
+            for &(r, swapped) in rs {
+                let (rs_, ro_) = if swapped { (o, s) } else { (s, o) };
+                out.push([rs_, r, ro_]); // rdfs7 / prp-inv / prp-symp / prp-eqp
+                if let Some(cs) = dom_full.get(&r) {
+                    out.extend(cs.iter().map(|&c| [rs_, v.ty, c])); // rdfs2 (+rdfs9)
+                }
+                if let Some(cs) = rng_full.get(&r) {
+                    out.extend(cs.iter().map(|&c| [ro_, v.ty, c])); // rdfs3 (+rdfs9)
+                }
+            }
         }
     } else {
         // rdfs7: (s p o), (p sp* q) ⊢ (s q o)
@@ -207,6 +243,7 @@ fn emit_consequences(
 /// Run [`emit_consequences`] over every asserted triple. With the `parallel` feature the sweep
 /// fans out over rayon (read-only on the schema closures) into per-thread buffers.
 #[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
 fn sweep(
     triples: &[[Id; 3]],
     v: &Vocab,
@@ -214,19 +251,20 @@ fn sweep(
     sp: &FxHashMap<Id, Vec<Id>>,
     dom: &FxHashMap<Id, Vec<Id>>,
     rng: &FxHashMap<Id, Vec<Id>>,
+    px: Option<&PropExpand>,
 ) -> Vec<[Id; 3]> {
     use rayon::prelude::*;
     if triples.len() < PAR_THRESHOLD {
         let mut out = Vec::new();
         for &t in triples {
-            emit_consequences(t, v, sc, sp, dom, rng, &mut out);
+            emit_consequences(t, v, sc, sp, dom, rng, px, &mut out);
         }
         return out;
     }
     triples
         .par_iter()
         .fold(Vec::new, |mut acc, &t| {
-            emit_consequences(t, v, sc, sp, dom, rng, &mut acc);
+            emit_consequences(t, v, sc, sp, dom, rng, px, &mut acc);
             acc
         })
         .reduce(Vec::new, |mut a, mut b| {
@@ -235,6 +273,7 @@ fn sweep(
         })
 }
 #[cfg(not(feature = "parallel"))]
+#[allow(clippy::too_many_arguments)]
 fn sweep(
     triples: &[[Id; 3]],
     v: &Vocab,
@@ -242,10 +281,11 @@ fn sweep(
     sp: &FxHashMap<Id, Vec<Id>>,
     dom: &FxHashMap<Id, Vec<Id>>,
     rng: &FxHashMap<Id, Vec<Id>>,
+    px: Option<&PropExpand>,
 ) -> Vec<[Id; 3]> {
     let mut out = Vec::new();
     for &t in triples {
-        emit_consequences(t, v, sc, sp, dom, rng, &mut out);
+        emit_consequences(t, v, sc, sp, dom, rng, px, &mut out);
     }
     out
 }
@@ -285,9 +325,91 @@ fn dedup_derived(emitted: Vec<[Id; 3]>, original: &FxHashSet<[Id; 3]>) -> Vec<[I
     d
 }
 
+/// The MONOTONE OWL-RL TBox that the single-pass sweep can saturate alongside RDFS, supplied
+/// by the OWL materializer when an ontology uses ONLY these (non-recursive) features. Each is
+/// fixed by the input (no OWL-RL rule derives `inverseOf` / `SymmetricProperty` / `equivalent*`
+/// / `subPropertyOf`-from-nothing), so saturating them once is complete.
+#[derive(Default)]
+pub(crate) struct MonoOwl {
+    /// `owl:equivalentClass` pairs (folded into subClassOf both ways — scm-eqc + cax-eqc).
+    pub equiv_class: Vec<(Id, Id)>,
+    /// `owl:equivalentProperty` pairs (folded into subPropertyOf both ways — scm-eqp + prp-eqp).
+    pub equiv_prop: Vec<(Id, Id)>,
+    /// `owl:inverseOf` direct edges, both directions (prp-inv1/2).
+    pub inverse: FxHashMap<Id, Vec<Id>>,
+    /// `owl:SymmetricProperty` (prp-symp).
+    pub symmetric: FxHashSet<Id>,
+}
+
+impl MonoOwl {
+    fn needs_prop_expand(&self) -> bool {
+        !self.inverse.is_empty() || !self.symmetric.is_empty()
+    }
+}
+
+/// Build the property-orientation closure (see [`PropExpand`]) from the saturated subPropertyOf
+/// closure plus the monotone-OWL inverse/symmetric axioms. BFS over `(property, orientation)`
+/// nodes; small (TBox-only). The start node `(p,false)` is INCLUDED so the asserted edge's own
+/// predicate is rewritten uniformly (and its domain/range typed); the asserted triple itself is
+/// dropped later by the dedup against `original`.
+fn build_prop_expand(sp_closure: &FxHashMap<Id, Vec<Id>>, m: &MonoOwl) -> PropExpand {
+    // Every property mentioned anywhere in the property TBox/ABox flows through here; we expand
+    // lazily per start property encountered as a key of the union of relevant maps.
+    let starts: FxHashSet<Id> = sp_closure
+        .keys()
+        .chain(m.inverse.keys())
+        .chain(m.symmetric.iter())
+        .copied()
+        .collect();
+    // We must also expand properties that only appear as subPropertyOf SUPERS or inverse targets;
+    // collect those too so a bare asserted `(x p y)` whose p is e.g. only an inverse target still
+    // resolves. (Properties never mentioned in the TBox have the trivial {(p,false)} expansion,
+    // handled by the `None` fall-through in emit_consequences via sp_closure absence — but with
+    // PropExpand active we need an explicit entry, so include all reachable property ids.)
+    let mut all_props: FxHashSet<Id> = starts.clone();
+    for sup in sp_closure.values() {
+        all_props.extend(sup.iter().copied());
+    }
+    for inv in m.inverse.values() {
+        all_props.extend(inv.iter().copied());
+    }
+    let mut map: FxHashMap<Id, Vec<(Id, bool)>> = FxHashMap::default();
+    for &p in &all_props {
+        let mut seen: FxHashSet<(Id, bool)> = FxHashSet::default();
+        let mut stack: Vec<(Id, bool)> = vec![(p, false)];
+        while let Some((q, or)) = stack.pop() {
+            if !seen.insert((q, or)) {
+                continue;
+            }
+            // subPropertyOf (incl. equivalentProperty folded in earlier): same orientation.
+            if let Some(sups) = sp_closure.get(&q) {
+                for &r in sups {
+                    if !seen.contains(&(r, or)) {
+                        stack.push((r, or));
+                    }
+                }
+            }
+            // inverseOf: flip orientation.
+            if let Some(invs) = m.inverse.get(&q) {
+                for &r in invs {
+                    if !seen.contains(&(r, !or)) {
+                        stack.push((r, !or));
+                    }
+                }
+            }
+            // SymmetricProperty: flip orientation, same predicate.
+            if m.symmetric.contains(&q) && !seen.contains(&(q, !or)) {
+                stack.push((q, !or));
+            }
+        }
+        map.insert(p, seen.into_iter().collect());
+    }
+    PropExpand { map }
+}
+
 /// Expand `triples` in place with the RDFS closure. Returns the number of NEW triples added.
 pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
-    rdfs_closure(dict, triples, false)
+    rdfs_closure(dict, triples, false, &MonoOwl::default())
 }
 
 /// The RDFS closure, plus — when `emit_dr_closure` — the OWL-RL `scm-dom1/2` / `scm-rng1/2`
@@ -299,7 +421,12 @@ pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
 /// are independent and need no fixpoint, so the sweep is embarrassingly parallel. Used directly
 /// for RDFS, and by the OWL-RL materializer when the ontology uses no OWL-specific features (the
 /// OWL closure is then exactly RDFS + scm-dom/rng).
-pub(crate) fn rdfs_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>, emit_dr_closure: bool) -> usize {
+pub(crate) fn rdfs_closure(
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+    emit_dr_closure: bool,
+    mono: &MonoOwl,
+) -> usize {
     let v = Vocab::intern(dict);
     let before = triples.len();
     let original: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
@@ -320,6 +447,18 @@ pub(crate) fn rdfs_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>, emit_dr_
             rng.entry(s).or_default().push(o);
         }
     }
+    // Monotone OWL: fold equivalentClass/equivalentProperty into subClassOf/subPropertyOf both
+    // ways BEFORE saturation (scm-eqc/scm-eqp). cax-eqc1/2 and prp-eqp1/2 then follow for free
+    // from rdfs9/rdfs7 over the added edges, and the closure emits the subClassOf/subPropertyOf
+    // triples exactly as the fixpoint's scm-eqc/eqp do.
+    for &(a, b) in &mono.equiv_class {
+        sc.entry(a).or_default().push(b);
+        sc.entry(b).or_default().push(a);
+    }
+    for &(a, b) in &mono.equiv_prop {
+        sp.entry(a).or_default().push(b);
+        sp.entry(b).or_default().push(a);
+    }
 
     // 2. Saturate the schema (small, serial).
     let sc_closure = transitive_closure(&sc);
@@ -327,9 +466,24 @@ pub(crate) fn rdfs_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>, emit_dr_
     let dom_full = close_dr(&dom, &sp_closure, &sc_closure);
     let rng_full = close_dr(&rng, &sp_closure, &sc_closure);
 
+    // Property-orientation closure for inverseOf/SymmetricProperty (only when needed).
+    let prop_expand = if mono.needs_prop_expand() {
+        Some(build_prop_expand(&sp_closure, mono))
+    } else {
+        None
+    };
+
     // 3. Single parallel ABox sweep + the schema-closure triples (rdfs11 / rdfs5).
     let asserted: Vec<[Id; 3]> = original.iter().copied().collect();
-    let mut emitted = sweep(&asserted, &v, &sc_closure, &sp_closure, &dom_full, &rng_full);
+    let mut emitted = sweep(
+        &asserted,
+        &v,
+        &sc_closure,
+        &sp_closure,
+        &dom_full,
+        &rng_full,
+        prop_expand.as_ref(),
+    );
     for (&c, ds) in &sc_closure {
         emitted.extend(ds.iter().map(|&d| [c, v.sub_class, d]));
     }

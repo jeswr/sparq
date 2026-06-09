@@ -246,17 +246,80 @@ fn owl_uses_features(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> bool {
     triples.iter().any(|&[_, p, ob]| preds.contains(&p) || (p == v.ty && types.contains(&ob)))
 }
 
+/// If the ontology uses ONLY the monotone / non-recursive OWL-RL subset (equivalentClass,
+/// equivalentProperty, inverseOf, SymmetricProperty) — and NONE of the recursive features that
+/// require the fixpoint (owl:sameAs, Transitive/Functional/InverseFunctionalProperty,
+/// propertyChainAxiom, the restriction/cardinality/hasKey/intersection/union family) — return a
+/// [`MonoOwl`](crate::rdfs::MonoOwl) descriptor so the closure runs in the single-pass sweep.
+/// Returns `None` (→ fixpoint) the moment any recursive feature is present.
+fn monotone_only(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> Option<crate::rdfs::MonoOwl> {
+    // Predicates / type-objects whose presence forces the recursive fixpoint.
+    let recursive_preds: FxHashSet<Id> = [
+        o.same_as,
+        o.property_chain,
+        o.on_property,
+        o.some_values,
+        o.all_values,
+        o.has_value,
+        o.intersection,
+        o.union,
+        o.has_key,
+        o.max_cardinality,
+        o.max_qual_card,
+        o.on_class,
+    ]
+    .into_iter()
+    .collect();
+    let recursive_types: FxHashSet<Id> =
+        [o.transitive, o.functional, o.inv_functional].into_iter().collect();
+
+    let mut mono = crate::rdfs::MonoOwl::default();
+    for &[s, p, ob] in triples {
+        if recursive_preds.contains(&p) {
+            return None;
+        }
+        if p == o.inverse_of {
+            mono.inverse.entry(s).or_default().push(ob);
+            mono.inverse.entry(ob).or_default().push(s);
+        } else if p == o.equiv_class {
+            mono.equiv_class.push((s, ob));
+        } else if p == o.equiv_prop {
+            mono.equiv_prop.push((s, ob));
+        } else if p == v.ty {
+            if recursive_types.contains(&ob) {
+                return None;
+            }
+            if ob == o.symmetric {
+                mono.symmetric.insert(s);
+            }
+        }
+    }
+    Some(mono)
+}
+
 /// Expand `triples` in place with the OWL 2 RL (+ RDFS) closure. Returns NEW triple count.
 pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let v = Vocab::intern(dict);
     let o = Owl::intern(dict);
 
-    // Fast path: an ontology with NO OWL-specific feature has an OWL-RL closure equal to the
+    // Fast path 1: an ontology with NO OWL-specific feature has an OWL-RL closure equal to the
     // RDFS closure plus the scm-dom/rng domain/range closure — so it runs through the single-pass
     // (parallel, no fixpoint) materializer instead of the OWL fixpoint. The common "OWL profile
     // but really just classes/properties/domains" case then reasons ~as fast as RDFS.
     if !owl_uses_features(triples, &v, &o) {
-        return crate::rdfs::rdfs_closure(dict, triples, true);
+        return crate::rdfs::rdfs_closure(dict, triples, true, &crate::rdfs::MonoOwl::default());
+    }
+
+    // Fast path 2: the ontology uses ONLY the MONOTONE / non-recursive OWL-RL subset —
+    // equivalentClass, equivalentProperty, inverseOf, SymmetricProperty — and NONE of the
+    // recursive features (sameAs, Transitive/Functional/InverseFunctional, propertyChain,
+    // restrictions, hasKey, cardinality, intersection/union). Then the OWL-RL closure is
+    // saturable in the single ABox pass: equiv* fold into subClass/subProperty, and
+    // inverse/symmetric are handled by the property-orientation closure (see `PropExpand`).
+    // This is byte-identical to the fixpoint on this subset (asserted in tests) and skips the
+    // semi-naive loop entirely.
+    if let Some(mono) = monotone_only(triples, &v, &o) {
+        return crate::rdfs::rdfs_closure(dict, triples, true, &mono);
     }
 
     let before = triples.len();
