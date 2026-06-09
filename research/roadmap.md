@@ -84,6 +84,34 @@ instrument T1 and T2 are blind without. Additive — conflicts with nothing.
 - Property paths (`*`/`+`/`/`), SERVICE federation, remaining aggregates/expressions (the `M2:`
   markers at `exec.rs:2375/2640`). These touch `exec.rs` (conflict with T1).
 
+### T10 — SPARQL 1.1/1.2 Update  *(store mutation; core cluster)*
+The store is currently **immutable** (built once, queried). Update needs incremental insert/delete:
+`INSERT DATA` / `DELETE DATA` / `DELETE…INSERT…WHERE` / `LOAD` / `CLEAR` / `CREATE` / `DROP` /
+`COPY` / `MOVE` / `ADD`. Touches the **store + dict** (mutable permutation indexes + dict growth /
+tombstones), and `exec.rs` (the update algebra; spargebra already parses Update). Architectural
+decision required: mutate-in-place vs a delta/overlay layer merged at query time (the overlay
+approach preserves the immutable-index fast path + the byte-identity invariant, and composes with
+the out-of-core mmap store). **Conflicts with the core cluster** (T1/T3/T4 all touch store/dict).
+**Prerequisite for T11's update endpoint** and a soft prerequisite for named-graph (T9) semantics.
+Strongly interacts with T9 (GRAPH targets in `WITH`/`USING`/`GRAPH` update clauses) → do T9's
+quad/graph-column model and T10 together.
+
+### T11 — HTTP server, W3C-conformant  *(new `sparq-server` crate; mostly independent)*
+Expose the engine over HTTP per the W3C specs:
+- **SPARQL 1.1/1.2 Protocol** — `query` via GET + POST (`application/sparql-query` and
+  url-encoded), `update` via POST (`application/sparql-update`); content negotiation for result
+  formats (SPARQL Results **JSON/XML/CSV/TSV**, and RDF serializations for CONSTRUCT/DESCRIBE);
+  correct HTTP status/error semantics; `default-graph-uri`/`named-graph-uri` params.
+- **SPARQL 1.1 Graph Store HTTP Protocol** — `GET/PUT/POST/DELETE/HEAD` on graph resources
+  (direct + indirect graph identification).
+- Conformance: run the W3C SPARQL Protocol + GSP test suites. Async runtime (axum/hyper or similar,
+  feature-gated; **not** in the wasm build).
+- **Mostly independent** — a new crate wrapping the engine's public API. The **query + result-format
+  + GSP-read side has no core-cluster conflicts** and can be built concurrently *now*. The
+  **update + GSP-write side depends on T10**. So split: **T11a (query/protocol/formats/GSP-read,
+  independent)** and **T11b (update endpoints, gated on T10)**.
+- New result serializers (XML/CSV/TSV) are additive and reusable by the CLI.
+
 ---
 
 ## 2. Dependency & conflict map
@@ -100,10 +128,14 @@ worktree/box.
    Recommended order inside the cluster:  T1.0 (+T2 core)  →  T1.1  →  T3  →  T4 / T6bc / T9 / T1.2 → T1.3
 
  INDEPENDENT THREADS (separate crates / additive — run fully concurrently, no merge conflicts)
-   T5  inference        (sparq-reason)         ── no exec.rs / dict.rs edits
-   T7  genai            (new sparq-* crates)    ── isolated; after T5+T6 per directive
-   T6a RDF1.2 parser    (sparq-core parser)     ── parser files only
-   T8  scaling harness  (sparq-bench)           ── additive instrument
+   T5   inference       (sparq-reason)          ── no exec.rs / dict.rs edits
+   T7   genai           (new sparq-* crates)    ── isolated; after T5+T6 per directive
+   T6a  RDF1.2 parser   (sparq-core parser)     ── parser files only
+   T8   scaling harness (sparq-bench)           ── additive instrument
+   T11a HTTP server     (new sparq-server crate)── query/protocol/formats/GSP-read; wraps public API
+
+ NEW STORE-MUTATION SUB-CLUSTER (joins the core cluster; do T9 quad-model + T10 together)
+   T10  SPARQL Update   (store + dict + exec.rs) ──prereq──► T11b (update endpoints)
 ```
 
 **Key dependency facts:**
@@ -182,4 +214,7 @@ merge conflicts. Each lands via its own PR/commit; the core-cluster owner rebase
 | T6b/c RDF/SPARQL1.2 | store + algebra | store, exec.rs | T1,T3 | no | no — core cluster |
 | T7 GenAI | 4 feature-gated crates | new crates | — | no | **yes** (after T5/T6) |
 | T8 scaling harness | thread-count sweep | sparq-bench | — | no | **yes** |
-| T9 SPARQL gaps | GRAPH, paths, SERVICE | exec.rs | T1 | no | no — core cluster |
+| T9 SPARQL gaps | GRAPH, paths, SERVICE | exec.rs | T1,T10 | no | no — core cluster |
+| T10 SPARQL Update | INSERT/DELETE/LOAD/… | store, dict, exec.rs | T1,T3,T4,T9 | no | no — core cluster |
+| T11a HTTP server | Protocol+formats+GSP-read | new sparq-server | — | no | **yes** |
+| T11b update endpoints | Protocol update + GSP-write | sparq-server | T10 | no | gated on T10 |
