@@ -35,6 +35,18 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  wasm:
+    name: wasm build (sparq-wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build sparq-wasm for the browser target
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
+
   lint:
     name: fmt + clippy (informational)
     runs-on: ubuntu-latest

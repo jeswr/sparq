@@ -1,0 +1,5 @@
+# getrandom 0.3 has no default backend for wasm32-unknown-unknown; select the browser backend
+# (crypto.getRandomValues) so the wasm build (oxrdf -> rand -> getrandom, for blank-node ids)
+# compiles. Pairs with `getrandom = { features = ["wasm_js"] }` in crates/sparq-wasm/Cargo.toml.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
