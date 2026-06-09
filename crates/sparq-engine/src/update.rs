@@ -79,9 +79,9 @@ fn build(triples: &FxHashSet<TripleTerms>) -> Graph {
 /// Apply a SPARQL Update string to `graph`, returning the updated graph. Errors (leaving the input
 /// consumed) on operations not yet supported, so the caller can keep the original on failure by
 /// cloning beforehand if needed.
-pub fn update(graph: Graph, sparql: &str) -> Result<Graph, String> {
+pub fn update(graph: &Graph, sparql: &str) -> Result<Graph, String> {
     let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
-    let mut triples = current_triples(&graph);
+    let mut triples = current_triples(graph);
     for op in &upd.operations {
         match op {
             GraphUpdateOperation::InsertData { data } => {
@@ -125,25 +125,25 @@ mod tests {
         let g = Graph::load_str("@prefix : <http://ex/> . :a :p :b . :b :p :c .", "turtle").unwrap();
         assert_eq!(count(&g), 2);
         // INSERT DATA adds; set semantics (a re-insert is a no-op).
-        let g = update(g, "PREFIX : <http://ex/> INSERT DATA { :c :p :d . :a :q :x }").unwrap();
+        let g = update(&g, "PREFIX : <http://ex/> INSERT DATA { :c :p :d . :a :q :x }").unwrap();
         assert_eq!(count(&g), 4);
-        let g = update(g, "PREFIX : <http://ex/> INSERT DATA { :a :p :b }").unwrap();
+        let g = update(&g, "PREFIX : <http://ex/> INSERT DATA { :a :p :b }").unwrap();
         assert_eq!(count(&g), 4);
         // DELETE DATA removes a present triple; deleting an absent one is a no-op.
-        let g = update(g, "PREFIX : <http://ex/> DELETE DATA { :a :p :b }").unwrap();
+        let g = update(&g, "PREFIX : <http://ex/> DELETE DATA { :a :p :b }").unwrap();
         assert_eq!(count(&g), 3);
-        let g = update(g, "PREFIX : <http://ex/> DELETE DATA { :z :z :z }").unwrap();
+        let g = update(&g, "PREFIX : <http://ex/> DELETE DATA { :z :z :z }").unwrap();
         assert_eq!(count(&g), 3);
         // The graph is still queryable after a rebuild.
         assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { :c :p ?o }").unwrap(), 1);
         // CLEAR empties the default graph.
-        let g = update(g, "CLEAR ALL").unwrap();
+        let g = update(&g, "CLEAR ALL").unwrap();
         assert_eq!(count(&g), 0);
     }
 
     #[test]
     fn named_graph_update_errors() {
         let g = Graph::load_str("@prefix : <http://ex/> . :a :p :b .", "turtle").unwrap();
-        assert!(update(g, "PREFIX : <http://ex/> INSERT DATA { GRAPH :g { :a :p :c } }").is_err());
+        assert!(update(&g, "PREFIX : <http://ex/> INSERT DATA { GRAPH :g { :a :p :c } }").is_err());
     }
 }

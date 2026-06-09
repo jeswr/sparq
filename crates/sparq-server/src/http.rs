@@ -5,11 +5,11 @@
 //!   * Graph Store HTTP Protocol READ — `GET`/`HEAD` on `/graphs/*path` (direct) and on
 //!     `/sparql/graph` via `?graph=<uri>` / `?default` (indirect). Write verbs → 501.
 //!
-//! All shared state is a single read-only [`sparq_core::Graph`] behind an `Arc` (the engine
-//! is `Sync` for queries); the server is concurrent-read with no locking.
+//! Shared state is a [`sparq_core::Graph`] behind an `RwLock<Arc<…>>`: queries take a cheap
+//! lock-free `Arc` snapshot; SPARQL Update (T11b) rebuilds the graph and swaps it in atomically.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::{
     body::Bytes,
@@ -26,15 +26,29 @@ use crate::exec::{prepare, PrepareError, QueryForm};
 use crate::negotiate::{negotiate, Format};
 use crate::results;
 
-/// Shared, read-only server state: the dataset under query.
+/// Shared server state: the dataset under query, behind an `RwLock` so SPARQL Update can swap in a
+/// rebuilt graph atomically. Queries take a cheap `Arc` snapshot (lock-free for the duration of the
+/// request); an update takes the write lock briefly to install the new graph.
 #[derive(Clone)]
 pub struct AppState {
-    pub graph: Arc<Graph>,
+    graph: Arc<RwLock<Arc<Graph>>>,
 }
 
 impl AppState {
     pub fn new(graph: Graph) -> Self {
-        Self { graph: Arc::new(graph) }
+        Self { graph: Arc::new(RwLock::new(Arc::new(graph))) }
+    }
+
+    /// A cheap, consistent snapshot of the current graph for the duration of a request.
+    pub fn snapshot(&self) -> Arc<Graph> {
+        self.graph.read().expect("graph lock poisoned").clone()
+    }
+
+    /// Apply a SPARQL Update, atomically swapping in the rebuilt graph (T11b).
+    pub fn apply_update(&self, sparql: &str) -> Result<(), String> {
+        let next = sparq_engine::update(&self.snapshot(), sparql)?;
+        *self.graph.write().expect("graph lock poisoned") = Arc::new(next);
+        Ok(())
     }
 }
 
@@ -102,8 +116,14 @@ fn handle_post(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Response 
             None => bad_request("missing 'query' parameter in url-encoded body"),
         }
     } else if ct.starts_with("application/sparql-update") {
-        // SPARQL Update is the T11b thread — not implemented here.
-        not_implemented("SPARQL Update is not implemented (thread T11b); this endpoint is query-only")
+        // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
+        match std::str::from_utf8(body) {
+            Ok(u) => match state.apply_update(u) {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => bad_request(&format!("update failed: {e}")),
+            },
+            Err(_) => bad_request("request body is not valid UTF-8"),
+        }
     } else {
         // Unsupported media type for the POST query operation.
         (
@@ -132,7 +152,7 @@ fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_only: boo
         }
         QueryForm::Ask => {
             let select = prepared.runnable_select.expect("ASK always rewrites to a SELECT");
-            match sparq_engine::count(&state.graph, &select) {
+            match sparq_engine::count(&state.snapshot(), &select) {
                 Ok(n) => {
                     let value = n > 0;
                     let (body, ct) = match fmt {
@@ -155,12 +175,12 @@ fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_only: boo
 fn render_select(state: &AppState, select: &str, fmt: Format, head_only: bool) -> Response {
     let ct = fmt.select_content_type();
     let body = match fmt {
-        Format::Json => match sparq_engine::query_json(&state.graph, select) {
+        Format::Json => match sparq_engine::query_json(&state.snapshot(), select) {
             Ok(json) => json,
             Err(e) => return execution_error(&e),
         },
         _ => {
-            let result = match sparq_engine::query(&state.graph, select) {
+            let result = match sparq_engine::query(&state.snapshot(), select) {
                 Ok(r) => r,
                 Err(e) => return execution_error(&e),
             };
@@ -240,7 +260,7 @@ fn serialise_default_graph(state: &AppState, headers: &HeaderMap, head_only: boo
     } else {
         "application/n-triples; charset=utf-8"
     };
-    let body = nt_dump(&state.graph);
+    let body = nt_dump(&state.snapshot());
     text_response(StatusCode::OK, ct, body, head_only)
 }
 

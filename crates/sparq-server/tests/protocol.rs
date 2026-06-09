@@ -227,16 +227,41 @@ async fn unsupported_method_is_405_with_allow() {
 }
 
 #[tokio::test]
-async fn sparql_update_post_is_501() {
+async fn sparql_update_insert_then_query() {
     let base = spawn().await;
-    let resp = client()
+    let cl = client();
+    // INSERT DATA via the SPARQL 1.1 Protocol update operation -> 204 No Content.
+    let resp = cl
         .post(format!("{base}/sparql"))
         .header("content-type", "application/sparql-update")
-        .body("INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }")
+        .body("INSERT DATA { <http://ex/newS> <http://ex/newP> <http://ex/newO> }")
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 501);
+    assert_eq!(resp.status(), 204);
+
+    // The inserted triple is now visible to a query against the swapped-in graph.
+    let body = cl
+        .get(format!("{base}/sparql"))
+        .header("accept", "application/sparql-results+json")
+        .query(&[("query", "SELECT ?o WHERE { <http://ex/newS> <http://ex/newP> ?o }")])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("http://ex/newO"), "inserted object should be queryable: {body}");
+
+    // A malformed update is a 400.
+    let bad = cl
+        .post(format!("{base}/sparql"))
+        .header("content-type", "application/sparql-update")
+        .body("INSERT DATA { not valid sparql")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
 }
 
 #[tokio::test]
