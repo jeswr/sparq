@@ -23,7 +23,7 @@ mod rdfs;
 pub use n3::{reason_n3, reason_n3_proof, ProofStep};
 pub use owl::{inconsistencies, materialize_owl_rl};
 pub use rdfs::materialize_rdfs;
-pub(crate) use rdfs::rdfs_round;
+pub(crate) use rdfs::RdfsIndex;
 
 /// Which entailment regime to materialize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
