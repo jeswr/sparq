@@ -53,11 +53,11 @@ rules use spec eq-rep substitution; union-find canonicalization is a future opti
 post-materialization; the CLI reports them under `--reason owl`. **Cardinality + keys** ✅ —
 cls-maxc2 (`maxCardinality 1` ⊢ the ≤1 values are `sameAs`), cls-maxc1 (`maxCardinality 0`
 with a value ⊢ clash), prp-key (`owl:hasKey` ⊢ individuals agreeing on all key values are
-`sameAs`). **Remaining for full RL:** `maxQualifiedCardinality`/`onClass`, and the schema
-rules scm-* for full class/property-hierarchy completeness (mostly redundant with the direct
-type/subClassOf rules already implemented).
+`sameAs`); `maxQualifiedCardinality 1` + `onClass` (cls-maxqc — the ≤1 qualifying values are
+`sameAs`). **Remaining for full RL:** the schema rules scm-* for full class/property-hierarchy
+completeness — mostly redundant with the direct type/subClassOf rules already implemented.
 
-### ▢ OWL — remaining (qualified cardinality, scm-*)
+### ▢ OWL — remaining (scm-* schema rules, largely redundant)
 OWL 2 **RL** is the materialization-friendly profile (the others — EL, QL — target different
 algorithms; full OWL DL is undecidable for forward chaining). RL extends the same fixpoint
 engine with property and class axioms, all expressible as datalog-style rules over ids:
@@ -88,9 +88,11 @@ implement and the OWL test suite the validation set. Sizeable but mechanical.
   (`?x!:p` = the `:p`-object of `?x`; `?x^:p` = the `:p`-subject reaching `?x`) is desugared
   into fresh-variable triples that join in the premise.
 - **Builtins:** `math:` comparison (`greaterThan`/`lessThan`/`notGreaterThan`/`notLessThan`/
-  `equalTo`/`notEqualTo`) + functional (`sum`/`difference`/`product`/`quotient`/`max`/`min`);
+  `equalTo`/`notEqualTo`) + functional (`sum`/`difference`/`product`/`quotient`/`max`/`min`/
+  `exponentiation`) + unary (`negation`/`absoluteValue`/`rounded`/`floor`/`ceiling`);
   `string:` (`concatenation` + `contains`/`startsWith`/`endsWith`/`greaterThan`/`lessThan`);
-  `list:` (`member`/`in` generators, `length`); `log:equalTo`/`notEqualTo` and
+  `list:` (`member`/`in` generators, `length`); `time:` (`year`/`month`/`day`/`hours`/
+  `minutes`/`seconds` of an `xsd:dateTime`); `log:equalTo`/`notEqualTo` and
   `log:includes`/`notIncludes` (scoped negation-as-failure via recursive sub-formula match).
 - Tested: the canonical Man⊢Mortal rule, a recursive transitive rule (fixpoint), a
   `math:greaterThan` age filter, and end-to-end chained rules (`age>17 ⊢ Adult ⊢ canVote`).

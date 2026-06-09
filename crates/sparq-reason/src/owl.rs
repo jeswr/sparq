@@ -54,6 +54,8 @@ struct Owl {
     nothing: Id,          // owl:Nothing
     has_key: Id,          // owl:hasKey
     max_cardinality: Id,  // owl:maxCardinality
+    max_qual_card: Id,    // owl:maxQualifiedCardinality
+    on_class: Id,         // owl:onClass
     rdf_first: Id,
     rdf_rest: Id,
     rdf_nil: Id,
@@ -85,6 +87,8 @@ impl Owl {
             nothing: i("Nothing"),
             has_key: i("hasKey"),
             max_cardinality: i("maxCardinality"),
+            max_qual_card: i("maxQualifiedCardinality"),
+            on_class: i("onClass"),
             rdf_first: dict.intern_iri(&format!("{RDF}first")),
             rdf_rest: dict.intern_iri(&format!("{RDF}rest")),
             rdf_nil: dict.intern_iri(&format!("{RDF}nil")),
@@ -253,6 +257,8 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
         let mut type_subj: FxHashMap<Id, Vec<Id>> = FxHashMap::default(); // class -> subjects
         let mut subj_types: FxHashMap<Id, Vec<Id>> = FxHashMap::default(); // subject -> classes
         let mut max_card: FxHashMap<Id, i64> = FxHashMap::default(); // restriction -> maxCardinality
+        let mut max_qcard: FxHashMap<Id, i64> = FxHashMap::default(); // restriction -> maxQualifiedCardinality
+        let mut on_class: FxHashMap<Id, Id> = FxHashMap::default(); // restriction -> onClass
         let mut keys: FxHashMap<Id, Vec<Id>> = FxHashMap::default(); // class -> hasKey property list
         for &[s, p, obj] in &all {
             by_pred.entry(p).or_default().entry(s).or_default().push(obj);
@@ -271,6 +277,12 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
                 if let Some(n) = lit_int(dict, obj) {
                     max_card.insert(s, n);
                 }
+            } else if p == o.max_qual_card {
+                if let Some(n) = lit_int(dict, obj) {
+                    max_qcard.insert(s, n);
+                }
+            } else if p == o.on_class {
+                on_class.insert(s, obj);
             } else if p == o.has_key {
                 if let Some(l) = lists.get(&obj) {
                     keys.insert(s, l.clone());
@@ -301,6 +313,28 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
                                 for i in 0..ys.len() {
                                     for j in (i + 1)..ys.len() {
                                         cand.push([ys[i], o.same_as, ys[j]]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // cls-maxqc3/4 — maxQualifiedCardinality 1 onClass c: the (≤1) c-typed values are sameAs.
+        for (&r, &n) in &max_qcard {
+            if n == 1 {
+                if let (Some(&p), Some(&c), Some(xs)) =
+                    (on_prop.get(&r), on_class.get(&r), type_subj.get(&r))
+                {
+                    if let Some(adj) = by_pred.get(&p) {
+                        for &x in xs {
+                            if let Some(ys) = adj.get(&x) {
+                                let q: Vec<Id> =
+                                    ys.iter().copied().filter(|&y| c == o.thing || has_type(y, c)).collect();
+                                for i in 0..q.len() {
+                                    for j in (i + 1)..q.len() {
+                                        cand.push([q[i], o.same_as, q[j]]);
                                     }
                                 }
                             }
@@ -746,6 +780,28 @@ mod tests {
         let mut t2 = vec![[r2, onp, child], [r2, mc, zero], [b, ty, r2], [b, child, ex(&mut d2, "kid")]];
         materialize_owl_rl(&mut d2, &mut t2);
         assert!(!inconsistencies(&d2, &t2).is_empty(), "cls-maxc1 clash detected");
+    }
+
+    #[test]
+    fn max_qualified_cardinality() {
+        // R = [onProperty :parent; maxQualifiedCardinality 1; onClass :Mother];
+        // :x a R, :x :parent :a, :x :parent :b, :a a :Mother, :b a :Mother ⊢ :a sameAs :b.
+        let mut dict = Dict::new();
+        let (parent, mother, x, a, b) = (
+            ex(&mut dict, "parent"), ex(&mut dict, "Mother"), ex(&mut dict, "x"), ex(&mut dict, "a"), ex(&mut dict, "b"),
+        );
+        let r = dict.intern_blank("_RQ");
+        let ty = rdf(&mut dict, "type");
+        let (onp, mqc, onc) = (owl(&mut dict, "onProperty"), owl(&mut dict, "maxQualifiedCardinality"), owl(&mut dict, "onClass"));
+        let one = dict.intern_lit("1", "http://www.w3.org/2001/XMLSchema#integer", None);
+        let mut triples = vec![
+            [r, onp, parent], [r, mqc, one], [r, onc, mother],
+            [x, ty, r], [x, parent, a], [x, parent, b], [a, ty, mother], [b, ty, mother],
+        ];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        let sa = owl(&mut dict, "sameAs");
+        assert!(set.contains(&[a, sa, b]) || set.contains(&[b, sa, a]), "cls-maxqc ⊢ sameAs");
     }
 
     #[test]

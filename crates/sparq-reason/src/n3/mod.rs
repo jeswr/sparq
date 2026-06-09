@@ -24,6 +24,7 @@ const MATH: &str = "http://www.w3.org/2000/10/swap/math#";
 const LOG: &str = "http://www.w3.org/2000/10/swap/log#";
 const STRING: &str = "http://www.w3.org/2000/10/swap/string#";
 const LIST: &str = "http://www.w3.org/2000/10/swap/list#";
+const TIME: &str = "http://www.w3.org/2000/10/swap/time#";
 
 /// Parse N3 `src`, run the rule closure, and return the entailed GROUND triples interned into
 /// `dict`. The rules/formulae/variables are consumed by reasoning; only ground facts remain.
@@ -354,17 +355,33 @@ fn num(t: &Term) -> Option<f64> {
     }
 }
 
-/// Functional `math:`/`string:`/`list:` builtins: subject is a `( … )` list, object computed.
+/// Functional `math:`/`string:`/`list:`/`time:` builtins: the subject is a `( … )` list (or a
+/// single value for the unary ops), and the object is computed.
 #[derive(Clone, Copy)]
 enum Func {
+    // list-arg
     Sum,
     Difference,
     Product,
     Quotient,
     Max,
     Min,
+    Exponentiation,
     Concat, // string:concatenation
     Length, // list:length
+    // single-value-arg (unary math)
+    Negation,
+    AbsoluteValue,
+    Rounded,
+    Floor,
+    Ceiling,
+    // single-value-arg (time: components of an xsd:dateTime)
+    Year,
+    Month,
+    Day,
+    Hours,
+    Minutes,
+    Seconds,
 }
 
 fn functional_builtin(p: &Term) -> Option<Func> {
@@ -377,6 +394,23 @@ fn functional_builtin(p: &Term) -> Option<Func> {
             "quotient" => Func::Quotient,
             "max" => Func::Max,
             "min" => Func::Min,
+            "exponentiation" => Func::Exponentiation,
+            "negation" => Func::Negation,
+            "absoluteValue" => Func::AbsoluteValue,
+            "rounded" => Func::Rounded,
+            "floor" => Func::Floor,
+            "ceiling" => Func::Ceiling,
+            _ => return None,
+        });
+    }
+    if let Some(f) = i.strip_prefix(TIME) {
+        return Some(match f {
+            "year" => Func::Year,
+            "month" => Func::Month,
+            "day" => Func::Day,
+            "hours" => Func::Hours,
+            "minutes" => Func::Minutes,
+            "seconds" => Func::Seconds,
             _ => return None,
         });
     }
@@ -396,8 +430,14 @@ fn eval_functional(
     lists: &HashMap<Term, Vec<Term>>,
     b: Binding,
 ) -> Option<Binding> {
-    let members = lists.get(subj)?;
-    let args: Vec<Term> = members.iter().map(|m| apply(m, &b)).collect();
+    // Arguments: the list members, or a singleton for the unary (math:/time:) ops.
+    let args: Vec<Term> = match lists.get(subj) {
+        Some(members) => members.iter().map(|m| apply(m, &b)).collect(),
+        None => vec![apply(subj, &b)],
+    };
+    if args.is_empty() {
+        return None;
+    }
     let result: Term = match f {
         Func::Concat => {
             let mut s = String::new();
@@ -410,29 +450,38 @@ fn eval_functional(
             Term::Lit(s, "http://www.w3.org/2001/XMLSchema#string".into(), None)
         }
         Func::Length => number_term(args.len() as f64),
+        Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds => {
+            number_term(datetime_part(lex(&args[0])?, f)? as f64)
+        }
         _ => {
             let nums: Vec<f64> = args.iter().map(num).collect::<Option<_>>()?;
-            if nums.is_empty() {
-                return None;
-            }
+            let two = |n: &[f64]| if n.len() == 2 { Some((n[0], n[1])) } else { None };
             let v = match f {
                 Func::Sum => nums.iter().sum(),
                 Func::Product => nums.iter().product(),
                 Func::Max => nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
                 Func::Min => nums.iter().copied().fold(f64::INFINITY, f64::min),
                 Func::Difference => {
-                    if nums.len() != 2 {
-                        return None;
-                    }
-                    nums[0] - nums[1]
+                    let (a, b) = two(&nums)?;
+                    a - b
                 }
                 Func::Quotient => {
-                    if nums.len() != 2 || nums[1] == 0.0 {
+                    let (a, b) = two(&nums)?;
+                    if b == 0.0 {
                         return None;
                     }
-                    nums[0] / nums[1]
+                    a / b
                 }
-                Func::Concat | Func::Length => unreachable!(),
+                Func::Exponentiation => {
+                    let (a, b) = two(&nums)?;
+                    a.powf(b)
+                }
+                Func::Negation => -nums[0],
+                Func::AbsoluteValue => nums[0].abs(),
+                Func::Rounded => nums[0].round(),
+                Func::Floor => nums[0].floor(),
+                Func::Ceiling => nums[0].ceil(),
+                _ => unreachable!(),
             };
             number_term(v)
         }
@@ -443,6 +492,32 @@ fn eval_functional(
         Some(nb)
     } else {
         None
+    }
+}
+
+/// Extract a component of an `xsd:dateTime`/`xsd:date` lexical form for `time:` builtins.
+/// Lexical: `[-]YYYY-MM-DD[Thh:mm:ss[.sss]][Z|±hh:mm]`.
+fn datetime_part(s: &str, f: Func) -> Option<i64> {
+    let (date, time) = s.split_once('T').unwrap_or((s, ""));
+    let neg = date.starts_with('-');
+    let mut dparts = date.trim_start_matches('-').split('-');
+    match f {
+        Func::Year => dparts.next()?.parse::<i64>().ok().map(|y| if neg { -y } else { y }),
+        Func::Month => dparts.nth(1)?.parse().ok(),
+        Func::Day => dparts.nth(2)?.parse().ok(),
+        Func::Hours | Func::Minutes | Func::Seconds => {
+            // strip any timezone (Z, +hh:mm, -hh:mm) — the time itself has no +/-/Z.
+            let t = time.split(['+', '-', 'Z']).next().unwrap_or(time);
+            let idx = match f {
+                Func::Hours => 0,
+                Func::Minutes => 1,
+                Func::Seconds => 2,
+                _ => unreachable!(),
+            };
+            let part = t.split(':').nth(idx)?;
+            part.split('.').next().unwrap_or(part).parse().ok()
+        }
+        _ => None,
     }
 }
 
@@ -618,6 +693,28 @@ mod tests {
         for m in ["a", "b", "c"] {
             assert!(has(&d, &s, &format!("http://ex/{m}"), ty, "http://ex/Listed"), "list:member {m}");
         }
+    }
+
+    #[test]
+    fn time_components_and_unary_math() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix time: <http://www.w3.org/2000/10/swap/time#> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :e :when "2024-03-15T10:30:45"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+            :e :temp -5 .
+            { ?x :when ?d . ?d time:year ?y . ?d time:month ?mo . ?d time:day ?dd } => { ?x :y ?y ; :mo ?mo ; :dd ?dd } .
+            { ?x :temp ?t . ?t math:absoluteValue ?a } => { ?x :absTemp ?a } .
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let lit = |d: &mut Dict, n: &str| d.intern_lit(n, int, None);
+        let (y, mo, dd, a) = (lit(&mut d, "2024"), lit(&mut d, "3"), lit(&mut d, "15"), lit(&mut d, "5"));
+        let e = id(&d, "http://ex/e");
+        assert!(s.contains(&[e, id(&d, "http://ex/y"), y]), "time:year = 2024");
+        assert!(s.contains(&[e, id(&d, "http://ex/mo"), mo]), "time:month = 3");
+        assert!(s.contains(&[e, id(&d, "http://ex/dd"), dd]), "time:day = 15");
+        assert!(s.contains(&[e, id(&d, "http://ex/absTemp"), a]), "math:absoluteValue(-5) = 5");
     }
 
     #[test]
