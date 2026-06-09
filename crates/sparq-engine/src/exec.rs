@@ -3398,6 +3398,13 @@ fn eval_function(
             }
             _ => Value::Error,
         },
+        // xsd:dateTime accessors — parse the lexical form and return the numeric component.
+        F::Year => datetime_field(&ev(0)?, 0),
+        F::Month => datetime_field(&ev(0)?, 1),
+        F::Day => datetime_field(&ev(0)?, 2),
+        F::Hours => datetime_field(&ev(0)?, 3),
+        F::Minutes => datetime_field(&ev(0)?, 4),
+        F::Seconds => datetime_field(&ev(0)?, 5),
         #[cfg(feature = "regex")]
         F::Regex => {
             let (text, pat) = match (value_str(&ev(0)?), value_str(&ev(1)?)) {
@@ -3452,6 +3459,34 @@ fn encode_for_uri(s: &str) -> String {
         }
     }
     out
+}
+
+/// Extract a numeric `xsd:dateTime` component (0=year…5=seconds) from a value's lexical form.
+fn datetime_field(v: &Value, idx: usize) -> Value {
+    match value_str(v).as_deref().and_then(parse_datetime) {
+        Some(fields) => Value::Num(fields[idx]),
+        None => Value::Error,
+    }
+}
+
+/// Parse an `xsd:dateTime` lexical (`[-]YYYY-MM-DDThh:mm:ss[.frac][TZ]`) into
+/// `[year, month, day, hours, minutes, seconds]`. Timezone is stripped (component accessors are on
+/// the local time per SPARQL); seconds keeps any fractional part.
+fn parse_datetime(s: &str) -> Option<[f64; 6]> {
+    let (date, time) = s.split_once('T')?;
+    let neg = date.starts_with('-');
+    let mut d = date.strip_prefix('-').unwrap_or(date).split('-');
+    let year: f64 = d.next()?.parse().ok()?;
+    let year = if neg { -year } else { year };
+    let month: f64 = d.next()?.parse().ok()?;
+    let day: f64 = d.next()?.parse().ok()?;
+    // Strip the timezone (Z, or +hh:mm / -hh:mm after the seconds — the time part itself has no '-').
+    let time = if let Some(i) = time.find(['Z', '+', '-']) { &time[..i] } else { time };
+    let mut t = time.split(':');
+    let hours: f64 = t.next()?.parse().ok()?;
+    let minutes: f64 = t.next()?.parse().ok()?;
+    let seconds: f64 = t.next()?.parse().ok()?;
+    Some([year, month, day, hours, minutes, seconds])
 }
 
 fn value_str(v: &Value) -> Option<String> {
@@ -3781,6 +3816,19 @@ mod function_tests {
             crate::query(&g2, "SELECT ?s (SAMPLE(?o) AS ?v) WHERE { ?s <http://ex/p> ?o } GROUP BY ?s").unwrap().len(),
             2
         );
+    }
+
+    #[test]
+    fn datetime_accessors() {
+        let g = Graph::load_str(
+            "@prefix : <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+             :e :at \"2024-03-15T13:45:30\"^^xsd:dateTime .",
+            "turtle",
+        )
+        .unwrap();
+        let q = |s: &str| crate::query(&g, s).unwrap().len();
+        assert_eq!(q("SELECT * WHERE { ?e <http://ex/at> ?d FILTER(YEAR(?d) = 2024 && MONTH(?d) = 3 && DAY(?d) = 15) }"), 1);
+        assert_eq!(q("SELECT * WHERE { ?e <http://ex/at> ?d FILTER(HOURS(?d) = 13 && MINUTES(?d) = 45 && SECONDS(?d) = 30) }"), 1);
     }
 
     #[cfg(feature = "regex")]
