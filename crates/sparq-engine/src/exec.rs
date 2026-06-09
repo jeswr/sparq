@@ -12,8 +12,9 @@ use rustc_hash::FxHashMap;
 use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern as IdPattern;
 use sparq_core::Graph;
+use rustc_hash::FxHashSet;
 use spargebra::algebra::{
-    AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
+    AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression, PropertyPathExpression,
 };
 use smallvec::SmallVec;
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern};
@@ -887,6 +888,7 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
             Ok(minus_bindings(l, r))
         }
         GraphPattern::Values { variables, bindings } => Ok(values_bindings(graph, local, variables, bindings)),
+        GraphPattern::Path { subject, path, object } => eval_path(graph, subject, path, object),
         GraphPattern::Graph { .. } => {
             // The store is a single default graph; evaluating a named-graph
             // pattern against it would silently return wrong matches.
@@ -1065,6 +1067,182 @@ fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Op
 /// optimal in the worst case. Acyclic (tree-shaped) BGPs use binary joins, which
 /// are optimal for them and avoid LFTJ's per-tuple overhead. Both paths are
 /// differentially tested to produce identical results.
+/// Evaluate a SPARQL property path `subject <path> object` into bindings over its endpoint
+/// variables. Computes the path's (start,end) id-pair relation recursively — transitive `+`/`*`
+/// via BFS, zero-length `*`/`?` add identity over the graph's nodes — then constrains it by any
+/// bound or repeated endpoint. Correctness-first: the relation is materialised (the common
+/// bound-endpoint case is cheap; a both-unbound `*` over a huge graph is expensive — a future
+/// optimisation can push a bound endpoint into a directed traversal).
+fn eval_path(
+    graph: &Graph,
+    subject: &TermPattern,
+    path: &PropertyPathExpression,
+    object: &TermPattern,
+) -> Result<Bindings, String> {
+    enum End {
+        Var(Variable),
+        Bound(Id),
+        Unsat,
+    }
+    let resolve = |t: &TermPattern| -> End {
+        match t {
+            TermPattern::Variable(v) => End::Var(v.clone()),
+            TermPattern::BlankNode(b) => End::Var(bnode_var(b)),
+            other => match term_pattern_to_term(other).ok().and_then(|t| graph.id_of(&t)) {
+                Some(id) => End::Bound(id),
+                None => End::Unsat,
+            },
+        }
+    };
+    let (s_end, o_end) = (resolve(subject), resolve(object));
+
+    let s_var = if let End::Var(v) = &s_end { Some(v.clone()) } else { None };
+    let o_var = if let End::Var(v) = &o_end { Some(v.clone()) } else { None };
+    let same_var = matches!((&s_var, &o_var), (Some(a), Some(b)) if a == b);
+    let mut vars: Vec<Variable> = Vec::new();
+    if let Some(v) = &s_var {
+        vars.push(v.clone());
+    }
+    if let Some(v) = &o_var {
+        if !same_var {
+            vars.push(v.clone());
+        }
+    }
+    // A concrete-but-absent endpoint makes the whole pattern unsatisfiable.
+    if matches!(s_end, End::Unsat) || matches!(o_end, End::Unsat) {
+        return Ok(Bindings::unsorted(vars, Vec::new()));
+    }
+    let s_bound = if let End::Bound(id) = &s_end { Some(*id) } else { None };
+    let o_bound = if let End::Bound(id) = &o_end { Some(*id) } else { None };
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut seen: FxHashSet<Row> = FxHashSet::default();
+    for (s, o) in path_pairs(graph, path)? {
+        if s_bound.is_some_and(|b| s != b) || o_bound.is_some_and(|b| o != b) || (same_var && s != o) {
+            continue;
+        }
+        let mut row: Row = SmallVec::new();
+        if s_var.is_some() {
+            row.push(s);
+        }
+        if o_var.is_some() && !same_var {
+            row.push(o);
+        }
+        if seen.insert(row.clone()) {
+            rows.push(row); // property-path solutions are a set (DISTINCT)
+        }
+    }
+    Ok(Bindings::unsorted(vars, rows))
+}
+
+/// All `(subject, object)` id pairs connected by a property path expression.
+fn path_pairs(graph: &Graph, path: &PropertyPathExpression) -> Result<FxHashSet<(Id, Id)>, String> {
+    use PropertyPathExpression as P;
+    Ok(match path {
+        P::NamedNode(p) => predicate_pairs(graph, p),
+        P::Reverse(a) => path_pairs(graph, a)?.into_iter().map(|(s, o)| (o, s)).collect(),
+        P::Sequence(a, c) => {
+            let (av, cv) = (path_pairs(graph, a)?, path_pairs(graph, c)?);
+            let mut by_start: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+            for (m, o) in cv {
+                by_start.entry(m).or_default().push(o);
+            }
+            let mut out = FxHashSet::default();
+            for (s, m) in av {
+                if let Some(os) = by_start.get(&m) {
+                    for &o in os {
+                        out.insert((s, o));
+                    }
+                }
+            }
+            out
+        }
+        P::Alternative(a, c) => {
+            let mut s = path_pairs(graph, a)?;
+            s.extend(path_pairs(graph, c)?);
+            s
+        }
+        P::OneOrMore(a) => transitive_closure_pairs(path_pairs(graph, a)?),
+        P::ZeroOrMore(a) => {
+            let mut c = transitive_closure_pairs(path_pairs(graph, a)?);
+            c.extend(graph_nodes(graph).into_iter().map(|n| (n, n)));
+            c
+        }
+        P::ZeroOrOne(a) => {
+            let mut s = path_pairs(graph, a)?;
+            s.extend(graph_nodes(graph).into_iter().map(|n| (n, n)));
+            s
+        }
+        P::NegatedPropertySet(props) => {
+            let excluded: FxHashSet<Id> =
+                props.iter().filter_map(|p| graph.id_of(&Term::NamedNode(p.clone()))).collect();
+            let pat: IdPattern = [None, None, None];
+            let scan = graph.store.scan(&pat);
+            scan.rows
+                .iter()
+                .filter_map(|r| {
+                    let t = scan.to_spo(r);
+                    (!excluded.contains(&t[1])).then_some((t[0], t[2]))
+                })
+                .collect()
+        }
+    })
+}
+
+/// All `(s, o)` for a single predicate IRI (empty if the predicate isn't in the graph).
+fn predicate_pairs(graph: &Graph, p: &oxrdf::NamedNode) -> FxHashSet<(Id, Id)> {
+    match graph.id_of(&Term::NamedNode(p.clone())) {
+        None => FxHashSet::default(),
+        Some(pid) => {
+            let pat: IdPattern = [None, Some(pid), None];
+            let scan = graph.store.scan(&pat);
+            scan.rows
+                .iter()
+                .map(|r| {
+                    let t = scan.to_spo(r);
+                    (t[0], t[2])
+                })
+                .collect()
+        }
+    }
+}
+
+/// Every id that appears as a subject or object (the domain of zero-length path matches).
+fn graph_nodes(graph: &Graph) -> FxHashSet<Id> {
+    let pat: IdPattern = [None, None, None];
+    let scan = graph.store.scan(&pat);
+    let mut s = FxHashSet::default();
+    for r in scan.rows.iter() {
+        let t = scan.to_spo(r);
+        s.insert(t[0]);
+        s.insert(t[2]);
+    }
+    s
+}
+
+/// Transitive (NOT reflexive) closure of a pair relation — BFS of reachability from each start.
+fn transitive_closure_pairs(pairs: FxHashSet<(Id, Id)>) -> FxHashSet<(Id, Id)> {
+    let mut adj: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for (s, o) in &pairs {
+        adj.entry(*s).or_default().push(*o);
+    }
+    let mut out: FxHashSet<(Id, Id)> = FxHashSet::default();
+    let starts: Vec<Id> = adj.keys().copied().collect();
+    for start in starts {
+        let mut seen: FxHashSet<Id> = FxHashSet::default();
+        let mut stack: Vec<Id> = adj.get(&start).cloned().unwrap_or_default();
+        while let Some(n) = stack.pop() {
+            if seen.insert(n) {
+                out.insert((start, n));
+                if let Some(nexts) = adj.get(&n) {
+                    stack.extend(nexts.iter().copied());
+                }
+            }
+        }
+    }
+    out
+}
+
 fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
     if patterns.is_empty() {
         return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
@@ -3558,5 +3736,42 @@ mod function_tests {
         assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"BOB\", \"i\")) }"), 1);
         assert_eq!(n("SELECT ?n WHERE { ?s <http://ex/name> ?n FILTER(REGEX(?n, \"[0-9]+\")) }"), 1); // Carol123
         assert_eq!(n("SELECT ?g WHERE { ?s <http://ex/name> ?n BIND(REPLACE(?n, \"[0-9]\", \"X\") AS ?g) }"), 3);
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    // Chain a -p-> b -p-> c -p-> d, plus a -q-> x.
+    fn g() -> Graph {
+        Graph::load_str(
+            "@prefix : <http://ex/> .\n:a :p :b . :b :p :c . :c :p :d . :a :q :x .\n",
+            "turtle",
+        )
+        .unwrap()
+    }
+    fn n(sparql: &str) -> usize {
+        crate::query(&g(), sparql).unwrap().len()
+    }
+    const PFX: &str = "PREFIX : <http://ex/> ";
+
+    #[test]
+    fn property_paths() {
+        let n = |q: &str| n(&format!("{PFX}{q}"));
+        // OneOrMore (transitive): all reachable pairs over the chain = C(4,2) = 6.
+        assert_eq!(n("SELECT ?x ?y WHERE { ?x :p+ ?y }"), 6);
+        assert_eq!(n("SELECT ?y WHERE { :a :p+ ?y }"), 3); // b,c,d
+        // ZeroOrMore adds reflexive self-match: a,b,c,d.
+        assert_eq!(n("SELECT ?y WHERE { :a :p* ?y }"), 4);
+        // Sequence / Alternative / ZeroOrOne.
+        assert_eq!(n("SELECT ?y WHERE { :a :p/:p ?y }"), 1); // c
+        assert_eq!(n("SELECT ?y WHERE { :a :p|:q ?y }"), 2); // b, x
+        assert_eq!(n("SELECT ?y WHERE { :a :p? ?y }"), 2); // a (zero), b (one)
+        // Reverse (inverse), incl. inverse-transitive.
+        assert_eq!(n("SELECT ?x WHERE { :d ^:p ?x }"), 1); // c
+        assert_eq!(n("SELECT ?x WHERE { :d ^:p+ ?x }"), 3); // c,b,a
+        // NegatedPropertySet: edges not via :p  ->  only a -q-> x.
+        assert_eq!(n("SELECT ?x ?y WHERE { ?x !:p ?y }"), 1);
     }
 }
