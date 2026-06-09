@@ -286,12 +286,20 @@ fn dedup_derived(emitted: Vec<[Id; 3]>, original: &FxHashSet<[Id; 3]>) -> Vec<[I
 }
 
 /// Expand `triples` in place with the RDFS closure. Returns the number of NEW triples added.
+pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
+    rdfs_closure(dict, triples, false)
+}
+
+/// The RDFS closure, plus — when `emit_dr_closure` — the OWL-RL `scm-dom1/2` / `scm-rng1/2`
+/// domain/range closure triples.
 ///
 /// Strategy: SATURATE THE SCHEMA (TBox) once — subClassOf / subPropertyOf transitive closures
 /// and the domain/range typing sets closed through them — then do a SINGLE data-parallel sweep
-/// of the assertions (ABox). Because the schema is fully closed, every assertion's RDFS
-/// consequences are independent and need no fixpoint, so the sweep is embarrassingly parallel.
-pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
+/// of the assertions (ABox). Because the schema is fully closed, every assertion's consequences
+/// are independent and need no fixpoint, so the sweep is embarrassingly parallel. Used directly
+/// for RDFS, and by the OWL-RL materializer when the ontology uses no OWL-specific features (the
+/// OWL closure is then exactly RDFS + scm-dom/rng).
+pub(crate) fn rdfs_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>, emit_dr_closure: bool) -> usize {
     let v = Vocab::intern(dict);
     let before = triples.len();
     let original: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
@@ -327,6 +335,15 @@ pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     }
     for (&p, qs) in &sp_closure {
         emitted.extend(qs.iter().map(|&q| [p, v.sub_prop, q]));
+    }
+    // OWL-RL scm-dom1/2 + scm-rng1/2: the saturated domain/range sets ARE their closure.
+    if emit_dr_closure {
+        for (&p, cs) in &dom_full {
+            emitted.extend(cs.iter().map(|&c| [p, v.domain, c]));
+        }
+        for (&p, cs) in &rng_full {
+            emitted.extend(cs.iter().map(|&c| [p, v.range, c]));
+        }
     }
 
     // 4. De-duplicate the derived facts, drop those already asserted, sort for determinism.

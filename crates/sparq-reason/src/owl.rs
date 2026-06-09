@@ -220,10 +220,45 @@ fn build_adjacency(
     }
 }
 
+/// True if the ontology uses any OWL-specific feature (so it needs the OWL fixpoint). When false,
+/// the OWL-RL closure is exactly RDFS + scm-dom/rng, computed by the fast single-pass path.
+fn owl_uses_features(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> bool {
+    let preds: FxHashSet<Id> = [
+        o.same_as,
+        o.inverse_of,
+        o.equiv_prop,
+        o.equiv_class,
+        o.property_chain,
+        o.on_property,
+        o.some_values,
+        o.all_values,
+        o.has_value,
+        o.intersection,
+        o.union,
+        o.has_key,
+        o.max_cardinality,
+        o.max_qual_card,
+        o.on_class,
+    ]
+    .into_iter()
+    .collect();
+    let types: FxHashSet<Id> = [o.symmetric, o.transitive, o.functional, o.inv_functional].into_iter().collect();
+    triples.iter().any(|&[_, p, ob]| preds.contains(&p) || (p == v.ty && types.contains(&ob)))
+}
+
 /// Expand `triples` in place with the OWL 2 RL (+ RDFS) closure. Returns NEW triple count.
 pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let v = Vocab::intern(dict);
     let o = Owl::intern(dict);
+
+    // Fast path: an ontology with NO OWL-specific feature has an OWL-RL closure equal to the
+    // RDFS closure plus the scm-dom/rng domain/range closure — so it runs through the single-pass
+    // (parallel, no fixpoint) materializer instead of the OWL fixpoint. The common "OWL profile
+    // but really just classes/properties/domains" case then reasons ~as fast as RDFS.
+    if !owl_uses_features(triples, &v, &o) {
+        return crate::rdfs::rdfs_closure(dict, triples, true);
+    }
+
     let before = triples.len();
     let mut all: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
 
@@ -1038,6 +1073,37 @@ mod tests {
             ),
             "prp-spo2 property chain"
         );
+    }
+
+    #[test]
+    fn owl_no_features_routes_to_single_pass_with_scm_dom_rng() {
+        // No OWL-specific feature → the OWL-RL closure is RDFS + scm-dom/rng, computed by the
+        // single-pass fast path. Validates the routing produces rdfs7/2/3/9 + scm-dom1/2/rng1.
+        let mut dict = Dict::new();
+        let r = |d: &mut Dict, f: &str| d.intern_iri(&format!("http://www.w3.org/2000/01/rdf-schema#{f}"));
+        let (sc, sp, dom, rng) =
+            (r(&mut dict, "subClassOf"), r(&mut dict, "subPropertyOf"), r(&mut dict, "domain"), r(&mut dict, "range"));
+        let ty = rdf(&mut dict, "type");
+        let (c0, c1, d0, d1, p, q, x, y) = (
+            ex(&mut dict, "c0"),
+            ex(&mut dict, "c1"),
+            ex(&mut dict, "d0"),
+            ex(&mut dict, "d1"),
+            ex(&mut dict, "p"),
+            ex(&mut dict, "q"),
+            ex(&mut dict, "x"),
+            ex(&mut dict, "y"),
+        );
+        let mut triples =
+            vec![[c0, sc, c1], [d0, sc, d1], [p, dom, c0], [p, rng, d0], [q, sp, p], [x, q, y]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[x, p, y]), "rdfs7 (q subPropertyOf p)");
+        assert!(set.contains(&[x, ty, c0]) && set.contains(&[x, ty, c1]), "rdfs2 domain + rdfs9 up subclass");
+        assert!(set.contains(&[y, ty, d0]) && set.contains(&[y, ty, d1]), "rdfs3 range + rdfs9 up subclass");
+        assert!(set.contains(&[p, dom, c1]), "scm-dom1 (domain up subclass)");
+        assert!(set.contains(&[q, dom, c0]), "scm-dom2 (domain down subproperty)");
+        assert!(set.contains(&[p, rng, d1]), "scm-rng1 (range up subclass)");
     }
 
     #[test]
