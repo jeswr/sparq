@@ -23,6 +23,7 @@ use std::collections::HashMap;
 const MATH: &str = "http://www.w3.org/2000/10/swap/math#";
 const LOG: &str = "http://www.w3.org/2000/10/swap/log#";
 const STRING: &str = "http://www.w3.org/2000/10/swap/string#";
+const LIST: &str = "http://www.w3.org/2000/10/swap/list#";
 
 /// Parse N3 `src`, run the rule closure, and return the entailed GROUND triples interned into
 /// `dict`. The rules/formulae/variables are consumed by reasoning; only ground facts remain.
@@ -75,7 +76,27 @@ fn match_premise(premise: &[[Term; 3]], facts: &FxHashSet<[Term; 3]>) -> Vec<Bin
         if is_list_struct(pat, &lists) {
             continue; // structural, handled by list resolution
         }
-        if let Some(f) = functional_builtin(&pat[1]) {
+        if let Some(gen) = list_generator(&pat[1]) {
+            // list:member / list:in — generate one binding per list member.
+            let (list_pos, var_pos) = match gen {
+                ListGen::Member => (&pat[0], &pat[2]),
+                ListGen::In => (&pat[2], &pat[0]),
+            };
+            let mut next = Vec::new();
+            for b in &bindings {
+                let head = apply(list_pos, b);
+                if let Some(members) = lists.get(&head) {
+                    for m in members {
+                        let mv = apply(m, b);
+                        let mut nb = b.clone();
+                        if unify_term(var_pos, &mv, &mut nb) {
+                            next.push(nb);
+                        }
+                    }
+                }
+            }
+            bindings = next;
+        } else if let Some(f) = functional_builtin(&pat[1]) {
             bindings = bindings
                 .into_iter()
                 .filter_map(|b| eval_functional(f, &pat[0], &pat[2], &lists, b))
@@ -184,31 +205,55 @@ fn ground_triple(t: &[Term; 3], b: &Binding) -> Option<[Term; 3]> {
 
 #[derive(Clone, Copy)]
 enum Builtin {
+    // numeric (math:)
     Gt,
     Lt,
     NotGt,
     NotLt,
     MathEq,
     MathNe,
+    // term (log:)
     LogEq,
     LogNe,
+    // string (string:)
+    StrContains,
+    StrStarts,
+    StrEnds,
+    StrGt,
+    StrLt,
 }
 
 fn builtin(p: &Term) -> Option<Builtin> {
     let Term::Iri(i) = p else { return None };
-    let m = i.strip_prefix(MATH);
-    let l = i.strip_prefix(LOG);
-    Some(match (m, l) {
-        (Some("greaterThan"), _) => Builtin::Gt,
-        (Some("lessThan"), _) => Builtin::Lt,
-        (Some("notGreaterThan"), _) => Builtin::NotGt,
-        (Some("notLessThan"), _) => Builtin::NotLt,
-        (Some("equalTo"), _) => Builtin::MathEq,
-        (Some("notEqualTo"), _) => Builtin::MathNe,
-        (_, Some("equalTo")) => Builtin::LogEq,
-        (_, Some("notEqualTo")) => Builtin::LogNe,
-        _ => return None,
-    })
+    if let Some(f) = i.strip_prefix(MATH) {
+        return Some(match f {
+            "greaterThan" => Builtin::Gt,
+            "lessThan" => Builtin::Lt,
+            "notGreaterThan" => Builtin::NotGt,
+            "notLessThan" => Builtin::NotLt,
+            "equalTo" => Builtin::MathEq,
+            "notEqualTo" => Builtin::MathNe,
+            _ => return None,
+        });
+    }
+    if let Some(f) = i.strip_prefix(LOG) {
+        return Some(match f {
+            "equalTo" => Builtin::LogEq,
+            "notEqualTo" => Builtin::LogNe,
+            _ => return None,
+        });
+    }
+    if let Some(f) = i.strip_prefix(STRING) {
+        return Some(match f {
+            "contains" => Builtin::StrContains,
+            "startsWith" => Builtin::StrStarts,
+            "endsWith" => Builtin::StrEnds,
+            "greaterThan" => Builtin::StrGt,
+            "lessThan" => Builtin::StrLt,
+            _ => return None,
+        });
+    }
+    None
 }
 
 fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
@@ -216,6 +261,17 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
     match op {
         Builtin::LogEq => s == o,
         Builtin::LogNe => s != o,
+        Builtin::StrContains | Builtin::StrStarts | Builtin::StrEnds | Builtin::StrGt | Builtin::StrLt => {
+            let (Some(x), Some(y)) = (lex(&s), lex(&o)) else { return false };
+            match op {
+                Builtin::StrContains => x.contains(y),
+                Builtin::StrStarts => x.starts_with(y),
+                Builtin::StrEnds => x.ends_with(y),
+                Builtin::StrGt => x > y,
+                Builtin::StrLt => x < y,
+                _ => unreachable!(),
+            }
+        }
         _ => {
             let (Some(x), Some(y)) = (num(&s), num(&o)) else { return false };
             match op {
@@ -231,6 +287,29 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ListGen {
+    Member, // ?list list:member ?x
+    In,     // ?x list:in ?list
+}
+
+fn list_generator(p: &Term) -> Option<ListGen> {
+    let Term::Iri(i) = p else { return None };
+    match i.strip_prefix(LIST) {
+        Some("member") => Some(ListGen::Member),
+        Some("in") => Some(ListGen::In),
+        _ => None,
+    }
+}
+
+/// The lexical string of a literal term (for `string:` builtins).
+fn lex(t: &Term) -> Option<&str> {
+    match t {
+        Term::Lit(v, _, _) => Some(v.as_str()),
+        _ => None,
+    }
+}
+
 /// The numeric value of a literal term (for `math:` builtins).
 fn num(t: &Term) -> Option<f64> {
     match t {
@@ -239,27 +318,35 @@ fn num(t: &Term) -> Option<f64> {
     }
 }
 
-/// Functional `math:`/`string:` builtins: subject is a `( … )` list, object is computed.
+/// Functional `math:`/`string:`/`list:` builtins: subject is a `( … )` list, object computed.
 #[derive(Clone, Copy)]
 enum Func {
     Sum,
     Difference,
     Product,
     Quotient,
+    Max,
+    Min,
     Concat, // string:concatenation
+    Length, // list:length
 }
 
 fn functional_builtin(p: &Term) -> Option<Func> {
     let Term::Iri(i) = p else { return None };
-    match i.strip_prefix(MATH) {
-        Some("sum") => return Some(Func::Sum),
-        Some("difference") => return Some(Func::Difference),
-        Some("product") => return Some(Func::Product),
-        Some("quotient") => return Some(Func::Quotient),
-        _ => {}
+    if let Some(f) = i.strip_prefix(MATH) {
+        return Some(match f {
+            "sum" => Func::Sum,
+            "difference" => Func::Difference,
+            "product" => Func::Product,
+            "quotient" => Func::Quotient,
+            "max" => Func::Max,
+            "min" => Func::Min,
+            _ => return None,
+        });
     }
-    match i.strip_prefix(STRING) {
-        Some("concatenation") => Some(Func::Concat),
+    match (i.strip_prefix(STRING), i.strip_prefix(LIST)) {
+        (Some("concatenation"), _) => Some(Func::Concat),
+        (_, Some("length")) => Some(Func::Length),
         _ => None,
     }
 }
@@ -286,12 +373,17 @@ fn eval_functional(
             }
             Term::Lit(s, "http://www.w3.org/2001/XMLSchema#string".into(), None)
         }
+        Func::Length => number_term(args.len() as f64),
         _ => {
-            let nums: Option<Vec<f64>> = args.iter().map(num).collect();
-            let nums = nums?;
+            let nums: Vec<f64> = args.iter().map(num).collect::<Option<_>>()?;
+            if nums.is_empty() {
+                return None;
+            }
             let v = match f {
                 Func::Sum => nums.iter().sum(),
                 Func::Product => nums.iter().product(),
+                Func::Max => nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                Func::Min => nums.iter().copied().fold(f64::INFINITY, f64::min),
                 Func::Difference => {
                     if nums.len() != 2 {
                         return None;
@@ -304,7 +396,7 @@ fn eval_functional(
                     }
                     nums[0] / nums[1]
                 }
-                Func::Concat => unreachable!(),
+                Func::Concat | Func::Length => unreachable!(),
             };
             number_term(v)
         }
@@ -443,6 +535,53 @@ mod tests {
             s.iter().any(|[a, p, _]| *a == id(&d, "http://ex/mary") && *p == id(&d, "http://ex/hasChildNamed")),
             "backward path ^ derived mary :hasChildNamed"
         );
+    }
+
+    #[test]
+    fn string_contains_filter() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :a :label "hello world" .
+            :b :label "goodbye" .
+            { ?x :label ?l . ?l string:contains "world" } => { ?x a :Matched } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Matched"), "string:contains match");
+        assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/Matched"), "non-match excluded");
+    }
+
+    #[test]
+    fn list_member_generator() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            :s :p :o .
+            { ( :a :b :c ) list:member ?x } => { ?x a :Listed } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        for m in ["a", "b", "c"] {
+            assert!(has(&d, &s, &format!("http://ex/{m}"), ty, "http://ex/Listed"), "list:member {m}");
+        }
+    }
+
+    #[test]
+    fn math_max_and_list_length() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            :d :seed "x" .
+            { ( 3 7 2 ) math:max ?m . ( 3 7 2 ) list:length ?n } => { :d :maxVal ?m ; :count ?n } .
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let seven = d.intern_lit("7", int, None);
+        let three = d.intern_lit("3", int, None);
+        assert!(s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/maxVal"), seven]), "math:max = 7");
+        assert!(s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/count"), three]), "list:length = 3");
     }
 
     #[test]

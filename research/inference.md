@@ -84,8 +84,10 @@ implement and the OWL test suite the validation set. Sizeable but mechanical.
   goal-directed backward chaining + proof output is a later addition. **Path syntax** `!`/`^`
   (`?x!:p` = the `:p`-object of `?x`; `?x^:p` = the `:p`-subject reaching `?x`) is desugared
   into fresh-variable triples that join in the premise.
-- **Builtins (v1):** comparison/equality — `math:greaterThan`/`lessThan`/`notGreaterThan`/
-  `notLessThan`/`equalTo`/`notEqualTo`, `log:equalTo`/`notEqualTo` (premise filters).
+- **Builtins:** `math:` comparison (`greaterThan`/`lessThan`/`notGreaterThan`/`notLessThan`/
+  `equalTo`/`notEqualTo`) + functional (`sum`/`difference`/`product`/`quotient`/`max`/`min`);
+  `string:` (`concatenation` + `contains`/`startsWith`/`endsWith`/`greaterThan`/`lessThan`);
+  `list:` (`member`/`in` generators, `length`); `log:equalTo`/`notEqualTo`.
 - Tested: the canonical Man⊢Mortal rule, a recursive transitive rule (fixpoint), a
   `math:greaterThan` age filter, and end-to-end chained rules (`age>17 ⊢ Adult ⊢ canVote`).
 
