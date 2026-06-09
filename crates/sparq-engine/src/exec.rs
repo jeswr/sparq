@@ -265,21 +265,34 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
     #[cfg(feature = "parallel")]
     if scan_rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
+        // One string per chunk (≈ per worker), not per row — avoids one heap allocation per
+        // result cell. Chunks stay in order, so the bytes are identical to the serial path.
+        let chunk = scan_rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
         let frags: Vec<String> = scan_rows
-            .par_iter()
-            .filter_map(|row| {
-                if !passes(row) {
-                    return None;
-                }
+            .par_chunks(chunk)
+            .map(|rows| {
                 let mut f = String::new();
-                write_row(row, &mut f);
-                Some(f)
+                for row in rows {
+                    if !passes(row) {
+                        continue;
+                    }
+                    if !f.is_empty() {
+                        f.push(',');
+                    }
+                    write_row(row, &mut f);
+                }
+                f
             })
             .collect();
-        for (i, f) in frags.iter().enumerate() {
-            if i > 0 {
+        let mut wrote = false;
+        for f in &frags {
+            if f.is_empty() {
+                continue;
+            }
+            if wrote {
                 s.push(',');
             }
+            wrote = true;
             s.push_str(f);
         }
         s.push_str("]}}");
@@ -350,12 +363,19 @@ pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String,
     #[cfg(feature = "parallel")]
     if bindings.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
+        // One string per chunk (≈ per worker), not per row. Chunks stay in order → identical bytes.
+        let chunk = bindings.rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
         let frags: Vec<String> = bindings
             .rows
-            .par_iter()
-            .map(|row| {
+            .par_chunks(chunk)
+            .map(|rows| {
                 let mut f = String::new();
-                write_row(row, &mut f);
+                for (k, row) in rows.iter().enumerate() {
+                    if k > 0 {
+                        f.push(',');
+                    }
+                    write_row(row, &mut f);
+                }
                 f
             })
             .collect();
