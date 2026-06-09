@@ -51,12 +51,16 @@ prefetch ON vs OFF, best of repeated runs:
 | platform | prefetch ON | prefetch OFF | effect of ON |
 |----------|------------|--------------|--------------|
 | M1 (Apple aarch64) | 68.7 M/s | 56.0 M/s | **+22%** |
-| x86 Sapphire Rapids | 27.9 M/s | 25.7 M/s | **+7.5%** |
+| x86 Sapphire Rapids (Intel) | 27.9 M/s | 25.7 M/s | **+7.5%** |
+| x86 EPYC 9R14 (AMD Zen 4) | 25.8 M/s | 25.1 M/s | **+3%** |
 | Graviton3 / Neoverse-V1 | 31.5 M/s | 35.2 M/s | **−10%** (hurts!) |
 
-The *same* `prfm pldl1keep` hint that wins big on Apple silicon and modestly on Intel **slows
-Graviton3 down** — its hardware prefetcher already saturates the gather, so explicit hints only
-add instruction overhead. This is the textbook case for per-hardware tuning.
+The *same* `prfm pldl1keep`/`prefetcht0` hint that wins on Apple silicon and both x86 vendors
+(Intel +7.5%, AMD +3% — consistent every run) **slows Graviton3 down** — its hardware prefetcher
+already saturates the gather, so explicit hints only add instruction overhead. This is the textbook
+case for per-hardware tuning. Four silicon families measured (Apple, Intel, AMD, Graviton) cover the
+consumer + server landscape; the `x86_64 → ON` default is validated across *both* x86 vendors, and
+the aarch64 split (Apple ON / Neoverse-Linux OFF) is the only divergence.
 
 **Action taken** (`crates/sparq-core/src/lib.rs`, `PREFETCH_DEFAULT`): the prefetch now defaults
 ON for x86_64 and Apple aarch64, OFF for aarch64-Linux (Graviton/Neoverse), overridable at runtime
