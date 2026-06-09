@@ -21,15 +21,20 @@ pub type Id = u32;
 
 pub const NO_ID: Id = 0;
 
-/// Tagged-ValueId base: ids in `[INLINE_BASE, INLINE_BASE*2)` encode an
+/// Tagged-ValueId base: ids in `[INLINE_BASE, INLINE_BASE + 2^30)` encode an
 /// `xsd:integer` whose value is `id - INLINE_BASE` *inline* — no dictionary entry,
 /// no string parse. Numeric FILTER / comparison / ORDER BY read the value straight
 /// from the id (QLever's value-id idea, kept in `u32` so the index stays compact).
 /// Inline integers also sort by value in the permutations (enabling range pruning).
-/// Dictionary ids occupy `[1, INLINE_BASE)`; the engine's local-vocab ids start at
-/// `INLINE_BASE*2` (= 1<<31), so the three ranges never overlap.
-pub const INLINE_BASE: Id = 1 << 30;
-const INLINE_MAX: u32 = INLINE_BASE - 1;
+///
+/// The `u32` id space is partitioned: dictionary ids `[1, INLINE_BASE)` (≈2.1 billion
+/// distinct terms — enough for e.g. full-Wikidata's term count without widening to `u64`,
+/// which would double the index), inline integers `[INLINE_BASE, INLINE_BASE + 2^30)`, and
+/// the engine's local-vocab ids `[INLINE_BASE + 2^30, 2^32)`. `0` is `NO_ID`.
+pub const INLINE_BASE: Id = 1 << 31;
+/// The largest value encodable inline (the inline range stays 2^30 wide; bigger integers
+/// fall back to the dictionary).
+const INLINE_MAX: u32 = (1 << 30) - 1;
 
 /// If a literal `value`/`datatype` is a canonical non-negative `xsd:integer` in
 /// range, its inline id. Only the canonical lexical form (no leading zeros / sign)
@@ -54,10 +59,11 @@ fn try_inline(term: &Term) -> Option<Id> {
     }
 }
 
-/// Whether an id encodes an inline integer value.
+/// Whether an id encodes an inline integer value. (`INLINE_BASE << 1` would overflow `u32`,
+/// so the upper bound is expressed via the inline width.)
 #[inline]
 pub fn is_inline(id: Id) -> bool {
-    (INLINE_BASE..INLINE_BASE << 1).contains(&id)
+    id >= INLINE_BASE && id - INLINE_BASE <= INLINE_MAX
 }
 
 /// A compact, single-storage term interner. Each (non-inline) term is stored once, in
@@ -417,9 +423,9 @@ impl Dict {
         let id = (self.terms.len() as Id) + 1; // 1-based
         // Enforced in release too: once the (non-inline) dictionary reaches INLINE_BASE
         // distinct terms, new ids would collide with the inline-integer range and decode
-        // as integers — silent corruption. 2^30 ≈ 1.07B distinct non-integer terms is a
-        // hard capacity limit of the u32 inline scheme; fail loudly (widen Id to u64).
-        assert!(id < INLINE_BASE, "dictionary exceeded the inline-id capacity (2^30 distinct non-integer terms); widen Id to u64");
+        // as integers — silent corruption. 2^31 ≈ 2.1B distinct non-integer terms is the
+        // hard capacity limit of the u32 scheme; fail loudly (widen Id to u64).
+        assert!(id < INLINE_BASE, "dictionary exceeded the id capacity (2^31 distinct non-integer terms); widen Id to u64");
         self.terms.push(stored);
         let (terms, prefixes, datatypes) = (&self.terms, &self.prefixes, &self.datatypes);
         self.table.insert_unique(hash, id, |&i| hash_stored(&terms[(i - 1) as usize], prefixes, datatypes));

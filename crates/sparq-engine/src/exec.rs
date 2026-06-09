@@ -41,10 +41,11 @@ type Key = SmallVec<[Id; 2]>;
 /// build allocates nothing per bucket in the common case.
 type Posting = SmallVec<[usize; 2]>;
 
-/// Ids at or above this base index into the per-query [`LocalVocab`] instead of
-/// the graph dictionary. (M2 uses `u32` ids; the tagged 64-bit ValueId of M4
-/// removes this watermark split.)
-const LOCAL_BASE: Id = 1 << 31;
+/// Ids at or above this base index into the per-query [`LocalVocab`] instead of the graph
+/// dictionary. It sits ABOVE the dictionary range `[1, INLINE_BASE)` and the inline-integer
+/// range `[INLINE_BASE, INLINE_BASE + 2^30)`, i.e. at `INLINE_BASE + 2^30 = 3·2^30`, leaving
+/// the local vocab `[3·2^30, 2^32)` (≈1.07B query-computed terms — far more than any query).
+const LOCAL_BASE: Id = dict::INLINE_BASE + (1 << 30);
 
 #[inline]
 fn is_local(id: Id) -> bool {
