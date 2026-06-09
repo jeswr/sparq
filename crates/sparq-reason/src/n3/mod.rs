@@ -541,6 +541,8 @@ enum Func {
     Difference,
     Product,
     Quotient,
+    Remainder,       // math:remainder (a mod b)
+    IntegerQuotient, // math:integerQuotient (floor(a/b))
     Max,
     Min,
     Exponentiation,
@@ -572,6 +574,8 @@ fn functional_builtin(p: &Term) -> Option<Func> {
             "difference" => Func::Difference,
             "product" => Func::Product,
             "quotient" => Func::Quotient,
+            "remainder" => Func::Remainder,
+            "integerQuotient" => Func::IntegerQuotient,
             "max" => Func::Max,
             "min" => Func::Min,
             "exponentiation" => Func::Exponentiation,
@@ -661,6 +665,20 @@ fn eval_functional(
                 Func::Exponentiation => {
                     let (a, b) = two(&nums)?;
                     a.powf(b)
+                }
+                Func::Remainder => {
+                    let (a, b) = two(&nums)?;
+                    if b == 0.0 {
+                        return None;
+                    }
+                    a % b
+                }
+                Func::IntegerQuotient => {
+                    let (a, b) = two(&nums)?;
+                    if b == 0.0 {
+                        return None;
+                    }
+                    (a / b).floor()
                 }
                 Func::Negation => -nums[0],
                 Func::AbsoluteValue => nums[0].abs(),
@@ -834,6 +852,20 @@ mod tests {
         let (mut d, s) = closure(src);
         let five = d.intern_lit("5", "http://www.w3.org/2001/XMLSchema#integer", None);
         assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/wordLen"), five]), "string:length(hello)=5");
+    }
+
+    #[test]
+    fn functional_math_remainder_intquotient() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :x :v 17 .
+            { ?x :v ?v . (?v 5) math:remainder ?r . (?v 5) math:integerQuotient ?q } => { ?x :rem ?r . ?x :quot ?q } .
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        assert!(s.contains(&[id(&d, "http://ex/x"), id(&d, "http://ex/rem"), d.intern_lit("2", int, None)]), "17 mod 5 = 2");
+        assert!(s.contains(&[id(&d, "http://ex/x"), id(&d, "http://ex/quot"), d.intern_lit("3", int, None)]), "17 div 5 = 3");
     }
 
     #[test]
