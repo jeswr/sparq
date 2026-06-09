@@ -386,6 +386,50 @@ Ranked. "Validate on 196-core?" flags whether M1 can confirm the win.
 
 ---
 
+## ADDENDUM — re-review (Fable 5, 2026-06-10)
+
+A fresh-model re-review of this analysis against the code, after the first Tier-0 items landed.
+What it confirmed, corrected, and re-prioritized:
+
+**Now stale (done since the original analysis):**
+- Tier-0 #2 (allocator): mimalloc is registered in `sparq-cli` (commit 5fed087) **and now
+  `sparq-server`** (the re-review found the server binary had been missed — the long-running,
+  concurrent-query process that needs it most).
+- §3.8 (harness): `sparq-cli scaling` now sweeps per-subsystem parallel efficiency over thread
+  counts (T8); the original "no thread-count sweep" claim no longer holds.
+
+**Corrections to the original analysis:**
+1. **B1's fix is much simpler than proposed.** The original prescribed a sharded/thread-local
+   vocab with id-range partitioning + deferred merge (high complexity, id-determinism risk). But
+   `value_to_id` is *mostly read-only*: small integers inline into the id with **zero** vocab
+   access (`try_inline` in `dict::lookup`), and graph-dict / already-local terms are read-only
+   lookups. The landed fix (`value_to_id_readonly`, commit 3ab301d) does a parallel resolve pass
+   and serially interns only the genuine misses, in row order → **byte-identical ids with no new
+   id-space machinery**. Measured on M1 @8 threads: BIND-new-strings 1.92×, BIND-numeric 1.48×,
+   GROUP_CONCAT 1.16×, COUNT 1.06×. The residual serial fraction is map-inserts of *novel terms
+   only*, so the win grows with core count. The sharded-vocab design remains the escalation path
+   only if the NUMA box shows the miss-intern residue matters at 196 threads.
+2. **"Allocator contention is invisible on M1" was wrong.** mimalloc measured **+29% on the
+   parallel join at just 8 threads** (5fed087). This *strengthens* B2: if arena contention is
+   visible at 8 threads, it would have been brutal at 196. Already banked.
+3. **`numactl --interleave=all` caveat** (§3.2/Tier-0 #1): interleaving is a *ceiling probe*, not
+   a fix — it raises aggregate bandwidth across controllers but makes ~(N−1)/N of accesses remote.
+   A flat→improved efficiency curve under interleave confirms B0 is binding; the real fix is
+   still pinning + node-local placement/replication. (The original text implies this but reads as
+   if interleave were remediation.)
+4. **Single-socket many-core is a cheaper first validation step than 2-socket bare metal.** A
+   Graviton `c8g/r8g.24xlarge` (96 vCPU, one socket, uniform memory) isolates B1/B2/B5/B7 from
+   NUMA entirely — if efficiency collapses *there*, the algorithmic serial fractions (not B0) are
+   binding and can be fixed before paying for the 2-socket box. Recommend sequencing the ≤$10
+   budget: ~1h single-socket 96-vCPU sweep first, then the 2-socket metal run for B0.
+
+**Updated Tier-0/1 priority (post-landings):**
+remaining highest-value, in order — (a) radix-partitioned group build + hash-join build (Tier-1
+#4/#5: with B1 largely gone, the serial group-hash build at `exec.rs` group_aggregate and the
+serial hash_join build are now the dominant *algorithmic* serial fractions); (b) parallel
+`distinct`/`minus` via the same partitioning; (c) NUMA placement (gated on hardware, unchanged);
+(d) morsels/columnar (Tier-3, unchanged — only after the above prove insufficient on target).
+
 ## Sources
 - Leis et al., *Morsel-Driven Parallelism: A NUMA-Aware Query Evaluation Framework
   for the Many-Core Age*, SIGMOD 2014 —
