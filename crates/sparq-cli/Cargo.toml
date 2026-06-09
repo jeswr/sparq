@@ -12,6 +12,9 @@ mmap = ["sparq-core/mmap"]
 [dependencies]
 sparq-core = { path = "../sparq-core", features = ["mmap"] }
 sparq-engine = { path = "../sparq-engine" }
+# Opt-in reasoning (RDFS/OWL-RL materialization) — engaged only by `--reason` / the `reason`
+# subcommand; the default query/build path never touches it.
+sparq-reason = { path = "../sparq-reason" }
 oxttl.workspace = true
 oxrdf.workspace = true
 # Streaming decompression: gzip + bzip2, and zstd (the fast, parallel-friendly bulk

@@ -1,0 +1,190 @@
+//! RDFS forward-chaining materialization.
+//!
+//! Implements the *useful, non-explosive* RDFS entailment rules (RDF 1.1 Semantics §9.2.1)
+//! as a fixpoint over dictionary-encoded triples:
+//!
+//! | rule | premise | conclusion |
+//! |------|---------|------------|
+//! | rdfs2  | `(p domain c)`, `(s p o)`         | `(s type c)` |
+//! | rdfs3  | `(p range c)`, `(s p o)`          | `(o type c)` |
+//! | rdfs5  | `(p subPropertyOf q)`, `(q subPropertyOf r)` | `(p subPropertyOf r)` |
+//! | rdfs7  | `(p subPropertyOf q)`, `(s p o)`  | `(s q o)` |
+//! | rdfs9  | `(c subClassOf d)`, `(s type c)`  | `(s type d)` |
+//! | rdfs11 | `(c subClassOf d)`, `(d subClassOf e)` | `(c subClassOf e)` |
+//!
+//! Deliberately OMITTED: the axiomatic triples and the reflexive/`rdfs:Resource` rules
+//! (rdfs4a/4b, rdfs6, rdfs8, rdfs10, rdfs13). They entail that every resource is an
+//! `rdfs:Resource` and every class a subclass of itself/`Resource` — true but useless, and
+//! they blow up the store by O(terms). This matches the "RDFS" rule set materialized by
+//! production engines (GraphDB/RDF4J `rdfs` minus the axiomatic closure).
+//!
+//! The fixpoint is **naive** (re-derive from the full set each round until stable) — chosen
+//! for obvious correctness; RDFS closures converge in a handful of rounds (≈ hierarchy
+//! depth + 1). Semi-naive (delta-only) evaluation is a future optimization; materialization
+//! is an opt-in build-time step, never on the query hot path.
+
+use crate::{Schema, Vocab};
+use rustc_hash::FxHashSet;
+use sparq_core::dict::{Dict, Id};
+
+/// Expand `triples` in place with the RDFS closure. Returns the number of NEW triples added.
+pub fn materialize_rdfs(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
+    let v = Vocab::intern(dict);
+    let before = triples.len();
+
+    // Dedup set seeded with the input (the input may itself contain duplicates; we return a
+    // duplicate-free closure either way).
+    let mut all: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+
+    loop {
+        let schema = Schema::build(&all, &v);
+        // Collect this round's candidate derivations, then fold them in; `changed` tracks
+        // whether any were genuinely new (fixpoint reached when none are).
+        let mut cand: Vec<[Id; 3]> = Vec::new();
+        for &[s, p, o] in &all {
+            // rdfs11 — subClassOf transitivity: (s subClassOf o), (o subClassOf x) ⊢ (s sc x)
+            if p == v.sub_class {
+                if let Some(sup) = schema.sub_class.get(&o) {
+                    cand.extend(sup.iter().map(|&x| [s, v.sub_class, x]));
+                }
+            }
+            // rdfs5 — subPropertyOf transitivity
+            if p == v.sub_prop {
+                if let Some(sup) = schema.sub_prop.get(&o) {
+                    cand.extend(sup.iter().map(|&x| [s, v.sub_prop, x]));
+                }
+            }
+            // rdfs9 — type propagation up the class hierarchy: (s type o), (o sc d) ⊢ (s type d)
+            if p == v.ty {
+                if let Some(sup) = schema.sub_class.get(&o) {
+                    cand.extend(sup.iter().map(|&d| [s, v.ty, d]));
+                }
+            }
+            // rdfs7 — subproperty entailment: (s p o), (p sp q) ⊢ (s q o)
+            if let Some(sup) = schema.sub_prop.get(&p) {
+                cand.extend(sup.iter().map(|&q| [s, q, o]));
+            }
+            // rdfs2 — domain typing: (s p o), (p domain c) ⊢ (s type c)
+            if let Some(cs) = schema.domain.get(&p) {
+                cand.extend(cs.iter().map(|&c| [s, v.ty, c]));
+            }
+            // rdfs3 — range typing: (s p o), (p range c) ⊢ (o type c)
+            if let Some(cs) = schema.range.get(&p) {
+                cand.extend(cs.iter().map(|&c| [o, v.ty, c]));
+            }
+        }
+        let mut changed = false;
+        for t in cand {
+            changed |= all.insert(t);
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Rebuild `triples` as the (duplicate-free) closure, preserving the original triples'
+    // relative order at the front for determinism, then the newly-derived ones sorted (so
+    // the materialized output is deterministic regardless of HashSet iteration order).
+    let original: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+    let mut derived: Vec<[Id; 3]> = all.iter().copied().filter(|t| !original.contains(t)).collect();
+    derived.sort_unstable();
+    triples.clear();
+    triples.extend(original_in_order(&original));
+    triples.extend(derived);
+    triples.len() - before
+}
+
+/// The original triples, deduplicated but in a deterministic (sorted) order. (We do not have
+/// the caller's original Vec here after clearing; sorting gives a stable, reproducible base.)
+fn original_in_order(original: &FxHashSet<[Id; 3]>) -> Vec<[Id; 3]> {
+    let mut v: Vec<[Id; 3]> = original.iter().copied().collect();
+    v.sort_unstable();
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdf::vocab::{rdf, rdfs};
+    use oxrdf::{NamedNode, Term};
+
+    fn iri(dict: &mut Dict, s: &str) -> Id {
+        dict.intern_iri(s)
+    }
+    fn ex(dict: &mut Dict, local: &str) -> Id {
+        dict.intern_iri(&format!("http://ex/{local}"))
+    }
+    /// Is the triple (by IRI strings) in the materialized set?
+    fn has(dict: &Dict, set: &FxHashSet<[Id; 3]>, s: &str, p: &str, o: &str) -> bool {
+        let g = |iri: &str| dict.lookup(&Term::NamedNode(NamedNode::new_unchecked(iri.to_string())));
+        let (si, pi, oi) = (g(s), g(p), g(o));
+        si != 0 && pi != 0 && oi != 0 && set.contains(&[si, pi, oi])
+    }
+
+    #[test]
+    fn subclass_transitivity_and_type_propagation() {
+        // ex:Dog sc ex:Mammal sc ex:Animal ; ex:rex a ex:Dog.  Expect ex:rex a Mammal, Animal.
+        let mut dict = Dict::new();
+        let (dog, mammal, animal, rex) =
+            (ex(&mut dict, "Dog"), ex(&mut dict, "Mammal"), ex(&mut dict, "Animal"), ex(&mut dict, "rex"));
+        let (sc, ty) = (iri(&mut dict, rdfs::SUB_CLASS_OF.as_str()), iri(&mut dict, rdf::TYPE.as_str()));
+        let mut triples = vec![[dog, sc, mammal], [mammal, sc, animal], [rex, ty, dog]];
+        let added = materialize_rdfs(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(has(&dict, &set, "http://ex/rex", rdf::TYPE.as_str(), "http://ex/Mammal"), "rdfs9 one hop");
+        assert!(has(&dict, &set, "http://ex/rex", rdf::TYPE.as_str(), "http://ex/Animal"), "rdfs9 transitive");
+        assert!(has(&dict, &set, "http://ex/Dog", rdfs::SUB_CLASS_OF.as_str(), "http://ex/Animal"), "rdfs11");
+        assert!(added >= 3);
+    }
+
+    #[test]
+    fn domain_range_and_subproperty() {
+        // ex:hasParent sp ex:relatedTo ; ex:hasParent domain ex:Person ; ex:hasParent range ex:Person.
+        // ex:a ex:hasParent ex:b.  Expect: a relatedTo b; a type Person; b type Person.
+        let mut dict = Dict::new();
+        let (hp, rel, person, a, b) = (
+            ex(&mut dict, "hasParent"), ex(&mut dict, "relatedTo"), ex(&mut dict, "Person"),
+            ex(&mut dict, "a"), ex(&mut dict, "b"),
+        );
+        let (sp, dom, rng) = (
+            iri(&mut dict, rdfs::SUB_PROPERTY_OF.as_str()),
+            iri(&mut dict, rdfs::DOMAIN.as_str()),
+            iri(&mut dict, rdfs::RANGE.as_str()),
+        );
+        let mut triples = vec![[hp, sp, rel], [hp, dom, person], [hp, rng, person], [a, hp, b]];
+        materialize_rdfs(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(has(&dict, &set, "http://ex/a", "http://ex/relatedTo", "http://ex/b"), "rdfs7");
+        assert!(has(&dict, &set, "http://ex/a", rdf::TYPE.as_str(), "http://ex/Person"), "rdfs2 domain");
+        assert!(has(&dict, &set, "http://ex/b", rdf::TYPE.as_str(), "http://ex/Person"), "rdfs3 range");
+    }
+
+    #[test]
+    fn subproperty_domain_interaction() {
+        // ex:p sp ex:q ; ex:q domain ex:C ; ex:s ex:p ex:o.  rdfs7 gives (s q o), then rdfs2
+        // on q's domain gives (s type C). Tests the rule-interaction the fixpoint must catch.
+        let mut dict = Dict::new();
+        let (p, q, c, s, o) = (
+            ex(&mut dict, "p"), ex(&mut dict, "q"), ex(&mut dict, "C"), ex(&mut dict, "s"), ex(&mut dict, "o"),
+        );
+        let (sp, dom) = (iri(&mut dict, rdfs::SUB_PROPERTY_OF.as_str()), iri(&mut dict, rdfs::DOMAIN.as_str()));
+        let mut triples = vec![[p, sp, q], [q, dom, c], [s, p, o]];
+        materialize_rdfs(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(has(&dict, &set, "http://ex/s", "http://ex/q", "http://ex/o"), "rdfs7");
+        assert!(has(&dict, &set, "http://ex/s", rdf::TYPE.as_str(), "http://ex/C"), "rdfs7->rdfs2 interaction");
+    }
+
+    #[test]
+    fn idempotent() {
+        let mut dict = Dict::new();
+        let (dog, animal, rex) = (ex(&mut dict, "Dog"), ex(&mut dict, "Animal"), ex(&mut dict, "rex"));
+        let (sc, ty) = (iri(&mut dict, rdfs::SUB_CLASS_OF.as_str()), iri(&mut dict, rdf::TYPE.as_str()));
+        let mut triples = vec![[dog, sc, animal], [rex, ty, dog]];
+        materialize_rdfs(&mut dict, &mut triples);
+        let n = triples.len();
+        let added2 = materialize_rdfs(&mut dict, &mut triples);
+        assert_eq!(added2, 0, "second materialization adds nothing");
+        assert_eq!(triples.len(), n, "idempotent");
+    }
+}

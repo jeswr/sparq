@@ -162,6 +162,15 @@ impl Graph {
     /// graphs from TriG/N-Quads are folded into the default graph). Returns the
     /// built graph. `format`: "turtle" | "ntriples" | "nquads" | "trig".
     pub fn load_str(text: &str, format: &str) -> Result<Graph, String> {
+        let (dict, triples) = Self::parse_to_triples(text, format)?;
+        Ok(Self::from_parts(dict, triples))
+    }
+
+    /// Parses an RDF document into its dictionary + interned triples WITHOUT building the
+    /// indexes. The seam that opt-in reasoning hooks into: a caller (e.g. the CLI, which can
+    /// depend on `sparq-reason`) parses, materializes the entailed triples, then calls
+    /// [`from_parts`](Self::from_parts) — keeping all reasoning out of the core engine.
+    pub fn parse_to_triples(text: &str, format: &str) -> Result<(Dict, Vec<[Id; 3]>), String> {
         let mut dict = Dict::new();
         let mut triples: Vec<[Id; 3]> = Vec::new();
         let bytes = text.as_bytes();
@@ -182,14 +191,13 @@ impl Graph {
                 // builds a partial dictionary, then the partials are merged).
                 #[cfg(feature = "parallel")]
                 {
-                    let (d, t) = parse_ntriples_parallel(bytes)?;
-                    return Ok(Self::build(d, t));
+                    return parse_ntriples_parallel(bytes);
                 }
                 #[cfg(not(feature = "parallel"))]
                 {
                     let mut d = Dict::new();
                     let t = nt::parse_chunk(bytes, &mut d)?;
-                    return Ok(Self::build(d, t));
+                    return Ok((d, t));
                 }
             }
             "nquads" | "n-quads" => {
@@ -212,7 +220,14 @@ impl Graph {
             }
         }
 
-        Ok(Self::build(dict, triples))
+        Ok((dict, triples))
+    }
+
+    /// Builds a graph from an already-interned dictionary + triple set (e.g. after opt-in
+    /// reasoning materialized additional triples). Public counterpart of the internal
+    /// [`build`](Self::build).
+    pub fn from_parts(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
+        Self::build(dict, triples)
     }
 
     /// Streaming loader: parses an RDF document incrementally from a reader (so a

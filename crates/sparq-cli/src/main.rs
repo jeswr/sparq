@@ -21,6 +21,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("query") => cmd_query(&args),
+        Some("reason") => cmd_reason(&args),
         Some("bench") => cmd_bench(&args),
         Some("bench-mmap") => cmd_bench_mmap(&args),
         Some("ingest") => cmd_ingest(&args),
@@ -382,6 +383,79 @@ fn raw_reload(path: &str, format: &str) -> sparq_core::Graph {
     sparq_core::Graph::load_str(&text, format).unwrap()
 }
 
+/// Parses `path`, optionally materializes the entailed closure for `profile` (opt-in
+/// reasoning), then builds the graph. The reasoning step runs between parse and index-build
+/// (the `parse_to_triples` → `from_parts` seam), so the default no-`--reason` path is
+/// untouched. Reports the closure expansion.
+fn load_reasoned(path: &str, format: &str, profile: sparq_reason::Profile) -> sparq_core::Graph {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("error reading {path}: {e}");
+        std::process::exit(1);
+    });
+    let (mut dict, mut triples) = sparq_core::Graph::parse_to_triples(&text, format).unwrap_or_else(|e| {
+        eprintln!("parse error: {e}");
+        std::process::exit(1);
+    });
+    let base = triples.len();
+    let t = Instant::now();
+    let added = sparq_reason::materialize(profile, &mut dict, &mut triples);
+    eprintln!(
+        "reasoned [{:?}]: {base} -> {} triples (+{added} entailed) in {:.3}s",
+        profile,
+        triples.len(),
+        t.elapsed().as_secs_f64()
+    );
+    sparq_core::Graph::from_parts(dict, triples)
+}
+
+/// Pull an optional `--reason <profile>` flag out of the argument list.
+fn reason_flag(args: &[String]) -> Option<sparq_reason::Profile> {
+    let i = args.iter().position(|a| a == "--reason")?;
+    let name = args.get(i + 1).unwrap_or_else(|| {
+        eprintln!("--reason needs a profile (e.g. rdfs)");
+        std::process::exit(2);
+    });
+    Some(sparq_reason::Profile::parse(name).unwrap_or_else(|| {
+        eprintln!("unknown reasoning profile '{name}' (known: rdfs)");
+        std::process::exit(2);
+    }))
+}
+
+/// `reason <data-file> <format> <profile> [out.nt]` — materialize the entailed closure and
+/// report the expansion; with `out.nt`, write the full closure as N-Triples.
+fn cmd_reason(args: &[String]) {
+    let (path, format, profile) = match (args.get(2), args.get(3), args.get(4)) {
+        (Some(p), Some(f), Some(pr)) => (
+            p,
+            f.as_str(),
+            sparq_reason::Profile::parse(pr).unwrap_or_else(|| {
+                eprintln!("unknown reasoning profile '{pr}' (known: rdfs)");
+                std::process::exit(2);
+            }),
+        ),
+        _ => {
+            eprintln!("usage: sparq-cli reason <data-file> <format> <profile=rdfs> [out.nt]");
+            std::process::exit(2);
+        }
+    };
+    let g = load_reasoned(path, format, profile);
+    println!("{} triples after {:?} materialization", g.len(), profile);
+    if let Some(out) = args.get(5) {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(out).unwrap_or_else(|e| {
+            eprintln!("create {out}: {e}");
+            std::process::exit(1);
+        }));
+        let scan = g.store.scan(&[None, None, None]);
+        for r in scan.rows.iter() {
+            let spo = scan.to_spo(r);
+            writeln!(w, "{} {} {} .", g.dict.term(spo[0]), g.dict.term(spo[1]), g.dict.term(spo[2])).unwrap();
+        }
+        w.flush().unwrap();
+        eprintln!("wrote closure to {out}");
+    }
+}
+
 /// `query-mmap <dir> <sparql>` — open a saved dataset with memory-mapped indexes and
 /// run a query. Reports load time + the store self-estimate (≈0 GB heap for the
 /// mmap'd permutations — they live in the OS page cache, not the process heap).
@@ -450,7 +524,10 @@ fn cmd_query(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let g = load(path, format);
+    let g = match reason_flag(args) {
+        Some(profile) => load_reasoned(path, format, profile),
+        None => load(path, format),
+    };
     let t = Instant::now();
     match sparq_engine::query(&g, sparql) {
         Ok(r) => println!("{} solutions in {:.3}ms", r.len(), t.elapsed().as_secs_f64() * 1e3),

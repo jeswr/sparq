@@ -1,0 +1,15 @@
+[package]
+name = "sparq-reason"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Opt-in reasoning (RDFS / OWL-RL forward-chaining materialization; Notation3 later). This
+# is a SEPARATE crate so the core engine carries zero reasoning code, deps, or runtime cost
+# by default — reasoning is engaged only by depending on / invoking this crate (e.g. the CLI
+# `--reason` flag), preserving the default build's performance and memory profile.
+
+[dependencies]
+sparq-core = { path = "../sparq-core", default-features = false }
+oxrdf.workspace = true
+rustc-hash.workspace = true

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm"]
+members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason"]
 
 [workspace.package]
 version = "0.0.1"
