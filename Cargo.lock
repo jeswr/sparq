@@ -1340,6 +1340,7 @@ version = "0.0.1"
 dependencies = [
  "oxrdf",
  "rayon",
+ "regex",
  "rustc-hash",
  "smallvec",
  "spargebra",

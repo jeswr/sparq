@@ -3191,8 +3191,45 @@ fn eval_function(
         F::Ceil => as_num(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
         F::Floor => as_num(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
         F::Round => as_num(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
+        #[cfg(feature = "regex")]
+        F::Regex => {
+            let (text, pat) = match (value_str(&ev(0)?), value_str(&ev(1)?)) {
+                (Some(t), Some(p)) => (t, p),
+                _ => return Ok(Value::Error),
+            };
+            let flags = if args.len() >= 3 { value_str(&ev(2)?).unwrap_or_default() } else { String::new() };
+            match build_regex(&pat, &flags) {
+                Some(re) => Value::Bool(re.is_match(&text)),
+                None => Value::Error,
+            }
+        }
+        #[cfg(feature = "regex")]
+        F::Replace => {
+            let (text, pat, rep) = match (value_str(&ev(0)?), value_str(&ev(1)?), value_str(&ev(2)?)) {
+                (Some(t), Some(p), Some(r)) => (t, p, r),
+                _ => return Ok(Value::Error),
+            };
+            let flags = if args.len() >= 4 { value_str(&ev(3)?).unwrap_or_default() } else { String::new() };
+            match build_regex(&pat, &flags) {
+                Some(re) => simple(re.replace_all(&text, rep.as_str()).into_owned()),
+                None => Value::Error,
+            }
+        }
         other => return Err(format!("unsupported SPARQL function: {other:?}")),
     })
+}
+
+/// Build a regex honouring the SPARQL flag string (`i` case-insensitive, `s` dot-all, `m`
+/// multi-line, `x` extended/ignore-whitespace). Returns `None` on an invalid pattern (→ type error).
+#[cfg(feature = "regex")]
+fn build_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(flags.contains('i'))
+        .dot_matches_new_line(flags.contains('s'))
+        .multi_line(flags.contains('m'))
+        .ignore_whitespace(flags.contains('x'))
+        .build()
+        .ok()
 }
 
 /// SPARQL `ENCODE_FOR_URI`: percent-encode everything except the unreserved set (RFC 3986

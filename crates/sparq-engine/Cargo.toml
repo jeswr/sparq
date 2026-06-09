@@ -7,8 +7,11 @@ license.workspace = true
 [features]
 # Forwards sparq-core's parallel index build. Default on for native; the wasm
 # crate disables defaults so rayon is never pulled into the bundle.
-default = ["parallel"]
+# `regex` powers SPARQL REGEX/REPLACE; default-on for native, off for wasm (the wasm crate
+# disables defaults) so the regex automata don't bloat the browser bundle.
+default = ["parallel", "regex"]
 parallel = ["dep:rayon", "sparq-core/parallel"]
+regex = ["dep:regex"]
 
 [dependencies]
 sparq-core = { path = "../sparq-core", default-features = false }
@@ -17,3 +20,4 @@ spargebra.workspace = true
 rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
+regex = { version = "1", optional = true }
