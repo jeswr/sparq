@@ -557,6 +557,7 @@ enum Func {
     Concat,    // string:concatenation
     Length,    // list:length
     StrLength, // string:length (Unicode scalar count)
+    Replace,   // string:replace (regex): ( str pattern replacement ) string:replace ?out
     First,     // list:first
     Last,      // list:last
     // single-value-arg (unary math)
@@ -609,6 +610,7 @@ fn functional_builtin(p: &Term) -> Option<Func> {
     match (i.strip_prefix(STRING), i.strip_prefix(LIST)) {
         (Some("concatenation"), _) => Some(Func::Concat),
         (Some("length"), _) => Some(Func::StrLength),
+        (Some("replace"), _) => Some(Func::Replace),
         (_, Some("length")) => Some(Func::Length),
         (_, Some("first")) => Some(Func::First),
         (_, Some("last")) => Some(Func::Last),
@@ -648,6 +650,15 @@ fn eval_functional(
         Func::StrLength => number_term(lex(&args[0])?.chars().count() as f64),
         Func::First => args.first()?.clone(),
         Func::Last => args.last()?.clone(),
+        Func::Replace => {
+            // ( str pattern replacement ) string:replace ?out — regex replace-all.
+            if args.len() != 3 {
+                return None;
+            }
+            let re = regex::Regex::new(lex(&args[1])?).ok()?;
+            let out = re.replace_all(lex(&args[0])?, lex(&args[2])?).into_owned();
+            Term::Lit(out, "http://www.w3.org/2001/XMLSchema#string".into(), None)
+        }
         Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds => {
             number_term(datetime_part(lex(&args[0])?, f)? as f64)
         }
@@ -873,6 +884,19 @@ mod tests {
         let (d, s) = closure(src);
         assert!(has(&d, &s, "http://ex/a", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Valid"));
         assert!(!has(&d, &s, "http://ex/b", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Valid"));
+    }
+
+    #[test]
+    fn string_replace_regex() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :a :raw "a1b2c3" .
+            { ?x :raw ?r . ( ?r "[0-9]" "_" ) string:replace ?out } => { ?x :clean ?out } .
+        "#;
+        let (mut d, s) = closure(src);
+        let expected = d.intern_lit("a_b_c_", "http://www.w3.org/2001/XMLSchema#string", None);
+        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/clean"), expected]), "replace [0-9]->_ = a_b_c_");
     }
 
     #[test]
