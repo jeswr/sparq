@@ -1,0 +1,5 @@
+@prefix : <http://ex/> .
+@prefix math: <http://www.w3.org/2000/10/swap/math#> .
+:a :val 3 .
+:b :val 4 .
+{ :a :val ?x . :b :val ?y . (?x ?y) math:sum ?z } => { :result :total ?z } .

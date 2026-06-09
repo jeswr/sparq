@@ -22,6 +22,7 @@ use std::collections::HashMap;
 
 const MATH: &str = "http://www.w3.org/2000/10/swap/math#";
 const LOG: &str = "http://www.w3.org/2000/10/swap/log#";
+const STRING: &str = "http://www.w3.org/2000/10/swap/string#";
 
 /// Parse N3 `src`, run the rule closure, and return the entailed GROUND triples interned into
 /// `dict`. The rules/formulae/variables are consumed by reasoning; only ground facts remain.
@@ -64,28 +65,79 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
 type Binding = HashMap<String, Term>;
 
 /// All variable bindings under which every premise pattern holds (joining against `facts`,
-/// evaluating builtins as filters).
+/// evaluating builtins as filters/computations). N3 collections `( … )` in the premise are
+/// rule-local list STRUCTURE (rdf:first/rest over fresh bnodes), not data to match — they are
+/// extracted up front and consumed by the functional builtins (e.g. `math:sum`).
 fn match_premise(premise: &[[Term; 3]], facts: &FxHashSet<[Term; 3]>) -> Vec<Binding> {
+    let lists = extract_lists(premise);
     let mut bindings: Vec<Binding> = vec![Binding::new()];
     for pat in premise {
-        if let Some(op) = builtin(&pat[1]) {
-            bindings.retain(|b| eval_builtin(op, &pat[0], &pat[2], b));
-            continue;
+        if is_list_struct(pat, &lists) {
+            continue; // structural, handled by list resolution
         }
-        let mut next = Vec::new();
-        for b in &bindings {
-            for f in facts {
-                if let Some(nb) = unify(pat, f, b) {
-                    next.push(nb);
+        if let Some(f) = functional_builtin(&pat[1]) {
+            bindings = bindings
+                .into_iter()
+                .filter_map(|b| eval_functional(f, &pat[0], &pat[2], &lists, b))
+                .collect();
+        } else if let Some(op) = builtin(&pat[1]) {
+            bindings.retain(|b| eval_builtin(op, &pat[0], &pat[2], b));
+        } else {
+            let mut next = Vec::new();
+            for b in &bindings {
+                for fact in facts {
+                    if let Some(nb) = unify(pat, fact, b) {
+                        next.push(nb);
+                    }
                 }
             }
+            bindings = next;
         }
-        bindings = next;
         if bindings.is_empty() {
             break;
         }
     }
     bindings
+}
+
+/// Resolve every list node in `premise` (rooted at an rdf:first) to its member sequence.
+fn extract_lists(premise: &[[Term; 3]]) -> HashMap<Term, Vec<Term>> {
+    use parser::{RDF_FIRST, RDF_NIL, RDF_REST};
+    let (is, ir) = (Term::Iri(RDF_FIRST.into()), Term::Iri(RDF_REST.into()));
+    let nil = Term::Iri(RDF_NIL.into());
+    let mut first: HashMap<Term, Term> = HashMap::new();
+    let mut rest: HashMap<Term, Term> = HashMap::new();
+    for [s, p, o] in premise {
+        if *p == is {
+            first.insert(s.clone(), o.clone());
+        } else if *p == ir {
+            rest.insert(s.clone(), o.clone());
+        }
+    }
+    let mut lists = HashMap::new();
+    for head in first.keys() {
+        let mut members = Vec::new();
+        let mut cur = head.clone();
+        // follow first/rest to nil (bounded by node count to avoid cycles)
+        for _ in 0..first.len() + 1 {
+            match first.get(&cur) {
+                Some(m) => members.push(m.clone()),
+                None => break,
+            }
+            match rest.get(&cur) {
+                Some(n) if *n != nil => cur = n.clone(),
+                _ => break,
+            }
+        }
+        lists.insert(head.clone(), members);
+    }
+    lists
+}
+
+/// Is `pat` an rdf:first/rest triple belonging to an extracted list (rule structure)?
+fn is_list_struct(pat: &[Term; 3], lists: &HashMap<Term, Vec<Term>>) -> bool {
+    use parser::{RDF_FIRST, RDF_REST};
+    matches!(&pat[1], Term::Iri(i) if i == RDF_FIRST || i == RDF_REST) && lists.contains_key(&pat[0])
 }
 
 /// Try to unify pattern triple `pat` with ground fact `f`, extending binding `b`.
@@ -187,6 +239,94 @@ fn num(t: &Term) -> Option<f64> {
     }
 }
 
+/// Functional `math:`/`string:` builtins: subject is a `( … )` list, object is computed.
+#[derive(Clone, Copy)]
+enum Func {
+    Sum,
+    Difference,
+    Product,
+    Quotient,
+    Concat, // string:concatenation
+}
+
+fn functional_builtin(p: &Term) -> Option<Func> {
+    let Term::Iri(i) = p else { return None };
+    match i.strip_prefix(MATH) {
+        Some("sum") => return Some(Func::Sum),
+        Some("difference") => return Some(Func::Difference),
+        Some("product") => return Some(Func::Product),
+        Some("quotient") => return Some(Func::Quotient),
+        _ => {}
+    }
+    match i.strip_prefix(STRING) {
+        Some("concatenation") => Some(Func::Concat),
+        _ => None,
+    }
+}
+
+/// Evaluate a functional builtin `(members) op object`: resolve the list members under `b`,
+/// compute, then either bind the object variable to the result or filter if it is ground.
+fn eval_functional(
+    f: Func,
+    subj: &Term,
+    obj: &Term,
+    lists: &HashMap<Term, Vec<Term>>,
+    b: Binding,
+) -> Option<Binding> {
+    let members = lists.get(subj)?;
+    let args: Vec<Term> = members.iter().map(|m| apply(m, &b)).collect();
+    let result: Term = match f {
+        Func::Concat => {
+            let mut s = String::new();
+            for a in &args {
+                match a {
+                    Term::Lit(v, _, _) => s.push_str(v),
+                    _ => return None,
+                }
+            }
+            Term::Lit(s, "http://www.w3.org/2001/XMLSchema#string".into(), None)
+        }
+        _ => {
+            let nums: Option<Vec<f64>> = args.iter().map(num).collect();
+            let nums = nums?;
+            let v = match f {
+                Func::Sum => nums.iter().sum(),
+                Func::Product => nums.iter().product(),
+                Func::Difference => {
+                    if nums.len() != 2 {
+                        return None;
+                    }
+                    nums[0] - nums[1]
+                }
+                Func::Quotient => {
+                    if nums.len() != 2 || nums[1] == 0.0 {
+                        return None;
+                    }
+                    nums[0] / nums[1]
+                }
+                Func::Concat => unreachable!(),
+            };
+            number_term(v)
+        }
+    };
+    // Bind the object variable, or (if already ground) filter on equality.
+    let mut nb = b;
+    if unify_term(obj, &result, &mut nb) {
+        Some(nb)
+    } else {
+        None
+    }
+}
+
+/// Render an `f64` result as an N3 numeric literal (integer when whole, else decimal).
+fn number_term(v: f64) -> Term {
+    if v.fract() == 0.0 && v.abs() < 9.007e15 {
+        Term::Lit((v as i64).to_string(), "http://www.w3.org/2001/XMLSchema#integer".into(), None)
+    } else {
+        Term::Lit(format!("{v}"), "http://www.w3.org/2001/XMLSchema#decimal".into(), None)
+    }
+}
+
 /// Intern an N3 ground term into the dictionary.
 fn intern(dict: &mut Dict, t: &Term) -> Result<Id, String> {
     Ok(match t {
@@ -240,6 +380,24 @@ mod tests {
         assert!(has(&d, &s, "http://ex/a", "http://ex/before", "http://ex/c"));
         assert!(has(&d, &s, "http://ex/a", "http://ex/before", "http://ex/d"));
         assert!(has(&d, &s, "http://ex/b", "http://ex/before", "http://ex/d"));
+    }
+
+    #[test]
+    fn functional_math_sum_and_product() {
+        // (?a ?b) math:sum ?s computes ?s; chained with product.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :rect :width 4 ; :height 5 .
+            { ?r :width ?w . ?r :height ?h . (?w ?h) math:product ?area } => { ?r :area ?area } .
+            { ?r :width ?w . ?r :height ?h . (?w ?h) math:sum ?half } => { ?r :perimeterHalf ?half } .
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let area_id = d.intern_lit("20", int, None); // 4*5
+        let half_id = d.intern_lit("9", int, None); // 4+5
+        assert!(s.contains(&[id(&d, "http://ex/rect"), id(&d, "http://ex/area"), area_id]), "math:product 4*5=20");
+        assert!(s.contains(&[id(&d, "http://ex/rect"), id(&d, "http://ex/perimeterHalf"), half_id]), "math:sum 4+5=9");
     }
 
     #[test]

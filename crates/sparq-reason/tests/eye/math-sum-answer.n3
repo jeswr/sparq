@@ -1,0 +1,2 @@
+@prefix : <http://ex/> .
+:result :total 7 .
