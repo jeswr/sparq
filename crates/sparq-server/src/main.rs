@@ -13,6 +13,12 @@ use std::net::SocketAddr;
 use sparq_core::Graph;
 use sparq_server::{router, AppState};
 
+// Same allocator as the CLI (T1.0a, measured ~1.29x on the parallel join): the system allocator's
+// arena locks contend under rayon's per-row allocation, and the server is the long-running,
+// concurrent-query process where that matters most.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut addr = "127.0.0.1:3030".to_string();

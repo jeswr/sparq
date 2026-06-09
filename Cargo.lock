@@ -1363,6 +1363,7 @@ name = "sparq-server"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "mimalloc",
  "oxrdf",
  "reqwest",
  "spargebra",

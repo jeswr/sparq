@@ -2483,11 +2483,48 @@ fn values_bindings(graph: &Graph, local: &mut LocalVocab, variables: &[Variable]
 }
 
 fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: &Variable, expr: &Expression) -> Result<Bindings, String> {
-    let mut col = Vec::with_capacity(b.rows.len());
-    for row in &b.rows {
-        let v = eval_expr(graph, local, &b, row, expr)?;
-        col.push(value_to_id(graph, local, &v));
-    }
+    // BIND was fully serial because each row's computed value was interned immediately. Split it
+    // (T1.0b): a PARALLEL pass evaluates the expression (read-only) and resolves the value to an
+    // id read-only (inline / graph-dict / already-local); only genuinely new terms fall through to
+    // the serial intern below, applied in row order → ids byte-identical to the serial path.
+    // (Safe to parallelise: rows reference only ids created by EARLIER operators, never ids
+    // created within this BIND loop.)
+    #[cfg(feature = "parallel")]
+    let resolved: Vec<Result<Id, Term>> = if b.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        let lv: &LocalVocab = local;
+        let bref = &b;
+        b.rows
+            .par_iter()
+            .map(|row| {
+                let v = eval_expr(graph, lv, bref, row, expr)?;
+                Ok(value_to_id_readonly(graph, lv, &v))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        let mut out = Vec::with_capacity(b.rows.len());
+        for row in &b.rows {
+            let v = eval_expr(graph, local, &b, row, expr)?;
+            out.push(value_to_id_readonly(graph, local, &v));
+        }
+        out
+    };
+    #[cfg(not(feature = "parallel"))]
+    let resolved: Vec<Result<Id, Term>> = {
+        let mut out = Vec::with_capacity(b.rows.len());
+        for row in &b.rows {
+            let v = eval_expr(graph, local, &b, row, expr)?;
+            out.push(value_to_id_readonly(graph, local, &v));
+        }
+        out
+    };
+    let col: Vec<Id> = resolved
+        .into_iter()
+        .map(|r| match r {
+            Ok(id) => id,
+            Err(term) => local.intern(term),
+        })
+        .collect();
     b.vars.push(var.clone());
     for (row, id) in b.rows.iter_mut().zip(col) {
         row.push(id);
@@ -2571,11 +2608,32 @@ fn group_aggregate(
                 .collect::<Result<Vec<_>, String>>()
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // Resolve the aggregate values to ids: a PARALLEL read-only pass (inline integers, graph-dict
+    // and already-local terms — the vast majority) and then a serial intern of only the genuinely
+    // new terms, in order, so ids are byte-identical to the fully-serial path (T1.0b).
+    #[cfg(feature = "parallel")]
+    let resolved: Vec<Vec<Result<Id, Term>>> = if b.rows.len() >= PAR_THRESHOLD {
+        use rayon::prelude::*;
+        let lv: &LocalVocab = local;
+        agg_values
+            .par_iter()
+            .map(|vals| vals.iter().map(|v| value_to_id_readonly(graph, lv, v)).collect())
+            .collect()
+    } else {
+        agg_values.iter().map(|vals| vals.iter().map(|v| value_to_id_readonly(graph, local, v)).collect()).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let resolved: Vec<Vec<Result<Id, Term>>> =
+        agg_values.iter().map(|vals| vals.iter().map(|v| value_to_id_readonly(graph, local, v)).collect()).collect();
+
     let mut rows: Vec<Row> = Vec::with_capacity(order.len());
-    for (key, vals) in order.iter().zip(agg_values) {
+    for (key, res) in order.iter().zip(resolved) {
         let mut row = Row::from_slice(key);
-        for v in vals {
-            row.push(value_to_id(graph, local, &v));
+        for r in res {
+            row.push(match r {
+                Ok(id) => id,
+                Err(term) => local.intern(term),
+            });
         }
         rows.push(row);
     }
@@ -3581,6 +3639,33 @@ fn value_to_id(graph: &Graph, local: &mut LocalVocab, v: &Value) -> Id {
         Value::Term(t) => t.clone(),
     };
     graph.id_of(&term).unwrap_or_else(|| local.intern(term))
+}
+
+/// Read-only half of [`value_to_id`], for the parallel resolve pass (T1.0b). Most computed values
+/// resolve WITHOUT touching the mutable vocab: small integers inline into the id, and terms
+/// already in the graph dictionary (or already interned locally) are read-only lookups. Only a
+/// genuinely new term returns `Err(term)` — carrying the constructed `Term` so the serial
+/// intern-the-misses pass does no re-construction. Splitting this way removes the bulk of the B1
+/// serialization point (research/parallelism-scaling.md) without sharded-vocab complexity, and
+/// stays byte-identical: misses are interned in row order, exactly as the serial path would.
+fn value_to_id_readonly(graph: &Graph, local: &LocalVocab, v: &Value) -> Result<Id, Term> {
+    let term = match v {
+        Value::Unbound | Value::Error => return Ok(NO_ID),
+        Value::Bool(b) => Term::Literal(Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN)),
+        Value::Num(n) => Term::Literal(if n.fract() == 0.0 && n.is_finite() {
+            Literal::new_typed_literal((*n as i64).to_string(), xsd::INTEGER)
+        } else {
+            Literal::new_typed_literal(n.to_string(), xsd::DOUBLE)
+        }),
+        Value::Term(t) => t.clone(),
+    };
+    if let Some(id) = graph.id_of(&term) {
+        return Ok(id);
+    }
+    if let Some(&id) = local.ids.get(&term) {
+        return Ok(id);
+    }
+    Err(term)
 }
 
 // ---- spargebra term helpers --------------------------------------------------
