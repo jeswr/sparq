@@ -656,36 +656,6 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
 /// decompress, the largest measured ingest win. At most a few 64 MiB blocks are in flight,
 /// so memory stays bounded.
 #[cfg(all(feature = "mmap", feature = "parallel"))]
-/// Env-gated (`SPARQ_BUILD_TIMING`) phase-time accumulators for the parallel ingest path,
-/// to attribute wall-time across parallel-parse vs serial dict-merge vs serial triple-remap.
-#[cfg(all(feature = "mmap", feature = "parallel"))]
-mod build_timing {
-    use std::sync::atomic::AtomicU64;
-    pub static PARSE_NS: AtomicU64 = AtomicU64::new(0);
-    pub static MERGE_NS: AtomicU64 = AtomicU64::new(0);
-    pub static REMAP_NS: AtomicU64 = AtomicU64::new(0);
-    pub fn reset() {
-        use std::sync::atomic::Ordering::Relaxed;
-        PARSE_NS.store(0, Relaxed);
-        MERGE_NS.store(0, Relaxed);
-        REMAP_NS.store(0, Relaxed);
-    }
-    pub fn enabled() -> bool {
-        std::env::var("SPARQ_BUILD_TIMING").is_ok()
-    }
-    pub fn report(stage: &str, secs: f64) {
-        use std::sync::atomic::Ordering::Relaxed;
-        let (p, m, r) = (
-            PARSE_NS.load(Relaxed) as f64 / 1e9,
-            MERGE_NS.load(Relaxed) as f64 / 1e9,
-            REMAP_NS.load(Relaxed) as f64 / 1e9,
-        );
-        eprintln!(
-            "[build-timing] {stage}: parse(parallel) {p:.2}s | merge_remap(serial) {m:.2}s | triple-remap(serial) {r:.2}s | {secs:.2}s wall to here"
-        );
-    }
-}
-
 fn build_external_ntriples_parallel<R: std::io::Read + Send>(
     reader: R,
     dict: &mut Dict,
@@ -697,9 +667,16 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
     use std::sync::mpsc::sync_channel;
     const BLOCK: usize = 64 << 20; // 64 MiB
     let (tx, rx) = sync_channel::<Vec<u8>>(3);
+    // Parsed partials flow parse-thread -> merge (this thread). A small bound keeps memory
+    // bounded (a couple of blocks' partials in flight) while letting the rayon PARSE of the
+    // next block overlap the SERIAL dict-merge of the current one. Profiling showed the
+    // merge (merge_remap + triple-remap, ~10.5s/50M) dominates the parallel parse (~5.2s),
+    // and they previously ran sequentially per block; this 3-stage pipeline hides the parse.
+    type Partials = Vec<(Dict, Vec<[Id; 3]>)>;
+    let (ptx, prx) = sync_channel::<Partials>(2);
 
     std::thread::scope(|scope| -> Result<(), String> {
-        // Producer: decompress + read on its own thread, emitting newline-aligned blocks.
+        // Stage 1 — decompress + read on its own thread, emitting newline-aligned blocks.
         let producer = scope.spawn(move || -> Result<(), String> {
             let mut reader = reader;
             let mut readbuf = vec![0u8; BLOCK];
@@ -729,36 +706,56 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
                 carry = block[cut..].to_vec();
                 block.truncate(cut);
                 if tx.send(block).is_err() {
-                    return Ok(()); // the consumer hit an error and dropped the receiver
+                    return Ok(()); // a downstream stage errored and dropped the receiver
                 }
             }
         });
 
-        // Consumer: parse+intern+spill each block (itself rayon-parallel) as it arrives.
-        for block in rx {
-            parse_block_into(&block, dict, buf, runs, tmp, chunk)?;
+        // Stage 2 — parse+intern each block in parallel (per-chunk local dicts, no shared
+        // state), forwarding the partials to the merge stage. Concurrent with stage 3.
+        let parser = scope.spawn(move || -> Result<(), String> {
+            for block in rx {
+                if block.is_empty() {
+                    continue;
+                }
+                let partials = parse_block(&block)?;
+                if ptx.send(partials).is_err() {
+                    return Ok(()); // the merge stage errored and dropped the receiver
+                }
+            }
+            Ok(())
+        });
+
+        // Stage 3 (this thread) — SERIAL dict-merge + triple-remap + spill; owns dict/buf/
+        // runs. The id-assignment order is identical to the old sequential path (blocks
+        // arrive in order; partials are in chunk order), so the output is byte-identical.
+        for partials in prx {
+            for (pd, ptriples) in partials {
+                let t_merge = std::time::Instant::now();
+                let remap = dict.merge_remap(&pd);
+                build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                let t_remap = std::time::Instant::now();
+                let map = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
+                for [s, p, o] in ptriples {
+                    buf.push([map(s), map(p), map(o)]);
+                    if buf.len() >= chunk {
+                        extsort::spill_run(buf, runs, tmp).map_err(|e| e.to_string())?;
+                    }
+                }
+                build_timing::REMAP_NS.fetch_add(t_remap.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
         }
-        // Surface a decompression error (the producer ends → channel closes → loop above
-        // exits cleanly, and the error is here).
+        // Join parse first (it feeds stage 3 — surface a parse error), then the producer.
+        parser.join().map_err(|_| "parse thread panicked".to_string())??;
         producer.join().map_err(|_| "decompression thread panicked".to_string())?
     })
 }
 
-/// Parses one (complete-line) N-Triples byte block in parallel, merges each chunk's
-/// partial dictionary into `dict`, and spills SPO runs as `buf` fills.
+/// Parses one (complete-line) N-Triples byte block in parallel into per-chunk partial
+/// dictionaries + local-id triples (no shared state) — the parallelizable half of ingest.
 #[cfg(all(feature = "mmap", feature = "parallel"))]
-fn parse_block_into(
-    bytes: &[u8],
-    dict: &mut Dict,
-    buf: &mut Vec<[Id; 3]>,
-    runs: &mut Vec<std::path::PathBuf>,
-    tmp: &std::path::Path,
-    chunk: usize,
-) -> Result<(), String> {
+fn parse_block(bytes: &[u8]) -> Result<Vec<(Dict, Vec<[Id; 3]>)>, String> {
     use rayon::prelude::*;
-    if bytes.is_empty() {
-        return Ok(());
-    }
     let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 4096 + 1);
     let bounds = newline_chunk_bounds(bytes, target);
     let t_parse = std::time::Instant::now();
@@ -771,21 +768,37 @@ fn parse_block_into(
         })
         .collect::<Result<Vec<_>, _>>()?;
     build_timing::PARSE_NS.fetch_add(t_parse.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-    for (pd, ptriples) in partials {
-        let t_merge = std::time::Instant::now();
-        let remap = dict.merge_remap(&pd);
-        build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-        let t_remap = std::time::Instant::now();
-        let map = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
-        for [s, p, o] in ptriples {
-            buf.push([map(s), map(p), map(o)]);
-            if buf.len() >= chunk {
-                extsort::spill_run(buf, runs, tmp).map_err(|e| e.to_string())?;
-            }
-        }
-        build_timing::REMAP_NS.fetch_add(t_remap.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    Ok(partials)
+}
+
+/// Env-gated (`SPARQ_BUILD_TIMING`) phase-time accumulators for the parallel ingest path,
+/// to attribute wall-time across parallel-parse vs serial dict-merge vs serial triple-remap.
+#[cfg(all(feature = "mmap", feature = "parallel"))]
+mod build_timing {
+    use std::sync::atomic::AtomicU64;
+    pub static PARSE_NS: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_NS: AtomicU64 = AtomicU64::new(0);
+    pub static REMAP_NS: AtomicU64 = AtomicU64::new(0);
+    pub fn reset() {
+        use std::sync::atomic::Ordering::Relaxed;
+        PARSE_NS.store(0, Relaxed);
+        MERGE_NS.store(0, Relaxed);
+        REMAP_NS.store(0, Relaxed);
     }
-    Ok(())
+    pub fn enabled() -> bool {
+        std::env::var("SPARQ_BUILD_TIMING").is_ok()
+    }
+    pub fn report(stage: &str, secs: f64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (p, m, r) = (
+            PARSE_NS.load(Relaxed) as f64 / 1e9,
+            MERGE_NS.load(Relaxed) as f64 / 1e9,
+            REMAP_NS.load(Relaxed) as f64 / 1e9,
+        );
+        eprintln!(
+            "[build-timing] {stage}: parse(parallel) {p:.2}s | merge_remap(serial) {m:.2}s | triple-remap(serial) {r:.2}s | {secs:.2}s wall to here"
+        );
+    }
 }
 
 #[cfg(test)]

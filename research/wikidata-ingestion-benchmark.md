@@ -91,6 +91,16 @@ profile). This is exactly what the sharded parallel dict must eliminate.
    Per-thread local intern (zero contention) → hash-partition terms across shards → parallel
    per-shard dedup + prefix-sum for global id ranges → parallel column rewrite. Replaces the
    serial `merge_remap`. Target **1.3 → 3–4 M/s** on 8 cores (won't reach 6.5 alone). High.
+   - **2a DONE (commit pending): 3-stage parse∥merge pipeline.** A first, low-risk,
+     byte-identical step toward 2: parse (rayon) and the serial dict-merge now run on
+     separate stages so the parse of block N+1 overlaps the merge of block N (previously
+     sequential per block). Measured real 50 M `.zst`, interleaved best-of-4: 38.77 s →
+     36.66 s (**−5.4 %**, every pair new<old). Modest because it only *hides the parse* under
+     the merge; the merge itself is still serial. **2b (the full win) remains:** parallelize
+     `merge_remap` itself via a concurrent/sharded dict — larger change (unsafe concurrent
+     arena or a finalization remap that breaks the streaming-sort spill; touches the
+     id-contiguity invariants in the blob/mmap-dict/numerics formats), scoped as a dedicated
+     fuzz-gated effort.
 3. **[real win, dual benefit] Extend inline tagged ValueIds beyond small ints** to dateTime,
    decimal/double, boolean, short langString. Much of Wikidata's 42%-distinct mass is
    dates/quantities/coords that pack inline and **never enter the dict** — shrinks *both* the
