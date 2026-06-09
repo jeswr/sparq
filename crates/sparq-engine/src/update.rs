@@ -4,13 +4,16 @@
 //! update batch. Pattern-based `DELETE/INSERT ... WHERE`, `LOAD`, and named-graph operations are
 //! follow-ups (they need query evaluation and/or a quad store).
 
-use oxrdf::{NamedOrBlankNode, Term};
-use rustc_hash::FxHashSet;
+use oxrdf::{NamedOrBlankNode, Term, Variable};
+use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::Dict;
 use sparq_core::store::Pattern as IdPattern;
 use sparq_core::Graph;
 use spargebra::algebra::GraphTarget;
-use spargebra::term::{GraphName, GroundQuad, GroundTerm, Quad};
+use spargebra::term::{
+    GraphName, GraphNamePattern, GroundQuad, GroundTerm, GroundTermPattern, NamedNodePattern, Quad,
+    TermPattern,
+};
 use spargebra::GraphUpdateOperation;
 use spargebra::SparqlParser;
 
@@ -76,6 +79,41 @@ fn build(triples: &FxHashSet<TripleTerms>) -> Graph {
     Graph::from_parts(dict, ids)
 }
 
+// --- template instantiation for DELETE/INSERT … WHERE ------------------------------------------
+// Substitute a template term from a WHERE solution. `None` => the position has an unbound variable,
+// so the whole quad is skipped (per SPARQL, a template triple with an unbound slot is not produced).
+type Subst<'a> = dyn Fn(&Variable) -> Option<Term> + 'a;
+
+fn tp_subst(tp: &TermPattern, get: &Subst) -> Option<Term> {
+    match tp {
+        TermPattern::Variable(v) => get(v),
+        TermPattern::NamedNode(n) => Some(Term::NamedNode(n.clone())),
+        TermPattern::BlankNode(b) => Some(Term::BlankNode(b.clone())),
+        TermPattern::Literal(l) => Some(Term::Literal(l.clone())),
+        _ => None, // RDF-star triple terms not supported
+    }
+}
+fn gtp_subst(tp: &GroundTermPattern, get: &Subst) -> Option<Term> {
+    match tp {
+        GroundTermPattern::Variable(v) => get(v),
+        GroundTermPattern::NamedNode(n) => Some(Term::NamedNode(n.clone())),
+        GroundTermPattern::Literal(l) => Some(Term::Literal(l.clone())),
+        _ => None,
+    }
+}
+fn nnp_subst(p: &NamedNodePattern, get: &Subst) -> Option<Term> {
+    match p {
+        NamedNodePattern::NamedNode(n) => Some(Term::NamedNode(n.clone())),
+        NamedNodePattern::Variable(v) => get(v),
+    }
+}
+fn gnp_default(g: &GraphNamePattern) -> Result<(), String> {
+    match g {
+        GraphNamePattern::DefaultGraph => Ok(()),
+        _ => Err("named graphs in an UPDATE template are not yet supported".into()),
+    }
+}
+
 /// Apply a SPARQL Update string to `graph`, returning the updated graph. Errors (leaving the input
 /// consumed) on operations not yet supported, so the caller can keep the original on failure by
 /// cloning beforehand if needed.
@@ -99,6 +137,45 @@ pub fn update(graph: &Graph, sparql: &str) -> Result<Graph, String> {
             GraphUpdateOperation::Clear { graph: target, .. } => {
                 if clears_default(target) {
                     triples.clear();
+                }
+            }
+            // DELETE { d } INSERT { i } WHERE { p } — evaluate the WHERE pattern against the graph
+            // state so far, instantiate the delete/insert templates per solution, then apply all
+            // deletes and then all inserts (SPARQL semantics).
+            GraphUpdateOperation::DeleteInsert { delete, insert, using, pattern } => {
+                if using.is_some() {
+                    return Err("USING in DELETE/INSERT … WHERE is not yet supported".into());
+                }
+                let current = build(&triples);
+                let result = crate::exec::eval_select(&current, pattern)?;
+                let cols: FxHashMap<Variable, usize> =
+                    result.vars.iter().enumerate().map(|(i, v)| (v.clone(), i)).collect();
+                let mut dels: Vec<TripleTerms> = Vec::new();
+                let mut inss: Vec<TripleTerms> = Vec::new();
+                for row in &result.rows {
+                    let get = |v: &Variable| -> Option<Term> { cols.get(v).and_then(|&i| row[i].clone()) };
+                    for dp in delete {
+                        gnp_default(&dp.graph_name)?;
+                        if let (Some(s), Some(p), Some(o)) =
+                            (gtp_subst(&dp.subject, &get), nnp_subst(&dp.predicate, &get), gtp_subst(&dp.object, &get))
+                        {
+                            dels.push([s, p, o]);
+                        }
+                    }
+                    for ip in insert {
+                        gnp_default(&ip.graph_name)?;
+                        if let (Some(s), Some(p), Some(o)) =
+                            (tp_subst(&ip.subject, &get), nnp_subst(&ip.predicate, &get), tp_subst(&ip.object, &get))
+                        {
+                            inss.push([s, p, o]);
+                        }
+                    }
+                }
+                for t in dels {
+                    triples.remove(&t);
+                }
+                for t in inss {
+                    triples.insert(t);
                 }
             }
             other => return Err(format!("UPDATE operation not yet supported: {other:?}")),
@@ -138,6 +215,23 @@ mod tests {
         assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { :c :p ?o }").unwrap(), 1);
         // CLEAR empties the default graph.
         let g = update(&g, "CLEAR ALL").unwrap();
+        assert_eq!(count(&g), 0);
+    }
+
+    #[test]
+    fn delete_insert_where() {
+        let g = Graph::load_str("@prefix : <http://ex/> . :a :age 30 . :b :age 25 .", "turtle").unwrap();
+        // Rename predicate :age -> :years for every match.
+        let g = update(
+            &g,
+            "PREFIX : <http://ex/> DELETE { ?s :age ?a } INSERT { ?s :years ?a } WHERE { ?s :age ?a }",
+        )
+        .unwrap();
+        assert_eq!(count(&g), 2);
+        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?s :age ?a }").unwrap(), 0);
+        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?s :years ?a }").unwrap(), 2);
+        // DELETE WHERE shorthand removes all matches.
+        let g = update(&g, "PREFIX : <http://ex/> DELETE WHERE { ?s :years ?a }").unwrap();
         assert_eq!(count(&g), 0);
     }
 
