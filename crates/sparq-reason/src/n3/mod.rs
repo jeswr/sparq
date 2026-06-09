@@ -11,10 +11,25 @@
 //!   * `math:` comparisons (greaterThan/lessThan/notGreaterThan/notLessThan/equalTo/notEqualTo)
 //!     and functional (sum/difference/product/quotient/max/min/exponentiation/negation/
 //!     absoluteValue/rounded/floor/ceiling) over `( … )` list arguments;
-//!   * `string:` concatenation/length/contains/startsWith/endsWith/greaterThan/lessThan;
-//!   * `list:` length;  `time:` year/month/day/hours/minutes/seconds;  `log:` equalTo/notEqualTo.
-//! Next increments (T12): `list:` member/first/append, more `string:` (matches/replace),
-//! `log:` includes/conjunction, backward chaining (`<=`).
+//!   * `string:` concatenation/length/contains/startsWith/endsWith/greaterThan/lessThan/
+//!     matches/notMatches/replace/lowerCase/upperCase;
+//!   * `list:` length/first/last and the member/in generators;
+//!   * `time:` year/month/day/hours/minutes/seconds;
+//!   * `log:` equalTo/notEqualTo, and includes/notIncludes (store-scoped when the subject is
+//!     `{ }`/unbound — scoped negation as failure — or true formula containment when the
+//!     subject is a ground `{ … }` formula; see [`scoped_negation`]).
+//!
+//! Deliberately NOT implemented (checked against EYE/SWAP):
+//!   * `math:greaterThanOrEqual`/`lessThanOrEqual` — not in the SWAP math vocabulary nor in
+//!     EYE's builtin table; the canonical names are notLessThan/notGreaterThan (implemented).
+//!   * `list:append` — producing a NEW list requires a first-class list value in [`Term`];
+//!     lists currently exist only as rule-local rdf:first/rest structure resolved up front
+//!     ([`extract_lists`]), and `intern` has no dictionary representation for a list value,
+//!     so a produced list could neither be bound to a variable nor emitted into the ground
+//!     closure. Needs a `Term::List` variant first — deferred rather than hacked.
+//!
+//! Next increments: `log:` conjunction/semantics, non-ground formula scopes for
+//! `log:includes` (quantification), backward chaining (`<=` goal-direction).
 
 mod model;
 mod parser;
@@ -248,21 +263,43 @@ fn match_premise_seeded(
         if is_list_struct(pat, &lists) {
             continue; // structural, handled by list resolution
         }
-        // log:includes / log:notIncludes — does the object formula hold (scoped negation as
-        // failure for notIncludes)? The subject formula is treated as the current store.
+        // log:includes / log:notIncludes — does the SCOPE include the object formula?
+        //   * subject `{ }` (empty formula) or unbound/non-formula: the scope is the current
+        //     store (the engine's scoped-negation-as-failure idiom, matching prior behaviour);
+        //   * subject a ground non-empty `{ … }` formula: true formula containment — the
+        //     pattern is matched against THAT formula's triples only;
+        //   * subject a NON-ground formula (free variables inside `{ … }`): needs
+        //     quantification machinery — future work; the premise fails (matches nothing).
+        // `log:includes` may BIND free variables of the object pattern (one binding per
+        // match, like EYE); `log:notIncludes` holds iff no match exists.
         if let Some(is_not) = scoped_negation(&pat[1]) {
             let inner: &[[Term; 3]] = match &pat[2] {
                 Term::Formula(t) => t,
                 _ => &[],
             };
-            bindings.retain(|b| {
-                let holds = !match_premise_seeded(inner, facts, b, None).is_empty();
+            let mut next = Vec::new();
+            for b in bindings {
+                let matches: Option<Vec<Binding>> = match apply(&pat[0], &b) {
+                    Term::Formula(ts) if !ts.is_empty() => {
+                        if ts.iter().all(|t| t.iter().all(Term::is_ground)) {
+                            let scope = FactIndex::from_iter(ts);
+                            Some(match_premise_seeded(inner, &scope, &b, None))
+                        } else {
+                            None // non-ground scope formula: unsupported (future work)
+                        }
+                    }
+                    _ => Some(match_premise_seeded(inner, facts, &b, None)),
+                };
+                let Some(matches) = matches else { continue };
                 if is_not {
-                    !holds
+                    if matches.is_empty() {
+                        next.push(b);
+                    }
                 } else {
-                    holds
+                    next.extend(matches);
                 }
-            });
+            }
+            bindings = next;
             if bindings.is_empty() {
                 break;
             }
@@ -425,7 +462,8 @@ enum Builtin {
     StrEnds,
     StrGt,
     StrLt,
-    StrMatches, // string:matches (regex)
+    StrMatches,    // string:matches (regex)
+    StrNotMatches, // string:notMatches (regex, negated; invalid regex ⇒ premise fails)
 }
 
 fn builtin(p: &Term) -> Option<Builtin> {
@@ -456,6 +494,7 @@ fn builtin(p: &Term) -> Option<Builtin> {
             "greaterThan" => Builtin::StrGt,
             "lessThan" => Builtin::StrLt,
             "matches" => Builtin::StrMatches,
+            "notMatches" => Builtin::StrNotMatches,
             _ => return None,
         });
     }
@@ -472,7 +511,8 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
         | Builtin::StrEnds
         | Builtin::StrGt
         | Builtin::StrLt
-        | Builtin::StrMatches => {
+        | Builtin::StrMatches
+        | Builtin::StrNotMatches => {
             let (Some(x), Some(y)) = (lex(&s), lex(&o)) else { return false };
             match op {
                 Builtin::StrContains => x.contains(y),
@@ -481,6 +521,7 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
                 Builtin::StrGt => x > y,
                 Builtin::StrLt => x < y,
                 Builtin::StrMatches => regex::Regex::new(y).map(|re| re.is_match(x)).unwrap_or(false),
+                Builtin::StrNotMatches => regex::Regex::new(y).map(|re| !re.is_match(x)).unwrap_or(false),
                 _ => unreachable!(),
             }
         }
@@ -560,6 +601,9 @@ enum Func {
     Replace,   // string:replace (regex): ( str pattern replacement ) string:replace ?out
     First,     // list:first
     Last,      // list:last
+    // single-value-arg (string case mapping, Unicode-aware)
+    LowerCase, // string:lowerCase
+    UpperCase, // string:upperCase
     // single-value-arg (unary math)
     Negation,
     AbsoluteValue,
@@ -611,6 +655,8 @@ fn functional_builtin(p: &Term) -> Option<Func> {
         (Some("concatenation"), _) => Some(Func::Concat),
         (Some("length"), _) => Some(Func::StrLength),
         (Some("replace"), _) => Some(Func::Replace),
+        (Some("lowerCase"), _) => Some(Func::LowerCase),
+        (Some("upperCase"), _) => Some(Func::UpperCase),
         (_, Some("length")) => Some(Func::Length),
         (_, Some("first")) => Some(Func::First),
         (_, Some("last")) => Some(Func::Last),
@@ -648,6 +694,12 @@ fn eval_functional(
         }
         Func::Length => number_term(args.len() as f64),
         Func::StrLength => number_term(lex(&args[0])?.chars().count() as f64),
+        Func::LowerCase => {
+            Term::Lit(lex(&args[0])?.to_lowercase(), "http://www.w3.org/2001/XMLSchema#string".into(), None)
+        }
+        Func::UpperCase => {
+            Term::Lit(lex(&args[0])?.to_uppercase(), "http://www.w3.org/2001/XMLSchema#string".into(), None)
+        }
         Func::First => args.first()?.clone(),
         Func::Last => args.last()?.clone(),
         Func::Replace => {
@@ -1043,6 +1095,105 @@ mod tests {
         let three = d.intern_lit("3", int, None);
         assert!(s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/maxVal"), seven]), "math:max = 7");
         assert!(s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/count"), three]), "list:length = 3");
+    }
+
+    #[test]
+    fn list_member_with_bound_variables() {
+        // list:member resolves members THROUGH the current binding: ( ?v :extra ) with ?v
+        // joined from data generates one binding per (substituted) member.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            :s :p :o1 . :s :p :o2 .
+            { :s :p ?v . ( ?v :extra ) list:member ?m } => { ?m a :Seen } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        for m in ["o1", "o2", "extra"] {
+            assert!(has(&d, &s, &format!("http://ex/{m}"), ty, "http://ex/Seen"), "list:member {m}");
+        }
+    }
+
+    #[test]
+    fn list_in_generator() {
+        // ?x list:in ( … ) — the inverse direction of list:member.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            :seed :p :o .
+            { ?x list:in ( :a :b ) } => { ?x a :InList } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/InList"), "list:in a");
+        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/InList"), "list:in b");
+        assert!(!has(&d, &s, "http://ex/o", ty, "http://ex/InList"), "non-member excluded");
+    }
+
+    #[test]
+    fn string_lower_upper_case() {
+        // string:lowerCase / string:upperCase — functional, Unicode-aware case mapping.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :a :word "HeLLo Wörld" .
+            { ?x :word ?w . ?w string:lowerCase ?l . ?w string:upperCase ?u } => { ?x :lower ?l ; :upper ?u } .
+        "#;
+        let (mut d, s) = closure(src);
+        let xs = "http://www.w3.org/2001/XMLSchema#string";
+        let lo = d.intern_lit("hello wörld", xs, None);
+        let up = d.intern_lit("HELLO WÖRLD", xs, None);
+        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/lower"), lo]), "string:lowerCase");
+        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/upper"), up]), "string:upperCase");
+    }
+
+    #[test]
+    fn string_not_matches_regex() {
+        // string:notMatches — negated regex filter.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :a :code "abc" . :b :code "123" .
+            { ?x :code ?c . ?c string:notMatches "^[0-9]+$" } => { ?x a :NonNumeric } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/NonNumeric"), "abc does not match digits");
+        assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/NonNumeric"), "123 matches → excluded");
+    }
+
+    #[test]
+    fn log_includes_ground_formula() {
+        // Ground-formula containment: { f } log:includes { pattern } matches the pattern
+        // against the SUBJECT formula's triples (not the store) and binds its variables.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :x :q :y .
+            { { :a :p :b . :c :p :d } log:includes { ?s :p :b } } => { ?s a :FoundInFormula } .
+            { { :a :p :b } log:includes { :x :q :y } } => { :s a :StoreLeak } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/FoundInFormula"), "?s bound inside the formula");
+        assert!(!has(&d, &s, "http://ex/c", ty, "http://ex/FoundInFormula"), ":c :p :d does not match ?s :p :b");
+        // :x :q :y IS in the store but NOT in the subject formula — must not leak through.
+        assert!(!has(&d, &s, "http://ex/s", ty, "http://ex/StoreLeak"), "formula scope must not see the store");
+    }
+
+    #[test]
+    fn log_not_includes_ground_formula() {
+        // notIncludes over a ground subject formula: containment failure, scoped to it.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :seed :p :o .
+            { { :a :p :b } log:notIncludes { :a :p :c } } => { :s :notInc :yes } .
+            { { :a :p :b } log:notIncludes { :a :p :b } } => { :s :bad :yes } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(has(&d, &s, "http://ex/s", "http://ex/notInc", "http://ex/yes"), "absent triple → notIncludes holds");
+        assert!(!has(&d, &s, "http://ex/s", "http://ex/bad", "http://ex/yes"), "present triple → notIncludes fails");
     }
 
     #[test]
