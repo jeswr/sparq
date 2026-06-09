@@ -55,11 +55,10 @@ cls-maxc2 (`maxCardinality 1` ⊢ the ≤1 values are `sameAs`), cls-maxc1 (`max
 with a value ⊢ clash), prp-key (`owl:hasKey` ⊢ individuals agreeing on all key values are
 `sameAs`); `maxQualifiedCardinality 1` + `onClass` (cls-maxqc — the ≤1 qualifying values are
 `sameAs`). **Schema rules** scm-eqc/eqp (equivalence ⊢ subClassOf/subPropertyOf both ways),
-scm-int/uni (intersectionOf/unionOf ⊢ subClassOf) make the class/property hierarchy explicit
-(queryable). **Remaining for full RL:** scm-dom/rng (domain/range propagation through
-subPropertyOf — the ABox *effect* is already derived via rdfs7→rdfs2/3).
-
-### ▢ OWL — remaining (scm-dom/rng, ABox effect already covered)
+scm-int/uni (intersectionOf/unionOf ⊢ subClassOf), and scm-dom1/2 + scm-rng1/2 (domain/range
+propagate up subClassOf and down subPropertyOf) make the class/property hierarchy explicit
+(queryable). **OWL 2 RL is now substantially complete** — every commonly-used property, class,
+restriction, cardinality, key, consistency, and schema rule is implemented.
 OWL 2 **RL** is the materialization-friendly profile (the others — EL, QL — target different
 algorithms; full OWL DL is undecidable for forward chaining). RL extends the same fixpoint
 engine with property and class axioms, all expressible as datalog-style rules over ids:
@@ -112,6 +111,11 @@ implement and the OWL test suite the validation set. Sizeable but mechanical.
    `=>` with bound formula bodies; existentials in conclusions → fresh blank nodes.
 4. **Backward chaining / proof** — EYE's Euler-path resolution + proof (`--pass`/`--proof`)
    output; needed for goal-directed queries and parity on the proof tests.
+0. **Goal answering is already supported** via closure + query: `reason_n3` materializes the
+   closure into a queryable `Graph`, and `query --reason n3` reasons then SPARQL-matches any
+   goal pattern — the same answers a backward chainer gives. A LAZY goal-directed engine
+   (proving a goal without materializing the full closure) is a performance optimization for
+   very large rule sets, not a capability gap.
 5. **Validation = EYE's own test suite.** Run EYE's `cases/` (the `eye`/`eye-js` repos)
    differentially: same N3 input → compare our ground closure to EYE's `--pass` output. Each
    passing case is a parity checkpoint; the failing ones drive the next builtin/feature. This

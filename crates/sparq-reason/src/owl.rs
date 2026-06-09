@@ -195,6 +195,31 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
             }
         }
 
+        // --- scm-dom1/2, scm-rng1/2: domain/range propagate UP subClassOf and DOWN
+        // subPropertyOf (makes the schema-level domain/range closure explicit). ----------
+        let mut subprop_inv: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        for (&p2, supers) in &schema.sub_prop {
+            for &sup in supers {
+                subprop_inv.entry(sup).or_default().push(p2);
+            }
+        }
+        for (which, map) in [(v.domain, &schema.domain), (v.range, &schema.range)] {
+            for (&p, classes) in map {
+                for &c in classes {
+                    // scm-dom1/rng1: (p domain/range c), (c subClassOf d) ⊢ (p domain/range d).
+                    if let Some(ds) = schema.sub_class.get(&c) {
+                        cand.extend(ds.iter().map(|&d| [p, which, d]));
+                    }
+                }
+                // scm-dom2/rng2: (p2 subPropertyOf p), (p domain/range c) ⊢ (p2 domain/range c).
+                if let Some(subs) = subprop_inv.get(&p) {
+                    for &p2 in subs {
+                        cand.extend(classes.iter().map(|&c| [p2, which, c]));
+                    }
+                }
+            }
+        }
+
         // --- joins that need an adjacency index (prp-trp / prp-fp / prp-ifp) ----------
         if !ax.transitive.is_empty() || !ax.functional.is_empty() || !ax.inv_functional.is_empty() {
             // by_pred: p -> (s -> [o]) and inverse o -> [s], built once per round.
@@ -841,6 +866,21 @@ mod tests {
         let mut t2 = vec![[cat, dw, dog], [felix, ty, cat]];
         materialize_owl_rl(&mut dict2, &mut t2);
         assert!(inconsistencies(&dict2, &t2).is_empty(), "consistent graph reports no clash");
+    }
+
+    #[test]
+    fn scm_domain_range_propagation() {
+        // :p2 subPropertyOf :p ; :p domain :C ; :C subClassOf :D
+        // ⊢ :p domain :D (scm-dom1, up subClassOf) and :p2 domain :C (scm-dom2, down subPropertyOf).
+        let mut dict = Dict::new();
+        let (p, p2, cc, dd) = (ex(&mut dict, "p"), ex(&mut dict, "p2"), ex(&mut dict, "C"), ex(&mut dict, "D"));
+        let rdfs = |d: &mut Dict, f: &str| d.intern_iri(&format!("http://www.w3.org/2000/01/rdf-schema#{f}"));
+        let (sp, dom, sc) = (rdfs(&mut dict, "subPropertyOf"), rdfs(&mut dict, "domain"), rdfs(&mut dict, "subClassOf"));
+        let mut triples = vec![[p2, sp, p], [p, dom, cc], [cc, sc, dd]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[p, dom, dd]), "scm-dom1: domain up subClassOf");
+        assert!(set.contains(&[p2, dom, cc]), "scm-dom2: domain down subPropertyOf");
     }
 
     #[test]
