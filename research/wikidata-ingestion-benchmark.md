@@ -65,6 +65,23 @@ engine speed.** The 5× gap to RDFox's "24 min" is *separate* and secondary — 
 is an in-memory load on an undisclosed large-RAM server, very likely a larger dump, so it's
 un-normalized on both hardware and triple count.
 
+## PROFILING CONFIRMED (2026-06-09) — `merge_remap` is the serialization
+
+`SPARQ_BUILD_TIMING=1` phase instrumentation on the real 50 M `.zst` build attributes the
+16.49 s parse phase:
+
+| sub-phase | time | parallel? |
+|---|--:|:--:|
+| parse (8 cores, per-chunk local dicts) | 5.23 s | ✅ |
+| **`Dict::merge_remap` (re-intern into global dict)** | **7.57 s** | ❌ serial |
+| triple-remap (apply remap to every triple) | 2.96 s | ❌ serial |
+
+Full wall: parse 16.5 s → kway-merge SPO 18.8 s → sibling sorts 32.0 s → finalize 38.5 s.
+**`merge_remap` (7.57 s) alone exceeds the entire parallel parse (5.23 s)** — the dict work is
+done twice, the second time single-threaded. The serial dict portion (merge + remap = 10.5 s)
+is ~27 % of total wall and 100 % serial. Confirmed (corroborated by a `samply` function-level
+profile). This is exactly what the sharded parallel dict must eliminate.
+
 ## Prioritized next steps (real wins, measure-first)
 
 1. **[measure-first, gates all] Profile the parallel-build serialization.** Flamegraph the

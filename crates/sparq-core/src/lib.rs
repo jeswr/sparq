@@ -355,6 +355,10 @@ impl Graph {
         let mut dict = Dict::new();
         let mut buf: Vec<[Id; 3]> = Vec::with_capacity(chunk);
         let mut runs: Vec<std::path::PathBuf> = Vec::new();
+        #[cfg(all(feature = "mmap", feature = "parallel"))]
+        let _t_build = std::time::Instant::now();
+        #[cfg(all(feature = "mmap", feature = "parallel"))]
+        build_timing::reset();
 
         // Stream-parse + intern, spilling SPO-sorted runs to disk whenever the buffer fills.
         macro_rules! push_triple {
@@ -403,10 +407,18 @@ impl Graph {
         }
         extsort::spill_run(&mut buf, &mut runs, &tmp).map_err(|e| e.to_string())?;
         buf.shrink_to_fit();
+        #[cfg(all(feature = "mmap", feature = "parallel"))]
+        if build_timing::enabled() {
+            build_timing::report("parse+intern+spill done", _t_build.elapsed().as_secs_f64());
+        }
 
         // Merge the SPO runs into the SPO permutation file (deduplicating).
         let spo_path = dir.join(format!("perm{}.bin", Perm::Spo as usize));
         extsort::kway_merge(&runs, &spo_path).map_err(|e| e.to_string())?;
+        #[cfg(all(feature = "mmap", feature = "parallel"))]
+        if build_timing::enabled() {
+            eprintln!("[build-timing] kway_merge SPO done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+        }
         for r in &runs {
             std::fs::remove_file(r).ok();
         }
@@ -439,6 +451,10 @@ impl Graph {
             sib_sort(perm, &tmp, chunk)?;
         }
         drop(map);
+        #[cfg(all(feature = "mmap", feature = "parallel"))]
+        if build_timing::enabled() {
+            eprintln!("[build-timing] sibling sorts (5 perms) done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+        }
 
         // Empty files for the unbuilt permutations so `open` finds all six slots.
         for i in 0..6 {
@@ -640,6 +656,36 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
 /// decompress, the largest measured ingest win. At most a few 64 MiB blocks are in flight,
 /// so memory stays bounded.
 #[cfg(all(feature = "mmap", feature = "parallel"))]
+/// Env-gated (`SPARQ_BUILD_TIMING`) phase-time accumulators for the parallel ingest path,
+/// to attribute wall-time across parallel-parse vs serial dict-merge vs serial triple-remap.
+#[cfg(all(feature = "mmap", feature = "parallel"))]
+mod build_timing {
+    use std::sync::atomic::AtomicU64;
+    pub static PARSE_NS: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_NS: AtomicU64 = AtomicU64::new(0);
+    pub static REMAP_NS: AtomicU64 = AtomicU64::new(0);
+    pub fn reset() {
+        use std::sync::atomic::Ordering::Relaxed;
+        PARSE_NS.store(0, Relaxed);
+        MERGE_NS.store(0, Relaxed);
+        REMAP_NS.store(0, Relaxed);
+    }
+    pub fn enabled() -> bool {
+        std::env::var("SPARQ_BUILD_TIMING").is_ok()
+    }
+    pub fn report(stage: &str, secs: f64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (p, m, r) = (
+            PARSE_NS.load(Relaxed) as f64 / 1e9,
+            MERGE_NS.load(Relaxed) as f64 / 1e9,
+            REMAP_NS.load(Relaxed) as f64 / 1e9,
+        );
+        eprintln!(
+            "[build-timing] {stage}: parse(parallel) {p:.2}s | merge_remap(serial) {m:.2}s | triple-remap(serial) {r:.2}s | {secs:.2}s wall to here"
+        );
+    }
+}
+
 fn build_external_ntriples_parallel<R: std::io::Read + Send>(
     reader: R,
     dict: &mut Dict,
@@ -715,6 +761,7 @@ fn parse_block_into(
     }
     let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 4096 + 1);
     let bounds = newline_chunk_bounds(bytes, target);
+    let t_parse = std::time::Instant::now();
     let partials: Vec<(Dict, Vec<[Id; 3]>)> = bounds
         .par_iter()
         .map(|&(s, e)| {
@@ -723,8 +770,12 @@ fn parse_block_into(
             Ok::<_, String>((d, t))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    build_timing::PARSE_NS.fetch_add(t_parse.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     for (pd, ptriples) in partials {
+        let t_merge = std::time::Instant::now();
         let remap = dict.merge_remap(&pd);
+        build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        let t_remap = std::time::Instant::now();
         let map = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
         for [s, p, o] in ptriples {
             buf.push([map(s), map(p), map(o)]);
@@ -732,6 +783,7 @@ fn parse_block_into(
                 extsort::spill_run(buf, runs, tmp).map_err(|e| e.to_string())?;
             }
         }
+        build_timing::REMAP_NS.fetch_add(t_remap.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
     Ok(())
 }
