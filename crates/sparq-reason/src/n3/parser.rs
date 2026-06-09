@@ -63,11 +63,12 @@ struct Parser<'a> {
     base: String,
     prefixes: std::collections::HashMap<String, String>,
     bnode: usize,
+    pathvar: usize,
 }
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str) -> Parser<'a> {
-        Parser { s: src.as_bytes(), i: 0, base: String::new(), prefixes: Default::default(), bnode: 0 }
+        Parser { s: src.as_bytes(), i: 0, base: String::new(), prefixes: Default::default(), bnode: 0, pathvar: 0 }
     }
 
     // ---- lexing helpers ------------------------------------------------------
@@ -194,11 +195,46 @@ impl<'a> Parser<'a> {
                 return Ok(Term::Iri(RDF_TYPE.into()));
             }
         }
-        self.term(_out)
+        self.atom(_out)
     }
 
     // ---- terms ---------------------------------------------------------------
+    /// A term, including N3 path expressions: `node (! pred | ^ pred)*`. `A!P` is the object
+    /// reached by `A P ?o`; `A^P` is the subject reaching `A` via `?s P A`. Each step
+    /// introduces a fresh variable and emits the connecting triple into `out` (so paths in
+    /// rule premises join correctly).
     fn term(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
+        let mut base = self.atom(out)?;
+        loop {
+            self.ws();
+            match self.peek() {
+                Some(b'!') => {
+                    self.i += 1;
+                    let pred = self.atom(out)?;
+                    let next = self.fresh_pathvar();
+                    out.push([base, pred, next.clone()]);
+                    base = next;
+                }
+                Some(b'^') => {
+                    self.i += 1;
+                    let pred = self.atom(out)?;
+                    let next = self.fresh_pathvar();
+                    out.push([next.clone(), pred, base]);
+                    base = next;
+                }
+                _ => break,
+            }
+        }
+        Ok(base)
+    }
+
+    fn fresh_pathvar(&mut self) -> Term {
+        self.pathvar += 1;
+        Term::Var(format!("__path{}", self.pathvar))
+    }
+
+    /// A single atomic term (no path operators).
+    fn atom(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
         self.ws();
         match self.peek() {
             Some(b'<') => Ok(Term::Iri(self.read_iriref()?)),
@@ -266,7 +302,9 @@ impl<'a> Parser<'a> {
         let start = self.i;
         while self.i < self.s.len() {
             let c = self.s[self.i];
-            if (c as char).is_whitespace() || matches!(c, b'.' | b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{') {
+            if (c as char).is_whitespace()
+                || matches!(c, b'.' | b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{' | b'!' | b'^')
+            {
                 break;
             }
             self.i += 1;

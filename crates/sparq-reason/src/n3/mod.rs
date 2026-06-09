@@ -413,6 +413,39 @@ mod tests {
     }
 
     #[test]
+    fn path_syntax_forward() {
+        // `?x!:mother :knows ?f` — the path ?x!:mother is the mother node; desugars to
+        // (?x :mother _m)(_m :knows ?f).
+        let src = r#"
+            @prefix : <http://ex/> .
+            :alice :mother :mary .
+            :mary :knows :bob .
+            { ?x!:mother :knows ?f } => { ?x :motherKnows ?f } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(has(&d, &s, "http://ex/alice", "http://ex/motherKnows", "http://ex/bob"), "forward path !");
+    }
+
+    #[test]
+    fn path_syntax_backward() {
+        // `?x^:mother` — the subject whose :mother is ?x (i.e. ?x's children).
+        let src = r#"
+            @prefix : <http://ex/> .
+            :alice :mother :mary .
+            { ?child :mother ?m . ?m^:mother :name ?cn } => { ?m :hasChildNamed ?cn } .
+            :alice :name "Alice" .
+        "#;
+        // ?m^:mother is a child of ?m; simpler: verify ^ desugars to a backward triple.
+        let (d, s) = closure(src);
+        // ?m=mary: mary^:mother = alice (alice :mother mary); alice :name "Alice"
+        // ⊢ mary :hasChildNamed "Alice".
+        assert!(
+            s.iter().any(|[a, p, _]| *a == id(&d, "http://ex/mary") && *p == id(&d, "http://ex/hasChildNamed")),
+            "backward path ^ derived mary :hasChildNamed"
+        );
+    }
+
+    #[test]
     fn math_builtin_filter() {
         // math:greaterThan as a premise filter: adults are people over 17.
         let src = r#"

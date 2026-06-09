@@ -81,7 +81,9 @@ implement and the OWL test suite the validation set. Sizeable but mechanical.
   rules with variable binding (conjunctive premise = nested-loop join over facts), chaining
   rules to closure, then interning the ground result into the dict. **Backward rules `<=`**
   are supported for the closure (`A <= B` ≡ `B => A`, reversed into a forward rule); true
-  goal-directed backward chaining + proof output is a later addition.
+  goal-directed backward chaining + proof output is a later addition. **Path syntax** `!`/`^`
+  (`?x!:p` = the `:p`-object of `?x`; `?x^:p` = the `:p`-subject reaching `?x`) is desugared
+  into fresh-variable triples that join in the premise.
 - **Builtins (v1):** comparison/equality — `math:greaterThan`/`lessThan`/`notGreaterThan`/
   `notLessThan`/`equalTo`/`notEqualTo`, `log:equalTo`/`notEqualTo` (premise filters).
 - Tested: the canonical Man⊢Mortal rule, a recursive transitive rule (fixpoint), a
