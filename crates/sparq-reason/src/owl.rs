@@ -48,10 +48,6 @@ struct Owl {
     intersection: Id,     // owl:intersectionOf
     union: Id,            // owl:unionOf
     thing: Id,            // owl:Thing
-    disjoint_with: Id,    // owl:disjointWith
-    different_from: Id,   // owl:differentFrom
-    complement_of: Id,    // owl:complementOf
-    nothing: Id,          // owl:Nothing
     has_key: Id,          // owl:hasKey
     max_cardinality: Id,  // owl:maxCardinality
     max_qual_card: Id,    // owl:maxQualifiedCardinality
@@ -81,10 +77,6 @@ impl Owl {
             intersection: i("intersectionOf"),
             union: i("unionOf"),
             thing: i("Thing"),
-            disjoint_with: i("disjointWith"),
-            different_from: i("differentFrom"),
-            complement_of: i("complementOf"),
-            nothing: i("Nothing"),
             has_key: i("hasKey"),
             max_cardinality: i("maxCardinality"),
             max_qual_card: i("maxQualifiedCardinality"),
@@ -139,12 +131,87 @@ fn decode_lists(all: &FxHashSet<[Id; 3]>, o: &Owl) -> FxHashMap<Id, Vec<Id>> {
     lists
 }
 
+/// Union-find over term ids for owl:sameAs ENTITY REWRITING (RDFox's approach). Instead of the
+/// quadratic eq-rep substitution rule (copy every triple between every pair of equal terms,
+/// re-derived each round), equal individuals are merged to a canonical representative (the
+/// smallest id) and the whole closure is computed over representatives. The full eq-rep
+/// expansion + the sameAs relation are emitted ONCE at the end. Large speed/memory win on
+/// equality-heavy data; ~free when there are no equalities. (RDFox: up to 7.8× memory / 31×
+/// time / 45–85× fewer derivations.)
+#[derive(Default)]
+struct UnionFind {
+    parent: FxHashMap<Id, Id>,
+}
+impl UnionFind {
+    fn find(&mut self, x: Id) -> Id {
+        let mut root = x;
+        while let Some(&p) = self.parent.get(&root) {
+            if p == root {
+                break;
+            }
+            root = p;
+        }
+        // path compression
+        let mut cur = x;
+        while cur != root {
+            let nxt = self.parent[&cur];
+            self.parent.insert(cur, root);
+            cur = nxt;
+        }
+        root
+    }
+    /// Merge `a` and `b` (canonical rep = the smaller id). Returns true if newly merged.
+    fn union(&mut self, a: Id, b: Id) -> bool {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra == rb {
+            return false;
+        }
+        let (lo, hi) = (ra.min(rb), ra.max(rb));
+        self.parent.insert(hi, lo);
+        self.parent.entry(lo).or_insert(lo);
+        true
+    }
+    /// rep -> all member ids, for every non-singleton equivalence class.
+    fn classes(&mut self) -> FxHashMap<Id, Vec<Id>> {
+        let ids: Vec<Id> = self.parent.keys().copied().collect();
+        let mut m: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        for id in ids {
+            let r = self.find(id);
+            m.entry(r).or_default().push(id);
+        }
+        m
+    }
+}
+
+/// Re-key every triple to its sameAs representative, dropping sameAs triples (the union-find
+/// holds equality). Skips reflexive results.
+fn canonicalize(all: &FxHashSet<[Id; 3]>, uf: &mut UnionFind, same_as: Id) -> FxHashSet<[Id; 3]> {
+    let mut out = FxHashSet::default();
+    for &[s, p, o] in all {
+        if p == same_as {
+            continue;
+        }
+        out.insert([uf.find(s), uf.find(p), uf.find(o)]);
+    }
+    out
+}
+
 /// Expand `triples` in place with the OWL 2 RL (+ RDFS) closure. Returns NEW triple count.
 pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let v = Vocab::intern(dict);
     let o = Owl::intern(dict);
     let before = triples.len();
     let mut all: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+
+    // owl:sameAs entity rewriting: seed the union-find from explicit sameAs, then reason over
+    // canonical representatives (no quadratic eq-rep during the fixpoint).
+    let mut uf = UnionFind::default();
+    for &[s, p, obj] in &all {
+        if p == o.same_as {
+            uf.union(s, obj);
+        }
+    }
+    all = canonicalize(&all, &mut uf, o.same_as);
 
     loop {
         let schema = Schema::build(&all, &v);
@@ -155,20 +222,7 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
         rdfs_round(&all, &v, &schema, &mut cand);
 
         for &[s, p, obj] in &all {
-            // --- equality (eq-sym, eq-rep-s/p/o) -------------------------------------
-            if p == o.same_as {
-                cand.push([obj, o.same_as, s]); // eq-sym
-            }
-            // eq-rep: substitute any sameAs-equal term in each position.
-            if let Some(eqs) = ax.same.get(&s) {
-                cand.extend(eqs.iter().map(|&s2| [s2, p, obj]));
-            }
-            if let Some(eqp) = ax.same.get(&p) {
-                cand.extend(eqp.iter().map(|&p2| [s, p2, obj]));
-            }
-            if let Some(eqo) = ax.same.get(&obj) {
-                cand.extend(eqo.iter().map(|&o2| [s, p, o2]));
-            }
+            // (eq-sym / eq-rep are handled by the union-find, not as rules.)
             // --- property axioms on assertion (s p obj) ------------------------------
             if let Some(invs) = ax.inverse.get(&p) {
                 cand.extend(invs.iter().map(|&q| [obj, q, s])); // prp-inv1/2
@@ -511,13 +565,60 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
         }
 
         let mut changed = false;
+        let mut merged = false;
         for t in cand {
-            changed |= all.insert(t);
+            if t[1] == o.same_as {
+                // A derived sameAs (prp-fp/ifp, cls-maxc2/maxqc, …) → merge, don't store.
+                if uf.union(t[0], t[2]) {
+                    merged = true;
+                }
+            } else {
+                changed |= all.insert([uf.find(t[0]), uf.find(t[1]), uf.find(t[2])]);
+            }
+        }
+        if merged {
+            // Rewrite any now-outdated facts to the new representatives.
+            all = canonicalize(&all, &mut uf, o.same_as);
+            changed = true;
         }
         if !changed {
             break;
         }
     }
+
+    // EXPAND the owl:sameAs equivalence classes back into the full closure: every canonical
+    // triple is re-emitted for each member combination, plus the full sameAs relation. (The
+    // memory-efficient canonical form would need a sameAs-aware query engine; we expand so the
+    // existing engine answers queries over any member correctly.)
+    let classes = uf.classes();
+    let mut closure: FxHashSet<[Id; 3]> = FxHashSet::default();
+    for &[s, p, ob] in &all {
+        let sm = classes.get(&s).map_or(std::slice::from_ref(&s), |v| v.as_slice());
+        let pm = classes.get(&p).map_or(std::slice::from_ref(&p), |v| v.as_slice());
+        let om = classes.get(&ob).map_or(std::slice::from_ref(&ob), |v| v.as_slice());
+        if sm.len() == 1 && pm.len() == 1 && om.len() == 1 {
+            closure.insert([s, p, ob]); // common case: no equalities involved
+        } else {
+            for &s2 in sm {
+                for &p2 in pm {
+                    for &o2 in om {
+                        closure.insert([s2, p2, o2]);
+                    }
+                }
+            }
+        }
+    }
+    // Emit the sameAs relation (all ordered pairs within each non-singleton class).
+    for mem in classes.values() {
+        for &a in mem {
+            for &b in mem {
+                if a != b {
+                    closure.insert([a, o.same_as, b]);
+                }
+            }
+        }
+    }
+    all = closure;
 
     let original: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
     let mut derived: Vec<[Id; 3]> = all.iter().copied().filter(|t| !original.contains(t)).collect();
@@ -610,7 +711,6 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
 /// OWL axiom maps (the TBox), rebuilt each fixpoint round.
 #[derive(Default)]
 struct Axioms {
-    same: FxHashMap<Id, Vec<Id>>,        // x -> sameAs partners (both directions seeded)
     inverse: FxHashMap<Id, Vec<Id>>,     // p -> inverse properties (both directions)
     equiv_prop: FxHashMap<Id, Vec<Id>>,  // p -> equivalent properties (both directions)
     equiv_class: FxHashMap<Id, Vec<Id>>, // c -> equivalent classes (both directions)
@@ -623,14 +723,12 @@ struct Axioms {
 impl Axioms {
     fn build(all: &FxHashSet<[Id; 3]>, v: &Vocab, o: &Owl) -> Axioms {
         let mut ax = Axioms::default();
-        let mut bi = |m: &mut FxHashMap<Id, Vec<Id>>, a: Id, b: Id| {
+        let bi = |m: &mut FxHashMap<Id, Vec<Id>>, a: Id, b: Id| {
             m.entry(a).or_default().push(b);
             m.entry(b).or_default().push(a);
         };
         for &[s, p, obj] in all {
-            if p == o.same_as {
-                bi(&mut ax.same, s, obj);
-            } else if p == o.inverse_of {
+            if p == o.inverse_of {
                 bi(&mut ax.inverse, s, obj);
             } else if p == o.equiv_prop {
                 bi(&mut ax.equiv_prop, s, obj);
