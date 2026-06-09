@@ -36,6 +36,10 @@ pub const INLINE_BASE: Id = 1 << 31;
 /// fall back to the dictionary).
 const INLINE_MAX: u32 = (1 << 30) - 1;
 
+/// Sentinel datatype under which an RDF-star triple term is stored as its canonical string (the
+/// stopgap RDF 1.2 encoding — see `Dict::intern`).
+const RDF_STAR_TRIPLE_DT: &str = "urn:sparq:rdf-star-triple";
+
 /// If a literal `value`/`datatype` is a canonical non-negative `xsd:integer` in
 /// range, its inline id. Only the canonical lexical form (no leading zeros / sign)
 /// inlines, so `"030"^^integer` stays a distinct dictionary term.
@@ -493,7 +497,12 @@ impl Dict {
             Term::NamedNode(n) => self.intern_iri(n.as_str()),
             Term::Literal(l) => self.intern_lit(l.value(), l.datatype().as_str(), l.language()),
             Term::BlankNode(b) => self.intern_blank(b.as_str()),
-            other => unreachable!("non-triple term in dictionary: {other:?}"),
+            // RDF-star triple term (RDF 1.2). Stored as a canonical-string literal — a STOPGAP that
+            // keeps RDF 1.2 input from crashing the loader and makes concrete `<< … >>` patterns
+            // MATCH (the same triple canonicalises to the same string → same id). Structural
+            // triple-term storage (proper `<<…>>` output + variable-pattern matching) is the full
+            // T6 work.
+            Term::Triple(t) => self.intern_lit(&t.to_string(), RDF_STAR_TRIPLE_DT, None),
         }
     }
 
@@ -511,6 +520,15 @@ impl Dict {
     /// Returns the id for a term if present, else `NO_ID`.
     #[inline]
     pub fn lookup(&self, term: &Term) -> Id {
+        // Mirror intern's RDF-star canonicalisation so a concrete `<< … >>` query term resolves to
+        // the same id as the loaded data.
+        if let Term::Triple(t) = term {
+            let lit = oxrdf::Literal::new_typed_literal(
+                t.to_string(),
+                oxrdf::NamedNode::new_unchecked(RDF_STAR_TRIPLE_DT),
+            );
+            return self.lookup(&Term::Literal(lit));
+        }
         if let Some(id) = try_inline(term) {
             return id;
         }

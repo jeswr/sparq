@@ -3599,7 +3599,23 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
         TermPattern::BlankNode(b) => Ok(Term::BlankNode(b.clone())),
         TermPattern::Literal(l) => Ok(Term::Literal(l.clone())),
         TermPattern::Variable(_) => Err("variable where a term was expected".into()),
-        other => Err(format!("unsupported term pattern: {other:?}")),
+        // RDF-star GROUND triple term `<< s p o >>` (RDF 1.2). Variables inside the quoted triple
+        // are a T6 follow-up (they need structural matching, not a single id).
+        TermPattern::Triple(t) => {
+            let subject: oxrdf::NamedOrBlankNode = match term_pattern_to_term(&t.subject)? {
+                Term::NamedNode(n) => n.into(),
+                Term::BlankNode(b) => b.into(),
+                _ => return Err("RDF-star triple-term subject must be an IRI or blank node".into()),
+            };
+            let predicate = match &t.predicate {
+                NamedNodePattern::NamedNode(n) => n.clone(),
+                NamedNodePattern::Variable(_) => {
+                    return Err("variable inside a triple-term pattern is not yet supported (T6)".into())
+                }
+            };
+            let object = term_pattern_to_term(&t.object)?;
+            Ok(Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, object))))
+        }
     }
 }
 
@@ -3952,5 +3968,19 @@ mod path_tests {
         assert_eq!(n("SELECT * WHERE { GRAPH <http://ex/absent> { ?s ?p ?o } }"), 0);
         // Result ids are translated to the outer dict, so a join across GRAPH works.
         assert_eq!(n("SELECT ?o WHERE { GRAPH ?g { <http://ex/b> <http://ex/p> ?o } }"), 1);
+    }
+
+    #[test]
+    fn rdf_star_concrete_triple_terms() {
+        // RDF 1.2 triple terms load (no crash) and CONCRETE `<< … >>` patterns match (canonical
+        // string encoding). Variable-inside patterns + structural output are the T6 follow-up.
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .\n<< :bob :age 25 >> :certainty 0.5 .",
+            "turtle",
+        )
+        .unwrap();
+        let n = |q: &str| crate::query(&g, q).unwrap().len();
+        assert_eq!(n("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice :age 30 >> :certainty ?c }"), 1);
+        assert_eq!(n("PREFIX : <http://ex/> SELECT ?c WHERE { << :carol :age 99 >> :certainty ?c }"), 0);
     }
 }
