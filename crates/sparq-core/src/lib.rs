@@ -453,22 +453,37 @@ impl Graph {
         // The sibling sorts are independent — run them CONCURRENTLY (each in its own tmp
         // subdir, so run files don't collide), sharing the chunk budget so total resident
         // memory stays ~`chunk`. The shared SPO mmap is read-only (paged, no extra RAM).
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            let per = (chunk / siblings.len().max(1)).max(1 << 16);
-            siblings
-                .par_iter()
-                .try_for_each(|&perm| sib_sort(perm, &tmp.join(format!("p{}", perm as usize)), per))?;
-        }
-        #[cfg(not(feature = "parallel"))]
-        for &perm in &siblings {
-            sib_sort(perm, &tmp, chunk)?;
-        }
+        // Persisting the DICTIONARY (save_mmap: the term blob + sorted-hash index) and the
+        // numeric cache only needs `dict` — it is INDEPENDENT of the permutation sorts. Run
+        // it CONCURRENTLY with the sibling sorts (on its own thread) so the multi-hundred-MB
+        // dict write is hidden under the sort time instead of being a serial tail. Output is
+        // byte-identical (same files); only the wall-clock ordering overlaps.
+        std::thread::scope(|scope| -> Result<(), String> {
+            let dict_ref = &dict;
+            let finalize = scope.spawn(move || -> Result<(), String> {
+                dict_ref.save_mmap(dir).map_err(|e| e.to_string())?;
+                write_numerics(&dir.join("numerics.bin"), &numerics_of(dict_ref)).map_err(|e| e.to_string())?;
+                Ok(())
+            });
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                let per = (chunk / siblings.len().max(1)).max(1 << 16);
+                siblings
+                    .par_iter()
+                    .try_for_each(|&perm| sib_sort(perm, &tmp.join(format!("p{}", perm as usize)), per))?;
+            }
+            #[cfg(not(feature = "parallel"))]
+            for &perm in &siblings {
+                sib_sort(perm, &tmp, chunk)?;
+            }
+            finalize.join().map_err(|_| "dict-finalize thread panicked".to_string())??;
+            Ok(())
+        })?;
         drop(map);
         #[cfg(all(feature = "mmap", feature = "parallel"))]
         if build_timing::enabled() {
-            eprintln!("[build-timing] sibling sorts (5 perms) done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+            eprintln!("[build-timing] sibling sorts ∥ dict-save done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
         }
 
         // Empty files for the unbuilt permutations so `open` finds all six slots.
@@ -478,10 +493,6 @@ impl Graph {
                 std::fs::File::create(&p).map_err(|e| e.to_string())?;
             }
         }
-
-        dict.save_mmap(dir).map_err(|e| e.to_string())?;
-        // Persist the numeric-value cache so `open` mmaps it instead of recomputing.
-        write_numerics(&dir.join("numerics.bin"), &numerics_of(&dict)).map_err(|e| e.to_string())?;
         // Compute per-predicate stats once (a one-time POS/PSO scan) and persist them so
         // query-open never re-scans those indexes — keeping out-of-core open fast + small.
         let store = TripleStore::open(dir).map_err(|e| e.to_string())?;

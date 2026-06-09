@@ -106,6 +106,13 @@ profile). This is exactly what the sharded parallel dict must eliminate.
    dates/quantities/coords that pack inline and **never enter the dict** — shrinks *both* the
    dict-RAM blocker *and* the intern tax. **Measure the literal-type histogram of the 8.46 M
    distinct terms first** to size it.
+5. **[done/real] Overlap dict-save with the sibling sorts.** The dictionary persist
+   (`save_mmap` term-blob + sorted-hash index + numeric cache, ~6.5 s / multi-hundred-MB)
+   ran as a serial tail *after* the 5 sibling permutation sorts (~13 s), yet it only needs
+   the dict + SPO — independent of the perm sorts. Now it runs on its own thread concurrently
+   with the sorts (`std::thread::scope`), hiding the dict write under the sort time. Measured
+   real 50M `.zst`, interleaved best-of-4: 37.2 s → 34.1 s (**−8.2%**, every settled pair
+   faster), byte-identical output, COUNT correct. Stacks with the parse∥merge pipeline (#2a).
 4. **[done/real] Keep source on `.zst`/`.gz`.** Decompress fully hidden, `.zst` build
    byte-identical to `.nt`. Prefer over lbzip2/pbzip2 (parallel bzip2 burns parse cores).
 
