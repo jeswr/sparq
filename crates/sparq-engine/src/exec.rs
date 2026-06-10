@@ -3793,7 +3793,13 @@ fn ground_to_term(g: &GroundTerm) -> Term {
     match g {
         GroundTerm::NamedNode(n) => Term::NamedNode(n.clone()),
         GroundTerm::Literal(l) => Term::Literal(l.clone()),
-        other => panic!("unsupported ground term: {other:?}"),
+        // A ground RDF 1.2 triple term (e.g. in VALUES): fully concrete, so it maps
+        // straight to a structural `Term::Triple` (the object may nest another).
+        GroundTerm::Triple(t) => Term::Triple(Box::new(oxrdf::Triple::new(
+            t.subject.clone(),
+            t.predicate.clone(),
+            ground_to_term(&t.object),
+        ))),
     }
 }
 
@@ -4240,6 +4246,23 @@ mod path_tests {
         let n = |q: &str| crate::query(&g, q).unwrap().len();
         assert_eq!(n("PREFIX : <http://ex/> SELECT ?s WHERE { ?s :p <<( :a :b <<( :c :d :e )>> )>> }"), 1);
         assert_eq!(n("PREFIX : <http://ex/> SELECT ?s WHERE { ?s :p <<( :a :b <<( :c :d :x )>> )>> }"), 0);
+    }
+
+    #[test]
+    fn rdf_star_values_ground_triple_term() {
+        // A ground triple term in VALUES binds and joins against stored triple terms.
+        let g = Graph::load_str("PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .", "turtle").unwrap();
+        let n = |q: &str| crate::query(&g, q).unwrap().len();
+        assert_eq!(
+            n("PREFIX : <http://ex/> SELECT ?c WHERE { VALUES ?t { <<( :alice :age 30 )>> } \
+               ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t . ?r :certainty ?c }"),
+            1
+        );
+        assert_eq!(
+            n("PREFIX : <http://ex/> SELECT ?c WHERE { VALUES ?t { <<( :alice :age 31 )>> } \
+               ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t . ?r :certainty ?c }"),
+            0
+        );
     }
 
     #[test]
