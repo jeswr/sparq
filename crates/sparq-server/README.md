@@ -153,6 +153,46 @@ A future `sparq-core` cheap-snapshot API (an `Arc`-shared immutable base under a
 copy-on-write overlay) would remove the 2x residency and the first-update rebuild; the
 server-side wiring would not need to change shape.
 
+### EXPLAIN — query-plan introspection (T22)
+
+Any `/sparql` **query** request (all three request forms) can ask for the engine's plan
+instead of results:
+
+| How | Effect |
+| --- | --- |
+| `explain` / `explain=true` / `explain=plan` parameter (URL query string, or the url-encoded body) | **planning-only dry run** — the algebra tree, the greedy (GOO) join order with per-pattern cardinality estimates, the join strategy per step (merge / hash / bind / worst-case-optimal), and pushed-down filters. Nothing is executed, so this is cheap regardless of query cost. |
+| `explain=analyze` | plan **plus execution**: the query runs under the normal request budget and the response appends a per-operator trace (output rows + wall time per operator) and totals. SELECT/ASK only. |
+| `Accept: text/x-sparq-explain` | same as `explain=plan` |
+
+The response is `text/plain`. One caveat (also stated in the output header): the executor
+picks the bind-join cutover from *actual* intermediate row counts at run time; the
+plan-only dry run predicts that choice from the same cardinality estimates it reports.
+
+```sh
+curl 'localhost:3030/sparql?explain=true' --data-urlencode \
+  'query=SELECT * WHERE { ?a <http://ex/knows> ?b . ?b <http://ex/age> ?age }' -G
+# EXPLAIN (SELECT) — planning-only dry run; nothing is executed.
+# Plan:
+#   Project ?a, ?b, ?age
+#     BGP [binary join plan: greedy GOO ordering] (2 patterns)
+#       1. scan ?a <http://ex/knows> ?b (est 2 rows, sorted by ?b) [seed: smallest estimate]
+#       2. merge join on ?b with scan ?b <http://ex/age> ?age (est 3 rows, sorted by ?b) → est 2 rows
+```
+
+### Prometheus metrics — `GET /metrics` (T22)
+
+Hand-rolled Prometheus text exposition (no metrics dependency). The middleware wraps the
+whole hardening stack, so shed requests (429), body-limit rejections (413) and panics
+(500) are all counted with the status the client saw.
+
+| Metric | Type | What |
+| --- | --- | --- |
+| `sparq_http_requests_total{endpoint,status}` | counter | requests by endpoint (`/sparql`, `/sparql/graph`, `/graphs`, `/subscriptions`, `/health`, `/metrics`, `other`) and response status |
+| `sparq_query_duration_seconds` | histogram | wall time of `/sparql` requests (query **and** update operations); fixed buckets 1 ms … 10 s |
+| `sparq_active_subscriptions` | gauge | currently active WebSocket subscriptions (read at scrape time) |
+| `sparq_graph_triples` | gauge | triples in the published graph (read at scrape time) |
+| `sparq_updates_total` | counter | successfully applied SPARQL updates |
+
 ### Graph Store HTTP Protocol — read
 
 | Resource | How |

@@ -68,8 +68,10 @@ AMD / Graviton) — see [`research/hw-bench-results.md`](research/hw-bench-resul
 - **Out-of-core** — build on-disk indexes and query them **memory-mapped**, so billion-triple
   datasets are queryable in a fraction of the RAM.
 - **HTTP server** (`sparq-server`) — W3C SPARQL 1.1 Protocol query + update endpoints, Graph
-  Store read, result formats JSON / XML / CSV / TSV; content negotiation. Docker image via the
-  release workflow (see [`docs/release.md`](docs/release.md)).
+  Store read, result formats JSON / XML / CSV / TSV; content negotiation; **EXPLAIN /
+  EXPLAIN ANALYZE** plan introspection (`?explain=…`) and a **Prometheus `/metrics`**
+  endpoint (see [`crates/sparq-server/README.md`](crates/sparq-server/README.md)). Docker
+  image via the release workflow (see [`docs/release.md`](docs/release.md)).
 - **WebAssembly** — the core engine builds for the browser with a minimal bundle.
 
 ## Workspace

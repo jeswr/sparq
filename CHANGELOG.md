@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **EXPLAIN / EXPLAIN ANALYZE (`sparq-engine`, `sparq-server`, T22)** — query-plan
+  introspection: engine `explain()` renders the algebra tree plus a planning-only dry
+  run of the BGP planner (greedy GOO join order with cardinality estimates, per-step
+  join strategy — merge/hash/bind/worst-case-optimal — and pushed-down filters) by
+  replaying the executor's own planning helpers; `explain_analyze()` (SELECT/ASK)
+  executes under a thread-local per-operator trace reporting output rows + wall time
+  per operator (zero-cost when off: one flag read per operator entry). Served on
+  `/sparql` via `?explain=` / `explain=analyze` or `Accept: text/x-sparq-explain`.
+- **Prometheus metrics (`sparq-server`, T22)** — hand-rolled text exposition at
+  `GET /metrics` (no new dependencies): request counts by endpoint/status, a `/sparql`
+  latency histogram, active-subscription and graph-triple gauges, an update counter.
 - **SPARQL CONSTRUCT / DESCRIBE (`sparq-engine`, `sparq-server`)** — RDF-graph query
   results: spec-conformant CONSTRUCT template instantiation (unbound/illegal slots
   skipped, fresh blank nodes per solution, set-deduplicated) and DESCRIBE as concise

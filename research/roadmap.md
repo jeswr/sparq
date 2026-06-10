@@ -282,9 +282,16 @@ Homebrew formula. Versioning + changelog.
 ### T21 — Python bindings  *(adoption)*
 pyo3 bindings + an rdflib Store backend; wheels via maturin in CI.
 
-### T22 — EXPLAIN + observability  *(engine + server)*
+### T22 — EXPLAIN + observability  *(engine + server)* ✅
 Query-plan introspection (EXPLAIN endpoint/CLI flag showing plan choice, cardinality estimates,
 per-operator timings) + Prometheus metrics on the server.
+**Done:** engine `explain()` — a planning-only dry run that replays the executor's own GOO
+ordering/strategy helpers (shared functions, no logic duplication) with cardinality estimates,
+filter-pushdown and binary-vs-WCOJ dispatch — and `explain_analyze()` (SELECT/ASK), which executes
+under a thread-local per-operator trace (rows + wall time per `eval_graph_pattern` operator; one
+flag check per operator entry when off). Server: `?explain=`/`Accept: text/x-sparq-explain` on
+`/sparql`, plus a hand-rolled Prometheus `/metrics` (requests by endpoint/status, `/sparql`
+latency histogram, subscription/triple gauges, update counter). See the server README.
 
 ### T23 — Subscription API (SPARQL subscriptions)  *(server; SEPA-inspired)*
 Subscribe to a SPARQL query over WebSocket: initial result, then ADDED/REMOVED binding diffs after

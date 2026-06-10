@@ -25,6 +25,10 @@ pub mod results;
 #[cfg(feature = "server")]
 pub mod http;
 
+/// Prometheus metrics — hand-rolled text exposition at `GET /metrics` (T22).
+#[cfg(feature = "server")]
+pub mod metrics;
+
 /// SEPA-style SPARQL subscriptions over WebSocket (T23) — see `SUBSCRIPTIONS.md`.
 #[cfg(feature = "server")]
 pub mod subscriptions;
