@@ -36,10 +36,6 @@ pub const INLINE_BASE: Id = 1 << 31;
 /// fall back to the dictionary).
 const INLINE_MAX: u32 = (1 << 30) - 1;
 
-/// Sentinel datatype under which an RDF-star triple term is stored as its canonical string (the
-/// stopgap RDF 1.2 encoding — see `Dict::intern`).
-const RDF_STAR_TRIPLE_DT: &str = "urn:sparq:rdf-star-triple";
-
 /// If a literal `value`/`datatype` is a canonical non-negative `xsd:integer` in
 /// range, its inline id. Only the canonical lexical form (no leading zeros / sign)
 /// inlines, so `"030"^^integer` stays a distinct dictionary term.
@@ -96,11 +92,15 @@ pub struct Dict {
 }
 
 /// The compact per-term storage. An IRI is `(prefix id, suffix)`; a literal is
-/// `(value, datatype id, optional language)`; a blank node is its label.
+/// `(value, datatype id, optional language)`; a blank node is its label. An RDF 1.2
+/// TRIPLE TERM (`<<( s p o )>>`) is stored STRUCTURALLY as the ids of its three
+/// components (which are interned first, so a child id is always lower than — or an
+/// inline id distinct from — the triple's own id; nesting recurses through the object).
 enum Stored {
     Iri { prefix: u32, suffix: Box<str> },
     Lit { value: Box<str>, datatype: u32, lang: Option<Box<str>> },
     Blank(Box<str>),
+    Triple([Id; 3]),
 }
 
 /// A borrowed view of a dictionary term's string components (no allocation), for
@@ -110,6 +110,9 @@ pub enum TermParts<'a> {
     Iri { prefix: &'a str, suffix: &'a str },
     Lit { value: &'a str, datatype: &'a str, lang: Option<&'a str> },
     Blank(&'a str),
+    /// An RDF 1.2 triple term: the ids of its subject/predicate/object (resolve each via
+    /// `term_parts`/`term` recursively — a child may also be an inline-integer id).
+    Triple([Id; 3]),
 }
 
 // ---- Content hashing ---------------------------------------------------------
@@ -162,6 +165,23 @@ fn hash_blank(label: &str) -> u64 {
     h.finish()
 }
 
+/// Content hash of a structurally stored triple term — over the (already-interned) ids of
+/// its components, NOT strings. Unlike the other term kinds this hash is dict-relative
+/// (the ids are), so a `Term::Triple` is hashed only AFTER its children are resolved in
+/// the target dict (`intern`/`lookup` handle this; `hash_term` cannot).
+#[inline]
+fn hash_triple_ids(ids: [Id; 3]) -> u64 {
+    let mut h = rustc_hash::FxHasher::default();
+    h.write_u8(3);
+    h.write_u32(ids[0]);
+    h.write_u32(ids[1]);
+    h.write_u32(ids[2]);
+    h.finish()
+}
+
+/// NOTE: returns a placeholder for `Term::Triple` — a triple term's hash is over its
+/// component IDS (dict-relative), so callers must resolve those first (see
+/// `Dict::intern` / `Dict::lookup`, which intercept `Term::Triple` before hashing).
 #[inline]
 fn hash_term(t: &Term) -> u64 {
     match t {
@@ -180,6 +200,9 @@ fn hash_termparts(tp: &TermParts) -> u64 {
         TermParts::Iri { prefix, suffix } => hash_iri_parts(prefix, suffix),
         TermParts::Lit { value, datatype, lang } => hash_lit(value, datatype, *lang),
         TermParts::Blank(b) => hash_blank(b),
+        // Dict-relative (ids of the SOURCE dict): only meaningful within one dict.
+        // The cross-dict parts paths (`intern_partials`) reject triple terms explicitly.
+        TermParts::Triple(ids) => hash_triple_ids(*ids),
     }
 }
 
@@ -189,6 +212,7 @@ fn hash_stored(s: &Stored, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> u6
         Stored::Iri { prefix, suffix } => hash_iri_parts(&prefixes[*prefix as usize], suffix),
         Stored::Lit { value, datatype, lang } => hash_lit(value, datatypes[*datatype as usize].as_str(), lang.as_deref()),
         Stored::Blank(b) => hash_blank(b),
+        Stored::Triple(ids) => hash_triple_ids(*ids),
     }
 }
 
@@ -231,6 +255,8 @@ fn stored_is_lit(s: &Stored, value: &str, datatype: &str, lang: Option<&str>, da
     }
 }
 
+/// NOTE: `Term::Triple` always misses here — triple terms are matched by their component
+/// IDS (see `Dict::lookup`, which resolves the children and intercepts before this path).
 #[inline]
 fn stored_eq_term(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> bool {
     match q {
@@ -241,11 +267,12 @@ fn stored_eq_term(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[Name
     }
 }
 
-/// Rebuilds a full `Term` from its compact storage (for `term()`).
-fn reconstruct(s: &Stored, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> Term {
+/// Rebuilds a full `Term` from its compact storage (for `term()`). Takes the whole dict
+/// so a triple term can recursively rebuild its components by id.
+fn reconstruct(d: &Dict, s: &Stored) -> Term {
     match s {
         Stored::Iri { prefix, suffix } => {
-            let p = &prefixes[*prefix as usize];
+            let p = &d.prefixes[*prefix as usize];
             let mut iri = String::with_capacity(p.len() + suffix.len());
             iri.push_str(p);
             iri.push_str(suffix);
@@ -253,10 +280,27 @@ fn reconstruct(s: &Stored, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> Te
         }
         Stored::Lit { value, datatype, lang } => Term::Literal(match lang {
             Some(l) => Literal::new_language_tagged_literal_unchecked(value.to_string(), l.to_string()),
-            None => Literal::new_typed_literal(value.to_string(), datatypes[*datatype as usize].clone()),
+            None => Literal::new_typed_literal(value.to_string(), d.datatypes[*datatype as usize].clone()),
         }),
         Stored::Blank(b) => Term::BlankNode(oxrdf::BlankNode::new_unchecked(b.to_string())),
+        Stored::Triple(ids) => reconstruct_triple(d, *ids),
     }
+}
+
+/// Rebuilds an RDF 1.2 triple term from its stored component ids. Interning only ever
+/// stores a valid (IRI|blank, IRI, any-term) shape, so the inner matches cannot fail on
+/// ids produced by this dict.
+fn reconstruct_triple(d: &Dict, ids: [Id; 3]) -> Term {
+    let subject: oxrdf::NamedOrBlankNode = match d.term(ids[0]) {
+        Term::NamedNode(n) => n.into(),
+        Term::BlankNode(b) => b.into(),
+        other => unreachable!("stored triple-term subject must be an IRI or blank node, got {other}"),
+    };
+    let predicate = match d.term(ids[1]) {
+        Term::NamedNode(n) => n,
+        other => unreachable!("stored triple-term predicate must be an IRI, got {other}"),
+    };
+    Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, d.term(ids[2]))))
 }
 
 // ---- Memory-mapped (out-of-core) dictionary --------------------------------------
@@ -273,6 +317,7 @@ enum StoredRef<'a> {
     Iri { prefix: u32, suffix: &'a str },
     Lit { value: &'a str, datatype: u32, lang: Option<&'a str> },
     Blank(&'a str),
+    Triple([Id; 3]),
 }
 
 #[inline]
@@ -311,14 +356,15 @@ fn parse_stored_ref(b: &[u8]) -> StoredRef<'_> {
             };
             StoredRef::Lit { value, datatype, lang }
         }
+        3 => StoredRef::Triple([rd_u32(b, &mut p), rd_u32(b, &mut p), rd_u32(b, &mut p)]),
         _ => StoredRef::Blank(rd_str(b, &mut p)),
     }
 }
 
-fn reconstruct_ref(s: &StoredRef, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> Term {
+fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
     match *s {
         StoredRef::Iri { prefix, suffix } => {
-            let p = &prefixes[prefix as usize];
+            let p = &d.prefixes[prefix as usize];
             let mut iri = String::with_capacity(p.len() + suffix.len());
             iri.push_str(p);
             iri.push_str(suffix);
@@ -326,12 +372,15 @@ fn reconstruct_ref(s: &StoredRef, prefixes: &[Box<str>], datatypes: &[NamedNode]
         }
         StoredRef::Lit { value, datatype, lang } => Term::Literal(match lang {
             Some(l) => Literal::new_language_tagged_literal_unchecked(value.to_string(), l.to_string()),
-            None => Literal::new_typed_literal(value.to_string(), datatypes[datatype as usize].clone()),
+            None => Literal::new_typed_literal(value.to_string(), d.datatypes[datatype as usize].clone()),
         }),
         StoredRef::Blank(b) => Term::BlankNode(oxrdf::BlankNode::new_unchecked(b.to_string())),
+        StoredRef::Triple(ids) => reconstruct_triple(d, ids),
     }
 }
 
+/// NOTE: like `stored_eq_term`, `Term::Triple` always misses here — `Dict::lookup`
+/// resolves a triple term's component ids first and matches `StoredRef::Triple` by id.
 fn stored_ref_eq_term(s: &StoredRef, q: &Term, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> bool {
     match (s, q) {
         (StoredRef::Iri { prefix, suffix }, Term::NamedNode(n)) => {
@@ -489,45 +538,75 @@ impl Dict {
         self.push(hash, Stored::Blank(label.into()))
     }
 
+    /// Interns an RDF 1.2 triple term whose components are ALREADY interned in this dict
+    /// (ids may include inline-integer ids). Content-addressed by the component ids, so
+    /// separately-interned identical triples share one id.
+    fn intern_triple_ids(&mut self, ids: [Id; 3]) -> Id {
+        let hash = hash_triple_ids(ids);
+        if let Some(&id) = self.table.find(hash, |&id| matches!(&self.terms[(id - 1) as usize], Stored::Triple(x) if *x == ids)) {
+            return id;
+        }
+        self.push(hash, Stored::Triple(ids))
+    }
+
     /// Interns a term, returning its id (creating it if new). Dispatches to the
     /// component interners so the `Term` and byte-slice paths share one code path.
+    /// An RDF 1.2 triple term is stored STRUCTURALLY: its s/p/o are interned first
+    /// (recursing through a nested triple-term object) and the triple holds their ids.
     #[inline]
     pub fn intern(&mut self, term: &Term) -> Id {
         match term {
             Term::NamedNode(n) => self.intern_iri(n.as_str()),
             Term::Literal(l) => self.intern_lit(l.value(), l.datatype().as_str(), l.language()),
             Term::BlankNode(b) => self.intern_blank(b.as_str()),
-            // RDF-star triple term (RDF 1.2). Stored as a canonical-string literal — a STOPGAP that
-            // keeps RDF 1.2 input from crashing the loader and makes concrete `<< … >>` patterns
-            // MATCH (the same triple canonicalises to the same string → same id). Structural
-            // triple-term storage (proper `<<…>>` output + variable-pattern matching) is the full
-            // T6 work.
-            Term::Triple(t) => self.intern_lit(&t.to_string(), RDF_STAR_TRIPLE_DT, None),
+            Term::Triple(t) => {
+                let s = match t.subject {
+                    oxrdf::NamedOrBlankNode::NamedNode(ref n) => self.intern_iri(n.as_str()),
+                    oxrdf::NamedOrBlankNode::BlankNode(ref b) => self.intern_blank(b.as_str()),
+                };
+                let p = self.intern_iri(t.predicate.as_str());
+                let o = self.intern(&t.object);
+                self.intern_triple_ids([s, p, o])
+            }
         }
     }
 
     /// Interns a borrowed term (already-split components) without building a `Term` or
     /// concatenating the IRI — the fast path used by the sharded parallel merge.
+    ///
+    /// Triple terms are NOT supported here: `TermParts::Triple` carries ids of the
+    /// SOURCE dict, which are meaningless in another dict. The callers that feed this
+    /// (the sharded N-Triples bulk loaders) can never produce one — the byte-level
+    /// N-Triples parser rejects RDF-star syntax — so this is a loud guard, not a path.
     #[inline]
     fn intern_parts(&mut self, tp: &TermParts) -> Id {
         match tp {
             TermParts::Iri { prefix, suffix } => self.intern_iri_parts(prefix, suffix),
             TermParts::Lit { value, datatype, lang } => self.intern_lit(value, datatype, *lang),
             TermParts::Blank(b) => self.intern_blank(b),
+            TermParts::Triple(_) => {
+                panic!("RDF-star triple terms are not supported by the sharded (parts-based) bulk interner; use the serial loader")
+            }
         }
     }
 
     /// Returns the id for a term if present, else `NO_ID`.
     #[inline]
     pub fn lookup(&self, term: &Term) -> Id {
-        // Mirror intern's RDF-star canonicalisation so a concrete `<< … >>` query term resolves to
-        // the same id as the loaded data.
+        // An RDF 1.2 triple term is matched STRUCTURALLY: resolve its components first
+        // (a missing component means the triple term cannot be present either), then
+        // find the triple by its component ids.
         if let Term::Triple(t) = term {
-            let lit = oxrdf::Literal::new_typed_literal(
-                t.to_string(),
-                oxrdf::NamedNode::new_unchecked(RDF_STAR_TRIPLE_DT),
-            );
-            return self.lookup(&Term::Literal(lit));
+            let s = match t.subject {
+                oxrdf::NamedOrBlankNode::NamedNode(ref n) => self.lookup(&Term::NamedNode(n.clone())),
+                oxrdf::NamedOrBlankNode::BlankNode(ref b) => self.lookup(&Term::BlankNode(b.clone())),
+            };
+            let p = self.lookup(&Term::NamedNode(t.predicate.clone()));
+            let o = self.lookup(&t.object);
+            if s == NO_ID || p == NO_ID || o == NO_ID {
+                return NO_ID;
+            }
+            return self.lookup_triple_ids([s, p, o]);
         }
         if let Some(id) = try_inline(term) {
             return id;
@@ -563,6 +642,37 @@ impl Dict {
             .unwrap_or(NO_ID)
     }
 
+    /// Returns the id of a triple term whose components resolved to `ids`, else `NO_ID`.
+    /// Serves all three storage modes (arena, blob, mmap).
+    fn lookup_triple_ids(&self, ids: [Id; 3]) -> Id {
+        let hash = hash_triple_ids(ids);
+        #[cfg(feature = "mmap")]
+        if let Some(m) = &self.mapped {
+            let hashes = m.hashes();
+            let mut i = hashes.partition_point(|&h| h < hash);
+            let hids = m.hashids();
+            while i < hashes.len() && hashes[i] == hash {
+                let id = hids[i];
+                if matches!(m.stored(id), StoredRef::Triple(x) if x == ids) {
+                    return id;
+                }
+                i += 1;
+            }
+            return NO_ID;
+        }
+        if self.blob.is_some() {
+            return self
+                .table
+                .find(hash, |&id| matches!(self.blob_ref(id).unwrap(), StoredRef::Triple(x) if x == ids))
+                .copied()
+                .unwrap_or(NO_ID);
+        }
+        self.table
+            .find(hash, |&id| matches!(&self.terms[(id - 1) as usize], Stored::Triple(x) if *x == ids))
+            .copied()
+            .unwrap_or(NO_ID)
+    }
+
     /// Borrows a dictionary term's components WITHOUT reconstructing an `oxrdf::Term`
     /// (no allocation) — for serialising results straight from ids. Only valid for a
     /// real dictionary id (`1..INLINE_BASE`); the caller handles inline / local ids.
@@ -578,6 +688,7 @@ impl Dict {
                     TermParts::Lit { value, datatype: self.datatypes[datatype as usize].as_str(), lang }
                 }
                 StoredRef::Blank(b) => TermParts::Blank(b),
+                StoredRef::Triple(ids) => TermParts::Triple(ids),
             };
         }
         if let Some(r) = self.blob_ref(id) {
@@ -587,6 +698,7 @@ impl Dict {
                     TermParts::Lit { value, datatype: self.datatypes[datatype as usize].as_str(), lang }
                 }
                 StoredRef::Blank(b) => TermParts::Blank(b),
+                StoredRef::Triple(ids) => TermParts::Triple(ids),
             };
         }
         match &self.terms[(id - 1) as usize] {
@@ -595,6 +707,7 @@ impl Dict {
                 TermParts::Lit { value, datatype: self.datatypes[*datatype as usize].as_str(), lang: lang.as_deref() }
             }
             Stored::Blank(b) => TermParts::Blank(b),
+            Stored::Triple(ids) => TermParts::Triple(*ids),
         }
     }
 
@@ -608,12 +721,12 @@ impl Dict {
         }
         #[cfg(feature = "mmap")]
         if let Some(m) = &self.mapped {
-            return reconstruct_ref(&m.stored(id), &self.prefixes, &self.datatypes);
+            return reconstruct_ref(self, &m.stored(id));
         }
         if let Some(r) = self.blob_ref(id) {
-            return reconstruct_ref(&r, &self.prefixes, &self.datatypes);
+            return reconstruct_ref(self, &r);
         }
-        reconstruct(&self.terms[(id - 1) as usize], &self.prefixes, &self.datatypes)
+        reconstruct(self, &self.terms[(id - 1) as usize])
     }
 
     /// The parsed term record for an id from the in-memory blob, if the dict is compacted.
@@ -665,15 +778,22 @@ impl Dict {
             self.table
                 .reserve(other.terms.len(), |&i| hash_stored(&terms[(i - 1) as usize], prefixes, datatypes));
         }
-        other
-            .terms
-            .iter()
-            .map(|s| match s {
+        let mut remap: Vec<Id> = Vec::with_capacity(other.terms.len());
+        for s in &other.terms {
+            let id = match s {
                 Stored::Iri { prefix, suffix } => self.intern_iri_parts(&other.prefixes[*prefix as usize], suffix),
                 Stored::Lit { value, datatype, lang } => self.intern_lit(value, other.datatypes[*datatype as usize].as_str(), lang.as_deref()),
                 Stored::Blank(b) => self.intern_blank(b),
-            })
-            .collect()
+                // A triple term's components always precede it in `other` (interning
+                // pushes children first), so their remapped ids are already known.
+                Stored::Triple(ids) => {
+                    let m = |id: Id| if is_inline(id) { id } else { remap[(id - 1) as usize] };
+                    self.intern_triple_ids([m(ids[0]), m(ids[1]), m(ids[2])])
+                }
+            };
+            remap.push(id);
+        }
+        remap
     }
 
     /// Serialises the dictionary (prefixes, datatypes, compact terms) to `path` in a
@@ -713,6 +833,12 @@ impl Dict {
                     w.write_all(&[2])?;
                     write_str(&mut w, b)?;
                 }
+                Stored::Triple(ids) => {
+                    w.write_all(&[3])?;
+                    for id in ids {
+                        w.write_all(&id.to_le_bytes())?;
+                    }
+                }
             }
         }
         w.flush()
@@ -751,6 +877,7 @@ impl Dict {
                     Stored::Lit { value, datatype, lang }
                 }
                 2 => Stored::Blank(read_str(&mut r)?),
+                3 => Stored::Triple([read_u32(&mut r)?, read_u32(&mut r)?, read_u32(&mut r)?]),
                 other => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad term tag {other}"))),
             });
         }
@@ -949,6 +1076,13 @@ fn write_record(w: &mut impl std::io::Write, t: &Stored) -> std::io::Result<u64>
             write_str(w, b)?;
             1 + 4 + b.len() as u64
         }
+        Stored::Triple(ids) => {
+            w.write_all(&[3])?;
+            for id in ids {
+                w.write_all(&id.to_le_bytes())?;
+            }
+            1 + 12
+        }
     })
 }
 
@@ -990,6 +1124,7 @@ fn stored_owned_bytes(s: &Stored) -> usize {
         Stored::Iri { suffix, .. } => suffix.len(),
         Stored::Lit { value, lang, .. } => value.len() + lang.as_ref().map_or(0, |l| l.len()),
         Stored::Blank(b) => b.len(),
+        Stored::Triple(_) => 0, // the three ids live inline in the slot
     }
 }
 
@@ -1025,11 +1160,20 @@ impl ShardedDict {
     /// Route + intern a batch of `(tag, idx, term)` items (the terms must be NON-inline —
     /// inline integers are handled by the caller), returning `(tag, idx, temp-id)`. The
     /// per-shard interning runs in parallel (each shard is single-writer → no contention).
+    ///
+    /// RDF-star triple terms are NOT supported by the sharded interner (a triple's
+    /// component terms would be interned both in their hash-routed shard and alongside
+    /// the triple, breaking the term↔id bijection on merge); the N-Triples bulk loaders
+    /// that feed it reject RDF-star syntax before it could reach here.
     pub fn intern_terms(&mut self, items: Vec<(u32, Id, Term)>) -> Vec<(u32, Id, Id)> {
         let n = self.shards.len();
         let stride = self.stride;
         let mut buckets: Vec<Vec<(u32, Id, Term)>> = (0..n).map(|_| Vec::new()).collect();
         for (tag, idx, t) in items {
+            assert!(
+                !matches!(t, Term::Triple(_)),
+                "RDF-star triple terms are not supported by the sharded bulk interner; use the serial loader"
+            );
             let s = (hash_term(&t) % n as u64) as usize;
             buckets[s].push((tag, idx, t));
         }
@@ -1181,6 +1325,9 @@ impl ShardedDict {
                     Stored::Iri { prefix, suffix } => Stored::Iri { prefix: pr[prefix as usize], suffix },
                     Stored::Lit { value, datatype, lang } => Stored::Lit { value, datatype: dr[datatype as usize], lang },
                     Stored::Blank(b) => Stored::Blank(b),
+                    // Guarded out at `intern_terms` / `intern_parts` — a shard can never
+                    // hold a triple term (see the `intern_terms` doc comment).
+                    Stored::Triple(_) => unreachable!("triple terms cannot enter the sharded interner"),
                 });
             }
         }
@@ -1338,6 +1485,129 @@ mod tests {
         let (lid, did) = (d.intern(&lang), d.intern(&dec));
         assert_eq!(d.term(lid), lang);
         assert_eq!(d.term(did), dec);
+    }
+
+    fn triple(s: &str, p: &str, o: Term) -> Term {
+        Term::Triple(Box::new(oxrdf::Triple::new(
+            NamedNode::new_unchecked(s),
+            NamedNode::new_unchecked(p),
+            o,
+        )))
+    }
+
+    #[test]
+    fn triple_terms_intern_structurally_and_roundtrip() {
+        let mut d = Dict::new();
+        let tt = triple("http://ex/alice", "http://ex/age", int("30"));
+        let id = d.intern(&tt);
+        assert!(id >= 1 && id < INLINE_BASE);
+        // Children were interned (subject + predicate; the object is inline).
+        assert_eq!(d.len(), 3, "subject + predicate + the triple itself (inline object not stored)");
+        // term() rebuilds a structural Term::Triple, not a literal.
+        assert_eq!(d.term(id), tt);
+        // lookup agrees with intern; a separately-built identical triple shares the id.
+        assert_eq!(d.lookup(&tt), id);
+        assert_eq!(d.intern(&triple("http://ex/alice", "http://ex/age", int("30"))), id);
+        // A different triple gets a different id; lookup with absent components misses.
+        let other = triple("http://ex/bob", "http://ex/age", int("30"));
+        let oid = d.intern(&other);
+        assert_ne!(oid, id);
+        assert_eq!(d.lookup(&triple("http://ex/carol", "http://ex/age", int("30"))), NO_ID);
+        // A triple whose components exist but that was never interned also misses.
+        assert_eq!(d.lookup(&triple("http://ex/alice", "http://ex/age", int("25"))), NO_ID);
+    }
+
+    #[test]
+    fn nested_triple_terms_roundtrip() {
+        // RDF 1.2 nests triple terms through the OBJECT position.
+        let mut d = Dict::new();
+        let inner = triple("http://ex/a", "http://ex/b", Term::NamedNode(NamedNode::new_unchecked("http://ex/c")));
+        let outer = triple("http://ex/x", "http://ex/p", inner.clone());
+        let oid = d.intern(&outer);
+        let iid = d.intern(&inner);
+        assert_ne!(oid, iid);
+        assert_eq!(d.term(oid), outer);
+        assert_eq!(d.term(iid), inner);
+        assert_eq!(d.lookup(&outer), oid);
+        // Blank-node subject round-trips too.
+        let bsubj = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::BlankNode::new_unchecked("r0"),
+            NamedNode::new_unchecked("http://ex/p"),
+            Term::Literal(Literal::new_simple_literal("v")),
+        )));
+        let bid = d.intern(&bsubj);
+        assert_eq!(d.term(bid), bsubj);
+        assert_eq!(d.lookup(&bsubj), bid);
+    }
+
+    #[test]
+    fn triple_terms_survive_blob_compaction() {
+        let mut d = Dict::new();
+        let inner = triple("http://ex/a", "http://ex/b", int("7"));
+        let outer = triple("http://ex/x", "http://ex/p", inner.clone());
+        let plain = Term::NamedNode(NamedNode::new_unchecked("http://ex/other"));
+        let ids = [d.intern(&outer), d.intern(&inner), d.intern(&plain)];
+        let d = d.into_blob();
+        assert_eq!(d.term(ids[0]), outer);
+        assert_eq!(d.term(ids[1]), inner);
+        assert_eq!(d.term(ids[2]), plain);
+        assert_eq!(d.lookup(&outer), ids[0]);
+        assert_eq!(d.lookup(&inner), ids[1]);
+        assert_eq!(d.lookup(&triple("http://ex/x", "http://ex/p", int("7"))), NO_ID);
+    }
+
+    #[test]
+    fn triple_terms_survive_save_open() {
+        let mut d = Dict::new();
+        let inner = triple("http://ex/a", "http://ex/b", int("7"));
+        let outer = triple("http://ex/x", "http://ex/p", inner.clone());
+        let (oid, iid) = (d.intern(&outer), d.intern(&inner));
+        let dir = std::env::temp_dir().join(format!("sparq-dict-star-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dict.bin");
+        d.save(&path).unwrap();
+        let d2 = Dict::open(&path).unwrap();
+        assert_eq!(d2.term(oid), outer);
+        assert_eq!(d2.term(iid), inner);
+        assert_eq!(d2.lookup(&outer), oid);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn triple_terms_survive_save_open_mmap() {
+        let mut d = Dict::new();
+        let inner = triple("http://ex/a", "http://ex/b", int("7"));
+        let outer = triple("http://ex/x", "http://ex/p", inner.clone());
+        let (oid, iid) = (d.intern(&outer), d.intern(&inner));
+        let dir = std::env::temp_dir().join(format!("sparq-dict-star-mmap-{}", std::process::id()));
+        d.save_mmap(&dir).unwrap();
+        let d2 = Dict::open_mmap(&dir).unwrap();
+        assert_eq!(d2.term(oid), outer);
+        assert_eq!(d2.term(iid), inner);
+        assert_eq!(d2.lookup(&outer), oid);
+        assert_eq!(d2.lookup(&triple("http://ex/x", "http://ex/p", int("8"))), NO_ID);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn merge_remap_translates_triple_term_components() {
+        // A partial dict's triple term must be re-interned against the GLOBAL ids of its
+        // components (which differ from the partial's local ids).
+        let mut global = Dict::new();
+        // Pre-populate the global dict so ids diverge from the partial's.
+        for i in 0..5 {
+            global.intern(&Term::NamedNode(NamedNode::new_unchecked(format!("http://pre/{i}"))));
+        }
+        let mut partial = Dict::new();
+        let inner = triple("http://ex/a", "http://ex/b", int("7"));
+        let outer = triple("http://ex/x", "http://ex/p", inner.clone());
+        let local_outer = partial.intern(&outer);
+        let remap = global.merge_remap(&partial);
+        let gid = remap[(local_outer - 1) as usize];
+        assert_eq!(global.term(gid), outer);
+        assert_eq!(global.lookup(&outer), gid);
+        assert_eq!(global.lookup(&inner), remap[(partial.lookup(&inner) - 1) as usize]);
     }
 
     #[test]

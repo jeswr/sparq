@@ -10,8 +10,13 @@ const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 
 /// Serialises a term's JSON binding object directly from its dictionary components,
 /// with no intermediate `oxrdf::Term` allocation (the materialise hot path).
+///
+/// `TermParts::Triple` is NOT handled here (it carries component IDS that need the
+/// dictionary to resolve) — the id-level writers in `exec.rs` intercept it and recurse
+/// before calling this. A stray call is a logic error, not silent corruption.
 pub(crate) fn parts_to_json(s: &mut String, parts: TermParts<'_>) {
     match parts {
+        TermParts::Triple(_) => unreachable!("triple-term JSON is written by the id-level writers (exec::write_id_json)"),
         TermParts::Iri { prefix, suffix } => {
             s.push_str("{\"type\":\"uri\",\"value\":\"");
             escape_into(s, prefix);
@@ -128,11 +133,19 @@ pub(crate) fn term_to_json(s: &mut String, t: &Term) {
             }
             s.push('}');
         }
-        // RDF-star quoted triple: fall back to its N-Triples form as a literal.
-        other => {
-            s.push_str("{\"type\":\"literal\",\"value\":\"");
-            escape_into(s, &other.to_string());
-            s.push_str("\"}");
+        // RDF 1.2 triple term — the SPARQL 1.2 JSON results encoding:
+        // {"type":"triple","value":{"subject":…,"predicate":…,"object":…}}.
+        Term::Triple(t) => {
+            s.push_str("{\"type\":\"triple\",\"value\":{\"subject\":");
+            match &t.subject {
+                oxrdf::NamedOrBlankNode::NamedNode(n) => term_to_json(s, &Term::NamedNode(n.clone())),
+                oxrdf::NamedOrBlankNode::BlankNode(b) => term_to_json(s, &Term::BlankNode(b.clone())),
+            }
+            s.push_str(",\"predicate\":");
+            term_to_json(s, &Term::NamedNode(t.predicate.clone()));
+            s.push_str(",\"object\":");
+            term_to_json(s, &t.object);
+            s.push_str("}}");
         }
     }
 }

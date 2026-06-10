@@ -94,12 +94,19 @@ fn term_to_xml(s: &mut String, t: &Term) {
                 s.push_str("</literal>");
             }
         }
-        // RDF-star quoted triple: no standard XML element — fall back to its
-        // N-Triples form inside a plain <literal> (best-effort; documented limitation).
-        other => {
-            s.push_str("<literal>");
-            xml_text_escape(s, &other.to_string());
-            s.push_str("</literal>");
+        // RDF 1.2 triple term — the SPARQL 1.2 XML results encoding:
+        // <triple><subject>…</subject><predicate>…</predicate><object>…</object></triple>.
+        Term::Triple(t) => {
+            s.push_str("<triple><subject>");
+            match &t.subject {
+                oxrdf::NamedOrBlankNode::NamedNode(n) => term_to_xml(s, &Term::NamedNode(n.clone())),
+                oxrdf::NamedOrBlankNode::BlankNode(b) => term_to_xml(s, &Term::BlankNode(b.clone())),
+            }
+            s.push_str("</subject><predicate>");
+            term_to_xml(s, &Term::NamedNode(t.predicate.clone()));
+            s.push_str("</predicate><object>");
+            term_to_xml(s, &t.object);
+            s.push_str("</object></triple>");
         }
     }
 }
@@ -353,6 +360,23 @@ mod tests {
         let csv = select_to_csv(&r);
         // field with comma + quote must be quoted, inner quote doubled
         assert!(csv.contains("\"a,b\"\"c\""), "got: {csv}");
+    }
+
+    #[test]
+    fn xml_and_tsv_triple_terms() {
+        // RDF 1.2 triple term: SPARQL 1.2 XML <triple> element; TSV falls back to the
+        // SPARQL 1.2 `<<( … )>>` term syntax via oxrdf's Display.
+        let g = Graph::load_str("PREFIX : <http://ex/>\n<< :a :b :c >> :certainty 0.9 .", "turtle").unwrap();
+        let r = query(&g, "SELECT ?t WHERE { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }").unwrap();
+        let xml = select_to_xml(&r);
+        assert!(
+            xml.contains(
+                "<triple><subject><uri>http://ex/a</uri></subject><predicate><uri>http://ex/b</uri></predicate><object><uri>http://ex/c</uri></object></triple>"
+            ),
+            "got: {xml}"
+        );
+        let tsv = select_to_tsv(&r);
+        assert!(tsv.contains("<<( <http://ex/a> <http://ex/b> <http://ex/c> )>>"), "got: {tsv}");
     }
 
     #[test]
