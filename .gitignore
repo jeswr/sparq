@@ -8,3 +8,6 @@
 /tests/w3c/
 # Conformance scoreboard (regenerated locally by `cargo run -p sparq-conformance`).
 /conformance-report.md
+# Local venv for the Python bindings (crates/sparq-py: maturin develop + pytest).
+/.venv-py/
+__pycache__/
