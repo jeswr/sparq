@@ -281,9 +281,8 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
                 if is_ask {
-                    match sparq_engine::count_with_budget(&graph, &select, &budget) {
-                        Ok(n) => {
-                            let value = n > 0;
+                    match sparq_engine::ask_with_budget(&graph, &select, &budget) {
+                        Ok(value) => {
                             let (body, ct) = match fmt {
                                 Format::Xml => (results::ask_to_xml(value), fmt.ask_content_type()),
                                 _ => (results::ask_to_json(value), fmt.ask_content_type()),

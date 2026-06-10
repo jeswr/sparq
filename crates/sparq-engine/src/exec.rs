@@ -7,7 +7,7 @@
 
 use crate::QueryResult;
 use oxrdf::vocab::xsd;
-use oxrdf::{Literal, Term, Variable};
+use oxrdf::{BlankNode, Literal, Term, Variable};
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern as IdPattern;
@@ -565,6 +565,22 @@ pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String,
     }
     s.push_str("]}}");
     Ok(s)
+}
+
+/// ASK evaluation: `true` iff `pattern` has at least one solution. The pattern is
+/// wrapped in a `LIMIT 1` slice so the early-terminating single-pattern scan path
+/// stops at the first row; shapes without a streaming path evaluate normally (the
+/// row count is irrelevant — only emptiness is observed).
+pub fn eval_ask(graph: &Graph, pattern: &GraphPattern) -> Result<bool, String> {
+    // Exact-count fast path first (a single-pattern BGP answers from the index).
+    if let Some(n) = try_count(graph, pattern) {
+        return Ok(n > 0);
+    }
+    let sliced = GraphPattern::Slice { inner: Box::new(pattern.clone()), start: 0, length: Some(1) };
+    let mut local = LocalVocab::default();
+    let b = eval_modified(graph, &mut local, &sliced)?;
+    budget::check(b.rows.len())?;
+    Ok(!b.rows.is_empty())
 }
 
 /// Evaluates a SELECT but returns only the solution count. When the count can be
@@ -2756,6 +2772,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
     // the serial intern below, applied in row order → ids byte-identical to the serial path.
     // (Safe to parallelise: rows reference only ids created by EARLIER operators, never ids
     // created within this BIND loop.)
+    // Row identity for BNODE(str)'s per-solution scoping (see ROW_SCOPE).
+    let scope = b.rows.as_ptr() as usize;
     #[cfg(feature = "parallel")]
     let resolved: Vec<Result<Id, Term>> = if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
@@ -2763,14 +2781,17 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         let bref = &b;
         b.rows
             .par_iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(i, row)| {
+                ROW_SCOPE.set((scope, i));
                 let v = eval_expr(graph, lv, bref, row, expr)?;
                 Ok(value_to_id_readonly(graph, lv, &v))
             })
             .collect::<Result<Vec<_>, String>>()?
     } else {
         let mut out = Vec::with_capacity(b.rows.len());
-        for row in &b.rows {
+        for (i, row) in b.rows.iter().enumerate() {
+            ROW_SCOPE.set((scope, i));
             let v = eval_expr(graph, local, &b, row, expr)?;
             out.push(value_to_id_readonly(graph, local, &v));
         }
@@ -2779,7 +2800,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
     #[cfg(not(feature = "parallel"))]
     let resolved: Vec<Result<Id, Term>> = {
         let mut out = Vec::with_capacity(b.rows.len());
-        for row in &b.rows {
+        for (i, row) in b.rows.iter().enumerate() {
+            ROW_SCOPE.set((scope, i));
             let v = eval_expr(graph, local, &b, row, expr)?;
             out.push(value_to_id_readonly(graph, local, &v));
         }
@@ -3111,16 +3133,23 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
 fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
     // Per-row FILTER evaluation is independent and read-only over the graph/bindings, so a
     // large residual (non-pushed-down) filter is evaluated in parallel on native.
+    // Row identity for BNODE(str)'s per-solution scoping (see ROW_SCOPE).
+    let scope = b.rows.as_ptr() as usize;
     #[cfg(feature = "parallel")]
     let keep: Vec<bool> = if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         b.rows
             .par_iter()
-            .map(|row| Ok(effective_boolean(&eval_expr(graph, local, b, row, expr)?)))
+            .enumerate()
+            .map(|(i, row)| {
+                ROW_SCOPE.set((scope, i));
+                Ok(effective_boolean(&eval_expr(graph, local, b, row, expr)?))
+            })
             .collect::<Result<Vec<bool>, String>>()?
     } else {
         let mut keep = Vec::with_capacity(b.rows.len());
-        for row in &b.rows {
+        for (i, row) in b.rows.iter().enumerate() {
+            ROW_SCOPE.set((scope, i));
             keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
         }
         keep
@@ -3128,7 +3157,8 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
     #[cfg(not(feature = "parallel"))]
     let keep: Vec<bool> = {
         let mut keep = Vec::with_capacity(b.rows.len());
-        for row in &b.rows {
+        for (i, row) in b.rows.iter().enumerate() {
+            ROW_SCOPE.set((scope, i));
             keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
         }
         keep
@@ -3269,8 +3299,55 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
             Ok(if errored { Value::Error } else { Value::Bool(false) })
         }
         FunctionCall(f, args) => eval_function(graph, local, b, row, f, args),
-        other => Err(format!("M2: unsupported expression: {other:?}")),
+        Exists(inner) => Ok(Value::Bool(eval_exists(graph, local, b, row, inner)?)),
     }
+}
+
+/// Correlated `EXISTS { inner }` for one outer solution row: evaluate `inner` and
+/// test whether any of its solutions is join-compatible with the row on the
+/// variables they share (same term, or unbound on the inner side). Working at the
+/// id/term level — rather than substituting the row's terms into the pattern AST —
+/// keeps blank-node-valued bindings expressible (spargebra has no ground blank-node
+/// term pattern).
+///
+/// The inner pattern is evaluated against `graph`, which inside `GRAPH <g> { … }`
+/// is the active named graph — so an EXISTS nested in a GRAPH pattern sees the same
+/// dataset as its surrounding group, per the spec.
+///
+/// Note: the inner evaluation is re-run per outer row (the expression evaluator is
+/// read-only, so there is no per-FILTER place to memoise the inner bindings). Fine
+/// for correctness and small/mid results; a shared cache is a follow-up optimisation.
+fn eval_exists(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], inner: &GraphPattern) -> Result<bool, String> {
+    let mut inner_local = LocalVocab::default();
+    let inner_b = eval_graph_pattern(graph, &mut inner_local, inner)?;
+    budget::check(inner_b.rows.len())?;
+    // Columns shared between the inner solutions and the (bound part of the) outer row.
+    let shared: Vec<(usize, usize)> = inner_b
+        .vars
+        .iter()
+        .enumerate()
+        .filter_map(|(ic, v)| b.col(v).map(|oc| (oc, ic)))
+        .filter(|&(oc, _)| row[oc] != NO_ID)
+        .collect();
+    Ok(inner_b.rows.iter().any(|irow| {
+        shared
+            .iter()
+            .all(|&(oc, ic)| exists_compatible(graph, local, row[oc], &inner_local, irow[ic]))
+    }))
+}
+
+/// Join-compatibility of an outer cell with an inner EXISTS cell, where the two rows
+/// were produced against different local vocabs: unbound inner is compatible; ids in
+/// the shared spaces (graph dictionary / inline integers) compare directly; anything
+/// involving a local id falls back to term equality.
+fn exists_compatible(graph: &Graph, outer_local: &LocalVocab, o: Id, inner_local: &LocalVocab, i: Id) -> bool {
+    if i == NO_ID {
+        return true;
+    }
+    if !is_local(o) && !is_local(i) {
+        return o == i;
+    }
+    term_of(graph, outer_local, o) == term_of(graph, inner_local, i)
 }
 
 
@@ -3729,16 +3806,25 @@ fn eval_function(
     use spargebra::algebra::Function as F;
     let ev = |i: usize| eval_expr(graph, local, b, row, &args[i]);
     let simple = |s: String| Value::Term(Term::Literal(Literal::new_simple_literal(s)));
-    // Both operands as lexical strings, or `Value::Error` on a type error.
-    let str2 = |a: Value, c: Value, g: &dyn Fn(&str, &str) -> bool| match (value_str(&a), value_str(&c)) {
-        (Some(x), Some(y)) => Value::Bool(g(&x, &y)),
+    // Both operands as ARGUMENT-COMPATIBLE string literals (second simple/xsd:string,
+    // or same language tag as the first), else `Value::Error`.
+    let str_compat2 = |a: &Value, c: &Value, g: &dyn Fn(&str, &str) -> bool| match (str_lit(a), str_lit(c)) {
+        (Some((x, lx)), Some((y, ly))) if ly.is_none() || ly == lx => Value::Bool(g(&x, &y)),
         _ => Value::Error,
     };
     Ok(match f {
         F::Str => value_str(&ev(0)?).map(simple).unwrap_or(Value::Error),
         F::StrLen => value_str(&ev(0)?).map(|s| Value::Num(s.chars().count() as f64)).unwrap_or(Value::Error),
-        F::UCase => value_str(&ev(0)?).map(|s| simple(s.to_uppercase())).unwrap_or(Value::Error),
-        F::LCase => value_str(&ev(0)?).map(|s| simple(s.to_lowercase())).unwrap_or(Value::Error),
+        // UCASE/LCASE/SUBSTR operate on string literals and preserve the language tag
+        // of the argument (simple in, simple out; "bar"@en in, "BAR"@en out).
+        F::UCase => match str_lit(&ev(0)?) {
+            Some((s, lang)) => lit_with_lang(s.to_uppercase(), lang.as_deref()),
+            None => Value::Error,
+        },
+        F::LCase => match str_lit(&ev(0)?) {
+            Some((s, lang)) => lit_with_lang(s.to_lowercase(), lang.as_deref()),
+            None => Value::Error,
+        },
         F::Lang => match ev(0)? {
             Value::Term(Term::Literal(l)) => simple(l.language().unwrap_or("").to_string()),
             Value::Num(_) | Value::Bool(_) => simple(String::new()),
@@ -3751,30 +3837,49 @@ fn eval_function(
             Value::Bool(_) => Value::Term(Term::NamedNode(xsd::BOOLEAN.into_owned())),
             _ => Value::Error,
         },
+        // CONCAT: all operands must be string literals. The result carries a language
+        // tag only when every operand has the SAME tag; otherwise it is simple.
         F::Concat => {
             let mut s = String::new();
+            let mut lang: Option<Option<String>> = None; // common-tag accumulator
             for i in 0..args.len() {
-                match value_str(&ev(i)?) {
-                    Some(p) => s.push_str(&p),
+                match str_lit(&ev(i)?) {
+                    Some((p, l)) => {
+                        s.push_str(&p);
+                        lang = Some(match lang {
+                            None => l,
+                            Some(prev) if prev == l => prev,
+                            Some(_) => None,
+                        });
+                    }
                     None => return Ok(Value::Error),
                 }
             }
-            simple(s)
+            lit_with_lang(s, lang.flatten().as_deref())
         }
-        F::Contains => str2(ev(0)?, ev(1)?, &|a, c| a.contains(c)),
-        F::StrStarts => str2(ev(0)?, ev(1)?, &|a, c| a.starts_with(c)),
-        F::StrEnds => str2(ev(0)?, ev(1)?, &|a, c| a.ends_with(c)),
-        F::StrBefore => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
-            (Some(a), Some(c)) => a.find(&c).map(|i| simple(a[..i].to_string())).unwrap_or_else(|| simple(String::new())),
+        F::Contains => str_compat2(&ev(0)?, &ev(1)?, &|a, c| a.contains(c)),
+        F::StrStarts => str_compat2(&ev(0)?, &ev(1)?, &|a, c| a.starts_with(c)),
+        F::StrEnds => str_compat2(&ev(0)?, &ev(1)?, &|a, c| a.ends_with(c)),
+        // STRBEFORE/STRAFTER: arguments must be compatible (second simple/xsd:string,
+        // or same language tag). On a match the result carries the FIRST argument's
+        // language tag; no match gives the empty simple literal.
+        F::StrBefore => match (str_lit(&ev(0)?), str_lit(&ev(1)?)) {
+            (Some((a, la)), Some((c, lc))) if lc.is_none() || lc == la => match a.find(&c) {
+                Some(i) => lit_with_lang(a[..i].to_string(), la.as_deref()),
+                None => simple(String::new()),
+            },
             _ => Value::Error,
         },
-        F::StrAfter => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
-            (Some(a), Some(c)) => a.find(&c).map(|i| simple(a[i + c.len()..].to_string())).unwrap_or_else(|| simple(String::new())),
+        F::StrAfter => match (str_lit(&ev(0)?), str_lit(&ev(1)?)) {
+            (Some((a, la)), Some((c, lc))) if lc.is_none() || lc == la => match a.find(&c) {
+                Some(i) => lit_with_lang(a[i + c.len()..].to_string(), la.as_deref()),
+                None => simple(String::new()),
+            },
             _ => Value::Error,
         },
         F::SubStr => {
-            let s = match value_str(&ev(0)?) {
-                Some(s) => s,
+            let (s, lang) = match str_lit(&ev(0)?) {
+                Some(x) => x,
                 None => return Ok(Value::Error),
             };
             let start = match as_num(&ev(1)?) {
@@ -3783,15 +3888,16 @@ fn eval_function(
             };
             let chars: Vec<char> = s.chars().collect();
             let from = (start.max(1) - 1) as usize; // SPARQL SUBSTR is 1-indexed by codepoint
-            if args.len() >= 3 {
+            let out: String = if args.len() >= 3 {
                 let len = match as_num(&ev(2)?) {
                     Some(n) => n.max(0.0) as usize,
                     None => return Ok(Value::Error),
                 };
-                simple(chars.iter().skip(from).take(len).collect())
+                chars.iter().skip(from).take(len).collect()
             } else {
-                simple(chars.iter().skip(from).collect())
-            }
+                chars.iter().skip(from).collect()
+            };
+            lit_with_lang(out, lang.as_deref())
         }
         F::EncodeForUri => value_str(&ev(0)?).map(|s| simple(encode_for_uri(&s))).unwrap_or(Value::Error),
         F::Iri => match value_str(&ev(0)?) {
@@ -3810,16 +3916,18 @@ fn eval_function(
         F::Ceil => as_num(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
         F::Floor => as_num(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
         F::Round => as_num(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
-        // STRDT(lexical, datatypeIRI) -> typed literal.
-        F::StrDt => match (value_str(&ev(0)?), ev(1)?) {
-            (Some(lex), Value::Term(Term::NamedNode(dt))) => {
+        // STRDT(lexical, datatypeIRI) -> typed literal. The first argument must be a
+        // SIMPLE literal (= xsd:string in RDF 1.1) — lang-tagged / typed input errors.
+        F::StrDt => match (str_lit(&ev(0)?), ev(1)?) {
+            (Some((lex, None)), Value::Term(Term::NamedNode(dt))) => {
                 Value::Term(Term::Literal(Literal::new_typed_literal(lex, dt)))
             }
             _ => Value::Error,
         },
-        // STRLANG(lexical, langTag) -> language-tagged literal.
-        F::StrLang => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
-            (Some(lex), Some(lang)) => match Literal::new_language_tagged_literal(lex, lang) {
+        // STRLANG(lexical, langTag) -> language-tagged literal; both arguments must be
+        // simple literals.
+        F::StrLang => match (str_lit(&ev(0)?), str_lit(&ev(1)?)) {
+            (Some((lex, None)), Some((lang, None))) => match Literal::new_language_tagged_literal(lex, lang) {
                 Ok(l) => Value::Term(Term::Literal(l)),
                 Err(_) => Value::Error,
             },
@@ -3838,6 +3946,54 @@ fn eval_function(
             }
             _ => Value::Error,
         },
+        // Hash builtins: operand must be a simple literal / xsd:string; lowercase hex out.
+        #[cfg(feature = "digest")]
+        F::Md5 => digest_hex::<md5::Md5>(&ev(0)?),
+        #[cfg(feature = "digest")]
+        F::Sha1 => digest_hex::<sha1::Sha1>(&ev(0)?),
+        #[cfg(feature = "digest")]
+        F::Sha256 => digest_hex::<sha2::Sha256>(&ev(0)?),
+        #[cfg(feature = "digest")]
+        F::Sha384 => digest_hex::<sha2::Sha384>(&ev(0)?),
+        #[cfg(feature = "digest")]
+        F::Sha512 => digest_hex::<sha2::Sha512>(&ev(0)?),
+        // TZ(xsd:dateTime) -> the timezone part of the lexical form as a simple
+        // literal ("Z", "±hh:mm", or "" when absent).
+        F::Tz => datetime_arg_tz(&ev(0)?).map(simple).unwrap_or(Value::Error),
+        // TIMEZONE(xsd:dateTime) -> xsd:dayTimeDuration; no timezone is a type error.
+        F::Timezone => match datetime_arg_tz(&ev(0)?).as_deref().and_then(tz_to_duration) {
+            Some(d) => Value::Term(Term::Literal(Literal::new_typed_literal(d, xsd::DAY_TIME_DURATION))),
+            None => Value::Error,
+        },
+        F::BNode => {
+            if args.is_empty() {
+                // BNODE(): a fresh blank node per call.
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Value::Term(Term::BlankNode(BlankNode::new_unchecked(format!("fnb{n}"))))
+            } else {
+                // BNODE(str): the label is derived from (solution-row scope, argument),
+                // so equal arguments within ONE solution map to the same blank node and
+                // everything else stays distinct (see ROW_SCOPE).
+                match string_literal(&ev(0)?) {
+                    Some(s) => {
+                        let (scope, idx) = ROW_SCOPE.get();
+                        Value::Term(Term::BlankNode(BlankNode::new_unchecked(format!(
+                            "fnb{scope:x}r{idx}h{:016x}",
+                            fx64(&s)
+                        ))))
+                    }
+                    None => Value::Error,
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        F::Uuid => Value::Term(Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
+            "urn:uuid:{}",
+            uuid::Uuid::new_v4()
+        )))),
+        #[cfg(not(target_arch = "wasm32"))]
+        F::StrUuid => simple(uuid::Uuid::new_v4().to_string()),
         // xsd:dateTime accessors — parse the lexical form and return the numeric component.
         F::Year => datetime_field(&ev(0)?, 0),
         F::Month => datetime_field(&ev(0)?, 1),
@@ -3845,10 +4001,12 @@ fn eval_function(
         F::Hours => datetime_field(&ev(0)?, 3),
         F::Minutes => datetime_field(&ev(0)?, 4),
         F::Seconds => datetime_field(&ev(0)?, 5),
+        // REGEX/REPLACE: the text operand must be a string literal (an IRI or non-string
+        // literal is a type error); REPLACE's result keeps the text's language tag.
         #[cfg(feature = "regex")]
         F::Regex => {
-            let (text, pat) = match (value_str(&ev(0)?), value_str(&ev(1)?)) {
-                (Some(t), Some(p)) => (t, p),
+            let (text, pat) = match (str_lit(&ev(0)?), value_str(&ev(1)?)) {
+                (Some((t, _)), Some(p)) => (t, p),
                 _ => return Ok(Value::Error),
             };
             let flags = if args.len() >= 3 { value_str(&ev(2)?).unwrap_or_default() } else { String::new() };
@@ -3859,18 +4017,139 @@ fn eval_function(
         }
         #[cfg(feature = "regex")]
         F::Replace => {
-            let (text, pat, rep) = match (value_str(&ev(0)?), value_str(&ev(1)?), value_str(&ev(2)?)) {
-                (Some(t), Some(p), Some(r)) => (t, p, r),
+            let (text, lang, pat, rep) = match (str_lit(&ev(0)?), value_str(&ev(1)?), value_str(&ev(2)?)) {
+                (Some((t, lang)), Some(p), Some(r)) => (t, lang, p, r),
                 _ => return Ok(Value::Error),
             };
             let flags = if args.len() >= 4 { value_str(&ev(3)?).unwrap_or_default() } else { String::new() };
             match build_regex(&pat, &flags) {
-                Some(re) => simple(re.replace_all(&text, rep.as_str()).into_owned()),
+                Some(re) => lit_with_lang(re.replace_all(&text, rep.as_str()).into_owned(), lang.as_deref()),
                 None => Value::Error,
             }
         }
         other => return Err(format!("unsupported SPARQL function: {other:?}")),
     })
+}
+
+thread_local! {
+    /// The identity of the solution row an expression is being evaluated for:
+    /// (bindings identity — the rows buffer address —, row index). Set by the per-row
+    /// evaluation loops (BIND / FILTER); BNODE(str) derives its label from it, so equal
+    /// arguments within one solution share a blank node while distinct solutions get
+    /// distinct ones. The buffer address is stable across consecutive Extends over the
+    /// same Bindings (the SELECT-expression case the per-solution rule exists for).
+    static ROW_SCOPE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// 64-bit FxHash of a string (label material for BNODE(str)).
+fn fx64(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// The string value of a simple literal / xsd:string argument — the only operand type
+/// the hash builtins and BNODE(str) accept; anything else is a type error (`None`).
+fn string_literal(v: &Value) -> Option<String> {
+    match v {
+        Value::Term(Term::Literal(l)) if l.language().is_none() && l.datatype() == xsd::STRING => {
+            Some(l.value().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// A STRING-LITERAL operand (simple/xsd:string or language-tagged): `(value, language)`.
+/// IRIs, blank nodes, non-string literals and computed numerics/booleans are type
+/// errors (`None`) — per the SPARQL string-function operand rules.
+fn str_lit(v: &Value) -> Option<(String, Option<String>)> {
+    match v {
+        Value::Term(Term::Literal(l)) => {
+            if let Some(lang) = l.language() {
+                Some((l.value().to_string(), Some(lang.to_string())))
+            } else if l.datatype() == xsd::STRING {
+                Some((l.value().to_string(), None))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A simple or language-tagged literal value, per the tag the operand carried.
+fn lit_with_lang(s: String, lang: Option<&str>) -> Value {
+    Value::Term(Term::Literal(match lang {
+        Some(l) => Literal::new_language_tagged_literal_unchecked(s, l),
+        None => Literal::new_simple_literal(s),
+    }))
+}
+
+/// Lowercase-hex digest of a string-literal argument, or a type error.
+#[cfg(feature = "digest")]
+fn digest_hex<D: md5::Digest>(v: &Value) -> Value {
+    use std::fmt::Write;
+    match string_literal(v) {
+        Some(s) => {
+            let out = D::digest(s.as_bytes());
+            let mut hex = String::with_capacity(out.len() * 2);
+            for byte in out {
+                let _ = write!(hex, "{byte:02x}");
+            }
+            Value::Term(Term::Literal(Literal::new_simple_literal(hex)))
+        }
+        None => Value::Error,
+    }
+}
+
+/// The timezone part of an xsd:dateTime argument's lexical form: `"Z"`, `"±hh:mm"`, or
+/// `""` when absent. `None` (type error) when the argument is not a valid xsd:dateTime.
+fn datetime_arg_tz(v: &Value) -> Option<String> {
+    let l = match v {
+        Value::Term(Term::Literal(l))
+            if l.datatype() == xsd::DATE_TIME || l.datatype() == xsd::DATE_TIME_STAMP =>
+        {
+            l
+        }
+        _ => return None,
+    };
+    let s = l.value();
+    parse_datetime(s)?; // lexical shape check
+    let (_, time) = s.split_once('T')?;
+    Some(match time.find(['Z', '+', '-']) {
+        Some(i) => time[i..].to_string(),
+        None => String::new(),
+    })
+}
+
+/// XSD-canonical `xsd:dayTimeDuration` for a timezone string (`Z` / `±hh:mm`); an empty
+/// timezone is a type error (`None`).
+fn tz_to_duration(tz: &str) -> Option<String> {
+    if tz.is_empty() {
+        return None;
+    }
+    if tz == "Z" {
+        return Some("PT0S".to_string());
+    }
+    let (sign, hm) = tz.split_at(1);
+    let (h, m) = hm.split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    if h == 0 && m == 0 {
+        return Some("PT0S".to_string());
+    }
+    let mut out = String::new();
+    if sign == "-" {
+        out.push('-');
+    }
+    out.push_str("PT");
+    if h > 0 {
+        out.push_str(&format!("{h}H"));
+    }
+    if m > 0 {
+        out.push_str(&format!("{m}M"));
+    }
+    Some(out)
 }
 
 /// Build a regex honouring the SPARQL flag string (`i` case-insensitive, `s` dot-all, `m`

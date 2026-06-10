@@ -57,7 +57,30 @@ pub fn query_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> R
     let _guard = exec::budget::install(budget);
     match q {
         Query::Select { pattern, .. } => exec::eval_select(graph, &pattern),
-        _ => Err("only SELECT queries are supported".into()),
+        // ASK as a QueryResult: zero variables, and one (empty) row iff the pattern
+        // is satisfiable — the standard "unit row" encoding of a boolean result.
+        Query::Ask { pattern, .. } => Ok(QueryResult {
+            vars: Vec::new(),
+            rows: if exec::eval_ask(graph, &pattern)? { vec![Vec::new()] } else { Vec::new() },
+        }),
+        _ => Err("only SELECT and ASK queries are supported".into()),
+    }
+}
+
+/// Executes an ASK query: `true` iff the pattern has at least one solution.
+/// Evaluation early-exits where the engine has a streaming path (the pattern is
+/// evaluated under a `LIMIT 1`).
+pub fn ask(graph: &Graph, sparql: &str) -> Result<bool, String> {
+    ask_with_budget(graph, sparql, &QueryBudget::unlimited())
+}
+
+/// [`ask`] under a cooperative [`QueryBudget`] (deadline / max result rows).
+pub fn ask_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<bool, String> {
+    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let _guard = exec::budget::install(budget);
+    match q {
+        Query::Ask { pattern, .. } => exec::eval_ask(graph, &pattern),
+        _ => Err("ask() requires an ASK query".into()),
     }
 }
 
@@ -75,7 +98,9 @@ pub fn query_json_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget)
     let _guard = exec::budget::install(budget);
     match q {
         Query::Select { pattern, .. } => exec::eval_select_json(graph, &pattern),
-        _ => Err("only SELECT queries are supported".into()),
+        // The SPARQL 1.1 JSON results boolean form.
+        Query::Ask { pattern, .. } => Ok(format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, &pattern)?)),
+        _ => Err("only SELECT and ASK queries are supported".into()),
     }
 }
 
@@ -92,7 +117,9 @@ pub fn count_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> R
     let _guard = exec::budget::install(budget);
     match q {
         Query::Select { pattern, .. } => exec::count_select(graph, &pattern),
-        _ => Err("only SELECT queries are supported".into()),
+        // An ASK counts its unit row: 1 when satisfiable, 0 otherwise.
+        Query::Ask { pattern, .. } => Ok(usize::from(exec::eval_ask(graph, &pattern)?)),
+        _ => Err("only SELECT and ASK queries are supported".into()),
     }
 }
 
@@ -780,6 +807,159 @@ mod tests {
         let r = query(&g(), "SELECT * WHERE { ?__bn_x <http://ex/age> ?a }").unwrap();
         assert_eq!(r.len(), 3);
         assert_eq!(r.vars.len(), 2); // both ?__bn_x and ?a are visible
+    }
+
+    #[test]
+    fn ask_true_false_and_result_forms() {
+        // Satisfiable and unsatisfiable patterns.
+        assert!(ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }").unwrap());
+        assert!(!ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap());
+        // ASK with FILTER / join.
+        assert!(ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 34) }").unwrap());
+        assert!(!ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 100) }").unwrap());
+        // query(): unit-row encoding (zero vars, 0/1 rows).
+        let r = query(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age 30 }").unwrap();
+        assert_eq!((r.vars.len(), r.rows.len()), (0, 1));
+        let r = query(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age 31 }").unwrap();
+        assert_eq!((r.vars.len(), r.rows.len()), (0, 0));
+        // count(): 1 / 0.
+        assert_eq!(super::count(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o }").unwrap(), 1);
+        assert_eq!(super::count(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap(), 0);
+        // query_json(): the SPARQL 1.1 JSON boolean form.
+        assert_eq!(
+            query_json(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o }").unwrap(),
+            "{\"head\":{},\"boolean\":true}"
+        );
+        assert_eq!(
+            query_json(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap(),
+            "{\"head\":{},\"boolean\":false}"
+        );
+        // ask() on a non-ASK query is a clear error.
+        assert!(ask(&g(), "SELECT * WHERE { ?s ?p ?o }").is_err());
+    }
+
+    #[test]
+    fn exists_and_not_exists() {
+        // EXISTS correlated on the outer row: people who know someone.
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER EXISTS { ?s ex:knows ?o } }"), 2);
+        // NOT EXISTS: people who know no-one (carol).
+        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER NOT EXISTS { ?s ex:knows ?o } }").unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "<http://ex/carol>");
+        // Uncorrelated EXISTS: a satisfiable / unsatisfiable constant pattern keeps / drops all rows.
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER EXISTS { ex:alice ex:knows ex:bob } }"), 3);
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER EXISTS { ex:alice ex:knows ex:carol } }"), 0);
+        // Nested EXISTS (exists04 shape): knows someone who is known by someone.
+        assert_eq!(
+            count(
+                "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a \
+                 FILTER EXISTS { ?s ex:knows ?o FILTER EXISTS { ?o ex:knows ?p } } }"
+            ),
+            1 // alice: knows bob, and bob knows carol
+        );
+        // NOT EXISTS in ASK.
+        assert!(ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age 35 FILTER NOT EXISTS { ?s ex:knows ?o } }").unwrap());
+    }
+
+    #[test]
+    #[cfg(feature = "digest")]
+    fn hash_builtins() {
+        let one = |q: &str| {
+            let r = query(&g(), q).unwrap();
+            r.rows[0][0].as_ref().unwrap().to_string()
+        };
+        // RFC / spec vectors for "abc".
+        assert_eq!(one("SELECT (MD5(\"abc\") AS ?h) {}"), "\"900150983cd24fb0d6963f7d28e17f72\"");
+        assert_eq!(one("SELECT (SHA1(\"abc\") AS ?h) {}"), "\"a9993e364706816aba3e25717850c26c9cd0d89d\"");
+        assert_eq!(
+            one("SELECT (SHA256(\"abc\") AS ?h) {}"),
+            "\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\""
+        );
+        // A language-tagged operand is a type error -> unbound.
+        let r = query(&g(), "SELECT (MD5(\"abc\"@en) AS ?h) {}").unwrap();
+        assert!(r.rows[0][0].is_none());
+    }
+
+    #[test]
+    fn timezone_tz_bnode_uuid_builtins() {
+        let one = |q: &str| {
+            let r = query(&g(), q).unwrap();
+            r.rows[0][0].as_ref().map(|t| t.to_string())
+        };
+        let dt = "\"2010-12-21T15:38:02-08:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime>";
+        assert_eq!(one(&format!("SELECT (TZ({dt}) AS ?x) {{}}")).unwrap(), "\"-08:00\"");
+        assert_eq!(
+            one(&format!("SELECT (TIMEZONE({dt}) AS ?x) {{}}")).unwrap(),
+            "\"-PT8H\"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>"
+        );
+        let dtz = "\"2010-12-21T15:38:02Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>";
+        assert_eq!(one(&format!("SELECT (TZ({dtz}) AS ?x) {{}}")).unwrap(), "\"Z\"");
+        assert_eq!(
+            one(&format!("SELECT (TIMEZONE({dtz}) AS ?x) {{}}")).unwrap(),
+            "\"PT0S\"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>"
+        );
+        // No timezone: TZ -> "", TIMEZONE -> type error (unbound).
+        let dn = "\"2011-02-01T01:02:03\"^^<http://www.w3.org/2001/XMLSchema#dateTime>";
+        assert_eq!(one(&format!("SELECT (TZ({dn}) AS ?x) {{}}")).unwrap(), "\"\"");
+        assert_eq!(one(&format!("SELECT (TIMEZONE({dn}) AS ?x) {{}}")), None);
+
+        // BNODE(): two calls in one row give two distinct fresh blank nodes.
+        let r = query(&g(), "SELECT (BNODE() AS ?a) (BNODE() AS ?b) {}").unwrap();
+        let (a, b) = (r.rows[0][0].as_ref().unwrap(), r.rows[0][1].as_ref().unwrap());
+        assert_ne!(a, b);
+        // BNODE(str): same argument in the same solution -> same bnode; different
+        // rows -> different bnodes.
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (BNODE(\"x\") AS ?a) (BNODE(\"x\") AS ?b) WHERE { ?s ex:age ?n }",
+        )
+        .unwrap();
+        assert_eq!(r.rows.len(), 3);
+        for row in &r.rows {
+            assert_eq!(row[0], row[1]);
+        }
+        assert_ne!(r.rows[0][0], r.rows[1][0]);
+
+        // UUID()/STRUUID() (native targets).
+        let u = one("SELECT (UUID() AS ?u) {}").unwrap();
+        assert!(u.starts_with("<urn:uuid:") && u.len() == 47, "got: {u}");
+        let s = one("SELECT (STRUUID() AS ?s) {}").unwrap();
+        assert_eq!(s.len(), 38); // quoted 36-char UUID
+        assert_ne!(one("SELECT (STRUUID() AS ?s) {}").unwrap(), s);
+    }
+
+    #[test]
+    fn string_functions_preserve_language_tags() {
+        let one = |q: &str| {
+            let r = query(&g(), q).unwrap();
+            r.rows[0][0].as_ref().map(|t| t.to_string())
+        };
+        assert_eq!(one("SELECT (UCASE(\"bar\"@en) AS ?x) {}").unwrap(), "\"BAR\"@en");
+        assert_eq!(one("SELECT (LCASE(\"BAR\"@en) AS ?x) {}").unwrap(), "\"bar\"@en");
+        assert_eq!(one("SELECT (SUBSTR(\"bar\"@en, 2) AS ?x) {}").unwrap(), "\"ar\"@en");
+        assert_eq!(one("SELECT (SUBSTR(\"bar\"@en, 1, 1) AS ?x) {}").unwrap(), "\"b\"@en");
+        // CONCAT: same tag everywhere -> tagged; mixed -> simple; non-string -> error.
+        assert_eq!(one("SELECT (CONCAT(\"a\"@en, \"b\"@en) AS ?x) {}").unwrap(), "\"ab\"@en");
+        assert_eq!(one("SELECT (CONCAT(\"a\"@en, \"b\") AS ?x) {}").unwrap(), "\"ab\"");
+        assert_eq!(one("SELECT (CONCAT(\"a\", 1) AS ?x) {}"), None);
+        // STRBEFORE/STRAFTER: result carries arg1's tag on a match, plain "" on no
+        // match, and incompatible language tags are a type error.
+        assert_eq!(one("SELECT (STRBEFORE(\"abc\"@en, \"b\") AS ?x) {}").unwrap(), "\"a\"@en");
+        assert_eq!(one("SELECT (STRAFTER(\"abc\"@en, \"b\"@en) AS ?x) {}").unwrap(), "\"c\"@en");
+        assert_eq!(one("SELECT (STRBEFORE(\"abc\"@en, \"z\") AS ?x) {}").unwrap(), "\"\"");
+        assert_eq!(one("SELECT (STRBEFORE(\"abc\"@en, \"b\"@cy) AS ?x) {}"), None);
+        assert_eq!(one("SELECT (STRAFTER(\"abc\", \"b\"@en) AS ?x) {}"), None);
+        // REPLACE keeps the text's tag.
+        #[cfg(feature = "regex")]
+        assert_eq!(one("SELECT (REPLACE(\"abc\"@en, \"b\", \"-\") AS ?x) {}").unwrap(), "\"a-c\"@en");
+        // STRDT/STRLANG require a simple-literal first argument.
+        assert_eq!(
+            one("PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT (STRDT(\"1\", xsd:integer) AS ?x) {}").unwrap(),
+            "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        );
+        assert_eq!(one("PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT (STRDT(\"1\"@en, xsd:integer) AS ?x) {}"), None);
+        assert_eq!(one("SELECT (STRLANG(\"a\", \"en\") AS ?x) {}").unwrap(), "\"a\"@en");
+        assert_eq!(one("SELECT (STRLANG(\"a\"@en, \"en\") AS ?x) {}"), None);
     }
 
     #[test]

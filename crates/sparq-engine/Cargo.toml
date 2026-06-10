@@ -16,9 +16,13 @@ readme = "../../README.md"
 # crate disables defaults so rayon is never pulled into the bundle.
 # `regex` powers SPARQL REGEX/REPLACE; default-on for native, off for wasm (the wasm crate
 # disables defaults) so the regex automata don't bloat the browser bundle.
-default = ["parallel", "regex"]
+# `digest` powers the SPARQL hash builtins (MD5/SHA1/SHA256/SHA384/SHA512); default-on
+# for native, off for wasm (the wasm crate disables defaults) so the hash cores never
+# enter the browser bundle.
+default = ["parallel", "regex", "digest"]
 parallel = ["dep:rayon", "sparq-core/parallel"]
 regex = ["dep:regex"]
+digest = ["dep:md-5", "dep:sha1", "dep:sha2"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -30,3 +34,11 @@ rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
 regex = { version = "1", optional = true }
+md-5 = { version = "0.10", optional = true }
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+# UUID()/STRUUID() need an OS RNG; depending on uuid from the wasm build would drag
+# getrandom into the browser dependency graph, so the functions are native-only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+uuid = { version = "1", features = ["v4"] }
