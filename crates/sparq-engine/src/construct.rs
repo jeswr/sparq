@@ -40,6 +40,7 @@ pub fn construct_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) 
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = crate::view_scope(&active);
     match q {
         Query::Construct { template, pattern, .. } => {
             let _guard = crate::exec::budget::install(budget);
@@ -61,6 +62,7 @@ pub fn describe_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = crate::view_scope(&active);
     match q {
         Query::Describe { pattern, .. } => {
             let _guard = crate::exec::budget::install(budget);
@@ -83,6 +85,7 @@ pub fn construct_ntriples_with_budget(graph: &Graph, sparql: &str, budget: &Quer
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = crate::view_scope(&active);
     let _guard = crate::exec::budget::install(budget);
     let triples = match q {
         Query::Construct { template, pattern, .. } => {

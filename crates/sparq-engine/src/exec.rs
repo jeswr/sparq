@@ -302,6 +302,129 @@ pub(crate) mod functions {
     }
 }
 
+// ---- Dataset view (L1) ---------------------------------------------------------
+//
+// A thread-local named-graph-subset view installed by the `*_view` entry points /
+// `with_view` in lib.rs (see research/solid-access-control-design.md §5 in the
+// sparq-solid worktree). Consulted at the only places a dataset is enumerated:
+// `eval_graph_named` (named-graph visibility), the BGP/path entries
+// (`DefaultGraphMode::Empty`) and `dataset::build_active` (FROM / FROM NAMED
+// intersect with the view — restriction composes, never widens). A non-visible
+// graph must be INDISTINGUISHABLE from an absent one; that is the security
+// property. Like the budget/functions guards, evaluation is synchronous on the
+// installing thread; the rayon-parallel expression branches (FILTER / BIND /
+// aggregates — the only off-thread paths that can re-enter pattern evaluation,
+// via EXISTS) snapshot the view and re-install it around each worker item.
+pub(crate) mod view {
+    use crate::{DatasetView, DefaultGraphMode};
+    use oxrdf::Term;
+    use rustc_hash::FxHashSet;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    /// The installed view, plus the "inside GRAPH" suspend flag:
+    /// `eval_graph_named` swaps evaluation to the named sub-`Graph`, whose inner
+    /// patterns must NOT be empty-defaulted (only the TOP-LEVEL graph scope is).
+    #[derive(Clone, Default)]
+    pub(crate) struct State {
+        named: Option<Arc<FxHashSet<Term>>>,
+        default_empty: bool,
+        suspended: bool,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<State> = RefCell::new(State::default());
+    }
+
+    /// Restores the pre-install state when the installing entry point returns
+    /// (also on error/unwind, so a poisoned thread never leaks a stale view).
+    pub(crate) struct Guard(State);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.with(|a| *a.borrow_mut() = std::mem::take(&mut self.0));
+        }
+    }
+
+    pub(crate) fn install(v: &DatasetView) -> Guard {
+        let new = State {
+            named: Some(Arc::clone(&v.named)),
+            default_empty: matches!(v.default, DefaultGraphMode::Empty),
+            suspended: false,
+        };
+        Guard(ACTIVE.with(|a| std::mem::replace(&mut *a.borrow_mut(), new)))
+    }
+
+    /// Fully suspends the view (named filter AND empty default) for a scope —
+    /// used by the entry points once `dataset::build_active` has folded the view
+    /// into a dataset-clause ACTIVE graph: the restriction is already applied,
+    /// and re-filtering would make a non-visible FROM NAMED graph behave
+    /// differently from an absent one (both must be the EMPTY active graph).
+    pub(crate) fn suspend_all() -> Guard {
+        Guard(ACTIVE.with(|a| std::mem::take(&mut *a.borrow_mut())))
+    }
+
+    /// RAII suspension of the empty-default short-circuit only, for GRAPH scope
+    /// (the named-graph visibility filter stays active). Restores the previous
+    /// flag on drop, so nested scopes compose.
+    pub(crate) struct GraphScope(bool);
+    impl Drop for GraphScope {
+        fn drop(&mut self) {
+            ACTIVE.with(|a| a.borrow_mut().suspended = self.0);
+        }
+    }
+
+    pub(crate) fn enter_graph() -> GraphScope {
+        GraphScope(ACTIVE.with(|a| std::mem::replace(&mut a.borrow_mut().suspended, true)))
+    }
+
+    /// `true` when `name` is a visible named graph under the installed view
+    /// (always true with no view installed).
+    #[inline]
+    pub(crate) fn allows(name: &Term) -> bool {
+        ACTIVE.with(|a| a.borrow().named.as_ref().is_none_or(|s| s.contains(name)))
+    }
+
+    /// `true` when the view's default graph is EMPTY at the current scope —
+    /// false with no view, under `StoreDefault`, or inside a GRAPH pattern.
+    #[inline]
+    pub(crate) fn default_is_empty() -> bool {
+        ACTIVE.with(|a| {
+            let s = a.borrow();
+            s.default_empty && !s.suspended
+        })
+    }
+
+    /// Snapshot of the installed view for the rayon-parallel expression branches
+    /// (`None` — no view, the common case — makes [`worker_install`] free).
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn snapshot() -> Option<State> {
+        ACTIVE.with(|a| {
+            let s = a.borrow();
+            (s.named.is_some() || s.default_empty).then(|| s.clone())
+        })
+    }
+
+    /// Scoped re-install of a snapshot inside a rayon worker item. Restores the
+    /// PREVIOUS thread-local value on drop: rayon runs some items on the
+    /// installing thread itself, whose view must survive the item.
+    pub(crate) struct WorkerGuard(Option<State>);
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.0.take() {
+                ACTIVE.with(|a| *a.borrow_mut() = prev);
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn worker_install(snap: &Option<State>) -> WorkerGuard {
+        match snap {
+            None => WorkerGuard(None),
+            Some(s) => WorkerGuard(Some(ACTIVE.with(|a| std::mem::replace(&mut *a.borrow_mut(), s.clone())))),
+        }
+    }
+}
+
 /// One solution row: the ids bound to each of a [`Bindings`]' variables. Inlined
 /// up to 4 columns (the common case) so a join produces no heap allocation per
 /// row — the dominant cost on large join results.
@@ -666,10 +789,14 @@ pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String,
 /// sequential paths, head+fragments concatenated on the parallel path — exactly the
 /// old behaviour and allocation profile).
 pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Result<Vec<String>, String> {
-    // Streaming fast paths — no Bindings materialised at all.
-    if let Some(json) = single_pattern_scan_json(graph, pattern, flush) {
-        budget::check(0)?; // sticky: the streaming loop may have stopped mid-scan
-        return Ok(json);
+    // Streaming fast paths — no Bindings materialised at all. They scan the
+    // store's default graph directly, so they are skipped under an empty-default
+    // view (the general path short-circuits at the BGP entry).
+    if !view::default_is_empty() {
+        if let Some(json) = single_pattern_scan_json(graph, pattern, flush) {
+            budget::check(0)?; // sticky: the streaming loop may have stopped mid-scan
+            return Ok(json);
+        }
     }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
@@ -761,8 +888,12 @@ pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Opt
 /// row count is irrelevant — only emptiness is observed).
 pub fn eval_ask(graph: &Graph, pattern: &GraphPattern) -> Result<bool, String> {
     // Exact-count fast path first (a single-pattern BGP answers from the index).
-    if let Some(n) = try_count(graph, pattern) {
-        return Ok(n > 0);
+    // It reads the default-graph index directly, so it is skipped under an
+    // empty-default view (the general path short-circuits at the BGP entry).
+    if !view::default_is_empty() {
+        if let Some(n) = try_count(graph, pattern) {
+            return Ok(n > 0);
+        }
     }
     let sliced = GraphPattern::Slice { inner: Box::new(pattern.clone()), start: 0, length: Some(1) };
     let mut local = LocalVocab::default();
@@ -776,8 +907,12 @@ pub fn eval_ask(graph: &Graph, pattern: &GraphPattern) -> Result<bool, String> {
 /// projection / LIMIT — like QLever's lazy count) it short-circuits; otherwise it
 /// evaluates and counts the rows.
 pub fn count_select(graph: &Graph, pattern: &GraphPattern) -> Result<usize, String> {
-    if let Some(n) = try_count(graph, pattern) {
-        return Ok(n);
+    // The lazy index count reads the default graph directly — skipped under an
+    // empty-default view (see eval_ask).
+    if !view::default_is_empty() {
+        if let Some(n) = try_count(graph, pattern) {
+            return Ok(n);
+        }
     }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
@@ -1222,6 +1357,9 @@ fn eval_graph_named(
     inner: &GraphPattern,
 ) -> Result<Bindings, String> {
     fn eval_translated(graph: &Graph, local: &mut LocalVocab, sub: &Graph, inner: &GraphPattern) -> Result<Bindings, String> {
+        // Inside GRAPH the evaluation graph IS the named sub-graph: suspend a
+        // view's empty-default short-circuit for the inner pattern (L1 view).
+        let _scope = view::enter_graph();
         let mut sub_local = LocalVocab::default();
         let b = eval_graph_pattern(sub, &mut sub_local, inner)?;
         let rows: Vec<Row> = b
@@ -1241,13 +1379,22 @@ fn eval_graph_named(
     match name {
         NamedNodePattern::NamedNode(n) => {
             let target = Term::NamedNode(n.clone());
-            match graph.named.iter().find(|(t, _)| *t == target) {
-                Some((_, sub)) => eval_translated(graph, local, sub, inner),
+            // A graph outside an installed dataset view takes the absent-graph
+            // branch below: non-visible must be INDISTINGUISHABLE from absent
+            // (the L1 view's security property).
+            let sub = if view::allows(&target) {
+                graph.named.iter().find(|(t, _)| *t == target).map(|(_, sub)| sub)
+            } else {
+                None
+            };
+            match sub {
+                Some(sub) => eval_translated(graph, local, sub, inner),
                 // The named graph is absent → ZERO solutions (even for `GRAPH <g> {}`,
                 // which must NOT yield the unit row), but with `inner`'s variable
                 // schema — evaluate against an empty graph for the columns, then drop
                 // any rows (an empty group pattern would otherwise produce one).
                 None => {
+                    let _scope = view::enter_graph(); // schema eval matches the present-graph path
                     let empty = Graph::load_str("", "ntriples").map_err(|e| e.to_string())?;
                     let mut el = LocalVocab::default();
                     let mut b = eval_graph_pattern(&empty, &mut el, inner)?;
@@ -1259,6 +1406,9 @@ fn eval_graph_named(
         NamedNodePattern::Variable(v) => {
             let mut acc: Option<Bindings> = None;
             for (gname, sub) in &graph.named {
+                if !view::allows(gname) {
+                    continue; // not visible under the installed dataset view (L1)
+                }
                 let mut b = eval_translated(graph, local, sub, inner)?;
                 let gid = value_to_id(graph, local, &Value::Term(gname.clone()));
                 match b.col(v) {
@@ -1701,7 +1851,10 @@ fn eval_path(
 
     let mut rows: Vec<Row> = Vec::new();
     let mut seen: FxHashSet<Row> = FxHashSet::default();
-    if !(matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
+    // DefaultGraphMode::Empty (L1 dataset view): no data pairs at top-level graph
+    // scope — exactly the empty-graph evaluation. The zero-length constant
+    // solutions below still apply (`<s> p* <s>` holds even on an empty graph).
+    if !view::default_is_empty() && !(matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
         for (s, o) in path_pairs(graph, path)? {
             if s_bound.is_some_and(|b| s != b) || o_bound.is_some_and(|b| o != b) || (same_var && s != o) {
                 continue;
@@ -1862,6 +2015,12 @@ fn transitive_closure_pairs(pairs: FxHashSet<(Id, Id)>) -> FxHashSet<(Id, Id)> {
 fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, String> {
     if patterns.is_empty() {
         return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
+    }
+    // DefaultGraphMode::Empty (L1 dataset view): a non-empty BGP at top-level
+    // graph scope has ZERO rows, with its normal variable schema (the empty BGP
+    // above keeps its unit row; GRAPH scope suspends the flag).
+    if view::default_is_empty() {
+        return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
     // RDF 1.2 quoted-triple patterns with variables decompose into synthetic-variable
     // slots + structural-unification relations, joined by the ordinary machinery (F14).
@@ -2042,6 +2201,11 @@ pub(crate) fn bgp_uses_binary(patterns: &[TriplePattern]) -> bool {
 fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Option<(usize, NumCmp)>]) -> Result<Bindings, String> {
     if patterns.is_empty() {
         return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
+    }
+    // L1 dataset view: the conjunctive-flattening path calls this directly
+    // (bypassing eval_bgp), so the empty-default short-circuit must be here too.
+    if view::default_is_empty() {
+        return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
     // Quoted-triple patterns with variables (F14): the conjunctive-flattening path calls
     // this directly (bypassing eval_bgp), so the decomposition must happen here too.
@@ -3383,14 +3547,17 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         use rayon::prelude::*;
         let lv: &LocalVocab = local;
         let bref = &b;
-        // Thread-local extension-function registry: snapshot + per-item re-install
-        // (free when no registry is installed) — see the FILTER branch.
+        // Thread-local extension-function registry and dataset view: snapshot +
+        // per-item re-install (free when neither is installed) — see the FILTER
+        // branch (the view matters here via EXISTS in the expression).
         let fns = functions::snapshot();
+        let vw = view::snapshot();
         b.rows
             .par_iter()
             .enumerate()
             .map(|(i, row)| {
                 let _fns = functions::worker_install(&fns);
+                let _vw = view::worker_install(&vw);
                 ROW_SCOPE.set((scope, i));
                 let v = eval_expr(graph, lv, bref, row, expr)?;
                 Ok(value_to_id_readonly(graph, lv, &v))
@@ -3533,13 +3700,15 @@ fn group_aggregate(
         use rayon::prelude::*;
         let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
         let bref = &b;
-        // Thread-local extension-function registry: snapshot + per-item re-install
-        // (free when no registry is installed) — see the FILTER branch.
+        // Thread-local extension-function registry and dataset view: snapshot +
+        // per-item re-install (free when neither is installed) — see the FILTER branch.
         let fns = functions::snapshot();
+        let vw = view::snapshot();
         members
             .par_iter()
             .map(|members| {
                 let _fns = functions::worker_install(&fns);
+                let _vw = view::worker_install(&vw);
                 aggregates
                     .iter()
                     .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg))
@@ -3817,14 +3986,19 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
     #[cfg(feature = "parallel")]
     let keep: Vec<bool> = if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
-        // The extension-function registry is thread-local: snapshot it here and
-        // re-install per worker item (free when no registry is installed).
+        // The extension-function registry and the dataset view are thread-local:
+        // snapshot them here and re-install per worker item (free when neither is
+        // installed). The view matters because a FILTER can re-enter pattern
+        // evaluation via EXISTS — without the re-install it would silently
+        // evaluate UNRESTRICTED on a rayon worker.
         let fns = functions::snapshot();
+        let vw = view::snapshot();
         b.rows
             .par_iter()
             .enumerate()
             .map(|(i, row)| {
                 let _fns = functions::worker_install(&fns);
+                let _vw = view::worker_install(&vw);
                 ROW_SCOPE.set((scope, i));
                 Ok(effective_boolean(&eval_expr(graph, local, b, row, expr)?))
             })

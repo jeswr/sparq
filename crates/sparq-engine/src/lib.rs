@@ -145,6 +145,105 @@ pub fn query_with_functions_and_budget(
     with_functions(fns, || query_with_budget(graph, sparql, budget))
 }
 
+/// A zero-copy restriction of a [`Graph`]'s dataset for one query execution
+/// (the L1 "dataset view"): only the named graphs in `named` are visible, and
+/// the default graph is the store's own or empty per [`DefaultGraphMode`].
+///
+/// The security property is INDISTINGUISHABILITY: a non-visible named graph
+/// behaves exactly like an absent one — `GRAPH <g> { … }` yields zero
+/// solutions, `GRAPH ?g` never enumerates it, and a dataset clause
+/// (`FROM` / `FROM NAMED`) first intersects with the view, so a query can only
+/// ever restrict further, never widen. Evaluation runs in place on the
+/// existing sub-`Graph`s — zero decode, zero rebuild, zero copy (contrast the
+/// `FROM NAMED` path, which rebuilds an active dataset per query).
+///
+/// The engine holds no session state: `named` is shared from the caller's
+/// cache (an `Arc` clone per call, never a set copy) and visibility is one
+/// O(1) hash lookup per graph name.
+pub struct DatasetView<'g> {
+    /// The full store the view restricts.
+    pub base: &'g Graph,
+    /// The visible named-graph names.
+    pub named: std::sync::Arc<FxHashSet<Term>>,
+    /// What the view exposes as the default graph.
+    pub default: DefaultGraphMode,
+}
+
+/// The default graph a [`DatasetView`] exposes. Phase 1 ships these two modes;
+/// a union-of-visible-graphs default is phase 2 (it cannot be zero-copy while
+/// each named sub-`Graph` owns a private dictionary) and the variant will be
+/// added when it is implemented.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DefaultGraphMode {
+    /// The store's own default graph (today's behaviour).
+    #[default]
+    StoreDefault,
+    /// An empty default graph (e.g. data lives only in named graphs).
+    Empty,
+}
+
+/// The hash set type [`DatasetView::named`] uses, re-exported so callers build
+/// the exact type (`rustc-hash`'s `FxHashSet`).
+pub use rustc_hash::FxHashSet;
+
+/// Runs `f` with `v` installed as the active dataset view — the scoped form
+/// behind [`query_view`], for callers that need one of the OTHER entry points
+/// (`construct`, `query_json_chunks_with_budget`, …) to see the view:
+///
+/// ```ignore
+/// let chunks = with_view(&v, || query_json_chunks_with_budget(v.base, q, &budget))?;
+/// ```
+///
+/// The view is visible to every query the closure runs on this thread (it is
+/// installed thread-locally and propagated into the engine's rayon workers),
+/// and uninstalled when the closure returns. Composes with [`with_functions`]
+/// in either nesting order.
+pub fn with_view<T>(v: &DatasetView, f: impl FnOnce() -> T) -> T {
+    let _guard = exec::view::install(v);
+    f()
+}
+
+/// [`query`] restricted to a [`DatasetView`]: `GRAPH` only sees the view's
+/// named graphs and the default graph follows the view's mode.
+pub fn query_view(v: &DatasetView, sparql: &str) -> Result<QueryResult, String> {
+    query_view_with_budget(v, sparql, &QueryBudget::unlimited())
+}
+
+/// [`query_view`] under a cooperative [`QueryBudget`].
+pub fn query_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget) -> Result<QueryResult, String> {
+    with_view(v, || query_with_budget(v.base, sparql, budget))
+}
+
+/// [`query_json`] restricted to a [`DatasetView`].
+pub fn query_json_view(v: &DatasetView, sparql: &str) -> Result<String, String> {
+    query_json_view_with_budget(v, sparql, &QueryBudget::unlimited())
+}
+
+/// [`query_json_view`] under a cooperative [`QueryBudget`].
+pub fn query_json_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
+    with_view(v, || query_json_with_budget(v.base, sparql, budget))
+}
+
+/// [`count`] restricted to a [`DatasetView`].
+pub fn count_view(v: &DatasetView, sparql: &str) -> Result<usize, String> {
+    count_view_with_budget(v, sparql, &QueryBudget::unlimited())
+}
+
+/// [`count_view`] under a cooperative [`QueryBudget`].
+pub fn count_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget) -> Result<usize, String> {
+    with_view(v, || count_with_budget(v.base, sparql, budget))
+}
+
+/// [`ask`] restricted to a [`DatasetView`].
+pub fn ask_view(v: &DatasetView, sparql: &str) -> Result<bool, String> {
+    ask_view_with_budget(v, sparql, &QueryBudget::unlimited())
+}
+
+/// [`ask_view`] under a cooperative [`QueryBudget`].
+pub fn ask_view_with_budget(v: &DatasetView, sparql: &str, budget: &QueryBudget) -> Result<bool, String> {
+    with_view(v, || ask_with_budget(v.base, sparql, budget))
+}
+
 /// When the query carries a dataset clause (FROM / FROM NAMED), the ACTIVE
 /// dataset it describes — built from the store's named graphs; see
 /// [`dataset::build_active`]. `None` (the common case) means: evaluate against
@@ -152,6 +251,16 @@ pub fn query_with_functions_and_budget(
 /// the no-clause path costs exactly one `Option` check.
 fn active_dataset(graph: &Graph, q: &Query) -> Option<Graph> {
     q.dataset().map(|ds| dataset::build_active(graph, ds))
+}
+
+/// Suspends an installed [`DatasetView`] while a dataset-clause query evaluates:
+/// [`dataset::build_active`] has already INTERSECTED the clause with the view
+/// (non-visible ≡ absent), so re-filtering during evaluation would make a
+/// non-visible `FROM NAMED` graph distinguishable from an absent one (both must
+/// be the empty active graph, with its unit-row `GRAPH <g> {}` semantics). A
+/// no-op when no view is installed or the query has no dataset clause.
+pub(crate) fn view_scope(active: &Option<Graph>) -> Option<exec::view::Guard> {
+    active.is_some().then(exec::view::suspend_all)
 }
 
 /// Executes a SPARQL query string against a graph, materialising the solutions.
@@ -164,6 +273,7 @@ pub fn query_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> R
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
@@ -190,6 +300,7 @@ pub fn ask_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Res
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
@@ -211,6 +322,7 @@ pub fn query_json_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget)
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
@@ -234,6 +346,7 @@ pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &Query
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
@@ -257,6 +370,7 @@ pub fn count_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> R
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {

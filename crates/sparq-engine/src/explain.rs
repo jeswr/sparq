@@ -45,6 +45,7 @@ pub fn explain(graph: &Graph, sparql: &str) -> Result<String, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = crate::view_scope(&active);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     let (form, pattern) = query_form_pattern(&q);
     let mut out = String::new();
@@ -69,6 +70,7 @@ pub fn explain_analyze_with_budget(graph: &Graph, sparql: &str, budget: &QueryBu
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let active = crate::active_dataset(graph, &q);
     let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = crate::view_scope(&active);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     let (form, pattern) = query_form_pattern(&q);
     if !matches!(q, Query::Select { .. } | Query::Ask { .. }) {

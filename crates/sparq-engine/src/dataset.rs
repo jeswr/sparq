@@ -61,11 +61,21 @@ fn find_named<'a>(graph: &'a Graph, name: &NamedNode) -> Option<&'a Graph> {
 /// graph name the store does not hold denotes the EMPTY graph (it still exists
 /// in the active dataset, so `GRAPH <absent> {}` keeps its unit-row semantics).
 ///
+/// Under an installed dataset view (L1) the clause first INTERSECTS with the
+/// view: a non-visible graph is treated exactly like an absent one (it
+/// contributes nothing to `FROM` and denotes the empty graph for `FROM NAMED`),
+/// so the restriction composes and never widens — and a non-visible graph stays
+/// indistinguishable from an absent one.
+///
 /// Only called when the query has a dataset clause; the common no-clause path
 /// never pays for this.
 pub(crate) fn build_active(graph: &Graph, ds: &QueryDataset) -> Graph {
+    let visible = |n: &NamedNode| crate::exec::view::allows(&Term::NamedNode(n.clone()));
     let mut default = TripleSet::default();
     for n in &ds.default {
+        if !visible(n) {
+            continue; // view: non-visible ≡ absent
+        }
         if let Some(g) = find_named(graph, n) {
             default.extend(decode_triples(g));
         }
@@ -76,7 +86,7 @@ pub(crate) fn build_active(graph: &Graph, ds: &QueryDataset) -> Graph {
         if out.named.iter().any(|(g, _)| *g == name) {
             continue; // a repeated FROM NAMED still names ONE graph
         }
-        let g = match find_named(graph, n) {
+        let g = match find_named(graph, n).filter(|_| visible(n)) {
             Some(g) => build(&decode_triples(g)),
             None => empty_graph(),
         };
