@@ -47,3 +47,23 @@ this vendored tree once the fixes land in a released spargebra.
   accepted before, rejected after.
 - **Fix**: `ExprTripleTermSubject` now derives exactly `iri | Var` instead of
   delegating to `ExprTripleTermObject`.
+
+## 3. Longest-match tokenization: `<` starting an IRIREF token is not the less-than operator
+
+- **Spec**: SPARQL 1.2 Query §19.7 (same note in SPARQL 1.1 §19.8), note 3:
+  *"When tokenizing the input and choosing grammar rules, the longest match is
+  chosen."* In `FILTER (?x<?a&&?b>?y)` the characters starting at `<` form a
+  valid IRIREF token (`<?a&&?b>` — none of ``<>"{}|^`\`` or #x00–#x20 occur
+  inside), so the input tokenizes as `?x`, IRIREF, `?y`, which has no parse —
+  the document is a syntax error. The suite's comment in `syn-bad-26.rq`:
+  *"longest token rule means this isn't a '<' and '&&'"*. spargebra's
+  scannerless grammar happily read `<` as less-than and accepted the document.
+- **Test**: `sparql10/syntax-sparql3#syn-bad-26` (NegativeSyntaxTest) —
+  accepted before, rejected after. All other syntax suites (1.0/1.1/1.2,
+  including every `<`-comparison with whitespace and `?x<<http://iri>` forms,
+  where the second `<` terminates the IRIREF scan) are unchanged.
+- **Fix**: the `"<=" / "<"` alternative of `RelationalExpression_inner` now
+  carries a negative lookahead `!IRIREF_TOKEN()`, where `IRIREF_TOKEN` is the
+  IRIREF terminal exactly as tokenized ([172]). The guard also covers `<=`
+  (`<=?a>` is likewise the longer IRIREF token), keeping tokenization
+  consistent.

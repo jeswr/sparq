@@ -2217,9 +2217,20 @@ parser! {
             None => a
         } }
         rule RelationalExpression_inner() -> (&'input str, Option<Expression>, Option<Vec<Expression>>) =
-            s: $("="  / "!=" / ">=" / ">" / "<=" / "<") _ e:NumericExpression() { (s, Some(e), None) } /
+            s: $("="  / "!=" / ">=" / ">") _ e:NumericExpression() { (s, Some(e), None) } /
+            // "When tokenizing the input and choosing grammar rules, the longest match
+            // is chosen" (19.7 note 3): a '<' that starts a valid IRIREF token (e.g. in
+            // `FILTER (?x<?a&&?b>?y)`, the sparql10/syntax-sparql3 syn-bad-26 case) is
+            // that token, so it cannot be read as the less-than operator.
+            s: $(!IRIREF_TOKEN() ("<=" / "<")) _ e:NumericExpression() { (s, Some(e), None) } /
             i("IN") _ l:ExpressionList() { ("IN", None, Some(l)) } /
             i("NOT") _ i("IN") _ l:ExpressionList() { ("NOT IN", None, Some(l)) }
+
+        /// The IRIREF terminal exactly as tokenized ([172]): '<' then any characters
+        /// other than `<>"{}|^\`\\` and #x00-#x20, then '>'. Used only as a negative
+        /// lookahead to apply the longest-match tokenization rule to '<' / '<='.
+        rule IRIREF_TOKEN() = "<" IRIREF_TOKEN_char()* ">"
+        rule IRIREF_TOKEN_char() = !['<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\' | '\u{00}'..='\u{20}'] [_]
 
         rule NumericExpression() -> Expression = AdditiveExpression()
 
