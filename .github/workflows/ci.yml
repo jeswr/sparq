@@ -62,3 +62,26 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets
         continue-on-error: true
+
+  conformance:
+    # W3C SPARQL conformance scoreboard (roadmap T13). Informational: the runner
+    # always exits 0 and the job never blocks a merge — the value is the uploaded
+    # pass-rate report. Ratchet later by switching to `--strict`.
+    name: W3C SPARQL conformance (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch W3C test suites (pinned)
+        run: ./scripts/fetch-conformance.sh
+      - name: Run conformance suites
+        run: cargo run --release -p sparq-conformance
+      - name: Summarize
+        run: cat conformance-report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report
+          path: conformance-report.md
