@@ -1,23 +1,35 @@
-//! SPARQL 1.1 Update (roadmap T10), v1: the data operations `INSERT DATA`, `DELETE DATA`, and
-//! `CLEAR` on the default graph, applied by **rebuild** — collect the current triple set, apply the
-//! mutations as set operations, and rebuild the (immutable) store. Correct and simple; O(n) per
-//! update batch. Pattern-based `DELETE/INSERT ... WHERE`, `LOAD`, and named-graph operations are
-//! follow-ups (they need query evaluation and/or a quad store).
+//! SPARQL 1.1 Update (roadmap T10) over the FULL DATASET — default graph + named graphs.
+//!
+//! v1 applied data operations on the default graph only and silently DROPPED named graphs on
+//! rebuild (conformance finding F19, a data-loss class). v2 models the dataset as a set of
+//! term-triples per graph and implements every `GraphUpdateOperation`:
+//! INSERT DATA / DELETE DATA with `GRAPH` blocks, `DELETE/INSERT … WHERE` with graph templates
+//! (including variable graph names) and `USING (NAMED)` dataset re-scoping, CLEAR / DROP /
+//! CREATE (ADD / COPY / MOVE arrive from the parser desugared into DROP + DELETE/INSERT),
+//! and LOAD for `file://` sources. The rebuild path ([`update`]) is correct-and-simple O(n);
+//! the delta-overlay path ([`update_in_place`]) keeps data operations O(batch) per graph.
+//!
+//! Failure policy: operations whose failure the spec leaves optional (CLEAR/DROP of an absent
+//! graph, CREATE of an existing one) are no-ops here — a graph store that auto-creates graphs
+//! is explicitly allowed to succeed on them — so `SILENT` only matters for LOAD.
 
-use oxrdf::{NamedOrBlankNode, Term, Variable};
+use oxrdf::{BlankNode, NamedOrBlankNode, Term, Variable};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::Dict;
 use sparq_core::store::Pattern as IdPattern;
 use sparq_core::Graph;
-use spargebra::algebra::GraphTarget;
+use spargebra::algebra::{GraphTarget, QueryDataset};
 use spargebra::term::{
-    GraphName, GraphNamePattern, GroundQuad, GroundTerm, GroundTermPattern, NamedNodePattern, Quad,
-    TermPattern,
+    GraphName, GraphNamePattern, GroundQuad, GroundQuadPattern, GroundTerm, GroundTermPattern,
+    NamedNodePattern, Quad, QuadPattern, TermPattern,
 };
 use spargebra::GraphUpdateOperation;
 use spargebra::SparqlParser;
 
 type TripleTerms = [Term; 3];
+type TripleSet = FxHashSet<TripleTerms>;
+/// A graph slot: `None` = the default graph, `Some(term)` = that named graph.
+type GraphSlot = Option<Term>;
 
 fn nob_to_term(s: &NamedOrBlankNode) -> Term {
     match s {
@@ -26,38 +38,42 @@ fn nob_to_term(s: &NamedOrBlankNode) -> Term {
     }
 }
 
-fn ground_to_term(t: &GroundTerm) -> Result<Term, String> {
+fn ground_to_term(t: &GroundTerm) -> Term {
     match t {
-        GroundTerm::NamedNode(n) => Ok(Term::NamedNode(n.clone())),
-        GroundTerm::Literal(l) => Ok(Term::Literal(l.clone())),
-        other => Err(format!("unsupported ground term in DELETE DATA: {other:?}")),
+        GroundTerm::NamedNode(n) => Term::NamedNode(n.clone()),
+        GroundTerm::Literal(l) => Term::Literal(l.clone()),
+        // A ground RDF 1.2 triple term in DELETE DATA: fully concrete.
+        GroundTerm::Triple(t) => Term::Triple(Box::new(oxrdf::Triple::new(
+            t.subject.clone(),
+            t.predicate.clone(),
+            ground_to_term(&t.object),
+        ))),
     }
 }
 
-fn require_default(g: &GraphName) -> Result<(), String> {
-    if *g == GraphName::DefaultGraph {
-        Ok(())
-    } else {
-        Err("named graphs in UPDATE are not yet supported".into())
+fn graph_name_slot(g: &GraphName) -> GraphSlot {
+    match g {
+        GraphName::DefaultGraph => None,
+        GraphName::NamedNode(n) => Some(Term::NamedNode(n.clone())),
     }
 }
 
-fn quad_to_triple(q: &Quad) -> Result<TripleTerms, String> {
-    require_default(&q.graph_name)?;
-    Ok([nob_to_term(&q.subject), Term::NamedNode(q.predicate.clone()), q.object.clone()])
+fn quad_to_triple(q: &Quad) -> (GraphSlot, TripleTerms) {
+    (
+        graph_name_slot(&q.graph_name),
+        [nob_to_term(&q.subject), Term::NamedNode(q.predicate.clone()), q.object.clone()],
+    )
 }
 
-fn ground_quad_to_triple(q: &GroundQuad) -> Result<TripleTerms, String> {
-    require_default(&q.graph_name)?;
-    Ok([
-        Term::NamedNode(q.subject.clone()),
-        Term::NamedNode(q.predicate.clone()),
-        ground_to_term(&q.object)?,
-    ])
+fn ground_quad_to_triple(q: &GroundQuad) -> (GraphSlot, TripleTerms) {
+    (
+        graph_name_slot(&q.graph_name),
+        [Term::NamedNode(q.subject.clone()), Term::NamedNode(q.predicate.clone()), ground_to_term(&q.object)],
+    )
 }
 
-/// The current default-graph triples as ground term-triples (decoded from the dictionary).
-fn current_triples(g: &Graph) -> FxHashSet<TripleTerms> {
+/// The triples of one graph as ground term-triples (decoded from its dictionary).
+fn decode_triples(g: &Graph) -> TripleSet {
     let pat: IdPattern = [None, None, None];
     let scan = g.store.scan(&pat);
     scan.rows
@@ -70,7 +86,7 @@ fn current_triples(g: &Graph) -> FxHashSet<TripleTerms> {
 }
 
 /// Rebuild an immutable graph from a term-triple set (fresh dictionary + permutation indexes).
-fn build(triples: &FxHashSet<TripleTerms>) -> Graph {
+fn build(triples: &TripleSet) -> Graph {
     let mut dict = Dict::new();
     let mut ids = Vec::with_capacity(triples.len());
     for [s, p, o] in triples {
@@ -79,165 +95,490 @@ fn build(triples: &FxHashSet<TripleTerms>) -> Graph {
     Graph::from_parts(dict, ids)
 }
 
+fn empty_graph() -> Graph {
+    Graph::from_parts(Dict::new(), Vec::new())
+}
+
+// --- the mutable dataset model (rebuild path) ---------------------------------------------------
+
+/// The whole dataset as decoded term-triple sets: the working representation of the rebuild
+/// path. Named-graph order is preserved; a named graph may be present and EMPTY (CREATE).
+struct Dataset {
+    default: TripleSet,
+    named: Vec<(Term, TripleSet)>,
+}
+
+impl Dataset {
+    fn decode(graph: &Graph) -> Dataset {
+        Dataset {
+            default: decode_triples(graph),
+            named: graph.named.iter().map(|(name, g)| (name.clone(), decode_triples(g))).collect(),
+        }
+    }
+
+    fn graph(&self, name: &Term) -> Option<&TripleSet> {
+        self.named.iter().find(|(n, _)| n == name).map(|(_, s)| s)
+    }
+
+    /// The named graph's set, CREATING an empty one if absent (auto-create store semantics).
+    fn graph_mut(&mut self, name: &Term) -> &mut TripleSet {
+        if let Some(i) = self.named.iter().position(|(n, _)| n == name) {
+            return &mut self.named[i].1;
+        }
+        self.named.push((name.clone(), TripleSet::default()));
+        &mut self.named.last_mut().unwrap().1
+    }
+
+    fn slot_mut(&mut self, slot: &GraphSlot) -> &mut TripleSet {
+        match slot {
+            None => &mut self.default,
+            Some(name) => self.graph_mut(name),
+        }
+    }
+
+    fn insert(&mut self, slot: &GraphSlot, t: TripleTerms) {
+        self.slot_mut(slot).insert(t);
+    }
+
+    fn remove(&mut self, slot: &GraphSlot, t: &TripleTerms) {
+        match slot {
+            None => {
+                self.default.remove(t);
+            }
+            // Deleting from an absent graph is a no-op (it has nothing to delete).
+            Some(name) => {
+                if let Some(i) = self.named.iter().position(|(n, _)| n == name) {
+                    self.named[i].1.remove(t);
+                }
+            }
+        }
+    }
+
+    /// Materialise the dataset as a queryable [`Graph`] (named graphs included, even empty
+    /// ones — `GRAPH <g> {}` over a CREATEd-but-empty graph must yield the unit row).
+    fn build(&self) -> Graph {
+        let mut g = build(&self.default);
+        g.named = self.named.iter().map(|(name, set)| (name.clone(), build(set))).collect();
+        g
+    }
+
+    /// The active dataset for a `USING (NAMED)` / `WITH` re-scoped WHERE: the default
+    /// graph is the UNION of the `USING` graphs (absent store graphs contribute nothing,
+    /// like a FROM of an empty document). `named: Some(list)` — explicit `USING NAMED` —
+    /// makes exactly those the named graphs; `named: None` (how the parser encodes `WITH`,
+    /// which only re-scopes the DEFAULT graph) keeps the store's named graphs untouched.
+    fn build_using(&self, u: &QueryDataset) -> Graph {
+        let mut default = TripleSet::default();
+        for n in &u.default {
+            if let Some(s) = self.graph(&Term::NamedNode(n.clone())) {
+                default.extend(s.iter().cloned());
+            }
+        }
+        let mut g = build(&default);
+        match &u.named {
+            Some(named) => {
+                for n in named {
+                    let name = Term::NamedNode(n.clone());
+                    if let Some(s) = self.graph(&name) {
+                        g.named.push((name, build(s)));
+                    }
+                }
+            }
+            None => g.named = self.named.iter().map(|(name, set)| (name.clone(), build(set))).collect(),
+        }
+        g
+    }
+}
+
 // --- template instantiation for DELETE/INSERT … WHERE ------------------------------------------
-// Substitute a template term from a WHERE solution. `None` => the position has an unbound variable,
-// so the whole quad is skipped (per SPARQL, a template triple with an unbound slot is not produced).
+// Substitute a template term from a WHERE solution. `None` => an unbound variable (or an
+// ill-formed substitution), so the whole quad is skipped (per SPARQL, a template quad with an
+// unbound/invalid slot is not produced).
 type Subst<'a> = dyn Fn(&Variable) -> Option<Term> + 'a;
 
-fn tp_subst(tp: &TermPattern, get: &Subst) -> Option<Term> {
+/// Fresh-blank-node state for ONE solution row: per SPARQL, every blank node in an INSERT
+/// template is instantiated FRESH per solution (same label, same row → same fresh node;
+/// different rows — and different operations in one request — get DIFFERENT nodes, hence
+/// the process-wide counter).
+struct FreshBnodes {
+    map: FxHashMap<String, Term>,
+}
+
+static FRESH_BNODE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl FreshBnodes {
+    fn get(&mut self, label: &str) -> Term {
+        if let Some(t) = self.map.get(label) {
+            return t.clone();
+        }
+        let n = FRESH_BNODE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let t = Term::BlankNode(BlankNode::new_unchecked(format!("fb{n}")));
+        self.map.insert(label.to_string(), t.clone());
+        t
+    }
+}
+
+fn tp_subst(tp: &TermPattern, get: &Subst, fresh: &mut FreshBnodes) -> Option<Term> {
     match tp {
         TermPattern::Variable(v) => get(v),
         TermPattern::NamedNode(n) => Some(Term::NamedNode(n.clone())),
-        TermPattern::BlankNode(b) => Some(Term::BlankNode(b.clone())),
+        TermPattern::BlankNode(b) => Some(fresh.get(b.as_str())),
         TermPattern::Literal(l) => Some(Term::Literal(l.clone())),
-        _ => None, // RDF-star triple terms not supported
+        // RDF 1.2 triple term in an INSERT template: substitute the components recursively.
+        TermPattern::Triple(t) => {
+            let subject = match tp_subst(&t.subject, get, fresh)? {
+                Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
+                Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
+                _ => return None,
+            };
+            let predicate = match nnp_subst(&t.predicate, get)? {
+                Term::NamedNode(n) => n,
+                _ => return None,
+            };
+            let object = tp_subst(&t.object, get, fresh)?;
+            Some(Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, object))))
+        }
     }
 }
+
 fn gtp_subst(tp: &GroundTermPattern, get: &Subst) -> Option<Term> {
     match tp {
         GroundTermPattern::Variable(v) => get(v),
         GroundTermPattern::NamedNode(n) => Some(Term::NamedNode(n.clone())),
         GroundTermPattern::Literal(l) => Some(Term::Literal(l.clone())),
-        _ => None,
+        GroundTermPattern::Triple(t) => {
+            let subject = match gtp_subst(&t.subject, get)? {
+                Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
+                Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
+                _ => return None,
+            };
+            let predicate = match nnp_subst(&t.predicate, get)? {
+                Term::NamedNode(n) => n,
+                _ => return None,
+            };
+            let object = gtp_subst(&t.object, get)?;
+            Some(Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, object))))
+        }
     }
 }
+
 fn nnp_subst(p: &NamedNodePattern, get: &Subst) -> Option<Term> {
     match p {
         NamedNodePattern::NamedNode(n) => Some(Term::NamedNode(n.clone())),
         NamedNodePattern::Variable(v) => get(v),
     }
 }
-fn gnp_default(g: &GraphNamePattern) -> Result<(), String> {
+
+/// Resolve a template's graph slot. Outer `None` = skip the quad (unbound variable or a
+/// literal where a graph name is required); `Some(None)` = the default graph.
+fn gnp_subst(g: &GraphNamePattern, get: &Subst) -> Option<GraphSlot> {
     match g {
-        GraphNamePattern::DefaultGraph => Ok(()),
-        _ => Err("named graphs in an UPDATE template are not yet supported".into()),
+        GraphNamePattern::DefaultGraph => Some(None),
+        GraphNamePattern::NamedNode(n) => Some(Some(Term::NamedNode(n.clone()))),
+        GraphNamePattern::Variable(v) => match get(v)? {
+            t @ (Term::NamedNode(_) | Term::BlankNode(_)) => Some(Some(t)),
+            _ => None, // a literal / triple term cannot name a graph
+        },
     }
 }
 
-/// Apply a SPARQL Update string to `graph`, returning the updated graph. Errors (leaving the input
-/// consumed) on operations not yet supported, so the caller can keep the original on failure by
-/// cloning beforehand if needed.
-pub fn update(graph: &Graph, sparql: &str) -> Result<Graph, String> {
-    let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
-    let mut triples = current_triples(graph);
-    for op in &upd.operations {
-        match op {
-            GraphUpdateOperation::InsertData { data } => {
-                for q in data {
-                    triples.insert(quad_to_triple(q)?);
-                }
-            }
-            GraphUpdateOperation::DeleteData { data } => {
-                for q in data {
-                    triples.remove(&ground_quad_to_triple(q)?);
-                }
-            }
-            // Only a default graph exists: CLEAR DEFAULT / ALL empties it; CLEAR of a named graph is
-            // a no-op (the graph is absent — `silent` is irrelevant here).
-            GraphUpdateOperation::Clear { graph: target, .. } => {
-                if clears_default(target) {
-                    triples.clear();
-                }
-            }
-            // DELETE { d } INSERT { i } WHERE { p } — evaluate the WHERE pattern against the graph
-            // state so far, instantiate the delete/insert templates per solution, then apply all
-            // deletes and then all inserts (SPARQL semantics).
-            GraphUpdateOperation::DeleteInsert { delete, insert, using, pattern } => {
-                if using.is_some() {
-                    return Err("USING in DELETE/INSERT … WHERE is not yet supported".into());
-                }
-                let current = build(&triples);
-                let (dels, inss) = instantiate_templates(&current, delete, insert, pattern)?;
-                for t in dels {
-                    triples.remove(&t);
-                }
-                for t in inss {
-                    triples.insert(t);
-                }
-            }
-            other => return Err(format!("UPDATE operation not yet supported: {other:?}")),
-        }
-    }
-    Ok(build(&triples))
-}
-
-/// Evaluates a DELETE/INSERT … WHERE pattern against `graph` and instantiates the delete /
-/// insert templates per solution (skipping any template triple with an unbound slot, per
-/// SPARQL). Shared by the rebuild (`update`) and delta-overlay (`update_in_place`) paths.
+/// Evaluates a DELETE/INSERT … WHERE pattern against `active` and instantiates the delete /
+/// insert templates per solution as (graph-slot, triple) pairs. Shared by the rebuild
+/// (`update`) and delta-overlay (`update_in_place`) paths.
 fn instantiate_templates(
-    graph: &Graph,
-    delete: &[spargebra::term::GroundQuadPattern],
-    insert: &[spargebra::term::QuadPattern],
+    active: &Graph,
+    delete: &[GroundQuadPattern],
+    insert: &[QuadPattern],
     pattern: &spargebra::algebra::GraphPattern,
-) -> Result<(Vec<TripleTerms>, Vec<TripleTerms>), String> {
-    let result = crate::exec::eval_select(graph, pattern)?;
+) -> Result<(Vec<(GraphSlot, TripleTerms)>, Vec<(GraphSlot, TripleTerms)>), String> {
+    let result = crate::exec::eval_select(active, pattern)?;
     let cols: FxHashMap<Variable, usize> =
         result.vars.iter().enumerate().map(|(i, v)| (v.clone(), i)).collect();
-    let mut dels: Vec<TripleTerms> = Vec::new();
-    let mut inss: Vec<TripleTerms> = Vec::new();
+    let mut dels: Vec<(GraphSlot, TripleTerms)> = Vec::new();
+    let mut inss: Vec<(GraphSlot, TripleTerms)> = Vec::new();
     for row in &result.rows {
         let get = |v: &Variable| -> Option<Term> { cols.get(v).and_then(|&i| row[i].clone()) };
         for dp in delete {
-            gnp_default(&dp.graph_name)?;
-            if let (Some(s), Some(p), Some(o)) =
-                (gtp_subst(&dp.subject, &get), nnp_subst(&dp.predicate, &get), gtp_subst(&dp.object, &get))
-            {
-                dels.push([s, p, o]);
-            }
+            let (Some(slot), Some(s), Some(p), Some(o)) = (
+                gnp_subst(&dp.graph_name, &get),
+                gtp_subst(&dp.subject, &get),
+                nnp_subst(&dp.predicate, &get),
+                gtp_subst(&dp.object, &get),
+            ) else {
+                continue;
+            };
+            dels.push((slot, [s, p, o]));
         }
+        let mut fresh = FreshBnodes { map: FxHashMap::default() };
         for ip in insert {
-            gnp_default(&ip.graph_name)?;
-            if let (Some(s), Some(p), Some(o)) =
-                (tp_subst(&ip.subject, &get), nnp_subst(&ip.predicate, &get), tp_subst(&ip.object, &get))
-            {
-                inss.push([s, p, o]);
-            }
+            let (Some(slot), Some(s), Some(p), Some(o)) = (
+                gnp_subst(&ip.graph_name, &get),
+                tp_subst(&ip.subject, &get, &mut fresh),
+                nnp_subst(&ip.predicate, &get),
+                tp_subst(&ip.object, &get, &mut fresh),
+            ) else {
+                continue;
+            };
+            inss.push((slot, [s, p, o]));
         }
     }
     Ok((dels, inss))
 }
 
-/// Applies a SPARQL Update IN PLACE through the store's DELTA-OVERLAY (roadmap T17): the data
-/// operations route to [`Graph::apply_delta`] — O(batch) per operation instead of the O(n)
-/// decode-everything-and-rebuild that [`update`] performs — and, for a directory-backed graph,
-/// each batch is WAL-logged (fsync'd) before it is applied, so updates are durable across a
-/// crash. `CLEAR` (DEFAULT/ALL) still REPLACES the graph with an empty rebuild (it discards
-/// everything anyway; note this drops a directory-backed graph's WAL/directory association).
-/// Fold the accumulated overlay back into the base periodically with [`Graph::compact`].
-pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
-    let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
-    for op in &upd.operations {
-        match op {
-            GraphUpdateOperation::InsertData { data } => {
-                let inss: Vec<TripleTerms> = data.iter().map(quad_to_triple).collect::<Result<_, _>>()?;
-                graph.apply_delta(&inss, &[])?;
+// --- LOAD ----------------------------------------------------------------------------------------
+
+/// Reads and parses a `file://` document for LOAD (the conformance suites resolve their
+/// relative sources against the request file's location, so this covers them). Non-file
+/// schemes are an error — `LOAD SILENT` turns that into a no-op at the call sites.
+fn load_document(source: &str) -> Result<TripleSet, String> {
+    let path = source
+        .strip_prefix("file://")
+        .ok_or_else(|| format!("LOAD source not supported (only file:// URIs): {source}"))?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("LOAD {source}: {e}"))?;
+    let format = match path.rsplit('.').next() {
+        Some("nt") => "ntriples",
+        Some("nq") => "nquads",
+        Some("trig") => "trig",
+        _ => "turtle",
+    };
+    let g = Graph::load_str(&text, format).map_err(|e| format!("LOAD {source}: {e}"))?;
+    Ok(decode_triples(&g))
+}
+
+// --- the rebuild path ----------------------------------------------------------------------------
+
+/// Applies one parsed operation to the dataset model.
+fn apply_op(ds: &mut Dataset, op: &GraphUpdateOperation) -> Result<(), String> {
+    match op {
+        GraphUpdateOperation::InsertData { data } => {
+            for q in data {
+                let (slot, t) = quad_to_triple(q);
+                ds.insert(&slot, t);
             }
-            GraphUpdateOperation::DeleteData { data } => {
-                let dels: Vec<TripleTerms> = data.iter().map(ground_quad_to_triple).collect::<Result<_, _>>()?;
-                graph.apply_delta(&[], &dels)?;
+        }
+        GraphUpdateOperation::DeleteData { data } => {
+            for q in data {
+                let (slot, t) = ground_quad_to_triple(q);
+                ds.remove(&slot, &t);
             }
-            GraphUpdateOperation::Clear { graph: target, .. } => {
-                if clears_default(target) {
-                    *graph = build(&FxHashSet::default());
+        }
+        // CLEAR empties the target graph(s) but keeps named-graph entries; clearing an
+        // absent named graph is a no-op (auto-create stores may succeed — we do).
+        GraphUpdateOperation::Clear { graph: target, .. } => match target {
+            GraphTarget::DefaultGraph => ds.default.clear(),
+            GraphTarget::NamedNode(n) => {
+                let name = Term::NamedNode(n.clone());
+                if let Some(i) = ds.named.iter().position(|(g, _)| *g == name) {
+                    ds.named[i].1.clear();
                 }
             }
-            GraphUpdateOperation::DeleteInsert { delete, insert, using, pattern } => {
-                if using.is_some() {
-                    return Err("USING in DELETE/INSERT … WHERE is not yet supported".into());
-                }
-                // The WHERE pattern is evaluated against the graph as updated so far in this
-                // request (scans merge the overlay), matching the rebuild path's semantics.
-                let (dels, inss) = instantiate_templates(graph, delete, insert, pattern)?;
-                graph.apply_delta(&inss, &dels)?;
+            GraphTarget::NamedGraphs => ds.named.iter_mut().for_each(|(_, s)| s.clear()),
+            GraphTarget::AllGraphs => {
+                ds.default.clear();
+                ds.named.iter_mut().for_each(|(_, s)| s.clear());
             }
-            other => return Err(format!("UPDATE operation not yet supported: {other:?}")),
+        },
+        // DROP removes named-graph entries; the default graph always exists, so DROP
+        // DEFAULT only empties it.
+        GraphUpdateOperation::Drop { graph: target, .. } => match target {
+            GraphTarget::DefaultGraph => ds.default.clear(),
+            GraphTarget::NamedNode(n) => {
+                let name = Term::NamedNode(n.clone());
+                ds.named.retain(|(g, _)| *g != name);
+            }
+            GraphTarget::NamedGraphs => ds.named.clear(),
+            GraphTarget::AllGraphs => {
+                ds.default.clear();
+                ds.named.clear();
+            }
+        },
+        GraphUpdateOperation::Create { graph, .. } => {
+            ds.graph_mut(&Term::NamedNode(graph.clone()));
+        }
+        GraphUpdateOperation::Load { silent, source, destination } => {
+            match load_document(source.as_str()) {
+                Ok(triples) => ds.slot_mut(&graph_name_slot(destination)).extend(triples),
+                Err(e) => {
+                    if !silent {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        // DELETE { d } INSERT { i } WHERE { p } — evaluate the WHERE against the dataset
+        // state so far (re-scoped by USING when present), instantiate the templates per
+        // solution, then apply all deletes and then all inserts (SPARQL semantics).
+        GraphUpdateOperation::DeleteInsert { delete, insert, using, pattern } => {
+            let active = match using {
+                Some(u) => ds.build_using(u),
+                None => ds.build(),
+            };
+            let (dels, inss) = instantiate_templates(&active, delete, insert, pattern)?;
+            for (slot, t) in &dels {
+                ds.remove(slot, t);
+            }
+            for (slot, t) in inss {
+                ds.insert(&slot, t);
+            }
         }
     }
     Ok(())
 }
 
-fn clears_default(target: &GraphTarget) -> bool {
-    matches!(target, GraphTarget::DefaultGraph | GraphTarget::AllGraphs)
+/// Apply a SPARQL Update string to `graph`, returning the updated graph (named graphs
+/// preserved). Errors (leaving the input untouched — it is borrowed) on a parse error or a
+/// non-SILENT failing LOAD.
+pub fn update(graph: &Graph, sparql: &str) -> Result<Graph, String> {
+    let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
+    let mut ds = Dataset::decode(graph);
+    for op in &upd.operations {
+        apply_op(&mut ds, op)?;
+    }
+    Ok(ds.build())
+}
+
+// --- the delta-overlay path ------------------------------------------------------------------
+
+/// Groups (graph-slot, triple) pairs per graph slot, preserving first-seen slot order.
+fn group_by_slot(items: Vec<(GraphSlot, TripleTerms)>) -> Vec<(GraphSlot, Vec<TripleTerms>)> {
+    let mut out: Vec<(GraphSlot, Vec<TripleTerms>)> = Vec::new();
+    for (slot, t) in items {
+        match out.iter_mut().find(|(s, _)| *s == slot) {
+            Some((_, v)) => v.push(t),
+            None => out.push((slot, vec![t])),
+        }
+    }
+    out
+}
+
+/// Applies one insert/delete batch to the graph slot through the delta overlay,
+/// auto-creating an empty named graph for an insert into an absent one.
+fn apply_slot_delta(
+    graph: &mut Graph,
+    slot: &GraphSlot,
+    inserts: &[TripleTerms],
+    deletes: &[TripleTerms],
+) -> Result<(), String> {
+    match slot {
+        None => graph.apply_delta(inserts, deletes),
+        Some(name) => {
+            if let Some(i) = graph.named.iter().position(|(n, _)| n == name) {
+                return graph.named[i].1.apply_delta(inserts, deletes);
+            }
+            if inserts.is_empty() {
+                return Ok(()); // deleting from an absent graph is a no-op
+            }
+            let mut g = empty_graph();
+            g.apply_delta(inserts, &[])?;
+            graph.named.push((name.clone(), g));
+            Ok(())
+        }
+    }
+}
+
+/// Applies a SPARQL Update IN PLACE through the store's DELTA-OVERLAY (roadmap T17): the data
+/// operations route to [`Graph::apply_delta`] per target graph — O(batch) per operation instead
+/// of the O(n) decode-everything-and-rebuild that [`update`] performs — and, for a
+/// directory-backed graph, each default-graph batch is WAL-logged (fsync'd) before it is
+/// applied, so updates are durable across a crash. `CLEAR`/`DROP` of the default graph still
+/// REPLACE it with an empty rebuild (this drops a directory-backed graph's WAL/directory
+/// association); named graphs are preserved across every operation. Fold the accumulated
+/// overlay back into the base periodically with [`Graph::compact`].
+pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
+    let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
+    for op in &upd.operations {
+        match op {
+            GraphUpdateOperation::InsertData { data } => {
+                for (slot, ins) in group_by_slot(data.iter().map(quad_to_triple).collect()) {
+                    apply_slot_delta(graph, &slot, &ins, &[])?;
+                }
+            }
+            GraphUpdateOperation::DeleteData { data } => {
+                for (slot, del) in group_by_slot(data.iter().map(ground_quad_to_triple).collect()) {
+                    apply_slot_delta(graph, &slot, &[], &del)?;
+                }
+            }
+            GraphUpdateOperation::Clear { graph: target, .. } => match target {
+                GraphTarget::DefaultGraph => replace_default(graph),
+                GraphTarget::NamedNode(n) => {
+                    let name = Term::NamedNode(n.clone());
+                    if let Some(i) = graph.named.iter().position(|(g, _)| *g == name) {
+                        graph.named[i].1 = empty_graph();
+                    }
+                }
+                GraphTarget::NamedGraphs => {
+                    for entry in &mut graph.named {
+                        entry.1 = empty_graph();
+                    }
+                }
+                GraphTarget::AllGraphs => {
+                    replace_default(graph);
+                    for entry in &mut graph.named {
+                        entry.1 = empty_graph();
+                    }
+                }
+            },
+            GraphUpdateOperation::Drop { graph: target, .. } => match target {
+                GraphTarget::DefaultGraph => replace_default(graph),
+                GraphTarget::NamedNode(n) => {
+                    let name = Term::NamedNode(n.clone());
+                    graph.named.retain(|(g, _)| *g != name);
+                }
+                GraphTarget::NamedGraphs => graph.named.clear(),
+                GraphTarget::AllGraphs => {
+                    replace_default(graph);
+                    graph.named.clear();
+                }
+            },
+            GraphUpdateOperation::Create { graph: name, .. } => {
+                let name = Term::NamedNode(name.clone());
+                if !graph.named.iter().any(|(g, _)| *g == name) {
+                    graph.named.push((name, empty_graph()));
+                }
+            }
+            GraphUpdateOperation::Load { silent, source, destination } => {
+                match load_document(source.as_str()) {
+                    Ok(triples) => {
+                        let ins: Vec<TripleTerms> = triples.into_iter().collect();
+                        apply_slot_delta(graph, &graph_name_slot(destination), &ins, &[])?;
+                    }
+                    Err(e) => {
+                        if !silent {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            GraphUpdateOperation::DeleteInsert { delete, insert, using, pattern } => {
+                // Without USING the WHERE pattern is evaluated against the graph as updated
+                // so far in this request (scans merge the overlay; GRAPH blocks see the live
+                // named graphs), matching the rebuild path's semantics. With USING, the
+                // re-scoped active dataset is materialised from the current state.
+                let (dels, inss) = match using {
+                    Some(u) => {
+                        let active = Dataset::decode(graph).build_using(u);
+                        instantiate_templates(&active, delete, insert, pattern)?
+                    }
+                    None => instantiate_templates(graph, delete, insert, pattern)?,
+                };
+                // All deletes first, then all inserts (SPARQL semantics), per graph slot.
+                for (slot, del) in group_by_slot(dels) {
+                    apply_slot_delta(graph, &slot, &[], &del)?;
+                }
+                for (slot, ins) in group_by_slot(inss) {
+                    apply_slot_delta(graph, &slot, &ins, &[])?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replaces the default graph with an empty one, PRESERVING the named graphs.
+fn replace_default(graph: &mut Graph) {
+    let named = std::mem::take(&mut graph.named);
+    *graph = empty_graph();
+    graph.named = named;
 }
 
 #[cfg(test)]
@@ -287,12 +628,110 @@ mod tests {
         assert_eq!(count(&g), 0);
     }
 
+    /// F19 regression: updates must PRESERVE named graphs, route GRAPH-scoped data ops,
+    /// and implement the graph-management operations.
     #[test]
-    fn named_graph_update_errors() {
-        let g = Graph::load_str("@prefix : <http://ex/> . :a :p :b .", "turtle").unwrap();
-        assert!(update(&g, "PREFIX : <http://ex/> INSERT DATA { GRAPH :g { :a :p :c } }").is_err());
-        let mut g = g;
-        assert!(update_in_place(&mut g, "PREFIX : <http://ex/> INSERT DATA { GRAPH :g { :a :p :c } }").is_err());
+    fn named_graph_updates() {
+        let src = "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
+                   <http://ex/x> <http://ex/q> <http://ex/y> <http://ex/g1> .";
+        let g = Graph::load_dataset(src, "nquads").unwrap();
+        assert_eq!((count(&g), g.named.len()), (1, 1));
+
+        // A default-graph INSERT DATA must keep :g1 intact.
+        let g = update(&g, "PREFIX : <http://ex/> INSERT DATA { :a :p :c }").unwrap();
+        assert_eq!((count(&g), g.named.len()), (2, 1));
+        assert_eq!(count(&g.named[0].1), 1);
+
+        // GRAPH-scoped INSERT DATA goes to the right graph (auto-creating :g2).
+        let g = update(&g, "PREFIX : <http://ex/> INSERT DATA { GRAPH :g1 { :x :q :z } GRAPH :g2 { :n :m :o } }").unwrap();
+        assert_eq!(g.named.len(), 2);
+        assert_eq!(count(&g.named[0].1), 2);
+
+        // GRAPH-scoped DELETE DATA.
+        let g = update(&g, "PREFIX : <http://ex/> DELETE DATA { GRAPH :g1 { :x :q :y } }").unwrap();
+        assert_eq!(count(&g.named[0].1), 1);
+
+        // DELETE/INSERT WHERE with GRAPH templates + GRAPH WHERE (the ADD desugaring shape).
+        let g = update(
+            &g,
+            "PREFIX : <http://ex/> INSERT { GRAPH :g3 { ?s ?p ?o } } WHERE { GRAPH :g2 { ?s ?p ?o } }",
+        )
+        .unwrap();
+        let g3 = g.named.iter().find(|(n, _)| n.to_string().contains("g3")).unwrap();
+        assert_eq!(count(&g3.1), 1);
+
+        // CLEAR GRAPH empties only that graph; DROP removes it.
+        let g = update(&g, "PREFIX : <http://ex/> CLEAR GRAPH :g2").unwrap();
+        assert_eq!(g.named.len(), 3); // entry kept, empty
+        let g2 = g.named.iter().find(|(n, _)| n.to_string().contains("g2")).unwrap();
+        assert_eq!(count(&g2.1), 0);
+        let g = update(&g, "PREFIX : <http://ex/> DROP GRAPH :g3").unwrap();
+        assert_eq!(g.named.len(), 2);
+
+        // CLEAR DEFAULT keeps named graphs.
+        let g = update(&g, "CLEAR DEFAULT").unwrap();
+        assert_eq!(count(&g), 0);
+        assert_eq!(g.named.len(), 2);
+        assert_eq!(count(&g.named[0].1), 1);
+
+        // CREATE makes an (empty) graph that GRAPH <g> {} can see.
+        let g = update(&g, "PREFIX : <http://ex/> CREATE GRAPH :fresh").unwrap();
+        assert!(g.named.iter().any(|(n, _)| n.to_string().contains("fresh")));
+
+        // DROP ALL empties everything.
+        let g = update(&g, "DROP ALL").unwrap();
+        assert_eq!((count(&g), g.named.len()), (0, 0));
+    }
+
+    /// ADD / COPY / MOVE arrive desugared from the parser; end-to-end they must move the
+    /// triples and preserve everything else.
+    #[test]
+    fn add_copy_move() {
+        let src = "<http://ex/d> <http://ex/p> <http://ex/e> .\n\
+                   <http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .";
+        let g = Graph::load_dataset(src, "nquads").unwrap();
+        // ADD the default graph into :g1 (union).
+        let g = update(&g, "ADD DEFAULT TO GRAPH <http://ex/g1>").unwrap();
+        assert_eq!(count(&g), 1); // source kept
+        assert_eq!(count(&g.named[0].1), 2);
+        // COPY replaces the destination.
+        let g = update(&g, "COPY DEFAULT TO GRAPH <http://ex/g1>").unwrap();
+        assert_eq!(count(&g.named.iter().find(|(n, _)| n.to_string().contains("g1")).unwrap().1), 1);
+        // MOVE drops the source.
+        let g = update(&g, "MOVE GRAPH <http://ex/g1> TO GRAPH <http://ex/g2>").unwrap();
+        assert!(!g.named.iter().any(|(n, _)| n.to_string().contains("g1")));
+        assert_eq!(count(&g.named.iter().find(|(n, _)| n.to_string().contains("g2")).unwrap().1), 1);
+    }
+
+    /// USING re-scopes the WHERE dataset: the named graph becomes the active default graph.
+    #[test]
+    fn using_rescopes_where() {
+        let src = "<http://ex/d> <http://ex/p> <http://ex/e> .\n\
+                   <http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .";
+        let g = Graph::load_dataset(src, "nquads").unwrap();
+        let g = update(
+            &g,
+            "PREFIX : <http://ex/> INSERT { ?s :copied ?o } USING :g1 WHERE { ?s :p ?o }",
+        )
+        .unwrap();
+        // Only :g1's triple matched (the real default graph was re-scoped away).
+        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?s :copied ?o }").unwrap(), 1);
+        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { :a :copied :b }").unwrap(), 1);
+    }
+
+    /// Blank nodes in an INSERT template are FRESH per solution.
+    #[test]
+    fn insert_template_bnodes_fresh_per_solution() {
+        let g = Graph::load_str("@prefix : <http://ex/> . :a :age 30 . :b :age 25 .", "turtle").unwrap();
+        let g = update(
+            &g,
+            "PREFIX : <http://ex/> INSERT { ?s :note _:n . _:n :label \"x\" } WHERE { ?s :age ?a }",
+        )
+        .unwrap();
+        // 2 solutions × 2 template triples = 4 inserted (distinct bnodes per solution).
+        assert_eq!(count(&g), 2 + 4);
+        // Two DISTINCT bnodes -> two :label triples.
+        assert_eq!(crate::count(&g, "PREFIX : <http://ex/> SELECT * WHERE { ?n :label ?l }").unwrap(), 2);
     }
 
     /// The delta-overlay path (`update_in_place`) must be observationally identical to the
@@ -309,17 +748,31 @@ mod tests {
             "PREFIX : <http://ex/> INSERT DATA { :a :p :b }", // re-insert of a delete
             "PREFIX : <http://ex/> DELETE { ?s :age ?a } INSERT { ?s :years ?a } WHERE { ?s :age ?a }",
             "PREFIX : <http://ex/> DELETE WHERE { ?s :q ?v }",
+            // Named-graph operations (F19): both paths must route + preserve identically.
+            "PREFIX : <http://ex/> INSERT DATA { GRAPH :g1 { :n :m :o . :n :m :p } }",
+            "PREFIX : <http://ex/> DELETE DATA { GRAPH :g1 { :n :m :p } }",
+            "PREFIX : <http://ex/> INSERT { GRAPH :g2 { ?s ?p ?o } } WHERE { GRAPH :g1 { ?s ?p ?o } }",
+            "PREFIX : <http://ex/> CLEAR GRAPH :g1",
+            "PREFIX : <http://ex/> DROP GRAPH :g2",
         ];
-        let dump = |g: &Graph| -> Vec<(String, String, String)> {
-            let scan = g.store.scan(&[None, None, None]);
-            let mut v: Vec<_> = scan
-                .rows
-                .iter()
-                .map(|r| {
+        let dump = |g: &Graph| -> Vec<(String, String, String, String)> {
+            let mut v: Vec<_> = Vec::new();
+            let mut one = |g: &Graph, name: &str| {
+                let scan = g.store.scan(&[None, None, None]);
+                for r in scan.rows.iter() {
                     let t = scan.to_spo(r);
-                    (g.dict.term(t[0]).to_string(), g.dict.term(t[1]).to_string(), g.dict.term(t[2]).to_string())
-                })
-                .collect();
+                    v.push((
+                        g.dict.term(t[0]).to_string(),
+                        g.dict.term(t[1]).to_string(),
+                        g.dict.term(t[2]).to_string(),
+                        name.to_string(),
+                    ));
+                }
+            };
+            one(g, "");
+            for (name, sub) in &g.named {
+                one(sub, &name.to_string());
+            }
             v.sort();
             v
         };
@@ -332,6 +785,7 @@ mod tests {
                 "PREFIX : <http://ex/> SELECT * WHERE { ?s :p ?o }",
                 "PREFIX : <http://ex/> SELECT * WHERE { ?s ?p ?o . FILTER(?o > 20) }",
                 "PREFIX : <http://ex/> SELECT * WHERE { ?s :p ?m . ?m :p ?o }",
+                "PREFIX : <http://ex/> SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }",
             ] {
                 assert_eq!(crate::count(&inplace, q).unwrap(), crate::count(&rebuilt, q).unwrap(), "query {q} diverged after op {i}");
             }

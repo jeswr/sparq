@@ -97,6 +97,25 @@ fn prefix_bnodes_quad(q: Quad, idx: usize) -> Quad {
     Quad::new(t.subject, t.predicate, t.object, graph_name)
 }
 
+/// Loads the N-Quads dataset and then registers any EXPLICITLY-NAMED graphs that
+/// contributed no quads: a named graph can exist and be EMPTY (`qt:graphData` /
+/// `ut:graphData` pointing at an empty document), and `GRAPH ?g {}` / `GRAPH <g> {}`
+/// must see it — but the N-Quads encoding cannot represent a graph with no triples,
+/// so the loader is told the graph names separately.
+fn load_dataset_with_graphs(nquads: &str, graph_names: &[String]) -> Result<sparq_core::Graph, String> {
+    let mut graph = sparq_core::Graph::load_dataset(nquads, "nquads")?;
+    for name in graph_names {
+        let Ok(nn) = oxrdf::NamedNode::new(name.clone()) else {
+            continue;
+        };
+        let t = Term::NamedNode(nn);
+        if !graph.named.iter().any(|(g, _)| *g == t) {
+            graph.named.push((t, sparq_core::Graph::from_parts(sparq_core::dict::Dict::new(), Vec::new())));
+        }
+    }
+    Ok(graph)
+}
+
 /// Prepends a BASE so relative IRIs in the query resolve against the query
 /// file's location (the engine API takes no base; an explicit in-text BASE
 /// later in the prologue simply overrides this one, which is fine).
@@ -220,10 +239,11 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
                 return Status::Fail("expected result is a binding set, query is ASK".into())
             }
         };
+        let graph_names: Vec<String> = entry.action.graph_data.iter().map(|(g, _)| g.clone()).collect();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {
-                let graph = sparq_core::Graph::load_dataset(&nquads, "nquads")?;
+                let graph = load_dataset_with_graphs(&nquads, &graph_names)?;
                 sparq_engine::ask(&graph, &query_with_base)
             })();
             let _ = tx.send(result);
@@ -238,10 +258,11 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
     }
 
     // Engine invocation on a watchdog thread.
+    let graph_names: Vec<String> = entry.action.graph_data.iter().map(|(g, _)| g.clone()).collect();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| {
-            let graph = sparq_core::Graph::load_dataset(&nquads, "nquads")?;
+            let graph = load_dataset_with_graphs(&nquads, &graph_names)?;
             let res = sparq_engine::query(&graph, &query_with_base)?;
             let vars: Vec<String> = res.vars.iter().map(|v| v.as_str().to_string()).collect();
             Ok::<_, String>((vars, res.rows))
@@ -407,10 +428,11 @@ fn run_construct_test(entry: &TestEntry, query_text: &str, base: &str) -> Status
     };
     let query_with_base = with_base(query_text, base);
 
+    let graph_names: Vec<String> = entry.action.graph_data.iter().map(|(g, _)| g.clone()).collect();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| {
-            let graph = sparq_core::Graph::load_dataset(&nquads, "nquads")?;
+            let graph = load_dataset_with_graphs(&nquads, &graph_names)?;
             let triples = sparq_engine::construct(&graph, &query_with_base)?;
             let rows: Vec<Row> = triples
                 .into_iter()
@@ -507,10 +529,11 @@ pub fn run_update_test(entry: &TestEntry) -> Status {
     }
     dedup_rows(&mut expected);
 
+    let graph_names: Vec<String> = entry.update_pre.graph_data.iter().map(|(g, _)| g.clone()).collect();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| {
-            let graph = sparq_core::Graph::load_dataset(&nquads, "nquads")?;
+            let graph = load_dataset_with_graphs(&nquads, &graph_names)?;
             let updated = sparq_engine::update(&graph, &request)?;
             // Dump the resulting dataset: default graph + every named graph.
             let mut rows: Vec<Row> = Vec::new();

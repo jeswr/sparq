@@ -176,7 +176,14 @@ fn object_term<'a>(
         TermPattern::BlankNode(b) => Some(Term::BlankNode(fresh(b.as_str(), row_bnodes))),
         TermPattern::Literal(l) => Some(Term::Literal(l.clone())),
         TermPattern::Variable(v) => get(v),
-        _ => None, // RDF-star triple template — not supported, skip
+        // An RDF 1.2 triple-term template object: instantiate the components
+        // recursively (an unbound / illegal component skips the whole triple).
+        TermPattern::Triple(t) => {
+            let subject = subject_term(&t.subject, get, row_bnodes)?;
+            let predicate = predicate_term(&t.predicate, get)?;
+            let object = object_term(&t.object, get, row_bnodes)?;
+            Some(Term::Triple(Box::new(Triple { subject, predicate, object })))
+        }
     }
 }
 
