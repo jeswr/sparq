@@ -19,9 +19,42 @@ use oxrdf::{Term, Variable};
 use sparq_core::Graph;
 use spargebra::{Query, SparqlParser};
 
+/// A cooperative resource budget for one query evaluation (T15 server hardening).
+///
+/// The executor checks it at coarse sites only (operator entry, once per outer
+/// iteration of the big scan/join loops), so enforcement is approximate but cheap:
+/// an unlimited budget (the default) costs nothing on the hot paths. When a limit
+/// trips, evaluation stops and the query fails with
+/// `"query budget exceeded (timeout)"` / `"query budget exceeded (max-rows)"`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueryBudget {
+    /// Wall-clock deadline. Native only: `std::time::Instant` is unusable on
+    /// `wasm32-unknown-unknown` (it panics), so the field does not exist there —
+    /// the row budget below stays fully portable.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub deadline: Option<std::time::Instant>,
+    /// Upper bound on the rows of any materialised (intermediate or final) result.
+    /// This is a *working-set* bound: a query whose intermediate result exceeds it
+    /// is refused even if a later operator (e.g. LIMIT) would have shrunk it.
+    pub max_rows: Option<usize>,
+}
+
+impl QueryBudget {
+    /// The do-nothing budget every non-budgeted entry point uses.
+    pub fn unlimited() -> Self {
+        Self::default()
+    }
+}
+
 /// Executes a SPARQL query string against a graph, materialising the solutions.
 pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
+    query_with_budget(graph, sparql, &QueryBudget::unlimited())
+}
+
+/// [`query`] under a cooperative [`QueryBudget`] (deadline / max result rows).
+pub fn query_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<QueryResult, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let _guard = exec::budget::install(budget);
     match q {
         Query::Select { pattern, .. } => exec::eval_select(graph, &pattern),
         _ => Err("only SELECT queries are supported".into()),
@@ -33,7 +66,13 @@ pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
 /// (the dictionary case is formatted straight from the stored prefix/suffix). This is
 /// the fast path for the actual end-use — returning results to the CLI / browser.
 pub fn query_json(graph: &Graph, sparql: &str) -> Result<String, String> {
+    query_json_with_budget(graph, sparql, &QueryBudget::unlimited())
+}
+
+/// [`query_json`] under a cooperative [`QueryBudget`] (deadline / max result rows).
+pub fn query_json_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let _guard = exec::budget::install(budget);
     match q {
         Query::Select { pattern, .. } => exec::eval_select_json(graph, &pattern),
         _ => Err("only SELECT queries are supported".into()),
@@ -44,7 +83,13 @@ pub fn query_json(graph: &Graph, sparql: &str) -> Result<String, String> {
 /// terms (the id-level row count equals the solution count). Used to measure
 /// engine compute in isolation from result serialisation.
 pub fn count(graph: &Graph, sparql: &str) -> Result<usize, String> {
+    count_with_budget(graph, sparql, &QueryBudget::unlimited())
+}
+
+/// [`count`] under a cooperative [`QueryBudget`] (the server's budgeted ASK path).
+pub fn count_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<usize, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let _guard = exec::budget::install(budget);
     match q {
         Query::Select { pattern, .. } => exec::count_select(graph, &pattern),
         _ => Err("only SELECT queries are supported".into()),
@@ -735,6 +780,46 @@ mod tests {
         let r = query(&g(), "SELECT * WHERE { ?__bn_x <http://ex/age> ?a }").unwrap();
         assert_eq!(r.len(), 3);
         assert_eq!(r.vars.len(), 2); // both ?__bn_x and ?a are visible
+    }
+
+    #[test]
+    fn budget_unlimited_matches_query() {
+        let q = "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:age ?age }";
+        let plain = query(&g(), q).unwrap();
+        let budgeted = query_with_budget(&g(), q, &QueryBudget::unlimited()).unwrap();
+        assert_eq!(plain.len(), budgeted.len());
+        assert_eq!(
+            query_json(&g(), q).unwrap(),
+            query_json_with_budget(&g(), q, &QueryBudget::unlimited()).unwrap()
+        );
+    }
+
+    #[test]
+    fn budget_max_rows_refuses_not_truncates() {
+        // 8 triples; max_rows 3 must REFUSE (error), never return a truncated result.
+        let b = QueryBudget { max_rows: Some(3), ..QueryBudget::unlimited() };
+        let e = query_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).map(|r| r.len()).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
+        let e = query_json_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
+        // A generous row budget changes nothing.
+        let b = QueryBudget { max_rows: Some(1000), ..QueryBudget::unlimited() };
+        assert_eq!(query_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap().len(), 8);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn budget_deadline_times_out() {
+        // A deadline already in the past trips the first cooperative check.
+        let b = QueryBudget {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+            ..QueryBudget::unlimited()
+        };
+        let q = "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:age ?age }";
+        let e = query_with_budget(&g(), q, &b).map(|r| r.len()).unwrap_err();
+        assert!(e.contains("query budget exceeded (timeout)"), "got: {e}");
+        // …and the budget never leaks into the next (unbudgeted) query on this thread.
+        assert_eq!(query(&g(), q).unwrap().len(), 2);
     }
 
     // Differential: the engine's join machinery (merge/hash/greedy ordering)

@@ -27,7 +27,7 @@ required-features = ["server"]
 # are never part of the bundle. Kept behind a feature so a consumer can depend on the
 # pure serializer library (XML/CSV/TSV) without dragging in the runtime.
 default = ["server"]
-server = ["dep:axum", "dep:tokio", "dep:tower", "dep:tower-http"]
+server = ["dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -41,9 +41,13 @@ spargebra.workspace = true
 
 # --- async HTTP stack (feature-gated; native only) ---
 axum = { version = "0.7", optional = true, default-features = false, features = ["http1", "tokio", "query", "json"] }
-tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "macros", "net", "signal"] }
-tower = { version = "0.5", optional = true }
-tower-http = { version = "0.6", optional = true, features = ["trace"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+# `limit` + `load-shed` power the max-concurrency guard (T15); `util` for ServiceBuilder combinators.
+tower = { version = "0.5", optional = true, features = ["limit", "load-shed", "util"] }
+# `catch-panic` turns a handler panic into a 500 instead of a dead connection (T15).
+tower-http = { version = "0.6", optional = true, features = ["trace", "catch-panic"] }
+# Emits the TraceLayer request log when the binary runs with --verbose.
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["fmt", "env-filter"] }
 
 mimalloc = "0.1"
 

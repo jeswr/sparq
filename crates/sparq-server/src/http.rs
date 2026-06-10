@@ -10,33 +10,110 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use axum::{
     body::Bytes,
-    extract::{Query, RawQuery, State},
+    error_handling::HandleErrorLayer,
+    extract::{DefaultBodyLimit, Query, RawQuery, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get},
-    Router,
+    BoxError, Router,
 };
+use tower::ServiceBuilder;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::trace::TraceLayer;
 
 use sparq_core::Graph;
+use sparq_engine::QueryBudget;
 
 use crate::exec::{prepare, PrepareError, QueryForm};
 use crate::negotiate::{negotiate, Format};
 use crate::results;
 
+// ---------------------------------------------------------------------------
+// Hardening configuration (T15)
+// ---------------------------------------------------------------------------
+
+/// Tunable guards that make the endpoint safe to expose publicly (T15).
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// Per-request query timeout. The engine's cooperative [`QueryBudget`] stops the
+    /// worker mid-query at its next coarse check; a hard await-cap of
+    /// `timeout + TIMEOUT_GRACE` guarantees the HTTP 503 even if the engine is inside
+    /// an uninstrumented stretch. `None` disables the timeout.
+    pub query_timeout: Option<Duration>,
+    /// Maximum accepted request body, enforced before the handler reads it (413).
+    pub max_body_bytes: usize,
+    /// Maximum in-flight requests; excess requests are shed with 429.
+    pub max_concurrent: usize,
+    /// Maximum SELECT result rows. Exceeding it is an honest 413 refusal (the engine
+    /// aborts evaluation via the row budget), never a silent truncation.
+    pub max_results: Option<usize>,
+    /// Log every request/response via `tower_http::trace::TraceLayer`.
+    pub verbose: bool,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            query_timeout: Some(Duration::from_secs(30)),
+            max_body_bytes: 1024 * 1024, // 1 MiB
+            max_concurrent: 32,
+            max_results: None,
+            verbose: false,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// Defaults overridden by the `SPARQ_QUERY_TIMEOUT` (seconds; `0` disables),
+    /// `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT` and `SPARQ_MAX_RESULTS`
+    /// environment variables. CLI flags override these in `main`.
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+        if let Some(secs) = env_parse::<u64>("SPARQ_QUERY_TIMEOUT") {
+            cfg.query_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+        }
+        if let Some(n) = env_parse::<usize>("SPARQ_MAX_BODY_BYTES") {
+            cfg.max_body_bytes = n;
+        }
+        if let Some(n) = env_parse::<usize>("SPARQ_MAX_CONCURRENT") {
+            cfg.max_concurrent = n.max(1);
+        }
+        if let Some(n) = env_parse::<usize>("SPARQ_MAX_RESULTS") {
+            cfg.max_results = (n > 0).then_some(n);
+        }
+        cfg
+    }
+}
+
+fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
+    std::env::var(name).ok()?.trim().parse().ok()
+}
+
+/// Extra wall-clock allowance past the cooperative deadline before the server gives up
+/// awaiting the worker and answers 503 anyway (the detached worker still stops at its
+/// next budget check — it is not leaked indefinitely).
+const TIMEOUT_GRACE: Duration = Duration::from_secs(2);
+
 /// Shared server state: the dataset under query, behind an `RwLock` so SPARQL Update can swap in a
-/// rebuilt graph atomically. Queries take a cheap `Arc` snapshot (lock-free for the duration of the
-/// request); an update takes the write lock briefly to install the new graph.
+/// rebuilt graph atomically. Queries take a cheap lock-free `Arc` snapshot; SPARQL Update takes the
+/// write lock briefly to install the new graph. Also carries the hardening [`ServerConfig`].
 #[derive(Clone)]
 pub struct AppState {
     graph: Arc<RwLock<Arc<Graph>>>,
+    config: Arc<ServerConfig>,
 }
 
 impl AppState {
     pub fn new(graph: Graph) -> Self {
-        Self { graph: Arc::new(RwLock::new(Arc::new(graph))) }
+        Self::with_config(graph, ServerConfig::default())
+    }
+
+    pub fn with_config(graph: Graph, config: ServerConfig) -> Self {
+        Self { graph: Arc::new(RwLock::new(Arc::new(graph))), config: Arc::new(config) }
     }
 
     /// A cheap, consistent snapshot of the current graph for the duration of a request.
@@ -52,9 +129,11 @@ impl AppState {
     }
 }
 
-/// Builds the application router for the SPARQL Protocol + GSP-read endpoints.
+/// Builds the application router for the SPARQL Protocol + GSP-read endpoints, hardened
+/// with the state's [`ServerConfig`] guards (see [`harden`]).
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let config = state.config.clone();
+    let routes = Router::new()
         // SPARQL 1.1 Protocol — query operation. `any` so we can return a proper 405 with
         // an `Allow` header for unsupported methods (update verbs are T11b).
         .route("/sparql", any(sparql_endpoint))
@@ -64,7 +143,43 @@ pub fn router(state: AppState) -> Router {
         .route("/graphs/*path", any(graph_store_direct))
         // Liveness.
         .route("/health", get(|| async { "ok" }))
-        .with_state(state)
+        .with_state(state);
+    harden(routes, &config)
+}
+
+/// Applies the T15 hardening middleware stack to a router (outermost first):
+/// optional request logging, panic→500, concurrency limit with load-shedding→429,
+/// JSON error bodies, and the request body-size limit→413. Public so integration
+/// tests can wrap probe routes (e.g. a deliberately panicking handler) in the
+/// exact production stack.
+pub fn harden(routes: Router, config: &ServerConfig) -> Router {
+    let routes = routes.layer(
+        ServiceBuilder::new()
+            // Panic in any inner layer/handler => 500 with a JSON body, not a dead socket.
+            .layer(CatchPanicLayer::custom(|_: Box<dyn std::any::Any + Send>| {
+                json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error (panic)")
+            }))
+            // Load-shed converts "concurrency limit reached" into an immediate error
+            // (mapped to 429) instead of queueing unboundedly.
+            .layer(HandleErrorLayer::new(|err: BoxError| async move {
+                if err.is::<tower::load_shed::error::Overloaded>() {
+                    json_error(StatusCode::TOO_MANY_REQUESTS, "server is at its concurrent-request limit, retry later")
+                } else {
+                    json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("middleware error: {err}"))
+                }
+            }))
+            .load_shed()
+            .concurrency_limit(config.max_concurrent)
+            // Normalise plain-text error bodies (e.g. extractor rejections like the
+            // body-size 413) into the structured JSON shape used everywhere else.
+            .layer(axum::middleware::map_response(json_error_bodies))
+            .layer(DefaultBodyLimit::max(config.max_body_bytes)),
+    );
+    if config.verbose {
+        routes.layer(TraceLayer::new_for_http())
+    } else {
+        routes
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,21 +202,21 @@ async fn sparql_endpoint(
             // GET without a `query` parameter is a malformed request (400).
             let params = parse_form(raw_query.as_deref().unwrap_or(""));
             match params.get("query") {
-                Some(q) => run_query(&state, q, &headers, method == Method::HEAD),
+                Some(q) => run_query(&state, q, &headers, method == Method::HEAD).await,
                 None => bad_request("missing 'query' parameter"),
             }
         }
-        Method::POST => handle_post(&state, &headers, &body),
+        Method::POST => handle_post(&state, &headers, &body).await,
         _ => method_not_allowed(&[Method::GET, Method::HEAD, Method::POST]),
     }
 }
 
-fn handle_post(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Response {
+async fn handle_post(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Response {
     let ct = content_type(headers);
     if ct.starts_with(SPARQL_QUERY_CT) {
         // POST directly — body IS the SPARQL query.
         match std::str::from_utf8(body) {
-            Ok(q) => run_query(state, q, headers, false),
+            Ok(q) => run_query(state, q, headers, false).await,
             Err(_) => bad_request("request body is not valid UTF-8"),
         }
     } else if ct.starts_with(FORM_CT) {
@@ -112,30 +227,41 @@ fn handle_post(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Response 
         };
         let params = parse_form(s);
         match params.get("query") {
-            Some(q) => run_query(state, q, headers, false),
+            Some(q) => run_query(state, q, headers, false).await,
             None => bad_request("missing 'query' parameter in url-encoded body"),
         }
     } else if ct.starts_with("application/sparql-update") {
         // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
+        // Rebuilding the graph is CPU-bound, so it runs off the async workers too.
         match std::str::from_utf8(body) {
-            Ok(u) => match state.apply_update(u) {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => bad_request(&format!("update failed: {e}")),
-            },
+            Ok(u) => {
+                let st = state.clone();
+                let u = u.to_string();
+                let joined = tokio::task::spawn_blocking(move || st.apply_update(&u)).await;
+                match joined {
+                    Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+                    Ok(Err(e)) => bad_request(&format!("update failed: {e}")),
+                    Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
+                }
+            }
             Err(_) => bad_request("request body is not valid UTF-8"),
         }
     } else {
         // Unsupported media type for the POST query operation.
-        (
+        json_error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "POST requires Content-Type 'application/sparql-query' or 'application/x-www-form-urlencoded'",
         )
-            .into_response()
     }
 }
 
 /// Executes a query string and renders the negotiated representation.
-fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_only: bool) -> Response {
+///
+/// The engine call is synchronous + CPU-bound, so it runs on the blocking pool under a
+/// cooperative [`QueryBudget`] (deadline + SELECT row cap). The await is additionally
+/// hard-capped at `timeout + TIMEOUT_GRACE` so a worker stuck in an uninstrumented
+/// stretch still gets its 503 on time (the worker itself stops at its next budget check).
+async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_only: bool) -> Response {
     let prepared = match prepare(sparql) {
         Ok(p) => p,
         Err(PrepareError::Malformed(msg)) => return bad_request(&format!("malformed query: {msg}")),
@@ -144,25 +270,33 @@ fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_only: boo
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok());
     let fmt = negotiate(accept);
+    let config = state.config.clone();
 
     match prepared.form {
-        QueryForm::Select => {
-            let select = prepared.runnable_select.expect("SELECT always has a runnable query");
-            render_select(state, &select, fmt, head_only)
-        }
-        QueryForm::Ask => {
-            let select = prepared.runnable_select.expect("ASK always rewrites to a SELECT");
-            match sparq_engine::count(&state.snapshot(), &select) {
-                Ok(n) => {
-                    let value = n > 0;
-                    let (body, ct) = match fmt {
-                        Format::Xml => (results::ask_to_xml(value), fmt.ask_content_type()),
-                        _ => (results::ask_to_json(value), fmt.ask_content_type()),
-                    };
-                    text_response(StatusCode::OK, ct, body, head_only)
+        QueryForm::Select | QueryForm::Ask => {
+            let is_ask = prepared.form == QueryForm::Ask;
+            let select = prepared.runnable_select.expect("SELECT/ASK always has a runnable query");
+            let budget = make_budget(&config, !is_ask);
+            let graph = state.snapshot();
+            let cfg = config.clone();
+            let task = tokio::task::spawn_blocking(move || {
+                if is_ask {
+                    match sparq_engine::count_with_budget(&graph, &select, &budget) {
+                        Ok(n) => {
+                            let value = n > 0;
+                            let (body, ct) = match fmt {
+                                Format::Xml => (results::ask_to_xml(value), fmt.ask_content_type()),
+                                _ => (results::ask_to_json(value), fmt.ask_content_type()),
+                            };
+                            text_response(StatusCode::OK, ct, body, head_only)
+                        }
+                        Err(e) => engine_error_response(&e, &cfg),
+                    }
+                } else {
+                    render_select(&graph, &select, fmt, head_only, &budget, &cfg)
                 }
-                Err(e) => execution_error(&e),
-            }
+            });
+            await_worker(task, &config).await
         }
         QueryForm::Construct | QueryForm::Describe => not_implemented(
             "CONSTRUCT/DESCRIBE are not yet supported: the engine exposes no RDF-graph result API (documented follow-up)",
@@ -170,19 +304,52 @@ fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_only: boo
     }
 }
 
+/// The per-request engine budget: deadline from the configured timeout; the SELECT
+/// row cap from `--max-results` (ASK only needs existence, so no row cap there).
+fn make_budget(config: &ServerConfig, apply_max_results: bool) -> QueryBudget {
+    QueryBudget {
+        deadline: config.query_timeout.map(|t| std::time::Instant::now() + t),
+        max_rows: if apply_max_results { config.max_results } else { None },
+    }
+}
+
+/// Awaits a blocking engine worker under the hard timeout cap; maps a worker panic to a
+/// 500 (CatchPanicLayer cannot see panics on the blocking pool — the JoinError carries them).
+async fn await_worker(task: tokio::task::JoinHandle<Response>, config: &ServerConfig) -> Response {
+    let joined = match config.query_timeout {
+        Some(t) => match tokio::time::timeout(t + TIMEOUT_GRACE, task).await {
+            Ok(j) => j,
+            Err(_elapsed) => return timeout_response(config),
+        },
+        None => task.await,
+    };
+    match joined {
+        Ok(resp) => resp,
+        Err(e) if e.is_panic() => json_error(StatusCode::INTERNAL_SERVER_ERROR, "query worker panicked"),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "query worker was cancelled"),
+    }
+}
+
 /// Runs a SELECT on the engine and serialises it in the negotiated format. JSON uses the
 /// engine's direct id→JSON fast path; the others go through the materialised `QueryResult`.
-fn render_select(state: &AppState, select: &str, fmt: Format, head_only: bool) -> Response {
+fn render_select(
+    graph: &Graph,
+    select: &str,
+    fmt: Format,
+    head_only: bool,
+    budget: &QueryBudget,
+    config: &ServerConfig,
+) -> Response {
     let ct = fmt.select_content_type();
     let body = match fmt {
-        Format::Json => match sparq_engine::query_json(&state.snapshot(), select) {
+        Format::Json => match sparq_engine::query_json_with_budget(graph, select, budget) {
             Ok(json) => json,
-            Err(e) => return execution_error(&e),
+            Err(e) => return engine_error_response(&e, config),
         },
         _ => {
-            let result = match sparq_engine::query(&state.snapshot(), select) {
+            let result = match sparq_engine::query_with_budget(graph, select, budget) {
                 Ok(r) => r,
-                Err(e) => return execution_error(&e),
+                Err(e) => return engine_error_response(&e, config),
             };
             match fmt {
                 Format::Xml => results::select_to_xml(&result),
@@ -193,6 +360,30 @@ fn render_select(state: &AppState, select: &str, fmt: Format, head_only: bool) -
         }
     };
     text_response(StatusCode::OK, ct, body, head_only)
+}
+
+/// Maps an engine error string onto the HTTP guard semantics: budget timeout → 503,
+/// budget row cap → 413 (honest refusal), anything else → 500.
+fn engine_error_response(e: &str, config: &ServerConfig) -> Response {
+    if e.contains("query budget exceeded (timeout)") {
+        return timeout_response(config);
+    }
+    if e.contains("query budget exceeded (max-rows)") {
+        let max = config.max_results.unwrap_or(0);
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("result exceeds the server's max-results limit ({max} rows); narrow the query (e.g. add LIMIT) or raise --max-results"),
+        );
+    }
+    execution_error(e)
+}
+
+fn timeout_response(config: &ServerConfig) -> Response {
+    let secs = config.query_timeout.map(|t| t.as_secs()).unwrap_or(0);
+    json_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &format!("query timed out (server limit: {secs}s); simplify the query or raise --query-timeout"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +402,7 @@ async fn graph_store_indirect(
     if !is_default && named.is_none() {
         return bad_request("indirect graph identification requires '?default' or '?graph=<uri>'");
     }
-    graph_store_read(&state, &method, named.as_deref(), &headers)
+    graph_store_read(&state, &method, named.as_deref(), &headers).await
 }
 
 /// Direct graph identification: the path IS (a path under) the graph's resource.
@@ -224,11 +415,11 @@ async fn graph_store_direct(
     // The named graph here is the request's effective URI path; with no named-graph store,
     // every direct graph maps onto the default graph (documented limitation).
     let _ = path;
-    graph_store_read(&state, &method, None, &headers)
+    graph_store_read(&state, &method, None, &headers).await
 }
 
 /// Shared GSP handler. READ (GET/HEAD) serialises the (default) graph; write verbs → 501.
-fn graph_store_read(state: &AppState, method: &Method, named: Option<&str>, headers: &HeaderMap) -> Response {
+async fn graph_store_read(state: &AppState, method: &Method, named: Option<&str>, headers: &HeaderMap) -> Response {
     match *method {
         Method::GET | Method::HEAD => {
             // The engine has no named-graph store: only the default graph is materialised.
@@ -236,7 +427,7 @@ fn graph_store_read(state: &AppState, method: &Method, named: Option<&str>, head
             // graph; we serve the default-graph contents and document the limitation.
             let _ = named;
             let head_only = *method == Method::HEAD;
-            serialise_default_graph(state, headers, head_only)
+            serialise_default_graph(state, headers, head_only).await
         }
         Method::PUT | Method::POST | Method::DELETE | Method::PATCH => not_implemented(
             "Graph Store write operations (PUT/POST/DELETE) are not implemented (thread T11b)",
@@ -248,8 +439,9 @@ fn graph_store_read(state: &AppState, method: &Method, named: Option<&str>, head
 /// Serialises the default graph as N-Triples (the one RDF serialisation we can emit from
 /// the engine's term-level scan without a full Turtle writer). Negotiation is minimal:
 /// `text/turtle` and `application/n-triples` both yield N-Triples (valid Turtle), default
-/// `application/n-triples`.
-fn serialise_default_graph(state: &AppState, headers: &HeaderMap, head_only: bool) -> Response {
+/// `application/n-triples`. CPU-bound (a full-graph dump), so it runs on the blocking pool
+/// under the request timeout (no row cap: a dump is inherently graph-sized).
+async fn serialise_default_graph(state: &AppState, headers: &HeaderMap, head_only: bool) -> Response {
     let accept = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -260,17 +452,22 @@ fn serialise_default_graph(state: &AppState, headers: &HeaderMap, head_only: boo
     } else {
         "application/n-triples; charset=utf-8"
     };
-    let body = nt_dump(&state.snapshot());
-    text_response(StatusCode::OK, ct, body, head_only)
+    let ct = ct.to_string();
+    let config = state.config.clone();
+    let budget = make_budget(&config, false);
+    let graph = state.snapshot();
+    let cfg = config.clone();
+    let task = tokio::task::spawn_blocking(move || match nt_dump(&graph, &budget) {
+        Ok(body) => text_response(StatusCode::OK, &ct, body, head_only),
+        Err(e) => engine_error_response(&e, &cfg),
+    });
+    await_worker(task, &config).await
 }
 
 /// Dumps the whole default graph as N-Triples by reusing the engine's SELECT path
 /// (`?s ?p ?o`) and the materialised terms — no private store API needed.
-fn nt_dump(graph: &Graph) -> String {
-    let r = match sparq_engine::query(graph, "SELECT ?s ?p ?o WHERE { ?s ?p ?o }") {
-        Ok(r) => r,
-        Err(_) => return String::new(),
-    };
+fn nt_dump(graph: &Graph, budget: &QueryBudget) -> Result<String, String> {
+    let r = sparq_engine::query_with_budget(graph, "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", budget)?;
     let mut out = String::with_capacity(r.rows.len() * 64);
     for row in &r.rows {
         let (Some(s), Some(p), Some(o)) = (&row[0], &row[1], &row[2]) else { continue };
@@ -281,7 +478,7 @@ fn nt_dump(graph: &Graph) -> String {
         nt_term(&mut out, o);
         out.push_str(" .\n");
     }
-    out
+    Ok(out)
 }
 
 fn nt_term(out: &mut String, t: &oxrdf::Term) {
@@ -376,16 +573,71 @@ fn text_response(status: StatusCode, content_type: &str, body: String, head_only
         .unwrap()
 }
 
+/// Structured error body: every error the server emits is `{"error": "..."}` JSON, so
+/// programmatic clients never have to scrape prose out of plain text.
+fn json_error(status: StatusCode, msg: &str) -> Response {
+    let mut body = String::with_capacity(msg.len() + 16);
+    body.push_str("{\"error\":\"");
+    for c in msg.chars() {
+        match c {
+            '"' => body.push_str("\\\""),
+            '\\' => body.push_str("\\\\"),
+            '\n' => body.push_str("\\n"),
+            '\r' => body.push_str("\\r"),
+            '\t' => body.push_str("\\t"),
+            c if (c as u32) < 0x20 => body.push_str(&format!("\\u{:04x}", c as u32)),
+            c => body.push(c),
+        }
+    }
+    body.push_str("\"}");
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.into())
+        .unwrap()
+}
+
+/// `map_response` middleware: rewrites plain-text error bodies produced *inside* the
+/// stack (e.g. axum's body-limit 413 rejection) into the structured JSON error shape.
+/// Non-error responses and already-JSON errors pass through untouched; original headers
+/// (e.g. `Allow` on a 405) are preserved.
+async fn json_error_bodies(resp: Response) -> Response {
+    let status = resp.status();
+    if !(status.is_client_error() || status.is_server_error()) {
+        return resp;
+    }
+    let is_json = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    if is_json {
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    // Error bodies are short; cap the read defensively.
+    let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let msg = String::from_utf8_lossy(&bytes);
+    let json = json_error(status, msg.trim());
+    parts.headers.remove(header::CONTENT_TYPE);
+    parts.headers.remove(header::CONTENT_LENGTH);
+    let (jparts, jbody) = json.into_parts();
+    for (k, v) in jparts.headers.iter() {
+        parts.headers.insert(k, v.clone());
+    }
+    Response::from_parts(parts, jbody)
+}
+
 fn bad_request(msg: &str) -> Response {
-    (StatusCode::BAD_REQUEST, msg.to_string()).into_response()
+    json_error(StatusCode::BAD_REQUEST, msg)
 }
 
 fn execution_error(msg: &str) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, format!("query execution error: {msg}")).into_response()
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("query execution error: {msg}"))
 }
 
 fn not_implemented(msg: &str) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, msg.to_string()).into_response()
+    json_error(StatusCode::NOT_IMPLEMENTED, msg)
 }
 
 fn method_not_allowed(allow: &[Method]) -> Response {

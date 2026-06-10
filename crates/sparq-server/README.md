@@ -28,6 +28,34 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --format ntriples data.nt
 cargo run -p sparq-server
 ```
 
+## Hardening flags (T15)
+
+The endpoint ships with guards that make it safe to expose publicly. Each flag overrides
+the matching `SPARQ_*` environment variable; the environment overrides the default.
+
+| Flag | Env var | Default | Guard |
+| --- | --- | --- | --- |
+| `--query-timeout SECS` | `SPARQ_QUERY_TIMEOUT` | `30` (`0` disables) | Per-request query timeout. The engine evaluates under a cooperative budget and aborts at its next coarse check; the response is `503` with a JSON body. A hard await-cap of *timeout + 2 s* guarantees the `503` even if the engine is inside an uninstrumented stretch (the detached worker still stops at its next budget check). |
+| `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` (1 MiB) | Maximum request body. Larger bodies are rejected with `413` before the handler reads them. |
+| `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | Maximum in-flight requests (all routes). Excess requests are load-shed immediately with `429` instead of queueing unboundedly. |
+| `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0` disables) | Maximum SELECT result rows, enforced inside the engine via the row budget. Exceeding it is an **honest `413` refusal** (with the limit named in the error) — never a silent truncation. It is a *working-set* bound: a query whose intermediate result exceeds the cap is refused even if a later operator would shrink it (add `LIMIT`/aggregation to stay under). ASK is existence-only and ignores it. |
+| `--verbose` | — | off | Per-request logging via `tower_http::trace::TraceLayer` (respects `RUST_LOG`). |
+
+Robustness, always on:
+
+* **Structured JSON error bodies** — every error response is `{"error": "..."}` with
+  `Content-Type: application/json` (headers such as `Allow` on a `405` are preserved).
+* **Panic recovery** — a panicking handler returns `500` (JSON body) instead of a dead
+  connection (`CatchPanicLayer`); a panic on the blocking query pool is mapped to `500`
+  through the join error.
+* **Graceful shutdown** — `SIGINT`/`SIGTERM` stop accepting connections and drain
+  in-flight requests before exit.
+* **Off-loop execution** — query evaluation (CPU-bound) runs on the blocking pool, so
+  slow queries never stall the async accept/IO workers.
+
+Library users: build the same stack with `AppState::with_config(graph, ServerConfig { … })`
++ `router(state)`, or wrap any router in the middleware via `harden(router, &config)`.
+
 Then, e.g.:
 
 ```sh
@@ -47,7 +75,9 @@ cargo test -p sparq-server
 Unit tests cover the serialisers, content negotiation and query classification; the
 `tests/protocol.rs` integration suite spins the **actual** axum server on an ephemeral port
 and drives it over real HTTP, asserting request forms, exact result media types, ASK
-booleans and HTTP status semantics.
+booleans and HTTP status semantics. `tests/hardening.rs` exercises every T15 guard the
+same way: timeout on a deliberately slow query, body-size `413`, concurrency shed `429`,
+panic→`500`, the `--max-results` refusal and the structured JSON error bodies.
 
 ## Endpoints
 
@@ -93,7 +123,13 @@ Negotiation is q-value aware; unsupported / absent `Accept` defaults to JSON.
 | Query execution error | `500` |
 | Unsupported method on `/sparql` | `405` + `Allow: GET, HEAD, POST` |
 | `POST` with an unsupported `Content-Type` | `415` |
+| Request body over `--max-body-bytes` | `413` |
+| SELECT result over `--max-results` | `413` (honest refusal, see hardening flags) |
+| Concurrency limit reached | `429` |
+| Query timed out (`--query-timeout`) | `503` |
 | SPARQL Update / Graph Store write | `501` (thread T11b) |
+
+All error bodies are structured JSON: `{"error": "..."}`.
 
 ## Limitations / follow-ups
 

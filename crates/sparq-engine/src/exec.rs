@@ -20,6 +20,144 @@ use smallvec::SmallVec;
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern};
 use std::cmp::Ordering;
 
+// ---- Cooperative query budget (T15 server hardening) -------------------------
+//
+// A thread-local, cooperatively-checked budget installed by the
+// `*_with_budget` entry points in lib.rs. Checked at COARSE sites only: operator
+// entry (`eval_graph_pattern`) and once per outer iteration / key group of the
+// big row-producing loops — never in inner loops. Evaluation is synchronous on
+// the installing thread (rayon offloads block the caller), so a thread-local
+// suffices; the rayon-parallel branches use a captured `Limits` snapshot to cap
+// their own work and the next on-thread check converts that into the error.
+pub(crate) mod budget {
+    use crate::QueryBudget;
+    use std::cell::Cell;
+
+    /// The installed limits, flattened for a cheap per-check read.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Limits {
+        on: bool,
+        #[cfg(not(target_arch = "wasm32"))]
+        deadline: Option<std::time::Instant>,
+        max_rows: usize,
+    }
+
+    const OFF: Limits = Limits {
+        on: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        deadline: None,
+        max_rows: usize::MAX,
+    };
+
+    impl Limits {
+        /// Pure (no thread-local) exhaustion test for rayon closures, where the
+        /// installing thread's sticky flag is out of reach: a worker that sees
+        /// `hit` stops producing, and the caller's next on-thread check fires
+        /// (the deadline is global time; a hit row cap leaves `rows > max_rows`).
+        /// Only the rayon-parallel branches call this (and `snapshot`); the
+        /// non-parallel (wasm) build compiles them out.
+        #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+        #[inline]
+        pub(crate) fn hit(&self, rows: usize) -> bool {
+            if !self.on {
+                return false;
+            }
+            if rows > self.max_rows {
+                return true;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return true;
+            }
+            false
+        }
+    }
+
+    thread_local! {
+        static ACTIVE: Cell<Limits> = const { Cell::new(OFF) };
+        static EXCEEDED: Cell<Option<&'static str>> = const { Cell::new(None) };
+    }
+
+    /// Clears the budget when the `*_with_budget` entry point returns (also on
+    /// error/unwind, so a poisoned thread never leaks a stale budget).
+    pub(crate) struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.with(|a| a.set(OFF));
+            EXCEEDED.with(|e| e.set(None));
+        }
+    }
+
+    pub(crate) fn install(b: &QueryBudget) -> Guard {
+        #[cfg(not(target_arch = "wasm32"))]
+        let on = b.deadline.is_some() || b.max_rows.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let on = b.max_rows.is_some();
+        ACTIVE.with(|a| {
+            a.set(Limits {
+                on,
+                #[cfg(not(target_arch = "wasm32"))]
+                deadline: b.deadline,
+                max_rows: b.max_rows.unwrap_or(usize::MAX),
+            })
+        });
+        EXCEEDED.with(|e| e.set(None));
+        Guard
+    }
+
+    /// Snapshot of the installed limits, for the rayon-parallel branches.
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    #[inline]
+    pub(crate) fn snapshot() -> Limits {
+        ACTIVE.with(|a| a.get())
+    }
+
+    /// `true` once the budget is exhausted (sticky) — row-producing loops break
+    /// on it; `rows` is the loop's current output size.
+    #[inline]
+    pub(crate) fn exhausted(rows: usize) -> bool {
+        let a = ACTIVE.with(|c| c.get());
+        if !a.on {
+            return false;
+        }
+        if EXCEEDED.with(|e| e.get()).is_some() {
+            return true;
+        }
+        if rows > a.max_rows {
+            EXCEEDED.with(|e| e.set(Some("max-rows")));
+            return true;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if a.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            EXCEEDED.with(|e| e.set(Some("timeout")));
+            return true;
+        }
+        false
+    }
+
+    /// Propagates an exhausted budget as the query error.
+    #[inline]
+    pub(crate) fn check(rows: usize) -> Result<(), String> {
+        if exhausted(rows) {
+            let why = EXCEEDED.with(|e| e.get()).unwrap_or("timeout");
+            return Err(format!("query budget exceeded ({why})"));
+        }
+        Ok(())
+    }
+
+    /// Caps a speculative `Vec` pre-allocation while a budget is active, so a
+    /// budgeted cross-product cannot allocate its full (possibly astronomical)
+    /// output up front before the first cooperative check fires.
+    #[inline]
+    pub(crate) fn cap_alloc(cap: usize) -> usize {
+        let a = ACTIVE.with(|c| c.get());
+        if !a.on {
+            return cap;
+        }
+        cap.min(a.max_rows.saturating_add(1)).min(1 << 20)
+    }
+}
+
 /// One solution row: the ids bound to each of a [`Bindings`]' variables. Inlined
 /// up to 4 columns (the common case) so a join produces no heap allocation per
 /// row — the dominant cost on large join results.
@@ -110,6 +248,10 @@ impl Bindings {
 pub fn eval_select(graph: &Graph, pattern: &GraphPattern) -> Result<QueryResult, String> {
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
+    // Final budget gate: converts a row-capped/timed-out evaluation (including the
+    // uninstrumented rayon branches) into the error before the expensive term
+    // materialisation below.
+    budget::check(bindings.rows.len())?;
 
     // SELECT * exposes only real variables, never synthetic blank-node variables.
     let out_vars: Vec<Variable> = bindings
@@ -282,9 +424,10 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
         // One string per chunk (≈ per worker), not per row — avoids one heap allocation per
         // result cell. Chunks stay in order, so the bytes are identical to the serial path.
         let chunk = scan_rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
-        let frags: Vec<String> = scan_rows
+        let frags: Vec<(usize, String)> = scan_rows
             .par_chunks(chunk)
             .map(|rows| {
+                let mut n = 0usize;
                 let mut f = String::new();
                 for row in rows {
                     if !passes(row) {
@@ -293,13 +436,17 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
                     if !f.is_empty() {
                         f.push(',');
                     }
+                    n += 1;
                     write_row(row, &mut f);
                 }
-                f
+                (n, f)
             })
             .collect();
+        // Budget gate on the total row count (sets the sticky flag; the caller's
+        // check converts it into the budget error).
+        let _ = budget::exhausted(frags.iter().map(|(n, _)| n).sum());
         let mut wrote = false;
-        for f in &frags {
+        for (_, f) in &frags {
             if f.is_empty() {
                 continue;
             }
@@ -312,17 +459,23 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
         s.push_str("]}}");
         return Some(s);
     }
-    let mut wrote = false;
-    for row in scan_rows {
+    let mut written = 0usize;
+    for (i, row) in scan_rows.iter().enumerate() {
+        // Coarse budget check every 1024 scanned rows; the caller's sticky check
+        // turns an early stop into the budget error (never a truncated result).
+        if i & 1023 == 0 && budget::exhausted(written) {
+            break;
+        }
         if !passes(row) {
             continue;
         }
-        if wrote {
+        if written > 0 {
             s.push(',');
         }
-        wrote = true;
+        written += 1;
         write_row(row, &mut s);
     }
+    let _ = budget::exhausted(written); // final row-count gate (sticky)
     s.push_str("]}}");
     Some(s)
 }
@@ -333,10 +486,12 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
 pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String, String> {
     // Streaming fast paths — no Bindings materialised at all.
     if let Some(json) = single_pattern_scan_json(graph, pattern) {
+        budget::check(0)?; // sticky: the streaming loop may have stopped mid-scan
         return Ok(json);
     }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
+    budget::check(bindings.rows.len())?; // final gate (see eval_select)
 
     let out_vars: Vec<&Variable> = bindings.vars.iter().filter(|v| !v.as_str().starts_with(BNODE_VAR_PREFIX)).collect();
     let col_of: Vec<Option<usize>> = out_vars.iter().map(|v| bindings.col(v)).collect();
@@ -422,6 +577,7 @@ pub fn count_select(graph: &Graph, pattern: &GraphPattern) -> Result<usize, Stri
     }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
+    budget::check(bindings.rows.len())?; // final gate (see eval_select)
     Ok(bindings.rows.len())
 }
 
@@ -912,6 +1068,7 @@ fn eval_graph_named(
 }
 
 fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+    budget::check(0)?; // coarse cooperative cancellation: once per operator entry
     if is_conjunctive(p) {
         let mut patterns = Vec::new();
         let mut filters = Vec::new();
@@ -1298,6 +1455,11 @@ fn transitive_closure_pairs(pairs: FxHashSet<(Id, Id)>) -> FxHashSet<(Id, Id)> {
     let mut out: FxHashSet<(Id, Id)> = FxHashSet::default();
     let starts: Vec<Id> = adj.keys().copied().collect();
     for start in starts {
+        // Coarse budget check once per BFS start node (sticky; the caller's next
+        // check raises the error).
+        if budget::exhausted(out.len()) {
+            break;
+        }
         let mut seen: FxHashSet<Id> = FxHashSet::default();
         let mut stack: Vec<Id> = adj.get(&start).cloned().unwrap_or_default();
         while let Some(n) = stack.pop() {
@@ -1681,6 +1843,11 @@ fn lftj_recurse(
     }
     let mut lf = Leapfrog::init(iters, parts);
     while !lf.ended {
+        // Coarse budget check once per leapfrog key (sticky, so it also unwinds
+        // the enclosing recursion levels).
+        if budget::exhausted(out.len()) {
+            break;
+        }
         current[level] = lf.key;
         lftj_recurse(iters, parts_at_level, level + 1, n_levels, current, out);
         lf.next(iters);
@@ -1982,8 +2149,12 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
     // Reserve only up to the LIMIT so a small LIMIT over a huge scan does not
     // allocate for the whole relation (the point of early termination).
     let cap = limit.map_or(scan_rows.len(), |n| n.min(scan_rows.len()));
-    let mut rows: Vec<Row> = Vec::with_capacity(cap);
-    for row in scan_rows {
+    let mut rows: Vec<Row> = Vec::with_capacity(budget::cap_alloc(cap));
+    for (i, row) in scan_rows.iter().enumerate() {
+        // Coarse budget check every 4096 scanned rows.
+        if i & 4095 == 0 && budget::exhausted(rows.len()) {
+            break;
+        }
         if let Some(out) = build_row(row) {
             rows.push(out);
             // LIMIT early-termination: stop scanning once we have enough rows.
@@ -2017,6 +2188,10 @@ fn merge_join(left: Bindings, right: Bindings, jv: &Variable) -> Bindings {
     let mut rows = Vec::new();
     let (mut i, mut j) = (0, 0);
     while i < l.len() && j < r.len() {
+        // Coarse budget check once per key group.
+        if budget::exhausted(rows.len()) {
+            break;
+        }
         let (lv, rv) = (l[i][lk], r[j][rk]);
         match lv.cmp(&rv) {
             Ordering::Less => i += 1,
@@ -2195,21 +2370,32 @@ fn hash_join(left: Bindings, right: Bindings) -> Bindings {
     #[cfg(feature = "parallel")]
     if probe.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
+        // Budget snapshot for the workers (the installing thread's thread-local is
+        // invisible to them): a worker that hits the limits stops adding to its own
+        // accumulator; the caller's next on-thread check raises the actual error.
+        let limits = budget::snapshot();
         let rows: Vec<Row> = probe
             .rows
             .par_iter()
             .fold(Vec::new, |mut acc, prow| {
-                emit(prow, &mut acc);
+                if !limits.hit(acc.len()) {
+                    emit(prow, &mut acc);
+                }
                 acc
             })
             .reduce(Vec::new, |mut a, mut b| {
                 a.append(&mut b);
                 a
             });
+        let _ = budget::exhausted(rows.len()); // sticky gate on the combined size
         return Bindings::unsorted(out_vars, rows);
     }
     let mut rows = Vec::new();
     for prow in &probe.rows {
+        // Coarse budget check once per probe row.
+        if budget::exhausted(rows.len()) {
+            break;
+        }
         emit(prow, &mut rows);
     }
     Bindings::unsorted(out_vars, rows)
@@ -2245,6 +2431,10 @@ fn bind_join(
 
     let mut out_rows: Vec<Row> = Vec::new();
     for (val, ris) in groups {
+        // Coarse budget check once per distinct join value.
+        if budget::exhausted(out_rows.len()) {
+            break;
+        }
         let mut bound = *id_pat;
         bound[pp] = Some(val);
         let scan = graph.store.scan(&bound);
@@ -2269,8 +2459,12 @@ fn bind_join(
 fn cross_product(left: Bindings, right: Bindings) -> Bindings {
     let mut out_vars = left.vars.clone();
     out_vars.extend(right.vars.iter().cloned());
-    let mut rows = Vec::with_capacity(left.rows.len() * right.rows.len());
+    let mut rows = Vec::with_capacity(budget::cap_alloc(left.rows.len().saturating_mul(right.rows.len())));
     for l in &left.rows {
+        // Coarse budget check once per left row.
+        if budget::exhausted(rows.len()) {
+            break;
+        }
         for r in &right.rows {
             let mut row = l.clone();
             row.extend_from_slice(r);
@@ -2302,6 +2496,10 @@ fn join_bindings(left: Bindings, right: Bindings) -> Bindings {
     }
     let mut rows = Vec::new();
     for lrow in &left.rows {
+        // Coarse budget check once per left row.
+        if budget::exhausted(rows.len()) {
+            break;
+        }
         for rrow in &right.rows {
             if compatible(lrow, rrow, &shared) {
                 rows.push(merge_rows(lrow, rrow, &shared, &right_only));
@@ -2346,6 +2544,10 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
 
     let mut rows = Vec::new();
     for lrow in &left.rows {
+        // Coarse budget check once per left row.
+        if budget::exhausted(rows.len()) {
+            break;
+        }
         // Inline (no heap alloc per left row): an OPTIONAL key usually has 0–1
         // matches. The hashed branch copies the matching indices by value rather
         // than cloning the table's Vec.
@@ -2406,6 +2608,10 @@ fn left_outer_merge(
     let mut j = 0usize;
     let mut i = 0usize;
     while i < l.len() {
+        // Coarse budget check once per key group.
+        if budget::exhausted(rows.len()) {
+            break;
+        }
         let key = l[i][lk];
         let mut i2 = i + 1;
         while i2 < l.len() && l[i2][lk] == key {
