@@ -13,10 +13,9 @@
 //! graph, CREATE of an existing one) are no-ops here — a graph store that auto-creates graphs
 //! is explicitly allowed to succeed on them — so `SILENT` only matters for LOAD.
 
+use crate::dataset::{build, decode_triples, empty_graph, TripleSet, TripleTerms};
 use oxrdf::{BlankNode, NamedOrBlankNode, Term, Variable};
-use rustc_hash::{FxHashMap, FxHashSet};
-use sparq_core::dict::Dict;
-use sparq_core::store::Pattern as IdPattern;
+use rustc_hash::FxHashMap;
 use sparq_core::Graph;
 use spargebra::algebra::{GraphTarget, QueryDataset};
 use spargebra::term::{
@@ -26,8 +25,6 @@ use spargebra::term::{
 use spargebra::GraphUpdateOperation;
 use spargebra::SparqlParser;
 
-type TripleTerms = [Term; 3];
-type TripleSet = FxHashSet<TripleTerms>;
 /// A graph slot: `None` = the default graph, `Some(term)` = that named graph.
 type GraphSlot = Option<Term>;
 
@@ -72,34 +69,9 @@ fn ground_quad_to_triple(q: &GroundQuad) -> (GraphSlot, TripleTerms) {
     )
 }
 
-/// The triples of one graph as ground term-triples (decoded from its dictionary).
-fn decode_triples(g: &Graph) -> TripleSet {
-    let pat: IdPattern = [None, None, None];
-    let scan = g.store.scan(&pat);
-    scan.rows
-        .iter()
-        .map(|r| {
-            let t = scan.to_spo(r);
-            [g.dict.term(t[0]), g.dict.term(t[1]), g.dict.term(t[2])]
-        })
-        .collect()
-}
-
-/// Rebuild an immutable graph from a term-triple set (fresh dictionary + permutation indexes).
-fn build(triples: &TripleSet) -> Graph {
-    let mut dict = Dict::new();
-    let mut ids = Vec::with_capacity(triples.len());
-    for [s, p, o] in triples {
-        ids.push([dict.intern(s), dict.intern(p), dict.intern(o)]);
-    }
-    Graph::from_parts(dict, ids)
-}
-
-fn empty_graph() -> Graph {
-    Graph::from_parts(Dict::new(), Vec::new())
-}
-
 // --- the mutable dataset model (rebuild path) ---------------------------------------------------
+// (Decode/build primitives live in `crate::dataset`, shared with the query side's
+// FROM / FROM NAMED active-dataset construction.)
 
 /// The whole dataset as decoded term-triple sets: the working representation of the rebuild
 /// path. Named-graph order is preserved; a named graph may be present and EMPTY (CREATE).
@@ -584,6 +556,7 @@ fn replace_default(graph: &mut Graph) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sparq_core::store::Pattern as IdPattern;
 
     fn count(g: &Graph) -> usize {
         let pat: IdPattern = [None, None, None];

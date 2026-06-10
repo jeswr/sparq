@@ -5,7 +5,7 @@
 
 use crate::compare::{rows_equal, Row};
 use crate::manifest::TestEntry;
-use crate::rdf::{file_iri, parse_file, parse_file_quads};
+use crate::rdf::{file_iri, iri_to_path, parse_file, parse_file_quads};
 use crate::results::{parse_expected, Binding, Expected};
 use oxrdf::{BlankNode, GraphName, Quad, Term, Triple};
 use spargebra::algebra::GraphPattern;
@@ -116,6 +116,32 @@ fn load_dataset_with_graphs(nquads: &str, graph_names: &[String]) -> Result<spar
     Ok(graph)
 }
 
+/// The documents a query's dataset clause (FROM / FROM NAMED) dereferences:
+/// per the test-suite convention, those IRIs name *documents* next to the query
+/// file, and the dataset is constructed from them. Each referenced IRI that is
+/// not already a named graph of the test dataset and resolves to an existing
+/// file is appended as `(graph IRI, file)` graph data — the engine then
+/// assembles the active dataset from the store's named graphs. Loading each
+/// document separately keeps blank nodes distinct per document (RDF merge
+/// semantics) via the per-file prefixing in [`build_nquads`].
+fn add_dataset_clause_docs(
+    dataset: Option<&spargebra::algebra::QueryDataset>,
+    graph_data: &mut Vec<(String, PathBuf)>,
+) {
+    let Some(ds) = dataset else { return };
+    let named = ds.named.as_deref().unwrap_or_default();
+    for iri in ds.default.iter().chain(named) {
+        if graph_data.iter().any(|(g, _)| g == iri.as_str()) {
+            continue; // already loaded (qt:graphData, or repeated in the clause)
+        }
+        if let Some(path) = iri_to_path(iri.as_str()) {
+            if path.is_file() {
+                graph_data.push((iri.as_str().to_string(), path));
+            }
+        }
+    }
+}
+
 /// Prepends a BASE so relative IRIs in the query resolve against the query
 /// file's location (the engine API takes no base; an explicit in-text BASE
 /// later in the prologue simply overrides this one, which is fine).
@@ -193,16 +219,17 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
         Ok(p) => p.parse_query(&query_text),
         Err(e) => return Status::Fail(format!("bad base IRI: {e}")),
     };
-    let (pattern, dataset, is_ask) = match &parsed {
-        Ok(Query::Select {
-            pattern, dataset, ..
-        }) => (pattern, dataset, false),
-        Ok(Query::Ask { pattern, dataset, .. }) => (pattern, dataset, true),
-        Ok(Query::Construct { dataset, .. }) => {
-            if dataset.is_some() {
-                return Status::Skip("FROM / FROM NAMED dataset clause not supported".into());
-            }
-            return run_construct_test(entry, &query_text, &base);
+    // A dataset clause (FROM / FROM NAMED) names documents to load as named
+    // graphs; the engine builds the active dataset from them.
+    let mut graph_data = entry.action.graph_data.clone();
+    if let Ok(q) = &parsed {
+        add_dataset_clause_docs(q.dataset(), &mut graph_data);
+    }
+    let (pattern, is_ask) = match &parsed {
+        Ok(Query::Select { pattern, .. }) => (pattern, false),
+        Ok(Query::Ask { pattern, .. }) => (pattern, true),
+        Ok(Query::Construct { .. }) => {
+            return run_construct_test(entry, &query_text, &base, &graph_data);
         }
         Ok(Query::Describe { .. }) => {
             // The engine implements DESCRIBE (CBD), but the spec leaves the result
@@ -211,9 +238,6 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
         }
         Err(e) => return Status::Fail(format!("query parse error: {e}")),
     };
-    if dataset.is_some() {
-        return Status::Skip("FROM / FROM NAMED dataset clause not supported".into());
-    }
     let ordered = is_ordered(pattern);
 
     let Some(result_path) = entry.result_file.clone() else {
@@ -225,7 +249,7 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
         Err(e) => return Status::Fail(format!("expected-result parse error: {e}")),
     };
 
-    let nquads = match build_nquads(&entry.action.data, &entry.action.graph_data) {
+    let nquads = match build_nquads(&entry.action.data, &graph_data) {
         Ok(n) => n,
         Err(e) => return Status::Fail(format!("data load error: {e}")),
     };
@@ -239,7 +263,7 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
                 return Status::Fail("expected result is a binding set, query is ASK".into())
             }
         };
-        let graph_names: Vec<String> = entry.action.graph_data.iter().map(|(g, _)| g.clone()).collect();
+        let graph_names: Vec<String> = graph_data.iter().map(|(g, _)| g.clone()).collect();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {
@@ -258,7 +282,7 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
     }
 
     // Engine invocation on a watchdog thread.
-    let graph_names: Vec<String> = entry.action.graph_data.iter().map(|(g, _)| g.clone()).collect();
+    let graph_names: Vec<String> = graph_data.iter().map(|(g, _)| g.clone()).collect();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| {
@@ -403,7 +427,12 @@ fn align_binding(binding: &Binding, order: &[String]) -> Row {
 /// CONSTRUCT evaluation test (T16): the expected result is an RDF *graph* document,
 /// compared against the engine's constructed graph as triples-as-rows under the same
 /// bnode-bijection machinery the update tests use (graphs are sets — unordered).
-fn run_construct_test(entry: &TestEntry, query_text: &str, base: &str) -> Status {
+fn run_construct_test(
+    entry: &TestEntry,
+    query_text: &str,
+    base: &str,
+    graph_data: &[(String, PathBuf)],
+) -> Status {
     let Some(result_path) = entry.result_file.clone() else {
         return Status::Skip("no mf:result".into());
     };
@@ -422,13 +451,13 @@ fn run_construct_test(entry: &TestEntry, query_text: &str, base: &str) -> Status
     };
     dedup_rows(&mut expected); // an RDF graph is a set
 
-    let nquads = match build_nquads(&entry.action.data, &entry.action.graph_data) {
+    let nquads = match build_nquads(&entry.action.data, graph_data) {
         Ok(n) => n,
         Err(e) => return Status::Fail(format!("data load error: {e}")),
     };
     let query_with_base = with_base(query_text, base);
 
-    let graph_names: Vec<String> = entry.action.graph_data.iter().map(|(g, _)| g.clone()).collect();
+    let graph_names: Vec<String> = graph_data.iter().map(|(g, _)| g.clone()).collect();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| {

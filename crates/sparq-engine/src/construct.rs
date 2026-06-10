@@ -38,6 +38,8 @@ pub fn construct(graph: &Graph, sparql: &str) -> Result<Vec<Triple>, String> {
 /// [`construct`] under a cooperative [`QueryBudget`] (deadline / max WHERE-solution rows).
 pub fn construct_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<Triple>, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let active = crate::active_dataset(graph, &q);
+    let graph = active.as_ref().unwrap_or(graph);
     match q {
         Query::Construct { template, pattern, .. } => {
             let _guard = crate::exec::budget::install(budget);
@@ -57,6 +59,8 @@ pub fn describe(graph: &Graph, sparql: &str) -> Result<Vec<Triple>, String> {
 /// [`describe`] under a cooperative [`QueryBudget`] (deadline / max rows).
 pub fn describe_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<Triple>, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let active = crate::active_dataset(graph, &q);
+    let graph = active.as_ref().unwrap_or(graph);
     match q {
         Query::Describe { pattern, .. } => {
             let _guard = crate::exec::budget::install(budget);
@@ -77,6 +81,8 @@ pub fn construct_ntriples(graph: &Graph, sparql: &str) -> Result<String, String>
 /// [`construct_ntriples`] under a cooperative [`QueryBudget`].
 pub fn construct_ntriples_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let active = crate::active_dataset(graph, &q);
+    let graph = active.as_ref().unwrap_or(graph);
     let _guard = crate::exec::budget::install(budget);
     let triples = match q {
         Query::Construct { template, pattern, .. } => {

@@ -1,5 +1,36 @@
 # Engine findings from the W3C SPARQL conformance run (T13)
 
+## Round 4 — FROM / FROM NAMED (branch `from-named`)
+
+Headline at rdf-tests `f25dbc0`, full scope (1229 tests):
+**1218 pass / 11 fail / 0 skip — 99.1% of run, 99.1% of ALL in-scope tests**
+(branch point: 1205 / 11 / 13). All 13 remaining skips flipped to PASS; the 11
+fails are the unchanged pre-diagnosed set below (round 3).
+
+- **Engine — the dataset clause is no longer silently dropped** (coverage-gap #2,
+  the latent run-against-wrong-dataset bug): every query entry point
+  (`query`/`ask`/`count`/`query_json`/`query_json_chunks` and
+  `construct`/`describe`/`construct_ntriples`, budgeted forms included) now builds
+  the ACTIVE dataset when `Query::dataset()` is `Some`: default graph = the merge
+  of the `FROM` graphs, named graphs = exactly the `FROM NAMED` ones (the store's
+  own default/named graphs never leak in; an absent graph name denotes the EMPTY
+  graph, which still exists in the active dataset so `GRAPH <absent> {}` keeps its
+  unit row). The decode/rebuild primitives moved from `update.rs` to the shared
+  `dataset.rs`; `Dataset::build_using` (USING/USING NAMED/WITH) reuses them. The
+  no-clause path is guarded by a single `Option` check — ci-bench query latencies
+  are at parity (branch ≥ main on 5/6 queries over the ci-bench synthetic at scale
+  200000, the one +6% is 0.2µs on a 3µs point-query; wasm bundle
+  1,546,608 → 1,548,368 B, +0.11%).
+- **Harness — FROM/FROM NAMED documents load as named graphs**: per the suite
+  convention the clause IRIs name *documents* beside the query (`sparql10/dataset`
+  has no `qt:data` at all), so the runner appends each referenced `file://` IRI
+  that is not already a `qt:graphData` graph as `(graph IRI, file)` graph data and
+  lets the engine assemble the active dataset. Loading per document keeps blank
+  nodes distinct across documents (RDF merge semantics) via the existing per-file
+  prefixing — exactly what `dataset-09b/10b` test (their cross-document bnode join
+  must be EMPTY). `constructwhere04` needed only the un-skip: its `qt:graphData`
+  graph already carried the IRI its `FROM` references.
+
 ## Round 3 — F19/F14/F15/F16/F17/F18 fixed (branch `conformance-round3`)
 
 Headline at sparq `454593c`+round-3 / rdf-tests `f25dbc0`, full scope (1229 tests):
