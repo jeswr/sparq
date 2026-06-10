@@ -122,10 +122,11 @@ async fn failed_update_is_atomic_and_server_recovers() {
     assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/a> <http://ex/q> <http://ex/b> }").await, 204);
     assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/c> <http://ex/q> <http://ex/d> }").await, 204);
 
-    // A request whose FIRST operation succeeds and SECOND is unsupported (named graph):
+    // A request whose FIRST operation succeeds and SECOND fails at execution (LOAD from a
+    // nonexistent file — named-graph ops themselves are supported since conformance round 3):
     // must be a 400 with no partial effect visible.
     let partial = "INSERT DATA { <http://ex/leak> <http://ex/q> <http://ex/leak> } ; \
-                   INSERT DATA { GRAPH <http://ex/g> { <http://ex/x> <http://ex/y> <http://ex/z> } }";
+                   LOAD <file:///nonexistent/sparq-test-no-such-file.nt>";
     assert_eq!(post_update(&cl, &base, partial).await, 400);
     assert_eq!(
         count_rows(&cl, &base, "SELECT ?s WHERE { <http://ex/leak> <http://ex/q> ?s }").await,
