@@ -1,0 +1,42 @@
+# Opt-in natural-language-to-SPARQL (GenAI phase 3 — see research/genai-design.md and
+# research/genai-nl-to-sparql.md). This is a SEPARATE crate so the core engine carries
+# zero GenAI code; nothing in the workspace depends on it. The loop is deliberately
+# lean (SPARQL-LLM-style retrieve → generate → validate → execute → repair, not an
+# agent): grounding comes from sparq-introspect's token-budgeted schema summary,
+# validation from spargebra, execution from sparq-engine under a QueryBudget. The LLM
+# sits behind a trait with record/replay fixtures so CI is fully offline; a thin
+# Anthropic Messages-API client lives behind the non-default `live` feature.
+
+[package]
+name = "sparq-nlq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in natural-language-to-SPARQL for the sparq RDF engine: schema-grounded prompt construction, LLM behind a record/replay trait, spargebra validation, budgeted execution and a bounded repair loop"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+# `live` enables AnthropicLlm (network access to the Anthropic Messages API).
+# OFF by default: CI and the eval harness run entirely on recorded fixtures.
+live = ["dep:reqwest"]
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
+sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
+# Validation: parse the generated query to algebra BEFORE touching the engine, so the
+# repair round gets a real parser error message.
+spargebra.workspace = true
+# Record/replay fixtures (prompt -> completion pairs) are plain JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The live Anthropic client (non-default `live` feature only). Blocking: the loop is
+# synchronous by design and this crate must not drag an async runtime into the tree.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
