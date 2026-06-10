@@ -1,5 +1,77 @@
 # Engine findings from the W3C SPARQL conformance run (T13)
 
+## Round 3 — F19/F14/F15/F16/F17/F18 fixed (branch `conformance-round3`)
+
+Headline at sparq `454593c`+round-3 / rdf-tests `f25dbc0`, full scope (1229 tests):
+**1205 pass / 11 fail / 13 skip — 99.1% of run** (branch point: 1092/73/64, 93.7%).
+
+| group | before (454593c) | after | note |
+|---|---|---|---|
+| SPARQL 1.0 query eval | 268 / 3 / 12 | 268 / 3 / 12 | unchanged (skips are FROM/FROM NAMED) |
+| SPARQL 1.1 query eval | 220 / 4 / 1 | 222 / 2 / 1 | +2: empty named graphs now registered |
+| SPARQL 1.1 update eval | 23 / 20 / 51 | **94 / 0 / 0** | F19: suite is 100%, zero skips |
+| 1.1 result formats | 6 / 1 / 0 | 6 / 1 / 0 | tsv03 = F21 (lexical preservation) |
+| SPARQL 1.2 eval | 25 / 41 / 0 | **65 / 1 / 0** | F14–F18; last fail is upstream-parser F20 |
+| syntax (1.0/1.1/1.2) | 550 / 4 / 0 | 550 / 4 / 0 | all F20 (spargebra 0.4.6 posture) |
+
+### What was fixed (round 3)
+
+- **F19 (named-graph UPDATE data loss)** — `update.rs` v2 models the dataset as
+  per-graph term-triple sets and implements every `GraphUpdateOperation`: GRAPH-scoped
+  INSERT/DELETE DATA (auto-creating targets), DELETE/INSERT…WHERE with GRAPH templates
+  (incl. variable graph names), fresh-per-solution blank nodes with request-unique
+  labels, triple-term templates, USING/USING NAMED (note: spargebra encodes `WITH g` as
+  `using {default:[g], named: None}` — `named: None` must KEEP the store's named graphs,
+  `Some(list)` replaces them), CLEAR/DROP/CREATE (ADD/COPY/MOVE arrive pre-desugared as
+  DROP + DELETE/INSERT), LOAD for `file://`. `update_in_place` keeps O(batch)
+  delta-overlay semantics per target graph. Optional-failure ops (CLEAR/DROP absent,
+  CREATE existing) are no-ops — auto-create store semantics, which the suite accepts.
+- **F14 (variables in quoted-triple patterns)** — BGP slots holding variable-carrying
+  quoted patterns are rewritten to synthetic `#qt#N` variables plus constraint
+  relations: enumerate the dictionary's `TermParts::Triple` records (only quoting
+  queries pay the scan), structurally unify componentwise (recursing through nesting,
+  repeated-variable consistency), then join through the ordinary machinery so inner
+  variables join with outer patterns. Wired into BOTH `eval_bgp` and `eval_bgp_binary`
+  (the conjunctive-flattening path calls the latter directly).
+- **F15 (1.2 builtins)** — TRIPLE/isTRIPLE/SUBJECT/PREDICATE/OBJECT,
+  hasLANG/hasLANGDIR/LANGDIR/STRLANGDIR.
+- **F16** — `=` on triple terms is componentwise with VALUE equality on objects
+  (errors propagate); ORDER BY total order: triple terms sort AFTER literals,
+  componentwise within (subject compared through the same total order — raw IRI
+  strings, not the `<>`-wrapped Display form).
+- **F17** — EBV of rdf:langString/dirLangString is a type error (`!!"a"@en` unbound).
+- **F18 + storage** — the CORE dictionary preserves RDF 1.2 base direction by storing
+  `lang--dir` in the language slot (hash/equality/layout unchanged; nt.rs types such
+  literals rdf:dirLangString); the engine's `str_lit`/`lit_with_lang` carry the same
+  combined slot, which yields the 1.2 CONCAT rules (identical lang+dir kept, any
+  mismatch drops to a SIMPLE literal) and direction preservation through
+  SUBSTR/UCASE/REPLACE/STRBEFORE/STRAFTER for free.
+- **Harness** — explicitly-named-but-empty graphs (`qt:`/`ut:graphData` with an empty
+  document) are registered after the N-Quads load (N-Quads cannot encode them), fixing
+  the two round-2 query failures needing `GRAPH ?g {}` over empty graphs.
+- CONSTRUCT templates instantiate triple-term objects recursively (4 tests).
+
+Perf guard (vs `454593c`, same machine): `update_in_place` 10-triple INSERT into a 2M
+graph 15.2µs → 15.9µs mean-of-3 (+4.6%, within the 5% guard — the per-quad graph-slot
+routing); ci-bench query latencies all ≥ parity (noise-dominated, branch faster in
+every pairing); store 100 B/triple and dict 84 B/term unchanged; wasm bundle
+1,511,742 → 1,546,616 B (+2.3% — the named-graph update + 1.2 matching/builtins code,
+not a leaked feature).
+
+### The 11 remaining failures (all pre-diagnosed, none regressions)
+
+- 5× **F20 upstream spargebra 0.4.6** (4 syntax-negative + the 1.2 grouping eval test
+  that fails at parse) + *case-insensitive booleans* (F13).
+- 3× **lexical-form preservation / suite-convention conflicts**: *xsd:decimal cast*,
+  *tsv03* (F21), *SUM DISTINCT with GROUP BY* (canonical-vs-plain double, see round 2).
+- *"/" on mixed datatypes* (suites disagree on integer-division scale, round-2 note).
+- *dawg-optional-filter-005-not-simplified* (algebra-duality, round-2 note).
+
+The 13 remaining skips are all **FROM / FROM NAMED** on queries — the engine still
+drops `Query::Select { dataset }`; wiring it through the same active-dataset builder
+`update.rs` now has (`Dataset::build_using`) is the obvious next lever, and would also
+fix the latent run-against-wrong-dataset bug for users.
+
 ## Scope extension — full SPARQL 1.1 + 1.2 coverage (branch `conformance-12`)
 
 The runner now covers the WHOLE prioritised target: 1.0/1.1 evaluation as before,
