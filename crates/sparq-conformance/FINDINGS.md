@@ -1,5 +1,102 @@
 # Engine findings from the W3C SPARQL conformance run (T13)
 
+## Round 2 — full SPARQL 1.1 + 1.2 scope (branch `conformance-12`)
+
+The runner now covers the WHOLE prioritised target: 1.0/1.1 evaluation as before,
+plus the **SPARQL 1.2 suites** (`sparql12/`: triple-term query+update evaluation,
+expression, lang-basedir, grouping, rdf11, codepoint-escapes), the **1.1 result-format
+suites** (`csv-tsv-res` TSV + `json-res`), and ALL **syntax suites** (1.0/1.1/1.2,
+positive = spargebra must parse, negative = it must reject). Still not run:
+protocol, SERVICE evaluation, entailment (report footer). Scoreboard at sparq
+`93cec32` / rdf-tests `f25dbc0`, 1229 tests run:
+
+| group | pass | fail | skip | pass-rate (of run) |
+|---|---:|---:|---:|---:|
+| SPARQL 1.0 query evaluation | 224 | 42 | 17 | 84.2% |
+| SPARQL 1.1 (query / update / result formats) | 214 | 54 | 58 | 79.9% |
+| SPARQL 1.2 evaluation | 24 | 35 | 7 | 40.7% |
+| Syntax 1.0+1.1+1.2 (spargebra posture) | 550 | 4 | 0 | 99.3% |
+| **overall** | **1012** | **135** | **82** | **88.2%** |
+
+Harness extensions behind the new visibility (all in this crate): syntax-test mode;
+TSV expected results; RDF 1.2 triple terms decoded in `.srj`/`.srx` and matched with
+blank-node bijection inside triple terms; TriG/N-Quads test data loaded as datasets;
+UPDATE comparison is now **quad-based over the full dataset** (named graphs included)
+instead of default-graph-only — which unmasked F19 below.
+
+### NEW failure categories (round 2)
+
+#### F14. Variables inside triple-term patterns — 14 tests, the dominant 1.2 blocker
+`engine error: variable where a term was expected` (13×) and the explicit
+`variable inside a triple-term pattern is not yet supported (T6)` (1×). Kills most of
+`sparql12/eval-triple-terms`: every `<< ?s ?p ?o >>` / reifier-pattern test with a
+variable in any slot, including the GRAPH and annotation-syntax variants. The suite
+exercises: var in subject/predicate/object slot, nested triple terms with vars, same
+variable repeated, vars under GRAPH, and annotation sugar `:s :p :o {| :q :z |}`.
+
+#### F15. SPARQL 1.2 builtin functions missing — 12 tests
+- `TRIPLE()` (5×) and `isTRIPLE()` (1×) → `unsupported SPARQL function: Triple/IsTriple`
+  (SUBJECT()/PREDICATE()/OBJECT() are exercised inside the same queries).
+- New direction/language builtins: `hasLANG`, `hasLANGDIR`, `LANGDIR` (2×),
+  `STRLANGDIR` → `unsupported SPARQL function: HasLang/HasLangDir/LangDir/StrLangDir`
+  (5× in `sparql12/lang-basedir`).
+
+#### F16. Triple-term VALUE semantics — 4 tests
+Constant triple-term machinery works (12 passes incl. all-graph-triples dumps and
+constant matches), but: `=` value-equality between triple terms whose inner literals
+are value-equal-but-not-identical (`01` vs `1`) fails; ORDER BY does not implement the
+SPARQL 1.2 total order extension (triple terms sort AFTER literals; `Embedded triple -
+ORDER BY` / `ordering` put them elsewhere); `Pattern - Nesting 1` loses a doubly-nested
+match.
+
+#### F17. EBV type-error propagation (1.2 `expression/not-not`) — 1 test
+`!!?v` over `"a"@en`, `"z"^^xsd:boolean`, ill-typed numerics etc. must leave `?ebv`
+UNBOUND (EBV type error) for non-EBV-able terms; the engine binds true/false instead.
+Same root cause as round-1 F5/F8 (errors-as-values), now with 1.2's expanded vector.
+
+#### F18. `rdf:dirLangString` handling — 1 test (+5 blocked behind F15)
+`CONCAT` of two dir-lang strings with the same lang but different/absent base
+direction must drop to plain `xsd:string`/`langString` per the 1.2 rules; engine keeps
+`@en` where it must not (`CONCAT and rdf:dirLangString`).
+
+#### F19. UPDATE silently DROPS named graphs — ~20 tests (1.1 update + 2× 1.2)
+Previously masked by harness skips; the quad-aware comparison exposes it:
+`sparq_engine::update` rebuilds the result from `current_triples(graph)` (default
+graph only) and returns a `Graph` whose `named` is EMPTY, so any pre-existing named
+graph is lost even when the operation itself succeeds (e.g. `CLEAR DEFAULT` returns a
+fully empty dataset; `ADD`/`COPY`/`MOVE`/graph-specific `DELETE` lose `:g1`/`:g2`).
+This is a *data-loss* class, distinct from the explicit "named graphs not yet
+supported" errors (which remain honest skips). The 1.2 `Reified triples - Update`
+tests fail the same way (`INSERT { << ?s ?p ?o >> :source ?g } WHERE { GRAPH ?g … }`
+— the inserted default-graph triples are right, the named graphs vanish).
+
+#### F20. Upstream spargebra 0.4.6 posture (syntax suites + 1 eval) — 5 tests
+The syntax suites measure the parser dependency; sparq inherits these:
+- accepts nested aggregate functions (`sparql12/syntax` negative test);
+- accepts a literal / triple term in the SUBJECT position of a triple term in
+  *expressions* (2× `syntax-triple-terms-negative`);
+- accepts `sparql10/syntax-sparql3` `syn-bad-26.rq`;
+- REJECTS 1.2's now-legal reuse of a SELECT expression variable in an aggregating
+  query (`sparql12/grouping` evaluation test fails at parse).
+Everything else parses cleanly: 550/554 — including all 113 positive triple-term
+documents, VERSION declarations and codepoint escapes.
+
+#### F21. Lexical forms of data terms not preserved — 1 test (`csv-tsv-res` tsv03)
+`"1.0e6"^^xsd:double` from the data comes back as `"1.0E6"` — the store normalises
+numeric lexical forms instead of preserving them; SPARQL requires bound values to keep
+the original lexical form. (Adjacent to round-1 F4 but the inverse: F4 wants
+*canonical* forms for computed values, F21 wants *preserved* forms for data values.)
+
+Other 1.2 notes: `sparql12/rdf11` (singleton bnode graphs, plain-vs-xsd:string) passes
+3/3; codepoint-escape evaluation passes 4/4 (+1 CONSTRUCT skip); 1.2 CONSTRUCT tests
+(6) skip on the round-1 CONSTRUCT gap; `sparql12/version` is syntax-only and passes.
+
+---
+
+## Round 1 (historical) — original notes below
+
+
+
 First full run of `sparq-conformance` against w3c/rdf-tests @ `f25dbc092c654d792974848e81bb519d7328f0e8`
 (sparq @ `d555096`). Headline: **344 pass / 110 fail / 148 skip over 602 evaluation
 tests — 75.8% of executed tests pass** (data-r2 query 85.3%, data-sparql11 query 62.4%,

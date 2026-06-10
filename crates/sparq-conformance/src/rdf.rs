@@ -1,7 +1,7 @@
 //! Minimal RDF plumbing for the harness: parse a test file into triples with a
 //! `file://` base IRI, and query the resulting triple soup manifest-style.
 
-use oxrdf::{NamedOrBlankNode, Term, Triple};
+use oxrdf::{NamedOrBlankNode, Quad, Term, Triple};
 use std::path::{Path, PathBuf};
 
 /// The `file://` IRI of a (test-suite) file — the base against which every
@@ -40,6 +40,34 @@ pub fn parse_file(path: &Path) -> Result<Vec<Triple>, String> {
         }
     }
     Ok(triples)
+}
+
+/// Parses an RDF document into QUADS: TriG (`.trig`) and N-Quads (`.nq`) keep
+/// their named graphs; everything [`parse_file`] handles lands in the default
+/// graph. Relative IRIs resolve against the file's own location.
+pub fn parse_file_quads(path: &Path) -> Result<Vec<Quad>, String> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !matches!(ext, "trig" | "nq") {
+        return Ok(parse_file(path)?
+            .into_iter()
+            .map(|t| Quad::new(t.subject, t.predicate, t.object, oxrdf::GraphName::DefaultGraph))
+            .collect());
+    }
+    let text = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut quads = Vec::new();
+    if ext == "nq" {
+        for q in oxttl::NQuadsParser::new().for_slice(&text) {
+            quads.push(q.map_err(|e| format!("{}: {e}", path.display()))?);
+        }
+    } else {
+        let parser = oxttl::TriGParser::new()
+            .with_base_iri(file_iri(path))
+            .map_err(|e| e.to_string())?;
+        for q in parser.for_slice(&text) {
+            quads.push(q.map_err(|e| format!("{}: {e}", path.display()))?);
+        }
+    }
+    Ok(quads)
 }
 
 /// A parsed manifest / expected-result document with the lookups the harness needs.

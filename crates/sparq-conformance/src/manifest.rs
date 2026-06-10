@@ -1,6 +1,7 @@
 //! W3C test-manifest parsing: walks `mf:include` trees and `mf:entries` lists,
 //! extracting `mf:QueryEvaluationTest` / `mf:UpdateEvaluationTest` entries with
-//! their `qt:`/`ut:` action descriptions.
+//! their `qt:`/`ut:` action descriptions, plus the four
+//! `mf:{Positive,Negative}[Update]SyntaxTest*` kinds (action = the bare file).
 
 use crate::rdf::{as_node, iri_to_path, MiniGraph};
 use oxrdf::{NamedOrBlankNode, Term};
@@ -16,7 +17,13 @@ const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 pub enum EntryKind {
     QueryEval,
     UpdateEval,
-    /// Syntax / protocol / CSV-format / … tests — out of scope for this runner.
+    /// `mf:PositiveSyntaxTest*` / `mf:PositiveUpdateSyntaxTest*` — the document
+    /// must parse. `update` selects `parse_update` over `parse_query`.
+    PositiveSyntax { update: bool },
+    /// `mf:NegativeSyntaxTest*` / `mf:NegativeUpdateSyntaxTest*` — the document
+    /// must be REJECTED by the parser.
+    NegativeSyntax { update: bool },
+    /// Protocol / CSV-format / … tests — out of scope for this runner.
     Other(String),
 }
 
@@ -103,16 +110,26 @@ fn parse_entry(g: &MiniGraph, node: &NamedOrBlankNode, suite: &str) -> TestEntry
         NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
     };
     let types = g.types_of(node);
-    let kind = if types
-        .iter()
-        .any(|t| t == &format!("{MF}QueryEvaluationTest"))
-    {
+    // Local names of the entry's mf: types, version suffix stripped — the suites
+    // use mf:PositiveSyntaxTest (1.0/1.2) and mf:PositiveSyntaxTest11 (1.1) etc.
+    // for the same test shape.
+    let local = |t: &String| -> Option<String> {
+        t.strip_prefix(MF)
+            .map(|n| n.trim_end_matches(|c: char| c.is_ascii_digit()).to_string())
+    };
+    let has = |name: &str| types.iter().filter_map(local).any(|n| n == name);
+    let kind = if has("QueryEvaluationTest") {
         EntryKind::QueryEval
-    } else if types
-        .iter()
-        .any(|t| t == &format!("{MF}UpdateEvaluationTest"))
-    {
+    } else if has("UpdateEvaluationTest") {
         EntryKind::UpdateEval
+    } else if has("PositiveSyntaxTest") {
+        EntryKind::PositiveSyntax { update: false }
+    } else if has("NegativeSyntaxTest") {
+        EntryKind::NegativeSyntax { update: false }
+    } else if has("PositiveUpdateSyntaxTest") {
+        EntryKind::PositiveSyntax { update: true }
+    } else if has("NegativeUpdateSyntaxTest") {
+        EntryKind::NegativeSyntax { update: true }
     } else {
         EntryKind::Other(
             types

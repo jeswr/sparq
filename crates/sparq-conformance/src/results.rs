@@ -1,5 +1,6 @@
-//! Expected-result parsing: SPARQL XML results (`.srx`), DAWG result-set
-//! graphs (`.ttl` / `.rdf` using the `rs:` vocabulary).
+//! Expected-result parsing: SPARQL XML results (`.srx`), JSON results (`.srj`),
+//! TSV results (`.tsv`), and DAWG result-set graphs (`.ttl` / `.rdf` using the
+//! `rs:` vocabulary).
 
 use crate::rdf::{as_node, MiniGraph};
 use oxrdf::{Literal, NamedNode, Term};
@@ -28,8 +29,64 @@ pub fn parse_expected(path: &Path) -> Result<Expected, String> {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "srx" => parse_srx(path),
         "srj" => parse_srj(path),
+        "tsv" => parse_tsv(path),
         "ttl" | "rdf" | "nt" => parse_rs_graph(path),
+        // .csv is intentionally unsupported: CSV results are lossy (no term
+        // kinds/datatypes), so equality against them is not meaningful here.
         ext => Err(format!("unsupported result format: .{ext}")),
+    }
+}
+
+/// SPARQL Query Results TSV Format: header `?v1\t?v2…`, then one row per line,
+/// each cell a Turtle-encoded term (or empty = unbound). Cells are parsed by
+/// wrapping them as the object of a dummy Turtle triple, which also covers the
+/// bare-number abbreviations the format allows.
+fn parse_tsv(path: &Path) -> Result<Expected, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut lines = text.lines();
+    let header = lines.next().ok_or_else(|| format!("{}: empty TSV", path.display()))?;
+    let vars: Vec<String> = header
+        .split('\t')
+        .map(|v| v.trim().trim_start_matches('?').to_string())
+        .filter(|v| !v.is_empty())
+        .collect();
+    let mut rows: Vec<Binding> = Vec::new();
+    for (lineno, line) in lines.enumerate() {
+        // An empty cell is an unbound variable, so an all-tabs (or, for a
+        // single variable, empty) line is a row with no bindings — `split`
+        // yields the empty cells; nothing to special-case.
+        let mut binding: Binding = Vec::new();
+        for (i, cell) in line.split('\t').enumerate() {
+            if cell.is_empty() {
+                continue; // unbound
+            }
+            let var = vars
+                .get(i)
+                .ok_or_else(|| format!("{}: row {} has more cells than variables", path.display(), lineno + 2))?;
+            binding.push((var.clone(), parse_tsv_term(cell).map_err(|e| {
+                format!("{}: row {}: {e}", path.display(), lineno + 2)
+            })?));
+        }
+        rows.push(binding);
+    }
+    Ok(Expected::Bindings {
+        vars,
+        rows,
+        indexed: false, // TSV is order-preserving per row sequence, but the
+                        // harness only honours order for SRX/rs:index encodings.
+    })
+}
+
+fn parse_tsv_term(cell: &str) -> Result<Term, String> {
+    let doc = format!("<urn:tsv:s> <urn:tsv:p> {cell} .");
+    let mut triples = Vec::new();
+    for t in oxttl::TurtleParser::new().for_slice(doc.as_bytes()) {
+        triples.push(t.map_err(|e| format!("bad TSV term `{cell}`: {e}"))?);
+    }
+    match triples.len() {
+        1 => Ok(triples.pop().expect("len checked").object),
+        n => Err(format!("bad TSV term `{cell}`: parsed to {n} triples")),
     }
 }
 
@@ -60,19 +117,7 @@ fn parse_srj(path: &Path) -> Result<Expected, String> {
     {
         let mut row: Binding = Vec::new();
         for (var, val) in sol.as_object().into_iter().flatten() {
-            let get = |k: &str| val.get(k).and_then(|s| s.as_str());
-            let Some(value) = get("value") else { continue };
-            let term = match get("type") {
-                Some("uri") => make_term("uri", None, None, value.to_string())?,
-                Some("bnode") => make_term("bnode", None, None, value.to_string())?,
-                _ => make_term(
-                    "literal",
-                    get("xml:lang").map(String::from),
-                    get("datatype").map(String::from),
-                    value.to_string(),
-                )?,
-            };
-            row.push((var.clone(), term));
+            row.push((var.clone(), srj_term(val)?));
         }
         rows.push(row);
     }
@@ -81,6 +126,46 @@ fn parse_srj(path: &Path) -> Result<Expected, String> {
         rows,
         indexed: false,
     })
+}
+
+/// One SRJ term object, including SPARQL 1.2 `"type": "triple"` whose value is
+/// `{subject, predicate, object}` (object may nest another triple term).
+fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
+    let get = |k: &str| val.get(k).and_then(|s| s.as_str());
+    match get("type") {
+        Some("uri") => make_term("uri", None, None, get("value").unwrap_or_default().to_string()),
+        Some("bnode") => {
+            make_term("bnode", None, None, get("value").unwrap_or_default().to_string())
+        }
+        Some("triple") => {
+            let v = val
+                .get("value")
+                .ok_or_else(|| "triple term without value".to_string())?;
+            let part = |k: &str| -> Result<Term, String> {
+                srj_term(v.get(k).ok_or_else(|| format!("triple term without {k}"))?)
+            };
+            let subject = match part("subject")? {
+                Term::NamedNode(n) => oxrdf::NamedOrBlankNode::NamedNode(n),
+                Term::BlankNode(b) => oxrdf::NamedOrBlankNode::BlankNode(b),
+                other => return Err(format!("invalid triple-term subject: {other}")),
+            };
+            let predicate = match part("predicate")? {
+                Term::NamedNode(n) => n,
+                other => return Err(format!("invalid triple-term predicate: {other}")),
+            };
+            Ok(Term::Triple(Box::new(oxrdf::Triple {
+                subject,
+                predicate,
+                object: part("object")?,
+            })))
+        }
+        _ => make_term(
+            "literal",
+            get("xml:lang").map(String::from),
+            get("datatype").map(String::from),
+            get("value").unwrap_or_default().to_string(),
+        ),
+    }
 }
 
 /// SPARQL Query Results XML Format.
@@ -96,8 +181,31 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
     let mut cur_var: Option<String> = None;
     // Value element currently open: (kind, lang, datatype, text).
     let mut cur_val: Option<(String, Option<String>, Option<String>, String)> = None;
+    // SPARQL 1.2 `<triple>` nesting: each frame is (active slot, [s, p, o]).
+    let mut triple_stack: Vec<(usize, [Option<Term>; 3])> = Vec::new();
     let mut boolean: Option<bool> = None;
     let mut in_boolean = false;
+
+    // Routes a finished term either into the enclosing `<triple>` frame's
+    // active slot or, at top level, into the current row binding.
+    fn commit(
+        term: Term,
+        triple_stack: &mut [(usize, [Option<Term>; 3])],
+        cur_row: &mut Binding,
+        cur_var: &Option<String>,
+    ) {
+        if let Some((slot, parts)) = triple_stack.last_mut() {
+            parts[*slot] = Some(term);
+        } else if let Some(var) = cur_var.clone() {
+            cur_row.push((var, term));
+        }
+    }
+
+    fn set_slot(triple_stack: &mut [(usize, [Option<Term>; 3])], slot: usize) {
+        if let Some((s, _)) = triple_stack.last_mut() {
+            *s = slot;
+        }
+    }
 
     loop {
         match reader
@@ -136,16 +244,23 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
                     "literal" => {
                         cur_val = Some((name, attr("lang"), attr("datatype"), String::new()))
                     }
+                    "triple" => triple_stack.push((0, [None, None, None])),
+                    "subject" => set_slot(&mut triple_stack, 0),
+                    "predicate" => set_slot(&mut triple_stack, 1),
+                    "object" => set_slot(&mut triple_stack, 2),
                     "boolean" => in_boolean = true,
                     _ => {}
                 }
                 // Self-closing value elements (e.g. `<literal/>`) get no End event:
                 // commit the (empty-text) term right away.
                 if is_empty {
-                    if let (Some((kind, lang, dt, text)), Some(var)) =
-                        (cur_val.take(), cur_var.clone())
-                    {
-                        cur_row.push((var, make_term(&kind, lang, dt, text)?));
+                    if let Some((kind, lang, dt, text)) = cur_val.take() {
+                        commit(
+                            make_term(&kind, lang, dt, text)?,
+                            &mut triple_stack,
+                            &mut cur_row,
+                            &cur_var,
+                        );
                     }
                 }
             }
@@ -166,12 +281,51 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
                 let name = e.local_name();
                 match name.as_ref() {
                     b"uri" | b"bnode" | b"literal" => {
-                        if let (Some((kind, lang, dt, text)), Some(var)) =
-                            (cur_val.take(), cur_var.clone())
-                        {
-                            let term = make_term(&kind, lang, dt, text)?;
-                            cur_row.push((var, term));
+                        if let Some((kind, lang, dt, text)) = cur_val.take() {
+                            commit(
+                                make_term(&kind, lang, dt, text)?,
+                                &mut triple_stack,
+                                &mut cur_row,
+                                &cur_var,
+                            );
                         }
+                    }
+                    b"triple" => {
+                        let Some((_, [s, p, o])) = triple_stack.pop() else {
+                            return Err(format!("{}: stray </triple>", path.display()));
+                        };
+                        let subject = match s {
+                            Some(Term::NamedNode(n)) => oxrdf::NamedOrBlankNode::NamedNode(n),
+                            Some(Term::BlankNode(b)) => oxrdf::NamedOrBlankNode::BlankNode(b),
+                            other => {
+                                return Err(format!(
+                                    "{}: invalid triple-term subject: {other:?}",
+                                    path.display()
+                                ))
+                            }
+                        };
+                        let predicate = match p {
+                            Some(Term::NamedNode(n)) => n,
+                            other => {
+                                return Err(format!(
+                                    "{}: invalid triple-term predicate: {other:?}",
+                                    path.display()
+                                ))
+                            }
+                        };
+                        let object = o.ok_or_else(|| {
+                            format!("{}: triple term without object", path.display())
+                        })?;
+                        commit(
+                            Term::Triple(Box::new(oxrdf::Triple {
+                                subject,
+                                predicate,
+                                object,
+                            })),
+                            &mut triple_stack,
+                            &mut cur_row,
+                            &cur_var,
+                        );
                     }
                     b"binding" => cur_var = None,
                     b"result" => rows.push(std::mem::take(&mut cur_row)),
