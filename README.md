@@ -50,7 +50,9 @@ AMD / Graviton) — see [`research/hw-bench-results.md`](research/hw-bench-resul
   REGEX), OPTIONAL, UNION, MINUS, VALUES, BIND, aggregation + GROUP BY, ORDER BY, DISTINCT,
   LIMIT/OFFSET, **property paths** (all 8 operators), **named graphs** (`GRAPH`, N-Quads/TriG
   datasets); sort-merge + hash + worst-case-optimal joins; greedy cardinality-based planning.
-  Parallel scan / filter / sort / join-build / aggregation / serialization.
+  Parallel scan / filter / sort / join-build / aggregation / serialization. **Custom
+  functions** (SPARQL 17.6 extensible value testing): register Rust closures under function
+  IRIs and call them from FILTER/BIND ([`docs/extension-functions.md`](docs/extension-functions.md)).
 - **SPARQL Update** — the complete operation set (data ops, `DELETE/INSERT … WHERE` with GRAPH
   templates, `USING`, `LOAD`, `CLEAR`/`DROP`/`CREATE`/`COPY`/`MOVE`/`ADD`) over default and named
   graphs — **100% of the W3C update suite**. Updates are **incremental** (delta overlay +
@@ -65,7 +67,9 @@ AMD / Graviton) — see [`research/hw-bench-results.md`](research/hw-bench-resul
   builtins, goal-directed `<=`), with single-pass materialization and **incremental closure
   maintenance** (counting-based; deltas ~10³–10⁴× faster than re-materialization).
 - **Validation** (opt-in `sparq-shacl`) — SHACL Core at **100% of the W3C core suite**.
-- **More opt-in crates** — `sparq-geo` (GeoSPARQL relations + R-tree index), `sparq-hdt` (HDT
+- **More opt-in crates** — `sparq-geo` (GeoSPARQL: `geof:` functions runnable inside SPARQL
+  via the extension-function registry — also on the server with `--features geo` — plus an
+  R-tree index), `sparq-hdt` (HDT
   archives), `sparq-sim` (training-free structural similarity), `sparq-introspect`
   (characteristic sets + LLM-ready schema digests), `sparq-py` (Python bindings), and an
   RDF/JS-typed npm package under [`js/`](js/).
@@ -119,6 +123,8 @@ cargo run --release -p sparq-cli -- scaling data.nt ntriples queries/ 1,2,4,8
 - [`research/ARCHITECTURE.md`](research/ARCHITECTURE.md) — design blueprint.
 - [`research/roadmap.md`](research/roadmap.md) — what's done and what's planned (with a
   dependency graph of the work threads).
+- [`docs/extension-functions.md`](docs/extension-functions.md) — registering custom SPARQL
+  functions (and the GeoSPARQL `geof:` registry built on it).
 - [`bench/qlever-baselines.md`](bench/qlever-baselines.md) — the QLever comparison methodology
   and numbers.
 - `research/` — design notes on indexing, compression, inference, parallelism, RDF 1.2, and more.
