@@ -1,5 +1,37 @@
 # Engine findings from the W3C SPARQL conformance run (T13)
 
+## Round 5 — the final eleven (branch `final-eleven`)
+
+Headline at rdf-tests `f25dbc0`, full scope (1229 tests):
+**1225 pass / 0 fail / 4 documented divergences / 0 skip — 1229/1229**
+(branch point: 1218 / 11 / 0). The eleven round-4 failures resolved as:
+
+- **6 fixed in a vendored spargebra 0.4.6** (`vendor/spargebra`, wired via
+  `[patch.crates-io]`; every patch logged with spec citation + test in
+  `vendor/spargebra/SPARQ-PATCHES.md`, upstream PR descriptions drafted in
+  `docs/upstream-proposals.md`): reject nested aggregates;
+  `ExprTripleTermSubject ::= iri | Var` (2 tests); longest-match tokenization
+  for `<` vs IRIREF (syn-bad-26); accept earlier-SELECT-expression variable
+  reuse under aggregation (1.2 §11.4); case-insensitive TRUE/FALSE. Plus the
+  round-2 `dawg-optional-filter-005-not-simplified` item, which turned out to
+  be a spargebra translation bug too: the spec's preferred reading (§18.3.2)
+  applies simplification AFTER translation, so `OPTIONAL { { P FILTER } }`
+  must not hoist the nested group's filter into the LeftJoin expression — the
+  vendored `GroupGraphPatternSub` now keeps `Join(Z, Filter(F, A))` for
+  filter-bearing groups without their own FILTER clause.
+- **4 documented divergences** — expected-results files that are provably
+  wrong against the spec and their own approved siblings (tsv03's `1.0e6` for
+  the data term `"1.0E6"`; cast-decimal normalizing the echoed data terms
+  `0E1`/`1E0`; agg-sum-distinct's plain `"2100"` vs approved agg-sum-02's
+  canonical `"3.21E4"`; divide-numbers-cast's scale-0 decimals vs the approved
+  sparql11 scale-1 convention). The runner now carries a
+  `DOCUMENTED_DIVERGENCES` allowlist: these render as a DISTINCT outcome
+  (neither pass/fail/skip) with full rationale in the report, count towards
+  the CI ratchet as `pass + divergence`, and flip back to visible the moment
+  the expected files change. rdf-tests issue drafts: `docs/upstream-proposals.md`.
+
+CI ratchet raised 1218 → 1229 (pass+divergence, parsed from the Overall line).
+
 ## Round 4 — FROM / FROM NAMED (branch `from-named`)
 
 Headline at rdf-tests `f25dbc0`, full scope (1229 tests):
