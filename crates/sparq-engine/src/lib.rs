@@ -58,6 +58,93 @@ impl QueryBudget {
     }
 }
 
+/// An extension function: concrete RDF terms in, one concrete RDF term out.
+///
+/// Arguments arrive fully materialised (computed numerics/booleans as their typed
+/// literals). Returning `Err` is a SPARQL *expression* error — the row is filtered
+/// by a `FILTER`, left unbound by a `BIND` — never a hard query error, matching how
+/// the builtin functions report bad arguments (wrong arity, unparsable lexicals, …).
+/// The message itself is discarded, so it only needs to be useful to a human
+/// debugging the extension.
+pub type ExtFn = std::sync::Arc<dyn Fn(&[Term]) -> Result<Term, String> + Send + Sync>;
+
+/// A map from function IRIs to [`ExtFn`]s, consulted by the evaluator for
+/// `Function::Custom` IRIs that are not XSD constructor casts (SPARQL 17.6,
+/// extensible value testing). Installed per query by [`query_with_functions`] /
+/// [`with_functions`]; the registry-free entry points never consult it, so they
+/// keep their exact pre-registry behaviour (an unknown custom IRI is a hard
+/// "unsupported SPARQL function" error) and hot-path cost.
+///
+/// Cloning is cheap (the functions are `Arc`-shared), so a long-lived registry can
+/// be built once and reused across queries and threads.
+#[derive(Clone, Default)]
+pub struct FunctionRegistry {
+    map: std::collections::HashMap<String, ExtFn>,
+}
+
+impl FunctionRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers `f` under the function IRI (replacing any previous registration).
+    pub fn register(
+        &mut self,
+        iri: impl Into<String>,
+        f: impl Fn(&[Term]) -> Result<Term, String> + Send + Sync + 'static,
+    ) {
+        self.map.insert(iri.into(), std::sync::Arc::new(f));
+    }
+
+    /// The function registered under `iri`, if any.
+    pub fn get(&self, iri: &str) -> Option<&ExtFn> {
+        self.map.get(iri)
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+/// Runs `f` with `fns` installed as the active extension-function registry — the
+/// scoped form behind [`query_with_functions`], for callers that need one of the
+/// OTHER entry points (`ask`, `query_json_chunks_with_budget`, `construct`, …) to
+/// see the registry:
+///
+/// ```ignore
+/// let chunks = with_functions(&reg, || query_json_chunks_with_budget(&g, q, &budget))?;
+/// ```
+///
+/// The registry is visible to every query the closure runs on this thread (it is
+/// installed thread-locally and propagated into the engine's rayon workers), and
+/// uninstalled when the closure returns.
+pub fn with_functions<T>(fns: &FunctionRegistry, f: impl FnOnce() -> T) -> T {
+    let _guard = exec::functions::install(fns);
+    f()
+}
+
+/// [`query`] with an extension-function registry: `Function::Custom` IRIs that are
+/// not XSD constructor casts are dispatched to `fns` (SPARQL 17.6). An IRI absent
+/// from the registry remains the same hard error the registry-free entry points
+/// raise.
+pub fn query_with_functions(graph: &Graph, sparql: &str, fns: &FunctionRegistry) -> Result<QueryResult, String> {
+    query_with_functions_and_budget(graph, sparql, fns, &QueryBudget::unlimited())
+}
+
+/// [`query_with_functions`] under a cooperative [`QueryBudget`].
+pub fn query_with_functions_and_budget(
+    graph: &Graph,
+    sparql: &str,
+    fns: &FunctionRegistry,
+    budget: &QueryBudget,
+) -> Result<QueryResult, String> {
+    with_functions(fns, || query_with_budget(graph, sparql, budget))
+}
+
 /// When the query carries a dataset clause (FROM / FROM NAMED), the ACTIVE
 /// dataset it describes — built from the store's named graphs; see
 /// [`dataset::build_active`]. `None` (the common case) means: evaluate against
@@ -1202,5 +1289,180 @@ mod tests {
             }
         }
         c
+    }
+
+    // ---- extension-function registry (SPARQL 17.6) ----------------------------
+
+    /// `ex:double(?n)` — a 1-arg numeric extension used by the registry tests.
+    fn doubling_registry() -> FunctionRegistry {
+        let mut reg = FunctionRegistry::new();
+        reg.register("http://ex/fn#double", |args: &[Term]| {
+            let [Term::Literal(l)] = args else {
+                return Err(format!("double() expects 1 literal argument, got {}", args.len()));
+            };
+            let n: i64 = l.value().parse().map_err(|e| format!("double(): {e}"))?;
+            Ok(Term::Literal(oxrdf::Literal::from(n * 2)))
+        });
+        reg
+    }
+
+    #[test]
+    fn function_registry_dispatch_bind_and_filter() {
+        let reg = doubling_registry();
+        // BIND: the extension result is a first-class computed value.
+        let r = query_with_functions(
+            &g(),
+            "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
+             SELECT ?d WHERE { ?s ex:age ?a . BIND(fn:double(?a) AS ?d) } ORDER BY ?d",
+            &reg,
+        )
+        .unwrap();
+        let ds: Vec<String> = r.rows.iter().map(|row| row[0].as_ref().unwrap().to_string()).collect();
+        assert!(ds[0].contains("\"50\"") && ds[1].contains("\"60\"") && ds[2].contains("\"70\""));
+        // FILTER: the result participates in ordinary value comparison.
+        let r = query_with_functions(
+            &g(),
+            "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
+             SELECT ?s WHERE { ?s ex:age ?a . FILTER(fn:double(?a) > 65) }",
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1); // carol (35 -> 70)
+        // The budget variant threads the registry too.
+        let r = query_with_functions_and_budget(
+            &g(),
+            "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
+             SELECT ?s WHERE { ?s ex:age ?a . FILTER(fn:double(?a) > 65) }",
+            &reg,
+            &QueryBudget::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn function_registry_unknown_iri_is_hard_error() {
+        let reg = doubling_registry();
+        let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(<http://ex/fn#nope>(?a) > 0) }";
+        // Registry installed but the IRI is not in it: the same hard error …
+        let err = query_with_functions(&g(), q, &reg).map(|r| r.len()).unwrap_err();
+        assert!(err.contains("unsupported SPARQL function"), "got: {err}");
+        // … as the registry-free entry point raises (pre-registry behaviour intact).
+        let err = query(&g(), q).map(|r| r.len()).unwrap_err();
+        assert!(err.contains("unsupported SPARQL function"), "got: {err}");
+        // And a registered IRI without a registry stays a hard error too.
+        let err = query(
+            &g(),
+            "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(fn:double(?a) > 0) }",
+        )
+        .map(|r| r.len())
+        .unwrap_err();
+        assert!(err.contains("unsupported SPARQL function"), "got: {err}");
+    }
+
+    #[test]
+    fn function_registry_errors_are_expression_errors() {
+        let reg = doubling_registry();
+        // Arity error (2 args -> the extension returns Err): a per-row expression
+        // error, so the BIND leaves ?d unbound — the query itself succeeds.
+        let r = query_with_functions(
+            &g(),
+            "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
+             SELECT ?s ?d WHERE { ?s ex:age ?a . BIND(fn:double(?a, ?a) AS ?d) }",
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(r.len(), 3);
+        assert!(r.rows.iter().all(|row| row[1].is_none()), "errored BIND must be unbound");
+        // In a FILTER the same error excludes every row (error -> EBV false).
+        let r = query_with_functions(
+            &g(),
+            "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
+             SELECT ?s WHERE { ?s ex:age ?a . FILTER(fn:double(?a, ?a) > 0) }",
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(r.len(), 0);
+        // A value error inside the extension (non-numeric lexical) behaves the same:
+        // names error out per-row, the query still succeeds with unbound ?d.
+        let r = query_with_functions(
+            &g(),
+            "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
+             SELECT ?s ?d WHERE { ?s ex:name ?n . BIND(fn:double(?n) AS ?d) }",
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(r.len(), 3);
+        assert!(r.rows.iter().all(|row| row[1].is_none()));
+        // An UNBOUND argument is an expression error before the extension is called.
+        let r = query_with_functions(
+            &g(),
+            "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
+             SELECT ?s ?d WHERE { ?s ex:age ?a . OPTIONAL { ?s ex:nope ?k } BIND(fn:double(?k) AS ?d) }",
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(r.len(), 3);
+        assert!(r.rows.iter().all(|row| row[1].is_none()));
+    }
+
+    #[test]
+    fn function_registry_xsd_cast_precedence_and_uninstall() {
+        // A (pathological) registration under an XSD cast IRI must NOT shadow the
+        // builtin constructor cast — the cast check runs first.
+        let mut reg = doubling_registry();
+        reg.register("http://www.w3.org/2001/XMLSchema#integer", |_args: &[Term]| {
+            Ok(Term::Literal(oxrdf::Literal::from(999)))
+        });
+        let r = query_with_functions(
+            &g(),
+            "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT (xsd:integer(\"7\") AS ?i) WHERE {}",
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "\"7\"^^<http://www.w3.org/2001/XMLSchema#integer>");
+        // The registry is uninstalled when the entry point returns: the same custom
+        // IRI is a hard error again on the plain entry point afterwards.
+        let q = "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a . FILTER(fn:double(?a) > 0) }";
+        assert!(query_with_functions(&g(), q, &reg).is_ok());
+        assert!(query(&g(), q).is_err());
+    }
+
+    /// The registry must reach expressions evaluated INSIDE rayon workers: the
+    /// parallel FILTER / BIND branches engage at `PAR_THRESHOLD` (50k) rows, where
+    /// the installing thread's thread-local is invisible without re-installation.
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn function_registry_reaches_parallel_workers() {
+        let n: i64 = 50_001;
+        let mut ttl = String::with_capacity(n as usize * 32);
+        ttl.push_str("@prefix ex: <http://ex/> .\n");
+        for i in 0..n {
+            ttl.push_str(&format!("ex:n{i} ex:v {i} .\n"));
+        }
+        let graph = Graph::load_str(&ttl, "turtle").unwrap();
+        let reg = doubling_registry();
+        // Parallel FILTER: double(?v) > 2*(n-1) - 1 keeps exactly the last row.
+        let r = query_with_functions(
+            &graph,
+            &format!(
+                "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
+                 SELECT ?s WHERE {{ ?s ex:v ?v . FILTER(fn:double(?v) > {}) }}",
+                2 * (n - 1) - 1
+            ),
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1);
+        // Parallel BIND: every row gets a bound ?d.
+        let r = query_with_functions(
+            &graph,
+            "PREFIX fn: <http://ex/fn#> PREFIX ex: <http://ex/> \
+             SELECT ?d WHERE { ?s ex:v ?v . BIND(fn:double(?v) AS ?d) }",
+            &reg,
+        )
+        .unwrap();
+        assert_eq!(r.len(), n as usize);
+        assert!(r.rows.iter().all(|row| row[0].is_some()));
     }
 }
