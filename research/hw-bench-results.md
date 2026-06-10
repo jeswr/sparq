@@ -79,3 +79,25 @@ better.
 scripts/hw-bench.sh [scale] [out.csv]          # per-tier sweep on the host
 sparq-cli bench-remap [n] [dict] [iters]       # isolated remap gather; set SPARQ_NO_PREFETCH=1 to A/B
 ```
+
+## Graviton 16-vCPU thread sweep (c7g.4xlarge, 2026-06-10, commit d7e401a)
+
+First *uniform-core server* datapoint for the scaling work (no E-cores, single socket — isolates
+algorithmic serial fractions + bandwidth from the M1's heterogeneity and from NUMA). 8M triples,
+`sparq-cli scaling`, threads 1→16, best-of-3. Speedup at 16 threads (parallel efficiency):
+
+| subsystem | 16-thread speedup (eff) |
+|---|---|
+| **GROUP BY COUNT (radix build + T1.0b)** | **6.10× (0.38)** — still climbing at 16 |
+| GROUP_CONCAT | 3.37× (0.21) |
+| BIND new-strings (T1.0b) | 2.45× (0.15) |
+| 2-pattern join (merge) | 2.50× (0.16) |
+| 3-star join | 2.24× (0.14) |
+| OPTIONAL | 2.01× (0.13) |
+| load (parse+build) | 2.19× (0.14) |
+
+**Reading:** the rebuilt aggregation pipeline scales 2–3× better than every other subsystem —
+direct validation of the radix-group + parallel-resolve work. Everything else plateaus ~2.2–2.5×
+by 8 threads on UNIFORM cores, so the remaining ceiling is memory bandwidth (a 16-vCPU slice of
+the chip) + the still-serial merge/outer joins + per-operator materialization — i.e. exactly the
+Tier-3 (morsel/columnar) territory, NOT NUMA or core heterogeneity. Cost of the datapoint: ~$0.30.
