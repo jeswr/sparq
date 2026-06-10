@@ -789,6 +789,55 @@ fn are_variables_bound(expression: &Expression, variables: &HashSet<Variable>) -
     }
 }
 
+/// Looks for one of the synthetic variables that earlier aggregate expressions of the
+/// same query level were replaced with (see `ParserState::new_aggregation`). Finding one
+/// inside an aggregate argument means aggregate calls were nested, which is forbidden.
+///
+/// `Expression::Exists` is not visited: a nested query level (sub-SELECT) manages its own
+/// aggregate scope, and aggregates are not allowed in an EXISTS pattern outside of one.
+/// `Expression::Bound` only takes a plain variable, which cannot be a synthetic one.
+fn mentions_aggregate_variable(
+    expression: &Expression,
+    aggregates: &[(Variable, AggregateExpression)],
+) -> bool {
+    match expression {
+        Expression::NamedNode(_)
+        | Expression::Literal(_)
+        | Expression::Bound(_)
+        | Expression::Exists(_) => false,
+        Expression::Variable(var) => aggregates.iter().any(|(v, _)| v == var),
+        Expression::UnaryPlus(e) | Expression::UnaryMinus(e) | Expression::Not(e) => {
+            mentions_aggregate_variable(e, aggregates)
+        }
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            mentions_aggregate_variable(a, aggregates) || mentions_aggregate_variable(b, aggregates)
+        }
+        Expression::In(a, b) => {
+            mentions_aggregate_variable(a, aggregates)
+                || b.iter().any(|b| mentions_aggregate_variable(b, aggregates))
+        }
+        Expression::Coalesce(parameters) | Expression::FunctionCall(_, parameters) => parameters
+            .iter()
+            .any(|p| mentions_aggregate_variable(p, aggregates)),
+        Expression::If(a, b, c) => {
+            mentions_aggregate_variable(a, aggregates)
+                || mentions_aggregate_variable(b, aggregates)
+                || mentions_aggregate_variable(c, aggregates)
+        }
+    }
+}
+
 /// Called on every variable defined using "AS" or "VALUES"
 #[cfg(feature = "sep-0006")]
 fn add_defined_variables<'a>(pattern: &'a GraphPattern, set: &mut HashSet<&'a Variable>) {
@@ -967,6 +1016,18 @@ impl ParserState {
 
     fn new_aggregation(&mut self, agg: AggregateExpression) -> Result<Variable, &'static str> {
         let aggregates = self.aggregates.last_mut().ok_or("Unexpected aggregate")?;
+        // Aggregate functions cannot be nested: each aggregate that has already been
+        // parsed at this query level was replaced with a fresh synthetic variable, so
+        // finding one of those variables inside this aggregate's argument means the
+        // query nested an aggregate call inside another one (e.g. COUNT(COUNT(*))).
+        // See SPARQL 1.2 18.3.4.1 (aggregate arguments are sequences over the group,
+        // with no derivation producing an aggregate inside another's argument) and the
+        // W3C negative syntax test sparql12/syntax#nested-aggregate-functions.
+        if let AggregateExpression::FunctionCall { expr, .. } = &agg {
+            if mentions_aggregate_variable(expr, aggregates) {
+                return Err("Aggregate functions cannot be nested");
+            }
+        }
         Ok(aggregates
             .iter()
             .find_map(|(v, a)| (a == &agg).then_some(v))
