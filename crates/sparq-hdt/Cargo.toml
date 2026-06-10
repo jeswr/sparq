@@ -1,0 +1,41 @@
+[package]
+name = "sparq-hdt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# The wrapped `hdt` crate's MSRV is 1.87, above the workspace's 1.85 — declared
+# per-crate so the rest of the workspace keeps its lower floor.
+rust-version = "1.87"
+description = "Opt-in HDT (Header Dictionary Triples) reader for the sparq RDF engine: load .hdt archives straight into a sparq Graph"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# Opt-in HDT ingestion (T24a). This is a SEPARATE crate so the core engine — and in
+# particular the wasm build — carries zero HDT code or dependencies; HDT support is
+# engaged only by depending on this crate. Native-only by design (the wrapped reader
+# spawns threads and the use case is bulk ingest).
+#
+# Wrap-vs-implement: we WRAP the maintained `hdt` crate (KonradHoeffner/hdt, MIT)
+# rather than reimplement the binary format (Plain/Log64 sequences, PFC dictionary
+# sections, BitmapTriples). It reads the de-facto standard layout emitted by
+# hdt-cpp / hdt-java: FourSectionDictionary (Plain Front Coding) + BitmapTriples in
+# SPO order. `default-features = false` drops its sophia adapter — we translate at
+# the id level, not through sophia terms. Pinned to 0.4: 0.6 pulls `qwt`, whose
+# default `prefetch` feature needs NIGHTLY rustc on aarch64 (see TODO.md).
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+hdt = { version = "0.4", default-features = false }
+
+[dev-dependencies]
+# The `sophia` feature provides hdt's (experimental) N-Triples -> HDT writer
+# (`Hdt::read_nt`), used ONLY to build .hdt round-trip fixtures / benchmark inputs
+# from N-Triples ground truth in-process.
+hdt = { version = "0.4", features = ["sophia"] }
+# Decompress .nt.gz in the load-throughput benchmark example.
+flate2 = "1"
