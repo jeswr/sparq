@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-server", "crates/sparq-conformance", "crates/sparq-py", "crates/sparq-shacl", "crates/sparq-hdt", "crates/sparq-sim", "crates/sparq-geo", "crates/sparq-introspect", "crates/sparq-nlq"]
+members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-server", "crates/sparq-conformance", "crates/sparq-py", "crates/sparq-shacl", "crates/sparq-hdt", "crates/sparq-sim", "crates/sparq-geo", "crates/sparq-introspect", "crates/sparq-nlq", "crates/sparq-vectors"]
 
 [workspace.package]
 version = "0.1.0"
@@ -30,6 +30,18 @@ rayon = "1"
 # Memory-mapped on-disk indexes (out-of-core, native only) — query datasets larger
 # than RAM by letting the OS page in only the working set.
 memmap2 = "0.9"
+# HNSW approximate nearest-neighbour search (sparq-vectors only, GenAI phase 4).
+# Chosen over hnsw_rs: pure Rust, minimal dependency tree, maintained (InstantDomain).
+instant-distance = "0.6"
+
+# sparq-vectors' accuracy gate (HNSW recall@10 vs brute force on 50k vectors) runs as
+# an ordinary `cargo test`, but HNSW construction at opt-level 0 is minutes-slow. These
+# overrides optimise ONLY the vector crates in dev builds (integration tests link the
+# dev-profile lib); every other crate's dev build is untouched.
+[profile.dev.package.sparq-vectors]
+opt-level = 2
+[profile.dev.package.instant-distance]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,39 @@
+[package]
+name = "sparq-vectors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in embedding store + ANN for the sparq RDF engine: a memory-mapped per-term-id f32 vector store (.spqv), exact brute-force and HNSW approximate nearest-neighbour search, and label-embedding helpers"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# Opt-in embedding storage + ANN (T7, GenAI phase 4 — see research/genai-design.md).
+# This is a SEPARATE crate so the core engine carries zero vector code; it consumes only
+# sparq-core's PUBLIC read API (dict lookups, permutation-index scans). Embeddings are
+# produced OUTSIDE the engine (research decision: "embeddings out-of-process") and keyed
+# by the store's dictionary term ids — no side join tables. Nothing in the workspace
+# depends on this crate; the default build does not even compile it.
+
+[features]
+default = []
+# API shape for a live OpenAI-compatible `/v1/embeddings` provider. The HTTP transport
+# is supplied by the CALLER (a `Transport` impl over their HTTP client of choice);
+# this crate never opens a socket. Pulls in serde_json for request/response bodies.
+provider = ["dep:serde_json"]
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+oxrdf.workspace = true
+rustc-hash.workspace = true
+memmap2.workspace = true
+# HNSW (pure Rust, minimal deps, maintained). Evaluated against hnsw_rs 0.3 (heavier
+# dependency tree: anndists/simd feature plumbing); instant-distance is the smaller,
+# cleaner fit for an in-RAM index rebuilt from the mmap'd store on open.
+instant-distance.workspace = true
+serde_json = { version = "1", optional = true }
