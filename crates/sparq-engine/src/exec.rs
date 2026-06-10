@@ -4543,6 +4543,17 @@ fn eval_function(
                 }
             }
         }
+        // NOW(): the current UTC instant as xsd:dateTime. RAND(): xsd:double in [0, 1)
+        // (sourced from the same OS RNG as UUID, avoiding a new wasm-hostile dep) —
+        // both native-only for the same reason as UUID()/STRUUID().
+        #[cfg(not(target_arch = "wasm32"))]
+        F::Now => Value::Term(Term::Literal(Literal::new_typed_literal(now_lexical(), xsd::DATE_TIME))),
+        #[cfg(not(target_arch = "wasm32"))]
+        F::Rand => {
+            let bytes = *uuid::Uuid::new_v4().as_bytes();
+            let x = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
+            Value::Num(Num::Double((x >> 11) as f64 / (1u64 << 53) as f64))
+        }
         #[cfg(not(target_arch = "wasm32"))]
         F::Uuid => Value::Term(Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
             "urn:uuid:{}",
@@ -4583,7 +4594,211 @@ fn eval_function(
                 None => Value::Error,
             }
         }
+        // XSD constructor casts: xsd:integer(?x), xsd:decimal(?x), … (SPARQL 17.5).
+        F::Custom(nn) if args.len() == 1 => match eval_cast(nn.as_str(), &ev(0)?) {
+            Some(out) => out,
+            None => return Err(format!("unsupported SPARQL function: Custom({})", nn.as_str())),
+        },
         other => return Err(format!("unsupported SPARQL function: {other:?}")),
+    })
+}
+
+/// Plain decimal form of an f64 with at least one fraction digit ("0.0", "1.0",
+/// "1.25") — the form the W3C cast expected-results use for float/double sources.
+fn plain_min1(f: f64) -> String {
+    if f.fract() == 0.0 && f.abs() < 1e15 {
+        format!("{:.1}", f)
+    } else {
+        format!("{f}")
+    }
+}
+
+/// A decimal lexical with trailing fraction zeros trimmed but AT LEAST one fraction
+/// digit kept ("33.3300" -> "33.33", "0" -> "0.0") — the xsd:decimal cast convention.
+fn dec_trim_min1(d: Dec) -> String {
+    let mut d = d;
+    while d.scale > 1 && d.mant % 10 == 0 {
+        d.mant /= 10;
+        d.scale -= 1;
+    }
+    if d.scale == 0 {
+        d = Dec { mant: d.mant.saturating_mul(10), scale: 1 };
+    }
+    d.lexical()
+}
+
+/// Trim ALL trailing fraction zeros ("0.0" -> "0", "2.50" -> "2.5") — the xsd:string
+/// cast convention for decimal sources.
+fn dec_trim(d: Dec) -> String {
+    let mut d = d;
+    while d.scale > 0 && d.mant % 10 == 0 {
+        d.mant /= 10;
+        d.scale -= 1;
+    }
+    d.lexical()
+}
+
+/// The XSD constructor-cast table. `None` when `target` is not a recognised cast IRI
+/// (the caller reports an unsupported function); `Some(Value::Error)` for a cast that
+/// fails per XPath (invalid source lexical, wrong source type, NaN/INF to exact types).
+/// The result LEXICAL forms follow the conventions of the W3C cast test expected
+/// results (which track the reference implementations), varying by source type.
+fn eval_cast(target: &str, v: &Value) -> Option<Value> {
+    // The source as a STRING lexical only when it is a simple/xsd:string literal
+    // (language-tagged literals and non-string types are NOT castable as strings).
+    let src_str = || match v {
+        Value::Term(Term::Literal(l)) if l.language().is_none() && l.datatype() == xsd::STRING => {
+            Some(l.value().trim().to_string())
+        }
+        _ => None,
+    };
+    let typed = |lex: String, dt: oxrdf::NamedNodeRef<'_>| Value::Term(Term::Literal(Literal::new_typed_literal(lex, dt)));
+    // Classify a numeric SOURCE by its tower type (computed value or literal).
+    let src_num = || as_numeric(v).filter(|_| !matches!(v, Value::Bool(_)));
+    if target == xsd::STRING.as_str() {
+        // STR semantics with VALUE canonicalisation for typed sources: booleans print
+        // true/false, decimals trim trailing zeros ("0.0" -> "0"), float/double print
+        // plain when integral ("0E1" -> "0") — everything else keeps its lexical.
+        if let Some(b) = as_bool_val(v) {
+            return Some(typed(b.to_string(), xsd::STRING));
+        }
+        if let Some(n) = src_num() {
+            let s = match n {
+                Num::Int(i) => i.to_string(),
+                Num::Dec(d) => dec_trim(d),
+                // plain shortest decimal form, never scientific ("0E1" -> "0",
+                // "1.25"^^xsd:float -> "1.25")
+                Num::Float(f) if f.is_finite() => format!("{f}"),
+                Num::Double(f) if f.is_finite() => format!("{f}"),
+                other => other.lexical(),
+            };
+            return Some(typed(s, xsd::STRING));
+        }
+        return Some(match v {
+            Value::Term(Term::BlankNode(_)) | Value::Term(Term::Triple(_)) | Value::Unbound | Value::Error => Value::Error,
+            other => value_str(other).map(|s| typed(s, xsd::STRING)).unwrap_or(Value::Error),
+        });
+    }
+    if target == xsd::BOOLEAN.as_str() {
+        if let Some(b) = as_bool_val(v) {
+            return Some(Value::Bool(b));
+        }
+        if let Some(n) = as_numeric(v) {
+            return Some(Value::Bool(!n.is_zero() && !n.is_nan()));
+        }
+        return Some(match src_str().as_deref() {
+            Some("true") | Some("1") => Value::Bool(true),
+            Some("false") | Some("0") => Value::Bool(false),
+            _ => Value::Error,
+        });
+    }
+    if target == xsd::DATE_TIME.as_str() {
+        return Some(match v {
+            Value::Term(Term::Literal(l))
+                if l.datatype() == xsd::DATE_TIME || l.datatype() == xsd::DATE_TIME_STAMP =>
+            {
+                typed(l.value().to_string(), xsd::DATE_TIME)
+            }
+            _ => match src_str() {
+                Some(s) if parse_datetime(&s).is_some() => typed(s, xsd::DATE_TIME),
+                _ => Value::Error,
+            },
+        });
+    }
+    let is_int = target == xsd::INTEGER.as_str();
+    let is_dec = target == xsd::DECIMAL.as_str();
+    let is_flt = target == xsd::FLOAT.as_str();
+    let is_dbl = target == xsd::DOUBLE.as_str();
+    if !(is_int || is_dec || is_flt || is_dbl) {
+        return None; // not a cast IRI this engine knows
+    }
+    if is_int {
+        // Truncate toward zero; strings must be valid xsd:integer lexicals.
+        if let Some(b) = as_bool_val(v) {
+            return Some(Value::Num(Num::Int(b as i64)));
+        }
+        if let Some(n) = src_num() {
+            return Some(match n {
+                Num::Int(i) => Value::Num(Num::Int(i)),
+                Num::Dec(d) => Value::Num(Num::Int((d.mant / 10i128.pow(d.scale)) as i64)),
+                Num::Float(_) | Num::Double(_) => {
+                    let f = n.f64();
+                    if f.is_finite() && f.abs() < 9.2e18 {
+                        Value::Num(Num::Int(f.trunc() as i64))
+                    } else {
+                        Value::Error
+                    }
+                }
+            });
+        }
+        return Some(src_str().and_then(|s| s.parse::<i64>().ok()).map(|i| Value::Num(Num::Int(i))).unwrap_or(Value::Error));
+    }
+    if is_dec {
+        if let Some(b) = as_bool_val(v) {
+            return Some(typed(if b { "1.0" } else { "0.0" }.to_string(), xsd::DECIMAL));
+        }
+        if let Some(n) = src_num() {
+            return Some(match n {
+                // integer -> N.0 (zero prints bare, per the reference results)
+                Num::Int(0) => typed("0".to_string(), xsd::DECIMAL),
+                Num::Int(i) => typed(format!("{i}.0"), xsd::DECIMAL),
+                // decimal -> decimal keeps its lexical
+                Num::Dec(d) => typed(d.lexical(), xsd::DECIMAL),
+                Num::Float(_) | Num::Double(_) => {
+                    let f = n.f64();
+                    if f.is_finite() {
+                        typed(plain_min1(f), xsd::DECIMAL)
+                    } else {
+                        Value::Error
+                    }
+                }
+            });
+        }
+        // string -> parse (no exponent allowed), trim trailing zeros, keep >= 1
+        // fraction digit ("+33.3300" -> "33.33", "0" -> "0.0").
+        return Some(
+            src_str()
+                .and_then(|s| Dec::parse_lexical(&s))
+                .map(|d| typed(dec_trim_min1(d), xsd::DECIMAL))
+                .unwrap_or(Value::Error),
+        );
+    }
+    // float / double
+    let dt = if is_flt { xsd::FLOAT } else { xsd::DOUBLE };
+    if let Some(b) = as_bool_val(v) {
+        return Some(typed(if b { "1.0E0" } else { "0E0" }.to_string(), dt));
+    }
+    if let Some(n) = src_num() {
+        return Some(match n {
+            // integer -> N.0 (zero prints bare)
+            Num::Int(0) => typed("0".to_string(), dt),
+            Num::Int(i) => typed(format!("{i}.0"), dt),
+            // decimal -> keeps its lexical
+            Num::Dec(d) => typed(d.lexical(), dt),
+            // float/double -> plain decimal form with >= 1 fraction digit
+            Num::Float(f) => typed(plain_min1(f as f64), dt),
+            Num::Double(f) => typed(plain_min1(f), dt),
+        });
+    }
+    Some(match src_str() {
+        Some(s) => {
+            // A valid integer lexical keeps its form verbatim ("13" -> "13"^^xsd:double);
+            // anything else parses and serialises in canonical scientific form.
+            if s.parse::<i64>().is_ok() {
+                typed(s, dt)
+            } else if is_flt {
+                match parse_xsd_f32(&s) {
+                    Some(f) if !f.is_nan() || s == "NaN" => typed(if f.is_finite() { format!("{f:E}") } else { Num::Float(f).lexical() }, dt),
+                    _ => Value::Error,
+                }
+            } else {
+                match parse_xsd_f64(&s) {
+                    Some(f) if !f.is_nan() || s == "NaN" => typed(if f.is_finite() { format!("{f:E}") } else { Num::Double(f).lexical() }, dt),
+                    _ => Value::Error,
+                }
+            }
+        }
+        None => Value::Error,
     })
 }
 
@@ -4595,6 +4810,29 @@ thread_local! {
     /// distinct ones. The buffer address is stable across consecutive Extends over the
     /// same Bindings (the SELECT-expression case the per-solution rule exists for).
     static ROW_SCOPE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// The current UTC instant as an `xsd:dateTime` lexical (civil-from-days conversion,
+/// no time-crate dependency).
+#[cfg(not(target_arch = "wasm32"))]
+fn now_lexical() -> String {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs() as i64;
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
 /// 64-bit FxHash of a string (label material for BNODE(str)).
