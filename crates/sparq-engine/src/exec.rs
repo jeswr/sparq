@@ -3806,16 +3806,25 @@ fn eval_function(
     use spargebra::algebra::Function as F;
     let ev = |i: usize| eval_expr(graph, local, b, row, &args[i]);
     let simple = |s: String| Value::Term(Term::Literal(Literal::new_simple_literal(s)));
-    // Both operands as lexical strings, or `Value::Error` on a type error.
-    let str2 = |a: Value, c: Value, g: &dyn Fn(&str, &str) -> bool| match (value_str(&a), value_str(&c)) {
-        (Some(x), Some(y)) => Value::Bool(g(&x, &y)),
+    // Both operands as ARGUMENT-COMPATIBLE string literals (second simple/xsd:string,
+    // or same language tag as the first), else `Value::Error`.
+    let str_compat2 = |a: &Value, c: &Value, g: &dyn Fn(&str, &str) -> bool| match (str_lit(a), str_lit(c)) {
+        (Some((x, lx)), Some((y, ly))) if ly.is_none() || ly == lx => Value::Bool(g(&x, &y)),
         _ => Value::Error,
     };
     Ok(match f {
         F::Str => value_str(&ev(0)?).map(simple).unwrap_or(Value::Error),
         F::StrLen => value_str(&ev(0)?).map(|s| Value::Num(s.chars().count() as f64)).unwrap_or(Value::Error),
-        F::UCase => value_str(&ev(0)?).map(|s| simple(s.to_uppercase())).unwrap_or(Value::Error),
-        F::LCase => value_str(&ev(0)?).map(|s| simple(s.to_lowercase())).unwrap_or(Value::Error),
+        // UCASE/LCASE/SUBSTR operate on string literals and preserve the language tag
+        // of the argument (simple in, simple out; "bar"@en in, "BAR"@en out).
+        F::UCase => match str_lit(&ev(0)?) {
+            Some((s, lang)) => lit_with_lang(s.to_uppercase(), lang.as_deref()),
+            None => Value::Error,
+        },
+        F::LCase => match str_lit(&ev(0)?) {
+            Some((s, lang)) => lit_with_lang(s.to_lowercase(), lang.as_deref()),
+            None => Value::Error,
+        },
         F::Lang => match ev(0)? {
             Value::Term(Term::Literal(l)) => simple(l.language().unwrap_or("").to_string()),
             Value::Num(_) | Value::Bool(_) => simple(String::new()),
@@ -3828,30 +3837,49 @@ fn eval_function(
             Value::Bool(_) => Value::Term(Term::NamedNode(xsd::BOOLEAN.into_owned())),
             _ => Value::Error,
         },
+        // CONCAT: all operands must be string literals. The result carries a language
+        // tag only when every operand has the SAME tag; otherwise it is simple.
         F::Concat => {
             let mut s = String::new();
+            let mut lang: Option<Option<String>> = None; // common-tag accumulator
             for i in 0..args.len() {
-                match value_str(&ev(i)?) {
-                    Some(p) => s.push_str(&p),
+                match str_lit(&ev(i)?) {
+                    Some((p, l)) => {
+                        s.push_str(&p);
+                        lang = Some(match lang {
+                            None => l,
+                            Some(prev) if prev == l => prev,
+                            Some(_) => None,
+                        });
+                    }
                     None => return Ok(Value::Error),
                 }
             }
-            simple(s)
+            lit_with_lang(s, lang.flatten().as_deref())
         }
-        F::Contains => str2(ev(0)?, ev(1)?, &|a, c| a.contains(c)),
-        F::StrStarts => str2(ev(0)?, ev(1)?, &|a, c| a.starts_with(c)),
-        F::StrEnds => str2(ev(0)?, ev(1)?, &|a, c| a.ends_with(c)),
-        F::StrBefore => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
-            (Some(a), Some(c)) => a.find(&c).map(|i| simple(a[..i].to_string())).unwrap_or_else(|| simple(String::new())),
+        F::Contains => str_compat2(&ev(0)?, &ev(1)?, &|a, c| a.contains(c)),
+        F::StrStarts => str_compat2(&ev(0)?, &ev(1)?, &|a, c| a.starts_with(c)),
+        F::StrEnds => str_compat2(&ev(0)?, &ev(1)?, &|a, c| a.ends_with(c)),
+        // STRBEFORE/STRAFTER: arguments must be compatible (second simple/xsd:string,
+        // or same language tag). On a match the result carries the FIRST argument's
+        // language tag; no match gives the empty simple literal.
+        F::StrBefore => match (str_lit(&ev(0)?), str_lit(&ev(1)?)) {
+            (Some((a, la)), Some((c, lc))) if lc.is_none() || lc == la => match a.find(&c) {
+                Some(i) => lit_with_lang(a[..i].to_string(), la.as_deref()),
+                None => simple(String::new()),
+            },
             _ => Value::Error,
         },
-        F::StrAfter => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
-            (Some(a), Some(c)) => a.find(&c).map(|i| simple(a[i + c.len()..].to_string())).unwrap_or_else(|| simple(String::new())),
+        F::StrAfter => match (str_lit(&ev(0)?), str_lit(&ev(1)?)) {
+            (Some((a, la)), Some((c, lc))) if lc.is_none() || lc == la => match a.find(&c) {
+                Some(i) => lit_with_lang(a[i + c.len()..].to_string(), la.as_deref()),
+                None => simple(String::new()),
+            },
             _ => Value::Error,
         },
         F::SubStr => {
-            let s = match value_str(&ev(0)?) {
-                Some(s) => s,
+            let (s, lang) = match str_lit(&ev(0)?) {
+                Some(x) => x,
                 None => return Ok(Value::Error),
             };
             let start = match as_num(&ev(1)?) {
@@ -3860,15 +3888,16 @@ fn eval_function(
             };
             let chars: Vec<char> = s.chars().collect();
             let from = (start.max(1) - 1) as usize; // SPARQL SUBSTR is 1-indexed by codepoint
-            if args.len() >= 3 {
+            let out: String = if args.len() >= 3 {
                 let len = match as_num(&ev(2)?) {
                     Some(n) => n.max(0.0) as usize,
                     None => return Ok(Value::Error),
                 };
-                simple(chars.iter().skip(from).take(len).collect())
+                chars.iter().skip(from).take(len).collect()
             } else {
-                simple(chars.iter().skip(from).collect())
-            }
+                chars.iter().skip(from).collect()
+            };
+            lit_with_lang(out, lang.as_deref())
         }
         F::EncodeForUri => value_str(&ev(0)?).map(|s| simple(encode_for_uri(&s))).unwrap_or(Value::Error),
         F::Iri => match value_str(&ev(0)?) {
@@ -3887,16 +3916,18 @@ fn eval_function(
         F::Ceil => as_num(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
         F::Floor => as_num(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
         F::Round => as_num(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
-        // STRDT(lexical, datatypeIRI) -> typed literal.
-        F::StrDt => match (value_str(&ev(0)?), ev(1)?) {
-            (Some(lex), Value::Term(Term::NamedNode(dt))) => {
+        // STRDT(lexical, datatypeIRI) -> typed literal. The first argument must be a
+        // SIMPLE literal (= xsd:string in RDF 1.1) — lang-tagged / typed input errors.
+        F::StrDt => match (str_lit(&ev(0)?), ev(1)?) {
+            (Some((lex, None)), Value::Term(Term::NamedNode(dt))) => {
                 Value::Term(Term::Literal(Literal::new_typed_literal(lex, dt)))
             }
             _ => Value::Error,
         },
-        // STRLANG(lexical, langTag) -> language-tagged literal.
-        F::StrLang => match (value_str(&ev(0)?), value_str(&ev(1)?)) {
-            (Some(lex), Some(lang)) => match Literal::new_language_tagged_literal(lex, lang) {
+        // STRLANG(lexical, langTag) -> language-tagged literal; both arguments must be
+        // simple literals.
+        F::StrLang => match (str_lit(&ev(0)?), str_lit(&ev(1)?)) {
+            (Some((lex, None)), Some((lang, None))) => match Literal::new_language_tagged_literal(lex, lang) {
                 Ok(l) => Value::Term(Term::Literal(l)),
                 Err(_) => Value::Error,
             },
@@ -3970,10 +4001,12 @@ fn eval_function(
         F::Hours => datetime_field(&ev(0)?, 3),
         F::Minutes => datetime_field(&ev(0)?, 4),
         F::Seconds => datetime_field(&ev(0)?, 5),
+        // REGEX/REPLACE: the text operand must be a string literal (an IRI or non-string
+        // literal is a type error); REPLACE's result keeps the text's language tag.
         #[cfg(feature = "regex")]
         F::Regex => {
-            let (text, pat) = match (value_str(&ev(0)?), value_str(&ev(1)?)) {
-                (Some(t), Some(p)) => (t, p),
+            let (text, pat) = match (str_lit(&ev(0)?), value_str(&ev(1)?)) {
+                (Some((t, _)), Some(p)) => (t, p),
                 _ => return Ok(Value::Error),
             };
             let flags = if args.len() >= 3 { value_str(&ev(2)?).unwrap_or_default() } else { String::new() };
@@ -3984,13 +4017,13 @@ fn eval_function(
         }
         #[cfg(feature = "regex")]
         F::Replace => {
-            let (text, pat, rep) = match (value_str(&ev(0)?), value_str(&ev(1)?), value_str(&ev(2)?)) {
-                (Some(t), Some(p), Some(r)) => (t, p, r),
+            let (text, lang, pat, rep) = match (str_lit(&ev(0)?), value_str(&ev(1)?), value_str(&ev(2)?)) {
+                (Some((t, lang)), Some(p), Some(r)) => (t, lang, p, r),
                 _ => return Ok(Value::Error),
             };
             let flags = if args.len() >= 4 { value_str(&ev(3)?).unwrap_or_default() } else { String::new() };
             match build_regex(&pat, &flags) {
-                Some(re) => simple(re.replace_all(&text, rep.as_str()).into_owned()),
+                Some(re) => lit_with_lang(re.replace_all(&text, rep.as_str()).into_owned(), lang.as_deref()),
                 None => Value::Error,
             }
         }
@@ -4025,6 +4058,32 @@ fn string_literal(v: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// A STRING-LITERAL operand (simple/xsd:string or language-tagged): `(value, language)`.
+/// IRIs, blank nodes, non-string literals and computed numerics/booleans are type
+/// errors (`None`) — per the SPARQL string-function operand rules.
+fn str_lit(v: &Value) -> Option<(String, Option<String>)> {
+    match v {
+        Value::Term(Term::Literal(l)) => {
+            if let Some(lang) = l.language() {
+                Some((l.value().to_string(), Some(lang.to_string())))
+            } else if l.datatype() == xsd::STRING {
+                Some((l.value().to_string(), None))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A simple or language-tagged literal value, per the tag the operand carried.
+fn lit_with_lang(s: String, lang: Option<&str>) -> Value {
+    Value::Term(Term::Literal(match lang {
+        Some(l) => Literal::new_language_tagged_literal_unchecked(s, l),
+        None => Literal::new_simple_literal(s),
+    }))
 }
 
 /// Lowercase-hex digest of a string-literal argument, or a type error.

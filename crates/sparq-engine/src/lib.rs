@@ -929,6 +929,40 @@ mod tests {
     }
 
     #[test]
+    fn string_functions_preserve_language_tags() {
+        let one = |q: &str| {
+            let r = query(&g(), q).unwrap();
+            r.rows[0][0].as_ref().map(|t| t.to_string())
+        };
+        assert_eq!(one("SELECT (UCASE(\"bar\"@en) AS ?x) {}").unwrap(), "\"BAR\"@en");
+        assert_eq!(one("SELECT (LCASE(\"BAR\"@en) AS ?x) {}").unwrap(), "\"bar\"@en");
+        assert_eq!(one("SELECT (SUBSTR(\"bar\"@en, 2) AS ?x) {}").unwrap(), "\"ar\"@en");
+        assert_eq!(one("SELECT (SUBSTR(\"bar\"@en, 1, 1) AS ?x) {}").unwrap(), "\"b\"@en");
+        // CONCAT: same tag everywhere -> tagged; mixed -> simple; non-string -> error.
+        assert_eq!(one("SELECT (CONCAT(\"a\"@en, \"b\"@en) AS ?x) {}").unwrap(), "\"ab\"@en");
+        assert_eq!(one("SELECT (CONCAT(\"a\"@en, \"b\") AS ?x) {}").unwrap(), "\"ab\"");
+        assert_eq!(one("SELECT (CONCAT(\"a\", 1) AS ?x) {}"), None);
+        // STRBEFORE/STRAFTER: result carries arg1's tag on a match, plain "" on no
+        // match, and incompatible language tags are a type error.
+        assert_eq!(one("SELECT (STRBEFORE(\"abc\"@en, \"b\") AS ?x) {}").unwrap(), "\"a\"@en");
+        assert_eq!(one("SELECT (STRAFTER(\"abc\"@en, \"b\"@en) AS ?x) {}").unwrap(), "\"c\"@en");
+        assert_eq!(one("SELECT (STRBEFORE(\"abc\"@en, \"z\") AS ?x) {}").unwrap(), "\"\"");
+        assert_eq!(one("SELECT (STRBEFORE(\"abc\"@en, \"b\"@cy) AS ?x) {}"), None);
+        assert_eq!(one("SELECT (STRAFTER(\"abc\", \"b\"@en) AS ?x) {}"), None);
+        // REPLACE keeps the text's tag.
+        #[cfg(feature = "regex")]
+        assert_eq!(one("SELECT (REPLACE(\"abc\"@en, \"b\", \"-\") AS ?x) {}").unwrap(), "\"a-c\"@en");
+        // STRDT/STRLANG require a simple-literal first argument.
+        assert_eq!(
+            one("PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT (STRDT(\"1\", xsd:integer) AS ?x) {}").unwrap(),
+            "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        );
+        assert_eq!(one("PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT (STRDT(\"1\"@en, xsd:integer) AS ?x) {}"), None);
+        assert_eq!(one("SELECT (STRLANG(\"a\", \"en\") AS ?x) {}").unwrap(), "\"a\"@en");
+        assert_eq!(one("SELECT (STRLANG(\"a\"@en, \"en\") AS ?x) {}"), None);
+    }
+
+    #[test]
     fn budget_unlimited_matches_query() {
         let q = "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:age ?age }";
         let plain = query(&g(), q).unwrap();
