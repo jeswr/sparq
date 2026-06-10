@@ -1,0 +1,2 @@
+# The W3C SHACL test suite, fetched by ./fetch-shacl-tests.sh (pinned clone).
+/tests/shacl/
