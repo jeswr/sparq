@@ -30,6 +30,11 @@ use crate::{RdfsIndex, Schema, Vocab};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
+/// Below this many delta facts / candidates the per-round work runs single-threaded
+/// (rayon fan-out is not worth the overhead). Matches `rdfs::PAR_THRESHOLD`.
+#[cfg(feature = "parallel")]
+const PAR_THRESHOLD: usize = 4096;
+
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
@@ -162,6 +167,19 @@ impl UnionFind {
         }
         root
     }
+    /// Read-only root lookup (no path compression) — usable from parallel workers. Returns
+    /// the same representative as [`find`](Self::find): compression never changes roots.
+    #[cfg(feature = "parallel")]
+    fn find_ro(&self, x: Id) -> Id {
+        let mut root = x;
+        while let Some(&p) = self.parent.get(&root) {
+            if p == root {
+                break;
+            }
+            root = p;
+        }
+        root
+    }
     /// Merge `a` and `b` (canonical rep = the smaller id). Returns true if newly merged.
     fn union(&mut self, a: Id, b: Id) -> bool {
         let (ra, rb) = (self.find(a), self.find(b));
@@ -218,6 +236,131 @@ fn build_adjacency(
             inc.entry(p).or_default().entry(obj).or_default().push(s);
         }
     }
+}
+
+/// Commit one round's candidates: a derived `sameAs` merges in the union-find (never stored);
+/// anything else is canonicalized and inserted into `all` (+ the incremental `rdfs_idx` and
+/// `out`/`inc` adjacency), with genuinely-new facts pushed to `new_delta`. Returns whether any
+/// sameAs MERGE happened. This is the serial commit (also the small-round / no-rayon path).
+#[allow(clippy::too_many_arguments)]
+fn commit_serial(
+    cand: Vec<[Id; 3]>,
+    same_as: Id,
+    v: &Vocab,
+    uf: &mut UnionFind,
+    all: &mut FxHashSet<[Id; 3]>,
+    rdfs_idx: &mut RdfsIndex,
+    need: &FxHashSet<Id>,
+    out: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
+    inc: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
+    new_delta: &mut Vec<[Id; 3]>,
+) -> bool {
+    let mut merged = false;
+    for t in cand {
+        if t[1] == same_as {
+            // A derived sameAs (prp-fp/ifp, cls-maxc2/maxqc, …) → merge, don't store.
+            if uf.union(t[0], t[2]) {
+                merged = true;
+            }
+        } else {
+            let c = [uf.find(t[0]), uf.find(t[1]), uf.find(t[2])];
+            if all.insert(c) {
+                rdfs_idx.insert(c, v);
+                if need.contains(&c[1]) {
+                    out.entry(c[1]).or_default().entry(c[0]).or_default().push(c[2]);
+                    inc.entry(c[1]).or_default().entry(c[2]).or_default().push(c[0]);
+                }
+                new_delta.push(c);
+            }
+        }
+    }
+    merged
+}
+
+/// Parallel one-shot commit for large rounds: par-sort + dedup the candidate pool (the
+/// Δ⋈full ∪ full⋈Δ joins double-count heavily), apply the sameAs merges serially (union-find
+/// mutation), then canonicalize + membership-prefilter the rest in PARALLEL (read-only
+/// `find_ro` / `all.contains`) so only genuinely-new facts reach the serial insert pass.
+///
+/// Equivalent to [`commit_serial`]: candidate ORDER is immaterial (the union-find partition is
+/// order-independent with min-id representatives, and when any merge happens the caller
+/// recanonicalizes `all` and reruns a full round, absorbing any pre-merge canonicalization).
+#[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
+fn commit_candidates(
+    mut cand: Vec<[Id; 3]>,
+    same_as: Id,
+    v: &Vocab,
+    uf: &mut UnionFind,
+    all: &mut FxHashSet<[Id; 3]>,
+    rdfs_idx: &mut RdfsIndex,
+    need: &FxHashSet<Id>,
+    out: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
+    inc: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
+    new_delta: &mut Vec<[Id; 3]>,
+) -> bool {
+    use rayon::prelude::*;
+    if cand.len() < PAR_THRESHOLD {
+        return commit_serial(cand, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta);
+    }
+    let prof = std::env::var("SPARQ_OWL_PROF").is_ok(); // TEMP PROFILING (removed before merge)
+    let n0 = cand.len();
+    let t0 = std::time::Instant::now();
+    cand.par_sort_unstable();
+    cand.dedup();
+    let t1 = std::time::Instant::now();
+    let mut merged = false;
+    for &t in &cand {
+        if t[1] == same_as && uf.union(t[0], t[2]) {
+            merged = true;
+        }
+    }
+    let t2 = std::time::Instant::now();
+    let canon: Vec<[Id; 3]> = cand
+        .par_iter()
+        .filter(|t| t[1] != same_as)
+        .map(|&[s, p, o]| [uf.find_ro(s), uf.find_ro(p), uf.find_ro(o)])
+        .filter(|c| !all.contains(c))
+        .collect();
+    let t3 = std::time::Instant::now();
+    let nc = canon.len();
+    for c in canon {
+        if all.insert(c) {
+            rdfs_idx.insert(c, v);
+            if need.contains(&c[1]) {
+                out.entry(c[1]).or_default().entry(c[0]).or_default().push(c[2]);
+                inc.entry(c[1]).or_default().entry(c[2]).or_default().push(c[0]);
+            }
+            new_delta.push(c);
+        }
+    }
+    if prof {
+        eprintln!(
+            "OWL-PROF-COMMIT cand={n0} dedup={} canon={nc} sort={:.3} union={:.3} prefilter={:.3} insert={:.3}",
+            cand.len(),
+            (t1 - t0).as_secs_f64(),
+            (t2 - t1).as_secs_f64(),
+            (t3 - t2).as_secs_f64(),
+            t3.elapsed().as_secs_f64()
+        );
+    }
+    merged
+}
+#[cfg(not(feature = "parallel"))]
+#[allow(clippy::too_many_arguments)]
+fn commit_candidates(
+    cand: Vec<[Id; 3]>,
+    same_as: Id,
+    v: &Vocab,
+    uf: &mut UnionFind,
+    all: &mut FxHashSet<[Id; 3]>,
+    rdfs_idx: &mut RdfsIndex,
+    need: &FxHashSet<Id>,
+    out: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
+    inc: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
+    new_delta: &mut Vec<[Id; 3]>,
+) -> bool {
+    commit_serial(cand, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta)
 }
 
 /// True if the ontology uses any OWL-specific feature (so it needs the OWL fixpoint). When false,
@@ -379,20 +522,35 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
     let mut inc: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
     build_adjacency(&all, &need, &mut out, &mut inc);
 
+    // TEMP PROFILING (dev only, removed before merge): SPARQ_OWL_PROF=1 prints phase totals.
+    let prof = std::env::var("SPARQ_OWL_PROF").is_ok();
+    let (mut t_schema, mut t_gen, mut t_scm, mut t_fpifp, mut t_class, mut t_commit, mut t_merge) =
+        (0f64, 0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
+    let mut rounds = 0usize;
+    let now = std::time::Instant::now;
+
     loop {
+        rounds += 1;
+        let __t = now();
         let schema = Schema::build(&all, &v);
+        t_schema += __t.elapsed().as_secs_f64();
         let mut cand: Vec<[Id; 3]> = Vec::new();
+        let __t = now();
 
-        // RDFS rules (RL includes them) — SEMI-NAIVE: derive only from `delta` against the
-        // incremental index (RdfsIndex::derive fires each rule in both delta directions), never
-        // re-scanning the whole closure.
-        for &t in &delta {
-            rdfs_idx.derive(t, &v, &mut cand);
-        }
-
-        // Property/class-equivalence rules are single-premise over assertions joined against the
-        // fixed property axioms, so SEMI-NAIVE: drive from `delta` (axiom side never changes).
-        for &[s, p, obj] in &delta {
+        // Delta-driven rules, fused into ONE per-fact emitter so the sweep over `delta` can fan
+        // out over rayon (every index it joins against is read-only here):
+        //  - RDFS rules (RL includes them) — SEMI-NAIVE: derive only from `delta` against the
+        //    incremental index (RdfsIndex::derive fires each rule in both delta directions),
+        //    never re-scanning the whole closure.
+        //  - Property/class-equivalence rules: single-premise over assertions joined against the
+        //    fixed property axioms (axiom side never changes).
+        //  - prp-trp: (x p y),(y p z) ⊢ (x p z) — SEMI-NAIVE, join only the NEW edges in `delta`
+        //    (each against the full incremental adjacency `out`/`inc`), not the whole closure.
+        //    The one-step transitive rule has two delta directions for a new edge (x p y): as the
+        //    FIRST premise it extends forward through out[y]; as the SECOND premise it extends
+        //    backward through inc[x]. (Δ⋈full ∪ full⋈Δ; Δ⋈Δ double-counts but dedup absorbs.)
+        let emit_delta = |[s, p, obj]: [Id; 3], cand: &mut Vec<[Id; 3]>| {
+            rdfs_idx.derive([s, p, obj], &v, cand);
             // (eq-sym / eq-rep are handled by the union-find, not as rules.)
             // --- property axioms on assertion (s p obj) ------------------------------
             if let Some(invs) = ax.inverse.get(&p) {
@@ -418,7 +576,41 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
                 cand.push([s, v.sub_prop, obj]);
                 cand.push([obj, v.sub_prop, s]);
             }
+            // --- prp-trp against the incremental adjacency ---------------------------
+            if ax.transitive.contains(&p) {
+                if let Some(zs) = out.get(&p).and_then(|m| m.get(&obj)) {
+                    cand.extend(zs.iter().map(|&z| [s, p, z]));
+                }
+                if let Some(ws) = inc.get(&p).and_then(|m| m.get(&s)) {
+                    cand.extend(ws.iter().map(|&w| [w, p, obj]));
+                }
+            }
+        };
+        #[cfg(feature = "parallel")]
+        if delta.len() >= PAR_THRESHOLD {
+            use rayon::prelude::*;
+            let mut from_delta = delta
+                .par_iter()
+                .fold(Vec::new, |mut acc, &t| {
+                    emit_delta(t, &mut acc);
+                    acc
+                })
+                .reduce(Vec::new, |mut a, mut b| {
+                    a.append(&mut b);
+                    a
+                });
+            cand.append(&mut from_delta);
+        } else {
+            for &t in &delta {
+                emit_delta(t, &mut cand);
+            }
         }
+        #[cfg(not(feature = "parallel"))]
+        for &t in &delta {
+            emit_delta(t, &mut cand);
+        }
+        t_gen += __t.elapsed().as_secs_f64();
+        let __t = now();
 
         // --- scm-dom1/2, scm-rng1/2: domain/range propagate UP subClassOf and DOWN
         // subPropertyOf (makes the schema-level domain/range closure explicit). ----------
@@ -445,26 +637,13 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
             }
         }
 
-        // --- joins that need an adjacency index (prp-trp / prp-fp / prp-ifp) ----------
+        t_scm += __t.elapsed().as_secs_f64();
+        let __t = now();
+        // --- joins that need an adjacency index (prp-fp / prp-ifp; prp-trp is fused into the
+        // delta sweep above) ----------
         // `out`/`inc` are maintained incrementally (seeded before the loop, delta edges appended
         // at the bottom), so no per-round rebuild here.
         if !need.is_empty() {
-            // prp-trp: (x p y),(y p z) ⊢ (x p z). SEMI-NAIVE — join only the NEW edges in
-            // `delta` (each against the full adjacency), not the whole closure. The one-step
-            // transitive rule has two delta directions for a new edge (x p y): as the FIRST
-            // premise it extends forward through out[y]; as the SECOND premise it extends
-            // backward through inc[x]. (Δ⋈full ∪ full⋈Δ; Δ⋈Δ double-counts but dedup absorbs.)
-            for &[x, p, y] in &delta {
-                if !ax.transitive.contains(&p) {
-                    continue;
-                }
-                if let Some(zs) = out.get(&p).and_then(|m| m.get(&y)) {
-                    cand.extend(zs.iter().map(|&z| [x, p, z]));
-                }
-                if let Some(ws) = inc.get(&p).and_then(|m| m.get(&x)) {
-                    cand.extend(ws.iter().map(|&w| [w, p, y]));
-                }
-            }
             // prp-fp: functional ⊢ the two objects of one subject are sameAs.
             for &p in &ax.functional {
                 if let Some(adj) = out.get(&p) {
@@ -491,6 +670,8 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
             }
         }
 
+        t_fpifp += __t.elapsed().as_secs_f64();
+        let __t = now();
         // --- list/restriction rules (prp-spo2, cls-svf/avf/hv, cls-int, scm-uni) ------
         // Decode RDF lists + restrictions + class lists once, plus the adjacency / type
         // indexes the rules join over. Skipped wholesale when the ontology uses none of these
@@ -744,27 +925,24 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
                 cand.extend(members.iter().map(|&m| [m, v.sub_class, c]));
             }
         } // uses_class_features
+        t_class += __t.elapsed().as_secs_f64();
+        let __t = now();
 
-        let mut merged = false;
         let mut new_delta: Vec<[Id; 3]> = Vec::new();
-        for t in cand {
-            if t[1] == o.same_as {
-                // A derived sameAs (prp-fp/ifp, cls-maxc2/maxqc, …) → merge, don't store.
-                if uf.union(t[0], t[2]) {
-                    merged = true;
-                }
-            } else {
-                let c = [uf.find(t[0]), uf.find(t[1]), uf.find(t[2])];
-                if all.insert(c) {
-                    rdfs_idx.insert(c, &v);
-                    if need.contains(&c[1]) {
-                        out.entry(c[1]).or_default().entry(c[0]).or_default().push(c[2]);
-                        inc.entry(c[1]).or_default().entry(c[2]).or_default().push(c[0]);
-                    }
-                    new_delta.push(c);
-                }
-            }
-        }
+        let merged = commit_candidates(
+            cand,
+            o.same_as,
+            &v,
+            &mut uf,
+            &mut all,
+            &mut rdfs_idx,
+            &need,
+            &mut out,
+            &mut inc,
+            &mut new_delta,
+        );
+        t_commit += __t.elapsed().as_secs_f64();
+        let __t = now();
         if merged {
             // A merge rewrites representatives across `all`; recanonicalize, rebuild the
             // incremental indexes, and run a full (naive) round next so nothing is missed. Merges
@@ -779,65 +957,105 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
                 rdfs_idx.insert(t, &v);
             }
             delta = all.iter().copied().collect();
+            t_merge += __t.elapsed().as_secs_f64();
         } else if new_delta.is_empty() {
             break;
         } else {
             delta = new_delta;
         }
     }
+    if prof {
+        eprintln!(
+            "OWL-PROF rounds={rounds} schema={t_schema:.3} gen={t_gen:.3} scm={t_scm:.3} \
+             fpifp={t_fpifp:.3} class={t_class:.3} commit={t_commit:.3} merge={t_merge:.3}"
+        );
+    }
+    let __t = now();
 
     // EXPAND the owl:sameAs equivalence classes back into the full closure: every canonical
     // triple is re-emitted for each member combination, plus the full sameAs relation. (The
     // memory-efficient canonical form would need a sameAs-aware query engine; we expand so the
-    // existing engine answers queries over any member correctly.)
+    // existing engine answers queries over any member correctly.) When there are NO equivalence
+    // classes (no sameAs anywhere — common), `all` already IS the closure: skip the rebuild,
+    // which is otherwise a full O(|closure|) hash-set reconstruction.
     let classes = uf.classes();
-    let mut closure: FxHashSet<[Id; 3]> = FxHashSet::default();
-    for &[s, p, ob] in &all {
-        let sm = classes
-            .get(&s)
-            .map_or(std::slice::from_ref(&s), |v| v.as_slice());
-        let pm = classes
-            .get(&p)
-            .map_or(std::slice::from_ref(&p), |v| v.as_slice());
-        let om = classes
-            .get(&ob)
-            .map_or(std::slice::from_ref(&ob), |v| v.as_slice());
-        if sm.len() == 1 && pm.len() == 1 && om.len() == 1 {
-            closure.insert([s, p, ob]); // common case: no equalities involved
-        } else {
-            for &s2 in sm {
-                for &p2 in pm {
-                    for &o2 in om {
-                        closure.insert([s2, p2, o2]);
+    if !classes.is_empty() {
+        let mut closure: FxHashSet<[Id; 3]> = FxHashSet::default();
+        for &[s, p, ob] in &all {
+            let sm = classes
+                .get(&s)
+                .map_or(std::slice::from_ref(&s), |v| v.as_slice());
+            let pm = classes
+                .get(&p)
+                .map_or(std::slice::from_ref(&p), |v| v.as_slice());
+            let om = classes
+                .get(&ob)
+                .map_or(std::slice::from_ref(&ob), |v| v.as_slice());
+            if sm.len() == 1 && pm.len() == 1 && om.len() == 1 {
+                closure.insert([s, p, ob]); // common case: no equalities involved
+            } else {
+                for &s2 in sm {
+                    for &p2 in pm {
+                        for &o2 in om {
+                            closure.insert([s2, p2, o2]);
+                        }
                     }
                 }
             }
         }
-    }
-    // Emit the sameAs relation (all ordered pairs within each non-singleton class).
-    for mem in classes.values() {
-        for &a in mem {
-            for &b in mem {
-                if a != b {
-                    closure.insert([a, o.same_as, b]);
+        // Emit the sameAs relation (all ordered pairs within each non-singleton class).
+        for mem in classes.values() {
+            for &a in mem {
+                for &b in mem {
+                    if a != b {
+                        closure.insert([a, o.same_as, b]);
+                    }
                 }
             }
         }
-    }
-    all = closure;
+        all = closure;
+    } // !classes.is_empty()
 
+    if prof {
+        eprintln!("OWL-PROF expand={:.3}", __t.elapsed().as_secs_f64());
+    }
+    let __t = now();
+
+    // Final ordering: original (sorted) then the genuinely-new facts (sorted). The filter and
+    // both sorts parallelize (same one-shot pattern as `rdfs::dedup_derived`).
     let original: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
-    let mut derived: Vec<[Id; 3]> = all
-        .iter()
-        .copied()
-        .filter(|t| !original.contains(t))
-        .collect();
-    derived.sort_unstable();
-    let mut base: Vec<[Id; 3]> = original.into_iter().collect();
-    base.sort_unstable();
+    #[cfg(feature = "parallel")]
+    let (mut base, derived) = {
+        use rayon::prelude::*;
+        let snapshot: Vec<[Id; 3]> = all.iter().copied().collect();
+        let mut derived: Vec<[Id; 3]> = if snapshot.len() >= PAR_THRESHOLD {
+            snapshot.par_iter().copied().filter(|t| !original.contains(t)).collect()
+        } else {
+            snapshot.iter().copied().filter(|t| !original.contains(t)).collect()
+        };
+        derived.par_sort_unstable();
+        let mut base: Vec<[Id; 3]> = original.into_iter().collect();
+        base.par_sort_unstable();
+        (base, derived)
+    };
+    #[cfg(not(feature = "parallel"))]
+    let (mut base, derived) = {
+        let mut derived: Vec<[Id; 3]> = all
+            .iter()
+            .copied()
+            .filter(|t| !original.contains(t))
+            .collect();
+        derived.sort_unstable();
+        let mut base: Vec<[Id; 3]> = original.into_iter().collect();
+        base.sort_unstable();
+        (base, derived)
+    };
     triples.clear();
-    triples.extend(base);
+    triples.append(&mut base);
     triples.extend(derived);
+    if prof {
+        eprintln!("OWL-PROF finalsort={:.3}", __t.elapsed().as_secs_f64());
+    }
     triples.len() - before
 }
 
