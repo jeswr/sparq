@@ -24,4 +24,4 @@ pub mod results;
 pub mod http;
 
 #[cfg(feature = "server")]
-pub use http::{router, AppState};
+pub use http::{harden, router, AppState, ServerConfig};
