@@ -297,9 +297,13 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
         .collect();
 
     // Sequence comparison only when the query orders AND the expected encoding
-    // preserves order (SRX document order, or rs:index in result-set graphs).
-    let compare_ordered =
-        ordered && (result_path.extension().is_some_and(|e| e == "srx") || indexed);
+    // preserves order (SRX/SRJ/TSV document order, or rs:index in result-set
+    // graphs).
+    let compare_ordered = ordered
+        && (result_path
+            .extension()
+            .is_some_and(|e| e == "srx" || e == "srj" || e == "tsv")
+            || indexed);
     match rows_equal(&exp, &act, compare_ordered) {
         Ok(true) => Status::Pass,
         Ok(false) => Status::Fail(format!(

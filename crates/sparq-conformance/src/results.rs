@@ -73,8 +73,9 @@ fn parse_tsv(path: &Path) -> Result<Expected, String> {
     Ok(Expected::Bindings {
         vars,
         rows,
-        indexed: false, // TSV is order-preserving per row sequence, but the
-                        // harness only honours order for SRX/rs:index encodings.
+        // `indexed` flags rs:index graphs only; TSV row order is honoured via
+        // the runner's extension check (srx/srj/tsv are order-preserving).
+        indexed: false,
     })
 }
 
@@ -133,9 +134,11 @@ fn parse_srj(path: &Path) -> Result<Expected, String> {
 fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
     let get = |k: &str| val.get(k).and_then(|s| s.as_str());
     match get("type") {
-        Some("uri") => make_term("uri", None, None, get("value").unwrap_or_default().to_string()),
+        Some("uri") => {
+            make_term("uri", None, None, None, get("value").unwrap_or_default().to_string())
+        }
         Some("bnode") => {
-            make_term("bnode", None, None, get("value").unwrap_or_default().to_string())
+            make_term("bnode", None, None, None, get("value").unwrap_or_default().to_string())
         }
         Some("triple") => {
             let v = val
@@ -162,6 +165,7 @@ fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
         _ => make_term(
             "literal",
             get("xml:lang").map(String::from),
+            get("its:dir").map(String::from),
             get("datatype").map(String::from),
             get("value").unwrap_or_default().to_string(),
         ),
@@ -179,8 +183,10 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
     let mut rows: Vec<Binding> = Vec::new();
     let mut cur_row: Binding = Vec::new();
     let mut cur_var: Option<String> = None;
-    // Value element currently open: (kind, lang, datatype, text).
-    let mut cur_val: Option<(String, Option<String>, Option<String>, String)> = None;
+    // Value element currently open: (kind, lang, its:dir, datatype, text).
+    #[allow(clippy::type_complexity)]
+    let mut cur_val: Option<(String, Option<String>, Option<String>, Option<String>, String)> =
+        None;
     // SPARQL 1.2 `<triple>` nesting: each frame is (active slot, [s, p, o]).
     let mut triple_stack: Vec<(usize, [Option<Term>; 3])> = Vec::new();
     let mut boolean: Option<bool> = None;
@@ -240,9 +246,15 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
                     }
                     "result" => cur_row = Vec::new(),
                     "binding" => cur_var = attr("name"),
-                    "uri" | "bnode" => cur_val = Some((name, None, None, String::new())),
+                    "uri" | "bnode" => cur_val = Some((name, None, None, None, String::new())),
                     "literal" => {
-                        cur_val = Some((name, attr("lang"), attr("datatype"), String::new()))
+                        cur_val = Some((
+                            name,
+                            attr("lang"),
+                            attr("dir"),
+                            attr("datatype"),
+                            String::new(),
+                        ))
                     }
                     "triple" => triple_stack.push((0, [None, None, None])),
                     "subject" => set_slot(&mut triple_stack, 0),
@@ -254,9 +266,9 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
                 // Self-closing value elements (e.g. `<literal/>`) get no End event:
                 // commit the (empty-text) term right away.
                 if is_empty {
-                    if let Some((kind, lang, dt, text)) = cur_val.take() {
+                    if let Some((kind, lang, dir, dt, text)) = cur_val.take() {
                         commit(
-                            make_term(&kind, lang, dt, text)?,
+                            make_term(&kind, lang, dir, dt, text)?,
                             &mut triple_stack,
                             &mut cur_row,
                             &cur_var,
@@ -269,21 +281,21 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
                 if in_boolean {
                     boolean = Some(s.trim() == "true");
                 } else if let Some(v) = cur_val.as_mut() {
-                    v.3.push_str(&s);
+                    v.4.push_str(&s);
                 }
             }
             Event::CData(t) => {
                 if let Some(v) = cur_val.as_mut() {
-                    v.3.push_str(&String::from_utf8_lossy(&t));
+                    v.4.push_str(&String::from_utf8_lossy(&t));
                 }
             }
             Event::End(e) => {
                 let name = e.local_name();
                 match name.as_ref() {
                     b"uri" | b"bnode" | b"literal" => {
-                        if let Some((kind, lang, dt, text)) = cur_val.take() {
+                        if let Some((kind, lang, dir, dt, text)) = cur_val.take() {
                             commit(
-                                make_term(&kind, lang, dt, text)?,
+                                make_term(&kind, lang, dir, dt, text)?,
                                 &mut triple_stack,
                                 &mut cur_row,
                                 &cur_var,
@@ -350,6 +362,7 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
 fn make_term(
     kind: &str,
     lang: Option<String>,
+    dir: Option<String>,
     dt: Option<String>,
     text: String,
 ) -> Result<Term, String> {
@@ -358,9 +371,24 @@ fn make_term(
         "bnode" => Term::BlankNode(oxrdf::BlankNode::new(text).map_err(|e| e.to_string())?),
         _ => {
             if let Some(lang) = lang {
-                Term::Literal(
-                    Literal::new_language_tagged_literal(text, lang).map_err(|e| e.to_string())?,
-                )
+                // SPARQL 1.2: `its:dir` makes this an rdf:dirLangString literal —
+                // direction is part of the term and must survive into comparison.
+                if let Some(dir) = dir {
+                    let direction = match dir.as_str() {
+                        "ltr" => oxrdf::BaseDirection::Ltr,
+                        "rtl" => oxrdf::BaseDirection::Rtl,
+                        other => return Err(format!("invalid base direction: {other}")),
+                    };
+                    Term::Literal(
+                        Literal::new_directional_language_tagged_literal(text, lang, direction)
+                            .map_err(|e| e.to_string())?,
+                    )
+                } else {
+                    Term::Literal(
+                        Literal::new_language_tagged_literal(text, lang)
+                            .map_err(|e| e.to_string())?,
+                    )
+                }
             } else if let Some(dt) = dt {
                 Term::Literal(Literal::new_typed_literal(
                     text,
