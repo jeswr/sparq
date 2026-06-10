@@ -231,3 +231,78 @@ merge conflicts. Each lands via its own PR/commit; the core-cluster owner rebase
 | T10 SPARQL Update | INSERT/DELETE/LOAD/… | store, dict, exec.rs | T1,T3,T4,T9 | no | no — core cluster |
 | T11a HTTP server | Protocol+formats+GSP-read | new sparq-server | — | no | **yes** |
 | T11b update endpoints | Protocol update + GSP-write | sparq-server | T10 | no | gated on T10 |
+
+---
+
+# Roadmap extension (2026-06-10) — user-approved new threads
+
+**Global constraint (hard rule):** every thread below is **opt-in** — a separate crate or a
+non-default cargo feature, following the `sparq-reason` pattern — and must have **zero impact on
+the WASM build's performance or bundle size** (and zero default-engine impact). Enforcement: the
+wasm-build CI job stays mandatory, and T14 adds a tracked **bundle-size metric** to the benchmark
+series so any size regression is visible per commit.
+
+### T13 — W3C conformance suites in CI  *(correctness credibility; independent)*
+Run the official `w3c/rdf-tests` suites (SPARQL 1.1 query evaluation + update + protocol; RDF 1.2
+syntax) against the engine/server. Manifest-driven runner (parse `manifest.ttl`, evaluate, compare
+against expected results with bag/set semantics). Report a pass-rate scoreboard in CI (informational
+first, ratchet to a gate as coverage climbs). New dev-only crate `sparq-conformance`.
+
+### T14 — RDF/JS bindings + npm  *(distribution; wasm)*
+Expose sparq-wasm through the RDF/JS Dataset/Store/Query interfaces; TypeScript types; publish to
+npm. Add a wasm **bundle-size tracking** metric to the benchmark CI. The natural channel for the
+rdfjs ecosystem; benchmark vs Oxigraph-wasm + Comunica.
+
+### T15 — Server production hardening  *(server; independent)*
+Request timeouts + concurrency limits (tower layers), payload/result-size caps, cooperative query
+cancellation (row-budget checks in the executor — the part needing engine support), structured
+errors. Without this a public endpoint is one cross-product away from OOM.
+
+### T16 — CONSTRUCT / DESCRIBE + streaming results  *(engine + server)*
+An RDF-graph result API in the engine; CONSTRUCT/DESCRIBE evaluation; chunked/streaming
+serialization on the server (and lazy SELECT streaming — pairs with the Tier-3 pipelined work).
+
+### T17 — Incremental updates + durability  *(store)*
+Delta-overlay updates (insert/delete sets merged at query time; periodic compaction) replacing the
+O(n) rebuild; write-ahead log + recovery → sparq becomes a database, not just a query engine.
+Readers keep snapshot isolation via the existing Arc-swap design.
+
+### T18 — Incremental reasoning (DRed/counting)  *(sparq-reason)*
+Maintain RDFS/OWL closures incrementally under INSERT/DELETE instead of full re-materialization
+(RDFox's headline capability). Composes with T17; the materialization tests are the oracle.
+
+### T19 — SHACL validation  *(new opt-in crate `sparq-shacl`)*
+Core constraint components + targets evaluated via the query engine; W3C SHACL test suite as the
+gate (fits the T13 conformance harness).
+
+### T20 — Releases & packaging  *(infrastructure)*
+crates.io publication, GitHub Releases wired to dist.yml binaries, Docker image for the server,
+Homebrew formula. Versioning + changelog.
+
+### T21 — Python bindings  *(adoption)*
+pyo3 bindings + an rdflib Store backend; wheels via maturin in CI.
+
+### T22 — EXPLAIN + observability  *(engine + server)*
+Query-plan introspection (EXPLAIN endpoint/CLI flag showing plan choice, cardinality estimates,
+per-operator timings) + Prometheus metrics on the server.
+
+### T23 — Subscription API (SPARQL subscriptions)  *(server; SEPA-inspired)*
+Subscribe to a SPARQL query over WebSocket: initial result, then ADDED/REMOVED binding diffs after
+each committed update. Model on the SEPA member submission (SPARQL 1.1 Subscribe Language /
+Secure Event Protocol) — the spec lineage Blazegraph never shipped. v1: post-commit re-evaluation +
+result diffing (hash rows; correct, simple) with debounce/coalescing; v2: incremental evaluation
+reusing T17's deltas (only re-run when the delta's predicates intersect the query's). Adjacent to
+Solid Notifications channels for that ecosystem.
+
+### T24 — Previously-parked features, now unparked (all opt-in, wasm-neutral)
+- **T24a HDT format** (`sparq-hdt`): read (and later write) HDT archives — HDT's dict+triples
+  layout maps naturally onto sparq's model; big research-community win.
+- **T24b GeoSPARQL** (`sparq-geo`): geometry literals, spatial functions + an R-tree index.
+- **T24c RDF stream processing** (`sparq-stream`): windowed continuous queries (RSP-QL style);
+  shares machinery with T23.
+- **T24d GPU execution** (`sparq-gpu`): the g5 prototype — offload the embarrassingly-parallel
+  inference sweep + large joins; measure PCIe-transfer break-even honestly before keeping.
+
+**Sequencing/dependencies:** T13/T15/T20/T21/T22 are independent → agent-parallel now. T14 after
+the in-flight RDF-star merge (wasm API surface). T16 before T23-CONSTRUCT subscriptions. T17 → T18
+→ T23-v2 chain. T24x each fully independent opt-in crates.
