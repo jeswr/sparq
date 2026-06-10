@@ -169,8 +169,11 @@ pub mod provider {
             if data.len() != texts.len() {
                 return Err(format!("asked for {} embeddings, got {}", texts.len(), data.len()));
             }
-            // The API may return out of order; honor the `index` field.
-            let mut out = vec![Vec::new(); texts.len()];
+            // The API may return out of order; honor the `index` field. Each input
+            // index must appear exactly once — a duplicate or missing index is a
+            // protocol violation (the Embedder contract is one dim()-length vector
+            // per input, in input order).
+            let mut out: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
             for item in data {
                 let i = item["index"].as_u64().ok_or("embedding without `index`")? as usize;
                 let emb = item["embedding"].as_array().ok_or("embedding without `embedding`")?;
@@ -183,9 +186,16 @@ pub mod provider {
                         self.cfg.dim
                     ));
                 }
-                *out.get_mut(i).ok_or(format!("embedding index {i} out of range"))? = v;
+                let slot = out.get_mut(i).ok_or(format!("embedding index {i} out of range"))?;
+                if slot.is_some() {
+                    return Err(format!("duplicate embedding index {i} in response"));
+                }
+                *slot = Some(v);
             }
-            Ok(out)
+            out.into_iter()
+                .enumerate()
+                .map(|(i, v)| v.ok_or(format!("response is missing embedding index {i}")))
+                .collect()
         }
     }
 
@@ -221,6 +231,34 @@ pub mod provider {
             );
             let got = e.embed(&["a", "b"]).unwrap();
             assert_eq!(got, vec![vec![1.0, 0.0], vec![0.5, 0.5]]);
+        }
+
+        /// A duplicate `index` in the response (which also leaves another index
+        /// missing) must be rejected, not silently yield an empty vector.
+        struct DupIndex;
+        impl Transport for DupIndex {
+            fn post_json(&self, _: &str, _: &[(String, String)], _: &str) -> Result<String, String> {
+                Ok(r#"{"data":[
+                    {"index":1,"embedding":[0.5,0.5]},
+                    {"index":1,"embedding":[1.0,0.0]}
+                ]}"#
+                .to_string())
+            }
+        }
+
+        #[test]
+        fn remote_embedder_rejects_duplicate_response_indexes() {
+            let e = RemoteEmbedder::new(
+                ProviderConfig {
+                    endpoint: "https://example.test/v1/embeddings".into(),
+                    model: "m".into(),
+                    api_key: None,
+                    dim: 2,
+                },
+                DupIndex,
+            );
+            let err = e.embed(&["a", "b"]).unwrap_err();
+            assert!(err.contains("duplicate embedding index 1"), "got: {err}");
         }
     }
 }

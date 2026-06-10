@@ -66,6 +66,7 @@ fn build_phase_errors() {
     let mut store = VectorStore::create(&path, 2).unwrap();
     assert!(store.put(1, &[1.0]).is_err(), "dim mismatch rejected");
     assert!(store.put(1, &[1.0, f32::NAN]).is_err(), "non-finite rejected");
+    assert!(store.put(1, &[0.0, 0.0]).is_err(), "all-zero rejected (cosine undefined)");
     store.put(1, &[1.0, 2.0]).unwrap();
     assert!(store.put(1, &[3.0, 4.0]).is_err(), "duplicate id rejected");
     store.finalize().unwrap();
@@ -95,4 +96,52 @@ fn open_rejects_garbage() {
     bytes.extend_from_slice(&[0u8; 12]);
     std::fs::write(&truncated, &bytes).unwrap();
     assert!(VectorStore::open(&truncated).is_err());
+
+    // Overflowing header: count×dim×4 wraps usize — must be rejected by checked
+    // arithmetic, not pass a wrapped size check.
+    let overflow = tmp_path("overflow.spqv");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"SPQV");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // dim
+    bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // count
+    bytes.extend_from_slice(&[0u8; 12]);
+    std::fs::write(&overflow, &bytes).unwrap();
+    assert!(VectorStore::open(&overflow).is_err());
+}
+
+/// Builds a structurally well-sized 1-d, 2-vector file with a caller-chosen id→slot
+/// index section, to exercise `open`'s index validation.
+fn file_with_index(name: &str, index: &[(u32, u32)]) -> std::path::PathBuf {
+    let path = tmp_path(name);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"SPQV");
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // version
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // dim
+    bytes.extend_from_slice(&2u64.to_le_bytes()); // count
+    bytes.extend_from_slice(&[0u8; 12]);
+    bytes.extend_from_slice(&1.0f32.to_le_bytes()); // slot 0
+    bytes.extend_from_slice(&2.0f32.to_le_bytes()); // slot 1
+    for &(id, slot) in index {
+        bytes.extend_from_slice(&id.to_le_bytes());
+        bytes.extend_from_slice(&slot.to_le_bytes());
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    path
+}
+
+#[test]
+fn open_rejects_corrupt_index() {
+    // A valid index round-trips…
+    let good = file_with_index("idx-good.spqv", &[(5, 1), (9, 0)]);
+    let store = VectorStore::open(&good).unwrap();
+    assert_eq!(store.get(5), Some(&[2.0f32][..]));
+    assert_eq!(store.get(9), Some(&[1.0f32][..]));
+
+    // …but unsorted ids, duplicate ids, out-of-range slots and duplicate slots are
+    // all rejected at open (they would otherwise corrupt get/iter).
+    assert!(VectorStore::open(file_with_index("idx-unsorted.spqv", &[(9, 0), (5, 1)])).is_err());
+    assert!(VectorStore::open(file_with_index("idx-dup-id.spqv", &[(5, 0), (5, 1)])).is_err());
+    assert!(VectorStore::open(file_with_index("idx-bad-slot.spqv", &[(5, 0), (9, 7)])).is_err());
+    assert!(VectorStore::open(file_with_index("idx-dup-slot.spqv", &[(5, 0), (9, 0)])).is_err());
 }

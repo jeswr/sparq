@@ -89,5 +89,13 @@ fn exact_and_hnsw_agree_on_tiny_separable_data() {
             assert!(sim > 0.99, "cluster member should be near-identical, got {sim}");
         }
     }
+
+    // An all-zero query has no direction (cosine undefined): both searchers return
+    // empty — and stored vectors can never be zero (VectorStore::put rejects them),
+    // so exact and HNSW agree on every degenerate case.
+    let zero = vec![0.0f32; DIM];
+    assert!(nearest_exact(&store, &zero, 5).is_empty());
+    assert!(index.nearest(&zero, 5).is_empty());
+
     let _ = std::fs::remove_file(&path);
 }

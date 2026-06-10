@@ -8,8 +8,13 @@ Opt-in **embedding storage + nearest-neighbour search** for the
   get embeddings, not every literal): vectors are stored densely in insertion
   slots and a trailing sorted `(id, slot)` index maps term ids to slots, so a
   `get` on an mmap'd store is one binary search plus a contiguous `&[f32]` —
-  no per-vector allocation, near-instant open (the OS pages in the working
-  set).
+  no per-vector allocation. `open` eagerly reads only the header and the
+  index section (validated up front with checked arithmetic, so a corrupt
+  file is rejected rather than panicking later); the vector data — the bulk
+  of the file — is paged in by the OS on access. All-zero vectors are
+  rejected at `put` (cosine is undefined on them), and an all-zero *query*
+  returns no results from both searchers, so exact and HNSW agree even on
+  degenerate inputs.
 - **`nearest_exact` / `VectorIndex`** — exact brute-force cosine top-`k` (the
   ground-truth baseline) and an HNSW approximate index
   ([`instant-distance`](https://crates.io/crates/instant-distance), pure
@@ -78,16 +83,17 @@ Measured: **recall@10 = 0.998–0.999** with the default `HnswConfig`
 
 Measured by `tests/throughput.rs` —
 `cargo test -p sparq-vectors --release --test throughput -- --ignored --nocapture` —
-on an Apple M1, 50 000 × 32-d vectors, k = 10, 200 queries:
+on an Apple M1, 50 000 × 32-d vectors, k = 10, 200 queries. Ranges span two
+runs (quiet vs heavily loaded machine); rerun the harness on your hardware:
 
 | Operation                  | Time            |
 | -------------------------- | --------------- |
-| `put` 50k vectors (RAM)    | 6.6 ms          |
-| `finalize` (write + mmap)  | 7.2 ms          |
-| `open` (mmap, cold handle) | 0.56 ms         |
-| HNSW build (rayon)         | 33 s            |
-| exact top-10 (full scan)   | 6.5 ms/query (≈150 q/s) |
-| HNSW top-10                | 1.6 ms/query (≈630 q/s) |
+| `put` 50k vectors (RAM)    | 7–10 ms         |
+| `finalize` (write + mmap)  | 7–22 ms         |
+| `open` (mmap + index validation) | 0.6–0.9 ms |
+| HNSW build (rayon)         | 33–83 s         |
+| exact top-10 (full scan)   | 6.5–11.8 ms/query (85–150 q/s) |
+| HNSW top-10                | 1.6–2.5 ms/query (400–630 q/s) |
 
 Below ~10⁵ vectors the exact scan is a fine default; the HNSW index pays for
 its build once query volume is high. The index is rebuilt from the mmap'd
@@ -97,7 +103,7 @@ store per process rather than persisted; out-of-core persistent ANN
 ## Tests
 
 - `tests/store.rs` — `.spqv` round-trip, sparse/unsorted ids, build-phase
-  error paths, garbage/truncated-file rejection.
+  error paths, garbage/truncated/overflowing-header/corrupt-index rejection.
 - `tests/recall.rs` — the recall@10 ≥ 0.95 gate plus exact/HNSW agreement on
   separable clusters.
 - `tests/labels.rs` — `embed_labels` predicate priority, literal filtering,

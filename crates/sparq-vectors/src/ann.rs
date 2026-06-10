@@ -9,7 +9,7 @@
 //! **Persistence**: the HNSW index is rebuilt from the mmap'd store on open rather than
 //! persisted. `instant-distance`'s serde persistence would add serde + bincode and a
 //! second versioned artifact; at the scales this v1 targets the rebuild is a one-off
-//! cost per process (~33 s release for 50k×32 on an M1, rayon-parallel — see the README
+//! cost per process (tens of seconds for 50k×32 on an M1, rayon-parallel — see the README
 //! throughput table). Out-of-core persistent ANN (DiskANN-style) is the recorded
 //! follow-up for 10M+ stores.
 
@@ -52,8 +52,14 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 /// **Exact** top-`k` by cosine similarity: a full scan of the store. The ground-truth
 /// baseline the HNSW recall gate measures against, and a fine default below ~10⁵
-/// vectors. Ties break on ascending id, so results are deterministic.
+/// vectors. Ties break on ascending id, so results are deterministic. An all-zero
+/// `query` has no direction (cosine is undefined), so it returns no results — stored
+/// vectors are never zero ([`VectorStore::put`] rejects them), and [`VectorIndex`]
+/// treats a zero query the same way, so exact and HNSW agree on the degenerate case.
 pub fn nearest_exact(store: &VectorStore, query: &[f32], k: usize) -> Vec<(Id, f32)> {
+    if query.iter().all(|&v| v == 0.0) {
+        return Vec::new();
+    }
     let mut scored: Vec<(Id, f32)> =
         store.iter().map(|(id, v)| (id, cosine(query, v))).collect();
     scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -123,13 +129,11 @@ impl Point for NPoint {
     }
 }
 
-fn normalized(v: &[f32]) -> Vec<f32> {
+/// L2-normalizes `v`; `None` for an all-zero vector (no direction). Stored vectors are
+/// never zero ([`VectorStore::put`] rejects them), so `None` only arises for queries.
+fn normalized(v: &[f32]) -> Option<Vec<f32>> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        v.iter().map(|x| x / norm).collect()
-    } else {
-        v.to_vec()
-    }
+    (norm > 0.0).then(|| v.iter().map(|x| x / norm).collect())
 }
 
 /// An in-RAM HNSW index over a [`VectorStore`], for approximate top-`k` at scales
@@ -151,7 +155,8 @@ impl VectorIndex {
         let mut points = Vec::with_capacity(store.len());
         let mut values = Vec::with_capacity(store.len());
         for (id, v) in store.iter() {
-            points.push(NPoint(normalized(v)));
+            let n = normalized(v).expect("stores never hold zero vectors (put rejects them)");
+            points.push(NPoint(n));
             values.push(id);
         }
         let map = Builder::default()
@@ -163,10 +168,12 @@ impl VectorIndex {
     }
 
     /// Approximate top-`k` ids by cosine similarity to `query`, best first.
-    /// `k` is clamped by the index's `ef_search`.
+    /// `k` is clamped by the index's `ef_search`. An all-zero `query` returns no
+    /// results (same contract as [`nearest_exact`]).
     pub fn nearest(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
         assert_eq!(query.len(), self.dim, "query dim {} != store dim {}", query.len(), self.dim);
-        let q = NPoint(normalized(query));
+        let Some(q) = normalized(query) else { return Vec::new() };
+        let q = NPoint(q);
         let mut search = Search::default();
         self.map
             .search(&q, &mut search)
