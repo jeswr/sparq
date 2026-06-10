@@ -3626,23 +3626,40 @@ enum RoundMode {
 }
 
 fn effective_boolean(v: &Value) -> bool {
+    ebv(v) == Some(true)
+}
+
+/// SPARQL effective boolean value, three-valued: `None` is a TYPE ERROR (unbound,
+/// non-literal terms, literals of unknown datatypes, ill-formed boolean / numeric
+/// lexicals) — it matters because `!error` must stay an error, not become true.
+fn ebv(v: &Value) -> Option<bool> {
     match v {
-        Value::Bool(b) => *b,
-        Value::Num(n) => !n.is_zero() && !n.is_nan(),
-        Value::Unbound | Value::Error => false,
+        Value::Bool(b) => Some(*b),
+        Value::Num(n) => Some(!n.is_zero() && !n.is_nan()),
+        Value::Unbound | Value::Error => None,
         Value::Term(Term::Literal(l)) => {
+            if l.language().is_some() {
+                return Some(!l.value().is_empty());
+            }
             let dt = l.datatype().as_str();
             if dt == xsd::BOOLEAN.as_str() {
-                matches!(l.value(), "true" | "1")
+                match l.value() {
+                    "true" | "1" => Some(true),
+                    "false" | "0" => Some(false),
+                    _ => None,
+                }
             } else if is_numeric_dt(l) {
-                l.value().parse::<f64>().map(|n| n != 0.0 && !n.is_nan()).unwrap_or(false)
-            } else if dt == xsd::STRING.as_str() || dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" {
-                !l.value().is_empty()
+                match l.value().parse::<f64>() {
+                    Ok(n) => Some(n != 0.0 && !n.is_nan()),
+                    Err(_) => None,
+                }
+            } else if dt == xsd::STRING.as_str() {
+                Some(!l.value().is_empty())
             } else {
-                false
+                None
             }
         }
-        Value::Term(_) => false,
+        Value::Term(_) => None,
     }
 }
 
@@ -4199,55 +4216,218 @@ fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &E
     })
 }
 
-/// SPARQL `=` (RDFterm-equal) as a three-valued result: `Some(true/false)` for a
-/// decided comparison, `None` for a type error. Value comparison applies first;
-/// otherwise identical RDF terms are equal, an unbound/errored operand is an error,
-/// and any other (recognised) terms are KNOWN to be different -> false. Note this
-/// does NOT type-error on incomparable recognised types (so `!=` across e.g. string
-/// vs number is true), unlike the ordering operators.
+/// Datatype family of a literal-valued operand, the basis for OPEN-WORLD `=` and
+/// the ordering operators: only operands within a comparable family decide; unknown
+/// datatypes and ill-formed lexicals are type errors unless the terms are identical.
+enum LitKind {
+    /// A numeric-datatype operand; `None` = ill-formed lexical.
+    Num(Option<Num>),
+    Str(String),
+    /// A boolean-datatype operand; `None` = ill-formed lexical.
+    Bool(Option<bool>),
+    /// xsd:dateTime / xsd:dateTimeStamp on the timeline; `None` = ill-formed.
+    DateTime(Option<Timeline>),
+    /// xsd:date on the timeline (midnight); `None` = ill-formed.
+    Date(Option<Timeline>),
+    /// Another XSD datatype (time, duration, gYear, …): (datatype IRI, lexical).
+    OtherXsd(String, String),
+    /// Language-tagged: (lowercased tag, value).
+    Lang(String, String),
+    /// A literal of a NON-XSD (unknown) datatype: open-world, never decidable.
+    Unknown,
+    NotLiteral,
+}
+
+fn lit_kind(v: &Value) -> LitKind {
+    match v {
+        Value::Num(n) => LitKind::Num(Some(*n)),
+        Value::Bool(b) => LitKind::Bool(Some(*b)),
+        Value::Term(Term::Literal(l)) => {
+            if let Some(tag) = l.language() {
+                return LitKind::Lang(tag.to_ascii_lowercase(), l.value().to_string());
+            }
+            let dt = l.datatype();
+            if is_numeric_dt(l) {
+                LitKind::Num(Num::of_literal(l))
+            } else if dt == xsd::STRING {
+                LitKind::Str(l.value().to_string())
+            } else if dt == xsd::BOOLEAN {
+                LitKind::Bool(as_bool_val(v))
+            } else if dt == xsd::DATE_TIME || dt == xsd::DATE_TIME_STAMP {
+                LitKind::DateTime(Timeline::parse_datetime(l.value()))
+            } else if dt == xsd::DATE {
+                LitKind::Date(Timeline::parse_date(l.value()))
+            } else if dt.as_str().starts_with("http://www.w3.org/2001/XMLSchema#") {
+                LitKind::OtherXsd(dt.as_str().to_string(), l.value().to_string())
+            } else {
+                LitKind::Unknown
+            }
+        }
+        _ => LitKind::NotLiteral,
+    }
+}
+
+/// An xsd:date / xsd:dateTime VALUE: seconds-from-epoch of the local time, fractional
+/// seconds, and the timezone offset when present. Comparison follows XSD: both-with-tz
+/// and both-without compare directly; MIXED presence is only decidable outside the
+/// ±14h window (inside it the comparison is indeterminate — a SPARQL type error).
+#[derive(Clone, Copy, Debug)]
+struct Timeline {
+    secs: i64,
+    frac: f64,
+    tz: Option<i64>,
+}
+
+impl Timeline {
+    fn parse_datetime(s: &str) -> Option<Timeline> {
+        let (date, rest) = s.split_once('T')?;
+        let (time, tz) = match rest.find(['Z', '+', '-']) {
+            Some(i) => (&rest[..i], Some(parse_tz(&rest[i..])?)),
+            None => (rest, None),
+        };
+        let days = parse_civil_date(date)?;
+        let mut t = time.split(':');
+        let h: i64 = t.next()?.parse().ok()?;
+        let mi: i64 = t.next()?.parse().ok()?;
+        let sec_lex = t.next()?;
+        if t.next().is_some() {
+            return None;
+        }
+        let sec: f64 = sec_lex.parse().ok()?;
+        Some(Timeline {
+            secs: days * 86_400 + h * 3600 + mi * 60 + sec.trunc() as i64,
+            frac: sec.fract(),
+            tz,
+        })
+    }
+
+    fn parse_date(s: &str) -> Option<Timeline> {
+        // The timezone suffix starts after the day: "...-23Z" / "...-23+05:00". A bare
+        // date's own hyphens must not be mistaken for an offset sign, so require the
+        // ":" of "±hh:mm" at the right position.
+        let (date, tz) = if let Some(d) = s.strip_suffix('Z') {
+            (d, Some(0))
+        } else if s.len() > 10 && matches!(s.as_bytes()[s.len() - 6], b'+' | b'-') && s.as_bytes()[s.len() - 3] == b':' {
+            (&s[..s.len() - 6], Some(parse_tz(&s[s.len() - 6..])?))
+        } else {
+            (s, None)
+        };
+        Some(Timeline { secs: parse_civil_date(date)? * 86_400, frac: 0.0, tz })
+    }
+
+    /// The absolute instant (treating an absent timezone as UTC) in seconds.
+    fn instant(&self) -> f64 {
+        (self.secs - self.tz.unwrap_or(0)) as f64 + self.frac
+    }
+
+    fn cmp_tl(a: Timeline, b: Timeline) -> Option<Ordering> {
+        let (ai, bi) = (a.instant(), b.instant());
+        match (a.tz, b.tz) {
+            (Some(_), Some(_)) | (None, None) => ai.partial_cmp(&bi),
+            // Mixed timezone presence: indeterminate inside the ±14h window.
+            _ => {
+                if (ai - bi).abs() > 14.0 * 3600.0 {
+                    ai.partial_cmp(&bi)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// `"Z"` / `"±hh:mm"` -> offset seconds.
+fn parse_tz(tz: &str) -> Option<i64> {
+    if tz == "Z" {
+        return Some(0);
+    }
+    let (sign, hm) = tz.split_at(1);
+    let (h, m) = hm.split_once(':')?;
+    let (h, m): (i64, i64) = (h.parse().ok()?, m.parse().ok()?);
+    let off = h * 3600 + m * 60;
+    Some(if sign == "-" { -off } else { off })
+}
+
+/// `[-]YYYY-MM-DD` -> days from the epoch (Howard Hinnant's days_from_civil).
+fn parse_civil_date(date: &str) -> Option<i64> {
+    let neg = date.starts_with('-');
+    let mut p = date.strip_prefix('-').unwrap_or(date).split('-');
+    let y: i64 = p.next()?.parse().ok()?;
+    let y = if neg { -y } else { y };
+    let m: i64 = p.next()?.parse().ok()?;
+    let d: i64 = p.next()?.parse().ok()?;
+    if p.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// SPARQL `=` (and, negated, `!=`) as a three-valued result: `Some(true/false)` for a
+/// decided comparison, `None` for a type error. OPEN-WORLD rules: identical terms are
+/// equal regardless of datatype; non-literal terms decide by identity; within a
+/// comparable literal family the VALUES decide; a language-tagged literal is KNOWN
+/// different from any non-language literal; everything else — unknown datatypes,
+/// ill-formed lexicals, cross-family pairs — is a TYPE ERROR (`"a"^^ex:dt != "b"^^ex:other`
+/// filters the row out rather than evaluating to true).
 fn values_equal(x: &Value, y: &Value) -> Option<bool> {
-    if let Some(o) = value_compare_strict(x, y) {
-        return Some(o == Ordering::Equal);
+    if matches!(x, Value::Unbound | Value::Error) || matches!(y, Value::Unbound | Value::Error) {
+        return None;
     }
     if let (Value::Term(p), Value::Term(q)) = (x, y) {
         if p == q {
-            return Some(true);
+            return Some(true); // sameTerm decides even for unknown datatypes
+        }
+        if !matches!(p, Term::Literal(_)) || !matches!(q, Term::Literal(_)) {
+            return Some(false); // IRI / bnode / triple term: identity decides
         }
     }
-    if matches!(x, Value::Unbound | Value::Error) || matches!(y, Value::Unbound | Value::Error) {
-        None
-    } else {
-        Some(false)
+    let (ka, kb) = (lit_kind(x), lit_kind(y));
+    if matches!(ka, LitKind::NotLiteral) || matches!(kb, LitKind::NotLiteral) {
+        return Some(false); // computed literal vs non-literal term
+    }
+    use LitKind::*;
+    match (ka, kb) {
+        (Num(Some(a)), Num(Some(b))) => Some(num_compare(a, b) == Some(Ordering::Equal)),
+        (Num(_), Num(_)) => None, // ill-formed numeric (and not sameTerm)
+        (Str(a), Str(b)) => Some(a == b),
+        (Bool(Some(a)), Bool(Some(b))) => Some(a == b),
+        (Bool(_), Bool(_)) => None,
+        (DateTime(Some(a)), DateTime(Some(b))) => Timeline::cmp_tl(a, b).map(|o| o == Ordering::Equal),
+        (Date(Some(a)), Date(Some(b))) => Timeline::cmp_tl(a, b).map(|o| o == Ordering::Equal),
+        (DateTime(_), DateTime(_)) | (Date(_), Date(_)) => None,
+        // date and dateTime values are disjoint -> known different.
+        (DateTime(_), Date(_)) | (Date(_), DateTime(_)) => Some(false),
+        // A language-tagged literal equals only a literal with the same (ci) tag.
+        (Lang(t1, v1), Lang(t2, v2)) => Some(t1 == t2 && v1 == v2),
+        (Lang(..), _) | (_, Lang(..)) => Some(false),
+        (OtherXsd(d1, l1), OtherXsd(d2, l2)) if d1 == d2 => Some(l1 == l2),
+        // Cross-family, unknown datatypes, unknown XSD pairings: open world -> error.
+        _ => None,
     }
 }
 
 /// Strict SPARQL value comparison for relational operators: `Some(ordering)` only
-/// when the operands are value-comparable (both numeric, both boolean, or two
-/// literals of the same datatype and language), else `None` (a type error).
+/// when the operands are value-comparable (same family per [`lit_kind`]), else
+/// `None` (a type error).
 fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
-    // Exact when both operands are integer/decimal literals (no f64 precision loss for
-    // integers > 2^53 or high-precision decimals).
-    if let (Value::Term(p), Value::Term(q)) = (x, y) {
-        if let (Some(la), Some(lb)) = (exact_lexical_of_term(p), exact_lexical_of_term(q)) {
-            if let Some(o) = cmp_decimal_str(&la, &lb) {
-                return Some(o);
-            }
-        }
+    use LitKind::*;
+    match (lit_kind(x), lit_kind(y)) {
+        (Num(Some(a)), Num(Some(b))) => num_compare(a, b),
+        (Str(a), Str(b)) => Some(a.cmp(&b)),
+        (Bool(Some(a)), Bool(Some(b))) => Some(a.cmp(&b)),
+        (DateTime(Some(a)), DateTime(Some(b))) => Timeline::cmp_tl(a, b),
+        (Date(Some(a)), Date(Some(b))) => Timeline::cmp_tl(a, b),
+        // Same language tag: compare values (the suites' lenient extension).
+        (Lang(t1, v1), Lang(t2, v2)) if t1 == t2 => Some(v1.cmp(&v2)),
+        // Same other-XSD datatype: lexical order (correct for time, gYear, …).
+        (OtherXsd(d1, l1), OtherXsd(d2, l2)) if d1 == d2 => Some(l1.cmp(&l2)),
+        _ => None,
     }
-    if let (Some(a), Some(b)) = (strict_num(x), strict_num(y)) {
-        return a.partial_cmp(&b);
-    }
-    if let (Some(a), Some(b)) = (as_bool_val(x), as_bool_val(y)) {
-        return Some(a.cmp(&b));
-    }
-    if let (Value::Term(Term::Literal(a)), Value::Term(Term::Literal(c))) = (x, y) {
-        // Same datatype (and language) literals — incl. xsd:string and dateTime —
-        // compare by code point / lexical value.
-        if a.datatype() == c.datatype() && a.language() == c.language() {
-            return Some(a.value().cmp(c.value()));
-        }
-    }
-    None
 }
 
 /// A numeric value for STRICT comparison — only genuine numeric literals (NOT
@@ -4275,10 +4455,7 @@ fn as_bool_val(v: &Value) -> Option<bool> {
 /// Three-valued effective boolean: `None` is a SPARQL error (type error or unbound),
 /// used by the logical operators to implement SPARQL's 3-valued `&&` / `||` / `!`.
 fn ebv3(v: &Value) -> Option<bool> {
-    match v {
-        Value::Error | Value::Unbound => None,
-        other => Some(effective_boolean(other)),
-    }
+    ebv(v)
 }
 
 fn and3(x: Option<bool>, y: Option<bool>) -> Value {

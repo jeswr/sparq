@@ -763,9 +763,11 @@ mod tests {
         // type error -> excluded.
         assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v > -1) }"), 1);
         assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v < 100) }"), 1);
-        // `=` / `!=` are NOT type errors across recognised types: term-distinct values
-        // are KNOWN different, so `!= 5` is true for all four non-numerics + (50!=5).
-        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v != 5) }"), 5);
+        // OPEN-WORLD `=` / `!=` (W3C open-world suite): an IRI and a language-tagged
+        // literal are KNOWN different from a number (`!=` true), but a plain string or
+        // boolean against a number is a cross-family TYPE ERROR -> excluded. So 50,
+        // ex:thing and "bonjour"@fr pass; "hi" and true error out.
+        assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v != 5) }"), 3);
         assert_eq!(cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v FILTER(?v = 5) }"), 0);
         // Value equality across integer datatypes still holds.
         let g2 = Graph::load_str(
