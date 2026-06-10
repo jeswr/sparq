@@ -1914,6 +1914,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-sim"
+version = "0.1.0"
+dependencies = [
+ "oxrdf",
+ "rustc-hash",
+ "sparq-core",
+]
+
+[[package]]
 name = "sparq-wasm"
 version = "0.1.0"
 dependencies = [

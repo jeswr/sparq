@@ -1,0 +1,27 @@
+[package]
+name = "sparq-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in, training-free structural entity similarity for the sparq RDF engine: signature-based (predicate, neighbor) similarity computed straight from the store's permutation indexes"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# Opt-in structural similarity (T7, GenAI phase 1 — see research/genai-design.md). This
+# is a SEPARATE crate so the core engine carries zero similarity code; it consumes only
+# sparq-core's PUBLIC read API (dict lookups, permutation-index scans, predicate stats).
+# Training-free by design: an entity's "structural signature" is the set of
+# (direction, predicate, neighbor) pairs already materialised in the SPO/OSP indexes,
+# and similarity is a predicate-IDF-weighted Jaccard over those sets — no embeddings,
+# no model, no network; incrementally correct because the indexes ARE the feature store.
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+oxrdf.workspace = true
+rustc-hash.workspace = true

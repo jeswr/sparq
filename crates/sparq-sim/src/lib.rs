@@ -1,0 +1,589 @@
+//! sparq-sim: **training-free structural entity similarity** over a [`sparq_core::Graph`].
+//!
+//! An entity's **structural signature** is the set of `(direction, predicate, neighbor)`
+//! pairs it participates in: outgoing pairs from an SPO range scan (`(e, p, o)` →
+//! `(Out, p, o)`) and incoming pairs from an OSP/OPS range scan (`(s, p, e)` →
+//! `(In, p, s)`). Both are single contiguous index ranges in the store's existing
+//! permutation indexes, so a signature costs `O(log n + degree(e))` — no embeddings, no
+//! training, no extra state; the indexes ARE the feature store, and stay correct under
+//! incremental updates.
+//!
+//! Similarity is a **weighted Jaccard** over two signatures. With predicate-IDF
+//! weighting (the default) each element `(d, p, n)` weighs `1 + ln(|G| / freq(p))`,
+//! using the per-predicate triple counts the store already keeps for its query planner
+//! ([`sparq_core::store::PredStat`]) — so sharing a rare predicate counts for more than
+//! sharing `rdf:type` with half the graph.
+//!
+//! `most_similar` generates candidates **through the indexes, not a full scan**: every
+//! entity sharing a signature element with the query is found by one range scan per
+//! element (POS for "who else has `(p, n)` outgoing", SPO for incoming). See
+//! [`Sim::most_similar`] for the precise complexity and the (documented) frequency-cap
+//! approximation.
+//!
+//! Everything here is read-only over the public `sparq-core` API; the crate is opt-in
+//! and the default engine build does not include it.
+
+use oxrdf::{NamedNode, Term};
+use rustc_hash::FxHashMap;
+use sparq_core::dict::{self, Id, NO_ID};
+use sparq_core::store::Pattern;
+use sparq_core::Graph;
+
+/// What a signature element records about each adjacent triple.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SignatureMode {
+    /// `(direction, predicate, neighbor)` — entities are similar when they relate to the
+    /// SAME neighbors via the same predicates (co-citation / shared-context similarity).
+    /// The default, and the mode `most_similar`'s index-driven candidate generation is
+    /// designed around.
+    #[default]
+    PredicateNeighbor,
+    /// `(direction, predicate)` only — entities are similar when they are USED the same
+    /// way, regardless of which neighbors they touch (predicate-profile / role
+    /// similarity, a characteristic-set overlap).
+    Predicates,
+}
+
+/// Configuration for a [`Sim`] instance.
+#[derive(Clone, Debug)]
+pub struct SimConfig {
+    pub mode: SignatureMode,
+    /// Weigh each element by its predicate's inverse frequency (`1 + ln(|G|/freq(p))`),
+    /// from the store's existing per-predicate stats. `false` = plain Jaccard.
+    pub idf: bool,
+    /// Predicates to EXCLUDE from signatures entirely (e.g. `rdf:type` when evaluating
+    /// against type ground truth, or noisy provenance predicates).
+    pub exclude_predicates: Vec<NamedNode>,
+    /// Candidate-generation cap: signature elements matched by more than this many
+    /// triples are SKIPPED during `most_similar` candidate generation (they are the
+    /// lowest-IDF, least-informative elements, and scanning a hub's full extent would
+    /// dominate the cost). Exact similarity scoring is unaffected; see
+    /// [`Sim::most_similar`] for what this approximates. Default: 10 000.
+    pub max_pair_frequency: usize,
+}
+
+impl Default for SimConfig {
+    fn default() -> Self {
+        SimConfig {
+            mode: SignatureMode::PredicateNeighbor,
+            idf: true,
+            exclude_predicates: Vec::new(),
+            max_pair_frequency: 10_000,
+        }
+    }
+}
+
+/// Edge direction within a signature element (outgoing: the entity is the subject;
+/// incoming: the entity is the object). Direction is part of the element — "directs
+/// films" and "is directed by" are different roles.
+const OUT: u8 = 0;
+const IN: u8 = 1;
+
+/// An entity's structural signature: its sorted, deduplicated `(direction, predicate,
+/// neighbor)` elements (neighbor = [`NO_ID`] in [`SignatureMode::Predicates`]) with one
+/// weight per element. Build via [`Sim::signature`]; compare via [`Sim::similarity`] /
+/// [`Sim::similar_by_signature`].
+#[derive(Clone, Debug)]
+pub struct Signature {
+    /// Sorted ascending, unique.
+    elems: Vec<(u8, Id, Id)>,
+    /// Parallel to `elems`.
+    weights: Vec<f64>,
+    /// Sum of `weights`.
+    total: f64,
+}
+
+impl Signature {
+    pub fn len(&self) -> usize {
+        self.elems.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elems.is_empty()
+    }
+
+    /// The sum of element weights (the weighted-Jaccard denominator contribution).
+    pub fn total_weight(&self) -> f64 {
+        self.total
+    }
+}
+
+/// Structural similarity over a graph. Cheap to construct ([`Sim::new`] resolves the
+/// excluded predicates and snapshots the triple count; predicate frequencies come from
+/// the store's already-computed planner stats, O(1) per lookup).
+pub struct Sim<'g> {
+    graph: &'g Graph,
+    mode: SignatureMode,
+    idf: bool,
+    excluded: Vec<Id>,
+    max_pair_frequency: usize,
+    /// |G| as f64, the IDF numerator.
+    n_triples: f64,
+}
+
+impl<'g> Sim<'g> {
+    /// A `Sim` with the default configuration (predicate+neighbor signatures, pred-IDF
+    /// weighting on).
+    pub fn new(graph: &'g Graph) -> Self {
+        Self::with_config(graph, SimConfig::default())
+    }
+
+    pub fn with_config(graph: &'g Graph, cfg: SimConfig) -> Self {
+        // Resolve excluded predicates to ids once; absent predicates can never occur.
+        let mut excluded: Vec<Id> = cfg
+            .exclude_predicates
+            .iter()
+            .filter_map(|p| graph.id_of(&Term::NamedNode(p.clone())))
+            .collect();
+        excluded.sort_unstable();
+        Sim {
+            graph,
+            mode: cfg.mode,
+            idf: cfg.idf,
+            excluded,
+            max_pair_frequency: cfg.max_pair_frequency,
+            n_triples: graph.len().max(1) as f64,
+        }
+    }
+
+    /// The weight of a signature element with predicate `p`: `1 + ln(|G| / freq(p))`
+    /// when IDF weighting is on (freq from the store's per-predicate planner stats — no
+    /// scan), else 1. Monotonically decreasing in predicate frequency, ≥ 1.
+    #[inline]
+    fn weight(&self, p: Id) -> f64 {
+        if !self.idf {
+            return 1.0;
+        }
+        let freq = self.graph.store.pred_stat(p).map_or(1, |s| s.count.max(1));
+        1.0 + (self.n_triples / freq as f64).ln().max(0.0)
+    }
+
+    #[inline]
+    fn is_excluded(&self, p: Id) -> bool {
+        self.excluded.binary_search(&p).is_ok()
+    }
+
+    /// The structural signature of `term`, or `None` if the term is not in the graph's
+    /// dictionary. `O(log n + degree)`: one SPO range scan (outgoing) + one OSP/OPS
+    /// range scan (incoming).
+    pub fn signature(&self, term: &Term) -> Option<Signature> {
+        let id = self.graph.id_of(term)?;
+        Some(self.signature_of_id(id))
+    }
+
+    fn signature_of_id(&self, id: Id) -> Signature {
+        let mut elems: Vec<(u8, Id, Id)> = Vec::new();
+        let keep_neighbor = self.mode == SignatureMode::PredicateNeighbor;
+        // Outgoing: (id, p, o) — one contiguous SPO range.
+        let scan = self.graph.store.scan(&[Some(id), None, None]);
+        for row in scan.rows.iter() {
+            let [_, p, o] = scan.to_spo(row);
+            if !self.is_excluded(p) {
+                elems.push((OUT, p, if keep_neighbor { o } else { NO_ID }));
+            }
+        }
+        // Incoming: (s, p, id) — one contiguous OSP/OPS range.
+        let scan = self.graph.store.scan(&[None, None, Some(id)]);
+        for row in scan.rows.iter() {
+            let [s, p, _] = scan.to_spo(row);
+            if !self.is_excluded(p) {
+                elems.push((IN, p, if keep_neighbor { s } else { NO_ID }));
+            }
+        }
+        elems.sort_unstable();
+        elems.dedup();
+        let weights: Vec<f64> = elems.iter().map(|&(_, p, _)| self.weight(p)).collect();
+        let total = weights.iter().sum();
+        Signature { elems, weights, total }
+    }
+
+    /// Weighted Jaccard similarity of two terms' structural signatures, in `[0, 1]`:
+    /// `Σ w(e) over A∩B / Σ w(e) over A∪B`. 0 if either term is absent from the graph
+    /// or both signatures are empty; 1 iff the (non-empty) signatures are identical.
+    /// Symmetric. Cost: two signature builds + one sorted merge.
+    pub fn similarity(&self, a: &Term, b: &Term) -> f64 {
+        let (Some(a), Some(b)) = (self.graph.id_of(a), self.graph.id_of(b)) else {
+            return 0.0;
+        };
+        weighted_jaccard(&self.signature_of_id(a), &self.signature_of_id(b))
+    }
+
+    /// The `k` entities most similar to `a` (excluding `a` itself), best first.
+    ///
+    /// **Candidate generation is index-driven, not a full scan.** For each element of
+    /// `a`'s signature, the entities sharing it form one contiguous index range:
+    /// - outgoing `(p, n)`: subjects of `(?, p, n)` — a POS range scan;
+    /// - incoming `(p, n)`: objects of `(n, p, ?)` — an SPO range scan;
+    /// - [`SignatureMode::Predicates`]: the distinct subjects (PSO) / objects (POS) of
+    ///   the predicate's whole block.
+    ///
+    /// Candidates accumulate the weight of each element they share (an upper bound on
+    /// their intersection weight); the top `max(4k, 64)` accumulated candidates are then
+    /// re-scored EXACTLY with [`similarity`](Self::similarity) semantics.
+    ///
+    /// **Complexity** `O( Σ_e min(freq(e), F) )` for generation over the signature's
+    /// elements `e` (each a binary search + contiguous range read), plus
+    /// `O( M · (log n + d̄) )` for re-scoring `M = max(4k, 64)` candidates of average
+    /// degree `d̄`.
+    ///
+    /// **Approximation:** elements matched by more than `max_pair_frequency` (`F`)
+    /// triples are skipped during *generation* (hub elements — the lowest-IDF, least
+    /// informative, and the only unbounded cost). An entity is therefore guaranteed to
+    /// be found iff it shares at least one sub-cap element with `a`; re-scoring is
+    /// always exact over full signatures. Raise the cap (or set it to `usize::MAX`) for
+    /// exact-but-slower candidate generation.
+    pub fn most_similar(&self, a: &Term, k: usize) -> Vec<(Term, f64)> {
+        let Some(id) = self.graph.id_of(a) else {
+            return Vec::new();
+        };
+        let sig = self.signature_of_id(id);
+        self.similar_by_sig(&sig, k, Some(id))
+    }
+
+    /// Like [`most_similar`](Self::most_similar) but for an arbitrary (possibly
+    /// synthetic) signature — e.g. a probe built from a handful of (predicate, neighbor)
+    /// constraints, or a signature carried over from another graph.
+    pub fn similar_by_signature(&self, sig: &Signature, k: usize) -> Vec<(Term, f64)> {
+        self.similar_by_sig(sig, k, None)
+    }
+
+    fn similar_by_sig(&self, sig: &Signature, k: usize, exclude: Option<Id>) -> Vec<(Term, f64)> {
+        if k == 0 || sig.is_empty() {
+            return Vec::new();
+        }
+        // 1. Accumulate, per candidate entity, the total weight of shared elements.
+        let mut acc: FxHashMap<Id, f64> = FxHashMap::default();
+        for (i, &(dir, p, n)) in sig.elems.iter().enumerate() {
+            let w = sig.weights[i];
+            // The candidates sharing this element are one contiguous range; which
+            // pattern (and which row column holds the candidate) depends on the
+            // direction and mode.
+            let (pattern, sorted_by): (Pattern, usize) = match (self.mode, dir) {
+                // Who else has (p, n) outgoing? subjects of (?, p, n) — POS range.
+                (SignatureMode::PredicateNeighbor, OUT) => ([None, Some(p), Some(n)], 0),
+                // Who else has (p, n) incoming? objects of (n, p, ?) — SPO range.
+                (SignatureMode::PredicateNeighbor, _) => ([Some(n), Some(p), None], 2),
+                // Predicate-profile mode: every subject / object of p's block.
+                (SignatureMode::Predicates, OUT) => ([None, Some(p), None], 0),
+                (SignatureMode::Predicates, _) => ([None, Some(p), None], 2),
+            };
+            if self.graph.store.estimate(&pattern) > self.max_pair_frequency {
+                continue; // hub element: skipped (documented approximation)
+            }
+            // `scan_sorted` orders rows by the candidate column, so duplicates (one
+            // subject with many objects under p, etc.) are consecutive — dedup as we go
+            // so each candidate receives this element's weight exactly once.
+            let scan = self.graph.store.scan_sorted(&pattern, sorted_by);
+            let mut last: Option<Id> = None;
+            for row in scan.rows.iter() {
+                let cand = scan.to_spo(row)[sorted_by];
+                if last == Some(cand) {
+                    continue;
+                }
+                last = Some(cand);
+                if Some(cand) == exclude || !self.is_entity(cand) {
+                    continue;
+                }
+                *acc.entry(cand).or_insert(0.0) += w;
+            }
+        }
+        // 2. Keep the strongest M candidates by accumulated (upper-bound) weight …
+        let m = (4 * k).max(64);
+        let mut cands: Vec<(Id, f64)> = acc.into_iter().collect();
+        cands.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        cands.truncate(m);
+        // 3. … and re-score them exactly against the full signature.
+        let mut scored: Vec<(Id, f64)> = cands
+            .into_iter()
+            .map(|(c, _)| (c, weighted_jaccard(sig, &self.signature_of_id(c))))
+            .collect();
+        scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        scored.truncate(k);
+        scored.into_iter().map(|(c, s)| (self.graph.dict.term(c), s)).collect()
+    }
+
+    /// Whether an id names an entity (IRI or blank node) — literals (incl. inline
+    /// integers) are valid signature *neighbors* but are never returned as similar
+    /// *entities*.
+    #[inline]
+    fn is_entity(&self, id: Id) -> bool {
+        if dict::is_inline(id) {
+            return false;
+        }
+        matches!(
+            self.graph.dict.term_parts(id),
+            dict::TermParts::Iri { .. } | dict::TermParts::Blank(_)
+        )
+    }
+}
+
+/// Weighted Jaccard of two prebuilt signatures — `Σ w over A∩B / Σ w over A∪B` by a
+/// single merge of the two sorted element lists; 0 when the union is empty. The
+/// signature-level counterpart of [`Sim::similarity`], for callers that cache
+/// signatures (e.g. all-pairs evaluation).
+pub fn weighted_jaccard(a: &Signature, b: &Signature) -> f64 {
+    let mut inter = 0.0;
+    let (mut i, mut j) = (0, 0);
+    while i < a.elems.len() && j < b.elems.len() {
+        match a.elems[i].cmp(&b.elems[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                inter += a.weights[i];
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    let union = a.total + b.total - inter;
+    if union <= 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn iri(s: &str) -> Term {
+        Term::NamedNode(NamedNode::new(format!("http://ex.org/{s}")).unwrap())
+    }
+
+    fn graph(ttl: &str) -> Graph {
+        let prefix = "@prefix : <http://ex.org/> . @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n";
+        Graph::load_str(&format!("{prefix}{ttl}"), "turtle").unwrap()
+    }
+
+    fn unweighted(g: &Graph) -> Sim<'_> {
+        Sim::with_config(g, SimConfig { idf: false, ..SimConfig::default() })
+    }
+
+    #[test]
+    fn identical_signatures_similarity_one() {
+        let g = graph(":alice :knows :bob ; :worksAt :acme . :carol :knows :bob ; :worksAt :acme .");
+        let sim = unweighted(&g);
+        assert_eq!(sim.similarity(&iri("alice"), &iri("carol")), 1.0);
+        assert_eq!(sim.similarity(&iri("alice"), &iri("alice")), 1.0);
+    }
+
+    #[test]
+    fn plain_jaccard_hand_computed() {
+        // sig(alice) = {(out,knows,bob), (out,knows,eve), (out,worksAt,acme)}  (3 elems)
+        // sig(dave)  = {(out,knows,eve), (out,plays,chess)}                    (2 elems)
+        // intersection = {(out,knows,eve)} = 1; union = 4 → 0.25.
+        let g = graph(":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .");
+        let sim = unweighted(&g);
+        assert_eq!(sim.similarity(&iri("alice"), &iri("dave")), 0.25);
+        // symmetric
+        assert_eq!(sim.similarity(&iri("dave"), &iri("alice")), 0.25);
+    }
+
+    #[test]
+    fn disjoint_signatures_zero_and_absent_term_zero() {
+        let g = graph(":a :p :x . :b :q :y .");
+        let sim = unweighted(&g);
+        assert_eq!(sim.similarity(&iri("a"), &iri("b")), 0.0);
+        assert_eq!(sim.similarity(&iri("a"), &iri("missing")), 0.0);
+        assert!(sim.signature(&iri("missing")).is_none());
+        assert!(sim.most_similar(&iri("missing"), 5).is_empty());
+    }
+
+    #[test]
+    fn incoming_edges_count() {
+        // a and b share ONLY their incoming context: x→a and x→b via :p.
+        let g = graph(":x :p :a . :x :p :b .");
+        let sim = unweighted(&g);
+        // sig(a) = sig(b) = {(in, p, x)} → 1.0
+        assert_eq!(sim.similarity(&iri("a"), &iri("b")), 1.0);
+        // and direction matters: x's OUTGOING (p, a) is not a's INCOMING (p, x)
+        assert_eq!(sim.similarity(&iri("x"), &iri("a")), 0.0);
+    }
+
+    #[test]
+    fn predicates_only_mode_ignores_neighbors() {
+        let g = graph(":a :knows :x ; :worksAt :acme . :b :knows :y ; :worksAt :corp .");
+        let pred_only = Sim::with_config(
+            &g,
+            SimConfig { mode: SignatureMode::Predicates, idf: false, ..SimConfig::default() },
+        );
+        // Same predicate profile, different neighbors.
+        assert_eq!(pred_only.similarity(&iri("a"), &iri("b")), 1.0);
+        let full = unweighted(&g);
+        assert_eq!(full.similarity(&iri("a"), &iri("b")), 0.0);
+    }
+
+    #[test]
+    fn idf_weights_rare_predicates_higher() {
+        // a∩b share the RARE predicate (2 triples); a∩c share the COMMON one (8 triples).
+        // Unweighted the two pairs tie; with IDF the rare-shared pair must win.
+        let mut ttl = String::from(":a :rare :r ; :common :c1 . :b :rare :r . :c :common :c1 .");
+        for i in 0..6 {
+            ttl.push_str(&format!(" :f{i} :common :c{i} ."));
+        }
+        let g = graph(&ttl);
+        let plain = unweighted(&g);
+        let ab = plain.similarity(&iri("a"), &iri("b"));
+        let ac = plain.similarity(&iri("a"), &iri("c"));
+        assert_eq!(ab, ac, "unweighted: both pairs share exactly one of a's two elements");
+        let idf = Sim::new(&g);
+        assert!(
+            idf.similarity(&iri("a"), &iri("b")) > idf.similarity(&iri("a"), &iri("c")),
+            "IDF must favour the rare shared predicate"
+        );
+    }
+
+    #[test]
+    fn excluded_predicates_drop_from_signature() {
+        let g = graph(":a rdf:type :T ; :p :x . :b rdf:type :T ; :q :y .");
+        let rdf_type = NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type").unwrap();
+        let with_type = unweighted(&g);
+        assert!(with_type.similarity(&iri("a"), &iri("b")) > 0.0);
+        let no_type = Sim::with_config(
+            &g,
+            SimConfig { idf: false, exclude_predicates: vec![rdf_type], ..SimConfig::default() },
+        );
+        assert_eq!(no_type.similarity(&iri("a"), &iri("b")), 0.0);
+        assert_eq!(no_type.signature(&iri("a")).unwrap().len(), 1); // just (out, :p, :x)
+    }
+
+    #[test]
+    fn most_similar_ranks_and_excludes_self() {
+        let g = graph(
+            ":a :knows :bob, :eve ; :worksAt :acme .
+             :twin :knows :bob, :eve ; :worksAt :acme .
+             :half :knows :bob ; :worksAt :other .
+             :far  :plays :chess .",
+        );
+        let sim = unweighted(&g);
+        let top = sim.most_similar(&iri("a"), 10);
+        let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
+        assert_eq!(names[0], "<http://ex.org/twin>");
+        assert_eq!(top[0].1, 1.0);
+        assert_eq!(names[1], "<http://ex.org/half>"); // shares 1 elem; union = 3+2-1 → 1/4
+        assert_eq!(top[1].1, 0.25);
+        assert!(!names.iter().any(|n| n == "<http://ex.org/a>"), "self must be excluded");
+        assert!(!names.iter().any(|n| n == "<http://ex.org/far>"), "disjoint entity must not appear");
+        // most_similar scores must agree with the pairwise API.
+        assert_eq!(top[1].1, sim.similarity(&iri("a"), &iri("half")));
+        // … and literals must never be returned as entities.
+        let g2 = graph(":s1 :p \"lit\" . :s2 :p \"lit\" .");
+        let sim2 = unweighted(&g2);
+        assert!(sim2.most_similar(&iri("s1"), 5).iter().all(|(t, _)| !matches!(t, Term::Literal(_))));
+    }
+
+    #[test]
+    fn similar_by_signature_matches_most_similar_modulo_self() {
+        let g = graph(
+            ":a :knows :bob ; :worksAt :acme .
+             :twin :knows :bob ; :worksAt :acme .
+             :half :knows :bob .",
+        );
+        let sim = unweighted(&g);
+        let sig = sim.signature(&iri("a")).unwrap();
+        let by_sig = sim.similar_by_signature(&sig, 10);
+        // Without an exclusion, `a` itself is the best match for its own signature.
+        assert_eq!(by_sig[0].0.to_string(), "<http://ex.org/a>");
+        assert_eq!(by_sig[0].1, 1.0);
+        assert_eq!(by_sig[1].0.to_string(), "<http://ex.org/twin>");
+    }
+
+    #[test]
+    fn hub_elements_are_capped_but_rescore_is_exact() {
+        // (p, hub) is shared by 6 entities; with the cap below 6 the hub element cannot
+        // GENERATE candidates, but :a and :b also share the rare (q, r) pair, so :b is
+        // still found — and its score is the EXACT similarity including the hub element.
+        let mut ttl = String::from(":a :q :r . :b :q :r .");
+        for e in ["a", "b", "c", "d", "e", "f"] {
+            ttl.push_str(&format!(" :{e} :p :hub ."));
+        }
+        let g = graph(&ttl);
+        let sim = Sim::with_config(
+            &g,
+            SimConfig { idf: false, max_pair_frequency: 5, ..SimConfig::default() },
+        );
+        let top = sim.most_similar(&iri("a"), 10);
+        assert_eq!(top[0].0.to_string(), "<http://ex.org/b>");
+        assert_eq!(top[0].1, 1.0, "re-score must include the capped hub element");
+        // c..f share only the capped hub element → not generated (the approximation).
+        assert_eq!(top.len(), 1);
+    }
+
+    /// The accuracy gate on a GENERATED TAXONOMY (research/genai-design.md §4): entities
+    /// of the same class share class-correlated structure plus per-entity noise; with
+    /// rdf:type EXCLUDED from signatures, same-class pairs must rank above cross-class
+    /// pairs with AUC > 0.9.
+    #[test]
+    fn generated_taxonomy_auc_gate() {
+        const CLASSES: usize = 6;
+        const PER_CLASS: usize = 20;
+        // Deterministic xorshift, no rand dep.
+        let mut st = 0xC0FFEE123u64;
+        let mut rng = move |m: usize| {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            (st % m as u64) as usize
+        };
+        let mut ttl = String::new();
+        for c in 0..CLASSES {
+            for e in 0..PER_CLASS {
+                let s = format!(":c{c}e{e}");
+                ttl.push_str(&format!("{s} rdf:type :Class{c} .\n"));
+                // Class-correlated structure: each class has 3 hub neighbors reached via
+                // class-specific predicates (each entity links to 2 of the 3).
+                for h in 0..3 {
+                    if (e + h) % 3 != 0 {
+                        ttl.push_str(&format!("{s} :p{c}_{h} :hub{c}_{h} .\n"));
+                    }
+                }
+                // Noise: 2 random edges via shared predicates to random targets.
+                for _ in 0..2 {
+                    ttl.push_str(&format!("{s} :noise{} :n{} .\n", rng(4), rng(40)));
+                }
+            }
+        }
+        let g = graph(&ttl);
+        let rdf_type = NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type").unwrap();
+        let sim = Sim::with_config(
+            &g,
+            SimConfig { exclude_predicates: vec![rdf_type], ..SimConfig::default() },
+        );
+        // All pairwise similarities over the population, labelled by same-class.
+        let entities: Vec<(usize, Term)> = (0..CLASSES)
+            .flat_map(|c| (0..PER_CLASS).map(move |e| (c, iri(&format!("c{c}e{e}")))))
+            .collect();
+        let sigs: Vec<(usize, Signature)> =
+            entities.iter().map(|(c, t)| (*c, sim.signature(t).unwrap())).collect();
+        let mut pos: Vec<f64> = Vec::new();
+        let mut neg: Vec<f64> = Vec::new();
+        for i in 0..sigs.len() {
+            for j in (i + 1)..sigs.len() {
+                let s = weighted_jaccard(&sigs[i].1, &sigs[j].1);
+                if sigs[i].0 == sigs[j].0 {
+                    pos.push(s);
+                } else {
+                    neg.push(s);
+                }
+            }
+        }
+        let auc = auc(&pos, &neg);
+        assert!(auc > 0.9, "taxonomy AUC gate failed: {auc:.4}");
+    }
+
+    /// AUC by pairwise comparison (ties count ½) — exact, fine at test scale.
+    fn auc(pos: &[f64], neg: &[f64]) -> f64 {
+        let mut wins = 0.0;
+        for &p in pos {
+            for &n in neg {
+                if p > n {
+                    wins += 1.0;
+                } else if p == n {
+                    wins += 0.5;
+                }
+            }
+        }
+        wins / (pos.len() as f64 * neg.len() as f64)
+    }
+}
