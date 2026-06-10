@@ -204,9 +204,14 @@ pub struct NlqConfig {
     /// failure sends the error + failed query back to the LLM). The design doc caps
     /// this at 3; the default is the leanest loop that still self-corrects.
     pub max_repair_rounds: usize,
-    /// Resource budget for query execution (deadline / max materialised rows) —
-    /// LLM-generated queries are untrusted input to the engine.
-    pub budget: QueryBudget,
+    /// Wall-clock cap on ONE query execution (turned into a [`QueryBudget`] deadline
+    /// at execution time, so the config is reusable across `ask` calls). LLM-generated
+    /// queries are untrusted input to the engine — the default is bounded (10 s);
+    /// set `None` only to opt out explicitly. Native only (wasm has no `Instant`).
+    pub exec_timeout: Option<std::time::Duration>,
+    /// Cap on the rows of any materialised (intermediate or final) result — the
+    /// other half of the budget. Default: 1,000,000. `None` opts out.
+    pub max_rows: Option<usize>,
     /// Few-shot examples. The defaults are schema-agnostic (rdf:type / rdfs:label
     /// only) so one prompt template serves any dataset.
     pub examples: Vec<Example>,
@@ -217,7 +222,8 @@ impl Default for NlqConfig {
         Self {
             summary_budget_chars: 4000,
             max_repair_rounds: 1,
-            budget: QueryBudget::unlimited(),
+            exec_timeout: Some(std::time::Duration::from_secs(10)),
+            max_rows: Some(1_000_000),
             examples: vec![
                 Example {
                     question: "How many entities of each type are there?".into(),
@@ -389,6 +395,21 @@ impl<'g> Nlq<'g> {
         )
     }
 
+    /// The per-execution [`QueryBudget`]: built fresh at execution time so the
+    /// configured timeout is a per-query duration, not a fixed absolute deadline.
+    fn execution_budget(&self) -> QueryBudget {
+        let mut b = QueryBudget::unlimited();
+        b.max_rows = self.config.max_rows;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            b.deadline = self
+                .config
+                .exec_timeout
+                .map(|d| std::time::Instant::now() + d);
+        }
+        b
+    }
+
     /// Runs the loop: ground → generate → validate → execute, with up to
     /// `max_repair_rounds` repair rounds on parse or execution failure.
     pub fn ask(&self, question: &str) -> Result<Answer, NlqError> {
@@ -424,23 +445,25 @@ impl<'g> Nlq<'g> {
                         }
                         // EXECUTE under the budget. Engine-side failures (unsupported
                         // form, budget trip) are also repairable signals.
-                        Ok(_) => match query_with_budget(self.graph, &q, &self.config.budget) {
-                            Err(e) => (Some(q), Some((e.clone(), TurnOutcome::ExecError(e)))),
-                            Ok(result) => {
-                                transcript.push(Turn {
-                                    prompt,
-                                    completion,
-                                    sparql: Some(q.clone()),
-                                    outcome: TurnOutcome::Ok { rows: result.len() },
-                                });
-                                return Ok(Answer {
-                                    sparql: q,
-                                    result,
-                                    repairs: round,
-                                    transcript,
-                                });
+                        Ok(_) => {
+                            match query_with_budget(self.graph, &q, &self.execution_budget()) {
+                                Err(e) => (Some(q), Some((e.clone(), TurnOutcome::ExecError(e)))),
+                                Ok(result) => {
+                                    transcript.push(Turn {
+                                        prompt,
+                                        completion,
+                                        sparql: Some(q.clone()),
+                                        outcome: TurnOutcome::Ok { rows: result.len() },
+                                    });
+                                    return Ok(Answer {
+                                        sparql: q,
+                                        result,
+                                        repairs: round,
+                                        transcript,
+                                    });
+                                }
                             }
-                        },
+                        }
                     },
                 };
 
@@ -648,10 +671,7 @@ mod tests {
     fn budget_trips_surface_as_exec_errors() {
         let g = tiny_graph();
         let cfg = NlqConfig {
-            budget: QueryBudget {
-                max_rows: Some(1),
-                ..QueryBudget::unlimited()
-            },
+            max_rows: Some(1),
             max_repair_rounds: 0,
             ..NlqConfig::default()
         };

@@ -1,5 +1,13 @@
 # TODO
 
+## sparq-engine: `#[derive(Debug)]` on `QueryResult`
+
+`sparq_engine::QueryResult` does not implement `Debug` (its fields — `Vec<Variable>`,
+`Vec<Vec<Option<Term>>>` — all do). Downstream crates that embed it in their own
+types (`sparq-nlq`'s `Answer`) have to hand-write a summarising `Debug` impl instead
+of deriving. One-line, zero-cost derive; recorded here rather than patched in place
+because GenAI crates do not modify core crates (research/genai-design.md §0).
+
 ## sparq-core: cheap graph snapshot API (would simplify the server's update path)
 
 The server's SPARQL Update path (T17 wiring, `crates/sparq-server/src/http.rs::Writer`)

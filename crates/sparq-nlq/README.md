@@ -40,7 +40,9 @@ crate; the default build does not compile it, and the engine carries zero GenAI 
   repair round gets a real parser error message. Execution failures (unsupported
   forms, `QueryBudget` trips) are repair signals too.
 - **Execution** always runs under a [`QueryBudget`] — LLM-generated queries are
-  untrusted input.
+  untrusted input. The default is **bounded** (10 s wall clock, 1M materialised
+  rows); opting out requires setting `exec_timeout` / `max_rows` to `None`
+  explicitly.
 - The returned `Answer` carries the final query, the materialised result, the repair
   count and the **full transcript** (every prompt/completion with its outcome) — the
   transcript is the provenance of the answer.

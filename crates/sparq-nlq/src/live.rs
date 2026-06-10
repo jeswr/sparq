@@ -23,6 +23,10 @@ pub struct AnthropicLlm {
     client: reqwest::blocking::Client,
 }
 
+/// Hard wall-clock cap on one API round trip — `Llm::complete` must never hang the
+/// loop on a stalled connection.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl AnthropicLlm {
     /// Default model, key from `ANTHROPIC_API_KEY`.
     pub fn from_env() -> Result<Self, String> {
@@ -33,11 +37,15 @@ impl AnthropicLlm {
     pub fn with_model(model: impl Into<String>) -> Result<Self, String> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| "ANTHROPIC_API_KEY is not set".to_string())?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| format!("cannot build HTTP client: {e}"))?;
         Ok(Self {
             api_key,
             model: model.into(),
             max_tokens: 2048,
-            client: reqwest::blocking::Client::new(),
+            client,
         })
     }
 }
