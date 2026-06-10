@@ -28,12 +28,21 @@ required-features = ["server"]
 # pure serializer library (XML/CSV/TSV) without dragging in the runtime.
 default = ["server"]
 server = ["dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json"]
+# `geo` (default OFF) installs sparq-geo's geof: extension-function registry
+# (GeoSPARQL distance / sf* relations / envelope / boundary / convexHull) on the
+# query, update and subscription paths — see docs/extension-functions.md. Off, the
+# server compiles without sparq-geo or the georust stack and every engine call is
+# the registry-free one (zero cost, byte-identical behaviour).
+geo = ["dep:sparq-geo"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
+# Behind the opt-in `geo` feature only (geof_registry; its own default `engine`
+# feature is this same sparq-engine, so the graph gains just the georust stack).
+sparq-geo = { path = "../sparq-geo", version = "0.1.0", optional = true }
 oxrdf.workspace = true
 # Re-parse to classify the SPARQL query form (SELECT/ASK/CONSTRUCT/DESCRIBE) before
 # dispatching to the engine — the engine's public API only runs SELECT.

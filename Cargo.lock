@@ -2341,6 +2341,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-geo",
  "tokio",
  "tokio-tungstenite",
  "tower",

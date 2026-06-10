@@ -393,7 +393,9 @@ fn budget_error(e: &str, config: &ServerConfig) -> String {
 /// deterministic key order, so equal rows always serialise identically. Duplicate rows
 /// collapse (set semantics — see module docs).
 fn eval_rows(graph: &Graph, query: &str, budget: &QueryBudget) -> Result<(Vec<String>, HashMap<String, Value>), String> {
-    let r = sparq_engine::query_with_budget(graph, query, budget)?;
+    // Extension functions (the `geo` feature's geof: registry) apply to
+    // subscription SELECTs exactly as to /sparql ones.
+    let r = crate::http::with_extensions(|| sparq_engine::query_with_budget(graph, query, budget))?;
     let vars: Vec<String> = r.vars.iter().map(|v| v.as_str().to_string()).collect();
     let mut rows = HashMap::with_capacity(r.rows.len());
     for row in &r.rows {
