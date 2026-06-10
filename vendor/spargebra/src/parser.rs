@@ -691,6 +691,11 @@ fn build_select(
                             variable: variable.clone(),
                             expression,
                         };
+                        // SPARQL 1.2 11.4 third condition: "the variable is introduced
+                        // by an earlier SELECT expression in the same SELECT clause" —
+                        // later select expressions may use this alias (and the override
+                        // check above keeps rebinding it an error).
+                        visible.insert(variable.clone());
                         variable
                     }
                 };

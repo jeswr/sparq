@@ -67,3 +67,22 @@ this vendored tree once the fixes land in a released spargebra.
   IRIREF terminal exactly as tokenized ([172]). The guard also covers `<=`
   (`<=?a>` is likewise the longer IRIREF token), keeping tokenization
   consistent.
+
+## 4. Accept reuse of an earlier SELECT-expression variable in an aggregating query
+
+- **Spec**: SPARQL 1.2 Query §11.4 *Aggregate Projection Restrictions* — every
+  variable occurrence in projection/SELECT expressions of a grouping query
+  level must satisfy one of three conditions, the third being *"the variable
+  is introduced by an earlier SELECT expression in the same SELECT clause"*.
+  spargebra validated SELECT expressions in aggregating queries against only
+  the WHERE-visible variables, so the legal
+  `SELECT (COUNT(?v) AS ?count) (?count + 1 AS ?countPlusOne)` was rejected
+  with *"The SELECT contains an expression with a variable that is unbound"*.
+- **Test**: `sparql12/grouping#select-variable-reuse` (*Reuse of SELECT
+  variable in an aggregating query*, QueryEvaluationTest) — failed at parse
+  before, passes end-to-end after.
+- **Fix**: `build_select` adds each select-expression alias to the visible set
+  after emitting its `Extend`, so later expressions in the same SELECT clause
+  see it. The "SELECT overrides an existing variable" check reads the same
+  set, so rebinding an alias stays an error (matching §18.3.4.4: *"var must
+  not appear in VS nor in PV"*).
