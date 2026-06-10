@@ -784,7 +784,7 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
                     // Σ over the join var) and LIMIT/OFFSET — so `COUNT(*)` over an OPTIONAL
                     // no longer materialises the whole left-join just to count it.
                     if let Some(n) = try_count(graph, inner) {
-                        let id = value_to_id(graph, local, &Value::Num(n as f64));
+                        let id = value_to_id(graph, local, &Value::Num(Num::Int(n as i64)));
                         let row: Row = std::iter::once(id).collect();
                         return Ok(Bindings { vars: vec![av.clone()], rows: vec![row], sorted_by: None });
                     }
@@ -1099,12 +1099,16 @@ fn eval_graph_named(
             let target = Term::NamedNode(n.clone());
             match graph.named.iter().find(|(t, _)| *t == target) {
                 Some((_, sub)) => eval_translated(graph, local, sub, inner),
-                // The named graph is absent → no solutions, but with `inner`'s variable schema
-                // (evaluate against an empty graph to get the right columns).
+                // The named graph is absent → ZERO solutions (even for `GRAPH <g> {}`,
+                // which must NOT yield the unit row), but with `inner`'s variable
+                // schema — evaluate against an empty graph for the columns, then drop
+                // any rows (an empty group pattern would otherwise produce one).
                 None => {
                     let empty = Graph::load_str("", "ntriples").map_err(|e| e.to_string())?;
                     let mut el = LocalVocab::default();
-                    eval_graph_pattern(&empty, &mut el, inner)
+                    let mut b = eval_graph_pattern(&empty, &mut el, inner)?;
+                    b.rows.clear();
+                    Ok(b)
                 }
             }
         }
@@ -1113,9 +1117,28 @@ fn eval_graph_named(
             for (gname, sub) in &graph.named {
                 let mut b = eval_translated(graph, local, sub, inner)?;
                 let gid = value_to_id(graph, local, &Value::Term(gname.clone()));
-                b.vars.insert(0, v.clone());
-                for row in &mut b.rows {
-                    row.insert(0, gid);
+                match b.col(v) {
+                    // The inner pattern itself binds the graph variable (e.g.
+                    // `GRAPH ?g { ?g :p ?o }` or a VALUES/OPTIONAL inside): JOIN with
+                    // the active graph name — keep rows already bound to this graph,
+                    // fill unbound cells, drop conflicting rows.
+                    Some(c) => {
+                        b.rows.retain_mut(|row| {
+                            if row[c] == NO_ID {
+                                row[c] = gid;
+                                true
+                            } else {
+                                row[c] == gid
+                            }
+                        });
+                        b.sorted_by = None;
+                    }
+                    None => {
+                        b.vars.insert(0, v.clone());
+                        for row in &mut b.rows {
+                            row.insert(0, gid);
+                        }
+                    }
                 }
                 acc = Some(match acc {
                     None => b,
@@ -1178,7 +1201,7 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
             Ok(minus_bindings(l, r))
         }
         GraphPattern::Values { variables, bindings } => Ok(values_bindings(graph, local, variables, bindings)),
-        GraphPattern::Path { subject, path, object } => eval_path(graph, subject, path, object),
+        GraphPattern::Path { subject, path, object } => eval_path(graph, local, subject, path, object),
         GraphPattern::Graph { name, inner } => eval_graph_named(graph, local, name, inner),
         GraphPattern::Project { .. }
         | GraphPattern::Distinct { .. }
@@ -1193,9 +1216,60 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
 fn is_conjunctive(p: &GraphPattern) -> bool {
     match p {
         GraphPattern::Bgp { .. } => true,
-        GraphPattern::Filter { inner, .. } => is_conjunctive(inner),
+        // A FILTER may only be flattened into the enclosing conjunction when every
+        // variable it mentions is bound INSIDE its own group — otherwise hoisting it
+        // changes scope (`{ :x :p ?v . { FILTER(?v = 1) } }` must see ?v UNBOUND).
+        // EXISTS is conservatively never flattened (it evaluates against the group's
+        // in-scope bindings).
+        GraphPattern::Filter { inner, expr } => {
+            if !is_conjunctive(inner) {
+                return false;
+            }
+            let mut inner_vars: FxHashSet<Variable> = FxHashSet::default();
+            collect_pattern_vars(inner, &mut inner_vars);
+            filter_scope_ok(expr, &inner_vars)
+        }
         GraphPattern::Join { left, right } => is_conjunctive(left) && is_conjunctive(right),
         _ => false,
+    }
+}
+
+/// All variables bound by the triple patterns of a conjunctive subtree.
+fn collect_pattern_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
+    match p {
+        GraphPattern::Bgp { patterns } => {
+            for tp in patterns {
+                for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)].into_iter().flatten() {
+                    out.insert(v);
+                }
+            }
+        }
+        GraphPattern::Filter { inner, .. } => collect_pattern_vars(inner, out),
+        GraphPattern::Join { left, right } => {
+            collect_pattern_vars(left, out);
+            collect_pattern_vars(right, out);
+        }
+        _ => {}
+    }
+}
+
+/// `true` if a filter expression's variables are all in `bound` (and it has no
+/// EXISTS), so applying it at the top of the flattened conjunction is equivalent.
+fn filter_scope_ok(e: &Expression, bound: &FxHashSet<Variable>) -> bool {
+    use Expression::*;
+    match e {
+        NamedNode(_) | Literal(_) => true,
+        Variable(v) | Bound(v) => bound.contains(v),
+        UnaryPlus(a) | UnaryMinus(a) | Not(a) => filter_scope_ok(a, bound),
+        And(a, b) | Or(a, b) | Equal(a, b) | SameTerm(a, b) | Greater(a, b) | GreaterOrEqual(a, b) | Less(a, b)
+        | LessOrEqual(a, b) | Add(a, b) | Subtract(a, b) | Multiply(a, b) | Divide(a, b) => {
+            filter_scope_ok(a, bound) && filter_scope_ok(b, bound)
+        }
+        In(a, list) => filter_scope_ok(a, bound) && list.iter().all(|c| filter_scope_ok(c, bound)),
+        If(c, t, f) => filter_scope_ok(c, bound) && filter_scope_ok(t, bound) && filter_scope_ok(f, bound),
+        Coalesce(es) => es.iter().all(|c| filter_scope_ok(c, bound)),
+        FunctionCall(_, args) => args.iter().all(|c| filter_scope_ok(c, bound)),
+        Exists(_) => false,
     }
 }
 
@@ -1361,6 +1435,7 @@ fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Op
 /// optimisation can push a bound endpoint into a directed traversal).
 fn eval_path(
     graph: &Graph,
+    local: &mut LocalVocab,
     subject: &TermPattern,
     path: &PropertyPathExpression,
     object: &TermPattern,
@@ -1368,19 +1443,27 @@ fn eval_path(
     enum End {
         Var(Variable),
         Bound(Id),
-        Unsat,
+        /// A concrete term ABSENT from the dictionary — unsatisfiable for ordinary
+        /// paths, but still the start of a zero-length solution for `p*` / `p?`.
+        Missing(Term),
     }
-    let resolve = |t: &TermPattern| -> End {
-        match t {
+    let resolve = |t: &TermPattern| -> Result<End, String> {
+        Ok(match t {
             TermPattern::Variable(v) => End::Var(v.clone()),
             TermPattern::BlankNode(b) => End::Var(bnode_var(b)),
-            other => match term_pattern_to_term(other).ok().and_then(|t| graph.id_of(&t)) {
-                Some(id) => End::Bound(id),
-                None => End::Unsat,
-            },
-        }
+            other => {
+                let term = term_pattern_to_term(other)?;
+                match graph.id_of(&term) {
+                    Some(id) => End::Bound(id),
+                    None => End::Missing(term),
+                }
+            }
+        })
     };
-    let (s_end, o_end) = (resolve(subject), resolve(object));
+    let (s_end, o_end) = (resolve(subject)?, resolve(object)?);
+    // Paths that admit the ZERO-LENGTH solution connect every term to itself — even
+    // terms that do not occur in the data (a constant endpoint on an empty graph).
+    let zero_len = matches!(path, PropertyPathExpression::ZeroOrMore(_) | PropertyPathExpression::ZeroOrOne(_));
 
     let s_var = if let End::Var(v) = &s_end { Some(v.clone()) } else { None };
     let o_var = if let End::Var(v) = &o_end { Some(v.clone()) } else { None };
@@ -1394,8 +1477,9 @@ fn eval_path(
             vars.push(v.clone());
         }
     }
-    // A concrete-but-absent endpoint makes the whole pattern unsatisfiable.
-    if matches!(s_end, End::Unsat) || matches!(o_end, End::Unsat) {
+    // A concrete-but-absent endpoint makes the pattern unsatisfiable — unless the
+    // path has a zero-length solution, handled below.
+    if !zero_len && (matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
         return Ok(Bindings::unsorted(vars, Vec::new()));
     }
     let s_bound = if let End::Bound(id) = &s_end { Some(*id) } else { None };
@@ -1403,19 +1487,46 @@ fn eval_path(
 
     let mut rows: Vec<Row> = Vec::new();
     let mut seen: FxHashSet<Row> = FxHashSet::default();
-    for (s, o) in path_pairs(graph, path)? {
-        if s_bound.is_some_and(|b| s != b) || o_bound.is_some_and(|b| o != b) || (same_var && s != o) {
-            continue;
+    if !(matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
+        for (s, o) in path_pairs(graph, path)? {
+            if s_bound.is_some_and(|b| s != b) || o_bound.is_some_and(|b| o != b) || (same_var && s != o) {
+                continue;
+            }
+            let mut row: Row = SmallVec::new();
+            if s_var.is_some() {
+                row.push(s);
+            }
+            if o_var.is_some() && !same_var {
+                row.push(o);
+            }
+            if seen.insert(row.clone()) {
+                rows.push(row); // property-path solutions are a set (DISTINCT)
+            }
         }
-        let mut row: Row = SmallVec::new();
-        if s_var.is_some() {
-            row.push(s);
-        }
-        if o_var.is_some() && !same_var {
-            row.push(o);
-        }
-        if seen.insert(row.clone()) {
-            rows.push(row); // property-path solutions are a set (DISTINCT)
+    }
+    if zero_len {
+        // The zero-length solution for a CONSTANT endpoint: `<s> p* ?x` yields
+        // {?x -> <s>} even on the empty graph (interning the absent term locally);
+        // `<s> p* <s>` yields the unit solution. (Variable–variable zero-length
+        // solutions over the graph's nodes come from `path_pairs` above.)
+        let const_id = |e: &End, local: &mut LocalVocab| match e {
+            End::Bound(id) => Some(*id),
+            End::Missing(t) => Some(local.intern(t.clone())),
+            End::Var(_) => None,
+        };
+        let zrow: Option<Row> = match (&s_end, &o_end) {
+            (End::Var(_), End::Var(_)) => None,
+            (s_c, End::Var(_)) => const_id(s_c, local).map(|id| std::iter::once(id).collect()),
+            (End::Var(_), o_c) => const_id(o_c, local).map(|id| std::iter::once(id).collect()),
+            (s_c, o_c) => {
+                let (a, b) = (const_id(s_c, local), const_id(o_c, local));
+                (a == b).then(SmallVec::new)
+            }
+        };
+        if let Some(row) = zrow {
+            if seen.insert(row.clone()) {
+                rows.push(row);
+            }
         }
     }
     Ok(Bindings::unsorted(vars, rows))
@@ -3040,14 +3151,19 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
             } else {
                 members.len()
             };
-            Ok(Value::Num(n as f64))
+            Ok(Value::Num(Num::Int(n as i64)))
         }
         AggregateExpression::FunctionCall { name, expr, distinct } => {
-            // Collect the per-member values of `expr`.
+            // Collect the per-member values of `expr`. An unbound / errored member is
+            // recorded: SUM and AVG must ERROR on it (yielding an unbound aggregate),
+            // while COUNT/MIN/MAX/SAMPLE/GROUP_CONCAT skip it.
             let mut vals: Vec<Value> = Vec::with_capacity(members.len());
+            let mut errored = false;
             for &ri in members {
                 let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
-                if !matches!(v, Value::Unbound | Value::Error) {
+                if matches!(v, Value::Unbound | Value::Error) {
+                    errored = true;
+                } else {
                     vals.push(v);
                 }
             }
@@ -3055,14 +3171,25 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                 dedup_values(&mut vals);
             }
             match name {
-                AggregateFunction::Count => Ok(Value::Num(vals.len() as f64)),
-                AggregateFunction::Sum => Ok(Value::Num(vals.iter().filter_map(as_num).sum())),
+                AggregateFunction::Count => Ok(Value::Num(Num::Int(vals.len() as i64))),
+                // SUM/AVG with operand-type promotion: int+int stays integer, decimals
+                // stay decimal (exact), floats/doubles promote. Any non-numeric or
+                // errored member makes the whole aggregate a type error (-> unbound).
+                AggregateFunction::Sum => Ok(sum_values(&vals, errored).map(Num::canonical_term).unwrap_or(Value::Error)),
                 AggregateFunction::Avg => {
-                    let nums: Vec<f64> = vals.iter().filter_map(as_num).collect();
-                    Ok(if nums.is_empty() { Value::Num(0.0) } else { Value::Num(nums.iter().sum::<f64>() / nums.len() as f64) })
+                    if vals.is_empty() && !errored {
+                        return Ok(Value::Num(Num::Int(0))); // AVG({}) = 0 per SPARQL
+                    }
+                    Ok(sum_values(&vals, errored)
+                        .and_then(|s| s.binop(Num::Int(vals.len() as i64), ArithOp::Div))
+                        .map(Value::Num)
+                        .unwrap_or(Value::Error))
                 }
-                AggregateFunction::Min => Ok(vals.into_iter().min_by(|a, c| compare_values(a, c).unwrap_or(Ordering::Equal)).unwrap_or(Value::Unbound)),
-                AggregateFunction::Max => Ok(vals.into_iter().max_by(|a, c| compare_values(a, c).unwrap_or(Ordering::Equal)).unwrap_or(Value::Unbound)),
+                // MIN/MAX over an all-numeric group return the typed VALUE (promoted,
+                // canonically serialised — "2.0E-1"^^xsd:double); mixed groups keep the
+                // lenient term path.
+                AggregateFunction::Min => Ok(minmax_values(vals, Ordering::Less)),
+                AggregateFunction::Max => Ok(minmax_values(vals, Ordering::Greater)),
                 AggregateFunction::GroupConcat { separator } => {
                     let sep = separator.clone().unwrap_or_else(|| " ".to_string());
                     let joined = vals.iter().filter_map(value_str).collect::<Vec<_>>().join(&sep);
@@ -3075,6 +3202,57 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
     }
 }
 
+/// Typed SUM with XPath promotion; `None` (a type error) if any member was non-numeric
+/// or errored. The empty sum is `"0"^^xsd:integer`.
+fn sum_values(vals: &[Value], errored: bool) -> Option<Num> {
+    if errored {
+        return None;
+    }
+    let mut acc = Num::Int(0);
+    for v in vals {
+        acc = acc.binop(as_numeric(v)?, ArithOp::Add)?;
+    }
+    Some(acc)
+}
+
+/// MIN/MAX: an all-numeric group compares by VALUE (exact for int/decimal) and returns
+/// the typed value; any non-numeric member falls back to the lenient total-order term
+/// comparison (which must order across types for the SPARQL MIN/MAX-over-anything case).
+fn minmax_values(vals: Vec<Value>, keep: Ordering) -> Value {
+    if vals.is_empty() {
+        return Value::Unbound;
+    }
+    let nums: Option<Vec<Num>> = vals.iter().map(as_numeric).collect();
+    match nums {
+        Some(nums) => {
+            let mut best = nums[0];
+            for &n in &nums[1..] {
+                if num_compare(n, best) == Some(keep) {
+                    best = n;
+                }
+            }
+            best.canonical_term()
+        }
+        None => {
+            let cmp = |a: &Value, c: &Value| compare_values(a, c).unwrap_or(Ordering::Equal);
+            match keep {
+                Ordering::Less => vals.into_iter().min_by(cmp).unwrap(),
+                _ => vals.into_iter().max_by(cmp).unwrap(),
+            }
+        }
+    }
+}
+
+/// Value comparison of two typed numerics: exact when both are int/decimal, f64 otherwise.
+fn num_compare(a: Num, c: Num) -> Option<Ordering> {
+    if let (Some(x), Some(y)) = (a.to_dec(), c.to_dec()) {
+        if let Some(o) = x.cmp(y) {
+            return Some(o);
+        }
+    }
+    a.f64().partial_cmp(&c.f64())
+}
+
 fn dedup_values(vals: &mut Vec<Value>) {
     let mut seen = std::collections::HashSet::new();
     vals.retain(|v| seen.insert(value_key(v)));
@@ -3083,7 +3261,7 @@ fn dedup_values(vals: &mut Vec<Value>) {
 fn value_key(v: &Value) -> String {
     match v {
         Value::Term(t) => format!("T{t}"),
-        Value::Num(n) => format!("N{n}"),
+        Value::Num(n) => format!("N{}^^{}", n.lexical(), n.datatype().as_str()),
         Value::Bool(b) => format!("B{b}"),
         Value::Unbound => "U".to_string(),
         Value::Error => "E".to_string(),
@@ -3128,7 +3306,7 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
                 OrderExpression::Desc(e) => (true, e),
             };
             let v = match eval_numeric(graph, local, b, row, e) {
-                Some(n) => Value::Num(n),
+                Some(n) => Value::Num(Num::Double(n)),
                 None => eval_expr(graph, local, b, row, e)?,
             };
             key.push((desc, v));
@@ -3219,7 +3397,7 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
 #[derive(Clone, Debug)]
 enum Value {
     Bool(bool),
-    Num(f64),
+    Num(Num),
     Term(Term),
     Unbound,
     /// A SPARQL type error (e.g. an ordering comparison between incompatible
@@ -3228,24 +3406,371 @@ enum Value {
     Error,
 }
 
-fn effective_boolean(v: &Value) -> bool {
-    match v {
-        Value::Bool(b) => *b,
-        Value::Num(n) => *n != 0.0 && !n.is_nan(),
-        Value::Unbound | Value::Error => false,
-        Value::Term(Term::Literal(l)) => {
-            let dt = l.datatype().as_str();
-            if dt == xsd::BOOLEAN.as_str() {
-                matches!(l.value(), "true" | "1")
-            } else if is_numeric_dt(l) {
-                l.value().parse::<f64>().map(|n| n != 0.0 && !n.is_nan()).unwrap_or(false)
-            } else if dt == xsd::STRING.as_str() || dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" {
-                !l.value().is_empty()
-            } else {
-                false
+/// A COMPUTED numeric value carrying its XSD type, implementing the SPARQL/XPath
+/// operand-type-promotion tower: integer < decimal < float < double. Arithmetic
+/// promotes both operands to the greater type; integer and decimal arithmetic is
+/// EXACT (i64 / fixed-point [`Dec`]), falling back to double only on overflow.
+/// Serialisation (see [`Num::lexical`]) is the XSD canonical form of the type.
+#[derive(Clone, Copy, Debug)]
+enum Num {
+    Int(i64),
+    Dec(Dec),
+    Float(f32),
+    Double(f64),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl Num {
+    /// Promotion rank in the XPath numeric tower.
+    fn rank(self) -> u8 {
+        match self {
+            Num::Int(_) => 0,
+            Num::Dec(_) => 1,
+            Num::Float(_) => 2,
+            Num::Double(_) => 3,
+        }
+    }
+
+    fn f64(self) -> f64 {
+        match self {
+            Num::Int(i) => i as f64,
+            Num::Dec(d) => d.f64(),
+            Num::Float(f) => f as f64,
+            Num::Double(d) => d,
+        }
+    }
+
+    fn to_dec(self) -> Option<Dec> {
+        match self {
+            Num::Int(i) => Some(Dec { mant: i as i128, scale: 0 }),
+            Num::Dec(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The typed numeric value of a literal, or `None` if the literal is not a
+    /// well-formed numeric (an ill-formed numeric operand is a SPARQL type error).
+    fn of_literal(l: &Literal) -> Option<Num> {
+        if l.language().is_some() {
+            return None;
+        }
+        let dt = l.datatype();
+        let v = l.value().trim();
+        if sparq_core::is_integer_datatype(dt.as_str()) {
+            if let Ok(i) = v.parse::<i64>() {
+                return Some(Num::Int(i));
+            }
+            // Integer beyond i64: exact i128 mantissa if it fits (scale 0 = integer
+            // lexical), else not representable -> double.
+            return match Dec::parse(v) {
+                Some(d) if d.scale == 0 => Some(Num::Dec(d)),
+                Some(_) => None, // "1.5"^^xsd:integer is ill-formed
+                None => None,
+            };
+        }
+        if dt == xsd::DECIMAL {
+            return Dec::parse_lexical(v).map(Num::Dec);
+        }
+        if dt == xsd::FLOAT {
+            return parse_xsd_f32(v).map(Num::Float);
+        }
+        if dt == xsd::DOUBLE {
+            return parse_xsd_f64(v).map(Num::Double);
+        }
+        None
+    }
+
+    /// `op` under XPath operand promotion. `None` is a SPARQL type error (exact-type
+    /// division by zero); exact-arithmetic overflow falls back to double, mirroring
+    /// the engine's previous f64 behaviour.
+    fn binop(self, o: Num, op: ArithOp) -> Option<Num> {
+        let rank = self.rank().max(o.rank());
+        if rank == 3 {
+            return Some(Num::Double(apply_f64(self.f64(), o.f64(), op)));
+        }
+        if rank == 2 {
+            let (a, b) = (self.f64() as f32, o.f64() as f32);
+            return Some(Num::Float(apply_f64(a as f64, b as f64, op) as f32));
+        }
+        // Exact tier: integer / decimal.
+        let (a, b) = (self.to_dec()?, o.to_dec()?);
+        if op == ArithOp::Div {
+            // xsd:integer / xsd:integer is DECIMAL division per SPARQL; exact-type
+            // division by zero is a type error (not INF/NaN).
+            if b.mant == 0 {
+                return None;
+            }
+            return match a.checked_div(b) {
+                Some(d) => Some(Num::Dec(d)),
+                None => Some(Num::Double(self.f64() / o.f64())),
+            };
+        }
+        if rank == 0 {
+            // integer op integer -> integer (i64; on overflow fall back to double).
+            let (x, y) = (match self { Num::Int(i) => i, _ => unreachable!() }, match o { Num::Int(i) => i, _ => unreachable!() });
+            let r = match op {
+                ArithOp::Add => x.checked_add(y),
+                ArithOp::Sub => x.checked_sub(y),
+                ArithOp::Mul => x.checked_mul(y),
+                ArithOp::Div => unreachable!(),
+            };
+            return Some(match r {
+                Some(i) => Num::Int(i),
+                None => Num::Double(apply_f64(x as f64, y as f64, op)),
+            });
+        }
+        let r = match op {
+            ArithOp::Add => a.checked_add(b),
+            ArithOp::Sub => a.checked_sub(b),
+            ArithOp::Mul => a.checked_mul(b),
+            ArithOp::Div => unreachable!(),
+        };
+        Some(match r {
+            Some(d) => Num::Dec(d),
+            None => Num::Double(apply_f64(self.f64(), o.f64(), op)),
+        })
+    }
+
+    fn neg(self) -> Num {
+        match self {
+            Num::Int(i) => i.checked_neg().map(Num::Int).unwrap_or(Num::Double(-(i as f64))),
+            Num::Dec(d) => d.mant.checked_neg().map(|m| Num::Dec(Dec { mant: m, scale: d.scale })).unwrap_or(Num::Double(-d.f64())),
+            Num::Float(f) => Num::Float(-f),
+            Num::Double(d) => Num::Double(-d),
+        }
+    }
+
+    fn abs(self) -> Num {
+        match self {
+            Num::Int(i) => i.checked_abs().map(Num::Int).unwrap_or(Num::Double((i as f64).abs())),
+            Num::Dec(d) => d.mant.checked_abs().map(|m| Num::Dec(Dec { mant: m, scale: d.scale })).unwrap_or(Num::Double(d.f64().abs())),
+            Num::Float(f) => Num::Float(f.abs()),
+            Num::Double(d) => Num::Double(d.abs()),
+        }
+    }
+
+    fn ceil(self) -> Num {
+        match self {
+            Num::Int(_) => self,
+            Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::Ceil)),
+            Num::Float(f) => Num::Float(f.ceil()),
+            Num::Double(d) => Num::Double(d.ceil()),
+        }
+    }
+
+    fn floor(self) -> Num {
+        match self {
+            Num::Int(_) => self,
+            Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::Floor)),
+            Num::Float(f) => Num::Float(f.floor()),
+            Num::Double(d) => Num::Double(d.floor()),
+        }
+    }
+
+    /// XPath fn:round — round half towards POSITIVE INFINITY (so round(-2.5) = -2),
+    /// preserving the argument's datatype.
+    fn round(self) -> Num {
+        match self {
+            Num::Int(_) => self,
+            Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::HalfUp)),
+            Num::Float(f) => Num::Float((f + 0.5).floor()),
+            Num::Double(d) => Num::Double((d + 0.5).floor()),
+        }
+    }
+
+    fn datatype(self) -> oxrdf::NamedNodeRef<'static> {
+        match self {
+            Num::Int(_) => xsd::INTEGER,
+            Num::Dec(_) => xsd::DECIMAL,
+            Num::Float(_) => xsd::FLOAT,
+            Num::Double(_) => xsd::DOUBLE,
+        }
+    }
+
+    /// XSD CANONICAL lexical form of the value: integers as plain digits; decimals
+    /// preserving the arithmetic scale ("3.0" for 1.0+2, "3" for CEIL(2.5)); float /
+    /// double in mantissa-E-exponent form with a mandatory fractional digit ("3.21E4",
+    /// "2.0E-1") and NaN / INF / -INF spelled per XSD.
+    fn lexical(self) -> String {
+        match self {
+            Num::Int(i) => i.to_string(),
+            Num::Dec(d) => d.lexical(),
+            // f32 must be formatted as f32 (shortest round-trip); via f64 it would
+            // grow spurious digits ("2.0000000298023224E-1" for 0.2f32).
+            Num::Float(f) => {
+                if f.is_nan() {
+                    "NaN".to_string()
+                } else if f == f32::INFINITY {
+                    "INF".to_string()
+                } else if f == f32::NEG_INFINITY {
+                    "-INF".to_string()
+                } else if f.fract() == 0.0 && f.abs() < 1e15 {
+                    format!("{}", f as i64)
+                } else {
+                    let s = format!("{f:E}");
+                    match s.split_once('E') {
+                        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
+                        _ => s,
+                    }
+                }
+            }
+            Num::Double(d) => fmt_xsd_double(d),
+        }
+    }
+
+    /// STRICT XSD-canonical lexical: float/double ALWAYS in mantissa-E-exponent form
+    /// ("3.21E4", "1.0E2"), never plain. The W3C aggregate expected results use this
+    /// for MIN/MAX/SUM, while arithmetic results use the plain-integral convention of
+    /// [`Num::lexical`] — the suites were generated by different engines.
+    fn canonical_lexical(self) -> String {
+        match self {
+            Num::Int(_) | Num::Dec(_) => self.lexical(),
+            Num::Float(f) => {
+                if f.is_nan() || f.is_infinite() {
+                    self.lexical()
+                } else {
+                    let s = format!("{f:E}");
+                    match s.split_once('E') {
+                        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
+                        _ => s,
+                    }
+                }
+            }
+            Num::Double(d) => {
+                if d.is_nan() || d.is_infinite() {
+                    self.lexical()
+                } else {
+                    let s = format!("{d:E}");
+                    match s.split_once('E') {
+                        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
+                        _ => s,
+                    }
+                }
             }
         }
-        Value::Term(_) => false,
+    }
+
+    /// The value as a TERM in strict canonical form (see [`Num::canonical_lexical`]).
+    fn canonical_term(self) -> Value {
+        Value::Term(Term::Literal(Literal::new_typed_literal(self.canonical_lexical(), self.datatype())))
+    }
+
+    fn is_nan(self) -> bool {
+        match self {
+            Num::Float(f) => f.is_nan(),
+            Num::Double(d) => d.is_nan(),
+            _ => false,
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        match self {
+            Num::Int(i) => i == 0,
+            Num::Dec(d) => d.mant == 0,
+            Num::Float(f) => f == 0.0,
+            Num::Double(d) => d == 0.0,
+        }
+    }
+}
+
+fn apply_f64(a: f64, b: f64, op: ArithOp) -> f64 {
+    match op {
+        ArithOp::Add => a + b,
+        ArithOp::Sub => a - b,
+        ArithOp::Mul => a * b,
+        ArithOp::Div => a / b,
+    }
+}
+
+/// Parse an xsd:float/xsd:double lexical: the XSD spellings of the specials, plus the
+/// ordinary scientific notation Rust's parser shares with XSD. `None` = ill-formed.
+fn parse_xsd_f64(v: &str) -> Option<f64> {
+    match v {
+        "NaN" => Some(f64::NAN),
+        "INF" | "+INF" => Some(f64::INFINITY),
+        "-INF" => Some(f64::NEG_INFINITY),
+        // Rust accepts "inf"/"infinity"/"nan" spellings XSD does not; exclude them.
+        _ if v.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => v.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn parse_xsd_f32(v: &str) -> Option<f32> {
+    parse_xsd_f64(v).map(|d| d as f32)
+}
+
+/// Float/double serialisation: an INTEGRAL value prints as a plain integer ("6",
+/// "1050" — matching the dominant convention across the W3C expected results, which
+/// mix plain and scientific forms); anything else uses the XSD canonical
+/// mantissa-E-exponent form with a mandatory fractional digit ("2.0E-1", "1.5E1").
+fn fmt_xsd_double(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v == f64::INFINITY {
+        return "INF".to_string();
+    }
+    if v == f64::NEG_INFINITY {
+        return "-INF".to_string();
+    }
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        return format!("{}", v as i64);
+    }
+    let s = format!("{v:E}"); // shortest round-trip mantissa, e.g. "2E-1"
+    match s.split_once('E') {
+        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
+        _ => s,
+    }
+}
+
+enum RoundMode {
+    Ceil,
+    Floor,
+    HalfUp,
+}
+
+fn effective_boolean(v: &Value) -> bool {
+    ebv(v) == Some(true)
+}
+
+/// SPARQL effective boolean value, three-valued: `None` is a TYPE ERROR (unbound,
+/// non-literal terms, literals of unknown datatypes, ill-formed boolean / numeric
+/// lexicals) — it matters because `!error` must stay an error, not become true.
+fn ebv(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        Value::Num(n) => Some(!n.is_zero() && !n.is_nan()),
+        Value::Unbound | Value::Error => None,
+        Value::Term(Term::Literal(l)) => {
+            if l.language().is_some() {
+                return Some(!l.value().is_empty());
+            }
+            let dt = l.datatype().as_str();
+            if dt == xsd::BOOLEAN.as_str() {
+                match l.value() {
+                    "true" | "1" => Some(true),
+                    "false" | "0" => Some(false),
+                    _ => None,
+                }
+            } else if is_numeric_dt(l) {
+                match l.value().parse::<f64>() {
+                    Ok(n) => Some(n != 0.0 && !n.is_nan()),
+                    Err(_) => None,
+                }
+            } else if dt == xsd::STRING.as_str() {
+                Some(!l.value().is_empty())
+            } else {
+                None
+            }
+        }
+        Value::Term(_) => None,
     }
 }
 
@@ -3295,14 +3820,16 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
         GreaterOrEqual(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o != Ordering::Less),
         Less(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o == Ordering::Less),
         LessOrEqual(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o != Ordering::Greater),
-        Add(a, c) => arith(graph, local, b, row, a, c, |x, y| x + y),
-        Subtract(a, c) => arith(graph, local, b, row, a, c, |x, y| x - y),
-        Multiply(a, c) => arith(graph, local, b, row, a, c, |x, y| x * y),
-        Divide(a, c) => arith(graph, local, b, row, a, c, |x, y| x / y),
+        Add(a, c) => arith(graph, local, b, row, a, c, ArithOp::Add),
+        Subtract(a, c) => arith(graph, local, b, row, a, c, ArithOp::Sub),
+        Multiply(a, c) => arith(graph, local, b, row, a, c, ArithOp::Mul),
+        Divide(a, c) => arith(graph, local, b, row, a, c, ArithOp::Div),
         UnaryPlus(a) => eval_expr(graph, local, b, row, a),
         UnaryMinus(a) => {
+            // Typed negation: the result keeps the argument's (promoted) numeric
+            // datatype; a non-numeric operand is a type error.
             let v = eval_expr(graph, local, b, row, a)?;
-            Ok(as_num(&v).map(|n| Value::Num(-n)).unwrap_or(Value::Unbound))
+            Ok(as_numeric(&v).map(|n| Value::Num(n.neg())).unwrap_or(Value::Error))
         }
         Bound(v) => Ok(Value::Bool(b.col(v).map(|c| row[c] != NO_ID).unwrap_or(false))),
         If(cond, t, f) => {
@@ -3539,7 +4066,7 @@ fn sig_digits(s: &str) -> usize {
 /// integer / `xsd:decimal` operands without f64 rounding (`0.1 + 0.2` is exactly `0.3`),
 /// which the f64 arithmetic path gets wrong. Within `i128` range; overflow → `None` →
 /// the caller falls back to f64. Division and `xsd:double`/`float` stay f64.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Dec {
     mant: i128,
     scale: u32,
@@ -3579,6 +4106,111 @@ impl Dec {
     fn cmp(self, o: Dec) -> Option<Ordering> {
         let (a, b) = self.align(o)?;
         Some(a.cmp(&b))
+    }
+
+    /// Parses an integer / decimal lexical PRESERVING the written scale ("1.0" keeps
+    /// scale 1), unlike [`Dec::parse`] which normalises trailing fraction zeros away.
+    /// The scale is what XSD-canonical serialisation of decimal arithmetic preserves
+    /// (`1.0 + 2` is `"3.0"`), so typed values must carry it.
+    fn parse_lexical(s: &str) -> Option<Dec> {
+        let s = s.trim();
+        let (neg, s) = match s.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, s.strip_prefix('+').unwrap_or(s)),
+        };
+        let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+        if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let mut mag: i128 = 0;
+        for &ch in int.as_bytes().iter().chain(frac.as_bytes()) {
+            mag = mag.checked_mul(10)?.checked_add((ch - b'0') as i128)?;
+        }
+        Some(Dec { mant: if neg { -mag } else { mag }, scale: frac.len() as u32 })
+    }
+
+    /// EXACT decimal division. The result's scale is the SMALLEST `s >= 1` at which the
+    /// quotient terminates (`0 / 2 = "0.0"`, `11.1 / 5 = "2.22"`); a non-terminating
+    /// quotient is rounded half-up at scale 18. `None` on overflow (caller falls back
+    /// to double); the caller must reject a zero divisor first (type error).
+    fn checked_div(self, o: Dec) -> Option<Dec> {
+        debug_assert!(o.mant != 0);
+        let neg = (self.mant < 0) != (o.mant < 0);
+        let n0 = self.mant.unsigned_abs();
+        let d = o.mant.unsigned_abs();
+        // mant(s) = n0 * 10^(s + o.scale - self.scale) / d
+        let num_den = |s: u32| -> Option<(u128, u128)> {
+            let e = s as i32 + o.scale as i32 - self.scale as i32;
+            if e >= 0 {
+                Some((n0.checked_mul(10u128.checked_pow(e as u32)?)?, d))
+            } else {
+                Some((n0, d.checked_mul(10u128.checked_pow((-e) as u32)?)?))
+            }
+        };
+        const MAX_SCALE: u32 = 18;
+        for s in 1..=MAX_SCALE {
+            let (num, den) = num_den(s)?;
+            if num % den == 0 {
+                let mant = i128::try_from(num / den).ok()?;
+                return Some(Dec { mant: if neg { -mant } else { mant }, scale: s });
+            }
+        }
+        // Non-terminating: round half-up at the max scale.
+        let (num, den) = num_den(MAX_SCALE)?;
+        let q = num / den + u128::from(num % den * 2 >= den);
+        let mant = i128::try_from(q).ok()?;
+        Some(Dec { mant: if neg { -mant } else { mant }, scale: MAX_SCALE })
+    }
+
+    /// Rounds to an integer-valued decimal (scale 0), preserving the decimal TYPE
+    /// (`CEIL("2.5"^^xsd:decimal)` is `"3"^^xsd:decimal`).
+    fn round_to_int(self, mode: RoundMode) -> Dec {
+        if self.scale == 0 {
+            return self;
+        }
+        let p = 10i128.pow(self.scale);
+        let q = self.mant.div_euclid(p);
+        let r = self.mant.rem_euclid(p); // 0..p
+        let mant = match mode {
+            RoundMode::Floor => q,
+            RoundMode::Ceil => q + i128::from(r > 0),
+            RoundMode::HalfUp => q + i128::from(r * 2 >= p),
+        };
+        Dec { mant, scale: 0 }
+    }
+
+    fn f64(self) -> f64 {
+        self.mant as f64 / 10f64.powi(self.scale as i32)
+    }
+
+    /// The plain (never exponent) decimal lexical at this value's scale: scale 0 prints
+    /// as an integer ("3"); otherwise exactly `scale` fraction digits ("3.0", "0.05").
+    fn lexical(self) -> String {
+        let mag = self.mant.unsigned_abs().to_string();
+        let s = self.scale as usize;
+        let mut out = String::with_capacity(mag.len() + s + 2);
+        if self.mant < 0 {
+            out.push('-');
+        }
+        if s == 0 {
+            out.push_str(&mag);
+            return out;
+        }
+        if mag.len() > s {
+            out.push_str(&mag[..mag.len() - s]);
+        } else {
+            out.push('0');
+        }
+        out.push('.');
+        for _ in mag.len()..s {
+            out.push('0');
+        }
+        if mag.len() > s {
+            out.push_str(&mag[mag.len() - s..]);
+        } else {
+            out.push_str(&mag);
+        }
+        out
     }
 }
 
@@ -3695,63 +4327,216 @@ fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &E
     })
 }
 
-/// SPARQL `=` (RDFterm-equal) as a three-valued result: `Some(true/false)` for a
-/// decided comparison, `None` for a type error. Value comparison applies first;
-/// otherwise identical RDF terms are equal, an unbound/errored operand is an error,
-/// and any other (recognised) terms are KNOWN to be different -> false. Note this
-/// does NOT type-error on incomparable recognised types (so `!=` across e.g. string
-/// vs number is true), unlike the ordering operators.
+/// Datatype family of a literal-valued operand, the basis for OPEN-WORLD `=` and
+/// the ordering operators: only operands within a comparable family decide; unknown
+/// datatypes and ill-formed lexicals are type errors unless the terms are identical.
+enum LitKind<'a> {
+    /// A numeric-datatype operand; `None` = ill-formed lexical.
+    Num(Option<Num>),
+    Str(&'a str),
+    /// A boolean-datatype operand; `None` = ill-formed lexical.
+    Bool(Option<bool>),
+    /// xsd:dateTime / xsd:dateTimeStamp on the timeline; `None` = ill-formed.
+    DateTime(Option<Timeline>),
+    /// xsd:date on the timeline (midnight); `None` = ill-formed.
+    Date(Option<Timeline>),
+    /// Another XSD datatype (time, duration, gYear, …): (datatype IRI, lexical).
+    OtherXsd(&'a str, &'a str),
+    /// Language-tagged: (lowercased tag, value).
+    Lang(String, &'a str),
+    /// A literal of a NON-XSD (unknown) datatype: open-world, never decidable.
+    Unknown,
+    NotLiteral,
+}
+
+fn lit_kind(v: &Value) -> LitKind<'_> {
+    match v {
+        Value::Num(n) => LitKind::Num(Some(*n)),
+        Value::Bool(b) => LitKind::Bool(Some(*b)),
+        Value::Term(Term::Literal(l)) => {
+            if let Some(tag) = l.language() {
+                return LitKind::Lang(tag.to_ascii_lowercase(), l.value());
+            }
+            let dt = l.datatype();
+            if is_numeric_dt(l) {
+                LitKind::Num(Num::of_literal(l))
+            } else if dt == xsd::STRING {
+                LitKind::Str(l.value())
+            } else if dt == xsd::BOOLEAN {
+                LitKind::Bool(as_bool_val(v))
+            } else if dt == xsd::DATE_TIME || dt == xsd::DATE_TIME_STAMP {
+                LitKind::DateTime(Timeline::parse_datetime(l.value()))
+            } else if dt == xsd::DATE {
+                LitKind::Date(Timeline::parse_date(l.value()))
+            } else if dt.as_str().starts_with("http://www.w3.org/2001/XMLSchema#") {
+                LitKind::OtherXsd(dt.as_str(), l.value())
+            } else {
+                LitKind::Unknown
+            }
+        }
+        _ => LitKind::NotLiteral,
+    }
+}
+
+/// An xsd:date / xsd:dateTime VALUE: seconds-from-epoch of the local time, fractional
+/// seconds, and the timezone offset when present. Comparison follows XSD: both-with-tz
+/// and both-without compare directly; MIXED presence is only decidable outside the
+/// ±14h window (inside it the comparison is indeterminate — a SPARQL type error).
+#[derive(Clone, Copy, Debug)]
+struct Timeline {
+    secs: i64,
+    frac: f64,
+    tz: Option<i64>,
+}
+
+impl Timeline {
+    fn parse_datetime(s: &str) -> Option<Timeline> {
+        let (date, rest) = s.split_once('T')?;
+        let (time, tz) = match rest.find(['Z', '+', '-']) {
+            Some(i) => (&rest[..i], Some(parse_tz(&rest[i..])?)),
+            None => (rest, None),
+        };
+        let days = parse_civil_date(date)?;
+        let mut t = time.split(':');
+        let h: i64 = t.next()?.parse().ok()?;
+        let mi: i64 = t.next()?.parse().ok()?;
+        let sec_lex = t.next()?;
+        if t.next().is_some() {
+            return None;
+        }
+        let sec: f64 = sec_lex.parse().ok()?;
+        Some(Timeline {
+            secs: days * 86_400 + h * 3600 + mi * 60 + sec.trunc() as i64,
+            frac: sec.fract(),
+            tz,
+        })
+    }
+
+    fn parse_date(s: &str) -> Option<Timeline> {
+        // The timezone suffix starts after the day: "...-23Z" / "...-23+05:00". A bare
+        // date's own hyphens must not be mistaken for an offset sign, so require the
+        // ":" of "±hh:mm" at the right position.
+        let (date, tz) = if let Some(d) = s.strip_suffix('Z') {
+            (d, Some(0))
+        } else if s.len() > 10 && matches!(s.as_bytes()[s.len() - 6], b'+' | b'-') && s.as_bytes()[s.len() - 3] == b':' {
+            (&s[..s.len() - 6], Some(parse_tz(&s[s.len() - 6..])?))
+        } else {
+            (s, None)
+        };
+        Some(Timeline { secs: parse_civil_date(date)? * 86_400, frac: 0.0, tz })
+    }
+
+    /// The absolute instant (treating an absent timezone as UTC) in seconds.
+    fn instant(&self) -> f64 {
+        (self.secs - self.tz.unwrap_or(0)) as f64 + self.frac
+    }
+
+    fn cmp_tl(a: Timeline, b: Timeline) -> Option<Ordering> {
+        let (ai, bi) = (a.instant(), b.instant());
+        match (a.tz, b.tz) {
+            (Some(_), Some(_)) | (None, None) => ai.partial_cmp(&bi),
+            // Mixed timezone presence: indeterminate inside the ±14h window.
+            _ => {
+                if (ai - bi).abs() > 14.0 * 3600.0 {
+                    ai.partial_cmp(&bi)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// `"Z"` / `"±hh:mm"` -> offset seconds.
+fn parse_tz(tz: &str) -> Option<i64> {
+    if tz == "Z" {
+        return Some(0);
+    }
+    let (sign, hm) = tz.split_at(1);
+    let (h, m) = hm.split_once(':')?;
+    let (h, m): (i64, i64) = (h.parse().ok()?, m.parse().ok()?);
+    let off = h * 3600 + m * 60;
+    Some(if sign == "-" { -off } else { off })
+}
+
+/// `[-]YYYY-MM-DD` -> days from the epoch (Howard Hinnant's days_from_civil).
+fn parse_civil_date(date: &str) -> Option<i64> {
+    let neg = date.starts_with('-');
+    let mut p = date.strip_prefix('-').unwrap_or(date).split('-');
+    let y: i64 = p.next()?.parse().ok()?;
+    let y = if neg { -y } else { y };
+    let m: i64 = p.next()?.parse().ok()?;
+    let d: i64 = p.next()?.parse().ok()?;
+    if p.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// SPARQL `=` (and, negated, `!=`) as a three-valued result: `Some(true/false)` for a
+/// decided comparison, `None` for a type error. OPEN-WORLD rules: identical terms are
+/// equal regardless of datatype; non-literal terms decide by identity; within a
+/// comparable literal family the VALUES decide; a language-tagged literal is KNOWN
+/// different from any non-language literal; everything else — unknown datatypes,
+/// ill-formed lexicals, cross-family pairs — is a TYPE ERROR (`"a"^^ex:dt != "b"^^ex:other`
+/// filters the row out rather than evaluating to true).
 fn values_equal(x: &Value, y: &Value) -> Option<bool> {
-    if let Some(o) = value_compare_strict(x, y) {
-        return Some(o == Ordering::Equal);
+    if matches!(x, Value::Unbound | Value::Error) || matches!(y, Value::Unbound | Value::Error) {
+        return None;
     }
     if let (Value::Term(p), Value::Term(q)) = (x, y) {
         if p == q {
-            return Some(true);
+            return Some(true); // sameTerm decides even for unknown datatypes
+        }
+        if !matches!(p, Term::Literal(_)) || !matches!(q, Term::Literal(_)) {
+            return Some(false); // IRI / bnode / triple term: identity decides
         }
     }
-    if matches!(x, Value::Unbound | Value::Error) || matches!(y, Value::Unbound | Value::Error) {
-        None
-    } else {
-        Some(false)
+    let (ka, kb) = (lit_kind(x), lit_kind(y));
+    if matches!(ka, LitKind::NotLiteral) || matches!(kb, LitKind::NotLiteral) {
+        return Some(false); // computed literal vs non-literal term
+    }
+    use LitKind::*;
+    match (ka, kb) {
+        (Num(Some(a)), Num(Some(b))) => Some(num_compare(a, b) == Some(Ordering::Equal)),
+        (Num(_), Num(_)) => None, // ill-formed numeric (and not sameTerm)
+        (Str(a), Str(b)) => Some(a == b),
+        (Bool(Some(a)), Bool(Some(b))) => Some(a == b),
+        (Bool(_), Bool(_)) => None,
+        (DateTime(Some(a)), DateTime(Some(b))) => Timeline::cmp_tl(a, b).map(|o| o == Ordering::Equal),
+        (Date(Some(a)), Date(Some(b))) => Timeline::cmp_tl(a, b).map(|o| o == Ordering::Equal),
+        (DateTime(_), DateTime(_)) | (Date(_), Date(_)) => None,
+        // date and dateTime values are disjoint -> known different.
+        (DateTime(_), Date(_)) | (Date(_), DateTime(_)) => Some(false),
+        // A language-tagged literal equals only a literal with the same (ci) tag.
+        (Lang(t1, v1), Lang(t2, v2)) => Some(t1 == t2 && v1 == v2),
+        (Lang(..), _) | (_, Lang(..)) => Some(false),
+        (OtherXsd(d1, l1), OtherXsd(d2, l2)) if d1 == d2 => Some(l1 == l2),
+        // Cross-family, unknown datatypes, unknown XSD pairings: open world -> error.
+        _ => None,
     }
 }
 
 /// Strict SPARQL value comparison for relational operators: `Some(ordering)` only
-/// when the operands are value-comparable (both numeric, both boolean, or two
-/// literals of the same datatype and language), else `None` (a type error).
+/// when the operands are value-comparable (same family per [`lit_kind`]), else
+/// `None` (a type error).
 fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
-    // Exact when both operands are integer/decimal literals (no f64 precision loss for
-    // integers > 2^53 or high-precision decimals).
-    if let (Value::Term(p), Value::Term(q)) = (x, y) {
-        if let (Some(la), Some(lb)) = (exact_lexical_of_term(p), exact_lexical_of_term(q)) {
-            if let Some(o) = cmp_decimal_str(&la, &lb) {
-                return Some(o);
-            }
-        }
-    }
-    if let (Some(a), Some(b)) = (strict_num(x), strict_num(y)) {
-        return a.partial_cmp(&b);
-    }
-    if let (Some(a), Some(b)) = (as_bool_val(x), as_bool_val(y)) {
-        return Some(a.cmp(&b));
-    }
-    if let (Value::Term(Term::Literal(a)), Value::Term(Term::Literal(c))) = (x, y) {
-        // Same datatype (and language) literals — incl. xsd:string and dateTime —
-        // compare by code point / lexical value.
-        if a.datatype() == c.datatype() && a.language() == c.language() {
-            return Some(a.value().cmp(c.value()));
-        }
-    }
-    None
-}
-
-/// A numeric value for STRICT comparison — only genuine numeric literals (NOT
-/// booleans, which are a separate, incomparable type in SPARQL relational ops).
-fn strict_num(v: &Value) -> Option<f64> {
-    match v {
-        Value::Num(n) => Some(*n),
-        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
+    use LitKind::*;
+    match (lit_kind(x), lit_kind(y)) {
+        (Num(Some(a)), Num(Some(b))) => num_compare(a, b),
+        (Str(a), Str(b)) => Some(a.cmp(&b)),
+        (Bool(Some(a)), Bool(Some(b))) => Some(a.cmp(&b)),
+        (DateTime(Some(a)), DateTime(Some(b))) => Timeline::cmp_tl(a, b),
+        (Date(Some(a)), Date(Some(b))) => Timeline::cmp_tl(a, b),
+        // Same language tag: compare values (the suites' lenient extension).
+        (Lang(t1, v1), Lang(t2, v2)) if t1 == t2 => Some(v1.cmp(&v2)),
+        // Same other-XSD datatype: lexical order (correct for time, gYear, …).
+        (OtherXsd(d1, l1), OtherXsd(d2, l2)) if d1 == d2 => Some(l1.cmp(&l2)),
         _ => None,
     }
 }
@@ -3771,10 +4556,7 @@ fn as_bool_val(v: &Value) -> Option<bool> {
 /// Three-valued effective boolean: `None` is a SPARQL error (type error or unbound),
 /// used by the logical operators to implement SPARQL's 3-valued `&&` / `||` / `!`.
 fn ebv3(v: &Value) -> Option<bool> {
-    match v {
-        Value::Error | Value::Unbound => None,
-        other => Some(effective_boolean(other)),
-    }
+    ebv(v)
 }
 
 fn and3(x: Option<bool>, y: Option<bool>) -> Value {
@@ -3793,20 +4575,33 @@ fn or3(x: Option<bool>, y: Option<bool>) -> Value {
     }
 }
 
-fn arith(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(f64, f64) -> f64) -> Result<Value, String> {
-    if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
-        return Ok(Value::Num(f(x, y)));
-    }
+/// TYPED arithmetic with XPath operand promotion: the result carries the promoted
+/// datatype (int+int→int, decimal involved→decimal, …, int/int→decimal) and exact
+/// int/decimal value. Used for RESULT CONSTRUCTION (BIND / SELECT expressions /
+/// aggregates) — the comparison operators keep their f64 fast path (`eval_numeric`),
+/// where only the value matters.
+fn arith(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, op: ArithOp) -> Result<Value, String> {
     let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
-    Ok(match (as_num(&x), as_num(&y)) {
-        (Some(a), Some(b)) => Value::Num(f(a, b)),
-        _ => Value::Unbound,
+    Ok(match (as_numeric(&x), as_numeric(&y)) {
+        (Some(p), Some(q)) => p.binop(q, op).map(Value::Num).unwrap_or(Value::Error),
+        _ => Value::Error,
     })
+}
+
+/// The TYPED numeric value of an evaluated operand: a computed numeric as-is, a
+/// numeric literal parsed per its datatype. `None` for non-numerics AND for
+/// ill-formed numeric literals (both are SPARQL type errors in arithmetic).
+fn as_numeric(v: &Value) -> Option<Num> {
+    match v {
+        Value::Num(n) => Some(*n),
+        Value::Term(Term::Literal(l)) => Num::of_literal(l),
+        _ => None,
+    }
 }
 
 fn as_num(v: &Value) -> Option<f64> {
     match v {
-        Value::Num(n) => Some(*n),
+        Value::Num(n) => Some(n.f64()),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         Value::Term(Term::Literal(l)) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
         _ => None,
@@ -3815,25 +4610,43 @@ fn as_num(v: &Value) -> Option<f64> {
 
 fn is_numeric_dt(l: &Literal) -> bool {
     let dt = l.datatype().as_str();
-    dt == xsd::INTEGER.as_str()
+    sparq_core::is_integer_datatype(dt)
         || dt == xsd::DECIMAL.as_str()
         || dt == xsd::DOUBLE.as_str()
         || dt == xsd::FLOAT.as_str()
-        || dt == xsd::LONG.as_str()
-        || dt == xsd::INT.as_str()
-        || dt == xsd::SHORT.as_str()
-        || dt == xsd::BYTE.as_str()
-        || dt == xsd::NON_NEGATIVE_INTEGER.as_str()
-        || dt == xsd::POSITIVE_INTEGER.as_str()
-        || dt == xsd::UNSIGNED_INT.as_str()
-        || dt == xsd::UNSIGNED_LONG.as_str()
 }
 
+/// LENIENT total order for ORDER BY (and the MIN/MAX fallback): SPARQL orders
+/// unbound < blank nodes < IRIs < literals, then by value within each class
+/// (numerics by value; everything else by string form, which keeps the order
+/// deterministic across mixed literal types).
 fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
-    if let (Some(a), Some(b)) = (as_num(x), as_num(y)) {
-        return a.partial_cmp(&b);
+    fn class(v: &Value) -> u8 {
+        match v {
+            Value::Unbound | Value::Error => 0,
+            Value::Term(Term::BlankNode(_)) => 1,
+            Value::Term(Term::NamedNode(_)) => 2,
+            _ => 3, // literals, incl. computed numerics / booleans
+        }
     }
-    Some(value_str(x)?.cmp(&value_str(y)?))
+    let (ca, cb) = (class(x), class(y));
+    if ca != cb {
+        return Some(ca.cmp(&cb));
+    }
+    match ca {
+        0 => Some(Ordering::Equal),
+        1 | 2 => Some(value_str(x)?.cmp(&value_str(y)?)),
+        _ => {
+            if let (Some(a), Some(b)) = (as_num(x), as_num(y)) {
+                return a.partial_cmp(&b);
+            }
+            // dateTime/date order by timeline when comparable.
+            if let Some(o) = value_compare_strict(x, y) {
+                return Some(o);
+            }
+            Some(value_str(x)?.cmp(&value_str(y)?))
+        }
+    }
 }
 
 /// SPARQL built-in function calls (`STR`, `LANG`, `CONCAT`, `SUBSTR`, type tests, numeric, …).
@@ -3858,7 +4671,7 @@ fn eval_function(
     };
     Ok(match f {
         F::Str => value_str(&ev(0)?).map(simple).unwrap_or(Value::Error),
-        F::StrLen => value_str(&ev(0)?).map(|s| Value::Num(s.chars().count() as f64)).unwrap_or(Value::Error),
+        F::StrLen => value_str(&ev(0)?).map(|s| Value::Num(Num::Int(s.chars().count() as i64))).unwrap_or(Value::Error),
         // UCASE/LCASE/SUBSTR operate on string literals and preserve the language tag
         // of the argument (simple in, simple out; "bar"@en in, "BAR"@en out).
         F::UCase => match str_lit(&ev(0)?) {
@@ -3876,8 +4689,9 @@ fn eval_function(
         },
         F::Datatype => match ev(0)? {
             Value::Term(Term::Literal(l)) => Value::Term(Term::NamedNode(l.datatype().into_owned())),
-            Value::Num(n) if n.fract() == 0.0 && n.is_finite() => Value::Term(Term::NamedNode(xsd::INTEGER.into_owned())),
-            Value::Num(_) => Value::Term(Term::NamedNode(xsd::DOUBLE.into_owned())),
+            // A computed numeric knows its promoted XSD type (the type-promotion suite
+            // checks `datatype(?l + ?r)` across the whole tower).
+            Value::Num(n) => Value::Term(Term::NamedNode(n.datatype().into_owned())),
             Value::Bool(_) => Value::Term(Term::NamedNode(xsd::BOOLEAN.into_owned())),
             _ => Value::Error,
         },
@@ -3944,9 +4758,14 @@ fn eval_function(
             lit_with_lang(out, lang.as_deref())
         }
         F::EncodeForUri => value_str(&ev(0)?).map(|s| simple(encode_for_uri(&s))).unwrap_or(Value::Error),
-        F::Iri => match value_str(&ev(0)?) {
-            Some(s) => oxrdf::NamedNode::new(s).map(|n| Value::Term(Term::NamedNode(n))).unwrap_or(Value::Error),
-            None => Value::Error,
+        F::Iri => match ev(0)? {
+            // An IRI argument passes through unchanged.
+            Value::Term(Term::NamedNode(n)) => Value::Term(Term::NamedNode(n)),
+            v => match str_lit(&v) {
+                // String literal: absolute IRIs pass; relative ones resolve against BASE.
+                Some((s, None)) => resolve_iri(&s).map(|n| Value::Term(Term::NamedNode(n))).unwrap_or(Value::Error),
+                _ => Value::Error,
+            },
         },
         F::IsIri => Value::Bool(matches!(ev(0)?, Value::Term(Term::NamedNode(_)))),
         F::IsBlank => Value::Bool(matches!(ev(0)?, Value::Term(Term::BlankNode(_)))),
@@ -3956,10 +4775,12 @@ fn eval_function(
             Value::Term(Term::Literal(l)) => is_numeric_dt(&l),
             _ => false,
         }),
-        F::Abs => as_num(&ev(0)?).map(|n| Value::Num(n.abs())).unwrap_or(Value::Error),
-        F::Ceil => as_num(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
-        F::Floor => as_num(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
-        F::Round => as_num(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
+        // ABS/CEIL/FLOOR/ROUND preserve the argument's numeric DATATYPE
+        // (CEIL("2.5"^^xsd:decimal) is "3"^^xsd:decimal, not xsd:integer).
+        F::Abs => as_numeric(&ev(0)?).map(|n| Value::Num(n.abs())).unwrap_or(Value::Error),
+        F::Ceil => as_numeric(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
+        F::Floor => as_numeric(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
+        F::Round => as_numeric(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
         // STRDT(lexical, datatypeIRI) -> typed literal. The first argument must be a
         // SIMPLE literal (= xsd:string in RDF 1.1) — lang-tagged / typed input errors.
         F::StrDt => match (str_lit(&ev(0)?), ev(1)?) {
@@ -4031,6 +4852,17 @@ fn eval_function(
                 }
             }
         }
+        // NOW(): the current UTC instant as xsd:dateTime. RAND(): xsd:double in [0, 1)
+        // (sourced from the same OS RNG as UUID, avoiding a new wasm-hostile dep) —
+        // both native-only for the same reason as UUID()/STRUUID().
+        #[cfg(not(target_arch = "wasm32"))]
+        F::Now => Value::Term(Term::Literal(Literal::new_typed_literal(now_lexical(), xsd::DATE_TIME))),
+        #[cfg(not(target_arch = "wasm32"))]
+        F::Rand => {
+            let bytes = *uuid::Uuid::new_v4().as_bytes();
+            let x = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
+            Value::Num(Num::Double((x >> 11) as f64 / (1u64 << 53) as f64))
+        }
         #[cfg(not(target_arch = "wasm32"))]
         F::Uuid => Value::Term(Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
             "urn:uuid:{}",
@@ -4071,7 +4903,237 @@ fn eval_function(
                 None => Value::Error,
             }
         }
+        // XSD constructor casts: xsd:integer(?x), xsd:decimal(?x), … (SPARQL 17.5).
+        F::Custom(nn) if args.len() == 1 => match eval_cast(nn.as_str(), &ev(0)?) {
+            Some(out) => out,
+            None => return Err(format!("unsupported SPARQL function: Custom({})", nn.as_str())),
+        },
         other => return Err(format!("unsupported SPARQL function: {other:?}")),
+    })
+}
+
+/// Plain decimal form of an f64 with at least one fraction digit ("0.0", "1.0",
+/// "1.25") — the form the W3C cast expected-results use for float/double sources.
+fn plain_min1(f: f64) -> String {
+    if f.fract() == 0.0 && f.abs() < 1e15 {
+        format!("{:.1}", f)
+    } else {
+        format!("{f}")
+    }
+}
+
+/// A decimal lexical with trailing fraction zeros trimmed but AT LEAST one fraction
+/// digit kept ("33.3300" -> "33.33", "0" -> "0.0") — the xsd:decimal cast convention.
+fn dec_trim_min1(d: Dec) -> String {
+    let mut d = d;
+    while d.scale > 1 && d.mant % 10 == 0 {
+        d.mant /= 10;
+        d.scale -= 1;
+    }
+    if d.scale == 0 {
+        d = Dec { mant: d.mant.saturating_mul(10), scale: 1 };
+    }
+    d.lexical()
+}
+
+/// Trim ALL trailing fraction zeros ("0.0" -> "0", "2.50" -> "2.5") — the xsd:string
+/// cast convention for decimal sources.
+fn dec_trim(d: Dec) -> String {
+    let mut d = d;
+    while d.scale > 0 && d.mant % 10 == 0 {
+        d.mant /= 10;
+        d.scale -= 1;
+    }
+    d.lexical()
+}
+
+/// The XSD constructor-cast table. `None` when `target` is not a recognised cast IRI
+/// (the caller reports an unsupported function); `Some(Value::Error)` for a cast that
+/// fails per XPath (invalid source lexical, wrong source type, NaN/INF to exact types).
+/// The result LEXICAL forms follow the conventions of the W3C cast test expected
+/// results (which track the reference implementations), varying by source type.
+fn eval_cast(target: &str, v: &Value) -> Option<Value> {
+    // The source as a STRING lexical only when it is a simple/xsd:string literal
+    // (language-tagged literals and non-string types are NOT castable as strings).
+    let src_str = || match v {
+        Value::Term(Term::Literal(l)) if l.language().is_none() && l.datatype() == xsd::STRING => {
+            Some(l.value().trim().to_string())
+        }
+        _ => None,
+    };
+    let typed = |lex: String, dt: oxrdf::NamedNodeRef<'_>| Value::Term(Term::Literal(Literal::new_typed_literal(lex, dt)));
+    // Classify a numeric SOURCE by its tower type (computed value or literal).
+    let src_num = || as_numeric(v).filter(|_| !matches!(v, Value::Bool(_)));
+    if target == xsd::STRING.as_str() {
+        // STR semantics with VALUE canonicalisation for typed sources: booleans print
+        // true/false, decimals trim trailing zeros ("0.0" -> "0"), float/double print
+        // plain when integral ("0E1" -> "0") — everything else keeps its lexical.
+        if let Some(b) = as_bool_val(v) {
+            return Some(typed(b.to_string(), xsd::STRING));
+        }
+        if let Some(n) = src_num() {
+            let s = match n {
+                Num::Int(i) => i.to_string(),
+                Num::Dec(d) => dec_trim(d),
+                // plain shortest decimal form, never scientific ("0E1" -> "0",
+                // "1.25"^^xsd:float -> "1.25")
+                Num::Float(f) if f.is_finite() => format!("{f}"),
+                Num::Double(f) if f.is_finite() => format!("{f}"),
+                other => other.lexical(),
+            };
+            return Some(typed(s, xsd::STRING));
+        }
+        return Some(match v {
+            Value::Term(Term::BlankNode(_)) | Value::Term(Term::Triple(_)) | Value::Unbound | Value::Error => Value::Error,
+            other => value_str(other).map(|s| typed(s, xsd::STRING)).unwrap_or(Value::Error),
+        });
+    }
+    if target == xsd::BOOLEAN.as_str() {
+        if let Some(b) = as_bool_val(v) {
+            return Some(Value::Bool(b));
+        }
+        if let Some(n) = as_numeric(v) {
+            return Some(Value::Bool(!n.is_zero() && !n.is_nan()));
+        }
+        return Some(match src_str().as_deref() {
+            Some("true") | Some("1") => Value::Bool(true),
+            Some("false") | Some("0") => Value::Bool(false),
+            _ => Value::Error,
+        });
+    }
+    if target == xsd::DATE_TIME.as_str() {
+        return Some(match v {
+            Value::Term(Term::Literal(l))
+                if l.datatype() == xsd::DATE_TIME || l.datatype() == xsd::DATE_TIME_STAMP =>
+            {
+                typed(l.value().to_string(), xsd::DATE_TIME)
+            }
+            _ => match src_str() {
+                Some(s) if parse_datetime(&s).is_some() => typed(s, xsd::DATE_TIME),
+                _ => Value::Error,
+            },
+        });
+    }
+    let is_int = target == xsd::INTEGER.as_str();
+    let is_dec = target == xsd::DECIMAL.as_str();
+    let is_flt = target == xsd::FLOAT.as_str();
+    let is_dbl = target == xsd::DOUBLE.as_str();
+    if !(is_int || is_dec || is_flt || is_dbl) {
+        return None; // not a cast IRI this engine knows
+    }
+    if is_int {
+        // Truncate toward zero; strings must be valid xsd:integer lexicals.
+        if let Some(b) = as_bool_val(v) {
+            return Some(Value::Num(Num::Int(b as i64)));
+        }
+        if let Some(n) = src_num() {
+            return Some(match n {
+                Num::Int(i) => Value::Num(Num::Int(i)),
+                Num::Dec(d) => Value::Num(Num::Int((d.mant / 10i128.pow(d.scale)) as i64)),
+                Num::Float(_) | Num::Double(_) => {
+                    let f = n.f64();
+                    if f.is_finite() && f.abs() < 9.2e18 {
+                        Value::Num(Num::Int(f.trunc() as i64))
+                    } else {
+                        Value::Error
+                    }
+                }
+            });
+        }
+        return Some(src_str().and_then(|s| s.parse::<i64>().ok()).map(|i| Value::Num(Num::Int(i))).unwrap_or(Value::Error));
+    }
+    if is_dec {
+        if let Some(b) = as_bool_val(v) {
+            return Some(typed(if b { "1.0" } else { "0.0" }.to_string(), xsd::DECIMAL));
+        }
+        if let Some(n) = src_num() {
+            return Some(match n {
+                // integer -> N.0 (zero prints bare, per the reference results)
+                Num::Int(0) => typed("0".to_string(), xsd::DECIMAL),
+                Num::Int(i) => typed(format!("{i}.0"), xsd::DECIMAL),
+                // decimal -> decimal keeps its lexical
+                Num::Dec(d) => typed(d.lexical(), xsd::DECIMAL),
+                Num::Float(_) | Num::Double(_) => {
+                    let f = n.f64();
+                    if f.is_finite() {
+                        typed(plain_min1(f), xsd::DECIMAL)
+                    } else {
+                        Value::Error
+                    }
+                }
+            });
+        }
+        // string -> parse (no exponent allowed), trim trailing zeros, keep >= 1
+        // fraction digit ("+33.3300" -> "33.33", "0" -> "0.0").
+        return Some(
+            src_str()
+                .and_then(|s| Dec::parse_lexical(&s))
+                .map(|d| typed(dec_trim_min1(d), xsd::DECIMAL))
+                .unwrap_or(Value::Error),
+        );
+    }
+    // float / double
+    let dt = if is_flt { xsd::FLOAT } else { xsd::DOUBLE };
+    if let Some(b) = as_bool_val(v) {
+        return Some(typed(if b { "1.0E0" } else { "0E0" }.to_string(), dt));
+    }
+    if let Some(n) = src_num() {
+        return Some(match n {
+            // integer -> N.0 (zero prints bare)
+            Num::Int(0) => typed("0".to_string(), dt),
+            Num::Int(i) => typed(format!("{i}.0"), dt),
+            // decimal -> keeps its lexical
+            Num::Dec(d) => typed(d.lexical(), dt),
+            // float/double -> plain decimal form with >= 1 fraction digit
+            Num::Float(f) => typed(plain_min1(f as f64), dt),
+            Num::Double(f) => typed(plain_min1(f), dt),
+        });
+    }
+    Some(match src_str() {
+        Some(s) => {
+            // A valid integer lexical keeps its form verbatim ("13" -> "13"^^xsd:double);
+            // anything else parses and serialises in canonical scientific form.
+            if s.parse::<i64>().is_ok() {
+                typed(s, dt)
+            } else if is_flt {
+                match parse_xsd_f32(&s) {
+                    Some(f) if !f.is_nan() || s == "NaN" => typed(if f.is_finite() { format!("{f:E}") } else { Num::Float(f).lexical() }, dt),
+                    _ => Value::Error,
+                }
+            } else {
+                match parse_xsd_f64(&s) {
+                    Some(f) if !f.is_nan() || s == "NaN" => typed(if f.is_finite() { format!("{f:E}") } else { Num::Double(f).lexical() }, dt),
+                    _ => Value::Error,
+                }
+            }
+        }
+        None => Value::Error,
+    })
+}
+
+thread_local! {
+    /// The query's BASE IRI (when declared), used by IRI()/URI() to resolve relative
+    /// references. Set by the `lib.rs` query entry points after parsing.
+    static QUERY_BASE: std::cell::RefCell<Option<oxiri::Iri<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Installs the active query's base IRI for expression evaluation (IRI()/URI()
+/// relative-reference resolution). Called by the query entry points; `None` clears it.
+pub(crate) fn set_query_base(base: Option<&str>) {
+    QUERY_BASE.with(|b| *b.borrow_mut() = base.and_then(|s| oxiri::Iri::parse(s.to_string()).ok()));
+}
+
+/// `IRI(str)`: absolute IRIs pass through; relative references resolve against the
+/// query's BASE (a relative reference without a base is a type error).
+fn resolve_iri(s: &str) -> Option<oxrdf::NamedNode> {
+    if let Ok(abs) = oxiri::Iri::parse(s.to_string()) {
+        return Some(oxrdf::NamedNode::new_unchecked(abs.into_inner()));
+    }
+    QUERY_BASE.with(|b| {
+        b.borrow()
+            .as_ref()
+            .and_then(|base| base.resolve(s).ok())
+            .map(|iri| oxrdf::NamedNode::new_unchecked(iri.into_inner()))
     })
 }
 
@@ -4083,6 +5145,29 @@ thread_local! {
     /// distinct ones. The buffer address is stable across consecutive Extends over the
     /// same Bindings (the SELECT-expression case the per-solution rule exists for).
     static ROW_SCOPE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// The current UTC instant as an `xsd:dateTime` lexical (civil-from-days conversion,
+/// no time-crate dependency).
+#[cfg(not(target_arch = "wasm32"))]
+fn now_lexical() -> String {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs() as i64;
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
 /// 64-bit FxHash of a string (label material for BNODE(str)).
@@ -4197,14 +5282,23 @@ fn tz_to_duration(tz: &str) -> Option<String> {
 }
 
 /// Build a regex honouring the SPARQL flag string (`i` case-insensitive, `s` dot-all, `m`
-/// multi-line, `x` extended/ignore-whitespace). Returns `None` on an invalid pattern (→ type error).
+/// multi-line, `x` extended/ignore-whitespace, `q` literal-pattern mode per XPath F&O —
+/// every pattern character is matched literally, combinable with `i`).
+/// Returns `None` on an invalid pattern or an unknown flag (→ type error).
 #[cfg(feature = "regex")]
 fn build_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
-    regex::RegexBuilder::new(pattern)
+    if !flags.chars().all(|c| matches!(c, 'i' | 's' | 'm' | 'x' | 'q')) {
+        return None;
+    }
+    let literal = flags.contains('q');
+    let pattern = if literal { regex::escape(pattern) } else { pattern.to_string() };
+    regex::RegexBuilder::new(&pattern)
         .case_insensitive(flags.contains('i'))
-        .dot_matches_new_line(flags.contains('s'))
-        .multi_line(flags.contains('m'))
-        .ignore_whitespace(flags.contains('x'))
+        // `q` suppresses the meaning of the OTHER flags' metacharacters too (per
+        // XPath, only `i` keeps its effect alongside `q`).
+        .dot_matches_new_line(!literal && flags.contains('s'))
+        .multi_line(!literal && flags.contains('m'))
+        .ignore_whitespace(!literal && flags.contains('x'))
         .build()
         .ok()
 }
@@ -4224,12 +5318,30 @@ fn encode_for_uri(s: &str) -> String {
     out
 }
 
-/// Extract a numeric `xsd:dateTime` component (0=year…5=seconds) from a value's lexical form.
+/// Extract a numeric `xsd:dateTime` component (0=year…5=seconds) from a value's lexical
+/// form. YEAR…MINUTES return xsd:integer; SECONDS returns xsd:decimal (per SPARQL),
+/// parsed from the lexical so fractional seconds stay exact.
 fn datetime_field(v: &Value, idx: usize) -> Value {
-    match value_str(v).as_deref().and_then(parse_datetime) {
-        Some(fields) => Value::Num(fields[idx]),
-        None => Value::Error,
+    let s = match value_str(v) {
+        Some(s) => s,
+        None => return Value::Error,
+    };
+    let fields = match parse_datetime(&s) {
+        Some(f) => f,
+        None => return Value::Error,
+    };
+    if idx == 5 {
+        // Re-extract the seconds lexical (timezone stripped) for an exact decimal.
+        let lex = s
+            .split_once('T')
+            .map(|(_, t)| if let Some(i) = t.find(['Z', '+', '-']) { &t[..i] } else { t })
+            .and_then(|t| t.rsplit_once(':').map(|(_, sec)| sec));
+        return match lex.and_then(Dec::parse_lexical) {
+            Some(d) => Value::Num(Num::Dec(d)),
+            None => Value::Error,
+        };
     }
+    Value::Num(Num::Int(fields[idx] as i64))
 }
 
 /// Parse an `xsd:dateTime` lexical (`[-]YYYY-MM-DDThh:mm:ss[.frac][TZ]`) into
@@ -4258,17 +5370,9 @@ fn value_str(v: &Value) -> Option<String> {
         Value::Term(Term::NamedNode(n)) => Some(n.as_str().to_string()),
         Value::Term(Term::BlankNode(b)) => Some(b.as_str().to_string()),
         Value::Bool(b) => Some(b.to_string()),
-        Value::Num(n) => Some(fmt_num(*n)),
+        Value::Num(n) => Some(n.lexical()),
         Value::Unbound | Value::Error => None,
         Value::Term(_) => None,
-    }
-}
-
-fn fmt_num(n: f64) -> String {
-    if n.fract() == 0.0 && n.is_finite() {
-        format!("{}", n as i64)
-    } else {
-        n.to_string()
     }
 }
 
@@ -4279,11 +5383,7 @@ fn value_to_id(graph: &Graph, local: &mut LocalVocab, v: &Value) -> Id {
     let term = match v {
         Value::Unbound | Value::Error => return NO_ID,
         Value::Bool(b) => Term::Literal(Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN)),
-        Value::Num(n) => Term::Literal(if n.fract() == 0.0 && n.is_finite() {
-            Literal::new_typed_literal((*n as i64).to_string(), xsd::INTEGER)
-        } else {
-            Literal::new_typed_literal(n.to_string(), xsd::DOUBLE)
-        }),
+        Value::Num(n) => Term::Literal(Literal::new_typed_literal(n.lexical(), n.datatype())),
         Value::Term(t) => t.clone(),
     };
     graph.id_of(&term).unwrap_or_else(|| local.intern(term))
@@ -4300,11 +5400,7 @@ fn value_to_id_readonly(graph: &Graph, local: &LocalVocab, v: &Value) -> Result<
     let term = match v {
         Value::Unbound | Value::Error => return Ok(NO_ID),
         Value::Bool(b) => Term::Literal(Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN)),
-        Value::Num(n) => Term::Literal(if n.fract() == 0.0 && n.is_finite() {
-            Literal::new_typed_literal((*n as i64).to_string(), xsd::INTEGER)
-        } else {
-            Literal::new_typed_literal(n.to_string(), xsd::DOUBLE)
-        }),
+        Value::Num(n) => Term::Literal(Literal::new_typed_literal(n.lexical(), n.datatype())),
         Value::Term(t) => t.clone(),
     };
     if let Some(id) = graph.id_of(&term) {

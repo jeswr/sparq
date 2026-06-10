@@ -30,6 +30,9 @@ digest = ["dep:md-5", "dep:sha1", "dep:sha2"]
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 oxrdf.workspace = true
 spargebra.workspace = true
+# Relative-IRI resolution for IRI()/URI() against the query's BASE (already in the
+# dependency tree via spargebra/oxrdf).
+oxiri = "0.2"
 rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
