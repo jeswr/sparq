@@ -39,6 +39,8 @@ the matching `SPARQ_*` environment variable; the environment overrides the defau
 | `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` (1 MiB) | Maximum request body. Larger bodies are rejected with `413` before the handler reads them. |
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | Maximum in-flight requests (all routes). Excess requests are load-shed immediately with `429` instead of queueing unboundedly. |
 | `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0` disables) | Maximum SELECT result rows, enforced inside the engine via the row budget. Exceeding it is an **honest `413` refusal** (with the limit named in the error) — never a silent truncation. It is a *working-set* bound: a query whose intermediate result exceeds the cap is refused even if a later operator would shrink it (add `LIMIT`/aggregation to stay under). ASK is existence-only and ignores it. |
+| `--max-subscriptions N` | `SPARQ_MAX_SUBSCRIPTIONS` | `256` | Maximum active subscriptions server-wide (T23); further `subscribe` requests are refused with a protocol `error`. |
+| `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | Maximum active subscriptions per WebSocket connection (T23). |
 | `--verbose` | — | off | Per-request logging via `tower_http::trace::TraceLayer` (respects `RUST_LOG`). |
 
 Robustness, always on:
@@ -72,12 +74,16 @@ curl -H 'Content-Type: application/sparql-query' \
 cargo test -p sparq-server
 ```
 
-Unit tests cover the serialisers, content negotiation and query classification; the
-`tests/protocol.rs` integration suite spins the **actual** axum server on an ephemeral port
-and drives it over real HTTP, asserting request forms, exact result media types, ASK
-booleans and HTTP status semantics. `tests/hardening.rs` exercises every T15 guard the
-same way: timeout on a deliberately slow query, body-size `413`, concurrency shed `429`,
-panic→`500`, the `--max-results` refusal and the structured JSON error bodies.
+Unit tests cover the serialisers, content negotiation, query classification and the
+subscription diff/encoding primitives; the `tests/protocol.rs` integration suite spins the
+**actual** axum server on an ephemeral port and drives it over real HTTP, asserting
+request forms, exact result media types, ASK booleans and HTTP status semantics.
+`tests/hardening.rs` exercises every T15 guard the same way: timeout on a deliberately
+slow query, body-size `413`, concurrency shed `429`, panic→`500`, the `--max-results`
+refusal and the structured JSON error bodies. `tests/subscriptions.rs` drives the T23
+WebSocket protocol end to end with `tokio-tungstenite`: initial result, update→diff,
+silence on non-matching updates, unsubscribe, both subscription limits, the oversized
+refusal and slot cleanup after a dropped socket.
 
 ## Endpoints
 
@@ -101,6 +107,24 @@ panic→`500`, the `--max-results` refusal and the structured JSON error bodies.
 
 `GET`/`HEAD` serialise the graph as **N-Triples** (also offered for an `Accept: text/turtle`
 request, since N-Triples is a syntactic subset of Turtle). Write verbs → `501`.
+
+### SPARQL subscriptions — `ws://…/subscriptions` (T23)
+
+SEPA-style live queries over WebSocket: register a SELECT once, receive
+**added/removed bindings diffs** (each a full SPARQL JSON results object) after every
+committed update that changes the result. JSON protocol, limits, the
+re-evaluate+diff/coalescing model and the SEPA lineage/divergences are documented in
+[`SUBSCRIPTIONS.md`](SUBSCRIPTIONS.md).
+
+```text
+client:  {"subscribe": {"query": "SELECT ?s WHERE { ?s <http://ex/age> ?o }"}}
+server:  {"subscribed": {"id": 1}}
+server:  {"notification": {"id": 1, "sequence": 0, "addedResults": {…full result…}, "removedResults": {…empty…}}}
+         …POST /sparql update commits…
+server:  {"notification": {"id": 1, "sequence": 1, "addedResults": {…}, "removedResults": {…}}}
+client:  {"unsubscribe": {"id": 1}}
+server:  {"unsubscribed": {"id": 1}}
+```
 
 ## Result formats + conformance status
 
