@@ -125,7 +125,7 @@ const PAR_THRESHOLD: usize = 4096;
 /// Transitive closure of a directed relation (`node -> direct successors`): returns
 /// `node -> ALL reachable successors`. BFS per source — the schema graph (subClassOf /
 /// subPropertyOf) is small relative to the data, even when deep.
-fn transitive_closure(direct: &FxHashMap<Id, Vec<Id>>) -> FxHashMap<Id, Vec<Id>> {
+pub(crate) fn transitive_closure(direct: &FxHashMap<Id, Vec<Id>>) -> FxHashMap<Id, Vec<Id>> {
     let mut closure: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
     for (&start, succ0) in direct {
         let mut seen: FxHashSet<Id> = FxHashSet::default();
@@ -146,7 +146,7 @@ fn transitive_closure(direct: &FxHashMap<Id, Vec<Id>>) -> FxHashMap<Id, Vec<Id>>
 /// triples), gathered over the property AND all its super-properties, each closed upward through
 /// the subclass closure. So in one pass `(s p o)` yields `(s type c)` / `(o type c)` for every
 /// `c` here — no fixpoint over rdfs2/3 ⋈ rdfs7 ⋈ rdfs9 needed.
-fn close_dr(
+pub(crate) fn close_dr(
     dr: &FxHashMap<Id, Vec<Id>>,
     sp_closure: &FxHashMap<Id, Vec<Id>>,
     sc_closure: &FxHashMap<Id, Vec<Id>>,
@@ -194,7 +194,7 @@ pub(crate) struct PropExpand {
 /// All RDFS consequences of one asserted triple against the (already fully-closed) schema,
 /// optionally extended by the monotone-OWL property-orientation closure `px`.
 #[allow(clippy::too_many_arguments)]
-fn emit_consequences(
+pub(crate) fn emit_consequences(
     [s, p, o]: [Id; 3],
     v: &Vocab,
     sc_closure: &FxHashMap<Id, Vec<Id>>,
@@ -244,7 +244,7 @@ fn emit_consequences(
 /// fans out over rayon (read-only on the schema closures) into per-thread buffers.
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
-fn sweep(
+pub(crate) fn sweep(
     triples: &[[Id; 3]],
     v: &Vocab,
     sc: &FxHashMap<Id, Vec<Id>>,
@@ -274,7 +274,7 @@ fn sweep(
 }
 #[cfg(not(feature = "parallel"))]
 #[allow(clippy::too_many_arguments)]
-fn sweep(
+pub(crate) fn sweep(
     triples: &[[Id; 3]],
     v: &Vocab,
     sc: &FxHashMap<Id, Vec<Id>>,
