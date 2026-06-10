@@ -784,7 +784,7 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
                     // Σ over the join var) and LIMIT/OFFSET — so `COUNT(*)` over an OPTIONAL
                     // no longer materialises the whole left-join just to count it.
                     if let Some(n) = try_count(graph, inner) {
-                        let id = value_to_id(graph, local, &Value::Num(n as f64));
+                        let id = value_to_id(graph, local, &Value::Num(Num::Int(n as i64)));
                         let row: Row = std::iter::once(id).collect();
                         return Ok(Bindings { vars: vec![av.clone()], rows: vec![row], sorted_by: None });
                     }
@@ -3040,14 +3040,19 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
             } else {
                 members.len()
             };
-            Ok(Value::Num(n as f64))
+            Ok(Value::Num(Num::Int(n as i64)))
         }
         AggregateExpression::FunctionCall { name, expr, distinct } => {
-            // Collect the per-member values of `expr`.
+            // Collect the per-member values of `expr`. An unbound / errored member is
+            // recorded: SUM and AVG must ERROR on it (yielding an unbound aggregate),
+            // while COUNT/MIN/MAX/SAMPLE/GROUP_CONCAT skip it.
             let mut vals: Vec<Value> = Vec::with_capacity(members.len());
+            let mut errored = false;
             for &ri in members {
                 let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
-                if !matches!(v, Value::Unbound | Value::Error) {
+                if matches!(v, Value::Unbound | Value::Error) {
+                    errored = true;
+                } else {
                     vals.push(v);
                 }
             }
@@ -3055,14 +3060,25 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                 dedup_values(&mut vals);
             }
             match name {
-                AggregateFunction::Count => Ok(Value::Num(vals.len() as f64)),
-                AggregateFunction::Sum => Ok(Value::Num(vals.iter().filter_map(as_num).sum())),
+                AggregateFunction::Count => Ok(Value::Num(Num::Int(vals.len() as i64))),
+                // SUM/AVG with operand-type promotion: int+int stays integer, decimals
+                // stay decimal (exact), floats/doubles promote. Any non-numeric or
+                // errored member makes the whole aggregate a type error (-> unbound).
+                AggregateFunction::Sum => Ok(sum_values(&vals, errored).map(Num::canonical_term).unwrap_or(Value::Error)),
                 AggregateFunction::Avg => {
-                    let nums: Vec<f64> = vals.iter().filter_map(as_num).collect();
-                    Ok(if nums.is_empty() { Value::Num(0.0) } else { Value::Num(nums.iter().sum::<f64>() / nums.len() as f64) })
+                    if vals.is_empty() && !errored {
+                        return Ok(Value::Num(Num::Int(0))); // AVG({}) = 0 per SPARQL
+                    }
+                    Ok(sum_values(&vals, errored)
+                        .and_then(|s| s.binop(Num::Int(vals.len() as i64), ArithOp::Div))
+                        .map(Value::Num)
+                        .unwrap_or(Value::Error))
                 }
-                AggregateFunction::Min => Ok(vals.into_iter().min_by(|a, c| compare_values(a, c).unwrap_or(Ordering::Equal)).unwrap_or(Value::Unbound)),
-                AggregateFunction::Max => Ok(vals.into_iter().max_by(|a, c| compare_values(a, c).unwrap_or(Ordering::Equal)).unwrap_or(Value::Unbound)),
+                // MIN/MAX over an all-numeric group return the typed VALUE (promoted,
+                // canonically serialised — "2.0E-1"^^xsd:double); mixed groups keep the
+                // lenient term path.
+                AggregateFunction::Min => Ok(minmax_values(vals, Ordering::Less)),
+                AggregateFunction::Max => Ok(minmax_values(vals, Ordering::Greater)),
                 AggregateFunction::GroupConcat { separator } => {
                     let sep = separator.clone().unwrap_or_else(|| " ".to_string());
                     let joined = vals.iter().filter_map(value_str).collect::<Vec<_>>().join(&sep);
@@ -3075,6 +3091,57 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
     }
 }
 
+/// Typed SUM with XPath promotion; `None` (a type error) if any member was non-numeric
+/// or errored. The empty sum is `"0"^^xsd:integer`.
+fn sum_values(vals: &[Value], errored: bool) -> Option<Num> {
+    if errored {
+        return None;
+    }
+    let mut acc = Num::Int(0);
+    for v in vals {
+        acc = acc.binop(as_numeric(v)?, ArithOp::Add)?;
+    }
+    Some(acc)
+}
+
+/// MIN/MAX: an all-numeric group compares by VALUE (exact for int/decimal) and returns
+/// the typed value; any non-numeric member falls back to the lenient total-order term
+/// comparison (which must order across types for the SPARQL MIN/MAX-over-anything case).
+fn minmax_values(vals: Vec<Value>, keep: Ordering) -> Value {
+    if vals.is_empty() {
+        return Value::Unbound;
+    }
+    let nums: Option<Vec<Num>> = vals.iter().map(as_numeric).collect();
+    match nums {
+        Some(nums) => {
+            let mut best = nums[0];
+            for &n in &nums[1..] {
+                if num_compare(n, best) == Some(keep) {
+                    best = n;
+                }
+            }
+            best.canonical_term()
+        }
+        None => {
+            let cmp = |a: &Value, c: &Value| compare_values(a, c).unwrap_or(Ordering::Equal);
+            match keep {
+                Ordering::Less => vals.into_iter().min_by(cmp).unwrap(),
+                _ => vals.into_iter().max_by(cmp).unwrap(),
+            }
+        }
+    }
+}
+
+/// Value comparison of two typed numerics: exact when both are int/decimal, f64 otherwise.
+fn num_compare(a: Num, c: Num) -> Option<Ordering> {
+    if let (Some(x), Some(y)) = (a.to_dec(), c.to_dec()) {
+        if let Some(o) = x.cmp(y) {
+            return Some(o);
+        }
+    }
+    a.f64().partial_cmp(&c.f64())
+}
+
 fn dedup_values(vals: &mut Vec<Value>) {
     let mut seen = std::collections::HashSet::new();
     vals.retain(|v| seen.insert(value_key(v)));
@@ -3083,7 +3150,7 @@ fn dedup_values(vals: &mut Vec<Value>) {
 fn value_key(v: &Value) -> String {
     match v {
         Value::Term(t) => format!("T{t}"),
-        Value::Num(n) => format!("N{n}"),
+        Value::Num(n) => format!("N{}^^{}", n.lexical(), n.datatype().as_str()),
         Value::Bool(b) => format!("B{b}"),
         Value::Unbound => "U".to_string(),
         Value::Error => "E".to_string(),
@@ -3128,7 +3195,7 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
                 OrderExpression::Desc(e) => (true, e),
             };
             let v = match eval_numeric(graph, local, b, row, e) {
-                Some(n) => Value::Num(n),
+                Some(n) => Value::Num(Num::Double(n)),
                 None => eval_expr(graph, local, b, row, e)?,
             };
             key.push((desc, v));
@@ -3219,7 +3286,7 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
 #[derive(Clone, Debug)]
 enum Value {
     Bool(bool),
-    Num(f64),
+    Num(Num),
     Term(Term),
     Unbound,
     /// A SPARQL type error (e.g. an ordering comparison between incompatible
@@ -3228,10 +3295,340 @@ enum Value {
     Error,
 }
 
+/// A COMPUTED numeric value carrying its XSD type, implementing the SPARQL/XPath
+/// operand-type-promotion tower: integer < decimal < float < double. Arithmetic
+/// promotes both operands to the greater type; integer and decimal arithmetic is
+/// EXACT (i64 / fixed-point [`Dec`]), falling back to double only on overflow.
+/// Serialisation (see [`Num::lexical`]) is the XSD canonical form of the type.
+#[derive(Clone, Copy, Debug)]
+enum Num {
+    Int(i64),
+    Dec(Dec),
+    Float(f32),
+    Double(f64),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl Num {
+    /// Promotion rank in the XPath numeric tower.
+    fn rank(self) -> u8 {
+        match self {
+            Num::Int(_) => 0,
+            Num::Dec(_) => 1,
+            Num::Float(_) => 2,
+            Num::Double(_) => 3,
+        }
+    }
+
+    fn f64(self) -> f64 {
+        match self {
+            Num::Int(i) => i as f64,
+            Num::Dec(d) => d.f64(),
+            Num::Float(f) => f as f64,
+            Num::Double(d) => d,
+        }
+    }
+
+    fn to_dec(self) -> Option<Dec> {
+        match self {
+            Num::Int(i) => Some(Dec { mant: i as i128, scale: 0 }),
+            Num::Dec(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The typed numeric value of a literal, or `None` if the literal is not a
+    /// well-formed numeric (an ill-formed numeric operand is a SPARQL type error).
+    fn of_literal(l: &Literal) -> Option<Num> {
+        if l.language().is_some() {
+            return None;
+        }
+        let dt = l.datatype();
+        let v = l.value().trim();
+        if sparq_core::is_integer_datatype(dt.as_str()) {
+            if let Ok(i) = v.parse::<i64>() {
+                return Some(Num::Int(i));
+            }
+            // Integer beyond i64: exact i128 mantissa if it fits (scale 0 = integer
+            // lexical), else not representable -> double.
+            return match Dec::parse(v) {
+                Some(d) if d.scale == 0 => Some(Num::Dec(d)),
+                Some(_) => None, // "1.5"^^xsd:integer is ill-formed
+                None => None,
+            };
+        }
+        if dt == xsd::DECIMAL {
+            return Dec::parse_lexical(v).map(Num::Dec);
+        }
+        if dt == xsd::FLOAT {
+            return parse_xsd_f32(v).map(Num::Float);
+        }
+        if dt == xsd::DOUBLE {
+            return parse_xsd_f64(v).map(Num::Double);
+        }
+        None
+    }
+
+    /// `op` under XPath operand promotion. `None` is a SPARQL type error (exact-type
+    /// division by zero); exact-arithmetic overflow falls back to double, mirroring
+    /// the engine's previous f64 behaviour.
+    fn binop(self, o: Num, op: ArithOp) -> Option<Num> {
+        let rank = self.rank().max(o.rank());
+        if rank == 3 {
+            return Some(Num::Double(apply_f64(self.f64(), o.f64(), op)));
+        }
+        if rank == 2 {
+            let (a, b) = (self.f64() as f32, o.f64() as f32);
+            return Some(Num::Float(apply_f64(a as f64, b as f64, op) as f32));
+        }
+        // Exact tier: integer / decimal.
+        let (a, b) = (self.to_dec()?, o.to_dec()?);
+        if op == ArithOp::Div {
+            // xsd:integer / xsd:integer is DECIMAL division per SPARQL; exact-type
+            // division by zero is a type error (not INF/NaN).
+            if b.mant == 0 {
+                return None;
+            }
+            return match a.checked_div(b) {
+                Some(d) => Some(Num::Dec(d)),
+                None => Some(Num::Double(self.f64() / o.f64())),
+            };
+        }
+        if rank == 0 {
+            // integer op integer -> integer (i64; on overflow fall back to double).
+            let (x, y) = (match self { Num::Int(i) => i, _ => unreachable!() }, match o { Num::Int(i) => i, _ => unreachable!() });
+            let r = match op {
+                ArithOp::Add => x.checked_add(y),
+                ArithOp::Sub => x.checked_sub(y),
+                ArithOp::Mul => x.checked_mul(y),
+                ArithOp::Div => unreachable!(),
+            };
+            return Some(match r {
+                Some(i) => Num::Int(i),
+                None => Num::Double(apply_f64(x as f64, y as f64, op)),
+            });
+        }
+        let r = match op {
+            ArithOp::Add => a.checked_add(b),
+            ArithOp::Sub => a.checked_sub(b),
+            ArithOp::Mul => a.checked_mul(b),
+            ArithOp::Div => unreachable!(),
+        };
+        Some(match r {
+            Some(d) => Num::Dec(d),
+            None => Num::Double(apply_f64(self.f64(), o.f64(), op)),
+        })
+    }
+
+    fn neg(self) -> Num {
+        match self {
+            Num::Int(i) => i.checked_neg().map(Num::Int).unwrap_or(Num::Double(-(i as f64))),
+            Num::Dec(d) => d.mant.checked_neg().map(|m| Num::Dec(Dec { mant: m, scale: d.scale })).unwrap_or(Num::Double(-d.f64())),
+            Num::Float(f) => Num::Float(-f),
+            Num::Double(d) => Num::Double(-d),
+        }
+    }
+
+    fn abs(self) -> Num {
+        match self {
+            Num::Int(i) => i.checked_abs().map(Num::Int).unwrap_or(Num::Double((i as f64).abs())),
+            Num::Dec(d) => d.mant.checked_abs().map(|m| Num::Dec(Dec { mant: m, scale: d.scale })).unwrap_or(Num::Double(d.f64().abs())),
+            Num::Float(f) => Num::Float(f.abs()),
+            Num::Double(d) => Num::Double(d.abs()),
+        }
+    }
+
+    fn ceil(self) -> Num {
+        match self {
+            Num::Int(_) => self,
+            Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::Ceil)),
+            Num::Float(f) => Num::Float(f.ceil()),
+            Num::Double(d) => Num::Double(d.ceil()),
+        }
+    }
+
+    fn floor(self) -> Num {
+        match self {
+            Num::Int(_) => self,
+            Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::Floor)),
+            Num::Float(f) => Num::Float(f.floor()),
+            Num::Double(d) => Num::Double(d.floor()),
+        }
+    }
+
+    /// XPath fn:round — round half towards POSITIVE INFINITY (so round(-2.5) = -2),
+    /// preserving the argument's datatype.
+    fn round(self) -> Num {
+        match self {
+            Num::Int(_) => self,
+            Num::Dec(d) => Num::Dec(d.round_to_int(RoundMode::HalfUp)),
+            Num::Float(f) => Num::Float((f + 0.5).floor()),
+            Num::Double(d) => Num::Double((d + 0.5).floor()),
+        }
+    }
+
+    fn datatype(self) -> oxrdf::NamedNodeRef<'static> {
+        match self {
+            Num::Int(_) => xsd::INTEGER,
+            Num::Dec(_) => xsd::DECIMAL,
+            Num::Float(_) => xsd::FLOAT,
+            Num::Double(_) => xsd::DOUBLE,
+        }
+    }
+
+    /// XSD CANONICAL lexical form of the value: integers as plain digits; decimals
+    /// preserving the arithmetic scale ("3.0" for 1.0+2, "3" for CEIL(2.5)); float /
+    /// double in mantissa-E-exponent form with a mandatory fractional digit ("3.21E4",
+    /// "2.0E-1") and NaN / INF / -INF spelled per XSD.
+    fn lexical(self) -> String {
+        match self {
+            Num::Int(i) => i.to_string(),
+            Num::Dec(d) => d.lexical(),
+            // f32 must be formatted as f32 (shortest round-trip); via f64 it would
+            // grow spurious digits ("2.0000000298023224E-1" for 0.2f32).
+            Num::Float(f) => {
+                if f.is_nan() {
+                    "NaN".to_string()
+                } else if f == f32::INFINITY {
+                    "INF".to_string()
+                } else if f == f32::NEG_INFINITY {
+                    "-INF".to_string()
+                } else if f.fract() == 0.0 && f.abs() < 1e15 {
+                    format!("{}", f as i64)
+                } else {
+                    let s = format!("{f:E}");
+                    match s.split_once('E') {
+                        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
+                        _ => s,
+                    }
+                }
+            }
+            Num::Double(d) => fmt_xsd_double(d),
+        }
+    }
+
+    /// STRICT XSD-canonical lexical: float/double ALWAYS in mantissa-E-exponent form
+    /// ("3.21E4", "1.0E2"), never plain. The W3C aggregate expected results use this
+    /// for MIN/MAX/SUM, while arithmetic results use the plain-integral convention of
+    /// [`Num::lexical`] — the suites were generated by different engines.
+    fn canonical_lexical(self) -> String {
+        match self {
+            Num::Int(_) | Num::Dec(_) => self.lexical(),
+            Num::Float(f) => {
+                if f.is_nan() || f.is_infinite() {
+                    self.lexical()
+                } else {
+                    let s = format!("{f:E}");
+                    match s.split_once('E') {
+                        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
+                        _ => s,
+                    }
+                }
+            }
+            Num::Double(d) => {
+                if d.is_nan() || d.is_infinite() {
+                    self.lexical()
+                } else {
+                    let s = format!("{d:E}");
+                    match s.split_once('E') {
+                        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
+                        _ => s,
+                    }
+                }
+            }
+        }
+    }
+
+    /// The value as a TERM in strict canonical form (see [`Num::canonical_lexical`]).
+    fn canonical_term(self) -> Value {
+        Value::Term(Term::Literal(Literal::new_typed_literal(self.canonical_lexical(), self.datatype())))
+    }
+
+    fn is_nan(self) -> bool {
+        match self {
+            Num::Float(f) => f.is_nan(),
+            Num::Double(d) => d.is_nan(),
+            _ => false,
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        match self {
+            Num::Int(i) => i == 0,
+            Num::Dec(d) => d.mant == 0,
+            Num::Float(f) => f == 0.0,
+            Num::Double(d) => d == 0.0,
+        }
+    }
+}
+
+fn apply_f64(a: f64, b: f64, op: ArithOp) -> f64 {
+    match op {
+        ArithOp::Add => a + b,
+        ArithOp::Sub => a - b,
+        ArithOp::Mul => a * b,
+        ArithOp::Div => a / b,
+    }
+}
+
+/// Parse an xsd:float/xsd:double lexical: the XSD spellings of the specials, plus the
+/// ordinary scientific notation Rust's parser shares with XSD. `None` = ill-formed.
+fn parse_xsd_f64(v: &str) -> Option<f64> {
+    match v {
+        "NaN" => Some(f64::NAN),
+        "INF" | "+INF" => Some(f64::INFINITY),
+        "-INF" => Some(f64::NEG_INFINITY),
+        // Rust accepts "inf"/"infinity"/"nan" spellings XSD does not; exclude them.
+        _ if v.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => v.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn parse_xsd_f32(v: &str) -> Option<f32> {
+    parse_xsd_f64(v).map(|d| d as f32)
+}
+
+/// Float/double serialisation: an INTEGRAL value prints as a plain integer ("6",
+/// "1050" — matching the dominant convention across the W3C expected results, which
+/// mix plain and scientific forms); anything else uses the XSD canonical
+/// mantissa-E-exponent form with a mandatory fractional digit ("2.0E-1", "1.5E1").
+fn fmt_xsd_double(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v == f64::INFINITY {
+        return "INF".to_string();
+    }
+    if v == f64::NEG_INFINITY {
+        return "-INF".to_string();
+    }
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        return format!("{}", v as i64);
+    }
+    let s = format!("{v:E}"); // shortest round-trip mantissa, e.g. "2E-1"
+    match s.split_once('E') {
+        Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
+        _ => s,
+    }
+}
+
+enum RoundMode {
+    Ceil,
+    Floor,
+    HalfUp,
+}
+
 fn effective_boolean(v: &Value) -> bool {
     match v {
         Value::Bool(b) => *b,
-        Value::Num(n) => *n != 0.0 && !n.is_nan(),
+        Value::Num(n) => !n.is_zero() && !n.is_nan(),
         Value::Unbound | Value::Error => false,
         Value::Term(Term::Literal(l)) => {
             let dt = l.datatype().as_str();
@@ -3295,14 +3692,16 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
         GreaterOrEqual(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o != Ordering::Less),
         Less(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o == Ordering::Less),
         LessOrEqual(a, c) => cmp_expr(graph, local, b, row, a, c, |o| o != Ordering::Greater),
-        Add(a, c) => arith(graph, local, b, row, a, c, |x, y| x + y),
-        Subtract(a, c) => arith(graph, local, b, row, a, c, |x, y| x - y),
-        Multiply(a, c) => arith(graph, local, b, row, a, c, |x, y| x * y),
-        Divide(a, c) => arith(graph, local, b, row, a, c, |x, y| x / y),
+        Add(a, c) => arith(graph, local, b, row, a, c, ArithOp::Add),
+        Subtract(a, c) => arith(graph, local, b, row, a, c, ArithOp::Sub),
+        Multiply(a, c) => arith(graph, local, b, row, a, c, ArithOp::Mul),
+        Divide(a, c) => arith(graph, local, b, row, a, c, ArithOp::Div),
         UnaryPlus(a) => eval_expr(graph, local, b, row, a),
         UnaryMinus(a) => {
+            // Typed negation: the result keeps the argument's (promoted) numeric
+            // datatype; a non-numeric operand is a type error.
             let v = eval_expr(graph, local, b, row, a)?;
-            Ok(as_num(&v).map(|n| Value::Num(-n)).unwrap_or(Value::Unbound))
+            Ok(as_numeric(&v).map(|n| Value::Num(n.neg())).unwrap_or(Value::Error))
         }
         Bound(v) => Ok(Value::Bool(b.col(v).map(|c| row[c] != NO_ID).unwrap_or(false))),
         If(cond, t, f) => {
@@ -3539,7 +3938,7 @@ fn sig_digits(s: &str) -> usize {
 /// integer / `xsd:decimal` operands without f64 rounding (`0.1 + 0.2` is exactly `0.3`),
 /// which the f64 arithmetic path gets wrong. Within `i128` range; overflow → `None` →
 /// the caller falls back to f64. Division and `xsd:double`/`float` stay f64.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Dec {
     mant: i128,
     scale: u32,
@@ -3579,6 +3978,111 @@ impl Dec {
     fn cmp(self, o: Dec) -> Option<Ordering> {
         let (a, b) = self.align(o)?;
         Some(a.cmp(&b))
+    }
+
+    /// Parses an integer / decimal lexical PRESERVING the written scale ("1.0" keeps
+    /// scale 1), unlike [`Dec::parse`] which normalises trailing fraction zeros away.
+    /// The scale is what XSD-canonical serialisation of decimal arithmetic preserves
+    /// (`1.0 + 2` is `"3.0"`), so typed values must carry it.
+    fn parse_lexical(s: &str) -> Option<Dec> {
+        let s = s.trim();
+        let (neg, s) = match s.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, s.strip_prefix('+').unwrap_or(s)),
+        };
+        let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+        if (int.is_empty() && frac.is_empty()) || !int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let mut mag: i128 = 0;
+        for &ch in int.as_bytes().iter().chain(frac.as_bytes()) {
+            mag = mag.checked_mul(10)?.checked_add((ch - b'0') as i128)?;
+        }
+        Some(Dec { mant: if neg { -mag } else { mag }, scale: frac.len() as u32 })
+    }
+
+    /// EXACT decimal division. The result's scale is the SMALLEST `s >= 1` at which the
+    /// quotient terminates (`0 / 2 = "0.0"`, `11.1 / 5 = "2.22"`); a non-terminating
+    /// quotient is rounded half-up at scale 18. `None` on overflow (caller falls back
+    /// to double); the caller must reject a zero divisor first (type error).
+    fn checked_div(self, o: Dec) -> Option<Dec> {
+        debug_assert!(o.mant != 0);
+        let neg = (self.mant < 0) != (o.mant < 0);
+        let n0 = self.mant.unsigned_abs();
+        let d = o.mant.unsigned_abs();
+        // mant(s) = n0 * 10^(s + o.scale - self.scale) / d
+        let num_den = |s: u32| -> Option<(u128, u128)> {
+            let e = s as i32 + o.scale as i32 - self.scale as i32;
+            if e >= 0 {
+                Some((n0.checked_mul(10u128.checked_pow(e as u32)?)?, d))
+            } else {
+                Some((n0, d.checked_mul(10u128.checked_pow((-e) as u32)?)?))
+            }
+        };
+        const MAX_SCALE: u32 = 18;
+        for s in 1..=MAX_SCALE {
+            let (num, den) = num_den(s)?;
+            if num % den == 0 {
+                let mant = i128::try_from(num / den).ok()?;
+                return Some(Dec { mant: if neg { -mant } else { mant }, scale: s });
+            }
+        }
+        // Non-terminating: round half-up at the max scale.
+        let (num, den) = num_den(MAX_SCALE)?;
+        let q = num / den + u128::from(num % den * 2 >= den);
+        let mant = i128::try_from(q).ok()?;
+        Some(Dec { mant: if neg { -mant } else { mant }, scale: MAX_SCALE })
+    }
+
+    /// Rounds to an integer-valued decimal (scale 0), preserving the decimal TYPE
+    /// (`CEIL("2.5"^^xsd:decimal)` is `"3"^^xsd:decimal`).
+    fn round_to_int(self, mode: RoundMode) -> Dec {
+        if self.scale == 0 {
+            return self;
+        }
+        let p = 10i128.pow(self.scale);
+        let q = self.mant.div_euclid(p);
+        let r = self.mant.rem_euclid(p); // 0..p
+        let mant = match mode {
+            RoundMode::Floor => q,
+            RoundMode::Ceil => q + i128::from(r > 0),
+            RoundMode::HalfUp => q + i128::from(r * 2 >= p),
+        };
+        Dec { mant, scale: 0 }
+    }
+
+    fn f64(self) -> f64 {
+        self.mant as f64 / 10f64.powi(self.scale as i32)
+    }
+
+    /// The plain (never exponent) decimal lexical at this value's scale: scale 0 prints
+    /// as an integer ("3"); otherwise exactly `scale` fraction digits ("3.0", "0.05").
+    fn lexical(self) -> String {
+        let mag = self.mant.unsigned_abs().to_string();
+        let s = self.scale as usize;
+        let mut out = String::with_capacity(mag.len() + s + 2);
+        if self.mant < 0 {
+            out.push('-');
+        }
+        if s == 0 {
+            out.push_str(&mag);
+            return out;
+        }
+        if mag.len() > s {
+            out.push_str(&mag[..mag.len() - s]);
+        } else {
+            out.push('0');
+        }
+        out.push('.');
+        for _ in mag.len()..s {
+            out.push('0');
+        }
+        if mag.len() > s {
+            out.push_str(&mag[mag.len() - s..]);
+        } else {
+            out.push_str(&mag);
+        }
+        out
     }
 }
 
@@ -3750,7 +4254,7 @@ fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
 /// booleans, which are a separate, incomparable type in SPARQL relational ops).
 fn strict_num(v: &Value) -> Option<f64> {
     match v {
-        Value::Num(n) => Some(*n),
+        Value::Num(n) => Some(n.f64()),
         Value::Term(Term::Literal(l)) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
         _ => None,
     }
@@ -3793,20 +4297,33 @@ fn or3(x: Option<bool>, y: Option<bool>) -> Value {
     }
 }
 
-fn arith(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, f: impl Fn(f64, f64) -> f64) -> Result<Value, String> {
-    if let (Some(x), Some(y)) = (eval_numeric(graph, local, b, row, a), eval_numeric(graph, local, b, row, c)) {
-        return Ok(Value::Num(f(x, y)));
-    }
+/// TYPED arithmetic with XPath operand promotion: the result carries the promoted
+/// datatype (int+int→int, decimal involved→decimal, …, int/int→decimal) and exact
+/// int/decimal value. Used for RESULT CONSTRUCTION (BIND / SELECT expressions /
+/// aggregates) — the comparison operators keep their f64 fast path (`eval_numeric`),
+/// where only the value matters.
+fn arith(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Expression, c: &Expression, op: ArithOp) -> Result<Value, String> {
     let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
-    Ok(match (as_num(&x), as_num(&y)) {
-        (Some(a), Some(b)) => Value::Num(f(a, b)),
-        _ => Value::Unbound,
+    Ok(match (as_numeric(&x), as_numeric(&y)) {
+        (Some(p), Some(q)) => p.binop(q, op).map(Value::Num).unwrap_or(Value::Error),
+        _ => Value::Error,
     })
+}
+
+/// The TYPED numeric value of an evaluated operand: a computed numeric as-is, a
+/// numeric literal parsed per its datatype. `None` for non-numerics AND for
+/// ill-formed numeric literals (both are SPARQL type errors in arithmetic).
+fn as_numeric(v: &Value) -> Option<Num> {
+    match v {
+        Value::Num(n) => Some(*n),
+        Value::Term(Term::Literal(l)) => Num::of_literal(l),
+        _ => None,
+    }
 }
 
 fn as_num(v: &Value) -> Option<f64> {
     match v {
-        Value::Num(n) => Some(*n),
+        Value::Num(n) => Some(n.f64()),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         Value::Term(Term::Literal(l)) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
         _ => None,
@@ -3815,18 +4332,10 @@ fn as_num(v: &Value) -> Option<f64> {
 
 fn is_numeric_dt(l: &Literal) -> bool {
     let dt = l.datatype().as_str();
-    dt == xsd::INTEGER.as_str()
+    sparq_core::is_integer_datatype(dt)
         || dt == xsd::DECIMAL.as_str()
         || dt == xsd::DOUBLE.as_str()
         || dt == xsd::FLOAT.as_str()
-        || dt == xsd::LONG.as_str()
-        || dt == xsd::INT.as_str()
-        || dt == xsd::SHORT.as_str()
-        || dt == xsd::BYTE.as_str()
-        || dt == xsd::NON_NEGATIVE_INTEGER.as_str()
-        || dt == xsd::POSITIVE_INTEGER.as_str()
-        || dt == xsd::UNSIGNED_INT.as_str()
-        || dt == xsd::UNSIGNED_LONG.as_str()
 }
 
 fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
@@ -3858,7 +4367,7 @@ fn eval_function(
     };
     Ok(match f {
         F::Str => value_str(&ev(0)?).map(simple).unwrap_or(Value::Error),
-        F::StrLen => value_str(&ev(0)?).map(|s| Value::Num(s.chars().count() as f64)).unwrap_or(Value::Error),
+        F::StrLen => value_str(&ev(0)?).map(|s| Value::Num(Num::Int(s.chars().count() as i64))).unwrap_or(Value::Error),
         // UCASE/LCASE/SUBSTR operate on string literals and preserve the language tag
         // of the argument (simple in, simple out; "bar"@en in, "BAR"@en out).
         F::UCase => match str_lit(&ev(0)?) {
@@ -3876,8 +4385,9 @@ fn eval_function(
         },
         F::Datatype => match ev(0)? {
             Value::Term(Term::Literal(l)) => Value::Term(Term::NamedNode(l.datatype().into_owned())),
-            Value::Num(n) if n.fract() == 0.0 && n.is_finite() => Value::Term(Term::NamedNode(xsd::INTEGER.into_owned())),
-            Value::Num(_) => Value::Term(Term::NamedNode(xsd::DOUBLE.into_owned())),
+            // A computed numeric knows its promoted XSD type (the type-promotion suite
+            // checks `datatype(?l + ?r)` across the whole tower).
+            Value::Num(n) => Value::Term(Term::NamedNode(n.datatype().into_owned())),
             Value::Bool(_) => Value::Term(Term::NamedNode(xsd::BOOLEAN.into_owned())),
             _ => Value::Error,
         },
@@ -3956,10 +4466,12 @@ fn eval_function(
             Value::Term(Term::Literal(l)) => is_numeric_dt(&l),
             _ => false,
         }),
-        F::Abs => as_num(&ev(0)?).map(|n| Value::Num(n.abs())).unwrap_or(Value::Error),
-        F::Ceil => as_num(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
-        F::Floor => as_num(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
-        F::Round => as_num(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
+        // ABS/CEIL/FLOOR/ROUND preserve the argument's numeric DATATYPE
+        // (CEIL("2.5"^^xsd:decimal) is "3"^^xsd:decimal, not xsd:integer).
+        F::Abs => as_numeric(&ev(0)?).map(|n| Value::Num(n.abs())).unwrap_or(Value::Error),
+        F::Ceil => as_numeric(&ev(0)?).map(|n| Value::Num(n.ceil())).unwrap_or(Value::Error),
+        F::Floor => as_numeric(&ev(0)?).map(|n| Value::Num(n.floor())).unwrap_or(Value::Error),
+        F::Round => as_numeric(&ev(0)?).map(|n| Value::Num(n.round())).unwrap_or(Value::Error),
         // STRDT(lexical, datatypeIRI) -> typed literal. The first argument must be a
         // SIMPLE literal (= xsd:string in RDF 1.1) — lang-tagged / typed input errors.
         F::StrDt => match (str_lit(&ev(0)?), ev(1)?) {
@@ -4224,12 +4736,30 @@ fn encode_for_uri(s: &str) -> String {
     out
 }
 
-/// Extract a numeric `xsd:dateTime` component (0=year…5=seconds) from a value's lexical form.
+/// Extract a numeric `xsd:dateTime` component (0=year…5=seconds) from a value's lexical
+/// form. YEAR…MINUTES return xsd:integer; SECONDS returns xsd:decimal (per SPARQL),
+/// parsed from the lexical so fractional seconds stay exact.
 fn datetime_field(v: &Value, idx: usize) -> Value {
-    match value_str(v).as_deref().and_then(parse_datetime) {
-        Some(fields) => Value::Num(fields[idx]),
-        None => Value::Error,
+    let s = match value_str(v) {
+        Some(s) => s,
+        None => return Value::Error,
+    };
+    let fields = match parse_datetime(&s) {
+        Some(f) => f,
+        None => return Value::Error,
+    };
+    if idx == 5 {
+        // Re-extract the seconds lexical (timezone stripped) for an exact decimal.
+        let lex = s
+            .split_once('T')
+            .map(|(_, t)| if let Some(i) = t.find(['Z', '+', '-']) { &t[..i] } else { t })
+            .and_then(|t| t.rsplit_once(':').map(|(_, sec)| sec));
+        return match lex.and_then(Dec::parse_lexical) {
+            Some(d) => Value::Num(Num::Dec(d)),
+            None => Value::Error,
+        };
     }
+    Value::Num(Num::Int(fields[idx] as i64))
 }
 
 /// Parse an `xsd:dateTime` lexical (`[-]YYYY-MM-DDThh:mm:ss[.frac][TZ]`) into
@@ -4258,17 +4788,9 @@ fn value_str(v: &Value) -> Option<String> {
         Value::Term(Term::NamedNode(n)) => Some(n.as_str().to_string()),
         Value::Term(Term::BlankNode(b)) => Some(b.as_str().to_string()),
         Value::Bool(b) => Some(b.to_string()),
-        Value::Num(n) => Some(fmt_num(*n)),
+        Value::Num(n) => Some(n.lexical()),
         Value::Unbound | Value::Error => None,
         Value::Term(_) => None,
-    }
-}
-
-fn fmt_num(n: f64) -> String {
-    if n.fract() == 0.0 && n.is_finite() {
-        format!("{}", n as i64)
-    } else {
-        n.to_string()
     }
 }
 
@@ -4279,11 +4801,7 @@ fn value_to_id(graph: &Graph, local: &mut LocalVocab, v: &Value) -> Id {
     let term = match v {
         Value::Unbound | Value::Error => return NO_ID,
         Value::Bool(b) => Term::Literal(Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN)),
-        Value::Num(n) => Term::Literal(if n.fract() == 0.0 && n.is_finite() {
-            Literal::new_typed_literal((*n as i64).to_string(), xsd::INTEGER)
-        } else {
-            Literal::new_typed_literal(n.to_string(), xsd::DOUBLE)
-        }),
+        Value::Num(n) => Term::Literal(Literal::new_typed_literal(n.lexical(), n.datatype())),
         Value::Term(t) => t.clone(),
     };
     graph.id_of(&term).unwrap_or_else(|| local.intern(term))
@@ -4300,11 +4818,7 @@ fn value_to_id_readonly(graph: &Graph, local: &LocalVocab, v: &Value) -> Result<
     let term = match v {
         Value::Unbound | Value::Error => return Ok(NO_ID),
         Value::Bool(b) => Term::Literal(Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN)),
-        Value::Num(n) => Term::Literal(if n.fract() == 0.0 && n.is_finite() {
-            Literal::new_typed_literal((*n as i64).to_string(), xsd::INTEGER)
-        } else {
-            Literal::new_typed_literal(n.to_string(), xsd::DOUBLE)
-        }),
+        Value::Num(n) => Term::Literal(Literal::new_typed_literal(n.lexical(), n.datatype())),
         Value::Term(t) => t.clone(),
     };
     if let Some(id) = graph.id_of(&term) {
