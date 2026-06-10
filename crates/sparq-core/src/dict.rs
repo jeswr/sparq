@@ -89,6 +89,11 @@ pub struct Dict {
     // files and `terms`/`table` are empty — the out-of-core, minimal-RAM dictionary.
     #[cfg(feature = "mmap")]
     mapped: Option<MappedDict>,
+    // APPEND-ONLY growth over the compacted storage modes (delta-overlay updates, T17):
+    // ids `1..=base` are served by the blob / mmap'd record store; freshly interned terms
+    // go to the `terms` arena with ids `base + i + 1`. Always 0 in the plain arena mode,
+    // so the arena hot paths are unchanged (one predictable comparison).
+    base: usize,
 }
 
 /// The compact per-term storage. An IRI is `(prefix id, suffix)`; a literal is
@@ -267,26 +272,6 @@ fn stored_eq_term(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[Name
     }
 }
 
-/// Rebuilds a full `Term` from its compact storage (for `term()`). Takes the whole dict
-/// so a triple term can recursively rebuild its components by id.
-fn reconstruct(d: &Dict, s: &Stored) -> Term {
-    match s {
-        Stored::Iri { prefix, suffix } => {
-            let p = &d.prefixes[*prefix as usize];
-            let mut iri = String::with_capacity(p.len() + suffix.len());
-            iri.push_str(p);
-            iri.push_str(suffix);
-            Term::NamedNode(NamedNode::new_unchecked(iri))
-        }
-        Stored::Lit { value, datatype, lang } => Term::Literal(match lang {
-            Some(l) => Literal::new_language_tagged_literal_unchecked(value.to_string(), l.to_string()),
-            None => Literal::new_typed_literal(value.to_string(), d.datatypes[*datatype as usize].clone()),
-        }),
-        Stored::Blank(b) => Term::BlankNode(oxrdf::BlankNode::new_unchecked(b.to_string())),
-        Stored::Triple(ids) => reconstruct_triple(d, *ids),
-    }
-}
-
 /// Rebuilds an RDF 1.2 triple term from its stored component ids. Interning only ever
 /// stores a valid (IRI|blank, IRI, any-term) shape, so the inner matches cannot fail on
 /// ids produced by this dict.
@@ -396,6 +381,83 @@ fn stored_ref_eq_term(s: &StoredRef, q: &Term, prefixes: &[Box<str>], datatypes:
     }
 }
 
+/// A zero-copy `StoredRef` view of an arena `Stored` — so the appended-term (arena-over-
+/// blob/mmap) paths can share the `StoredRef`-based comparison/serialisation code.
+#[inline]
+fn stored_as_ref(s: &Stored) -> StoredRef<'_> {
+    match s {
+        Stored::Iri { prefix, suffix } => StoredRef::Iri { prefix: *prefix, suffix },
+        Stored::Lit { value, datatype, lang } => {
+            StoredRef::Lit { value, datatype: *datatype, lang: lang.as_deref() }
+        }
+        Stored::Blank(b) => StoredRef::Blank(b),
+        Stored::Triple(ids) => StoredRef::Triple(*ids),
+    }
+}
+
+/// Content hash of a `StoredRef` record — same value as `hash_stored` for the same term.
+#[inline]
+fn hash_stored_ref(s: &StoredRef, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> u64 {
+    match s {
+        StoredRef::Iri { prefix, suffix } => hash_iri_parts(&prefixes[*prefix as usize], suffix),
+        StoredRef::Lit { value, datatype, lang } => hash_lit(value, datatypes[*datatype as usize].as_str(), *lang),
+        StoredRef::Blank(b) => hash_blank(b),
+        StoredRef::Triple(ids) => hash_triple_ids(*ids),
+    }
+}
+
+// `StoredRef` counterparts of the stored-vs-query-component comparisons, for the
+// blob/mmap'd base records consulted by the append-capable intern paths.
+
+#[inline]
+fn stored_ref_is_iri(s: &StoredRef, iri: &str, prefixes: &[Box<str>]) -> bool {
+    match s {
+        StoredRef::Iri { prefix, suffix } => {
+            let p = &prefixes[*prefix as usize];
+            iri.len() == p.len() + suffix.len() && iri.as_bytes().starts_with(p.as_bytes()) && iri[p.len()..] == **suffix
+        }
+        _ => false,
+    }
+}
+
+#[inline]
+fn stored_ref_is_iri_parts(s: &StoredRef, prefix: &str, suffix: &str, prefixes: &[Box<str>]) -> bool {
+    match s {
+        StoredRef::Iri { prefix: pid, suffix: suf } => prefixes[*pid as usize].as_ref() == prefix && *suf == suffix,
+        _ => false,
+    }
+}
+
+#[inline]
+fn stored_ref_is_lit(s: &StoredRef, value: &str, datatype: &str, lang: Option<&str>, datatypes: &[NamedNode]) -> bool {
+    match s {
+        StoredRef::Lit { value: v, datatype: dt, lang: lg } => {
+            *v == value && *lg == lang && datatypes[*dt as usize].as_str() == datatype
+        }
+        _ => false,
+    }
+}
+
+/// Content hash of any id present in the lookup `table` (blob-base or appended-arena —
+/// mapped-base ids are never in the table; they are found via the mmap'd sorted index).
+/// Free function so it can serve hashbrown's rehash closures while `table` is borrowed.
+#[inline]
+fn hash_tabled(
+    id: Id,
+    base: usize,
+    terms: &[Stored],
+    blob: &Option<(Vec<u8>, Vec<u32>)>,
+    prefixes: &[Box<str>],
+    datatypes: &[NamedNode],
+) -> u64 {
+    let i = (id - 1) as usize;
+    if i >= base {
+        return hash_stored(&terms[i - base], prefixes, datatypes);
+    }
+    let (b, offs) = blob.as_ref().expect("a tabled id below `base` must be a blob id");
+    hash_stored_ref(&parse_stored_ref(&b[offs[i] as usize..]), prefixes, datatypes)
+}
+
 /// The mmap-backed term store + lookup index (out-of-core dictionary).
 #[cfg(feature = "mmap")]
 struct MappedDict {
@@ -403,7 +465,6 @@ struct MappedDict {
     offsets: memmap2::Mmap, // [u64; n] byte offset of each term record in `blob`
     hashes: memmap2::Mmap,  // [u64; n] content hashes, SORTED (for lookup)
     hashids: memmap2::Mmap, // [u32; n] term ids parallel to `hashes`
-    len: usize,
 }
 
 #[cfg(feature = "mmap")]
@@ -470,26 +531,123 @@ impl Dict {
         id
     }
 
-    /// Assigns the next id to a freshly built `Stored` and indexes it.
+    /// Assigns the next id to a freshly built `Stored` and indexes it. With a compacted
+    /// base (blob/mmap), the new term is APPENDED to the arena above `base` — the dict's
+    /// append-only growth path for delta-overlay updates.
     #[inline]
     fn push(&mut self, hash: u64, stored: Stored) -> Id {
-        let id = (self.terms.len() as Id) + 1; // 1-based
+        let id = (self.base + self.terms.len()) as Id + 1; // 1-based
         // Enforced in release too: once the (non-inline) dictionary reaches INLINE_BASE
         // distinct terms, new ids would collide with the inline-integer range and decode
         // as integers — silent corruption. 2^31 ≈ 2.1B distinct non-integer terms is the
         // hard capacity limit of the u32 scheme; fail loudly (widen Id to u64).
         assert!(id < INLINE_BASE, "dictionary exceeded the id capacity (2^31 distinct non-integer terms); widen Id to u64");
         self.terms.push(stored);
-        let (terms, prefixes, datatypes) = (&self.terms, &self.prefixes, &self.datatypes);
-        self.table.insert_unique(hash, id, |&i| hash_stored(&terms[(i - 1) as usize], prefixes, datatypes));
+        let (base, terms, blob, prefixes, datatypes) =
+            (self.base, &self.terms, &self.blob, &self.prefixes, &self.datatypes);
+        self.table.insert_unique(hash, id, |&i| hash_tabled(i, base, terms, blob, prefixes, datatypes));
         id
+    }
+
+    /// Finds a term in the MAPPED base by content hash (binary search of the mmap'd
+    /// sorted-hash index, verifying candidates with `eq`). `None` when not mapped or
+    /// absent — the caller then consults the table (blob base + appended arena terms).
+    #[cfg(feature = "mmap")]
+    #[inline]
+    fn mapped_find(&self, hash: u64, eq: impl Fn(&StoredRef) -> bool) -> Option<Id> {
+        let m = self.mapped.as_ref()?;
+        let hashes = m.hashes();
+        let mut i = hashes.partition_point(|&h| h < hash);
+        let ids = m.hashids();
+        while i < hashes.len() && hashes[i] == hash {
+            let id = ids[i];
+            if eq(&m.stored(id)) {
+                return Some(id);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// The record of a TABLED id (blob base, or appended arena) as needed by the intern
+    /// comparison closures. Pure-arena dicts (`base == 0`) always take the arena branch,
+    /// so the bulk-load hot path is unchanged beyond one predictable comparison.
+    #[inline]
+    fn tabled_base_ref(&self, id: Id) -> StoredRef<'_> {
+        let (blob, offs) = self.blob.as_ref().expect("a tabled id below `base` requires the blob");
+        parse_stored_ref(&blob[offs[(id - 1) as usize] as usize..])
+    }
+
+    #[inline]
+    fn tabled_is_iri(&self, id: Id, iri: &str) -> bool {
+        let i = (id - 1) as usize;
+        if i >= self.base {
+            stored_is_iri(&self.terms[i - self.base], iri, &self.prefixes)
+        } else {
+            stored_ref_is_iri(&self.tabled_base_ref(id), iri, &self.prefixes)
+        }
+    }
+
+    #[inline]
+    fn tabled_is_iri_parts(&self, id: Id, prefix: &str, suffix: &str) -> bool {
+        let i = (id - 1) as usize;
+        if i >= self.base {
+            stored_is_iri_parts(&self.terms[i - self.base], prefix, suffix, &self.prefixes)
+        } else {
+            stored_ref_is_iri_parts(&self.tabled_base_ref(id), prefix, suffix, &self.prefixes)
+        }
+    }
+
+    #[inline]
+    fn tabled_is_lit(&self, id: Id, value: &str, datatype: &str, lang: Option<&str>) -> bool {
+        let i = (id - 1) as usize;
+        if i >= self.base {
+            stored_is_lit(&self.terms[i - self.base], value, datatype, lang, &self.datatypes)
+        } else {
+            stored_ref_is_lit(&self.tabled_base_ref(id), value, datatype, lang, &self.datatypes)
+        }
+    }
+
+    #[inline]
+    fn tabled_is_blank(&self, id: Id, label: &str) -> bool {
+        let i = (id - 1) as usize;
+        if i >= self.base {
+            matches!(&self.terms[i - self.base], Stored::Blank(b) if **b == *label)
+        } else {
+            matches!(self.tabled_base_ref(id), StoredRef::Blank(b) if b == label)
+        }
+    }
+
+    #[inline]
+    fn tabled_is_triple(&self, id: Id, ids: [Id; 3]) -> bool {
+        let i = (id - 1) as usize;
+        if i >= self.base {
+            matches!(&self.terms[i - self.base], Stored::Triple(x) if *x == ids)
+        } else {
+            matches!(self.tabled_base_ref(id), StoredRef::Triple(x) if x == ids)
+        }
+    }
+
+    #[inline]
+    fn tabled_eq_term(&self, id: Id, term: &Term) -> bool {
+        let i = (id - 1) as usize;
+        if i >= self.base {
+            stored_eq_term(&self.terms[i - self.base], term, &self.prefixes, &self.datatypes)
+        } else {
+            stored_ref_eq_term(&self.tabled_base_ref(id), term, &self.prefixes, &self.datatypes)
+        }
     }
 
     /// Interns an IRI term from its string, returning its id.
     #[inline]
     pub fn intern_iri(&mut self, iri: &str) -> Id {
         let hash = hash_iri(iri);
-        if let Some(&id) = self.table.find(hash, |&id| stored_is_iri(&self.terms[(id - 1) as usize], iri, &self.prefixes)) {
+        // Mapped base terms live in the mmap'd sorted index, not the table.
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_iri(s, iri, &self.prefixes)) {
+            return id;
+        }
+        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_iri(id, iri)) {
             return id;
         }
         let (p, suffix) = split_iri(iri);
@@ -502,9 +660,11 @@ impl Dict {
     #[inline]
     fn intern_iri_parts(&mut self, prefix: &str, suffix: &str) -> Id {
         let hash = hash_iri_parts(prefix, suffix);
-        if let Some(&id) =
-            self.table.find(hash, |&id| stored_is_iri_parts(&self.terms[(id - 1) as usize], prefix, suffix, &self.prefixes))
-        {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_iri_parts(s, prefix, suffix, &self.prefixes)) {
+            return id;
+        }
+        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_iri_parts(id, prefix, suffix)) {
             return id;
         }
         let prefix = self.intern_prefix(prefix);
@@ -519,9 +679,11 @@ impl Dict {
             return id;
         }
         let hash = hash_lit(value, datatype, lang);
-        if let Some(&id) =
-            self.table.find(hash, |&id| stored_is_lit(&self.terms[(id - 1) as usize], value, datatype, lang, &self.datatypes))
-        {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_lit(s, value, datatype, lang, &self.datatypes)) {
+            return id;
+        }
+        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_lit(id, value, datatype, lang)) {
             return id;
         }
         let datatype = self.intern_datatype(datatype);
@@ -532,7 +694,11 @@ impl Dict {
     #[inline]
     pub fn intern_blank(&mut self, label: &str) -> Id {
         let hash = hash_blank(label);
-        if let Some(&id) = self.table.find(hash, |&id| matches!(&self.terms[(id - 1) as usize], Stored::Blank(b) if **b == *label)) {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Blank(b) if *b == label)) {
+            return id;
+        }
+        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_blank(id, label)) {
             return id;
         }
         self.push(hash, Stored::Blank(label.into()))
@@ -543,7 +709,11 @@ impl Dict {
     /// separately-interned identical triples share one id.
     fn intern_triple_ids(&mut self, ids: [Id; 3]) -> Id {
         let hash = hash_triple_ids(ids);
-        if let Some(&id) = self.table.find(hash, |&id| matches!(&self.terms[(id - 1) as usize], Stored::Triple(x) if *x == ids)) {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Triple(x) if *x == ids)) {
+            return id;
+        }
+        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_triple(id, ids)) {
             return id;
         }
         self.push(hash, Stored::Triple(ids))
@@ -612,34 +782,14 @@ impl Dict {
             return id;
         }
         let hash = hash_term(term);
+        // Mapped base first (binary search of the sorted hash index, verifying each
+        // equal-hash candidate — content hashes can collide), then the table, which
+        // covers the blob base and any APPENDED terms (delta-overlay growth).
         #[cfg(feature = "mmap")]
-        if let Some(m) = &self.mapped {
-            // Binary-search the sorted hash index, then verify each equal-hash candidate
-            // against the actual term (content hashes can collide).
-            let hashes = m.hashes();
-            let mut i = hashes.partition_point(|&h| h < hash);
-            let ids = m.hashids();
-            while i < hashes.len() && hashes[i] == hash {
-                let id = ids[i];
-                if stored_ref_eq_term(&m.stored(id), term, &self.prefixes, &self.datatypes) {
-                    return id;
-                }
-                i += 1;
-            }
-            return NO_ID;
+        if let Some(id) = self.mapped_find(hash, |s| stored_ref_eq_term(s, term, &self.prefixes, &self.datatypes)) {
+            return id;
         }
-        // Compacted (blob) mode keeps the hash table; verify candidates against the blob.
-        if self.blob.is_some() {
-            return self
-                .table
-                .find(hash, |&id| stored_ref_eq_term(&self.blob_ref(id).unwrap(), term, &self.prefixes, &self.datatypes))
-                .copied()
-                .unwrap_or(NO_ID);
-        }
-        self.table
-            .find(hash, |&id| stored_eq_term(&self.terms[(id - 1) as usize], term, &self.prefixes, &self.datatypes))
-            .copied()
-            .unwrap_or(NO_ID)
+        self.table.find(hash, |&id| self.tabled_eq_term(id, term)).copied().unwrap_or(NO_ID)
     }
 
     /// Returns the id of a triple term whose components resolved to `ids`, else `NO_ID`.
@@ -647,30 +797,10 @@ impl Dict {
     fn lookup_triple_ids(&self, ids: [Id; 3]) -> Id {
         let hash = hash_triple_ids(ids);
         #[cfg(feature = "mmap")]
-        if let Some(m) = &self.mapped {
-            let hashes = m.hashes();
-            let mut i = hashes.partition_point(|&h| h < hash);
-            let hids = m.hashids();
-            while i < hashes.len() && hashes[i] == hash {
-                let id = hids[i];
-                if matches!(m.stored(id), StoredRef::Triple(x) if x == ids) {
-                    return id;
-                }
-                i += 1;
-            }
-            return NO_ID;
+        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Triple(x) if *x == ids)) {
+            return id;
         }
-        if self.blob.is_some() {
-            return self
-                .table
-                .find(hash, |&id| matches!(self.blob_ref(id).unwrap(), StoredRef::Triple(x) if x == ids))
-                .copied()
-                .unwrap_or(NO_ID);
-        }
-        self.table
-            .find(hash, |&id| matches!(&self.terms[(id - 1) as usize], Stored::Triple(x) if *x == ids))
-            .copied()
-            .unwrap_or(NO_ID)
+        self.table.find(hash, |&id| self.tabled_is_triple(id, ids)).copied().unwrap_or(NO_ID)
     }
 
     /// Borrows a dictionary term's components WITHOUT reconstructing an `oxrdf::Term`
@@ -678,62 +808,44 @@ impl Dict {
     /// real dictionary id (`1..INLINE_BASE`); the caller handles inline / local ids.
     #[inline]
     pub fn term_parts(&self, id: Id) -> TermParts<'_> {
-        #[cfg(feature = "mmap")]
-        if let Some(m) = &self.mapped {
-            // The &str slices borrow the mmap blob / the in-RAM prefix+datatype tables,
-            // all owned by `self` for `'_`, so this stays zero-copy.
-            return match m.stored(id) {
-                StoredRef::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[prefix as usize], suffix },
-                StoredRef::Lit { value, datatype, lang } => {
-                    TermParts::Lit { value, datatype: self.datatypes[datatype as usize].as_str(), lang }
-                }
-                StoredRef::Blank(b) => TermParts::Blank(b),
-                StoredRef::Triple(ids) => TermParts::Triple(ids),
-            };
-        }
-        if let Some(r) = self.blob_ref(id) {
-            return match r {
-                StoredRef::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[prefix as usize], suffix },
-                StoredRef::Lit { value, datatype, lang } => {
-                    TermParts::Lit { value, datatype: self.datatypes[datatype as usize].as_str(), lang }
-                }
-                StoredRef::Blank(b) => TermParts::Blank(b),
-                StoredRef::Triple(ids) => TermParts::Triple(ids),
-            };
-        }
-        match &self.terms[(id - 1) as usize] {
-            Stored::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[*prefix as usize], suffix },
-            Stored::Lit { value, datatype, lang } => {
-                TermParts::Lit { value, datatype: self.datatypes[*datatype as usize].as_str(), lang: lang.as_deref() }
+        // The &str slices borrow the mmap/blob record store (or the arena), plus the
+        // in-RAM prefix+datatype tables, all owned by `self` for `'_` — zero-copy.
+        match self.record(id) {
+            StoredRef::Iri { prefix, suffix } => TermParts::Iri { prefix: &self.prefixes[prefix as usize], suffix },
+            StoredRef::Lit { value, datatype, lang } => {
+                TermParts::Lit { value, datatype: self.datatypes[datatype as usize].as_str(), lang }
             }
-            Stored::Blank(b) => TermParts::Blank(b),
-            Stored::Triple(ids) => TermParts::Triple(*ids),
+            StoredRef::Blank(b) => TermParts::Blank(b),
+            StoredRef::Triple(ids) => TermParts::Triple(ids),
         }
     }
 
     /// Returns the term for an id. Inline-integer ids are decoded directly; others are
-    /// reconstructed from the compact arena (panics on an invalid index — ids come from
-    /// the store).
+    /// reconstructed from the compact record store (panics on an invalid index — ids
+    /// come from the store).
     #[inline]
     pub fn term(&self, id: Id) -> Term {
         if is_inline(id) {
             return Term::Literal(Literal::new_typed_literal((id - INLINE_BASE).to_string(), xsd::INTEGER));
         }
-        #[cfg(feature = "mmap")]
-        if let Some(m) = &self.mapped {
-            return reconstruct_ref(self, &m.stored(id));
-        }
-        if let Some(r) = self.blob_ref(id) {
-            return reconstruct_ref(self, &r);
-        }
-        reconstruct(self, &self.terms[(id - 1) as usize])
+        reconstruct_ref(self, &self.record(id))
     }
 
-    /// The parsed term record for an id from the in-memory blob, if the dict is compacted.
+    /// The record for ANY 1-based dictionary id, across all storage modes: ids above
+    /// `base` come from the (appended) arena; ids at or below it from the mmap'd files
+    /// or the in-memory blob. Pure-arena dicts always take the first branch (base = 0).
     #[inline]
-    fn blob_ref(&self, id: Id) -> Option<StoredRef<'_>> {
-        let (blob, offs) = self.blob.as_ref()?;
-        Some(parse_stored_ref(&blob[offs[(id - 1) as usize] as usize..]))
+    fn record(&self, id: Id) -> StoredRef<'_> {
+        let i = (id - 1) as usize;
+        if i >= self.base {
+            return stored_as_ref(&self.terms[i - self.base]);
+        }
+        #[cfg(feature = "mmap")]
+        if let Some(m) = &self.mapped {
+            return m.stored(id);
+        }
+        let (blob, offs) = self.blob.as_ref().expect("an id below `base` requires the blob or mmap store");
+        parse_stored_ref(&blob[offs[i] as usize..])
     }
 
     /// Compacts the id→term storage into a single concatenated BLOB + per-term `u32`
@@ -758,9 +870,10 @@ impl Dict {
             );
             offsets.push(blob.len() as u32);
             // Writing to a `Vec<u8>` is infallible.
-            let _ = write_record(&mut blob, t);
+            let _ = write_record(&mut blob, &stored_as_ref(t));
         }
         blob.shrink_to_fit();
+        self.base = offsets.len(); // appended (delta-overlay) terms continue above the blob
         self.blob = Some((blob, offsets));
         self.terms = Vec::new(); // free the Stored arena (the win)
         self
@@ -774,9 +887,10 @@ impl Dict {
     pub fn merge_remap(&mut self, other: &Dict) -> Vec<Id> {
         self.terms.reserve(other.terms.len());
         {
-            let (terms, prefixes, datatypes) = (&self.terms, &self.prefixes, &self.datatypes);
+            let (base, terms, blob, prefixes, datatypes) =
+                (self.base, &self.terms, &self.blob, &self.prefixes, &self.datatypes);
             self.table
-                .reserve(other.terms.len(), |&i| hash_stored(&terms[(i - 1) as usize], prefixes, datatypes));
+                .reserve(other.terms.len(), |&i| hash_tabled(i, base, terms, blob, prefixes, datatypes));
         }
         let mut remap: Vec<Id> = Vec::with_capacity(other.terms.len());
         for s in &other.terms {
@@ -798,8 +912,11 @@ impl Dict {
 
     /// Serialises the dictionary (prefixes, datatypes, compact terms) to `path` in a
     /// compact binary format. The hash table is NOT written — it is rebuilt on `open`.
+    /// Arena-mode only (it serialises `terms`); the compacted/mmap'd modes persist via
+    /// [`save_mmap`](Self::save_mmap), which handles appended terms too.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         use std::io::Write;
+        assert_eq!(self.base, 0, "Dict::save is arena-mode only; use save_mmap for blob/mmap'd (or grown) dicts");
         let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
         w.write_all(&(self.prefixes.len() as u32).to_le_bytes())?;
         for p in &self.prefixes {
@@ -907,6 +1024,7 @@ impl Dict {
             blob: None,
             #[cfg(feature = "mmap")]
             mapped: None,
+            base: 0,
         })
     }
 
@@ -918,7 +1036,9 @@ impl Dict {
     pub fn save_mmap(&self, dir: &std::path::Path) -> std::io::Result<()> {
         use std::io::Write;
         std::fs::create_dir_all(dir)?;
-        let n = self.terms.len();
+        // ALL ids — the blob/mmap'd base plus any APPENDED (delta-overlay) terms — so a
+        // grown dictionary persists totally (the compaction path relies on this).
+        let n = self.len();
 
         // meta: prefixes, datatypes, term count.
         let mut meta = std::io::BufWriter::new(std::fs::File::create(dir.join("dict-meta.bin"))?);
@@ -938,10 +1058,11 @@ impl Dict {
         let mut offsets: Vec<u64> = Vec::with_capacity(n);
         let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(n);
         let mut pos: u64 = 0;
-        for (i, t) in self.terms.iter().enumerate() {
+        for id in 1..=n as Id {
             offsets.push(pos);
-            pos += write_record(&mut blob, t)?;
-            pairs.push((hash_stored(t, &self.prefixes, &self.datatypes), (i as u32) + 1));
+            let r = self.record(id);
+            pos += write_record(&mut blob, &r)?;
+            pairs.push((hash_stored_ref(&r, &self.prefixes, &self.datatypes), id));
         }
         blob.flush()?;
         write_pod_slice(&dir.join("dict-offs.bin"), &offsets)?;
@@ -987,20 +1108,14 @@ impl Dict {
             offsets: map("dict-offs.bin")?,
             hashes: map("dict-hash.bin")?,
             hashids: map("dict-hid.bin")?,
-            len,
         };
-        Ok(Dict { prefixes, datatypes, mapped: Some(mapped), ..Default::default() })
+        Ok(Dict { prefixes, datatypes, mapped: Some(mapped), base: len, ..Default::default() })
     }
 
     pub fn len(&self) -> usize {
-        #[cfg(feature = "mmap")]
-        if let Some(m) = &self.mapped {
-            return m.len;
-        }
-        if let Some((_, offs)) = &self.blob {
-            return offs.len();
-        }
-        self.terms.len()
+        // `base` is the blob/mmap'd record count (0 for a plain arena dict); appended
+        // (delta-overlay) terms live in the arena above it.
+        self.base + self.terms.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1013,11 +1128,15 @@ impl Dict {
     pub fn heap_bytes(&self) -> usize {
         // A memory-mapped dictionary keeps only the small prefix/datatype tables resident;
         // the term blob + offsets + lookup index are mmap'd (OS page cache, not the heap).
+        // Appended (delta-overlay) terms live in the in-RAM arena in every mode.
+        let appended: usize = self.terms.capacity() * std::mem::size_of::<Stored>()
+            + self.terms.iter().map(stored_owned_bytes).sum::<usize>();
         #[cfg(feature = "mmap")]
         if self.mapped.is_some() {
             let prefix_bytes: usize = self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum();
             let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
-            return prefix_bytes + dt_bytes;
+            let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
+            return appended + table + prefix_bytes + dt_bytes;
         }
         // Compacted (blob) mode: the term blob + u32 offsets + the kept hash table, plus
         // the small prefix/datatype tables — no per-`Stored` slot or per-`Box<str>` term.
@@ -1025,7 +1144,7 @@ impl Dict {
             let prefix_bytes: usize = self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum::<usize>() * 2;
             let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
             let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
-            return blob.capacity() + offs.capacity() * 4 + table + prefix_bytes + dt_bytes;
+            return appended + blob.capacity() + offs.capacity() * 4 + table + prefix_bytes + dt_bytes;
         }
         let term_slots = self.terms.capacity() * std::mem::size_of::<Stored>();
         let owned: usize = self.terms.iter().map(stored_owned_bytes).sum();
@@ -1046,15 +1165,15 @@ fn write_str(w: &mut impl std::io::Write, s: &str) -> std::io::Result<()> {
 
 /// Writes one compact term record (the format `parse_stored_ref` reads) and returns the
 /// number of bytes written — for building the mmap term blob + its offset index.
-fn write_record(w: &mut impl std::io::Write, t: &Stored) -> std::io::Result<u64> {
+fn write_record(w: &mut impl std::io::Write, t: &StoredRef) -> std::io::Result<u64> {
     Ok(match t {
-        Stored::Iri { prefix, suffix } => {
+        StoredRef::Iri { prefix, suffix } => {
             w.write_all(&[0])?;
             w.write_all(&prefix.to_le_bytes())?;
             write_str(w, suffix)?;
             1 + 4 + 4 + suffix.len() as u64
         }
-        Stored::Lit { value, datatype, lang } => {
+        StoredRef::Lit { value, datatype, lang } => {
             w.write_all(&[1])?;
             write_str(w, value)?;
             w.write_all(&datatype.to_le_bytes())?;
@@ -1071,12 +1190,12 @@ fn write_record(w: &mut impl std::io::Write, t: &Stored) -> std::io::Result<u64>
             };
             1 + (4 + value.len() as u64) + 4 + lang_bytes
         }
-        Stored::Blank(b) => {
+        StoredRef::Blank(b) => {
             w.write_all(&[2])?;
             write_str(w, b)?;
             1 + 4 + b.len() as u64
         }
-        Stored::Triple(ids) => {
+        StoredRef::Triple(ids) => {
             w.write_all(&[3])?;
             for id in ids {
                 w.write_all(&id.to_le_bytes())?;

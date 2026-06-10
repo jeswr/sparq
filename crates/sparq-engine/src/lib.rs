@@ -20,7 +20,7 @@ pub use construct::{
     construct, construct_ntriples, construct_ntriples_with_budget, construct_with_budget, describe,
     describe_with_budget, triples_to_ntriples,
 };
-pub use update::update;
+pub use update::{update, update_in_place};
 
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;

@@ -30,6 +30,12 @@ pub struct Graph {
     /// usual single-default-graph load; populated by [`load_dataset`](Self::load_dataset) from
     /// N-Quads / TriG so the engine can evaluate `GRAPH <iri> { … }` / `GRAPH ?g { … }`.
     pub named: Vec<(Term, Graph)>,
+    /// The write-ahead log for a DIRECTORY-BACKED graph (opened via [`open`](Self::open)):
+    /// every [`apply_delta`](Self::apply_delta) batch is appended + fsync'd here BEFORE it
+    /// is applied, and replayed into the delta-overlay on the next `open` — durability for
+    /// incremental updates. `None` for in-memory graphs (updates are overlay-only).
+    #[cfg(feature = "mmap")]
+    wal: Option<Wal>,
 }
 
 /// Backing storage for the numeric-value cache (`numerics[id-1]` = f64 value of term
@@ -40,8 +46,10 @@ pub struct Graph {
 /// numeric literals, the right shape for the memory-bound browser store.
 enum NumData {
     Owned(Vec<f64>),
+    /// The mmap'd dense cache, plus a small side map for terms APPENDED after open
+    /// (delta-overlay updates) — the mmap'd file cannot grow, the dictionary can.
     #[cfg(feature = "mmap")]
-    Mapped(memmap2::Mmap),
+    Mapped(memmap2::Mmap, rustc_hash::FxHashMap<Id, f64>),
     Sparse(rustc_hash::FxHashMap<Id, f64>),
 }
 
@@ -52,8 +60,15 @@ impl NumData {
     fn lookup(&self, id: Id) -> Option<f64> {
         match self {
             NumData::Sparse(m) => m.get(&id).copied(),
-            _ => {
-                let v = *self.as_slice().get((id - 1) as usize)?;
+            #[cfg(feature = "mmap")]
+            NumData::Mapped(_, extra) => match self.as_slice().get((id - 1) as usize) {
+                Some(v) if !v.is_nan() => Some(*v),
+                Some(_) => None,
+                // Beyond the mmap'd dense cache: a term appended after open.
+                None => extra.get(&id).copied(),
+            },
+            NumData::Owned(v) => {
+                let v = *v.get((id - 1) as usize)?;
                 if v.is_nan() {
                     None
                 } else {
@@ -63,14 +78,40 @@ impl NumData {
         }
     }
 
+    /// Appends cache entries for freshly interned dictionary ids `old_len+1 ..= dict.len()`
+    /// (delta-overlay growth): the dense backing extends in place; the sparse / mmap'd
+    /// backings record only the real numeric values in their side map.
+    fn extend_for(&mut self, dict: &Dict, old_len: usize) {
+        for i in old_len..dict.len() {
+            let id = i as Id + 1;
+            let v = numeric_of(&dict.term(id));
+            match self {
+                NumData::Owned(vec) => vec.push(v),
+                NumData::Sparse(m) => {
+                    if !v.is_nan() {
+                        m.insert(id, v);
+                    }
+                }
+                #[cfg(feature = "mmap")]
+                NumData::Mapped(_, extra) => {
+                    if !v.is_nan() {
+                        extra.insert(id, v);
+                    }
+                }
+            }
+        }
+    }
+
     /// The dense f64 slice — valid only for the Owned/Mapped backings (the ones `save`
-    /// persists); the sparse backing is never written to disk.
+    /// persists); the sparse backing is never written to disk. Only the mmap (save /
+    /// mapped-lookup) paths need it.
+    #[cfg(feature = "mmap")]
     #[inline]
     fn as_slice(&self) -> &[f64] {
         match self {
             NumData::Owned(v) => v,
             #[cfg(feature = "mmap")]
-            NumData::Mapped(m) => {
+            NumData::Mapped(m, _) => {
                 let n = m.len() / std::mem::size_of::<f64>();
                 // SAFETY: numerics.bin is a whole number of f64; the mmap base is
                 // page-aligned (>= the 8-byte f64 alignment).
@@ -86,7 +127,7 @@ impl NumData {
         match self {
             NumData::Owned(v) => v.capacity() * std::mem::size_of::<f64>(),
             #[cfg(feature = "mmap")]
-            NumData::Mapped(_) => 0,
+            NumData::Mapped(_, extra) => extra.capacity() * 17,
             // hashbrown: ~(8-byte key + 8-byte f64 + 1 control byte) per slot.
             NumData::Sparse(m) => m.capacity() * 17,
         }
@@ -386,7 +427,14 @@ impl Graph {
     fn build(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         let store = TripleStore::from_triples(triples);
         let numerics = NumData::Owned(numerics_of(&dict));
-        Graph { dict, store, numerics, named: Vec::new() }
+        Graph {
+            dict,
+            store,
+            numerics,
+            named: Vec::new(),
+            #[cfg(feature = "mmap")]
+            wal: None,
+        }
     }
 
     /// Like [`load_str`](Self::load_str) but stores the permutation indexes
@@ -414,6 +462,8 @@ impl Graph {
             // numeric literals when sparse, freeing the dense f64-per-term Vec.
             numerics: self.numerics.into_sparse_if_worthwhile(),
             named: self.named,
+            #[cfg(feature = "mmap")]
+            wal: self.wal,
         }
     }
 
@@ -423,9 +473,33 @@ impl Graph {
     #[cfg(feature = "mmap")]
     pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
-        self.store.save(dir)?;
-        self.dict.save_mmap(dir)?;
-        write_numerics(&dir.join("numerics.bin"), self.numerics.as_slice())
+        self.store.save(dir)?; // folds any delta-overlay into the persisted permutations
+        self.dict.save_mmap(dir)?; // includes appended (delta-overlay) terms
+        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())
+    }
+
+    /// The full dense numeric cache (one f64 per dictionary term) for persisting: the
+    /// owned/mmap'd dense backing extended over any APPENDED terms, or recomputed when
+    /// no dense backing covers the dictionary (the sparse browser mode).
+    #[cfg(feature = "mmap")]
+    fn dense_numerics(&self) -> std::borrow::Cow<'_, [f64]> {
+        let n = self.dict.len();
+        match &self.numerics {
+            NumData::Owned(v) if v.len() == n => std::borrow::Cow::Borrowed(v),
+            NumData::Mapped(_, extra) => {
+                let dense = self.numerics.as_slice();
+                if dense.len() == n {
+                    return std::borrow::Cow::Borrowed(dense);
+                }
+                let mut v = dense.to_vec();
+                v.resize(n, f64::NAN);
+                for (&id, &val) in extra {
+                    v[(id - 1) as usize] = val;
+                }
+                std::borrow::Cow::Owned(v)
+            }
+            _ => std::borrow::Cow::Owned(numerics_of(&self.dict)),
+        }
     }
 
     /// Opens a graph saved by [`save`](Self::save) with its permutation indexes AND
@@ -442,11 +516,23 @@ impl Graph {
         let numerics = match std::fs::File::open(&np) {
             Ok(f) if f.metadata()?.len() as usize == dict.len() * std::mem::size_of::<f64>() => {
                 // SAFETY: the file is owned by this graph for its lifetime and not mutated.
-                NumData::Mapped(unsafe { memmap2::Mmap::map(&f)? })
+                NumData::Mapped(unsafe { memmap2::Mmap::map(&f)? }, rustc_hash::FxHashMap::default())
             }
             _ => NumData::Owned(numerics_of(&dict)),
         };
-        Ok(Graph { dict, store, numerics, named: Vec::new() })
+        let mut g = Graph { dict, store, numerics, named: Vec::new(), wal: None };
+        // Replay any write-ahead log into the delta-overlay (recovery after a crash or a
+        // plain not-yet-compacted close), stopping cleanly at the first torn record and
+        // truncating the log there — then keep the log open for further appends.
+        for (insert, t) in Wal::replay(dir)? {
+            if insert {
+                g.apply_delta_mem(&[t], &[]);
+            } else {
+                g.apply_delta_mem(&[], &[t]);
+            }
+        }
+        g.wal = Some(Wal::open(dir)?);
+        Ok(g)
     }
 
     /// EXTERNAL-MEMORY build: streams an RDF document and writes the on-disk permutation
@@ -711,6 +797,193 @@ impl Graph {
         let o = resolve(o)?;
         Some([s, p, o])
     }
+
+    // ---- Incremental updates (T17): delta-overlay + WAL durability ------------------
+
+    /// Applies an incremental update batch — `deletes` first, then `inserts` (SPARQL's
+    /// DELETE/INSERT application order) — through the store's DELTA-OVERLAY: O(batch)
+    /// work instead of the O(n) full rebuild. New terms are interned APPEND-ONLY (the
+    /// dictionary grows; existing ids never change), so readers of existing ids are
+    /// unaffected. For a directory-backed graph (opened via [`open`](Self::open)) the
+    /// batch is appended to the write-ahead log and fsync'd BEFORE it is applied, so a
+    /// crash replays it on the next open. Fold the overlay back into the immutable base
+    /// periodically with [`compact`](Self::compact).
+    pub fn apply_delta(&mut self, inserts: &[[Term; 3]], deletes: &[[Term; 3]]) -> Result<(), String> {
+        if inserts.is_empty() && deletes.is_empty() {
+            return Ok(());
+        }
+        #[cfg(feature = "mmap")]
+        if let Some(w) = &mut self.wal {
+            w.append_batch(inserts, deletes).map_err(|e| format!("WAL append failed: {e}"))?;
+        }
+        self.apply_delta_mem(inserts, deletes);
+        Ok(())
+    }
+
+    /// The in-memory half of [`apply_delta`](Self::apply_delta) (no WAL append) — also
+    /// the target the WAL replays into on [`open`](Self::open).
+    fn apply_delta_mem(&mut self, inserts: &[[Term; 3]], deletes: &[[Term; 3]]) {
+        // A delete only matters if every term resolves — otherwise the triple cannot be
+        // present, and deleting must NOT intern the (absent) terms.
+        let del_ids: Vec<[Id; 3]> = deletes
+            .iter()
+            .filter_map(|[s, p, o]| Some([self.id_of(s)?, self.id_of(p)?, self.id_of(o)?]))
+            .collect();
+        let old_len = self.dict.len();
+        let ins_ids: Vec<[Id; 3]> = inserts
+            .iter()
+            .map(|[s, p, o]| [self.dict.intern(s), self.dict.intern(p), self.dict.intern(o)])
+            .collect();
+        // Keep the numeric-filter cache covering the grown dictionary.
+        self.numerics.extend_for(&self.dict, old_len);
+        self.store.apply_delta(&ins_ids, &del_ids);
+    }
+
+    /// Folds the delta-overlay into a REBUILT immutable base (the periodic compaction
+    /// that keeps scans overlay-free). The dictionary is kept as-is — ids are stable;
+    /// terms only referenced by deleted triples linger until a full reload (cheap, and
+    /// it keeps compaction O(triples) with no re-interning). For a directory-backed
+    /// graph the new base is persisted ATOMICALLY (written to a fresh sibling directory,
+    /// then swapped in via rename) and the write-ahead log truncated; the graph re-opens
+    /// memory-mapped from the new base.
+    pub fn compact(&mut self) -> Result<(), String> {
+        #[cfg(feature = "mmap")]
+        let dir = self.wal.as_ref().map(|w| w.dir.clone());
+        if self.store.has_overlay() {
+            let triples: Vec<[Id; 3]> = {
+                let scan = self.store.scan(&[None, None, None]);
+                scan.rows.iter().map(|r| scan.to_spo(r)).collect()
+            };
+            self.store = TripleStore::from_triples(triples);
+        } else {
+            // Nothing pending: for a directory-backed graph just discard the (no-op) log.
+            #[cfg(feature = "mmap")]
+            if let Some(w) = &mut self.wal {
+                w.truncate().map_err(|e| e.to_string())?;
+            }
+            return Ok(());
+        }
+        #[cfg(feature = "mmap")]
+        if let Some(dir) = dir {
+            // Persist the new base to a sibling dir, then swap via two renames — the
+            // original dir stays intact until the new one is fully written + synced.
+            let new_dir = dir.with_extension("compact-new");
+            let old_dir = dir.with_extension("compact-old");
+            std::fs::remove_dir_all(&new_dir).ok();
+            std::fs::remove_dir_all(&old_dir).ok();
+            self.wal = None; // close the log before the directory swap
+            self.save(&new_dir).map_err(|e| e.to_string())?;
+            std::fs::rename(&dir, &old_dir).map_err(|e| e.to_string())?;
+            std::fs::rename(&new_dir, &dir).map_err(|e| e.to_string())?;
+            // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop
+            // the old files (open mmaps keep unlinked files alive on unix).
+            *self = Graph::open(&dir).map_err(|e| e.to_string())?;
+            std::fs::remove_dir_all(&old_dir).ok();
+        }
+        Ok(())
+    }
+}
+
+/// The append-only write-ahead log of update operations for a directory-backed graph.
+/// One record per triple: `[op: u8 (0 = insert, 1 = delete)][len: u32 LE][N-Triples
+/// statement bytes]`. Batches are fsync'd on append; replay stops at the first torn /
+/// unparsable record (crash mid-write) and truncates there.
+#[cfg(feature = "mmap")]
+struct Wal {
+    file: std::fs::File,
+    dir: std::path::PathBuf,
+}
+
+#[cfg(feature = "mmap")]
+impl Wal {
+    const INSERT: u8 = 0;
+    const DELETE: u8 = 1;
+
+    fn path(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join("wal.log")
+    }
+
+    fn open(dir: &std::path::Path) -> std::io::Result<Wal> {
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(Self::path(dir))?;
+        Ok(Wal { file, dir: dir.to_path_buf() })
+    }
+
+    /// Appends one batch — delete records first, then inserts (the order `apply_delta`
+    /// applies them) — and fsyncs, so the batch is durable BEFORE it is applied.
+    fn append_batch(&mut self, inserts: &[[Term; 3]], deletes: &[[Term; 3]]) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        for t in deletes {
+            Self::push_record(&mut buf, Self::DELETE, t);
+        }
+        for t in inserts {
+            Self::push_record(&mut buf, Self::INSERT, t);
+        }
+        self.file.write_all(&buf)?;
+        self.file.sync_data()
+    }
+
+    fn push_record(buf: &mut Vec<u8>, op: u8, t: &[Term; 3]) {
+        // oxrdf's Display is the canonical N-Triples serialisation of each term.
+        let line = format!("{} {} {} .\n", t[0], t[1], t[2]);
+        buf.push(op);
+        buf.extend_from_slice(&(line.len() as u32).to_le_bytes());
+        buf.extend_from_slice(line.as_bytes());
+    }
+
+    /// Empties the log (after a compaction persisted the folded base).
+    fn truncate(&mut self) -> std::io::Result<()> {
+        self.file.set_len(0)?;
+        self.file.sync_data()
+    }
+
+    /// Reads `dir`'s log into `(is_insert, triple)` ops in append order. Stops cleanly
+    /// at the first incomplete or unparsable record — a crash mid-write — and TRUNCATES
+    /// the file to the last complete record, so subsequent appends are well-formed.
+    fn replay(dir: &std::path::Path) -> std::io::Result<Vec<(bool, [Term; 3])>> {
+        let path = Self::path(dir);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut ops = Vec::new();
+        let mut good = 0usize; // end of the last fully-replayed record
+        while good < bytes.len() {
+            let pos = good;
+            if pos + 5 > bytes.len() {
+                break; // torn header
+            }
+            let op = bytes[pos];
+            if op > Self::DELETE {
+                break; // corrupt op byte
+            }
+            let len = u32::from_le_bytes([bytes[pos + 1], bytes[pos + 2], bytes[pos + 3], bytes[pos + 4]]) as usize;
+            let start = pos + 5;
+            let Some(end) = start.checked_add(len).filter(|&e| e <= bytes.len()) else {
+                break; // torn body
+            };
+            let Some(t) = parse_nt_record(&bytes[start..end]) else {
+                break; // unparsable body (corruption)
+            };
+            ops.push((op == Self::INSERT, t));
+            good = end;
+        }
+        if good < bytes.len() {
+            let f = std::fs::OpenOptions::new().write(true).open(&path)?;
+            f.set_len(good as u64)?;
+            f.sync_data()?;
+        }
+        Ok(ops)
+    }
+}
+
+/// Parses one WAL record body (a single N-Triples statement) into its term triple.
+#[cfg(feature = "mmap")]
+fn parse_nt_record(bytes: &[u8]) -> Option<[Term; 3]> {
+    let mut it = NTriplesParser::new().for_slice(bytes);
+    let t = it.next()?.ok()?;
+    Some([subject_term(&t.subject), Term::NamedNode(t.predicate), t.object])
 }
 
 /// The numeric-value cache for a dictionary: `numerics[id-1]` is the f64 value of term
@@ -1490,7 +1763,7 @@ mod tests {
         // The numeric-value cache must round-trip through its memory-mapped form: every
         // numeric literal resolves to the same f64 (and non-numerics to None) as before.
         assert!(dir.join("numerics.bin").exists(), "numerics cache not persisted");
-        assert!(matches!(g2.numerics, NumData::Mapped(_)), "numerics not mmap'd on open");
+        assert!(matches!(g2.numerics, NumData::Mapped(..)), "numerics not mmap'd on open");
         for v in [0u32, 1, 42, 250, 499] {
             let lit = Term::Literal(Literal::new_typed_literal(v.to_string(), xsd::INTEGER));
             if let Some(id) = g.id_of(&lit) {
@@ -1636,5 +1909,171 @@ mod tests {
         let pat = g.pattern(None, Some(&p), Some(&b)).unwrap();
         let scan = g.store.scan(&pat);
         assert_eq!(scan.rows.len(), 2);
+    }
+
+    /// The full sorted term-triple set of a graph (overlay merged), for state comparison.
+    fn dump_terms(g: &Graph) -> Vec<(String, String, String)> {
+        let scan = g.store.scan(&[None, None, None]);
+        let mut v: Vec<(String, String, String)> = scan
+            .rows
+            .iter()
+            .map(|r| {
+                let spo = scan.to_spo(r);
+                (g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string())
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn term_iri(n: u32, ns: &str) -> Term {
+        Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/{ns}{n}")))
+    }
+
+    /// DIFFERENTIAL: a random sequence of 200 insert/delete batches applied through the
+    /// delta-overlay must yield exactly the same sorted triple set as applying each batch
+    /// by full set-ops + rebuild — including across periodic `compact()` calls.
+    #[test]
+    fn overlay_differential_200_batches() {
+        let base_ttl = "@prefix : <http://ex/> . :s0 :p0 :o0 . :s1 :p0 :o1 . :s2 :p1 :o2 .";
+        let mut g = Graph::load_str(base_ttl, "turtle").unwrap();
+        let mut reference: std::collections::BTreeSet<(String, String, String)> =
+            dump_terms(&g).into_iter().collect();
+
+        let mut st = 0xDEADBEEFu32;
+        let mut rng = move || {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            st
+        };
+        let mk = |r: &mut dyn FnMut() -> u32| -> [Term; 3] {
+            // A small term universe so inserts/deletes collide often (the hard cases:
+            // re-insert, delete-of-pending-insert, delete-absent, re-insert-of-deleted).
+            [term_iri(r() % 30, "s"), term_iri(r() % 5, "p"), term_iri(r() % 40, "o")]
+        };
+        for batch in 0..200 {
+            let n_ins = (rng() % 6) as usize;
+            let n_del = (rng() % 6) as usize;
+            let inserts: Vec<[Term; 3]> = (0..n_ins).map(|_| mk(&mut rng)).collect();
+            let deletes: Vec<[Term; 3]> = (0..n_del).map(|_| mk(&mut rng)).collect();
+
+            // Reference semantics: deletes first, then inserts (SPARQL order).
+            for [s, p, o] in &deletes {
+                reference.remove(&(s.to_string(), p.to_string(), o.to_string()));
+            }
+            for [s, p, o] in &inserts {
+                reference.insert((s.to_string(), p.to_string(), o.to_string()));
+            }
+            g.apply_delta(&inserts, &deletes).unwrap();
+
+            if batch % 50 == 49 {
+                g.compact().unwrap(); // fold the overlay periodically
+                assert!(!g.store.has_overlay());
+            }
+            let got = dump_terms(&g);
+            let want: Vec<(String, String, String)> = reference.iter().cloned().collect();
+            assert_eq!(got, want, "state diverged after batch {batch}");
+            assert_eq!(g.len(), reference.len(), "len diverged after batch {batch}");
+        }
+    }
+
+    /// Durability roundtrip: updates on a directory-backed graph are WAL-logged and
+    /// replayed on re-open; `compact()` folds them into a new persisted base atomically
+    /// and truncates the log; the compacted state re-opens identically.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn wal_replay_and_compact_roundtrip() {
+        let mut nt = String::new();
+        for i in 0..2000u32 {
+            nt.push_str(&format!("<http://ex/s{}> <http://ex/p{}> <http://ex/o{}> .\n", i % 97, i % 7, i % 311));
+        }
+        let dir = std::env::temp_dir().join(format!("sparq_wal_rt_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_str(&nt, "ntriples").unwrap().save(&dir).unwrap();
+
+        // Open from disk, apply two update batches (one with a NEW term + a numeric
+        // literal — exercising dict append + numeric-cache growth), drop WITHOUT compacting.
+        let expected = {
+            let mut g = Graph::open(&dir).unwrap();
+            let lit = Term::Literal(Literal::new_typed_literal("31250000000", xsd::INTEGER));
+            g.apply_delta(
+                &[[term_iri(1000, "s"), term_iri(50, "p"), lit.clone()], [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]],
+                &[[term_iri(0, "s"), term_iri(0, "p"), term_iri(0, "o")]],
+            )
+            .unwrap();
+            g.apply_delta(&[], &[[term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]]).unwrap();
+            assert!(g.store.has_overlay());
+            // The appended numeric literal must be live in the numeric cache.
+            let id = g.id_of(&lit).expect("appended literal must be interned");
+            assert_eq!(g.numeric_value(id), Some(31_250_000_000.0));
+            dump_terms(&g)
+        };
+        assert!(dir.join("wal.log").metadata().unwrap().len() > 0, "WAL must persist the batches");
+
+        // Re-open: the WAL replays into the overlay — identical state.
+        let mut g2 = Graph::open(&dir).unwrap();
+        assert!(g2.store.has_overlay(), "replayed WAL must rebuild the overlay");
+        assert_eq!(dump_terms(&g2), expected, "WAL replay must restore the exact state");
+        let lit = Term::Literal(Literal::new_typed_literal("31250000000", xsd::INTEGER));
+        let id = g2.id_of(&lit).expect("replayed literal must be interned");
+        assert_eq!(g2.numeric_value(id), Some(31_250_000_000.0), "numeric cache must cover replayed terms");
+
+        // Compact: overlay folded, base re-persisted atomically, WAL truncated.
+        g2.compact().unwrap();
+        assert!(!g2.store.has_overlay());
+        assert_eq!(dump_terms(&g2), expected);
+        assert_eq!(dir.join("wal.log").metadata().unwrap().len(), 0, "compact must truncate the WAL");
+        assert!(!dir.with_extension("compact-new").exists());
+        assert!(!dir.with_extension("compact-old").exists());
+        drop(g2);
+
+        // The compacted base re-opens to the same state, with nothing left to replay.
+        let g3 = Graph::open(&dir).unwrap();
+        assert!(!g3.store.has_overlay());
+        assert_eq!(dump_terms(&g3), expected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Kill-during-write simulation: a WAL truncated mid-record must replay cleanly up
+    /// to the last COMPLETE record (and the file must be truncated to that boundary).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn wal_torn_record_replay() {
+        let dir = std::env::temp_dir().join(format!("sparq_wal_torn_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_str("<http://ex/s0> <http://ex/p0> <http://ex/o0> .", "ntriples").unwrap().save(&dir).unwrap();
+
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            g.apply_delta(&[[term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]], &[]).unwrap();
+            g.apply_delta(&[[term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")]], &[]).unwrap();
+        }
+        let wal_path = dir.join("wal.log");
+        let full = std::fs::read(&wal_path).unwrap();
+
+        // Sever the SECOND record mid-body (a crash between write and fsync completion).
+        let first_len = 5 + u32::from_le_bytes([full[1], full[2], full[3], full[4]]) as usize;
+        assert!(full.len() > first_len + 8, "test needs two records");
+        let torn = &full[..first_len + 8];
+        std::fs::write(&wal_path, torn).unwrap();
+
+        let g = Graph::open(&dir).unwrap();
+        let got = dump_terms(&g);
+        // Only the FIRST update survives; the torn second record is discarded.
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().any(|(s, _, _)| s.contains("s1")));
+        assert!(!got.iter().any(|(s, _, _)| s.contains("s2")));
+        // …and the log was truncated to the last complete record.
+        assert_eq!(std::fs::read(&wal_path).unwrap().len(), first_len, "torn tail must be truncated");
+
+        // A corrupt OP BYTE (bit-rot) must also stop replay cleanly.
+        let mut corrupt = full[..first_len].to_vec();
+        corrupt[0] = 7; // invalid op
+        std::fs::write(&wal_path, &corrupt).unwrap();
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(dump_terms(&g2).len(), 1, "corrupt first record must stop replay at the base");
+        assert_eq!(std::fs::read(&wal_path).unwrap().len(), 0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

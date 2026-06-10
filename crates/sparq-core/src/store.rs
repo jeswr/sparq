@@ -59,7 +59,7 @@ impl Perm {
 /// bound.
 pub type Pattern = [Option<Id>; 3];
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Per-predicate statistics for cardinality estimation (a characteristic-set-lite
 /// summary): how many triples use the predicate, and how many *distinct* subjects
@@ -156,12 +156,98 @@ impl PermData {
     }
 }
 
+/// Pending updates layered over the immutable base indexes (the T17 delta-overlay):
+/// triples INSERTED since the last compaction, and base triples DELETED since then.
+/// Consulted at scan time — the base stays immutable (and mmap-able), and an update
+/// batch costs O(batch) instead of the O(n) full rebuild. Invariants kept by
+/// [`TripleStore::apply_delta`]: `added` is canonical-SPO sorted + deduplicated and
+/// DISJOINT from both the base and `deleted`; `deleted` only ever holds base triples.
+#[derive(Default)]
+struct Overlay {
+    added: Vec<[Id; 3]>,
+    deleted: FxHashSet<[Id; 3]>,
+}
+
+impl Overlay {
+    /// The `added` triples matching the inclusive `[lo, hi]` key range, as rows in
+    /// `perm` column order, SORTED in that order (re-sorted per scan — the overlay is
+    /// small between compactions, so this is O(k log k) on k matching insertions).
+    fn added_rows(&self, perm: Perm, lo: [Id; 3], hi: [Id; 3]) -> Vec<[Id; 3]> {
+        let order = perm.order();
+        let mut rows: Vec<[Id; 3]> = self
+            .added
+            .iter()
+            .map(|t| [t[order[0]], t[order[1]], t[order[2]]])
+            .filter(|r| *r >= lo && *r <= hi)
+            .collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// Merges the (perm-sorted) base rows with the overlay for one scan: base rows whose
+    /// canonical triple is deleted are dropped, and the matching `added` rows are merge-
+    /// interleaved — so the output keeps the permutation's sort order, preserving the
+    /// guarantees downstream merge joins rely on. `added` is disjoint from the base, so
+    /// no duplicate handling is needed.
+    fn merge(&self, base: &[[Id; 3]], perm: Perm, lo: [Id; 3], hi: [Id; 3]) -> Vec<[Id; 3]> {
+        let add = self.added_rows(perm, lo, hi);
+        let order = perm.order();
+        let mut out = Vec::with_capacity(base.len() + add.len());
+        let mut ai = 0;
+        let check_deleted = !self.deleted.is_empty();
+        for &row in base {
+            if check_deleted {
+                let mut spo = [0; 3];
+                spo[order[0]] = row[0];
+                spo[order[1]] = row[1];
+                spo[order[2]] = row[2];
+                if self.deleted.contains(&spo) {
+                    continue;
+                }
+            }
+            while ai < add.len() && add[ai] < row {
+                out.push(add[ai]);
+                ai += 1;
+            }
+            out.push(row);
+        }
+        out.extend_from_slice(&add[ai..]);
+        out
+    }
+
+    /// How many overlay triples fall in the `[lo, hi]` range of `perm` — the exact
+    /// correction to a base range count. O(|overlay|).
+    fn count_correction(&self, perm: Perm, lo: [Id; 3], hi: [Id; 3]) -> (usize, usize) {
+        let order = perm.order();
+        let in_range = |t: &[Id; 3]| {
+            let r = [t[order[0]], t[order[1]], t[order[2]]];
+            r >= lo && r <= hi
+        };
+        let add = self.added.iter().filter(|t| in_range(t)).count();
+        let del = self.deleted.iter().filter(|t| in_range(t)).count();
+        (add, del)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.deleted.is_empty()
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.added.capacity() * std::mem::size_of::<[Id; 3]>() + self.deleted.capacity() * 13
+    }
+}
+
 pub struct TripleStore {
     // Each permutation in its column order, sorted (so binary search on a bound prefix
     // is a plain lexicographic comparison of the leading columns) — owned or mmap'd.
     perms: [PermData; 6],
     // Per-predicate stats keyed by predicate id (for the cost-based planner).
     pred_stats: FxHashMap<Id, PredStat>,
+    // The delta-overlay of pending updates, `None` when there are none — so the scan
+    // hot path pays exactly one (perfectly predicted) branch when no update happened.
+    // NOTE: `pred_stats` is not overlay-adjusted (planner estimates only); `estimate`
+    // and `len` are exact.
+    overlay: Option<Box<Overlay>>,
 }
 
 impl TripleStore {
@@ -171,7 +257,7 @@ impl TripleStore {
     pub fn from_triples(triples: Vec<[Id; 3]>) -> Self {
         let perms = Self::build_raw_perms(triples);
         let pred_stats = Self::compute_pred_stats(&perms);
-        TripleStore { perms, pred_stats }
+        TripleStore { perms, pred_stats, overlay: None }
     }
 
     /// Like [`from_triples`](Self::from_triples) but stores each permutation
@@ -190,7 +276,7 @@ impl TripleStore {
                 }
             }
         }
-        TripleStore { perms, pred_stats }
+        TripleStore { perms, pred_stats, overlay: None }
     }
 
     /// Builds the [`BUILT`] raw permutation indexes from canonical [s,p,o] triples (all
@@ -241,6 +327,15 @@ impl TripleStore {
             let rows: std::borrow::Cow<[[Id; 3]]> = match p {
                 PermData::Compressed(c) => std::borrow::Cow::Owned(c.decode_all()),
                 _ => std::borrow::Cow::Borrowed(p.as_slice()),
+            };
+            // A pending delta-overlay is FOLDED into every BUILT permutation on save, so
+            // the persisted base always reflects the full current state (unbuilt perms
+            // stay empty). The in-memory overlay is untouched (`save` takes `&self`).
+            let rows: std::borrow::Cow<[[Id; 3]]> = match &self.overlay {
+                Some(ov) if BUILT.contains(&Perm::ALL[i]) => {
+                    std::borrow::Cow::Owned(ov.merge(&rows, Perm::ALL[i], [Id::MIN; 3], [Id::MAX; 3]))
+                }
+                _ => rows,
             };
             // SAFETY: reinterpret the contiguous [u32;3] rows as bytes for writing.
             let bytes = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<u8>(), std::mem::size_of_val(rows.as_ref())) };
@@ -309,7 +404,7 @@ impl TripleStore {
         // Use the persisted stats if present (no POS/PSO re-scan — keeps open fast and the
         // resident set small); else recompute (backward compatible with older saved dirs).
         let pred_stats = Self::load_pred_stats(dir).unwrap_or_else(|| Self::compute_pred_stats(&perms));
-        Ok(TripleStore { perms, pred_stats })
+        Ok(TripleStore { perms, pred_stats, overlay: None })
     }
 
     /// Per-predicate stats: count + distinct objects from POS (always built), and
@@ -358,17 +453,78 @@ impl TripleStore {
     }
 
     pub fn len(&self) -> usize {
-        self.perms[0].len()
+        let base = self.perms[0].len();
+        match &self.overlay {
+            Some(ov) => base + ov.added.len() - ov.deleted.len(),
+            None => base,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.perms[0].len() == 0
+        self.len() == 0
+    }
+
+    /// Whether a delta-overlay of pending updates exists (i.e. updates were applied
+    /// since the base was built / last compacted).
+    pub fn has_overlay(&self) -> bool {
+        self.overlay.is_some()
+    }
+
+    /// Whether the store (base merged with any overlay) contains the canonical triple.
+    pub fn contains(&self, t: [Id; 3]) -> bool {
+        match &self.overlay {
+            Some(ov) => {
+                !ov.deleted.contains(&t)
+                    && (ov.added.binary_search(&t).is_ok() || self.base_contains(t))
+            }
+            None => self.base_contains(t),
+        }
+    }
+
+    /// Whether the immutable BASE (ignoring the overlay) contains the canonical triple —
+    /// one binary search of the SPO permutation (always built, in every index set).
+    #[inline]
+    fn base_contains(&self, t: [Id; 3]) -> bool {
+        self.perms[Perm::Spo as usize].count_in(t, t) > 0
+    }
+
+    /// Applies an update batch as a DELTA-OVERLAY: `deletes` first, then `inserts`
+    /// (SPARQL's DELETE/INSERT order), each O(log n + batch · overlay) — instead of the
+    /// O(n) rebuild. Set semantics: re-inserting a present triple and deleting an absent
+    /// one are no-ops; a delete of a pending insertion simply retracts it. When the
+    /// overlay nets out to nothing it is dropped entirely, so an untouched (or fully
+    /// reverted) store scans with zero overhead.
+    pub fn apply_delta(&mut self, inserts: &[[Id; 3]], deletes: &[[Id; 3]]) {
+        if inserts.is_empty() && deletes.is_empty() {
+            return;
+        }
+        let mut ov = self.overlay.take().unwrap_or_default();
+        for t in deletes {
+            if let Ok(i) = ov.added.binary_search(t) {
+                ov.added.remove(i); // retract a pending insertion
+            } else if self.base_contains(*t) {
+                ov.deleted.insert(*t);
+            }
+        }
+        for t in inserts {
+            if ov.deleted.remove(t) {
+                continue; // re-insert of a deleted base triple: just undelete
+            }
+            if self.base_contains(*t) {
+                continue; // already present in the base
+            }
+            if let Err(i) = ov.added.binary_search(t) {
+                ov.added.insert(i, *t);
+            }
+        }
+        self.overlay = if ov.is_empty() { None } else { Some(ov) };
     }
 
     /// Heap footprint of the permutation indexes in bytes (for benchmarking). Memory-
     /// mapped permutations contribute 0 — their resident pages are OS page cache.
     pub fn heap_bytes(&self) -> usize {
-        self.perms.iter().map(PermData::heap_bytes).sum()
+        self.perms.iter().map(PermData::heap_bytes).sum::<usize>()
+            + self.overlay.as_ref().map_or(0, |ov| ov.heap_bytes())
     }
 
     /// Chooses the permutation whose sort order places all bound pattern
@@ -445,10 +601,16 @@ impl TripleStore {
 
     fn scan_with(&self, pattern: &Pattern, perm: Perm, lead: usize) -> Scan<'_> {
         let (lo, hi) = Self::bounds(pattern, perm, lead);
-        Scan {
-            rows: self.perms[perm as usize].rows_in(lo, hi),
-            perm,
-        }
+        let base = self.perms[perm as usize].rows_in(lo, hi);
+        // The single overlay branch on the scan hot path: with no pending updates the
+        // base range is returned untouched (borrowed, zero copies); with an overlay the
+        // deleted triples are filtered out and the inserted ones merge-interleaved, so
+        // the rows keep the permutation's sort order (merge joins stay valid).
+        let rows = match &self.overlay {
+            None => base,
+            Some(ov) => std::borrow::Cow::Owned(ov.merge(&base, perm, lo, hi)),
+        };
+        Scan { rows, perm }
     }
 
     /// Estimated number of matches for a pattern (the range length) — the cardinality
@@ -458,7 +620,14 @@ impl TripleStore {
     pub fn estimate(&self, pattern: &Pattern) -> usize {
         let (perm, lead) = Self::choose(pattern);
         let (lo, hi) = Self::bounds(pattern, perm, lead);
-        self.perms[perm as usize].count_in(lo, hi)
+        let base = self.perms[perm as usize].count_in(lo, hi);
+        match &self.overlay {
+            None => base,
+            Some(ov) => {
+                let (add, del) = ov.count_correction(perm, lo, hi);
+                base + add - del
+            }
+        }
     }
 }
 
@@ -543,5 +712,85 @@ mod tests {
         for p in 1..=13 {
             assert_eq!(raw.pred_stat(p), cmp.pred_stat(p), "pred_stat differs for {p}");
         }
+    }
+    /// The delta-overlay must be INVISIBLE in results: a store with an overlay must answer
+    /// every triple pattern with exactly the rows of a store REBUILT from the merged triple
+    /// set — and the rows must stay sorted in the scan's permutation order (the guarantee
+    /// merge joins rely on). Also: `estimate` stays exact, `len`/`contains` agree, and an
+    /// overlay that nets out to nothing is dropped (zero-overhead empty case).
+    #[test]
+    fn overlay_scans_match_rebuild() {
+        let mut st = 0xC0FFEEu32;
+        let mut rng = || {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            st
+        };
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        for _ in 0..20_000 {
+            triples.push([1 + rng() % 400, 1 + rng() % 9, 1 + rng() % 2000]);
+        }
+        let mut store = TripleStore::from_triples(triples.clone());
+
+        // Deletes: a sample of base triples (plus an absent one — must be a no-op).
+        // Inserts: fresh triples (plus a base duplicate — must be a no-op).
+        triples.sort_unstable();
+        triples.dedup();
+        let deletes: Vec<[Id; 3]> = triples.iter().step_by(7).copied().chain([[9999, 9999, 9999]]).collect();
+        let mut inserts: Vec<[Id; 3]> = (0..500).map(|_| [401 + rng() % 50, 10 + rng() % 3, 2001 + rng() % 100]).collect();
+        inserts.push(triples[3]); // already in the base
+        store.apply_delta(&inserts, &deletes);
+        assert!(store.has_overlay());
+
+        // Reference: the same set operations applied eagerly, then a full rebuild.
+        let mut reference: Vec<[Id; 3]> = triples.clone();
+        let del: std::collections::HashSet<[Id; 3]> = deletes.iter().copied().collect();
+        reference.retain(|t| !del.contains(t));
+        reference.extend(inserts.iter().copied().filter(|t| !del.contains(t)));
+        reference.sort_unstable();
+        reference.dedup();
+        let rebuilt = TripleStore::from_triples(reference.clone());
+
+        assert_eq!(store.len(), rebuilt.len(), "len must reflect the overlay");
+        for t in &reference {
+            assert!(store.contains(*t));
+        }
+        assert!(!store.contains([9999, 9999, 9999]));
+
+        let svals = [None, Some(1), Some(200), Some(420), Some(9999)];
+        let pvals = [None, Some(1), Some(5), Some(11)];
+        let ovals = [None, Some(2), Some(1500), Some(2050)];
+        for &s in &svals {
+            for &p in &pvals {
+                for &o in &ovals {
+                    let pat: Pattern = [s, p, o];
+                    for sort_col in [None, Some(0), Some(1), Some(2)] {
+                        let (ov_scan, rb_scan) = match sort_col {
+                            None => (store.scan(&pat), rebuilt.scan(&pat)),
+                            Some(c) => (store.scan_sorted(&pat, c), rebuilt.scan_sorted(&pat, c)),
+                        };
+                        // Rows must be SORTED in the chosen permutation's order…
+                        assert!(ov_scan.rows.windows(2).all(|w| w[0] <= w[1]), "unsorted overlay scan for {pat:?}");
+                        // …and identical (same perm choice — `choose` is pattern-only) to the rebuild.
+                        assert_eq!(ov_scan.perm, rb_scan.perm);
+                        assert_eq!(ov_scan.rows, rb_scan.rows, "rows differ for {pat:?} sort {sort_col:?}");
+                    }
+                    assert_eq!(store.estimate(&pat), rebuilt.scan(&pat).rows.len(), "estimate wrong for {pat:?}");
+                }
+            }
+        }
+
+        // Reverting every EFFECTIVE change must drop the overlay entirely (no residual
+        // overhead): re-insert the base triples that were deleted, delete the genuinely
+        // new ones (the no-op delete/insert from above never entered the overlay).
+        let eff_del: Vec<[Id; 3]> = deletes.iter().copied().filter(|t| triples.binary_search(t).is_ok()).collect();
+        let eff_add: Vec<[Id; 3]> = inserts.iter().copied().filter(|t| triples.binary_search(t).is_err()).collect();
+        store.apply_delta(&eff_del, &eff_add);
+        assert!(!store.has_overlay(), "a fully reverted overlay must be dropped");
+        let full = store.scan(&[None, None, None]);
+        let mut orig: Vec<[Id; 3]> = triples.clone();
+        orig.sort_unstable();
+        assert_eq!(full.rows.as_ref(), &orig[..]);
     }
 }
