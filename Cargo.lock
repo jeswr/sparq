@@ -1553,6 +1553,7 @@ name = "sparq-engine"
 version = "0.1.0"
 dependencies = [
  "md-5",
+ "oxiri",
  "oxrdf",
  "rayon",
  "regex",

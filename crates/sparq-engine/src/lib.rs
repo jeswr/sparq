@@ -62,6 +62,7 @@ pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
 pub fn query_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<QueryResult, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let _guard = exec::budget::install(budget);
+    exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
         Query::Select { pattern, .. } => exec::eval_select(graph, &pattern),
         // ASK as a QueryResult: zero variables, and one (empty) row iff the pattern
@@ -85,6 +86,7 @@ pub fn ask(graph: &Graph, sparql: &str) -> Result<bool, String> {
 pub fn ask_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<bool, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let _guard = exec::budget::install(budget);
+    exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
         Query::Ask { pattern, .. } => exec::eval_ask(graph, &pattern),
         _ => Err("ask() requires an ASK query".into()),
@@ -103,6 +105,7 @@ pub fn query_json(graph: &Graph, sparql: &str) -> Result<String, String> {
 pub fn query_json_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let _guard = exec::budget::install(budget);
+    exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
         Query::Select { pattern, .. } => exec::eval_select_json(graph, &pattern),
         // The SPARQL 1.1 JSON results boolean form.
@@ -123,6 +126,7 @@ const JSON_CHUNK_BYTES: usize = 64 * 1024;
 pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<String>, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let _guard = exec::budget::install(budget);
+    exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
         Query::Select { pattern, .. } => exec::eval_select_json_chunks(graph, &pattern, Some(JSON_CHUNK_BYTES)),
         Query::Ask { pattern, .. } => {
@@ -143,6 +147,7 @@ pub fn count(graph: &Graph, sparql: &str) -> Result<usize, String> {
 pub fn count_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<usize, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let _guard = exec::budget::install(budget);
+    exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
         Query::Select { pattern, .. } => exec::count_select(graph, &pattern),
         // An ASK counts its unit row: 1 when satisfiable, 0 otherwise.

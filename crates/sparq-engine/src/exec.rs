@@ -1201,7 +1201,7 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
             Ok(minus_bindings(l, r))
         }
         GraphPattern::Values { variables, bindings } => Ok(values_bindings(graph, local, variables, bindings)),
-        GraphPattern::Path { subject, path, object } => eval_path(graph, subject, path, object),
+        GraphPattern::Path { subject, path, object } => eval_path(graph, local, subject, path, object),
         GraphPattern::Graph { name, inner } => eval_graph_named(graph, local, name, inner),
         GraphPattern::Project { .. }
         | GraphPattern::Distinct { .. }
@@ -1384,6 +1384,7 @@ fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Op
 /// optimisation can push a bound endpoint into a directed traversal).
 fn eval_path(
     graph: &Graph,
+    local: &mut LocalVocab,
     subject: &TermPattern,
     path: &PropertyPathExpression,
     object: &TermPattern,
@@ -1391,19 +1392,27 @@ fn eval_path(
     enum End {
         Var(Variable),
         Bound(Id),
-        Unsat,
+        /// A concrete term ABSENT from the dictionary — unsatisfiable for ordinary
+        /// paths, but still the start of a zero-length solution for `p*` / `p?`.
+        Missing(Term),
     }
-    let resolve = |t: &TermPattern| -> End {
-        match t {
+    let resolve = |t: &TermPattern| -> Result<End, String> {
+        Ok(match t {
             TermPattern::Variable(v) => End::Var(v.clone()),
             TermPattern::BlankNode(b) => End::Var(bnode_var(b)),
-            other => match term_pattern_to_term(other).ok().and_then(|t| graph.id_of(&t)) {
-                Some(id) => End::Bound(id),
-                None => End::Unsat,
-            },
-        }
+            other => {
+                let term = term_pattern_to_term(other)?;
+                match graph.id_of(&term) {
+                    Some(id) => End::Bound(id),
+                    None => End::Missing(term),
+                }
+            }
+        })
     };
-    let (s_end, o_end) = (resolve(subject), resolve(object));
+    let (s_end, o_end) = (resolve(subject)?, resolve(object)?);
+    // Paths that admit the ZERO-LENGTH solution connect every term to itself — even
+    // terms that do not occur in the data (a constant endpoint on an empty graph).
+    let zero_len = matches!(path, PropertyPathExpression::ZeroOrMore(_) | PropertyPathExpression::ZeroOrOne(_));
 
     let s_var = if let End::Var(v) = &s_end { Some(v.clone()) } else { None };
     let o_var = if let End::Var(v) = &o_end { Some(v.clone()) } else { None };
@@ -1417,8 +1426,9 @@ fn eval_path(
             vars.push(v.clone());
         }
     }
-    // A concrete-but-absent endpoint makes the whole pattern unsatisfiable.
-    if matches!(s_end, End::Unsat) || matches!(o_end, End::Unsat) {
+    // A concrete-but-absent endpoint makes the pattern unsatisfiable — unless the
+    // path has a zero-length solution, handled below.
+    if !zero_len && (matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
         return Ok(Bindings::unsorted(vars, Vec::new()));
     }
     let s_bound = if let End::Bound(id) = &s_end { Some(*id) } else { None };
@@ -1426,19 +1436,46 @@ fn eval_path(
 
     let mut rows: Vec<Row> = Vec::new();
     let mut seen: FxHashSet<Row> = FxHashSet::default();
-    for (s, o) in path_pairs(graph, path)? {
-        if s_bound.is_some_and(|b| s != b) || o_bound.is_some_and(|b| o != b) || (same_var && s != o) {
-            continue;
+    if !(matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
+        for (s, o) in path_pairs(graph, path)? {
+            if s_bound.is_some_and(|b| s != b) || o_bound.is_some_and(|b| o != b) || (same_var && s != o) {
+                continue;
+            }
+            let mut row: Row = SmallVec::new();
+            if s_var.is_some() {
+                row.push(s);
+            }
+            if o_var.is_some() && !same_var {
+                row.push(o);
+            }
+            if seen.insert(row.clone()) {
+                rows.push(row); // property-path solutions are a set (DISTINCT)
+            }
         }
-        let mut row: Row = SmallVec::new();
-        if s_var.is_some() {
-            row.push(s);
-        }
-        if o_var.is_some() && !same_var {
-            row.push(o);
-        }
-        if seen.insert(row.clone()) {
-            rows.push(row); // property-path solutions are a set (DISTINCT)
+    }
+    if zero_len {
+        // The zero-length solution for a CONSTANT endpoint: `<s> p* ?x` yields
+        // {?x -> <s>} even on the empty graph (interning the absent term locally);
+        // `<s> p* <s>` yields the unit solution. (Variable–variable zero-length
+        // solutions over the graph's nodes come from `path_pairs` above.)
+        let const_id = |e: &End, local: &mut LocalVocab| match e {
+            End::Bound(id) => Some(*id),
+            End::Missing(t) => Some(local.intern(t.clone())),
+            End::Var(_) => None,
+        };
+        let zrow: Option<Row> = match (&s_end, &o_end) {
+            (End::Var(_), End::Var(_)) => None,
+            (s_c, End::Var(_)) => const_id(s_c, local).map(|id| std::iter::once(id).collect()),
+            (End::Var(_), o_c) => const_id(o_c, local).map(|id| std::iter::once(id).collect()),
+            (s_c, o_c) => {
+                let (a, b) = (const_id(s_c, local), const_id(o_c, local));
+                (a == b).then(SmallVec::new)
+            }
+        };
+        if let Some(row) = zrow {
+            if seen.insert(row.clone()) {
+                rows.push(row);
+            }
         }
     }
     Ok(Bindings::unsorted(vars, rows))
@@ -4538,11 +4575,37 @@ fn is_numeric_dt(l: &Literal) -> bool {
         || dt == xsd::FLOAT.as_str()
 }
 
+/// LENIENT total order for ORDER BY (and the MIN/MAX fallback): SPARQL orders
+/// unbound < blank nodes < IRIs < literals, then by value within each class
+/// (numerics by value; everything else by string form, which keeps the order
+/// deterministic across mixed literal types).
 fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
-    if let (Some(a), Some(b)) = (as_num(x), as_num(y)) {
-        return a.partial_cmp(&b);
+    fn class(v: &Value) -> u8 {
+        match v {
+            Value::Unbound | Value::Error => 0,
+            Value::Term(Term::BlankNode(_)) => 1,
+            Value::Term(Term::NamedNode(_)) => 2,
+            _ => 3, // literals, incl. computed numerics / booleans
+        }
     }
-    Some(value_str(x)?.cmp(&value_str(y)?))
+    let (ca, cb) = (class(x), class(y));
+    if ca != cb {
+        return Some(ca.cmp(&cb));
+    }
+    match ca {
+        0 => Some(Ordering::Equal),
+        1 | 2 => Some(value_str(x)?.cmp(&value_str(y)?)),
+        _ => {
+            if let (Some(a), Some(b)) = (as_num(x), as_num(y)) {
+                return a.partial_cmp(&b);
+            }
+            // dateTime/date order by timeline when comparable.
+            if let Some(o) = value_compare_strict(x, y) {
+                return Some(o);
+            }
+            Some(value_str(x)?.cmp(&value_str(y)?))
+        }
+    }
 }
 
 /// SPARQL built-in function calls (`STR`, `LANG`, `CONCAT`, `SUBSTR`, type tests, numeric, …).
@@ -4654,9 +4717,14 @@ fn eval_function(
             lit_with_lang(out, lang.as_deref())
         }
         F::EncodeForUri => value_str(&ev(0)?).map(|s| simple(encode_for_uri(&s))).unwrap_or(Value::Error),
-        F::Iri => match value_str(&ev(0)?) {
-            Some(s) => oxrdf::NamedNode::new(s).map(|n| Value::Term(Term::NamedNode(n))).unwrap_or(Value::Error),
-            None => Value::Error,
+        F::Iri => match ev(0)? {
+            // An IRI argument passes through unchanged.
+            Value::Term(Term::NamedNode(n)) => Value::Term(Term::NamedNode(n)),
+            v => match str_lit(&v) {
+                // String literal: absolute IRIs pass; relative ones resolve against BASE.
+                Some((s, None)) => resolve_iri(&s).map(|n| Value::Term(Term::NamedNode(n))).unwrap_or(Value::Error),
+                _ => Value::Error,
+            },
         },
         F::IsIri => Value::Bool(matches!(ev(0)?, Value::Term(Term::NamedNode(_)))),
         F::IsBlank => Value::Bool(matches!(ev(0)?, Value::Term(Term::BlankNode(_)))),
@@ -5003,6 +5071,32 @@ fn eval_cast(target: &str, v: &Value) -> Option<Value> {
 }
 
 thread_local! {
+    /// The query's BASE IRI (when declared), used by IRI()/URI() to resolve relative
+    /// references. Set by the `lib.rs` query entry points after parsing.
+    static QUERY_BASE: std::cell::RefCell<Option<oxiri::Iri<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Installs the active query's base IRI for expression evaluation (IRI()/URI()
+/// relative-reference resolution). Called by the query entry points; `None` clears it.
+pub(crate) fn set_query_base(base: Option<&str>) {
+    QUERY_BASE.with(|b| *b.borrow_mut() = base.and_then(|s| oxiri::Iri::parse(s.to_string()).ok()));
+}
+
+/// `IRI(str)`: absolute IRIs pass through; relative references resolve against the
+/// query's BASE (a relative reference without a base is a type error).
+fn resolve_iri(s: &str) -> Option<oxrdf::NamedNode> {
+    if let Ok(abs) = oxiri::Iri::parse(s.to_string()) {
+        return Some(oxrdf::NamedNode::new_unchecked(abs.into_inner()));
+    }
+    QUERY_BASE.with(|b| {
+        b.borrow()
+            .as_ref()
+            .and_then(|base| base.resolve(s).ok())
+            .map(|iri| oxrdf::NamedNode::new_unchecked(iri.into_inner()))
+    })
+}
+
+thread_local! {
     /// The identity of the solution row an expression is being evaluated for:
     /// (bindings identity — the rows buffer address —, row index). Set by the per-row
     /// evaluation loops (BIND / FILTER); BNODE(str) derives its label from it, so equal
@@ -5147,14 +5241,23 @@ fn tz_to_duration(tz: &str) -> Option<String> {
 }
 
 /// Build a regex honouring the SPARQL flag string (`i` case-insensitive, `s` dot-all, `m`
-/// multi-line, `x` extended/ignore-whitespace). Returns `None` on an invalid pattern (→ type error).
+/// multi-line, `x` extended/ignore-whitespace, `q` literal-pattern mode per XPath F&O —
+/// every pattern character is matched literally, combinable with `i`).
+/// Returns `None` on an invalid pattern or an unknown flag (→ type error).
 #[cfg(feature = "regex")]
 fn build_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
-    regex::RegexBuilder::new(pattern)
+    if !flags.chars().all(|c| matches!(c, 'i' | 's' | 'm' | 'x' | 'q')) {
+        return None;
+    }
+    let literal = flags.contains('q');
+    let pattern = if literal { regex::escape(pattern) } else { pattern.to_string() };
+    regex::RegexBuilder::new(&pattern)
         .case_insensitive(flags.contains('i'))
-        .dot_matches_new_line(flags.contains('s'))
-        .multi_line(flags.contains('m'))
-        .ignore_whitespace(flags.contains('x'))
+        // `q` suppresses the meaning of the OTHER flags' metacharacters too (per
+        // XPath, only `i` keeps its effect alongside `q`).
+        .dot_matches_new_line(!literal && flags.contains('s'))
+        .multi_line(!literal && flags.contains('m'))
+        .ignore_whitespace(!literal && flags.contains('x'))
         .build()
         .ok()
 }
