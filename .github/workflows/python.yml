@@ -1,0 +1,43 @@
+name: Python bindings
+
+# Informational build + test of the `sparq` Python package (crates/sparq-py, T21) on
+# every push to main: maturin builds the abi3 wheel, pip installs it, pytest runs the
+# round-trip suite. The release wheels matrix (manylinux / macOS / Windows via
+# maturin-action) is a follow-up — see docs/release.md "Python wheels".
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: maturin build + pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install maturin + pytest
+        run: pip install maturin pytest
+      - name: Build wheel (abi3, python-release profile — unwinding panics)
+        run: maturin build --manifest-path crates/sparq-py/Cargo.toml --profile python-release --out dist
+      - name: Install wheel
+        run: pip install dist/*.whl
+      - name: Run tests
+        run: pytest crates/sparq-py/tests -q

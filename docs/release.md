@@ -131,3 +131,20 @@ Users get `sparq-cli` plus a `sparq` symlink on PATH.
   and the crates.io pages render the README.
 - Bump `[workspace.package] version` to the next `-dev` cycle if desired, and start a new
   `## [Unreleased]` section in `CHANGELOG.md`.
+
+## Python wheels (PyPI) — follow-up, not wired yet
+
+`crates/sparq-py` packages the engine as the Python package **`sparq`** (pyo3 +
+maturin, `abi3-py39` so one wheel per platform covers CPython ≥ 3.9). CI builds and
+tests it informationally on pushes to main (`.github/workflows/python.yml`); release
+publishing is **not** wired. To ship wheels with a release later:
+
+1. Check the name `sparq` is available on PyPI (same caveat as the crates.io names in §0).
+2. Add a wheels job to `release.yml` using `PyO3/maturin-action` with a platform
+   matrix (manylinux x86_64/aarch64, macOS arm64/x64, Windows x64), each step:
+   `command: build`, `args: --manifest-path crates/sparq-py/Cargo.toml --profile
+   python-release --out dist` (the `python-release` profile keeps unwinding panics —
+   the default `release` profile's `panic = "abort"` would hard-abort the interpreter
+   on any Rust panic).
+3. Publish with `maturin upload` (or `pypa/gh-action-pypi-publish` + trusted
+   publishing) gated on the `v*` tag, mirroring the cargo/crates.io flow above.

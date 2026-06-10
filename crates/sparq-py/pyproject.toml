@@ -1,0 +1,39 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sparq"
+description = "Python bindings for the sparq RDF + SPARQL engine (dictionary-encoded triplestore, SPARQL 1.1 query/update, opt-in RDFS/OWL-RL/N3 reasoning)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["rdf", "sparql", "semantic-web", "triplestore", "query-engine", "reasoning"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Database :: Database Engines/Servers",
+  "Topic :: Scientific/Engineering",
+]
+# Version comes from the workspace Cargo.toml ([workspace.package] version).
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/jeswr/sparq"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+# The cdylib's lib name and #[pymodule] are both `sparq`, so no module-name
+# override is needed. abi3 (set in Cargo.toml) makes the wheel one-per-platform.
+# For RELEASE wheels use `maturin build --profile python-release` (release
+# optimisation + unwinding panics; the workspace's plain release profile is
+# panic=abort, which would turn any Rust panic into a hard interpreter abort).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

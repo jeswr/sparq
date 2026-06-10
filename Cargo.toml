@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-server", "crates/sparq-conformance"]
+members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-server", "crates/sparq-conformance", "crates/sparq-py"]
 
 [workspace.package]
 version = "0.1.0"
@@ -36,6 +36,14 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+
+# Python extension wheels (T21): release optimisation but UNWINDING panics, so a Rust
+# panic inside the `sparq` Python module surfaces as `pyo3_runtime.PanicException`
+# instead of `panic = "abort"` killing the whole interpreter. Used by
+# `maturin build --profile python-release`; the default release profile is unchanged.
+[profile.python-release]
+inherits = "release"
+panic = "unwind"
 
 # A profile for benchmarking that keeps symbols for profiling.
 [profile.bench]
