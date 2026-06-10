@@ -1,5 +1,55 @@
 # Engine findings from the W3C SPARQL conformance run (T13)
 
+## Round-2 update (conformance-round2 branch)
+
+Headline after the round-2 engine batch: **509 pass / 7 fail / 86 skip over 602
+evaluation tests — 98.6% of executed tests pass** (was 441/75/86 at the branch
+point). Fixed in `crates/sparq-engine` (commits on `conformance-round2`):
+
+- **F4 numeric type promotion + canonical lexical forms** — `Value::Num` is now a
+  typed tower `Num::{Int(i64), Dec(exact fixed-point), Float(f32), Double(f64)}`
+  with the XPath promotion table, exact integer/decimal arithmetic and division
+  (int/int → decimal; ÷0 on exact types is a type error), datatype-preserving
+  ABS/CEIL/FLOOR/ROUND, SECONDS() → xsd:decimal, typed SUM/AVG/MIN/MAX (SUM/AVG
+  error → unbound on a non-numeric/errored member). Comparison fast paths
+  (numeric_value f64 cache, sargable scans) untouched.
+- **F2 XSD constructor casts** — full cast table for xsd:{integer,decimal,float,
+  double,string,boolean,dateTime}; plus NOW() and RAND() (native-only, like UUID).
+- **F8 open-world `=`** — family-based equality (sameTerm decides positively;
+  unknown datatypes / ill-formed lexicals / cross-family pairs are TYPE ERRORS;
+  lang-tagged vs non-lang is decided-false), timeline-valued xsd:date/xsd:dateTime
+  comparison (offset normalisation, 24:00:00 rollover, XSD ±14h indeterminacy);
+  EBV is genuinely 3-valued (`!?w` over an unknown type stays an error).
+- **F7 GRAPH semantics** — `GRAPH <absent> {}` yields 0 solutions; a graph
+  variable bound INSIDE the pattern joins instead of duplicating the column.
+- **F9–F12 stragglers** — FILTER group scoping in the conjunctive flattening
+  (filter-nested-2), REGEX `q`/`iq` flags, zero-length property paths on absent
+  constants, SPARQL total order for ORDER BY (unbound < bnode < IRI < literal),
+  IRI()/URI() relative-reference resolution against the query BASE.
+
+### The 7 remaining failures are blocked outside `sparq-engine`:
+
+1. *case-insensitive booleans* — upstream `spargebra` 0.4.6 parse error (F13).
+2. */ operator on number mixed datatypes* — expects `3/3 = "1"^^xsd:decimal`
+   while sparql11/functions COALESCE expects `0/2 = "0.0"` and aggregates AVG
+   expects `6/3 = "2.0"`: the expected files disagree on integer-division
+   scale; the engine follows the (larger) sparql11 convention.
+3. *dawg-optional-filter-005-not-simplified* — zero-sum with its `-simplified`
+   twin: spargebra hoists the nested filter into the LeftJoin expression, which
+   matches the simplified reading; satisfying both needs algebra-level control.
+4. *COUNT: no GROUP BY inside of GRAPH* and 5. *VALUES inside GRAPH binding the
+   same variable as the graph name* — both need EMPTY named graphs to exist in
+   the dataset; the harness loads test data via N-Quads (`Graph::load_dataset`),
+   which cannot represent a named graph with zero triples. Needs a core/harness
+   path that registers `qt:graphData` graph NAMES explicitly.
+6. *xsd:decimal cast* — the expected file contains parser-NORMALISED data terms
+   (`"0E1"^^xsd:double` in data appears as `"0.0"^^xsd:double` in results), so
+   it cannot pass under term-equality without a normalising loader.
+7. *SUM DISTINCT with GROUP BY* — expects `"2100"^^xsd:double` (plain) while
+   *SUM with GROUP BY* expects `"3.21E4"^^xsd:double` (canonical scientific)
+   for the same construct; the engine follows the canonical convention.
+
+
 First full run of `sparq-conformance` against w3c/rdf-tests @ `f25dbc092c654d792974848e81bb519d7328f0e8`
 (sparq @ `d555096`). Headline: **344 pass / 110 fail / 148 skip over 602 evaluation
 tests — 75.8% of executed tests pass** (data-r2 query 85.3%, data-sparql11 query 62.4%,

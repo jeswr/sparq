@@ -4541,16 +4541,6 @@ fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
     }
 }
 
-/// A numeric value for STRICT comparison — only genuine numeric literals (NOT
-/// booleans, which are a separate, incomparable type in SPARQL relational ops).
-fn strict_num(v: &Value) -> Option<f64> {
-    match v {
-        Value::Num(n) => Some(n.f64()),
-        Value::Term(Term::Literal(l)) if is_numeric_dt(l) => l.value().parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
 fn as_bool_val(v: &Value) -> Option<bool> {
     match v {
         Value::Bool(b) => Some(*b),
