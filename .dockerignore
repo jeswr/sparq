@@ -1,0 +1,28 @@
+# Keep the Docker build context to what `cargo build -p sparq-server` needs:
+# the workspace manifests, lockfile, .cargo config, crate sources, and README.
+
+# Build outputs (huge) and git history.
+target/
+.git/
+.github/
+
+# Benchmark datasets + baselines (multi-GB local data dirs live under bench/).
+bench/
+
+# Research notes, docs, packaging, CI scripts — not needed to compile the server.
+research/
+docs/
+packaging/
+scripts/
+dist/
+
+# Local tooling/editor state.
+.claude/
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+
+# Docker files themselves.
+Dockerfile
+.dockerignore
