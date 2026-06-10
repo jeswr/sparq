@@ -1099,12 +1099,16 @@ fn eval_graph_named(
             let target = Term::NamedNode(n.clone());
             match graph.named.iter().find(|(t, _)| *t == target) {
                 Some((_, sub)) => eval_translated(graph, local, sub, inner),
-                // The named graph is absent → no solutions, but with `inner`'s variable schema
-                // (evaluate against an empty graph to get the right columns).
+                // The named graph is absent → ZERO solutions (even for `GRAPH <g> {}`,
+                // which must NOT yield the unit row), but with `inner`'s variable
+                // schema — evaluate against an empty graph for the columns, then drop
+                // any rows (an empty group pattern would otherwise produce one).
                 None => {
                     let empty = Graph::load_str("", "ntriples").map_err(|e| e.to_string())?;
                     let mut el = LocalVocab::default();
-                    eval_graph_pattern(&empty, &mut el, inner)
+                    let mut b = eval_graph_pattern(&empty, &mut el, inner)?;
+                    b.rows.clear();
+                    Ok(b)
                 }
             }
         }
@@ -1113,9 +1117,28 @@ fn eval_graph_named(
             for (gname, sub) in &graph.named {
                 let mut b = eval_translated(graph, local, sub, inner)?;
                 let gid = value_to_id(graph, local, &Value::Term(gname.clone()));
-                b.vars.insert(0, v.clone());
-                for row in &mut b.rows {
-                    row.insert(0, gid);
+                match b.col(v) {
+                    // The inner pattern itself binds the graph variable (e.g.
+                    // `GRAPH ?g { ?g :p ?o }` or a VALUES/OPTIONAL inside): JOIN with
+                    // the active graph name — keep rows already bound to this graph,
+                    // fill unbound cells, drop conflicting rows.
+                    Some(c) => {
+                        b.rows.retain_mut(|row| {
+                            if row[c] == NO_ID {
+                                row[c] = gid;
+                                true
+                            } else {
+                                row[c] == gid
+                            }
+                        });
+                        b.sorted_by = None;
+                    }
+                    None => {
+                        b.vars.insert(0, v.clone());
+                        for row in &mut b.rows {
+                            row.insert(0, gid);
+                        }
+                    }
                 }
                 acc = Some(match acc {
                     None => b,
