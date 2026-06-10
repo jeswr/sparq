@@ -5,12 +5,12 @@ RDF engine: `geo:wktLiteral` parsing, the `geof:` spatial functions, and an
 R-tree `GeoIndex` over sparq `Graph`s.
 
 This is a **separate crate** by design: no existing sparq crate (and in
-particular not the wasm build) depends on it — spatial support is engaged only
-by adding `sparq-geo` as a dependency. It is a **library** in v1: sparq-engine
-does not yet have an extension-function registry, so the `geof:` functions are
-exposed as plain Rust (including lexical-level mirrors ready to be registered
-as SPARQL builtins later — see [TODO.md](TODO.md) for the registry API that
-needs).
+particular not the wasm build) depends on it unconditionally — spatial support
+is engaged only by adding `sparq-geo` as a dependency. The `geof:` functions
+are exposed both as plain Rust (`geof::*` over parsed geometries, `geof::lex::*`
+over wktLiteral lexical forms) and — behind the default-on `engine` feature —
+as a sparq-engine **extension-function registry**, so they run inside real
+SPARQL `FILTER`/`BIND` expressions (see "Running `geof:` inside SPARQL" below).
 
 Geometry parsing and algorithms wrap the standard pure-Rust geo stack
 ([`wkt`](https://crates.io/crates/wkt), [`geo`](https://crates.io/crates/geo) /
@@ -72,6 +72,49 @@ let nearby = index.within_distance(Point::new(-0.1276, 51.5074), 250_000.0, None
 let top10  = index.nearest(Point::new(-0.1276, 51.5074), 10);
 let hits   = index.intersects_wkt("POLYGON((1 48, 3 48, 3 49.5, 1 49.5, 1 48))")?;
 ```
+
+## Running `geof:` inside SPARQL
+
+`geof_registry()` (the default-on `engine` cargo feature) packages every
+implemented `geof:` function as a
+[`sparq_engine::FunctionRegistry`](../../docs/extension-functions.md) —
+sparq-engine's SPARQL 17.6 extension-function mechanism:
+
+```rust
+use sparq_core::Graph;
+use sparq_engine::query_with_functions;
+use sparq_geo::geof_registry;
+
+let g = Graph::load_str(ttl, "turtle")?;
+let r = query_with_functions(&g, r#"
+    PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+    PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
+    SELECT ?city WHERE {
+      <http://ex/london> <http://ex/loc> ?here .
+      ?city <http://ex/loc> ?there .
+      FILTER(geof:distance(?here, ?there, uom:kilometre) < 400)
+    }"#, &geof_registry())?;
+```
+
+Registered IRIs (all under `http://www.opengis.net/def/function/geosparql/`):
+`distance` (3rd arg a unit IRI, result `xsd:double`), the eight
+simple-features relations `sfEquals` … `sfOverlaps` (`xsd:boolean`), and
+`envelope` / `boundary` / `convexHull` (`geo:wktLiteral`). Geometry arguments
+must be `geo:wktLiteral` literals. Any geo error (malformed WKT, wrong
+datatype, CRS mismatch, unknown unit, wrong arity) is a per-row SPARQL
+*expression* error — the row is dropped by a `FILTER`, left unbound by a
+`BIND` — exactly like the builtin functions; an IRI not in the registry (e.g.
+`geof:buffer`, not in v1) stays a hard query error.
+
+Build the registry **once** and reuse it: it is cheaply cloneable and
+`Send + Sync`. sparq-server exposes exactly this wiring behind its opt-in
+`geo` cargo feature (`cargo build -p sparq-server --features geo`), which
+installs the registry on the `/sparql` query, update, and subscription paths.
+
+The registry evaluates `geof:` *post-hoc* (after pattern matching, per row).
+For large spatial selections, pre-filter with the R-tree `GeoIndex` below and
+feed the candidates to the query (e.g. via `VALUES`); pushing `geof:` filters
+down into index windows automatically needs a planner hook (TODO.md).
 
 ## Index design
 

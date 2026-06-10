@@ -235,6 +235,73 @@ pub(crate) mod trace {
     }
 }
 
+// ---- Extension-function registry (SPARQL 17.6) --------------------------------
+//
+// A thread-local registry installed by the `*_with_functions` entry points /
+// `with_functions` in lib.rs, consulted ONLY in `eval_function`'s `F::Custom` arm
+// after the XSD constructor-cast check misses. The registry-free entry points
+// never install one, so their behaviour and hot-path cost are exactly the
+// pre-registry ones (the `F::Custom` arm gains one thread-local `Option` check,
+// on a path that previously always errored). Like the budget, evaluation is
+// synchronous on the installing thread; the three rayon-parallel branches that
+// evaluate expressions off-thread (FILTER, BIND, aggregates) snapshot the
+// registry and re-install it around each worker item via [`worker_install`].
+pub(crate) mod functions {
+    use crate::FunctionRegistry;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<FunctionRegistry>>> = const { RefCell::new(None) };
+    }
+
+    /// Uninstalls the registry when the installing entry point returns (also on
+    /// error/unwind, so a poisoned thread never leaks a stale registry).
+    pub(crate) struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.with(|a| a.borrow_mut().take());
+        }
+    }
+
+    pub(crate) fn install(fns: &FunctionRegistry) -> Guard {
+        ACTIVE.with(|a| *a.borrow_mut() = Some(Arc::new(fns.clone())));
+        Guard
+    }
+
+    /// Snapshot of the installed registry for the rayon-parallel branches
+    /// (`None` — the overwhelmingly common case — makes [`worker_install`] free).
+    pub(crate) fn snapshot() -> Option<Arc<FunctionRegistry>> {
+        ACTIVE.with(|a| a.borrow().clone())
+    }
+
+    /// Scoped re-install of a snapshot inside a rayon worker item. Restores the
+    /// PREVIOUS thread-local value on drop: rayon runs some items on the
+    /// installing thread itself, whose registry must survive the item.
+    pub(crate) struct WorkerGuard(Option<Option<Arc<FunctionRegistry>>>);
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.0.take() {
+                ACTIVE.with(|a| *a.borrow_mut() = prev);
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn worker_install(snap: &Option<Arc<FunctionRegistry>>) -> WorkerGuard {
+        match snap {
+            None => WorkerGuard(None),
+            Some(fns) => WorkerGuard(Some(ACTIVE.with(|a| a.borrow_mut().replace(fns.clone())))),
+        }
+    }
+
+    /// The extension function registered for `iri`, if a registry is installed
+    /// and contains it.
+    pub(crate) fn lookup(iri: &str) -> Option<crate::ExtFn> {
+        ACTIVE.with(|a| a.borrow().as_ref().and_then(|fns| fns.get(iri).cloned()))
+    }
+}
+
 /// One solution row: the ids bound to each of a [`Bindings`]' variables. Inlined
 /// up to 4 columns (the common case) so a join produces no heap allocation per
 /// row — the dominant cost on large join results.
@@ -3316,10 +3383,14 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         use rayon::prelude::*;
         let lv: &LocalVocab = local;
         let bref = &b;
+        // Thread-local extension-function registry: snapshot + per-item re-install
+        // (free when no registry is installed) — see the FILTER branch.
+        let fns = functions::snapshot();
         b.rows
             .par_iter()
             .enumerate()
             .map(|(i, row)| {
+                let _fns = functions::worker_install(&fns);
                 ROW_SCOPE.set((scope, i));
                 let v = eval_expr(graph, lv, bref, row, expr)?;
                 Ok(value_to_id_readonly(graph, lv, &v))
@@ -3462,9 +3533,13 @@ fn group_aggregate(
         use rayon::prelude::*;
         let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
         let bref = &b;
+        // Thread-local extension-function registry: snapshot + per-item re-install
+        // (free when no registry is installed) — see the FILTER branch.
+        let fns = functions::snapshot();
         members
             .par_iter()
             .map(|members| {
+                let _fns = functions::worker_install(&fns);
                 aggregates
                     .iter()
                     .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg))
@@ -3742,10 +3817,14 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
     #[cfg(feature = "parallel")]
     let keep: Vec<bool> = if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
+        // The extension-function registry is thread-local: snapshot it here and
+        // re-install per worker item (free when no registry is installed).
+        let fns = functions::snapshot();
         b.rows
             .par_iter()
             .enumerate()
             .map(|(i, row)| {
+                let _fns = functions::worker_install(&fns);
                 ROW_SCOPE.set((scope, i));
                 Ok(effective_boolean(&eval_expr(graph, local, b, row, expr)?))
             })
@@ -5393,11 +5472,45 @@ fn eval_function(
             }
             _ => Value::Error,
         },
-        // XSD constructor casts: xsd:integer(?x), xsd:decimal(?x), … (SPARQL 17.5).
-        F::Custom(nn) if args.len() == 1 => match eval_cast(nn.as_str(), &ev(0)?) {
-            Some(out) => out,
-            None => return Err(format!("unsupported SPARQL function: Custom({})", nn.as_str())),
-        },
+        // XSD constructor casts: xsd:integer(?x), xsd:decimal(?x), … (SPARQL 17.5),
+        // then the installed extension-function registry (SPARQL 17.6; see
+        // `query_with_functions` / `with_functions` in lib.rs). An IRI that is
+        // neither stays the same hard query error as before the registry existed.
+        F::Custom(nn) => {
+            let mut vals = Vec::with_capacity(args.len());
+            for i in 0..args.len() {
+                vals.push(ev(i)?);
+            }
+            if vals.len() == 1 {
+                if let Some(out) = eval_cast(nn.as_str(), &vals[0]) {
+                    return Ok(out);
+                }
+            }
+            if let Some(f) = functions::lookup(nn.as_str()) {
+                // Arguments are materialised as concrete RDF terms; an unbound or
+                // errored argument is an expression ERROR (row filtered / BIND
+                // unbound), exactly like the builtins. The extension returning
+                // `Err` (wrong arity, bad lexical, …) is the same expression
+                // error — per-row, never a hard query error.
+                let mut terms = Vec::with_capacity(vals.len());
+                for v in &vals {
+                    match value_as_term(v) {
+                        Some(t) => terms.push(t),
+                        None => return Ok(Value::Error),
+                    }
+                }
+                return Ok(match f(&terms) {
+                    Ok(t) => Value::Term(t),
+                    Err(_) => Value::Error,
+                });
+            }
+            return Err(format!("unsupported SPARQL function: Custom({})", nn.as_str()));
+        }
+        // With every default feature on, the arms above are exhaustive (the
+        // `F::Custom` arm is no longer guarded on arity); this arm is reached
+        // only when the feature-gated builtins (regex / digest / native-only
+        // UUID) are compiled out — i.e. the wasm build.
+        #[allow(unreachable_patterns)]
         other => return Err(format!("unsupported SPARQL function: {other:?}")),
     })
 }

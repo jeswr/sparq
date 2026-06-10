@@ -35,6 +35,31 @@ use crate::negotiate::{negotiate, negotiate_graph, Format};
 use crate::results;
 
 // ---------------------------------------------------------------------------
+// SPARQL extension functions (opt-in `geo` cargo feature)
+// ---------------------------------------------------------------------------
+
+/// Runs `f` — a synchronous engine call (or a whole blocking-pool work item) — with
+/// the server's SPARQL extension functions installed.
+///
+/// With the opt-in `geo` cargo feature this is sparq-geo's `geof_registry()`
+/// (the GeoSPARQL spatial functions), built once per process and scoped
+/// thread-locally around the call (the engine re-installs it inside its rayon
+/// workers — see docs/extension-functions.md). Without the feature it is the
+/// identity function, so the engine call is *exactly* the registry-free one —
+/// zero cost, no new dependencies, byte-identical behaviour.
+#[cfg(feature = "geo")]
+pub(crate) fn with_extensions<T>(f: impl FnOnce() -> T) -> T {
+    static GEOF: std::sync::OnceLock<sparq_engine::FunctionRegistry> = std::sync::OnceLock::new();
+    sparq_engine::with_functions(GEOF.get_or_init(sparq_geo::geof_registry), f)
+}
+
+#[cfg(not(feature = "geo"))]
+#[inline(always)]
+pub(crate) fn with_extensions<T>(f: impl FnOnce() -> T) -> T {
+    f()
+}
+
+// ---------------------------------------------------------------------------
 // Hardening configuration (T15)
 // ---------------------------------------------------------------------------
 
@@ -273,7 +298,7 @@ impl AppState {
     /// delta-overlay (O(batch)), periodically fold the overlay back, and publish.
     fn apply_in_place(&self, w: &mut Writer, mut g: Graph, sparql: &str) -> Result<(), String> {
         for missed in std::mem::take(&mut w.lag) {
-            if sparq_engine::update_in_place(&mut g, &missed).is_err() {
+            if with_extensions(|| sparq_engine::update_in_place(&mut g, &missed)).is_err() {
                 // Unreachable (the op already succeeded on the published line and the
                 // two paths are observationally identical) — but if it ever happens,
                 // recover by discarding the buffer and rebuilding from published.
@@ -282,7 +307,7 @@ impl AppState {
             }
             w.spare_ops += 1;
         }
-        if let Err(e) = sparq_engine::update_in_place(&mut g, sparql) {
+        if let Err(e) = with_extensions(|| sparq_engine::update_in_place(&mut g, sparql)) {
             // A failed request may have applied a *prefix* of its operations to `g`.
             // The published graph is untouched (failures stay atomic to clients); the
             // possibly-inconsistent buffer is dropped here and rebuilt lazily.
@@ -306,7 +331,7 @@ impl AppState {
     /// update). Doubles as the materialisation of the second buffer: the old published
     /// graph is demoted to spare unchanged.
     fn apply_by_rebuild(&self, w: &mut Writer, sparql: &str) -> Result<(), String> {
-        let next = sparq_engine::update(&self.snapshot(), sparql)?;
+        let next = with_extensions(|| sparq_engine::update(&self.snapshot(), sparql))?;
         w.spare_ops = 0; // freshly rebuilt: no overlay
         self.publish(w, next, sparql);
         Ok(())
@@ -558,11 +583,13 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
         let analyze = explain == ExplainMode::Analyze;
         let budget = make_budget(&config, true);
         let task = tokio::task::spawn_blocking(move || {
-            let r = if analyze {
-                sparq_engine::explain_analyze_with_budget(&graph, &q, &budget)
-            } else {
-                sparq_engine::explain(&graph, &q)
-            };
+            let r = with_extensions(|| {
+                if analyze {
+                    sparq_engine::explain_analyze_with_budget(&graph, &q, &budget)
+                } else {
+                    sparq_engine::explain(&graph, &q)
+                }
+            });
             match r {
                 Ok(text) => text_response(StatusCode::OK, "text/plain; charset=utf-8", text, head_only),
                 // ANALYZE of a non-SELECT/ASK form is a client error, not a server one.
@@ -586,7 +613,7 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
             let graph = state.snapshot();
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
-                if is_ask {
+                with_extensions(|| if is_ask {
                     match sparq_engine::ask_with_budget(&graph, &select, &budget) {
                         Ok(value) => {
                             let (body, ct) = match fmt {
@@ -599,7 +626,7 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
                     }
                 } else {
                     render_select(&graph, &select, fmt, head_only, &budget, &cfg)
-                }
+                })
             });
             await_worker(task, &config).await
         }
@@ -615,7 +642,7 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
             let graph = state.snapshot();
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
-                match sparq_engine::construct_ntriples_with_budget(&graph, &query, &budget) {
+                match with_extensions(|| sparq_engine::construct_ntriples_with_budget(&graph, &query, &budget)) {
                     Ok(body) => text_response(StatusCode::OK, gfmt.content_type(), body, head_only),
                     Err(e) => engine_error_response(&e, &cfg),
                 }

@@ -26,7 +26,35 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --format ntriples data.nt
 
 # no data file => empty default graph (still answers queries)
 cargo run -p sparq-server
+
+# GeoSPARQL: the opt-in `geo` feature installs sparq-geo's geof: functions
+# (distance / sf* relations / envelope / boundary / convexHull) on the query,
+# update and subscription paths — see the "GeoSPARQL" section below
+cargo run -p sparq-server --features geo -- --format turtle places.ttl
 ```
+
+## GeoSPARQL (`geof:`) — opt-in `geo` feature
+
+Built with `--features geo` (default **off**), every SPARQL endpoint evaluates
+the [sparq-geo](../sparq-geo/README.md) `geof:` extension functions inside
+`FILTER`/`BIND` expressions, via the engine's extension-function registry
+([docs/extension-functions.md](../../docs/extension-functions.md)):
+
+```sh
+curl -G http://127.0.0.1:3030/sparql --data-urlencode query='
+  PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+  PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
+  SELECT ?city WHERE {
+    <http://ex/london> <http://ex/loc> ?here . ?city <http://ex/loc> ?there .
+    FILTER(geof:distance(?here, ?there, uom:kilometre) < 400)
+  }'
+```
+
+With the feature **off** (the default) nothing changes: sparq-geo and the
+georust stack are not compiled in, every engine call is the registry-free one,
+and an unknown `geof:` IRI is the usual hard "unsupported SPARQL function"
+error (a 500). Feature-gated tests: `cargo test -p sparq-server --features geo`
+(see `tests/geo.rs`).
 
 ## Hardening flags (T15)
 

@@ -12,26 +12,33 @@
 //!    and `geof:envelope` / `geof:boundary` / `geof:convexHull`. The
 //!    [`geof::lex`] sub-module mirrors every function at the LEXICAL level
 //!    (wkt-literal strings in, plain values / wkt-literal strings out) — the
-//!    exact shape a SPARQL engine builtin receives, so sparq-engine can wire
-//!    them as `geof:` extension functions later (see TODO.md for the registry
-//!    API this needs).
+//!    exact shape a SPARQL engine builtin receives; the [`registry`] module
+//!    (default-on `engine` feature) packages them as a sparq-engine
+//!    [`FunctionRegistry`](sparq_engine::FunctionRegistry), so `geof:`
+//!    functions run inside real SPARQL via
+//!    [`sparq_engine::query_with_functions`] — see [`geof_registry`].
 //! 3. [`index`] — [`GeoIndex`]: extracts `(entity, geometry)` pairs from a
 //!    sparq [`sparq_core::Graph`] (via `geo:hasGeometry` /
 //!    `geo:hasDefaultGeometry` / `geo:asWKT`), bulk-loads an R-tree (`rstar`)
 //!    over their bounding boxes, and answers `within_distance` / `nearest` /
 //!    `intersects` queries returning entity [`oxrdf::Term`]s.
 //!
-//! This crate is deliberately NOT a dependency of any existing sparq crate
-//! (in particular the wasm build carries zero geometry code); spatial support
-//! is engaged only by depending on `sparq-geo`.
+//! No existing sparq crate depends on this one unconditionally (in particular
+//! the wasm build carries zero geometry code); spatial support is engaged only
+//! by depending on `sparq-geo` — e.g. sparq-server's opt-in `geo` cargo
+//! feature, which installs [`geof_registry`] on its SPARQL endpoints.
 
 pub mod geof;
 pub mod index;
 pub mod literal;
+#[cfg(feature = "engine")]
+pub mod registry;
 
 pub use geof::Unit;
 pub use index::GeoIndex;
 pub use literal::{parse_wkt_literal, Crs, GeoGeometry};
+#[cfg(feature = "engine")]
+pub use registry::geof_registry;
 
 /// The GeoSPARQL vocabulary IRIs this crate touches.
 pub mod vocab {
