@@ -1,0 +1,6 @@
+# Expected entailment for witch.n3 + witch-goal.n3 (the EYE repo ships a proof, not an
+# answer file; this is the goal instance the proof derives — see witch-proof.n3 upstream:
+# the top-level lemma r:gives { :GIRL a :WITCH. }).
+@prefix : <https://eyereasoner.github.io/eye/reasoning/witch#>.
+
+:GIRL a :WITCH.

@@ -1,0 +1,47 @@
+# Expected entailments for bi-subset.n3: one `:<test> :result true` per passing EYE builtin
+# unit test (upstream biA.n3 records each as a `{ … } a :PASS` formula under query
+# projection; the ground conclusions below are exactly what each test rule derives).
+@prefix : <http://eulersharp.sourceforge.net/2007/07test#>.
+
+:listf1 :result true.
+:listi1 :result true.
+:listl1 :result true.
+:listm1 :result true.
+:logc1 :result true.
+:logc2 :result true.
+:logc3 :result true.
+:loge2 :result true.
+:logi1 :result true.
+:logid0 :result true.
+:logid1 :result true.
+:logid3 :result true.
+:logne1 :result true.
+:logned1 :result true.
+:logned2 :result true.
+:lognid2 :result true.
+:logu1 :result true.
+:logu2 :result true.
+:mathd1 :result true.
+:mathg1 :result true.
+:mathg2 :result true.
+:mathm1 :result true.
+:mathm2 :result true.
+:mathnl1 :result true.
+:maths1 :result true.
+:maths2 :result true.
+:strc1 :result true.
+:strc2 :result true.
+:strc3 :result true.
+:strcn1 :result true.
+:strcn2 :result true.
+:strci1 :result true.
+:strm1 :result true.
+:strs1 :result true.
+:strs4 :result true.
+:timed1 :result true.
+:timem1 :result true.
+:timey1 :result true.
+
+# Plus the forward rule over the test data:
+:c :p :a.
+:d :p :a.
