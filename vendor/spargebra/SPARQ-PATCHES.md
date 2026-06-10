@@ -104,3 +104,28 @@ this vendored tree once the fixes land in a released spargebra.
   matcher `i()` and always emits the lowercase lexical forms. Every
   alternation tries `iri()` before `BooleanLiteral`, so prefixed names with a
   `true`/`false` prefix (e.g. `true:x`) are unaffected.
+
+## 6. `OPTIONAL { { P FILTER(F) } }`: do not hoist the nested group's filter
+
+- **Spec**: SPARQL 1.2 Query §18.3.2 (same in SPARQL 1.1 §18.2.2) — the
+  working group notes the SPARQL 1.0 ambiguity for `OPTIONAL { { ... FILTER
+  (...?x...) } }` and resolves it: *"Applying the simplification step after
+  all the translation of graph patterns is the preferred reading."* Under
+  that reading, when the OPTIONAL translation (§18.3.2.6) runs, the doubly
+  braced group is still `Join(Z, Filter(F, A))` — not the `Filter(F, A)` form
+  — so `F` must NOT become the LeftJoin expression (where it would see the
+  left side's bindings). spargebra's `new_join` simplifies `Join(Z, A) = A`
+  eagerly during parsing, making the group indistinguishable from a top-level
+  filter and hoisting `F`. The W3C manifest includes ONLY the
+  `-not-simplified` variant of the test pair ("Preferred reading and SPARQL
+  1.1"); the `-simplified` variant is commented out.
+- **Test**: `sparql10/optional-filter#dawg-optional-filter-005-not-simplified`
+  (QueryEvaluationTest, `expr-5.rq`) — failed before (the hoisted
+  `?title = "TITLE 2"` saw the outer `?title` binding and kept a `?price`),
+  passes after (the filter's `?title` is unbound inside the nested group, so
+  the inner pattern yields nothing and OPTIONAL adds no bindings).
+- **Fix**: `GroupGraphPatternSub` keeps the spec's pre-simplification shape:
+  when a group has no FILTER clause of its own but its body reduced to a bare
+  `Filter` (i.e. the filter bubbled up from a nested group), it returns
+  `Join(Z, Filter(F, A))` instead. Groups with their own top-level FILTER
+  still translate to `Filter(F, A)` and keep hoisting, per §18.3.2.6.

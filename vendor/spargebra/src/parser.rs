@@ -1581,6 +1581,20 @@ parser! {
 
             Ok(if let Some(expr) = filter {
                 GraphPattern::Filter { expr, inner: Box::new(g) }
+            } else if matches!(g, GraphPattern::Filter { .. }) {
+                // This group has no FILTER clause of its own, so a bare Filter here
+                // bubbled up from a nested group ({ { P FILTER(F) } }) through the
+                // eager Join(Z, A) = A simplification in new_join. Keep the spec's
+                // pre-simplification translation Join(Z, Filter(F, A)) so that the
+                // OPTIONAL translation (18.3.2.6) does not read this group as the
+                // Filter(F, A) form and hoist F into the LeftJoin expression: per
+                // 18.3.2, applying the simplification step after all translation is
+                // the preferred reading (cf. dawg-optional-filter-005-not-simplified,
+                // the only 005 variant in the W3C manifest).
+                GraphPattern::Join {
+                    left: Box::new(GraphPattern::default()),
+                    right: Box::new(g),
+                }
             } else {
                 g
             })
