@@ -24,8 +24,11 @@
 //! * **Empty windows are reported.** When the watermark jumps a gap, every
 //!   window in between closes with no content — DSTREAM needs this (results
 //!   must be observed disappearing), and it keeps emission deterministic.
-//!   Windows wholly before the first accepted triple are skipped, so a stream
-//!   starting at `ts = 10⁹` does not replay a billion empties.
+//!   Windows wholly closed at the INITIAL watermark (first accepted `ts` minus
+//!   `max_delay`) are skipped, so a stream starting at `ts = 10⁹` does not
+//!   replay a billion empties — while every window the watermark holds open
+//!   stays open even across the first push: a first push at `ts = 12` with
+//!   `max_delay = 5` leaves `[0, 10)` open for a later `ts = 8`.
 //! * `step > range` leaves timestamp gaps covered by no window; a triple in a
 //!   gap enters no window and is not counted "late" — but its timestamp still
 //!   ADVANCES the watermark (event time passed), closing earlier windows.
@@ -209,9 +212,17 @@ impl WindowedStream {
                     return;
                 }
                 None => {
-                    // First accepted triple fixes the starting window: the FIRST
-                    // window covering ts (skip the all-empty prefix of the axis).
-                    let k_min = if ts >= range { (ts - range) / step + 1 } else { 0 };
+                    // First accepted triple fixes the starting window: the oldest
+                    // window the WATERMARK (ts − max_delay) still holds open, i.e.
+                    // the first k with k·step + range > ts − max_delay. Anchoring
+                    // on the watermark instead of on ts keeps the lateness
+                    // contract honest from the very first push — with
+                    // max_delay = 5, a first push at ts = 12 must leave [0,10)
+                    // open for a subsequent ts = 8 (watermark 7 < 10). With
+                    // max_delay = 0 this is exactly the first window covering
+                    // ts, so the all-empty prefix of the axis is still skipped.
+                    let wm = ts.saturating_sub(max_delay);
+                    let k_min = if wm >= range { (wm - range) / step + 1 } else { 0 };
                     self.next_close = Some(k_min);
                 }
                 _ => {}

@@ -2271,6 +2271,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-rsp"
+version = "0.1.0"
+dependencies = [
+ "oxrdf",
+ "rustc-hash",
+ "spargebra",
+ "sparq-core",
+ "sparq-engine",
+]
+
+[[package]]
 name = "sparq-server"
 version = "0.1.0"
 dependencies = [

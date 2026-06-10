@@ -148,6 +148,22 @@ fn out_of_order_within_max_delay_is_kept_beyond_is_dropped_and_counted() {
     assert_eq!(objs(&windows[0]), ["b", "c"], "dropped triple never surfaces");
 }
 
+/// The lateness contract holds across the FIRST push too: the starting window
+/// is anchored on the initial watermark (first ts − max_delay), not on the
+/// first ts itself, so an out-of-order arrival older than the first triple but
+/// within the tolerance still lands in its window.
+#[test]
+fn out_of_order_before_first_triple_within_max_delay_is_kept() {
+    let mut ws = WindowedStream::empty(WindowSpec::time(10, 10).with_max_delay(5));
+    ws.push(t("s", "p", "first"), 12); // watermark 7: [0,10) must stay open
+    ws.push(t("s", "p", "older"), 8); // before the first triple, within delay
+    assert_eq!(ws.late_dropped(), 0, "ts 8 is within max_delay of ts 12");
+    let windows = ws.flush();
+    assert_eq!((windows[0].start, windows[0].end), (0, 10));
+    assert_eq!(objs(&windows[0]), ["older"]);
+    assert_eq!(objs(&windows[1]), ["first"]);
+}
+
 /// With max_delay 0 the watermark is max_ts itself: the first newer-window
 /// triple closes everything before it.
 #[test]
