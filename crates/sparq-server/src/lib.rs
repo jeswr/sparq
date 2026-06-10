@@ -23,5 +23,9 @@ pub mod results;
 #[cfg(feature = "server")]
 pub mod http;
 
+/// SEPA-style SPARQL subscriptions over WebSocket (T23) — see `SUBSCRIPTIONS.md`.
+#[cfg(feature = "server")]
+pub mod subscriptions;
+
 #[cfg(feature = "server")]
 pub use http::{harden, router, AppState, ServerConfig};

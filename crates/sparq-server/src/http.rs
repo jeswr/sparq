@@ -51,6 +51,11 @@ pub struct ServerConfig {
     /// Maximum SELECT result rows. Exceeding it is an honest 413 refusal (the engine
     /// aborts evaluation via the row budget), never a silent truncation.
     pub max_results: Option<usize>,
+    /// Maximum active subscriptions per WebSocket connection (T23); further `subscribe`
+    /// requests on the socket are refused with a protocol error message.
+    pub max_subscriptions_per_conn: usize,
+    /// Maximum active subscriptions across the whole server (T23).
+    pub max_subscriptions: usize,
     /// Log every request/response via `tower_http::trace::TraceLayer`.
     pub verbose: bool,
 }
@@ -62,6 +67,8 @@ impl Default for ServerConfig {
             max_body_bytes: 1024 * 1024, // 1 MiB
             max_concurrent: 32,
             max_results: None,
+            max_subscriptions_per_conn: 16,
+            max_subscriptions: 256,
             verbose: false,
         }
     }
@@ -85,6 +92,12 @@ impl ServerConfig {
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_RESULTS") {
             cfg.max_results = (n > 0).then_some(n);
         }
+        if let Some(n) = env_parse::<usize>("SPARQ_MAX_SUBSCRIPTIONS_PER_CONN") {
+            cfg.max_subscriptions_per_conn = n;
+        }
+        if let Some(n) = env_parse::<usize>("SPARQ_MAX_SUBSCRIPTIONS") {
+            cfg.max_subscriptions = n;
+        }
         cfg
     }
 }
@@ -96,15 +109,23 @@ fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
 /// Extra wall-clock allowance past the cooperative deadline before the server gives up
 /// awaiting the worker and answers 503 anyway (the detached worker still stops at its
 /// next budget check — it is not leaked indefinitely).
-const TIMEOUT_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 
 /// Shared server state: the dataset under query, behind an `RwLock` so SPARQL Update can swap in a
 /// rebuilt graph atomically. Queries take a cheap lock-free `Arc` snapshot; SPARQL Update takes the
-/// write lock briefly to install the new graph. Also carries the hardening [`ServerConfig`].
+/// write lock briefly to install the new graph. Also carries the hardening [`ServerConfig`] and the
+/// subscription plumbing (T23): a `watch` channel that broadcasts the commit generation to every
+/// open `/subscriptions` socket, plus the global active-subscription counters.
 #[derive(Clone)]
 pub struct AppState {
     graph: Arc<RwLock<Arc<Graph>>>,
     config: Arc<ServerConfig>,
+    /// Commit generation, bumped after every successful graph swap. Subscription
+    /// connections hold a `watch::Receiver` and re-evaluate when it changes; the watch
+    /// channel inherently coalesces bursts (see `subscriptions` module docs).
+    commits: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Global subscription bookkeeping shared by all `/subscriptions` connections.
+    pub(crate) subs: Arc<crate::subscriptions::SubscriptionCounters>,
 }
 
 impl AppState {
@@ -113,7 +134,12 @@ impl AppState {
     }
 
     pub fn with_config(graph: Graph, config: ServerConfig) -> Self {
-        Self { graph: Arc::new(RwLock::new(Arc::new(graph))), config: Arc::new(config) }
+        Self {
+            graph: Arc::new(RwLock::new(Arc::new(graph))),
+            config: Arc::new(config),
+            commits: Arc::new(tokio::sync::watch::channel(0).0),
+            subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
+        }
     }
 
     /// A cheap, consistent snapshot of the current graph for the duration of a request.
@@ -121,11 +147,24 @@ impl AppState {
         self.graph.read().expect("graph lock poisoned").clone()
     }
 
-    /// Apply a SPARQL Update, atomically swapping in the rebuilt graph (T11b).
+    /// Apply a SPARQL Update, atomically swapping in the rebuilt graph (T11b). On success,
+    /// bumps the commit generation so active subscriptions re-evaluate (T23). The bump
+    /// happens strictly *after* the swap, so a woken subscription always snapshots a graph
+    /// at least as new as the commit it was woken for.
     pub fn apply_update(&self, sparql: &str) -> Result<(), String> {
         let next = sparq_engine::update(&self.snapshot(), sparql)?;
         *self.graph.write().expect("graph lock poisoned") = Arc::new(next);
+        self.commits.send_modify(|gen| *gen += 1);
         Ok(())
+    }
+
+    /// A receiver of the commit generation for a subscription connection (T23).
+    pub(crate) fn subscribe_commits(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.commits.subscribe()
+    }
+
+    pub(crate) fn config(&self) -> &ServerConfig {
+        &self.config
     }
 }
 
@@ -141,6 +180,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sparql/graph", any(graph_store_indirect))
         // Graph Store HTTP Protocol (direct graph identification).
         .route("/graphs/*path", any(graph_store_direct))
+        // SEPA-style SPARQL subscriptions over WebSocket (T23).
+        .route("/subscriptions", get(crate::subscriptions::subscriptions_endpoint))
         // Liveness.
         .route("/health", get(|| async { "ok" }))
         .with_state(state);
@@ -321,7 +362,7 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
 
 /// The per-request engine budget: deadline from the configured timeout; the SELECT
 /// row cap from `--max-results` (ASK only needs existence, so no row cap there).
-fn make_budget(config: &ServerConfig, apply_max_results: bool) -> QueryBudget {
+pub(crate) fn make_budget(config: &ServerConfig, apply_max_results: bool) -> QueryBudget {
     QueryBudget {
         deadline: config.query_timeout.map(|t| std::time::Instant::now() + t),
         max_rows: if apply_max_results { config.max_results } else { None },

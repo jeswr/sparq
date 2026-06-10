@@ -4,7 +4,8 @@
 //! Usage:
 //!   sparq-server [--addr 127.0.0.1:3030] [--format turtle]
 //!                [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
-//!                [--max-results N] [--verbose] [DATA_FILE]
+//!                [--max-results N] [--max-subscriptions N]
+//!                [--max-subscriptions-per-conn N] [--verbose] [DATA_FILE]
 //!
 //! With no DATA_FILE the server starts with an empty default graph (still answers queries —
 //! they just return no rows). The format defaults to `turtle`; pass `--format ntriples |
@@ -17,6 +18,10 @@
 //!   --max-concurrent N     maximum in-flight requests (429 beyond) [32, env SPARQ_MAX_CONCURRENT]
 //!   --max-results N        maximum SELECT rows (413 beyond), 0 off [unlimited, env SPARQ_MAX_RESULTS]
 //!   --verbose              per-request logging (TraceLayer)
+//!
+//! Subscription limits (T23, the /subscriptions WebSocket — see SUBSCRIPTIONS.md):
+//!   --max-subscriptions N           server-wide active subscriptions [256, env SPARQ_MAX_SUBSCRIPTIONS]
+//!   --max-subscriptions-per-conn N  active subscriptions per socket  [16, env SPARQ_MAX_SUBSCRIPTIONS_PER_CONN]
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -56,11 +61,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let n: usize = parse_flag(&mut args, "--max-results")?;
                 config.max_results = (n > 0).then_some(n);
             }
+            "--max-subscriptions" => {
+                config.max_subscriptions = parse_flag(&mut args, "--max-subscriptions")?;
+            }
+            "--max-subscriptions-per-conn" => {
+                config.max_subscriptions_per_conn = parse_flag(&mut args, "--max-subscriptions-per-conn")?;
+            }
             "--verbose" => config.verbose = true,
             "-h" | "--help" => {
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--format FMT] [--query-timeout SECS] \
-                     [--max-body-bytes N] [--max-concurrent N] [--max-results N] [--verbose] [DATA_FILE]"
+                     [--max-body-bytes N] [--max-concurrent N] [--max-results N] \
+                     [--max-subscriptions N] [--max-subscriptions-per-conn N] [--verbose] [DATA_FILE]"
                 );
                 return Ok(());
             }
@@ -91,11 +103,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
-        "guards: query-timeout={} max-body-bytes={} max-concurrent={} max-results={}",
+        "guards: query-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
+         max-subscriptions={} max-subscriptions-per-conn={}",
         config.query_timeout.map_or("off".into(), |t| format!("{}s", t.as_secs())),
         config.max_body_bytes,
         config.max_concurrent,
         config.max_results.map_or("off".into(), |n| n.to_string()),
+        config.max_subscriptions,
+        config.max_subscriptions_per_conn,
     );
 
     let state = AppState::with_config(graph, config);
@@ -103,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr: SocketAddr = addr.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    eprintln!("sparq-server listening on http://{addr}  (SPARQL endpoint: /sparql)");
+    eprintln!("sparq-server listening on http://{addr}  (SPARQL endpoint: /sparql, subscriptions: ws://{addr}/subscriptions)");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;

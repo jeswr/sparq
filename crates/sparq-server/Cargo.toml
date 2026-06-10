@@ -27,7 +27,7 @@ required-features = ["server"]
 # are never part of the bundle. Kept behind a feature so a consumer can depend on the
 # pure serializer library (XML/CSV/TSV) without dragging in the runtime.
 default = ["server"]
-server = ["dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util"]
+server = ["dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -40,8 +40,10 @@ oxrdf.workspace = true
 spargebra.workspace = true
 
 # --- async HTTP stack (feature-gated; native only) ---
-axum = { version = "0.7", optional = true, default-features = false, features = ["http1", "tokio", "query", "json"] }
-tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+# `ws` powers the /subscriptions endpoint (T23, SEPA-style SPARQL subscriptions).
+axum = { version = "0.7", optional = true, default-features = false, features = ["http1", "tokio", "query", "json", "ws"] }
+# `sync` adds the watch channel that carries the commit generation to subscription tasks (T23).
+tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 # `limit` + `load-shed` power the max-concurrency guard (T15); `util` for ServiceBuilder combinators.
 tower = { version = "0.5", optional = true, features = ["limit", "load-shed", "util"] }
 # `catch-panic` turns a handler panic into a 500 instead of a dead connection (T15).
@@ -51,10 +53,18 @@ tracing-subscriber = { version = "0.3", optional = true, default-features = fals
 # `stream::iter` feeds the streamed SELECT body (T16) — already in axum's dependency
 # graph, so this adds no new transitive code.
 futures-util = { version = "0.3", optional = true, default-features = false }
+# Subscription protocol messages + result diffs (T23) — already in axum's dependency
+# graph (its `json` feature), so this adds no new transitive code.
+serde_json = { version = "1", optional = true }
 
 mimalloc = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "time"] }
 # In-process HTTP client for integration tests (spin the server, assert protocol shape).
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# WebSocket client for the /subscriptions integration tests (T23) — same version axum's
+# `ws` feature resolves to, so the dependency tree gains nothing new.
+tokio-tungstenite = "0.24"
+# `StreamExt::next` / `SinkExt::send` on the test client's WebSocket stream.
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
