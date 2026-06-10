@@ -27,7 +27,8 @@
 //!   Windows wholly before the first accepted triple are skipped, so a stream
 //!   starting at `ts = 10⁹` does not replay a billion empties.
 //! * `step > range` leaves timestamp gaps covered by no window; a triple in a
-//!   gap belongs to no window and is silently ignored (it is not "late").
+//!   gap enters no window and is not counted "late" — but its timestamp still
+//!   ADVANCES the watermark (event time passed), closing earlier windows.
 //!
 //! # Count-window semantics
 //!
@@ -198,26 +199,28 @@ impl WindowedStream {
         // Window k covers [k·step, k·step + range). The LAST window covering
         // ts is k_max = ts / step — valid only if ts actually falls inside it
         // (ts % step < range can fail when step > range: gap timestamps are
-        // covered by no window and ignored).
+        // covered by no window).
         let k_max = ts / step;
-        if ts - k_max * step >= range {
-            return; // gap (step > range): in no window
-        }
-        match self.next_close {
-            Some(k_next) if k_max < k_next => {
-                // Every window covering ts already closed: too late.
-                self.late_dropped += 1;
-                return;
+        if ts - k_max * step < range {
+            match self.next_close {
+                Some(k_next) if k_max < k_next => {
+                    // Every window covering ts already closed: too late.
+                    self.late_dropped += 1;
+                    return;
+                }
+                None => {
+                    // First accepted triple fixes the starting window: the FIRST
+                    // window covering ts (skip the all-empty prefix of the axis).
+                    let k_min = if ts >= range { (ts - range) / step + 1 } else { 0 };
+                    self.next_close = Some(k_min);
+                }
+                _ => {}
             }
-            None => {
-                // First accepted triple fixes the starting window: the FIRST
-                // window covering ts (skip the all-empty prefix of the axis).
-                let k_min = if ts >= range { (ts - range) / step + 1 } else { 0 };
-                self.next_close = Some(k_min);
-            }
-            _ => {}
+            self.buffer.entry(ts).or_default().push(triple);
         }
-        self.buffer.entry(ts).or_default().push(triple);
+        // A gap triple (step > range) enters no window, but it is still
+        // evidence of event time passing: it advances the watermark and can
+        // close (and empty-report) earlier windows, exactly like any arrival.
         if ts > self.max_ts {
             self.max_ts = ts;
         }

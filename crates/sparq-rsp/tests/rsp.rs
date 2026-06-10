@@ -111,6 +111,20 @@ fn step_greater_than_range_gap_triples_belong_to_no_window() {
     assert_eq!(ws.late_dropped(), 0, "gap triples are not late");
 }
 
+/// A gap arrival still ADVANCES event time: it closes earlier windows even
+/// though it enters none itself (roborev 1687 regression).
+#[test]
+fn gap_triples_advance_the_watermark_and_close_earlier_windows() {
+    let mut ws = WindowedStream::empty(WindowSpec::time(5, 10)); // covers [0,5) [10,15) …
+    ws.push(t("s", "p", "in"), 3);
+    assert!(ws.take_closed().is_empty(), "[0,5) still open at watermark 3");
+    ws.push(t("s", "p", "gap"), 7); // no window, but watermark → 7 ≥ 5
+    let closed = ws.take_closed();
+    assert_eq!(closed.len(), 1, "gap arrival closed [0,5)");
+    assert_eq!((closed[0].start, closed[0].end), (0, 5));
+    assert_eq!(objs(&closed[0]), ["in"]);
+}
+
 // ------------------------------------------------------------- out-of-order
 
 /// max_delay holds windows open: an out-of-order triple within the tolerance
