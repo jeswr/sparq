@@ -29,10 +29,21 @@ Opt-in **embedding storage + nearest-neighbour search** for the
   hashing — no semantics); the non-default `provider` feature carries the API
   shape for an OpenAI-compatible `/v1/embeddings` endpoint with a
   **caller-supplied** HTTP transport (this crate never opens a socket).
-- **`embed_labels`** — embeds one human-readable label per entity
-  (`rdfs:label` > `skos:prefLabel` > `foaf:name` > `schema:name` >
-  `dc:title`, configurable via `LabelConfig`), scanning each predicate's
+- **`verbalize` / `embed_entities`** — the entity **verbalization layer**:
+  renders one text passage per entity from its literal properties (label +
+  type + description + extra prefixed literals, multilingual-aware,
+  char-budgeted) per a configurable `EntityTextConfig`, then embeds it. This
+  is how production KG/vector systems build entity vectors (Wikidata's vector
+  database, BLINK entity linking, GraphRAG, Weaviate's text2vec — sources in
+  [`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md)).
+- **`embed_labels`** — the label-only special case: one human-readable label
+  per entity (`rdfs:label` > `skos:prefLabel` > `foaf:name` > `schema:name`
+  > `dc:title`, configurable via `LabelConfig`), scanning each predicate's
   contiguous index block rather than the whole graph.
+- **`fuse_rrf` / `fuse_scores`** — rank/score **fusion for hybrid search**:
+  combine the text-vector ranking with another ranked signal (typically
+  [`sparq-sim`](../sparq-sim)'s structural similarity) with reciprocal-rank
+  fusion or a normalized alpha-blend.
 
 This is a **separate crate** by design: nothing in the workspace depends on
 it (the wasm build in particular is untouched), and the default engine build
@@ -54,7 +65,10 @@ offset 32+count·dim·4   id→slot index                    count·8 bytes
 Both sections start at multiples of 4 from the page-aligned map, so the f32
 casts are always aligned. Big-endian targets are rejected at `create`/`open`.
 
-## Usage
+## How to: index entity labels
+
+The minimal pipeline — one vector per labeled entity, embedded from the label
+text alone. Enough for lexical lookup ("find me things called roughly X"):
 
 ```rust
 use sparq_core::Graph;
@@ -63,12 +77,116 @@ use sparq_vectors::{embed_labels, HashEmbedder, VectorIndex, VectorStore};
 let graph = Graph::load_str(ttl, "turtle")?;
 let embedder = HashEmbedder::new(64); // test-only; bring your own Embedder
 let mut store = VectorStore::create("graph.spqv", 64)?;
-embed_labels(&graph, &mut store, &embedder)?;
+embed_labels(&graph, &mut store, &embedder)?; // rdfs:label > skos:prefLabel > …
 store.finalize()?; // writes the file, handle becomes mmap-backed
 
 let index = VectorIndex::build(&store); // HNSW, rebuilt per process
 let neighbours = index.nearest_term(&some_term, &graph, &store, 10);
 ```
+
+Use `embed_labels_with(&graph, &mut store, &embedder, &LabelConfig { .. })`
+to change the label predicates or batch size. Label-only vectors cannot tell
+two "John Smith"s apart — when the graph has descriptions, types, or other
+text worth embedding, index verbalized entities instead.
+
+## How to: index verbalized entities (labels + descriptions + types)
+
+`embed_entities` embeds a **text passage** per entity, the way production KG
+systems do (Wikidata vector DB: label + description + statements; BLINK:
+`title [SEP] description`; GraphRAG: `name + description` — see
+[`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md)).
+The default `EntityTextConfig` renders **`<label>. a <type>. <description>`**:
+the first label by predicate priority and language preference, the type as a
+*word* (the type IRI's own label, falling back to its local name), and the
+first description-like literal:
+
+```rust
+use sparq_core::Graph;
+use sparq_vectors::{embed_entities, verbalize, EntityTextConfig, HashEmbedder, VectorStore};
+
+let graph = Graph::load_str(ttl, "turtle")?;
+let cfg = EntityTextConfig::default(); // label. a type. description
+
+// Eyeball what would be embedded BEFORE paying for a model:
+println!("{:?}", verbalize(&graph, &bolt, &cfg));
+// Some("Usain Bolt. a athlete. Jamaican sprinter, eight-time Olympic champion.")
+
+let embedder = HashEmbedder::new(64); // test-only; bring your own Embedder
+let mut store = VectorStore::create("graph.spqv", 64)?;
+let n = embed_entities(&graph, &mut store, &embedder, &cfg)?;
+store.finalize()?;
+```
+
+Tailor the template per dataset:
+
+```rust
+use sparq_vectors::{EntityTextConfig, PropertyGroup};
+use oxrdf::NamedNode;
+
+let mut cfg = EntityTextConfig::default();
+// Multilingual graphs: prefer en, then plain literals; anything else is a
+// last resort ("en" also matches en-GB and the RDF 1.2 `en--ltr` form).
+cfg.languages = vec!["en".into(), "".into()];
+// Domain literals worth embedding: short, categorical, human-readable
+// values, each with a property-name prefix (the Weaviate convention).
+cfg.groups.push(
+    PropertyGroup::literal(vec![NamedNode::new("http://example.org/occupation")?])
+        .with_prefix("occupation: ")
+        .with_max_values(3),
+);
+cfg.max_chars = 1024; // char budget; the leading label always survives
+```
+
+Rules of thumb (research-backed, sources in the research doc):
+
+- **One value per slot by predicate priority** — `rdfs:label` beats
+  `skos:prefLabel` for the same entity; groups are templates, not bags.
+- **Include a description if the graph has one** — it is the disambiguator
+  every production system embeds (labels alone are too ambiguous).
+- **Keep raw numbers and dates OUT** of the text — embedding models do not
+  order numbers; leave them to structured filters and verbalize only
+  categorical values, with a prefix.
+- Entities with **no literal text are skipped** (a bare "a athlete" passage
+  matches every athlete and nothing else); `verbalize` returning `None`
+  means `embed_entities` will skip that entity.
+
+## How to: hybrid search (text vectors × structural similarity)
+
+Text vectors know what things *mean*; [`sparq-sim`](../sparq-sim)'s
+structural similarity knows how things are *connected*. Fuse the two ranked
+lists — neither crate depends on the other; the fusion helpers take plain
+`(item, score)` lists:
+
+```rust
+use sparq_sim::Sim;
+use sparq_vectors::{fuse_rrf, fuse_scores, VectorIndex, RRF_K};
+
+// Signal 1: text-vector neighbours (cosine, best first).
+let text: Vec<(Term, f32)> = index.nearest_term(&query, &graph, &store, 50);
+let text: Vec<(Term, f64)> = text.into_iter().map(|(t, s)| (t, s as f64)).collect();
+
+// Signal 2: structural neighbours (weighted Jaccard, best first).
+let sim = Sim::new(&graph);
+let structural: Vec<(Term, f64)> = sim.most_similar(&query, 50);
+
+// Default: Reciprocal Rank Fusion — rank-based, no normalization, nothing
+// to tune. k = 60 is the industry-standard constant.
+let hybrid = fuse_rrf(&[&text, &structural], RRF_K, 10);
+
+// Tunable: min-max normalize each list, then alpha-blend.
+// alpha = 1.0 → text only; 0.0 → structure only.
+let blended = fuse_scores(&text, &structural, 0.7, 10);
+```
+
+Recipe notes:
+
+- **Over-fetch each signal** (k = 50 for a top-10 fusion): RRF rewards items
+  that appear in *both* lists, so give it overlap to work with.
+- **`fuse_rrf` is the right default** when score scales differ (cosine in
+  [-1, 1] vs Jaccard in [0, 1]) — it only uses ranks. Use `fuse_scores` when
+  you want magnitudes to matter (a runaway top hit stays a runaway) and are
+  willing to tune `alpha`.
+- Both functions are deterministic: ties break by first appearance.
 
 ## Accuracy gate
 
@@ -108,6 +226,12 @@ store per process rather than persisted; out-of-core persistent ANN
   separable clusters.
 - `tests/labels.rs` — `embed_labels` predicate priority, literal filtering,
   and term-keyed lookup end to end on a small graph.
+- `tests/verbalize.rs` — `verbalize`/`embed_entities` on a fixture graph:
+  template shape, language preference + fallback, predicate priority, type
+  naming (label vs local name), prefixes and value caps, char-budget
+  truncation, type-only skip, embed coverage/determinism/dim mismatch.
+- `src/fuse.rs` unit tests — hand-computed RRF scores, rank-only invariance,
+  min-max blend, tie-break determinism, input validation.
 - `tests/olympics.rs` — the real 1.78M-triple olympics dataset (137k labels):
   embed → finalize → HNSW → `nearest_term`, with a same-type sanity check on
   the neighbours. **Skips (passes with a stderr note) when

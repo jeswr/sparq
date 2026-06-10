@@ -17,8 +17,13 @@ crate README. These are the deliberate cuts, in rough priority order:
 - **Quantization.** f32-only today. Scalar i8 (4×) or product quantization for
   100M-scale stores; the `.spqv` header has 12 reserved bytes for an encoding
   tag.
-- **Hybrid RRF fusion** (lexical + structural + vector) once ≥2 ranked signals
-  exist in the workspace — design doc places it "here-ish".
+- ~~**Hybrid RRF fusion** (lexical + structural + vector)~~ **DONE** —
+  `fuse_rrf` / `fuse_scores` in `src/fuse.rs` (rank-based RRF `k = 60` +
+  min-max alpha-blend over plain ranked lists, so `sparq-vectors` never
+  depends on `sparq-sim`); recipe in the README, research in
+  `research/genai-text-embedding-practices.md`. Remaining cut: per-list
+  *weights* for RRF (Elasticsearch-style weighted RRF) — add a weighted
+  variant if a third signal ever needs down-weighting.
 - **Planner cardinality hook** (GNCE-style) — explicitly out of v1.
 - **WASM.** Nothing here is wasm-hostile except memmap2 (the build-phase store
   and the in-RAM index are pure computation); a wasm feature would need a

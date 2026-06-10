@@ -51,6 +51,35 @@ Two signature modes, two notions of similarity:
 - `Predicates`: similar = **used the same way** (predicate profile / role similarity —
   two Sports share no concrete neighbor, but their profiles are near-identical).
 
+## How to: hybrid search with text vectors
+
+Structural similarity knows how entities are *connected*; it knows nothing about
+what their labels and descriptions *mean* (two differently-modeled descriptions of
+the same person share no structure). The opt-in [`sparq-vectors`](../sparq-vectors)
+crate covers the text side — `embed_entities` embeds a passage per entity
+(label + type + description, configurable) — and ships dependency-free fusion
+helpers, so the two signals combine without either crate depending on the other:
+
+```rust
+use sparq_sim::Sim;
+use sparq_vectors::{fuse_rrf, RRF_K};
+
+let structural: Vec<(Term, f64)> = Sim::new(&graph).most_similar(&query, 50);
+let text: Vec<(Term, f64)> = index // sparq_vectors::VectorIndex
+    .nearest_term(&query, &graph, &store, 50)
+    .into_iter().map(|(t, s)| (t, s as f64)).collect();
+
+// Reciprocal Rank Fusion: rank-based, no score normalization needed
+// (weighted Jaccard in [0,1] and cosine in [-1,1] fuse as-is).
+let hybrid = fuse_rrf(&[&text, &structural], RRF_K, 10);
+```
+
+Over-fetch each signal (k = 50 for a top-10 fusion) so the fusion has overlap to
+reward. `fuse_scores(&text, &structural, alpha, k)` is the tunable alternative
+(min-max normalized alpha-blend). Full recipe + the research behind it:
+[`sparq-vectors` README](../sparq-vectors/README.md) and
+[`research/genai-text-embedding-practices.md`](../../research/genai-text-embedding-practices.md).
+
 ## Measured results — olympics, 1.78M triples
 
 `bench/qlever-olympics/olympics.nt` (134,730 foaf:Person + SportsTeam/SportsEvent/
