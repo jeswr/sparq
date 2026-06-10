@@ -567,6 +567,22 @@ pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String,
     Ok(s)
 }
 
+/// ASK evaluation: `true` iff `pattern` has at least one solution. The pattern is
+/// wrapped in a `LIMIT 1` slice so the early-terminating single-pattern scan path
+/// stops at the first row; shapes without a streaming path evaluate normally (the
+/// row count is irrelevant — only emptiness is observed).
+pub fn eval_ask(graph: &Graph, pattern: &GraphPattern) -> Result<bool, String> {
+    // Exact-count fast path first (a single-pattern BGP answers from the index).
+    if let Some(n) = try_count(graph, pattern) {
+        return Ok(n > 0);
+    }
+    let sliced = GraphPattern::Slice { inner: Box::new(pattern.clone()), start: 0, length: Some(1) };
+    let mut local = LocalVocab::default();
+    let b = eval_modified(graph, &mut local, &sliced)?;
+    budget::check(b.rows.len())?;
+    Ok(!b.rows.is_empty())
+}
+
 /// Evaluates a SELECT but returns only the solution count. When the count can be
 /// derived without materialising the result (a single-pattern scan, possibly under
 /// projection / LIMIT — like QLever's lazy count) it short-circuits; otherwise it

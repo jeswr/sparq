@@ -113,11 +113,11 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
         Ok(p) => p.parse_query(&query_text),
         Err(e) => return Status::Fail(format!("bad base IRI: {e}")),
     };
-    let (pattern, dataset) = match &parsed {
+    let (pattern, dataset, is_ask) = match &parsed {
         Ok(Query::Select {
             pattern, dataset, ..
-        }) => (pattern, dataset),
-        Ok(Query::Ask { .. }) => return Status::Skip("ASK queries not supported".into()),
+        }) => (pattern, dataset, false),
+        Ok(Query::Ask { pattern, dataset, .. }) => (pattern, dataset, true),
         Ok(Query::Construct { .. }) => {
             return Status::Skip("CONSTRUCT queries not supported".into())
         }
@@ -143,6 +143,31 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
         Err(e) => return Status::Fail(format!("data load error: {e}")),
     };
     let query_with_base = with_base(&query_text, &base);
+
+    // ASK: run on the engine's native boolean path and compare to the expected boolean.
+    if is_ask {
+        let expected_bool = match expected {
+            Expected::Boolean(b) => b,
+            Expected::Bindings { .. } => {
+                return Status::Fail("expected result is a binding set, query is ASK".into())
+            }
+        };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let graph = sparq_core::Graph::load_dataset(&nquads, "nquads")?;
+                sparq_engine::ask(&graph, &query_with_base)
+            })();
+            let _ = tx.send(result);
+        });
+        return match rx.recv_timeout(TEST_TIMEOUT) {
+            Ok(Ok(actual)) if actual == expected_bool => Status::Pass,
+            Ok(Ok(actual)) => Status::Fail(format!("ASK mismatch: expected {expected_bool}, got {actual}")),
+            Ok(Err(e)) => Status::Fail(format!("engine error: {e}")),
+            Err(mpsc::RecvTimeoutError::Timeout) => Status::Fail("timeout (20s)".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Status::Fail("engine panicked".into()),
+        };
+    }
 
     // Engine invocation on a watchdog thread.
     let (tx, rx) = mpsc::channel();

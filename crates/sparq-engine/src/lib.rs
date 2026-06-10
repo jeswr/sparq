@@ -57,7 +57,30 @@ pub fn query_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> R
     let _guard = exec::budget::install(budget);
     match q {
         Query::Select { pattern, .. } => exec::eval_select(graph, &pattern),
-        _ => Err("only SELECT queries are supported".into()),
+        // ASK as a QueryResult: zero variables, and one (empty) row iff the pattern
+        // is satisfiable — the standard "unit row" encoding of a boolean result.
+        Query::Ask { pattern, .. } => Ok(QueryResult {
+            vars: Vec::new(),
+            rows: if exec::eval_ask(graph, &pattern)? { vec![Vec::new()] } else { Vec::new() },
+        }),
+        _ => Err("only SELECT and ASK queries are supported".into()),
+    }
+}
+
+/// Executes an ASK query: `true` iff the pattern has at least one solution.
+/// Evaluation early-exits where the engine has a streaming path (the pattern is
+/// evaluated under a `LIMIT 1`).
+pub fn ask(graph: &Graph, sparql: &str) -> Result<bool, String> {
+    ask_with_budget(graph, sparql, &QueryBudget::unlimited())
+}
+
+/// [`ask`] under a cooperative [`QueryBudget`] (deadline / max result rows).
+pub fn ask_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<bool, String> {
+    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let _guard = exec::budget::install(budget);
+    match q {
+        Query::Ask { pattern, .. } => exec::eval_ask(graph, &pattern),
+        _ => Err("ask() requires an ASK query".into()),
     }
 }
 
@@ -75,7 +98,9 @@ pub fn query_json_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget)
     let _guard = exec::budget::install(budget);
     match q {
         Query::Select { pattern, .. } => exec::eval_select_json(graph, &pattern),
-        _ => Err("only SELECT queries are supported".into()),
+        // The SPARQL 1.1 JSON results boolean form.
+        Query::Ask { pattern, .. } => Ok(format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, &pattern)?)),
+        _ => Err("only SELECT and ASK queries are supported".into()),
     }
 }
 
@@ -92,7 +117,9 @@ pub fn count_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> R
     let _guard = exec::budget::install(budget);
     match q {
         Query::Select { pattern, .. } => exec::count_select(graph, &pattern),
-        _ => Err("only SELECT queries are supported".into()),
+        // An ASK counts its unit row: 1 when satisfiable, 0 otherwise.
+        Query::Ask { pattern, .. } => Ok(usize::from(exec::eval_ask(graph, &pattern)?)),
+        _ => Err("only SELECT and ASK queries are supported".into()),
     }
 }
 
@@ -780,6 +807,35 @@ mod tests {
         let r = query(&g(), "SELECT * WHERE { ?__bn_x <http://ex/age> ?a }").unwrap();
         assert_eq!(r.len(), 3);
         assert_eq!(r.vars.len(), 2); // both ?__bn_x and ?a are visible
+    }
+
+    #[test]
+    fn ask_true_false_and_result_forms() {
+        // Satisfiable and unsatisfiable patterns.
+        assert!(ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }").unwrap());
+        assert!(!ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap());
+        // ASK with FILTER / join.
+        assert!(ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 34) }").unwrap());
+        assert!(!ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 100) }").unwrap());
+        // query(): unit-row encoding (zero vars, 0/1 rows).
+        let r = query(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age 30 }").unwrap();
+        assert_eq!((r.vars.len(), r.rows.len()), (0, 1));
+        let r = query(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age 31 }").unwrap();
+        assert_eq!((r.vars.len(), r.rows.len()), (0, 0));
+        // count(): 1 / 0.
+        assert_eq!(super::count(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o }").unwrap(), 1);
+        assert_eq!(super::count(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap(), 0);
+        // query_json(): the SPARQL 1.1 JSON boolean form.
+        assert_eq!(
+            query_json(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o }").unwrap(),
+            "{\"head\":{},\"boolean\":true}"
+        );
+        assert_eq!(
+            query_json(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap(),
+            "{\"head\":{},\"boolean\":false}"
+        );
+        // ask() on a non-ASK query is a clear error.
+        assert!(ask(&g(), "SELECT * WHERE { ?s ?p ?o }").is_err());
     }
 
     #[test]
