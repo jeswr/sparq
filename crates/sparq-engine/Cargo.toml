@@ -3,6 +3,13 @@ name = "sparq-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "SPARQL query engine over sparq-core: algebra-to-physical-plan compilation, cardinality-based join planning, and parallel execution"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [features]
 # Forwards sparq-core's parallel index build. Default on for native; the wasm
@@ -14,7 +21,9 @@ parallel = ["dep:rayon", "sparq-core/parallel"]
 regex = ["dep:regex"]
 
 [dependencies]
-sparq-core = { path = "../sparq-core", default-features = false }
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 oxrdf.workspace = true
 spargebra.workspace = true
 rustc-hash.workspace = true

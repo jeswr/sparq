@@ -3,6 +3,13 @@ name = "sparq-reason"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Opt-in RDFS / OWL-RL / Notation3 forward-chaining materialization for the sparq RDF engine"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 # Opt-in reasoning (RDFS / OWL-RL forward-chaining materialization; Notation3 later). This
 # is a SEPARATE crate so the core engine carries zero reasoning code, deps, or runtime cost
@@ -16,7 +23,9 @@ default = ["parallel"]
 parallel = ["dep:rayon", "sparq-core/parallel"]
 
 [dependencies]
-sparq-core = { path = "../sparq-core", default-features = false }
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 oxrdf.workspace = true
 rustc-hash.workspace = true
 rayon = { workspace = true, optional = true }

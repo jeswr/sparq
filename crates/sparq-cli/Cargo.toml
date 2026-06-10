@@ -3,6 +3,13 @@ name = "sparq-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Command-line interface for the sparq RDF triplestore: load, query, benchmark, build/query on-disk indexes, and reason (RDFS/OWL-RL/N3)"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [features]
 # Out-of-core querying (memory-mapped on-disk indexes) — on by default for the CLI.
@@ -13,8 +20,10 @@ mmap = ["sparq-core/mmap"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
-sparq-core = { path = "../sparq-core", features = ["mmap"] }
-sparq-engine = { path = "../sparq-engine" }
+# `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the
+# version on crates.io (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
+sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 # Direct dep so the `scaling` harness can build fixed-size rayon pools (ThreadPoolBuilder) and
 # sweep RAYON thread counts in one process — the per-subsystem parallel-efficiency instrument.
 rayon = "1"
@@ -23,7 +32,7 @@ rayon = "1"
 mimalloc = { version = "0.1", optional = true }
 # Opt-in reasoning (RDFS/OWL-RL materialization) — engaged only by `--reason` / the `reason`
 # subcommand; the default query/build path never touches it.
-sparq-reason = { path = "../sparq-reason" }
+sparq-reason = { path = "../sparq-reason", version = "0.1.0" }
 oxttl.workspace = true
 oxrdf.workspace = true
 # Streaming decompression: gzip + bzip2, and zstd (the fast, parallel-friendly bulk

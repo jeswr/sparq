@@ -3,6 +3,13 @@ name = "sparq-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Dictionary-encoded RDF triplestore core: six sorted permutation indexes, parallel + streaming loaders, and an out-of-core memory-mapped store"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [features]
 # Parallel index construction via rayon. On by default for native builds; turn it
