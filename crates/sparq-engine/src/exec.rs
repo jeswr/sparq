@@ -3285,8 +3285,55 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
             Ok(if errored { Value::Error } else { Value::Bool(false) })
         }
         FunctionCall(f, args) => eval_function(graph, local, b, row, f, args),
-        other => Err(format!("M2: unsupported expression: {other:?}")),
+        Exists(inner) => Ok(Value::Bool(eval_exists(graph, local, b, row, inner)?)),
     }
+}
+
+/// Correlated `EXISTS { inner }` for one outer solution row: evaluate `inner` and
+/// test whether any of its solutions is join-compatible with the row on the
+/// variables they share (same term, or unbound on the inner side). Working at the
+/// id/term level — rather than substituting the row's terms into the pattern AST —
+/// keeps blank-node-valued bindings expressible (spargebra has no ground blank-node
+/// term pattern).
+///
+/// The inner pattern is evaluated against `graph`, which inside `GRAPH <g> { … }`
+/// is the active named graph — so an EXISTS nested in a GRAPH pattern sees the same
+/// dataset as its surrounding group, per the spec.
+///
+/// Note: the inner evaluation is re-run per outer row (the expression evaluator is
+/// read-only, so there is no per-FILTER place to memoise the inner bindings). Fine
+/// for correctness and small/mid results; a shared cache is a follow-up optimisation.
+fn eval_exists(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], inner: &GraphPattern) -> Result<bool, String> {
+    let mut inner_local = LocalVocab::default();
+    let inner_b = eval_graph_pattern(graph, &mut inner_local, inner)?;
+    budget::check(inner_b.rows.len())?;
+    // Columns shared between the inner solutions and the (bound part of the) outer row.
+    let shared: Vec<(usize, usize)> = inner_b
+        .vars
+        .iter()
+        .enumerate()
+        .filter_map(|(ic, v)| b.col(v).map(|oc| (oc, ic)))
+        .filter(|&(oc, _)| row[oc] != NO_ID)
+        .collect();
+    Ok(inner_b.rows.iter().any(|irow| {
+        shared
+            .iter()
+            .all(|&(oc, ic)| exists_compatible(graph, local, row[oc], &inner_local, irow[ic]))
+    }))
+}
+
+/// Join-compatibility of an outer cell with an inner EXISTS cell, where the two rows
+/// were produced against different local vocabs: unbound inner is compatible; ids in
+/// the shared spaces (graph dictionary / inline integers) compare directly; anything
+/// involving a local id falls back to term equality.
+fn exists_compatible(graph: &Graph, outer_local: &LocalVocab, o: Id, inner_local: &LocalVocab, i: Id) -> bool {
+    if i == NO_ID {
+        return true;
+    }
+    if !is_local(o) && !is_local(i) {
+        return o == i;
+    }
+    term_of(graph, outer_local, o) == term_of(graph, inner_local, i)
 }
 
 

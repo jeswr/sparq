@@ -839,6 +839,29 @@ mod tests {
     }
 
     #[test]
+    fn exists_and_not_exists() {
+        // EXISTS correlated on the outer row: people who know someone.
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER EXISTS { ?s ex:knows ?o } }"), 2);
+        // NOT EXISTS: people who know no-one (carol).
+        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER NOT EXISTS { ?s ex:knows ?o } }").unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "<http://ex/carol>");
+        // Uncorrelated EXISTS: a satisfiable / unsatisfiable constant pattern keeps / drops all rows.
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER EXISTS { ex:alice ex:knows ex:bob } }"), 3);
+        assert_eq!(count("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a FILTER EXISTS { ex:alice ex:knows ex:carol } }"), 0);
+        // Nested EXISTS (exists04 shape): knows someone who is known by someone.
+        assert_eq!(
+            count(
+                "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age ?a \
+                 FILTER EXISTS { ?s ex:knows ?o FILTER EXISTS { ?o ex:knows ?p } } }"
+            ),
+            1 // alice: knows bob, and bob knows carol
+        );
+        // NOT EXISTS in ASK.
+        assert!(ask(&g(), "PREFIX ex: <http://ex/> ASK { ?s ex:age 35 FILTER NOT EXISTS { ?s ex:knows ?o } }").unwrap());
+    }
+
+    #[test]
     fn budget_unlimited_matches_query() {
         let q = "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:age ?age }";
         let plain = query(&g(), q).unwrap();
