@@ -61,8 +61,16 @@ version = "=0.3.3"
 [dependencies.peg]
 version = "0.8"
 
+# Upstream's range is ">=0.8,<0.10" — narrowed to 0.9 (what the crates.io
+# spargebra 0.4.6 artifact actually resolves to). As a path patch this manifest
+# re-resolves inside OUR workspace, where cargo unifies the range onto the
+# pre-existing rand 0.8 lock entry (tungstenite's) — and rand 0.8's getrandom
+# 0.2 has no enabled wasm32-unknown-unknown backend, which breaks the
+# sparq-wasm build (sparq-wasm configures getrandom 0.3's wasm_js backend
+# only). Pinning 0.9 keeps the dependency graph identical to the published
+# crate. See SPARQ-PATCHES.md §7.
 [dependencies.rand]
-version = ">=0.8,<0.10"
+version = "0.9"
 
 [dependencies.thiserror]
 version = ">=1.0.50, <3.0"

@@ -129,3 +129,26 @@ this vendored tree once the fixes land in a released spargebra.
   `Filter` (i.e. the filter bubbled up from a nested group), it returns
   `Join(Z, Filter(F, A))` instead. Groups with their own top-level FILTER
   still translate to `Filter(F, A)` and keep hoisting, per §18.3.2.6.
+
+## 7. Manifest: pin `rand` to 0.9 (wasm build guard — not an upstream change)
+
+- **Why**: upstream declares `rand = ">=0.8,<0.10"`. The published
+  spargebra 0.4.6 artifact resolves that to rand 0.9 (getrandom 0.3). As a
+  `[patch.crates-io]` *path* dependency this manifest re-resolves inside the
+  sparq workspace instead, and cargo unifies the range onto the lockfile's
+  pre-existing `rand 0.8.6` (tungstenite's) — whose getrandom 0.2 has no
+  enabled `wasm32-unknown-unknown` backend. Result: `cargo build -p sparq-wasm
+  --target wasm32-unknown-unknown` fails to compile `getrandom 0.2`
+  (`sparq-wasm` only configures getrandom **0.3**'s `wasm_js` backend), and
+  `scripts/ci-bench.sh` skips its wasm-size step *silently* on build failure,
+  so nothing gated it. Narrowing to `rand = "0.9"` keeps the vendored
+  dependency graph byte-identical to the published crate's and makes the
+  resolution sticky against future `cargo update`s.
+- **Verified**: `cargo build --release -p sparq-wasm --target
+  wasm32-unknown-unknown` compiles; bundle 1,554,093 B on `main` (merge
+  `9917404`) vs 1,552,190 B on the pre-final-eleven `main` (`0fefc9a`) —
+  the six parser patches cost ≈1.9 KB (+0.12%, a few bytes of build-path
+  noise aside), all parser code that conformance requires.
+- **Upstream**: nothing to propose — this is an artifact of path-patching, not
+  an upstream bug. (At most, oxigraph could drop the rand 0.8 compatibility
+  range, but it is harmless when consumed from crates.io.)
