@@ -22,6 +22,10 @@
 //! Subscription limits (T23, the /subscriptions WebSocket — see SUBSCRIPTIONS.md):
 //!   --max-subscriptions N           server-wide active subscriptions [256, env SPARQ_MAX_SUBSCRIPTIONS]
 //!   --max-subscriptions-per-conn N  active subscriptions per socket  [16, env SPARQ_MAX_SUBSCRIPTIONS_PER_CONN]
+//!
+//! Update path (T17 wiring — see crates/sparq-server/README.md "Update concurrency model"):
+//!   --compact-every N      fold the update overlay into a fresh index every N update
+//!                          batches per buffer, 0 disables [1024, env SPARQ_COMPACT_EVERY]
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -67,12 +71,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-subscriptions-per-conn" => {
                 config.max_subscriptions_per_conn = parse_flag(&mut args, "--max-subscriptions-per-conn")?;
             }
+            "--compact-every" => config.compact_every = parse_flag(&mut args, "--compact-every")?,
             "--verbose" => config.verbose = true,
             "-h" | "--help" => {
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--format FMT] [--query-timeout SECS] \
                      [--max-body-bytes N] [--max-concurrent N] [--max-results N] \
-                     [--max-subscriptions N] [--max-subscriptions-per-conn N] [--verbose] [DATA_FILE]"
+                     [--max-subscriptions N] [--max-subscriptions-per-conn N] \
+                     [--compact-every N] [--verbose] [DATA_FILE]"
                 );
                 return Ok(());
             }

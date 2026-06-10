@@ -6,10 +6,12 @@
 //!     `/sparql/graph` via `?graph=<uri>` / `?default` (indirect). Write verbs → 501.
 //!
 //! Shared state is a [`sparq_core::Graph`] behind an `RwLock<Arc<…>>`: queries take a cheap
-//! lock-free `Arc` snapshot; SPARQL Update (T11b) rebuilds the graph and swaps it in atomically.
+//! `Arc` snapshot (the read lock is held only for the refcount bump); SPARQL Update goes
+//! through the DOUBLE-BUFFERED writer (see [`Writer`]) — the T17 delta-overlay
+//! `update_in_place` applied off-line to the spare buffer, published by an atomic `Arc` swap.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use axum::{
@@ -56,6 +58,11 @@ pub struct ServerConfig {
     pub max_subscriptions_per_conn: usize,
     /// Maximum active subscriptions across the whole server (T23).
     pub max_subscriptions: usize,
+    /// Fold the update delta-overlay back into a fresh immutable index after this many
+    /// in-place update batches have accumulated on a buffer (`0` disables). Keeps scans
+    /// near overlay-free speed and bounds overlay/dictionary growth in a long-running
+    /// server; each compaction is O(graph), amortised over `compact_every` updates.
+    pub compact_every: usize,
     /// Log every request/response via `tower_http::trace::TraceLayer`.
     pub verbose: bool,
 }
@@ -69,6 +76,7 @@ impl Default for ServerConfig {
             max_results: None,
             max_subscriptions_per_conn: 16,
             max_subscriptions: 256,
+            compact_every: 1024,
             verbose: false,
         }
     }
@@ -98,6 +106,9 @@ impl ServerConfig {
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_SUBSCRIPTIONS") {
             cfg.max_subscriptions = n;
         }
+        if let Some(n) = env_parse::<usize>("SPARQ_COMPACT_EVERY") {
+            cfg.compact_every = n;
+        }
         cfg
     }
 }
@@ -111,14 +122,19 @@ fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
 /// next budget check — it is not leaked indefinitely).
 pub(crate) const TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 
-/// Shared server state: the dataset under query, behind an `RwLock` so SPARQL Update can swap in a
-/// rebuilt graph atomically. Queries take a cheap lock-free `Arc` snapshot; SPARQL Update takes the
-/// write lock briefly to install the new graph. Also carries the hardening [`ServerConfig`] and the
-/// subscription plumbing (T23): a `watch` channel that broadcasts the commit generation to every
-/// open `/subscriptions` socket, plus the global active-subscription counters.
+/// Shared server state: the dataset under query, published as an `Arc<Graph>` inside an
+/// `RwLock` slot. Queries take a cheap `Arc` snapshot (the read lock is held only for the
+/// refcount bump — readers never wait on an update beyond the instant of the publish
+/// pointer-swap); SPARQL Update goes through the double-buffered [`Writer`]. Also carries
+/// the hardening [`ServerConfig`] and the subscription plumbing (T23): a `watch` channel
+/// that broadcasts the commit generation to every open `/subscriptions` socket, plus the
+/// global active-subscription counters.
 #[derive(Clone)]
 pub struct AppState {
     graph: Arc<RwLock<Arc<Graph>>>,
+    /// Single-writer update state (the double-buffer) — see [`Writer`]. A `std` mutex:
+    /// `apply_update` always runs on the blocking pool, and it serialises updates.
+    writer: Arc<Mutex<Writer>>,
     config: Arc<ServerConfig>,
     /// Commit generation, bumped after every successful graph swap. Subscription
     /// connections hold a `watch::Receiver` and re-evaluate when it changes; the watch
@@ -128,6 +144,53 @@ pub struct AppState {
     pub(crate) subs: Arc<crate::subscriptions::SubscriptionCounters>,
 }
 
+/// The single-writer side of the **double-buffered update path** (T17 wiring).
+///
+/// `Graph` is deliberately not `Clone` (a deep copy of the dictionary arena + six
+/// permutation indexes is O(n)), and readers must keep their lock-free `Arc` snapshots —
+/// so the writer never mutates a graph a reader could be holding. Instead two physical
+/// graphs alternate between the roles *published* and *spare*; an update:
+///
+/// 1. **reclaims** the spare — the previously published `Arc`, unwrapped once the last
+///    reader snapshot of it drops (bounded: snapshots cannot outlive the query budget),
+/// 2. **replays** the updates the spare missed while it was published ([`Writer::lag`]),
+/// 3. applies the new update via [`sparq_engine::update_in_place`] — the T17
+///    delta-overlay path, O(batch) instead of the O(graph) rebuild,
+/// 4. **publishes** it with an `Arc` pointer-swap under the write lock (the only instant
+///    readers contend), demoting the old published graph to be the next spare with
+///    `lag = [this update]`.
+///
+/// Failed updates stay **atomic** to clients: every mutation happens on the off-line
+/// buffer, so the published graph is untouched; the (possibly partially-updated) buffer
+/// is discarded and the next update re-materialises it via the rebuild path.
+///
+/// Cost model: steady-state update latency is microseconds (plus, every
+/// [`ServerConfig::compact_every`] batches, one O(graph) overlay fold-back). The price
+/// is ~2x graph residency, paid lazily from the first update. The first update (and the
+/// first after a discard) is an O(graph) rebuild — it doubles as the materialisation of
+/// the second buffer.
+struct Writer {
+    /// The off-line buffer: the previously published graph, waiting for its last reader
+    /// snapshots to drop so it can be reclaimed and mutated. `None` before the first
+    /// update and after a failed in-place update (discarded; the next update rebuilds).
+    spare: Option<Arc<Graph>>,
+    /// Updates committed to the published line that `spare` has not seen yet, in commit
+    /// order (replayed before the next update is applied). Non-empty only while `spare`
+    /// is `Some`.
+    lag: Vec<String>,
+    /// In-place batches accumulated on the published / spare graph since each was last
+    /// compacted — drives the periodic overlay fold-back. Swapped at publish so each
+    /// counter tracks its buffer.
+    published_ops: usize,
+    spare_ops: usize,
+}
+
+/// Poll interval while waiting for the spare buffer's last reader snapshot to drop.
+const RECLAIM_POLL: Duration = Duration::from_micros(200);
+/// Bound on that wait when no query timeout is configured (snapshot lifetimes are then
+/// unbounded); past it the update falls back to the rebuild path.
+const RECLAIM_FALLBACK_WAIT: Duration = Duration::from_secs(5);
+
 impl AppState {
     pub fn new(graph: Graph) -> Self {
         Self::with_config(graph, ServerConfig::default())
@@ -136,6 +199,12 @@ impl AppState {
     pub fn with_config(graph: Graph, config: ServerConfig) -> Self {
         Self {
             graph: Arc::new(RwLock::new(Arc::new(graph))),
+            writer: Arc::new(Mutex::new(Writer {
+                spare: None,
+                lag: Vec::new(),
+                published_ops: 0,
+                spare_ops: 0,
+            })),
             config: Arc::new(config),
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
@@ -147,15 +216,105 @@ impl AppState {
         self.graph.read().expect("graph lock poisoned").clone()
     }
 
-    /// Apply a SPARQL Update, atomically swapping in the rebuilt graph (T11b). On success,
-    /// bumps the commit generation so active subscriptions re-evaluate (T23). The bump
-    /// happens strictly *after* the swap, so a woken subscription always snapshots a graph
-    /// at least as new as the commit it was woken for.
+    /// Applies a SPARQL Update through the double-buffered writer (see [`Writer`]):
+    /// steady-state, the T17 `update_in_place` delta-overlay path applied to the spare
+    /// buffer and published by an atomic `Arc` swap — readers keep their snapshots and
+    /// only contend for the instant of the pointer swap. On success, bumps the commit
+    /// generation so active subscriptions re-evaluate (T23). The bump happens strictly
+    /// *after* the swap, so a woken subscription always snapshots a graph at least as
+    /// new as the commit it was woken for. Synchronous and possibly slow (first update /
+    /// fallbacks rebuild): call it on the blocking pool.
     pub fn apply_update(&self, sparql: &str) -> Result<(), String> {
-        let next = sparq_engine::update(&self.snapshot(), sparql)?;
-        *self.graph.write().expect("graph lock poisoned") = Arc::new(next);
+        let mut w = self.writer.lock().expect("writer lock poisoned");
+        match self.reclaim_spare(&mut w) {
+            Some(g) => self.apply_in_place(&mut w, g, sparql),
+            None => self.apply_by_rebuild(&mut w, sparql),
+        }?;
         self.commits.send_modify(|gen| *gen += 1);
         Ok(())
+    }
+
+    /// Takes the spare buffer, waiting (bounded) for outstanding reader snapshots of it
+    /// to drop. Snapshots cannot legally outlive the query budget, so the wait is capped
+    /// at `query_timeout + TIMEOUT_GRACE` (or [`RECLAIM_FALLBACK_WAIT`] without a
+    /// timeout); in practice the spare has usually drained long before the next update.
+    /// Returns `None` when there is no spare (first update / after a failure) or a
+    /// reader still holds it at the deadline — the caller then rebuilds instead.
+    fn reclaim_spare(&self, w: &mut Writer) -> Option<Graph> {
+        let mut arc = w.spare.take()?;
+        let wait = self.config.query_timeout.map_or(RECLAIM_FALLBACK_WAIT, |t| t + TIMEOUT_GRACE);
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match Arc::try_unwrap(arc) {
+                Ok(g) => return Some(g),
+                Err(still_shared) => {
+                    if std::time::Instant::now() >= deadline {
+                        // A reader is stuck past its budget: drop our reference (the
+                        // memory frees when the reader finishes) and rebuild instead.
+                        w.lag.clear();
+                        return None;
+                    }
+                    arc = still_shared;
+                    std::thread::sleep(RECLAIM_POLL);
+                }
+            }
+        }
+    }
+
+    /// The fast path: replay the spare's lag, apply the new update through the T17
+    /// delta-overlay (O(batch)), periodically fold the overlay back, and publish.
+    fn apply_in_place(&self, w: &mut Writer, mut g: Graph, sparql: &str) -> Result<(), String> {
+        for missed in std::mem::take(&mut w.lag) {
+            if sparq_engine::update_in_place(&mut g, &missed).is_err() {
+                // Unreachable (the op already succeeded on the published line and the
+                // two paths are observationally identical) — but if it ever happens,
+                // recover by discarding the buffer and rebuilding from published.
+                w.spare_ops = 0;
+                return self.apply_by_rebuild(w, sparql);
+            }
+            w.spare_ops += 1;
+        }
+        if let Err(e) = sparq_engine::update_in_place(&mut g, sparql) {
+            // A failed request may have applied a *prefix* of its operations to `g`.
+            // The published graph is untouched (failures stay atomic to clients); the
+            // possibly-inconsistent buffer is dropped here and rebuilt lazily.
+            w.spare_ops = 0;
+            return Err(e);
+        }
+        w.spare_ops += 1;
+        if self.config.compact_every > 0 && w.spare_ops >= self.config.compact_every {
+            // Fold the accumulated overlay into a fresh immutable base — O(graph),
+            // amortised over `compact_every` updates. Infallible for the in-memory
+            // graphs the server hosts (the Err arm is the directory-backed WAL swap).
+            g.compact()?;
+            w.spare_ops = 0;
+        }
+        self.publish(w, g, sparql);
+        Ok(())
+    }
+
+    /// The slow path — the engine's O(graph) rebuild `update` — used for the first
+    /// update and whenever the spare buffer is unavailable (stuck reader, prior failed
+    /// update). Doubles as the materialisation of the second buffer: the old published
+    /// graph is demoted to spare unchanged.
+    fn apply_by_rebuild(&self, w: &mut Writer, sparql: &str) -> Result<(), String> {
+        let next = sparq_engine::update(&self.snapshot(), sparql)?;
+        w.spare_ops = 0; // freshly rebuilt: no overlay
+        self.publish(w, next, sparql);
+        Ok(())
+    }
+
+    /// Atomically swaps `g` into the published slot — the *only* instant readers contend
+    /// with the writer — and demotes the old published graph to be the next spare, whose
+    /// one missed update is `sparql`. The op counters swap roles with the buffers.
+    fn publish(&self, w: &mut Writer, g: Graph, sparql: &str) {
+        let old = {
+            let mut slot = self.graph.write().expect("graph lock poisoned");
+            std::mem::replace(&mut *slot, Arc::new(g))
+        };
+        w.spare = Some(old);
+        w.lag = vec![sparql.to_string()];
+        std::mem::swap(&mut w.published_ops, &mut w.spare_ops);
     }
 
     /// A receiver of the commit generation for a subscription connection (T23).
@@ -273,7 +432,8 @@ async fn handle_post(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Res
         }
     } else if ct.starts_with("application/sparql-update") {
         // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
-        // Rebuilding the graph is CPU-bound, so it runs off the async workers too.
+        // `apply_update` may block (spare-buffer reclaim) or run long (first-update /
+        // fallback rebuild, periodic compaction), so it runs off the async workers too.
         match std::str::from_utf8(body) {
             Ok(u) => {
                 let st = state.clone();
