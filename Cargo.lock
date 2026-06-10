@@ -1323,6 +1323,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-conformance"
+version = "0.1.0"
+dependencies = [
+ "oxrdf",
+ "oxrdfxml",
+ "oxttl",
+ "quick-xml",
+ "rustc-hash",
+ "serde_json",
+ "spargebra",
+ "sparq-core",
+ "sparq-engine",
+]
+
+[[package]]
 name = "sparq-core"
 version = "0.1.0"
 dependencies = [
