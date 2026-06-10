@@ -862,6 +862,73 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "digest")]
+    fn hash_builtins() {
+        let one = |q: &str| {
+            let r = query(&g(), q).unwrap();
+            r.rows[0][0].as_ref().unwrap().to_string()
+        };
+        // RFC / spec vectors for "abc".
+        assert_eq!(one("SELECT (MD5(\"abc\") AS ?h) {}"), "\"900150983cd24fb0d6963f7d28e17f72\"");
+        assert_eq!(one("SELECT (SHA1(\"abc\") AS ?h) {}"), "\"a9993e364706816aba3e25717850c26c9cd0d89d\"");
+        assert_eq!(
+            one("SELECT (SHA256(\"abc\") AS ?h) {}"),
+            "\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\""
+        );
+        // A language-tagged operand is a type error -> unbound.
+        let r = query(&g(), "SELECT (MD5(\"abc\"@en) AS ?h) {}").unwrap();
+        assert!(r.rows[0][0].is_none());
+    }
+
+    #[test]
+    fn timezone_tz_bnode_uuid_builtins() {
+        let one = |q: &str| {
+            let r = query(&g(), q).unwrap();
+            r.rows[0][0].as_ref().map(|t| t.to_string())
+        };
+        let dt = "\"2010-12-21T15:38:02-08:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime>";
+        assert_eq!(one(&format!("SELECT (TZ({dt}) AS ?x) {{}}")).unwrap(), "\"-08:00\"");
+        assert_eq!(
+            one(&format!("SELECT (TIMEZONE({dt}) AS ?x) {{}}")).unwrap(),
+            "\"-PT8H\"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>"
+        );
+        let dtz = "\"2010-12-21T15:38:02Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>";
+        assert_eq!(one(&format!("SELECT (TZ({dtz}) AS ?x) {{}}")).unwrap(), "\"Z\"");
+        assert_eq!(
+            one(&format!("SELECT (TIMEZONE({dtz}) AS ?x) {{}}")).unwrap(),
+            "\"PT0S\"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>"
+        );
+        // No timezone: TZ -> "", TIMEZONE -> type error (unbound).
+        let dn = "\"2011-02-01T01:02:03\"^^<http://www.w3.org/2001/XMLSchema#dateTime>";
+        assert_eq!(one(&format!("SELECT (TZ({dn}) AS ?x) {{}}")).unwrap(), "\"\"");
+        assert_eq!(one(&format!("SELECT (TIMEZONE({dn}) AS ?x) {{}}")), None);
+
+        // BNODE(): two calls in one row give two distinct fresh blank nodes.
+        let r = query(&g(), "SELECT (BNODE() AS ?a) (BNODE() AS ?b) {}").unwrap();
+        let (a, b) = (r.rows[0][0].as_ref().unwrap(), r.rows[0][1].as_ref().unwrap());
+        assert_ne!(a, b);
+        // BNODE(str): same argument in the same solution -> same bnode; different
+        // rows -> different bnodes.
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT (BNODE(\"x\") AS ?a) (BNODE(\"x\") AS ?b) WHERE { ?s ex:age ?n }",
+        )
+        .unwrap();
+        assert_eq!(r.rows.len(), 3);
+        for row in &r.rows {
+            assert_eq!(row[0], row[1]);
+        }
+        assert_ne!(r.rows[0][0], r.rows[1][0]);
+
+        // UUID()/STRUUID() (native targets).
+        let u = one("SELECT (UUID() AS ?u) {}").unwrap();
+        assert!(u.starts_with("<urn:uuid:") && u.len() == 47, "got: {u}");
+        let s = one("SELECT (STRUUID() AS ?s) {}").unwrap();
+        assert_eq!(s.len(), 38); // quoted 36-char UUID
+        assert_ne!(one("SELECT (STRUUID() AS ?s) {}").unwrap(), s);
+    }
+
+    #[test]
     fn budget_unlimited_matches_query() {
         let q = "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:age ?age }";
         let plain = query(&g(), q).unwrap();

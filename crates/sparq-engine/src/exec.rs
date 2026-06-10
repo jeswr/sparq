@@ -7,7 +7,7 @@
 
 use crate::QueryResult;
 use oxrdf::vocab::xsd;
-use oxrdf::{Literal, Term, Variable};
+use oxrdf::{BlankNode, Literal, Term, Variable};
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern as IdPattern;
@@ -2772,6 +2772,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
     // the serial intern below, applied in row order → ids byte-identical to the serial path.
     // (Safe to parallelise: rows reference only ids created by EARLIER operators, never ids
     // created within this BIND loop.)
+    // Row identity for BNODE(str)'s per-solution scoping (see ROW_SCOPE).
+    let scope = b.rows.as_ptr() as usize;
     #[cfg(feature = "parallel")]
     let resolved: Vec<Result<Id, Term>> = if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
@@ -2779,14 +2781,17 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         let bref = &b;
         b.rows
             .par_iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(i, row)| {
+                ROW_SCOPE.set((scope, i));
                 let v = eval_expr(graph, lv, bref, row, expr)?;
                 Ok(value_to_id_readonly(graph, lv, &v))
             })
             .collect::<Result<Vec<_>, String>>()?
     } else {
         let mut out = Vec::with_capacity(b.rows.len());
-        for row in &b.rows {
+        for (i, row) in b.rows.iter().enumerate() {
+            ROW_SCOPE.set((scope, i));
             let v = eval_expr(graph, local, &b, row, expr)?;
             out.push(value_to_id_readonly(graph, local, &v));
         }
@@ -2795,7 +2800,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
     #[cfg(not(feature = "parallel"))]
     let resolved: Vec<Result<Id, Term>> = {
         let mut out = Vec::with_capacity(b.rows.len());
-        for row in &b.rows {
+        for (i, row) in b.rows.iter().enumerate() {
+            ROW_SCOPE.set((scope, i));
             let v = eval_expr(graph, local, &b, row, expr)?;
             out.push(value_to_id_readonly(graph, local, &v));
         }
@@ -3127,16 +3133,23 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
 fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expression) -> Result<(), String> {
     // Per-row FILTER evaluation is independent and read-only over the graph/bindings, so a
     // large residual (non-pushed-down) filter is evaluated in parallel on native.
+    // Row identity for BNODE(str)'s per-solution scoping (see ROW_SCOPE).
+    let scope = b.rows.as_ptr() as usize;
     #[cfg(feature = "parallel")]
     let keep: Vec<bool> = if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         b.rows
             .par_iter()
-            .map(|row| Ok(effective_boolean(&eval_expr(graph, local, b, row, expr)?)))
+            .enumerate()
+            .map(|(i, row)| {
+                ROW_SCOPE.set((scope, i));
+                Ok(effective_boolean(&eval_expr(graph, local, b, row, expr)?))
+            })
             .collect::<Result<Vec<bool>, String>>()?
     } else {
         let mut keep = Vec::with_capacity(b.rows.len());
-        for row in &b.rows {
+        for (i, row) in b.rows.iter().enumerate() {
+            ROW_SCOPE.set((scope, i));
             keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
         }
         keep
@@ -3144,7 +3157,8 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
     #[cfg(not(feature = "parallel"))]
     let keep: Vec<bool> = {
         let mut keep = Vec::with_capacity(b.rows.len());
-        for row in &b.rows {
+        for (i, row) in b.rows.iter().enumerate() {
+            ROW_SCOPE.set((scope, i));
             keep.push(effective_boolean(&eval_expr(graph, local, b, row, expr)?));
         }
         keep
@@ -3901,6 +3915,54 @@ fn eval_function(
             }
             _ => Value::Error,
         },
+        // Hash builtins: operand must be a simple literal / xsd:string; lowercase hex out.
+        #[cfg(feature = "digest")]
+        F::Md5 => digest_hex::<md5::Md5>(&ev(0)?),
+        #[cfg(feature = "digest")]
+        F::Sha1 => digest_hex::<sha1::Sha1>(&ev(0)?),
+        #[cfg(feature = "digest")]
+        F::Sha256 => digest_hex::<sha2::Sha256>(&ev(0)?),
+        #[cfg(feature = "digest")]
+        F::Sha384 => digest_hex::<sha2::Sha384>(&ev(0)?),
+        #[cfg(feature = "digest")]
+        F::Sha512 => digest_hex::<sha2::Sha512>(&ev(0)?),
+        // TZ(xsd:dateTime) -> the timezone part of the lexical form as a simple
+        // literal ("Z", "±hh:mm", or "" when absent).
+        F::Tz => datetime_arg_tz(&ev(0)?).map(simple).unwrap_or(Value::Error),
+        // TIMEZONE(xsd:dateTime) -> xsd:dayTimeDuration; no timezone is a type error.
+        F::Timezone => match datetime_arg_tz(&ev(0)?).as_deref().and_then(tz_to_duration) {
+            Some(d) => Value::Term(Term::Literal(Literal::new_typed_literal(d, xsd::DAY_TIME_DURATION))),
+            None => Value::Error,
+        },
+        F::BNode => {
+            if args.is_empty() {
+                // BNODE(): a fresh blank node per call.
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Value::Term(Term::BlankNode(BlankNode::new_unchecked(format!("fnb{n}"))))
+            } else {
+                // BNODE(str): the label is derived from (solution-row scope, argument),
+                // so equal arguments within ONE solution map to the same blank node and
+                // everything else stays distinct (see ROW_SCOPE).
+                match string_literal(&ev(0)?) {
+                    Some(s) => {
+                        let (scope, idx) = ROW_SCOPE.get();
+                        Value::Term(Term::BlankNode(BlankNode::new_unchecked(format!(
+                            "fnb{scope:x}r{idx}h{:016x}",
+                            fx64(&s)
+                        ))))
+                    }
+                    None => Value::Error,
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        F::Uuid => Value::Term(Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
+            "urn:uuid:{}",
+            uuid::Uuid::new_v4()
+        )))),
+        #[cfg(not(target_arch = "wasm32"))]
+        F::StrUuid => simple(uuid::Uuid::new_v4().to_string()),
         // xsd:dateTime accessors — parse the lexical form and return the numeric component.
         F::Year => datetime_field(&ev(0)?, 0),
         F::Month => datetime_field(&ev(0)?, 1),
@@ -3934,6 +3996,101 @@ fn eval_function(
         }
         other => return Err(format!("unsupported SPARQL function: {other:?}")),
     })
+}
+
+thread_local! {
+    /// The identity of the solution row an expression is being evaluated for:
+    /// (bindings identity — the rows buffer address —, row index). Set by the per-row
+    /// evaluation loops (BIND / FILTER); BNODE(str) derives its label from it, so equal
+    /// arguments within one solution share a blank node while distinct solutions get
+    /// distinct ones. The buffer address is stable across consecutive Extends over the
+    /// same Bindings (the SELECT-expression case the per-solution rule exists for).
+    static ROW_SCOPE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// 64-bit FxHash of a string (label material for BNODE(str)).
+fn fx64(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// The string value of a simple literal / xsd:string argument — the only operand type
+/// the hash builtins and BNODE(str) accept; anything else is a type error (`None`).
+fn string_literal(v: &Value) -> Option<String> {
+    match v {
+        Value::Term(Term::Literal(l)) if l.language().is_none() && l.datatype() == xsd::STRING => {
+            Some(l.value().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Lowercase-hex digest of a string-literal argument, or a type error.
+#[cfg(feature = "digest")]
+fn digest_hex<D: md5::Digest>(v: &Value) -> Value {
+    use std::fmt::Write;
+    match string_literal(v) {
+        Some(s) => {
+            let out = D::digest(s.as_bytes());
+            let mut hex = String::with_capacity(out.len() * 2);
+            for byte in out {
+                let _ = write!(hex, "{byte:02x}");
+            }
+            Value::Term(Term::Literal(Literal::new_simple_literal(hex)))
+        }
+        None => Value::Error,
+    }
+}
+
+/// The timezone part of an xsd:dateTime argument's lexical form: `"Z"`, `"±hh:mm"`, or
+/// `""` when absent. `None` (type error) when the argument is not a valid xsd:dateTime.
+fn datetime_arg_tz(v: &Value) -> Option<String> {
+    let l = match v {
+        Value::Term(Term::Literal(l))
+            if l.datatype() == xsd::DATE_TIME || l.datatype() == xsd::DATE_TIME_STAMP =>
+        {
+            l
+        }
+        _ => return None,
+    };
+    let s = l.value();
+    parse_datetime(s)?; // lexical shape check
+    let (_, time) = s.split_once('T')?;
+    Some(match time.find(['Z', '+', '-']) {
+        Some(i) => time[i..].to_string(),
+        None => String::new(),
+    })
+}
+
+/// XSD-canonical `xsd:dayTimeDuration` for a timezone string (`Z` / `±hh:mm`); an empty
+/// timezone is a type error (`None`).
+fn tz_to_duration(tz: &str) -> Option<String> {
+    if tz.is_empty() {
+        return None;
+    }
+    if tz == "Z" {
+        return Some("PT0S".to_string());
+    }
+    let (sign, hm) = tz.split_at(1);
+    let (h, m) = hm.split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    if h == 0 && m == 0 {
+        return Some("PT0S".to_string());
+    }
+    let mut out = String::new();
+    if sign == "-" {
+        out.push('-');
+    }
+    out.push_str("PT");
+    if h > 0 {
+        out.push_str(&format!("{h}H"));
+    }
+    if m > 0 {
+        out.push_str(&format!("{m}M"));
+    }
+    Some(out)
 }
 
 /// Build a regex honouring the SPARQL flag string (`i` case-insensitive, `s` dot-all, `m`
