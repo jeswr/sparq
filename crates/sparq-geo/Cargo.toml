@@ -1,0 +1,42 @@
+[package]
+name = "sparq-geo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in GeoSPARQL 1.0/1.1 core for the sparq RDF engine: WKT geometry parsing, geof: spatial functions, and an R-tree GeoIndex over sparq Graphs"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# Opt-in GeoSPARQL support (T24b). This is a SEPARATE crate so the core engine — and
+# in particular the wasm build — carries zero geometry code or dependencies; spatial
+# support is engaged only by depending on this crate.
+#
+# Wrap-vs-implement: WKT parsing and the simple-features (DE-9IM) relations are
+# WRAPPED from the standard pure-Rust geo stack (georust: `wkt` + `geo`/`geo-types`)
+# rather than reimplemented; the R-tree spatial index wraps `rstar`. What this crate
+# adds is the GeoSPARQL layer: geo:wktLiteral lexical forms (optional leading CRS
+# IRI), the geof: function semantics, and Graph -> (entity, geometry) extraction
+# over geo:hasGeometry / geo:asWKT.
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+oxrdf.workspace = true
+# WKT lexical forms <-> geo-types geometries.
+wkt = "0.14"
+# Geometry algorithms: DE-9IM relate, convex hull, bounding rect, distances.
+geo = "0.30"
+geo-types = "0.7"
+# R-tree (bulk-loaded STR) over geometry bounding boxes.
+rstar = "0.12"
+# Fast hash maps for the geometry-node -> feature mapping during index build.
+rustc-hash.workspace = true
+
+[dev-dependencies]
+# Deterministic random geometries for property tests + the benchmark example.
+rand = "0.9"
