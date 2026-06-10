@@ -4,10 +4,12 @@ A from-scratch **RDF triplestore and SPARQL engine in Rust** — dictionary-enco
 sorted permutation indexes, parallel execution, RDFS/OWL-RL/N3 inference, an out-of-core
 (memory-mapped) mode, a WebAssembly build, and a W3C-conformant HTTP server.
 
-> **Status: experimental research engine.** The query/build/inference paths are tested and
-> benchmarked (see below), but the API is unstable and some features are still in progress
-> (SERVICE federation, CONSTRUCT/DESCRIBE, variables inside RDF-star patterns — see
-> [`research/roadmap.md`](research/roadmap.md)).
+> **Status: experimental research engine.** Tested against the full W3C SPARQL suites —
+> **1218 of 1229 tests pass (zero skips)**; the 11 remaining failures are upstream-parser or
+> test-suite-convention issues, catalogued in
+> [`crates/sparq-conformance/FINDINGS.md`](crates/sparq-conformance/FINDINGS.md). The API is
+> still unstable; SERVICE federation remains unimplemented
+> (see [`research/roadmap.md`](research/roadmap.md)).
 
 ## Why it exists
 
@@ -45,12 +47,24 @@ AMD / Graviton) — see [`research/hw-bench-results.md`](research/hw-bench-resul
   LIMIT/OFFSET, **property paths** (all 8 operators), **named graphs** (`GRAPH`, N-Quads/TriG
   datasets); sort-merge + hash + worst-case-optimal joins; greedy cardinality-based planning.
   Parallel scan / filter / sort / join-build / aggregation / serialization.
-- **SPARQL Update** — `INSERT DATA` / `DELETE DATA` / `DELETE/INSERT … WHERE` / `CLEAR`, on the
-  CLI and over the server's update endpoint (atomic graph swap).
+- **SPARQL Update** — the complete operation set (data ops, `DELETE/INSERT … WHERE` with GRAPH
+  templates, `USING`, `LOAD`, `CLEAR`/`DROP`/`CREATE`/`COPY`/`MOVE`/`ADD`) over default and named
+  graphs — **100% of the W3C update suite**. Updates are **incremental** (delta overlay +
+  append-only dictionary, ~10⁶× faster than rebuild) with an optional **write-ahead log** for
+  durability, and run end-to-end over HTTP in ~300 µs.
+- **Subscriptions** — SEPA-style WebSocket subscriptions: register a SELECT, receive
+  added/removed binding diffs after every committed update
+  ([`crates/sparq-server/SUBSCRIPTIONS.md`](crates/sparq-server/SUBSCRIPTIONS.md)).
 - **RDF 1.2 / RDF-star** — triple terms (`<< s p o >>`) stored structurally in the dictionary;
   concrete triple-term patterns match; SPARQL 1.2 JSON/XML result rendering.
-- **Inference** (opt-in `sparq-reason`) — RDFS, OWL-RL, and a Notation3 subset, with
-  saturate-then-sweep single-pass materialization.
+- **Inference** (opt-in `sparq-reason`) — RDFS, OWL-RL, and a Notation3 engine (EYE-validated
+  builtins, goal-directed `<=`), with single-pass materialization and **incremental closure
+  maintenance** (counting-based; deltas ~10³–10⁴× faster than re-materialization).
+- **Validation** (opt-in `sparq-shacl`) — SHACL Core at **100% of the W3C core suite**.
+- **More opt-in crates** — `sparq-geo` (GeoSPARQL relations + R-tree index), `sparq-hdt` (HDT
+  archives), `sparq-sim` (training-free structural similarity), `sparq-introspect`
+  (characteristic sets + LLM-ready schema digests), `sparq-py` (Python bindings), and an
+  RDF/JS-typed npm package under [`js/`](js/).
 - **Out-of-core** — build on-disk indexes and query them **memory-mapped**, so billion-triple
   datasets are queryable in a fraction of the RAM.
 - **HTTP server** (`sparq-server`) — W3C SPARQL 1.1 Protocol query + update endpoints, Graph

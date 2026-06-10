@@ -64,12 +64,13 @@ jobs:
         continue-on-error: true
 
   conformance:
-    # W3C SPARQL conformance scoreboard (roadmap T13). Informational: the runner
-    # always exits 0 and the job never blocks a merge — the value is the uploaded
-    # pass-rate report. Ratchet later by switching to `--strict`.
-    name: W3C SPARQL conformance (informational)
+    # W3C SPARQL conformance RATCHET (roadmap T13/38). The full 1229-test scope reached
+    # 1218 pass / 0 skip (the 11 fails are external: upstream spargebra posture + suite
+    # conventions — see crates/sparq-conformance/FINDINGS.md). This job now GATES: a drop
+    # below the ratchet count is a conformance regression and fails CI. Raise the ratchet
+    # when external blockers clear; never lower it.
+    name: W3C SPARQL conformance (ratchet >= 1218)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -80,8 +81,16 @@ jobs:
         run: cargo run --release -p sparq-conformance
       - name: Summarize
         run: cat conformance-report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Enforce ratchet (pass count must not regress)
+        run: |
+          RATCHET=1218
+          # The Overall section emits: **<N> pass / <M> fail / <K> skip — ...**
+          PASS=$(grep -oE '\*\*[0-9]+ pass /' conformance-report.md | grep -oE '[0-9]+' | head -1)
+          echo "passing: ${PASS:-unknown} (ratchet: $RATCHET)"
+          [ -n "$PASS" ] && [ "$PASS" -ge "$RATCHET" ] || { echo "::error::conformance regressed below the ratchet ($PASS < $RATCHET)"; exit 1; }
       - name: Upload report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: conformance-report
           path: conformance-report.md
