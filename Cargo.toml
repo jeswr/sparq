@@ -3,10 +3,16 @@ resolver = "2"
 members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-server"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.85"
+# Shared crates.io metadata (T20). Each publishable crate inherits these via
+# `<field>.workspace = true` and adds its own `description`.
+repository = "https://github.com/jeswr/sparq"
+homepage = "https://github.com/jeswr/sparq"
+keywords = ["rdf", "sparql", "semantic-web", "triplestore", "query-engine"]
+categories = ["database-implementations", "parsing", "science"]
 
 [workspace.dependencies]
 # Term model + parsers (best-in-class; we build the store + engine ourselves).

@@ -3,8 +3,13 @@ name = "sparq-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+rust-version.workspace = true
 description = "W3C-conformant HTTP server exposing the sparq query engine (SPARQL 1.1 Protocol + Graph Store HTTP Protocol read side)."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [lib]
 # rlib so the protocol/serializer logic can be unit-tested and reused by the binary.
@@ -25,8 +30,10 @@ default = ["server"]
 server = ["dep:axum", "dep:tokio", "dep:tower", "dep:tower-http"]
 
 [dependencies]
-sparq-core = { path = "../sparq-core" }
-sparq-engine = { path = "../sparq-engine" }
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 oxrdf.workspace = true
 # Re-parse to classify the SPARQL query form (SELECT/ASK/CONSTRUCT/DESCRIBE) before
 # dispatching to the engine — the engine's public API only runs SELECT.
