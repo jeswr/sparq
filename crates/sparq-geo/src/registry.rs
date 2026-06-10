@@ -64,6 +64,11 @@ fn wkt_term(lex: String) -> Term {
     Term::Literal(Literal::new_typed_literal(lex, NamedNode::new_unchecked(WKT_LITERAL)))
 }
 
+/// A [`crate::geof::lex`] binary relation (`sf_*`).
+type LexRelation = fn(&str, &str) -> Result<bool, GeoError>;
+/// A [`crate::geof::lex`] unary geometry function (`envelope` / `boundary` / `convex_hull`).
+type LexUnary = fn(&str) -> Result<String, GeoError>;
+
 /// The `geof:` extension functions as a sparq-engine [`FunctionRegistry`] — pass it
 /// to [`sparq_engine::query_with_functions`] (or scope any other entry point with
 /// [`sparq_engine::with_functions`]) to evaluate GeoSPARQL functions inside SPARQL.
@@ -90,7 +95,7 @@ pub fn geof_registry() -> FunctionRegistry {
     });
 
     // The eight simple-features relations: geof:sf*(?g1, ?g2) -> xsd:boolean.
-    let relations: [(&'static str, fn(&str, &str) -> Result<bool, GeoError>); 8] = [
+    let relations: [(&'static str, LexRelation); 8] = [
         ("sfEquals", lex::sf_equals),
         ("sfDisjoint", lex::sf_disjoint),
         ("sfIntersects", lex::sf_intersects),
@@ -109,7 +114,7 @@ pub fn geof_registry() -> FunctionRegistry {
     }
 
     // The unary geometry functions: geof:*(?g) -> geo:wktLiteral.
-    let unary: [(&'static str, fn(&str) -> Result<String, GeoError>); 3] = [
+    let unary: [(&'static str, LexUnary); 3] = [
         ("envelope", lex::envelope),
         ("boundary", lex::boundary),
         ("convexHull", lex::convex_hull),
