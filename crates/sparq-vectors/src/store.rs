@@ -73,8 +73,10 @@ impl VectorStore {
         })
     }
 
-    /// Memory-maps an existing `.spqv` file read-only. Near-instant: nothing is read
-    /// eagerly beyond the 32-byte header; the OS pages vectors in on access.
+    /// Memory-maps an existing `.spqv` file read-only. Cheap: only the 32-byte header
+    /// and the trailing `count·8`-byte id→slot index are read eagerly (the index is
+    /// validated so no later read can panic on a corrupt file); the vector data — the
+    /// overwhelming bulk of the file — is paged in by the OS on access.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<VectorStore, String> {
         if cfg!(target_endian = "big") {
             return Err(".spqv is a little-endian format; big-endian targets are unsupported".into());
@@ -96,17 +98,59 @@ impl VectorStore {
             return Err(format!("{}: unsupported .spqv version {version}", path.display()));
         }
         let dim = u32::from_le_bytes(map[8..12].try_into().unwrap()) as usize;
-        let count = u64::from_le_bytes(map[12..20].try_into().unwrap()) as usize;
+        let count64 = u64::from_le_bytes(map[12..20].try_into().unwrap());
         if dim == 0 {
             return Err(format!("{}: zero dimension", path.display()));
         }
-        let expect = HEADER_LEN + count * dim * 4 + count * 8;
+        let count: usize = count64
+            .try_into()
+            .map_err(|_| format!("{}: count {count64} exceeds the address space", path.display()))?;
+        // Checked size arithmetic: a malformed header must be rejected here, not wrap
+        // around and pass the size check (or panic later in `get`/`iter`).
+        let expect = count
+            .checked_mul(dim)
+            .and_then(|n| n.checked_mul(4))
+            .and_then(|data| count.checked_mul(8).and_then(|idx| data.checked_add(idx)))
+            .and_then(|body| body.checked_add(HEADER_LEN))
+            .ok_or_else(|| {
+                format!("{}: dim={dim} count={count} overflows the file size", path.display())
+            })?;
         if map.len() != expect {
             return Err(format!(
                 "{}: file is {} bytes, expected {expect} for dim={dim} count={count}",
                 path.display(),
                 map.len()
             ));
+        }
+        // Validate the trailing id→slot index up front (one sequential pass over
+        // count·8 bytes — a small fraction of the file; the vector data itself stays
+        // untouched/unpaged): ids strictly ascending (sorted + unique, what `get`'s
+        // binary search assumes) and every slot in range and used exactly once (what
+        // `iter`'s inverse map assumes). After this, no read path can panic on a
+        // corrupt index.
+        {
+            let index = &map[HEADER_LEN + count * dim * 4..];
+            let mut slot_seen = vec![false; count];
+            let mut prev_id: Option<Id> = None;
+            for i in 0..count {
+                let id = u32::from_le_bytes(index[i * 8..i * 8 + 4].try_into().unwrap());
+                let slot =
+                    u32::from_le_bytes(index[i * 8 + 4..i * 8 + 8].try_into().unwrap()) as usize;
+                if prev_id.is_some_and(|p| p >= id) {
+                    return Err(format!(
+                        "{}: index entry {i} (id {id}) is not strictly ascending",
+                        path.display()
+                    ));
+                }
+                prev_id = Some(id);
+                if slot >= count || slot_seen[slot] {
+                    return Err(format!(
+                        "{}: index entry {i} has invalid or duplicate slot {slot} (count {count})",
+                        path.display()
+                    ));
+                }
+                slot_seen[slot] = true;
+            }
         }
         Ok(VectorStore {
             dim,
@@ -118,13 +162,18 @@ impl VectorStore {
 
     /// Appends `vector` for term `id` (build phase only). Errors after
     /// [`finalize`](Self::finalize)/[`open`](Self::open), on a dimension mismatch, on a
-    /// non-finite component, or if `id` already has a vector.
+    /// non-finite component, on an all-zero vector (no direction — cosine is undefined
+    /// on it, so the exact and HNSW searchers could not even agree on its rank), or if
+    /// `id` already has a vector.
     pub fn put(&mut self, id: Id, vector: &[f32]) -> Result<(), String> {
         if vector.len() != self.dim {
             return Err(format!("vector has dim {}, store has dim {}", vector.len(), self.dim));
         }
         if vector.iter().any(|v| !v.is_finite()) {
             return Err(format!("vector for id {id} has a non-finite component"));
+        }
+        if vector.iter().all(|&v| v == 0.0) {
+            return Err(format!("vector for id {id} is all-zero (cosine is undefined on it)"));
         }
         let Backing::Build { data, slots, ids } = &mut self.backing else {
             return Err("put on a finalized/opened store (the .spqv file is immutable)".into());
