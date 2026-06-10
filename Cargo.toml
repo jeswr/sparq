@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
 members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-server", "crates/sparq-conformance", "crates/sparq-py", "crates/sparq-shacl", "crates/sparq-hdt", "crates/sparq-sim", "crates/sparq-geo", "crates/sparq-introspect", "crates/sparq-nlq", "crates/sparq-vectors", "crates/sparq-rsp"]
+exclude = ["vendor/spargebra"]
+
+# Vendored spargebra 0.4.6 with surgical W3C-conformance parser fixes (see
+# vendor/spargebra/SPARQ-PATCHES.md and docs/upstream-proposals.md — each fix is
+# prepared as an upstream PR against oxigraph/oxigraph). Drop this patch once the
+# fixes land upstream in a released spargebra.
+[patch.crates-io]
+spargebra = { path = "vendor/spargebra" }
 
 [workspace.package]
 version = "0.1.0"

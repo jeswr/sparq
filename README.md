@@ -5,10 +5,14 @@ sorted permutation indexes, parallel execution, RDFS/OWL-RL/N3 inference, an out
 (memory-mapped) mode, a WebAssembly build, and a W3C-conformant HTTP server.
 
 > **Status: experimental research engine.** Tested against the full W3C SPARQL suites —
-> **1218 of 1229 tests pass (zero skips)**; the 11 remaining failures are upstream-parser or
-> test-suite-convention issues, catalogued in
-> [`crates/sparq-conformance/FINDINGS.md`](crates/sparq-conformance/FINDINGS.md). The API is
-> still unstable; SERVICE federation remains unimplemented
+> **1229 of 1229 tests accounted for: 1225 pass, zero fail, zero skips**, plus 4 documented
+> divergences where the suite's expected files are provably wrong against the spec and
+> their own approved siblings (rendered with full rationale in the conformance report;
+> rdf-tests issue drafts in [`docs/upstream-proposals.md`](docs/upstream-proposals.md)).
+> Six former upstream-parser failures are fixed in a vendored spargebra
+> ([`vendor/spargebra/SPARQ-PATCHES.md`](vendor/spargebra/SPARQ-PATCHES.md), upstream PRs
+> drafted). Catalogue: [`crates/sparq-conformance/FINDINGS.md`](crates/sparq-conformance/FINDINGS.md).
+> The API is still unstable; SERVICE federation remains unimplemented
 > (see [`research/roadmap.md`](research/roadmap.md)).
 
 ## Why it exists
