@@ -54,6 +54,18 @@ done
 infs=$("$CLI" reason "$TMP/inf.ttl" turtle rdfs 2>&1 | grep -oE 'in [0-9.]+s' | grep -oE '[0-9.]+' | head -1)
 [ -n "${infs:-}" ] && add rdfs_infer_s s "$infs"
 
+# WASM bundle size (bytes, deterministic) — enforces the "zero wasm bundle impact" rule for
+# opt-in features: any feature that leaks into the browser bundle shows up here per commit.
+# Skipped gracefully when the wasm target isn't installed.
+if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
+  if cargo build --release -q -p sparq-wasm --target wasm32-unknown-unknown 2>/dev/null; then
+    WASM_BIN=$(ls target/wasm32-unknown-unknown/release/*.wasm 2>/dev/null | head -1)
+    if [ -n "${WASM_BIN:-}" ]; then
+      add wasm_bundle_bytes bytes "$(wc -c < "$WASM_BIN" | tr -d ' ')"
+    fi
+  fi
+fi
+
 python3 - "$RES" > "$OUT" <<'PY'
 import sys, json
 rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1]) if l.strip()]

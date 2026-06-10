@@ -5,8 +5,9 @@ sorted permutation indexes, parallel execution, RDFS/OWL-RL/N3 inference, an out
 (memory-mapped) mode, a WebAssembly build, and a W3C-conformant HTTP server.
 
 > **Status: experimental research engine.** The query/build/inference paths are tested and
-> benchmarked (see below), but the API is unstable and several SPARQL features are still in
-> progress (named graphs, property paths, SERVICE, UPDATE — see [`research/roadmap.md`](research/roadmap.md)).
+> benchmarked (see below), but the API is unstable and some features are still in progress
+> (SERVICE federation, CONSTRUCT/DESCRIBE, variables inside RDF-star patterns — see
+> [`research/roadmap.md`](research/roadmap.md)).
 
 ## Why it exists
 
@@ -39,16 +40,22 @@ AMD / Graviton) — see [`research/hw-bench-results.md`](research/hw-bench-resul
 
 - **Parsing** — N-Triples, Turtle, N-Quads, TriG; parallel; streaming + transparently
   decompressing (`.gz` / `.bz2` / `.zst`) with no full-document copy in RAM.
-- **SPARQL query** — SELECT/ASK, Basic Graph Patterns, FILTER, OPTIONAL, UNION, MINUS, VALUES,
-  BIND, aggregation + GROUP BY, ORDER BY, DISTINCT, LIMIT/OFFSET; sort-merge + hash + worst-case-
-  optimal joins; greedy cardinality-based planning. Parallel scan / filter / sort / aggregation /
-  serialization.
+- **SPARQL query** — SELECT/ASK, Basic Graph Patterns, FILTER (full built-in function set incl.
+  REGEX), OPTIONAL, UNION, MINUS, VALUES, BIND, aggregation + GROUP BY, ORDER BY, DISTINCT,
+  LIMIT/OFFSET, **property paths** (all 8 operators), **named graphs** (`GRAPH`, N-Quads/TriG
+  datasets); sort-merge + hash + worst-case-optimal joins; greedy cardinality-based planning.
+  Parallel scan / filter / sort / join-build / aggregation / serialization.
+- **SPARQL Update** — `INSERT DATA` / `DELETE DATA` / `DELETE/INSERT … WHERE` / `CLEAR`, on the
+  CLI and over the server's update endpoint (atomic graph swap).
+- **RDF 1.2 / RDF-star** — triple terms (`<< s p o >>`) stored structurally in the dictionary;
+  concrete triple-term patterns match; SPARQL 1.2 JSON/XML result rendering.
 - **Inference** (opt-in `sparq-reason`) — RDFS, OWL-RL, and a Notation3 subset, with
   saturate-then-sweep single-pass materialization.
 - **Out-of-core** — build on-disk indexes and query them **memory-mapped**, so billion-triple
   datasets are queryable in a fraction of the RAM.
-- **HTTP server** (`sparq-server`) — W3C SPARQL 1.1 Protocol query endpoint (GET/POST), Graph
-  Store read, result formats JSON / XML / CSV / TSV; content negotiation.
+- **HTTP server** (`sparq-server`) — W3C SPARQL 1.1 Protocol query + update endpoints, Graph
+  Store read, result formats JSON / XML / CSV / TSV; content negotiation. Docker image via the
+  release workflow (see [`docs/release.md`](docs/release.md)).
 - **WebAssembly** — the core engine builds for the browser with a minimal bundle.
 
 ## Workspace
