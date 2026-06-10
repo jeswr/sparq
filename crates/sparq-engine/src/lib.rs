@@ -9,10 +9,13 @@
 //! to algebra by `spargebra`. Values computed at query time (BIND, aggregates)
 //! are interned in a per-query local vocabulary. ASK runs natively; CONSTRUCT
 //! and DESCRIBE (T16) return RDF graphs — see [`construct`] / [`describe`].
+//! A query carrying a dataset clause (FROM / FROM NAMED) is evaluated against
+//! the ACTIVE dataset assembled from the store's named graphs (see `dataset`).
 //! Later milestones add worst-case-optimal joins, a DP planner and property
 //! paths.
 
 mod construct;
+mod dataset;
 mod exec;
 pub mod json;
 mod update;
@@ -53,6 +56,15 @@ impl QueryBudget {
     }
 }
 
+/// When the query carries a dataset clause (FROM / FROM NAMED), the ACTIVE
+/// dataset it describes — built from the store's named graphs; see
+/// [`dataset::build_active`]. `None` (the common case) means: evaluate against
+/// the store itself. Every query entry point calls this once after parsing, so
+/// the no-clause path costs exactly one `Option` check.
+fn active_dataset(graph: &Graph, q: &Query) -> Option<Graph> {
+    q.dataset().map(|ds| dataset::build_active(graph, ds))
+}
+
 /// Executes a SPARQL query string against a graph, materialising the solutions.
 pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
     query_with_budget(graph, sparql, &QueryBudget::unlimited())
@@ -61,6 +73,8 @@ pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
 /// [`query`] under a cooperative [`QueryBudget`] (deadline / max result rows).
 pub fn query_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<QueryResult, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let active = active_dataset(graph, &q);
+    let graph = active.as_ref().unwrap_or(graph);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
@@ -85,6 +99,8 @@ pub fn ask(graph: &Graph, sparql: &str) -> Result<bool, String> {
 /// [`ask`] under a cooperative [`QueryBudget`] (deadline / max result rows).
 pub fn ask_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<bool, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let active = active_dataset(graph, &q);
+    let graph = active.as_ref().unwrap_or(graph);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
@@ -104,6 +120,8 @@ pub fn query_json(graph: &Graph, sparql: &str) -> Result<String, String> {
 /// [`query_json`] under a cooperative [`QueryBudget`] (deadline / max result rows).
 pub fn query_json_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let active = active_dataset(graph, &q);
+    let graph = active.as_ref().unwrap_or(graph);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
@@ -125,6 +143,8 @@ const JSON_CHUNK_BYTES: usize = 64 * 1024;
 /// second whole-result copy from peak memory on large SELECTs.
 pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<String>, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let active = active_dataset(graph, &q);
+    let graph = active.as_ref().unwrap_or(graph);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
@@ -146,6 +166,8 @@ pub fn count(graph: &Graph, sparql: &str) -> Result<usize, String> {
 /// [`count`] under a cooperative [`QueryBudget`] (the server's budgeted ASK path).
 pub fn count_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<usize, String> {
     let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let active = active_dataset(graph, &q);
+    let graph = active.as_ref().unwrap_or(graph);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
@@ -821,6 +843,42 @@ mod tests {
             cnt("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:v ?v OPTIONAL { ?s ex:nomatch ?k } FILTER(!(?k IN (<http://ex/x>))) }"),
             0
         );
+    }
+
+    #[test]
+    fn from_and_from_named_define_the_active_dataset() {
+        // Store: default graph (1 triple), :g1 (2), :g2 (1). A dataset clause must
+        // REPLACE the dataset: FROM merges into the active default graph, FROM NAMED
+        // selects the active named graphs, and the store's own graphs never leak in.
+        let src = "<http://ex/d> <http://ex/p> <http://ex/e> .\n\
+                   <http://ex/x> <http://ex/p> <http://ex/y> <http://ex/g1> .\n\
+                   <http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .\n\
+                   <http://ex/x> <http://ex/q> <http://ex/z> <http://ex/g2> .";
+        let g = Graph::load_dataset(src, "nquads").unwrap();
+        let n = |q: &str| query(&g, q).unwrap().len();
+        // FROM g1: the store default graph is re-scoped away.
+        assert_eq!(n("SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }"), 2);
+        // FROM g1 + g2 merge; no FROM NAMED -> GRAPH matches nothing.
+        assert_eq!(n("SELECT * FROM <http://ex/g1> FROM <http://ex/g2> WHERE { ?s ?p ?o }"), 3);
+        assert_eq!(n("SELECT * FROM <http://ex/g1> WHERE { GRAPH ?g { ?s ?p ?o } }"), 0);
+        // FROM NAMED only: empty active default graph, exactly that named graph.
+        assert_eq!(n("SELECT * FROM NAMED <http://ex/g2> WHERE { ?s ?p ?o }"), 0);
+        assert_eq!(n("SELECT * FROM NAMED <http://ex/g2> WHERE { GRAPH ?g { ?s ?p ?o } }"), 1);
+        // An absent graph name denotes the empty graph (no error, no rows).
+        assert_eq!(n("SELECT * FROM <http://ex/nope> WHERE { ?s ?p ?o }"), 0);
+        // ASK / count / JSON run against the same active dataset.
+        assert!(!ask(&g, "ASK FROM NAMED <http://ex/g1> { ?s ?p ?o }").unwrap());
+        assert!(ask(&g, "ASK FROM <http://ex/g1> { ?s ?p ?o }").unwrap());
+        assert_eq!(super::count(&g, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }").unwrap(), 2);
+        assert_eq!(
+            query_json(&g, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }").unwrap(),
+            json::to_sparql_json(&query(&g, "SELECT * FROM <http://ex/g1> WHERE { ?s ?p ?o }").unwrap())
+        );
+        // CONSTRUCT honours the clause too.
+        let ts = construct(&g, "CONSTRUCT { ?s ?p ?o } FROM <http://ex/g2> WHERE { ?s ?p ?o }").unwrap();
+        assert_eq!(ts.len(), 1);
+        // No dataset clause: the store itself, unchanged.
+        assert_eq!(n("SELECT * WHERE { ?s ?p ?o }"), 1);
     }
 
     #[test]
