@@ -7,7 +7,7 @@
 
 use crate::QueryResult;
 use oxrdf::vocab::xsd;
-use oxrdf::{BlankNode, Literal, Term, Variable};
+use oxrdf::{BlankNode, Literal, NamedOrBlankNode, Term, Variable};
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern as IdPattern;
@@ -1649,10 +1649,170 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
     if patterns.is_empty() {
         return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
     }
+    // RDF 1.2 quoted-triple patterns with variables decompose into synthetic-variable
+    // slots + structural-unification relations, joined by the ordinary machinery (F14).
+    let (rewritten, constraints) = extract_quoted_constraints(patterns);
+    if !constraints.is_empty() {
+        let mut b = eval_bgp(graph, &rewritten)?;
+        for c in &constraints {
+            b = join_bindings(b, quoted_relation(graph, c));
+        }
+        return Ok(b);
+    }
     if patterns.len() >= 3 && bgp_is_cyclic(patterns) {
         return eval_bgp_wcoj(graph, patterns);
     }
     eval_bgp_binary(graph, patterns, &[])
+}
+
+// ---- RDF 1.2 quoted-triple patterns with variables (F14) ----------------------
+
+/// Prefix for the synthetic variables standing in for a quoted-triple pattern slot
+/// (like [`BNODE_VAR_PREFIX`], `#` cannot appear in a SPARQL VARNAME).
+const QT_VAR_PREFIX: &str = "#qt#";
+
+/// One BGP slot that held a quoted-triple pattern CONTAINING VARIABLES, replaced by a
+/// synthetic variable. Its relation enumerates every stored triple term and unifies it
+/// structurally against the quoted pattern, binding the inner variables.
+struct QuotedConstraint {
+    var: Variable,
+    pattern: TriplePattern,
+}
+
+/// `true` when a quoted-triple pattern has a variable / blank node anywhere inside
+/// (such a pattern cannot resolve to a single dictionary id).
+fn quoted_has_var(t: &TriplePattern) -> bool {
+    fn slot(tp: &TermPattern) -> bool {
+        match tp {
+            TermPattern::Variable(_) | TermPattern::BlankNode(_) => true,
+            TermPattern::Triple(inner) => quoted_has_var(inner),
+            _ => false,
+        }
+    }
+    slot(&t.subject) || matches!(t.predicate, NamedNodePattern::Variable(_)) || slot(&t.object)
+}
+
+/// Rewrites the BGP: every subject/object slot holding a variable-carrying quoted-triple
+/// pattern becomes a fresh synthetic variable, with the quoted pattern recorded as a
+/// [`QuotedConstraint`]. Ground quoted triples are untouched (they resolve to one id).
+fn extract_quoted_constraints(patterns: &[TriplePattern]) -> (Vec<TriplePattern>, Vec<QuotedConstraint>) {
+    let mut out = Vec::with_capacity(patterns.len());
+    let mut constraints: Vec<QuotedConstraint> = Vec::new();
+    for tp in patterns {
+        let mut tp = tp.clone();
+        for s in [&mut tp.subject, &mut tp.object] {
+            if let TermPattern::Triple(t) = s {
+                if quoted_has_var(t) {
+                    let var = Variable::new_unchecked(format!("{QT_VAR_PREFIX}{}", constraints.len()));
+                    constraints.push(QuotedConstraint { var: var.clone(), pattern: (**t).clone() });
+                    *s = TermPattern::Variable(var);
+                }
+            }
+        }
+        out.push(tp);
+    }
+    (out, constraints)
+}
+
+/// The variables of a quoted-triple pattern in first-occurrence order (blank nodes as
+/// their synthetic existential variables), appended to `out` without duplicates.
+fn collect_quoted_vars(t: &TriplePattern, out: &mut Vec<Variable>) {
+    fn push(out: &mut Vec<Variable>, v: Variable) {
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    fn slot(tp: &TermPattern, out: &mut Vec<Variable>) {
+        match tp {
+            TermPattern::Variable(v) => push(out, v.clone()),
+            TermPattern::BlankNode(b) => push(out, bnode_var(b)),
+            TermPattern::Triple(inner) => collect_quoted_vars(inner, out),
+            _ => {}
+        }
+    }
+    slot(&t.subject, out);
+    if let NamedNodePattern::Variable(v) = &t.predicate {
+        push(out, v.clone());
+    }
+    slot(&t.object, out);
+}
+
+/// Builds the constraint's relation: one row per stored triple term that structurally
+/// unifies with the quoted pattern — columns are the synthetic slot variable (bound to
+/// the triple term's own id) followed by the quoted pattern's inner variables.
+///
+/// Enumeration scans the dictionary for `TermParts::Triple` records: triple terms are a
+/// vanishing fraction of real dictionaries and the scan only runs for queries that quote
+/// variables, so no ordinary query pays for it. (A persistent side index of triple-term
+/// ids is the obvious upgrade if quoted-pattern workloads ever matter at scale.)
+fn quoted_relation(graph: &Graph, c: &QuotedConstraint) -> Bindings {
+    let mut vars = vec![c.var.clone()];
+    collect_quoted_vars(&c.pattern, &mut vars);
+    let mut rows: Vec<Row> = Vec::new();
+    for id in 1..=graph.dict.len() as Id {
+        let dict::TermParts::Triple(comps) = graph.dict.term_parts(id) else {
+            continue;
+        };
+        let mut binds: Row = std::iter::repeat_n(NO_ID, vars.len()).collect();
+        binds[0] = id;
+        if unify_quoted(graph, &c.pattern, comps, &vars, &mut binds) {
+            rows.push(binds);
+        }
+    }
+    Bindings::unsorted(vars, rows)
+}
+
+/// Binds `v` to `id`, or checks consistency when the variable is already bound
+/// (the same variable repeated inside a quoted pattern must match the same id).
+fn bind_quoted_var(v: &Variable, id: Id, vars: &[Variable], binds: &mut [Id]) -> bool {
+    let i = vars.iter().position(|x| x == v).expect("quoted var collected");
+    if binds[i] == NO_ID {
+        binds[i] = id;
+        true
+    } else {
+        binds[i] == id
+    }
+}
+
+/// Structurally unifies a quoted-triple pattern against a stored triple term's
+/// component ids, recursing through nested quoted patterns.
+fn unify_quoted(graph: &Graph, pat: &TriplePattern, comps: [Id; 3], vars: &[Variable], binds: &mut [Id]) -> bool {
+    fn slot(graph: &Graph, tp: &TermPattern, id: Id, vars: &[Variable], binds: &mut [Id]) -> bool {
+        match tp {
+            TermPattern::Variable(v) => bind_quoted_var(v, id, vars, binds),
+            TermPattern::BlankNode(b) => bind_quoted_var(&bnode_var(b), id, vars, binds),
+            TermPattern::Triple(inner) => {
+                if dict::is_inline(id) {
+                    return false;
+                }
+                match graph.dict.term_parts(id) {
+                    dict::TermParts::Triple(c) => unify_quoted(graph, inner, c, vars, binds),
+                    _ => false,
+                }
+            }
+            // A ground component: term-identity match (same as ordinary BGP slots).
+            other => match term_pattern_to_term(other) {
+                Ok(t) => graph.id_of(&t) == Some(id),
+                Err(_) => false,
+            },
+        }
+    }
+    if !slot(graph, &pat.subject, comps[0], vars, binds) {
+        return false;
+    }
+    match &pat.predicate {
+        NamedNodePattern::NamedNode(n) => {
+            if graph.id_of(&Term::NamedNode(n.clone())) != Some(comps[1]) {
+                return false;
+            }
+        }
+        NamedNodePattern::Variable(v) => {
+            if !bind_quoted_var(v, comps[1], vars, binds) {
+                return false;
+            }
+        }
+    }
+    slot(graph, &pat.object, comps[2], vars, binds)
 }
 
 /// Whether this conjunctive BGP would be routed to the worst-case-optimal plan
@@ -1668,6 +1828,17 @@ fn bgp_uses_binary(patterns: &[TriplePattern]) -> bool {
 fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Option<(usize, NumCmp)>]) -> Result<Bindings, String> {
     if patterns.is_empty() {
         return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
+    }
+    // Quoted-triple patterns with variables (F14): the conjunctive-flattening path calls
+    // this directly (bypassing eval_bgp), so the decomposition must happen here too.
+    // The rewrite preserves pattern count/order, so `pat_filters` indexes stay aligned.
+    let (rewritten, constraints) = extract_quoted_constraints(patterns);
+    if !constraints.is_empty() {
+        let mut b = eval_bgp_binary(graph, &rewritten, pat_filters)?;
+        for c in &constraints {
+            b = join_bindings(b, quoted_relation(graph, c));
+        }
+        return Ok(b);
     }
     let pfilter = |i: usize| -> Option<(usize, NumCmp)> { pat_filters.get(i).copied().flatten() };
 
@@ -3750,7 +3921,9 @@ fn ebv(v: &Value) -> Option<bool> {
         Value::Unbound | Value::Error => None,
         Value::Term(Term::Literal(l)) => {
             if l.language().is_some() {
-                return Some(!l.value().is_empty());
+                // rdf:langString / rdf:dirLangString is NOT xsd:string: its EBV is a
+                // type error per SPARQL (1.2 `expression/not-not` pins this down).
+                return None;
             }
             let dt = l.datatype().as_str();
             if dt == xsd::BOOLEAN.as_str() {
@@ -4493,8 +4666,16 @@ fn values_equal(x: &Value, y: &Value) -> Option<bool> {
         if p == q {
             return Some(true); // sameTerm decides even for unknown datatypes
         }
+        // RDF 1.2 triple terms compare componentwise, with VALUE equality on the
+        // objects (`<<(:a :b 01)>> = <<(:a :b 1)>>` is true, errors propagate).
+        if let (Term::Triple(a), Term::Triple(b)) = (p, q) {
+            if a.subject != b.subject || a.predicate != b.predicate {
+                return Some(false);
+            }
+            return values_equal(&Value::Term(a.object.clone()), &Value::Term(b.object.clone()));
+        }
         if !matches!(p, Term::Literal(_)) || !matches!(q, Term::Literal(_)) {
-            return Some(false); // IRI / bnode / triple term: identity decides
+            return Some(false); // IRI / bnode: identity decides
         }
     }
     let (ka, kb) = (lit_kind(x), lit_kind(y));
@@ -4626,6 +4807,8 @@ fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
             Value::Unbound | Value::Error => 0,
             Value::Term(Term::BlankNode(_)) => 1,
             Value::Term(Term::NamedNode(_)) => 2,
+            // SPARQL 1.2 total-order extension: triple terms sort AFTER literals.
+            Value::Term(Term::Triple(_)) => 4,
             _ => 3, // literals, incl. computed numerics / booleans
         }
     }
@@ -4636,6 +4819,28 @@ fn compare_values(x: &Value, y: &Value) -> Option<Ordering> {
     match ca {
         0 => Some(Ordering::Equal),
         1 | 2 => Some(value_str(x)?.cmp(&value_str(y)?)),
+        // Triple terms order componentwise (subject, predicate, then object under
+        // this same total order, recursing through nesting).
+        4 => {
+            let (Value::Term(Term::Triple(a)), Value::Term(Term::Triple(b))) = (x, y) else {
+                return None;
+            };
+            let nob = |n: &NamedOrBlankNode| {
+                Value::Term(match n {
+                    NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
+                    NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.clone()),
+                })
+            };
+            let s = compare_values(&nob(&a.subject), &nob(&b.subject))?;
+            if s != Ordering::Equal {
+                return Some(s);
+            }
+            let p = a.predicate.as_str().cmp(b.predicate.as_str());
+            if p != Ordering::Equal {
+                return Some(p);
+            }
+            compare_values(&Value::Term(a.object.clone()), &Value::Term(b.object.clone()))
+        }
         _ => {
             if let (Some(a), Some(b)) = (as_num(x), as_num(y)) {
                 return a.partial_cmp(&b);
@@ -4903,6 +5108,80 @@ fn eval_function(
                 None => Value::Error,
             }
         }
+        // ---- SPARQL 1.2 triple-term builtins ------------------------------------
+        // TRIPLE(s, p, o): s must be an IRI / blank node, p an IRI, o any RDF term.
+        F::Triple => {
+            let subject = match ev(0)? {
+                Value::Term(Term::NamedNode(n)) => NamedOrBlankNode::NamedNode(n),
+                Value::Term(Term::BlankNode(b)) => NamedOrBlankNode::BlankNode(b),
+                _ => return Ok(Value::Error),
+            };
+            let predicate = match ev(1)? {
+                Value::Term(Term::NamedNode(n)) => n,
+                _ => return Ok(Value::Error),
+            };
+            let Some(object) = value_as_term(&ev(2)?) else {
+                return Ok(Value::Error);
+            };
+            Value::Term(Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, object))))
+        }
+        F::IsTriple => match ev(0)? {
+            Value::Term(Term::Triple(_)) => Value::Bool(true),
+            Value::Unbound | Value::Error => Value::Error,
+            _ => Value::Bool(false),
+        },
+        F::Subject => match ev(0)? {
+            Value::Term(Term::Triple(t)) => Value::Term(match t.subject {
+                NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n),
+                NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b),
+            }),
+            _ => Value::Error,
+        },
+        F::Predicate => match ev(0)? {
+            Value::Term(Term::Triple(t)) => Value::Term(Term::NamedNode(t.predicate)),
+            _ => Value::Error,
+        },
+        F::Object => match ev(0)? {
+            Value::Term(Term::Triple(t)) => Value::Term(t.object),
+            _ => Value::Error,
+        },
+        // ---- SPARQL 1.2 language / base-direction builtins -----------------------
+        // hasLANG / hasLANGDIR: a boolean property of any RDF TERM (an IRI is simply
+        // `false`); only unbound/error operands propagate the error.
+        F::HasLang => match ev(0)? {
+            Value::Term(Term::Literal(l)) => Value::Bool(l.language().is_some()),
+            Value::Unbound | Value::Error => Value::Error,
+            _ => Value::Bool(false),
+        },
+        F::HasLangDir => match ev(0)? {
+            Value::Term(Term::Literal(l)) => Value::Bool(l.direction().is_some()),
+            Value::Unbound | Value::Error => Value::Error,
+            _ => Value::Bool(false),
+        },
+        // LANGDIR mirrors LANG: "" for a literal without a base direction, type error
+        // on non-literals.
+        F::LangDir => match ev(0)? {
+            Value::Term(Term::Literal(l)) => simple(l.direction().map(|d| d.to_string()).unwrap_or_default()),
+            Value::Num(_) | Value::Bool(_) => simple(String::new()),
+            _ => Value::Error,
+        },
+        // STRLANGDIR(lexical, langTag, "ltr"|"rtl") -> directional language-tagged
+        // literal; all three must be simple literals, the tag non-empty and valid,
+        // the direction exactly lowercase "ltr"/"rtl".
+        F::StrLangDir => match (str_lit(&ev(0)?), str_lit(&ev(1)?), str_lit(&ev(2)?)) {
+            (Some((lex, None)), Some((lang, None)), Some((dir, None))) => {
+                let dir = match dir.as_str() {
+                    "ltr" => oxrdf::BaseDirection::Ltr,
+                    "rtl" => oxrdf::BaseDirection::Rtl,
+                    _ => return Ok(Value::Error),
+                };
+                match Literal::new_directional_language_tagged_literal(lex, lang, dir) {
+                    Ok(l) => Value::Term(Term::Literal(l)),
+                    Err(_) => Value::Error,
+                }
+            }
+            _ => Value::Error,
+        },
         // XSD constructor casts: xsd:integer(?x), xsd:decimal(?x), … (SPARQL 17.5).
         F::Custom(nn) if args.len() == 1 => match eval_cast(nn.as_str(), &ev(0)?) {
             Some(out) => out,
@@ -5192,11 +5471,21 @@ fn string_literal(v: &Value) -> Option<String> {
 /// A STRING-LITERAL operand (simple/xsd:string or language-tagged): `(value, language)`.
 /// IRIs, blank nodes, non-string literals and computed numerics/booleans are type
 /// errors (`None`) — per the SPARQL string-function operand rules.
+///
+/// An RDF 1.2 base direction rides COMBINED into the language slot as `lang--dir`
+/// (`--` cannot occur in a BCP47 tag): the string functions then preserve language AND
+/// direction together, equality of the slot means "same language and same direction"
+/// (exactly the SPARQL 1.2 CONCAT/compatibility rule), and [`lit_with_lang`] splits the
+/// pair back out.
 fn str_lit(v: &Value) -> Option<(String, Option<String>)> {
     match v {
         Value::Term(Term::Literal(l)) => {
             if let Some(lang) = l.language() {
-                Some((l.value().to_string(), Some(lang.to_string())))
+                let tag = match l.direction() {
+                    Some(d) => format!("{lang}--{d}"),
+                    None => lang.to_string(),
+                };
+                Some((l.value().to_string(), Some(tag)))
             } else if l.datatype() == xsd::STRING {
                 Some((l.value().to_string(), None))
             } else {
@@ -5207,10 +5496,18 @@ fn str_lit(v: &Value) -> Option<(String, Option<String>)> {
     }
 }
 
-/// A simple or language-tagged literal value, per the tag the operand carried.
+/// A simple or language-tagged literal value, per the (possibly `lang--dir` combined,
+/// see [`str_lit`]) tag the operand carried.
 fn lit_with_lang(s: String, lang: Option<&str>) -> Value {
     Value::Term(Term::Literal(match lang {
-        Some(l) => Literal::new_language_tagged_literal_unchecked(s, l),
+        Some(l) => match l.split_once("--") {
+            Some((tag, dir)) => Literal::new_directional_language_tagged_literal_unchecked(
+                s,
+                tag,
+                if dir == "rtl" { oxrdf::BaseDirection::Rtl } else { oxrdf::BaseDirection::Ltr },
+            ),
+            None => Literal::new_language_tagged_literal_unchecked(s, l),
+        },
         None => Literal::new_simple_literal(s),
     }))
 }
@@ -5380,13 +5677,21 @@ fn value_str(v: &Value) -> Option<String> {
 /// the graph dictionary first (so they join and deduplicate against the data);
 /// terms not already present get a per-query local id.
 fn value_to_id(graph: &Graph, local: &mut LocalVocab, v: &Value) -> Id {
-    let term = match v {
-        Value::Unbound | Value::Error => return NO_ID,
+    let term = match value_as_term(v) {
+        Some(t) => t,
+        None => return NO_ID,
+    };
+    graph.id_of(&term).unwrap_or_else(|| local.intern(term))
+}
+
+/// A computed value as a concrete RDF term (`None` for unbound / type error).
+fn value_as_term(v: &Value) -> Option<Term> {
+    Some(match v {
+        Value::Unbound | Value::Error => return None,
         Value::Bool(b) => Term::Literal(Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN)),
         Value::Num(n) => Term::Literal(Literal::new_typed_literal(n.lexical(), n.datatype())),
         Value::Term(t) => t.clone(),
-    };
-    graph.id_of(&term).unwrap_or_else(|| local.intern(term))
+    })
 }
 
 /// Read-only half of [`value_to_id`], for the parallel resolve pass (T1.0b). Most computed values
@@ -5891,11 +6196,49 @@ mod path_tests {
     }
 
     #[test]
-    fn rdf_star_variable_inside_quoted_pattern_is_clean_error() {
-        // Variables inside a quoted-triple pattern are not yet supported: the query must
-        // return a clean Err (no panic, no wrong answer).
+    fn rdf_star_variables_inside_quoted_patterns() {
+        // F14: variables inside quoted-triple patterns MATCH structurally against the
+        // stored triple terms, binding the inner variables.
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .\n<< :bob :age 25 >> :certainty 0.4 .\n:alice :name \"Alice\" .",
+            "turtle",
+        )
+        .unwrap();
+        let q = |s: &str| crate::query(&g, s).unwrap();
+        // Var in the quoted subject slot.
+        let r = q("PREFIX : <http://ex/> SELECT ?w ?c WHERE { << ?w :age 30 >> :certainty ?c }");
+        assert_eq!(r.rows.len(), 1);
+        assert!(r.rows[0][0].as_ref().unwrap().to_string().contains("alice"));
+        // All slots variable: both reified statements match.
+        assert_eq!(q("PREFIX : <http://ex/> SELECT * WHERE { << ?s ?p ?o >> :certainty ?c }").rows.len(), 2);
+        // Inner variable JOINS with an outer pattern (alice has a name, bob does not).
+        assert_eq!(
+            q("PREFIX : <http://ex/> SELECT ?n WHERE { << ?w :age ?a >> :certainty ?c . ?w :name ?n }").rows.len(),
+            1
+        );
+        // A ground component inside the quoted pattern constrains the match.
+        assert_eq!(q("PREFIX : <http://ex/> SELECT ?c WHERE { << :bob :age ?a >> :certainty ?c }").rows.len(), 1);
+        // No match: nothing reifies :alice :age 31.
+        assert_eq!(q("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice :age 31 >> :certainty ?c }").rows.len(), 0);
+    }
+
+    #[test]
+    fn rdf_star_triple_builtins() {
+        // F15: TRIPLE / isTRIPLE / SUBJECT / PREDICATE / OBJECT.
         let g = Graph::load_str("PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .", "turtle").unwrap();
-        let r = crate::query(&g, "PREFIX : <http://ex/> SELECT ?w WHERE { << ?w :age 30 >> :certainty ?c }");
-        assert!(r.is_err(), "expected a clean error, got Ok with {} rows", r.map(|x| x.rows.len()).unwrap_or(0));
+        let one = |s: &str| {
+            let r = crate::query(&g, s).unwrap();
+            r.rows[0][0].as_ref().map(|t| t.to_string())
+        };
+        assert_eq!(
+            one("PREFIX : <http://ex/> SELECT (TRIPLE(:a, :b, 1) AS ?t) {}").unwrap(),
+            "<<( <http://ex/a> <http://ex/b> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> )>>"
+        );
+        assert_eq!(one("PREFIX : <http://ex/> SELECT (isTRIPLE(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(), "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
+        assert_eq!(one("PREFIX : <http://ex/> SELECT (SUBJECT(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(), "<http://ex/a>");
+        assert_eq!(one("PREFIX : <http://ex/> SELECT (PREDICATE(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(), "<http://ex/b>");
+        assert_eq!(one("PREFIX : <http://ex/> SELECT (OBJECT(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(), "<http://ex/c>");
+        // A literal subject is a type error -> unbound.
+        assert_eq!(one("PREFIX : <http://ex/> SELECT (TRIPLE(1, :b, :c) AS ?t) {}"), None);
     }
 }
