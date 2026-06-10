@@ -1216,9 +1216,60 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
 fn is_conjunctive(p: &GraphPattern) -> bool {
     match p {
         GraphPattern::Bgp { .. } => true,
-        GraphPattern::Filter { inner, .. } => is_conjunctive(inner),
+        // A FILTER may only be flattened into the enclosing conjunction when every
+        // variable it mentions is bound INSIDE its own group — otherwise hoisting it
+        // changes scope (`{ :x :p ?v . { FILTER(?v = 1) } }` must see ?v UNBOUND).
+        // EXISTS is conservatively never flattened (it evaluates against the group's
+        // in-scope bindings).
+        GraphPattern::Filter { inner, expr } => {
+            if !is_conjunctive(inner) {
+                return false;
+            }
+            let mut inner_vars: FxHashSet<Variable> = FxHashSet::default();
+            collect_pattern_vars(inner, &mut inner_vars);
+            filter_scope_ok(expr, &inner_vars)
+        }
         GraphPattern::Join { left, right } => is_conjunctive(left) && is_conjunctive(right),
         _ => false,
+    }
+}
+
+/// All variables bound by the triple patterns of a conjunctive subtree.
+fn collect_pattern_vars(p: &GraphPattern, out: &mut FxHashSet<Variable>) {
+    match p {
+        GraphPattern::Bgp { patterns } => {
+            for tp in patterns {
+                for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)].into_iter().flatten() {
+                    out.insert(v);
+                }
+            }
+        }
+        GraphPattern::Filter { inner, .. } => collect_pattern_vars(inner, out),
+        GraphPattern::Join { left, right } => {
+            collect_pattern_vars(left, out);
+            collect_pattern_vars(right, out);
+        }
+        _ => {}
+    }
+}
+
+/// `true` if a filter expression's variables are all in `bound` (and it has no
+/// EXISTS), so applying it at the top of the flattened conjunction is equivalent.
+fn filter_scope_ok(e: &Expression, bound: &FxHashSet<Variable>) -> bool {
+    use Expression::*;
+    match e {
+        NamedNode(_) | Literal(_) => true,
+        Variable(v) | Bound(v) => bound.contains(v),
+        UnaryPlus(a) | UnaryMinus(a) | Not(a) => filter_scope_ok(a, bound),
+        And(a, b) | Or(a, b) | Equal(a, b) | SameTerm(a, b) | Greater(a, b) | GreaterOrEqual(a, b) | Less(a, b)
+        | LessOrEqual(a, b) | Add(a, b) | Subtract(a, b) | Multiply(a, b) | Divide(a, b) => {
+            filter_scope_ok(a, bound) && filter_scope_ok(b, bound)
+        }
+        In(a, list) => filter_scope_ok(a, bound) && list.iter().all(|c| filter_scope_ok(c, bound)),
+        If(c, t, f) => filter_scope_ok(c, bound) && filter_scope_ok(t, bound) && filter_scope_ok(f, bound),
+        Coalesce(es) => es.iter().all(|c| filter_scope_ok(c, bound)),
+        FunctionCall(_, args) => args.iter().all(|c| filter_scope_ok(c, bound)),
+        Exists(_) => false,
     }
 }
 
@@ -4279,10 +4330,10 @@ fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &E
 /// Datatype family of a literal-valued operand, the basis for OPEN-WORLD `=` and
 /// the ordering operators: only operands within a comparable family decide; unknown
 /// datatypes and ill-formed lexicals are type errors unless the terms are identical.
-enum LitKind {
+enum LitKind<'a> {
     /// A numeric-datatype operand; `None` = ill-formed lexical.
     Num(Option<Num>),
-    Str(String),
+    Str(&'a str),
     /// A boolean-datatype operand; `None` = ill-formed lexical.
     Bool(Option<bool>),
     /// xsd:dateTime / xsd:dateTimeStamp on the timeline; `None` = ill-formed.
@@ -4290,27 +4341,27 @@ enum LitKind {
     /// xsd:date on the timeline (midnight); `None` = ill-formed.
     Date(Option<Timeline>),
     /// Another XSD datatype (time, duration, gYear, …): (datatype IRI, lexical).
-    OtherXsd(String, String),
+    OtherXsd(&'a str, &'a str),
     /// Language-tagged: (lowercased tag, value).
-    Lang(String, String),
+    Lang(String, &'a str),
     /// A literal of a NON-XSD (unknown) datatype: open-world, never decidable.
     Unknown,
     NotLiteral,
 }
 
-fn lit_kind(v: &Value) -> LitKind {
+fn lit_kind(v: &Value) -> LitKind<'_> {
     match v {
         Value::Num(n) => LitKind::Num(Some(*n)),
         Value::Bool(b) => LitKind::Bool(Some(*b)),
         Value::Term(Term::Literal(l)) => {
             if let Some(tag) = l.language() {
-                return LitKind::Lang(tag.to_ascii_lowercase(), l.value().to_string());
+                return LitKind::Lang(tag.to_ascii_lowercase(), l.value());
             }
             let dt = l.datatype();
             if is_numeric_dt(l) {
                 LitKind::Num(Num::of_literal(l))
             } else if dt == xsd::STRING {
-                LitKind::Str(l.value().to_string())
+                LitKind::Str(l.value())
             } else if dt == xsd::BOOLEAN {
                 LitKind::Bool(as_bool_val(v))
             } else if dt == xsd::DATE_TIME || dt == xsd::DATE_TIME_STAMP {
@@ -4318,7 +4369,7 @@ fn lit_kind(v: &Value) -> LitKind {
             } else if dt == xsd::DATE {
                 LitKind::Date(Timeline::parse_date(l.value()))
             } else if dt.as_str().starts_with("http://www.w3.org/2001/XMLSchema#") {
-                LitKind::OtherXsd(dt.as_str().to_string(), l.value().to_string())
+                LitKind::OtherXsd(dt.as_str(), l.value())
             } else {
                 LitKind::Unknown
             }
