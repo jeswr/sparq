@@ -118,10 +118,17 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
             pattern, dataset, ..
         }) => (pattern, dataset, false),
         Ok(Query::Ask { pattern, dataset, .. }) => (pattern, dataset, true),
-        Ok(Query::Construct { .. }) => {
-            return Status::Skip("CONSTRUCT queries not supported".into())
+        Ok(Query::Construct { dataset, .. }) => {
+            if dataset.is_some() {
+                return Status::Skip("FROM / FROM NAMED dataset clause not supported".into());
+            }
+            return run_construct_test(entry, &query_text, &base);
         }
-        Ok(Query::Describe { .. }) => return Status::Skip("DESCRIBE queries not supported".into()),
+        Ok(Query::Describe { .. }) => {
+            // The engine implements DESCRIBE (CBD), but the spec leaves the result
+            // form to the implementation, so expected graphs are not comparable.
+            return Status::Skip("DESCRIBE result form is implementation-defined (engine returns CBD)".into());
+        }
         Err(e) => return Status::Fail(format!("query parse error: {e}")),
     };
     if dataset.is_some() {
@@ -305,6 +312,71 @@ fn align_binding(binding: &Binding, order: &[String]) -> Row {
                 .map(|(_, t)| t.clone())
         })
         .collect()
+}
+
+/// CONSTRUCT evaluation test (T16): the expected result is an RDF *graph* document,
+/// compared against the engine's constructed graph as triples-as-rows under the same
+/// bnode-bijection machinery the update tests use (graphs are sets — unordered).
+fn run_construct_test(entry: &TestEntry, query_text: &str, base: &str) -> Status {
+    let Some(result_path) = entry.result_file.clone() else {
+        return Status::Skip("no mf:result".into());
+    };
+    let mut expected: Vec<Row> = match parse_file(&result_path) {
+        Ok(triples) => triples
+            .into_iter()
+            .map(|t| {
+                vec![
+                    Some(Term::from(t.subject)),
+                    Some(Term::NamedNode(t.predicate)),
+                    Some(t.object),
+                ]
+            })
+            .collect(),
+        Err(e) => return Status::Fail(format!("expected-graph parse error: {e}")),
+    };
+    dedup_rows(&mut expected); // an RDF graph is a set
+
+    let nquads = match build_nquads(&entry.action.data, &entry.action.graph_data) {
+        Ok(n) => n,
+        Err(e) => return Status::Fail(format!("data load error: {e}")),
+    };
+    let query_with_base = with_base(query_text, base);
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| {
+            let graph = sparq_core::Graph::load_dataset(&nquads, "nquads")?;
+            let triples = sparq_engine::construct(&graph, &query_with_base)?;
+            let rows: Vec<Row> = triples
+                .into_iter()
+                .map(|t| {
+                    vec![
+                        Some(Term::from(t.subject)),
+                        Some(Term::NamedNode(t.predicate)),
+                        Some(t.object),
+                    ]
+                })
+                .collect();
+            Ok::<_, String>(rows)
+        })();
+        let _ = tx.send(result);
+    });
+    let actual = match rx.recv_timeout(TEST_TIMEOUT) {
+        Ok(Ok(r)) => r, // the engine already dedups (set semantics)
+        Ok(Err(e)) => return Status::Fail(format!("engine error: {e}")),
+        Err(mpsc::RecvTimeoutError::Timeout) => return Status::Fail("timeout (20s)".into()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => return Status::Fail("engine panicked".into()),
+    };
+
+    match rows_equal(&expected, &actual, false) {
+        Ok(true) => Status::Pass,
+        Ok(false) => Status::Fail(format!(
+            "graph mismatch: expected {} triple(s), got {}",
+            expected.len(),
+            actual.len()
+        )),
+        Err(e) => Status::Fail(e),
+    }
 }
 
 pub fn run_update_test(entry: &TestEntry) -> Status {

@@ -190,6 +190,160 @@ async fn ask_xml() {
 }
 
 // ---------------------------------------------------------------------------
+// CONSTRUCT / DESCRIBE (T16)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn construct_ntriples_default() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[(
+            "query",
+            "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        )])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["content-type"],
+        "application/n-triples; charset=utf-8"
+    );
+    let body = resp.text().await.unwrap();
+    assert_eq!(body.lines().count(), 3);
+    assert!(body.contains(
+        "<http://ex/alice> <http://ex/years> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> ."
+    ));
+}
+
+#[tokio::test]
+async fn construct_negotiates_turtle() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .header("accept", "text/turtle")
+        .query(&[(
+            "query",
+            "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        )])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "text/turtle; charset=utf-8");
+    // The body is N-Triples — a syntactic subset of Turtle, so it loads as Turtle.
+    let body = resp.text().await.unwrap();
+    assert_eq!(Graph::load_str(&body, "turtle").unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn construct_via_post_and_empty_result() {
+    let base = spawn().await;
+    let resp = client()
+        .post(format!("{base}/sparql"))
+        .header("content-type", "application/sparql-query")
+        .body("CONSTRUCT { ?s <http://ex/x> ?o } WHERE { ?s <http://ex/nope> ?o }")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), ""); // the empty graph
+}
+
+#[tokio::test]
+async fn describe_returns_cbd() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "DESCRIBE <http://ex/alice>")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["content-type"],
+        "application/n-triples; charset=utf-8"
+    );
+    let body = resp.text().await.unwrap();
+    // alice's three outbound triples, nothing else.
+    assert_eq!(body.lines().count(), 3);
+    assert!(body.lines().all(|l| l.starts_with("<http://ex/alice>")));
+}
+
+#[tokio::test]
+async fn head_construct_mirrors_get() {
+    let base = spawn().await;
+    let resp = client()
+        .head(format!("{base}/sparql"))
+        .query(&[("query", "DESCRIBE <http://ex/alice>")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["content-type"],
+        "application/n-triples; charset=utf-8"
+    );
+    assert_eq!(resp.text().await.unwrap(), "");
+}
+
+// ---------------------------------------------------------------------------
+// Streamed SELECT bodies (T16) — byte-identical to the engine's single string
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn streamed_select_json_is_byte_identical() {
+    let base = spawn().await;
+    let q = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }";
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", q)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let advertised: usize = resp.headers()["content-length"].to_str().unwrap().parse().unwrap();
+    let body = resp.text().await.unwrap();
+    assert_eq!(body.len(), advertised, "Content-Length must match the streamed body");
+    // Exactly the engine's single-string serialisation.
+    let expect = sparq_engine::query_json(&Graph::load_str(DATA, "turtle").unwrap(), q).unwrap();
+    assert_eq!(body, expect);
+}
+
+#[tokio::test]
+async fn streamed_select_large_multichunk_is_byte_identical() {
+    // >64 KiB of JSON forces a genuinely multi-chunk stream over real HTTP.
+    let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+    for i in 0..3000 {
+        ttl.push_str(&format!(
+            "ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"
+        ));
+    }
+    let graph = Graph::load_str(&ttl, "turtle").unwrap();
+    let expect = sparq_engine::query_json(&graph, "SELECT * WHERE { ?s ?p ?o }").unwrap();
+    assert!(expect.len() > 64 * 1024);
+
+    let app = router(AppState::new(graph));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let resp = client()
+        .get(format!("http://{addr}/sparql"))
+        .query(&[("query", "SELECT * WHERE { ?s ?p ?o }")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let advertised: usize = resp.headers()["content-length"].to_str().unwrap().parse().unwrap();
+    let body = resp.text().await.unwrap();
+    assert_eq!(advertised, body.len());
+    assert_eq!(body, expect);
+}
+
+// ---------------------------------------------------------------------------
 // HTTP semantics: 400 / 405 / 501 / HEAD
 // ---------------------------------------------------------------------------
 

@@ -318,12 +318,34 @@ fn write_store_id_json(graph: &Graph, id: Id, s: &mut String) {
     }
 }
 
+/// Appends a serialised fragment to the chunk list. Chunked mode (`flush = Some`)
+/// MOVES the fragment in as its own chunk — never a second copy of result bytes;
+/// single-string mode (`flush = None`) concatenates onto the tail (the pre-existing
+/// behaviour of the parallel join). Concatenation order — and so the byte stream —
+/// is identical either way.
+fn emit_chunk(chunks: &mut Vec<String>, frag: String, flush: Option<usize>) {
+    match chunks.last_mut() {
+        Some(tail) if flush.is_none() => tail.push_str(&frag),
+        _ => chunks.push(frag),
+    }
+}
+
+/// Concatenates JSON chunks back into the single-string form (the non-streamed API).
+fn join_chunks(mut chunks: Vec<String>) -> String {
+    if chunks.len() == 1 {
+        chunks.pop().expect("len checked")
+    } else {
+        chunks.concat()
+    }
+}
+
 /// Streaming fast path: `SELECT ... WHERE { <one triple pattern> }` (optionally
 /// projected) serialised straight from the index scan to SPARQL-JSON — no `Bindings`,
 /// no per-row `Row`, no `Term`. Returns `None` if the query is not this shape (the
 /// caller falls back to the general evaluator). The vector-at-a-time idea for the most
-/// common (single-pattern) browser query.
-fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<String> {
+/// common (single-pattern) browser query. Output is a chunk sequence (see
+/// [`eval_select_json_chunks`]); concatenated it is the exact JSON document.
+fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Option<Vec<String>> {
     let (proj, inner): (Option<&[Variable]>, &GraphPattern) = match pattern {
         GraphPattern::Project { inner, variables } => (Some(variables), inner),
         other => (None, other),
@@ -367,7 +389,7 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
     head.push_str("]},\"results\":{\"bindings\":[");
     if unsat {
         head.push_str("]}}");
-        return Some(head);
+        return Some(vec![head]);
     }
 
     let scan = match filt {
@@ -445,20 +467,22 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
         // Budget gate on the total row count (sets the sticky flag; the caller's
         // check converts it into the budget error).
         let _ = budget::exhausted(frags.iter().map(|(n, _)| n).sum());
+        let mut chunks = vec![s];
         let mut wrote = false;
-        for (_, f) in &frags {
+        for (_, f) in frags {
             if f.is_empty() {
                 continue;
             }
             if wrote {
-                s.push(',');
+                chunks.last_mut().expect("chunks start non-empty").push(',');
             }
             wrote = true;
-            s.push_str(f);
+            emit_chunk(&mut chunks, f, flush);
         }
-        s.push_str("]}}");
-        return Some(s);
+        chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
+        return Some(chunks);
     }
+    let mut chunks: Vec<String> = Vec::new();
     let mut written = 0usize;
     for (i, row) in scan_rows.iter().enumerate() {
         // Coarse budget check every 1024 scanned rows; the caller's sticky check
@@ -474,18 +498,32 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern) -> Option<Str
         }
         written += 1;
         write_row(row, &mut s);
+        if flush.is_some_and(|n| s.len() >= n) {
+            chunks.push(std::mem::take(&mut s));
+        }
     }
     let _ = budget::exhausted(written); // final row-count gate (sticky)
     s.push_str("]}}");
-    Some(s)
+    chunks.push(s);
+    Some(chunks)
 }
 
 /// Evaluates a SELECT and serialises it straight to SPARQL-JSON, skipping the
 /// `QueryResult` (and its per-cell `oxrdf::Term` allocation). On native the per-row
 /// fragments are built in parallel; the wasm build is sequential.
 pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String, String> {
+    Ok(join_chunks(eval_select_json_chunks(graph, pattern, None)?))
+}
+
+/// [`eval_select_json`] as an ordered chunk sequence: the concatenation of the chunks
+/// is byte-identical to the single-string result. `flush = Some(n)` starts a new chunk
+/// roughly every `n` serialised bytes (and hands each parallel fragment over without
+/// re-copying); `flush = None` produces the single-string layout (one chunk on the
+/// sequential paths, head+fragments concatenated on the parallel path — exactly the
+/// old behaviour and allocation profile).
+pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Result<Vec<String>, String> {
     // Streaming fast paths — no Bindings materialised at all.
-    if let Some(json) = single_pattern_scan_json(graph, pattern) {
+    if let Some(json) = single_pattern_scan_json(graph, pattern, flush) {
         budget::check(0)?; // sticky: the streaming loop may have stopped mid-scan
         return Ok(json);
     }
@@ -548,23 +586,29 @@ pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String,
                 f
             })
             .collect();
-        for (i, f) in frags.iter().enumerate() {
+        let mut chunks = vec![s];
+        for (i, f) in frags.into_iter().enumerate() {
             if i > 0 {
-                s.push(',');
+                chunks.last_mut().expect("chunks start non-empty").push(',');
             }
-            s.push_str(f);
+            emit_chunk(&mut chunks, f, flush);
         }
-        s.push_str("]}}");
-        return Ok(s);
+        chunks.last_mut().expect("chunks start non-empty").push_str("]}}");
+        return Ok(chunks);
     }
+    let mut chunks: Vec<String> = Vec::new();
     for (i, row) in bindings.rows.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
         write_row(row, &mut s);
+        if flush.is_some_and(|n| s.len() >= n) {
+            chunks.push(std::mem::take(&mut s));
+        }
     }
     s.push_str("]}}");
-    Ok(s)
+    chunks.push(s);
+    Ok(chunks)
 }
 
 /// ASK evaluation: `true` iff `pattern` has at least one solution. The pattern is

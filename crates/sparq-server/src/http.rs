@@ -29,7 +29,7 @@ use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 
 use crate::exec::{prepare, PrepareError, QueryForm};
-use crate::negotiate::{negotiate, Format};
+use crate::negotiate::{negotiate, negotiate_graph, Format};
 use crate::results;
 
 // ---------------------------------------------------------------------------
@@ -275,7 +275,7 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
     match prepared.form {
         QueryForm::Select | QueryForm::Ask => {
             let is_ask = prepared.form == QueryForm::Ask;
-            let select = prepared.runnable_select.expect("SELECT/ASK always has a runnable query");
+            let select = prepared.runnable;
             let budget = make_budget(&config, !is_ask);
             let graph = state.snapshot();
             let cfg = config.clone();
@@ -297,9 +297,25 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
             });
             await_worker(task, &config).await
         }
-        QueryForm::Construct | QueryForm::Describe => not_implemented(
-            "CONSTRUCT/DESCRIBE are not yet supported: the engine exposes no RDF-graph result API (documented follow-up)",
-        ),
+        // CONSTRUCT / DESCRIBE (T16): an RDF graph result, negotiated between
+        // `application/n-triples` (default) and `text/turtle` (the N-Triples body is a
+        // syntactic subset of Turtle). DESCRIBE returns concise bounded descriptions.
+        // The engine's row budget applies to the WHERE-pattern solutions, the deadline
+        // to the whole evaluation — same guard semantics as SELECT.
+        QueryForm::Construct | QueryForm::Describe => {
+            let query = prepared.runnable;
+            let gfmt = negotiate_graph(accept);
+            let budget = make_budget(&config, true);
+            let graph = state.snapshot();
+            let cfg = config.clone();
+            let task = tokio::task::spawn_blocking(move || {
+                match sparq_engine::construct_ntriples_with_budget(&graph, &query, &budget) {
+                    Ok(body) => text_response(StatusCode::OK, gfmt.content_type(), body, head_only),
+                    Err(e) => engine_error_response(&e, &cfg),
+                }
+            });
+            await_worker(task, &config).await
+        }
     }
 }
 
@@ -330,7 +346,12 @@ async fn await_worker(task: tokio::task::JoinHandle<Response>, config: &ServerCo
 }
 
 /// Runs a SELECT on the engine and serialises it in the negotiated format. JSON uses the
-/// engine's direct id→JSON fast path; the others go through the materialised `QueryResult`.
+/// engine's direct id→JSON fast path and is **streamed**: the engine returns the body as
+/// an ordered chunk sequence (concatenation byte-identical to the single-string form) and
+/// the response body hands those chunks to hyper one by one — the peak never holds a
+/// second whole-result copy (T16). `Content-Length` is known up front (the chunks are
+/// fully evaluated before the response starts), so the response framing is identical to
+/// the buffered path. The other formats go through the materialised `QueryResult`.
 fn render_select(
     graph: &Graph,
     select: &str,
@@ -341,8 +362,8 @@ fn render_select(
 ) -> Response {
     let ct = fmt.select_content_type();
     let body = match fmt {
-        Format::Json => match sparq_engine::query_json_with_budget(graph, select, budget) {
-            Ok(json) => json,
+        Format::Json => match sparq_engine::query_json_chunks_with_budget(graph, select, budget) {
+            Ok(chunks) => return chunked_response(StatusCode::OK, ct, chunks, head_only),
             Err(e) => return engine_error_response(&e, config),
         },
         _ => {
@@ -569,6 +590,29 @@ fn text_response(status: StatusCode, content_type: &str, body: String, head_only
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, len)
         .body(out_body.into())
+        .unwrap()
+}
+
+/// Builds a response whose body is streamed from a pre-evaluated chunk sequence
+/// (T16): hyper writes the chunks one by one instead of the server concatenating
+/// them into a single giant `String` first. The total length is known, so the
+/// response carries the same `Content-Type`/`Content-Length` headers — and, by the
+/// engine's chunking contract, byte-identical body content — as the buffered path.
+/// HEAD mirrors GET: same headers, empty body.
+fn chunked_response(status: StatusCode, content_type: &str, chunks: Vec<String>, head_only: bool) -> Response {
+    let len: usize = chunks.iter().map(String::len).sum();
+    let body = if head_only {
+        axum::body::Body::empty()
+    } else {
+        axum::body::Body::from_stream(futures_util::stream::iter(
+            chunks.into_iter().map(|c| Ok::<_, std::convert::Infallible>(Bytes::from(c.into_bytes()))),
+        ))
+    };
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, len)
+        .body(body)
         .unwrap()
 }
 

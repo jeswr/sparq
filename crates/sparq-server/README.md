@@ -111,8 +111,23 @@ request, since N-Triples is a syntactic subset of Turtle). Write verbs → `501`
 | SELECT | `text/csv` | `text/csv; charset=utf-8` | conformant — [CSV/TSV](https://www.w3.org/TR/sparql11-results-csv-tsv/) (RFC 4180 quoting, CRLF) |
 | SELECT | `text/tab-separated-values` | `text/tab-separated-values; charset=utf-8` | conformant — TSV term syntax + escaping |
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` | conformant boolean |
+| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` | `application/n-triples` / `text/turtle` `; charset=utf-8` | conformant graph result (T16); the body is N-Triples — a syntactic subset of Turtle — under either type |
 
-Negotiation is q-value aware; unsupported / absent `Accept` defaults to JSON.
+Negotiation is q-value aware; unsupported / absent `Accept` defaults to JSON (SELECT/ASK)
+or N-Triples (CONSTRUCT/DESCRIBE).
+
+**Streamed SELECT bodies (T16).** JSON SELECT results are evaluated to an ordered chunk
+sequence inside the engine and streamed to the socket chunk by chunk instead of being
+concatenated into one giant `String` first. The bytes, `Content-Type` and
+`Content-Length` are identical to the buffered form (the length is known before the
+response starts); the win is peak memory — the server never holds a *second* whole-result
+copy. Measured on a 1M-row `SELECT * WHERE { ?s ?p ?o }` (202 MB JSON body): peak RSS
+~750 MB → ~405–570 MB.
+
+**DESCRIBE semantics.** The engine returns the **concise bounded description** (CBD) of
+each described resource: all triples with the resource as subject, recursing through
+blank-node objects. The SPARQL spec leaves the DESCRIBE result form to the
+implementation; CBD is the de-facto standard choice.
 
 ### HTTP status semantics
 
@@ -139,10 +154,10 @@ All error bodies are structured JSON: `{"error": "..."}`.
   selectors are **accepted and threaded through** but, with one default graph, have no
   effect — every graph resource maps onto the default graph. This needs roadmap **T9**
   (named-graph storage) before it can be made fully conformant.
-* **CONSTRUCT / DESCRIBE.** Classified correctly, but the engine exposes no RDF-graph
-  result API, so they return `501` with an explanatory message. A follow-up once the engine
-  gains a triple-result path (it would then negotiate `text/turtle` /
-  `application/n-triples` / `application/rdf+xml`).
+* **CONSTRUCT / DESCRIBE serialisations.** Implemented (T16) via the engine's RDF-graph
+  result API (`sparq_engine::construct` / `describe`), negotiated between
+  `application/n-triples` and `text/turtle` (the body is N-Triples either way — valid
+  Turtle). `application/rdf+xml` and a prefix-compacting Turtle writer are follow-ups.
 * **SPARQL Update + Graph Store write.** Out of scope here (thread **T11b**, gated on the
   T10 mutable-store work); `501` with a clear message.
 * **ASK** is implemented by rewriting the `ASK` to a `SELECT *` over the same pattern and
@@ -158,9 +173,9 @@ pointed at a running server:
 1. Start the server against the suite's data:
    `cargo run -p sparq-server -- --format turtle <suite-data>.ttl`
 2. Configure the harness's service endpoint to `http://127.0.0.1:3030/sparql`.
-3. The **query**, **result-format** and **HTTP-semantics** sections are expected to pass;
-   **update**, **CONSTRUCT/DESCRIBE** and **named-graph dataset** tests are expected to
-   report not-implemented per the limitations above.
+3. The **query** (including CONSTRUCT/DESCRIBE), **result-format** and **HTTP-semantics**
+   sections are expected to pass; **named-graph dataset** tests are expected to report
+   not-implemented per the limitations above.
 
 The in-process `tests/protocol.rs` suite mirrors the same assertions and runs in CI via
 `cargo test -p sparq-server`.
