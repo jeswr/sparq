@@ -142,6 +142,8 @@ pub struct AppState {
     commits: Arc<tokio::sync::watch::Sender<u64>>,
     /// Global subscription bookkeeping shared by all `/subscriptions` connections.
     pub(crate) subs: Arc<crate::subscriptions::SubscriptionCounters>,
+    /// Prometheus metrics (T22), exposed at `GET /metrics`.
+    metrics: Arc<crate::metrics::Metrics>,
 }
 
 /// The single-writer side of the **double-buffered update path** (T17 wiring).
@@ -208,7 +210,13 @@ impl AppState {
             config: Arc::new(config),
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
+            metrics: Arc::new(crate::metrics::Metrics::default()),
         }
+    }
+
+    /// The server's Prometheus metrics (T22).
+    pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {
+        &self.metrics
     }
 
     /// A cheap, consistent snapshot of the current graph for the duration of a request.
@@ -343,8 +351,22 @@ pub fn router(state: AppState) -> Router {
         .route("/subscriptions", get(crate::subscriptions::subscriptions_endpoint))
         // Liveness.
         .route("/health", get(|| async { "ok" }))
-        .with_state(state);
-    harden(routes, &config)
+        // Prometheus metrics (T22).
+        .route("/metrics", get(metrics_endpoint))
+        .with_state(state.clone());
+    // The metrics middleware wraps the WHOLE hardened stack so shed requests
+    // (429), body-limit rejections (413) and panics (500) are counted with the
+    // status the client actually saw.
+    harden(routes, &config).layer(axum::middleware::from_fn_with_state(state, crate::metrics::track))
+}
+
+/// `GET /metrics` — Prometheus text exposition (T22). The gauges (graph triple
+/// count, active subscriptions) are read at scrape time from live state.
+async fn metrics_endpoint(State(state): State<AppState>) -> Response {
+    let triples = state.snapshot().len();
+    let subs = state.subs.active_count();
+    let body = state.metrics().render(subs, triples);
+    text_response(StatusCode::OK, "text/plain; version=0.0.4; charset=utf-8", body, false)
 }
 
 /// Applies the T15 hardening middleware stack to a router (outermost first):
@@ -388,6 +410,46 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
 
 const SPARQL_QUERY_CT: &str = "application/sparql-query";
 const FORM_CT: &str = "application/x-www-form-urlencoded";
+/// `Accept` media type that turns a query request into an EXPLAIN response (T22).
+const EXPLAIN_CT: &str = "text/x-sparq-explain";
+
+/// How a `/sparql` query request should be answered (T22 EXPLAIN).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExplainMode {
+    /// Execute normally (the default).
+    Off,
+    /// Return the engine's planning-only plan text instead of executing.
+    Plan,
+    /// Execute under the normal budget and return the plan + per-operator trace.
+    Analyze,
+}
+
+/// EXPLAIN is requested via an `explain` parameter (URL query string, or the
+/// url-encoded POST body — the body wins) — `explain`, `explain=true`,
+/// `explain=plan` for the dry run, `explain=analyze` to execute and trace — or
+/// via `Accept: text/x-sparq-explain` (plan only).
+fn explain_mode(
+    url_params: &HashMap<String, String>,
+    body_params: Option<&HashMap<String, String>>,
+    headers: &HeaderMap,
+) -> ExplainMode {
+    if let Some(v) = body_params.and_then(|m| m.get("explain")).or_else(|| url_params.get("explain")) {
+        return match v.to_ascii_lowercase().as_str() {
+            "false" | "0" | "off" | "no" => ExplainMode::Off,
+            "analyze" | "analyse" => ExplainMode::Analyze,
+            _ => ExplainMode::Plan,
+        };
+    }
+    let accepts_explain = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains(EXPLAIN_CT));
+    if accepts_explain {
+        ExplainMode::Plan
+    } else {
+        ExplainMode::Off
+    }
+}
 
 async fn sparql_endpoint(
     State(state): State<AppState>,
@@ -396,27 +458,38 @@ async fn sparql_endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let url_params = parse_form(raw_query.as_deref().unwrap_or(""));
     match method {
         Method::GET | Method::HEAD => {
             // Query string carries `query=` (+ optional dataset params). Per protocol, a
             // GET without a `query` parameter is a malformed request (400).
-            let params = parse_form(raw_query.as_deref().unwrap_or(""));
-            match params.get("query") {
-                Some(q) => run_query(&state, q, &headers, method == Method::HEAD).await,
+            match url_params.get("query") {
+                Some(q) => {
+                    let explain = explain_mode(&url_params, None, &headers);
+                    run_query(&state, q, &headers, method == Method::HEAD, explain).await
+                }
                 None => bad_request("missing 'query' parameter"),
             }
         }
-        Method::POST => handle_post(&state, &headers, &body).await,
+        Method::POST => handle_post(&state, &headers, &body, &url_params).await,
         _ => method_not_allowed(&[Method::GET, Method::HEAD, Method::POST]),
     }
 }
 
-async fn handle_post(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Response {
+async fn handle_post(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &Bytes,
+    url_params: &HashMap<String, String>,
+) -> Response {
     let ct = content_type(headers);
     if ct.starts_with(SPARQL_QUERY_CT) {
         // POST directly — body IS the SPARQL query.
         match std::str::from_utf8(body) {
-            Ok(q) => run_query(state, q, headers, false).await,
+            Ok(q) => {
+                let explain = explain_mode(url_params, None, headers);
+                run_query(state, q, headers, false, explain).await
+            }
             Err(_) => bad_request("request body is not valid UTF-8"),
         }
     } else if ct.starts_with(FORM_CT) {
@@ -427,7 +500,10 @@ async fn handle_post(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Res
         };
         let params = parse_form(s);
         match params.get("query") {
-            Some(q) => run_query(state, q, headers, false).await,
+            Some(q) => {
+                let explain = explain_mode(url_params, Some(&params), headers);
+                run_query(state, q, headers, false, explain).await
+            }
             None => bad_request("missing 'query' parameter in url-encoded body"),
         }
     } else if ct.starts_with("application/sparql-update") {
@@ -440,7 +516,10 @@ async fn handle_post(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Res
                 let u = u.to_string();
                 let joined = tokio::task::spawn_blocking(move || st.apply_update(&u)).await;
                 match joined {
-                    Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+                    Ok(Ok(())) => {
+                        state.metrics().inc_updates();
+                        StatusCode::NO_CONTENT.into_response()
+                    }
                     Ok(Err(e)) => bad_request(&format!("update failed: {e}")),
                     Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
                 }
@@ -462,11 +541,37 @@ async fn handle_post(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Res
 /// cooperative [`QueryBudget`] (deadline + SELECT row cap). The await is additionally
 /// hard-capped at `timeout + TIMEOUT_GRACE` so a worker stuck in an uninstrumented
 /// stretch still gets its 503 on time (the worker itself stops at its next budget check).
-async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_only: bool) -> Response {
+async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_only: bool, explain: ExplainMode) -> Response {
     let prepared = match prepare(sparql) {
         Ok(p) => p,
         Err(PrepareError::Malformed(msg)) => return bad_request(&format!("malformed query: {msg}")),
     };
+    // T22 EXPLAIN: answer with the plan text instead of (plan-only) / alongside
+    // executing (analyze). Plan-only is a planning dry run — no budget needed —
+    // but both run on the blocking pool and under the worker timeout cap anyway;
+    // analyze executes, so it gets the standard per-request budget.
+    if explain != ExplainMode::Off {
+        let config = state.config.clone();
+        let cfg = config.clone();
+        let graph = state.snapshot();
+        let q = sparql.to_string();
+        let analyze = explain == ExplainMode::Analyze;
+        let budget = make_budget(&config, true);
+        let task = tokio::task::spawn_blocking(move || {
+            let r = if analyze {
+                sparq_engine::explain_analyze_with_budget(&graph, &q, &budget)
+            } else {
+                sparq_engine::explain(&graph, &q)
+            };
+            match r {
+                Ok(text) => text_response(StatusCode::OK, "text/plain; charset=utf-8", text, head_only),
+                // ANALYZE of a non-SELECT/ASK form is a client error, not a server one.
+                Err(e) if e.contains("EXPLAIN ANALYZE supports") => bad_request(&e),
+                Err(e) => engine_error_response(&e, &cfg),
+            }
+        });
+        return await_worker(task, &config).await;
+    }
     let accept = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok());

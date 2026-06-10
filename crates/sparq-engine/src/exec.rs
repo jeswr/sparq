@@ -158,6 +158,83 @@ pub(crate) mod budget {
     }
 }
 
+// ---- EXPLAIN ANALYZE operator trace (T22) -------------------------------------
+//
+// A thread-local trace installed only by `explain_analyze*`: every
+// `eval_graph_pattern` operator entry records a node (label, depth, output rows,
+// wall time). When no trace is installed the entire mechanism is one thread-local
+// `Cell<bool>` read per operator entry — the same cost class as the budget check
+// that already sits there, and nothing on any per-row path.
+pub(crate) mod trace {
+    use std::cell::{Cell, RefCell};
+
+    /// One traced operator (pre-order position + depth reconstruct the tree).
+    pub(crate) struct Node {
+        pub(crate) label: String,
+        pub(crate) depth: usize,
+        pub(crate) rows: usize,
+        pub(crate) nanos: u64,
+    }
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+        static DEPTH: Cell<usize> = const { Cell::new(0) };
+        static NODES: RefCell<Vec<Node>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Disables tracing (and clears any partial trace) when the installing entry
+    /// point returns — also on error/unwind, so a failed query never leaks a trace.
+    pub(crate) struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ENABLED.with(|e| e.set(false));
+            DEPTH.with(|d| d.set(0));
+            NODES.with(|n| n.borrow_mut().clear());
+        }
+    }
+
+    pub(crate) fn install() -> Guard {
+        ENABLED.with(|e| e.set(true));
+        DEPTH.with(|d| d.set(0));
+        NODES.with(|n| n.borrow_mut().clear());
+        Guard
+    }
+
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        ENABLED.with(|e| e.get())
+    }
+
+    /// Opens a node, returning its index for [`exit`] to fill in.
+    pub(crate) fn enter(label: String) -> usize {
+        let depth = DEPTH.with(|d| {
+            let v = d.get();
+            d.set(v + 1);
+            v
+        });
+        NODES.with(|n| {
+            let mut n = n.borrow_mut();
+            n.push(Node { label, depth, rows: 0, nanos: 0 });
+            n.len() - 1
+        })
+    }
+
+    pub(crate) fn exit(idx: usize, rows: usize, nanos: u64) {
+        DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        NODES.with(|n| {
+            if let Some(node) = n.borrow_mut().get_mut(idx) {
+                node.rows = rows;
+                node.nanos = nanos;
+            }
+        });
+    }
+
+    /// Drains the recorded nodes (pre-order). Call before the guard drops.
+    pub(crate) fn take() -> Vec<Node> {
+        NODES.with(|n| std::mem::take(&mut *n.borrow_mut()))
+    }
+}
+
 /// One solution row: the ids bound to each of a [`Bindings`]' variables. Inlined
 /// up to 4 columns (the common case) so a join produces no heap allocation per
 /// row — the dominant cost on large join results.
@@ -833,7 +910,7 @@ fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<
 
 /// Distinct (non-repeated) variable positions of a prepared pattern, or `None` if
 /// a variable repeats (e.g. `?x p ?x`), which would make range counts over-count.
-fn distinct_pattern_vars(pos_vars: &[Option<Variable>; 3]) -> bool {
+pub(crate) fn distinct_pattern_vars(pos_vars: &[Option<Variable>; 3]) -> bool {
     let vars: Vec<&Variable> = pos_vars.iter().flatten().collect();
     let mut sorted = vars.clone();
     sorted.sort();
@@ -1150,7 +1227,66 @@ fn eval_graph_named(
     }
 }
 
+/// Operator-entry dispatcher. When an EXPLAIN ANALYZE trace is installed (T22) it
+/// routes through the `#[cold]` timing wrapper; otherwise it is a direct call into
+/// the evaluator — the only cost on the normal path is one thread-local flag read
+/// per *operator* (the same class of check `budget::check` already does here).
 fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+    if trace::enabled() {
+        return eval_graph_pattern_traced(graph, local, p);
+    }
+    eval_graph_pattern_inner(graph, local, p)
+}
+
+/// EXPLAIN ANALYZE wrapper: records one trace node per operator with its output
+/// row count and wall time. `#[cold]` keeps it (and the `Instant` plumbing) off
+/// the normal path entirely.
+#[cold]
+fn eval_graph_pattern_traced(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
+    let idx = trace::enter(trace_label(p));
+    #[cfg(not(target_arch = "wasm32"))]
+    let start = std::time::Instant::now();
+    let r = eval_graph_pattern_inner(graph, local, p);
+    #[cfg(not(target_arch = "wasm32"))]
+    let nanos = start.elapsed().as_nanos() as u64;
+    // `Instant` is unusable on wasm32-unknown-unknown (it panics): rows only there.
+    #[cfg(target_arch = "wasm32")]
+    let nanos = 0u64;
+    trace::exit(idx, r.as_ref().map_or(0, |b| b.rows.len()), nanos);
+    r
+}
+
+/// The operator label an EXPLAIN ANALYZE trace node carries (only built while tracing).
+fn trace_label(p: &GraphPattern) -> String {
+    if is_conjunctive(p) {
+        let mut patterns = Vec::new();
+        let mut filters = Vec::new();
+        flatten_conjunction(p, &mut patterns, &mut filters);
+        let plan = if bgp_uses_binary(&patterns) { "binary GOO" } else { "worst-case-optimal (LFTJ)" };
+        return format!("BGP [{plan}] ({} patterns, {} filters)", patterns.len(), filters.len());
+    }
+    match p {
+        GraphPattern::Bgp { patterns } => format!("BGP ({} patterns)", patterns.len()),
+        GraphPattern::Filter { .. } => "Filter".into(),
+        GraphPattern::Join { .. } => "Join".into(),
+        GraphPattern::LeftJoin { .. } => "LeftJoin (OPTIONAL)".into(),
+        GraphPattern::Union { .. } => "Union".into(),
+        GraphPattern::Extend { variable, .. } => format!("Extend (BIND ?{})", variable.as_str()),
+        GraphPattern::Minus { .. } => "Minus".into(),
+        GraphPattern::Values { .. } => "Values".into(),
+        GraphPattern::Path { .. } => "PropertyPath".into(),
+        GraphPattern::Graph { .. } => "Graph".into(),
+        GraphPattern::Project { .. } => "Project (sub-select)".into(),
+        GraphPattern::Distinct { .. } => "Distinct".into(),
+        GraphPattern::Reduced { .. } => "Reduced".into(),
+        GraphPattern::Slice { .. } => "Slice".into(),
+        GraphPattern::OrderBy { .. } => "OrderBy".into(),
+        GraphPattern::Group { .. } => "Group".into(),
+        _ => "Other".into(),
+    }
+}
+
+fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Result<Bindings, String> {
     budget::check(0)?; // coarse cooperative cancellation: once per operator entry
     if is_conjunctive(p) {
         let mut patterns = Vec::new();
@@ -1213,7 +1349,7 @@ fn eval_graph_pattern(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -
     }
 }
 
-fn is_conjunctive(p: &GraphPattern) -> bool {
+pub(crate) fn is_conjunctive(p: &GraphPattern) -> bool {
     match p {
         GraphPattern::Bgp { .. } => true,
         // A FILTER may only be flattened into the enclosing conjunction when every
@@ -1273,7 +1409,7 @@ fn filter_scope_ok(e: &Expression, bound: &FxHashSet<Variable>) -> bool {
     }
 }
 
-fn flatten_conjunction(p: &GraphPattern, patterns: &mut Vec<TriplePattern>, filters: &mut Vec<Expression>) {
+pub(crate) fn flatten_conjunction(p: &GraphPattern, patterns: &mut Vec<TriplePattern>, filters: &mut Vec<Expression>) {
     match p {
         GraphPattern::Bgp { patterns: tps } => patterns.extend(tps.iter().cloned()),
         GraphPattern::Join { left, right } => {
@@ -1295,7 +1431,7 @@ fn flatten_conjunction(p: &GraphPattern, patterns: &mut Vec<TriplePattern>, filt
 /// so the numeric access is sequential rather than a random dictionary gather —
 /// the layout fix the hardware research measured as an 8–15× win).
 #[derive(Clone, Copy)]
-enum NumCmp {
+pub(crate) enum NumCmp {
     Gt(f64),
     Ge(f64),
     Lt(f64),
@@ -1304,6 +1440,17 @@ enum NumCmp {
 }
 
 impl NumCmp {
+    /// Human-readable comparison for EXPLAIN output, e.g. `> 28`.
+    pub(crate) fn render(&self) -> String {
+        match *self {
+            NumCmp::Gt(t) => format!("> {t}"),
+            NumCmp::Ge(t) => format!(">= {t}"),
+            NumCmp::Lt(t) => format!("< {t}"),
+            NumCmp::Le(t) => format!("<= {t}"),
+            NumCmp::Eq(t) => format!("= {t}"),
+        }
+    }
+
     #[inline]
     fn test(&self, x: f64) -> bool {
         match *self {
@@ -1399,7 +1546,7 @@ fn pattern_var_pos(tp: &TriplePattern, var: &Variable) -> Option<usize> {
 /// Splits FILTERs into per-pattern sargable numeric predicates (pushed into the
 /// scan of the first pattern that binds the variable) and the residual filters
 /// (applied normally afterwards).
-fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, NumCmp)>>, Vec<Expression>) {
+pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, NumCmp)>>, Vec<Expression>) {
     let mut pat_filters: Vec<Option<(usize, NumCmp)>> = vec![None; patterns.len()];
     let mut residual = Vec::new();
     for f in filters {
@@ -1818,7 +1965,7 @@ fn unify_quoted(graph: &Graph, pat: &TriplePattern, comps: [Id; 3], vars: &[Vari
 /// Whether this conjunctive BGP would be routed to the worst-case-optimal plan
 /// (so the caller knows whether sargable-filter pushdown into the binary scan
 /// applies).
-fn bgp_uses_binary(patterns: &[TriplePattern]) -> bool {
+pub(crate) fn bgp_uses_binary(patterns: &[TriplePattern]) -> bool {
     !(patterns.len() >= 3 && bgp_is_cyclic(patterns))
 }
 
@@ -1842,41 +1989,22 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     }
     let pfilter = |i: usize| -> Option<(usize, NumCmp)> { pat_filters.get(i).copied().flatten() };
 
-    struct Prepared {
-        id_pat: IdPattern,
-        pos_vars: [Option<Variable>; 3],
-        est: usize,
-        unsatisfiable: bool,
-    }
-    let mut prepared: Vec<Prepared> = Vec::with_capacity(patterns.len());
-    for tp in patterns {
-        let (id_pat, pos_vars, unsat) = prepare_pattern(graph, tp)?;
-        let est = if unsat { 0 } else { graph.store.estimate(&id_pat) };
-        prepared.push(Prepared { id_pat, pos_vars, est, unsatisfiable: unsat });
-    }
+    let prepared = prepare_bgp(graph, patterns)?;
     if prepared.iter().any(|p| p.unsatisfiable) {
         return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
 
-    let var_pos = |i: usize, v: &Variable| -> Option<usize> {
-        prepared[i].pos_vars.iter().position(|pv| pv.as_ref() == Some(v))
-    };
+    let var_pos = |i: usize, v: &Variable| -> Option<usize> { prepared[i].var_pos(v) };
 
     // Cost-based greedy (GOO): seed with the smallest single-pattern cardinality,
     // then repeatedly add the connected pattern that yields the smallest *estimated
     // join result*, using the per-predicate characteristic stats (distinct
     // subjects/objects) to estimate join selectivity. The join order only affects
     // performance (the result is identical for any order — differentially tested).
-    let seed = (0..prepared.len()).min_by_key(|&i| prepared[i].est).unwrap();
-    let seed_join_var = prepared[seed]
-        .pos_vars
-        .iter()
-        .flatten()
-        .find(|v| (0..prepared.len()).any(|j| j != seed && var_pos(j, v).is_some()))
-        .cloned();
-    // A pushed-down filter scans in its own column's order (sequential numeric
-    // access); otherwise sort by the join variable to enable a merge join.
-    let seed_sort_col = pfilter(seed).map(|(c, _)| c).or_else(|| seed_join_var.as_ref().and_then(|v| var_pos(seed, v)));
+    // The decision logic lives in `goo_seed` / `goo_seed_sort` / `goo_pick` /
+    // `record_pattern_ndv`, shared verbatim with the T22 EXPLAIN dry-run planner.
+    let seed = goo_seed(&prepared);
+    let seed_sort_col = goo_seed_sort(&prepared, seed, pfilter(seed).map(|(c, _)| c));
 
     let mut result = scan_to_bindings(graph, &prepared[seed].id_pat, &prepared[seed].pos_vars, seed_sort_col, pfilter(seed), None);
     let mut done = vec![false; prepared.len()];
@@ -1886,55 +2014,12 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     // count (ndv), used to score the next join.
     let mut cur_card = prepared[seed].est as f64;
     let mut var_ndv: FxHashMap<Variable, f64> = FxHashMap::default();
-    let record_vars = |i: usize, cur_card: f64, var_ndv: &mut FxHashMap<Variable, f64>| {
-        for (pos, ov) in prepared[i].pos_vars.iter().enumerate() {
-            if let Some(v) = ov {
-                let ndv = pattern_var_ndv(graph, &prepared[i].id_pat, pos, prepared[i].est).min(cur_card.max(1.0));
-                let e = var_ndv.entry(v.clone()).or_insert(ndv);
-                *e = e.min(ndv);
-            }
-        }
-    };
-    record_vars(seed, cur_card, &mut var_ndv);
+    record_pattern_ndv(graph, &prepared[seed], cur_card, &mut var_ndv);
 
     for _ in 1..prepared.len() {
         // Pick the connected candidate with the smallest estimated output.
-        let mut best: Option<(usize, f64)> = None;
-        for i in 0..prepared.len() {
-            if done[i] {
-                continue;
-            }
-            let mut sel = 1.0f64;
-            let mut shared = false;
-            for (pos, ov) in prepared[i].pos_vars.iter().enumerate() {
-                if let Some(v) = ov {
-                    if let Some(&rndv) = var_ndv.get(v) {
-                        shared = true;
-                        let pndv = pattern_var_ndv(graph, &prepared[i].id_pat, pos, prepared[i].est);
-                        sel /= rndv.max(pndv).max(1.0);
-                    }
-                }
-            }
-            if !shared {
-                continue;
-            }
-            let out = cur_card * prepared[i].est as f64 * sel;
-            if best.map_or(true, |(_, bc)| out < bc) {
-                best = Some((i, out));
-            }
-        }
-        let i = match best {
-            Some((i, out)) => {
-                cur_card = out.max(0.0);
-                i
-            }
-            None => {
-                // Disconnected: smallest-cardinality remaining (cross product).
-                let i = (0..prepared.len()).filter(|&j| !done[j]).min_by_key(|&j| prepared[j].est).unwrap();
-                cur_card *= prepared[i].est as f64;
-                i
-            }
-        };
+        let (i, new_card, _connected) = goo_pick(graph, &prepared, &done, &var_ndv, cur_card);
+        cur_card = new_card;
         done[i] = true;
 
         // Index-nested-loop (bind) join: when the running result is MUCH smaller than
@@ -1952,7 +2037,7 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
             let rk = result.col(jv).unwrap();
             let pp = var_pos(i, jv).unwrap();
             result = bind_join(graph, result, &prepared[i].id_pat, &prepared[i].pos_vars, rk, pp, pfilter(i));
-            record_vars(i, cur_card, &mut var_ndv);
+            record_pattern_ndv(graph, &prepared[i], cur_card, &mut var_ndv);
             if result.rows.is_empty() {
                 break;
             }
@@ -1975,13 +2060,127 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         } else {
             result = cross_product(result, rhs);
         }
-        record_vars(i, cur_card, &mut var_ndv);
+        record_pattern_ndv(graph, &prepared[i], cur_card, &mut var_ndv);
 
         if result.rows.is_empty() {
             break;
         }
     }
     Ok(result)
+}
+
+// ---- Shared GOO planning decisions (executor + T22 EXPLAIN dry run) -----------
+//
+// The greedy-ordering decisions of `eval_bgp_binary` are factored into the small
+// pure helpers below so EXPLAIN can REPLAY the planner without executing anything
+// and without duplicating the logic (no drift): the executor calls them on its hot
+// path (inlined, zero extra cost), the explain module replays them symbolically.
+
+/// One BGP triple pattern prepared for planning: resolved constant ids, the
+/// variable at each canonical position, and the index-range cardinality estimate.
+pub(crate) struct Prepared {
+    pub(crate) id_pat: IdPattern,
+    pub(crate) pos_vars: [Option<Variable>; 3],
+    pub(crate) est: usize,
+    pub(crate) unsatisfiable: bool,
+}
+
+impl Prepared {
+    /// Canonical position (0=s, 1=p, 2=o) of `v` in this pattern, if present.
+    #[inline]
+    pub(crate) fn var_pos(&self, v: &Variable) -> Option<usize> {
+        self.pos_vars.iter().position(|pv| pv.as_ref() == Some(v))
+    }
+}
+
+/// Prepares every pattern of a BGP for planning (constant resolution + estimates).
+pub(crate) fn prepare_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Vec<Prepared>, String> {
+    let mut prepared: Vec<Prepared> = Vec::with_capacity(patterns.len());
+    for tp in patterns {
+        let (id_pat, pos_vars, unsat) = prepare_pattern(graph, tp)?;
+        let est = if unsat { 0 } else { graph.store.estimate(&id_pat) };
+        prepared.push(Prepared { id_pat, pos_vars, est, unsatisfiable: unsat });
+    }
+    Ok(prepared)
+}
+
+/// GOO seed choice: the pattern with the smallest single-pattern cardinality.
+pub(crate) fn goo_seed(prepared: &[Prepared]) -> usize {
+    (0..prepared.len()).min_by_key(|&i| prepared[i].est).unwrap()
+}
+
+/// The seed scan's requested sort column: a pushed-down filter scans in its own
+/// column's order (sequential numeric access); otherwise sort by the first seed
+/// variable shared with another pattern, to enable a merge join.
+pub(crate) fn goo_seed_sort(prepared: &[Prepared], seed: usize, filter_col: Option<usize>) -> Option<usize> {
+    if filter_col.is_some() {
+        return filter_col;
+    }
+    prepared[seed]
+        .pos_vars
+        .iter()
+        .flatten()
+        .find(|v| (0..prepared.len()).any(|j| j != seed && prepared[j].var_pos(v).is_some()))
+        .and_then(|v| prepared[seed].var_pos(v))
+}
+
+/// Folds pattern `p`'s per-variable distinct-value estimates into the running
+/// `var_ndv` map (each variable keeps its smallest — most selective — estimate,
+/// capped by the running result cardinality).
+pub(crate) fn record_pattern_ndv(graph: &Graph, p: &Prepared, cur_card: f64, var_ndv: &mut FxHashMap<Variable, f64>) {
+    for (pos, ov) in p.pos_vars.iter().enumerate() {
+        if let Some(v) = ov {
+            let ndv = pattern_var_ndv(graph, &p.id_pat, pos, p.est).min(cur_card.max(1.0));
+            let e = var_ndv.entry(v.clone()).or_insert(ndv);
+            *e = e.min(ndv);
+        }
+    }
+}
+
+/// One GOO step: the connected not-yet-joined pattern with the smallest estimated
+/// join output (`|R| · |P| / max(ndv)` per shared variable), or — when nothing
+/// connects — the smallest remaining pattern (cross product). Returns the chosen
+/// pattern index, the updated result-cardinality estimate, and whether it was
+/// connected.
+pub(crate) fn goo_pick(
+    graph: &Graph,
+    prepared: &[Prepared],
+    done: &[bool],
+    var_ndv: &FxHashMap<Variable, f64>,
+    cur_card: f64,
+) -> (usize, f64, bool) {
+    let mut best: Option<(usize, f64)> = None;
+    for i in 0..prepared.len() {
+        if done[i] {
+            continue;
+        }
+        let mut sel = 1.0f64;
+        let mut shared = false;
+        for (pos, ov) in prepared[i].pos_vars.iter().enumerate() {
+            if let Some(v) = ov {
+                if let Some(&rndv) = var_ndv.get(v) {
+                    shared = true;
+                    let pndv = pattern_var_ndv(graph, &prepared[i].id_pat, pos, prepared[i].est);
+                    sel /= rndv.max(pndv).max(1.0);
+                }
+            }
+        }
+        if !shared {
+            continue;
+        }
+        let out = cur_card * prepared[i].est as f64 * sel;
+        if best.map_or(true, |(_, bc)| out < bc) {
+            best = Some((i, out));
+        }
+    }
+    match best {
+        Some((i, out)) => (i, out.max(0.0), true),
+        None => {
+            // Disconnected: smallest-cardinality remaining (cross product).
+            let i = (0..prepared.len()).filter(|&j| !done[j]).min_by_key(|&j| prepared[j].est).unwrap();
+            (i, cur_card * prepared[i].est as f64, false)
+        }
+    }
 }
 
 /// Estimated number of distinct values of the variable at canonical position
@@ -2000,7 +2199,7 @@ fn pattern_var_ndv(graph: &Graph, id_pat: &IdPattern, pos: usize, est: usize) ->
     }
 }
 
-fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
+pub(crate) fn collect_vars(patterns: &[TriplePattern]) -> Vec<Variable> {
     let mut vars = Vec::new();
     for tp in patterns {
         for v in [tp_var(&tp.subject), nnp_var(&tp.predicate), tp_var(&tp.object)].into_iter().flatten() {
@@ -2257,18 +2456,8 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
 
     // Global variable order: most-constrained first (highest degree, then most
     // selective). Constant-only patterns contribute no variables but must match.
-    let all_vars = collect_vars(patterns);
-    let degree = |v: &Variable| prepared.iter().filter(|(_, pv)| pv.iter().flatten().any(|x| x == v)).count();
-    let min_est = |v: &Variable| {
-        prepared
-            .iter()
-            .filter(|(_, pv)| pv.iter().flatten().any(|x| x == v))
-            .map(|(ip, _)| graph.store.estimate(ip))
-            .min()
-            .unwrap_or(usize::MAX)
-    };
-    let mut order_vars = all_vars.clone();
-    order_vars.sort_by(|a, b| degree(b).cmp(&degree(a)).then(min_est(a).cmp(&min_est(b))));
+    // (Shared with the T22 EXPLAIN dry run.)
+    let order_vars = wcoj_global_order(graph, patterns, &prepared);
     let n_levels = order_vars.len();
 
     let var_levels: FxHashMap<Variable, usize> =
@@ -2314,6 +2503,28 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
     // Output rows are produced in global-order lexicographic order.
     let sorted_by = order_vars.first().cloned();
     Ok(Bindings { vars: order_vars, rows: out, sorted_by })
+}
+
+/// The Leapfrog-Triejoin global variable order: most-constrained variables first
+/// (highest pattern degree, ties broken by the smallest estimate among the
+/// patterns mentioning the variable). Shared by `eval_bgp_wcoj` and EXPLAIN.
+pub(crate) fn wcoj_global_order(
+    graph: &Graph,
+    patterns: &[TriplePattern],
+    prepared: &[(IdPattern, [Option<Variable>; 3])],
+) -> Vec<Variable> {
+    let degree = |v: &Variable| prepared.iter().filter(|(_, pv)| pv.iter().flatten().any(|x| x == v)).count();
+    let min_est = |v: &Variable| {
+        prepared
+            .iter()
+            .filter(|(_, pv)| pv.iter().flatten().any(|x| x == v))
+            .map(|(ip, _)| graph.store.estimate(ip))
+            .min()
+            .unwrap_or(usize::MAX)
+    };
+    let mut order_vars = collect_vars(patterns);
+    order_vars.sort_by(|a, b| degree(b).cmp(&degree(a)).then(min_est(a).cmp(&min_est(b))));
+    order_vars
 }
 
 /// α-acyclicity test via GYO reduction: repeatedly drop variables that occur in

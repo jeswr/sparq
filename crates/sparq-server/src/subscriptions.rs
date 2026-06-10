@@ -72,6 +72,13 @@ pub(crate) struct SubscriptionCounters {
     next_id: AtomicU64,
 }
 
+impl SubscriptionCounters {
+    /// Currently active subscriptions server-wide (the `/metrics` gauge, T22).
+    pub(crate) fn active_count(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
 /// The slots a single connection holds against the global cap. Slots are acquired on
 /// `subscribe` and released on `unsubscribe`/termination; `Drop` releases whatever is
 /// still held, so a socket that disconnects (or a handler that panics) can never leak
