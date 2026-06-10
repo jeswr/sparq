@@ -187,11 +187,23 @@ fn hash_triple_ids(ids: [Id; 3]) -> u64 {
 /// NOTE: returns a placeholder for `Term::Triple` — a triple term's hash is over its
 /// component IDS (dict-relative), so callers must resolve those first (see
 /// `Dict::intern` / `Dict::lookup`, which intercept `Term::Triple` before hashing).
+/// The STORED language slot of a literal: the BCP47 tag, with an RDF 1.2 base direction
+/// appended as `lang--dir` (the SPARQL/Turtle surface syntax — `--` can never occur inside
+/// a valid language tag, so the encoding is unambiguous). One string field keeps the
+/// storage layout, hashing and equality unchanged; [`reconstruct_ref`] splits it back out.
+#[inline]
+fn lang_with_dir(l: &Literal) -> Option<std::borrow::Cow<'_, str>> {
+    match l.direction() {
+        Some(d) => Some(std::borrow::Cow::Owned(format!("{}--{d}", l.language().unwrap_or("")))),
+        None => l.language().map(std::borrow::Cow::Borrowed),
+    }
+}
+
 #[inline]
 fn hash_term(t: &Term) -> u64 {
     match t {
         Term::NamedNode(n) => hash_iri(n.as_str()),
-        Term::Literal(l) => hash_lit(l.value(), l.datatype().as_str(), l.language()),
+        Term::Literal(l) => hash_lit(l.value(), l.datatype().as_str(), lang_with_dir(l).as_deref()),
         Term::BlankNode(b) => hash_blank(b.as_str()),
         _ => 0,
     }
@@ -266,7 +278,7 @@ fn stored_is_lit(s: &Stored, value: &str, datatype: &str, lang: Option<&str>, da
 fn stored_eq_term(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> bool {
     match q {
         Term::NamedNode(n) => stored_is_iri(s, n.as_str(), prefixes),
-        Term::Literal(l) => stored_is_lit(s, l.value(), l.datatype().as_str(), l.language(), datatypes),
+        Term::Literal(l) => stored_is_lit(s, l.value(), l.datatype().as_str(), lang_with_dir(l).as_deref(), datatypes),
         Term::BlankNode(b) => matches!(s, Stored::Blank(x) if **x == *b.as_str()),
         _ => false,
     }
@@ -356,7 +368,16 @@ fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
             Term::NamedNode(NamedNode::new_unchecked(iri))
         }
         StoredRef::Lit { value, datatype, lang } => Term::Literal(match lang {
-            Some(l) => Literal::new_language_tagged_literal_unchecked(value.to_string(), l.to_string()),
+            // A stored `lang--dir` slot is an RDF 1.2 directional language-tagged string
+            // (see `lang_with_dir`); a plain tag is an ordinary one.
+            Some(l) => match l.split_once("--") {
+                Some((tag, dir)) => Literal::new_directional_language_tagged_literal_unchecked(
+                    value.to_string(),
+                    tag.to_string(),
+                    if dir == "rtl" { oxrdf::BaseDirection::Rtl } else { oxrdf::BaseDirection::Ltr },
+                ),
+                None => Literal::new_language_tagged_literal_unchecked(value.to_string(), l.to_string()),
+            },
             None => Literal::new_typed_literal(value.to_string(), d.datatypes[datatype as usize].clone()),
         }),
         StoredRef::Blank(b) => Term::BlankNode(oxrdf::BlankNode::new_unchecked(b.to_string())),
@@ -374,7 +395,9 @@ fn stored_ref_eq_term(s: &StoredRef, q: &Term, prefixes: &[Box<str>], datatypes:
             iri.len() == p.len() + suffix.len() && iri.starts_with(p.as_ref()) && iri[p.len()..] == **suffix
         }
         (StoredRef::Lit { value, datatype, lang }, Term::Literal(l)) => {
-            *value == l.value() && lang.as_deref() == l.language() && datatypes[*datatype as usize].as_str() == l.datatype().as_str()
+            *value == l.value()
+                && lang.as_deref() == lang_with_dir(l).as_deref()
+                && datatypes[*datatype as usize].as_str() == l.datatype().as_str()
         }
         (StoredRef::Blank(x), Term::BlankNode(b)) => *x == b.as_str(),
         _ => false,
@@ -727,7 +750,7 @@ impl Dict {
     pub fn intern(&mut self, term: &Term) -> Id {
         match term {
             Term::NamedNode(n) => self.intern_iri(n.as_str()),
-            Term::Literal(l) => self.intern_lit(l.value(), l.datatype().as_str(), l.language()),
+            Term::Literal(l) => self.intern_lit(l.value(), l.datatype().as_str(), lang_with_dir(l).as_deref()),
             Term::BlankNode(b) => self.intern_blank(b.as_str()),
             Term::Triple(t) => {
                 let s = match t.subject {

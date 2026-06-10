@@ -2077,3 +2077,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+#[cfg(test)]
+mod dir_roundtrip_test {
+    #[test]
+    fn dir_literal_roundtrip() {
+        let g = crate::Graph::load_str("@prefix : <http://ex/> . :a :p \"abc\"@en--ltr .", "turtle").unwrap();
+        let scan = g.store.scan(&[None, None, None]);
+        let t = scan.to_spo(&scan.rows.as_ref()[0]);
+        assert_eq!(g.dict.term(t[2]).to_string(), "\"abc\"@en--ltr");
+    }
+}

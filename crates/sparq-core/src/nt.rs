@@ -117,6 +117,7 @@ fn blank(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+const RDF_DIR_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString";
 
 fn literal(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     let (vstart, vend, vesc, after) = scan_delim(b, i, b'"')?;
@@ -139,8 +140,11 @@ fn literal(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
             while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'-') {
                 j += 1;
             }
+            // RDF 1.2 `@lang--dir` keeps the combined slot (the dict's stored encoding)
+            // but is typed rdf:dirLangString.
             let lang = str_of(&b[lstart..j])?;
-            Ok((dict.intern_lit(&value, RDF_LANG_STRING, Some(lang)), j))
+            let dt = if lang.contains("--") { RDF_DIR_LANG_STRING } else { RDF_LANG_STRING };
+            Ok((dict.intern_lit(&value, dt, Some(lang)), j))
         }
         // simple literal -> xsd:string
         _ => Ok((dict.intern_lit(&value, XSD_STRING, None), after)),
