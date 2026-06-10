@@ -10,26 +10,62 @@
 //! Builtins implemented (roadmap T12 — growing toward EYE parity):
 //!   * `math:` comparisons (greaterThan/lessThan/notGreaterThan/notLessThan/equalTo/notEqualTo)
 //!     and functional (sum/difference/product/quotient/max/min/exponentiation/negation/
-//!     absoluteValue/rounded/floor/ceiling) over `( … )` list arguments;
-//!   * `string:` concatenation/length/contains/startsWith/endsWith/greaterThan/lessThan/
-//!     matches/notMatches/replace/lowerCase/upperCase;
+//!     absoluteValue/rounded/floor/ceiling/memberCount) over `( … )` list arguments, plus the
+//!     trig/hyperbolic/log family (sin/cos/tan/asin/acos/atan/sinh/cosh/tanh/asinh/acosh/
+//!     atanh, degrees/radians, `(x base) math:logarithm` = log_base(x), and `(x y) math:atan2`
+//!     which — exactly like eye.pl — computes `atan(x/y)`, not the quadrant-aware C atan2);
+//!   * `string:` concatenation/length/contains/containsIgnoringCase/startsWith/endsWith/
+//!     greaterThan/lessThan/matches/notMatches/replace/lowerCase/upperCase, `string:scrape`
+//!     (first regex capture group), and a `string:format` SUBSET (`%s` `%d` `%f` `%%` only —
+//!     C-printf width/precision flags fail the premise rather than mis-format);
 //!   * `list:` length/first/last and the member/in generators;
-//!   * `time:` year/month/day/hours/minutes/seconds;
-//!   * `log:` equalTo/notEqualTo, and includes/notIncludes (store-scoped when the subject is
+//!   * `time:` year/month/day (EYE's set), plus hours/minutes/seconds (SWAP/cwm);
+//!   * `log:` equalTo/notEqualTo, includes/notIncludes (store-scoped when the subject is
 //!     `{ }`/unbound — scoped negation as failure — or true formula containment when the
-//!     subject is a ground `{ … }` formula; see [`scoped_negation`]).
+//!     subject is a ground `{ … }` formula; see [`scoped_negation`]), `log:conjunction`
+//!     (merge a list of formulae; duplicate triples deduped, original order kept),
+//!     `log:uri` (IRI ↔ xsd:string, both directions), and `log:dtlit`
+//!     (`("lex" xsd:dt) log:dtlit "lex"^^xsd:dt`, both directions).
+//!
+//! Backward rules (`<=`, log:impliedBy) are GOAL-DIRECTED, matching EYE: they never fire
+//! forward and their conclusions are never materialized into the closure on their own.
+//! When a forward-rule premise atom (e.g. an EYE-style query rule `{goal} => {goal}`)
+//! finds no supporting fact — or in addition to its fact matches — the engine resolves it
+//! against backward-rule conclusions SLD-style: unify the goal with a (variable-renamed)
+//! conclusion, then prove that rule's premise (joins, builtins, and further backward rules,
+//! depth-bounded by [`BW_DEPTH`]). Verified against eyereasoner/eye `reasoning/backward`:
+//! the old "reverse `<=` into a forward rule" treatment derives NOTHING there, because the
+//! premise (`?X math:greaterThan ?Y`) is a pure builtin that is only evaluable once the
+//! GOAL binds the variables. Known gap (documented, not hacked): goals whose arguments are
+//! `( … )` lists or quoted formulae are not structurally unified with backward conclusions
+//! (rule-local list structure uses per-rule blank nodes), so recursive list-state idioms
+//! (EYE's fibonacci/collatz/peasant) are out of scope for now.
 //!
 //! Deliberately NOT implemented (checked against EYE/SWAP):
 //!   * `math:greaterThanOrEqual`/`lessThanOrEqual` — not in the SWAP math vocabulary nor in
 //!     EYE's builtin table; the canonical names are notLessThan/notGreaterThan (implemented).
-//!   * `list:append` — producing a NEW list requires a first-class list value in [`Term`];
-//!     lists currently exist only as rule-local rdf:first/rest structure resolved up front
-//!     ([`extract_lists`]), and `intern` has no dictionary representation for a list value,
-//!     so a produced list could neither be bound to a variable nor emitted into the ground
-//!     closure. Needs a `Term::List` variant first — deferred rather than hacked.
+//!   * `list:append`/`list:rest` — producing a NEW list requires a first-class list value in
+//!     [`Term`]; lists currently exist only as rule-local rdf:first/rest structure resolved
+//!     up front ([`extract_lists`]), and `intern` has no dictionary representation for a
+//!     list value, so a produced list could neither be bound to a variable nor emitted into
+//!     the ground closure. Needs a `Term::List` variant first — deferred rather than hacked.
+//!   * `time:localTime`/`time:gmTime` — wall-clock reads; a deterministic closure cannot
+//!     depend on when it is computed. (`time:inSeconds` is not an EYE builtin at all —
+//!     eye-builtins.n3 lists only year/month/day/localTime under `time:`.)
+//!   * `log:semantics`/`log:content` — dereference and parse remote/local documents; the
+//!     reasoner is a pure function of its input text, so document fetching stays out.
+//!   * `log:rawType` — EYE distinguishes labeled vs unlabeled blank nodes by their origin,
+//!     which our parser does not track; reporting an approximate type would silently
+//!     disagree with EYE, so it is deferred until bnode origin is recorded.
+//!   * `string:format` directives beyond `%s`/`%d`/`%f`/`%%` (width, precision, `%e`/`%g`,
+//!     length modifiers) — unimplemented directives FAIL the premise (no silent mangling).
+//!   * Reverse (object-bound) modes of the unary math builtins (EYE's `?X math:sin 0.5`
+//!     solving X = asin 0.5) — only the forward subject→object direction is evaluated;
+//!     premises are evaluated left-to-right with no coroutining (EYE `when`-delays).
 //!
-//! Next increments: `log:` conjunction/semantics, non-ground formula scopes for
-//! `log:includes` (quantification), backward chaining (`<=` goal-direction).
+//! Next increments: `Term::List` (first-class list values: list:append, backward goals over
+//! list arguments), non-ground formula scopes for `log:includes` (quantification),
+//! `log:collectAllIn` (scoped aggregation).
 
 mod model;
 mod parser;
@@ -103,8 +139,28 @@ const STRING: &str = "http://www.w3.org/2000/10/swap/string#";
 const LIST: &str = "http://www.w3.org/2000/10/swap/list#";
 const TIME: &str = "http://www.w3.org/2000/10/swap/time#";
 
+/// Depth bound for goal-directed (`<=`) resolution: a backward proof may chain through at
+/// most this many backward-rule applications. Bounds runaway recursion (e.g. a rule whose
+/// premise re-poses its own goal) — within the bound, proofs are exhaustive.
+const BW_DEPTH: usize = 64;
+
+/// Goal-directed context: the document's backward (`<=`) rules plus a counter for renaming
+/// rule variables apart (standardizing apart, so nested applications of the same rule do not
+/// capture each other's bindings).
+struct BwCtx<'a> {
+    rules: &'a [Rule],
+    rename: std::cell::Cell<usize>,
+}
+
+impl<'a> BwCtx<'a> {
+    fn new(rules: &'a [Rule]) -> BwCtx<'a> {
+        BwCtx { rules, rename: std::cell::Cell::new(0) }
+    }
+}
+
 /// One derivation step: a `conclusion` triple was produced by rule `rule` (its index in the
-/// document's rule order) from the ground `premises` (the supporting facts under the binding).
+/// document's rule order) from the ground `premises` (the supporting facts under the binding;
+/// premise atoms proven by backward rules are not themselves facts and are not listed).
 pub struct ProofStep {
     pub conclusion: [Id; 3],
     pub rule: usize,
@@ -122,15 +178,36 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
 pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     let parsed = parser::parse(src)?;
     let mut facts = FactIndex::from_iter(parsed.facts);
+    let bw = BwCtx::new(&parsed.backward_rules);
     // Derivation steps at the term level (interned to ids once at the end).
     let mut steps: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
+
+    // Which predicates can a backward rule conclude? A forward rule with a premise atom on
+    // such a predicate cannot use the semi-naive delta restriction (a backward proof is not
+    // a fact in any delta), so it re-evaluates fully each round — see `needs_full` below.
+    let bw_concl_preds: FxHashSet<&str> = parsed
+        .backward_rules
+        .iter()
+        .flat_map(|r| r.conclusion.iter())
+        .filter_map(|c| match &c[1] {
+            Term::Iri(i) => Some(i.as_str()),
+            _ => None,
+        })
+        .collect();
+    let bw_any_var_pred = parsed
+        .backward_rules
+        .iter()
+        .flat_map(|r| r.conclusion.iter())
+        .any(|c| matches!(&c[1], Term::Var(_)));
 
     // SEMI-NAIVE fixpoint: each round, a positive rule only fires on bindings that involve at
     // least one NEWLY-derived fact (the `delta`) — run once per join-atom position, with that
     // atom restricted to `delta` and the rest to all facts. This avoids re-deriving the whole
     // closure every round (the naive blow-up on recursive rule chains). Rules with scoped
-    // negation are non-monotonic, so they re-evaluate against ALL facts each round (correct,
-    // matches the prior behaviour); pure-builtin rules (no join atom) fire only in round 0.
+    // negation are non-monotonic, and rules whose join atoms may be proven by BACKWARD rules
+    // have support outside the fact deltas — both re-evaluate against ALL facts each round
+    // (correct; the fixpoint still terminates because conclusions are deduped). Pure-builtin
+    // rules (no join atom) fire only in round 0.
     let rule_meta: Vec<(Vec<usize>, bool)> = parsed
         .rules
         .iter()
@@ -139,7 +216,11 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
             let joins: Vec<usize> =
                 r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p, &lists)).map(|(i, _)| i).collect();
             let has_neg = r.premise.iter().any(|p| scoped_negation(&p[1]).is_some());
-            (joins, has_neg)
+            let needs_bw = joins.iter().any(|&k| match &r.premise[k][1] {
+                Term::Iri(i) => bw_any_var_pred || bw_concl_preds.contains(i.as_str()),
+                _ => !parsed.backward_rules.is_empty(),
+            });
+            (joins, has_neg || needs_bw)
         })
         .collect();
 
@@ -148,11 +229,12 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
     loop {
         let mut produced: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
         for (ri, rule) in parsed.rules.iter().enumerate() {
-            let (joins, has_neg) = &rule_meta[ri];
-            let bindings: Vec<Binding> = if *has_neg || joins.is_empty() {
-                // non-monotonic / constant rule: full evaluation (negation) or round-0 only.
-                if *has_neg || first_round {
-                    match_premise(&rule.premise, &facts)
+            let (joins, needs_full) = &rule_meta[ri];
+            let bindings: Vec<Binding> = if *needs_full || joins.is_empty() {
+                // non-monotonic / backward-supported / constant rule: full evaluation
+                // (negation + backward) every round, or round-0 only (constant).
+                if *needs_full || first_round {
+                    match_premise(&rule.premise, &facts, &bw)
                 } else {
                     Vec::new()
                 }
@@ -160,7 +242,14 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
                 // Semi-naive: union over delta-at-each-join-position (dedup via facts.insert).
                 let mut bs = Vec::new();
                 for &k in joins {
-                    bs.extend(match_premise_seeded(&rule.premise, &facts, &Binding::new(), Some((&delta, k))));
+                    bs.extend(match_premise_seeded(
+                        &rule.premise,
+                        &facts,
+                        &Binding::new(),
+                        Some((&delta, k)),
+                        &bw,
+                        BW_DEPTH,
+                    ));
                 }
                 bs
             };
@@ -220,8 +309,8 @@ type Binding = HashMap<String, Term>;
 /// evaluating builtins as filters/computations). N3 collections `( … )` in the premise are
 /// rule-local list STRUCTURE (rdf:first/rest over fresh bnodes), not data to match — they are
 /// extracted up front and consumed by the functional builtins (e.g. `math:sum`).
-fn match_premise(premise: &[[Term; 3]], facts: &FactIndex) -> Vec<Binding> {
-    match_premise_seeded(premise, facts, &Binding::new(), None)
+fn match_premise(premise: &[[Term; 3]], facts: &FactIndex, bw: &BwCtx) -> Vec<Binding> {
+    match_premise_seeded(premise, facts, &Binding::new(), None, bw, BW_DEPTH)
 }
 
 /// Match `premise` starting from an existing partial binding `seed`. For SEMI-NAIVE
@@ -235,6 +324,8 @@ fn match_premise_seeded(
     facts: &FactIndex,
     seed: &Binding,
     delta_at: Option<(&FxHashSet<[Term; 3]>, usize)>,
+    bw: &BwCtx,
+    depth: usize,
 ) -> Vec<Binding> {
     // Semi-naive: seed from the DELTA atom first (delta is small → most selective), then
     // evaluate the rest against the index. Doing the delta atom first makes it prune early
@@ -253,7 +344,7 @@ fn match_premise_seeded(
             premise.iter().enumerate().filter(|&(i, _)| i != k).map(|(_, p)| p.clone()).collect();
         let mut out = Vec::new();
         for s in &seeds {
-            out.extend(match_premise_seeded(&rest, facts, s, None));
+            out.extend(match_premise_seeded(&rest, facts, s, None, bw, depth));
         }
         return out;
     }
@@ -282,13 +373,16 @@ fn match_premise_seeded(
                 let matches: Option<Vec<Binding>> = match apply(&pat[0], &b) {
                     Term::Formula(ts) if !ts.is_empty() => {
                         if ts.iter().all(|t| t.iter().all(Term::is_ground)) {
+                            // Formula containment is SYNTACTIC: backward rules describe the
+                            // store, not arbitrary quoted graphs — no goal-direction here.
                             let scope = FactIndex::from_iter(ts);
-                            Some(match_premise_seeded(inner, &scope, &b, None))
+                            let no_bw = BwCtx::new(&[]);
+                            Some(match_premise_seeded(inner, &scope, &b, None, &no_bw, 0))
                         } else {
                             None // non-ground scope formula: unsupported (future work)
                         }
                     }
-                    _ => Some(match_premise_seeded(inner, facts, &b, None)),
+                    _ => Some(match_premise_seeded(inner, facts, &b, None, bw, depth)),
                 };
                 let Some(matches) = matches else { continue };
                 if is_not {
@@ -330,10 +424,13 @@ fn match_premise_seeded(
                 .into_iter()
                 .filter_map(|b| eval_functional(f, &pat[0], &pat[2], &lists, b))
                 .collect();
+        } else if let Some(op) = binder_builtin(&pat[1]) {
+            bindings = bindings.into_iter().filter_map(|b| eval_binder(op, &pat[0], &pat[2], b)).collect();
         } else if let Some(op) = builtin(&pat[1]) {
             bindings.retain(|b| eval_builtin(op, &pat[0], &pat[2], b));
         } else {
-            // Join atom: selective FactIndex lookup (no full scan) for each current binding.
+            // Join atom: selective FactIndex lookup (no full scan) for each current binding,
+            // PLUS goal-directed resolution against the backward (`<=`) rules.
             let mut next = Vec::new();
             for b in &bindings {
                 let cands = facts.candidates(&apply(&pat[0], b), &apply(&pat[1], b), &apply(&pat[2], b));
@@ -341,6 +438,9 @@ fn match_premise_seeded(
                     if let Some(nb) = unify(pat, fact, b) {
                         next.push(nb);
                     }
+                }
+                if !bw.rules.is_empty() && depth > 0 {
+                    next.extend(backward_prove(pat, b, facts, bw, depth - 1));
                 }
             }
             bindings = next;
@@ -357,9 +457,116 @@ fn match_premise_seeded(
 fn is_join_atom(pat: &[Term; 3], lists: &HashMap<Term, Vec<Term>>) -> bool {
     builtin(&pat[1]).is_none()
         && functional_builtin(&pat[1]).is_none()
+        && binder_builtin(&pat[1]).is_none()
         && list_generator(&pat[1]).is_none()
         && scoped_negation(&pat[1]).is_none()
         && !is_list_struct(pat, lists)
+}
+
+/// Goal-directed (`<=`) resolution of one premise atom: for each backward rule whose
+/// conclusion unifies with the goal (under the current binding `b`), prove that rule's
+/// premise — recursively allowing joins, builtins, and further backward rules — and project
+/// each proof back onto the goal's variables. SLD resolution with standardized-apart rule
+/// variables and a depth bound (`depth` counts REMAINING backward applications).
+fn backward_prove(pat: &[Term; 3], b: &Binding, facts: &FactIndex, bw: &BwCtx, depth: usize) -> Vec<Binding> {
+    let goal = [apply(&pat[0], b), apply(&pat[1], b), apply(&pat[2], b)];
+    let mut out = Vec::new();
+    for rule in bw.rules {
+        for concl in &rule.conclusion {
+            // Cheap gate: ground predicates must agree before we rename/unify anything.
+            if let (Term::Iri(gp), Term::Iri(cp)) = (&goal[1], &concl[1]) {
+                if gp != cp {
+                    continue;
+                }
+            }
+            // Standardize apart: fresh names for this rule application's variables.
+            let n = bw.rename.get();
+            bw.rename.set(n + 1);
+            let rc = [rename_vars(&concl[0], n), rename_vars(&concl[1], n), rename_vars(&concl[2], n)];
+            let mut subst = b.clone();
+            if !(unify_walked(&goal[0], &rc[0], &mut subst)
+                && unify_walked(&goal[1], &rc[1], &mut subst)
+                && unify_walked(&goal[2], &rc[2], &mut subst))
+            {
+                continue;
+            }
+            let prem: Vec<[Term; 3]> = rule
+                .premise
+                .iter()
+                .map(|t| [rename_vars(&t[0], n), rename_vars(&t[1], n), rename_vars(&t[2], n)])
+                .collect();
+            for sol in match_premise_seeded(&prem, facts, &subst, None, bw, depth) {
+                // Project the proof onto the goal's variables (walk chains like
+                // outer-var → renamed-var → ground value).
+                let mut nb = b.clone();
+                let mut ok = true;
+                for g in pat {
+                    if let Term::Var(_) = g {
+                        let val = walk(g, &sol);
+                        if (val.is_ground() || matches!(val, Term::Formula(_)))
+                            && !unify_term(g, &val, &mut nb)
+                        {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    out.push(nb);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `t` with every variable renamed into the standardize-apart space of rule application `n`
+/// (recursing into quoted formulae).
+fn rename_vars(t: &Term, n: usize) -> Term {
+    match t {
+        Term::Var(v) => Term::Var(format!("__bw{n}_{v}")),
+        Term::Formula(ts) => Term::Formula(
+            ts.iter().map(|tr| [rename_vars(&tr[0], n), rename_vars(&tr[1], n), rename_vars(&tr[2], n)]).collect(),
+        ),
+        _ => t.clone(),
+    }
+}
+
+/// Resolve `t` through any chain of variable bindings in `s` (bounded against cycles).
+fn walk(t: &Term, s: &Binding) -> Term {
+    let mut cur = t.clone();
+    for _ in 0..s.len() + 1 {
+        match &cur {
+            Term::Var(v) => match s.get(v) {
+                Some(next) => cur = next.clone(),
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    cur
+}
+
+/// Unification where BOTH sides may contain variables (goal ↔ backward-rule conclusion),
+/// chain-resolving each side through `s` first. Unbound-vs-unbound binds left → right, so a
+/// free goal variable points AT the rule variable and is grounded by the premise proof.
+fn unify_walked(a: &Term, c: &Term, s: &mut Binding) -> bool {
+    let aw = walk(a, s);
+    let cw = walk(c, s);
+    if aw == cw {
+        return true;
+    }
+    match (&aw, &cw) {
+        (Term::Var(v), _) => {
+            s.insert(v.clone(), cw.clone());
+            true
+        }
+        (_, Term::Var(v)) => {
+            s.insert(v.clone(), aw.clone());
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Resolve every list node in `premise` (rooted at an rdf:first) to its member sequence.
@@ -462,8 +669,9 @@ enum Builtin {
     StrEnds,
     StrGt,
     StrLt,
-    StrMatches,    // string:matches (regex)
-    StrNotMatches, // string:notMatches (regex, negated; invalid regex ⇒ premise fails)
+    StrMatches,        // string:matches (regex)
+    StrNotMatches,     // string:notMatches (regex, negated; invalid regex ⇒ premise fails)
+    StrContainsIgnCase, // string:containsIgnoringCase
 }
 
 fn builtin(p: &Term) -> Option<Builtin> {
@@ -489,6 +697,7 @@ fn builtin(p: &Term) -> Option<Builtin> {
     if let Some(f) = i.strip_prefix(STRING) {
         return Some(match f {
             "contains" => Builtin::StrContains,
+            "containsIgnoringCase" => Builtin::StrContainsIgnCase,
             "startsWith" => Builtin::StrStarts,
             "endsWith" => Builtin::StrEnds,
             "greaterThan" => Builtin::StrGt,
@@ -512,7 +721,8 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
         | Builtin::StrGt
         | Builtin::StrLt
         | Builtin::StrMatches
-        | Builtin::StrNotMatches => {
+        | Builtin::StrNotMatches
+        | Builtin::StrContainsIgnCase => {
             let (Some(x), Some(y)) = (lex(&s), lex(&o)) else { return false };
             match op {
                 Builtin::StrContains => x.contains(y),
@@ -522,6 +732,7 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
                 Builtin::StrLt => x < y,
                 Builtin::StrMatches => regex::Regex::new(y).map(|re| re.is_match(x)).unwrap_or(false),
                 Builtin::StrNotMatches => regex::Regex::new(y).map(|re| !re.is_match(x)).unwrap_or(false),
+                Builtin::StrContainsIgnCase => x.to_lowercase().contains(&y.to_lowercase()),
                 _ => unreachable!(),
             }
         }
@@ -537,6 +748,50 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
                 _ => unreachable!(),
             }
         }
+    }
+}
+
+/// Bidirectional binary builtins over a SINGLE subject term (not a `( … )` list): either
+/// side may be the unknown, and evaluating binds it.
+#[derive(Clone, Copy)]
+enum Bidi {
+    LogUri, // log:uri — IRI ↔ its text as an xsd:string (either direction)
+}
+
+fn binder_builtin(p: &Term) -> Option<Bidi> {
+    let Term::Iri(i) = p else { return None };
+    match i.strip_prefix(LOG) {
+        Some("uri") => Some(Bidi::LogUri),
+        _ => None,
+    }
+}
+
+/// Evaluate a bidirectional builtin: compute the bound side, unify with the other (binding
+/// a variable or filtering on equality). `None` ⇒ the premise fails for this binding.
+fn eval_binder(op: Bidi, s: &Term, o: &Term, b: Binding) -> Option<Binding> {
+    let (sv, ov) = (apply(s, &b), apply(o, &b));
+    let mut nb = b;
+    match op {
+        Bidi::LogUri => match (&sv, &ov) {
+            // forward: IRI subject → its text as a string literal
+            (Term::Iri(i), _) => {
+                let lit = Term::Lit(i.clone(), "http://www.w3.org/2001/XMLSchema#string".into(), None);
+                if unify_term(o, &lit, &mut nb) {
+                    Some(nb)
+                } else {
+                    None
+                }
+            }
+            // reverse: string object → the IRI it names
+            (Term::Var(_), Term::Lit(v, _, _)) => {
+                if unify_term(s, &Term::Iri(v.clone()), &mut nb) {
+                    Some(nb)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
     }
 }
 
@@ -595,12 +850,19 @@ enum Func {
     Max,
     Min,
     Exponentiation,
-    Concat,    // string:concatenation
-    Length,    // list:length
-    StrLength, // string:length (Unicode scalar count)
-    Replace,   // string:replace (regex): ( str pattern replacement ) string:replace ?out
-    First,     // list:first
-    Last,      // list:last
+    Logarithm,   // (x base) math:logarithm log_base(x) — EYE: log(U)/log(V)
+    Atan2,       // (x y) math:atan2 — EYE's eye.pl computes atan(x/y), NOT C atan2; we match
+    MemberCount, // math:memberCount — list length, or distinct triple count of a formula
+    Concat,      // string:concatenation
+    Format,      // string:format — ( fmt args… ); %s/%d/%f/%% subset, else premise fails
+    Scrape,      // string:scrape — ( str regex ); the FIRST capture group of the first match
+    Length,      // list:length
+    StrLength,   // string:length (Unicode scalar count)
+    Replace,     // string:replace (regex): ( str pattern replacement ) string:replace ?out
+    First,       // list:first
+    Last,        // list:last
+    Conjunction, // log:conjunction — merge a list of formulae into one formula
+    Dtlit,       // log:dtlit — ( "lex" xsd:dt ) ↔ "lex"^^xsd:dt (both directions)
     // single-value-arg (string case mapping, Unicode-aware)
     LowerCase, // string:lowerCase
     UpperCase, // string:upperCase
@@ -610,6 +872,21 @@ enum Func {
     Rounded,
     Floor,
     Ceiling,
+    // single-value-arg trig/hyperbolic (forward direction only; see module doc)
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
+    Degrees, // radians → degrees (x·180/π), matching eye.pl
+    Radians, // degrees → radians (x·π/180)
     // single-value-arg (time: components of an xsd:dateTime)
     Year,
     Month,
@@ -632,11 +909,28 @@ fn functional_builtin(p: &Term) -> Option<Func> {
             "max" => Func::Max,
             "min" => Func::Min,
             "exponentiation" => Func::Exponentiation,
+            "logarithm" => Func::Logarithm,
+            "atan2" => Func::Atan2,
+            "memberCount" => Func::MemberCount,
             "negation" => Func::Negation,
             "absoluteValue" => Func::AbsoluteValue,
             "rounded" => Func::Rounded,
             "floor" => Func::Floor,
             "ceiling" => Func::Ceiling,
+            "sin" => Func::Sin,
+            "cos" => Func::Cos,
+            "tan" => Func::Tan,
+            "asin" => Func::Asin,
+            "acos" => Func::Acos,
+            "atan" => Func::Atan,
+            "sinh" => Func::Sinh,
+            "cosh" => Func::Cosh,
+            "tanh" => Func::Tanh,
+            "asinh" => Func::Asinh,
+            "acosh" => Func::Acosh,
+            "atanh" => Func::Atanh,
+            "degrees" => Func::Degrees,
+            "radians" => Func::Radians,
             _ => return None,
         });
     }
@@ -651,8 +945,17 @@ fn functional_builtin(p: &Term) -> Option<Func> {
             _ => return None,
         });
     }
+    if let Some(f) = i.strip_prefix(LOG) {
+        return match f {
+            "conjunction" => Some(Func::Conjunction),
+            "dtlit" => Some(Func::Dtlit),
+            _ => None,
+        };
+    }
     match (i.strip_prefix(STRING), i.strip_prefix(LIST)) {
         (Some("concatenation"), _) => Some(Func::Concat),
+        (Some("format"), _) => Some(Func::Format),
+        (Some("scrape"), _) => Some(Func::Scrape),
         (Some("length"), _) => Some(Func::StrLength),
         (Some("replace"), _) => Some(Func::Replace),
         (Some("lowerCase"), _) => Some(Func::LowerCase),
@@ -673,15 +976,113 @@ fn eval_functional(
     lists: &HashMap<Term, Vec<Term>>,
     b: Binding,
 ) -> Option<Binding> {
+    const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+    // log:dtlit needs the UNAPPLIED member terms: its reverse mode binds them by
+    // decomposing a ground object literal into ( "lexical" datatype-IRI ).
+    if let Func::Dtlit = f {
+        let members = lists.get(subj)?;
+        if members.len() != 2 {
+            return None;
+        }
+        let (m0, m1) = (apply(&members[0], &b), apply(&members[1], &b));
+        let mut nb = b;
+        return match (&m0, &m1) {
+            // forward: ( "lex" xsd:dt ) → "lex"^^xsd:dt
+            (Term::Lit(v, _, _), Term::Iri(dt)) => {
+                let lit = Term::Lit(v.clone(), dt.clone(), None);
+                unify_term(obj, &lit, &mut nb).then_some(nb)
+            }
+            // reverse: decompose a ground object literal into its parts
+            _ => {
+                let Term::Lit(v, dt, _) = apply(obj, &nb) else { return None };
+                (unify_term(&members[0], &Term::Lit(v.clone(), XSD_STRING.into(), None), &mut nb)
+                    && unify_term(&members[1], &Term::Iri(dt.clone()), &mut nb))
+                .then_some(nb)
+            }
+        };
+    }
     // Arguments: the list members, or a singleton for the unary (math:/time:) ops.
     let args: Vec<Term> = match lists.get(subj) {
         Some(members) => members.iter().map(|m| apply(m, &b)).collect(),
         None => vec![apply(subj, &b)],
     };
-    if args.is_empty() {
+    if args.is_empty() && !matches!(f, Func::Conjunction | Func::MemberCount) {
         return None;
     }
     let result: Term = match f {
+        Func::Conjunction => {
+            // Merge a list of formulae (EYE conjoin): duplicates deduped, order preserved.
+            // The boolean literal `true` counts as the empty formula (EYE's conjoin(true)).
+            let mut merged: Vec<[Term; 3]> = Vec::new();
+            for a in &args {
+                match a {
+                    Term::Formula(ts) => {
+                        for t in ts {
+                            if !merged.contains(t) {
+                                merged.push(t.clone());
+                            }
+                        }
+                    }
+                    Term::Lit(v, _, _) if v == "true" => {}
+                    _ => return None,
+                }
+            }
+            Term::Formula(merged)
+        }
+        Func::MemberCount => match &args[..] {
+            // a `( … )` list: its length; a quoted formula: its DISTINCT triple count
+            [Term::Formula(ts)] => {
+                let distinct: FxHashSet<&[Term; 3]> = ts.iter().collect();
+                number_term(distinct.len() as f64)
+            }
+            _ if lists.contains_key(subj) => number_term(args.len() as f64),
+            _ => return None,
+        },
+        Func::Format => {
+            // ( fmt args… ) string:format ?out — honest %s/%d/%f/%% subset; any other
+            // directive (or an argument-count mismatch, which EYE throws on) fails.
+            let fmt = lex(&args[0])?.to_string();
+            let mut out = String::new();
+            let mut argi = 1;
+            let mut chars = fmt.chars();
+            while let Some(c) = chars.next() {
+                if c != '%' {
+                    out.push(c);
+                    continue;
+                }
+                match chars.next()? {
+                    '%' => out.push('%'),
+                    's' => {
+                        out.push_str(lex(args.get(argi)?)?);
+                        argi += 1;
+                    }
+                    'd' => {
+                        let n = num(args.get(argi)?)?;
+                        out.push_str(&(n as i64).to_string());
+                        argi += 1;
+                    }
+                    'f' => {
+                        let n = num(args.get(argi)?)?;
+                        out.push_str(&format!("{n:.6}")); // C printf default precision
+                        argi += 1;
+                    }
+                    _ => return None, // unsupported directive: fail, don't mangle
+                }
+            }
+            if argi != args.len() {
+                return None;
+            }
+            Term::Lit(out, XSD_STRING.into(), None)
+        }
+        Func::Scrape => {
+            // ( str regex ) string:scrape ?out — first capture group of the first match.
+            if args.len() != 2 {
+                return None;
+            }
+            let re = regex::Regex::new(lex(&args[1])?).ok()?;
+            let cap = re.captures(lex(&args[0])?)?.get(1)?.as_str().to_string();
+            Term::Lit(cap, XSD_STRING.into(), None)
+        }
         Func::Concat => {
             let mut s = String::new();
             for a in &args {
@@ -737,6 +1138,22 @@ fn eval_functional(
                     let (a, b) = two(&nums)?;
                     a.powf(b)
                 }
+                Func::Logarithm => {
+                    // (x base) → log_base(x); EYE computes log(U)/log(V).
+                    let (x, base) = two(&nums)?;
+                    if x <= 0.0 || base <= 0.0 || base == 1.0 {
+                        return None;
+                    }
+                    x.ln() / base.ln()
+                }
+                Func::Atan2 => {
+                    // EYE's eye.pl: `W is atan(U/V)` — deliberately matched (see module doc).
+                    let (x, y) = two(&nums)?;
+                    if y == 0.0 {
+                        return None;
+                    }
+                    (x / y).atan()
+                }
                 Func::Remainder => {
                     let (a, b) = two(&nums)?;
                     if b == 0.0 {
@@ -756,8 +1173,25 @@ fn eval_functional(
                 Func::Rounded => nums[0].round(),
                 Func::Floor => nums[0].floor(),
                 Func::Ceiling => nums[0].ceil(),
+                Func::Sin => nums[0].sin(),
+                Func::Cos => nums[0].cos(),
+                Func::Tan => nums[0].tan(),
+                Func::Asin => nums[0].asin(),
+                Func::Acos => nums[0].acos(),
+                Func::Atan => nums[0].atan(),
+                Func::Sinh => nums[0].sinh(),
+                Func::Cosh => nums[0].cosh(),
+                Func::Tanh => nums[0].tanh(),
+                Func::Asinh => nums[0].asinh(),
+                Func::Acosh => nums[0].acosh(),
+                Func::Atanh => nums[0].atanh(),
+                Func::Degrees => nums[0] * 180.0 / std::f64::consts::PI,
+                Func::Radians => nums[0] * std::f64::consts::PI / 180.0,
                 _ => unreachable!(),
             };
+            if !v.is_finite() {
+                return None; // domain error (asin 2, acosh 0.5, …): the premise fails
+            }
             number_term(v)
         }
     };
@@ -869,14 +1303,86 @@ mod tests {
 
     #[test]
     fn backward_rule_arrow() {
-        // `{ conclusion } <= { premise }` — same closure as `premise => conclusion`.
+        // `{ conclusion } <= { premise }` is GOAL-DIRECTED (EYE semantics): it never fires
+        // forward on its own; a forward rule whose premise needs the conclusion (here an
+        // EYE-style query rule `{goal} => {goal}`) triggers the backward proof.
         let src = r#"
             @prefix : <http://ex/> .
             :Socrates a :Man .
             { ?x a :Mortal } <= { ?x a :Man } .
+            { ?x a :Mortal } => { ?x a :Mortal } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/Socrates", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Mortal"));
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/Socrates", ty, "http://ex/Mortal"), "query rule drives backward proof");
+
+        // Without a forward rule posing the goal, the backward rule must NOT materialize
+        // anything — EYE outputs no `:Mortal` triple for this document either.
+        let src_no_query = r#"
+            @prefix : <http://ex/> .
+            :Socrates a :Man .
+            { ?x a :Mortal } <= { ?x a :Man } .
+        "#;
+        let (d2, s2) = closure(src_no_query);
+        assert!(!has(&d2, &s2, "http://ex/Socrates", ty, "http://ex/Mortal"), "no goal, no backward firing");
+    }
+
+    #[test]
+    fn backward_rule_builtin_premise() {
+        // The eyereasoner/eye reasoning/backward case, inlined: the backward premise is a
+        // PURE BUILTIN over the goal's variables — only evaluable once the query rule's
+        // goal binds ?X/?Y (a forward reversal of `<=` derives nothing here).
+        let src = r#"
+            @prefix math: <http://www.w3.org/2000/10/swap/math#>.
+            @prefix : <http://example.org/#>.
+            { ?X :moreInterestingThan ?Y. } <= { ?X math:greaterThan ?Y. }.
+            { 5 :moreInterestingThan 3. } => { 5 :moreInterestingThan 3. }.
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let (five, three) = (d.intern_lit("5", int, None), d.intern_lit("3", int, None));
+        assert!(
+            s.contains(&[five, id(&d, "http://example.org/#moreInterestingThan"), three]),
+            "5 :moreInterestingThan 3 proven goal-directed"
+        );
+    }
+
+    #[test]
+    fn backward_rule_chained_and_base_case() {
+        // Backward rules chaining through other backward rules, plus a `<= true` base case.
+        let src = r#"
+            @prefix : <http://ex/> .
+            :rex a :Dog .
+            { ?x a :Animal } <= { ?x a :Dog } .
+            { ?x :needs :food } <= { ?x a :Animal } .
+            { :water a :Necessity } <= true .
+            { ?x :needs :food } => { ?x :gets :food } .
+            { :water a :Necessity } => { :water :is :necessary } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(has(&d, &s, "http://ex/rex", "http://ex/gets", "http://ex/food"), "two-step backward chain");
+        assert!(has(&d, &s, "http://ex/water", "http://ex/is", "http://ex/necessary"), "<= true base case");
+        // The intermediate backward conclusions are NOT materialized.
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(!has(&d, &s, "http://ex/rex", ty, "http://ex/Animal"), "backward conclusions stay virtual");
+    }
+
+    #[test]
+    fn backward_rule_recursion_bounded() {
+        // A self-referential backward rule must not hang: the depth bound cuts the cycle
+        // and the engine still terminates (deriving nothing for the unprovable goal).
+        let src = r#"
+            @prefix : <http://ex/> .
+            :seed :p :o .
+            { ?x :loops ?y } <= { ?y :loops ?x } .
+            { ?a :loops ?b } => { ?a :looped ?b } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(has(&d, &s, "http://ex/seed", "http://ex/p", "http://ex/o"), "facts survive");
+        assert!(
+            !s.iter().any(|[_, p, _]| *p == id(&d, "http://ex/looped")),
+            "cyclic backward goal proves nothing"
+        );
     }
 
     #[test]
@@ -1194,6 +1700,212 @@ mod tests {
         let (d, s) = closure(src);
         assert!(has(&d, &s, "http://ex/s", "http://ex/notInc", "http://ex/yes"), "absent triple → notIncludes holds");
         assert!(!has(&d, &s, "http://ex/s", "http://ex/bad", "http://ex/yes"), "present triple → notIncludes fails");
+    }
+
+    #[test]
+    fn trig_exact_values() {
+        // The EYE trig family at exact points: sin 0 = 0, cos 0 = 1, sin(π/2) = 1, tan 0 = 0,
+        // acos 1 = 0, sinh 0 = 0, cosh 0 = 1, tanh 0 = 0 (all exact in IEEE f64).
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :t :seed 0 .
+            { ?x :seed ?z .
+              ?z math:sin ?s . ?z math:cos ?c . ?z math:tan ?t .
+              ?z math:sinh ?sh . ?z math:cosh ?ch . ?z math:tanh ?th .
+              1 math:acos ?ac . 1.5707963267948966 math:sin ?shalf }
+            => { ?x :sin ?s ; :cos ?c ; :tan ?t ; :sinh ?sh ; :cosh ?ch ; :tanh ?th ;
+                    :acos1 ?ac ; :sinHalfPi ?shalf } .
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let zero = d.intern_lit("0", int, None);
+        let one = d.intern_lit("1", int, None);
+        let t = id(&d, "http://ex/t");
+        for (p, v) in [
+            ("sin", zero), ("cos", one), ("tan", zero), ("sinh", zero), ("cosh", one),
+            ("tanh", zero), ("acos1", zero), ("sinHalfPi", one),
+        ] {
+            assert!(s.contains(&[t, id(&d, &format!("http://ex/{p}")), v]), "math:{p} exact value");
+        }
+    }
+
+    #[test]
+    fn trig_domain_error_fails_premise() {
+        // asin 2 is NaN — the premise must FAIL (no binding), not emit a NaN literal.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :seed :p :o .
+            { 2 math:asin ?x } => { :s :bad ?x } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(!s.iter().any(|[a, p, _]| *a == id(&d, "http://ex/s") && *p == id(&d, "http://ex/bad")));
+    }
+
+    #[test]
+    fn degrees_radians_roundtrip() {
+        // π rad math:degrees 180; 180° math:radians π (both exact in f64, same ops as eye.pl).
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :a :rad 3.141592653589793 . :a :deg 180 .
+            { ?x :rad ?r . ?r math:degrees ?d } => { ?x :inDegrees ?d } .
+            { ?x :deg ?g . ?g math:radians ?r2 } => { ?x :inRadians ?r2 } .
+        "#;
+        let (mut d, s) = closure(src);
+        let deg = d.intern_lit("180", "http://www.w3.org/2001/XMLSchema#integer", None);
+        let rad = d.intern_lit("3.141592653589793", "http://www.w3.org/2001/XMLSchema#decimal", None);
+        let a = id(&d, "http://ex/a");
+        assert!(s.contains(&[a, id(&d, "http://ex/inDegrees"), deg]), "π rad = 180°");
+        assert!(s.contains(&[a, id(&d, "http://ex/inRadians"), rad]), "180° = π rad");
+    }
+
+    #[test]
+    fn logarithm_and_atan2() {
+        // (x base) math:logarithm log_base(x); (x y) math:atan2 = atan(x/y) (EYE's impl).
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :seed :p :o .
+            { (8 2) math:logarithm ?l . (1024 2) math:logarithm ?k . (0 1) math:atan2 ?a }
+            => { :s :log8 ?l ; :log1024 ?k ; :atan ?a } .
+            { (5 1) math:logarithm ?bad } => { :s :badLog ?bad } .
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let st = id(&d, "http://ex/s");
+        let three = d.intern_lit("3", int, None);
+        let ten = d.intern_lit("10", int, None);
+        let zero = d.intern_lit("0", int, None);
+        assert!(s.contains(&[st, id(&d, "http://ex/log8"), three]), "log_2 8 = 3");
+        assert!(s.contains(&[st, id(&d, "http://ex/log1024"), ten]), "log_2 1024 = 10");
+        assert!(s.contains(&[st, id(&d, "http://ex/atan"), zero]), "atan2(0,1) = 0");
+        assert!(!s.iter().any(|[a, p, _]| *a == st && *p == id(&d, "http://ex/badLog")), "base 1 fails");
+    }
+
+    #[test]
+    fn string_format_subset() {
+        // %s / %d / %% work; an unsupported directive fails the premise (no mangling).
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :seed :p :o .
+            { ("%s scored %d%%" "alice" 95) string:format ?out } => { :s :msg ?out } .
+            { ("%x" 255) string:format ?bad } => { :s :hex ?bad } .
+        "#;
+        let (mut d, s) = closure(src);
+        let msg = d.intern_lit("alice scored 95%", "http://www.w3.org/2001/XMLSchema#string", None);
+        let st = id(&d, "http://ex/s");
+        assert!(s.contains(&[st, id(&d, "http://ex/msg"), msg]), "%s/%d/%% formatting");
+        assert!(!s.iter().any(|[a, p, _]| *a == st && *p == id(&d, "http://ex/hex")), "%x unsupported → fails");
+    }
+
+    #[test]
+    fn string_scrape_capture_group() {
+        // EYE biP.n3 strs1: the FIRST capture group of the first match, as xsd:string.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :seed :p :o .
+            { ("http://example.org/1995/manifesto" "http://([^/]+)/([^/]+)") string:scrape ?h }
+            => { :s :host ?h } .
+        "#;
+        let (mut d, s) = closure(src);
+        let host = d.intern_lit("example.org", "http://www.w3.org/2001/XMLSchema#string", None);
+        assert!(s.contains(&[id(&d, "http://ex/s"), id(&d, "http://ex/host"), host]), "capture group 1");
+    }
+
+    #[test]
+    fn log_conjunction_merges_formulae() {
+        // EYE biP.n3 logc2/logc3 semantics: merge a list of formulae (empties contribute
+        // nothing); the result can be a log:includes scope in the same premise.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :seed :p :o .
+            { ({} {:u :v :w} {:x :y :z. :j :k :l}) log:conjunction {:u :v :w. :x :y :z. :j :k :l} }
+            => { :s :merged :exact } .
+            { ( {:a :p :b} {:c :q :d} ) log:conjunction ?F . ?F log:includes { ?s :q :d } }
+            => { ?s a :FoundViaConjunction } .
+        "#;
+        let (d, s) = closure(src);
+        assert!(has(&d, &s, "http://ex/s", "http://ex/merged", "http://ex/exact"), "exact merge (logc2)");
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/c", ty, "http://ex/FoundViaConjunction"), "merged formula as scope");
+    }
+
+    #[test]
+    fn log_uri_both_directions() {
+        // forward: IRI → its text as xsd:string; reverse: string → the IRI it names.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :alice :knows :bob .
+            { :alice log:uri ?u } => { :r :uriStr ?u } .
+            { ?who log:uri "http://ex/bob" } => { ?who a :Named } .
+        "#;
+        let (mut d, s) = closure(src);
+        let u = d.intern_lit("http://ex/alice", "http://www.w3.org/2001/XMLSchema#string", None);
+        assert!(s.contains(&[id(&d, "http://ex/r"), id(&d, "http://ex/uriStr"), u]), "IRI → string");
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/bob", ty, "http://ex/Named"), "string → IRI");
+    }
+
+    #[test]
+    fn log_dtlit_both_directions() {
+        // forward: ( "lex" xsd:dt ) → "lex"^^xsd:dt; reverse: decompose a ground literal.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            @prefix time: <http://www.w3.org/2000/10/swap/time#> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            :e :when "2024-03-15T10:30:45"^^xsd:dateTime .
+            { ("2024-01-01" xsd:date) log:dtlit ?lit . ?lit time:year ?y } => { :d :y ?y } .
+            { ?x :when ?w . (?lex ?dt) log:dtlit ?w } => { ?x :lexOf ?lex ; :dtOf ?dt } .
+        "#;
+        let (mut d, s) = closure(src);
+        let y = d.intern_lit("2024", "http://www.w3.org/2001/XMLSchema#integer", None);
+        assert!(s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/y"), y]), "forward dtlit feeds time:year");
+        let lex = d.intern_lit("2024-03-15T10:30:45", "http://www.w3.org/2001/XMLSchema#string", None);
+        let e = id(&d, "http://ex/e");
+        assert!(s.contains(&[e, id(&d, "http://ex/lexOf"), lex]), "reverse: lexical part");
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/dtOf"), id(&d, "http://www.w3.org/2001/XMLSchema#dateTime")]),
+            "reverse: datatype part"
+        );
+    }
+
+    #[test]
+    fn math_member_count() {
+        // EYE biP.n3 mathm1/mathm2: list length, or DISTINCT triple count of a formula.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+            :seed :p :o .
+            { (:u :v :u) math:memberCount ?n } => { :s :listCount ?n } .
+            { {:s :p :o1. :s :p :o2. :s :p :o1} math:memberCount ?m } => { :s :graphCount ?m } .
+        "#;
+        let (mut d, s) = closure(src);
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let st = id(&d, "http://ex/s");
+        assert!(s.contains(&[st, id(&d, "http://ex/listCount"), d.intern_lit("3", int, None)]), "list len 3");
+        assert!(s.contains(&[st, id(&d, "http://ex/graphCount"), d.intern_lit("2", int, None)]), "2 distinct");
+    }
+
+    #[test]
+    fn string_contains_ignoring_case() {
+        // EYE biP.n3 strci1: "Tim" string:containsIgnoringCase "IM".
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :a :name "Tim" . :b :name "Bob" .
+            { ?x :name ?n . ?n string:containsIgnoringCase "IM" } => { ?x a :Match } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Match"), "case-insensitive hit");
+        assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/Match"), "non-match excluded");
     }
 
     #[test]

@@ -30,8 +30,11 @@ pub const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 pub struct Parsed {
     /// Top-level ground triples (facts).
     pub facts: Vec<[Term; 3]>,
-    /// `{ premise } => { conclusion }` rules.
+    /// `{ premise } => { conclusion }` forward rules.
     pub rules: Vec<Rule>,
+    /// `{ conclusion } <= { premise }` BACKWARD rules — goal-directed, never fired forward.
+    /// `{ conclusion } <= true.` is a backward rule with an empty (always-provable) premise.
+    pub backward_rules: Vec<Rule>,
 }
 
 pub fn parse(src: &str) -> Result<Parsed, String> {
@@ -39,22 +42,33 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
     let stmts = p.document()?;
     let mut facts = Vec::new();
     let mut rules = Vec::new();
+    let mut backward_rules = Vec::new();
     for [s, pred, o] in stmts {
         match (&pred, &s, &o) {
             // { premise } => { conclusion }
             (Term::Iri(i), Term::Formula(prem), Term::Formula(concl)) if i == LOG_IMPLIES => {
                 rules.push(Rule { premise: prem.clone(), conclusion: concl.clone() });
             }
-            // { conclusion } <= { premise } — for the deductive CLOSURE this is exactly
-            // `premise => conclusion`, so we reverse it into a forward rule. (True
-            // goal-directed backward chaining + proof output is a later addition.)
+            // { conclusion } <= { premise } — a backward rule. EYE never fires these
+            // forward: they are tried goal-directed when a forward-rule premise (or an
+            // EYE-style query rule `{goal} => {goal}`) needs an atom they can conclude.
+            // Verified against eyereasoner/eye reasoning/backward: the premise is often a
+            // pure builtin over the goal's bindings, which can ONLY be evaluated once the
+            // goal instantiates the variables — a forward reversal would derive nothing.
             (Term::Iri(i), Term::Formula(concl), Term::Formula(prem)) if i == LOG_IMPLIED_BY => {
-                rules.push(Rule { premise: prem.clone(), conclusion: concl.clone() });
+                backward_rules.push(Rule { premise: prem.clone(), conclusion: concl.clone() });
+            }
+            // { conclusion } <= true. — an always-provable backward fact schema (EYE's
+            // idiom for backward base cases).
+            (Term::Iri(i), Term::Formula(concl), Term::Lit(v, _, _))
+                if i == LOG_IMPLIED_BY && v == "true" =>
+            {
+                backward_rules.push(Rule { premise: Vec::new(), conclusion: concl.clone() });
             }
             _ => facts.push([s, pred, o]),
         }
     }
-    Ok(Parsed { facts, rules })
+    Ok(Parsed { facts, rules, backward_rules })
 }
 
 struct Parser<'a> {
@@ -179,10 +193,9 @@ impl<'a> Parser<'a> {
         }
         if self.starts_with("<=") {
             self.i += 2;
-            // a <= b  means  b => a; we normalize by swapping at the call site is hard here,
-            // so emit a reverse-implies marker the reasoner treats like implies with swapped
-            // formulae. Simpler: not supported in v1 beyond parse; treat as log:implies marker.
-            return Ok(Term::Iri("http://www.w3.org/2000/10/swap/log#impliedBy".into()));
+            // `conclusion <= premise` — emit log:impliedBy; `parse` routes it into the
+            // backward-rule set (goal-directed resolution, see the module doc).
+            return Ok(Term::Iri(LOG_IMPLIED_BY.into()));
         }
         if self.eat(b'=') {
             return Ok(Term::Iri(OWL_SAME_AS.into()));
