@@ -149,18 +149,30 @@ fn write_id_json(graph: &Graph, local: &LocalVocab, id: Id, s: &mut String) {
         // Computed terms (BIND / aggregates) are rare; reconstruct just these.
         crate::json::term_to_json(s, local.term(id));
     } else {
-        crate::json::parts_to_json(s, graph.dict.term_parts(id));
+        write_store_id_json(graph, id, s);
     }
 }
 
 /// Writes one binding value's JSON directly from a STORE id (never a local-vocab id,
-/// so no `LocalVocab` needed) — for the streaming single-pattern scan path.
-#[inline]
+/// so no `LocalVocab` needed) — for the streaming single-pattern scan path. An RDF 1.2
+/// triple-term id recurses through its component ids (which are always store/inline
+/// ids), producing the SPARQL 1.2 `{"type":"triple","value":{…}}` JSON encoding.
 fn write_store_id_json(graph: &Graph, id: Id, s: &mut String) {
     if dict::is_inline(id) {
         crate::json::inline_int_json(s, id - dict::INLINE_BASE);
     } else {
-        crate::json::parts_to_json(s, graph.dict.term_parts(id));
+        match graph.dict.term_parts(id) {
+            dict::TermParts::Triple([ts, tp, to]) => {
+                s.push_str("{\"type\":\"triple\",\"value\":{\"subject\":");
+                write_store_id_json(graph, ts, s);
+                s.push_str(",\"predicate\":");
+                write_store_id_json(graph, tp, s);
+                s.push_str(",\"object\":");
+                write_store_id_json(graph, to, s);
+                s.push_str("}}");
+            }
+            parts => crate::json::parts_to_json(s, parts),
+        }
     }
 }
 
@@ -3791,8 +3803,10 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
         TermPattern::BlankNode(b) => Ok(Term::BlankNode(b.clone())),
         TermPattern::Literal(l) => Ok(Term::Literal(l.clone())),
         TermPattern::Variable(_) => Err("variable where a term was expected".into()),
-        // RDF-star GROUND triple term `<< s p o >>` (RDF 1.2). Variables inside the quoted triple
-        // are a T6 follow-up (they need structural matching, not a single id).
+        // RDF-star GROUND triple term `<<( s p o )>>` (RDF 1.2): build the structural
+        // `Term::Triple`, which the dictionary interns/looks up by its component ids.
+        // Variables INSIDE a quoted-triple pattern remain unsupported (they need pattern
+        // decomposition over stored triple terms, not a single id — a clean error, no crash).
         TermPattern::Triple(t) => {
             let subject: oxrdf::NamedOrBlankNode = match term_pattern_to_term(&t.subject)? {
                 Term::NamedNode(n) => n.into(),
@@ -4164,8 +4178,9 @@ mod path_tests {
 
     #[test]
     fn rdf_star_concrete_triple_terms() {
-        // RDF 1.2 triple terms load (no crash) and CONCRETE `<< … >>` patterns match (canonical
-        // string encoding). Variable-inside patterns + structural output are the T6 follow-up.
+        // RDF 1.2 triple terms load and CONCRETE `<< … >>` patterns match via the
+        // STRUCTURAL dictionary encoding (component ids). Variable-inside patterns are
+        // still unsupported (clean error, tested below).
         let g = Graph::load_str(
             "PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .\n<< :bob :age 25 >> :certainty 0.5 .",
             "turtle",
@@ -4174,5 +4189,65 @@ mod path_tests {
         let n = |q: &str| crate::query(&g, q).unwrap().len();
         assert_eq!(n("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice :age 30 >> :certainty ?c }"), 1);
         assert_eq!(n("PREFIX : <http://ex/> SELECT ?c WHERE { << :carol :age 99 >> :certainty ?c }"), 0);
+    }
+
+    #[test]
+    fn rdf_star_structural_roundtrip_output() {
+        // Loading RDF-star Turtle and selecting the triple term materialises a structural
+        // `Term::Triple` (oxrdf formats it as `<<( … )>>`), NOT the old canonical-string
+        // literal stopgap.
+        let g = Graph::load_str("PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .", "turtle").unwrap();
+        let r = crate::query(
+            &g,
+            "SELECT ?t WHERE { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }",
+        )
+        .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        let expected = Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::NamedNode::new_unchecked("http://ex/alice"),
+            oxrdf::NamedNode::new_unchecked("http://ex/age"),
+            Term::Literal(Literal::new_typed_literal("30", xsd::INTEGER)),
+        )));
+        assert_eq!(r.rows[0][0], Some(expected));
+
+        // SPARQL 1.2 JSON results encoding: {"type":"triple","value":{subject/predicate/object}}.
+        let json = crate::query_json(
+            &g,
+            "SELECT ?t WHERE { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }",
+        )
+        .unwrap();
+        assert!(
+            json.contains(
+                "{\"type\":\"triple\",\"value\":{\"subject\":{\"type\":\"uri\",\"value\":\"http://ex/alice\"},\
+                 \"predicate\":{\"type\":\"uri\",\"value\":\"http://ex/age\"},\"object\":{\"type\":\"literal\",\
+                 \"value\":\"30\",\"datatype\":\"http://www.w3.org/2001/XMLSchema#integer\"}}}"
+            ),
+            "got: {json}"
+        );
+    }
+
+    #[test]
+    fn rdf_star_nested_triple_terms() {
+        // A triple term nests through the OBJECT position; it round-trips structurally.
+        let g = Graph::load_str("PREFIX : <http://ex/>\n:x :p <<( :a :b <<( :c :d :e )>> )>> .", "turtle").unwrap();
+        let r = crate::query(&g, "PREFIX : <http://ex/> SELECT ?o WHERE { :x :p ?o }").unwrap();
+        assert_eq!(r.rows.len(), 1);
+        let nn = oxrdf::NamedNode::new_unchecked;
+        let inner = Term::Triple(Box::new(oxrdf::Triple::new(nn("http://ex/c"), nn("http://ex/d"), Term::NamedNode(nn("http://ex/e")))));
+        let outer = Term::Triple(Box::new(oxrdf::Triple::new(nn("http://ex/a"), nn("http://ex/b"), inner)));
+        assert_eq!(r.rows[0][0], Some(outer.clone()));
+        // The concrete nested pattern matches (1) and a non-matching one misses (0).
+        let n = |q: &str| crate::query(&g, q).unwrap().len();
+        assert_eq!(n("PREFIX : <http://ex/> SELECT ?s WHERE { ?s :p <<( :a :b <<( :c :d :e )>> )>> }"), 1);
+        assert_eq!(n("PREFIX : <http://ex/> SELECT ?s WHERE { ?s :p <<( :a :b <<( :c :d :x )>> )>> }"), 0);
+    }
+
+    #[test]
+    fn rdf_star_variable_inside_quoted_pattern_is_clean_error() {
+        // Variables inside a quoted-triple pattern are not yet supported: the query must
+        // return a clean Err (no panic, no wrong answer).
+        let g = Graph::load_str("PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .", "turtle").unwrap();
+        let r = crate::query(&g, "PREFIX : <http://ex/> SELECT ?w WHERE { << ?w :age 30 >> :certainty ?c }");
+        assert!(r.is_err(), "expected a clean error, got Ok with {} rows", r.map(|x| x.rows.len()).unwrap_or(0));
     }
 }
