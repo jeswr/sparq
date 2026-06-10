@@ -1,15 +1,17 @@
 //! sparq-server: a W3C-conformant HTTP server over the sparq query engine.
 //!
-//! Implements the **read** side of two W3C specs against an in-memory
-//! [`sparq_core::Graph`]:
+//! Implements two W3C specs against an in-memory [`sparq_core::Graph`]:
 //!
 //! * **SPARQL 1.1 Protocol** (<https://www.w3.org/TR/sparql11-protocol/>) — the `query`
 //!   operation over `GET`/`POST` at `/sparql`, with content negotiation to SPARQL Results
-//!   JSON / XML / CSV / TSV (and boolean JSON/XML for `ASK`).
+//!   JSON / XML / CSV / TSV (and boolean JSON/XML for `ASK`), and the `update` operation
+//!   (`POST` with `application/sparql-update`), applied through the double-buffered
+//!   delta-overlay writer (T17 wiring — see `http::Writer` and the README's "Update
+//!   concurrency model").
 //! * **SPARQL 1.1 Graph Store HTTP Protocol** (<https://www.w3.org/TR/sparql11-http-rdf-update/>)
 //!   — `GET`/`HEAD` on a graph resource (direct `/graphs/...` and indirect
-//!   `?graph=<uri>` / `?default`). The **write** side (PUT/POST/DELETE) and SPARQL
-//!   **Update** are out of scope here (thread **T11b**) and answered with `501`.
+//!   `?graph=<uri>` / `?default`). The Graph Store **write** verbs (PUT/POST/DELETE)
+//!   are answered with `501`.
 //!
 //! The pure pieces — result serialisers ([`results`]), query classification ([`exec`]) and
 //! content negotiation ([`negotiate`]) — are always compiled and unit-tested. The async
