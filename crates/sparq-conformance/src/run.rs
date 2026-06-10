@@ -5,9 +5,9 @@
 
 use crate::compare::{rows_equal, Row};
 use crate::manifest::TestEntry;
-use crate::rdf::{file_iri, parse_file};
+use crate::rdf::{file_iri, parse_file, parse_file_quads};
 use crate::results::{parse_expected, Binding, Expected};
-use oxrdf::{BlankNode, Term, Triple};
+use oxrdf::{BlankNode, GraphName, Quad, Term, Triple};
 use spargebra::algebra::GraphPattern;
 use spargebra::{Query, SparqlParser};
 use std::collections::BTreeSet;
@@ -25,54 +25,76 @@ pub enum Status {
     Skip(String),
 }
 
-/// Builds an N-Quads document for the test dataset: `data` files into the
-/// default graph, `graph_data` files into their named graphs. Blank node
-/// labels are prefixed per-file so distinct files never share bnodes.
+/// Builds an N-Quads document for the test dataset: `data` files contribute
+/// their own quads (TriG/N-Quads named graphs preserved, Turtle = default
+/// graph), `graph_data` files are triples poured into their labelled graph.
+/// Blank node labels are prefixed per-file so distinct files never share bnodes.
 fn build_nquads(data: &[PathBuf], graph_data: &[(String, PathBuf)]) -> Result<String, String> {
     let mut out = String::new();
     let mut file_idx = 0usize;
-    let emit = |triples: Vec<Triple>, graph: Option<&str>, idx: usize, out: &mut String| {
-        for t in triples {
-            let t = prefix_bnodes(t, idx);
-            match graph {
-                Some(g) => out.push_str(&format!(
-                    "{} {} {} <{}> .\n",
-                    t.subject, t.predicate, t.object, g
+    for d in data {
+        for q in parse_file_quads(d)? {
+            let q = prefix_bnodes_quad(q, file_idx);
+            match &q.graph_name {
+                GraphName::DefaultGraph => out.push_str(&format!(
+                    "{} {} {} .\n",
+                    q.subject, q.predicate, q.object
                 )),
-                None => out.push_str(&format!("{} {} {} .\n", t.subject, t.predicate, t.object)),
+                g => out.push_str(&format!(
+                    "{} {} {} {g} .\n",
+                    q.subject, q.predicate, q.object
+                )),
             }
         }
-    };
-    for d in data {
-        emit(parse_file(d)?, None, file_idx, &mut out);
         file_idx += 1;
     }
     for (g, d) in graph_data {
-        emit(parse_file(d)?, Some(g), file_idx, &mut out);
+        for t in parse_file(d)? {
+            let t = prefix_bnodes(t, file_idx);
+            out.push_str(&format!(
+                "{} {} {} <{}> .\n",
+                t.subject, t.predicate, t.object, g
+            ));
+        }
         file_idx += 1;
     }
     Ok(out)
 }
 
-fn prefix_bnodes(t: Triple, idx: usize) -> Triple {
-    let map = |term: Term| -> Term {
-        match term {
-            Term::BlankNode(b) => {
-                Term::BlankNode(BlankNode::new_unchecked(format!("f{idx}x{}", b.as_str())))
-            }
-            other => other,
+/// Prefixes every blank node label in a term with a per-file marker, recursing
+/// into RDF 1.2 triple terms.
+fn prefix_bnodes_term(term: Term, idx: usize) -> Term {
+    match term {
+        Term::BlankNode(b) => {
+            Term::BlankNode(BlankNode::new_unchecked(format!("f{idx}x{}", b.as_str())))
         }
-    };
-    let subject = match map(Term::from(t.subject)) {
+        Term::Triple(t) => Term::Triple(Box::new(prefix_bnodes(*t, idx))),
+        other => other,
+    }
+}
+
+fn prefix_bnodes(t: Triple, idx: usize) -> Triple {
+    let subject = match prefix_bnodes_term(Term::from(t.subject), idx) {
         Term::NamedNode(n) => oxrdf::NamedOrBlankNode::NamedNode(n),
         Term::BlankNode(b) => oxrdf::NamedOrBlankNode::BlankNode(b),
-        _ => unreachable!(),
+        _ => unreachable!("subject is never a literal/triple term"),
     };
     Triple {
         subject,
         predicate: t.predicate,
-        object: map(t.object),
+        object: prefix_bnodes_term(t.object, idx),
     }
+}
+
+fn prefix_bnodes_quad(q: Quad, idx: usize) -> Quad {
+    let t = prefix_bnodes(Triple::new(q.subject, q.predicate, q.object), idx);
+    let graph_name = match q.graph_name {
+        GraphName::BlankNode(b) => {
+            GraphName::BlankNode(BlankNode::new_unchecked(format!("f{idx}x{}", b.as_str())))
+        }
+        other => other,
+    };
+    Quad::new(t.subject, t.predicate, t.object, graph_name)
 }
 
 /// Prepends a BASE so relative IRIs in the query resolve against the query
@@ -92,6 +114,45 @@ fn is_ordered(p: &GraphPattern) -> bool {
         | GraphPattern::Reduced { inner }
         | GraphPattern::Slice { inner, .. } => is_ordered(inner),
         _ => false,
+    }
+}
+
+/// Syntax tests: positive = the document must parse (spargebra, our parser
+/// dependency — so this measures the parser conformance posture we inherit),
+/// negative = the parser must REJECT the document. `update` picks
+/// `parse_update` over `parse_query`. Runs on a watchdog thread like the
+/// evaluation tests so a parser panic/hang is a recorded FAIL.
+pub fn run_syntax_test(entry: &TestEntry, positive: bool, update: bool) -> Status {
+    let Some(path) = entry.action.query.clone() else {
+        return Status::Fail("manifest entry has no action file".into());
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => return Status::Fail(format!("read action file: {e}")),
+    };
+    let base = file_iri(&path);
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| {
+            let parser = SparqlParser::new()
+                .with_base_iri(&base)
+                .map_err(|e| format!("bad base IRI: {e}"))?;
+            if update {
+                parser.parse_update(&text).map(|_| ()).map_err(|e| e.to_string())
+            } else {
+                parser.parse_query(&text).map(|_| ()).map_err(|e| e.to_string())
+            }
+        })();
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(TEST_TIMEOUT) {
+        Ok(Ok(())) if positive => Status::Pass,
+        Ok(Ok(())) => Status::Fail("negative syntax: parser accepted an invalid document".into()),
+        Ok(Err(_)) if !positive => Status::Pass,
+        Ok(Err(e)) => Status::Fail(format!("positive syntax: parse error: {e}")),
+        Err(mpsc::RecvTimeoutError::Timeout) => Status::Fail("timeout (20s)".into()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Status::Fail("parser panicked".into()),
     }
 }
 
@@ -243,9 +304,13 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
         .collect();
 
     // Sequence comparison only when the query orders AND the expected encoding
-    // preserves order (SRX document order, or rs:index in result-set graphs).
-    let compare_ordered =
-        ordered && (result_path.extension().is_some_and(|e| e == "srx") || indexed);
+    // preserves order (SRX/SRJ/TSV document order, or rs:index in result-set
+    // graphs).
+    let compare_ordered = ordered
+        && (result_path
+            .extension()
+            .is_some_and(|e| e == "srx" || e == "srj" || e == "tsv")
+            || indexed);
     match rows_equal(&exp, &act, compare_ordered) {
         Ok(true) => Status::Pass,
         Ok(false) => Status::Fail(format!(
@@ -383,36 +448,62 @@ pub fn run_update_test(entry: &TestEntry) -> Status {
     let Some(request_path) = entry.update_request.clone() else {
         return Status::Fail("manifest entry has no ut:request".into());
     };
-    if !entry.update_pre.graph_data.is_empty() || !entry.update_post.graph_data.is_empty() {
-        return Status::Skip("named graphs in update not supported".into());
-    }
     let request_text = match std::fs::read_to_string(&request_path) {
         Ok(t) => t,
         Err(e) => return Status::Fail(format!("read request: {e}")),
     };
     let request = with_base(&request_text, &file_iri(&request_path));
 
-    let nquads = match build_nquads(&entry.update_pre.data, &[]) {
+    let nquads = match build_nquads(&entry.update_pre.data, &entry.update_pre.graph_data) {
         Ok(n) => n,
         Err(e) => return Status::Fail(format!("data load error: {e}")),
     };
 
-    // Expected post-state (default graph).
+    // Expected post-state as QUADS: [s, p, o, graph] rows (graph = None for the
+    // default graph), so named-graph post-states compare exactly.
     let mut expected: Vec<Row> = Vec::new();
-    for (i, d) in entry.update_post.data.iter().enumerate() {
-        match parse_file(d) {
-            Ok(triples) => {
-                for t in triples {
-                    let t = prefix_bnodes(t, i);
+    let mut file_idx = 0usize;
+    for d in &entry.update_post.data {
+        match parse_file_quads(d) {
+            Ok(quads) => {
+                for q in quads {
+                    let q = prefix_bnodes_quad(q, file_idx);
                     expected.push(vec![
-                        Some(Term::from(t.subject)),
-                        Some(Term::NamedNode(t.predicate)),
-                        Some(t.object),
+                        Some(Term::from(q.subject)),
+                        Some(Term::NamedNode(q.predicate)),
+                        Some(q.object),
+                        match q.graph_name {
+                            GraphName::DefaultGraph => None,
+                            GraphName::NamedNode(n) => Some(Term::NamedNode(n)),
+                            GraphName::BlankNode(b) => Some(Term::BlankNode(b)),
+                        },
                     ]);
                 }
             }
             Err(e) => return Status::Fail(format!("expected-data parse error: {e}")),
         }
+        file_idx += 1;
+    }
+    for (g, d) in &entry.update_post.graph_data {
+        let graph = match oxrdf::NamedNode::new(g.clone()) {
+            Ok(n) => Term::NamedNode(n),
+            Err(e) => return Status::Fail(format!("bad expected graph label {g}: {e}")),
+        };
+        match parse_file(d) {
+            Ok(triples) => {
+                for t in triples {
+                    let t = prefix_bnodes(t, file_idx);
+                    expected.push(vec![
+                        Some(Term::from(t.subject)),
+                        Some(Term::NamedNode(t.predicate)),
+                        Some(t.object),
+                        Some(graph.clone()),
+                    ]);
+                }
+            }
+            Err(e) => return Status::Fail(format!("expected-data parse error: {e}")),
+        }
+        file_idx += 1;
     }
     dedup_rows(&mut expected);
 
@@ -421,16 +512,23 @@ pub fn run_update_test(entry: &TestEntry) -> Status {
         let result = (|| {
             let graph = sparq_core::Graph::load_dataset(&nquads, "nquads")?;
             let updated = sparq_engine::update(&graph, &request)?;
-            // Dump the resulting default graph.
-            let scan = updated.store.scan(&[None, None, None]);
+            // Dump the resulting dataset: default graph + every named graph.
             let mut rows: Vec<Row> = Vec::new();
-            for r in scan.rows.iter() {
-                let [s, p, o] = scan.to_spo(r);
-                rows.push(vec![
-                    Some(updated.dict.term(s)),
-                    Some(updated.dict.term(p)),
-                    Some(updated.dict.term(o)),
-                ]);
+            let mut dump = |g: &sparq_core::Graph, name: Option<&Term>| {
+                let scan = g.store.scan(&[None, None, None]);
+                for r in scan.rows.iter() {
+                    let [s, p, o] = scan.to_spo(r);
+                    rows.push(vec![
+                        Some(g.dict.term(s)),
+                        Some(g.dict.term(p)),
+                        Some(g.dict.term(o)),
+                        name.cloned(),
+                    ]);
+                }
+            };
+            dump(&updated, None);
+            for (name, g) in &updated.named {
+                dump(g, Some(name));
             }
             Ok::<_, String>(rows)
         })();
@@ -454,11 +552,15 @@ pub fn run_update_test(entry: &TestEntry) -> Status {
 
     match rows_equal(&expected, &actual, false) {
         Ok(true) => Status::Pass,
-        Ok(false) => Status::Fail(format!(
-            "graph mismatch: expected {} triple(s), got {}",
-            expected.len(),
-            actual.len()
-        )),
+        Ok(false) => {
+            let cols: Vec<String> = ["s", "p", "o", "graph"].map(String::from).into();
+            Status::Fail(format!(
+                "dataset mismatch: expected {} quad(s), got {}{}",
+                expected.len(),
+                actual.len(),
+                diff_sample(&cols, &expected, &actual)
+            ))
+        }
         Err(e) => Status::Fail(e),
     }
 }

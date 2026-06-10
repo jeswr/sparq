@@ -31,20 +31,7 @@ fn row_match(
     for (e, a) in exp.iter().zip(act) {
         let ok = match (e, a) {
             (None, None) => true,
-            (Some(Term::BlankNode(eb)), Some(Term::BlankNode(ab))) => {
-                let (eb, ab) = (eb.as_str(), ab.as_str());
-                match (fwd.get(eb), rev.get(ab)) {
-                    (Some(m), Some(r)) => m == ab && r == eb,
-                    (None, None) => {
-                        fwd.insert(eb.to_string(), ab.to_string());
-                        rev.insert(ab.to_string(), eb.to_string());
-                        added.push(eb.to_string());
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            (Some(e), Some(a)) => e == a,
+            (Some(e), Some(a)) => term_match(e, a, fwd, rev, added),
             _ => false,
         };
         if !ok {
@@ -53,6 +40,39 @@ fn row_match(
         }
     }
     true
+}
+
+/// Term equality under (an extension of) the current blank-node bijection,
+/// recursing into RDF 1.2 triple terms so their inner blank nodes are mapped
+/// too. Mutates the maps; the caller backtracks via [`undo`].
+fn term_match(e: &Term, a: &Term, fwd: &mut BnodeMap, rev: &mut BnodeMap, added: &mut Vec<String>) -> bool {
+    match (e, a) {
+        (Term::BlankNode(eb), Term::BlankNode(ab)) => {
+            let (eb, ab) = (eb.as_str(), ab.as_str());
+            match (fwd.get(eb), rev.get(ab)) {
+                (Some(m), Some(r)) => m == ab && r == eb,
+                (None, None) => {
+                    fwd.insert(eb.to_string(), ab.to_string());
+                    rev.insert(ab.to_string(), eb.to_string());
+                    added.push(eb.to_string());
+                    true
+                }
+                _ => false,
+            }
+        }
+        (Term::Triple(et), Term::Triple(at)) => {
+            et.predicate == at.predicate
+                && term_match(
+                    &Term::from(et.subject.clone()),
+                    &Term::from(at.subject.clone()),
+                    fwd,
+                    rev,
+                    added,
+                )
+                && term_match(&et.object, &at.object, fwd, rev, added)
+        }
+        _ => e == a,
+    }
 }
 
 fn undo(fwd: &mut BnodeMap, rev: &mut BnodeMap, added: &mut Vec<String>, to: usize) {
