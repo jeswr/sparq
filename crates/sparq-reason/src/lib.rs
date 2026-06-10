@@ -13,13 +13,20 @@
 //!   Symmetric, equivalentClass/Property, …) — roadmap, builds on the same fixpoint engine.
 //! - Notation3 / EYE-style rules (`{ … } => { … }` with builtins) — a separate, larger
 //!   subsystem (see `n3` module, roadmap).
+//!
+//! Beyond batch materialization, [`MaterializedGraph`] maintains the RDFS closure
+//! **incrementally** under inserts/deletes (exact derivation counting; see the
+//! `incremental` module docs) so a data update costs time proportional to the change, not
+//! a full re-materialization.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
+mod incremental;
 pub mod n3;
 mod owl;
 mod rdfs;
+pub use incremental::MaterializedGraph;
 pub use n3::{reason_n3, reason_n3_proof, ProofStep};
 pub use owl::{inconsistencies, materialize_owl_rl};
 pub use rdfs::materialize_rdfs;
