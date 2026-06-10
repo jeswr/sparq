@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **SPARQL CONSTRUCT / DESCRIBE (`sparq-engine`, `sparq-server`)** — RDF-graph query
+  results: spec-conformant CONSTRUCT template instantiation (unbound/illegal slots
+  skipped, fresh blank nodes per solution, set-deduplicated) and DESCRIBE as concise
+  bounded description; engine API `construct` / `describe` / `construct_ntriples`
+  (+ `_with_budget` variants); served over HTTP with `application/n-triples` /
+  `text/turtle` content negotiation under the existing query budget. W3C construct
+  evaluation suites pass 9/9 run (1 skip: `FROM`).
+- **Streamed SELECT results (`sparq-server`)** — JSON SELECT bodies are streamed from
+  an ordered chunk sequence (engine `query_json_chunks_with_budget`; concatenation
+  byte-identical, same `Content-Length`) instead of one giant string: peak server RSS
+  for a 1M-row SELECT (202 MB body) drops from ~750 MB to ~405–570 MB.
+
 ## [0.1.0] - 2026-06-10
 
 First release: an experimental, from-scratch RDF triplestore and SPARQL engine in Rust

@@ -10,9 +10,13 @@ from here); **wasm** items are additive exports in `crates/sparq-wasm`.
   JS layer rewrites `ASK` → `SELECT *` and tests `count > 0`, which computes the
   *full* count instead of stopping at the first solution. A native ASK (or a
   budgeted `exists()` that early-exits) would be strictly better.
-- **CONSTRUCT / DESCRIBE (engine)** — unsupported; the JS `query()` throws. An
-  RDF/JS `queryQuads()` needs engine-side CONSTRUCT (template instantiation over
-  the SELECT solution stream).
+- **CONSTRUCT / DESCRIBE (engine)** — ✅ DONE (T16): `sparq_engine::construct` /
+  `describe` return `Vec<oxrdf::Triple>` (CONSTRUCT per spec — unbound/illegal
+  template slots skipped, fresh bnodes per solution, set-deduplicated; DESCRIBE
+  as concise bounded description), and `construct_ntriples*` serialises either
+  form to N-Triples (valid Turtle). Remaining for JS: a **wasm** export (e.g.
+  `Store.construct(sparql) -> string`) so `queryQuads()` can parse it — additive
+  in `crates/sparq-wasm`.
 - **Named graphs (engine/core)** — the store is triple-scoped; TriG/N-Quads
   graphs are folded into the default graph on load, and UPDATE rejects named
   graph targets. An RDF/JS DatasetCore-faithful `match(s, p, o, g)` needs a quad
@@ -21,7 +25,10 @@ from here); **wasm** items are additive exports in `crates/sparq-wasm`.
   string, so large results are double-buffered (wasm string + JS parse). A
   paged/cursor API (e.g. `query_page(sparql, offset, limit)` or a callback per
   row) would let the JS layer expose a true RDF/JS `ResultStream` and bound
-  memory. Until then `queryBindings()` returns a materialised array.
+  memory. Until then `queryBindings()` returns a materialised array. *Engine
+  half landed (T16):* `sparq_engine::query_json_chunks_with_budget` returns the
+  JSON as an ordered chunk sequence (concatenation byte-identical); a wasm
+  export over it is the remaining piece.
 - **Incremental update (engine)** — `update()` rebuilds the whole immutable
   index (O(store) per batch). Fine for small/medium graphs; a delta-index or
   merge structure would make RDF/JS `Store.add/remove`-style mutation viable.

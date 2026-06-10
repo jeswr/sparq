@@ -38,6 +38,70 @@ impl Format {
     }
 }
 
+/// The negotiated RDF graph serialisation for CONSTRUCT / DESCRIBE results (T16).
+/// The body bytes are N-Triples either way (a syntactic subset of Turtle, so the
+/// `text/turtle` representation is honest); negotiation picks the `Content-Type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphFormat {
+    NTriples,
+    Turtle,
+}
+
+impl GraphFormat {
+    pub fn content_type(self) -> &'static str {
+        match self {
+            GraphFormat::NTriples => "application/n-triples; charset=utf-8",
+            GraphFormat::Turtle => "text/turtle; charset=utf-8",
+        }
+    }
+}
+
+/// Negotiates the CONSTRUCT/DESCRIBE graph serialisation from an `Accept` header:
+/// `text/turtle` and `application/n-triples` (q-value aware), default N-Triples.
+pub fn negotiate_graph(accept: Option<&str>) -> GraphFormat {
+    let accept = match accept {
+        Some(a) if !a.trim().is_empty() => a,
+        _ => return GraphFormat::NTriples,
+    };
+    let mut best: Option<(GraphFormat, f32, usize)> = None;
+    for (media, q) in media_ranges(accept) {
+        let (fmt, spec) = match media.as_str() {
+            "application/n-triples" => (Some(GraphFormat::NTriples), 2),
+            "text/turtle" => (Some(GraphFormat::Turtle), 2),
+            "*/*" => (Some(GraphFormat::NTriples), 0),
+            _ => (None, 0),
+        };
+        if let Some(fmt) = fmt {
+            if q <= 0.0 {
+                continue; // q=0 explicitly rejects
+            }
+            let better = match best {
+                None => true,
+                Some((_, bq, bspec)) => q > bq || (q == bq && spec > bspec),
+            };
+            if better {
+                best = Some((fmt, q, spec));
+            }
+        }
+    }
+    best.map(|(f, _, _)| f).unwrap_or(GraphFormat::NTriples)
+}
+
+/// Splits an `Accept` header into (lowercased media range, q-value) pairs.
+fn media_ranges(accept: &str) -> impl Iterator<Item = (String, f32)> + '_ {
+    accept.split(',').map(|part| {
+        let mut it = part.split(';');
+        let media = it.next().unwrap_or("").trim().to_ascii_lowercase();
+        let mut q = 1.0f32;
+        for param in it {
+            if let Some(v) = param.trim().strip_prefix("q=") {
+                q = v.parse().unwrap_or(1.0);
+            }
+        }
+        (media, q)
+    })
+}
+
 /// Negotiates the result format from an optional `Accept` header value.
 pub fn negotiate(accept: Option<&str>) -> Format {
     let accept = match accept {
@@ -46,16 +110,7 @@ pub fn negotiate(accept: Option<&str>) -> Format {
     };
 
     let mut best: Option<(Format, f32, usize)> = None; // (format, q, specificity)
-    for part in accept.split(',') {
-        let mut it = part.split(';');
-        let media = it.next().unwrap_or("").trim().to_ascii_lowercase();
-        let mut q = 1.0f32;
-        for param in it {
-            let param = param.trim();
-            if let Some(v) = param.strip_prefix("q=") {
-                q = v.parse().unwrap_or(1.0);
-            }
-        }
+    for (media, q) in media_ranges(accept) {
         // specificity: an exact supported type beats a wildcard at equal q; the first
         // listed wins remaining ties (the `better` test below keeps the earlier match).
         let (fmt, spec) = match media.as_str() {
@@ -122,5 +177,26 @@ mod tests {
     #[test]
     fn exact_beats_wildcard() {
         assert_eq!(negotiate(Some("text/csv, */*")), Format::Csv);
+    }
+
+    #[test]
+    fn graph_formats() {
+        assert_eq!(negotiate_graph(None), GraphFormat::NTriples);
+        assert_eq!(negotiate_graph(Some("")), GraphFormat::NTriples);
+        assert_eq!(negotiate_graph(Some("*/*")), GraphFormat::NTriples);
+        assert_eq!(negotiate_graph(Some("text/turtle")), GraphFormat::Turtle);
+        assert_eq!(negotiate_graph(Some("application/n-triples")), GraphFormat::NTriples);
+        // q-values decide; q=0 rejects.
+        assert_eq!(
+            negotiate_graph(Some("application/n-triples;q=0.5, text/turtle;q=0.9")),
+            GraphFormat::Turtle
+        );
+        assert_eq!(
+            negotiate_graph(Some("application/n-triples;q=0, text/turtle")),
+            GraphFormat::Turtle
+        );
+        // exact beats wildcard; unsupported falls back to N-Triples.
+        assert_eq!(negotiate_graph(Some("text/turtle, */*")), GraphFormat::Turtle);
+        assert_eq!(negotiate_graph(Some("application/rdf+xml")), GraphFormat::NTriples);
     }
 }

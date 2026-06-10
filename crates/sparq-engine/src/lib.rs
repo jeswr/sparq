@@ -7,12 +7,19 @@
 //! GROUP_CONCAT) with GROUP BY and HAVING (as a post-group FILTER); ORDER BY;
 //! DISTINCT/REDUCED/LIMIT/OFFSET; projection and sub-SELECT. SPARQL is parsed
 //! to algebra by `spargebra`. Values computed at query time (BIND, aggregates)
-//! are interned in a per-query local vocabulary. Later milestones add
-//! worst-case-optimal joins, a DP planner and property paths.
+//! are interned in a per-query local vocabulary. ASK runs natively; CONSTRUCT
+//! and DESCRIBE (T16) return RDF graphs — see [`construct`] / [`describe`].
+//! Later milestones add worst-case-optimal joins, a DP planner and property
+//! paths.
 
+mod construct;
 mod exec;
 pub mod json;
 mod update;
+pub use construct::{
+    construct, construct_ntriples, construct_ntriples_with_budget, construct_with_budget, describe,
+    describe_with_budget, triples_to_ntriples,
+};
 pub use update::update;
 
 use oxrdf::{Term, Variable};
@@ -100,6 +107,27 @@ pub fn query_json_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget)
         Query::Select { pattern, .. } => exec::eval_select_json(graph, &pattern),
         // The SPARQL 1.1 JSON results boolean form.
         Query::Ask { pattern, .. } => Ok(format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, &pattern)?)),
+        _ => Err("only SELECT and ASK queries are supported".into()),
+    }
+}
+
+/// Flush threshold for [`query_json_chunks_with_budget`]: large enough that the
+/// per-chunk overhead (stream item, HTTP write) is negligible, small enough that a
+/// streamed body never holds a second whole-result copy in memory.
+const JSON_CHUNK_BYTES: usize = 64 * 1024;
+
+/// [`query_json_with_budget`] as an ordered sequence of chunks whose concatenation is
+/// **byte-identical** to the single-string result — the server streams these as one
+/// HTTP body instead of concatenating a giant `String` (T16), which removes the
+/// second whole-result copy from peak memory on large SELECTs.
+pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<String>, String> {
+    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let _guard = exec::budget::install(budget);
+    match q {
+        Query::Select { pattern, .. } => exec::eval_select_json_chunks(graph, &pattern, Some(JSON_CHUNK_BYTES)),
+        Query::Ask { pattern, .. } => {
+            Ok(vec![format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, &pattern)?)])
+        }
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
 }
@@ -960,6 +988,47 @@ mod tests {
         assert_eq!(one("PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT (STRDT(\"1\"@en, xsd:integer) AS ?x) {}"), None);
         assert_eq!(one("SELECT (STRLANG(\"a\", \"en\") AS ?x) {}").unwrap(), "\"a\"@en");
         assert_eq!(one("SELECT (STRLANG(\"a\"@en, \"en\") AS ?x) {}"), None);
+    }
+
+    #[test]
+    fn query_json_chunks_concat_is_byte_identical() {
+        // The streamed chunk sequence must concatenate to EXACTLY the single-string
+        // JSON — across the single-pattern fast path, the general path, OPTIONAL
+        // unbounds, aggregates and ASK.
+        let queries = [
+            "SELECT * WHERE { ?s ?p ?o }",                                                  // fast path
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }",                  // fast path, projected
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:knows ?k } }", // general
+            "PREFIX ex: <http://ex/> SELECT (AVG(?a) AS ?avg) WHERE { ?s ex:age ?a }",      // aggregate
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }",                                 // boolean form
+        ];
+        let b = QueryBudget::unlimited();
+        for q in queries {
+            let single = query_json(&g(), q).unwrap();
+            let chunks = query_json_chunks_with_budget(&g(), q, &b).unwrap();
+            assert_eq!(chunks.concat(), single, "chunk concat mismatch for: {q}");
+        }
+
+        // A result big enough to actually split (>64 KiB of JSON): every chunk
+        // boundary must fall so that the concatenation is still byte-identical.
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..3000 {
+            ttl.push_str(&format!("ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"));
+        }
+        let big = Graph::load_str(&ttl, "turtle").unwrap();
+        for q in ["SELECT * WHERE { ?s ?p ?o }", "SELECT ?s ?o WHERE { ?s ?p ?o . ?s ?p2 ?o }"] {
+            let single = query_json(&big, q).unwrap();
+            let chunks = query_json_chunks_with_budget(&big, q, &b).unwrap();
+            assert!(chunks.len() > 1, "expected a multi-chunk stream for: {q}");
+            assert_eq!(chunks.concat(), single, "chunk concat mismatch for: {q}");
+        }
+    }
+
+    #[test]
+    fn query_json_chunks_respects_budget() {
+        let b = QueryBudget { max_rows: Some(3), ..QueryBudget::unlimited() };
+        let e = query_json_chunks_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
     }
 
     #[test]
