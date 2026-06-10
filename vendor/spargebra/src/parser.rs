@@ -2269,7 +2269,12 @@ parser! {
             #[cfg(not(feature = "sparql-12"))]{Err("Triple terms are only available in SPARQL 1.2")}
         }
 
-        rule ExprTripleTermSubject() -> Expression = ExprTripleTermObject()
+        // [138] ExprTripleTermSubject ::= iri | Var
+        // (an RDF 1.2 triple term subject can only be an IRI or a blank node, so literals
+        // and nested triple terms are excluded from the subject position by the grammar)
+        rule ExprTripleTermSubject() -> Expression =
+            i:iri() { i.into() } /
+            v:Var() { v.into() }
 
         rule ExprTripleTermObject() -> Expression =
             ExprTripleTerm() /

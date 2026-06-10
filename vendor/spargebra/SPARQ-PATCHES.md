@@ -28,3 +28,22 @@ this vendored tree once the fixes land in a released spargebra.
   push their own aggregate scope, so legal aggregates inside `EXISTS
   { { SELECT ... } }` are unaffected (the walker does not descend into
   `Expression::Exists`).
+
+## 2. Reject literals / triple terms in the subject position of an expression triple term
+
+- **Spec**: SPARQL 1.2 Query §19.7 grammar production
+  `[138] ExprTripleTermSubject ::= iri | Var` (an RDF 1.2 triple term subject
+  is an IRI or blank node, so the grammar excludes literals and nested triple
+  terms from the subject slot). spargebra instead reused
+  `ExprTripleTermObject` ([139], which allows `RDFLiteral | NumericLiteral |
+  BooleanLiteral | ExprTripleTerm`) for the subject, accepting the invalid
+  forms. The data (`TripleTermData`, [127]) and pattern paths already
+  enforced the restriction — only the expression path was loose.
+- **Tests**: `sparql12/syntax-triple-terms-negative#tripleterm-subject-03`
+  (*Triple term in the subject position of a triple term (expression)*,
+  `BIND( <<( <<(:s :p :o )>> :q :z )>> AS ?X )`) and `#tripleterm-subject-06`
+  (*Literal in the subject position of a triple term (expression)*,
+  `BIND( <<( "literal" :q :z )>> AS ?X )`) — both NegativeSyntaxTest,
+  accepted before, rejected after.
+- **Fix**: `ExprTripleTermSubject` now derives exactly `iri | Var` instead of
+  delegating to `ExprTripleTermObject`.
