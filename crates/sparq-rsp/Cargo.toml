@@ -1,0 +1,33 @@
+[package]
+name = "sparq-rsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in RSP-QL-style RDF stream processing for the sparq engine: time/count windows over timestamped triple streams and windowed continuous SPARQL queries with RSTREAM/ISTREAM/DSTREAM output"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# Opt-in stream processing (the sparq-reason / sparq-shacl isolation pattern): a
+# SEPARATE crate so the core engine carries zero streaming code, deps, or runtime
+# cost by default — RSP is engaged only by depending on this crate. Nothing in
+# the workspace depends on it; NOT in the wasm dependency graph.
+#
+# Deliberately synchronous: a push API + callbacks, no async runtime. The engine
+# never reads the wall clock — timestamps are application-supplied — so window
+# behaviour is deterministic and unit-testable; wrapping pushes in tokio/threads
+# is the embedder's choice.
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", default-features = false }
+oxrdf.workspace = true
+# Register-time validation only (SELECT-form check); already in the tree via sparq-engine.
+spargebra.workspace = true
+# ISTREAM/DSTREAM row-hash diffs (already in the tree via sparq-core).
+rustc-hash.workspace = true
