@@ -1,0 +1,966 @@
+//! Constraint-component evaluation: walks each targeted shape's focus nodes and
+//! emits [`ValidationResult`]s via direct graph scans (no SPARQL round-trip).
+
+use crate::model::{sh, Component, Shape, ShapesModel, Target};
+use crate::path::Path;
+use crate::report::ValidationResult;
+use crate::view::GraphView;
+use oxrdf::{Literal, Term};
+use rustc_hash::FxHashMap;
+use sparq_core::Graph;
+use std::cmp::Ordering;
+
+const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+/// Runs every targeted shape over its focus nodes. Results are deliberately NOT
+/// deduplicated: the SHACL test suite expects one result per constraint-component
+/// OCCURRENCE (e.g. two sh:class violations on one value) and per traversal route
+/// (a nested shape reached through two parents reports twice). Duplicate focus
+/// nodes from overlapping targets ARE collapsed (in `focus_nodes`).
+pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<ValidationResult> {
+    let mut v = Validator {
+        data: GraphView::new(data),
+        shapes,
+        stack: Vec::new(),
+        regexes: FxHashMap::default(),
+    };
+    let mut out = Vec::new();
+    for &sid in &shapes.targeted {
+        for focus in v.focus_nodes(&shapes.shapes[sid]) {
+            v.validate_shape(sid, &focus, &mut out);
+        }
+    }
+    out
+}
+
+struct Validator<'a> {
+    data: GraphView<'a>,
+    shapes: &'a ShapesModel,
+    /// (focus, shape) pairs currently being validated — the recursion guard for
+    /// cyclic sh:node / sh:property references (re-entry counts as conforming).
+    stack: Vec<(Term, usize)>,
+    regexes: FxHashMap<String, Option<regex::Regex>>,
+}
+
+impl<'a> Validator<'a> {
+    fn focus_nodes(&self, shape: &Shape) -> Vec<Term> {
+        let mut out = Vec::new();
+        for t in &shape.targets {
+            match t {
+                Target::Node(n) => out.push(n.clone()),
+                Target::Class(c) | Target::ImplicitClass(c) => {
+                    out.extend(self.data.instances_of(c))
+                }
+                Target::SubjectsOf(p) => out.extend(self.data.subjects_of(p)),
+                Target::ObjectsOf(p) => out.extend(self.data.objects_of(p)),
+            }
+        }
+        crate::view::dedup(out)
+    }
+
+    /// True iff `node` produces no results against `shape` (conformance checking).
+    fn conforms(&mut self, node: &Term, sid: usize) -> bool {
+        if self.stack.iter().any(|(n, s)| n == node && *s == sid) {
+            return true; // recursive re-entry: treat as conforming (recursion is undefined in SHACL)
+        }
+        self.stack.push((node.clone(), sid));
+        let mut tmp = Vec::new();
+        self.validate_shape(sid, node, &mut tmp);
+        self.stack.pop();
+        tmp.is_empty()
+    }
+
+    fn validate_shape(&mut self, sid: usize, focus: &Term, out: &mut Vec<ValidationResult>) {
+        let shape = &self.shapes.shapes[sid];
+        if shape.deactivated {
+            return;
+        }
+        let values: Vec<Term> = match &shape.path {
+            Some(path) => path.values(&self.data, focus),
+            None => vec![focus.clone()],
+        };
+        let components = shape.components.clone();
+        for comp in &components {
+            self.eval_component(sid, focus, &values, comp, out);
+        }
+    }
+
+    /// A result owned by shape `sid` for `focus`.
+    fn result(
+        &self,
+        sid: usize,
+        focus: &Term,
+        value: Option<Term>,
+        component: &str,
+        message: String,
+    ) -> ValidationResult {
+        let shape = &self.shapes.shapes[sid];
+        ValidationResult {
+            focus_node: focus.clone(),
+            path: shape.path.clone(),
+            value,
+            source_shape: shape.node.clone(),
+            source_component: sh(component),
+            severity: shape.severity.clone(),
+            messages: shape.messages.clone(),
+            default_message: message,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn eval_component(
+        &mut self,
+        sid: usize,
+        focus: &Term,
+        values: &[Term],
+        comp: &Component,
+        out: &mut Vec<ValidationResult>,
+    ) {
+        match comp {
+            Component::Class(cls) => {
+                for v in values {
+                    if !self.data.is_instance_of(v, cls) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "ClassConstraintComponent",
+                            format!("Value does not have class {cls}"),
+                        ));
+                    }
+                }
+            }
+            Component::Datatype(dt) => {
+                for v in values {
+                    let ok = match v {
+                        Term::Literal(l) => l.datatype().as_str() == dt && well_formed(l),
+                        _ => false,
+                    };
+                    if !ok {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "DatatypeConstraintComponent",
+                            format!("Value does not have datatype <{dt}>"),
+                        ));
+                    }
+                }
+            }
+            Component::NodeKind(kind) => {
+                for v in values {
+                    let local = kind.strip_prefix(crate::model::SH).unwrap_or(kind);
+                    let ok = match v {
+                        Term::NamedNode(_) => {
+                            matches!(local, "IRI" | "BlankNodeOrIRI" | "IRIOrLiteral")
+                        }
+                        Term::BlankNode(_) => {
+                            matches!(local, "BlankNode" | "BlankNodeOrIRI" | "BlankNodeOrLiteral")
+                        }
+                        Term::Literal(_) => {
+                            matches!(local, "Literal" | "BlankNodeOrLiteral" | "IRIOrLiteral")
+                        }
+                        #[allow(unreachable_patterns)]
+                        _ => false,
+                    };
+                    if !ok {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "NodeKindConstraintComponent",
+                            format!("Value does not have node kind <{kind}>"),
+                        ));
+                    }
+                }
+            }
+            Component::MinCount(n) => {
+                if (values.len() as u64) < *n {
+                    out.push(self.result(
+                        sid,
+                        focus,
+                        None,
+                        "MinCountConstraintComponent",
+                        format!("Fewer than {n} values"),
+                    ));
+                }
+            }
+            Component::MaxCount(n) => {
+                if (values.len() as u64) > *n {
+                    out.push(self.result(
+                        sid,
+                        focus,
+                        None,
+                        "MaxCountConstraintComponent",
+                        format!("More than {n} values"),
+                    ));
+                }
+            }
+            Component::MinExclusive(b) => self.range(
+                sid,
+                focus,
+                values,
+                b,
+                &[Ordering::Greater],
+                "MinExclusiveConstraintComponent",
+                out,
+            ),
+            Component::MinInclusive(b) => self.range(
+                sid,
+                focus,
+                values,
+                b,
+                &[Ordering::Greater, Ordering::Equal],
+                "MinInclusiveConstraintComponent",
+                out,
+            ),
+            Component::MaxExclusive(b) => self.range(
+                sid,
+                focus,
+                values,
+                b,
+                &[Ordering::Less],
+                "MaxExclusiveConstraintComponent",
+                out,
+            ),
+            Component::MaxInclusive(b) => self.range(
+                sid,
+                focus,
+                values,
+                b,
+                &[Ordering::Less, Ordering::Equal],
+                "MaxInclusiveConstraintComponent",
+                out,
+            ),
+            Component::MinLength(n) => {
+                for v in values {
+                    let ok = string_repr(v)
+                        .map(|s| s.chars().count() as u64 >= *n)
+                        .unwrap_or(false);
+                    if !ok {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "MinLengthConstraintComponent",
+                            format!("Value is shorter than {n} characters"),
+                        ));
+                    }
+                }
+            }
+            Component::MaxLength(n) => {
+                for v in values {
+                    let ok = string_repr(v)
+                        .map(|s| s.chars().count() as u64 <= *n)
+                        .unwrap_or(false);
+                    if !ok {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "MaxLengthConstraintComponent",
+                            format!("Value is longer than {n} characters"),
+                        ));
+                    }
+                }
+            }
+            Component::Pattern { source, flags } => {
+                let re = self.regex_for(source, flags.as_deref());
+                for v in values {
+                    let ok = match (&re, string_repr(v)) {
+                        (Some(re), Some(s)) => re.is_match(&s),
+                        _ => false,
+                    };
+                    if !ok {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "PatternConstraintComponent",
+                            format!("Value does not match pattern \"{source}\""),
+                        ));
+                    }
+                }
+            }
+            Component::LanguageIn(tags) => {
+                for v in values {
+                    let ok = match v {
+                        Term::Literal(l) => match l.language() {
+                            Some(lang) => tags.iter().any(|t| lang_matches(lang, t)),
+                            None => false,
+                        },
+                        _ => false,
+                    };
+                    if !ok {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "LanguageInConstraintComponent",
+                            "Value language is not in the allowed list".into(),
+                        ));
+                    }
+                }
+            }
+            Component::UniqueLang => {
+                let mut counts: FxHashMap<String, usize> = FxHashMap::default();
+                for v in values {
+                    if let Term::Literal(l) = v {
+                        if let Some(lang) = l.language() {
+                            *counts.entry(lang.to_lowercase()).or_insert(0) += 1;
+                        }
+                    }
+                }
+                let mut langs: Vec<&String> = counts
+                    .iter()
+                    .filter(|(_, &c)| c > 1)
+                    .map(|(l, _)| l)
+                    .collect();
+                langs.sort();
+                for lang in langs {
+                    out.push(self.result(
+                        sid,
+                        focus,
+                        None,
+                        "UniqueLangConstraintComponent",
+                        format!("Language \"{lang}\" is used more than once"),
+                    ));
+                }
+            }
+            Component::Equals(p) => {
+                let others = self.data.objects(focus, p);
+                for v in values {
+                    if !others.contains(v) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "EqualsConstraintComponent",
+                            format!("Value missing from <{p}>"),
+                        ));
+                    }
+                }
+                for o in &others {
+                    if !values.contains(o) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(o.clone()),
+                            "EqualsConstraintComponent",
+                            format!("Value of <{p}> missing from the path values"),
+                        ));
+                    }
+                }
+            }
+            Component::Disjoint(p) => {
+                for v in values {
+                    if self.data.contains(focus, p, v) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "DisjointConstraintComponent",
+                            format!("Value shared with <{p}>"),
+                        ));
+                    }
+                }
+            }
+            // One result per FAILING PAIR (value, other) — the suite expects e.g.
+            // `1 < "a"` and `1 < "b"` to report `sh:value 1` twice.
+            Component::LessThan(p) => {
+                let others = self.data.objects(focus, p);
+                for v in values {
+                    for o in &others {
+                        if !matches!(cmp_terms(v, o), Some(Ordering::Less)) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(v.clone()),
+                                "LessThanConstraintComponent",
+                                format!("Value is not less than {o} (via <{p}>)"),
+                            ));
+                        }
+                    }
+                }
+            }
+            Component::LessThanOrEquals(p) => {
+                let others = self.data.objects(focus, p);
+                for v in values {
+                    for o in &others {
+                        if !matches!(cmp_terms(v, o), Some(Ordering::Less | Ordering::Equal)) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(v.clone()),
+                                "LessThanOrEqualsConstraintComponent",
+                                format!("Value is not less than or equal to {o} (via <{p}>)"),
+                            ));
+                        }
+                    }
+                }
+            }
+            Component::Not(inner) => {
+                for v in values {
+                    if self.conforms(v, *inner) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "NotConstraintComponent",
+                            "Value conforms to the negated shape".into(),
+                        ));
+                    }
+                }
+            }
+            Component::And(ids) => {
+                for v in values {
+                    if !ids.iter().all(|&s| self.conforms(v, s)) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "AndConstraintComponent",
+                            "Value does not conform to every member shape".into(),
+                        ));
+                    }
+                }
+            }
+            Component::Or(ids) => {
+                for v in values {
+                    if !ids.iter().any(|&s| self.conforms(v, s)) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "OrConstraintComponent",
+                            "Value does not conform to any member shape".into(),
+                        ));
+                    }
+                }
+            }
+            Component::Xone(ids) => {
+                for v in values {
+                    let n = ids.iter().filter(|&&s| self.conforms(v, s)).count();
+                    if n != 1 {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "XoneConstraintComponent",
+                            format!("Value conforms to {n} member shapes, not exactly one"),
+                        ));
+                    }
+                }
+            }
+            Component::Node(inner) => {
+                for v in values {
+                    if !self.conforms(v, *inner) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "NodeConstraintComponent",
+                            "Value does not conform to the node shape".into(),
+                        ));
+                    }
+                }
+            }
+            Component::Property(child) => {
+                for v in values {
+                    self.validate_shape(*child, v, out);
+                }
+            }
+            Component::Qualified {
+                shape,
+                min,
+                max,
+                disjoint,
+                siblings,
+            } => {
+                let count = values
+                    .iter()
+                    .filter(|v| {
+                        self.conforms(v, *shape)
+                            && (!disjoint || !siblings.iter().any(|&s| self.conforms(v, s)))
+                    })
+                    .count() as u64;
+                if let Some(min) = min {
+                    if count < *min {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            None,
+                            "QualifiedMinCountConstraintComponent",
+                            format!("Fewer than {min} values conform to the qualified shape"),
+                        ));
+                    }
+                }
+                if let Some(max) = max {
+                    if count > *max {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            None,
+                            "QualifiedMaxCountConstraintComponent",
+                            format!("More than {max} values conform to the qualified shape"),
+                        ));
+                    }
+                }
+            }
+            Component::Closed { ignored } => {
+                let shape = &self.shapes.shapes[sid];
+                let mut allowed: Vec<String> = ignored
+                    .iter()
+                    .filter_map(|t| match t {
+                        Term::NamedNode(n) => Some(n.as_str().to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                for &child in &shape.property_children {
+                    if let Some(Path::Predicate(p)) = &self.shapes.shapes[child].path {
+                        allowed.push(p.clone());
+                    }
+                }
+                for v in values {
+                    for (p, o) in self.data.predicate_objects(v) {
+                        let p_str = match &p {
+                            Term::NamedNode(n) => n.as_str().to_string(),
+                            _ => continue,
+                        };
+                        if !allowed.contains(&p_str) {
+                            let mut r = self.result(
+                                sid,
+                                focus,
+                                Some(o),
+                                "ClosedConstraintComponent",
+                                format!("Predicate <{p_str}> is not allowed (closed shape)"),
+                            );
+                            r.path = Some(Path::Predicate(p_str));
+                            out.push(r);
+                        }
+                    }
+                }
+            }
+            Component::HasValue(t) => {
+                if !values.iter().any(|v| equal_value(v, t)) {
+                    out.push(self.result(
+                        sid,
+                        focus,
+                        None,
+                        "HasValueConstraintComponent",
+                        format!("Missing required value {t}"),
+                    ));
+                }
+            }
+            Component::In(list) => {
+                for v in values {
+                    if !list.iter().any(|m| equal_value(v, m)) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            Some(v.clone()),
+                            "InConstraintComponent",
+                            "Value is not in the enumeration".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // one call site per range component; a struct would obscure it
+    fn range(
+        &mut self,
+        sid: usize,
+        focus: &Term,
+        values: &[Term],
+        bound: &Term,
+        accept: &[Ordering],
+        component: &str,
+        out: &mut Vec<ValidationResult>,
+    ) {
+        for v in values {
+            let ok = match cmp_terms(v, bound) {
+                Some(ord) => accept.contains(&ord),
+                None => false, // not comparable: constraint not satisfied
+            };
+            if !ok {
+                out.push(self.result(
+                    sid,
+                    focus,
+                    Some(v.clone()),
+                    component,
+                    format!("Value is out of range relative to {bound}"),
+                ));
+            }
+        }
+    }
+
+    fn regex_for(&mut self, source: &str, flags: Option<&str>) -> Option<regex::Regex> {
+        let key = format!("{}\u{0}{}", source, flags.unwrap_or(""));
+        self.regexes
+            .entry(key)
+            .or_insert_with(|| {
+                let mut inline = String::new();
+                for f in flags.unwrap_or("").chars() {
+                    if matches!(f, 'i' | 'm' | 's' | 'x' | 'U') {
+                        inline.push(f);
+                    }
+                }
+                let pat = if inline.is_empty() {
+                    source.to_string()
+                } else {
+                    format!("(?{inline}){source}")
+                };
+                regex::Regex::new(&pat).ok()
+            })
+            .clone()
+    }
+}
+
+/// The string a value node contributes to sh:minLength/maxLength/pattern:
+/// the IRI string or the literal's lexical form; blank nodes have none (fail).
+fn string_repr(t: &Term) -> Option<String> {
+    match t {
+        Term::NamedNode(n) => Some(n.as_str().to_string()),
+        Term::Literal(l) => Some(l.value().to_string()),
+        _ => None,
+    }
+}
+
+/// HTTP-style basic language-range match: exact (case-insensitive) or prefix
+/// followed by `-` (so `en` matches `en-GB`); `*` matches any tag.
+fn lang_matches(lang: &str, range: &str) -> bool {
+    if range == "*" {
+        return !lang.is_empty();
+    }
+    let lang = lang.to_ascii_lowercase();
+    let range = range.to_ascii_lowercase();
+    lang == range || (lang.starts_with(&range) && lang.as_bytes().get(range.len()) == Some(&b'-'))
+}
+
+/// SHACL "equal values" (sh:hasValue / sh:in): same term, or literals equal
+/// under SPARQL `=` value semantics (numeric / boolean / date-time families).
+fn equal_value(a: &Term, b: &Term) -> bool {
+    if a == b {
+        return true;
+    }
+    matches!(cmp_terms(a, b), Some(Ordering::Equal))
+}
+
+/// SPARQL-operator-style comparison of two terms; `None` when not comparable
+/// (non-literals, or literals of incompatible / unordered types).
+fn cmp_terms(a: &Term, b: &Term) -> Option<Ordering> {
+    match (a, b) {
+        (Term::Literal(la), Term::Literal(lb)) => cmp_literals(la, lb),
+        _ => None,
+    }
+}
+
+fn cmp_literals(a: &Literal, b: &Literal) -> Option<Ordering> {
+    let (da, db) = (a.datatype(), b.datatype());
+    let (da, db) = (da.as_str(), db.as_str());
+    if is_numeric(da) && is_numeric(db) {
+        let fa: f64 = a.value().parse().ok()?;
+        let fb: f64 = b.value().parse().ok()?;
+        return fa.partial_cmp(&fb);
+    }
+    if a.language().is_none()
+        && b.language().is_none()
+        && da == xsd("string")
+        && db == xsd("string")
+    {
+        return Some(a.value().cmp(b.value()));
+    }
+    if da == xsd("boolean") && db == xsd("boolean") {
+        let pa = parse_bool(a.value())?;
+        let pb = parse_bool(b.value())?;
+        return Some(pa.cmp(&pb));
+    }
+    if is_date_time(da) && is_date_time(db) {
+        let (ta, tza) = timestamp(a.value(), da)?;
+        let (tb, tzb) = timestamp(b.value(), db)?;
+        if tza != tzb {
+            // XSD order between a timezoned and an untimezoned value is
+            // INDETERMINATE (within the ±14h window) — not comparable.
+            return None;
+        }
+        return ta.partial_cmp(&tb);
+    }
+    None
+}
+
+fn xsd(local: &str) -> String {
+    format!("{XSD}{local}")
+}
+
+fn is_numeric(dt: &str) -> bool {
+    let Some(local) = dt.strip_prefix(XSD) else {
+        return false;
+    };
+    matches!(
+        local,
+        "integer"
+            | "decimal"
+            | "double"
+            | "float"
+            | "long"
+            | "int"
+            | "short"
+            | "byte"
+            | "nonNegativeInteger"
+            | "positiveInteger"
+            | "nonPositiveInteger"
+            | "negativeInteger"
+            | "unsignedLong"
+            | "unsignedInt"
+            | "unsignedShort"
+            | "unsignedByte"
+    )
+}
+
+fn is_date_time(dt: &str) -> bool {
+    let Some(local) = dt.strip_prefix(XSD) else {
+        return false;
+    };
+    matches!(local, "dateTime" | "date" | "time" | "dateTimeStamp")
+}
+
+fn parse_bool(v: &str) -> Option<bool> {
+    match v {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Seconds-since-epoch of an XSD date/time lexical value plus whether it
+/// carries an explicit timezone (an untimezoned value is normalised AS IF UTC,
+/// but only values agreeing on timezone presence are mutually comparable).
+fn timestamp(value: &str, dt: &str) -> Option<(f64, bool)> {
+    let local = dt.strip_prefix(XSD)?;
+    let v = value.trim();
+    let (date_part, rest) = match local {
+        "time" => ("2000-01-01", v),
+        "date" => {
+            // The date may carry a timezone suffix directly.
+            let split = date_tz_split(v);
+            (&v[..split], &v[split..])
+        }
+        _ => match v.find('T') {
+            Some(i) => (&v[..i], &v[i + 1..]),
+            None => return None,
+        },
+    };
+    let (y, m, d) = parse_date(date_part)?;
+    let (mut rest, mut secs) = (rest, 0.0f64);
+    if local != "date" {
+        let tz_at = rest
+            .char_indices()
+            .find(|(i, c)| *c == 'Z' || ((*c == '+' || *c == '-') && *i > 0))
+            .map(|(i, _)| i)
+            .unwrap_or(rest.len());
+        let time_part = &rest[..tz_at];
+        rest = &rest[tz_at..];
+        if !time_part.is_empty() {
+            let mut it = time_part.split(':');
+            let h: f64 = it.next()?.parse().ok()?;
+            let mi: f64 = it.next()?.parse().ok()?;
+            let s: f64 = it.next().unwrap_or("0").parse().ok()?;
+            if it.next().is_some() {
+                return None;
+            }
+            secs = h * 3600.0 + mi * 60.0 + s;
+        }
+    }
+    let tz_offset_secs = parse_tz(rest)?;
+    Some((days_from_civil(y, m, d) as f64 * 86_400.0 + secs - tz_offset_secs, !rest.is_empty()))
+}
+
+/// The byte index where a date lexical's optional timezone suffix starts.
+fn date_tz_split(v: &str) -> usize {
+    if v.ends_with('Z') {
+        return v.len() - 1;
+    }
+    // ±hh:mm — but the leading sign of a negative year is not a timezone.
+    if v.len() > 6 {
+        let tail = &v[v.len() - 6..];
+        if (tail.starts_with('+') || tail.starts_with('-')) && tail.as_bytes()[3] == b':' {
+            return v.len() - 6;
+        }
+    }
+    v.len()
+}
+
+fn parse_tz(s: &str) -> Option<f64> {
+    if s.is_empty() || s == "Z" {
+        return Some(0.0);
+    }
+    let (sign, rest) = match s.as_bytes()[0] {
+        b'+' => (1.0, &s[1..]),
+        b'-' => (-1.0, &s[1..]),
+        _ => return None,
+    };
+    let mut it = rest.split(':');
+    let h: f64 = it.next()?.parse().ok()?;
+    let m: f64 = it.next()?.parse().ok()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some(sign * (h * 3600.0 + m * 60.0))
+}
+
+fn parse_date(s: &str) -> Option<(i64, u32, u32)> {
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let mut it = s.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: u32 = it.next()?.parse().ok()?;
+    let d: u32 = it.next()?.parse().ok()?;
+    if it.next().is_some() || m == 0 || m > 12 || d == 0 || d > 31 {
+        return None;
+    }
+    Some((if neg { -y } else { y }, m, d))
+}
+
+/// Days since 1970-01-01 of a proleptic-Gregorian civil date (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = y - i64::from(m <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = i64::from(if m > 2 { m - 3 } else { m + 9 });
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Is the literal's lexical form in the lexical space of its (known XSD)
+/// datatype? Unknown datatypes are accepted (no lexical check possible).
+fn well_formed(l: &Literal) -> bool {
+    let dt = l.datatype();
+    let v = l.value();
+    let Some(local) = dt.as_str().strip_prefix(XSD) else {
+        return dt.as_str() != RDF_LANG_STRING || l.language().is_some();
+    };
+    match local {
+        "integer" => parse_integer(v).is_some(),
+        "long" => in_range(v, i64::MIN as i128, i64::MAX as i128),
+        "int" => in_range(v, i32::MIN as i128, i32::MAX as i128),
+        "short" => in_range(v, i16::MIN as i128, i16::MAX as i128),
+        "byte" => in_range(v, i8::MIN as i128, i8::MAX as i128),
+        "nonNegativeInteger" => parse_integer(v).map(|n| n >= 0).unwrap_or(false),
+        "positiveInteger" => parse_integer(v).map(|n| n > 0).unwrap_or(false),
+        "nonPositiveInteger" => parse_integer(v).map(|n| n <= 0).unwrap_or(false),
+        "negativeInteger" => parse_integer(v).map(|n| n < 0).unwrap_or(false),
+        "unsignedLong" => in_range(v, 0, u64::MAX as i128),
+        "unsignedInt" => in_range(v, 0, u32::MAX as i128),
+        "unsignedShort" => in_range(v, 0, u16::MAX as i128),
+        "unsignedByte" => in_range(v, 0, u8::MAX as i128),
+        "decimal" => is_decimal(v),
+        "float" | "double" => is_float(v),
+        "boolean" => parse_bool(v).is_some(),
+        "dateTime" | "dateTimeStamp" | "date" | "time" => timestamp(v, dt.as_str()).is_some(),
+        _ => true,
+    }
+}
+
+fn parse_integer(v: &str) -> Option<i128> {
+    let body = v.strip_prefix(['+', '-']).unwrap_or(v);
+    if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    v.parse().ok()
+}
+
+fn in_range(v: &str, lo: i128, hi: i128) -> bool {
+    parse_integer(v)
+        .map(|n| n >= lo && n <= hi)
+        .unwrap_or(false)
+}
+
+fn is_decimal(v: &str) -> bool {
+    let body = v.strip_prefix(['+', '-']).unwrap_or(v);
+    if body.is_empty() {
+        return false;
+    }
+    let mut dots = 0;
+    let mut digits = 0;
+    for b in body.bytes() {
+        match b {
+            b'.' => dots += 1,
+            b'0'..=b'9' => digits += 1,
+            _ => return false,
+        }
+    }
+    dots <= 1 && digits > 0
+}
+
+fn is_float(v: &str) -> bool {
+    if matches!(v, "NaN" | "INF" | "-INF" | "+INF") {
+        return true;
+    }
+    let (mantissa, exp) = match v.find(['e', 'E']) {
+        Some(i) => (&v[..i], Some(&v[i + 1..])),
+        None => (v, None),
+    };
+    if !is_decimal(mantissa) {
+        return false;
+    }
+    match exp {
+        None => true,
+        Some(e) => parse_integer(e).is_some(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xsd_well_formedness() {
+        let lit = |v: &str, dt: &str| {
+            Literal::new_typed_literal(v, oxrdf::NamedNode::new(xsd(dt)).unwrap())
+        };
+        assert!(well_formed(&lit("42", "integer")));
+        assert!(!well_formed(&lit("aaa", "integer")));
+        assert!(well_formed(&lit("-3.14", "decimal")));
+        assert!(!well_formed(&lit("3.1.4", "decimal")));
+        assert!(well_formed(&lit("1.0e6", "double")));
+        assert!(well_formed(&lit("INF", "float")));
+        assert!(well_formed(&lit("2024-02-29", "date")));
+        assert!(!well_formed(&lit("2024-13-01", "date")));
+        assert!(well_formed(&lit("2024-02-29T12:00:00Z", "dateTime")));
+    }
+
+    #[test]
+    fn date_time_ordering() {
+        let cmp = |a: &str, b: &str, dt: &str| {
+            timestamp(a, &xsd(dt))
+                .unwrap()
+                .0
+                .partial_cmp(&timestamp(b, &xsd(dt)).unwrap().0)
+                .unwrap()
+        };
+        assert_eq!(cmp("2024-01-01", "2024-01-02", "date"), Ordering::Less);
+        assert_eq!(
+            cmp(
+                "2024-01-01T10:00:00+01:00",
+                "2024-01-01T09:00:00Z",
+                "dateTime"
+            ),
+            Ordering::Equal
+        );
+        // Timezone presence must agree for the values to be comparable.
+        let lit = |v: &str| {
+            Literal::new_typed_literal(v, oxrdf::NamedNode::new(xsd("dateTime")).unwrap())
+        };
+        assert_eq!(
+            cmp_literals(&lit("2002-10-10T12:00:00-05:00"), &lit("2002-10-10T12:00:00")),
+            None
+        );
+    }
+}
