@@ -86,3 +86,21 @@ this vendored tree once the fixes land in a released spargebra.
   see it. The "SELECT overrides an existing variable" check reads the same
   set, so rebinding an alias stays an error (matching §18.3.4.4: *"var must
   not appear in VS nor in PV"*).
+
+## 5. Match the boolean keywords case-insensitively
+
+- **Spec**: SPARQL 1.2 Query §19.7 note 1 (same note in SPARQL 1.1 §19.8):
+  *"Keywords are matched in a case-insensitive manner with the exception of
+  the keyword 'a'"* — `true`/`false` are keyword terminals of the grammar
+  (`BooleanLiteral`, [173]), and §4.1.2 maps the token to a literal of
+  datatype `xsd:boolean`. `TRUE`/`False` therefore denote the boolean
+  literals with the canonical lexical forms `"true"`/`"false"` (the suite's
+  comment: *"Boolean keywords are case insensitive, and produce valid boolean
+  literals"*).
+- **Test**: `sparql10/expr-builtin#case-insensitive-booleans`
+  (QueryEvaluationTest, `SELECT (TRUE as ?t) (False as ?f) {}` expecting
+  `"true"`/`"false"^^xsd:boolean`) — parse error before, passes after.
+- **Fix**: `BooleanLiteral` uses the grammar's case-insensitive keyword
+  matcher `i()` and always emits the lowercase lexical forms. Every
+  alternation tries `iri()` before `BooleanLiteral`, so prefixed names with a
+  `true`/`false` prefix (e.g. `true:x`) are unaffected.

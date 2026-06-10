@@ -2496,9 +2496,13 @@ parser! {
             d:$(DECIMAL_NEGATIVE()) { Literal::new_typed_literal(d, xsd::DECIMAL) } /
             i:$(INTEGER_NEGATIVE()) { Literal::new_typed_literal(i, xsd::INTEGER) }
 
+        // "Keywords are matched in a case-insensitive manner with the exception of the
+        // keyword 'a'" (19.7 note 1) — that includes the boolean keywords, which always
+        // denote the literals "true"/"false"^^xsd:boolean (the canonical lexical forms;
+        // see the sparql10/expr-builtin#case-insensitive-booleans test).
         rule BooleanLiteral() -> Literal =
-            "true" { Literal::new_typed_literal("true", xsd::BOOLEAN) } /
-            "false" { Literal::new_typed_literal("false", xsd::BOOLEAN) }
+            i("true") { Literal::new_typed_literal("true", xsd::BOOLEAN) } /
+            i("false") { Literal::new_typed_literal("false", xsd::BOOLEAN) }
 
         rule String() -> String = STRING_LITERAL_LONG1() / STRING_LITERAL_LONG2() / STRING_LITERAL1() / STRING_LITERAL2()
 
