@@ -125,6 +125,27 @@ fn gap_triples_advance_the_watermark_and_close_earlier_windows() {
     assert_eq!(objs(&closed[0]), ["in"]);
 }
 
+/// A GAP arrival as the FIRST arrival still anchors the starting window on its
+/// watermark: a window max_delay holds open at that point must be tracked and
+/// eventually emitted EMPTY — not silently skipped (roborev 1693 regression).
+#[test]
+fn gap_first_arrival_anchors_and_empty_window_is_still_emitted() {
+    // Covers [0,5) [10,15) …; first arrival ts 7 is in the gap, watermark 3:
+    // [0,5) must stay open (3 < 5) even though nothing was ever buffered.
+    let mut ws = WindowedStream::empty(WindowSpec::time(5, 10).with_max_delay(4));
+    ws.push(t("s", "p", "gap"), 7);
+    assert!(ws.take_closed().is_empty(), "[0,5) still open at watermark 3");
+    ws.push(t("s", "p", "in"), 13); // watermark 9 ≥ 5: closes [0,5), empty
+    let closed = ws.take_closed();
+    assert_eq!(closed.len(), 1);
+    assert_eq!((closed[0].start, closed[0].end), (0, 5));
+    assert!(closed[0].triples.is_empty(), "emitted empty, not skipped");
+    let rest = ws.flush();
+    assert_eq!((rest[0].start, rest[0].end), (10, 15));
+    assert_eq!(objs(&rest[0]), ["in"]);
+    assert_eq!(ws.late_dropped(), 0);
+}
+
 // ------------------------------------------------------------- out-of-order
 
 /// max_delay holds windows open: an out-of-order triple within the tolerance

@@ -64,10 +64,10 @@ The classic RSP-QL pipeline, one type each:
   (`late_dropped()`).
 - **Empty windows are reported** (evaluated and delivered) when the watermark
   jumps a gap — DSTREAM requires observing results *disappear*. Windows wholly
-  closed at the initial watermark (first accepted `ts − max_delay`) are skipped
-  (a stream starting at `ts = 10⁹` does not replay a billion empties), and the
-  lateness contract holds across the first push: a first push at `ts = 12` with
-  `max_delay = 5` leaves `[0,10)` open for a later `ts = 8`.
+  closed at the initial watermark (the first arrival's `ts − max_delay`) are
+  skipped (a stream starting at `ts = 10⁹` does not replay a billion empties),
+  and the lateness contract holds across the first push: a first push at
+  `ts = 12` with `max_delay = 5` leaves `[0,10)` open for a later `ts = 8`.
 - `step > range` leaves uncovered gaps; a gap timestamp belongs to no window
   and is not "late" — but it still advances the watermark (event time passed),
   closing earlier windows.
@@ -123,7 +123,7 @@ Windowing alone (push + eviction) is `BTreeMap` insert + range-read +
 
 ## Tests
 
-`cargo test -p sparq-rsp` — 22 integration tests + 2 doctests pinning:
+`cargo test -p sparq-rsp` — 23 integration tests + 2 doctests pinning:
 boundary inclusivity (`[start, end)`), tumbling partition / sliding overlap,
 empty-window reporting, `step > range` gaps, out-of-order within `max_delay`
 vs. too-late drops, ROWS / SLIDE / arrival-order membership, scripted ISTREAM

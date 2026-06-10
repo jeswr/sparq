@@ -24,11 +24,12 @@
 //! * **Empty windows are reported.** When the watermark jumps a gap, every
 //!   window in between closes with no content — DSTREAM needs this (results
 //!   must be observed disappearing), and it keeps emission deterministic.
-//!   Windows wholly closed at the INITIAL watermark (first accepted `ts` minus
-//!   `max_delay`) are skipped, so a stream starting at `ts = 10⁹` does not
-//!   replay a billion empties — while every window the watermark holds open
-//!   stays open even across the first push: a first push at `ts = 12` with
-//!   `max_delay = 5` leaves `[0, 10)` open for a later `ts = 8`.
+//!   Windows wholly closed at the INITIAL watermark (the first arrival's `ts`
+//!   minus `max_delay` — gap arrivals included) are skipped, so a stream
+//!   starting at `ts = 10⁹` does not replay a billion empties — while every
+//!   window the watermark holds open stays open even across the first push: a
+//!   first push at `ts = 12` with `max_delay = 5` leaves `[0, 10)` open for a
+//!   later `ts = 8`.
 //! * `step > range` leaves timestamp gaps covered by no window; a triple in a
 //!   gap enters no window and is not counted "late" — but its timestamp still
 //!   ADVANCES the watermark (event time passed), closing earlier windows.
@@ -199,33 +200,32 @@ impl WindowedStream {
     }
 
     fn push_time(&mut self, triple: [Term; 3], ts: u64, range: u64, step: u64, max_delay: u64) {
+        // The FIRST arrival fixes the starting window: the oldest window its
+        // WATERMARK (ts − max_delay) still holds open, i.e. the first k with
+        // k·step + range > ts − max_delay. Anchoring on the watermark instead
+        // of on ts keeps the lateness contract honest from the very first
+        // push — with max_delay = 5, a first push at ts = 12 must leave
+        // [0,10) open for a subsequent ts = 8 (watermark 7 < 10). With
+        // max_delay = 0 this is exactly the first window covering ts, so the
+        // all-empty prefix of the axis is still skipped. GAP arrivals
+        // (step > range, see below) anchor too: they advance event time, so
+        // the windows their watermark holds open must be tracked — and
+        // eventually emitted empty — not silently skipped (roborev 1693).
+        if self.next_close.is_none() {
+            let wm = ts.saturating_sub(max_delay);
+            let k_min = if wm >= range { (wm - range) / step + 1 } else { 0 };
+            self.next_close = Some(k_min);
+        }
         // Window k covers [k·step, k·step + range). The LAST window covering
         // ts is k_max = ts / step — valid only if ts actually falls inside it
         // (ts % step < range can fail when step > range: gap timestamps are
         // covered by no window).
         let k_max = ts / step;
         if ts - k_max * step < range {
-            match self.next_close {
-                Some(k_next) if k_max < k_next => {
-                    // Every window covering ts already closed: too late.
-                    self.late_dropped += 1;
-                    return;
-                }
-                None => {
-                    // First accepted triple fixes the starting window: the oldest
-                    // window the WATERMARK (ts − max_delay) still holds open, i.e.
-                    // the first k with k·step + range > ts − max_delay. Anchoring
-                    // on the watermark instead of on ts keeps the lateness
-                    // contract honest from the very first push — with
-                    // max_delay = 5, a first push at ts = 12 must leave [0,10)
-                    // open for a subsequent ts = 8 (watermark 7 < 10). With
-                    // max_delay = 0 this is exactly the first window covering
-                    // ts, so the all-empty prefix of the axis is still skipped.
-                    let wm = ts.saturating_sub(max_delay);
-                    let k_min = if wm >= range { (wm - range) / step + 1 } else { 0 };
-                    self.next_close = Some(k_min);
-                }
-                _ => {}
+            if k_max < self.next_close.expect("anchored above") {
+                // Every window covering ts already closed: too late.
+                self.late_dropped += 1;
+                return;
             }
             self.buffer.entry(ts).or_default().push(triple);
         }
