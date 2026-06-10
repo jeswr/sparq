@@ -1,0 +1,46 @@
+{
+  "name": "@jeswr/sparq",
+  "version": "0.1.0",
+  "description": "RDF/JS interface to the sparq SPARQL engine (Rust → WebAssembly): an in-memory, dictionary-encoded RDF store with SELECT/ASK and SPARQL Update.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "wasm",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build:wasm": "wasm-pack build ../crates/sparq-wasm --target web --release && rm -rf wasm && mkdir wasm && cp ../crates/sparq-wasm/pkg/sparq_wasm.js ../crates/sparq-wasm/pkg/sparq_wasm.d.ts ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm.d.ts wasm/",
+    "build:ts": "tsc",
+    "build": "npm run build:wasm && npm run build:ts",
+    "test": "node --test \"test/*.test.mjs\"",
+    "bench": "node bench/vs-oxigraph.mjs",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "rdf",
+    "rdfjs",
+    "sparql",
+    "wasm",
+    "webassembly",
+    "triplestore",
+    "linked-data"
+  ],
+  "devDependencies": {
+    "@rdfjs/types": "^2.0.1",
+    "@types/node": "^25.9.2",
+    "typescript": "^5.6.0"
+  }
+}

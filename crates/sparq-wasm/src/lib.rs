@@ -71,6 +71,15 @@ impl Store {
     pub fn count(&self, sparql: &str) -> Result<usize, JsError> {
         sparq_engine::count(&self.graph, sparql).map_err(|e| JsError::new(&e))
     }
+
+    /// Applies a SPARQL 1.1 Update (`INSERT DATA`, `DELETE DATA`, `CLEAR`,
+    /// `DELETE/INSERT … WHERE` on the default graph) and returns the **new** store —
+    /// the receiver is immutable and remains valid. Mirrors `sparq_engine::update`'s
+    /// rebuild semantics.
+    pub fn update(&self, sparql: &str) -> Result<Store, JsError> {
+        let graph = sparq_engine::update(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
+        Ok(Store { graph })
+    }
 }
 
 #[cfg(test)]

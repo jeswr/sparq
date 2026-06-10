@@ -1,0 +1,52 @@
+# Informational CI for the npm package (js/) wrapping crates/sparq-wasm.
+# Builds the wasm artifact with wasm-pack, compiles the TypeScript wrapper,
+# runs the node:test suite, and checks that `npm pack` stays publishable.
+name: js
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  js:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: js-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build (wasm-pack + tsc)
+        run: npm run build
+
+      - name: Test (node --test)
+        run: npm test
+
+      - name: Pack check
+        run: npm pack --dry-run
+
+      - name: Report wasm size
+        run: ls -l wasm/sparq_wasm_bg.wasm
