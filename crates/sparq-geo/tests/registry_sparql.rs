@@ -1,0 +1,193 @@
+//! `geof:` functions through REAL SPARQL: every test parses a query with
+//! `geof:` IRIs in FILTER / BIND / SELECT expressions and runs it on
+//! sparq-engine via `query_with_functions(…, &geof_registry())` — the wiring a
+//! GeoSPARQL user actually exercises (engine `Function::Custom` dispatch ->
+//! registry -> `geof::lex`).
+#![cfg(feature = "engine")]
+
+use sparq_core::Graph;
+use sparq_engine::query_with_functions;
+use sparq_geo::geof_registry;
+
+const PREFIXES: &str = "PREFIX geof: <http://www.opengis.net/def/function/geosparql/> \
+                        PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/> \
+                        PREFIX ex:   <http://ex/> ";
+
+/// Three cities (points) and two areas (polygons): the UK box contains London,
+/// the France box contains Paris and Lyon.
+fn cities() -> Graph {
+    Graph::load_str(
+        r#"
+        @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:  <http://ex/> .
+        ex:london ex:loc  "POINT(-0.1278 51.5074)"^^geo:wktLiteral .
+        ex:paris  ex:loc  "POINT(2.3522 48.8566)"^^geo:wktLiteral .
+        ex:lyon   ex:loc  "POINT(4.8357 45.7640)"^^geo:wktLiteral .
+        ex:uk     ex:area "POLYGON((-6 50, 2 50, 2 59, -6 59, -6 50))"^^geo:wktLiteral .
+        ex:france ex:area "POLYGON((-1 42.5, 7 42.5, 7 51, -1 51, -1 42.5))"^^geo:wktLiteral .
+        "#,
+        "turtle",
+    )
+    .unwrap()
+}
+
+fn names(r: &sparq_engine::QueryResult, col: usize) -> Vec<String> {
+    r.rows.iter().map(|row| row[col].as_ref().unwrap().to_string()).collect()
+}
+
+#[test]
+fn filter_distance() {
+    // Cities within 400 km of London: Paris (≈343.6 km), not Lyon (≈750 km).
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?city WHERE {{ \
+               ex:london ex:loc ?here . ?city ex:loc ?there . \
+               FILTER(?city != ex:london && geof:distance(?here, ?there, uom:kilometre) < 400) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(names(&r, 0), vec!["<http://ex/paris>"]);
+}
+
+#[test]
+fn bind_distance_value() {
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?km WHERE {{ \
+               ex:london ex:loc ?a . ex:paris ex:loc ?b . \
+               BIND(geof:distance(?a, ?b, uom:kilometre) AS ?km) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 1);
+    let term = r.rows[0][0].as_ref().expect("?km must be bound").to_string();
+    let km: f64 = term
+        .strip_prefix('"')
+        .and_then(|s| s.split('"').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((km - 343.6).abs() < 1.0, "London–Paris ≈ 343.6 km, got {km}");
+    assert!(term.ends_with("^^<http://www.w3.org/2001/XMLSchema#double>"), "got {term}");
+}
+
+#[test]
+fn spatial_join_sf_within() {
+    // Which city lies within which area — a real spatial join (FILTER over the
+    // cross product of 3 points x 2 polygons).
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?city ?region WHERE {{ \
+               ?city ex:loc ?pt . ?region ex:area ?poly . \
+               FILTER(geof:sfWithin(?pt, ?poly)) \
+             }} ORDER BY ?city"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(
+        r.rows
+            .iter()
+            .map(|row| (row[0].as_ref().unwrap().to_string(), row[1].as_ref().unwrap().to_string()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("<http://ex/london>".to_string(), "<http://ex/uk>".to_string()),
+            ("<http://ex/lyon>".to_string(), "<http://ex/france>".to_string()),
+            ("<http://ex/paris>".to_string(), "<http://ex/france>".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn unary_geometry_function_roundtrips_through_relations() {
+    // geof:envelope returns a geo:wktLiteral that feeds straight back into
+    // another geof: function within the same expression.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?region WHERE {{ \
+               ?region ex:area ?poly . ex:paris ex:loc ?pt . \
+               FILTER(geof:sfContains(geof:envelope(?poly), ?pt)) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(names(&r, 0), vec!["<http://ex/france>"]);
+}
+
+#[test]
+fn select_expression_boolean() {
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT (geof:sfDisjoint(?a, ?b) AS ?d) WHERE {{ \
+               ex:uk ex:area ?a . ex:france ex:area ?b . \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(
+        names(&r, 0),
+        vec!["\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"] // the boxes overlap near Calais
+    );
+}
+
+#[test]
+fn geo_errors_are_expression_errors_not_query_errors() {
+    let g = Graph::load_str(
+        r#"
+        @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:  <http://ex/> .
+        ex:good ex:loc "POINT(0 0)"^^geo:wktLiteral .
+        ex:bad  ex:loc "POINT(not wkt)"^^geo:wktLiteral .
+        ex:str  ex:loc "POINT(1 1)" .
+        "#,
+        "turtle",
+    )
+    .unwrap();
+    // A malformed wktLiteral / plain-string geometry errors PER ROW: the BIND
+    // leaves ?e unbound, the query succeeds, the good row still computes.
+    let r = query_with_functions(
+        &g,
+        &format!("{PREFIXES} SELECT ?s ?e WHERE {{ ?s ex:loc ?g . BIND(geof:envelope(?g) AS ?e) }} ORDER BY ?s"),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 3);
+    let bound: Vec<bool> = r.rows.iter().map(|row| row[1].is_some()).collect();
+    assert_eq!(bound, vec![false, true, false]); // ex:bad, ex:good, ex:str
+    // In a FILTER the same error just drops the row.
+    let r = query_with_functions(
+        &g,
+        &format!(
+            "{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?g . \
+               FILTER(geof:sfIntersects(?g, ?g)) }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(names(&r, 0), vec!["<http://ex/good>"]);
+}
+
+#[test]
+fn unregistered_geof_iri_stays_a_hard_error() {
+    // geof:buffer is documented as not-in-v1: it is NOT in the registry, so the
+    // engine raises the same hard error as for any unknown function IRI.
+    let err = query_with_functions(
+        &cities(),
+        &format!("{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?g . FILTER(geof:buffer(?g, 1.0) > 0) }}"),
+        &geof_registry(),
+    )
+    .map(|r| r.len())
+    .unwrap_err();
+    assert!(err.contains("unsupported SPARQL function"), "got: {err}");
+}

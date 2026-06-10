@@ -1,54 +1,19 @@
 # sparq-geo — gaps / follow-ups
 
-## Engine extension-function registry (the wiring this crate is waiting for)
+## Engine extension-function registry — DONE
 
-sparq-engine was deliberately NOT modified (T24b scope: new opt-in crate only;
-the engine is owned by another agent). To run `geof:` functions inside SPARQL
-`FILTER`/`BIND`, the engine needs an extension-function registry. The exact
-seam, recorded for the engine maintainer:
+sparq-engine grew the extension-function registry this section originally
+specified (`FunctionRegistry` / `ExtFn` / `query_with_functions` /
+`with_functions`; see `docs/extension-functions.md`), and `src/registry.rs`
+registers all 12 implemented `geof:` functions through it (the default-on
+`engine` cargo feature; `tests/registry_sparql.rs` exercises them through
+real SPARQL). sparq-server installs the registry behind its opt-in `geo`
+cargo feature.
 
-- `spargebra` already parses unknown function IRIs as
-  `spargebra::algebra::Function::Custom(NamedNode)`.
-- `crates/sparq-engine/src/exec.rs` -> `eval_function(...)` (~line 4655)
-  currently handles `F::Custom(nn)` ONLY as the single-argument XSD
-  constructor casts (~line 4907) and errors on everything else — that arm is
-  the dispatch point.
-
-A minimal registry API that fits the existing code shape:
-
-```rust
-// sparq-engine
-/// Extension function: TERM-level in/out. `None` args are unbound/errored
-/// expressions; returning Err -> SPARQL expression error (row filtered).
-pub type ExtFn = dyn Fn(&[Term]) -> Result<Term, String> + Send + Sync;
-
-pub struct FunctionRegistry { map: HashMap<String /* IRI */, Box<ExtFn>> }
-impl FunctionRegistry {
-    pub fn register(&mut self, iri: &str, f: impl Fn(&[Term]) -> Result<Term, String> + Send + Sync + 'static);
-}
-
-// New entry points threading the registry to eval_function (alongside the
-// existing query/ask/count *_with_budget variants):
-pub fn query_with_functions(graph: &Graph, sparql: &str, fns: &FunctionRegistry) -> Result<QueryResult, String>;
-```
-
-In `eval_function`'s `F::Custom(nn)` arm: after the XSD-cast fast path misses,
-look up `nn.as_str()` in the registry, evaluate each `args[i]` to a `Value`,
-materialise to `Term`s (`Value::Term` is already there; numerics/bools via
-their literal forms), call, wrap the result back into `Value::Term`.
-
-sparq-geo's side is ready: `sparq_geo::geof::lex::*` are exactly that shape —
-e.g. register `geof:distance` as a 3-arg wrapper over
-`geof::lex::distance(&a_lex, &b_lex, &unit_iri)` (extract the literal lexical
-form of args 0/1, the IRI string of arg 2; return an `xsd:double` literal),
-and each `geof:sf*` over `geof::lex::sf_*` returning `xsd:boolean`. The IRIs
-are `vocab::GEOF_NS` + `distance` / `sfEquals` / `sfDisjoint` / `sfIntersects`
-/ `sfTouches` / `sfCrosses` / `sfWithin` / `sfContains` / `sfOverlaps` /
-`envelope` / `boundary` / `convexHull`.
-
-A registry alone gives FILTER-level GeoSPARQL (correct, post-hoc). Pushing
-`geof:` filters down into a `GeoIndex` window query (the performant plan
-shape) additionally needs a planner hook — much bigger; not specified here.
+Still open from that design note: the registry evaluates `geof:` post-hoc
+(per row, after pattern matching). Pushing `geof:` filters down into a
+`GeoIndex` window query (the performant plan shape) additionally needs a
+planner hook — much bigger; not specified here.
 
 ## geof: functions not in v1
 
@@ -60,7 +25,7 @@ shape) additionally needs a planner hook — much bigger; not specified here.
   geometry-pair implementation needs case analysis (line/line overlay etc.).
   Cheap to add for the polygonal subset if needed.
 - `geof:getSRID` — trivial (`GeoGeometry::crs.iri()`), just needs the literal
-  in/out plumbing once the registry exists.
+  in/out plumbing in src/registry.rs (the registry now exists).
 - `geof:relate` (generic DE-9IM pattern test) — `geo`'s `IntersectionMatrix`
   has `matches(pattern)`; easy follow-up.
 - Egenhofer (`geof:eh*`) and RCC8 (`geof:rcc8*`) relation families — same

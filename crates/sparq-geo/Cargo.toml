@@ -22,10 +22,22 @@ readme = "README.md"
 # IRI), the geof: function semantics, and Graph -> (entity, geometry) extraction
 # over geo:hasGeometry / geo:asWKT.
 
+[features]
+# `engine` (default on): [`geof_registry`] — the geof: functions packaged as a
+# sparq-engine `FunctionRegistry`, runnable inside SPARQL FILTER/BIND via
+# `sparq_engine::query_with_functions`. Disable default features for the pure
+# geometry library (WKT literals, geof: as plain Rust, GeoIndex) without the
+# engine in the dependency graph.
+default = ["engine"]
+engine = ["dep:sparq-engine"]
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
+# Behind the `engine` feature (the dependency direction is sparq-geo -> sparq-engine;
+# the engine itself stays geometry-free, and so does the wasm bundle).
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", optional = true }
 oxrdf.workspace = true
 # WKT lexical forms <-> geo-types geometries.
 wkt = "0.14"

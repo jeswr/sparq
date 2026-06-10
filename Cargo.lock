@@ -2256,6 +2256,7 @@ dependencies = [
  "rstar",
  "rustc-hash",
  "sparq-core",
+ "sparq-engine",
  "wkt",
 ]
 
