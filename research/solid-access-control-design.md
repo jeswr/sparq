@@ -434,10 +434,10 @@ per-resource creator facts from the storage layer), `acl:accessToClass`, custom 
 ### 4.1 Public surface (v1, prototype-backed)
 
 ```rust
-pub struct PodStore { pub graph: Graph, auth: Arc<AuthIndex>, epoch: u64 }
 pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String>;
 pub fn materialize_acp(graph: &mut Graph) -> Result<MaterializeStats, String>;
-//   both: assemble facts (§4.2) → reason_n3 strata → REPLACE <urn:sparq:auth> in graph.named
+//   both: strip reserved graphs → assemble facts (§4.2) → reason_n3 strata →
+//   REPLACE <urn:sparq:auth> in graph.named
 
 pub struct Session<'a> { pub agent: Option<&'a str>, pub client: Option<&'a str> }
 pub enum Mode { Read, Write, Append, Control }
@@ -446,11 +446,16 @@ impl AuthIndex {
     pub fn from_graph(g: &Graph) -> AuthIndex;            // reads GRAPH <urn:sparq:auth>
     pub fn accessible(&self, s: &Session, m: Mode) -> Vec<NamedNode>; // allow ∖ deny, conditionals applied
 }
-pub struct SessionCache { /* (agent,client,mode) → Arc<sorted Vec<NamedNode>>, keyed by epoch */ }
-
 pub fn rewrite_for(query: &str, allowed: &[NamedNode]) -> Result<String, String>;
-pub fn query_as(graph: &Graph, cache: &mut SessionCache, s: &Session, m: Mode, query: &str)
-    -> Result<QueryResult, String>;                        // rewrite_for + sparq_engine::query
+
+pub struct PodStore { pub graph: Graph, /* auth: Arc<AuthIndex>, epoch, per-session cache */ }
+impl PodStore {
+    pub fn new(graph: Graph) -> PodStore;                 // strips reserved urn:sparq: graphs
+    pub fn materialize_wac(&mut self) -> Result<MaterializeStats, String>; // + reindex + cache clear
+    pub fn materialize_acp(&mut self) -> Result<MaterializeStats, String>;
+    pub fn accessible(&mut self, s: &Session, m: Mode) -> Arc<Vec<NamedNode>>; // cached per epoch
+    pub fn query_as(&mut self, s: &Session, m: Mode, q: &str) -> Result<QueryResult, String>;
+}
 ```
 
 ### 4.2 Materializer pipeline
