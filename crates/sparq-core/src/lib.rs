@@ -10,8 +10,10 @@ pub mod dict;
 pub mod extsort;
 mod nt;
 pub mod store;
+pub mod temporal;
 
 use dict::{Dict, Id};
+use temporal::Temporal;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
@@ -26,6 +28,12 @@ pub struct Graph {
     /// / ORDER BY without materialising the term and parsing its string each time
     /// — a lightweight, u32-id-preserving stand-in for QLever's inline ValueIds.
     numerics: NumData,
+    /// Parallel to the dictionary: the precomputed comparison key of each
+    /// `xsd:dateTime`/`xsd:dateTimeStamp`/`xsd:date` literal (see
+    /// [`temporal::Temporal`]). The temporal twin of `numerics`: dateTime
+    /// FILTER / ORDER BY / MIN/MAX read the timeline value O(1) from the cache
+    /// instead of materialising the term and re-parsing its lexical per row.
+    temporals: TempData,
     /// Named graphs (each a self-contained `Graph`), keyed by their name term. Empty for the
     /// usual single-default-graph load; populated by [`load_dataset`](Self::load_dataset) from
     /// N-Quads / TriG so the engine can evaluate `GRAPH <iri> { … }` / `GRAPH ?g { … }`.
@@ -154,6 +162,176 @@ impl NumData {
         }
         NumData::Sparse(m)
     }
+}
+
+/// Backing storage for the temporal-value cache, mirroring [`NumData`]: owned dense in
+/// RAM (two parallel columns — a flag byte per term and an f64 instant per term), mmap'd
+/// from `temporals.bin` (out-of-core), or SPARSE (only the temporal literals, the right
+/// shape for the memory-bound browser store — most terms are not dates).
+enum TempData {
+    /// `flags[id-1]` (see [`temp_flag`]; 0 = not temporal) + `instants[id-1]`.
+    Owned(Vec<u8>, Vec<f64>),
+    /// The mmap'd dense cache (`temporals.bin`: `n` little-endian f64 instants then `n`
+    /// flag bytes), plus a side map for terms APPENDED after open (delta-overlay growth).
+    #[cfg(feature = "mmap")]
+    Mapped(memmap2::Mmap, rustc_hash::FxHashMap<Id, Temporal>),
+    Sparse(rustc_hash::FxHashMap<Id, Temporal>),
+}
+
+/// Dense-cache flag byte of a temporal value: kind + timezone presence. 0 = not temporal.
+fn temp_flag(t: Temporal) -> u8 {
+    match (t.kind, t.has_tz) {
+        (temporal::TemporalKind::DateTime, false) => 1,
+        (temporal::TemporalKind::DateTime, true) => 2,
+        (temporal::TemporalKind::Date, false) => 3,
+        (temporal::TemporalKind::Date, true) => 4,
+    }
+}
+
+/// Decodes a dense-cache cell back into the temporal value (`None` for flag 0).
+fn temp_unflag(flag: u8, instant: f64) -> Option<Temporal> {
+    let (kind, has_tz) = match flag {
+        1 => (temporal::TemporalKind::DateTime, false),
+        2 => (temporal::TemporalKind::DateTime, true),
+        3 => (temporal::TemporalKind::Date, false),
+        4 => (temporal::TemporalKind::Date, true),
+        _ => return None,
+    };
+    Some(Temporal { instant, has_tz, kind })
+}
+
+impl TempData {
+    /// The cached temporal value of a 1-based dictionary id, or `None` if it is not a
+    /// (cached) dateTime/date literal. The engine's O(1) temporal fast path.
+    #[inline]
+    fn lookup(&self, id: Id) -> Option<Temporal> {
+        let i = (id - 1) as usize;
+        match self {
+            TempData::Owned(flags, instants) => temp_unflag(*flags.get(i)?, *instants.get(i)?),
+            TempData::Sparse(m) => m.get(&id).copied(),
+            #[cfg(feature = "mmap")]
+            TempData::Mapped(m, extra) => {
+                let n = Self::mapped_len(m);
+                if i < n {
+                    // SAFETY: the instant section is `n` little-endian f64 at offset 0
+                    // (page-aligned mmap base >= 8-byte alignment); flags follow at n*8.
+                    let instant = unsafe { *m.as_ptr().cast::<f64>().add(i) };
+                    temp_unflag(m[n * 8 + i], instant)
+                } else {
+                    extra.get(&id).copied() // appended after open
+                }
+            }
+        }
+    }
+
+    /// Number of terms covered by a mapped `temporals.bin` (9 bytes per term).
+    #[cfg(feature = "mmap")]
+    #[inline]
+    fn mapped_len(m: &memmap2::Mmap) -> usize {
+        m.len() / 9
+    }
+
+    /// Appends cache entries for freshly interned dictionary ids `old_len+1 ..= dict.len()`
+    /// (delta-overlay growth), mirroring [`NumData::extend_for`].
+    fn extend_for(&mut self, dict: &Dict, old_len: usize) {
+        for i in old_len..dict.len() {
+            let id = i as Id + 1;
+            let t = temporal_of_id(dict, id);
+            match self {
+                TempData::Owned(flags, instants) => {
+                    flags.push(t.map(temp_flag).unwrap_or(0));
+                    instants.push(t.map(|t| t.instant).unwrap_or(f64::NAN));
+                }
+                TempData::Sparse(m) => {
+                    if let Some(t) = t {
+                        m.insert(id, t);
+                    }
+                }
+                #[cfg(feature = "mmap")]
+                TempData::Mapped(_, extra) => {
+                    if let Some(t) = t {
+                        extra.insert(id, t);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resident heap bytes (a memory-mapped cache contributes 0 — it is page cache).
+    #[inline]
+    fn heap_bytes(&self) -> usize {
+        match self {
+            TempData::Owned(flags, instants) => flags.capacity() + instants.capacity() * 8,
+            #[cfg(feature = "mmap")]
+            TempData::Mapped(_, extra) => extra.capacity() * 25,
+            // hashbrown: ~(4-byte key pad to 8 + 16-byte Temporal + control) per slot.
+            TempData::Sparse(m) => m.capacity() * 25,
+        }
+    }
+
+    /// Converts a dense cache into the sparse form when it is mostly empty (≥ 3/4 of
+    /// terms non-temporal — almost always true), mirroring the numerics cache.
+    fn into_sparse_if_worthwhile(self) -> TempData {
+        let (flags, instants) = match &self {
+            TempData::Owned(f, i) => (f, i),
+            _ => return self, // mmap'd/already-sparse: leave as is
+        };
+        let temporal = flags.iter().filter(|&&f| f != 0).count();
+        if temporal * 4 > flags.len() {
+            return self; // temporal-dense: the columns are the better representation
+        }
+        let mut m: rustc_hash::FxHashMap<Id, Temporal> = rustc_hash::FxHashMap::default();
+        m.reserve(temporal);
+        for (i, &f) in flags.iter().enumerate() {
+            if let Some(t) = temp_unflag(f, instants[i]) {
+                m.insert(i as Id + 1, t);
+            }
+        }
+        TempData::Sparse(m)
+    }
+}
+
+/// The cached temporal value of dictionary term `id`, parsed from its borrowed parts
+/// (no `Term` materialisation). `None` for non-temporal terms and ill-formed lexicals.
+fn temporal_of_id(dict: &Dict, id: Id) -> Option<Temporal> {
+    match dict.term_parts(id) {
+        dict::TermParts::Lit { value, datatype, lang: None } => Temporal::of_lit(value, datatype),
+        _ => None,
+    }
+}
+
+/// The temporal-value cache columns for a dictionary (see [`TempData::Owned`]).
+/// Parallel when the `parallel` feature is on.
+fn temporals_of(dict: &Dict) -> (Vec<u8>, Vec<f64>) {
+    let n = dict.len();
+    let cell = |i: usize| -> (u8, f64) {
+        match temporal_of_id(dict, i as Id + 1) {
+            Some(t) => (temp_flag(t), t.instant),
+            None => (0, f64::NAN),
+        }
+    };
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..n).into_par_iter().map(cell).unzip()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..n).map(cell).unzip()
+    }
+}
+
+/// Writes the temporal-value cache to disk (`n` little-endian f64 instants, then `n`
+/// flag bytes) so it can be memory-mapped on open instead of recomputed.
+#[cfg(feature = "mmap")]
+fn write_temporals(path: &std::path::Path, flags: &[u8], instants: &[f64]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    // SAFETY: reinterpret the contiguous f64 column as bytes for writing.
+    let ibytes = unsafe { std::slice::from_raw_parts(instants.as_ptr().cast::<u8>(), std::mem::size_of_val(instants)) };
+    f.write_all(ibytes)?;
+    f.write_all(flags)?;
+    f.flush()
 }
 
 /// The f64 value of a term if it is a numeric XSD literal, else NaN.
@@ -427,10 +605,12 @@ impl Graph {
     fn build(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         let store = TripleStore::from_triples(triples);
         let numerics = NumData::Owned(numerics_of(&dict));
+        let (tflags, tinstants) = temporals_of(&dict);
         Graph {
             dict,
             store,
             numerics,
+            temporals: TempData::Owned(tflags, tinstants),
             named: Vec::new(),
             #[cfg(feature = "mmap")]
             wal: None,
@@ -461,6 +641,7 @@ impl Graph {
             // The numeric cache is mostly (often entirely) NaN — keep only the real
             // numeric literals when sparse, freeing the dense f64-per-term Vec.
             numerics: self.numerics.into_sparse_if_worthwhile(),
+            temporals: self.temporals.into_sparse_if_worthwhile(),
             named: self.named,
             #[cfg(feature = "mmap")]
             wal: self.wal,
@@ -475,7 +656,9 @@ impl Graph {
         std::fs::create_dir_all(dir)?;
         self.store.save(dir)?; // folds any delta-overlay into the persisted permutations
         self.dict.save_mmap(dir)?; // includes appended (delta-overlay) terms
-        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())
+        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())?;
+        let (tf, ti) = self.dense_temporals();
+        write_temporals(&dir.join("temporals.bin"), &tf, &ti)
     }
 
     /// Like [`save`](Self::save) but persists the permutation indexes BLOCK-COMPRESSED
@@ -488,7 +671,9 @@ impl Graph {
         std::fs::create_dir_all(dir)?;
         self.store.save_compressed(dir)?; // folds any delta-overlay, like `save`
         self.dict.save_mmap(dir)?;
-        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())
+        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())?;
+        let (tf, ti) = self.dense_temporals();
+        write_temporals(&dir.join("temporals.bin"), &tf, &ti)
     }
 
     /// Decodes any block-compressed permutation indexes into raw RAM (the load-time
@@ -522,6 +707,38 @@ impl Graph {
         }
     }
 
+    /// The full dense temporal cache columns (flag byte + f64 instant per dictionary
+    /// term) for persisting — the temporal twin of [`dense_numerics`](Self::dense_numerics).
+    #[cfg(feature = "mmap")]
+    fn dense_temporals(&self) -> (std::borrow::Cow<'_, [u8]>, std::borrow::Cow<'_, [f64]>) {
+        use std::borrow::Cow;
+        let n = self.dict.len();
+        match &self.temporals {
+            TempData::Owned(f, i) if f.len() == n => (Cow::Borrowed(f), Cow::Borrowed(i)),
+            TempData::Mapped(m, extra) => {
+                let len = TempData::mapped_len(m);
+                // SAFETY: temporals.bin starts with `len` f64 (page-aligned mmap base).
+                let minst = unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<f64>(), len) };
+                let mut flags = m[len * 8..len * 9].to_vec();
+                let mut instants = minst.to_vec();
+                if flags.len() == n && extra.is_empty() {
+                    return (Cow::Owned(flags), Cow::Owned(instants));
+                }
+                flags.resize(n, 0);
+                instants.resize(n, f64::NAN);
+                for (&id, &t) in extra {
+                    flags[(id - 1) as usize] = temp_flag(t);
+                    instants[(id - 1) as usize] = t.instant;
+                }
+                (Cow::Owned(flags), Cow::Owned(instants))
+            }
+            _ => {
+                let (f, i) = temporals_of(&self.dict);
+                (Cow::Owned(f), Cow::Owned(i))
+            }
+        }
+    }
+
     /// Opens a graph saved by [`save`](Self::save) with its permutation indexes AND
     /// numeric-value cache MEMORY-MAPPED (paged in on demand) — so a large out-of-core
     /// dataset opens near-instantly without re-parsing every term, and the cache stays
@@ -540,7 +757,20 @@ impl Graph {
             }
             _ => NumData::Owned(numerics_of(&dict)),
         };
-        let mut g = Graph { dict, store, numerics, named: Vec::new(), wal: None };
+        let tp = dir.join("temporals.bin");
+        let temporals = match std::fs::File::open(&tp) {
+            Ok(f) if f.metadata()?.len() as usize == dict.len() * 9 => {
+                // SAFETY: the file is owned by this graph for its lifetime and not mutated.
+                TempData::Mapped(unsafe { memmap2::Mmap::map(&f)? }, rustc_hash::FxHashMap::default())
+            }
+            // Absent or stale (a graph saved before this cache existed): recompute —
+            // backward compatible, like the numerics cache.
+            _ => {
+                let (tf, ti) = temporals_of(&dict);
+                TempData::Owned(tf, ti)
+            }
+        };
+        let mut g = Graph { dict, store, numerics, temporals, named: Vec::new(), wal: None };
         // Replay any write-ahead log into the delta-overlay (recovery after a crash or a
         // plain not-yet-compacted close), stopping cleanly at the first torn record and
         // truncating the log there — then keep the log open for further appends.
@@ -702,6 +932,8 @@ impl Graph {
             let finalize = scope.spawn(move || -> Result<(), String> {
                 dict_ref.save_mmap(dir).map_err(|e| e.to_string())?;
                 write_numerics(&dir.join("numerics.bin"), &numerics_of(dict_ref)).map_err(|e| e.to_string())?;
+                let (tf, ti) = temporals_of(dict_ref);
+                write_temporals(&dir.join("temporals.bin"), &tf, &ti).map_err(|e| e.to_string())?;
                 Ok(())
             });
             #[cfg(feature = "parallel")]
@@ -751,6 +983,18 @@ impl Graph {
         self.numerics.lookup(id)
     }
 
+    /// The temporal (xsd:dateTime / xsd:dateTimeStamp / xsd:date) value of a term id,
+    /// or `None` if it is not a well-formed temporal literal. O(1), no allocation, no
+    /// lexical re-parse — the engine's fast path for dateTime FILTER / ORDER BY /
+    /// MIN/MAX, the temporal twin of [`numeric_value`](Self::numeric_value).
+    #[inline]
+    pub fn temporal_value(&self, id: Id) -> Option<Temporal> {
+        if dict::is_inline(id) {
+            return None; // inline ids are integers, never temporal
+        }
+        self.temporals.lookup(id)
+    }
+
     /// The lexical form of a term id IF it is an exact-valued numeric literal (an
     /// `xsd:integer` subtype or `xsd:decimal` — NOT float/double, whose value IS its f64).
     /// Used to disambiguate comparisons that the f64 fast path collapses (integers > 2^53,
@@ -781,7 +1025,7 @@ impl Graph {
     /// A rough estimate of the graph's in-memory footprint in bytes (dictionary +
     /// the six permutation indexes), for benchmarking.
     pub fn heap_bytes(&self) -> usize {
-        self.dict.heap_bytes() + self.store.heap_bytes() + self.numerics.heap_bytes()
+        self.dict.heap_bytes() + self.store.heap_bytes() + self.numerics.heap_bytes() + self.temporals.heap_bytes()
     }
 
     /// Resolves a term to its id, or `None` if the term is absent (so a pattern
@@ -854,8 +1098,9 @@ impl Graph {
             .iter()
             .map(|[s, p, o]| [self.dict.intern(s), self.dict.intern(p), self.dict.intern(o)])
             .collect();
-        // Keep the numeric-filter cache covering the grown dictionary.
+        // Keep the numeric- and temporal-filter caches covering the grown dictionary.
         self.numerics.extend_for(&self.dict, old_len);
+        self.temporals.extend_for(&self.dict, old_len);
         self.store.apply_delta(&ins_ids, &del_ids);
     }
 

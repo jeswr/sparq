@@ -34,7 +34,7 @@ use spargebra::algebra::GraphPattern;
 use spargebra::term::TriplePattern;
 use spargebra::{Query, SparqlParser};
 
-use crate::exec::{self, NumCmp, Prepared};
+use crate::exec::{self, Prepared, ScanCmp};
 use crate::QueryBudget;
 
 /// Renders the query's algebra and the physical plan the engine would choose —
@@ -307,7 +307,7 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
 
     // Binary plan: split the sargable filters, then replay the GOO loop.
     let (pat_filters, residual) = exec::split_sargable(&patterns, &filters);
-    let pfilter = |i: usize| -> Option<(usize, NumCmp)> { pat_filters.get(i).copied().flatten() };
+    let pfilter = |i: usize| -> Option<(usize, ScanCmp)> { pat_filters.get(i).copied().flatten() };
     let _ = writeln!(
         out,
         "{}BGP [binary join plan: greedy GOO ordering] ({} patterns)",
@@ -410,7 +410,7 @@ fn add_vars(vars: &mut Vec<Variable>, p: &Prepared) {
     }
 }
 
-fn filter_note(p: &Prepared, filt: Option<(usize, NumCmp)>) -> String {
+fn filter_note(p: &Prepared, filt: Option<(usize, ScanCmp)>) -> String {
     match filt {
         Some((pos, cmp)) => {
             let v = p.pos_vars[pos].as_ref().map(|v| v.as_str()).unwrap_or("?");

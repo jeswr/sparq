@@ -66,6 +66,19 @@ pub fn is_inline(id: Id) -> bool {
     id >= INLINE_BASE && id - INLINE_BASE <= INLINE_MAX
 }
 
+/// The inline id of an integer VALUE in the inline range — the id the canonical
+/// `xsd:integer` literal of that value interns/looks up to. The engine's fast path for
+/// resolving COMPUTED (BIND/aggregate) integer values to ids without constructing a
+/// term, or even its lexical form.
+#[inline]
+pub fn inline_id_of_int(v: i64) -> Option<Id> {
+    if (0..=INLINE_MAX as i64).contains(&v) {
+        Some(INLINE_BASE + v as u32)
+    } else {
+        None
+    }
+}
+
 /// A compact, single-storage term interner. Each (non-inline) term is stored once, in
 /// the `terms` arena, and the hash table holds only its `Id`. IRIs are split into a
 /// shared namespace prefix (deduplicated in `prefixes`, the redundancy SPARQL PREFIX
@@ -813,6 +826,23 @@ impl Dict {
             return id;
         }
         self.table.find(hash, |&id| self.tabled_eq_term(id, term)).copied().unwrap_or(NO_ID)
+    }
+
+    /// Returns the id for a literal given its components, else `NO_ID` — [`lookup`]
+    /// without constructing an `oxrdf::Term` (the fast path for resolving computed
+    /// BIND/aggregate values against the dictionary). Canonical small `xsd:integer`s
+    /// resolve to their inline id, exactly like `lookup`/`intern_lit`.
+    #[inline]
+    pub fn lookup_lit(&self, value: &str, datatype: &str, lang: Option<&str>) -> Id {
+        if let Some(id) = try_inline_lit(value, datatype) {
+            return id;
+        }
+        let hash = hash_lit(value, datatype, lang);
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_lit(s, value, datatype, lang, &self.datatypes)) {
+            return id;
+        }
+        self.table.find(hash, |&id| self.tabled_is_lit(id, value, datatype, lang)).copied().unwrap_or(NO_ID)
     }
 
     /// Returns the id of a triple term whose components resolved to `ids`, else `NO_ID`.

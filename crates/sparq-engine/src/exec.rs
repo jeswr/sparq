@@ -11,6 +11,7 @@ use oxrdf::{BlankNode, Literal, NamedOrBlankNode, Term, Variable};
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern as IdPattern;
+use sparq_core::temporal::{Temporal, Timeline};
 use sparq_core::Graph;
 use rustc_hash::FxHashSet;
 use spargebra::algebra::{
@@ -635,7 +636,7 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
     if !residual.is_empty() {
         return None;
     }
-    let filt: Option<(usize, NumCmp)> = pat_filters[0];
+    let filt: Option<(usize, ScanCmp)> = pat_filters[0];
 
     let (id_pat, pos_vars, unsat) = prepare_pattern(graph, &patterns[0]).ok()?;
     if !distinct_pattern_vars(&pos_vars) {
@@ -687,7 +688,7 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
     // column where pruning was skipped.
     let passes = |row: &[Id; 3]| -> bool {
         match filt {
-            Some((fpos, cmp)) => graph.numeric_value(scan.to_spo(row)[fpos]).is_some_and(|x| cmp.test(x)),
+            Some((fpos, cmp)) => cmp.test_id(graph, scan.to_spo(row)[fpos]),
             None => true,
         }
     };
@@ -1190,7 +1191,7 @@ fn count_single_filtered(
     filters: &[Expression],
 ) -> Option<usize> {
     // Resolve every filter to (canonical position, comparison); all must be sargable.
-    let mut cmps: Vec<(usize, NumCmp)> = Vec::with_capacity(filters.len());
+    let mut cmps: Vec<(usize, ScanCmp)> = Vec::with_capacity(filters.len());
     for f in filters {
         let (var, cmp) = extract_sargable(f)?;
         let pos = pos_vars.iter().position(|v| v.as_ref() == Some(&var))?;
@@ -1226,7 +1227,7 @@ fn count_single_filtered(
         .iter()
         .filter(|row| {
             let spo = scan.to_spo(row);
-            cmps.iter().all(|(pos, cmp)| graph.numeric_value(spo[*pos]).map(|v| cmp.test(v)).unwrap_or(false))
+            cmps.iter().all(|(pos, cmp)| cmp.test_id(graph, spo[*pos]))
         })
         .count();
     Some(total)
@@ -1677,10 +1678,85 @@ impl NumCmp {
     }
 }
 
+/// A comparison operator, for the temporal pushed-down predicate.
+#[derive(Clone, Copy)]
+pub(crate) enum CmpOp {
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    Eq,
+}
+
+impl CmpOp {
+    #[inline]
+    fn eval(self, o: Ordering) -> bool {
+        match self {
+            CmpOp::Gt => o == Ordering::Greater,
+            CmpOp::Ge => o != Ordering::Less,
+            CmpOp::Lt => o == Ordering::Less,
+            CmpOp::Le => o != Ordering::Greater,
+            CmpOp::Eq => o == Ordering::Equal,
+        }
+    }
+
+    fn render(self) -> &'static str {
+        match self {
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Eq => "=",
+        }
+    }
+}
+
+/// A sargable FILTER predicate pushed down into a pattern scan: numeric (via the f64
+/// `numerics` cache) or temporal (via the `temporals` cache — dateTime/date vs a
+/// temporal constant).
+#[derive(Clone, Copy)]
+pub(crate) enum ScanCmp {
+    Num(NumCmp),
+    /// `value OP temporal-constant`. A row passes when the comparison is DECIDABLE and
+    /// satisfies the operator; an indeterminate (mixed-timezone window), cross-family
+    /// (dateTime vs date) or non-temporal operand is a FILTER type error — the row is
+    /// excluded, which `false` reproduces exactly. (For `=`, cross-family is "known
+    /// different" rather than an error — also excluded, also `false`.)
+    Temp(CmpOp, Temporal),
+}
+
+impl ScanCmp {
+    /// Human-readable comparison for EXPLAIN output, e.g. `> 28`.
+    pub(crate) fn render(&self) -> String {
+        match *self {
+            ScanCmp::Num(c) => c.render(),
+            ScanCmp::Temp(op, t) => format!("{} temporal(instant {})", op.render(), t.instant),
+        }
+    }
+
+    /// Evaluates the pushed-down predicate against one scanned column id, through the
+    /// graph's numeric / temporal value cache — O(1), no term materialised.
+    #[inline]
+    fn test_id(&self, graph: &Graph, id: Id) -> bool {
+        match *self {
+            ScanCmp::Num(c) => graph.numeric_value(id).is_some_and(|x| c.test(x)),
+            ScanCmp::Temp(op, t) => {
+                graph.temporal_value(id).and_then(|v| Temporal::cmp_t(v, t)).is_some_and(|o| op.eval(o))
+            }
+        }
+    }
+}
+
 /// The inclusive range of inline-integer *values* `[lo, hi]` (within `[0, INLINE_MAX]`)
 /// that satisfy the comparison, or `None` if no integer can. Used to range-prune a
-/// scan whose filter column holds inline integers (which sort by value).
-fn inline_pass_values(cmp: NumCmp) -> Option<(u32, u32)> {
+/// scan whose filter column holds inline integers (which sort by value). A TEMPORAL
+/// predicate over an all-inline (integer) column is a type error on every row —
+/// `None`, the empty range.
+fn inline_pass_values(cmp: ScanCmp) -> Option<(u32, u32)> {
+    let cmp = match cmp {
+        ScanCmp::Num(c) => c,
+        ScanCmp::Temp(..) => return None,
+    };
     let max = (dict::INLINE_BASE - 1) as i64;
     let (lo, hi): (i64, i64) = match cmp {
         NumCmp::Gt(t) => (t.floor() as i64 + 1, max),
@@ -1699,9 +1775,10 @@ fn inline_pass_values(cmp: NumCmp) -> Option<(u32, u32)> {
     (lo <= hi).then_some((lo as u32, hi as u32))
 }
 
-/// Recognises a FILTER of the form `?v OP numeric-constant` (or the symmetric
-/// `constant OP ?v`), returning the variable and the comparison to push down.
-fn extract_sargable(e: &Expression) -> Option<(Variable, NumCmp)> {
+/// Recognises a FILTER of the form `?v OP constant` (or the symmetric
+/// `constant OP ?v`) over a numeric or temporal constant, returning the variable
+/// and the comparison to push down.
+fn extract_sargable(e: &Expression) -> Option<(Variable, ScanCmp)> {
     fn lit_num(e: &Expression) -> Option<f64> {
         match e {
             Expression::Literal(l) if is_numeric_dt(l) => {
@@ -1718,26 +1795,47 @@ fn extract_sargable(e: &Expression) -> Option<(Variable, NumCmp)> {
             _ => None,
         }
     }
+    // A well-formed dateTime/dateTimeStamp/date constant: its cached-comparable value.
+    // (The runtime compare through the cache is bit-identical to the per-row parse, so
+    // no precision guard is needed — unlike the f64 numeric threshold above.)
+    fn lit_temp(e: &Expression) -> Option<Temporal> {
+        match e {
+            Expression::Literal(l) => temporal_of_lit(l),
+            _ => None,
+        }
+    }
     fn var_of(e: &Expression) -> Option<Variable> {
         match e {
             Expression::Variable(v) => Some(v.clone()),
             _ => None,
         }
     }
-    // (left, right, cmp-if-var-on-left, cmp-if-var-on-right)
-    let (l, r, on_left, on_right): (&Expression, &Expression, fn(f64) -> NumCmp, fn(f64) -> NumCmp) = match e {
-        Expression::Greater(l, r) => (l, r, NumCmp::Gt, NumCmp::Lt),
-        Expression::GreaterOrEqual(l, r) => (l, r, NumCmp::Ge, NumCmp::Le),
-        Expression::Less(l, r) => (l, r, NumCmp::Lt, NumCmp::Gt),
-        Expression::LessOrEqual(l, r) => (l, r, NumCmp::Le, NumCmp::Ge),
-        Expression::Equal(l, r) => (l, r, NumCmp::Eq, NumCmp::Eq),
+    // (left, right, op-if-var-on-left, op-if-var-on-right)
+    let (l, r, on_left, on_right): (&Expression, &Expression, CmpOp, CmpOp) = match e {
+        Expression::Greater(l, r) => (l, r, CmpOp::Gt, CmpOp::Lt),
+        Expression::GreaterOrEqual(l, r) => (l, r, CmpOp::Ge, CmpOp::Le),
+        Expression::Less(l, r) => (l, r, CmpOp::Lt, CmpOp::Gt),
+        Expression::LessOrEqual(l, r) => (l, r, CmpOp::Le, CmpOp::Ge),
+        Expression::Equal(l, r) => (l, r, CmpOp::Eq, CmpOp::Eq),
         _ => return None,
     };
-    if let (Some(v), Some(c)) = (var_of(l), lit_num(r)) {
-        return Some((v, on_left(c)));
-    }
-    if let (Some(c), Some(v)) = (lit_num(l), var_of(r)) {
-        return Some((v, on_right(c)));
+    let num_cmp = |op: CmpOp, t: f64| -> ScanCmp {
+        ScanCmp::Num(match op {
+            CmpOp::Gt => NumCmp::Gt(t),
+            CmpOp::Ge => NumCmp::Ge(t),
+            CmpOp::Lt => NumCmp::Lt(t),
+            CmpOp::Le => NumCmp::Le(t),
+            CmpOp::Eq => NumCmp::Eq(t),
+        })
+    };
+    for (var, konst, op) in [(l, r, on_left), (r, l, on_right)] {
+        let Some(v) = var_of(var) else { continue };
+        if let Some(c) = lit_num(konst) {
+            return Some((v, num_cmp(op, c)));
+        }
+        if let Some(t) = lit_temp(konst) {
+            return Some((v, ScanCmp::Temp(op, t)));
+        }
     }
     None
 }
@@ -1760,8 +1858,8 @@ fn pattern_var_pos(tp: &TriplePattern, var: &Variable) -> Option<usize> {
 /// Splits FILTERs into per-pattern sargable numeric predicates (pushed into the
 /// scan of the first pattern that binds the variable) and the residual filters
 /// (applied normally afterwards).
-pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, NumCmp)>>, Vec<Expression>) {
-    let mut pat_filters: Vec<Option<(usize, NumCmp)>> = vec![None; patterns.len()];
+pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, ScanCmp)>>, Vec<Expression>) {
+    let mut pat_filters: Vec<Option<(usize, ScanCmp)>> = vec![None; patterns.len()];
     let mut residual = Vec::new();
     for f in filters {
         if let Some((var, cmp)) = extract_sargable(f) {
@@ -2195,7 +2293,7 @@ pub(crate) fn bgp_uses_binary(patterns: &[TriplePattern]) -> bool {
 /// Binary-join BGP plan: greedy cardinality ordering with sort-merge joins on the
 /// current sort variable (falling back to hash, then cross product). `pat_filters`
 /// holds an optional pushed-down numeric FILTER per pattern (by original index).
-fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Option<(usize, NumCmp)>]) -> Result<Bindings, String> {
+fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Option<(usize, ScanCmp)>]) -> Result<Bindings, String> {
     if patterns.is_empty() {
         return Ok(Bindings { vars: vec![], rows: vec![Row::new()], sorted_by: None });
     }
@@ -2215,7 +2313,7 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
         }
         return Ok(b);
     }
-    let pfilter = |i: usize| -> Option<(usize, NumCmp)> { pat_filters.get(i).copied().flatten() };
+    let pfilter = |i: usize| -> Option<(usize, ScanCmp)> { pat_filters.get(i).copied().flatten() };
 
     let prepared = prepare_bgp(graph, patterns)?;
     if prepared.iter().any(|p| p.unsatisfiable) {
@@ -2854,7 +2952,7 @@ fn prepare_pattern(graph: &Graph, tp: &TriplePattern) -> Result<(IdPattern, [Opt
     Ok((id_pat, pos_vars, unsat))
 }
 
-fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3], sort_col: Option<usize>, filter: Option<(usize, NumCmp)>, limit: Option<usize>) -> Bindings {
+fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variable>; 3], sort_col: Option<usize>, filter: Option<(usize, ScanCmp)>, limit: Option<usize>) -> Bindings {
     let mut vars: Vec<Variable> = Vec::new();
     let mut var_positions: Vec<Vec<usize>> = Vec::new();
     for (pos, v) in pos_vars.iter().enumerate() {
@@ -2904,7 +3002,7 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
     let build_row = |row: &[Id; 3]| -> Option<Row> {
         let spo = scan.to_spo(row);
         if let Some((fpos, cmp)) = filter {
-            if !graph.numeric_value(spo[fpos]).is_some_and(|x| cmp.test(x)) {
+            if !cmp.test_id(graph, spo[fpos]) {
                 return None;
             }
         }
@@ -3194,7 +3292,7 @@ fn bind_join(
     pos_vars: &[Option<Variable>; 3],
     rk: usize,
     pp: usize,
-    filt: Option<(usize, NumCmp)>,
+    filt: Option<(usize, ScanCmp)>,
 ) -> Bindings {
     // The pattern's NEW variable columns (every variable position except the join one;
     // the only shared variable is the join variable, so the rest are new).
@@ -3222,7 +3320,7 @@ fn bind_join(
         for prow in scan.rows.iter() {
             let pspo = scan.to_spo(prow);
             if let Some((fpos, cmp)) = filt {
-                if !graph.numeric_value(pspo[fpos]).is_some_and(|x| cmp.test(x)) {
+                if !cmp.test_id(graph, pspo[fpos]) {
                     continue;
                 }
             }
@@ -3777,6 +3875,15 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
             Ok(Value::Num(Num::Int(n as i64)))
         }
         AggregateExpression::FunctionCall { name, expr, distinct } => {
+            // MIN/MAX over an all-temporal column: fold at the ID level through the
+            // temporals cache — no term materialised, no per-comparison lexical
+            // re-parse. Falls through to the general path on any non-temporal member.
+            if let AggregateFunction::Min | AggregateFunction::Max = name {
+                let is_min = matches!(name, AggregateFunction::Min);
+                if let Some(v) = minmax_temporal(graph, local, b, members, expr, *distinct, is_min) {
+                    return Ok(v);
+                }
+            }
             // Collect the per-member values of `expr`. An unbound / errored member is
             // recorded: SUM and AVG must ERROR on it (yielding an unbound aggregate),
             // while COUNT/MIN/MAX/SAMPLE/GROUP_CONCAT skip it.
@@ -3866,6 +3973,69 @@ fn minmax_values(vals: Vec<Value>, keep: Ordering) -> Value {
     }
 }
 
+/// MIN/MAX over a variable whose group members are ALL well-formed temporal
+/// (dateTime/date) graph terms, folded at the id level through the temporals cache.
+/// `None` falls back to the general (materialise + compare_values) path: any unbound
+/// member is skipped (as the general path skips it), but a local-vocab or
+/// non-temporal member aborts the fast path entirely.
+///
+/// Tie semantics replicate `minmax_values` exactly: the comparator is
+/// `compare_values(..).unwrap_or(Equal)` — same-family temporals by timeline, the
+/// indeterminate/cross-family pairs by lexical form — with MIN keeping the FIRST of
+/// equal members (`Iterator::min_by`) and MAX the LAST (`Iterator::max_by`); DISTINCT
+/// drops later duplicate terms first (same term ⇔ same id for graph terms), which can
+/// change which of two equal-VALUED but distinct terms MAX returns, exactly as the
+/// general path's `dedup_values` does.
+fn minmax_temporal(
+    graph: &Graph,
+    local: &LocalVocab,
+    b: &Bindings,
+    members: &[usize],
+    expr: &Expression,
+    distinct: bool,
+    is_min: bool,
+) -> Option<Value> {
+    let Expression::Variable(v) = expr else { return None };
+    let col = b.col(v)?;
+    let lex = |id: Id| -> &str {
+        match graph.dict.term_parts(id) {
+            dict::TermParts::Lit { value, .. } => value,
+            _ => "", // unreachable: cached temporal ids are literal dictionary ids
+        }
+    };
+    let mut seen: FxHashSet<Id> = FxHashSet::default();
+    let mut best: Option<(Temporal, Id)> = None;
+    for &ri in members {
+        let id = b.rows[ri][col];
+        if id == NO_ID {
+            continue; // unbound member: MIN/MAX skips it
+        }
+        if is_local(id) {
+            return None; // computed term: general path
+        }
+        let t = graph.temporal_value(id)?; // non-temporal/ill-formed: general path
+        if distinct && !seen.insert(id) {
+            continue;
+        }
+        best = Some(match best {
+            None => (t, id),
+            Some((bt, bid)) => {
+                let ord = Temporal::cmp_t(t, bt).unwrap_or_else(|| lex(id).cmp(lex(bid)));
+                let replace = if is_min { ord == Ordering::Less } else { ord != Ordering::Less };
+                if replace {
+                    (t, id)
+                } else {
+                    (bt, bid)
+                }
+            }
+        });
+    }
+    Some(match best {
+        Some((_, id)) => Value::Term(term_of(graph, local, id).expect("aggregate member id resolves")),
+        None => Value::Unbound, // no bound members
+    })
+}
+
 /// Value comparison of two typed numerics: exact when both are int/decimal, f64 otherwise.
 fn num_compare(a: Num, c: Num) -> Option<Ordering> {
     if let (Some(x), Some(y)) = (a.to_dec(), c.to_dec()) {
@@ -3918,10 +4088,54 @@ fn slice_bindings(b: &mut Bindings, start: usize, length: Option<usize>) {
     }
 }
 
+/// One precomputed ORDER BY key cell. A temporal (dateTime/date) graph term keeps only
+/// its CACHED comparison value + id — no term materialised, no per-comparison lexical
+/// re-parse (the q09-class fix: ORDER BY dateTime was re-parsing both lexicals on every
+/// comparison of the sort). Everything else keeps the identity-preserving `Value`.
+enum SortCell {
+    Temp { t: Temporal, id: Id },
+    Val(Value),
+}
+
+/// Compares two ORDER BY key cells under the lenient total order, reproducing
+/// `compare_values` exactly: same-family temporals by timeline; the indeterminate /
+/// cross-family temporal pairs fall back to the lexical-form comparison (both cells are
+/// literals — class 3 — and non-numeric, so `compare_values` would reach its
+/// `value_str` fallback); a temporal against any other key materialises the term
+/// lazily (rare: only mixed-type columns) and defers to `compare_values` itself.
+fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell) -> Ordering {
+    let lex = |id: Id| -> &str {
+        match graph.dict.term_parts(id) {
+            dict::TermParts::Lit { value, .. } => value,
+            _ => "", // unreachable: cached temporal ids are literal dictionary ids
+        }
+    };
+    let term_val = |id: Id| Value::Term(term_of(graph, local, id).expect("sort key id resolves"));
+    match (a, c) {
+        (SortCell::Temp { t: ta, id: ia }, SortCell::Temp { t: tb, id: ib }) => {
+            Temporal::cmp_t(*ta, *tb).unwrap_or_else(|| lex(*ia).cmp(lex(*ib)))
+        }
+        (SortCell::Temp { id, .. }, SortCell::Val(v)) => compare_values(&term_val(*id), v).unwrap_or(Ordering::Equal),
+        (SortCell::Val(v), SortCell::Temp { id, .. }) => compare_values(v, &term_val(*id)).unwrap_or(Ordering::Equal),
+        (SortCell::Val(av), SortCell::Val(cv)) => compare_values(av, cv).unwrap_or(Ordering::Equal),
+    }
+}
+
 fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[OrderExpression]) -> Result<(), String> {
-    // The sort key (vector of (descending, Value)) for one row. Numeric keys use the cache (no
-    // per-comparison reparse); other expressions fall back to identity-preserving evaluation.
-    let key_of = |row: &Row| -> Result<Vec<(bool, Value)>, String> {
+    // A variable bound to a graph term with a cached temporal value sorts through the
+    // cache (`SortCell::Temp`); anything else takes the `Value` path.
+    let temporal_cell = |row: &Row, e: &Expression| -> Option<SortCell> {
+        let Expression::Variable(v) = e else { return None };
+        let id = row[b.col(v)?];
+        if id == NO_ID || is_local(id) {
+            return None;
+        }
+        graph.temporal_value(id).map(|t| SortCell::Temp { t, id })
+    };
+    // The sort key (vector of (descending, SortCell)) for one row. Numeric keys use the
+    // numerics cache and temporal keys the temporals cache (no per-comparison reparse);
+    // other expressions fall back to identity-preserving evaluation.
+    let key_of = |row: &Row| -> Result<Vec<(bool, SortCell)>, String> {
         let mut key = Vec::with_capacity(exprs.len());
         for oe in exprs {
             let (desc, e) = match oe {
@@ -3929,8 +4143,11 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
                 OrderExpression::Desc(e) => (true, e),
             };
             let v = match eval_numeric(graph, local, b, row, e) {
-                Some(n) => Value::Num(Num::Double(n)),
-                None => eval_expr(graph, local, b, row, e)?,
+                Some(n) => SortCell::Val(Value::Num(Num::Double(n))),
+                None => match temporal_cell(row, e) {
+                    Some(cell) => cell,
+                    None => SortCell::Val(eval_expr(graph, local, b, row, e)?),
+                },
             };
             key.push((desc, v));
         }
@@ -3938,19 +4155,19 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
     };
     // Precompute the keys (independent, read-only) — in parallel for large result sets.
     #[cfg(feature = "parallel")]
-    let mut keyed: Vec<(Vec<(bool, Value)>, Row)> = if b.rows.len() >= PAR_THRESHOLD {
+    let mut keyed: Vec<(Vec<(bool, SortCell)>, Row)> = if b.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
         b.rows.par_iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
     } else {
         b.rows.iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?
     };
     #[cfg(not(feature = "parallel"))]
-    let mut keyed: Vec<(Vec<(bool, Value)>, Row)> =
+    let mut keyed: Vec<(Vec<(bool, SortCell)>, Row)> =
         b.rows.iter().map(|row| Ok((key_of(row)?, row.clone()))).collect::<Result<_, String>>()?;
 
-    let cmp = |a: &(Vec<(bool, Value)>, Row), c: &(Vec<(bool, Value)>, Row)| {
+    let cmp = |a: &(Vec<(bool, SortCell)>, Row), c: &(Vec<(bool, SortCell)>, Row)| {
         for ((desc, av), (_, cv)) in a.0.iter().zip(c.0.iter()) {
-            let ord = compare_values(av, cv).unwrap_or(Ordering::Equal);
+            let ord = cmp_sort_cells(graph, local, av, cv);
             let ord = if *desc { ord.reverse() } else { ord };
             if ord != Ordering::Equal {
                 return ord;
@@ -4587,6 +4804,48 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
     }
 }
 
+/// Fast temporal (xsd:dateTime / xsd:dateTimeStamp / xsd:date) evaluation that never
+/// materialises a term: a variable bound to a graph term resolves through the
+/// load-time `temporals` cache (O(1), no lexical re-parse); a constant literal and a
+/// BIND-computed (local-vocab) term parse once here. Returns `None` for anything
+/// non-temporal or ill-formed, so the caller falls back to the general path (which
+/// yields the exact type-error semantics). Used only where the VALUE matters
+/// (comparison operators); term identity is never needed there.
+fn eval_temporal(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Expression) -> Option<Temporal> {
+    use Expression::*;
+    match e {
+        Variable(v) => {
+            let c = b.col(v)?;
+            let id = row[c];
+            if id == NO_ID {
+                None
+            } else if is_local(id) {
+                // Computed values are rare; parse through the local vocab term.
+                temporal_of_term(local.term(id))
+            } else {
+                graph.temporal_value(id)
+            }
+        }
+        Literal(l) => temporal_of_lit(l),
+        _ => None,
+    }
+}
+
+/// The temporal value of a term, if it is a well-formed dateTime/date literal.
+fn temporal_of_term(t: &Term) -> Option<Temporal> {
+    match t {
+        Term::Literal(l) => temporal_of_lit(l),
+        _ => None,
+    }
+}
+
+fn temporal_of_lit(l: &Literal) -> Option<Temporal> {
+    if l.language().is_some() {
+        return None;
+    }
+    Temporal::of_lit(l.value(), l.datatype().as_str())
+}
+
 /// The lexical form of an expression IF it is an exact-valued numeric operand (an
 /// integer subtype or xsd:decimal — NOT float/double). Used to re-check comparisons that
 /// the f64 fast path collapsed (integers > 2^53, high-precision decimals). Only reached
@@ -4924,6 +5183,15 @@ fn cmp_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &Exp
         }
         return Ok(Value::Bool(x.partial_cmp(&y).map(&f).unwrap_or(false)));
     }
+    // Fast path: both sides temporal -> compare cached/parsed timeline values, no term
+    // materialised. `None` from `cmp_t` is exactly the strict path's type-error cases
+    // (cross-family dateTime vs date, or mixed timezone presence inside the ±14h window).
+    if let (Some(ta), Some(tb)) = (eval_temporal(graph, local, b, row, a), eval_temporal(graph, local, b, row, c)) {
+        return Ok(match Temporal::cmp_t(ta, tb) {
+            Some(o) => Value::Bool(f(o)),
+            None => Value::Error,
+        });
+    }
     let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
     Ok(match value_compare_strict(&x, &y) {
         Some(o) => Value::Bool(f(o)),
@@ -4953,6 +5221,18 @@ fn equal_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], a: &E
             }
         }
         return Ok(Value::Bool(x == y));
+    }
+    // Fast path: both temporal. Same-family operands decide by timeline (`None` =
+    // the indeterminate mixed-timezone window -> type error); dateTime and date are
+    // DISJOINT value spaces -> known different (matching `values_equal`).
+    if let (Some(ta), Some(tb)) = (eval_temporal(graph, local, b, row, a), eval_temporal(graph, local, b, row, c)) {
+        if ta.kind != tb.kind {
+            return Ok(Value::Bool(false));
+        }
+        return Ok(match Temporal::cmp_t(ta, tb) {
+            Some(o) => Value::Bool(o == Ordering::Equal),
+            None => Value::Error,
+        });
     }
     let (x, y) = (eval_expr(graph, local, b, row, a)?, eval_expr(graph, local, b, row, c)?);
     Ok(match values_equal(&x, &y) {
@@ -5012,105 +5292,8 @@ fn lit_kind(v: &Value) -> LitKind<'_> {
     }
 }
 
-/// An xsd:date / xsd:dateTime VALUE: seconds-from-epoch of the local time, fractional
-/// seconds, and the timezone offset when present. Comparison follows XSD: both-with-tz
-/// and both-without compare directly; MIXED presence is only decidable outside the
-/// ±14h window (inside it the comparison is indeterminate — a SPARQL type error).
-#[derive(Clone, Copy, Debug)]
-struct Timeline {
-    secs: i64,
-    frac: f64,
-    tz: Option<i64>,
-}
-
-impl Timeline {
-    fn parse_datetime(s: &str) -> Option<Timeline> {
-        let (date, rest) = s.split_once('T')?;
-        let (time, tz) = match rest.find(['Z', '+', '-']) {
-            Some(i) => (&rest[..i], Some(parse_tz(&rest[i..])?)),
-            None => (rest, None),
-        };
-        let days = parse_civil_date(date)?;
-        let mut t = time.split(':');
-        let h: i64 = t.next()?.parse().ok()?;
-        let mi: i64 = t.next()?.parse().ok()?;
-        let sec_lex = t.next()?;
-        if t.next().is_some() {
-            return None;
-        }
-        let sec: f64 = sec_lex.parse().ok()?;
-        Some(Timeline {
-            secs: days * 86_400 + h * 3600 + mi * 60 + sec.trunc() as i64,
-            frac: sec.fract(),
-            tz,
-        })
-    }
-
-    fn parse_date(s: &str) -> Option<Timeline> {
-        // The timezone suffix starts after the day: "...-23Z" / "...-23+05:00". A bare
-        // date's own hyphens must not be mistaken for an offset sign, so require the
-        // ":" of "±hh:mm" at the right position.
-        let (date, tz) = if let Some(d) = s.strip_suffix('Z') {
-            (d, Some(0))
-        } else if s.len() > 10 && matches!(s.as_bytes()[s.len() - 6], b'+' | b'-') && s.as_bytes()[s.len() - 3] == b':' {
-            (&s[..s.len() - 6], Some(parse_tz(&s[s.len() - 6..])?))
-        } else {
-            (s, None)
-        };
-        Some(Timeline { secs: parse_civil_date(date)? * 86_400, frac: 0.0, tz })
-    }
-
-    /// The absolute instant (treating an absent timezone as UTC) in seconds.
-    fn instant(&self) -> f64 {
-        (self.secs - self.tz.unwrap_or(0)) as f64 + self.frac
-    }
-
-    fn cmp_tl(a: Timeline, b: Timeline) -> Option<Ordering> {
-        let (ai, bi) = (a.instant(), b.instant());
-        match (a.tz, b.tz) {
-            (Some(_), Some(_)) | (None, None) => ai.partial_cmp(&bi),
-            // Mixed timezone presence: indeterminate inside the ±14h window.
-            _ => {
-                if (ai - bi).abs() > 14.0 * 3600.0 {
-                    ai.partial_cmp(&bi)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-
-/// `"Z"` / `"±hh:mm"` -> offset seconds.
-fn parse_tz(tz: &str) -> Option<i64> {
-    if tz == "Z" {
-        return Some(0);
-    }
-    let (sign, hm) = tz.split_at(1);
-    let (h, m) = hm.split_once(':')?;
-    let (h, m): (i64, i64) = (h.parse().ok()?, m.parse().ok()?);
-    let off = h * 3600 + m * 60;
-    Some(if sign == "-" { -off } else { off })
-}
-
-/// `[-]YYYY-MM-DD` -> days from the epoch (Howard Hinnant's days_from_civil).
-fn parse_civil_date(date: &str) -> Option<i64> {
-    let neg = date.starts_with('-');
-    let mut p = date.strip_prefix('-').unwrap_or(date).split('-');
-    let y: i64 = p.next()?.parse().ok()?;
-    let y = if neg { -y } else { y };
-    let m: i64 = p.next()?.parse().ok()?;
-    let d: i64 = p.next()?.parse().ok()?;
-    if p.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146_097 + doe - 719_468)
-}
+// `Timeline` (the parsed xsd:date/dateTime value) and its comparison rules live in
+// `sparq_core::temporal`, shared with the graph's load-time `temporals` cache.
 
 /// SPARQL `=` (and, negated, `!=`) as a three-valued result: `Some(true/false)` for a
 /// decided comparison, `None` for a type error. OPEN-WORLD rules: identical terms are
@@ -6168,15 +6351,52 @@ fn value_str(v: &Value) -> Option<String> {
     }
 }
 
+/// Resolves a computed NUMERIC value to an id without constructing a Term when
+/// possible: an inline-range integer encodes straight into its id (no allocation at
+/// all); any other numeric probes the dictionary by (lexical, datatype) parts.
+/// `Ok(id)` on a hit; `Err(lexical)` carries the (already formatted) lexical form for
+/// the caller's local-vocab miss path.
+#[inline]
+fn num_to_id(graph: &Graph, n: Num) -> Result<Id, String> {
+    if let Num::Int(i) = n {
+        if let Some(id) = dict::inline_id_of_int(i) {
+            return Ok(id);
+        }
+    }
+    let lex = n.lexical();
+    match graph.dict.lookup_lit(&lex, n.datatype().as_str(), None) {
+        NO_ID => Err(lex),
+        id => Ok(id),
+    }
+}
+
 /// Converts an evaluated value into an id. Computed terms are resolved against
 /// the graph dictionary first (so they join and deduplicate against the data);
-/// terms not already present get a per-query local id.
+/// terms not already present get a per-query local id. Computed numerics skip
+/// Term construction entirely when they resolve to an inline id or a dictionary
+/// term (the BIND fast path).
 fn value_to_id(graph: &Graph, local: &mut LocalVocab, v: &Value) -> Id {
-    let term = match value_as_term(v) {
-        Some(t) => t,
-        None => return NO_ID,
+    let term = match v {
+        Value::Unbound | Value::Error => return NO_ID,
+        Value::Num(n) => match num_to_id(graph, *n) {
+            Ok(id) => return id,
+            Err(lex) => Term::Literal(Literal::new_typed_literal(lex, n.datatype())),
+        },
+        Value::Bool(b) => {
+            let lex = if *b { "true" } else { "false" };
+            match graph.dict.lookup_lit(lex, xsd::BOOLEAN.as_str(), None) {
+                NO_ID => Term::Literal(Literal::new_typed_literal(lex, xsd::BOOLEAN)),
+                id => return id,
+            }
+        }
+        Value::Term(t) => {
+            if let Some(id) = graph.id_of(t) {
+                return id;
+            }
+            t.clone()
+        }
     };
-    graph.id_of(&term).unwrap_or_else(|| local.intern(term))
+    local.intern(term)
 }
 
 /// A computed value as a concrete RDF term (`None` for unbound / type error).
@@ -6199,13 +6419,27 @@ fn value_as_term(v: &Value) -> Option<Term> {
 fn value_to_id_readonly(graph: &Graph, local: &LocalVocab, v: &Value) -> Result<Id, Term> {
     let term = match v {
         Value::Unbound | Value::Error => return Ok(NO_ID),
-        Value::Bool(b) => Term::Literal(Literal::new_typed_literal(b.to_string(), xsd::BOOLEAN)),
-        Value::Num(n) => Term::Literal(Literal::new_typed_literal(n.lexical(), n.datatype())),
-        Value::Term(t) => t.clone(),
+        // Computed numerics/booleans skip Term construction when they resolve to an
+        // inline id or a dictionary term — the constructed-Term path only runs for
+        // values that genuinely head to the local vocab (the BIND fast path).
+        Value::Num(n) => match num_to_id(graph, *n) {
+            Ok(id) => return Ok(id),
+            Err(lex) => Term::Literal(Literal::new_typed_literal(lex, n.datatype())),
+        },
+        Value::Bool(b) => {
+            let lex = if *b { "true" } else { "false" };
+            match graph.dict.lookup_lit(lex, xsd::BOOLEAN.as_str(), None) {
+                NO_ID => Term::Literal(Literal::new_typed_literal(lex, xsd::BOOLEAN)),
+                id => return Ok(id),
+            }
+        }
+        Value::Term(t) => {
+            if let Some(id) = graph.id_of(t) {
+                return Ok(id);
+            }
+            t.clone()
+        }
     };
-    if let Some(id) = graph.id_of(&term) {
-        return Ok(id);
-    }
     if let Some(&id) = local.ids.get(&term) {
         return Ok(id);
     }
