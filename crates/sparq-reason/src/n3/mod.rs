@@ -70,7 +70,7 @@
 //! `log:collectAllIn` (scoped aggregation).
 
 mod model;
-mod parser;
+pub mod parser;
 
 pub use model::{Rule, Term};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -179,16 +179,55 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
 /// triple, in derivation order) — the EYE `--proof` analogue.
 pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     let parsed = parser::parse(src)?;
-    let mut facts = FactIndex::from_iter(parsed.facts);
-    let bw = BwCtx::new(&parsed.backward_rules);
+    let (facts, steps) = run_closure(parsed);
+    intern_closure(dict, &facts, &steps)
+}
+
+/// Term-level closure result — what [`reason_n3_terms`] returns. Unlike
+/// [`reason_n3`], nothing is interned: facts may contain `{ … }` formula terms
+/// (which have no dictionary representation) and survive here untouched.
+pub struct N3Closure {
+    /// The full ground closure: original facts plus every derivation (a set).
+    pub facts: Vec<[Term; 3]>,
+    /// Only the newly-derived triples, in derivation order.
+    pub derived: Vec<[Term; 3]>,
+    /// Forward (`=>`) / backward (`<=`) rule counts of the parsed document.
+    pub n_rules: usize,
+    pub n_backward_rules: usize,
+}
+
+/// As [`reason_n3`], but returns the closure at the TERM level (no dictionary)
+/// and resolves relative IRIs against `base` when given — the entry point used
+/// by the W3C N3 conformance harness (cwm/EYE-style: `--think` then compare).
+pub fn reason_n3_terms(src: &str, base: Option<&str>) -> Result<N3Closure, String> {
+    let parsed = match base {
+        Some(b) => parser::parse_with_base(src, b)?,
+        None => parser::parse(src)?,
+    };
+    let (n_rules, n_backward_rules) = (parsed.rules.len(), parsed.backward_rules.len());
+    let (facts, steps) = run_closure(parsed);
+    Ok(N3Closure {
+        facts: facts.all.into_iter().collect(),
+        derived: steps.into_iter().map(|(g, _, _)| g).collect(),
+        n_rules,
+        n_backward_rules,
+    })
+}
+
+/// The semi-naive forward-chaining fixpoint shared by the id-level and
+/// term-level entry points. Returns the final fact set plus the derivation
+/// steps `(conclusion, rule index, supporting premises)` in derivation order.
+fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec<[Term; 3]>)>) {
+    let parser::Parsed { facts: facts0, rules, backward_rules } = parsed;
+    let mut facts = FactIndex::from_iter(facts0);
+    let bw = BwCtx::new(&backward_rules);
     // Derivation steps at the term level (interned to ids once at the end).
     let mut steps: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
 
     // Which predicates can a backward rule conclude? A forward rule with a premise atom on
     // such a predicate cannot use the semi-naive delta restriction (a backward proof is not
     // a fact in any delta), so it re-evaluates fully each round — see `needs_full` below.
-    let bw_concl_preds: FxHashSet<&str> = parsed
-        .backward_rules
+    let bw_concl_preds: FxHashSet<&str> = backward_rules
         .iter()
         .flat_map(|r| r.conclusion.iter())
         .filter_map(|c| match &c[1] {
@@ -196,8 +235,7 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
             _ => None,
         })
         .collect();
-    let bw_any_var_pred = parsed
-        .backward_rules
+    let bw_any_var_pred = backward_rules
         .iter()
         .flat_map(|r| r.conclusion.iter())
         .any(|c| matches!(&c[1], Term::Var(_)));
@@ -210,8 +248,7 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
     // have support outside the fact deltas — both re-evaluate against ALL facts each round
     // (correct; the fixpoint still terminates because conclusions are deduped). Pure-builtin
     // rules (no join atom) fire only in round 0.
-    let rule_meta: Vec<(Vec<usize>, bool)> = parsed
-        .rules
+    let rule_meta: Vec<(Vec<usize>, bool)> = rules
         .iter()
         .map(|r| {
             let lists = extract_lists(&r.premise);
@@ -220,7 +257,7 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
             let has_neg = r.premise.iter().any(|p| scoped_negation(&p[1]).is_some());
             let needs_bw = joins.iter().any(|&k| match &r.premise[k][1] {
                 Term::Iri(i) => bw_any_var_pred || bw_concl_preds.contains(i.as_str()),
-                _ => !parsed.backward_rules.is_empty(),
+                _ => !backward_rules.is_empty(),
             });
             (joins, has_neg || needs_bw)
         })
@@ -230,7 +267,7 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
     let mut first_round = true;
     loop {
         let mut produced: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
-        for (ri, rule) in parsed.rules.iter().enumerate() {
+        for (ri, rule) in rules.iter().enumerate() {
             let (joins, needs_full) = &rule_meta[ri];
             let bindings: Vec<Binding> = if *needs_full || joins.is_empty() {
                 // non-monotonic / backward-supported / constant rule: full evaluation
@@ -286,7 +323,17 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
         }
         delta = new_delta;
     }
+    (facts, steps)
+}
 
+/// Intern a term-level closure + derivation into the dictionary ([`reason_n3`] /
+/// [`reason_n3_proof`] output form). Errors on formula-valued facts, which have
+/// no dictionary representation (use [`reason_n3_terms`] for those documents).
+fn intern_closure(
+    dict: &mut Dict,
+    facts: &FactIndex,
+    steps: &[([Term; 3], usize, Vec<[Term; 3]>)],
+) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     // Intern the ground closure into the dictionary.
     let mut out = Vec::with_capacity(facts.len());
     for t in &facts.all {
@@ -294,7 +341,7 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
     }
     // Intern the proof steps.
     let mut proof = Vec::with_capacity(steps.len());
-    for (g, ri, prem) in &steps {
+    for (g, ri, prem) in steps {
         let it = |t: &[Term; 3], d: &mut Dict| -> Result<[Id; 3], String> {
             Ok([intern(d, &t[0])?, intern(d, &t[1])?, intern(d, &t[2])?])
         };

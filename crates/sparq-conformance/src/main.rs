@@ -8,14 +8,8 @@
 //! Informational by default (always exits 0); `--strict` exits 1 on any FAIL
 //! so the pass rate can be ratcheted in CI later.
 
-mod compare;
-mod manifest;
-mod rdf;
-mod results;
-mod run;
-
-use manifest::{EntryKind, TestEntry};
-use run::Status;
+use sparq_conformance::manifest::{self, EntryKind, TestEntry};
+use sparq_conformance::run::{self, Status};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

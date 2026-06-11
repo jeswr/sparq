@@ -38,7 +38,15 @@ pub struct Parsed {
 }
 
 pub fn parse(src: &str) -> Result<Parsed, String> {
+    parse_with_base(src, "")
+}
+
+/// As [`parse`], but resolves relative IRIs (in IRIREFs and `@prefix`/`@base`
+/// directives) against `base` — the document's own location, RFC 3986-style.
+/// An empty `base` keeps relative IRIs as written (the historical behavior).
+pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
     let mut p = Parser::new(src);
+    p.base = base.to_string();
     let stmts = p.document()?;
     let mut facts = Vec::new();
     let mut rules = Vec::new();
@@ -149,6 +157,7 @@ impl<'a> Parser<'a> {
     fn directive_base(&mut self) -> Result<(), String> {
         self.i += if self.starts_with("@base") { 5 } else { 4 };
         self.ws();
+        // read_iriref already resolves the new base against the current one.
         self.base = self.read_iriref()?;
         self.eat(b'.');
         Ok(())
@@ -292,12 +301,7 @@ impl<'a> Parser<'a> {
         }
         let iri = std::str::from_utf8(&self.s[start..self.i]).map_err(|e| e.to_string())?.to_string();
         self.i += 1; // '>'
-        // resolve against base if relative (no scheme) and base set
-        if self.base.is_empty() || iri.contains("://") || iri.starts_with("urn:") {
-            Ok(iri)
-        } else {
-            Ok(format!("{}{}", self.base, iri))
-        }
+        Ok(resolve_iri(&self.base, &iri))
     }
 
     fn read_pname_prefix(&mut self) -> Result<String, String> {
@@ -501,6 +505,72 @@ impl<'a> Parser<'a> {
         self.bnode += 1;
         Term::Blank(format!("_b{}", self.bnode))
     }
+}
+
+/// Pragmatic RFC 3986 reference resolution: enough for the forms test suites
+/// and real documents use (`#frag`, `name.n3#frag`, `../x`, absolute IRIs,
+/// scheme-relative and root-relative paths). With no base, or an absolute
+/// reference, the reference is returned as written.
+pub(super) fn resolve_iri(base: &str, iri: &str) -> String {
+    let is_absolute = |s: &str| -> bool {
+        match s.find(':') {
+            Some(i) if i > 0 => {
+                let scheme = &s[..i];
+                scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+                    // a pname-like "a:b" inside <> is still an IRI; treat any
+                    // syntactically valid scheme as absolute (RFC 3986 §4.3)
+            }
+            _ => false,
+        }
+    };
+    if base.is_empty() || is_absolute(iri) {
+        return iri.to_string();
+    }
+    // Strip any fragment from the base.
+    let base = base.split('#').next().unwrap_or(base);
+    if iri.is_empty() {
+        return base.to_string();
+    }
+    if let Some(frag) = iri.strip_prefix('#') {
+        return format!("{base}#{frag}");
+    }
+    // scheme = up to ':'; authority = '//…' if present.
+    let scheme_end = base.find(':').map(|i| i + 1).unwrap_or(0);
+    let (authority_end, has_authority) = if base[scheme_end..].starts_with("//") {
+        let rest = &base[scheme_end + 2..];
+        (scheme_end + 2 + rest.find('/').unwrap_or(rest.len()), true)
+    } else {
+        (scheme_end, false)
+    };
+    if iri.starts_with("//") && has_authority {
+        return format!("{}{}", &base[..scheme_end], iri);
+    }
+    let merged = if iri.starts_with('/') {
+        format!("{}{}", &base[..authority_end], iri)
+    } else {
+        // Merge with the base path minus its last segment.
+        let path_end = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
+        let dir = if path_end > authority_end { &base[..path_end] } else { base };
+        if dir.ends_with('/') {
+            format!("{dir}{iri}")
+        } else {
+            format!("{dir}/{iri}")
+        }
+    };
+    // Remove dot segments in the path part (after the authority).
+    let (prefix, path) = merged.split_at(authority_end.min(merged.len()));
+    let mut out: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    format!("{prefix}{}", out.join("/"))
 }
 
 fn utf8_len(b: u8) -> usize {

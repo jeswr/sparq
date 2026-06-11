@@ -35,8 +35,12 @@ pub struct QueryAction {
     pub query: Option<PathBuf>,
     pub data: Vec<PathBuf>,
     pub graph_data: Vec<GraphData>,
-    /// `sd:entailmentRegime` / `qt:serviceData` present — feature we skip.
+    /// `sd:entailmentRegime` / `qt:serviceData` present — feature the SPARQL
+    /// evaluation runner skips (the inference runner handles regimes it knows).
     pub unsupported_feature: Option<String>,
+    /// The `sd:entailmentRegime` IRIs of the action (e.g. `ent:RDFS`), when
+    /// present — consumed by the entailment-regime runner in `inference`.
+    pub entailment_regimes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -231,6 +235,14 @@ fn parse_query_action(g: &MiniGraph, action: &NamedOrBlankNode, action_term: &Te
     ] {
         if g.object(action, pred).is_some() {
             qa.unsupported_feature = Some(feat.to_string());
+        }
+    }
+    for r in g.objects(
+        action,
+        "http://www.w3.org/ns/sparql-service-description#entailmentRegime",
+    ) {
+        if let Term::NamedNode(n) = r {
+            qa.entailment_regimes.push(n.as_str().to_string());
         }
     }
     qa
