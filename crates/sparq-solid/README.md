@@ -222,28 +222,38 @@ non-authorized graph behaves exactly like an absent one (indistinguishability):
   `tests/hardening.rs` and `tests/e2e.rs`, which also asserts the two paths return
   byte-identical JSON).
 
-## Measured v1 baseline (design doc §6)
+## Measured (design doc §6 + §6.1)
 
 M1 MacBook Air, `--release`, fixture = 1148 named graphs / 3060 quads ("fat" = same
 tree with 50 filler triples per document = 46 260 quads). Reproduce with
-`cargo run -p sparq-solid --example bench --release`.
+`cargo run -p sparq-solid --example bench --release` (both query paths are measured
+in the same run, so the v1-vs-v2 comparison is honest under machine-load variance).
 
 | measurement | value |
 |---|---|
-| WAC auth-view materialization (full pipeline, 1 stratum) | **1.00 s** → 3 783 auth triples |
-| ACP auth-view materialization (3 strata) | **1.13 s** → 6 168 auth triples |
-| re-materialization after an ACL change (v1 = full re-run) | same (~1.0–1.1 s) |
-| engine on FULL dataset (no security), titles scan | 41 ms (864 rows) |
-| v1 `query_as` (rewrite + copy, 800 authorized graphs) | 30 ms (599 rows) |
-| v1 copy cost isolated | **12 ms/query** |
-| fat fixture: FULL dataset / `query_as` / copy isolated | 45 ms / 83 ms / **59 ms** |
-| session graph-set, cold / cached | 0.30 ms / 0.6 µs |
+| WAC auth-view materialization (full pipeline, 1 stratum) | ~0.5–1.0 s → 3 783 auth triples |
+| ACP auth-view materialization (3 strata) | ~0.6–1.1 s → 6 168 auth triples |
+| re-materialization after an ACL change (= full re-run) | same |
+| session graph-set, cold / cached | 0.30 ms / 0.3 µs |
+
+v1 rewrite path vs the default v2 dataset-view path (same run, 2026-06-11):
+
+| per-query measurement | v1 rewrite+copy | v2 dataset view | speedup |
+|---|---|---|---|
+| titles query, 800 authorized graphs (3k quads) | 28.98 ms | **18.35 ms** | 1.6× |
+| path overhead isolated (empty pattern), 3k quads | 11.52 ms | **1.72 ms** | **6.7×** |
+| titles query, fat fixture (46k quads) | 67.46 ms | **20.75 ms** | 3.3× |
+| path overhead isolated, fat fixture | 43.21 ms | **1.58 ms** | **27×** |
+| FULL-dataset query, no security, fat fixture | 33.58 ms | — | — |
 
 Reading honestly: materialization is cheap enough to re-run on every ACL change at
-pod scale, but the v1 per-query copy scales linearly with authorized data (~1.3 s
-extrapolated at 1M quads) — on the fat fixture it is already slower than querying
-the whole dataset with no security at all. The zero-copy dataset view (above) is the
-fix. These numbers are also the **D2 gate** for any custom authorization storage.
+pod scale. The v1 per-query copy scales linearly with authorized data (~1.3 s
+extrapolated at 1M quads) and on the fat fixture is 2× slower than querying the
+whole dataset with no security; the v2 view's overhead is **flat** (~1–1.7 ms at
+both sizes — the union-default `GRAPH` wrap, not a copy), and on the fat fixture
+the restricted query is *faster* than the unrestricted scan (the view prunes
+non-visible graphs before they are touched). These numbers are also the **D2 gate**
+for any custom authorization storage.
 
 ## Limitations & follow-ups (design doc §7)
 
