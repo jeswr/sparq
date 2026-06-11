@@ -140,3 +140,21 @@ fraction of the hardware**. "Beat RDFox on this M1" is not achievable — not on
 disk and the dict doesn't fit in RAM. Beating it would need (a) ~1 TB scratch + a spill dict
 to hold the output at all, then (b) the sharded-dict fix to lift ~1.3→3–4 M/s, then (c) an
 apples-to-apples run no published source currently provides.
+
+## Hardware-validation attempt (2026-06-11) — INFRA-BLOCKED, $0 spent
+
+The planned timed gz→queryable-store run (full truthy if it fit, else a ≥1 B-triple slice +
+labeled linear extrapolation) was attempted on the `hardware-validation` branch via
+`hwrun/launch.sh` + `hwrun/remote.sh` (ranged-parallel prefix download overlapped with the
+release build; `SPARQ_SHARDED_DICT=1` out-of-core build of the slice; sanity COUNTs over
+mmap). **No instance could be launched**: spot is still blocked by the missing EC2-Spot
+service-linked role, the on-demand Standard-bucket quota is still 16 vCPU, and the running
+prod t3.large consumes 2 of those 16 — so even the 16-vCPU fallback boxes
+(c7i.4xlarge/c7g.4xlarge, which worked in the June campaign when the bucket was empty) now
+fail with `VcpuLimitExceeded`. Verbatim errors, the quota arithmetic, and the three concrete
+unblock options (spot SLR; quota ≥194; or an 8-vCPU/64 GB `r7i.2xlarge`, the smallest box
+whose RAM holds a 1 B-triple build dict) are in `research/hardware-validation-blocked.md`.
+
+**T2 verdict: blocked — target neither met nor refuted.** The <24-min question remains open
+pending hardware; the code side (sharded dict + zstd source + out-of-core path) is committed
+and the on-box methodology is launch-ready (`bash hwrun/launch.sh` once any unblock lands).

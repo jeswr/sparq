@@ -1,0 +1,26 @@
+== resolve AMI / network ==
+AMI=ami-07f936ee1f9a0de0e VPC=vpc-00a7b8516fd784be9 SUBNETS=subnet-00e6f93cf6356d681	subnet-01047a50eef6afe84	subnet-0e924691f0dfb7f0f MYIP=77.108.166.120
+== ephemeral keypair + SG ==
+== RUNG 1: launch spot c7i.48xlarge (deadman +70m) ==
+--- RUNG 1 (spot c7i.48xlarge) FAILED 2026-06-11T11:10:40Z ---
+
+aws: [ERROR]: An error occurred (AuthFailure.ServiceLinkedRoleCreationNotPermitted) when calling the RunInstances operation: The provided credentials do not have permission to create the service-linked role for EC2 Spot Instances.
+== RUNG 2: launch on-demand c7i.48xlarge (deadman +70m) ==
+--- RUNG 2 (on-demand c7i.48xlarge) FAILED 2026-06-11T11:11:10Z ---
+
+aws: [ERROR]: An error occurred (VcpuLimitExceeded) when calling the RunInstances operation: You have requested more vCPU capacity than your current vCPU limit of 16 allows for the instance bucket that the specified instance type belongs to. Please visit http://aws.amazon.com/contact-us/ec2-request to request an adjustment to this limit.
+== RUNG 3: launch on-demand c7i.24xlarge (deadman +70m) ==
+--- RUNG 3 (on-demand c7i.24xlarge) FAILED 2026-06-11T11:12:41Z ---
+
+aws: [ERROR]: An error occurred (VcpuLimitExceeded) when calling the RunInstances operation: You have requested more vCPU capacity than your current vCPU limit of 16 allows for the instance bucket that the specified instance type belongs to. Please visit http://aws.amazon.com/contact-us/ec2-request to request an adjustment to this limit.
+== RUNG 4: launch on-demand c7i.4xlarge (deadman +160m) ==
+--- RUNG 4 (on-demand c7i.4xlarge) FAILED 2026-06-11T11:12:54Z ---
+
+aws: [ERROR]: An error occurred (VcpuLimitExceeded) when calling the RunInstances operation: You have requested more vCPU capacity than your current vCPU limit of 16 allows for the instance bucket that the specified instance type belongs to. Please visit http://aws.amazon.com/contact-us/ec2-request to request an adjustment to this limit.
+== RUNG 4b: launch on-demand c7g.4xlarge (deadman +160m) ==
+--- RUNG 4b (on-demand c7g.4xlarge) FAILED 2026-06-11T11:13:00Z ---
+
+aws: [ERROR]: An error occurred (VcpuLimitExceeded) when calling the RunInstances operation: You have requested more vCPU capacity than your current vCPU limit of 16 allows for the instance bucket that the specified instance type belongs to. Please visit http://aws.amazon.com/contact-us/ec2-request to request an adjustment to this limit.
+ALL RUNGS FAILED — see /Users/jesght/Documents/GitHub/rdfjs/sparq-hw/hwrun/results/launch-errors.log
+== cleanup 2026-06-11T11:13:00Z ==
+cleanup done

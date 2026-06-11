@@ -23,6 +23,12 @@ Source: `research/parallelism-scaling.md`. Touches the hot path: `exec.rs`, `lib
 - **T1.3 (deep):** morsel-driven pipelined execution; parallelise the serial merge/outer/bind/WCOJ
   joins. The real ceiling-lifter; months.
 - **Prereq:** validate on a 2-socket box (M1 cannot reveal NUMA). Needs **T8**.
+- **Status 2026-06-11: measurement INFRA-BLOCKED.** Launch ladder (spot+on-demand
+  c7i.48xlarge → c7i.24xlarge → c7i.4xlarge/c7g.4xlarge) all refused at `RunInstances`:
+  spot SLR still missing, on-demand quota still 16 vCPU *and now 2-consumed by the prod
+  t3.large*, so even 16-vCPU boxes fail. Harness is launch-ready (`hwrun/launch.sh` +
+  `hwrun/remote.sh`); M1 1→8-thread fallback curve captured. See
+  `research/hardware-validation-blocked.md` for verbatim errors + unblock options.
 
 ### T2 — Wikidata ingestion under 24 min
 Source: `research/wikidata-ingestion-benchmark.md`, `fast-ingestion.md`. Currently **1.28–1.30 M/s**
@@ -35,6 +41,10 @@ on the M1 (≈ QLever's server rate on a laptop). 24 min for ~9.4 B truthy ⇒ n
 - **Hard gate:** the full dump needs ~680–850 GB disk + >16 GB dict RAM — **cannot run on the M1
   at all**; needs the big instance. So T2's *validation* is hardware-bound, but its *code* is the
   merge_remap parallelisation (shared with T1).
+- **Status 2026-06-11: validation INFRA-BLOCKED** (same launch failures as T1 — see
+  `research/hardware-validation-blocked.md` and the results section appended to
+  `research/wikidata-ingestion-benchmark.md`). The timed ≥1 B-triple ingest is scripted and
+  ready in `hwrun/remote.sh`; <24-min target neither met nor refuted.
 
 ### T3 — Tagged/inline ValueIds (u64)  *(#23 + #26; foundational)*
 Inline numerics/dates/decimals into the id so range FILTER + ORDER BY skip the dict (QLever's main

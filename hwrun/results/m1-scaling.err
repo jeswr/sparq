@@ -1,0 +1,2 @@
+scaling sweep: threads=[1, 2, 4, 8] iters=2  (efficiency = speedup ÷ (threads/1); 1.0 = linear)
+loaded 15999994 triples in 19.201s (0.83 M/s) | store ~1.53 GB (96 B/triple), dict ~0.34 GB (4200006 terms, 82 B/term)

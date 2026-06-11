@@ -62,6 +62,9 @@ echo "== resolve AMI / network =="
 AMI=$(aws ec2 describe-images --region "$REGION" --owners 099720109477 \
   --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*" "Name=state,Values=available" \
   --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
+AMI_ARM=$(aws ec2 describe-images --region "$REGION" --owners 099720109477 \
+  --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*" "Name=state,Values=available" \
+  --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
 VPC=$(aws ec2 describe-vpcs --region "$REGION" --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
 SUBNETS=$(aws ec2 describe-subnets --region "$REGION" --filters Name=vpc-id,Values="$VPC" "Name=default-for-az,Values=true" \
   --query 'Subnets[].SubnetId' --output text)
@@ -78,16 +81,16 @@ SG_ID=$(aws ec2 create-security-group --region "$REGION" --group-name "$KEY_NAME
   --query 'GroupId' --output text)
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_ID" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null
 
-# try_launch <rung-name> <itype> <spot:0|1> <deadman-min> <subnet>
+# try_launch <rung-name> <itype> <spot:0|1> <deadman-min> <subnet> [ami]
 try_launch() {
-  local rung="$1" itype="$2" spot="$3" deadman="$4" subnet="$5"
+  local rung="$1" itype="$2" spot="$3" deadman="$4" subnet="$5" ami="${6:-$AMI}"
   local market=""
   # plain text: AWS CLI v2 base64-encodes --user-data itself
   printf '#!/bin/bash\nshutdown -h +%s\n' "$deadman" > "$WORK/udata.txt"
   [ "$spot" = "1" ] && market="--instance-market-options MarketType=spot"
   echo "== RUNG $rung: launch $( [ "$spot" = 1 ] && echo spot || echo on-demand ) $itype (deadman +${deadman}m) =="
   local err id
-  id=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type "$itype" \
+  id=$(aws ec2 run-instances --region "$REGION" --image-id "$ami" --instance-type "$itype" \
     --key-name "$KEY_NAME" --security-group-ids "$SG_ID" --subnet-id "$subnet" --associate-public-ip-address \
     $market \
     --user-data "file://$WORK/udata.txt" \
@@ -126,6 +129,10 @@ if [ -z "$LAUNCHED" ]; then
   try_launch 4 c7i.4xlarge 0 "$DEADMAN" "$SUBNET1" && LAUNCHED=4
 fi
 if [ -z "$LAUNCHED" ]; then
+  # rung 4b: the other explicitly-sanctioned 16-vCPU fallback (Graviton, arm64 AMI)
+  try_launch 4b c7g.4xlarge 0 "$DEADMAN" "$SUBNET1" "$AMI_ARM" && LAUNCHED=4b
+fi
+if [ -z "$LAUNCHED" ]; then
   echo "ALL RUNGS FAILED — see $ERRLOG"
   exit 1
 fi
@@ -149,6 +156,7 @@ case "$NPROC" in
   192) THREADS="1,2,4,8,16,32,64,96,128,192"; NUMA_AB=1 ;;
   96)  THREADS="1,2,4,8,16,32,48,64,96";      NUMA_AB=1 ;;
   16)  THREADS="1,2,4,8,16";                  NUMA_AB=0 ;;
+  8)   THREADS="1,2,4,8";                     NUMA_AB=0 ;;
   *)   THREADS="1,2,4,8,$NPROC";              NUMA_AB=1 ;;
 esac
 echo "nproc=$NPROC threads=$THREADS slice=$SLICE"
