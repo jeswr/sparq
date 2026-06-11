@@ -1,4 +1,19 @@
-# Upstream proposals (drafts — NOTHING has been filed)
+# Upstream proposals — resolution status (2026-06-11)
+
+**Section A (oxigraph PRs): RESOLVED, nothing filed — all six fixes already exist on
+oxigraph main.** The Chumsky/Logos parser rewrite (`dabda10`, 2026-05-02) subsumes
+fixes 1–4 and 6; `c29be03` (2026-05-21) fixes 5. Verified against upstream main
+`de4dc5f` (2026-06-09) with a 13-probe harness (each bug case + legal-counterpart
+guards). These fixes are **unreleased** — main's lib/spargebra still reads 0.4.6, so
+the published crate remains buggy and sparq's vendored copy stays until a >0.4.6
+release ships; re-run the conformance suite against that release, then retire
+`vendor/spargebra` and the `[patch.crates-io]` entry.
+
+**Section B (rdf-tests issues): NOT YET FILED (awaiting go-ahead).** Tracker search
+2026-06-11: Issues 3+4 fall under the already-open w3c/rdf-tests#58 "How to format
+decimals?" — file them as an evidence comment there (approved-vs-unapproved
+contradictory pairs), not new issues. Issues 1+2 are unreported (closed #81 was an
+author-retracted misreading, different specifics) — file as new issues.
 
 The final-eleven conformance work surfaced six parser bugs in spargebra 0.4.6
 (fixed in our vendored copy, `vendor/spargebra/SPARQ-PATCHES.md`) and four
@@ -268,13 +283,13 @@ apply to upstream `lib/spargebra/src/parser.rs` with only path changes.
 
 | item | where fixed locally | upstream action |
 |---|---|---|
-| nested aggregates accepted | vendor/spargebra (patch 1) | PR 1 (oxigraph) |
-| expr triple-term subject too loose | vendor/spargebra (patch 2) | PR 2 (oxigraph) |
-| syn-bad-26 longest match | vendor/spargebra (patch 3) | PR 3 (oxigraph) |
-| SELECT-var reuse rejected | vendor/spargebra (patch 4) | PR 4 (oxigraph) |
-| TRUE/FALSE case-sensitive | vendor/spargebra (patch 5) | PR 5 (oxigraph) |
-| OPTIONAL{{…FILTER}} hoisting | vendor/spargebra (patch 6) | PR 6 (oxigraph) |
-| tsv03 expected file | divergence allowlist (runner) | Issue 1 (rdf-tests) |
-| cast-decimal expected file | divergence allowlist (runner) | Issue 2 (rdf-tests) |
-| agg-sum-distinct expected file | divergence allowlist (runner) | Issue 3 (rdf-tests) |
-| divide-numbers-cast expected file | divergence allowlist (runner) | Issue 4 (rdf-tests) |
+| nested aggregates accepted | vendor/spargebra (patch 1) | already fixed upstream (`dabda10`, unreleased) |
+| expr triple-term subject too loose | vendor/spargebra (patch 2) | already fixed upstream (`dabda10`, unreleased) |
+| syn-bad-26 longest match | vendor/spargebra (patch 3) | already fixed upstream (`dabda10`, unreleased) |
+| SELECT-var reuse rejected | vendor/spargebra (patch 4) | already fixed upstream (`dabda10`, unreleased) |
+| TRUE/FALSE case-sensitive | vendor/spargebra (patch 5) | already fixed upstream (`c29be03`, unreleased) |
+| OPTIONAL{{…FILTER}} hoisting | vendor/spargebra (patch 6) | main already implements the preferred reading |
+| tsv03 expected file | divergence allowlist (runner) | Issue 1 (rdf-tests) — unreported, file as new issue |
+| cast-decimal expected file | divergence allowlist (runner) | Issue 2 (rdf-tests) — unreported, file as new issue |
+| agg-sum-distinct expected file | divergence allowlist (runner) | comment with evidence on open rdf-tests#58 |
+| divide-numbers-cast expected file | divergence allowlist (runner) | comment with evidence on open rdf-tests#58 |
