@@ -21,7 +21,9 @@ fn main() -> Result<(), String> {
     let stats = store.materialize_wac()?;
     println!("materialized {} auth triples in {:.0} ms", stats.auth_triples, stats.millis);
 
-    // 3. Open sessions and run the same query as each of them.
+    // 3. Open sessions and run the same query as each of them. `query_as` is the
+    //    fast path: it evaluates through the engine's zero-copy DatasetView — graph
+    //    visibility is an O(1) hash check, nothing is copied per query.
     let query = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }";
     for (label, session) in [
         ("alice (pod owner)", Session { agent: Some(ALICE), client: None }),

@@ -70,7 +70,9 @@ Everything is triples — a binding requirement (design-doc decisions D1–D4):
   auth:Authenticated        auth:append <https://pod.ex/inbox/> .
 
   # client-restricted grants use a deterministically minted PAIR principal
-  <urn:sparq:pair?agent=https://bob.ex/card#me&client=https://app.ex>
+  # (components RFC 3986 percent-encoded — string:encodeForUri — so the minting is
+  #  injective: no WebID can smuggle the &client= delimiter into someone else's pair)
+  <urn:sparq:pair?agent=https%3A%2F%2Fbob.ex%2Fcard%23me&client=https%3A%2F%2Fapp.ex>
       auth:read <https://pod.ex/shared/doc> .
 
   # ACP deny half (deny-overrides is resolved per session, not here)
@@ -151,53 +153,51 @@ ACL/ACR/group-document change) bumps an epoch and drops the entire cache — a r
 grant takes effect at the next query. Everything `accessible` answers is also
 derivable from the auth-view triples with plain SPARQL (`MINUS` over the deny half).
 
-### Query rewriting — the v1 path (design doc §4.4)
+### The query path — zero-copy dataset view (default; design doc §4.4 + §5)
 
-`PodStore::query_as` rewrites the query (`rewrite_for`), then runs it through
-`sparq_engine::query`:
+`PodStore::query_as` (and `query_json_as` / `ask_as`) wraps the query
+(`wrap_for_view`) and evaluates it through the engine's L1 zero-copy `DatasetView`
+(`sparq_engine::query_view` / `query_json_view` / `ask_view`):
 
 1. every default-graph triple/path pattern is wrapped in `GRAPH ?fresh { … }`
    (union-default emulation; cross-document joins keep working — a triple asserted
    in k accessible graphs yields k rows where an RDF merge would yield 1, `DISTINCT`
    restores set semantics);
-2. the dataset clause becomes `FROM NAMED <g>` for exactly the authorized graphs
-   (intersected with any pre-existing `FROM NAMED` — queries can restrict, never
-   widen; an empty set uses the absent sentinel `<urn:sparq:nothing>` so the clause
-   survives serialization, fail-closed).
+2. the engine evaluates under a `DatasetView` built from the session cache:
+   `named` = the authorized graph set (`Arc<FxHashSet<Term>>`, shared per call — the
+   engine holds no session state), `default` = `DefaultGraphMode::Empty` (pod data
+   never lives in the store default graph).
 
-The honest cost: the engine's `FROM NAMED` handling (`build_active`) decodes and
-rebuilds every listed graph **per query** — measured 12 ms/query at 3k quads,
-59 ms at 46k (linear in authorized data). That copy is what the dataset view below
-deletes.
-
-### Using the engine dataset view (recommended follow-up wiring)
-
-The engine on the **main branch** now ships the L1 zero-copy `DatasetView` this
-design specified (design doc §5): visibility is an O(1) hash check per graph name,
-evaluation runs in place on the existing sub-graphs (zero decode/rebuild/copy), and
-non-visible graphs are *indistinguishable* from absent ones. Measured **20–27×
-faster** than the v1 copy path on subset enumeration and ~3700× on single-graph
-reads. This branch predates the merge, so `query_as` still uses the v1 path; the
-follow-up wiring replaces step 2 of the rewrite (keep step 1 — union-default
-emulation is still needed under an empty default graph) with:
+Visibility is an O(1) hash check per graph name; evaluation runs in place on the
+existing sub-graphs — zero decode, zero rebuild, zero copy — and a non-authorized
+graph is *indistinguishable* from an absent one: `GRAPH <g>` yields nothing,
+`GRAPH ?g` never enumerates it, and a caller-supplied `FROM (NAMED)` clause is
+intersected with the view (queries can restrict, never widen). A grant-less session
+gets a view over the empty set — fail-closed. For entry points without a session
+wrapper (`construct`, chunked JSON, …), take `PodStore::view_for` /
+`PodStore::accessible_set` and run under `sparq_engine::with_view`:
 
 ```rust,ignore
-use sparq_engine::{DatasetView, DefaultGraphMode, FxHashSet, query_view};
-use std::sync::Arc;
-
-// the session cache holds the authorized set as Arc<FxHashSet<Term>>,
-// keyed (agent, client, mode, auth-epoch) — shared with the engine per call
-let view = DatasetView {
-    base: &store.graph,
-    named: Arc::clone(&allowed_set),       // no copy; engine holds no session state
-    default: DefaultGraphMode::Empty,      // pod data never lives in the default graph
-};
-let wrapped = wrap_patterns_in_graph(sparql)?; // rewrite step 1 only, no FROM NAMED
-let result = query_view(&view, &wrapped)?;
+let view = store.view_for(&session, Mode::Read);                  // cached, Arc-shared
+let wrapped = sparq_solid::wrap_for_view(sparql)?;                // step 1 only
+let g = sparq_engine::with_view(&view, || sparq_engine::construct(view.base, &wrapped))?;
 ```
 
-(`query_json_view` / `count_view` / `ask_view` / `with_view` exist for the other
-entry points, plus `_with_budget` variants.)
+### The v1 rewrite path (kept; portability + differential oracle)
+
+`PodStore::query_as_rewrite` / `rewrite_for` implement the same policy with **no
+view API**: step 1 above plus a dataset-clause injection — `FROM NAMED <g>` for
+exactly the authorized graphs (intersected with any pre-existing `FROM NAMED`; an
+empty set uses the absent sentinel `<urn:sparq:nothing>` so the clause survives
+serialization, fail-closed). The rewritten query enforces the policy on **any**
+SPARQL 1.1 engine with standard dataset-clause semantics — that is the portability
+story, and `tests/e2e.rs` uses it as a differential oracle (both paths must return
+byte-identical JSON for every fixture session).
+
+The honest cost of the rewrite path: the engine's `FROM NAMED` handling
+(`build_active`) decodes and rebuilds every listed graph **per query** — measured
+12 ms/query at 3k quads, 59 ms at 46k (linear in authorized data). That copy is
+exactly what the default view path deletes — measured below.
 
 ## Security model
 
@@ -213,47 +213,62 @@ non-authorized graph behaves exactly like an absent one (indistinguishability):
   exactly what `acl:Control` / ACR write gates.
 - **Reserved namespace** `urn:sparq:` (pair/candidate/grant principals, the auth
   view, the rewrite sentinel): the loader **rejects** agent/client/origin IRIs inside
-  it or containing the pair delimiter `&client=` (a crafted WebID could otherwise
-  collide with a minted pair principal and inherit its grants); sessions carrying
+  it or containing the pair delimiter `&client=` (pair minting percent-encodes its
+  components, so such a collision is no longer constructible — the validation stays
+  as defense in depth); sessions carrying
   such values get the **empty** graph set; and `PodStore::new`/the materializer
   **strip** all reserved-named graphs from loaded datasets — a dataset cannot smuggle
   in a forged `<urn:sparq:auth>`; only the materializer creates it.
-- **No rewrite escape**: explicit `GRAPH <private>` patterns and attacker-supplied
-  `FROM NAMED` clauses cannot reach outside the authorized set (intersection
-  semantics; regression-tested in `tests/hardening.rs` and `tests/e2e.rs`).
+- **No query escape**: explicit `GRAPH <private>` patterns and attacker-supplied
+  `FROM NAMED` clauses cannot reach outside the authorized set on either path
+  (view intersection / rewrite intersection semantics; regression-tested in
+  `tests/hardening.rs` and `tests/e2e.rs`, which also asserts the two paths return
+  byte-identical JSON).
 
-## Measured v1 baseline (design doc §6)
+## Measured (design doc §6 + §6.1)
 
 M1 MacBook Air, `--release`, fixture = 1148 named graphs / 3060 quads ("fat" = same
 tree with 50 filler triples per document = 46 260 quads). Reproduce with
-`cargo run -p sparq-solid --example bench --release`.
+`cargo run -p sparq-solid --example bench --release` (both query paths are measured
+in the same run, so the v1-vs-v2 comparison is honest under machine-load variance).
 
 | measurement | value |
 |---|---|
-| WAC auth-view materialization (full pipeline, 1 stratum) | **1.00 s** → 3 783 auth triples |
-| ACP auth-view materialization (3 strata) | **1.13 s** → 6 168 auth triples |
-| re-materialization after an ACL change (v1 = full re-run) | same (~1.0–1.1 s) |
-| engine on FULL dataset (no security), titles scan | 41 ms (864 rows) |
-| v1 `query_as` (rewrite + copy, 800 authorized graphs) | 30 ms (599 rows) |
-| v1 copy cost isolated | **12 ms/query** |
-| fat fixture: FULL dataset / `query_as` / copy isolated | 45 ms / 83 ms / **59 ms** |
-| session graph-set, cold / cached | 0.30 ms / 0.6 µs |
+| WAC auth-view materialization (full pipeline, 1 stratum) | ~0.5–1.0 s → 3 783 auth triples |
+| ACP auth-view materialization (3 strata) | ~0.6–1.1 s → 6 168 auth triples |
+| re-materialization after an ACL change (= full re-run) | same |
+| session graph-set, cold / cached | 0.30 ms / 0.3 µs |
+
+v1 rewrite path vs the default v2 dataset-view path (same run, 2026-06-11):
+
+| per-query measurement | v1 rewrite+copy | v2 dataset view | speedup |
+|---|---|---|---|
+| titles query, 800 authorized graphs (3k quads) | 28.98 ms | **18.35 ms** | 1.6× |
+| path overhead isolated (empty pattern), 3k quads | 11.52 ms | **1.72 ms** | **6.7×** |
+| titles query, fat fixture (46k quads) | 67.46 ms | **20.75 ms** | 3.3× |
+| path overhead isolated, fat fixture | 43.21 ms | **1.58 ms** | **27×** |
+| FULL-dataset query, no security, fat fixture | 33.58 ms | — | — |
 
 Reading honestly: materialization is cheap enough to re-run on every ACL change at
-pod scale, but the v1 per-query copy scales linearly with authorized data (~1.3 s
-extrapolated at 1M quads) — on the fat fixture it is already slower than querying
-the whole dataset with no security at all. The zero-copy dataset view (above) is the
-fix. These numbers are also the **D2 gate** for any custom authorization storage.
+pod scale. The v1 per-query copy scales linearly with authorized data (~1.3 s
+extrapolated at 1M quads) and on the fat fixture is 2× slower than querying the
+whole dataset with no security; the v2 view's overhead is **flat** (~1–1.7 ms at
+both sizes — the union-default `GRAPH` wrap, not a copy), and on the fat fixture
+the restricted query is *faster* than the unrestricted scan (the view prunes
+non-visible graphs before they are touched). These numbers are also the **D2 gate**
+for any custom authorization storage.
 
 ## Limitations & follow-ups (design doc §7)
 
 - **Incremental auth maintenance**: v1 re-runs the full pipeline (~1 s) on any
   ACL/ACR/group change; counting-based N3-incremental maintenance under stratified
   NAF is a `sparq-reason` follow-up.
-- **N3 builtin gaps**: no `string:encodeForUri` (pair-IRI minting concatenates raw
-  IRIs — mitigated by the reserved-namespace validation above), no multi-stratum
-  entry point (the ACP pipeline re-serializes closures between strata), no
-  count-over-property-values (would collapse ACP strata B+C).
+- **N3 builtin gaps**: ~~`string:encodeForUri`~~ DONE (sparq-reason; pair/candidate
+  IRI minting now percent-encodes its components — injective — with the
+  reserved-namespace validation kept as defense in depth); still open: a
+  multi-stratum entry point (`reason_n3_stratified` — the ACP pipeline re-serializes
+  closures between strata) and count-over-property-values (would collapse ACP
+  strata B+C).
 - **Union-default semantics** are emulated per pattern (duplicate rows vs RDF merge);
   a true zero-copy union default needs shared-dictionary named graphs (design doc
   §5.4).

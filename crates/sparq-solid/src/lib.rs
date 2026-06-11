@@ -22,10 +22,12 @@
 //!   is itself queryable with ordinary SPARQL.
 //! - A session ((WebID, client-id), both optional) expands to ≤6 principals; the
 //!   accessible graph set per (session, mode) is `∪ allow ∖ ∪ deny`, cached (a
-//!   transient index, design doc D3) and injected into queries as a `FROM NAMED`
-//!   dataset clause + per-pattern `GRAPH` wrapping (v1 path on today's public APIs;
-//!   the zero-copy engine dataset view — `sparq_engine::query_view` on the main
-//!   branch — is the specified L1 follow-up, see [`PodStore::query_as`]).
+//!   transient index, design doc D3) and enforced on queries through the engine's
+//!   **zero-copy dataset view** (`sparq_engine::query_view` + per-pattern `GRAPH`
+//!   wrapping — the default path, see [`PodStore::query_as`]). The v1 `FROM NAMED`
+//!   injection rewrite is kept as a portability path ([`rewrite_for`] /
+//!   [`PodStore::query_as_rewrite`]) for running the same policy on engines without
+//!   the view API.
 //!
 //! # Fail-closed semantics
 //!
@@ -76,15 +78,15 @@ mod loader;
 mod materialize;
 mod rewrite;
 
-pub use authindex::{AuthIndex, Mode, Session};
+pub use authindex::{pair_principal, AuthIndex, Mode, Session};
 pub use fixture::{acp_fixture, wac_fixture};
 pub use materialize::{materialize_acp, materialize_wac, MaterializeStats};
-pub use rewrite::rewrite_for;
+pub use rewrite::{rewrite_for, wrap_for_view};
 
-use oxrdf::NamedNode;
+use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashMap;
 use sparq_core::Graph;
-use sparq_engine::QueryResult;
+use sparq_engine::{DatasetView, DefaultGraphMode, FxHashSet, QueryResult};
 use std::sync::Arc;
 
 /// The reserved named graph holding the materialized authorization view.
@@ -165,7 +167,16 @@ pub struct PodStore {
     pub graph: Graph,
     auth: Arc<AuthIndex>,
     epoch: u64,
-    cache: FxHashMap<(Option<String>, Option<String>, Mode), Arc<Vec<NamedNode>>>,
+    cache: FxHashMap<(Option<String>, Option<String>, Mode), SessionSets>,
+}
+
+/// One session-cache entry: the same authorized graph set in the two shapes its two
+/// consumers need — sorted (the v1 `FROM NAMED` rewrite, [`PodStore::accessible`])
+/// and hashed (the engine [`DatasetView`], [`PodStore::accessible_set`]). Both are
+/// `Arc`-shared per call; neither is ever copied after construction.
+struct SessionSets {
+    sorted: Arc<Vec<NamedNode>>,
+    set: Arc<FxHashSet<Term>>,
 }
 
 impl PodStore {
@@ -244,35 +255,71 @@ impl PodStore {
     /// with no matching grants, and empty for session values inside the reserved
     /// `urn:sparq:` encoding (see [`AuthIndex::accessible`]).
     ///
-    /// Measured: ~0.3 ms cold, ~0.6 µs cached on the ~1.1k-graph fixture. This set is
-    /// exactly what the L1 engine dataset view takes as its visible-graph set.
+    /// Measured: ~0.3 ms cold, ~0.6 µs cached on the ~1.1k-graph fixture. The same
+    /// cache entry also holds this set in the hash-set shape the engine dataset view
+    /// takes — [`PodStore::accessible_set`].
     pub fn accessible(&mut self, s: &Session, mode: Mode) -> Arc<Vec<NamedNode>> {
-        let key = (s.agent.map(str::to_owned), s.client.map(str::to_owned), mode);
-        if let Some(set) = self.cache.get(&key) {
-            return Arc::clone(set);
-        }
-        let set = Arc::new(self.auth.accessible(s, mode));
-        self.cache.insert(key, Arc::clone(&set));
-        set
+        Arc::clone(&self.session_sets(s, mode).sorted)
     }
 
-    /// Evaluate `sparql` as `session`: rewrite to the authorized graph set
-    /// ([`rewrite_for`]) and run through `sparq_engine::query`. Two sessions running the
-    /// same query see different results — the end-to-end contract.
+    /// [`PodStore::accessible`] as the hash-set shape the engine [`DatasetView`]
+    /// takes (`Arc<FxHashSet<Term>>`, shared per call — design doc §5.3: the engine
+    /// holds no session state, visibility is one O(1) hash lookup per graph name).
     ///
-    /// This is the v1 path on today's public engine APIs: the rewrite injects a
-    /// `FROM NAMED` dataset clause, which the engine materializes by decoding and
-    /// rebuilding every authorized graph **per query** (measured 12 ms/query at 3k
-    /// quads, 59 ms at 46k). The recommended follow-up wiring replaces that copy with
-    /// the engine's zero-copy `DatasetView` (`sparq_engine::query_view`, merged on the
-    /// main branch; 20–27× faster on subset enumeration) — see "Using the engine
-    /// dataset view" in this crate's README.
+    /// Same cache, same fail-closed semantics. Use it with
+    /// [`sparq_engine::with_view`] when an entry point [`PodStore::query_as`] /
+    /// [`PodStore::query_json_as`] / [`PodStore::ask_as`] doesn't cover (e.g.
+    /// `construct`) needs to run under the session's view — or just take
+    /// [`PodStore::view_for`].
+    pub fn accessible_set(&mut self, s: &Session, mode: Mode) -> Arc<FxHashSet<Term>> {
+        Arc::clone(&self.session_sets(s, mode).set)
+    }
+
+    fn session_sets(&mut self, s: &Session, mode: Mode) -> &SessionSets {
+        let key = (s.agent.map(str::to_owned), s.client.map(str::to_owned), mode);
+        let auth = Arc::clone(&self.auth);
+        self.cache.entry(key).or_insert_with(|| {
+            let sorted = auth.accessible(s, mode);
+            let set = sorted.iter().map(|n| Term::NamedNode(n.clone())).collect();
+            SessionSets { sorted: Arc::new(sorted), set: Arc::new(set) }
+        })
+    }
+
+    /// The session's zero-copy [`DatasetView`] over this store (mode-checked graph
+    /// set, empty default graph — pod data never lives in the default graph). This
+    /// is what [`PodStore::query_as`] evaluates under; take it directly to drive any
+    /// other engine entry point through [`sparq_engine::with_view`].
+    ///
+    /// Fail-closed like [`PodStore::accessible`]: an un-materialized store or a
+    /// grant-less session yields a view over the empty graph set, under which every
+    /// graph is indistinguishable from absent.
+    pub fn view_for(&mut self, s: &Session, mode: Mode) -> DatasetView<'_> {
+        let named = self.accessible_set(s, mode);
+        DatasetView { base: &self.graph, named, default: DefaultGraphMode::Empty }
+    }
+
+    /// Evaluate `sparql` as `session`: wrap default-graph patterns to range over
+    /// named graphs ([`wrap_for_view`]) and run through the engine's **zero-copy
+    /// dataset view** ([`sparq_engine::query_view`]) restricted to the session's
+    /// authorized graph set. Two sessions running the same query see different
+    /// results — the end-to-end contract.
+    ///
+    /// This is the default (v2) path: graph visibility is one O(1) hash check per
+    /// graph name, evaluation runs in place on the existing sub-graphs (zero
+    /// decode/rebuild/copy), the view's default graph is empty (pod data never
+    /// lives in the default graph), and a non-authorized graph is
+    /// *indistinguishable* from an absent one — explicit `GRAPH <g>` patterns and
+    /// caller-supplied `FROM (NAMED)` clauses can only restrict the view, never
+    /// widen it. The v1 `FROM NAMED`-injection path is kept as
+    /// [`PodStore::query_as_rewrite`] (portability: same policy on engines without
+    /// a view API), at the measured cost of copying every authorized graph per
+    /// query. Measured before/after: see "Measured" in this crate's README.
     ///
     /// # Errors
     ///
     /// Returns `Err` if `sparql` does not parse, or if the engine fails on the
-    /// rewritten query. Authorization itself never errors: a session without grants
-    /// gets an empty (sentinel) dataset and zero rows.
+    /// wrapped query. Authorization itself never errors: a session without grants
+    /// gets a view over the empty graph set and zero rows.
     ///
     /// # Examples
     ///
@@ -294,6 +341,47 @@ impl PodStore {
     /// # Ok::<(), String>(())
     /// ```
     pub fn query_as(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<QueryResult, String> {
+        let wrapped = wrap_for_view(sparql)?;
+        sparq_engine::query_view(&self.view_for(s, mode), &wrapped)
+    }
+
+    /// [`PodStore::query_as`], returning the SPARQL 1.1 JSON results serialization
+    /// (via [`sparq_engine::query_json_view`]) instead of a materialized
+    /// [`QueryResult`]. Same view path, same fail-closed semantics.
+    pub fn query_json_as(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<String, String> {
+        let wrapped = wrap_for_view(sparql)?;
+        sparq_engine::query_json_view(&self.view_for(s, mode), &wrapped)
+    }
+
+    /// ASK as `session` through the view path ([`sparq_engine::ask_view`]): `true`
+    /// iff the pattern is satisfiable inside the session's authorized graph set.
+    /// Fail-closed: a grant-less session always gets `false` (empty view).
+    pub fn ask_as(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<bool, String> {
+        let wrapped = wrap_for_view(sparql)?;
+        sparq_engine::ask_view(&self.view_for(s, mode), &wrapped)
+    }
+
+    /// [`PodStore::query_as`] over the **v1 rewrite path**: inject a `FROM NAMED`
+    /// dataset clause for the authorized graph set ([`rewrite_for`]) and run through
+    /// plain [`sparq_engine::query`] — no view API needed.
+    ///
+    /// Kept for portability (the rewritten query enforces the same policy on any
+    /// SPARQL 1.1 engine with standard dataset-clause semantics) and as the
+    /// differential oracle for the view path (`tests/e2e.rs` asserts both paths
+    /// return byte-identical JSON). The honest cost: the engine's `FROM NAMED`
+    /// handling decodes + rebuilds every authorized graph **per query** (measured
+    /// 12 ms/query at 3k quads, 59 ms at 46k — linear in authorized data), which is
+    /// exactly the copy the default view path deletes.
+    ///
+    /// One deliberate semantic difference: a caller-supplied `FROM <g>` (default
+    /// graph) clause is **dropped** here (pod data never lives in the default
+    /// graph), while the view path intersects it with the authorized set like any
+    /// other dataset clause. Neither path lets it widen visibility.
+    ///
+    /// # Errors
+    ///
+    /// As [`PodStore::query_as`].
+    pub fn query_as_rewrite(&mut self, s: &Session, mode: Mode, sparql: &str) -> Result<QueryResult, String> {
         let allowed = self.accessible(s, mode);
         let rewritten = rewrite_for(sparql, &allowed)?;
         sparq_engine::query(&self.graph, &rewritten)

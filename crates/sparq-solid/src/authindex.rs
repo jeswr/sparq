@@ -110,9 +110,24 @@ impl Mode {
 }
 
 /// The deterministic pair-principal IRI minted by the rules
-/// (`string:concatenation` in rules/wac.n3 / rules/acp-c.n3 — keep in sync).
+/// (`string:encodeForUri` + `string:concatenation` in rules/wac.n3 / rules/acp-c.n3 —
+/// keep in sync; both sides share [`sparq_reason::n3::encode_for_uri`]'s RFC 3986
+/// percent-encoding, so the minting is INJECTIVE — no agent/client value can smuggle
+/// the `&client=` delimiter into someone else's pair. The loader's reserved-encoding
+/// validation ([`Session`] values, ACL agent/origin IRIs) stays as defense in depth.)
+///
+/// ```
+/// use sparq_solid::pair_principal;
+/// assert_eq!(
+///     pair_principal("https://bob.ex/card#me", "https://app.ex"),
+///     "urn:sparq:pair?agent=https%3A%2F%2Fbob.ex%2Fcard%23me&client=https%3A%2F%2Fapp.ex",
+/// );
+/// // injective: a delimiter inside a value cannot re-bracket the pair
+/// assert_ne!(pair_principal("a&client=b", "c"), pair_principal("a", "b&client=c"));
+/// ```
 pub fn pair_principal(agent: &str, client: &str) -> String {
-    format!("urn:sparq:pair?agent={agent}&client={client}")
+    let (a, c) = (sparq_reason::n3::encode_for_uri(agent), sparq_reason::n3::encode_for_uri(client));
+    format!("urn:sparq:pair?agent={a}&client={c}")
 }
 
 #[derive(Debug, Default)]

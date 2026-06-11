@@ -36,7 +36,8 @@ acl:Control solidx:allowPred auth:control ; solidx:denyPred auth:denyControl .
 => { ?k solidx:principal ?pa . } .
 { ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc . ?pc log:notEqualTo auth:AnyClient .
   ?pa log:uri ?pas . ?pc log:uri ?pcs .
-  ("urn:sparq:pair?agent=" ?pas "&client=" ?pcs) string:concatenation ?ps . ?p log:uri ?ps . }
+  ?pas string:encodeForUri ?pae . ?pcs string:encodeForUri ?pce .
+  ("urn:sparq:pair?agent=" ?pae "&client=" ?pce) string:concatenation ?ps . ?p log:uri ?ps . }
 => { ?k solidx:principal ?p . } .
 
 # ── SIMPLE grants (policy has no noneOf) ───────────────────────────────────────────────
@@ -50,7 +51,10 @@ acl:Control solidx:allowPred auth:control ; solidx:denyPred auth:denyControl .
 => { ?p ?pred ?r . } .
 
 # ── CONDITIONAL grants (noneOf present): minted node + exception matchers ──────────────
-# (?nm is not part of the minted IRI, so several noneOf matchers attach to ONE node.)
+# (?nm is not part of the minted IRI, so several noneOf matchers attach to ONE node.
+#  No encoding needed here for injectivity: ?ks is a minted cand IRI whose components
+#  are already percent-encoded (acp-a.n3) — it cannot contain a raw "&mode=" — ?modes
+#  is one of four fixed acl: IRIs, and ?rs is the final component.)
 { ?pol solidx:candPair ?k . ?k solidx:satisfied true .
   ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc .
   ?pol solidx:appliesToResource ?r . ?pol acp:allow ?mode . ?pol acp:noneOf ?nm .

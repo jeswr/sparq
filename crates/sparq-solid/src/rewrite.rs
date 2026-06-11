@@ -1,16 +1,21 @@
-//! v1 query rewriting on TODAY'S public engine APIs (design doc §4.4):
+//! Query rewriting for the two session-query paths (design doc §4.4 / §5):
 //!
-//! 1. every default-graph triple/path pattern is wrapped in `GRAPH ?__sgN { … }` (fresh
-//!    variable per pattern, joined above — cross-document joins keep working; this is
-//!    the standard union-default-graph emulation, modulo duplicate rows when the same
-//!    triple is asserted in several accessible graphs);
-//! 2. the dataset clause is replaced by `FROM NAMED <g>` for exactly the authorized
-//!    graphs (intersected with any pre-existing FROM NAMED), so `GRAPH` patterns range
-//!    over the authorized set only — enforced by the engine's `build_active` semantics
-//!    (the store's own graphs do not leak in; absent graphs are empty).
+//! 1. **GRAPH wrapping** ([`wrap_for_view`], used by BOTH paths): every default-graph
+//!    triple/path pattern is wrapped in `GRAPH ?__sgN { … }` (fresh variable per
+//!    pattern, joined above — cross-document joins keep working; this is the standard
+//!    union-default-graph emulation, modulo duplicate rows when the same triple is
+//!    asserted in several accessible graphs);
+//! 2. **dataset-clause injection** ([`rewrite_for`] = step 1 + this, the v1/portability
+//!    path): the dataset clause is replaced by `FROM NAMED <g>` for exactly the
+//!    authorized graphs (intersected with any pre-existing FROM NAMED), so `GRAPH`
+//!    patterns range over the authorized set only — enforced by the engine's
+//!    `build_active` semantics (the store's own graphs do not leak in; absent graphs
+//!    are empty).
 //!
-//! The honest cost: `build_active` decodes + rebuilds every listed graph PER QUERY.
-//! That copy is what the L1 engine dataset view (design doc §5) deletes.
+//! The honest cost of step 2: `build_active` decodes + rebuilds every listed graph PER
+//! QUERY. The default `DatasetView` path (engine L1, design doc §5) deletes that copy:
+//! it needs only step 1, because graph visibility is enforced by the view itself
+//! (O(1) hash check, zero copy) — see [`crate::PodStore::query_as`].
 
 use oxrdf::{NamedNode, Variable};
 use spargebra::algebra::{Expression, GraphPattern, QueryDataset};
@@ -61,11 +66,11 @@ use spargebra::{Query, SparqlParser};
 /// ```
 pub fn rewrite_for(sparql: &str, allowed: &[NamedNode]) -> Result<String, String> {
     let mut q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-    let (dataset, pattern) = match &mut q {
-        Query::Select { dataset, pattern, .. }
-        | Query::Construct { dataset, pattern, .. }
-        | Query::Describe { dataset, pattern, .. }
-        | Query::Ask { dataset, pattern, .. } => (dataset, pattern),
+    let dataset = match &mut q {
+        Query::Select { dataset, .. }
+        | Query::Construct { dataset, .. }
+        | Query::Describe { dataset, .. }
+        | Query::Ask { dataset, .. } => dataset,
     };
     // restrict the dataset: FROM NAMED = allowed (∩ pre-existing), FROM = nothing
     let mut named: Vec<NamedNode> = match dataset.as_ref().and_then(|d| d.named.clone()) {
@@ -79,15 +84,55 @@ pub fn rewrite_for(sparql: &str, allowed: &[NamedNode]) -> Result<String, String
         named.push(NamedNode::new_unchecked("urn:sparq:nothing"));
     }
     *dataset = Some(QueryDataset { default: Vec::new(), named: Some(named) });
-    // a graph-variable prefix that cannot collide with any user variable: lengthen
-    // until it appears nowhere in the original query text
+    wrap_query(&mut q, sparql);
+    Ok(q.to_string())
+}
+
+/// Rewrite step 1 ONLY — wrap every default-graph triple/path pattern in
+/// `GRAPH ?fresh { … }` (union-default emulation), leaving any dataset clause alone.
+///
+/// This is the rewrite the **default** `DatasetView` query path needs
+/// ([`crate::PodStore::query_as`]): under the view, graph visibility is already
+/// enforced by the engine (`GRAPH ?g` enumerates only visible graphs, a dataset
+/// clause is intersected with the view), and the view's default graph is empty —
+/// so the only transformation left is making default-graph patterns range over the
+/// (visible) named graphs.
+///
+/// # Errors
+///
+/// Returns `Err` if `sparql` is not a valid SPARQL query. The rewrite itself cannot
+/// fail.
+///
+/// # Examples
+///
+/// ```
+/// let q = sparq_solid::wrap_for_view("SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }")?;
+/// assert!(q.contains("GRAPH ?__sg0")); // pattern ranges over (visible) named graphs
+/// assert!(!q.contains("FROM"));        // no dataset clause: the view enforces visibility
+/// # Ok::<(), String>(())
+/// ```
+pub fn wrap_for_view(sparql: &str) -> Result<String, String> {
+    let mut q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    wrap_query(&mut q, sparql);
+    Ok(q.to_string())
+}
+
+/// Apply the per-pattern GRAPH wrap to a parsed query, with a graph-variable prefix
+/// that cannot collide with any user variable: lengthen until it appears nowhere in
+/// the original query text.
+fn wrap_query(q: &mut Query, original: &str) {
+    let pattern = match q {
+        Query::Select { pattern, .. }
+        | Query::Construct { pattern, .. }
+        | Query::Describe { pattern, .. }
+        | Query::Ask { pattern, .. } => pattern,
+    };
     let mut prefix = "__sg".to_owned();
-    while sparql.contains(&prefix) {
+    while original.contains(&prefix) {
         prefix.push('x');
     }
     let mut fresh = Fresh { prefix, n: 0 };
     wrap_in_graph(pattern, &mut fresh, false);
-    Ok(q.to_string())
 }
 
 struct Fresh {

@@ -666,11 +666,52 @@ D2 gate: any proposal to store authorizations in a custom (non-triple) structure
 these numbers — materialization, per-query, AND re-materialization — with the same
 correctness suite green, or it is rejected.
 
+### 6.1 v2 dataset-view measured (the §5 wiring, done)
+
+The L1 zero-copy `DatasetView` merged into the engine and `sparq-solid` now routes
+`query_as`/`query_json_as`/`ask_as` through it by default (`wrap_for_view` +
+`query_view`, `DefaultGraphMode::Empty`); the v1 FROM-NAMED rewrite is kept as
+`query_as_rewrite` (portability + differential oracle — tests/e2e.rs asserts both
+paths return byte-identical SPARQL-JSON for every fixture session). Same machine,
+same fixture, same bench (`cargo run -p sparq-solid --example bench --release`,
+2026-06-11, best-of-3; both paths measured IN THE SAME RUN so the comparison is
+honest under machine-load variance — absolute numbers swing ~1.6× between runs,
+ratios stay put):
+
+| measurement | v1 rewrite+copy | v2 dataset view | speedup |
+|---|---|---|---|
+| titles query, 800 authorized graphs (3 060 quads) | 28.98 ms | **18.35 ms** | 1.6× |
+| per-query overhead isolated (empty pattern), 3k quads | 11.52 ms | **1.72 ms** | **6.7×** |
+| titles query, fat fixture (46 260 quads) | 67.46 ms | **20.75 ms** | 3.3× |
+| per-query overhead isolated, fat fixture | 43.21 ms | **1.58 ms** | **27×** |
+| unrestricted FULL-dataset query, fat fixture (no security) | 33.58 ms | — | — |
+
+Reading the numbers honestly:
+
+- **The copy is gone and the overhead is flat**: v1's isolated overhead scales linearly
+  with authorized data (11.5 ms → 43.2 ms from 3k → 46k quads); v2's is constant
+  (~1.0–1.7 ms at BOTH sizes — it is not a copy at all but the `GRAPH ?__sgN`
+  union-default emulation enumerating the ~800 visible graph names per wrapped
+  pattern, plus the parse/serialize round-trip of the wrap).
+- **Security is now cheaper than no security**: on the fat fixture the v2 restricted
+  query (20.75 ms) beats the unrestricted full-dataset scan (33.58 ms) — the view
+  prunes 348 graphs before they are touched — where v1 was 2× slower than
+  unrestricted. The §5 prediction ("effectively the unrestricted-query line") was
+  conservative.
+- At 1M-quad pod scale the v1 extrapolation was ~1.3 s of copying per query; v2's
+  per-query cost stays O(visible graphs) hash checks + wrap, i.e. ~milliseconds.
+- Correctness gate held: the whole WAC/ACP/e2e/hardening suite passes through the
+  view path, plus the byte-identical-JSON differential test against the rewrite path.
+
 ## 7. Follow-ups & gaps (explicit)
 
-1. **L1 engine view** (§5) — separate thread; the only engine change this design needs.
-2. **sparq-reason builtins** (small, in gap-priority order): `string:encodeForUri` (sound
-   pair-IRI minting); a documented multi-stratum entry point
+1. **L1 engine view** (§5) — DONE: shipped in the engine and wired as `sparq-solid`'s
+   default query path; measured in §6.1.
+2. **sparq-reason builtins** (small, in gap-priority order): `string:encodeForUri` —
+   DONE (RFC 3986 / fn:encode-for-uri percent-encoding; wac.n3/acp-a.n3/acp-c.n3 pair
+   and candidate minting now encode their components, the session side shares the same
+   `encode_for_uri` helper, and the reserved-encoding validation is KEPT as defense in
+   depth). Still open: a documented multi-stratum entry point
    (`reason_n3_stratified(&[src])`) so the ACP pipeline does not re-serialize closures
    between strata; optionally `log:forAllIn`/count-over-property-values to collapse ACP
    strata B+C into one.
