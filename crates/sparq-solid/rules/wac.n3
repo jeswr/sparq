@@ -1,0 +1,79 @@
+# Web Access Control (https://solidproject.org/TR/wac) materialized to the auth view.
+# SINGLE stratum: every `log:notIncludes` here scopes over an INPUT-only predicate
+# (`solidx:ownAcl` is loader-emitted, `acl:origin` comes from the ACL documents), so the
+# engine's no-retraction negation-as-failure is sound in one fixpoint
+# (research/solid-access-control-design.md §3.5).
+#
+# Loader-synthesized inputs (besides common.n3's): <R> solidx:ownAcl <R.acl> for every
+# ACL graph present; <S> solidx:inDoc <D> for every subject S of ACL graph D (provenance
+# after the single-graph merge); group documents' triples are merged in.
+
+@prefix acl:    <http://www.w3.org/ns/auth/acl#> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+@prefix vcard:  <http://www.w3.org/2006/vcard/ns#> .
+@prefix auth:   <https://sparq.dev/ns/auth#> .
+@prefix solidx: <https://sparq.dev/ns/solidx#> .
+@prefix string: <http://www.w3.org/2000/10/swap/string#> .
+@prefix log:    <http://www.w3.org/2000/10/swap/log#> .
+
+# ── effective ACL: nearest ancestor with an own ACL ("no closer ACL exists") ──────────
+{ ?r solidx:parent ?p . ?p solidx:ownAcl ?acl .
+  {} log:notIncludes { ?r solidx:ownAcl ?x . } . }
+=> { ?r solidx:inheritedAcl ?acl . ?r solidx:inheritsFrom ?p . } .
+
+{ ?r solidx:parent ?p . ?p solidx:inheritedAcl ?acl . ?p solidx:inheritsFrom ?c .
+  {} log:notIncludes { ?r solidx:ownAcl ?x . } . }
+=> { ?r solidx:inheritedAcl ?acl . ?r solidx:inheritsFrom ?c . } .
+
+# ── which Authorizations apply to which resource ──────────────────────────────────────
+# own ACL: only acl:accessTo <R> authorizations IN THAT DOCUMENT apply to R
+{ ?r solidx:ownAcl ?acl . ?auth solidx:inDoc ?acl . ?auth a acl:Authorization .
+  ?auth acl:accessTo ?r . }
+=> { ?auth solidx:appliesTo ?r . } .
+
+# inherited ACL: only acl:default <ancestor-it-belongs-to> authorizations apply
+{ ?r solidx:inheritedAcl ?acl . ?r solidx:inheritsFrom ?c .
+  ?auth solidx:inDoc ?acl . ?auth a acl:Authorization . ?auth acl:default ?c . }
+=> { ?auth solidx:appliesTo ?r . } .
+
+# ── access subjects → principals ──────────────────────────────────────────────────────
+{ ?auth a acl:Authorization . ?auth acl:agent ?a . }
+=> { ?auth solidx:grantsAgent ?a . } .
+{ ?auth a acl:Authorization . ?auth acl:agentClass foaf:Agent . }
+=> { ?auth solidx:grantsAgent auth:Public . } .
+{ ?auth a acl:Authorization . ?auth acl:agentClass acl:AuthenticatedAgent . }
+=> { ?auth solidx:grantsAgent auth:Authenticated . } .
+{ ?auth a acl:Authorization . ?auth acl:agentGroup ?g . ?g vcard:hasMember ?a . }
+=> { ?auth solidx:grantsAgent ?a . } .
+
+# ── grants, origin-free (the negation is over acl:origin, an input predicate) ─────────
+{ ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?p . ?auth acl:mode acl:Read .
+  {} log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:read ?r . } .
+{ ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?p . ?auth acl:mode acl:Write .
+  {} log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:write ?r . } .
+{ ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?p . ?auth acl:mode acl:Append .
+  {} log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:append ?r . } .
+{ ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?p . ?auth acl:mode acl:Control .
+  {} log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:control ?r . } .
+
+# ── origin-restricted grants mint a (agent, client) pair principal ────────────────────
+{ ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?a . ?auth acl:origin ?o .
+  ?auth acl:mode acl:Read . ?a log:uri ?as . ?o log:uri ?os .
+  ("urn:sparq:pair?agent=" ?as "&client=" ?os) string:concatenation ?ps . ?p log:uri ?ps . }
+=> { ?p auth:read ?r . } .
+{ ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?a . ?auth acl:origin ?o .
+  ?auth acl:mode acl:Write . ?a log:uri ?as . ?o log:uri ?os .
+  ("urn:sparq:pair?agent=" ?as "&client=" ?os) string:concatenation ?ps . ?p log:uri ?ps . }
+=> { ?p auth:write ?r . } .
+{ ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?a . ?auth acl:origin ?o .
+  ?auth acl:mode acl:Append . ?a log:uri ?as . ?o log:uri ?os .
+  ("urn:sparq:pair?agent=" ?as "&client=" ?os) string:concatenation ?ps . ?p log:uri ?ps . }
+=> { ?p auth:append ?r . } .
+{ ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?a . ?auth acl:origin ?o .
+  ?auth acl:mode acl:Control . ?a log:uri ?as . ?o log:uri ?os .
+  ("urn:sparq:pair?agent=" ?as "&client=" ?os) string:concatenation ?ps . ?p log:uri ?ps . }
+=> { ?p auth:control ?r . } .
+
+# ── acl:Control governs the ACL RESOURCE itself (WAC: read+write of the ACL doc) ──────
+{ ?p auth:control ?r . ?r solidx:ownAcl ?acl . }
+=> { ?p auth:read ?acl . ?p auth:write ?acl . } .

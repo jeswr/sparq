@@ -2368,6 +2368,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-solid"
+version = "0.1.0"
+dependencies = [
+ "oxrdf",
+ "rustc-hash",
+ "spargebra",
+ "sparq-core",
+ "sparq-engine",
+ "sparq-reason",
+]
+
+[[package]]
 name = "sparq-vectors"
 version = "0.1.0"
 dependencies = [
