@@ -338,7 +338,7 @@ candidate because non-mentioned values behave exactly like the top of their dime
 { ?m acp:agent ?a . ?a solidx:isWebId true . } => { ?m solidx:agentValP ?a } .
 { ?m acp:agent acp:PublicAgent . }        => { ?m solidx:agentValP auth:Public } .
 { ?m acp:agent acp:AuthenticatedAgent . } => { ?m solidx:agentValP auth:Authenticated } .
-{ ?m acp:client ?c . {} log:notIncludes { ?c log:equalTo acp:PublicClient } . }
+{ ?m acp:client ?c . ?c log:notEqualTo acp:PublicClient . }
                                           => { ?m solidx:clientValP ?c } .
 { ?m acp:client acp:PublicClient . }      => { ?m solidx:clientValP auth:AnyClient } .
 
@@ -495,6 +495,10 @@ stratified NAF needs (de)derivation re-checks per stratum (§7).
    the query had one; `FROM`/default = empty). `GRAPH ?g` / `GRAPH <g>` then range over
    exactly the authorized graphs — enforced by the engine's existing `build_active`
    semantics ("the store's own graphs do NOT leak in"; absent graph = empty graph).
+   Pitfall found by test: an EMPTY allowed list serializes to *no* `FROM NAMED` clause at
+   all, and the reparsed query would see the whole store — the rewrite inserts a sentinel
+   absent graph (`<urn:sparq:nothing>`) so the dataset clause survives the round-trip
+   (fail-closed).
 3. Serialize (`spargebra` `Display`) and run through `sparq_engine::query`.
 
 Cost: `build_active` (crates/sparq-engine/src/dataset.rs) **decodes every listed graph to
@@ -589,19 +593,58 @@ follow-up. v1 ships (a); L1 phase 1 ships `StoreDefault`/`Empty` only.
 
 ## 6. v1 measured baseline (prototype, this machine — M1 MacBook Air, `--release`)
 
-Fixture (`crates/sparq-solid` `fixture` module): synthetic pod, ~1000 documents in a
-containment tree of depth 4, WAC ACLs on ~10% of containers + a few resource-specific ACLs,
-agents/groups incl. public and authenticated-only subtrees; an ACP variant of the same tree.
+Fixture (`crates/sparq-solid` `fixture` module): synthetic pod, 864 documents + 259
+containers (depth-4 tree, 1148 named graphs incl. ACLs/groups), WAC ACLs on ~10% of
+containers + one resource-specific ACL, agents/groups incl. public, authenticated-only,
+group, user/app-pair and deliberately narrowing/widening deep-ACL subtrees; an ACP
+variant of the same tree (cumulative inheritance, allOf pair, deny-overrides, noneOf).
 
-<!-- BENCH:BEGIN — filled by the prototype run; keep structure -->
-- Auth-view materialization, WAC, ~1k docs: _measured below_
-- Auth-view materialization, ACP variant: _measured below_
-- Re-materialization after one ACL change: same as above (v1 is full re-run) — this number
-  IS the incremental-maintenance baseline.
-- Per-query overhead, v1 FROM-NAMED-copy path vs querying the full dataset directly:
-  _measured below_ (the number the L1 zero-copy view must beat).
-- Session graph-set computation (cold) and cached lookup: _measured below_.
-<!-- BENCH:END -->
+Correctness gate (all green, `cargo test -p sparq-solid`): WAC access matrix (depth-4
+default inheritance, nearest-ACL shadowing incl. the alice-loses-team2 case,
+accessTo-vs-default split, agentGroup, AuthenticatedAgent vs anonymous, deep +
+resource-specific overrides, acl:origin pair, Control→ACL-doc, fail-closed anonymous);
+ACP matrix (cumulative root policy at depth 4, anyOf, native (agent ∧ client) allOf
+pair, deny-overrides, noneOf conditional grants); re-materialization revocation tests
+(group-member removal; ACR policy swap); end-to-end same-query-three-sessions
+(599 / 407 / 144 rows for alice / carol / anonymous — counts hand-derived in
+tests/e2e.rs); cross-document join inside the sandbox; explicit `GRAPH <private>` and
+attacker-supplied `FROM NAMED` cannot escape.
+
+Run: `cargo run -p sparq-solid --example bench --release` (numbers below from
+2026-06-11, best-of-3; fixture = 1148 named graphs / 3060 quads; "fat" variant = same
+tree with 50 filler triples per document = 46 260 quads).
+
+| measurement | value |
+|---|---|
+| WAC auth-view materialization (full pipeline, 1 stratum) | **1.00 s** → 3 783 auth triples (closure 15 475 facts) |
+| ACP auth-view materialization (3 strata) | **1.13 s** → 6 168 auth triples (closures 10 372 / 10 388 / 16 625) |
+| re-materialization after an ACL change (v1 = full re-run) | same as above (~1.0–1.1 s) — **this IS the incremental-maintenance baseline** |
+| engine on FULL dataset, `GRAPH ?g` titles scan | 41 ms (864 rows) |
+| v1 `query_as` (rewrite + `build_active` copy, 800 authorized graphs) | 30 ms (599 rows) |
+| v1 copy cost isolated (rewritten query matching nothing) | **12 ms / query** |
+| fat fixture: FULL-dataset query | 45 ms |
+| fat fixture: v1 `query_as` | 83 ms |
+| fat fixture: v1 copy cost isolated | **59 ms / query** |
+| session graph-set, cold (AuthIndex walk + allow∖deny) | 0.30 ms |
+| session graph-set, cached | 0.0006 ms |
+
+Reading the numbers honestly:
+
+- **Materialization is cheap and re-runs freely** (~1 s for ~1.1k graphs): "re-materialize
+  on every ACL change" is a perfectly serviceable v1 maintenance story at pod scale. (One
+  measured rule-authoring lesson is baked into `rules/common.n3`: a rule with TWO unbound
+  join atoms made semi-naive seeding enumerate a ~2M-binding cross product — 117 s; split
+  into candidate+filter rules → 0.7–1.0 s. N3 rules for this engine should keep every
+  seeding direction one-side-bound.)
+- **The v1 per-query copy is the real cost and it scales linearly with authorized data**:
+  ~12 ms at 3k quads → ~59 ms at 46k quads (≈1.3 µs/quad + ~15 µs/graph for the dict +
+  permutation rebuild). On the fat fixture the v1 path is ~1.8× SLOWER than querying the
+  whole dataset with no security at all; extrapolated to a 1M-quad pod it is ~1.3 s of
+  copying per query. This is the number the L1 zero-copy view (§5) must beat — its
+  expected per-query overhead is O(1) hash checks per graph, i.e. effectively the
+  41–45 ms unrestricted-query line.
+- Session-set computation is negligible either way (sub-ms cold, ~0.5 µs cached), so the
+  L1 view's `Arc<FxHashSet<Term>>` supply path adds nothing measurable per query.
 
 D2 gate: any proposal to store authorizations in a custom (non-triple) structure must beat
 these numbers — materialization, per-query, AND re-materialization — with the same

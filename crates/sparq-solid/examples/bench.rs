@@ -73,6 +73,33 @@ fn main() {
     });
     assert_eq!(nothing.rows.len(), 0);
 
+    // 2b. copy-cost SCALING: same tree, 50 filler triples per document (~46k quads).
+    //     build_active is O(authorized data) PER QUERY — this is the number the L1
+    //     zero-copy view deletes.
+    let fat = Graph::load_dataset(&sparq_solid::fixture::wac_fixture_sized(50), "nquads").unwrap();
+    let fat_quads: usize = fat.named.iter().map(|(_, g)| g.len()).sum();
+    let mut fat_store = PodStore::new(fat);
+    fat_store.materialize_wac().unwrap();
+    println!("\nfat fixture: {fat_quads} quads");
+    let fat_direct = timed("FULL dataset query, fat fixture", || {
+        sparq_engine::query(
+            &fat_store.graph,
+            "SELECT ?title WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?title } }",
+        )
+        .unwrap()
+    });
+    println!("    rows: {}", fat_direct.rows.len());
+    let fat_v1 = timed("query_as (v1 copy path), fat fixture", || {
+        fat_store.query_as(&alice, Mode::Read, TITLES).unwrap()
+    });
+    println!("    rows: {}", fat_v1.rows.len());
+    let fat_nothing = timed("v1 copy cost isolated, fat fixture", || {
+        fat_store
+            .query_as(&alice, Mode::Read, "SELECT ?x WHERE { ?x <urn:none> <urn:none> }")
+            .unwrap()
+    });
+    assert_eq!(fat_nothing.rows.len(), 0);
+
     // 3. session graph-set: cold vs cached
     let bob = Session { agent: Some(sparq_solid::fixture::BOB), client: None };
     let t = Instant::now();

@@ -36,6 +36,27 @@ fn quad_lit(out: &mut String, s: &str, p: &str, o: &str, g: &str) {
 }
 
 /// The shared containment tree + document contents (no access control).
+/// `extra` = additional filler triples per document (scaling the per-query copy cost
+/// measurement; access-control semantics are unaffected).
+fn tree_sized(out: &mut String, extra: usize) {
+    tree(out);
+    if extra == 0 {
+        return;
+    }
+    for top in SUBTREES {
+        for j in 0..6 {
+            for k in 0..6 {
+                for d in 0..4 {
+                    let doc = format!("{POD}{top}/c{j}/g{k}/d{d}.ttl");
+                    for n in 0..extra {
+                        quad_lit(out, &format!("{doc}#it"), &format!("{EX}note{n}"), &format!("filler {n}"), &doc);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn tree(out: &mut String) {
     for (i, top) in SUBTREES.iter().enumerate() {
         let c1 = format!("{POD}{top}/");
@@ -122,8 +143,13 @@ fn acl_doc(out: &mut String, resource: &str, auths: &[Auth]) {
 /// The WAC fixture (N-Quads). ACLs at root + every depth-1 container (semantics below)
 /// + restating ACLs at ~10% of containers + one resource-specific ACL.
 pub fn wac_fixture() -> String {
+    wac_fixture_sized(0)
+}
+
+/// [`wac_fixture`] with `extra` filler triples per document (copy-cost scaling).
+pub fn wac_fixture_sized(extra: usize) -> String {
     let mut out = String::with_capacity(1 << 20);
-    tree(&mut out);
+    tree_sized(&mut out, extra);
     let rwc: &[&str] = &["Read", "Write", "Control"];
     let owner = |frag| Auth { frag, agents: &[ALICE], modes: rwc, ..Auth::default() };
 
