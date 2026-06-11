@@ -71,6 +71,16 @@ fn reserved_session_values_fail_closed() {
             Mode::Read
         )
         .is_empty());
+    // delimiter-only values (NOT in the reserved space) must fail closed too: a WebID
+    // embedding `&client=` could otherwise complete someone else's pair encoding
+    let delim_agent = format!("https://x.ex/a{}https://app.ex", "&client=");
+    assert!(s.accessible(&Session { agent: Some(&delim_agent), client: None }, Mode::Read).is_empty());
+    assert!(s
+        .accessible(
+            &Session { agent: Some("https://bob.ex/card#me"), client: Some(&delim_agent) },
+            Mode::Read
+        )
+        .is_empty());
     // …while the REAL pair still works
     let real = Session { agent: Some("https://bob.ex/card#me"), client: Some("https://app.ex") };
     assert!(s
