@@ -151,7 +151,8 @@ pub struct Counted {
 /// predicates emitted by some group of subjects.
 #[derive(Clone, Debug, Serialize)]
 pub struct CharacteristicSet {
-    /// The predicate IRIs, sorted by dictionary id (deterministic).
+    /// The predicate IRIs, sorted lexicographically (deterministic across store
+    /// builds — dictionary-id order varies with the build path).
     pub predicates: Vec<String>,
     /// How many subjects have *exactly* this predicate set (`count(C)` in the paper).
     pub subjects: u64,
@@ -221,8 +222,9 @@ pub struct PredicateProfile {
     /// language-tagged strings appear as `rdf:langString`, inline integers as
     /// `xsd:integer`).
     pub datatypes: Vec<Counted>,
-    /// Sample object values from the sorted index (deterministic; literals quoted,
-    /// IRIs bare). The first sample is the predicate's *minimum* object value.
+    /// Sample object values (literals quoted, IRIs bare): the lexicographically
+    /// smallest rendered distinct values, so the selection is deterministic across
+    /// store builds (index order varies with dictionary-id assignment).
     pub samples: Vec<String>,
     /// **Observed domain**: classes of this predicate's subjects, by descending
     /// distinct-subject count (most-common first) — inferred from usage.
@@ -287,6 +289,20 @@ struct PredAcc {
 }
 
 /// Per-characteristic-set accumulator.
+/// Keep the `cap` lexicographically smallest sample strings, ascending — the
+/// selection (not just the order) is then independent of dictionary-id assignment.
+fn keep_min_sample(samples: &mut Vec<String>, cap: usize, s: String) {
+    if samples.len() < cap {
+        samples.push(s);
+        samples.sort_unstable();
+    } else if let Some(last) = samples.last_mut() {
+        if s < *last {
+            *last = s;
+            samples.sort_unstable();
+        }
+    }
+}
+
 struct CsAcc {
     subjects: u64,
     /// Aligned with the key's predicates: Σ triples.
@@ -436,9 +452,11 @@ impl Introspection {
                 if dict::is_inline(o) {
                     acc.kinds.literal += n;
                     *acc.datatypes.entry(XSD_INTEGER.to_string()).or_default() += n;
-                    if acc.samples.len() < opts.samples_per_predicate {
-                        acc.samples.push(format!("\"{}\"", o - INLINE_BASE));
-                    }
+                    keep_min_sample(
+                        &mut acc.samples,
+                        opts.samples_per_predicate,
+                        format!("\"{}\"", o - INLINE_BASE),
+                    );
                 } else {
                     match graph.dict.term_parts(o) {
                         TermParts::Iri { prefix, suffix } => {
@@ -448,12 +466,14 @@ impl Introspection {
                                     *acc.ranges.entry(c).or_default() += 1;
                                 }
                             }
-                            if acc.samples.len() < opts.samples_per_predicate {
-                                acc.samples.push(truncate_chars(
+                            keep_min_sample(
+                                &mut acc.samples,
+                                opts.samples_per_predicate,
+                                truncate_chars(
                                     &format!("{prefix}{suffix}"),
                                     opts.max_sample_chars,
-                                ));
-                            }
+                                ),
+                            );
                         }
                         TermParts::Lit {
                             value,
@@ -462,30 +482,34 @@ impl Introspection {
                         } => {
                             acc.kinds.literal += n;
                             *acc.datatypes.entry(datatype.to_string()).or_default() += n;
-                            if acc.samples.len() < opts.samples_per_predicate {
-                                let rendered = match lang {
-                                    Some(l) => format!("\"{value}\"@{l}"),
-                                    None => format!("\"{value}\""),
-                                };
-                                acc.samples
-                                    .push(truncate_chars(&rendered, opts.max_sample_chars));
-                            }
+                            let rendered = match lang {
+                                Some(l) => format!("\"{value}\"@{l}"),
+                                None => format!("\"{value}\""),
+                            };
+                            keep_min_sample(
+                                &mut acc.samples,
+                                opts.samples_per_predicate,
+                                truncate_chars(&rendered, opts.max_sample_chars),
+                            );
                         }
                         TermParts::Blank(b) => {
                             acc.kinds.blank += n;
-                            if acc.samples.len() < opts.samples_per_predicate {
-                                acc.samples
-                                    .push(truncate_chars(&format!("_:{b}"), opts.max_sample_chars));
-                            }
+                            keep_min_sample(
+                                &mut acc.samples,
+                                opts.samples_per_predicate,
+                                truncate_chars(&format!("_:{b}"), opts.max_sample_chars),
+                            );
                         }
                         TermParts::Triple(_) => {
                             acc.kinds.triple_term += n;
-                            if acc.samples.len() < opts.samples_per_predicate {
-                                acc.samples.push(truncate_chars(
+                            keep_min_sample(
+                                &mut acc.samples,
+                                opts.samples_per_predicate,
+                                truncate_chars(
                                     &graph.dict.term(o).to_string(),
                                     opts.max_sample_chars,
-                                ));
-                            }
+                                ),
+                            );
                         }
                     }
                 }
@@ -644,8 +668,23 @@ impl Introspection {
         });
 
         let distinct_cs = cs.len() as u64;
-        let mut cs_vec: Vec<(Box<[Id]>, CsAcc)> = cs.into_iter().collect();
-        cs_vec.sort_by(|a, b| b.1.subjects.cmp(&a.1.subjects).then(a.0.cmp(&b.0)));
+        // Resolve each set's predicates up front and sort them lexicographically
+        // (with the per-predicate triple counts kept aligned), so both the in-set
+        // order and the between-set tie-break are independent of dictionary-id
+        // assignment, which varies with the store build path.
+        let mut cs_vec: Vec<(Vec<(String, u64)>, CsAcc)> = cs
+            .into_iter()
+            .map(|(key, acc)| {
+                let mut preds: Vec<(String, u64)> = key
+                    .iter()
+                    .zip(&acc.triples)
+                    .map(|(&p, &t)| (iri_str(p), t))
+                    .collect();
+                preds.sort_unstable();
+                (preds, acc)
+            })
+            .collect();
+        cs_vec.sort_by(|a, b| b.1.subjects.cmp(&a.1.subjects).then_with(|| a.0.cmp(&b.0)));
         let mut elided_sets = 0u64;
         let mut elided_subjects = 0u64;
         if cs_vec.len() > opts.max_char_sets {
@@ -657,10 +696,10 @@ impl Introspection {
         }
         let sets: Vec<CharacteristicSet> = cs_vec
             .into_iter()
-            .map(|(key, acc)| CharacteristicSet {
-                predicates: key.iter().map(|&p| iri_str(p)).collect(),
+            .map(|(preds, acc)| CharacteristicSet {
+                predicates: preds.iter().map(|(s, _)| s.clone()).collect(),
                 subjects: acc.subjects,
-                predicate_triples: acc.triples,
+                predicate_triples: preds.iter().map(|&(_, t)| t).collect(),
                 classes: top_counted(&acc.classes, opts.max_classes_per_histogram),
             })
             .collect();
