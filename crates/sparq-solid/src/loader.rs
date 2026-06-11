@@ -42,14 +42,22 @@ fn validate_principal_iri(iri: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Drop named graphs in the reserved IRI space (except the auth view itself, which the
-/// materializer manages): a loaded dataset must not be able to smuggle in the rewrite
-/// sentinel (`urn:sparq:nothing`) or forged principal/grant nodes as a graph.
+/// Drop ALL named graphs in the reserved IRI space — including a pre-existing
+/// `<urn:sparq:auth>`: a loaded dataset must not be able to smuggle in the rewrite
+/// sentinel (`urn:sparq:nothing`) or a FORGED auth view; only `install_auth_view`
+/// creates `<urn:sparq:auth>`, after a successful materialization (roborev 1727).
 pub(crate) fn strip_reserved_graphs(graph: &mut Graph) {
     graph.named.retain(|(name, _)| match name {
-        Term::NamedNode(n) => !n.as_str().starts_with(RESERVED_PREFIX) || n.as_str() == AUTH_GRAPH,
+        Term::NamedNode(n) => !n.as_str().starts_with(RESERVED_PREFIX),
         _ => true,
     });
+}
+
+/// Whether a session-supplied agent/client value may participate in principal
+/// expansion: anything in the reserved space or containing the pair delimiter could
+/// IMPERSONATE a minted pair principal — fail closed.
+pub(crate) fn session_value_allowed(v: &str) -> bool {
+    !v.starts_with(RESERVED_PREFIX) && !v.contains(PAIR_DELIMITER)
 }
 /// `acp:agent` objects that are NOT concrete WebIDs.
 const SPECIAL_AGENTS: [&str; 5] = [

@@ -224,9 +224,11 @@ Pair-IRI minting uses raw concatenation (`urn:sparq:pair?agent=` + IRI + `&clien
 because the N3 dialect has no percent-encoding builtin. Mitigation shipped (it would
 otherwise be a grant-collision attack — roborev 1723): `urn:sparq:` is a **reserved IRI
 space** — the loader REJECTS any agent/group-member/origin/client value containing the
-literal `&client=` or starting with `urn:sparq:` (fail-closed, tests/hardening.rs), and
-`PodStore::new`/the materializer strip reserved-named graphs from loaded datasets (no
-smuggled rewrite sentinel or forged auth view). The clean long-term fix stays a tiny
+literal `&client=` or starting with `urn:sparq:`; sessions whose agent/client values sit
+in the reserved space get the EMPTY graph set (no pair-principal impersonation); and
+`PodStore::new`/the materializer strip ALL reserved-named graphs from loaded datasets,
+including a pre-existing `<urn:sparq:auth>` (only `install_auth_view` may create it) —
+all fail-closed, regression-tested in tests/hardening.rs. The clean long-term fix stays a tiny
 `string:encodeForUri` builtin follow-up (§7).
 
 ### 2.4 Security boundary of the reasoner

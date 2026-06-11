@@ -192,7 +192,15 @@ impl AuthIndex {
 
     /// The sorted, deduplicated graph set this session may access in `mode`:
     /// `∪ allow(principals) ∖ ∪ deny(principals)` (deny-overrides across principals).
+    ///
+    /// Fails CLOSED (empty set) for session values inside the reserved principal
+    /// encoding — a caller-supplied "WebID" like `urn:sparq:pair?agent=…&client=…`
+    /// must not impersonate a minted pair principal (roborev 1727).
     pub fn accessible(&self, s: &Session, mode: Mode) -> Vec<NamedNode> {
+        let invalid = |v: Option<&str>| v.is_some_and(|x| !crate::loader::session_value_allowed(x));
+        if invalid(s.agent) || invalid(s.client) {
+            return Vec::new();
+        }
         let principals = Self::principals(s);
         let mut allowed: FxHashSet<NamedNode> = FxHashSet::default();
         let mut denied: FxHashSet<&NamedNode> = FxHashSet::default();

@@ -13,7 +13,12 @@ fn sentinel_graph_cannot_be_smuggled() {
     nq.push_str("<urn:sparq:nothing#s> <urn:p> \"leak\" <urn:sparq:nothing> .\n");
     nq.push_str("<urn:sparq:auth#s> <https://sparq.dev/ns/auth#read> <https://pod.ex/priv0/> <urn:sparq:auth> .\n");
     let mut s = PodStore::new(Graph::load_dataset(&nq, "nquads").unwrap());
-    // the forged auth graph is dropped at construction: nothing accessible pre-materialize
+    // BOTH reserved graphs are dropped at construction (incl. the forged auth view —
+    // only install_auth_view may create <urn:sparq:auth>)
+    assert!(!s.graph.named.iter().any(|(n, _)| match n {
+        oxrdf::Term::NamedNode(n) => n.as_str().starts_with("urn:sparq:"),
+        _ => false,
+    }));
     assert!(s.accessible(&Session::default(), Mode::Read).is_empty());
     s.materialize_wac().unwrap();
     let q = "SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } }";
@@ -50,6 +55,28 @@ fn rewrite_avoids_user_variable_capture() {
     assert!(!out.contains("GRAPH ?__sg0"), "internal vars must avoid ?__sg0: {out}");
     // …and the rewritten query still parses
     assert!(spargebra::SparqlParser::new().parse_query(&out).is_ok(), "{out}");
+}
+
+/// A caller-supplied "WebID"/client inside the reserved principal encoding must not
+/// impersonate a minted pair principal — sessions fail closed.
+#[test]
+fn reserved_session_values_fail_closed() {
+    let mut s = PodStore::new(Graph::load_dataset(&wac_fixture(), "nquads").unwrap());
+    s.materialize_wac().unwrap();
+    let spoof = "urn:sparq:pair?agent=https://bob.ex/card#me&client=https://app.ex";
+    assert!(s.accessible(&Session { agent: Some(spoof), client: None }, Mode::Read).is_empty());
+    assert!(s
+        .accessible(
+            &Session { agent: Some("https://bob.ex/card#me"), client: Some("urn:sparq:x") },
+            Mode::Read
+        )
+        .is_empty());
+    // …while the REAL pair still works
+    let real = Session { agent: Some("https://bob.ex/card#me"), client: Some("https://app.ex") };
+    assert!(s
+        .accessible(&real, Mode::Read)
+        .iter()
+        .any(|g| g.as_str() == "https://pod.ex/origin5/c2/g0/d0.ttl"));
 }
 
 /// End-to-end sanity after hardening: the normal path still works.
