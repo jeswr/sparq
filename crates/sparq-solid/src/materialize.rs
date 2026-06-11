@@ -7,7 +7,7 @@
 //! each seeded with the previous closure.
 
 use crate::loader::{assemble_input, System};
-use crate::{AUTH_GRAPH, AUTH_NS, SOLIDX_NS};
+use crate::{AUTH_GRAPH, AUTH_NS};
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashSet;
 use sparq_core::dict::Dict;
@@ -128,8 +128,3 @@ fn install_auth_view(graph: &mut Graph, dict: &Dict, closure: &[[sparq_core::dic
     }
     stats
 }
-
-// (the SOLIDX_NS import is used by the doc comment contract above; keep the constant
-// referenced so the namespaces stay in one place)
-#[allow(dead_code)]
-const _: &str = SOLIDX_NS;
