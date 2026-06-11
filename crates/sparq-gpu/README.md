@@ -14,7 +14,7 @@ The full measured answer, tables, and the recommendation live in
 > **Parked.** On this M1 (unified memory — the *best possible* transfer
 > economics), the GPU loses or merely ties the 8-core CPU on compute-light
 > scans even when the column is already device-resident, and only wins on the
-> hash-probe shape (~1.5–3× resident, ~1–1.8× including transfer). One winning
+> hash-probe shape (~1.7–3× resident, ~1.1× including transfer). One winning
 > kernel class does not pay for a residency cache, scheduler integration, and
 > a second execution backend. Re-open only per the conditions in the verdict.
 

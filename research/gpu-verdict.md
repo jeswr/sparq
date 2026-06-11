@@ -61,13 +61,20 @@ f64 column) — no scale-down was needed.
 
 ### 2.1 Contention caveat
 
-The machine ran concurrent agent workloads (rustc jobs in sibling worktrees +
-an antivirus scanner); 1-min load average ranged ~33–60 during the run.
-Best-of-N minima and interleaving blunt but do not eliminate this. A repeat
-run under lower load (§3.5) reproduced every ratio's *sign* (win/lose) and
-ranking; absolute CPU times in the noisier run are pessimistic by up to ~2×
-in the worst single cell. The verdict does not change between runs — the
-contention noise is smaller than the margins it would need to overturn.
+The host ran concurrent agent workloads during both runs (sibling-worktree
+rustc/test jobs in run 1; an antivirus scan storm in run 2): 1-min load
+average ~33–60 (run 1) and ~22–50 (run 2). Best-of-N minima and interleaving
+blunt but do not eliminate this. Two things keep the verdict safe anyway:
+
+1. **The bias direction is known.** Contention steals CPU cores, so it
+   inflates the cpu1/cpuN legs and barely touches the GPU legs (one host
+   thread) — i.e. *all* the noise here flatters the GPU. On a quiet machine
+   the CPU columns improve and the PARK verdict only strengthens. Run 2
+   (lower contention) confirmed this directly: the lone GPU win (hash-probe)
+   *shrank* from 1.5–3.2× to 1.7–2.3× resident and 1.05–1.78× to ~1.1× e2e.
+2. **The margins dwarf the noise.** The decisions rest on 9–25× e2e losses
+   and the scan kernels losing/tying even resident; run-to-run wobble is
+   well under 2× per cell and never flips a sign that matters.
 
 ## 3. Results (milliseconds, best-of-N; ratios >1.0× = GPU wins)
 
@@ -103,13 +110,31 @@ contention noise is smaller than the margins it would need to overturn.
 | 10M | 20.71 | 13.64 | 13.47 | 47.66 | 1.01× | 0.29× |
 | 100M | 531.82 | 45.66 | 105.50 | 650.84 | 0.43× | 0.07× |
 
-### 3.5 Confirmation run (lower load)
+### 3.5 Confirmation run (lower load; includes the u64-match-count kernel fix)
 
-(repeat run, same protocol — see §2.1)
+Same protocol, ~30 min later, load ~22–50 (antivirus residue, no compiler
+jobs). Every sign and ranking reproduces; the hash-probe GPU win shrinks as
+predicted by §2.1; FILTER u32 resident wobbles around parity at 10–100M
+(0.69×–1.85× across the two runs — a tie zone, not a win).
 
-| kernel | scale | cpuN | gpu resident | gpu e2e | cpuN/resident | cpuN/e2e |
-|---|--:|--:|--:|--:|--:|--:|
-| TBD | | | | | | |
+| kernel | scale | cpu1 | cpuN | gpu resident | gpu e2e | cpuN/resident | cpuN/e2e |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| FILTER u32 | 1M | 0.54 | 1.03 | 1.62 | 3.03 | 0.64× | 0.34× |
+| FILTER u32 | 10M | 5.99 | 7.55 | 4.08 | 18.64 | 1.85× | 0.41× |
+| FILTER u32 | 100M | 59.30 | 18.91 | 17.39 | 184.94 | 1.09× | 0.10× |
+| FILTER f64 | 1M | 0.33 | 0.31 | 1.68 | 5.66 | 0.19× | 0.06× |
+| FILTER f64 | 10M | 3.18 | 3.01 | 4.70 | 35.21 | 0.64× | 0.09× |
+| FILTER f64 | 100M | 44.07 | 26.65 | 34.58 | 373.98 | 0.77× | 0.07× |
+| HASH probe | 1M | 66.97 | 7.56 | 4.01 | 6.44 | 1.88× | 1.17× |
+| HASH probe | 10M | 562.51 | 70.73 | 30.95 | 64.62 | 2.29× | 1.09× |
+| HASH probe | 100M | 10845.92 | 1640.64 | 944.85 | 1479.36 | 1.74× | 1.11× |
+| GROUP BY | 1M | 2.02 | 3.05 | 3.22 | 7.51 | 0.95× | 0.41× |
+| GROUP BY | 10M | 18.83 | 8.45 | 12.08 | 40.10 | 0.70× | 0.21× |
+| GROUP BY | 100M | 278.20 | 62.38 | 103.70 | 543.60 | 0.60× | 0.11× |
+
+(cpuN occasionally lands *behind* cpu1 at 1–10M in this run — rayon fork/join
+overhead plus the antivirus stealing cores; another reminder that the cpuN
+baseline here is a floor, not a ceiling.)
 
 ## 4. Reading the numbers
 
@@ -117,9 +142,10 @@ contention noise is smaller than the margins it would need to overturn.
    GPU sees the *same* DRAM as the CPU; for a ~1-op-per-word scan the 8 CPU
    cores already saturate bandwidth (FILTER u32 100M: 12.4 ms ≈ 32 GB/s).
    The GPU's only lever — more FLOPs — buys nothing, and dispatch+readback
-   latency (~1.5 ms floor) drowns small columns. Best case observed: 0.97×
-   (a tie) at 100M f64. **This kills the "GPU FILTER" idea on this class of
-   hardware in the most GPU-favourable (count-only) formulation.**
+   latency (~1.5 ms floor) drowns small columns. Best case observed across
+   both runs: parity (0.97×–1.09×) at 100M. **This kills the "GPU FILTER"
+   idea on this class of hardware in the most GPU-favourable (count-only)
+   formulation.**
 2. **The transfer tax is fatal everywhere it applies.** gpu-e2e loses by
    9–25× on scans. And this is *unified memory* — a `queue.write_buffer`
    memcpy at tens of GB/s. A discrete card over PCIe 3.0/4.0 (8–32 GB/s,
@@ -128,21 +154,22 @@ contention noise is smaller than the margins it would need to overturn.
    arrival; only a residency model is even discussable.
 3. **Hash-probe is the one real win** — the only kernel with enough work per
    byte (hash + data-dependent dependent-load walk) for the GPU's
-   latency-hiding to beat the CPU's cache hierarchy: 1.5–3.2× over 8-core
-   rayon when resident, and still ≥1× even charging the full re-upload.
+   latency-hiding to beat the CPU's cache hierarchy: 1.7–3.2× over 8-core
+   rayon when resident (1.7–2.3× in the cleaner run), and ~1.1× even
+   charging the full re-upload.
    But: (a) the build side stays on the CPU; (b) sparq's real joins are
    mostly *merge* joins on sorted permutations (the hash path is the
    fallback); (c) a 1.5–3× win on one operator class does not amortise a
    residency cache, a scheduler that knows what's resident, wgpu in the
    dependency tree, and a second backend to keep correct.
-4. **GROUP BY flips against the GPU at scale** (0.43× at 100M): per-element
+4. **GROUP BY flips against the GPU at scale** (0.43–0.60× at 100M): per-element
    shared-memory atomics with key-skew contention scale worse than the CPU's
    private 256-entry arrays + tree merge. The u64-carry emulation (WGSL has
    no 64-bit atomics) adds per-element cost the CPU doesn't pay.
-5. **Break-even points** (resident, vs 8-core CPU): FILTER u32/f64 — none
-   observed up to 100M (trend approaches 1× around ~100M–1B extrapolated, on
-   a workload nobody should ship); hash-probe — wins from ≤1M onward; GROUP
-   BY — narrow ~10M window, gone by 100M. Against *single-thread* CPU the GPU
+5. **Break-even points** (resident, vs 8-core CPU): FILTER u32 — parity at
+   ~100M (0.69×–1.09× across runs), never a clear win; FILTER f64 — none
+   observed up to 100M; hash-probe — wins from ≤1M onward; GROUP BY — at
+   best parity ~1–10M, clearly lost by 100M. Against *single-thread* CPU the GPU
    looks much better everywhere ≥10M, but cpu1 is not the honest baseline:
    rayon is already in sparq-bench and parallel scans are far cheaper to
    adopt than a GPU backend.
@@ -156,9 +183,10 @@ contention noise is smaller than the margins it would need to overturn.
   unified memory.
 - **Reject** GPU FILTER/scan on Apple-silicon-class unified memory — CPU
   cores saturate the same DRAM; there is nothing for the GPU to add.
-- **Park** the hash-probe result. It is real (1.5–3.2× resident) but
-  single-operator, fallback-path, and worth far less than its integration
-  cost today. The kernels and harness stay in-tree as the re-test rig.
+- **Park** the hash-probe result. It is real (1.7–2.3× resident in the
+  cleaner run) but single-operator, fallback-path, and worth far less than
+  its integration cost today. The kernels and harness stay in-tree as the
+  re-test rig.
 
 **Re-open T24d if any of these become true:**
 
@@ -173,8 +201,9 @@ contention noise is smaller than the margins it would need to overturn.
    backs on already-paid residency and the 1.4–3× becomes nearly free.
 3. **WebGPU in-browser** becomes the only parallelism available (wasm threads
    unavailable): against *cpu1* (the wasm reality today) the resident GPU is
-   3.7–11× on hash-probe and ~3–5× on big scans — a different calculus, but
-   blocked on f64 absence and buffer-size limits; treat as its own task.
+   ~11–18× on hash-probe, ~2.7× on big GROUP BY, and ~1.3–3.7× on 100M scans
+   — a different calculus, but blocked on f64 absence and buffer-size
+   limits; treat as its own task.
 
 ### Apple-silicon caveat (explicit)
 
