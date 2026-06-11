@@ -64,21 +64,29 @@
   {} log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:control ?r . } .
 
 # ── origin-restricted grants mint a (agent, client) pair principal ────────────────────
+# Components are percent-encoded (string:encodeForUri, RFC 3986) so the minting is
+# INJECTIVE: no agent/origin IRI can smuggle the `&client=` delimiter into the pair.
+# The session side mints identically (authindex::pair_principal — keep in sync), and
+# the loader's reserved-encoding validation stays as defense in depth.
 { ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?a . ?auth acl:origin ?o .
   ?auth acl:mode acl:Read . ?a log:uri ?as . ?o log:uri ?os .
-  ("urn:sparq:pair?agent=" ?as "&client=" ?os) string:concatenation ?ps . ?p log:uri ?ps . }
+  ?as string:encodeForUri ?ae . ?os string:encodeForUri ?oe .
+  ("urn:sparq:pair?agent=" ?ae "&client=" ?oe) string:concatenation ?ps . ?p log:uri ?ps . }
 => { ?p auth:read ?r . } .
 { ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?a . ?auth acl:origin ?o .
   ?auth acl:mode acl:Write . ?a log:uri ?as . ?o log:uri ?os .
-  ("urn:sparq:pair?agent=" ?as "&client=" ?os) string:concatenation ?ps . ?p log:uri ?ps . }
+  ?as string:encodeForUri ?ae . ?os string:encodeForUri ?oe .
+  ("urn:sparq:pair?agent=" ?ae "&client=" ?oe) string:concatenation ?ps . ?p log:uri ?ps . }
 => { ?p auth:write ?r . } .
 { ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?a . ?auth acl:origin ?o .
   ?auth acl:mode acl:Append . ?a log:uri ?as . ?o log:uri ?os .
-  ("urn:sparq:pair?agent=" ?as "&client=" ?os) string:concatenation ?ps . ?p log:uri ?ps . }
+  ?as string:encodeForUri ?ae . ?os string:encodeForUri ?oe .
+  ("urn:sparq:pair?agent=" ?ae "&client=" ?oe) string:concatenation ?ps . ?p log:uri ?ps . }
 => { ?p auth:append ?r . } .
 { ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?a . ?auth acl:origin ?o .
   ?auth acl:mode acl:Control . ?a log:uri ?as . ?o log:uri ?os .
-  ("urn:sparq:pair?agent=" ?as "&client=" ?os) string:concatenation ?ps . ?p log:uri ?ps . }
+  ?as string:encodeForUri ?ae . ?os string:encodeForUri ?oe .
+  ("urn:sparq:pair?agent=" ?ae "&client=" ?oe) string:concatenation ?ps . ?p log:uri ?ps . }
 => { ?p auth:control ?r . } .
 
 # ── acl:Control governs the ACL RESOURCE itself (WAC: read+write of the ACL doc) ──────

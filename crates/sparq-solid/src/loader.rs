@@ -26,8 +26,12 @@ const VCARD_MEMBER: &str = "http://www.w3.org/2006/vcard/ns#hasMember";
 /// Reserved IRI space: the auth view, the rewrite sentinel, minted pair/candidate/grant
 /// principals. Graphs named under it are stripped at PodStore/materializer boundaries,
 /// and agent/client/origin values inside it (or containing the pair-IRI delimiter) are
-/// REJECTED — otherwise a crafted WebID like `…&client=…` could collide with another
-/// (agent, client) pair principal and inherit its grants (roborev 1723).
+/// REJECTED (roborev 1723). Pair/candidate minting now percent-encodes its components
+/// (`string:encodeForUri` / [`sparq_reason::n3::encode_for_uri`]), so a crafted WebID
+/// like `…&client=…` can no longer collide with a minted pair at the encoding level —
+/// this validation stays as defense in depth, and it remains LOAD-BEARING for raw
+/// reserved-space values: a session or ACL agent equal to a full minted IRI
+/// (`urn:sparq:pair?…`) would otherwise match that principal's grants directly.
 pub(crate) const RESERVED_PREFIX: &str = "urn:sparq:";
 const PAIR_DELIMITER: &str = "&client=";
 

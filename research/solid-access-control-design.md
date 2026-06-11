@@ -707,8 +707,11 @@ Reading the numbers honestly:
 
 1. **L1 engine view** (§5) — DONE: shipped in the engine and wired as `sparq-solid`'s
    default query path; measured in §6.1.
-2. **sparq-reason builtins** (small, in gap-priority order): `string:encodeForUri` (sound
-   pair-IRI minting); a documented multi-stratum entry point
+2. **sparq-reason builtins** (small, in gap-priority order): `string:encodeForUri` —
+   DONE (RFC 3986 / fn:encode-for-uri percent-encoding; wac.n3/acp-a.n3/acp-c.n3 pair
+   and candidate minting now encode their components, the session side shares the same
+   `encode_for_uri` helper, and the reserved-encoding validation is KEPT as defense in
+   depth). Still open: a documented multi-stratum entry point
    (`reason_n3_stratified(&[src])`) so the ACP pipeline does not re-serialize closures
    between strata; optionally `log:forAllIn`/count-over-property-values to collapse ACP
    strata B+C into one.

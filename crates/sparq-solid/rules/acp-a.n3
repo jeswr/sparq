@@ -68,8 +68,11 @@
 { ?pol solidx:candClient ?c . ?c log:notEqualTo auth:AnyClient . } => { ?c solidx:isCandClient true . } .
 
 # ── candidate (agent, client) pairs, minted deterministically ──────────────────────────
+# (components percent-encoded — string:encodeForUri — so distinct (pol, agent, client)
+#  triples can never concatenate to the same candidate key)
 { ?pol solidx:candAgent ?pa . ?pol solidx:candClient ?pc .
   ?pol log:uri ?pols . ?pa log:uri ?pas . ?pc log:uri ?pcs .
-  ("urn:sparq:cand?pol=" ?pols "&agent=" ?pas "&client=" ?pcs) string:concatenation ?ks .
+  ?pols string:encodeForUri ?pole . ?pas string:encodeForUri ?pae . ?pcs string:encodeForUri ?pce .
+  ("urn:sparq:cand?pol=" ?pole "&agent=" ?pae "&client=" ?pce) string:concatenation ?ks .
   ?k log:uri ?ks . }
 => { ?pol solidx:candPair ?k . ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc . } .

@@ -70,7 +70,9 @@ Everything is triples — a binding requirement (design-doc decisions D1–D4):
   auth:Authenticated        auth:append <https://pod.ex/inbox/> .
 
   # client-restricted grants use a deterministically minted PAIR principal
-  <urn:sparq:pair?agent=https://bob.ex/card#me&client=https://app.ex>
+  # (components RFC 3986 percent-encoded — string:encodeForUri — so the minting is
+  #  injective: no WebID can smuggle the &client= delimiter into someone else's pair)
+  <urn:sparq:pair?agent=https%3A%2F%2Fbob.ex%2Fcard%23me&client=https%3A%2F%2Fapp.ex>
       auth:read <https://pod.ex/shared/doc> .
 
   # ACP deny half (deny-overrides is resolved per session, not here)
@@ -211,8 +213,9 @@ non-authorized graph behaves exactly like an absent one (indistinguishability):
   exactly what `acl:Control` / ACR write gates.
 - **Reserved namespace** `urn:sparq:` (pair/candidate/grant principals, the auth
   view, the rewrite sentinel): the loader **rejects** agent/client/origin IRIs inside
-  it or containing the pair delimiter `&client=` (a crafted WebID could otherwise
-  collide with a minted pair principal and inherit its grants); sessions carrying
+  it or containing the pair delimiter `&client=` (pair minting percent-encodes its
+  components, so such a collision is no longer constructible — the validation stays
+  as defense in depth); sessions carrying
   such values get the **empty** graph set; and `PodStore::new`/the materializer
   **strip** all reserved-named graphs from loaded datasets — a dataset cannot smuggle
   in a forged `<urn:sparq:auth>`; only the materializer creates it.
@@ -260,10 +263,12 @@ for any custom authorization storage.
 - **Incremental auth maintenance**: v1 re-runs the full pipeline (~1 s) on any
   ACL/ACR/group change; counting-based N3-incremental maintenance under stratified
   NAF is a `sparq-reason` follow-up.
-- **N3 builtin gaps**: no `string:encodeForUri` (pair-IRI minting concatenates raw
-  IRIs — mitigated by the reserved-namespace validation above), no multi-stratum
-  entry point (the ACP pipeline re-serializes closures between strata), no
-  count-over-property-values (would collapse ACP strata B+C).
+- **N3 builtin gaps**: ~~`string:encodeForUri`~~ DONE (sparq-reason; pair/candidate
+  IRI minting now percent-encodes its components — injective — with the
+  reserved-namespace validation kept as defense in depth); still open: a
+  multi-stratum entry point (`reason_n3_stratified` — the ACP pipeline re-serializes
+  closures between strata) and count-over-property-values (would collapse ACP
+  strata B+C).
 - **Union-default semantics** are emulated per pattern (duplicate rows vs RDF merge);
   a true zero-copy union default needs shared-dictionary named graphs (design doc
   §5.4).

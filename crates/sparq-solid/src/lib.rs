@@ -78,7 +78,7 @@ mod loader;
 mod materialize;
 mod rewrite;
 
-pub use authindex::{AuthIndex, Mode, Session};
+pub use authindex::{pair_principal, AuthIndex, Mode, Session};
 pub use fixture::{acp_fixture, wac_fixture};
 pub use materialize::{materialize_acp, materialize_wac, MaterializeStats};
 pub use rewrite::{rewrite_for, wrap_for_view};

@@ -15,7 +15,9 @@
 //!     atanh, degrees/radians, `(x base) math:logarithm` = log_base(x), and `(x y) math:atan2`
 //!     which — exactly like eye.pl — computes `atan(x/y)`, not the quadrant-aware C atan2);
 //!   * `string:` concatenation/length/contains/containsIgnoringCase/startsWith/endsWith/
-//!     greaterThan/lessThan/matches/notMatches/replace/lowerCase/upperCase, `string:scrape`
+//!     greaterThan/lessThan/matches/notMatches/replace/lowerCase/upperCase,
+//!     `string:encodeForUri` (RFC 3986 percent-encoding, the XPath `fn:encode-for-uri`
+//!     unreserved set — see [`encode_for_uri`]), `string:scrape`
 //!     (first regex capture group), and a `string:format` SUBSET (`%s` `%d` `%f` `%%` only —
 //!     C-printf width/precision flags fail the premise rather than mis-format);
 //!   * `list:` length/first/last and the member/in generators;
@@ -828,6 +830,39 @@ fn lex(t: &Term) -> Option<&str> {
     }
 }
 
+/// RFC 3986 percent-encoding as `string:encodeForUri` computes it: every UTF-8 byte
+/// outside the *unreserved* set (`ALPHA / DIGIT / "-" / "." / "_" / "~"`, RFC 3986
+/// §2.3) becomes `%XX` with uppercase hex (§2.1's canonical form). This is XPath
+/// `fn:encode-for-uri` / SPARQL `ENCODE_FOR_URI`, the strictest of the encoding
+/// flavours — reserved delimiters (`/ ? # & = :` …) and spaces are all encoded, so
+/// the result is safe to splice into ANY URI component and the encoding is
+/// injective (no input can smuggle a delimiter past it).
+///
+/// Public (not just the builtin's engine room) so callers that must mint the same
+/// IRIs OUTSIDE a reasoner run — e.g. `sparq-solid`'s session-side pair-principal
+/// minting — share one definition instead of re-implementing it.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_reason::n3::encode_for_uri;
+/// assert_eq!(encode_for_uri("AZaz09-._~"), "AZaz09-._~"); // unreserved: untouched
+/// assert_eq!(encode_for_uri("a&b=c"), "a%26b%3Dc");       // delimiters: encoded
+/// assert_eq!(encode_for_uri("café"), "caf%C3%A9");        // UTF-8 bytes, uppercase hex
+/// ```
+pub fn encode_for_uri(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// The numeric value of a literal term (for `math:` builtins).
 fn num(t: &Term) -> Option<f64> {
     match t {
@@ -864,8 +899,9 @@ enum Func {
     Conjunction, // log:conjunction — merge a list of formulae into one formula
     Dtlit,       // log:dtlit — ( "lex" xsd:dt ) ↔ "lex"^^xsd:dt (both directions)
     // single-value-arg (string case mapping, Unicode-aware)
-    LowerCase, // string:lowerCase
-    UpperCase, // string:upperCase
+    LowerCase,    // string:lowerCase
+    UpperCase,    // string:upperCase
+    EncodeForUri, // string:encodeForUri — RFC 3986 percent-encoding (see [`encode_for_uri`])
     // single-value-arg (unary math)
     Negation,
     AbsoluteValue,
@@ -960,6 +996,7 @@ fn functional_builtin(p: &Term) -> Option<Func> {
         (Some("replace"), _) => Some(Func::Replace),
         (Some("lowerCase"), _) => Some(Func::LowerCase),
         (Some("upperCase"), _) => Some(Func::UpperCase),
+        (Some("encodeForUri"), _) => Some(Func::EncodeForUri),
         (_, Some("length")) => Some(Func::Length),
         (_, Some("first")) => Some(Func::First),
         (_, Some("last")) => Some(Func::Last),
@@ -1100,6 +1137,9 @@ fn eval_functional(
         }
         Func::UpperCase => {
             Term::Lit(lex(&args[0])?.to_uppercase(), "http://www.w3.org/2001/XMLSchema#string".into(), None)
+        }
+        Func::EncodeForUri => {
+            Term::Lit(encode_for_uri(lex(&args[0])?), "http://www.w3.org/2001/XMLSchema#string".into(), None)
         }
         Func::First => args.first()?.clone(),
         Func::Last => args.last()?.clone(),
@@ -1651,6 +1691,36 @@ mod tests {
         let up = d.intern_lit("HELLO WÖRLD", xs, None);
         assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/lower"), lo]), "string:lowerCase");
         assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/upper"), up]), "string:upperCase");
+    }
+
+    #[test]
+    fn string_encode_for_uri() {
+        // string:encodeForUri — RFC 3986 percent-encoding (fn:encode-for-uri set):
+        // unreserved untouched, delimiters/space encoded, non-ASCII as UTF-8 bytes
+        // with uppercase hex. Object-ground use acts as an equality filter.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix string: <http://www.w3.org/2000/10/swap/string#> .
+            :a :raw "AZaz09-._~" .
+            :b :raw "https://alice.ex/card#me&client=x" .
+            :c :raw "café déjà" .
+            { ?x :raw ?r . ?r string:encodeForUri ?e } => { ?x :enc ?e } .
+            { ?x :raw ?r . ?r string:encodeForUri "AZaz09-._~" } => { ?x a :Unchanged } .
+        "#;
+        let (mut d, s) = closure(src);
+        let xs = "http://www.w3.org/2001/XMLSchema#string";
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let ea = d.intern_lit("AZaz09-._~", xs, None);
+        let eb = d.intern_lit("https%3A%2F%2Falice.ex%2Fcard%23me%26client%3Dx", xs, None);
+        let ec = d.intern_lit("caf%C3%A9%20d%C3%A9j%C3%A0", xs, None);
+        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/enc"), ea]), "unreserved untouched");
+        assert!(s.contains(&[id(&d, "http://ex/b"), id(&d, "http://ex/enc"), eb]), "delimiters encoded");
+        assert!(s.contains(&[id(&d, "http://ex/c"), id(&d, "http://ex/enc"), ec]), "UTF-8 bytes, uppercase hex");
+        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Unchanged"), "ground object: filter passes");
+        assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/Unchanged"), "ground object: filter rejects");
+        // the helper directly (shared with sparq-solid's session-side pair minting)
+        assert_eq!(super::encode_for_uri(" %"), "%20%25", "space and percent themselves");
+        assert_eq!(super::encode_for_uri("नमस्ते"), "%E0%A4%A8%E0%A4%AE%E0%A4%B8%E0%A5%8D%E0%A4%A4%E0%A5%87");
     }
 
     #[test]
