@@ -52,7 +52,10 @@ pub struct PodStore {
 impl PodStore {
     /// Wrap a loaded dataset (e.g. `Graph::load_dataset(nquads, "nquads")`). No auth
     /// view yet — every session sees nothing until a `materialize_*` call (fail-closed).
-    pub fn new(graph: Graph) -> PodStore {
+    /// Named graphs under the reserved `urn:sparq:` space are dropped: a loaded dataset
+    /// must not smuggle in the rewrite sentinel or a forged auth view.
+    pub fn new(mut graph: Graph) -> PodStore {
+        loader::strip_reserved_graphs(&mut graph);
         PodStore { graph, auth: Arc::new(AuthIndex::default()), epoch: 0, cache: FxHashMap::default() }
     }
 

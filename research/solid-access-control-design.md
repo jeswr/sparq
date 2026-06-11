@@ -221,8 +221,12 @@ Why this shape (the **principal model**) and not 4-ary reified quads:
   same answer with a `MINUS`/`FILTER NOT EXISTS` over the auth graph.
 
 Pair-IRI minting uses raw concatenation (`urn:sparq:pair?agent=` + IRI + `&client=` + IRI)
-because the N3 dialect has no percent-encoding builtin; collision would need a WebID
-literally containing `&client=` — noted as a (far-fetched) gap, fixed by a tiny
+because the N3 dialect has no percent-encoding builtin. Mitigation shipped (it would
+otherwise be a grant-collision attack — roborev 1723): `urn:sparq:` is a **reserved IRI
+space** — the loader REJECTS any agent/group-member/origin/client value containing the
+literal `&client=` or starting with `urn:sparq:` (fail-closed, tests/hardening.rs), and
+`PodStore::new`/the materializer strip reserved-named graphs from loaded datasets (no
+smuggled rewrite sentinel or forged auth view). The clean long-term fix stays a tiny
 `string:encodeForUri` builtin follow-up (§7).
 
 ### 2.4 Security boundary of the reasoner

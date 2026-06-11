@@ -18,8 +18,39 @@ pub(crate) const ACR_SUFFIX: &str = ".acr";
 
 const ACL_AGENT: &str = "http://www.w3.org/ns/auth/acl#agent";
 const ACL_AGENT_GROUP: &str = "http://www.w3.org/ns/auth/acl#agentGroup";
+const ACL_ORIGIN: &str = "http://www.w3.org/ns/auth/acl#origin";
 const ACP_AGENT: &str = "http://www.w3.org/ns/solid/acp#agent";
+const ACP_CLIENT: &str = "http://www.w3.org/ns/solid/acp#client";
 const VCARD_MEMBER: &str = "http://www.w3.org/2006/vcard/ns#hasMember";
+
+/// Reserved IRI space: the auth view, the rewrite sentinel, minted pair/candidate/grant
+/// principals. Graphs named under it are stripped at PodStore/materializer boundaries,
+/// and agent/client/origin values inside it (or containing the pair-IRI delimiter) are
+/// REJECTED — otherwise a crafted WebID like `…&client=…` could collide with another
+/// (agent, client) pair principal and inherit its grants (roborev 1723).
+pub(crate) const RESERVED_PREFIX: &str = "urn:sparq:";
+const PAIR_DELIMITER: &str = "&client=";
+
+fn validate_principal_iri(iri: &str) -> Result<(), String> {
+    if iri.starts_with(RESERVED_PREFIX) || iri.contains(PAIR_DELIMITER) {
+        return Err(format!(
+            "agent/client/origin IRI <{iri}> is not allowed: \
+             `{RESERVED_PREFIX}` and the literal `{PAIR_DELIMITER}` are reserved by the \
+             pair-principal encoding"
+        ));
+    }
+    Ok(())
+}
+
+/// Drop named graphs in the reserved IRI space (except the auth view itself, which the
+/// materializer manages): a loaded dataset must not be able to smuggle in the rewrite
+/// sentinel (`urn:sparq:nothing`) or forged principal/grant nodes as a graph.
+pub(crate) fn strip_reserved_graphs(graph: &mut Graph) {
+    graph.named.retain(|(name, _)| match name {
+        Term::NamedNode(n) => !n.as_str().starts_with(RESERVED_PREFIX) || n.as_str() == AUTH_GRAPH,
+        _ => true,
+    });
+}
 /// `acp:agent` objects that are NOT concrete WebIDs.
 const SPECIAL_AGENTS: [&str; 5] = [
     "http://www.w3.org/ns/solid/acp#PublicAgent",
@@ -78,7 +109,9 @@ fn subject_repr(t: &Term, gix: usize) -> String {
 }
 
 /// Assemble the full facts source: structural facts + the access-control graphs.
-pub(crate) fn assemble_input(graph: &Graph, system: System) -> String {
+/// Errors if any agent/client/origin value collides with the reserved principal
+/// encoding (see [`validate_principal_iri`]).
+pub(crate) fn assemble_input(graph: &Graph, system: System) -> Result<String, String> {
     let mut out = String::new();
     let suffix = if system == System::Wac { ACL_SUFFIX } else { ACR_SUFFIX };
     let own_pred = if system == System::Wac { "ownAcl" } else { "ownAcr" };
@@ -123,6 +156,7 @@ pub(crate) fn assemble_input(graph: &Graph, system: System) -> String {
     //    and (WAC) group documents referenced via acl:agentGroup.
     let mut group_docs: FxHashSet<String> = FxHashSet::default();
     let mut webids: FxHashSet<String> = FxHashSet::default();
+    let mut principal_iris: FxHashSet<String> = FxHashSet::default();
     for (gix, iri, sub) in &control_graphs {
         let mut in_doc: FxHashSet<String> = FxHashSet::default();
         for t in graph_triples(sub) {
@@ -133,7 +167,7 @@ pub(crate) fn assemble_input(graph: &Graph, system: System) -> String {
             write_term(&mut out, &t[2], *gix);
             out.push_str(" .\n");
             in_doc.insert(subject_repr(&t[0], *gix));
-            collect_agents(&t, &mut webids, &mut group_docs);
+            collect_agents(&t, &mut webids, &mut group_docs, &mut principal_iris);
         }
         for s in in_doc {
             let _ = writeln!(out, "{s} <{SOLIDX_NS}inDoc> <{iri}> .");
@@ -155,25 +189,40 @@ pub(crate) fn assemble_input(graph: &Graph, system: System) -> String {
                 if let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) {
                     if p.as_str() == VCARD_MEMBER {
                         webids.insert(o.as_str().to_owned());
+                        principal_iris.insert(o.as_str().to_owned());
                     }
                 }
             }
         }
     }
+    for iri in &principal_iris {
+        validate_principal_iri(iri)?;
+    }
     for a in &webids {
         let _ = writeln!(out, "<{a}> <{SOLIDX_NS}isWebId> true .");
     }
-    out
+    Ok(out)
 }
 
-/// Concrete agents + group documents mentioned by an access-control triple.
-fn collect_agents(t: &[Term; 3], webids: &mut FxHashSet<String>, groups: &mut FxHashSet<String>) {
+/// Concrete agents + group documents mentioned by an access-control triple; every
+/// pair-principal ingredient (agents, group members, origins, clients) is recorded for
+/// reserved-encoding validation.
+fn collect_agents(
+    t: &[Term; 3],
+    webids: &mut FxHashSet<String>,
+    groups: &mut FxHashSet<String>,
+    principal_iris: &mut FxHashSet<String>,
+) {
     let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) else { return };
     match p.as_str() {
         ACL_AGENT | ACP_AGENT | VCARD_MEMBER => {
             if !SPECIAL_AGENTS.contains(&o.as_str()) {
                 webids.insert(o.as_str().to_owned());
             }
+            principal_iris.insert(o.as_str().to_owned());
+        }
+        ACL_ORIGIN | ACP_CLIENT => {
+            principal_iris.insert(o.as_str().to_owned());
         }
         ACL_AGENT_GROUP => {
             // the group document = the group IRI without its fragment

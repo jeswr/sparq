@@ -39,20 +39,31 @@ pub fn rewrite_for(sparql: &str, allowed: &[NamedNode]) -> Result<String, String
         named.push(NamedNode::new_unchecked("urn:sparq:nothing"));
     }
     *dataset = Some(QueryDataset { default: Vec::new(), named: Some(named) });
-    let mut fresh = 0usize;
+    // a graph-variable prefix that cannot collide with any user variable: lengthen
+    // until it appears nowhere in the original query text
+    let mut prefix = "__sg".to_owned();
+    while sparql.contains(&prefix) {
+        prefix.push('x');
+    }
+    let mut fresh = Fresh { prefix, n: 0 };
     wrap_in_graph(pattern, &mut fresh, false);
     Ok(q.to_string())
 }
 
-fn fresh_graph_var(fresh: &mut usize) -> NamedNodePattern {
-    let v = Variable::new_unchecked(format!("__sg{}", *fresh));
-    *fresh += 1;
+struct Fresh {
+    prefix: String,
+    n: usize,
+}
+
+fn fresh_graph_var(fresh: &mut Fresh) -> NamedNodePattern {
+    let v = Variable::new_unchecked(format!("{}{}", fresh.prefix, fresh.n));
+    fresh.n += 1;
     NamedNodePattern::Variable(v)
 }
 
 /// Recursively wrap default-graph-scoped triple/path patterns in `GRAPH ?fresh { … }`.
 /// `in_graph` = already inside a GRAPH scope (leave those patterns alone).
-fn wrap_in_graph(p: &mut GraphPattern, fresh: &mut usize, in_graph: bool) {
+fn wrap_in_graph(p: &mut GraphPattern, fresh: &mut Fresh, in_graph: bool) {
     match p {
         GraphPattern::Bgp { patterns } => {
             if in_graph || patterns.is_empty() {
@@ -118,7 +129,7 @@ fn wrap_in_graph(p: &mut GraphPattern, fresh: &mut usize, in_graph: bool) {
 }
 
 /// EXISTS / NOT EXISTS carry nested patterns; wrap those too.
-fn wrap_expr(e: &mut Expression, fresh: &mut usize, in_graph: bool) {
+fn wrap_expr(e: &mut Expression, fresh: &mut Fresh, in_graph: bool) {
     match e {
         Expression::Exists(inner) => wrap_in_graph(inner, fresh, in_graph),
         Expression::Or(a, b)

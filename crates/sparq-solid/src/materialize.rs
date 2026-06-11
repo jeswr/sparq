@@ -6,7 +6,7 @@
 //! input facts → 1 call. ACP: accepts (A) → rejections (B) → grants (C) → 3 calls,
 //! each seeded with the previous closure.
 
-use crate::loader::{assemble_input, System};
+use crate::loader::{assemble_input, strip_reserved_graphs, System};
 use crate::{AUTH_GRAPH, AUTH_NS};
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashSet;
@@ -42,7 +42,8 @@ pub struct MaterializeStats {
 /// Materialize the WAC auth view (single stratum) and install it as `<urn:sparq:auth>`.
 pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
     let t0 = Instant::now();
-    let input = assemble_input(graph, System::Wac);
+    strip_reserved_graphs(graph);
+    let input = assemble_input(graph, System::Wac)?;
     let src = format!("{input}\n{COMMON_RULES}\n{WAC_RULES}");
     let mut dict = Dict::new();
     let closure = reason_n3(&mut dict, &src)?;
@@ -55,7 +56,8 @@ pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
 /// Materialize the ACP auth view (three strata) and install it as `<urn:sparq:auth>`.
 pub fn materialize_acp(graph: &mut Graph) -> Result<MaterializeStats, String> {
     let t0 = Instant::now();
-    let input = assemble_input(graph, System::Acp);
+    strip_reserved_graphs(graph);
+    let input = assemble_input(graph, System::Acp)?;
     let mut strata_facts = Vec::new();
 
     let mut dict = Dict::new();
