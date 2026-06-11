@@ -398,6 +398,245 @@ impl QueryResult {
 }
 
 #[cfg(test)]
+mod temporal_cache_tests {
+    //! Semantics of the temporal (dateTime/date) fast paths — the load-time
+    //! `temporals` cache feeding FILTER pushdown, the general comparison
+    //! operators, ORDER BY sort keys and the MIN/MAX id-level fold. Each test
+    //! pins behaviour the cache must NOT change relative to the per-row
+    //! dict-parse path: XPath timezone semantics (equal instants across
+    //! offsets; the ±14h mixed-presence indeterminate window), sub-second
+    //! precision, dateTime/date family disjointness, and ORDER BY / MIN/MAX
+    //! tie handling (lexical fallback, first/last-of-equals). The mixed-tz
+    //! ORDER BY permutation and MIN/MAX results are LOCKED against the
+    //! pre-cache (per-row dict-parse) engine, verified by running both.
+    use super::*;
+
+    const TDATA: &str = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+        ex:utc      ex:at "2024-03-15T13:00:00Z"^^xsd:dateTime .
+        ex:plus1    ex:at "2024-03-15T14:00:00+01:00"^^xsd:dateTime .
+        ex:minus5   ex:at "2024-03-15T08:00:00-05:00"^^xsd:dateTime .
+        ex:floating ex:at "2024-03-15T13:00:00"^^xsd:dateTime .
+        ex:later    ex:at "2024-03-16T09:00:00Z"^^xsd:dateTime .
+        ex:subsec   ex:at "2024-03-15T13:00:00.250Z"^^xsd:dateTime .
+        ex:farpast  ex:at "1999-01-01T00:00:00"^^xsd:dateTime .
+        ex:aday     ex:on "2024-03-15"^^xsd:date .
+    "#;
+
+    fn tg() -> Graph {
+        Graph::load_str(TDATA, "turtle").unwrap()
+    }
+
+    fn names(g: &Graph, q: &str) -> Vec<String> {
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        query(g, &format!("{pfx}{q}"))
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| match r[0].as_ref().unwrap() {
+                Term::NamedNode(n) => n.as_str().strip_prefix("http://ex/").unwrap().to_string(),
+                other => other.to_string(),
+            })
+            .collect()
+    }
+
+    /// FILTER `=` across timezones: equal instants are equal regardless of offset,
+    /// through both the pushed-down scan predicate and the general path.
+    #[test]
+    fn equality_across_timezones() {
+        let g = tg();
+        // Pushed-down (single pattern + sargable temporal filter).
+        let mut r = names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d = "2024-03-15T08:00:00-05:00"^^xsd:dateTime) }"#);
+        r.sort();
+        assert_eq!(r, ["minus5", "plus1", "utc"], "equal instants across offsets must all match");
+        // General path (the residual-filter shape: arithmetic-free but two patterns).
+        let mut r2 = names(
+            &g,
+            r#"SELECT ?s WHERE { ?s ex:at ?d . ?s ex:at ?e . FILTER(?d = "2024-03-15T13:00:00Z"^^xsd:dateTime && ?e = ?d) }"#,
+        );
+        r2.sort();
+        assert_eq!(r2, ["minus5", "plus1", "utc"]);
+    }
+
+    /// Mixed timezone presence: inside the ±14h window the comparison is
+    /// INDETERMINATE — a type error, so FILTER excludes the row; outside the
+    /// window it decides.
+    #[test]
+    fn mixed_presence_window() {
+        let g = tg();
+        // ?d > 13:00Z: plus1/minus5 equal -> excluded; later/subsec greater -> included;
+        // floating is INSIDE the window -> indeterminate -> excluded; farpast outside
+        // the window (decidably less) -> excluded.
+        let mut r = names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d > "2024-03-15T13:00:00Z"^^xsd:dateTime) }"#);
+        r.sort();
+        assert_eq!(r, ["later", "subsec"]);
+        // ?d < 13:00Z: only farpast is DECIDABLY less (floating is indeterminate).
+        let r = names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d < "2024-03-15T13:00:00Z"^^xsd:dateTime) }"#);
+        assert_eq!(r, ["farpast"]);
+        // A floating constant: zoned values inside the window are indeterminate; only
+        // the exact floating term itself passes `=`.
+        let r = names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d = "2024-03-15T13:00:00"^^xsd:dateTime) }"#);
+        assert_eq!(r, ["floating"]);
+    }
+
+    /// Sub-second precision must survive the cache (the f64 instant is bit-identical
+    /// to the parse path).
+    #[test]
+    fn subsecond_precision() {
+        let g = tg();
+        let r = names(
+            &g,
+            r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d > "2024-03-15T13:00:00Z"^^xsd:dateTime && ?d < "2024-03-15T13:00:01Z"^^xsd:dateTime) }"#,
+        );
+        assert_eq!(r, ["subsec"]);
+    }
+
+    /// dateTime and date are DISJOINT families: `=` is known-false (not an error),
+    /// ordering is a type error — both exclude in FILTER, including the pushdown.
+    #[test]
+    fn date_datetime_disjoint() {
+        let g = tg();
+        assert!(names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d = "2024-03-15"^^xsd:date) }"#).is_empty());
+        assert!(names(&g, r#"SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d >= "2024-03-15"^^xsd:date) }"#).is_empty());
+        assert_eq!(names(&g, r#"SELECT ?s WHERE { ?s ex:on ?d . FILTER(?d = "2024-03-15"^^xsd:date) }"#), ["aday"]);
+        // BIND makes the known-false vs error distinction observable: != of disjoint
+        // families is TRUE (not unbound/error).
+        let r = query(
+            &tg(),
+            r#"PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+               SELECT ?x WHERE { ex:utc ex:at ?d . BIND((?d != "2024-03-15"^^xsd:date) AS ?x) }"#,
+        )
+        .unwrap();
+        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
+    }
+
+    /// ORDER BY over temporals: same-presence values order by instant (across
+    /// offsets); the indeterminate mixed-presence pairs fall back to LEXICAL order —
+    /// exactly `compare_values`' fallback. The permutation below is what the
+    /// PRE-CACHE engine produces for this data (verified by running it).
+    #[test]
+    fn order_by_mixed_timezones_matches_lenient_order() {
+        let g = tg();
+        let got = names(&g, "SELECT ?s WHERE { ?s ex:at ?d } ORDER BY ?d");
+        let want = ["farpast", "utc", "plus1", "minus5", "floating", "subsec", "later"];
+        assert_eq!(got, want, "ORDER BY dateTime must match the pre-cache lenient order");
+    }
+
+    /// MIN/MAX over temporals through the id-level fold: value semantics across
+    /// timezones must match the general path; mixed groups fall back.
+    #[test]
+    fn minmax_temporal_semantics() {
+        let g = tg();
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        let one = |q: &str| -> String {
+            let r = query(&g, &format!("{pfx}{q}")).unwrap();
+            r.rows[0][0].as_ref().unwrap().to_string()
+        };
+        assert!(one("SELECT (MIN(?d) AS ?m) WHERE { ?s ex:at ?d }").contains("1999-01-01T00:00:00"));
+        assert!(one("SELECT (MAX(?d) AS ?m) WHERE { ?s ex:at ?d }").contains("2024-03-16T09:00:00Z"));
+        assert!(one("SELECT (MIN(DISTINCT ?d) AS ?m) WHERE { ?s ex:at ?d }").contains("1999-01-01T00:00:00"));
+        // Mixed temporal/non-temporal group falls back to the general path (no wrong
+        // fast-path answer).
+        let r = query(
+            &g,
+            &format!("{pfx}SELECT (MAX(?v) AS ?m) WHERE {{ {{ ?s ex:at ?v }} UNION {{ BIND(5 AS ?v) }} }}"),
+        )
+        .unwrap();
+        assert!(r.rows[0][0].is_some(), "mixed group MAX must still produce a value");
+    }
+
+    /// MAX tie semantics: equal instants in different offsets are equal-comparing
+    /// DISTINCT terms — `Iterator::max_by` keeps the LAST of equals, `min_by` the
+    /// FIRST, and the id-level fold must reproduce that.
+    #[test]
+    fn max_keeps_last_of_equals_min_keeps_first() {
+        let data = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:a ex:at "2024-03-15T13:00:00Z"^^xsd:dateTime .
+            ex:b ex:at "2024-03-15T14:00:00+01:00"^^xsd:dateTime .
+            ex:c ex:at "2024-03-15T08:00:00-05:00"^^xsd:dateTime .
+        "#;
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let pfx = "PREFIX ex: <http://ex/> ";
+        let one = |q: &str| -> String {
+            let r = query(&g, &format!("{pfx}{q}")).unwrap();
+            r.rows[0][0].as_ref().unwrap().to_string()
+        };
+        // Scan order of `?s ex:at ?d` is subject order a, b, c (SPO index).
+        let min = one("SELECT (MIN(?d) AS ?m) WHERE { ?s ex:at ?d }");
+        let max = one("SELECT (MAX(?d) AS ?m) WHERE { ?s ex:at ?d }");
+        assert!(min.contains("13:00:00Z"), "MIN must keep the first of equal members, got {min}");
+        assert!(max.contains("08:00:00-05:00"), "MAX must keep the last of equal members, got {max}");
+    }
+
+    /// xsd:time must stay on the lexical (OtherXsd) comparison path — the cache must
+    /// not pull it onto the timeline.
+    #[test]
+    fn time_stays_lexical() {
+        let data = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:a ex:t "09:00:00"^^xsd:time . ex:b ex:t "13:00:00"^^xsd:time .
+        "#;
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let r = query(
+            &g,
+            r#"PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+               SELECT ?s WHERE { ?s ex:t ?v . FILTER(?v < "12:00:00"^^xsd:time) }"#,
+        )
+        .unwrap();
+        assert_eq!(r.rows.len(), 1); // lexical "09:..." < "12:..." — same answer as before
+    }
+
+    /// Computed (BIND) integers in the inline range resolve to inline ids without a
+    /// Term — they must still JOIN against stored data and serialise canonically.
+    #[test]
+    fn bind_inline_int_fast_path_joins() {
+        let data = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:a ex:v "41"^^xsd:integer . ex:b ex:v "42"^^xsd:integer .
+        "#;
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        // BIND(?v + 1) = 42 joins back to ex:b's stored value via the inline id.
+        let r = query(&g, &format!("{pfx}SELECT ?s ?o WHERE {{ ex:a ex:v ?v . BIND(?v + 1 AS ?w) . ?s ex:v ?w . BIND(STR(?w) AS ?o) }}")).unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "<http://ex/b>");
+        assert_eq!(r.rows[0][1].as_ref().unwrap().to_string(), "\"42\"");
+        // Negative / out-of-inline-range integers and decimals still resolve correctly
+        // (dictionary probe or local vocab) — DISTINCT dedupes equal computed values.
+        let r = query(&g, &format!("{pfx}SELECT DISTINCT ?w WHERE {{ ?s ex:v ?v . BIND(?v - 100 AS ?w) }}")).unwrap();
+        assert_eq!(r.rows.len(), 2);
+        let r = query(&g, &format!("{pfx}SELECT DISTINCT ?w WHERE {{ ?s ex:v ?v . BIND(?v + 0.5 AS ?w) }}")).unwrap();
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    /// dateTime terms appended through the delta overlay must enter the temporal
+    /// cache (extend_for), so filters see them without a rebuild.
+    #[test]
+    fn delta_appended_datetimes_are_cached() {
+        let mut g = tg();
+        let dt = |s: &str| Term::Literal(oxrdf::Literal::new_typed_literal(s, oxrdf::vocab::xsd::DATE_TIME));
+        let nn = |s: &str| Term::NamedNode(oxrdf::NamedNode::new(s).unwrap());
+        g.apply_delta(&[[nn("http://ex/newer"), nn("http://ex/at"), dt("2030-01-01T00:00:00Z")]], &[])
+            .unwrap();
+        let r = query(
+            &g,
+            r#"PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+               SELECT ?s WHERE { ?s ex:at ?d . FILTER(?d > "2025-01-01T00:00:00Z"^^xsd:dateTime) }"#,
+        )
+        .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "<http://ex/newer>");
+    }
+
+    /// The compressed (sparse-cache) storage mode must answer temporal filters
+    /// identically to the raw build.
+    #[test]
+    fn compressed_mode_temporal_filter() {
+        let g = Graph::load_str(TDATA, "turtle").unwrap().into_compressed();
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        let r = query(&g, &format!(r#"{pfx}SELECT ?s WHERE {{ ?s ex:at ?d . FILTER(?d > "2024-03-15T13:00:00Z"^^xsd:dateTime) }}"#)).unwrap();
+        assert_eq!(r.rows.len(), 2); // later + subsec, as in the raw build
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

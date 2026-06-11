@@ -465,6 +465,11 @@ fn is_local(id: Id) -> bool {
 pub struct LocalVocab {
     terms: Vec<Term>,
     ids: FxHashMap<Term, Id>,
+    /// Parallel to `terms`: the f64 value of each numeric local literal (NaN
+    /// otherwise) — the local-vocab twin of the graph's `numerics` cache, so a
+    /// FILTER/comparison over a BIND-computed numeric does not clone + re-parse
+    /// the term per row.
+    nums: Vec<f64>,
 }
 
 impl LocalVocab {
@@ -475,12 +480,27 @@ impl LocalVocab {
             return id;
         }
         let id = LOCAL_BASE + self.terms.len() as Id;
+        self.nums.push(match &t {
+            Term::Literal(l) if is_numeric_dt(l) => l.value().parse::<f64>().unwrap_or(f64::NAN),
+            _ => f64::NAN,
+        });
         self.terms.push(t.clone());
         self.ids.insert(t, id);
         id
     }
     fn term(&self, id: Id) -> &Term {
         &self.terms[(id - LOCAL_BASE) as usize]
+    }
+    /// The cached numeric value of a local id (`None` for non-numeric terms) —
+    /// exactly what `as_num` of the materialised term would return.
+    #[inline]
+    fn numeric(&self, id: Id) -> Option<f64> {
+        let v = self.nums[(id - LOCAL_BASE) as usize];
+        if v.is_nan() {
+            None
+        } else {
+            Some(v)
+        }
     }
 }
 
@@ -1219,17 +1239,36 @@ fn count_single_filtered(
         }
     }
 
-    // General: scan once, count rows passing ALL comparisons via the numeric cache.
-    // No solution row is built.
+    // General: scan once, count rows passing ALL comparisons via the value caches.
+    // No solution row is built. The single-comparison shapes are specialised so the
+    // per-row test is a direct cache probe with no predicate-kind dispatch (this loop
+    // is the COUNT-mode hot path for cached-numeric FILTERs).
     let scan = graph.store.scan(id_pat);
-    let total = scan
-        .rows
-        .iter()
-        .filter(|row| {
-            let spo = scan.to_spo(row);
-            cmps.iter().all(|(pos, cmp)| cmp.test_id(graph, spo[*pos]))
-        })
-        .count();
+    let total = match cmps[..] {
+        [(pos, ScanCmp::Num(cmp))] => scan
+            .rows
+            .iter()
+            .filter(|row| graph.numeric_value(scan.to_spo(row)[pos]).is_some_and(|x| cmp.test(x)))
+            .count(),
+        [(pos, ScanCmp::Temp(op, t))] => scan
+            .rows
+            .iter()
+            .filter(|row| {
+                graph
+                    .temporal_value(scan.to_spo(row)[pos])
+                    .and_then(|v| Temporal::cmp_t(v, t))
+                    .is_some_and(|o| op.eval(o))
+            })
+            .count(),
+        _ => scan
+            .rows
+            .iter()
+            .filter(|row| {
+                let spo = scan.to_spo(row);
+                cmps.iter().all(|(pos, cmp)| cmp.test_id(graph, spo[*pos]))
+            })
+            .count(),
+    };
     Some(total)
 }
 
@@ -4103,38 +4142,74 @@ enum SortCell {
 /// literals — class 3 — and non-numeric, so `compare_values` would reach its
 /// `value_str` fallback); a temporal against any other key materialises the term
 /// lazily (rare: only mixed-type columns) and defers to `compare_values` itself.
+#[inline]
 fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell) -> Ordering {
+    match (a, c) {
+        (SortCell::Temp { t: ta, id: ia }, SortCell::Temp { t: tb, id: ib }) => {
+            match Temporal::cmp_t(*ta, *tb) {
+                Some(o) => o,
+                None => cmp_sort_cells_lex(graph, *ia, *ib),
+            }
+        }
+        (SortCell::Temp { id, .. }, SortCell::Val(v)) => {
+            compare_values(&sort_cell_term(graph, local, *id), v).unwrap_or(Ordering::Equal)
+        }
+        (SortCell::Val(v), SortCell::Temp { id, .. }) => {
+            compare_values(v, &sort_cell_term(graph, local, *id)).unwrap_or(Ordering::Equal)
+        }
+        (SortCell::Val(av), SortCell::Val(cv)) => compare_values(av, cv).unwrap_or(Ordering::Equal),
+    }
+}
+
+/// The lexical-form fallback for temporal sort cells `compare_values` cannot decide by
+/// value (cross-family or the mixed-timezone window) — out of line: the hot comparator
+/// stays branch + `partial_cmp`.
+#[cold]
+fn cmp_sort_cells_lex(graph: &Graph, a: Id, b: Id) -> Ordering {
     let lex = |id: Id| -> &str {
         match graph.dict.term_parts(id) {
             dict::TermParts::Lit { value, .. } => value,
             _ => "", // unreachable: cached temporal ids are literal dictionary ids
         }
     };
-    let term_val = |id: Id| Value::Term(term_of(graph, local, id).expect("sort key id resolves"));
-    match (a, c) {
-        (SortCell::Temp { t: ta, id: ia }, SortCell::Temp { t: tb, id: ib }) => {
-            Temporal::cmp_t(*ta, *tb).unwrap_or_else(|| lex(*ia).cmp(lex(*ib)))
-        }
-        (SortCell::Temp { id, .. }, SortCell::Val(v)) => compare_values(&term_val(*id), v).unwrap_or(Ordering::Equal),
-        (SortCell::Val(v), SortCell::Temp { id, .. }) => compare_values(v, &term_val(*id)).unwrap_or(Ordering::Equal),
-        (SortCell::Val(av), SortCell::Val(cv)) => compare_values(av, cv).unwrap_or(Ordering::Equal),
-    }
+    lex(a).cmp(lex(b))
+}
+
+/// Materialises a temporal sort cell's term for the (rare) mixed-type-column
+/// comparison against a non-temporal key.
+#[cold]
+fn sort_cell_term(graph: &Graph, local: &LocalVocab, id: Id) -> Value {
+    Value::Term(term_of(graph, local, id).expect("sort key id resolves"))
 }
 
 fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[OrderExpression]) -> Result<(), String> {
-    // A variable bound to a graph term with a cached temporal value sorts through the
-    // cache (`SortCell::Temp`); anything else takes the `Value` path.
-    let temporal_cell = |row: &Row, e: &Expression| -> Option<SortCell> {
-        let Expression::Variable(v) = e else { return None };
-        let id = row[b.col(v)?];
-        if id == NO_ID || is_local(id) {
-            return None;
+    // The sort key cell for one expression of one row. Numeric keys use the numerics
+    // cache and temporal keys the temporals cache (no per-comparison reparse); other
+    // expressions fall back to identity-preserving evaluation. The plain-variable case
+    // is unpacked here so the column lookup and the cache probes happen exactly once.
+    let cell_of = |row: &Row, e: &Expression| -> Result<SortCell, String> {
+        if let Expression::Variable(v) = e {
+            if let Some(c) = b.col(v) {
+                let id = row[c];
+                if id != NO_ID && !is_local(id) {
+                    if let Some(n) = graph.numeric_value(id) {
+                        return Ok(SortCell::Val(Value::Num(Num::Double(n))));
+                    }
+                    if let Some(t) = graph.temporal_value(id) {
+                        return Ok(SortCell::Temp { t, id });
+                    }
+                    // Neither cache hit: materialise the term, exactly as
+                    // `eval_expr(Variable)` would (no second cache probe).
+                    return Ok(SortCell::Val(Value::Term(term_of(graph, local, id).expect("bound id resolves"))));
+                }
+            }
         }
-        graph.temporal_value(id).map(|t| SortCell::Temp { t, id })
+        Ok(match eval_numeric(graph, local, b, row, e) {
+            Some(n) => SortCell::Val(Value::Num(Num::Double(n))),
+            None => SortCell::Val(eval_expr(graph, local, b, row, e)?),
+        })
     };
-    // The sort key (vector of (descending, SortCell)) for one row. Numeric keys use the
-    // numerics cache and temporal keys the temporals cache (no per-comparison reparse);
-    // other expressions fall back to identity-preserving evaluation.
+    // The sort key (vector of (descending, SortCell)) for one row.
     let key_of = |row: &Row| -> Result<Vec<(bool, SortCell)>, String> {
         let mut key = Vec::with_capacity(exprs.len());
         for oe in exprs {
@@ -4142,14 +4217,7 @@ fn order_bindings(graph: &Graph, local: &LocalVocab, b: &mut Bindings, exprs: &[
                 OrderExpression::Asc(e) => (false, e),
                 OrderExpression::Desc(e) => (true, e),
             };
-            let v = match eval_numeric(graph, local, b, row, e) {
-                Some(n) => SortCell::Val(Value::Num(Num::Double(n))),
-                None => match temporal_cell(row, e) {
-                    Some(cell) => cell,
-                    None => SortCell::Val(eval_expr(graph, local, b, row, e)?),
-                },
-            };
-            key.push((desc, v));
+            key.push((desc, cell_of(row, e)?));
         }
         Ok(key)
     };
@@ -4787,8 +4855,9 @@ fn eval_numeric(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: 
             if id == NO_ID {
                 None
             } else if is_local(id) {
-                // Computed values are rare; resolve through the local vocab term.
-                as_num(&Value::Term(local.term(id).clone()))
+                // Computed values resolve through the local vocab's numeric cache
+                // (no term clone, no per-row lexical re-parse).
+                local.numeric(id)
             } else {
                 graph.numeric_value(id)
             }
