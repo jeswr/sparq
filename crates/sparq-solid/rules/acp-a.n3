@@ -1,0 +1,75 @@
+# ACP (https://solidproject.org/TR/acp) — STRATUM A (monotone + input-only negation):
+# effective policies, matcher accept-sets over the principal lattice, candidate
+# (agent, client) pairs. Strata B/C (separate reason_n3 calls) add the NAF layers; see
+# research/solid-access-control-design.md §3.4–3.5.
+#
+# Principal lattice: auth:Public ⊒ auth:Authenticated ⊒ concrete WebID;
+# auth:AnyClient ⊒ concrete client id. A matcher "accepts" a principal iff it accepts
+# EVERY context the principal denotes, so surviving candidates are sound grants.
+#
+# Loader-synthesized inputs (besides common.n3's): <R> solidx:ownAcr <R.acr> ;
+# <A> solidx:isWebId true for concrete agent IRIs seen in ACR/group docs.
+#
+# Outputs (stratum B's inputs): ?pol solidx:appliesToResource ?r (ACP §"Effective
+# Policies": own accessControl + cumulative ancestor memberAccessControl);
+# ?m solidx:acceptsAgentP/acceptsClientP ?p (matcher accept-sets, ACP §"Matchers");
+# ?pol solidx:candPair ?k with solidx:pairAgent/pairClient (candidate principals).
+
+@prefix acp:    <http://www.w3.org/ns/solid/acp#> .
+@prefix auth:   <https://sparq.dev/ns/auth#> .
+@prefix solidx: <https://sparq.dev/ns/solidx#> .
+@prefix string: <http://www.w3.org/2000/10/swap/string#> .
+@prefix log:    <http://www.w3.org/2000/10/swap/log#> .
+
+# ── effective policies: own ACR + CUMULATIVE member access control of ALL ancestors ───
+{ ?r solidx:ownAcr ?acr . ?acr acp:accessControl ?c . ?c acp:apply ?pol . }
+=> { ?pol solidx:appliesToResource ?r . } .
+{ ?r solidx:ancestor ?anc . ?anc solidx:ownAcr ?acr .
+  ?acr acp:memberAccessControl ?c . ?c acp:apply ?pol . }
+=> { ?pol solidx:appliesToResource ?r . } .
+
+# ── matcher registry (noneOf matchers get accept-sets but generate NO candidates) ─────
+{ ?pol acp:allOf ?m . }  => { ?pol solidx:hasMatcher ?m . ?m solidx:isMatcher true . } .
+{ ?pol acp:anyOf ?m . }  => { ?pol solidx:hasMatcher ?m . ?m solidx:isMatcher true . } .
+{ ?pol acp:noneOf ?m . } => { ?m solidx:isMatcher true . } .
+
+# ── matcher raw values mapped into principal space (drive candidate generation) ───────
+{ ?m solidx:isMatcher true . ?m acp:agent ?a . ?a solidx:isWebId true . }
+=> { ?m solidx:agentValP ?a . } .
+{ ?m acp:agent acp:PublicAgent . }        => { ?m solidx:agentValP auth:Public . } .
+{ ?m acp:agent acp:AuthenticatedAgent . } => { ?m solidx:agentValP auth:Authenticated . } .
+{ ?m solidx:isMatcher true . ?m acp:client ?c . ?c log:notEqualTo acp:PublicClient . }
+=> { ?m solidx:clientValP ?c . } .
+{ ?m acp:client acp:PublicClient . }      => { ?m solidx:clientValP auth:AnyClient . } .
+
+# ── accept-sets: downward-closed over the principal lattice ────────────────────────────
+{ ?m solidx:agentValP ?a . } => { ?m solidx:acceptsAgentP ?a . } .
+# no agent attribute at all -> agent-unconstrained -> accepts the top
+{ ?m solidx:isMatcher true . {} log:notIncludes { ?m acp:agent ?x . } . }
+=> { ?m solidx:acceptsAgentP auth:Public . } .
+{ ?m solidx:acceptsAgentP auth:Public . }
+=> { ?m solidx:acceptsAgentP auth:Authenticated . } .
+{ ?m solidx:acceptsAgentP auth:Authenticated . ?a solidx:isCandAgent true . }
+=> { ?m solidx:acceptsAgentP ?a . } .
+
+{ ?m solidx:clientValP ?c . } => { ?m solidx:acceptsClientP ?c . } .
+{ ?m solidx:isMatcher true . {} log:notIncludes { ?m acp:client ?x . } . }
+=> { ?m solidx:acceptsClientP auth:AnyClient . } .
+{ ?m solidx:acceptsClientP auth:AnyClient . ?c solidx:isCandClient true . }
+=> { ?m solidx:acceptsClientP ?c . } .
+
+# ── candidates per policy: its matchers' values + the dimension tops ───────────────────
+# (the tops require >=1 allOf/anyOf matcher — encodes ACP's "at least one matcher" rule)
+{ ?pol solidx:hasMatcher ?m . ?m solidx:agentValP ?a . }  => { ?pol solidx:candAgent ?a . } .
+{ ?pol solidx:hasMatcher ?m . ?m solidx:clientValP ?c . } => { ?pol solidx:candClient ?c . } .
+{ ?pol solidx:hasMatcher ?m . }
+=> { ?pol solidx:candAgent auth:Public . ?pol solidx:candClient auth:AnyClient . } .
+{ ?pol solidx:candAgent ?a . ?a solidx:isWebId true . }       => { ?a solidx:isCandAgent true . } .
+{ ?pol solidx:candClient ?c . ?c log:notEqualTo auth:AnyClient . } => { ?c solidx:isCandClient true . } .
+
+# ── candidate (agent, client) pairs, minted deterministically ──────────────────────────
+{ ?pol solidx:candAgent ?pa . ?pol solidx:candClient ?pc .
+  ?pol log:uri ?pols . ?pa log:uri ?pas . ?pc log:uri ?pcs .
+  ("urn:sparq:cand?pol=" ?pols "&agent=" ?pas "&client=" ?pcs) string:concatenation ?ks .
+  ?k log:uri ?ks . }
+=> { ?pol solidx:candPair ?k . ?k solidx:pairAgent ?pa . ?k solidx:pairClient ?pc . } .

@@ -1,0 +1,26 @@
+[package]
+name = "sparq-solid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Solid Pod access control for the sparq RDF engine: pods as named graphs, WAC/ACP materialized to a queryable triples-native auth view by N3 rules, queries filtered to authorized graphs"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# Opt-in Solid layer (the sparq-reason isolation pattern): a SEPARATE crate so the
+# core engine carries zero Solid/access-control code, deps, or runtime cost — it is
+# a dependency of NOTHING in the workspace. Design: research/solid-access-control-design.md.
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", default-features = false }
+sparq-reason = { path = "../sparq-reason", version = "0.1.0", default-features = false }
+oxrdf.workspace = true
+spargebra.workspace = true
+rustc-hash.workspace = true

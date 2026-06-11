@@ -67,6 +67,12 @@ AMD / Graviton) — see [`research/hw-bench-results.md`](research/hw-bench-resul
   builtins, goal-directed `<=`), with single-pass materialization and **incremental closure
   maintenance** (counting-based; deltas ~10³–10⁴× faster than re-materialization).
 - **Validation** (opt-in `sparq-shacl`) — SHACL Core at **100% of the W3C core suite**.
+- **Solid access control** (opt-in `sparq-solid`) — [Solid](https://solidproject.org/) Pods
+  stored as named-graph-per-document; [WAC](https://solidproject.org/TR/wac)/[ACP](https://solidproject.org/TR/acp)
+  semantics run as N3 rules materializing a queryable, triples-native authorization view;
+  SPARQL filtered per (WebID, client) session, fail-closed
+  ([`crates/sparq-solid/README.md`](crates/sparq-solid/README.md), design:
+  [`research/solid-access-control-design.md`](research/solid-access-control-design.md)).
 - **More opt-in crates** — `sparq-geo` (GeoSPARQL: `geof:` functions runnable inside SPARQL
   via the extension-function registry — also on the server with `--features geo` — plus an
   R-tree index), `sparq-hdt` (HDT
