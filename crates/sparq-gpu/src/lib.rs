@@ -1,0 +1,606 @@
+//! sparq-gpu: opt-in wgpu compute kernels for the sparq RDF engine (roadmap T24d).
+//!
+//! This crate exists to answer ONE question with measurements, not aspiration:
+//! **where (if anywhere) does a GPU beat the CPU for sparq's hot paths once the
+//! host→device transfer tax is charged honestly?** See `README.md` for the
+//! measured verdict and `examples/gpu_bench.rs` for the experiment.
+//!
+//! Three kernels, chosen to span the compute-intensity axis:
+//!
+//! 1. [`Gpu::filter_count_u32`] / [`Gpu::filter_count_f64_gt`] — FILTER
+//!    evaluation over a resident column (sparq's permutation-index object column
+//!    / dense numeric cache). **Compute-light**: ~1 compare per 4–8 bytes read —
+//!    the PCIe-dominated case.
+//! 2. [`Gpu::hash_probe`] — hash-join probe of a resident probe column against a
+//!    resident open-addressing build table. **Compute-medium**: hashing + a
+//!    data-dependent probe walk per element.
+//! 3. [`Gpu::group_aggregate`] — COUNT + SUM GROUP BY over resident key/value
+//!    columns via two-level (workgroup-shared, then global) atomics with u64
+//!    emulation. **Compute-dense** for a scan shape: every element does atomic
+//!    read-modify-writes, and only `3·G` words ever come back to the host.
+//!
+//! Design constraints baked in:
+//! - Columns are plain `&[u32]` / `&[f64]` — the exact shape of sparq-core's
+//!   id columns and numeric cache; no engine dependency needed to measure.
+//! - All kernels reduce on-device and read back O(1)/O(G) bytes, the best case
+//!   for the GPU (materialising selected rows would add a device→host stream
+//!   and can only make the GPU look worse — see README).
+//! - [`Gpu::new`] returns `None` when no adapter exists, so CI (no GPU) skips
+//!   gracefully.
+//! - WGSL has **no f64**: the f64 filter compares IEEE-754 *bit patterns* mapped
+//!   to a monotonic u64 key (sign-flip trick) — exact, no precision loss, but a
+//!   real portability cost worth knowing about (see README §limits).
+
+use bytemuck::{Pod, Zeroable};
+
+pub mod cpu;
+
+const WG: u32 = 256;
+/// Sentinel key marking an empty hash-table slot (build keys must avoid it).
+pub const EMPTY_KEY: u32 = u32::MAX;
+/// The group-aggregate kernel tiles per-group accumulators in workgroup shared
+/// memory; this caps the supported group count (512 × 3 × 4 B = 6 KiB shared,
+/// under WebGPU's 16 KiB minimum guarantee).
+pub const MAX_GROUPS: u32 = 512;
+
+/// The 32-bit mixer used by both the CPU reference and the WGSL kernel (they
+/// must agree bit-for-bit so both sides walk identical probe sequences).
+#[inline]
+pub fn hash32(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    x
+}
+
+// ---------------------------------------------------------------------------
+// WGSL kernels
+// ---------------------------------------------------------------------------
+
+/// FILTER `lo <= v < hi` + count over a u32 column. Per-workgroup shared atomic,
+/// flushed once per workgroup to a single global counter. 2D-tiled dispatch
+/// (WebGPU caps each dispatch dimension at 65535 workgroups).
+const WGSL_FILTER_U32: &str = r#"
+struct Params { n: u32, lo: u32, hi: u32, _pad: u32 };
+@group(0) @binding(0) var<storage, read>       col:    array<u32>;
+@group(0) @binding(1) var<storage, read_write> result: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform>             params: Params;
+
+var<workgroup> wg_count: atomic<u32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>,
+        @builtin(workgroup_id)        wid: vec3<u32>,
+        @builtin(num_workgroups)      ngw: vec3<u32>) {
+    if (lid.x == 0u) { atomicStore(&wg_count, 0u); }
+    workgroupBarrier();
+    let i = (wid.y * ngw.x + wid.x) * 256u + lid.x;
+    if (i < params.n) {
+        let v = col[i];
+        if (v >= params.lo && v < params.hi) { atomicAdd(&wg_count, 1u); }
+    }
+    workgroupBarrier();
+    if (lid.x == 0u) {
+        let c = atomicLoad(&wg_count);
+        if (c != 0u) { atomicAdd(&result[0], c); }
+    }
+}
+"#;
+
+/// FILTER `v > t` + count over an f64 column — WGSL has no f64, so each element
+/// is its raw IEEE-754 bits as vec2<u32> (x = low word, y = high word) and the
+/// comparison maps bits to a monotonic key: negative => ~bits, else bits ^ sign
+/// bit. Exact for all non-NaN values; NaNs are detected and excluded (matching
+/// `v > t` semantics). The threshold arrives pre-mapped from the host.
+const WGSL_FILTER_F64: &str = r#"
+struct Params { n: u32, key_lo: u32, key_hi: u32, _pad: u32 };
+@group(0) @binding(0) var<storage, read>       col:    array<vec2<u32>>;
+@group(0) @binding(1) var<storage, read_write> result: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform>             params: Params;
+
+var<workgroup> wg_count: atomic<u32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>,
+        @builtin(workgroup_id)        wid: vec3<u32>,
+        @builtin(num_workgroups)      ngw: vec3<u32>) {
+    if (lid.x == 0u) { atomicStore(&wg_count, 0u); }
+    workgroupBarrier();
+    let i = (wid.y * ngw.x + wid.x) * 256u + lid.x;
+    if (i < params.n) {
+        let v = col[i];
+        let lo = v.x;
+        let hi = v.y;
+        let exp = (hi >> 20u) & 0x7FFu;
+        let is_nan = exp == 0x7FFu && (((hi & 0xFFFFFu) | lo) != 0u);
+        var khi: u32;
+        var klo: u32;
+        if ((hi & 0x80000000u) != 0u) { khi = ~hi; klo = ~lo; }
+        else                          { khi = hi ^ 0x80000000u; klo = lo; }
+        let gt = khi > params.key_hi || (khi == params.key_hi && klo > params.key_lo);
+        if (!is_nan && gt) { atomicAdd(&wg_count, 1u); }
+    }
+    workgroupBarrier();
+    if (lid.x == 0u) {
+        let c = atomicLoad(&wg_count);
+        if (c != 0u) { atomicAdd(&result[0], c); }
+    }
+}
+"#;
+
+/// Hash-join probe: for each probe id, walk the resident open-addressing table
+/// (linear probing, load factor <= 0.5, EMPTY_KEY sentinel) counting matches and
+/// summing matched payloads. The u64 payload sum is emulated with a lo-word
+/// atomic + wrap-detected carry into a hi-word atomic (WGSL atomics are 32-bit).
+const WGSL_HASH_PROBE: &str = r#"
+struct Params { n: u32, mask: u32, _p0: u32, _p1: u32 };
+@group(0) @binding(0) var<storage, read>       table:  array<vec2<u32>>; // x=key, y=payload
+@group(0) @binding(1) var<storage, read>       probe:  array<u32>;
+@group(0) @binding(2) var<storage, read_write> result: array<atomic<u32>>; // [matches, sum_lo, sum_hi]
+@group(0) @binding(3) var<uniform>             params: Params;
+
+var<workgroup> wg_m:  atomic<u32>;
+var<workgroup> wg_lo: atomic<u32>;
+var<workgroup> wg_hi: atomic<u32>;
+
+fn hash32(x0: u32) -> u32 {
+    var x = x0;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>,
+        @builtin(workgroup_id)        wid: vec3<u32>,
+        @builtin(num_workgroups)      ngw: vec3<u32>) {
+    if (lid.x == 0u) {
+        atomicStore(&wg_m, 0u);
+        atomicStore(&wg_lo, 0u);
+        atomicStore(&wg_hi, 0u);
+    }
+    workgroupBarrier();
+    let i = (wid.y * ngw.x + wid.x) * 256u + lid.x;
+    if (i < params.n) {
+        let k = probe[i];
+        var slot = hash32(k) & params.mask;
+        loop {
+            let e = table[slot];
+            if (e.x == 0xFFFFFFFFu) { break; }
+            if (e.x == k) {
+                atomicAdd(&wg_m, 1u);
+                let old = atomicAdd(&wg_lo, e.y);
+                if (old + e.y < old) { atomicAdd(&wg_hi, 1u); }
+            }
+            slot = (slot + 1u) & params.mask;
+        }
+    }
+    workgroupBarrier();
+    if (lid.x == 0u) {
+        let m = atomicLoad(&wg_m);
+        if (m != 0u) { atomicAdd(&result[0], m); }
+        let lo = atomicLoad(&wg_lo);
+        if (lo != 0u) {
+            let old = atomicAdd(&result[1], lo);
+            if (old + lo < old) { atomicAdd(&result[2], 1u); }
+        }
+        let hi = atomicLoad(&wg_hi);
+        if (hi != 0u) { atomicAdd(&result[2], hi); }
+    }
+}
+"#;
+
+/// COUNT + SUM GROUP BY: keys must already be in [0, g), g <= MAX_GROUPS.
+/// Two-level atomics: every thread accumulates into workgroup-shared per-group
+/// counters (the compute-dense part), then each workgroup flushes its g partial
+/// rows to global atomics once. u64 sums via the same lo/carry/hi emulation.
+const WGSL_GROUP_AGG: &str = r#"
+const MAX_G: u32 = 512u;
+struct Params { n: u32, g: u32, _p0: u32, _p1: u32 };
+@group(0) @binding(0) var<storage, read>       keys: array<u32>;
+@group(0) @binding(1) var<storage, read>       vals: array<u32>;
+@group(0) @binding(2) var<storage, read_write> out:  array<atomic<u32>>; // [count;g][sum_lo;g][sum_hi;g]
+@group(0) @binding(3) var<uniform>             params: Params;
+
+var<workgroup> s_cnt: array<atomic<u32>, MAX_G>;
+var<workgroup> s_lo:  array<atomic<u32>, MAX_G>;
+var<workgroup> s_hi:  array<atomic<u32>, MAX_G>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>,
+        @builtin(workgroup_id)        wid: vec3<u32>,
+        @builtin(num_workgroups)      ngw: vec3<u32>) {
+    var g = lid.x;
+    while (g < params.g) {
+        atomicStore(&s_cnt[g], 0u);
+        atomicStore(&s_lo[g], 0u);
+        atomicStore(&s_hi[g], 0u);
+        g += 256u;
+    }
+    workgroupBarrier();
+    let i = (wid.y * ngw.x + wid.x) * 256u + lid.x;
+    if (i < params.n) {
+        let k = keys[i];
+        let v = vals[i];
+        atomicAdd(&s_cnt[k], 1u);
+        let old = atomicAdd(&s_lo[k], v);
+        if (old + v < old) { atomicAdd(&s_hi[k], 1u); }
+    }
+    workgroupBarrier();
+    g = lid.x;
+    while (g < params.g) {
+        let c = atomicLoad(&s_cnt[g]);
+        if (c != 0u) { atomicAdd(&out[g], c); }
+        let lo = atomicLoad(&s_lo[g]);
+        if (lo != 0u) {
+            let old = atomicAdd(&out[params.g + g], lo);
+            if (old + lo < old) { atomicAdd(&out[2u * params.g + g], 1u); }
+        }
+        let hi = atomicLoad(&s_hi[g]);
+        if (hi != 0u) { atomicAdd(&out[2u * params.g + g], hi); }
+        g += 256u;
+    }
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Host side
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Params {
+    a: u32,
+    b: u32,
+    c: u32,
+    d: u32,
+}
+
+/// A device-resident u32 column (e.g. a permutation-index object column, a
+/// probe-side id column, or GROUP BY keys/values).
+pub struct ColU32 {
+    buf: wgpu::Buffer,
+    pub len: u32,
+}
+
+/// A device-resident f64 column (the dense numeric cache), stored as raw
+/// IEEE-754 bits (the kernel does bit-pattern comparison; upload is a memcpy).
+pub struct ColF64 {
+    buf: wgpu::Buffer,
+    pub len: u32,
+}
+
+/// A device-resident open-addressing hash table of (key, payload) pairs, built
+/// on the host by [`cpu::build_hash_table`].
+pub struct HashTable {
+    buf: wgpu::Buffer,
+    /// Slot count minus one (capacity is a power of two).
+    pub mask: u32,
+}
+
+/// Maps an f64's bits to a u64 whose unsigned order matches IEEE-754 `<` on
+/// non-NaN values (the classic sign-flip total-order trick).
+#[inline]
+fn f64_order_key(v: f64) -> u64 {
+    let bits = v.to_bits();
+    if bits & 0x8000_0000_0000_0000 != 0 {
+        !bits
+    } else {
+        bits ^ 0x8000_0000_0000_0000
+    }
+}
+
+/// A wgpu device + the four compiled kernel pipelines.
+pub struct Gpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pub info: wgpu::AdapterInfo,
+    /// The adapter's max storage-buffer binding — resident columns must fit.
+    pub max_storage_bytes: u64,
+    filter_u32: wgpu::ComputePipeline,
+    filter_f64: wgpu::ComputePipeline,
+    hash_probe: wgpu::ComputePipeline,
+    group_agg: wgpu::ComputePipeline,
+}
+
+impl Gpu {
+    /// Initialises the first available high-performance adapter. Returns `None`
+    /// when no usable GPU/driver exists (e.g. CI) so callers can skip cleanly.
+    pub fn new() -> Option<Gpu> {
+        pollster::block_on(Self::new_async())
+    }
+
+    async fn new_async() -> Option<Gpu> {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            })
+            .await?;
+        let info = adapter.get_info();
+        let limits = adapter.limits();
+        let max_storage_bytes = u64::from(limits.max_storage_buffer_binding_size);
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("sparq-gpu"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits,
+                    memory_hints: wgpu::MemoryHints::Performance,
+                },
+                None,
+            )
+            .await
+            .ok()?;
+
+        let pipeline = |label: &str, src: &str| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                module: &module,
+                entry_point: "main",
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+
+        Some(Gpu {
+            filter_u32: pipeline("filter_u32", WGSL_FILTER_U32),
+            filter_f64: pipeline("filter_f64", WGSL_FILTER_F64),
+            hash_probe: pipeline("hash_probe", WGSL_HASH_PROBE),
+            group_agg: pipeline("group_agg", WGSL_GROUP_AGG),
+            device,
+            queue,
+            info,
+            max_storage_bytes,
+        })
+    }
+
+    // -- column upload / overwrite (overwrite = the measured "transfer tax") --
+
+    pub fn upload_u32(&self, data: &[u32]) -> ColU32 {
+        ColU32 {
+            buf: self.storage_buffer(bytemuck::cast_slice(data)),
+            len: data.len() as u32,
+        }
+    }
+
+    pub fn upload_f64(&self, data: &[f64]) -> ColF64 {
+        ColF64 {
+            buf: self.storage_buffer(bytemuck::cast_slice(data)),
+            len: data.len() as u32,
+        }
+    }
+
+    /// Uploads a host-built open-addressing table (see [`cpu::build_hash_table`]).
+    pub fn upload_table(&self, slots: &[[u32; 2]]) -> HashTable {
+        debug_assert!(slots.len().is_power_of_two());
+        HashTable {
+            buf: self.storage_buffer(bytemuck::cast_slice(slots)),
+            mask: (slots.len() - 1) as u32,
+        }
+    }
+
+    /// Overwrites a resident u32 column — the host→device transfer the e2e
+    /// benchmark legs charge. (The copy is enqueued and lands at next submit.)
+    pub fn write_u32(&self, col: &ColU32, data: &[u32]) {
+        assert_eq!(col.len as usize, data.len());
+        self.queue
+            .write_buffer(&col.buf, 0, bytemuck::cast_slice(data));
+    }
+
+    pub fn write_f64(&self, col: &ColF64, data: &[f64]) {
+        assert_eq!(col.len as usize, data.len());
+        self.queue
+            .write_buffer(&col.buf, 0, bytemuck::cast_slice(data));
+    }
+
+    pub fn write_table(&self, table: &HashTable, slots: &[[u32; 2]]) {
+        assert_eq!(table.mask as usize + 1, slots.len());
+        self.queue
+            .write_buffer(&table.buf, 0, bytemuck::cast_slice(slots));
+    }
+
+    fn storage_buffer(&self, contents: &[u8]) -> wgpu::Buffer {
+        use wgpu::util::DeviceExt;
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("sparq-gpu column"),
+                contents,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            })
+    }
+
+    // -- kernels --
+
+    /// Counts elements with `lo <= v < hi` in a resident u32 column.
+    pub fn filter_count_u32(&self, col: &ColU32, lo: u32, hi: u32) -> u64 {
+        let r = self.run(
+            &self.filter_u32,
+            &[col.buf.as_entire_binding()],
+            Params {
+                a: col.len,
+                b: lo,
+                c: hi,
+                d: 0,
+            },
+            col.len,
+            1,
+        );
+        u64::from(r[0])
+    }
+
+    /// Counts elements with `v > t` (NaN-excluding, IEEE semantics, exact) in a
+    /// resident f64 column.
+    pub fn filter_count_f64_gt(&self, col: &ColF64, t: f64) -> u64 {
+        if t.is_nan() {
+            return 0; // v > NaN is false for every v; no dispatch needed
+        }
+        let key = f64_order_key(if t == 0.0 { 0.0 } else { t }); // canonicalise -0.0
+        let r = self.run(
+            &self.filter_f64,
+            &[col.buf.as_entire_binding()],
+            Params {
+                a: col.len,
+                b: key as u32,
+                c: (key >> 32) as u32,
+                d: 0,
+            },
+            col.len,
+            1,
+        );
+        u64::from(r[0])
+    }
+
+    /// Probes every id in `probe` against the resident `table`; returns
+    /// (number of matches, exact u64 sum of matched payloads).
+    pub fn hash_probe(&self, table: &HashTable, probe: &ColU32) -> (u64, u64) {
+        let r = self.run(
+            &self.hash_probe,
+            &[table.buf.as_entire_binding(), probe.buf.as_entire_binding()],
+            Params {
+                a: probe.len,
+                b: table.mask,
+                c: 0,
+                d: 0,
+            },
+            probe.len,
+            3,
+        );
+        (u64::from(r[0]), (u64::from(r[2]) << 32) | u64::from(r[1]))
+    }
+
+    /// COUNT + SUM GROUP BY over resident columns. `keys[i]` must be `< groups`
+    /// and `groups <= MAX_GROUPS`. Returns `(count, sum)` per group.
+    pub fn group_aggregate(&self, keys: &ColU32, vals: &ColU32, groups: u32) -> Vec<(u64, u64)> {
+        assert!(
+            (1..=MAX_GROUPS).contains(&groups),
+            "groups must be in 1..={MAX_GROUPS}"
+        );
+        assert_eq!(keys.len, vals.len);
+        let r = self.run(
+            &self.group_agg,
+            &[keys.buf.as_entire_binding(), vals.buf.as_entire_binding()],
+            Params {
+                a: keys.len,
+                b: groups,
+                c: 0,
+                d: 0,
+            },
+            keys.len,
+            3 * groups as usize,
+        );
+        let g = groups as usize;
+        (0..g)
+            .map(|i| {
+                let count = u64::from(r[i]);
+                let sum = (u64::from(r[2 * g + i]) << 32) | u64::from(r[g + i]);
+                (count, sum)
+            })
+            .collect()
+    }
+
+    /// Shared dispatch path: binds `inputs` at 0.., a zero-initialised result
+    /// buffer of `result_words` u32s next, the uniform params last; dispatches a
+    /// 2D-tiled grid covering `n` elements; reads the result back synchronously.
+    fn run(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        inputs: &[wgpu::BindingResource],
+        params: Params,
+        n: u32,
+        result_words: usize,
+    ) -> Vec<u32> {
+        use wgpu::util::DeviceExt;
+        let result_bytes = (result_words * 4) as u64;
+        // Freshly created buffers are zero-initialised per the WebGPU spec.
+        let result = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("result"),
+            size: result_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: result_bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let params_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let mut entries: Vec<wgpu::BindGroupEntry> = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: r.clone(),
+            })
+            .collect();
+        entries.push(wgpu::BindGroupEntry {
+            binding: inputs.len() as u32,
+            resource: result.as_entire_binding(),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: inputs.len() as u32 + 1,
+            resource: params_buf.as_entire_binding(),
+        });
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        });
+
+        // 2D-tile the workgroup grid: WebGPU caps each dimension at 65535.
+        let n_groups = n.div_ceil(WG).max(1);
+        let gx = n_groups.min(65535);
+        let gy = n_groups.div_ceil(gx);
+
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            cp.set_pipeline(pipeline);
+            cp.set_bind_group(0, &bind, &[]);
+            cp.dispatch_workgroups(gx, gy, 1);
+        }
+        enc.copy_buffer_to_buffer(&result, 0, &readback, 0, result_bytes);
+        self.queue.submit(Some(enc.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .expect("map_async callback dropped")
+            .expect("readback map failed");
+        let out: Vec<u32> = bytemuck::cast_slice(&slice.get_mapped_range()).to_vec();
+        readback.unmap();
+        out
+    }
+}
+
+// The WGSL result-buffer bindings above are written through the kernels' result
+// arrays; bind-group layout note: `inputs` occupy bindings 0..k, the result
+// buffer binding k, the uniform params binding k+1 — matching each shader.

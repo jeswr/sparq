@@ -1,0 +1,38 @@
+[package]
+name = "sparq-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in GPU (wgpu) compute kernels for the sparq RDF engine — the T24d measure-PCIe-break-even prototype"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# A measurement prototype (roadmap T24d), not a supported product surface: do not
+# publish until/unless the verdict in README.md flips to "wire it in".
+publish = false
+
+# Opt-in GPU execution (T24d). This is a SEPARATE crate so the core engine — and in
+# particular the wasm build — carries zero GPU code or dependencies: NOTHING in the
+# workspace depends on sparq-gpu, and wgpu must never enter the sparq-wasm dependency
+# graph (CI builds sparq-wasm for wasm32-unknown-unknown; `cargo tree -p sparq-wasm
+# --target wasm32-unknown-unknown | grep wgpu` must stay empty).
+#
+# The kernels operate on plain `&[u32]` / `&[f64]` columns — the shape of sparq-core's
+# permutation-index object columns and dense numeric cache — precisely so this crate
+# needs no sparq-core dependency to measure the question that decides T24d: where does
+# a GPU win once the host→device transfer tax is charged honestly?
+
+[dependencies]
+# wgpu 22: the exact version the research/hardware/wgpu-spike prototype proved to
+# build and run unmodified on Metal (M1); same source targets Vulkan/DX12/WebGPU.
+wgpu = "22"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# CPU parallel baselines in examples/gpu_bench.rs only — the library itself does not
+# need a thread pool.
+rayon = { workspace = true }
