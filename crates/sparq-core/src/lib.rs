@@ -478,6 +478,26 @@ impl Graph {
         write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())
     }
 
+    /// Like [`save`](Self::save) but persists the permutation indexes BLOCK-COMPRESSED
+    /// (~3-5x smaller on disk; the dictionary/numerics files are unchanged). [`open`]
+    /// auto-detects the format per file, serving compressed perms by lazy block-wise
+    /// decode off the mapped file; call [`decompress_indexes`](Self::decompress_indexes)
+    /// after open to trade RAM for exactly-raw query speed instead.
+    #[cfg(feature = "mmap")]
+    pub fn save_compressed(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        self.store.save_compressed(dir)?; // folds any delta-overlay, like `save`
+        self.dict.save_mmap(dir)?;
+        write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())
+    }
+
+    /// Decodes any block-compressed permutation indexes into raw RAM (the load-time
+    /// decompression mode for a compressed dir: one up-front decode, then scans are
+    /// zero-cost slice borrows, identical to a raw store). No-op on raw/mapped indexes.
+    pub fn decompress_indexes(&mut self) {
+        self.store.decompress_to_ram();
+    }
+
     /// The full dense numeric cache (one f64 per dictionary term) for persisting: the
     /// owned/mmap'd dense backing extended over any APPENDED terms, or recomputed when
     /// no dense backing covers the dictionary (the sparse browser mode).
@@ -1791,6 +1811,64 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Graph-level COMPRESSED persistence: `save_compressed` → `open` must round-trip the
+    /// full graph (terms, numerics, pred stats) identically to the raw path, including a
+    /// pending delta-overlay being folded into the compressed permutations on save.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn compressed_graph_roundtrip() {
+        let mut nt = String::new();
+        for i in 0..4000u32 {
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 311,
+                i % 11,
+                i % 700
+            ));
+        }
+        let mut g = Graph::load_str(&nt, "ntriples").unwrap();
+        // A pending overlay (one delete + one insert) must be folded into the compressed save.
+        let del = [g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/n1"))).unwrap(),
+                   g.id_of(&Term::NamedNode(NamedNode::new_unchecked("http://ex/p1"))).unwrap(),
+                   g.id_of(&Term::Literal(Literal::new_typed_literal("1", xsd::INTEGER))).unwrap()];
+        g.store.apply_delta(&[[del[0], del[1], del[0]]], &[del]);
+        assert!(g.store.has_overlay());
+
+        let base = std::env::temp_dir().join(format!("sparq_cgraph_{}", std::process::id()));
+        let (raw_dir, cmp_dir) = (base.join("raw"), base.join("cmp"));
+        g.save(&raw_dir).unwrap();
+        g.save_compressed(&cmp_dir).unwrap();
+
+        let a = Graph::open(&raw_dir).unwrap();
+        let mut b = Graph::open(&cmp_dir).unwrap();
+        let dump = |gg: &Graph| {
+            let scan = gg.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(g.len(), b.len(), "overlay not folded into the compressed save");
+        assert_eq!(dump(&a), dump(&b), "compressed graph differs from raw graph");
+        // Numerics still resolve through the compressed-opened graph.
+        let lit = Term::Literal(Literal::new_typed_literal("42", xsd::INTEGER));
+        if let Some(id) = b.id_of(&lit) {
+            assert_eq!(b.numeric_value(id), Some(42.0));
+        }
+        // Load-time decompression: identical content, perms now on the heap.
+        let lazy_heap = b.store.heap_bytes();
+        b.decompress_indexes();
+        assert!(b.store.heap_bytes() > lazy_heap, "decompress_indexes must move perms to the heap");
+        assert_eq!(dump(&a), dump(&b), "decompressed graph differs");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[cfg(feature = "mmap")]

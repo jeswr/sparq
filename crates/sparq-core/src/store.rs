@@ -320,6 +320,20 @@ impl TripleStore {
     /// the on-disk side of out-of-core querying.
     #[cfg(feature = "mmap")]
     pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        self.save_with(dir, false)
+    }
+
+    /// Like [`save`](Self::save) but writes each permutation BLOCK-COMPRESSED (the
+    /// delta+varint format of [`crate::compress`], ~3-5x smaller on disk). The files are
+    /// auto-detected by [`open`](Self::open) via [`crate::compress::FILE_MAGIC`], so old
+    /// raw directories keep working and the two formats can be mixed.
+    #[cfg(feature = "mmap")]
+    pub fn save_compressed(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        self.save_with(dir, true)
+    }
+
+    #[cfg(feature = "mmap")]
+    fn save_with(&self, dir: &std::path::Path, compressed: bool) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         for (i, p) in self.perms.iter().enumerate() {
             // Raw modes borrow zero-copy; a compressed perm is decoded back to raw rows so
@@ -337,9 +351,17 @@ impl TripleStore {
                 }
                 _ => rows,
             };
-            // SAFETY: reinterpret the contiguous [u32;3] rows as bytes for writing.
-            let bytes = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<u8>(), std::mem::size_of_val(rows.as_ref())) };
-            std::fs::write(dir.join(format!("perm{i}.bin")), bytes)?;
+            let path = dir.join(format!("perm{i}.bin"));
+            if compressed && !rows.is_empty() {
+                // Unbuilt (empty) permutations stay raw-empty so `open` skips them by size.
+                let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+                crate::compress::CompressedPerm::encode(&rows).write_to(&mut w)?;
+                std::io::Write::flush(&mut w)?;
+            } else {
+                // SAFETY: reinterpret the contiguous [u32;3] rows as bytes for writing.
+                let bytes = unsafe { std::slice::from_raw_parts(rows.as_ptr().cast::<u8>(), std::mem::size_of_val(rows.as_ref())) };
+                std::fs::write(path, bytes)?;
+            }
         }
         self.save_pred_stats(dir)
     }
@@ -399,7 +421,15 @@ impl TripleStore {
                 continue; // an empty (unbuilt, e.g. compact-index) permutation
             }
             // SAFETY: the file is owned by this store for its lifetime and is not mutated.
-            *slot = PermData::Mapped(unsafe { memmap2::Mmap::map(&file)? });
+            let map = unsafe { memmap2::Mmap::map(&file)? };
+            // FORMAT AUTO-DETECTION: a block-compressed file (written by `save_compressed`)
+            // starts with FILE_MAGIC; anything else is the original raw [u32;3] format.
+            // Compressed perms are served lazily — block-wise decode off the mapped file.
+            *slot = if map.len() >= 8 && map[..8] == crate::compress::FILE_MAGIC {
+                PermData::Compressed(crate::compress::CompressedPerm::from_mmap(map)?)
+            } else {
+                PermData::Mapped(map)
+            };
         }
         // Use the persisted stats if present (no POS/PSO re-scan — keeps open fast and the
         // resident set small); else recompute (backward compatible with older saved dirs).
@@ -412,8 +442,10 @@ impl TripleStore {
     /// else approximated by the count (under `compact-index`, where PSO is absent —
     /// the planner then treats subjects as non-selective, which is safe for ordering).
     fn compute_pred_stats(perms: &[PermData; 6]) -> FxHashMap<Id, PredStat> {
-        let pos = perms[Perm::Pos as usize].as_slice(); // [P, O, S]
-        let pso = perms[Perm::Pso as usize].as_slice(); // [P, S, O], empty under compact-index
+        // Full-range `rows_in`: raw modes borrow the whole slice (zero-copy, as before);
+        // a compressed perm (an opened compressed dir missing predstats.bin) is decoded.
+        let pos = perms[Perm::Pos as usize].rows_in([Id::MIN; 3], [Id::MAX; 3]); // [P, O, S]
+        let pso = perms[Perm::Pso as usize].rows_in([Id::MIN; 3], [Id::MAX; 3]); // [P, S, O], empty under compact-index
         let mut stats: FxHashMap<Id, PredStat> = FxHashMap::default();
         // POS: count + distinct O per P. ndv_subj defaults to count (refined below).
         let mut i = 0;
@@ -518,6 +550,18 @@ impl TripleStore {
             }
         }
         self.overlay = if ov.is_empty() { None } else { Some(ov) };
+    }
+
+    /// Decodes every block-compressed permutation into its raw in-RAM form, so later
+    /// scans are pure binary-search slice borrows (zero decode cost) — the LOAD-TIME
+    /// DECOMPRESSION mode for an opened compressed directory: pay one full decode up
+    /// front, query at exactly raw-store speed. Raw/mapped permutations are untouched.
+    pub fn decompress_to_ram(&mut self) {
+        for slot in &mut self.perms {
+            if let PermData::Compressed(c) = slot {
+                *slot = PermData::Owned(c.decode_all());
+            }
+        }
     }
 
     /// Heap footprint of the permutation indexes in bytes (for benchmarking). Memory-
@@ -713,6 +757,97 @@ mod tests {
             assert_eq!(raw.pred_stat(p), cmp.pred_stat(p), "pred_stat differs for {p}");
         }
     }
+    /// The COMPRESSED on-disk format must round-trip exactly: `save_compressed` → `open`
+    /// must answer every triple pattern with the same rows, in the same scan order, with
+    /// the same `estimate`, as the raw `save` → `open` of the same store — whether served
+    /// lazily (block-wise off the mapped file) or after `decompress_to_ram`. Also checks
+    /// FORMAT AUTO-DETECTION (magic header present iff compressed; both dirs open through
+    /// the same `open`), the old-format compat (the raw dir keeps working untouched), and
+    /// that the compressed files are genuinely smaller.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn compressed_save_open_roundtrip() {
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        let mut st = 0xBEEF5EEDu32;
+        let mut rng = || {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            st
+        };
+        for _ in 0..60_000 {
+            triples.push([1 + rng() % 1500, 1 + rng() % 17, 1 + rng() % 9000]);
+        }
+        let store = TripleStore::from_triples(triples);
+
+        let base = std::env::temp_dir().join(format!("sparq_cperm_{}", std::process::id()));
+        let raw_dir = base.join("raw");
+        let cmp_dir = base.join("cmp");
+        store.save(&raw_dir).unwrap();
+        store.save_compressed(&cmp_dir).unwrap();
+
+        // Auto-detection bytes: compressed BUILT perms carry FILE_MAGIC and are smaller;
+        // raw files never start with the magic.
+        let mut raw_total = 0u64;
+        let mut cmp_total = 0u64;
+        for &perm in BUILT {
+            let f = format!("perm{}.bin", perm as usize);
+            let r = std::fs::read(raw_dir.join(&f)).unwrap();
+            let c = std::fs::read(cmp_dir.join(&f)).unwrap();
+            assert_ne!(&r[..8], &crate::compress::FILE_MAGIC, "raw {f} must not carry the magic");
+            assert_eq!(&c[..8], &crate::compress::FILE_MAGIC, "compressed {f} must carry the magic");
+            assert!(c.len() < r.len(), "{f}: compressed ({}) not smaller than raw ({})", c.len(), r.len());
+            raw_total += r.len() as u64;
+            cmp_total += c.len() as u64;
+        }
+        assert!(cmp_total * 2 < raw_total, "expected >2x overall perm compression, got {raw_total}/{cmp_total}");
+
+        let raw = TripleStore::open(&raw_dir).unwrap(); // old format: still opens (compat)
+        let lazy = TripleStore::open(&cmp_dir).unwrap(); // auto-detected compressed
+        let mut eager = TripleStore::open(&cmp_dir).unwrap();
+        eager.decompress_to_ram(); // load-time decompression mode
+        assert!(matches!(lazy.perms[Perm::Spo as usize], PermData::Compressed(_)), "compressed file not auto-detected");
+        assert!(matches!(raw.perms[Perm::Spo as usize], PermData::Mapped(_)), "raw file must stay mmap'd");
+        assert!(matches!(eager.perms[Perm::Spo as usize], PermData::Owned(_)), "decompress_to_ram must own the rows");
+        assert_eq!(raw.len(), lazy.len());
+        assert_eq!(raw.len(), eager.len());
+
+        // Every pattern shape (and the merge-join sorted variants) must yield identical
+        // rows in identical order, and identical estimates, across the three stores.
+        let svals = [None, Some(1), Some(700), Some(1501)];
+        let pvals = [None, Some(1), Some(9), Some(18)];
+        let ovals = [None, Some(1), Some(4500), Some(9001)];
+        for &s in &svals {
+            for &p in &pvals {
+                for &o in &ovals {
+                    let pat: Pattern = [s, p, o];
+                    for sort_col in [None, Some(0), Some(1), Some(2)] {
+                        fn scans<'a>(g: &'a TripleStore, pat: &Pattern, sort_col: Option<usize>) -> Scan<'a> {
+                            match sort_col {
+                                None => g.scan(pat),
+                                Some(c) => g.scan_sorted(pat, c),
+                            }
+                        }
+                        let (r, l, e) = (scans(&raw, &pat, sort_col), scans(&lazy, &pat, sort_col), scans(&eager, &pat, sort_col));
+                        assert_eq!(r.perm, l.perm);
+                        assert_eq!(r.rows, l.rows, "lazy rows differ for {pat:?} sort {sort_col:?}");
+                        assert_eq!(r.rows, e.rows, "eager rows differ for {pat:?} sort {sort_col:?}");
+                    }
+                    assert_eq!(raw.estimate(&pat), lazy.estimate(&pat), "estimate differs for {pat:?}");
+                }
+            }
+        }
+        // Pred stats: persisted identically; and recomputable from compressed perms when
+        // predstats.bin is missing (the fallback decodes, it must not panic or differ).
+        std::fs::remove_file(cmp_dir.join("predstats.bin")).unwrap();
+        let refallback = TripleStore::open(&cmp_dir).unwrap();
+        for p in 1..=18 {
+            assert_eq!(raw.pred_stat(p), lazy.pred_stat(p), "persisted pred_stat differs for {p}");
+            assert_eq!(raw.pred_stat(p), refallback.pred_stat(p), "recomputed pred_stat differs for {p}");
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// The delta-overlay must be INVISIBLE in results: a store with an overlay must answer
     /// every triple pattern with exactly the rows of a store REBUILT from the merged triple
     /// set — and the rows must stay sorted in the scan's permutation order (the guarantee
