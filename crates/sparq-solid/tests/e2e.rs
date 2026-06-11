@@ -1,8 +1,10 @@
 //! End-to-end: the SAME SPARQL query, run as different sessions, returns different
-//! results — enforced purely by the rewrite + dataset clause on today's engine APIs.
+//! results — enforced by the engine's zero-copy dataset view (the default path),
+//! with the v1 FROM-NAMED rewrite path kept as a differential oracle: both paths
+//! must return byte-identical JSON for every fixture session.
 
 use sparq_core::Graph;
-use sparq_solid::fixture::{wac_fixture, ALICE, BOB, CAROL};
+use sparq_solid::fixture::{wac_fixture, ALICE, APP, BOB, CAROL};
 use sparq_solid::{rewrite_for, Mode, PodStore, Session};
 
 fn store() -> PodStore {
@@ -33,6 +35,9 @@ fn same_query_different_agents_different_results() {
     assert_eq!(alice.rows.len(), 599, "alice sees her documents");
     assert_eq!(carol.rows.len(), 407, "carol sees group + public + deep-override docs");
     assert_eq!(anon.rows.len(), 144, "anonymous sees only the public subtree");
+    // the kept v1 portability path (FROM NAMED rewrite) returns the same counts
+    let v1 = s.query_as_rewrite(&Session { agent: Some(ALICE), client: None }, Mode::Read, TITLES).unwrap();
+    assert_eq!(v1.rows.len(), 599);
 }
 
 #[test]
@@ -72,6 +77,50 @@ fn explicit_named_graph_query_cannot_escape() {
                    WHERE { GRAPH ?g { ?s ?p ?o } }";
     let anon2 = s.query_as(&Session::default(), Mode::Read, widened).unwrap();
     assert_eq!(anon2.rows.len(), 0);
+}
+
+/// The view path (default, zero-copy) and the v1 rewrite path (FROM NAMED + copy)
+/// must be observationally EQUAL: for every e2e fixture session, the same query
+/// returns byte-identical SPARQL-JSON through both. Queries carry a total ORDER BY
+/// over the projected variables so row order is fully determined by the semantics
+/// (both paths produce the same duplicate-row multiset; identical rows serialize
+/// identically regardless of their relative order — a full sort makes the whole
+/// serialization canonical).
+#[test]
+fn view_path_and_rewrite_path_return_identical_json() {
+    let mut s = store();
+    let queries = [
+        // plain default-graph pattern (union-default emulation on both paths)
+        "SELECT ?s ?title WHERE { ?s <https://ex.dev/ns#title> ?title } ORDER BY ?title ?s",
+        // explicit GRAPH ?g enumeration
+        "SELECT ?g ?s WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?title } } ORDER BY ?g ?s",
+        // explicit named graph (authorized for alice, absent for everyone else)
+        "SELECT ?p ?o WHERE { GRAPH <https://pod.ex/priv0/c4/g0/d0.ttl> { ?s ?p ?o } } ORDER BY ?p ?o",
+        // cross-document join
+        "SELECT ?s ?child WHERE { \
+           ?s <https://ex.dev/ns#inSubtree> <https://pod.ex/team2/> . \
+           <https://pod.ex/team2/> <http://www.w3.org/ns/ldp#contains> ?child } ORDER BY ?s ?child",
+        // attacker-supplied FROM NAMED: intersected (view) / intersected (rewrite)
+        "SELECT ?g ?o FROM NAMED <https://pod.ex/priv0/c4/g0/d0.ttl> \
+           WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?o",
+        // aggregate over the visible set
+        "SELECT (COUNT(?s) AS ?n) WHERE { ?s <https://ex.dev/ns#title> ?title }",
+    ];
+    let sessions = [
+        ("alice", Session { agent: Some(ALICE), client: None }),
+        ("carol", Session { agent: Some(CAROL), client: None }),
+        ("bob+app (origin pair)", Session { agent: Some(BOB), client: Some(APP) }),
+        ("anonymous", Session::default()),
+    ];
+    for (label, session) in sessions {
+        for q in queries {
+            let view_json = s.query_json_as(&session, Mode::Read, q).unwrap();
+            let allowed = s.accessible(&session, Mode::Read);
+            let rewritten = rewrite_for(q, &allowed).unwrap();
+            let v1_json = sparq_engine::query_json(&s.graph, &rewritten).unwrap();
+            assert_eq!(view_json, v1_json, "paths diverge for {label}: {q}");
+        }
+    }
 }
 
 #[test]

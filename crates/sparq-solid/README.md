@@ -151,53 +151,51 @@ ACL/ACR/group-document change) bumps an epoch and drops the entire cache — a r
 grant takes effect at the next query. Everything `accessible` answers is also
 derivable from the auth-view triples with plain SPARQL (`MINUS` over the deny half).
 
-### Query rewriting — the v1 path (design doc §4.4)
+### The query path — zero-copy dataset view (default; design doc §4.4 + §5)
 
-`PodStore::query_as` rewrites the query (`rewrite_for`), then runs it through
-`sparq_engine::query`:
+`PodStore::query_as` (and `query_json_as` / `ask_as`) wraps the query
+(`wrap_for_view`) and evaluates it through the engine's L1 zero-copy `DatasetView`
+(`sparq_engine::query_view` / `query_json_view` / `ask_view`):
 
 1. every default-graph triple/path pattern is wrapped in `GRAPH ?fresh { … }`
    (union-default emulation; cross-document joins keep working — a triple asserted
    in k accessible graphs yields k rows where an RDF merge would yield 1, `DISTINCT`
    restores set semantics);
-2. the dataset clause becomes `FROM NAMED <g>` for exactly the authorized graphs
-   (intersected with any pre-existing `FROM NAMED` — queries can restrict, never
-   widen; an empty set uses the absent sentinel `<urn:sparq:nothing>` so the clause
-   survives serialization, fail-closed).
+2. the engine evaluates under a `DatasetView` built from the session cache:
+   `named` = the authorized graph set (`Arc<FxHashSet<Term>>`, shared per call — the
+   engine holds no session state), `default` = `DefaultGraphMode::Empty` (pod data
+   never lives in the store default graph).
 
-The honest cost: the engine's `FROM NAMED` handling (`build_active`) decodes and
-rebuilds every listed graph **per query** — measured 12 ms/query at 3k quads,
-59 ms at 46k (linear in authorized data). That copy is what the dataset view below
-deletes.
-
-### Using the engine dataset view (recommended follow-up wiring)
-
-The engine on the **main branch** now ships the L1 zero-copy `DatasetView` this
-design specified (design doc §5): visibility is an O(1) hash check per graph name,
-evaluation runs in place on the existing sub-graphs (zero decode/rebuild/copy), and
-non-visible graphs are *indistinguishable* from absent ones. Measured **20–27×
-faster** than the v1 copy path on subset enumeration and ~3700× on single-graph
-reads. This branch predates the merge, so `query_as` still uses the v1 path; the
-follow-up wiring replaces step 2 of the rewrite (keep step 1 — union-default
-emulation is still needed under an empty default graph) with:
+Visibility is an O(1) hash check per graph name; evaluation runs in place on the
+existing sub-graphs — zero decode, zero rebuild, zero copy — and a non-authorized
+graph is *indistinguishable* from an absent one: `GRAPH <g>` yields nothing,
+`GRAPH ?g` never enumerates it, and a caller-supplied `FROM (NAMED)` clause is
+intersected with the view (queries can restrict, never widen). A grant-less session
+gets a view over the empty set — fail-closed. For entry points without a session
+wrapper (`construct`, chunked JSON, …), take `PodStore::view_for` /
+`PodStore::accessible_set` and run under `sparq_engine::with_view`:
 
 ```rust,ignore
-use sparq_engine::{DatasetView, DefaultGraphMode, FxHashSet, query_view};
-use std::sync::Arc;
-
-// the session cache holds the authorized set as Arc<FxHashSet<Term>>,
-// keyed (agent, client, mode, auth-epoch) — shared with the engine per call
-let view = DatasetView {
-    base: &store.graph,
-    named: Arc::clone(&allowed_set),       // no copy; engine holds no session state
-    default: DefaultGraphMode::Empty,      // pod data never lives in the default graph
-};
-let wrapped = wrap_patterns_in_graph(sparql)?; // rewrite step 1 only, no FROM NAMED
-let result = query_view(&view, &wrapped)?;
+let view = store.view_for(&session, Mode::Read);                  // cached, Arc-shared
+let wrapped = sparq_solid::wrap_for_view(sparql)?;                // step 1 only
+let g = sparq_engine::with_view(&view, || sparq_engine::construct(view.base, &wrapped))?;
 ```
 
-(`query_json_view` / `count_view` / `ask_view` / `with_view` exist for the other
-entry points, plus `_with_budget` variants.)
+### The v1 rewrite path (kept; portability + differential oracle)
+
+`PodStore::query_as_rewrite` / `rewrite_for` implement the same policy with **no
+view API**: step 1 above plus a dataset-clause injection — `FROM NAMED <g>` for
+exactly the authorized graphs (intersected with any pre-existing `FROM NAMED`; an
+empty set uses the absent sentinel `<urn:sparq:nothing>` so the clause survives
+serialization, fail-closed). The rewritten query enforces the policy on **any**
+SPARQL 1.1 engine with standard dataset-clause semantics — that is the portability
+story, and `tests/e2e.rs` uses it as a differential oracle (both paths must return
+byte-identical JSON for every fixture session).
+
+The honest cost of the rewrite path: the engine's `FROM NAMED` handling
+(`build_active`) decodes and rebuilds every listed graph **per query** — measured
+12 ms/query at 3k quads, 59 ms at 46k (linear in authorized data). That copy is
+exactly what the default view path deletes — measured below.
 
 ## Security model
 
@@ -218,9 +216,11 @@ non-authorized graph behaves exactly like an absent one (indistinguishability):
   such values get the **empty** graph set; and `PodStore::new`/the materializer
   **strip** all reserved-named graphs from loaded datasets — a dataset cannot smuggle
   in a forged `<urn:sparq:auth>`; only the materializer creates it.
-- **No rewrite escape**: explicit `GRAPH <private>` patterns and attacker-supplied
-  `FROM NAMED` clauses cannot reach outside the authorized set (intersection
-  semantics; regression-tested in `tests/hardening.rs` and `tests/e2e.rs`).
+- **No query escape**: explicit `GRAPH <private>` patterns and attacker-supplied
+  `FROM NAMED` clauses cannot reach outside the authorized set on either path
+  (view intersection / rewrite intersection semantics; regression-tested in
+  `tests/hardening.rs` and `tests/e2e.rs`, which also asserts the two paths return
+  byte-identical JSON).
 
 ## Measured v1 baseline (design doc §6)
 

@@ -1,11 +1,13 @@
-//! The v1 measured baseline (design doc §6). Run:
+//! The measured baseline (design doc §6: v1 rewrite path + v2 dataset-view path). Run:
 //!     cargo run -p sparq-solid --example bench --release
 //!
 //! Measures, on the ~1.1k-graph WAC fixture (+ ACP variant):
 //!   1. auth-view materialization (and re-materialization after an ACL change — v1's
 //!      incremental-maintenance story IS a full re-run);
-//!   2. per-query overhead of the v1 FROM-NAMED-copy path vs the engine on the full
-//!      dataset directly (the copy the L1 zero-copy view must beat);
+//!   2. per-query cost of the DEFAULT zero-copy dataset-view path (`query_as`) vs the
+//!      kept v1 FROM-NAMED-copy path (`query_as_rewrite`) vs the engine on the full
+//!      dataset directly — including each path's overhead isolated on a query whose
+//!      pattern matches nothing;
 //!   3. session graph-set computation, cold vs cached.
 
 use sparq_core::Graph;
@@ -61,17 +63,25 @@ fn main() {
         .unwrap()
     });
     println!("    rows: {}", direct.rows.len());
-    let v1 = timed("query_as (v1: rewrite + FROM NAMED build_active copy)", || {
-        store.query_as(&alice, Mode::Read, TITLES).unwrap()
+    let v1 = timed("query_as_rewrite (v1: FROM NAMED build_active copy)", || {
+        store.query_as_rewrite(&alice, Mode::Read, TITLES).unwrap()
     });
     println!("    rows: {} (authorized subset)", v1.rows.len());
-    // the copy alone, isolated: same rewritten query, pattern matched nothing
+    let v2 = timed("query_as (v2 DEFAULT: zero-copy DatasetView)", || {
+        store.query_as(&alice, Mode::Read, TITLES).unwrap()
+    });
+    println!("    rows: {} (authorized subset)", v2.rows.len());
+    assert_eq!(v1.rows.len(), v2.rows.len());
+    // each path's overhead alone, isolated: same query, pattern matched nothing
+    const NOTHING: &str = "SELECT ?x WHERE { ?x <urn:none> <urn:none> }";
     let nothing = timed("v1 copy cost isolated (rewritten query, empty pattern)", || {
-        store
-            .query_as(&alice, Mode::Read, "SELECT ?x WHERE { ?x <urn:none> <urn:none> }")
-            .unwrap()
+        store.query_as_rewrite(&alice, Mode::Read, NOTHING).unwrap()
     });
     assert_eq!(nothing.rows.len(), 0);
+    let vnothing = timed("v2 view overhead isolated (same empty pattern)", || {
+        store.query_as(&alice, Mode::Read, NOTHING).unwrap()
+    });
+    assert_eq!(vnothing.rows.len(), 0);
 
     // 2b. copy-cost SCALING: same tree, 50 filler triples per document (~46k quads).
     //     build_active is O(authorized data) PER QUERY — this is the number the L1
@@ -89,16 +99,23 @@ fn main() {
         .unwrap()
     });
     println!("    rows: {}", fat_direct.rows.len());
-    let fat_v1 = timed("query_as (v1 copy path), fat fixture", || {
-        fat_store.query_as(&alice, Mode::Read, TITLES).unwrap()
+    let fat_v1 = timed("query_as_rewrite (v1 copy path), fat fixture", || {
+        fat_store.query_as_rewrite(&alice, Mode::Read, TITLES).unwrap()
     });
     println!("    rows: {}", fat_v1.rows.len());
+    let fat_v2 = timed("query_as (v2 view path), fat fixture", || {
+        fat_store.query_as(&alice, Mode::Read, TITLES).unwrap()
+    });
+    println!("    rows: {}", fat_v2.rows.len());
+    assert_eq!(fat_v1.rows.len(), fat_v2.rows.len());
     let fat_nothing = timed("v1 copy cost isolated, fat fixture", || {
-        fat_store
-            .query_as(&alice, Mode::Read, "SELECT ?x WHERE { ?x <urn:none> <urn:none> }")
-            .unwrap()
+        fat_store.query_as_rewrite(&alice, Mode::Read, NOTHING).unwrap()
     });
     assert_eq!(fat_nothing.rows.len(), 0);
+    let fat_vnothing = timed("v2 view overhead isolated, fat fixture", || {
+        fat_store.query_as(&alice, Mode::Read, NOTHING).unwrap()
+    });
+    assert_eq!(fat_vnothing.rows.len(), 0);
 
     // 3. session graph-set: cold vs cached
     let bob = Session { agent: Some(sparq_solid::fixture::BOB), client: None };
