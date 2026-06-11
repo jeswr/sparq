@@ -1,0 +1,28 @@
+== pre-flight: no orphan sparq-hw-validation instances ==
+== resolve AMI / network ==
+AMI=ami-07f936ee1f9a0de0e VPC=vpc-00a7b8516fd784be9 SUBNET=subnet-00e6f93cf6356d681 MYIP=77.108.166.120
+== ephemeral keypair + SG ==
+== RUNG 5: launch on-demand r7i.2xlarge (deadman +150m, 400 GB gp3) ==
+RUNG 5 SUCCEEDED: i-025057480cb99a88a
+instance i-025057480cb99a88a (r7i.2xlarge, on-demand) ip=18.132.192.95 launched 2026-06-11T12:08:17Z
+== wait for sshd ==
+== run rung5-remote.sh (slice=1000000000 threads=1,2,4,8 sha=ef86e66) ==
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+started
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+Warning: Permanently added '18.132.192.95' (ED25519) to the list of known hosts.
+box unreachable (shutdown?)
+== cleanup 2026-06-11T14:00:02Z ==

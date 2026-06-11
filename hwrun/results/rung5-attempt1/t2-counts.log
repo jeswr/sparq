@@ -1,0 +1,9 @@
+Q: SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }
+opened 0 triples (indexes MEMORY-MAPPED) in 0.000s | store-heap ~0.00 GB (mmap'd perms not counted), dict ~0.00 GB
+1 solutions in 0.083ms
+Q: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.wikidata.org/prop/direct/P31> ?o }
+opened 0 triples (indexes MEMORY-MAPPED) in 0.000s | store-heap ~0.00 GB (mmap'd perms not counted), dict ~0.00 GB
+1 solutions in 0.094ms
+Q: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?o }
+opened 0 triples (indexes MEMORY-MAPPED) in 0.000s | store-heap ~0.00 GB (mmap'd perms not counted), dict ~0.00 GB
+1 solutions in 0.059ms

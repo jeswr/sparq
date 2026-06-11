@@ -29,6 +29,10 @@ Source: `research/parallelism-scaling.md`. Touches the hot path: `exec.rs`, `lib
   t3.large*, so even 16-vCPU boxes fail. Harness is launch-ready (`hwrun/launch.sh` +
   `hwrun/remote.sh`); M1 1→8-thread fallback curve captured. See
   `research/hardware-validation-blocked.md` for verbatim errors + unblock options.
+- **Status 2026-06-11 (pm, rung 5):** 1–8-thread sweep re-measured on homogeneous x86
+  (r7i.2xlarge, 4 physical cores + HT): load plateaus at **1.81× @4 / 1.99× @8** —
+  matches the M1 (1.82× @4), so the `merge_remap` ceiling is a **real measured
+  serialization target**, not core asymmetry. NUMA + >8-thread questions still blocked.
 
 ### T2 — Wikidata ingestion under 24 min
 Source: `research/wikidata-ingestion-benchmark.md`, `fast-ingestion.md`. Currently **1.28–1.30 M/s**
@@ -41,10 +45,20 @@ on the M1 (≈ QLever's server rate on a laptop). 24 min for ~9.4 B truthy ⇒ n
 - **Hard gate:** the full dump needs ~680–850 GB disk + >16 GB dict RAM — **cannot run on the M1
   at all**; needs the big instance. So T2's *validation* is hardware-bound, but its *code* is the
   merge_remap parallelisation (shared with T1).
-- **Status 2026-06-11: validation INFRA-BLOCKED** (same launch failures as T1 — see
+- **Status 2026-06-11 (am): validation INFRA-BLOCKED** (same launch failures as T1 — see
   `research/hardware-validation-blocked.md` and the results section appended to
   `research/wikidata-ingestion-benchmark.md`). The timed ≥1 B-triple ingest is scripted and
   ready in `hwrun/remote.sh`; <24-min target neither met nor refuted.
+- **Status 2026-06-11 (pm): partial-scale MEASURED @1 B, full target quota-blocked.**
+  Sanctioned rung-5 run (on-demand r7i.2xlarge, 8 vCPU/64 GB, ~$1.50 total): **1 B real
+  truthy triples gz→queryable store in 737.8 s = 1.355 M/s, 51.5 GB peak RSS, 84 GB index,
+  COUNTs correct over mmap.** Measured ceiling: dict consolidation+remap is ~200 s/1 B
+  *serial* even with the sharded dict ⇒ Amdahl-capped ≥31 min full-truthy on ANY core
+  count until that bucket shrinks below ~153 s/1 B; load scaling plateaus at 1.8× on 4
+  homogeneous x86 cores (merge_remap ceiling confirmed real, not M1 E-core artifact).
+  Full-truthy <24-min validation remains quota-blocked (needs 192-core box + spill dict).
+  See "Rung 5 MEASURED" in `research/wikidata-ingestion-benchmark.md` +
+  `research/hardware-validation-blocked.md`.
 
 ### T3 — Tagged/inline ValueIds (u64)  *(#23 + #26; foundational)*
 Inline numerics/dates/decimals into the id so range FILTER + ORDER BY skip the dict (QLever's main

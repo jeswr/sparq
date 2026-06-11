@@ -1,0 +1,9 @@
+instance i-06b07ada7108200a1 (r7i.2xlarge, on-demand) ip=3.8.87.7 launched 2026-06-11T11:54:28Z
+instance i-06b07ada7108200a1 (r7i.2xlarge) ran ~8 min
+instance i-025057480cb99a88a (r7i.2xlarge, on-demand) ip=18.132.192.95 launched 2026-06-11T12:08:17Z
+instance i-025057480cb99a88a (r7i.2xlarge) terminated 2026-06-11T14:07:33Z (ran ~120 min; productive run 12:08:16-12:45:57Z = 38 min, remainder was an idle tail: the local orchestrator lost ssh connectivity and its cleanup was killed mid-run -> caught by manual tag-verified terminate at 14:03Z)
+TOTAL: 2 launches, ~128 instance-minutes = ~2.13 instance-hours r7i.2xlarge on-demand
+  compute  ~2.13 h x ~$0.607/h (eu-west-2 list, assumed)  = ~$1.29
+  EBS gp3  400 GB + 6000 IOPS + 500 MB/s ~ $0.099/h x 2.13 = ~$0.21
+  ESTIMATED SPEND ~ $1.50  (target was <=$1.50; hard cap $3 — met)
+residue: none (instances terminated, SGs + keypairs deleted, verified by tag query; prod i-090531b4ede8f2d3f untouched, still running)

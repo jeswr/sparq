@@ -158,3 +158,64 @@ whose RAM holds a 1 B-triple build dict) are in `research/hardware-validation-bl
 **T2 verdict: blocked — target neither met nor refuted.** The <24-min question remains open
 pending hardware; the code side (sharded dict + zstd source + out-of-core path) is committed
 and the on-box methodology is launch-ready (`bash hwrun/launch.sh` once any unblock lands).
+
+## Rung 5 MEASURED (2026-06-11) — 1 B real-truthy triples on r7i.2xlarge
+
+The ≤8-vCPU unblock option above was sanctioned and run (branch `t2-rung5`, engine @
+`ef86e66`, orchestration `hwrun/rung5-launch.sh` + `hwrun/rung5-remote.sh`, raw results
+`hwrun/results/rung5/`). Box: **on-demand r7i.2xlarge, eu-west-2** — Xeon Platinum 8488C
+(Sapphire Rapids), **8 vCPU = 4 physical cores × 2 HT, 1 NUMA node, 64 GB RAM**, 400 GB
+gp3 (6000 IOPS / 500 MB/s). Input: first 10 GiB of the live `latest-truthy.nt.gz`
+(2-connection verified ranged download, 1284 s), sliced to **exactly 1,000,000,000
+N-Triples lines** (verified by `wc -l` tee) and recompressed `zstd -1` (6.9 GB, 198 s with
+`rapidgzip -P 8`). Two instances were used (attempt 1's 14-way parallel download was
+rate-limited into a broken gz — fixed to 2 verified connections and rerun); **total
+~2.13 instance-hours, estimated spend ~$1.50** (`hwrun/results/rung5-cost.txt`).
+
+### Measured
+
+| metric | value |
+|---|---|
+| timed build (`.zst` → queryable 6-perm out-of-core store, `SPARQ_SHARDED_DICT=1`, 64 M-triple runs) | **737.8 s (12 min 18 s)** |
+| **throughput** | **1.355 M triples/s** (1.07 M/s end-to-end if the one-time 198 s gz→zst slice pass is included) |
+| peak RAM (max RSS) | **51.5 GB** — the 64 GB box is genuinely required at this scale; a 16 GB machine cannot hold the 1 B-triple build dict |
+| CPU utilisation | 249% of 800% (~31%) — confirms large serial/IO-bound phases |
+| index on disk | 84 GB for 999,282,473 distinct triples (~90 B/triple incl. dict — matches the 50 M measurement) |
+| dedup | 1,000,000,000 → 999,282,473 (0.07% duplicate triples in real truthy, as at 50 M) |
+| disk IO during build (iostat, 30 s samples) | avg 100 MB/s read / 218 MB/s write; **peak 461 MB/s write ≈ 92% of the provisioned 500 MB/s** — the sibling-sort phase intermittently brushes the gp3 throughput cap |
+| sanity COUNTs over mmap (open ~3.5 s) | `COUNT(*)`=999,282,473 in 27 ms; `wdt:P31` 19 ms; `rdfs:label` 18 ms — all return |
+
+Phase split (`SPARQ_BUILD_TIMING=1`), per 1 B triples: parse(parallel) 138.1 s ∥
+dict-merge bucket (timer label `merge_remap(serial)`) **137.9 s** + triple-remap(serial)
+**62.2 s** → 221.2 s wall to end of parse+intern (the 3-stage pipeline overlaps parse
+under merge); k-way SPO merge +31.2 s; **sibling sorts ∥ dict-save +409.6 s (55% of
+wall — the dominant phase at this scale, IO-heavy, see iostat above)**; finalize +75.7 s
+= 737.8 s. Note: even with the sharded dict ON, the dict consolidation+remap bucket
+still costs **~200 s serial per 1 B triples**.
+
+### Extrapolations (labeled)
+
+- **Full truthy (~9.4 B) on this same 8-vCPU box, LINEAR-RATE ASSUMPTION:** 9.4 B ÷
+  1.355 M/s ≈ **6,940 s ≈ 1 h 56 m**. This is a **lower bound, and the run is not
+  actually possible on this box**: peak RSS was already 51.5 GB at 1 B, and the in-RAM
+  dict grows with distinct terms (~42% of truthy), so 9.4 B would blow past 64 GB long
+  before completion (needs the deferred spill dict or ~300 GB+ RAM), and the index +
+  scratch needs ~800 GB+ disk. Linearity is an ASSUMPTION on top of that.
+- **What 192 vCPU would need for <24 min (RATE×CORES LINEARITY IS AN ASSUMPTION — and a
+  measured-false one):** <24 min for 9.4 B ⇒ ≥6.53 M/s ⇒ **4.82× the measured 8-vCPU
+  rate**, i.e. a 192-vCPU box needs to realise only ~20% of naive 24× linear scaling
+  (naive linearity would give 32.5 M/s ≈ 4.8 min). **But** the same-box sweep says rate
+  does NOT scale linearly with cores (load reaches only ~1.8× at 4 threads, ~2.0× at
+  8 — see `research/hardware-validation-blocked.md`), and Amdahl on the measured phase
+  split caps it: with the ~200 s/1 B serial dict bucket, max speedup =
+  737.8/200.1 ≈ **3.7× ⇒ ≥31 min for full truthy on ANY core count**. So <24 min is
+  unreachable until the serial dict consolidation drops below ~153 s/1 B (the <24-min
+  per-1 B budget) — **that ~200 s/1 B serial bucket is now a measured optimisation
+  target, not a profile-extrapolated one.** A real 192-core run also still needs the
+  quota unblock and NUMA validation.
+
+**T2 verdict update: partial-scale VALIDATED at 1 B real triples — 12.3 min, 1.36 M/s,
+correct COUNTs, out-of-core, 51.5 GB peak RAM, on an 8-vCPU ~$0.61/h box.** The <24-min
+full-truthy target remains neither met nor refuted on real hardware (192-core box still
+quota-blocked), but the path is now quantified: shrink/parallelise the ~200 s/1 B serial
+dict bucket, then re-measure many-core scaling.

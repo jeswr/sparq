@@ -1,0 +1,39 @@
+== pre-flight: no orphan sparq-hw-validation instances ==
+== resolve AMI / network ==
+AMI=ami-07f936ee1f9a0de0e VPC=vpc-00a7b8516fd784be9 SUBNET=subnet-00e6f93cf6356d681 MYIP=77.108.166.120
+== ephemeral keypair + SG ==
+== RUNG 5: launch on-demand r7i.2xlarge (deadman +150m, 400 GB gp3) ==
+RUNG 5 SUCCEEDED: i-06b07ada7108200a1
+instance i-06b07ada7108200a1 (r7i.2xlarge, on-demand) ip=3.8.87.7 launched 2026-06-11T11:54:28Z
+== wait for sshd ==
+== run rung5-remote.sh (slice=1000000000 threads=1,2,4,8 sha=ef86e66) ==
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+started
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+Warning: Permanently added '3.8.87.7' (ED25519) to the list of known hosts.
+remote run completed
+== fetch results ==
+total 72
+drwxr-xr-x@ 10 jesght  staff   320 11 Jun 12:59 .
+drwxr-xr-x@ 11 jesght  staff   352 11 Jun 12:59 ..
+-rw-r--r--@  1 jesght  staff    27 11 Jun 12:59 download.log
+-rw-r--r--@  1 jesght  staff  3323 11 Jun 12:59 lscpu.txt
+-rw-r--r--@  1 jesght  staff  4256 11 Jun 12:59 onbox.log
+-rw-r--r--@  1 jesght  staff   215 11 Jun 12:59 scaling-x86.err
+-rw-r--r--@  1 jesght  staff   931 11 Jun 12:59 scaling-x86.tsv
+-rw-r--r--@  1 jesght  staff  1193 11 Jun 12:59 t2-build.log
+-rw-r--r--@  1 jesght  staff   633 11 Jun 12:59 t2-counts.log
+-rw-r--r--@  1 jesght  staff  1371 11 Jun 12:59 t2-iostat.log
+== done; cleanup trap will terminate ==
+== cleanup 2026-06-11T11:59:22Z ==
+instance i-06b07ada7108200a1 (r7i.2xlarge) ran ~8 min
+terminated i-06b07ada7108200a1
+cleanup done

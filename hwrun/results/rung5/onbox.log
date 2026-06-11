@@ -1,0 +1,109 @@
+== rung5 remote start 2026-06-11T12:08:16Z slice=1000000000 threads=1,2,4,8 sha=ef86e66 ==
+8
+               total        used        free      shared  buff/cache   available
+Mem:              61           1          60           0           0          60
+/dev/root       387G  1.8G  385G   1% /
+Model name:                              Intel(R) Xeon(R) Platinum 8488C
+Core(s) per socket:                      4
+Socket(s):                               1
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-7
+
+Running kernel seems to be up-to-date.
+
+No services need to be restarted.
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+== downloading first 10 GiB of truthy dump (2-conn ranged, verified, background) ==
+warning: use of deprecated method `oxigraph::store::Store::query`: Use `SparqlEvaluator` interface instead
+   --> crates/sparq-bench/src/fuzz.rs:178:17
+    |
+178 |     match store.query(q).map_err(|e| e.to_string())? {
+    |                 ^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `oxigraph::store::Store::query`: Use `SparqlEvaluator` interface instead
+   --> crates/sparq-bench/src/fuzz.rs:187:17
+    |
+187 |     match store.query(q).ok()? {
+    |                 ^^^^^
+
+warning: use of deprecated method `oxigraph::store::Store::query`: Use `SparqlEvaluator` interface instead
+   --> crates/sparq-bench/src/main.rs:200:17
+    |
+200 |     match store.query(q).expect("oxi query") {
+    |                 ^^^^^
+
+cargo build: 72s
+wrote 16000000 triples (2000000 entities) to /home/ubuntu/data.nt in 1.1s
+dump: 1s (16000000 triples)
+== x86 scaling sweep (threads=1,2,4,8, iters=2) ==
+q09_count_edges	1	0.0	1.00	1.00
+q09_count_edges	2	0.0	1.09	0.54
+q09_count_edges	4	0.0	0.73	0.18
+q09_count_edges	8	0.0	0.72	0.09
+q10_optional_age	1	852.0	1.00	1.00
+q10_optional_age	2	607.2	1.40	0.70
+q10_optional_age	4	456.4	1.87	0.47
+q10_optional_age	8	405.0	2.10	0.26
+== waiting for download ==
+part 1 try 1: http=206 size=1073741824
+part 0 try 1: http=206 size=1073741824
+part 3 try 1: http=206 size=1073741824
+part 2 try 1: http=206 size=1073741824
+part 4 try 1: http=206 size=1073741824
+part 5 try 1: http=206 size=1073741824
+part 6 try 1: http=206 size=1073741824
+part 7 try 1: http=206 size=1073741824
+part 9 try 1: http=206 size=1073741824
+part 8 try 1: http=206 size=1073741824
+download: 1284s for 10241 MB (10/10 contiguous verified GiB parts)
+probe [rapidgzip -d -c -P 8]: 8673 triple-lines in first MiB
+slice prep (rapidgzip -d -c -P 8 -> head 1000000000 -> zstd -1): 198s, 6948 MB, 1000000000 lines
+/dev/root       387G   12G  376G   3% /
+== T2 build @1000000000 triples (SPARQ_SHARDED_DICT=1, 64M-triple runs, iostat sampling) ==
+[build-timing] parse+intern+spill done: parse(parallel) 138.12s | merge_remap(serial) 137.90s | triple-remap(serial) 62.20s | 221.20s wall to here
+[build-timing] kway_merge SPO done | 252.44s wall to here
+[build-timing] sibling sorts ∥ dict-save done | 662.08s wall to here
+built on-disk indexes in /home/ubuntu/idx in 737.8s (external-memory, 64M-triple runs)
+	Command being timed: "/home/ubuntu/sparq/target/release/sparq-cli build /home/ubuntu/slice.nt.zst ntriples /home/ubuntu/idx 64"
+	User time (seconds): 1753.21
+	System time (seconds): 86.66
+	Percent of CPU this job got: 249%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 12:17.79
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 54043348
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1006
+	Minor (reclaiming a frame) page faults: 6339397
+	Voluntary context switches: 641826
+	Involuntary context switches: 271571
+	Swaps: 0
+	File system inputs: 156802984
+	File system outputs: 332994024
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+/dev/root       387G   95G  292G  25% /
+84G	/home/ubuntu/idx
+== T2 sanity COUNT queries (mmap) ==
+Q: SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }
+opened 999282473 triples (indexes MEMORY-MAPPED) in 3.788s | store-heap ~0.10 GB (mmap'd perms not counted), dict ~0.10 GB
+1 solutions in 27.073ms
+Q: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.wikidata.org/prop/direct/P31> ?o }
+opened 999282473 triples (indexes MEMORY-MAPPED) in 3.528s | store-heap ~0.10 GB (mmap'd perms not counted), dict ~0.10 GB
+1 solutions in 19.175ms
+Q: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?o }
+opened 999282473 triples (indexes MEMORY-MAPPED) in 3.519s | store-heap ~0.10 GB (mmap'd perms not counted), dict ~0.10 GB
+1 solutions in 17.574ms
+== remote done 2026-06-11T12:45:57Z ==
