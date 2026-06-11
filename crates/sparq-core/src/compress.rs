@@ -15,6 +15,14 @@ use crate::dict::Id;
 /// waste per probe but a larger directory; 128 keeps the directory at ~0.16 B/triple.
 pub const BLOCK: usize = 128;
 
+/// Magic prefix of the COMPRESSED on-disk permutation file format (see
+/// [`CompressedPerm::write_to`]). Distinguishes a compressed `perm{i}.bin` from the raw
+/// little-endian `[u32;3]` format on open: a raw file starts with the FIRST (i.e.
+/// smallest) sorted row, whose leading id would have to be 0x43515053 ≈ 1.13e9 to
+/// collide — ids are assigned densely from 1, so the minimum row never gets close.
+#[cfg(feature = "mmap")]
+pub const FILE_MAGIC: [u8; 8] = *b"SPQCPRM1";
+
 /// Appends `x` to `out` as an unsigned LEB128 varint.
 #[inline]
 fn put_varint(out: &mut Vec<u8>, mut x: u64) {
@@ -41,12 +49,32 @@ fn get_varint(buf: &[u8], pos: &mut usize) -> u64 {
     }
 }
 
+/// The encoded block stream: built in RAM, or borrowed from a memory-mapped compressed
+/// index file (the lazy out-of-core mode — the OS pages in only the blocks scans touch,
+/// and the stream never counts against the heap).
+enum Blocks {
+    Owned(Vec<u8>),
+    #[cfg(feature = "mmap")]
+    Mapped { map: memmap2::Mmap, off: usize },
+}
+
+impl Blocks {
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Blocks::Owned(v) => v,
+            #[cfg(feature = "mmap")]
+            Blocks::Mapped { map, off } => &map[*off..],
+        }
+    }
+}
+
 /// A block-compressed, random-accessible sorted permutation.
 pub struct CompressedPerm {
     /// One entry per block: (its first triple, its byte offset into `blocks`).
     dir: Vec<([Id; 3], u32)>,
     /// The concatenated encoded blocks.
-    blocks: Vec<u8>,
+    blocks: Blocks,
     len: usize,
 }
 
@@ -81,7 +109,59 @@ impl CompressedPerm {
                 }
             }
         }
-        CompressedPerm { dir, blocks, len: rows.len() }
+        CompressedPerm { dir, blocks: Blocks::Owned(blocks), len: rows.len() }
+    }
+
+    /// Writes the COMPRESSED on-disk permutation format (auto-detected on open by its
+    /// [`FILE_MAGIC`]; raw files keep working). Layout, all little-endian:
+    ///
+    /// ```text
+    /// magic[8] | len u64 | n_blocks u64 | blocks_len u64
+    /// directory: n_blocks × { first_row [u32;3], byte_off u32 }
+    /// blocks:    blocks_len bytes (the delta+varint block stream of `encode`)
+    /// ```
+    ///
+    /// The byte stream is exactly the in-memory encoding, so [`from_mmap`](Self::from_mmap)
+    /// can serve scans straight off the mapped file with no transcode.
+    #[cfg(feature = "mmap")]
+    pub fn write_to<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        let blocks = self.blocks.bytes();
+        w.write_all(&FILE_MAGIC)?;
+        w.write_all(&(self.len as u64).to_le_bytes())?;
+        w.write_all(&(self.dir.len() as u64).to_le_bytes())?;
+        w.write_all(&(blocks.len() as u64).to_le_bytes())?;
+        for &(key, off) in &self.dir {
+            for c in key {
+                w.write_all(&c.to_le_bytes())?;
+            }
+            w.write_all(&off.to_le_bytes())?;
+        }
+        w.write_all(blocks)
+    }
+
+    /// Opens a compressed permutation from a memory-mapped file written by
+    /// [`write_to`](Self::write_to). Only the sparse directory is copied to the heap
+    /// (~0.13 B/triple); the block stream stays on disk, decoded block-wise per scan —
+    /// the lazy out-of-core mode.
+    #[cfg(feature = "mmap")]
+    pub fn from_mmap(map: memmap2::Mmap) -> std::io::Result<Self> {
+        let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("compressed perm: {m}"));
+        let b: &[u8] = &map;
+        if b.len() < 32 || b[..8] != FILE_MAGIC {
+            return Err(bad("missing FILE_MAGIC header"));
+        }
+        let rd64 = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap()) as usize;
+        let (len, n_blocks, blocks_len) = (rd64(8), rd64(16), rd64(24));
+        let dir_end = 32 + n_blocks * 16;
+        if b.len() != dir_end + blocks_len {
+            return Err(bad("length does not match header"));
+        }
+        let mut dir = Vec::with_capacity(n_blocks);
+        for e in (32..dir_end).step_by(16) {
+            let rd32 = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+            dir.push(([rd32(e), rd32(e + 4), rd32(e + 8)], rd32(e + 12)));
+        }
+        Ok(CompressedPerm { dir, blocks: Blocks::Mapped { map, off: dir_end }, len })
     }
 
     pub fn len(&self) -> usize {
@@ -92,15 +172,21 @@ impl CompressedPerm {
         self.len == 0
     }
 
-    /// Resident bytes (directory + block stream).
+    /// Resident bytes (directory + block stream). A memory-mapped block stream counts 0:
+    /// its resident pages are OS page cache, not process heap (same as a raw mmap'd perm).
     pub fn heap_bytes(&self) -> usize {
-        self.dir.capacity() * std::mem::size_of::<([Id; 3], u32)>() + self.blocks.capacity()
+        let stream = match &self.blocks {
+            Blocks::Owned(v) => v.capacity(),
+            #[cfg(feature = "mmap")]
+            Blocks::Mapped { .. } => 0,
+        };
+        self.dir.capacity() * std::mem::size_of::<([Id; 3], u32)>() + stream
     }
 
     /// Decodes the block starting at byte `off` into `out` (appending).
     #[inline]
     fn decode_block_at(&self, off: usize, out: &mut Vec<[Id; 3]>) {
-        let buf = &self.blocks;
+        let buf = self.blocks.bytes();
         let mut pos = off;
         let count = get_varint(buf, &mut pos) as usize;
         let mut prev = [

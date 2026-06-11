@@ -33,6 +33,7 @@ fn main() {
         Some("bench-mmap") => cmd_bench_mmap(&args),
         Some("ingest") => cmd_ingest(&args),
         Some("save") => cmd_save(&args),
+        Some("recompress") => cmd_recompress(&args),
         Some("build") => cmd_build(&args),
         Some("query-mmap") => cmd_query_mmap(&args),
         Some("probe-compress") => cmd_probe_compress(&args),
@@ -40,7 +41,7 @@ fn main() {
         Some("bench-remap") => cmd_bench_remap(&args),
         Some("scaling") => cmd_scaling(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir>          # build + persist indexes to disk\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
         }
     }
@@ -298,22 +299,54 @@ fn subject_to_term(s: &oxrdf::NamedOrBlankNode) -> oxrdf::Term {
     }
 }
 
-/// `save <data> <format> <dir>` — build the store and persist its indexes to disk.
+/// `save <data> <format> <dir> [compressed]` — build the store and persist its indexes
+/// to disk; `compressed` writes the block-compressed permutation format (auto-detected
+/// by `query-mmap`/`bench-mmap`).
 fn cmd_save(args: &[String]) {
     let (path, format, dir) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(d)) => (p.as_str(), f.as_str(), d.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli save <data-file> <format> <dir>");
+            eprintln!("usage: sparq-cli save <data-file> <format> <dir> [compressed]");
             std::process::exit(2);
         }
     };
+    let compressed = args.get(5).map(String::as_str) == Some("compressed");
     let g = load(path, format);
     let t = Instant::now();
-    g.save(std::path::Path::new(dir)).unwrap_or_else(|e| {
+    let res = if compressed { g.save_compressed(std::path::Path::new(dir)) } else { g.save(std::path::Path::new(dir)) };
+    res.unwrap_or_else(|e| {
         eprintln!("save error: {e}");
         std::process::exit(1);
     });
-    eprintln!("saved {} triples to {dir} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
+    eprintln!(
+        "saved {} triples to {dir}{} in {:.3}s",
+        g.len(),
+        if compressed { " (compressed perms)" } else { "" },
+        t.elapsed().as_secs_f64()
+    );
+}
+
+/// `recompress <src-dir> <dst-dir>` — re-persist a saved dataset with block-compressed
+/// permutation indexes (the dictionary/numerics are rewritten unchanged). Lets a raw
+/// (e.g. external-memory `build`) directory be compacted without re-parsing the source.
+fn cmd_recompress(args: &[String]) {
+    let (src, dst) = match (args.get(2), args.get(3)) {
+        (Some(s), Some(d)) if s != d => (s.as_str(), d.as_str()),
+        _ => {
+            eprintln!("usage: sparq-cli recompress <src-dir> <dst-dir>   (dirs must differ)");
+            std::process::exit(2);
+        }
+    };
+    let g = sparq_core::Graph::open(std::path::Path::new(src)).unwrap_or_else(|e| {
+        eprintln!("open error: {e}");
+        std::process::exit(1);
+    });
+    let t = Instant::now();
+    g.save_compressed(std::path::Path::new(dst)).unwrap_or_else(|e| {
+        eprintln!("save error: {e}");
+        std::process::exit(1);
+    });
+    eprintln!("recompressed {} triples {src} -> {dst} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
 }
 
 /// `build <file[.gz|.bz2]> <format> <dir> [chunk_millions]` — EXTERNAL-MEMORY build:
@@ -794,18 +827,24 @@ fn cmd_bench_mmap(args: &[String]) {
     let (dir, qdir) = match (args.get(2), args.get(3)) {
         (Some(d), Some(q)) => (d.as_str(), q.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli bench-mmap <index-dir> <queries-dir> [iters] [count|materialize|json]");
+            eprintln!("usage: sparq-cli bench-mmap <index-dir> <queries-dir> [iters] [count|materialize|json] [decompress]");
             std::process::exit(2);
         }
     };
     let iters: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
     let mode = args.get(5).map(String::as_str).unwrap_or("count");
     let t = Instant::now();
-    let g = sparq_core::Graph::open(std::path::Path::new(dir)).unwrap_or_else(|e| {
+    let mut g = sparq_core::Graph::open(std::path::Path::new(dir)).unwrap_or_else(|e| {
         eprintln!("open error: {e}");
         std::process::exit(1);
     });
     eprintln!("opened {} triples (mmap) in {:.3}s | committed heap ~{:.3} GB", g.len(), t.elapsed().as_secs_f64(), g.heap_bytes() as f64 / 1e9);
+    // Load-time decompression mode: decode compressed perms to raw RAM before querying.
+    if args.get(6).map(String::as_str) == Some("decompress") {
+        let t = Instant::now();
+        g.decompress_indexes();
+        eprintln!("decompressed indexes to RAM in {:.3}s | committed heap ~{:.3} GB", t.elapsed().as_secs_f64(), g.heap_bytes() as f64 / 1e9);
+    }
     run_query_suite(&g, qdir, iters, mode);
 }
 
