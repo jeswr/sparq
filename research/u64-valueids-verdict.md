@@ -5,7 +5,16 @@ common literal values (integers beyond the current range, xsd:decimal,
 xsd:dateTime/date, xsd:boolean, short strings) directly in the id.
 Roadmap thread T3 (#23 + #26). Machine: Apple M1 (16 GB), 2026-06-11.*
 
-**VERDICT: (pending measurements — see below)**
+**VERDICT: REJECT (measured).** Widening to u64 costs 2x permutation memory and
+~1.6x on bandwidth-bound scan kernels at both olympics and 10M scale, while the
+only hot path still paying a dict round-trip — xsd:dateTime/date evaluation
+(measured 15.6–16.3x slower than the cached-numeric path) — is fully
+recoverable *within u32* by a `temporal_of` side-cache symmetrical to the
+existing `numerics_of`. Integer/decimal FILTER and aggregation already bypass
+the dict today (≈10 ns/row). On-disk compressed size is unaffected (+0%), so
+disk is not a tiebreaker either way. Billion-scale (>2^31 distinct terms)
+headroom remains the one motivation u32 cannot answer; deferred until a real
+workload approaches the cap (see §4).
 
 ## 1. What exists today (recon)
 
@@ -79,25 +88,111 @@ as order-preserving doubles — surrendering sparq's exact-decimal semantics).
 Fixture: `bench/u64-valueids/gen.py` — 1M subjects × {inline int, big int
 (>2^30, cache path), decimal (cache path), dateTime (dict path), group key}.
 `sparq-cli bench /tmp/t3-literals.nt ntriples bench/u64-valueids/queries 5 count`
-(min of 5, count mode — no serialisation).
+(min of 5, count mode — no serialisation). Load: 5M triples in 1.67 s,
+store ~0.48 GB, dict 1,202,145 terms.
 
-(pending)
+| query | rows | best (ms) | path exercised |
+| --- | ---: | ---: | --- |
+| q01 filter int (inline id) | 499,990 | **0.0032** | index range prune — effectively free |
+| q02 filter big int (cache) | 499,990 | 5.04 | `numerics_of` f64 cache, ≈10 ns/row, **no dict** |
+| q03 filter decimal (cache) | 499,990 | 5.04 | same — already dict-free |
+| q04 filter dateTime (dict) | 503,331 | 81.9 | term materialise + lexical parse/row — **16.3x q03** |
+| q05 BIND int +1 | 500,000 | 72.4 | Term construction + `id_of` per computed value |
+| q06 BIND dec +0.25 | 499,990 | 220.0 | + local-vocab intern (new lexicals) — **3.0x q05** |
+| q07 SUM(int) GROUP BY | 40 | 88.7 | numerics cache — dict-free |
+| q08 SUM(dec) GROUP BY | 40 | 104.2 | numerics cache — dict-free |
+| q09 ORDER BY dateTime | 10 | 1,316.7 | dict round-trip per comparison — **15.6x q10** |
+| q10 ORDER BY decimal | 10 | 84.6 | cached f64 sort key |
+| q11 MAX(dateTime) GROUP BY | 40 | 144.4 | dict round-trip per row |
+
+Decomposition of the ceiling:
+
+- **Integers + decimals in FILTER / aggregation: there is ~nothing left to win.**
+  The numerics cache already removes the dict from these paths (q02/q03/q07/q08
+  ≈10 ns/row). u64 inlining could at best convert q02/q03's 5 ms into q01-style
+  index pruning — a 5 ms/1M-row absolute win on paths that are not bottlenecks.
+- **dateTime/date is the real cost (~16x)** — q04 82 ms vs 5 ms, q09 1.32 s vs
+  85 ms, q11 144 ms. But this is a *cache gap*, not an id-width gap: an epoch
+  side-table (`temporal_of: id → i64`, exactly analogous to `numerics_of`)
+  recovers the same ~16x inside u32, with zero cost to perm width, wasm memory,
+  or disk format.
+- **BIND/computed values** pay Term construction (alloc + hash) even for ints,
+  and local-vocab interning for new decimal lexicals (q06−q05 ≈ 148 ms/1M
+  values). u64 inline decimals would skip the intern — but a `Value::Num` fast
+  path in `value_to_id`/`value_to_id_readonly` (exec.rs:6174) that encodes
+  inline-range integers *before* constructing a Term captures the integer half
+  of this inside u32 today, and the decimal half is bounded by q06's 220 ms/1M,
+  not a 2x-memory problem.
 
 ### 3b. Loss floor — 64-bit permutation rows
 
 `cargo run -p sparq-core --example bench_id_width --release` — sort / full-scan /
 100k-probe kernels over identical row data at both widths, olympics scale
-(1.8M) and 10M rows.
+(1.8M) and 10M rows. Apple M1, min of 3 (sort/probe) / 5 (scan).
 
-(pending)
+| kernel | 1.8M u32 | 1.8M u64 | ratio | 10M u32 | 10M u64 | ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| memory (one perm) | 21 MB | 43 MB | **2.00x** | 120 MB | 240 MB | **2.00x** |
+| sort (build kernel) | 83.8 ms | 72.3 ms | 0.86x | 502.2 ms | 484.6 ms | 0.96x |
+| full scan (sum col) | 0.4 ms | 0.7 ms | **1.60x** | 2.6 ms | 4.1 ms | **1.58x** |
+| 100k range probes | 5.0 ms | 5.2 ms | 1.04x | 6.9 ms | 7.1 ms | 1.03x |
+
+Reading: sort is compute-bound and even slightly *faster* at u64 (aligned 24 B
+rows, single-word lexicographic compare), and pointer-chasing probes are
+latency-bound and indifferent — but the bandwidth-bound scan kernel, which is
+the shape of every pattern scan and merge join inner loop, pays the full ~1.6x.
+Resident memory doubles unconditionally: native 72 → 144 B/triple across 6
+perms, wasm 36 → 72 B/triple against a 4 GB linear-memory ceiling (halves
+browser capacity; the u32-alias feature mitigation would mean maintaining both
+widths everywhere).
 
 ### 3c. Compressed on-disk size
 
-Same example: SPQCPRM1-style delta+varint size for u32-valued ids vs u64 ids
-with tag bit 60.
+Same example: SPQCPRM1-style delta+varint size (128-row blocks, lexicographic
+delta) for u32-valued ids vs u64 ids with inline values moved to tag bit 60.
 
-(pending)
+| | raw u32 | varint u32-ids | varint u64 tag-bit60 |
+| --- | ---: | ---: | ---: |
+| 1.8M rows | 21 MB | 9 MB | 9 MB (**+0%**) |
+| 10M rows | 120 MB | 52 MB | 52 MB (**+0%**) |
+
+The just-merged SPQCPRM1 varint format absorbs the widening entirely: within a
+tag-block, deltas are small regardless of where the tag bit sits; only
+block-first rows and tag-boundary resets pay 9–10-byte varints, amortised over
+128-row blocks to noise. **Disk is neutral — neither a cost of adopting nor a
+benefit of staying.**
 
 ## 4. Decision
 
-(pending)
+**REJECT u64 inline ValueIds.** The loss is structural and unconditional —
+2x resident permutation memory (native and, critically, wasm) and ~1.6x on the
+bandwidth-bound scan kernel that underlies every pattern scan — while the
+measured win decomposes into pieces that are each cheaper to capture inside
+u32:
+
+1. Integer/decimal FILTER + aggregation already bypass the dict (numerics
+   cache, ≈10 ns/row). Nothing material left.
+2. The one genuine dict round-trip — dateTime/date at 15.6–16.3x — is a
+   missing *side-cache*, not a missing id width. Follow-up (recommended, new
+   thread): `temporal_of` epoch-seconds cache mirroring `numerics_of`,
+   expected to collapse q04/q09/q11 to the q03/q10 envelope.
+3. BIND-path Term construction for inline-range integers can short-circuit in
+   `value_to_id`/`value_to_id_readonly` before allocating a Term — a localised
+   u32 optimisation.
+4. Ordering coherence is a real design risk for u64: per-tag blocks would
+   split today's single by-value inline-integer ordering that
+   `inline_pass_values` exploits for binary-searched range FILTER, unless all
+   numerics share an order-preserving encoding (QLever's doubles — which would
+   surrender sparq's exact-decimal semantics).
+
+**Deferred, not dead:** >2^31 distinct terms (billion-scale dictionaries) is
+the one motivation u32 cannot answer. When a workload approaches the cap, the
+path is a parametrised `Id` type (feature-gated, wasm pinned to u32) — and the
+measurements above say to take *plain* u64 dict ids at that point, not
+inline-tagged ones: the inlining half of the idea is dominated by side-caches
+either way.
+
+No engine code was changed on this branch (measure-first; measurements said
+stop). `cargo test --workspace`: 449 passed, 0 failed (65 suites). wasm bundle
+(unchanged code = baseline): 1,173,584 bytes (`wasm-pack build --target web
+--release`, wasm-pack 0.13.1).
