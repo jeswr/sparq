@@ -615,7 +615,11 @@ impl Graph {
     fn build(dict: Dict, triples: Vec<[Id; 3]>) -> Graph {
         let store = TripleStore::from_triples(triples);
         let numerics = NumData::Owned(numerics_of(&dict));
-        let temporals = TempData::Owned(temporals_of(&dict));
+        // Unlike the numerics cache (dense f64 = 8 B/term), the dense temporal cells
+        // are 16 B/term — go sparse straight away when temporals are rare (usually:
+        // none at all -> an empty map, zero memory), keeping the load-time memory
+        // metric flat for non-temporal datasets. Temporal-heavy data stays dense.
+        let temporals = TempData::Owned(temporals_of(&dict)).into_sparse_if_worthwhile();
         Graph {
             dict,
             store,

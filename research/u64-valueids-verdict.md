@@ -196,3 +196,95 @@ No engine code was changed on this branch (measure-first; measurements said
 stop). `cargo test --workspace`: 449 passed, 0 failed (65 suites). wasm bundle
 (unchanged code = baseline): 1,173,584 bytes (`wasm-pack build --target web
 --release`, wasm-pack 0.13.1).
+
+## Follow-up: temporal cache (branch `temporal-cache`, 2026-06-11) — IMPLEMENTED
+
+The two wins §4 said to capture inside u32, now built and measured (same
+machine, same fixture: `bench/u64-valueids/gen.py` 1M subjects / 5M triples;
+`sparq-cli bench … 5 count`, min over two alternated runs of each binary).
+
+**What was built**
+
+1. **`temporals` side-cache** (sparq-core): `Timeline` (the parsed
+   xsd:date/dateTime value + XPath timezone comparison rules) moved from the
+   engine into `sparq_core::temporal`, and the graph now precomputes, per
+   dictionary term, a 16-byte cell `(instant: f64, flag: kind+tz-presence)` for
+   every well-formed `xsd:dateTime`/`xsd:dateTimeStamp`/`xsd:date` literal —
+   the exact f64 `Timeline::instant()` the per-row parse would feed
+   `partial_cmp`, so cached comparisons are **bit-identical** to the dict
+   round-trip path (sub-second precision, equal instants across offsets, the
+   ±14h mixed-timezone indeterminate window, dateTime/date family
+   disjointness). `xsd:time` is deliberately NOT cached (the engine compares it
+   lexically as OtherXsd; a timeline cache would change semantics). Backings
+   mirror `numerics_of`: dense owned, mmap'd (`temporals.bin`, persisted by
+   save/save_compressed/build_external, recomputed when absent), and sparse —
+   with the dense form converted to sparse at build when temporals are < 1/4
+   of terms (16 B/term is twice the numerics cell; a temporal-free dataset
+   pays an empty map, keeping ci-bench's `store_bytes_per_triple` at 107).
+2. **Engine consumers**: temporal fast paths in `cmp_expr`/`equal_expr` (no
+   term materialisation), sargable temporal FILTER **pushdown**
+   (`ScanCmp::Temp` evaluated per scanned row through the cache; indeterminate
+   / cross-family rows excluded exactly as the general path's type errors),
+   ORDER BY sort keys carrying the cached value (no per-comparison lexical
+   re-parse — the q09 killer), and an id-level MIN/MAX fold for all-temporal
+   groups replicating `minmax_values` tie + DISTINCT semantics
+   (first-of-equals MIN, last-of-equals MAX — locked by test against the
+   pre-cache engine's output).
+3. **`Value::Num` fast path in `value_to_id`/`value_to_id_readonly`**
+   (exec.rs): computed inline-range integers encode straight to their inline
+   id (no Term, no lexical); other numerics/booleans probe the dictionary via
+   a new `Dict::lookup_lit` parts lookup — a Term is constructed only for
+   values that genuinely intern into the local vocab. Plus a `LocalVocab`
+   numeric side-cache so FILTER over BIND-computed values stops cloning +
+   re-parsing the local term per row.
+
+**Measured (min of 5 iters × 2 alternated runs, count mode; identical row counts)**
+
+| query | rows | main (µs) | temporal-cache (µs) | speedup |
+| --- | ---: | ---: | ---: | ---: |
+| q01 filter int (inline) | 499,990 | 2.5 | 2.7 | ~1.0 |
+| q02 filter big int (cache) | 499,990 | 4,159 | 3,479 | **1.20x** |
+| q03 filter decimal (cache) | 499,990 | 4,159 | 3,479 | **1.20x** |
+| q04 filter dateTime | 503,331 | 57,558 | 8,008 | **7.2x** |
+| q05 BIND int +1 | 500,000 | 45,863 | 36,365 | **1.26x** |
+| q06 BIND dec +0.25 | 499,990 | 162,007 | 150,266 | 1.08x |
+| q07 SUM(int) GROUP BY | 40 | 64,170 | 64,208 | 1.00x |
+| q08 SUM(dec) GROUP BY | 40 | 79,663 | 78,647 | 1.01x |
+| q09 ORDER BY dateTime | 10 | 896,911 | 120,820 | **7.4x** |
+| q10 ORDER BY decimal | 10 | 57,795 | 55,513 | 1.04x |
+| q11 MAX(dateTime) GROUP BY | 40 | 104,693 | 48,675 | **2.15x** |
+
+Notes on the residuals, measured not guessed:
+
+- **q04 at 8.0 ms vs q03's 3.5 ms**: this fixture has only 2,100 distinct
+  dateTimes (< 1/4 of terms), so the cache is SPARSE here — the per-row probe
+  is a small-hash lookup (~5 ns) instead of a dense array load. Forcing the
+  dense backing measures 5.5 ms; the sparse default was chosen to keep memory
+  flat for non-temporal datasets (the common case). Either way the dict
+  round-trip (16x) is gone.
+- **q09 at 121 ms vs q10's 56 ms is mostly NOT the temporal path**: the
+  column has 2,100 distinct values vs the decimal column's 100k, and the
+  stable parallel merge sort slows on duplicate-heavy keys regardless of type
+  — ORDER BY over a *decimal* column with the same 2,100-value cardinality
+  measures 88.6 ms (on a 5x smaller store). At matched cardinality the
+  temporal comparator is within ~1.4x of the numeric one.
+- **q06 (decimal BIND) is intern-bound**: the 150 ms is local-vocab interning
+  of genuinely new lexicals (Term construct + two hash probes + insert), which
+  no id-width or cache change removes — confirming §3a's decomposition. The
+  integer half (q05) captured its win via inline-id encoding.
+- q02/q03 got 1.2x FASTER as a side effect: the COUNT-filter loop was
+  specialised per predicate kind, removing the old closure dispatch.
+
+**Guards** — sparq-conformance (W3C rdf-tests @ pinned f25dbc0):
+`1225 pass / 0 fail / 4 documented divergence / 0 skip — pass+divergence
+100.0%` (identical to the pre-change baseline = 1229/1229; the dateTime
+comparison/ordering tests all pass). `cargo test --workspace`: 499 passed,
+0 failed (+50 vs baseline: new temporal/core/engine tests, incl. mixed-
+timezone FILTER/ORDER BY/MIN-MAX semantics locked against the pre-cache
+engine's measured output, the temporals.bin mmap round-trip with bit-identical
+instants, delta-overlay cache growth, and xsd:time staying lexical).
+ci-bench (200k entities): all query latencies within noise (most ±2%, several
+faster, e.g. q04_json −11%), `store_bytes_per_triple` 107 → 107,
+`dict_bytes_per_term` 113 → 113. wasm (cargo, wasm32-unknown-unknown
+release): 1,560,961 → 1,573,818 bytes (**+12,857 B, +0.82%** — the core
+temporal module + cache plumbing now compiled into the bundle).
