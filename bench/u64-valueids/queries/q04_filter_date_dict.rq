@@ -1,0 +1,2 @@
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+SELECT ?s WHERE { ?s <http://ex/date> ?d . FILTER(?d > "2012-06-01T00:00:00Z"^^xsd:dateTime) }

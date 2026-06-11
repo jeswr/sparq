@@ -1,0 +1,1 @@
+SELECT ?s ?d WHERE { ?s <http://ex/date> ?d } ORDER BY ?d LIMIT 10

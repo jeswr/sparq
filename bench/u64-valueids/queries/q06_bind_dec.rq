@@ -1,0 +1,1 @@
+SELECT ?w WHERE { ?s <http://ex/dec> ?v . BIND(?v + 0.25 AS ?w) FILTER(?w > 50000.75) }
