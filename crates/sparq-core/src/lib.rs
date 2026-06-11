@@ -582,17 +582,28 @@ impl Graph {
             return Self::load_reader(reader, format);
         }
         const BLOCK: usize = 32 << 20;
-        let mut global = Dict::new();
-        let mut all: Vec<[Id; 3]> = Vec::new();
         let mut carry: Vec<u8> = Vec::new();
         let mut chunk = vec![0u8; BLOCK];
-        // Parse one newline-aligned block in parallel and merge its partial dict into the global.
-        fn flush(global: &mut Dict, all: &mut Vec<[Id; 3]>, bytes: &[u8]) -> Result<(), String> {
-            let (pd, pt) = parse_ntriples_parallel(bytes)?;
-            let remap = global.merge_remap(&pd);
-            remap_extend(all, pt, &remap);
+        // ≥2 rayon threads: ONE sharded dict spans all blocks, so the per-block dict merge
+        // — the measured serial `merge_remap` that capped load scaling at ~1.8× on 4
+        // identical cores — runs parallel across hash-shards; triples carry temporary
+        // sharded ids until one parallel final remap. On one thread the proven serial
+        // merge is kept (no sharding overhead).
+        let sharded = rayon::current_num_threads() > 1;
+        let mut sd = dict::ShardedDict::new(if sharded { default_shards() } else { 1 });
+        let mut global = Dict::new();
+        let mut all: Vec<[Id; 3]> = Vec::new();
+        let flush = |global: &mut Dict, all: &mut Vec<[Id; 3]>, sd: &mut dict::ShardedDict, bytes: &[u8]| -> Result<(), String> {
+            if sharded {
+                let partials = parse_block(bytes)?;
+                sharded_extend(sd, &partials, all);
+            } else {
+                let (pd, pt) = parse_ntriples_parallel(bytes)?;
+                let remap = global.merge_remap(&pd);
+                remap_extend(all, pt, &remap);
+            }
             Ok(())
-        }
+        };
         loop {
             let n = reader.read(&mut chunk).map_err(|e| e.to_string())?;
             if n == 0 {
@@ -600,12 +611,16 @@ impl Graph {
             }
             carry.extend_from_slice(&chunk[..n]);
             if let Some(pos) = carry.iter().rposition(|&b| b == b'\n') {
-                flush(&mut global, &mut all, &carry[..=pos])?;
+                flush(&mut global, &mut all, &mut sd, &carry[..=pos])?;
                 carry.drain(..=pos);
             }
         }
         if !carry.is_empty() {
-            flush(&mut global, &mut all, &carry)?;
+            flush(&mut global, &mut all, &mut sd, &carry)?;
+        }
+        if sharded {
+            let (dict, ids) = finish_sharded(sd, all);
+            return Ok(Self::build(dict, ids));
         }
         Ok(Self::build(global, all))
     }
@@ -808,6 +823,34 @@ impl Graph {
         dir: &std::path::Path,
         chunk: usize,
     ) -> Result<(), String> {
+        // The SHARDED-dict N-Triples ingest (parallel dict consolidation) is the DEFAULT
+        // when it can run (parallel build, >1 rayon thread); `SPARQ_SHARDED_DICT=0` (or
+        // `off`) opts out to the serial-merge path, `=1` keeps forcing it on (its id
+        // assignment needs ≥2 threads' shard count to be meaningfully parallel, but it is
+        // correct on any). The on-disk FORMAT is identical either way (same writers, same
+        // record layouts — only term-id ASSIGNMENT differs), so no format-version bump:
+        // stores built by either path open interchangeably.
+        #[cfg(feature = "parallel")]
+        let sharded = match std::env::var("SPARQ_SHARDED_DICT").as_deref() {
+            Ok("0") | Ok("off") => false,
+            Ok(_) => true,
+            Err(_) => rayon::current_num_threads() > 1,
+        };
+        #[cfg(not(feature = "parallel"))]
+        let sharded = false;
+        Self::build_external_opts(reader, format, dir, chunk, sharded)
+    }
+
+    /// [`build_external`](Self::build_external) with the sharded-dict choice EXPLICIT
+    /// (no env lookup) — for tests and embedders that need a specific path.
+    #[cfg(feature = "mmap")]
+    pub fn build_external_opts<R: std::io::Read + Send>(
+        reader: R,
+        format: &str,
+        dir: &std::path::Path,
+        chunk: usize,
+        sharded: bool,
+    ) -> Result<(), String> {
         use store::{Perm, BUILT};
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let tmp = dir.join("tmp");
@@ -834,23 +877,30 @@ impl Graph {
             }};
         }
 
-        // Opt-in (`SPARQ_SHARDED_DICT`) PARALLEL sharded-dict ingest for N-Triples: interns
-        // through N hash-shards (no serial `merge_remap`), spilling temporary sharded ids
-        // that an order-preserving remap turns into final dense ids after the SPO sort. When
-        // not selected (or for other formats / non-parallel builds), the normal path runs.
+        // PARALLEL sharded-dict ingest for N-Triples (the default — see `build_external`):
+        // interns through N hash-shards (no serial `merge_remap`), spilling temporary
+        // sharded ids that an order-preserving remap turns into final dense ids after the
+        // SPO sort. When opted out (or for other formats / non-parallel builds), the
+        // serial-merge path runs.
         #[cfg(all(feature = "mmap", feature = "parallel"))]
-        let sharded = matches!(format, "ntriples" | "n-triples") && std::env::var("SPARQ_SHARDED_DICT").is_ok();
+        let sharded = matches!(format, "ntriples" | "n-triples") && sharded;
         #[cfg(not(all(feature = "mmap", feature = "parallel")))]
-        let sharded = false;
+        let sharded = {
+            let _ = sharded;
+            false
+        };
         let mut sharded_remap: Option<(Vec<u64>, u32)> = None;
 
         if sharded {
             #[cfg(all(feature = "mmap", feature = "parallel"))]
             {
-                let n_shards = (rayon::current_num_threads() * 2).clamp(4, 64);
-                let mut sd = dict::ShardedDict::new(n_shards);
+                let mut sd = dict::ShardedDict::new(default_shards());
                 build_external_ntriples_sharded(reader, &mut sd, &mut buf, &mut runs, &tmp, chunk)?;
+                let t_cons = std::time::Instant::now();
                 let (merged, base, stride) = sd.into_merged();
+                if build_timing::enabled() {
+                    eprintln!("[build-timing] dict consolidate (into_merged): {:.2}s", t_cons.elapsed().as_secs_f64());
+                }
                 dict = merged;
                 sharded_remap = Some((base, stride));
             }
@@ -1430,31 +1480,66 @@ pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
 
 #[cfg(feature = "parallel")]
 fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
-    use rayon::prelude::*;
-    // A few chunks per thread for load balancing (terms are not uniformly dense).
-    let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 4096 + 1);
-    let bounds = newline_chunk_bounds(bytes, target);
-
-    let partials: Vec<(Dict, Vec<[Id; 3]>)> = bounds
-        .par_iter()
-        .map(|&(s, e)| {
-            let mut dict = Dict::new();
-            let triples = nt::parse_chunk(&bytes[s..e], &mut dict)?;
-            Ok::<_, String>((dict, triples))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
+    let partials = parse_block(bytes)?;
     let total: usize = partials.iter().map(|(_, t)| t.len()).sum();
-    let cap = partials.iter().map(|(d, _)| d.len()).max().unwrap_or(0);
-    let mut global = Dict::with_capacity(cap);
-    let mut all = Vec::with_capacity(total);
-    for (pd, ptriples) in partials {
-        let remap = global.merge_remap(&pd);
-        // Dictionary ids are 1-based and below INLINE_BASE; inline-integer ids carry their
-        // value and pass through unchanged. Prefetches the remap gather (see remap_extend).
-        remap_extend(&mut all, ptriples, &remap);
+    // One rayon thread: the sharded merge would only add routing/consolidation overhead —
+    // keep the proven serial merge (also the byte-reference the differential tests pin).
+    if rayon::current_num_threads() <= 1 {
+        let cap = partials.iter().map(|(d, _)| d.len()).max().unwrap_or(0);
+        let mut global = Dict::with_capacity(cap);
+        let mut all = Vec::with_capacity(total);
+        for (pd, ptriples) in partials {
+            let remap = global.merge_remap(&pd);
+            // Dictionary ids are 1-based and below INLINE_BASE; inline-integer ids carry
+            // their value and pass through unchanged. Prefetches the gather (remap_extend).
+            remap_extend(&mut all, ptriples, &remap);
+        }
+        return Ok((global, all));
     }
-    Ok((global, all))
+    // ≥2 threads: SHARDED parallel dict consolidation (the measured serial `merge_remap`
+    // ceiling — load plateaued at ~1.8× on 4 identical cores — was exactly this stage).
+    let mut sd = dict::ShardedDict::new(default_shards());
+    let mut all: Vec<[Id; 3]> = Vec::with_capacity(total);
+    sharded_extend(&mut sd, &partials, &mut all);
+    Ok(finish_sharded(sd, all))
+}
+
+/// The shard count for the parallel in-memory/streaming dict consolidation (2 shards per
+/// rayon thread for load balance; same policy as the external sharded build).
+#[cfg(feature = "parallel")]
+fn default_shards() -> usize {
+    (rayon::current_num_threads() * 2).clamp(4, 64)
+}
+
+/// Interns a parsed block's partial dicts into the sharded dict and appends the block's
+/// triples (remapped to TEMPORARY sharded ids, inline ids passing through) to `all` — the
+/// parallel-merge step shared by the in-memory N-Triples loaders. The remap gather runs
+/// in parallel (indexed `par_extend`, deterministic order).
+#[cfg(feature = "parallel")]
+fn sharded_extend(sd: &mut dict::ShardedDict, partials: &[(Dict, Vec<[Id; 3]>)], all: &mut Vec<[Id; 3]>) {
+    use rayon::prelude::*;
+    let remaps = sd.intern_partials(partials);
+    for (pidx, (_, ptriples)) in partials.iter().enumerate() {
+        let rm = &remaps[pidx];
+        let map = |id: Id| if id >= dict::INLINE_BASE { id } else { rm[id as usize] };
+        all.par_extend(ptriples.par_iter().map(|&[s, p, o]| [map(s), map(p), map(o)]));
+    }
+}
+
+/// Consolidates the sharded dict into one `Dict` (parallel arena move + parallel-hash
+/// lookup-table rebuild, so the result serves `lookup`/`intern` like a serially-built
+/// dict) and remaps `all` from temporary sharded ids to the final dense ids in parallel.
+#[cfg(feature = "parallel")]
+fn finish_sharded(sd: dict::ShardedDict, mut all: Vec<[Id; 3]>) -> (Dict, Vec<[Id; 3]>) {
+    use rayon::prelude::*;
+    let (mut dict, base, stride) = sd.into_merged();
+    dict.build_table();
+    all.par_iter_mut().for_each(|t| {
+        for c in t.iter_mut() {
+            *c = dict::remap_sharded(*c, &base, stride);
+        }
+    });
+    (dict, all)
 }
 
 /// Serial Turtle parse of `bytes` into `dict` — the fallback and the per-chunk worker.
@@ -1860,25 +1945,57 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
             }
             Ok(())
         });
-        // Stage 3 — SHARDED merge: route each partial's (non-inline) terms to shards and
-        // intern in parallel (component-based, no Term alloc), then remap triples to temp ids.
-        for partials in prx {
-            let t_merge = std::time::Instant::now();
-            let remaps = sharded.intern_partials(&partials);
-            build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-            let t_remap = std::time::Instant::now();
-            for (pidx, (_, ptriples)) in partials.iter().enumerate() {
-                let rm = &remaps[pidx];
-                let map = |id: Id| if id >= dict::INLINE_BASE { id } else { rm[id as usize] };
-                for &[s, p, o] in ptriples {
-                    buf.push([map(s), map(p), map(o)]);
-                    if buf.len() >= chunk {
-                        extsort::spill_run(buf, runs, tmp).map_err(|e| e.to_string())?;
+        // Stage 4 — triple REMAP + spill on its own thread, so it runs CONCURRENTLY with
+        // stage 3's interning of the next batch (they were one serial stage — the measured
+        // ~200 s/1 B "dict bucket"; now the critical path is max(intern, remap), not the
+        // sum). The remap gather itself is rayon-parallel (indexed map into a scratch that
+        // is appended at exact `chunk` boundaries, so the run files — and every downstream
+        // byte — stay identical to the old serial loop's).
+        type Batch = (Vec<(Dict, Vec<[Id; 3]>)>, Vec<Vec<Id>>);
+        let (rtx, rrx) = sync_channel::<Batch>(1);
+        let remapper = scope.spawn(move || -> Result<(), String> {
+            use rayon::prelude::*;
+            let mut scratch: Vec<[Id; 3]> = Vec::new();
+            for (partials, remaps) in rrx {
+                let t_remap = std::time::Instant::now();
+                for (pidx, (_, ptriples)) in partials.iter().enumerate() {
+                    let rm = &remaps[pidx];
+                    let map = |id: Id| if id >= dict::INLINE_BASE { id } else { rm[id as usize] };
+                    ptriples.par_iter().map(|&[s, p, o]| [map(s), map(p), map(o)]).collect_into_vec(&mut scratch);
+                    let mut rest: &[[Id; 3]] = &scratch;
+                    while !rest.is_empty() {
+                        let take = (chunk - buf.len()).min(rest.len());
+                        buf.extend_from_slice(&rest[..take]);
+                        rest = &rest[take..];
+                        if buf.len() >= chunk {
+                            extsort::spill_run(buf, runs, tmp).map_err(|e| e.to_string())?;
+                        }
                     }
                 }
+                build_timing::REMAP_NS.fetch_add(t_remap.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             }
-            build_timing::REMAP_NS.fetch_add(t_remap.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
+            Ok(())
+        });
+        // Stage 3 (this thread) — SHARDED merge: route each partial's (non-inline) terms to
+        // shards and intern in parallel (component-based, no Term alloc; the routing and the
+        // remap-table scatter are parallel too — see `ShardedDict::intern_partials`), then
+        // hand the batch to stage 4 for the triple remap. Batches flow IN ORDER, so id
+        // assignment is deterministic and identical to the previous serial-stage version.
+        let feed = || -> Result<(), String> {
+            for partials in prx {
+                let t_merge = std::time::Instant::now();
+                let remaps = sharded.intern_partials(&partials);
+                build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                if rtx.send((partials, remaps)).is_err() {
+                    return Ok(()); // the remap stage errored and dropped the receiver
+                }
+            }
+            Ok(())
+        };
+        let fed = feed();
+        drop(rtx); // close the channel so stage 4 drains and exits
+        remapper.join().map_err(|_| "remap thread panicked".to_string())??;
+        fed?;
         parser.join().map_err(|_| "parse thread panicked".to_string())??;
         producer.join().map_err(|_| "decompression thread panicked".to_string())?
     })
@@ -1905,7 +2022,7 @@ fn remap_perm_file(path: &std::path::Path, base: &[u64], stride: u32) -> Result<
 
 /// Parses one (complete-line) N-Triples byte block in parallel into per-chunk partial
 /// dictionaries + local-id triples (no shared state) — the parallelizable half of ingest.
-#[cfg(all(feature = "mmap", feature = "parallel"))]
+#[cfg(feature = "parallel")]
 fn parse_block(bytes: &[u8]) -> Result<Vec<(Dict, Vec<[Id; 3]>)>, String> {
     use rayon::prelude::*;
     let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 4096 + 1);
@@ -1924,8 +2041,8 @@ fn parse_block(bytes: &[u8]) -> Result<Vec<(Dict, Vec<[Id; 3]>)>, String> {
 }
 
 /// Env-gated (`SPARQ_BUILD_TIMING`) phase-time accumulators for the parallel ingest path,
-/// to attribute wall-time across parallel-parse vs serial dict-merge vs serial triple-remap.
-#[cfg(all(feature = "mmap", feature = "parallel"))]
+/// to attribute wall-time across parallel-parse vs dict-merge vs triple-remap.
+#[cfg(feature = "parallel")]
 mod build_timing {
     use std::sync::atomic::AtomicU64;
     pub static PARSE_NS: AtomicU64 = AtomicU64::new(0);

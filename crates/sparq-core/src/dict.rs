@@ -963,6 +963,29 @@ impl Dict {
         remap
     }
 
+    /// (Re)builds the content-hash lookup table from the term arena — for dictionaries
+    /// assembled WITHOUT incremental table inserts (`ShardedDict::into_merged`), so the
+    /// result supports `lookup`/`intern` like any serially-built dict. The per-term
+    /// hashing (the dominant cost) runs in parallel; the inserts are a fast serial pass
+    /// (the table is pre-sized, so no resize re-hashing). Arena-mode only.
+    pub fn build_table(&mut self) {
+        debug_assert!(self.base == 0 && self.blob.is_none(), "build_table is arena-mode only");
+        let hashes: Vec<u64> = {
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                self.terms.par_iter().map(|t| hash_stored(t, &self.prefixes, &self.datatypes)).collect()
+            }
+            #[cfg(not(feature = "parallel"))]
+            self.terms.iter().map(|t| hash_stored(t, &self.prefixes, &self.datatypes)).collect()
+        };
+        let mut table = HashTable::with_capacity(self.terms.len());
+        for (i, &h) in hashes.iter().enumerate() {
+            table.insert_unique(h, (i as Id) + 1, |&j| hashes[(j - 1) as usize]);
+        }
+        self.table = table;
+    }
+
     /// Serialises the dictionary (prefixes, datatypes, compact terms) to `path` in a
     /// compact binary format. The hash table is NOT written — it is rebuilt on `open`.
     /// Arena-mode only (it serialises `terms`); the compacted/mmap'd modes persist via
@@ -1387,55 +1410,74 @@ impl ShardedDict {
     /// concat, and the cheaper part-based hashing is reused (mirrors the serial `merge_remap`
     /// per-term cost, but parallel and contention-free). Returns a per-partial remap:
     /// `remap[p][local_id] = temp_id` (`remap[p][0]` unused).
+    ///
+    /// FULLY parallel (measured: the old serial hash-routing scan + serial remap-vec
+    /// scatter were ~half the "merge" bucket): the routing runs per-partial in parallel
+    /// (each partial fills its own per-shard sub-buckets — no shared state), the interning
+    /// runs per-shard in parallel (each shard walks the partials IN ORDER, so per-shard id
+    /// assignment — and therefore the merged dict and every downstream byte — is identical
+    /// to the old serial-routed version), and each shard scatters its temp ids straight
+    /// into the shared remap table (disjoint writes: a term instance `(partial, local-id)`
+    /// is hash-routed to exactly one shard).
     pub fn intern_partials(&mut self, partials: &[(Dict, Vec<[Id; 3]>)]) -> Vec<Vec<Id>> {
         let n = self.shards.len();
         let stride = self.stride;
-        // Route each term to its shard (serial scan — cheap part-based hashing).
-        let mut buckets: Vec<Vec<(u32, Id, TermParts)>> = (0..n).map(|_| Vec::new()).collect();
-        for (pidx, (pd, _)) in partials.iter().enumerate() {
+        // Route each partial's terms to per-shard sub-buckets (parallel over partials).
+        fn route<'a>(pd: &'a Dict, n: usize) -> Vec<Vec<(Id, TermParts<'a>)>> {
+            let mut b: Vec<Vec<(Id, TermParts<'a>)>> = (0..n).map(|_| Vec::with_capacity(pd.len() / n + 1)).collect();
             for i in 1..=pd.len() as Id {
                 let tp = pd.term_parts(i);
+                debug_assert!(
+                    !matches!(tp, TermParts::Triple(_)),
+                    "RDF-star triple terms are not supported by the sharded bulk interner"
+                );
                 let s = (hash_termparts(&tp) % n as u64) as usize;
-                buckets[s].push((pidx as u32, i, tp));
+                b[s].push((i, tp));
             }
+            b
         }
-        // Intern each shard's bucket in parallel (single-writer per shard → no contention).
-        let intern_bucket = |s: usize, shard: &mut Dict, bucket: Vec<(u32, Id, TermParts)>| -> Vec<(u32, Id, Id)> {
-            bucket
-                .into_iter()
-                .map(|(pidx, i, tp)| {
-                    let lid = shard.intern_parts(&tp);
-                    debug_assert!(lid < stride, "shard {s} exceeded STRIDE — raise shard count / widen Id");
-                    (pidx, i, (s as u32) * stride + lid)
-                })
-                .collect()
+        #[cfg(feature = "parallel")]
+        let routed: Vec<Vec<Vec<(Id, TermParts)>>> = {
+            use rayon::prelude::*;
+            partials.par_iter().map(|(pd, _)| route(pd, n)).collect()
         };
-        let resolved: Vec<(u32, Id, Id)> = {
-            #[cfg(feature = "parallel")]
-            {
-                use rayon::prelude::*;
-                self.shards
-                    .par_iter_mut()
-                    .zip(buckets)
-                    .enumerate()
-                    .map(|(s, (shard, bucket))| intern_bucket(s, shard, bucket))
-                    .flatten()
-                    .collect()
-            }
-            #[cfg(not(feature = "parallel"))]
-            {
-                self.shards
-                    .iter_mut()
-                    .zip(buckets)
-                    .enumerate()
-                    .flat_map(|(s, (shard, bucket))| intern_bucket(s, shard, bucket))
-                    .collect()
-            }
-        };
+        #[cfg(not(feature = "parallel"))]
+        let routed: Vec<Vec<Vec<(Id, TermParts)>>> = partials.iter().map(|(pd, _)| route(pd, n)).collect();
+
+        // Pre-size the remap table; shards scatter into it with DISJOINT writes.
         let mut remaps: Vec<Vec<Id>> = partials.iter().map(|(pd, _)| vec![0 as Id; pd.len() + 1]).collect();
-        for (pidx, i, temp) in resolved {
-            remaps[pidx as usize][i as usize] = temp;
+        // Raw view of `remaps` so each shard can write its own (partial, local-id) slots
+        // from a parallel context. SAFETY (disjointness): the hash routing above assigns
+        // every (pidx, i) slot to exactly ONE shard, so no two shards write the same slot,
+        // and nobody reads until the parallel scope ends.
+        #[derive(Clone, Copy)]
+        struct SlotPtr(*mut Id, usize);
+        unsafe impl Send for SlotPtr {}
+        unsafe impl Sync for SlotPtr {}
+        let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| (SlotPtr(v.as_mut_ptr(), v.len()))).collect();
+
+        // Intern each shard's terms in parallel (single-writer per shard → no contention),
+        // walking partials in order so per-shard id assignment matches the serial routing.
+        let intern_shard = |s: usize, shard: &mut Dict| {
+            for (pidx, per_partial) in routed.iter().enumerate() {
+                let SlotPtr(ptr, len) = scatter[pidx];
+                for (i, tp) in &per_partial[s] {
+                    let lid = shard.intern_parts(tp);
+                    debug_assert!(lid < stride, "shard {s} exceeded STRIDE — raise shard count / widen Id");
+                    debug_assert!((*i as usize) < len);
+                    // SAFETY: i < len (local ids are 1..=pd.len() < pd.len()+1) and this
+                    // (pidx, i) slot is written by exactly this shard — see RemapScatter.
+                    unsafe { ptr.add(*i as usize).write((s as u32) * stride + lid) };
+                }
+            }
+        };
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            self.shards.par_iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
         }
+        #[cfg(not(feature = "parallel"))]
+        self.shards.iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
         remaps
     }
 
@@ -1488,19 +1530,53 @@ impl ShardedDict {
             dt_remap.push(dr);
         }
         // Build the merged arena by MOVING each shard's Stored (only the id field remaps).
+        // The move runs PER-SHARD IN PARALLEL into disjoint slices of the target arena
+        // (offsets = the same `base` prefix sums) — at 1 B-triple scale this single pass
+        // over every distinct term was a measurable serial tail of the consolidation.
         let total: usize = self.shards.iter().map(|s| s.terms.len()).sum();
         let mut terms: Vec<Stored> = Vec::with_capacity(total);
-        for (s, sh) in self.shards.into_iter().enumerate() {
-            let (pr, dr) = (&prefix_remap[s], &dt_remap[s]);
-            for stored in sh.terms {
-                terms.push(match stored {
+        {
+            let remap_one = |stored: Stored, pr: &[u32], dr: &[u32]| -> Stored {
+                match stored {
                     Stored::Iri { prefix, suffix } => Stored::Iri { prefix: pr[prefix as usize], suffix },
                     Stored::Lit { value, datatype, lang } => Stored::Lit { value, datatype: dr[datatype as usize], lang },
                     Stored::Blank(b) => Stored::Blank(b),
                     // Guarded out at `intern_terms` / `intern_parts` — a shard can never
                     // hold a triple term (see the `intern_terms` doc comment).
                     Stored::Triple(_) => unreachable!("triple terms cannot enter the sharded interner"),
-                });
+                }
+            };
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                // Split the spare capacity into one disjoint slice per shard.
+                let mut spare: &mut [std::mem::MaybeUninit<Stored>] = &mut terms.spare_capacity_mut()[..total];
+                let mut slices: Vec<&mut [std::mem::MaybeUninit<Stored>]> = Vec::with_capacity(self.shards.len());
+                for sh in &self.shards {
+                    let (head, tail) = spare.split_at_mut(sh.terms.len());
+                    slices.push(head);
+                    spare = tail;
+                }
+                self.shards
+                    .into_par_iter()
+                    .zip(slices)
+                    .enumerate()
+                    .for_each(|(s, (sh, out))| {
+                        let (pr, dr) = (&prefix_remap[s], &dt_remap[s]);
+                        for (slot, stored) in out.iter_mut().zip(sh.terms) {
+                            slot.write(remap_one(stored, pr, dr));
+                        }
+                    });
+                // SAFETY: every one of the `total` slots was initialised exactly once above
+                // (the slices partition [0, total) and each shard fills its slice fully).
+                unsafe { terms.set_len(total) };
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (s, sh) in self.shards.into_iter().enumerate() {
+                let (pr, dr) = (&prefix_remap[s], &dt_remap[s]);
+                for stored in sh.terms {
+                    terms.push(remap_one(stored, pr, dr));
+                }
             }
         }
         let prefix_ids = uni_prefixes.iter().enumerate().map(|(i, p)| (p.clone(), i as u32)).collect();
