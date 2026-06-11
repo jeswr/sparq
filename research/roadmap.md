@@ -309,6 +309,14 @@ Solid Notifications channels for that ecosystem.
   shares machinery with T23.
 - **T24d GPU execution** (`sparq-gpu`): the g5 prototype — offload the embarrassingly-parallel
   inference sweep + large joins; measure PCIe-transfer break-even honestly before keeping.
+  **DONE — measured-and-rejected (PARKED), 2026-06-11.** `crates/sparq-gpu` (opt-in, depended on
+  by nothing, wgpu kept out of the wasm graph) landed with FILTER/hash-probe/GROUP-BY kernels,
+  GPU-vs-CPU correctness tests (adapter-absent ⇒ skip) and an interleaved cpu1/cpuN/gpu-resident/
+  gpu-e2e benchmark at 1M/10M/100M. Measured on M1: per-query transfer loses 9–25×; compute-light
+  scans lose or tie the 8-core CPU *even resident*; hash-probe is the lone real win (1.7–3.2×
+  resident, ~1.1× e2e) — not enough to pay for a residency cache + second backend. Verdict +
+  re-open conditions (discrete ≥8 GB GPU, a resident-column tier landing anyway, or
+  WebGPU-in-browser): `research/gpu-verdict.md`; harness stays in-tree as the re-test rig.
 
 **Sequencing/dependencies:** T13/T15/T20/T21/T22 are independent → agent-parallel now. T14 after
 the in-flight RDF-star merge (wasm API surface). T16 before T23-CONSTRUCT subscriptions. T17 → T18
