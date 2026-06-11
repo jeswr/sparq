@@ -1,0 +1,1 @@
+SELECT ?s WHERE { ?s <http://ex/int> ?v . FILTER(?v > 50000) }

@@ -1,0 +1,1 @@
+SELECT ?w WHERE { ?s <http://ex/int> ?v . BIND(?v + 1 AS ?w) FILTER(?w > 50000) }

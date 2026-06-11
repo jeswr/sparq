@@ -1,0 +1,1 @@
+SELECT ?g (MAX(?d) AS ?m) WHERE { ?s <http://ex/group> ?g . ?s <http://ex/date> ?d } GROUP BY ?g
