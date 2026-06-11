@@ -7,6 +7,13 @@
 # Loader-synthesized inputs (besides common.n3's): <R> solidx:ownAcl <R.acl> for every
 # ACL graph present; <S> solidx:inDoc <D> for every subject S of ACL graph D (provenance
 # after the single-graph merge); group documents' triples are merged in.
+#
+# Outputs (the materialized auth view, filtered into <urn:sparq:auth> by
+# src/materialize.rs): <principal> auth:read|write|append|control <graphName> — where
+# principal is a WebID, auth:Public, auth:Authenticated, or a minted
+# urn:sparq:pair?agent=A&client=C (acl:origin grants). Implements WAC §"ACL resolution"
+# (accessTo / default / nearest-ancestor), §"Access subjects" (agent / agentClass /
+# agentGroup / origin), and §"Access modes" (Control gates the ACL resource).
 
 @prefix acl:    <http://www.w3.org/ns/auth/acl#> .
 @prefix foaf:   <http://xmlns.com/foaf/0.1/> .

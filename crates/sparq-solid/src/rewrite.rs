@@ -19,6 +19,46 @@ use spargebra::{Query, SparqlParser};
 
 /// Rewrite `sparql` so it can only see `allowed` named graphs. Returns the rewritten
 /// query string (parse → transform → serialize round-trip).
+///
+/// Two transformations (see the module docs for the why):
+///
+/// 1. default-graph triple/path patterns get wrapped in `GRAPH ?fresh { … }`
+///    (per-pattern fresh variables — union-default emulation, cross-document joins
+///    keep working);
+/// 2. the dataset clause becomes `FROM NAMED <g>` for exactly the `allowed` graphs,
+///    intersected with any `FROM NAMED` the query already carried (a query can
+///    restrict further, never widen). `FROM` (default-graph) clauses are dropped —
+///    pod data never lives in the store default graph.
+///
+/// Fail-closed invariant: an empty `allowed` set yields a query over a single
+/// reserved **sentinel** graph (`<urn:sparq:nothing>`, guaranteed absent — the loader
+/// strips reserved graphs), because an empty `FROM NAMED` list would not survive the
+/// serialize→reparse round-trip and the store's graphs would leak back in.
+///
+/// Callers normally go through [`crate::PodStore::query_as`], which feeds this the
+/// session's authorized graph set.
+///
+/// # Errors
+///
+/// Returns `Err` if `sparql` is not a valid SPARQL query (SELECT / ASK / CONSTRUCT /
+/// DESCRIBE). The rewrite itself cannot fail.
+///
+/// # Examples
+///
+/// ```
+/// use oxrdf::NamedNode;
+/// use sparq_solid::rewrite_for;
+///
+/// let allowed = [NamedNode::new("https://pod.ex/notes/n1").unwrap()];
+/// let q = rewrite_for("SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }", &allowed)?;
+/// assert!(q.contains("FROM NAMED <https://pod.ex/notes/n1>"));
+/// assert!(q.contains("GRAPH ?__sg0")); // the pattern now ranges over authorized graphs
+///
+/// // empty set -> the absent sentinel graph keeps the dataset clause fail-closed
+/// let none = rewrite_for("SELECT ?t WHERE { ?s ?p ?t }", &[])?;
+/// assert!(none.contains("FROM NAMED <urn:sparq:nothing>"));
+/// # Ok::<(), String>(())
+/// ```
 pub fn rewrite_for(sparql: &str, allowed: &[NamedNode]) -> Result<String, String> {
     let mut q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
     let (dataset, pattern) = match &mut q {

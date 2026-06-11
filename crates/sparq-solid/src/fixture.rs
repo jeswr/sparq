@@ -10,12 +10,24 @@
 
 use std::fmt::Write;
 
+/// The pod root container IRI.
 pub const POD: &str = "https://pod.ex/";
+/// The pod owner's WebID (Read/Write/Control almost everywhere — but deliberately
+/// shadowed out of `team2/` in the WAC fixture by its nearest-ACL).
 pub const ALICE: &str = "https://alice.ex/card#me";
+/// WebID of a team-group member who also holds the `friends3/` agent grant and the
+/// `origin5/` client-restricted grant (WAC) / `friends3/` allOf pair (ACP).
 pub const BOB: &str = "https://bob.ex/card#me";
+/// WebID of a team-group member; holds the `mixed4/c0/` deep override (WAC) and is
+/// the `origin5/` noneOf exception (ACP).
 pub const CAROL: &str = "https://carol.ex/card#me";
+/// WebID with no grants of its own; target of the `mixed4/` ACP deny (deny-overrides).
 pub const DAVE: &str = "https://dave.ex/card#me";
+/// The client identifier (WAC `acl:origin` / ACP `acp:client`) used by the
+/// pair-principal grants.
 pub const APP: &str = "https://app.ex";
+/// The vcard group document (a pod resource/named graph itself); the group IRI is
+/// `<{TEAM_GROUP_DOC}#g>` with members [`BOB`] and [`CAROL`].
 pub const TEAM_GROUP_DOC: &str = "https://pod.ex/groups/team";
 
 const ACL: &str = "http://www.w3.org/ns/auth/acl#";
@@ -142,11 +154,30 @@ fn acl_doc(out: &mut String, resource: &str, auths: &[Auth]) {
 
 /// The WAC fixture (N-Quads). ACLs at root + every depth-1 container (semantics below)
 /// + restating ACLs at ~10% of containers + one resource-specific ACL.
+///
+/// # Examples
+///
+/// ```
+/// let graph = sparq_core::Graph::load_dataset(&sparq_solid::wac_fixture(), "nquads")?;
+/// assert_eq!(graph.named.len(), 1148); // 864 docs + 259 containers + ACLs + group doc
+/// # Ok::<(), String>(())
+/// ```
+///
+/// Materializing it takes ~1 s in release mode (see `examples/bench.rs`), so prefer
+/// the tiny inline pods from the crate-level docs for fast tests.
 pub fn wac_fixture() -> String {
     wac_fixture_sized(0)
 }
 
 /// [`wac_fixture`] with `extra` filler triples per document (copy-cost scaling).
+///
+/// # Examples
+///
+/// ```no_run
+/// // ~46k quads: scales the v1 per-query copy cost without changing access semantics
+/// let fat = sparq_solid::fixture::wac_fixture_sized(50);
+/// # let _ = fat;
+/// ```
 pub fn wac_fixture_sized(extra: usize) -> String {
     let mut out = String::with_capacity(1 << 20);
     tree_sized(&mut out, extra);
@@ -288,6 +319,13 @@ impl Default for AcpPolicy<'_> {
 
 /// The ACP fixture: same tree, `.acr` graphs. ACP inheritance is CUMULATIVE (every
 /// ancestor's memberAccessControl applies), so the root owner policy reaches everywhere.
+///
+/// # Examples
+///
+/// ```
+/// let nq = sparq_solid::acp_fixture();
+/// assert!(nq.contains(".acr") && !nq.contains(".acl")); // ACP variant
+/// ```
 pub fn acp_fixture() -> String {
     let mut out = String::with_capacity(1 << 20);
     tree(&mut out);

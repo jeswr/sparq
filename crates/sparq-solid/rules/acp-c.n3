@@ -1,8 +1,14 @@
 # ACP — STRATUM C: grants. NAF over stratum B's (now complete) allOfRejected, plus
-# input-only NAF (acp:anyOf / acp:noneOf presence). Deny-overrides is deliberately NOT
-# resolved here: allow and deny are both materialized as triples and the session layer
-# computes allow ∖ deny per session — see design doc §2.3/§3.4. Policies with noneOf
-# matchers emit CONDITIONAL grant nodes carrying their exception matchers.
+# input-only NAF (acp:anyOf / acp:noneOf presence). Deny-overrides (ACP §"Access
+# Modes", normative) is deliberately NOT resolved here: allow and deny are both
+# materialized as triples and the session layer computes allow ∖ deny per session —
+# see design doc §2.3/§3.4. Policies with noneOf matchers emit CONDITIONAL grant
+# nodes carrying their exception matchers.
+#
+# Inputs: stratum B's closure. Outputs (the auth view, filtered into <urn:sparq:auth>
+# by src/materialize.rs): <principal> auth:read|write|append|control <graphName>,
+# <principal> auth:denyRead|denyWrite|denyAppend|denyControl <graphName>, and
+# auth:ConditionalGrant nodes (auth:effect/agent/client/mode/graph/exceptMatcher).
 
 @prefix acp:    <http://www.w3.org/ns/solid/acp#> .
 @prefix acl:    <http://www.w3.org/ns/auth/acl#> .

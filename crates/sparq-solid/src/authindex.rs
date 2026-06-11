@@ -12,23 +12,73 @@ use oxrdf::{NamedNode, Term};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::Graph;
 
+/// Principal IRI matched by every session (WAC `foaf:Agent` / ACP `acp:PublicAgent`).
 pub const PUBLIC: &str = "https://sparq.dev/ns/auth#Public";
+/// Principal IRI matched by any session with a WebID (WAC `acl:AuthenticatedAgent` /
+/// ACP `acp:AuthenticatedAgent`).
 pub const AUTHENTICATED: &str = "https://sparq.dev/ns/auth#Authenticated";
+/// Client IRI matched by any client in conditional-grant heads (ACP `acp:PublicClient`).
 pub const ANY_CLIENT: &str = "https://sparq.dev/ns/auth#AnyClient";
 
 /// A request context: who (WebID) through what (client identifier / origin).
 /// `agent: None` = anonymous.
+///
+/// A session expands to at most 6 principals when grants are looked up: always
+/// `auth:Public`; plus `auth:Authenticated` and the WebID itself when `agent` is
+/// given; plus the minted `urn:sparq:pair?agent=…&client=…` pair of each of those
+/// when `client` is given. Expansion is internal — callers just construct the pair:
+///
+/// # Examples
+///
+/// ```
+/// use sparq_solid::Session;
+///
+/// let anonymous = Session::default();
+/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None };
+/// let alice_via_app =
+///     Session { agent: Some("https://alice.ex/card#me"), client: Some("https://app.ex") };
+/// assert!(anonymous.agent.is_none());
+/// # let _ = (alice, alice_via_app);
+/// ```
+///
+/// # Invariants (fail-closed)
+///
+/// Agent/client values inside the reserved `urn:sparq:` IRI space, or containing the
+/// literal pair-encoding delimiter `&client=`, are never matched against grants: the
+/// accessible set for such a session is empty (they could otherwise impersonate a
+/// minted pair principal — see [`AuthIndex::accessible`]).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Session<'a> {
+    /// The authenticated agent's WebID; `None` = anonymous.
     pub agent: Option<&'a str>,
+    /// The client identifier (WAC `acl:origin` / ACP `acp:client`); `None` = any client.
     pub client: Option<&'a str>,
 }
 
+/// An access mode, matching WAC's `acl:Read`/`Write`/`Append`/`Control` (ACP reuses
+/// the same four mode IRIs by convention).
+///
+/// Per the WAC spec, `Control` governs the access-control document itself: the rules
+/// translate `acl:Control` on a resource into `auth:read`/`auth:write` grants **on
+/// its `.acl` graph**, not into access to the resource.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_solid::Mode;
+/// // Modes key the per-session cache; they are plain copyable enum values.
+/// let modes = [Mode::Read, Mode::Write, Mode::Append, Mode::Control];
+/// assert_eq!(modes.len(), 4);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
+    /// `acl:Read` — read the resource's triples.
     Read,
+    /// `acl:Write` — replace/delete the resource's triples.
     Write,
+    /// `acl:Append` — add triples without removing existing ones.
     Append,
+    /// `acl:Control` — read/write the resource's access-control document.
     Control,
 }
 
@@ -75,6 +125,39 @@ struct ConditionalGrant {
     except: Vec<String>, // matcher IRIs
 }
 
+/// A transient index over the `<urn:sparq:auth>` graph's triples: principal × mode →
+/// graph names, plus conditional grants (ACP `noneOf`) and the matcher accept-sets
+/// they reference.
+///
+/// Everything the index answers is derivable from the auth-view **triples** with
+/// plain SPARQL (the design doc shows the `MINUS` form); the index is the cached fast
+/// path (design doc D3) and holds no state of its own — [`crate::PodStore`] rebuilds
+/// it from the triples after every re-materialization. Use it directly only for
+/// inspection/tests ([`crate::PodStore::auth`]) or if you manage materialization
+/// yourself with the free [`crate::materialize_wac`] / [`crate::materialize_acp`]
+/// functions.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_solid::{materialize_wac, AuthIndex, Mode, Session};
+///
+/// let nquads = r#"
+/// <https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+/// <https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+/// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+/// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .
+/// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+/// "#;
+/// let mut graph = sparq_core::Graph::load_dataset(nquads, "nquads")?;
+/// materialize_wac(&mut graph)?;
+///
+/// let index = AuthIndex::from_graph(&graph);
+/// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None };
+/// assert_eq!(index.accessible(&alice, Mode::Read).len(), 2); // n1 + notes/
+/// assert!(index.accessible(&alice, Mode::Write).is_empty()); // fail-closed
+/// # Ok::<(), String>(())
+/// ```
 #[derive(Debug, Default)]
 pub struct AuthIndex {
     /// (principal IRI, mode) → graphs, for simple allow / deny triples.
@@ -89,6 +172,10 @@ pub struct AuthIndex {
 impl AuthIndex {
     /// Build from the dataset's `<urn:sparq:auth>` graph (empty index if absent —
     /// fail-closed).
+    ///
+    /// Only `auth:`-namespace triples (and the `solidx:` matcher accept-set facts the
+    /// materializer copies alongside conditional grants) are interpreted; anything
+    /// else in the graph is ignored. See [`AuthIndex`] for an end-to-end example.
     pub fn from_graph(graph: &Graph) -> AuthIndex {
         let mut ix = AuthIndex::default();
         let auth_name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
@@ -191,11 +278,21 @@ impl AuthIndex {
     }
 
     /// The sorted, deduplicated graph set this session may access in `mode`:
-    /// `∪ allow(principals) ∖ ∪ deny(principals)` (deny-overrides across principals).
+    /// `∪ allow(principals) ∖ ∪ deny(principals)` (deny-overrides across principals),
+    /// with conditional grants/denies (ACP `noneOf`) applied when their
+    /// (agent, client) head matches the session and no exception matcher accepts it.
     ///
-    /// Fails CLOSED (empty set) for session values inside the reserved principal
-    /// encoding — a caller-supplied "WebID" like `urn:sparq:pair?agent=…&client=…`
-    /// must not impersonate a minted pair principal (roborev 1727).
+    /// Never panics and never errors — every unauthorized condition degrades to the
+    /// **empty set**:
+    ///
+    /// - no auth view materialized → empty index → empty set;
+    /// - no grant names any of the session's principals → empty set;
+    /// - session values inside the reserved principal encoding fail CLOSED — a
+    ///   caller-supplied "WebID" like `urn:sparq:pair?agent=…&client=…` must not
+    ///   impersonate a minted pair principal (roborev 1727).
+    ///
+    /// Prefer [`crate::PodStore::accessible`], which memoizes this walk per
+    /// (agent, client, mode) until the next re-materialization.
     pub fn accessible(&self, s: &Session, mode: Mode) -> Vec<NamedNode> {
         let invalid = |v: Option<&str>| v.is_some_and(|x| !crate::loader::session_value_allowed(x));
         if invalid(s.agent) || invalid(s.client) {

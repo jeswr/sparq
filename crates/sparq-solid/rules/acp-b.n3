@@ -1,6 +1,11 @@
 # ACP — STRATUM B: negation-as-failure over stratum A's (now complete) accept-sets.
-# Derives per-candidate-pair allOf rejections and anyOf satisfaction. Runs as its own
-# reason_n3 call seeded with stratum A's closure (design doc §3.5).
+# Derives per-candidate-pair allOf rejections and anyOf satisfaction (ACP §"Policies":
+# allOf = every matcher satisfied, anyOf = at least one). Runs as its own reason_n3
+# call seeded with stratum A's closure (design doc §3.5).
+#
+# Inputs: stratum A's closure (candPair/pairAgent/pairClient, acceptsAgentP/ClientP)
+# + the original acp:allOf/anyOf facts. Outputs (stratum C's inputs):
+# ?k solidx:allOfRejected true ; ?k solidx:anyOfSat true .
 
 @prefix acp:    <http://www.w3.org/ns/solid/acp#> .
 @prefix solidx: <https://sparq.dev/ns/solidx#> .

@@ -9,6 +9,11 @@
 #
 # Loader-synthesized inputs (besides common.n3's): <R> solidx:ownAcr <R.acr> ;
 # <A> solidx:isWebId true for concrete agent IRIs seen in ACR/group docs.
+#
+# Outputs (stratum B's inputs): ?pol solidx:appliesToResource ?r (ACP §"Effective
+# Policies": own accessControl + cumulative ancestor memberAccessControl);
+# ?m solidx:acceptsAgentP/acceptsClientP ?p (matcher accept-sets, ACP §"Matchers");
+# ?pol solidx:candPair ?k with solidx:pairAgent/pairClient (candidate principals).
 
 @prefix acp:    <http://www.w3.org/ns/solid/acp#> .
 @prefix auth:   <https://sparq.dev/ns/auth#> .

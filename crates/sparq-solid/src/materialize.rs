@@ -29,17 +29,68 @@ const EXCEPT_MATCHER: &str = "https://sparq.dev/ns/auth#exceptMatcher";
 const MATCHER_FACTS: [&str; 2] =
     ["https://sparq.dev/ns/solidx#acceptsAgentP", "https://sparq.dev/ns/solidx#acceptsClientP"];
 
+/// What a `materialize_*` run produced: auth-view size, per-stratum closure sizes,
+/// and wall-clock time. Purely informational (logging / benchmarking) — the result
+/// itself is the `<urn:sparq:auth>` graph installed into the dataset.
+///
+/// # Examples
+///
+/// ```no_run
+/// let mut graph = sparq_core::Graph::load_dataset(&sparq_solid::wac_fixture(), "nquads")?;
+/// let stats = sparq_solid::materialize_wac(&mut graph)?;
+/// println!("{} auth triples, closure {:?}, {:.0} ms",
+///          stats.auth_triples, stats.strata_facts, stats.millis);
+/// # Ok::<(), String>(())
+/// ```
 #[derive(Debug, Default)]
 pub struct MaterializeStats {
     /// Triples in the produced auth view.
     pub auth_triples: usize,
-    /// Closure size after each reasoning stratum.
+    /// Closure size after each reasoning stratum (1 entry for WAC, 3 for ACP).
     pub strata_facts: Vec<usize>,
     /// Wall-clock total.
     pub millis: f64,
 }
 
 /// Materialize the WAC auth view (single stratum) and install it as `<urn:sparq:auth>`.
+///
+/// The free-function form of [`crate::PodStore::materialize_wac`], for callers
+/// managing a [`Graph`] directly: strips reserved `urn:sparq:` graphs, assembles the
+/// reasoning input (`.acl` graphs + group documents + structural facts — pod content
+/// is **never** fed to the reasoner), runs `rules/common.n3` + `rules/wac.n3`
+/// through `sparq_reason::reason_n3`, and swaps the filtered closure in as the
+/// `<urn:sparq:auth>` named graph (replacing any previous view).
+///
+/// Note: a [`crate::PodStore`] does NOT observe direct calls on its `graph` field —
+/// use the method form so the session index and cache are rebuilt.
+///
+/// # Errors
+///
+/// Returns `Err` if an agent / group-member / origin IRI collides with the reserved
+/// principal encoding (starts with `urn:sparq:` or contains the literal `&client=`),
+/// or if the reasoner rejects the assembled N3 source. The dataset's previous auth
+/// view (if any) is left untouched on error.
+///
+/// # Examples
+///
+/// ```
+/// use oxrdf::Term;
+///
+/// let nquads = r#"
+/// <https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+/// <https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+/// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+/// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .
+/// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+/// "#;
+/// let mut graph = sparq_core::Graph::load_dataset(nquads, "nquads")?;
+/// let stats = sparq_solid::materialize_wac(&mut graph)?;
+/// assert!(stats.auth_triples > 0);
+/// // the view is an ordinary named graph now
+/// assert!(graph.named.iter().any(|(name, _)| matches!(
+///     name, Term::NamedNode(n) if n.as_str() == sparq_solid::AUTH_GRAPH)));
+/// # Ok::<(), String>(())
+/// ```
 pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
     let t0 = Instant::now();
     strip_reserved_graphs(graph);
@@ -54,6 +105,39 @@ pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
 }
 
 /// Materialize the ACP auth view (three strata) and install it as `<urn:sparq:auth>`.
+///
+/// The free-function form of [`crate::PodStore::materialize_acp`]. Same contract as
+/// [`materialize_wac`], but the input graphs are the `.acr` ones and the rules run
+/// as three stratified `reason_n3` calls (`rules/acp-a.n3` accepts →
+/// `rules/acp-b.n3` rejections → `rules/acp-c.n3` grants), each seeded with the
+/// previous closure — the engine's negation-as-failure never retracts, so each
+/// negated predicate must be complete before its stratum runs (design doc §3.5).
+///
+/// # Errors
+///
+/// As [`materialize_wac`].
+///
+/// # Examples
+///
+/// ```
+/// // One document; an ACR on the pod root grants alice Read on all member resources.
+/// let nquads = r#"
+/// <https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+/// <https://pod.ex/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/.acr#c> <https://pod.ex/.acr> .
+/// <https://pod.ex/.acr#c> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/.acr#pol> <https://pod.ex/.acr> .
+/// <https://pod.ex/.acr#pol> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acr> .
+/// <https://pod.ex/.acr#pol> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/.acr#m> <https://pod.ex/.acr> .
+/// <https://pod.ex/.acr#m> <http://www.w3.org/ns/solid/acp#agent> <https://alice.ex/card#me> <https://pod.ex/.acr> .
+/// "#;
+/// let mut graph = sparq_core::Graph::load_dataset(nquads, "nquads")?;
+/// let stats = sparq_solid::materialize_acp(&mut graph)?;
+/// assert_eq!(stats.strata_facts.len(), 3); // accepts → rejections → grants
+///
+/// let index = sparq_solid::AuthIndex::from_graph(&graph);
+/// let alice = sparq_solid::Session { agent: Some("https://alice.ex/card#me"), client: None };
+/// assert_eq!(index.accessible(&alice, sparq_solid::Mode::Read).len(), 2); // n1 + notes/
+/// # Ok::<(), String>(())
+/// ```
 pub fn materialize_acp(graph: &mut Graph) -> Result<MaterializeStats, String> {
     let t0 = Instant::now();
     strip_reserved_graphs(graph);

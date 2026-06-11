@@ -4,6 +4,11 @@ Status: design + v1 prototype (`crates/sparq-solid`). The L1 engine change is **
 here but not implemented** — it is a follow-up thread; nothing in `sparq-engine`/`sparq-core`
 is modified by this design's v1.
 
+User-facing documentation of the shipped crate (quick start, support matrix, security
+model, API docs): [`crates/sparq-solid/README.md`](../crates/sparq-solid/README.md) and
+`cargo doc -p sparq-solid`. This document is the design rationale and the measured-baseline
+record those docs link back to.
+
 ## 0. Goal and binding constraints
 
 Store Solid Pods in the knowledge graph with **named-graph-per-document** semantics; store
