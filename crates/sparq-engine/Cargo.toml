@@ -45,3 +45,10 @@ sha2 = { version = "0.10", optional = true }
 # getrandom into the browser dependency graph, so the functions are native-only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# The dict-consolidation differential test compares the serial, sharded-parallel and
+# external (out-of-core) build paths — the tests need sparq-core's mmap feature even
+# though the library itself doesn't.
+sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap", "parallel"] }
+rayon.workspace = true

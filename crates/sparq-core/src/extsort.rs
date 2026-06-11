@@ -22,6 +22,16 @@ pub fn spill_run(buf: &mut Vec<[Id; 3]>, runs: &mut Vec<PathBuf>, tmp: &Path) ->
     if buf.is_empty() {
         return Ok(());
     }
+    // Parallel sort when available: a run is up to `chunk` (tens of millions of) triples,
+    // and this sort previously sat SERIALLY inside the ingest spill stage and each
+    // sibling-perm external sort. `[u32;3]` is total-ordered and equal triples are
+    // byte-identical, so the run file is byte-identical to the serial `sort_unstable`.
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        buf.par_sort_unstable();
+    }
+    #[cfg(not(feature = "parallel"))]
     buf.sort_unstable();
     let path = tmp.join(format!("run{}.bin", runs.len()));
     std::fs::write(&path, as_bytes(buf))?;
