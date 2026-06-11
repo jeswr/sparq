@@ -132,18 +132,22 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
 
 /// Hash-join probe: for each probe id, walk the resident open-addressing table
 /// (linear probing, load factor <= 0.5, EMPTY_KEY sentinel) counting matches and
-/// summing matched payloads. The u64 payload sum is emulated with a lo-word
-/// atomic + wrap-detected carry into a hi-word atomic (WGSL atomics are 32-bit).
+/// summing matched payloads. Both u64 results (match count and payload sum) are
+/// emulated with a lo-word atomic + wrap-detected carry into a hi-word atomic
+/// (WGSL atomics are 32-bit): duplicate build keys make >u32::MAX matches
+/// possible on a high-fanout join, so the count gets the same treatment as the
+/// sum.
 const WGSL_HASH_PROBE: &str = r#"
 struct Params { n: u32, mask: u32, _p0: u32, _p1: u32 };
 @group(0) @binding(0) var<storage, read>       table:  array<vec2<u32>>; // x=key, y=payload
 @group(0) @binding(1) var<storage, read>       probe:  array<u32>;
-@group(0) @binding(2) var<storage, read_write> result: array<atomic<u32>>; // [matches, sum_lo, sum_hi]
+@group(0) @binding(2) var<storage, read_write> result: array<atomic<u32>>; // [m_lo, m_hi, sum_lo, sum_hi]
 @group(0) @binding(3) var<uniform>             params: Params;
 
-var<workgroup> wg_m:  atomic<u32>;
-var<workgroup> wg_lo: atomic<u32>;
-var<workgroup> wg_hi: atomic<u32>;
+var<workgroup> wg_m:   atomic<u32>;
+var<workgroup> wg_mhi: atomic<u32>;
+var<workgroup> wg_lo:  atomic<u32>;
+var<workgroup> wg_hi:  atomic<u32>;
 
 fn hash32(x0: u32) -> u32 {
     var x = x0;
@@ -161,6 +165,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(num_workgroups)      ngw: vec3<u32>) {
     if (lid.x == 0u) {
         atomicStore(&wg_m, 0u);
+        atomicStore(&wg_mhi, 0u);
         atomicStore(&wg_lo, 0u);
         atomicStore(&wg_hi, 0u);
     }
@@ -173,7 +178,8 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
             let e = table[slot];
             if (e.x == 0xFFFFFFFFu) { break; }
             if (e.x == k) {
-                atomicAdd(&wg_m, 1u);
+                let oldm = atomicAdd(&wg_m, 1u);
+                if (oldm + 1u < oldm) { atomicAdd(&wg_mhi, 1u); }
                 let old = atomicAdd(&wg_lo, e.y);
                 if (old + e.y < old) { atomicAdd(&wg_hi, 1u); }
             }
@@ -183,14 +189,19 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
     workgroupBarrier();
     if (lid.x == 0u) {
         let m = atomicLoad(&wg_m);
-        if (m != 0u) { atomicAdd(&result[0], m); }
+        if (m != 0u) {
+            let oldm = atomicAdd(&result[0], m);
+            if (oldm + m < oldm) { atomicAdd(&result[1], 1u); }
+        }
+        let mhi = atomicLoad(&wg_mhi);
+        if (mhi != 0u) { atomicAdd(&result[1], mhi); }
         let lo = atomicLoad(&wg_lo);
         if (lo != 0u) {
-            let old = atomicAdd(&result[1], lo);
-            if (old + lo < old) { atomicAdd(&result[2], 1u); }
+            let old = atomicAdd(&result[2], lo);
+            if (old + lo < old) { atomicAdd(&result[3], 1u); }
         }
         let hi = atomicLoad(&wg_hi);
-        if (hi != 0u) { atomicAdd(&result[2], hi); }
+        if (hi != 0u) { atomicAdd(&result[3], hi); }
     }
 }
 "#;
@@ -463,7 +474,9 @@ impl Gpu {
     }
 
     /// Probes every id in `probe` against the resident `table`; returns
-    /// (number of matches, exact u64 sum of matched payloads).
+    /// (number of matches, exact u64 sum of matched payloads). Both are exact
+    /// u64s on the device (lo/carry/hi atomic emulation) — duplicate build keys
+    /// can push a high-fanout join past u32::MAX matches.
     pub fn hash_probe(&self, table: &HashTable, probe: &ColU32) -> (u64, u64) {
         let r = self.run(
             &self.hash_probe,
@@ -475,9 +488,12 @@ impl Gpu {
                 d: 0,
             },
             probe.len,
-            3,
+            4,
         );
-        (u64::from(r[0]), (u64::from(r[2]) << 32) | u64::from(r[1]))
+        (
+            (u64::from(r[1]) << 32) | u64::from(r[0]),
+            (u64::from(r[3]) << 32) | u64::from(r[2]),
+        )
     }
 
     /// COUNT + SUM GROUP BY over resident columns. `keys[i]` must be `< groups`
