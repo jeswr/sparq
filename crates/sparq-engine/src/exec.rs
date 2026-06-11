@@ -613,6 +613,9 @@ fn join_chunks(mut chunks: Vec<String>) -> String {
 /// common (single-pattern) browser query. Output is a chunk sequence (see
 /// [`eval_select_json_chunks`]); concatenated it is the exact JSON document.
 fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Option<Vec<String>> {
+    if view::default_is_empty() {
+        return None; // empty-default view: the general path short-circuits at the BGP
+    }
     let (proj, inner): (Option<&[Variable]>, &GraphPattern) = match pattern {
         GraphPattern::Project { inner, variables } => (Some(variables), inner),
         other => (None, other),
@@ -789,14 +792,10 @@ pub fn eval_select_json(graph: &Graph, pattern: &GraphPattern) -> Result<String,
 /// sequential paths, head+fragments concatenated on the parallel path — exactly the
 /// old behaviour and allocation profile).
 pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Result<Vec<String>, String> {
-    // Streaming fast paths — no Bindings materialised at all. They scan the
-    // store's default graph directly, so they are skipped under an empty-default
-    // view (the general path short-circuits at the BGP entry).
-    if !view::default_is_empty() {
-        if let Some(json) = single_pattern_scan_json(graph, pattern, flush) {
-            budget::check(0)?; // sticky: the streaming loop may have stopped mid-scan
-            return Ok(json);
-        }
+    // Streaming fast paths — no Bindings materialised at all.
+    if let Some(json) = single_pattern_scan_json(graph, pattern, flush) {
+        budget::check(0)?; // sticky: the streaming loop may have stopped mid-scan
+        return Ok(json);
     }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
@@ -888,12 +887,8 @@ pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Opt
 /// row count is irrelevant — only emptiness is observed).
 pub fn eval_ask(graph: &Graph, pattern: &GraphPattern) -> Result<bool, String> {
     // Exact-count fast path first (a single-pattern BGP answers from the index).
-    // It reads the default-graph index directly, so it is skipped under an
-    // empty-default view (the general path short-circuits at the BGP entry).
-    if !view::default_is_empty() {
-        if let Some(n) = try_count(graph, pattern) {
-            return Ok(n > 0);
-        }
+    if let Some(n) = try_count(graph, pattern) {
+        return Ok(n > 0);
     }
     let sliced = GraphPattern::Slice { inner: Box::new(pattern.clone()), start: 0, length: Some(1) };
     let mut local = LocalVocab::default();
@@ -907,12 +902,8 @@ pub fn eval_ask(graph: &Graph, pattern: &GraphPattern) -> Result<bool, String> {
 /// projection / LIMIT — like QLever's lazy count) it short-circuits; otherwise it
 /// evaluates and counts the rows.
 pub fn count_select(graph: &Graph, pattern: &GraphPattern) -> Result<usize, String> {
-    // The lazy index count reads the default graph directly — skipped under an
-    // empty-default view (see eval_ask).
-    if !view::default_is_empty() {
-        if let Some(n) = try_count(graph, pattern) {
-            return Ok(n);
-        }
+    if let Some(n) = try_count(graph, pattern) {
+        return Ok(n);
     }
     let mut local = LocalVocab::default();
     let bindings = eval_modified(graph, &mut local, pattern)?;
@@ -923,6 +914,9 @@ pub fn count_select(graph: &Graph, pattern: &GraphPattern) -> Result<usize, Stri
 /// The solution count without materialising, for shapes whose count is exact from
 /// the index: a single-pattern BGP (range size) under projection / OFFSET-LIMIT.
 fn try_count(graph: &Graph, p: &GraphPattern) -> Option<usize> {
+    if view::default_is_empty() {
+        return None; // empty-default view: the index ranges are not the active dataset
+    }
     match p {
         GraphPattern::Project { inner, .. } | GraphPattern::Reduced { inner } => try_count(graph, inner),
         GraphPattern::Slice { inner, start, length } => try_count(graph, inner).map(|n| {
@@ -1082,6 +1076,9 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
 /// needs the full result first (joins, ORDER BY, DISTINCT, aggregation, residual
 /// filters), so the caller falls back to full evaluation.
 fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<Bindings>, String> {
+    if view::default_is_empty() {
+        return Ok(None); // empty-default view: the general path short-circuits at the BGP
+    }
     match inner {
         GraphPattern::Project { inner, variables } => {
             Ok(try_capped(graph, inner, cap)?.map(|b| project_bindings(b, variables)))
