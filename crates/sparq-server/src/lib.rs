@@ -5,9 +5,9 @@
 //! * **SPARQL 1.1 Protocol** (<https://www.w3.org/TR/sparql11-protocol/>) — the `query`
 //!   operation over `GET`/`POST` at `/sparql`, with content negotiation to SPARQL Results
 //!   JSON / XML / CSV / TSV (and boolean JSON/XML for `ASK`), and the `update` operation
-//!   (`POST` with `application/sparql-update`), applied through the double-buffered
-//!   delta-overlay writer (T17 wiring — see `http::Writer` and the README's "Update
-//!   concurrency model").
+//!   (`POST` with `application/sparql-update`), applied through sparq-serve's single
+//!   sequenced group-commit writer over the lock-free generation ring (Wave A wiring —
+//!   see `http::AppState` and the README's "Update concurrency model").
 //! * **SPARQL 1.1 Graph Store HTTP Protocol** (<https://www.w3.org/TR/sparql11-http-rdf-update/>)
 //!   — `GET`/`HEAD` on a graph resource (direct `/graphs/...` and indirect
 //!   `?graph=<uri>` / `?default`). The Graph Store **write** verbs (PUT/POST/DELETE)

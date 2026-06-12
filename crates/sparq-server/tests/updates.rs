@@ -1,20 +1,20 @@
-//! Integration tests for the double-buffered SPARQL Update path (T17 wiring).
+//! Integration tests for the SPARQL Update path over the sparq-serve generation ring +
+//! sequenced writer (Wave A4 rewiring — see `src/http.rs::AppState` and
+//! research/concurrent-serving.md §6).
 //!
-//! Covers the properties the design promises (see `src/http.rs::Writer` and the README's
-//! "Update concurrency model"):
-//!   * sequential consistency over HTTP — every committed update is visible to the next
-//!     query, including updates whose effects reach the published graph via LAG REPLAY
-//!     on the other buffer;
-//!   * atomicity of failures — a refused update leaves the published graph untouched and
-//!     the server recovers (the discarded buffer is rebuilt by the next update);
-//!   * update latency — steady-state in-place updates are far cheaper than the first
-//!     (rebuild) update on the same graph;
-//!   * reader isolation — queries never block on an in-flight update beyond the publish
-//!     pointer-swap, even while the writer is doing O(graph) work;
-//!   * periodic compaction — overlay fold-back keeps results identical.
+//! Covers the properties the design promises:
+//!   * sequential consistency over HTTP — every group-commit ack means the generation
+//!     containing the update is published, so it is visible to the next query;
+//!   * atomicity of failures — a rejected update is skipped (writer re-forks and
+//!     replays), the published chain never contains a partial effect, and the server
+//!     keeps accepting updates;
+//!   * reader isolation — queries pin a generation lock-free and never wait on the
+//!     writer, even while a batch commit is doing its O(graph) fork;
+//!   * ring pinning — a generation pinned before a commit keeps serving its old state
+//!     after the writer publishes past it (snapshot consistency for long responses).
 //!
-//! The `#[ignore]`d benchmark at the bottom is the honest before/after measurement on a
-//! 1M-triple graph:
+//! The `#[ignore]`d benchmark at the bottom is the honest update-cost measurement on a
+//! 1M-triple graph under the ring (per-batch O(graph) fork — the recorded A2 trade):
 //!   cargo test -p sparq-server --release --test updates -- --ignored --nocapture
 
 use std::time::{Duration, Instant};
@@ -142,37 +142,60 @@ async fn failed_update_is_atomic_and_server_recovers() {
 }
 
 // ---------------------------------------------------------------------------
-// Update latency smoke test
+// Concurrent reads proceed while updates commit (no reader stall, over HTTP)
 // ---------------------------------------------------------------------------
 
-/// Steady-state updates take the in-place delta-overlay path, so they must be far
-/// cheaper than the first update on the same state, which pays the O(graph) rebuild
-/// (it materialises the second buffer — exactly the cost EVERY update used to pay).
-/// The bound is deliberately loose (5x; the release-mode gap is ~5 orders of magnitude
-/// on 1M triples — see the ignored benchmark) so machine noise can't flake it.
-#[tokio::test]
-async fn steady_state_update_latency_is_far_below_rebuild() {
-    let n = 100_000;
+/// The end-to-end no-reader-stall property the ring exists for: GET queries keep
+/// answering (with bounded latency) while a stream of updates commits, each update
+/// paying the writer's O(graph) batch fork on a 200k-triple graph. Under the removed
+/// double buffer this was where the §4.3/§4.4 reclaim stall could bite; under the ring
+/// readers pin generations lock-free and never interact with the writer. Prints the
+/// observed read latencies (this doubles as the Wave A4 perf smoke).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_queries_proceed_while_updates_commit() {
+    let n = 200_000;
     let base = spawn_with(synthetic_graph(n), ServerConfig::default()).await;
-    let cl = reqwest::Client::new();
+    let probe = "SELECT ?s WHERE { ?s <http://ex/cp> ?o }";
+    let updates = 5usize;
 
-    let t = Instant::now();
-    assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/n0> <http://ex/q> <http://ex/m0> }").await, 204);
-    let first = t.elapsed(); // bootstrap: the old rebuild-per-update cost
-
-    let mut steady = Vec::new();
-    for i in 1..=20 {
-        let ins = format!("INSERT DATA {{ <http://ex/n{i}> <http://ex/q> <http://ex/m{i}> }}");
+    let upd_base = base.clone();
+    let updater = tokio::spawn(async move {
+        let cl = reqwest::Client::new();
         let t = Instant::now();
-        assert_eq!(post_update(&cl, &base, &ins).await, 204);
-        steady.push(t.elapsed());
+        for i in 0..updates {
+            let ins = format!("INSERT DATA {{ <http://ex/c{i}> <http://ex/cp> <http://ex/cv> }}");
+            assert_eq!(post_update(&cl, &upd_base, &ins).await, 204);
+        }
+        t.elapsed()
+    });
+
+    let cl = reqwest::Client::new();
+    let mut max_read = Duration::ZERO;
+    let mut total_read = Duration::ZERO;
+    let mut samples = 0u32;
+    while !updater.is_finished() {
+        let t = Instant::now();
+        let rows = count_rows(&cl, &base, probe).await;
+        let dt = t.elapsed();
+        max_read = max_read.max(dt);
+        total_read += dt;
+        samples += 1;
+        assert!(rows <= updates, "reader saw an uncommitted state: {rows} rows");
     }
-    steady.sort();
-    let median = steady[steady.len() / 2];
-    assert_eq!(count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await, 21);
+    let updates_took = updater.await.unwrap();
+    assert_eq!(count_rows(&cl, &base, probe).await, updates, "an acked update is not visible");
+    assert!(samples > 3, "sampler barely ran ({samples} samples) — cannot judge stalling");
+    eprintln!(
+        "reads during {updates} committing updates ({updates_took:?} total): \
+         {samples} samples, mean {:?}, max {max_read:?}",
+        total_read / samples
+    );
+    // Reads are point scans answered from a pinned generation; 500 ms is an enormous
+    // margin over the milliseconds they take, while each update batch pays an O(graph)
+    // fork that is far slower — a reader waiting on the writer would blow through this.
     assert!(
-        median * 5 < first,
-        "steady-state update (median {median:?}) should be much cheaper than the rebuild bootstrap ({first:?})"
+        max_read < Duration::from_millis(500),
+        "a reader stalled for {max_read:?} while updates were committing"
     );
 }
 
@@ -180,16 +203,16 @@ async fn steady_state_update_latency_is_far_below_rebuild() {
 // Readers never block on the writer
 // ---------------------------------------------------------------------------
 
-/// While an update is doing O(graph) work (here: the bootstrap rebuild), readers must
-/// keep taking snapshots and answering queries — they may only contend for the instant
-/// of the publish pointer-swap. Each observed count must also be one of the two
+/// While an update is doing O(graph) work (the writer's per-batch fork), readers must
+/// keep pinning generations and answering queries — `current()` is a lock-free load
+/// that never touches the writer. Each observed count must also be one of the two
 /// committed states (snapshot consistency: old or new, never partial).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn readers_are_not_blocked_during_a_slow_update() {
     let n = 200_000;
     let state = AppState::with_config(synthetic_graph(n), ServerConfig::default());
     let probe = "SELECT ?o WHERE { <http://ex/w> <http://ex/w> ?o }";
-    let before = sparq_engine::query(&state.snapshot(), probe).unwrap().rows.len();
+    let before = sparq_engine::query(state.current().snapshot(), probe).unwrap().rows.len();
     assert_eq!(before, 0);
 
     let writer_state = state.clone();
@@ -208,8 +231,8 @@ async fn readers_are_not_blocked_during_a_slow_update() {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !committed && Instant::now() < deadline {
         let t = Instant::now();
-        let snap = state.snapshot();
-        let rows = sparq_engine::query(&snap, probe).unwrap().rows.len();
+        let gen = state.current();
+        let rows = sparq_engine::query(gen.snapshot(), probe).unwrap().rows.len();
         let dt = t.elapsed();
         max_read = max_read.max(dt);
         samples += 1;
@@ -220,8 +243,8 @@ async fn readers_are_not_blocked_during_a_slow_update() {
     let update_took = writer.await.unwrap();
     assert!(committed, "update did not become visible within 60s");
     assert!(samples > 3, "sampler barely ran ({samples} samples) — cannot judge blocking");
-    // The write lock is held only for a pointer swap; 250ms is an enormous margin over
-    // the microseconds it actually takes, while the rebuild itself takes much longer.
+    // Pinning is a lock-free arc-swap load (~ns) and the publish is one pointer store;
+    // 250ms is an enormous margin, while the batch fork itself takes much longer.
     assert!(
         max_read < Duration::from_millis(250),
         "a reader stalled for {max_read:?} during an update that took {update_took:?}"
@@ -229,44 +252,48 @@ async fn readers_are_not_blocked_during_a_slow_update() {
 }
 
 // ---------------------------------------------------------------------------
-// Periodic compaction
+// Ring pinning: old generations stay readable after the writer publishes past them
 // ---------------------------------------------------------------------------
 
-/// With `compact_every = 1` every published graph has had its overlay folded back into
-/// the immutable base; with `0` the overlay persists. Results must be identical either
-/// way — compaction is purely an internal representation change.
+/// The server-level pinning contract that makes long/streamed responses snapshot-
+/// consistent: a generation pinned BEFORE updates commit keeps serving exactly its
+/// old state afterwards (the writer never reclaims), while a fresh pin sees every
+/// acked update. Sequential acked updates advance the generation number one batch
+/// each (group commit can only coalesce concurrent submissions).
 #[test]
-fn compaction_folds_the_overlay_without_changing_results() {
-    for (compact_every, expect_overlay) in [(1usize, false), (0usize, true)] {
-        let config = ServerConfig { compact_every, ..ServerConfig::default() };
-        let state = AppState::with_config(synthetic_graph(1_000), config);
-        for i in 0..6 {
-            let upd = format!("INSERT DATA {{ <http://ex/k{i}> <http://ex/kp> <http://ex/kv> }}");
-            state.apply_update(&upd).unwrap_or_else(|e| panic!("{e}"));
-        }
-        let snap = state.snapshot();
-        // The first update is a rebuild (no overlay); from the second on, the in-place
-        // path leaves an overlay unless compaction folded it.
-        assert_eq!(
-            snap.store.has_overlay(),
-            expect_overlay,
-            "unexpected overlay state for compact_every = {compact_every}"
-        );
-        let rows = sparq_engine::query(&snap, "SELECT ?s WHERE { ?s <http://ex/kp> ?o }").unwrap();
-        assert_eq!(rows.rows.len(), 6, "compact_every = {compact_every} changed query results");
+fn pinned_generations_stay_readable_after_commits() {
+    let state = AppState::with_config(synthetic_graph(1_000), ServerConfig::default());
+    let probe = "SELECT ?s WHERE { ?s <http://ex/kp> ?o }";
+    let pinned = state.current();
+    let n0 = pinned.number();
+    for i in 0..6 {
+        let upd = format!("INSERT DATA {{ <http://ex/k{i}> <http://ex/kp> <http://ex/kv> }}");
+        state.apply_update(&upd).unwrap_or_else(|e| panic!("{e}"));
     }
+    let fresh = state.current();
+    assert_eq!(fresh.number(), n0 + 6, "each sequentially acked update publishes one generation");
+    let new_rows = sparq_engine::query(fresh.snapshot(), probe).unwrap();
+    assert_eq!(new_rows.rows.len(), 6, "a fresh pin must see every acked update");
+    // The old pin still answers from its own immutable snapshot — zero of the updates.
+    let old_rows = sparq_engine::query(pinned.snapshot(), probe).unwrap();
+    assert_eq!(old_rows.rows.len(), 0, "a pinned generation changed under a reader");
+    assert_eq!(pinned.number(), n0);
 }
 
 // ---------------------------------------------------------------------------
-// Honest before/after benchmark (1M triples) — run explicitly in release mode
+// Honest update-cost benchmark (1M triples) — run explicitly in release mode
 // ---------------------------------------------------------------------------
 
-/// End-to-end HTTP update latency on a 1M-triple graph.
-///   BEFORE = the rebuild path every update used to take (measured both as the engine
-///            call and end-to-end as the first update, which still pays it once);
-///   AFTER  = steady-state in-place updates over HTTP.
+/// End-to-end HTTP update cost on a 1M-triple graph under the generation ring.
+///
+/// Honest numbers, stated plainly: under the ring every BATCH commit pays the
+/// writer's O(graph) fork (the A2 `GraphApplier` decision — the double buffer's
+/// in-place reclaim is impossible by design and was the measured §4.3/§4.4 stall),
+/// so an ISOLATED update's ack latency is fork-priced. Group commit amortises the
+/// fork across every update that arrives in the same window — so the second
+/// measurement drives the server with concurrent submitters and reports updates/s.
 /// Run: cargo test -p sparq-server --release --test updates -- --ignored --nocapture
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark — run explicitly in --release"]
 async fn bench_update_latency_1m() {
     let n: usize = std::env::var("SPARQ_BENCH_TRIPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
@@ -274,26 +301,20 @@ async fn bench_update_latency_1m() {
     let graph = synthetic_graph(n);
     eprintln!("graph: {} triples, built in {:.2?}", graph.len(), t.elapsed());
 
-    // BEFORE (engine-level): the rebuild `update` the server used to call per request.
+    // Reference: one engine-level rebuild — the same O(graph) cost the writer's
+    // per-batch fork pays.
     let ins = "INSERT DATA { <http://ex/b0> <http://ex/q> <http://ex/b0> }";
     let t = Instant::now();
     let rebuilt = sparq_engine::update(&graph, ins).unwrap();
-    let before_engine = t.elapsed();
-    eprintln!("BEFORE  rebuild update (engine call):        {before_engine:.2?}");
+    let fork_engine = t.elapsed();
+    eprintln!("reference  O(graph) rebuild (engine call):    {fork_engine:.2?}");
     drop(rebuilt);
 
     let base = spawn_with(graph, ServerConfig::default()).await;
     let cl = reqwest::Client::new();
 
-    // BEFORE (end-to-end): the first update still pays exactly the old per-request cost
-    // (it doubles as the materialisation of the second buffer).
-    let t = Instant::now();
-    assert_eq!(post_update(&cl, &base, ins).await, 204);
-    let before_http = t.elapsed();
-    eprintln!("BEFORE  rebuild update (HTTP, = 1st update): {before_http:.2?}");
-
-    // AFTER: steady-state in-place updates, end-to-end over HTTP.
-    let reps = 200;
+    // Isolated updates: each is its own batch → ack latency ≈ window + fork.
+    let reps = 10;
     let mut lat = Vec::with_capacity(reps);
     for i in 0..reps {
         let upd = format!("INSERT DATA {{ <http://ex/a{i}> <http://ex/q> <http://ex/a{i}> }}");
@@ -302,12 +323,35 @@ async fn bench_update_latency_1m() {
         lat.push(t.elapsed());
     }
     lat.sort();
-    let median = lat[reps / 2];
-    let p99 = lat[reps * 99 / 100];
-    let mean: Duration = lat.iter().sum::<Duration>() / reps as u32;
-    eprintln!("AFTER   in-place update (HTTP, {reps} reps):  median {median:.2?}  mean {mean:.2?}  p99 {p99:.2?}");
     eprintln!(
-        "end-to-end speedup: {:.0}x (median) over the first/rebuild update",
-        before_http.as_secs_f64() / median.as_secs_f64()
+        "isolated   update ack (HTTP, {reps} reps):        median {:.2?}  max {:.2?}   (fork-priced — the recorded A2 trade)",
+        lat[reps / 2],
+        lat[reps - 1]
     );
+
+    // Concurrent updates: submitters share group-commit windows → the fork amortises.
+    let conc = 32usize;
+    let per_task = 8usize;
+    let t = Instant::now();
+    let mut tasks = Vec::new();
+    for c in 0..conc {
+        let base = base.clone();
+        tasks.push(tokio::spawn(async move {
+            let cl = reqwest::Client::new();
+            for i in 0..per_task {
+                let upd = format!("INSERT DATA {{ <http://ex/g{c}x{i}> <http://ex/q> <http://ex/g{c}x{i}> }}");
+                assert_eq!(post_update(&cl, &base, &upd).await, 204);
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let took = t.elapsed();
+    let total = conc * per_task;
+    eprintln!(
+        "concurrent {total} updates, {conc} submitters:        {took:.2?} total → {:.1} updates/s (group commit amortises the fork)",
+        total as f64 / took.as_secs_f64()
+    );
+    assert_eq!(count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await, reps + total);
 }

@@ -5,13 +5,18 @@
 //!   * Graph Store HTTP Protocol READ — `GET`/`HEAD` on `/graphs/*path` (direct) and on
 //!     `/sparql/graph` via `?graph=<uri>` / `?default` (indirect). Write verbs → 501.
 //!
-//! Shared state is a [`sparq_core::Graph`] behind an `RwLock<Arc<…>>`: queries take a cheap
-//! `Arc` snapshot (the read lock is held only for the refcount bump); SPARQL Update goes
-//! through the DOUBLE-BUFFERED writer (see [`Writer`]) — the T17 delta-overlay
-//! `update_in_place` applied off-line to the spare buffer, published by an atomic `Arc` swap.
+//! Shared state is the sparq-serve GENERATION RING + SEQUENCED WRITER (Wave A,
+//! research/concurrent-serving.md §6): queries pin the current generation once per request
+//! ([`GenerationRing::current`], lock-free) and evaluate against its immutable snapshot
+//! for the whole response — including streamed bodies; SPARQL Update submits through the
+//! single sequenced [`sparq_serve::Writer`] (group-commit window, §6.5), which publishes
+//! each batch as ONE new generation. Readers never block the writer; the writer never
+//! waits for (or reclaims from) readers. This replaced the previous double-buffered
+//! `RwLock<Arc<Graph>>` + spare-reclaim writer, whose measured pathologies (§4.3/§4.4:
+//! pinned-snapshot writer stalls and reclaim polling) the ring removes by design.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
@@ -29,6 +34,7 @@ use tower_http::trace::TraceLayer;
 
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
+use sparq_serve::{ApplyUpdates, Generation, GenerationRing, GraphApplier, PodId, WriteError, Writer, WriterConfig};
 
 use crate::exec::{prepare, PrepareError, QueryForm};
 use crate::negotiate::{negotiate, negotiate_graph, Format};
@@ -83,11 +89,6 @@ pub struct ServerConfig {
     pub max_subscriptions_per_conn: usize,
     /// Maximum active subscriptions across the whole server (T23).
     pub max_subscriptions: usize,
-    /// Fold the update delta-overlay back into a fresh immutable index after this many
-    /// in-place update batches have accumulated on a buffer (`0` disables). Keeps scans
-    /// near overlay-free speed and bounds overlay/dictionary growth in a long-running
-    /// server; each compaction is O(graph), amortised over `compact_every` updates.
-    pub compact_every: usize,
     /// Log every request/response via `tower_http::trace::TraceLayer`.
     pub verbose: bool,
 }
@@ -101,7 +102,6 @@ impl Default for ServerConfig {
             max_results: None,
             max_subscriptions_per_conn: 16,
             max_subscriptions: 256,
-            compact_every: 1024,
             verbose: false,
         }
     }
@@ -131,9 +131,6 @@ impl ServerConfig {
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_SUBSCRIPTIONS") {
             cfg.max_subscriptions = n;
         }
-        if let Some(n) = env_parse::<usize>("SPARQ_COMPACT_EVERY") {
-            cfg.compact_every = n;
-        }
         cfg
     }
 }
@@ -147,21 +144,76 @@ fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
 /// next budget check — it is not leaked indefinitely).
 pub(crate) const TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 
-/// Shared server state: the dataset under query, published as an `Arc<Graph>` inside an
-/// `RwLock` slot. Queries take a cheap `Arc` snapshot (the read lock is held only for the
-/// refcount bump — readers never wait on an update beyond the instant of the publish
-/// pointer-swap); SPARQL Update goes through the double-buffered [`Writer`]. Also carries
-/// the hardening [`ServerConfig`] and the subscription plumbing (T23): a `watch` channel
-/// that broadcasts the commit generation to every open `/subscriptions` socket, plus the
-/// global active-subscription counters.
+/// A request's pinned generation: holding this `Arc` keeps the generation's immutable
+/// snapshot alive no matter how far the writer publishes past it. Pinned ONCE per
+/// request and kept for the lifetime of response production (streamed bodies included —
+/// see [`chunked_response`]), so every response is snapshot-consistent with its start.
+pub type PinnedGen = Arc<Generation<Graph>>;
+
+/// The conservative touched-pods placeholder for every update (Wave A4 decision).
+///
+/// The server has no pod concept yet: the engine materialises one default graph and the
+/// GSP surface maps every direct graph onto it, so per-named-graph conflict tags would
+/// be fictional today. Every update therefore bumps this single global pod's epoch —
+/// honest over-coarse tagging (any write invalidates everything), never a missed bump.
+/// Wave B's cache work owns real visibility-scope extraction (per-named-graph PodIds
+/// from the parsed update, §6.3/§6.5) and MUST replace this before any cache keys on
+/// finer pods than the global one.
+const GLOBAL_POD: &str = "urn:sparq:pod:global";
+
+/// The sequenced writer's snapshot-production strategy: sparq-serve's [`GraphApplier`]
+/// (per-batch O(graph) fork + O(batch) `update_in_place` — see its module docs for the
+/// recorded cost decision), with every engine call wrapped in [`with_extensions`] so the
+/// opt-in `geo` registry applies to updates exactly as it does to queries. The trait is
+/// sparq-serve's documented seam for exactly this wrapper.
+#[derive(Default)]
+struct ServerApplier(GraphApplier);
+
+impl ApplyUpdates for ServerApplier {
+    type Snapshot = Graph;
+    type Working = Graph;
+    type Update = String;
+
+    fn fork(&mut self, base: &Graph) -> Result<Graph, String> {
+        with_extensions(|| self.0.fork(base))
+    }
+
+    fn apply(&mut self, working: &mut Graph, update: &String) -> Result<(), String> {
+        with_extensions(|| self.0.apply(working, update))
+    }
+
+    fn seal(&mut self, working: Graph) -> Graph {
+        self.0.seal(working)
+    }
+}
+
+/// Shared server state: the dataset under query, served from a sparq-serve
+/// [`GenerationRing`] of immutable snapshots. Queries pin the current generation
+/// ([`AppState::current`], lock-free `ArcSwap` load) and evaluate against it for the
+/// whole response; SPARQL Update submits through the single sequenced
+/// [`sparq_serve::Writer`], which group-commits each batch as ONE new generation.
+/// Also carries the hardening [`ServerConfig`] and the subscription plumbing (T23):
+/// a `watch` channel that broadcasts the committed generation number to every open
+/// `/subscriptions` socket, plus the global active-subscription counters.
+///
+/// **What this replaced (Wave A4):** the double-buffered `RwLock<Arc<Graph>>` writer —
+/// spare-buffer reclaim via `Arc::try_unwrap` + 200 µs polling, lag replay, periodic
+/// `compact_every` fold-back. The ring makes reclaim impossible *by design* (it retains
+/// up to K old generations, so a published graph never drains back to the writer) and
+/// unnecessary (old generations free by plain `Arc` drop) — removing the measured
+/// §4.3/§4.4 pathologies: the 5.4 s/32 s pinned-snapshot writer stall and reclaim-poll
+/// degradation under reader churn. `compact_every` went with it: the writer's per-batch
+/// fork rebuilds a folded base, so overlays never accumulate across batches.
 #[derive(Clone)]
 pub struct AppState {
-    graph: Arc<RwLock<Arc<Graph>>>,
-    /// Single-writer update state (the double-buffer) — see [`Writer`]. A `std` mutex:
-    /// `apply_update` always runs on the blocking pool, and it serialises updates.
-    writer: Arc<Mutex<Writer>>,
+    /// The generation ring (Wave A1): lock-free `current()`, bounded retention.
+    ring: Arc<GenerationRing<Graph>>,
+    /// The single sequenced writer (Wave A2): the sole publisher of generations.
+    /// `submit` blocks for the group-commit window + batch application, so update
+    /// handlers call it on the blocking pool.
+    writer: Arc<Writer<String>>,
     config: Arc<ServerConfig>,
-    /// Commit generation, bumped after every successful graph swap. Subscription
+    /// Committed generation number, advanced after every successful update. Subscription
     /// connections hold a `watch::Receiver` and re-evaluate when it changes; the watch
     /// channel inherently coalesces bursts (see `subscriptions` module docs).
     commits: Arc<tokio::sync::watch::Sender<u64>>,
@@ -171,67 +223,17 @@ pub struct AppState {
     metrics: Arc<crate::metrics::Metrics>,
 }
 
-/// The single-writer side of the **double-buffered update path** (T17 wiring).
-///
-/// `Graph` is deliberately not `Clone` (a deep copy of the dictionary arena + six
-/// permutation indexes is O(n)), and readers must keep their lock-free `Arc` snapshots —
-/// so the writer never mutates a graph a reader could be holding. Instead two physical
-/// graphs alternate between the roles *published* and *spare*; an update:
-///
-/// 1. **reclaims** the spare — the previously published `Arc`, unwrapped once the last
-///    reader snapshot of it drops (bounded: snapshots cannot outlive the query budget),
-/// 2. **replays** the updates the spare missed while it was published ([`Writer::lag`]),
-/// 3. applies the new update via [`sparq_engine::update_in_place`] — the T17
-///    delta-overlay path, O(batch) instead of the O(graph) rebuild,
-/// 4. **publishes** it with an `Arc` pointer-swap under the write lock (the only instant
-///    readers contend), demoting the old published graph to be the next spare with
-///    `lag = [this update]`.
-///
-/// Failed updates stay **atomic** to clients: every mutation happens on the off-line
-/// buffer, so the published graph is untouched; the (possibly partially-updated) buffer
-/// is discarded and the next update re-materialises it via the rebuild path.
-///
-/// Cost model: steady-state update latency is microseconds (plus, every
-/// [`ServerConfig::compact_every`] batches, one O(graph) overlay fold-back). The price
-/// is ~2x graph residency, paid lazily from the first update. The first update (and the
-/// first after a discard) is an O(graph) rebuild — it doubles as the materialisation of
-/// the second buffer.
-struct Writer {
-    /// The off-line buffer: the previously published graph, waiting for its last reader
-    /// snapshots to drop so it can be reclaimed and mutated. `None` before the first
-    /// update and after a failed in-place update (discarded; the next update rebuilds).
-    spare: Option<Arc<Graph>>,
-    /// Updates committed to the published line that `spare` has not seen yet, in commit
-    /// order (replayed before the next update is applied). Non-empty only while `spare`
-    /// is `Some`.
-    lag: Vec<String>,
-    /// In-place batches accumulated on the published / spare graph since each was last
-    /// compacted — drives the periodic overlay fold-back. Swapped at publish so each
-    /// counter tracks its buffer.
-    published_ops: usize,
-    spare_ops: usize,
-}
-
-/// Poll interval while waiting for the spare buffer's last reader snapshot to drop.
-const RECLAIM_POLL: Duration = Duration::from_micros(200);
-/// Bound on that wait when no query timeout is configured (snapshot lifetimes are then
-/// unbounded); past it the update falls back to the rebuild path.
-const RECLAIM_FALLBACK_WAIT: Duration = Duration::from_secs(5);
-
 impl AppState {
     pub fn new(graph: Graph) -> Self {
         Self::with_config(graph, ServerConfig::default())
     }
 
     pub fn with_config(graph: Graph, config: ServerConfig) -> Self {
+        let ring = Arc::new(GenerationRing::new(graph));
+        let writer = Arc::new(Writer::spawn(ring.clone(), ServerApplier::default(), WriterConfig::default()));
         Self {
-            graph: Arc::new(RwLock::new(Arc::new(graph))),
-            writer: Arc::new(Mutex::new(Writer {
-                spare: None,
-                lag: Vec::new(),
-                published_ops: 0,
-                spare_ops: 0,
-            })),
+            ring,
+            writer,
             config: Arc::new(config),
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
@@ -244,113 +246,45 @@ impl AppState {
         &self.metrics
     }
 
-    /// A cheap, consistent snapshot of the current graph for the duration of a request.
-    pub fn snapshot(&self) -> Arc<Graph> {
-        self.graph.read().expect("graph lock poisoned").clone()
+    /// Pins the current generation for a request: lock-free, ~10–20 ns, never blocked
+    /// by an in-flight update. Hold the returned `Arc` for as long as the response is
+    /// being produced; `gen.snapshot()` is the immutable [`Graph`] to evaluate against.
+    pub fn current(&self) -> PinnedGen {
+        self.ring.current()
     }
 
-    /// Applies a SPARQL Update through the double-buffered writer (see [`Writer`]):
-    /// steady-state, the T17 `update_in_place` delta-overlay path applied to the spare
-    /// buffer and published by an atomic `Arc` swap — readers keep their snapshots and
-    /// only contend for the instant of the pointer swap. On success, bumps the commit
-    /// generation so active subscriptions re-evaluate (T23). The bump happens strictly
-    /// *after* the swap, so a woken subscription always snapshots a graph at least as
-    /// new as the commit it was woken for. Synchronous and possibly slow (first update /
-    /// fallbacks rebuild): call it on the blocking pool.
+    /// Applies a SPARQL Update through the sequenced writer: the update joins the
+    /// writer's current group-commit window and this call **blocks until the generation
+    /// containing it is published** (group-commit ack). Failed updates stay atomic to
+    /// clients — the writer applies batches to a private working copy, skips the failing
+    /// update, and re-forks, so the published chain never contains a partial effect.
+    ///
+    /// On success, advances the commit watch so active subscriptions re-evaluate (T23).
+    /// The advance happens strictly *after* the publish (submit returns the published
+    /// generation number), so a woken subscription always pins a generation at least as
+    /// new as the commit it was woken for. Blocking (window + batch application): call
+    /// it on the blocking pool.
     pub fn apply_update(&self, sparql: &str) -> Result<(), String> {
-        let mut w = self.writer.lock().expect("writer lock poisoned");
-        match self.reclaim_spare(&mut w) {
-            Some(g) => self.apply_in_place(&mut w, g, sparql),
-            None => self.apply_by_rebuild(&mut w, sparql),
-        }?;
-        self.commits.send_modify(|gen| *gen += 1);
-        Ok(())
-    }
-
-    /// Takes the spare buffer, waiting (bounded) for outstanding reader snapshots of it
-    /// to drop. Snapshots cannot legally outlive the query budget, so the wait is capped
-    /// at `query_timeout + TIMEOUT_GRACE` (or [`RECLAIM_FALLBACK_WAIT`] without a
-    /// timeout); in practice the spare has usually drained long before the next update.
-    /// Returns `None` when there is no spare (first update / after a failure) or a
-    /// reader still holds it at the deadline — the caller then rebuilds instead.
-    fn reclaim_spare(&self, w: &mut Writer) -> Option<Graph> {
-        let mut arc = w.spare.take()?;
-        let wait = self.config.query_timeout.map_or(RECLAIM_FALLBACK_WAIT, |t| t + TIMEOUT_GRACE);
-        let deadline = std::time::Instant::now() + wait;
-        loop {
-            match Arc::try_unwrap(arc) {
-                Ok(g) => return Some(g),
-                Err(still_shared) => {
-                    if std::time::Instant::now() >= deadline {
-                        // A reader is stuck past its budget: drop our reference (the
-                        // memory frees when the reader finishes) and rebuild instead.
-                        w.lag.clear();
-                        return None;
+        match self.writer.submit(sparql.to_string(), [PodId::new(GLOBAL_POD)]) {
+            Ok(number) => {
+                // Monotonic max: batch-mates share a generation number and may ack in
+                // any order relative to a later batch's submitters.
+                self.commits.send_if_modified(|g| {
+                    if number > *g {
+                        *g = number;
+                        true
+                    } else {
+                        false
                     }
-                    arc = still_shared;
-                    std::thread::sleep(RECLAIM_POLL);
-                }
+                });
+                Ok(())
             }
+            Err(WriteError::Rejected(e)) => Err(e),
+            Err(WriteError::Shutdown) => Err("update writer has shut down".to_string()),
         }
     }
 
-    /// The fast path: replay the spare's lag, apply the new update through the T17
-    /// delta-overlay (O(batch)), periodically fold the overlay back, and publish.
-    fn apply_in_place(&self, w: &mut Writer, mut g: Graph, sparql: &str) -> Result<(), String> {
-        for missed in std::mem::take(&mut w.lag) {
-            if with_extensions(|| sparq_engine::update_in_place(&mut g, &missed)).is_err() {
-                // Unreachable (the op already succeeded on the published line and the
-                // two paths are observationally identical) — but if it ever happens,
-                // recover by discarding the buffer and rebuilding from published.
-                w.spare_ops = 0;
-                return self.apply_by_rebuild(w, sparql);
-            }
-            w.spare_ops += 1;
-        }
-        if let Err(e) = with_extensions(|| sparq_engine::update_in_place(&mut g, sparql)) {
-            // A failed request may have applied a *prefix* of its operations to `g`.
-            // The published graph is untouched (failures stay atomic to clients); the
-            // possibly-inconsistent buffer is dropped here and rebuilt lazily.
-            w.spare_ops = 0;
-            return Err(e);
-        }
-        w.spare_ops += 1;
-        if self.config.compact_every > 0 && w.spare_ops >= self.config.compact_every {
-            // Fold the accumulated overlay into a fresh immutable base — O(graph),
-            // amortised over `compact_every` updates. Infallible for the in-memory
-            // graphs the server hosts (the Err arm is the directory-backed WAL swap).
-            g.compact()?;
-            w.spare_ops = 0;
-        }
-        self.publish(w, g, sparql);
-        Ok(())
-    }
-
-    /// The slow path — the engine's O(graph) rebuild `update` — used for the first
-    /// update and whenever the spare buffer is unavailable (stuck reader, prior failed
-    /// update). Doubles as the materialisation of the second buffer: the old published
-    /// graph is demoted to spare unchanged.
-    fn apply_by_rebuild(&self, w: &mut Writer, sparql: &str) -> Result<(), String> {
-        let next = with_extensions(|| sparq_engine::update(&self.snapshot(), sparql))?;
-        w.spare_ops = 0; // freshly rebuilt: no overlay
-        self.publish(w, next, sparql);
-        Ok(())
-    }
-
-    /// Atomically swaps `g` into the published slot — the *only* instant readers contend
-    /// with the writer — and demotes the old published graph to be the next spare, whose
-    /// one missed update is `sparql`. The op counters swap roles with the buffers.
-    fn publish(&self, w: &mut Writer, g: Graph, sparql: &str) {
-        let old = {
-            let mut slot = self.graph.write().expect("graph lock poisoned");
-            std::mem::replace(&mut *slot, Arc::new(g))
-        };
-        w.spare = Some(old);
-        w.lag = vec![sparql.to_string()];
-        std::mem::swap(&mut w.published_ops, &mut w.spare_ops);
-    }
-
-    /// A receiver of the commit generation for a subscription connection (T23).
+    /// A receiver of the committed generation number for a subscription connection (T23).
     pub(crate) fn subscribe_commits(&self) -> tokio::sync::watch::Receiver<u64> {
         self.commits.subscribe()
     }
@@ -388,7 +322,7 @@ pub fn router(state: AppState) -> Router {
 /// `GET /metrics` — Prometheus text exposition (T22). The gauges (graph triple
 /// count, active subscriptions) are read at scrape time from live state.
 async fn metrics_endpoint(State(state): State<AppState>) -> Response {
-    let triples = state.snapshot().len();
+    let triples = state.current().snapshot().len();
     let subs = state.subs.active_count();
     let body = state.metrics().render(subs, triples);
     text_response(StatusCode::OK, "text/plain; version=0.0.4; charset=utf-8", body, false)
@@ -533,8 +467,8 @@ async fn handle_post(
         }
     } else if ct.starts_with("application/sparql-update") {
         // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
-        // `apply_update` may block (spare-buffer reclaim) or run long (first-update /
-        // fallback rebuild, periodic compaction), so it runs off the async workers too.
+        // `apply_update` blocks for the writer's group-commit ack (window + batch
+        // application, which includes an O(graph) fork), so it runs off the async workers.
         match std::str::from_utf8(body) {
             Ok(u) => {
                 let st = state.clone();
@@ -571,6 +505,10 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
         Ok(p) => p,
         Err(PrepareError::Malformed(msg)) => return bad_request(&format!("malformed query: {msg}")),
     };
+    // Pin the generation ONCE per request; every evaluation below (and the streamed
+    // JSON body) reads this snapshot, so the response is consistent with query start
+    // even while the writer publishes new generations concurrently.
+    let gen = state.current();
     // T22 EXPLAIN: answer with the plan text instead of (plan-only) / alongside
     // executing (analyze). Plan-only is a planning dry run — no budget needed —
     // but both run on the blocking pool and under the worker timeout cap anyway;
@@ -578,16 +516,16 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
     if explain != ExplainMode::Off {
         let config = state.config.clone();
         let cfg = config.clone();
-        let graph = state.snapshot();
         let q = sparql.to_string();
         let analyze = explain == ExplainMode::Analyze;
         let budget = make_budget(&config, true);
         let task = tokio::task::spawn_blocking(move || {
+            let graph = gen.snapshot();
             let r = with_extensions(|| {
                 if analyze {
-                    sparq_engine::explain_analyze_with_budget(&graph, &q, &budget)
+                    sparq_engine::explain_analyze_with_budget(graph, &q, &budget)
                 } else {
-                    sparq_engine::explain(&graph, &q)
+                    sparq_engine::explain(graph, &q)
                 }
             });
             match r {
@@ -610,11 +548,10 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
             let is_ask = prepared.form == QueryForm::Ask;
             let select = prepared.runnable;
             let budget = make_budget(&config, !is_ask);
-            let graph = state.snapshot();
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
                 with_extensions(|| if is_ask {
-                    match sparq_engine::ask_with_budget(&graph, &select, &budget) {
+                    match sparq_engine::ask_with_budget(gen.snapshot(), &select, &budget) {
                         Ok(value) => {
                             let (body, ct) = match fmt {
                                 Format::Xml => (results::ask_to_xml(value), fmt.ask_content_type()),
@@ -625,7 +562,7 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
                         Err(e) => engine_error_response(&e, &cfg),
                     }
                 } else {
-                    render_select(&graph, &select, fmt, head_only, &budget, &cfg)
+                    render_select(&gen, &select, fmt, head_only, &budget, &cfg)
                 })
             });
             await_worker(task, &config).await
@@ -639,10 +576,9 @@ async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_onl
             let query = prepared.runnable;
             let gfmt = negotiate_graph(accept);
             let budget = make_budget(&config, true);
-            let graph = state.snapshot();
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
-                match with_extensions(|| sparq_engine::construct_ntriples_with_budget(&graph, &query, &budget)) {
+                match with_extensions(|| sparq_engine::construct_ntriples_with_budget(gen.snapshot(), &query, &budget)) {
                     Ok(body) => text_response(StatusCode::OK, gfmt.content_type(), body, head_only),
                     Err(e) => engine_error_response(&e, &cfg),
                 }
@@ -685,18 +621,23 @@ async fn await_worker(task: tokio::task::JoinHandle<Response>, config: &ServerCo
 /// second whole-result copy (T16). `Content-Length` is known up front (the chunks are
 /// fully evaluated before the response starts), so the response framing is identical to
 /// the buffered path. The other formats go through the materialised `QueryResult`.
+///
+/// Takes the request's pinned generation (not a bare `&Graph`) so the streamed JSON body
+/// can keep the generation pinned until the last chunk is written — the stream stays
+/// snapshot-consistent with query START even if the writer publishes past it mid-response.
 fn render_select(
-    graph: &Graph,
+    gen: &PinnedGen,
     select: &str,
     fmt: Format,
     head_only: bool,
     budget: &QueryBudget,
     config: &ServerConfig,
 ) -> Response {
+    let graph = gen.snapshot();
     let ct = fmt.select_content_type();
     let body = match fmt {
         Format::Json => match sparq_engine::query_json_chunks_with_budget(graph, select, budget) {
-            Ok(chunks) => return chunked_response(StatusCode::OK, ct, chunks, head_only),
+            Ok(chunks) => return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone()),
             Err(e) => return engine_error_response(&e, config),
         },
         _ => {
@@ -808,9 +749,10 @@ async fn serialise_default_graph(state: &AppState, headers: &HeaderMap, head_onl
     let ct = ct.to_string();
     let config = state.config.clone();
     let budget = make_budget(&config, false);
-    let graph = state.snapshot();
+    // Pinned for the whole dump: the serialisation is consistent with request start.
+    let gen = state.current();
     let cfg = config.clone();
-    let task = tokio::task::spawn_blocking(move || match nt_dump(&graph, &budget) {
+    let task = tokio::task::spawn_blocking(move || match nt_dump(gen.snapshot(), &budget) {
         Ok(body) => text_response(StatusCode::OK, &ct, body, head_only),
         Err(e) => engine_error_response(&e, &cfg),
     });
@@ -932,13 +874,22 @@ fn text_response(status: StatusCode, content_type: &str, body: String, head_only
 /// response carries the same `Content-Type`/`Content-Length` headers — and, by the
 /// engine's chunking contract, byte-identical body content — as the buffered path.
 /// HEAD mirrors GET: same headers, empty body.
-fn chunked_response(status: StatusCode, content_type: &str, chunks: Vec<String>, head_only: bool) -> Response {
+///
+/// `pin` is the generation the chunks were evaluated against; the body stream owns it,
+/// so the generation stays pinned until the response finishes (or the client goes away)
+/// — the ring can never let the snapshot's memory go while the body is in flight. Today
+/// the chunks are fully materialised strings, so this is belt-and-braces; it becomes
+/// load-bearing the moment chunks evaluate lazily (Wave D push/pull streaming).
+fn chunked_response(status: StatusCode, content_type: &str, chunks: Vec<String>, head_only: bool, pin: PinnedGen) -> Response {
     let len: usize = chunks.iter().map(String::len).sum();
     let body = if head_only {
         axum::body::Body::empty()
     } else {
         axum::body::Body::from_stream(futures_util::stream::iter(
-            chunks.into_iter().map(|c| Ok::<_, std::convert::Infallible>(Bytes::from(c.into_bytes()))),
+            chunks.into_iter().map(move |c| {
+                let _pinned_for_stream_lifetime = &pin;
+                Ok::<_, std::convert::Infallible>(Bytes::from(c.into_bytes()))
+            }),
         ))
     };
     Response::builder()
