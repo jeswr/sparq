@@ -252,10 +252,195 @@ pub fn compress_chunks<S: AsRef<[u8]> + Sync>(chunks: &[S], codec: &Codec, mode:
     }
 }
 
-/// Decodes a concatenation of gzip members as one stream (what a browser does
-/// for `Content-Encoding: gzip`). Note: flate2's plain `GzDecoder` stops after
-/// the FIRST member — multi-member streams need `MultiGzDecoder` (this is the
-/// classic client caveat; see the research note).
+// ---------------------------------------------------------------------------
+// Browser-safe parallel gzip: ONE member, independently-deflated segments
+// ---------------------------------------------------------------------------
+
+/// Compresses `chunk` as a standalone raw-deflate segment: a fresh deflate
+/// stream (no shared dictionary with neighbours) ended by `Z_FULL_FLUSH` — so
+/// segments produced independently CONCATENATE into one valid deflate stream —
+/// or by `Finish` (the stream's final block) when `finish` is set.
+fn deflate_segment(level: u32, chunk: &[u8], finish: bool) -> io::Result<Vec<u8>> {
+    use flate2::{Compress, Compression, FlushCompress, Status};
+    let mut c = Compress::new(Compression::new(level), false);
+    let mut out: Vec<u8> = Vec::with_capacity(chunk.len() / 4 + 128);
+    // Phase 1: feed all input.
+    while (c.total_in() as usize) < chunk.len() {
+        if out.capacity() == out.len() {
+            out.reserve(16 * 1024);
+        }
+        c.compress_vec(&chunk[c.total_in() as usize..], &mut out, FlushCompress::None)?;
+    }
+    // Phase 2: flush. Per the zlib contract a flush is complete once deflate
+    // returns with output space still available; until then keep growing.
+    let flush = if finish { FlushCompress::Finish } else { FlushCompress::Full };
+    loop {
+        if out.capacity() == out.len() {
+            out.reserve(16 * 1024);
+        }
+        let status = c.compress_vec(&[], &mut out, flush)?;
+        if finish {
+            if matches!(status, Status::StreamEnd) {
+                break;
+            }
+        } else if out.len() < out.capacity() {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff]; // deflate, no flags, no mtime, OS=unknown
+
+/// Parallel gzip that every gzip consumer decodes — including the ones that
+/// stop at the first member.
+///
+/// Measured reality (see the D4 research note): Chromium, Firefox, WebKit and
+/// curl all silently TRUNCATE a multi-member `Content-Encoding: gzip` body to
+/// its first member, so [`Codec::Gzip`] member-per-chunk streams are wrong for
+/// browser-facing responses. This sink instead emits ONE gzip member (pigz's
+/// technique): each pushed chunk becomes an independent raw-deflate segment
+/// ended by a full flush (byte-aligned, dictionary reset, not the final block),
+/// compressed in parallel; the drained pieces are the gzip header, then the
+/// segments in order, then a final empty `Finish` segment + the trailer with
+/// the combined CRC32 (`flate2::Crc::combine`) and total length.
+///
+/// Same contract as [`CompressedSink`]: push chunks, drain wire pieces in
+/// order, concatenation decodes (with plain single-member decoders) to the
+/// concatenation of the chunks. The per-chunk dictionary reset costs the same
+/// ratio loss as multi-member framing (measured negligible at the engine's
+/// chunk sizes).
+pub struct SingleMemberGzipSink {
+    level: u32,
+    mode: Mode,
+    shared: Arc<GzShared>,
+    next_in: usize,
+    next_out: usize,
+    /// Running CRC/length over the chunks of drained segments, combined in order.
+    crc: flate2::Crc,
+    header_sent: bool,
+}
+
+struct GzShared {
+    ready: Mutex<BTreeMap<usize, io::Result<(Vec<u8>, flate2::Crc)>>>,
+    cv: Condvar,
+}
+
+impl SingleMemberGzipSink {
+    pub fn new(level: u32, mode: Mode) -> Self {
+        SingleMemberGzipSink {
+            level,
+            mode,
+            shared: Arc::new(GzShared { ready: Mutex::new(BTreeMap::new()), cv: Condvar::new() }),
+            next_in: 0,
+            next_out: 0,
+            crc: flate2::Crc::new(),
+            header_sent: false,
+        }
+    }
+
+    /// Number of chunks pushed so far.
+    pub fn pushed(&self) -> usize {
+        self.next_in
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) {
+        let idx = self.next_in;
+        self.next_in += 1;
+        let level = self.level;
+        let work = move |chunk: &[u8]| {
+            let mut crc = flate2::Crc::new();
+            crc.update(chunk);
+            deflate_segment(level, chunk, false).map(|seg| (seg, crc))
+        };
+        match self.mode {
+            Mode::Serial => {
+                let out = work(chunk);
+                self.shared.ready.lock().unwrap().insert(idx, out);
+            }
+            Mode::Parallel => {
+                let owned = chunk.to_vec();
+                let shared = Arc::clone(&self.shared);
+                rayon::spawn(move || {
+                    let out = work(&owned);
+                    shared.ready.lock().unwrap().insert(idx, out);
+                    shared.cv.notify_all();
+                });
+            }
+        }
+    }
+
+    fn take(&mut self, piece: io::Result<(Vec<u8>, flate2::Crc)>, out: &mut Vec<Vec<u8>>) -> io::Result<()> {
+        let (mut seg, crc) = piece?;
+        self.next_out += 1;
+        self.crc.combine(&crc);
+        if !self.header_sent {
+            self.header_sent = true;
+            let mut first = GZIP_HEADER.to_vec();
+            first.append(&mut seg);
+            out.push(first);
+        } else {
+            out.push(seg);
+        }
+        Ok(())
+    }
+
+    /// Non-blocking: the contiguous run of finished wire pieces (the first one
+    /// carries the gzip header).
+    pub fn try_drain(&mut self) -> io::Result<Vec<Vec<u8>>> {
+        let shared = Arc::clone(&self.shared);
+        let mut ready = shared.ready.lock().unwrap();
+        let mut out = Vec::new();
+        while let Some(p) = ready.remove(&self.next_out) {
+            self.take(p, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    /// Waits for the outstanding segments, then emits the final piece: an empty
+    /// `Finish` segment closing the deflate stream + the 8-byte gzip trailer.
+    pub fn finish(mut self) -> io::Result<Vec<Vec<u8>>> {
+        let total = self.next_in;
+        let shared = Arc::clone(&self.shared);
+        let mut out = Vec::with_capacity(total - self.next_out + 1);
+        {
+            let mut ready = shared.ready.lock().unwrap();
+            while self.next_out < total {
+                match ready.remove(&self.next_out) {
+                    Some(p) => self.take(p, &mut out)?,
+                    None => ready = shared.cv.wait(ready).unwrap(),
+                }
+            }
+        }
+        let mut last = deflate_segment(self.level, &[], true)?;
+        if !self.header_sent {
+            let mut first = GZIP_HEADER.to_vec();
+            first.append(&mut last);
+            last = first;
+        }
+        last.extend_from_slice(&self.crc.sum().to_le_bytes());
+        last.extend_from_slice(&self.crc.amount().to_le_bytes());
+        out.push(last);
+        Ok(out)
+    }
+}
+
+/// One-shot convenience over [`SingleMemberGzipSink`]: ordered wire pieces
+/// whose concatenation is ONE browser-decodable gzip member.
+pub fn gzip_single_member<S: AsRef<[u8]>>(chunks: &[S], level: u32, mode: Mode) -> io::Result<Vec<Vec<u8>>> {
+    let mut sink = SingleMemberGzipSink::new(level, mode);
+    for c in chunks {
+        sink.push(c.as_ref());
+    }
+    sink.finish()
+}
+
+/// Decodes a concatenation of gzip members as one stream (what `gzip -d`,
+/// Python `gzip` and Node `zlib.gunzip` do). Note: flate2's plain `GzDecoder` —
+/// like browsers, curl and `DecompressionStream('gzip')` — stops after the
+/// FIRST member; multi-member streams need `MultiGzDecoder` (see the D4
+/// research note's consumer matrix; for browser-facing gzip use
+/// [`SingleMemberGzipSink`] instead).
 pub fn decode_gzip_concat(data: &[u8]) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
     flate2::read::MultiGzDecoder::new(data).read_to_end(&mut out)?;
@@ -406,6 +591,60 @@ mod tests {
         let (with, without): (usize, usize) =
             (frames.iter().map(Vec::len).sum(), plain.iter().map(Vec::len).sum());
         assert!(with < without, "dict {with} B should beat plain {without} B on small responses");
+    }
+
+    /// Decodes with flate2's SINGLE-member `GzDecoder` — the strict stand-in for
+    /// the consumers that truncate multi-member streams (browsers, curl,
+    /// `DecompressionStream`): if this decodes fully, those do too.
+    fn decode_single_member(data: &[u8]) -> Vec<u8> {
+        let mut d = flate2::read::GzDecoder::new(data);
+        let mut out = Vec::new();
+        d.read_to_end(&mut out).unwrap();
+        // The whole input must be consumed by the ONE member (no ignored tail).
+        let mut rest = Vec::new();
+        d.into_inner().read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "single-member stream must leave no trailing bytes");
+        out
+    }
+
+    #[test]
+    fn single_member_gzip_roundtrips_with_a_single_member_decoder() {
+        let chunks = json_chunks(20);
+        for mode in [Mode::Serial, Mode::Parallel] {
+            for level in [1, 6] {
+                let mut sink = SingleMemberGzipSink::new(level, mode);
+                let mut pieces = Vec::new();
+                for c in &chunks {
+                    sink.push(c);
+                    pieces.extend(sink.try_drain().unwrap());
+                }
+                pieces.extend(sink.finish().unwrap());
+                assert_eq!(pieces.len(), chunks.len() + 1, "chunks + trailer piece ({mode:?})");
+                let wire = concat(&pieces);
+                assert_eq!(decode_single_member(&wire), concat(&chunks), "level {level} {mode:?}");
+                // MultiGzDecoder agrees (it sees one member).
+                assert_eq!(decode_gzip_concat(&wire).unwrap(), concat(&chunks));
+            }
+        }
+    }
+
+    #[test]
+    fn single_member_gzip_parallel_equals_serial() {
+        let chunks = json_chunks(32);
+        let serial = gzip_single_member(&chunks, 6, Mode::Serial).unwrap();
+        let parallel = gzip_single_member(&chunks, 6, Mode::Parallel).unwrap();
+        assert_eq!(serial, parallel);
+    }
+
+    #[test]
+    fn single_member_gzip_empty_and_empty_chunks() {
+        // No pushes: a valid empty gzip member.
+        let pieces = SingleMemberGzipSink::new(6, Mode::Parallel).finish().unwrap();
+        assert_eq!(decode_single_member(&concat(&pieces)), b"");
+        // Empty chunks interleaved.
+        let chunks = vec![b"".to_vec(), b"abc".to_vec(), b"".to_vec(), b"def".to_vec()];
+        let pieces = gzip_single_member(&chunks, 1, Mode::Parallel).unwrap();
+        assert_eq!(decode_single_member(&concat(&pieces)), b"abcdef");
     }
 
     #[test]
