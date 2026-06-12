@@ -631,18 +631,32 @@ impl Graph {
 
     /// Streaming PARALLEL load: reads the (already-decompressed) `reader` in newline-aligned
     /// ~32 MiB blocks and parses each block in parallel, so the full decompressed document is
-    /// NEVER materialised in memory — only one block plus the growing dictionary/triples. (The
-    /// store itself must fit in RAM; this removes the redundant full-text copy a read-to-string
-    /// load would hold alongside it.) For N-Triples; other formats defer to the serial streaming
-    /// [`load_reader`].
+    /// NEVER materialised in memory — only a few blocks in flight plus the growing
+    /// dictionary/triples. (The store itself must fit in RAM; this removes the redundant
+    /// full-text copy a read-to-string load would hold alongside it.) For N-Triples; other
+    /// formats defer to the serial streaming [`load_reader`].
+    ///
+    /// The read/decompress runs PIPELINED on its own thread (same 3-stage design as the
+    /// external build's `build_external_ntriples_parallel`): stage 1 fills full 32 MiB
+    /// blocks from the reader (looping over short `read()`s — a gzip/zstd decompressor
+    /// returns 0.4–1.6 MB per call, and flushing a parse+merge round per `read()` was the
+    /// measured 3.5–5× streaming-ingest slowdown), stage 2 parses each block on the rayon
+    /// pool, stage 3 (the caller's thread) merges dictionaries — so decode overlaps
+    /// parse+merge and streaming ingest approaches max(decode, parse).
     #[cfg(feature = "parallel")]
-    pub fn load_reader_parallel<R: std::io::Read>(mut reader: R, format: &str) -> Result<Graph, String> {
+    pub fn load_reader_parallel<R: std::io::Read + Send>(reader: R, format: &str) -> Result<Graph, String> {
         if !matches!(format, "ntriples" | "n-triples") {
             return Self::load_reader(reader, format);
         }
-        const BLOCK: usize = 32 << 20;
-        let mut carry: Vec<u8> = Vec::new();
-        let mut chunk = vec![0u8; BLOCK];
+        Self::load_ntriples_pipelined(reader, 32 << 20)
+    }
+
+    /// The pipelined N-Triples loader behind [`load_reader_parallel`], with the block size
+    /// as a parameter so tests can exercise the multi-block / boundary-straddling paths
+    /// cheaply (production always passes 32 MiB).
+    #[cfg(feature = "parallel")]
+    fn load_ntriples_pipelined<R: std::io::Read + Send>(reader: R, block_size: usize) -> Result<Graph, String> {
+        use std::sync::mpsc::sync_channel;
         // ≥2 rayon threads: ONE sharded dict spans all blocks, so the per-block dict merge
         // — the measured serial `merge_remap` that capped load scaling at ~1.8× on 4
         // identical cores — runs parallel across hash-shards; triples carry temporary
@@ -652,31 +666,74 @@ impl Graph {
         let mut sd = dict::ShardedDict::new(if sharded { default_shards() } else { 1 });
         let mut global = Dict::new();
         let mut all: Vec<[Id; 3]> = Vec::new();
-        let flush = |global: &mut Dict, all: &mut Vec<[Id; 3]>, sd: &mut dict::ShardedDict, bytes: &[u8]| -> Result<(), String> {
-            if sharded {
-                let partials = parse_block(bytes)?;
-                sharded_extend(sd, &partials, all);
-            } else {
-                let (pd, pt) = parse_ntriples_parallel(bytes)?;
-                let remap = global.merge_remap(&pd);
-                remap_extend(all, pt, &remap);
+        // Raw blocks flow read-thread -> parse; parsed partials flow parse-thread -> merge
+        // (this thread). Bounds of 1 keep at most ~3 blocks (+1 block's partials) in
+        // flight while letting decode, parse and merge overlap.
+        let (tx, rx) = sync_channel::<Vec<u8>>(1);
+        type Partials = Vec<(Dict, Vec<[Id; 3]>)>;
+        let (ptx, prx) = sync_channel::<Partials>(1);
+        std::thread::scope(|scope| -> Result<(), String> {
+            // Stage 1 — read (the caller's decompressor) on its own thread, emitting
+            // newline-aligned FULL blocks: loop `read()` until the block is full or EOF.
+            let producer = scope.spawn(move || -> Result<(), String> {
+                let mut reader = reader;
+                let mut readbuf = vec![0u8; block_size];
+                let mut carry: Vec<u8> = Vec::new();
+                loop {
+                    let mut filled = 0;
+                    while filled < block_size {
+                        let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
+                        if n == 0 {
+                            break;
+                        }
+                        filled += n;
+                    }
+                    if filled == 0 {
+                        // EOF: a final line without a trailing newline lives in `carry`.
+                        if !carry.is_empty() {
+                            let _ = tx.send(std::mem::take(&mut carry));
+                        }
+                        return Ok(());
+                    }
+                    // Emit `carry + readbuf[..filled]` up to the last newline; carry the
+                    // remainder (a partial line split across the block boundary) forward.
+                    let mut block = std::mem::take(&mut carry);
+                    block.extend_from_slice(&readbuf[..filled]);
+                    let cut = block.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+                    carry = block[cut..].to_vec();
+                    block.truncate(cut);
+                    if !block.is_empty() && tx.send(block).is_err() {
+                        return Ok(()); // a downstream stage errored and dropped the receiver
+                    }
+                }
+            });
+            // Stage 2 — parse+intern each block in parallel (per-chunk local dicts, no
+            // shared state), forwarding the partials to the merge stage.
+            let parser = scope.spawn(move || -> Result<(), String> {
+                for block in rx {
+                    let partials = parse_block(&block)?;
+                    if ptx.send(partials).is_err() {
+                        return Ok(()); // the merge stage errored and dropped the receiver
+                    }
+                }
+                Ok(())
+            });
+            // Stage 3 (this thread) — dict merge. Blocks arrive in document order, so id
+            // assignment matches the non-pipelined load (deterministic).
+            for partials in prx {
+                if sharded {
+                    sharded_extend(&mut sd, &partials, &mut all);
+                } else {
+                    for (pd, pt) in partials {
+                        let remap = global.merge_remap(&pd);
+                        remap_extend(&mut all, pt, &remap);
+                    }
+                }
             }
-            Ok(())
-        };
-        loop {
-            let n = reader.read(&mut chunk).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            carry.extend_from_slice(&chunk[..n]);
-            if let Some(pos) = carry.iter().rposition(|&b| b == b'\n') {
-                flush(&mut global, &mut all, &mut sd, &carry[..=pos])?;
-                carry.drain(..=pos);
-            }
-        }
-        if !carry.is_empty() {
-            flush(&mut global, &mut all, &mut sd, &carry)?;
-        }
+            // Join parse first (it feeds stage 3 — surface a parse error), then the producer.
+            parser.join().map_err(|_| "parse thread panicked".to_string())??;
+            producer.join().map_err(|_| "read thread panicked".to_string())?
+        })?;
         if sharded {
             let (dict, ids) = finish_sharded(sd, all);
             return Ok(Self::build(dict, ids));
@@ -2475,6 +2532,75 @@ mod tests {
             v
         };
         assert_eq!(dump(&par), dump(&seq));
+    }
+
+    /// The streaming pipelined loader must be byte-exact against the serial loader for
+    /// readers with SHORT reads (a gzip/zstd decompressor returns a fraction of the block
+    /// per `read()` — the measured streaming-ingest defect), read boundaries landing
+    /// mid-line, an EOF mid-line (final line without a trailing newline), and empty input.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn load_reader_parallel_short_reads_match_sequential() {
+        /// Returns at most `max` bytes per `read()` call.
+        struct ShortReader<'a> {
+            data: &'a [u8],
+            pos: usize,
+            max: usize,
+        }
+        impl std::io::Read for ShortReader<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = (self.data.len() - self.pos).min(self.max).min(buf.len());
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+        let mut nt = String::new();
+        for i in 0..3000u32 {
+            nt.push_str(&format!(
+                "<http://ex/n{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 211,
+                i % 13,
+                i % 700
+            ));
+        }
+        nt.push_str("<http://ex/last> <http://ex/p0> \"no trailing newline\" ."); // EOF mid-line
+        let seq = Graph::load_reader(nt.as_bytes(), "ntriples").unwrap();
+        // 7 B forces hundreds of reads per line; the others land boundaries mid-line.
+        for max in [7usize, 1024, 1 << 16] {
+            let par = Graph::load_reader_parallel(ShortReader { data: nt.as_bytes(), pos: 0, max }, "ntriples").unwrap();
+            assert_eq!(par.len(), seq.len(), "triple count differs at max={max}");
+            assert_eq!(par.dict.len(), seq.dict.len(), "dict size differs at max={max}");
+            assert_eq!(dump_terms(&par), dump_terms(&seq), "stored triples differ at max={max}");
+        }
+        // MULTI-BLOCK: a small block size (vs the production 32 MiB) makes the same
+        // document span ~60 blocks, with triple lines (each ~70-100 B, never a multiple
+        // of 4096) straddling every block boundary and partial lines carried across
+        // pipelined rounds — and the per-block dict merges must still agree.
+        for (block, max) in [(4096usize, 997usize), (4096, 1 << 16), (8192, 7)] {
+            let par = Graph::load_ntriples_pipelined(ShortReader { data: nt.as_bytes(), pos: 0, max }, block).unwrap();
+            assert_eq!(par.len(), seq.len(), "triple count differs at block={block} max={max}");
+            assert_eq!(par.dict.len(), seq.dict.len(), "dict size differs at block={block} max={max}");
+            assert_eq!(dump_terms(&par), dump_terms(&seq), "stored triples differ at block={block} max={max}");
+        }
+        // A single line LONGER than the block size (carry outgrows the block).
+        let long = format!("<http://ex/s> <http://ex/p> \"{}\" .\n<http://ex/s2> <http://ex/p> \"x\" .", "y".repeat(20_000));
+        let lseq = Graph::load_reader(long.as_bytes(), "ntriples").unwrap();
+        let lpar = Graph::load_ntriples_pipelined(ShortReader { data: long.as_bytes(), pos: 0, max: 333 }, 4096).unwrap();
+        assert_eq!(lpar.len(), lseq.len());
+        assert_eq!(dump_terms(&lpar), dump_terms(&lseq));
+        // Empty input and input with no final newline at all.
+        let empty = Graph::load_reader_parallel(ShortReader { data: b"", pos: 0, max: 7 }, "ntriples").unwrap();
+        assert_eq!(empty.len(), 0);
+        let one = Graph::load_reader_parallel(
+            ShortReader { data: b"<http://ex/s> <http://ex/p> <http://ex/o> .", pos: 0, max: 3 },
+            "ntriples",
+        )
+        .unwrap();
+        assert_eq!(one.len(), 1);
+        // A malformed document must surface the parse error, not hang the pipeline.
+        let bad = Graph::load_reader_parallel(ShortReader { data: b"not ntriples\n", pos: 0, max: 5 }, "ntriples");
+        assert!(bad.is_err());
     }
 
     #[test]

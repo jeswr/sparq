@@ -2844,6 +2844,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-parse"
+version = "0.1.0"
+
+[[package]]
 name = "sparq-py"
 version = "0.1.0"
 dependencies = [

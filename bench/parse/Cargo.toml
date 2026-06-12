@@ -1,0 +1,43 @@
+# BASELINE MEASUREMENT harness for the custom-parsers design
+# (research/custom-parsers-baseline.md). Deliberately a STANDALONE cargo project
+# (own [workspace] table, same isolation pattern as bench/serve) so the heavy
+# codec deps (flate2/zstd) never touch the root workspace or the wasm build.
+# Nothing here is production code; each measurement's numbers are recorded in
+# the research document.
+[package]
+name = "parse-baseline"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# The root workspace patches spargebra with the vendored W3C-conformance fork;
+# sparq-core's build depends on the same graph, so this detached project must
+# apply the same patch.
+[patch.crates-io]
+spargebra = { path = "../../vendor/spargebra" }
+
+[dependencies]
+# The incumbent ingestion path under test.
+sparq-core = { path = "../../crates/sparq-core", features = ["parallel"] }
+# Reference parsers (same versions the workspace pins).
+oxttl = { version = "0.2", features = ["rdf-12"] }
+oxrdf = { version = "0.3", features = ["rdf-12"] }
+# Codecs under test (same crates/versions sparq-cli ingest uses).
+flate2 = "1"
+zstd = "0.13"
+# Thread-count control for the serial-vs-parallel comparisons.
+rayon = "1"
+# Match the production CLI environment: sparq-cli ingest runs under mimalloc.
+mimalloc = "0.1"
+
+[[bin]]
+name = "parse-baseline"
+path = "src/main.rs"
+
+# Match the root workspace release profile (sparq-cli ships with fat LTO).
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
