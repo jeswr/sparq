@@ -20,7 +20,11 @@
 //!   mirroring `sparq-solid`'s `<urn:sparq:auth>` conventions.
 //! - [`trace`] — the zk-trace seam (plan §4.E): per-obligation input sets
 //!   from an executed query, leaf-index resolution against per-graph
-//!   commitment orderings, and the Q6 cross-graph bnode-join guard.
+//!   commitment orderings, and the Q6 cross-graph bnode-join guard
+//!   (prover side, plan §2.4 layer 2).
+//! - [`verify`] — the verifier-side static re-check (plan §2.4 layer 3):
+//!   independent re-derivation of fragment patterns and cross-graph join
+//!   obligations from the query text.
 //!
 //! NOTHING in the sparq workspace depends on this crate; default builds and
 //! the wasm artifact are byte-identical with or without it.
@@ -33,5 +37,6 @@ pub mod poseidon2;
 mod poseidon2_constants;
 pub mod registry;
 pub mod trace;
+pub mod verify;
 
 pub use field::Fr;

@@ -165,10 +165,33 @@ pub struct ZkDataset {
 
 /// The output of one traced execution: the result, the raw engine trace, and
 /// the per-obligation input sets resolved to commitment leaf references.
+#[derive(Debug)]
 pub struct TracedExecution {
     pub result: QueryResult,
     pub trace: ZkTrace,
     pub patterns: Vec<ResolvedPattern>,
+}
+
+impl TracedExecution {
+    /// The public per-pattern graph attributions for the manifest, in trace
+    /// pattern order: for each traced pattern, the union of graph indices
+    /// its matched triples are attributable to. This is the prover-side
+    /// input to [`crate::verify::cross_graph_join_obligations`] — the
+    /// verifier recomputes the required obligations from the query text and
+    /// these (public) sets, independent of the trace itself.
+    pub fn attributions(&self) -> Vec<(PatternKey, std::collections::BTreeSet<usize>)> {
+        self.patterns
+            .iter()
+            .map(|rp| {
+                let set = rp
+                    .leaves
+                    .iter()
+                    .flat_map(|refs| refs.iter().map(|r| r.graph))
+                    .collect();
+                (rp.pattern.clone(), set)
+            })
+            .collect()
+    }
 }
 
 impl ZkDataset {
