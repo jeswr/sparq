@@ -83,7 +83,7 @@ log that make sharding/replication a later, mechanical step (§6.8).
 ## 2. Literature review
 
 (Searched and compiled 2026-06-12; key sources only, each with the design implication
-that survives contact with our measurements. Full agent notes in commit history.)
+that survives contact with our measurements.)
 
 ### 2.1 MQO / work sharing
 
