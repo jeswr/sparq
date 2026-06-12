@@ -837,7 +837,7 @@ impl MaterializedOwlGraph {
             for &r in &self.transitive {
                 let mut tr: Vec<(Id, bool)> = Vec::new();
                 for &(r2, swap) in px_entries(&self.px, r) {
-                    if self.transitive.contains(&r2) && !(r2 == r && !swap) {
+                    if self.transitive.contains(&r2) && (r2 != r || swap) {
                         tr.push((r2, swap));
                     }
                 }
@@ -941,7 +941,7 @@ impl MaterializedOwlGraph {
             let entries = if entries.is_empty() { &identity[..] } else { entries };
             for &(r, swap) in entries {
                 let (rs, ro) = if swap { (o, s) } else { (s, o) };
-                if !(r == p && !swap) {
+                if r != p || swap {
                     out.push([rs, r, ro]);
                 }
                 if let Some(cs) = self.dom_used.get(&r) {
@@ -2492,7 +2492,7 @@ impl MaterializedN3Graph {
                 for f in removed {
                     if self.index.contains(&f)
                         && !self.base.contains(&f)
-                        && self.counts.get(&f).is_none()
+                        && !self.counts.contains_key(&f)
                         && !self.in_any_layer(&f)
                         && queued.insert(f.clone())
                     {
@@ -2522,7 +2522,7 @@ impl MaterializedN3Graph {
                 for f in facts {
                     let stale_own = self.layer_derived[li].contains(f)
                         && !self.base.contains(f)
-                        && self.counts.get(f).is_none();
+                        && !self.counts.contains_key(f);
                     if !stale_own {
                         seed.push(f.clone());
                     }
@@ -2626,7 +2626,7 @@ impl MaterializedN3Graph {
         }
         let pending: Vec<[N3Term; 3]> = removed
             .iter()
-            .filter(|f| self.counts.get(*f).is_none() && !self.in_any_layer(f))
+            .filter(|f| !self.counts.contains_key(*f) && !self.in_any_layer(f))
             .cloned()
             .collect();
         if !self.propagate(pending, false) {
