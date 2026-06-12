@@ -52,7 +52,7 @@ fn turtle_to_index_to_queries() {
     assert_eq!(index.len(), 6);
     assert_eq!(index.skipped(), 0);
 
-    let entities: Vec<&Term> = index.entries().iter().map(|e| &e.entity).collect();
+    let entities: Vec<&Term> = index.entries().map(|e| &e.entity).collect();
     for ent in ["london", "paris", "brussels", "amsterdam", "thames", "innerLondon"] {
         assert!(entities.contains(&&iri(ent)), "missing {ent}");
     }
@@ -108,7 +108,7 @@ ex:g geo:asWKT "POINT(1 1)"^^geo:wktLiteral .
     let index = GeoIndex::build(&graph);
     assert_eq!(index.len(), 2);
     let mut entities: Vec<String> =
-        index.entries().iter().map(|e| e.entity.to_string()).collect();
+        index.entries().map(|e| e.entity.to_string()).collect();
     entities.sort();
     assert_eq!(entities, ["<http://example.org/a>", "<http://example.org/b>"]);
 }
