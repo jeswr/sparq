@@ -23,6 +23,11 @@
 //!   --max-subscriptions N           server-wide active subscriptions [256, env SPARQ_MAX_SUBSCRIPTIONS]
 //!   --max-subscriptions-per-conn N  active subscriptions per socket  [16, env SPARQ_MAX_SUBSCRIPTIONS_PER_CONN]
 //!
+//! Time-travel retention (opt-in `time-travel` cargo feature — see the README's
+//! "Time-travel queries" section; each retained generation is a FULL graph today):
+//!   --time-travel-generations N  queryable generations older than current [16, env SPARQ_TIME_TRAVEL_GENERATIONS]
+//!   --time-travel-max-age SECS   age generations out after SECS, 0 off    [off, env SPARQ_TIME_TRAVEL_MAX_AGE]
+//!
 //! Update path (Wave A wiring — see crates/sparq-server/README.md "Update concurrency
 //! model"): sparq-serve's sequenced group-commit writer over the generation ring. The
 //! old `--compact-every` flag is gone — every batch commit forks a freshly folded base,
@@ -72,12 +77,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-subscriptions-per-conn" => {
                 config.max_subscriptions_per_conn = parse_flag(&mut args, "--max-subscriptions-per-conn")?;
             }
+            #[cfg(feature = "time-travel")]
+            "--time-travel-generations" => {
+                config.time_travel_generations = parse_flag(&mut args, "--time-travel-generations")?;
+            }
+            #[cfg(feature = "time-travel")]
+            "--time-travel-max-age" => {
+                let secs: u64 = parse_flag(&mut args, "--time-travel-max-age")?;
+                config.time_travel_max_age = (secs > 0).then(|| Duration::from_secs(secs));
+            }
             "--verbose" => config.verbose = true,
             "-h" | "--help" => {
+                let time_travel = if cfg!(feature = "time-travel") {
+                    " [--time-travel-generations N] [--time-travel-max-age SECS]"
+                } else {
+                    ""
+                };
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--format FMT] [--query-timeout SECS] \
                      [--max-body-bytes N] [--max-concurrent N] [--max-results N] \
-                     [--max-subscriptions N] [--max-subscriptions-per-conn N] \
+                     [--max-subscriptions N] [--max-subscriptions-per-conn N]{time_travel} \
                      [--verbose] [DATA_FILE]"
                 );
                 return Ok(());
@@ -117,6 +136,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.max_results.map_or("off".into(), |n| n.to_string()),
         config.max_subscriptions,
         config.max_subscriptions_per_conn,
+    );
+    #[cfg(feature = "time-travel")]
+    eprintln!(
+        "time travel: ?generation=N enabled — generations={} max-age={} (each retained generation is a full graph)",
+        config.time_travel_generations,
+        config.time_travel_max_age.map_or("off".into(), |t| format!("{}s", t.as_secs())),
     );
 
     let state = AppState::with_config(graph, config);

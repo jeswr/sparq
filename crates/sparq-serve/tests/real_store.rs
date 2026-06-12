@@ -20,7 +20,7 @@ fn graph_with(n: usize) -> Graph {
 
 #[test]
 fn ring_serves_real_graph_snapshots_consistently() {
-    let ring = GenerationRing::with_config(graph_with(2), RingConfig { retain: 2 });
+    let ring = GenerationRing::with_config(graph_with(2), RingConfig { retain: 2, ..RingConfig::default() });
 
     let gen0 = ring.current();
     assert_eq!(gen0.snapshot().len(), 2);

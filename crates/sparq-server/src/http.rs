@@ -89,6 +89,18 @@ pub struct ServerConfig {
     pub max_subscriptions_per_conn: usize,
     /// Maximum active subscriptions across the whole server (T23).
     pub max_subscriptions: usize,
+    /// How many generations older than current stay queryable via `?generation=N`
+    /// (opt-in `time-travel` feature). Composes with the ring's concurrency bound
+    /// K = 4 as a floor (`max(K, this)` — see `sparq_serve::TimeTravelConfig`).
+    /// **Memory cost is real:** each retained generation is a FULL `Graph` until
+    /// the structural-fork follow-up lands.
+    #[cfg(feature = "time-travel")]
+    pub time_travel_generations: usize,
+    /// Additionally age time-travel generations out after this duration (pruned at
+    /// the next publish; the K newest are never age-evicted). `None` = count-bounded
+    /// only.
+    #[cfg(feature = "time-travel")]
+    pub time_travel_max_age: Option<Duration>,
     /// Log every request/response via `tower_http::trace::TraceLayer`.
     pub verbose: bool,
 }
@@ -102,6 +114,10 @@ impl Default for ServerConfig {
             max_results: None,
             max_subscriptions_per_conn: 16,
             max_subscriptions: 256,
+            #[cfg(feature = "time-travel")]
+            time_travel_generations: 16,
+            #[cfg(feature = "time-travel")]
+            time_travel_max_age: None,
             verbose: false,
         }
     }
@@ -110,7 +126,9 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// Defaults overridden by the `SPARQ_QUERY_TIMEOUT` (seconds; `0` disables),
     /// `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT` and `SPARQ_MAX_RESULTS`
-    /// environment variables. CLI flags override these in `main`.
+    /// environment variables — plus, with the `time-travel` feature,
+    /// `SPARQ_TIME_TRAVEL_GENERATIONS` and `SPARQ_TIME_TRAVEL_MAX_AGE` (seconds;
+    /// `0` disables the age bound). CLI flags override these in `main`.
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
         if let Some(secs) = env_parse::<u64>("SPARQ_QUERY_TIMEOUT") {
@@ -130,6 +148,15 @@ impl ServerConfig {
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_SUBSCRIPTIONS") {
             cfg.max_subscriptions = n;
+        }
+        #[cfg(feature = "time-travel")]
+        {
+            if let Some(n) = env_parse::<usize>("SPARQ_TIME_TRAVEL_GENERATIONS") {
+                cfg.time_travel_generations = n;
+            }
+            if let Some(secs) = env_parse::<u64>("SPARQ_TIME_TRAVEL_MAX_AGE") {
+                cfg.time_travel_max_age = (secs > 0).then(|| Duration::from_secs(secs));
+            }
         }
         cfg
     }
@@ -229,7 +256,19 @@ impl AppState {
     }
 
     pub fn with_config(graph: Graph, config: ServerConfig) -> Self {
-        let ring = Arc::new(GenerationRing::new(graph));
+        // Default ring (concurrency retention only); the opt-in `time-travel`
+        // feature extends retention so `?generation=N` has history to serve.
+        #[cfg(not(feature = "time-travel"))]
+        let ring_config = sparq_serve::RingConfig::default();
+        #[cfg(feature = "time-travel")]
+        let ring_config = sparq_serve::RingConfig {
+            time_travel: Some(sparq_serve::TimeTravelConfig {
+                max_generations: config.time_travel_generations,
+                max_age: config.time_travel_max_age,
+            }),
+            ..sparq_serve::RingConfig::default()
+        };
+        let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
         let writer = Arc::new(Writer::spawn(ring.clone(), ServerApplier::default(), WriterConfig::default()));
         Self {
             ring,
@@ -253,18 +292,29 @@ impl AppState {
         self.ring.current()
     }
 
+    /// Pins the retained generation numbered `number` (time travel): `None` when it
+    /// was never published or has aged out of the retention window. See
+    /// [`sparq_serve::GenerationRing::at`].
+    #[cfg(feature = "time-travel")]
+    pub fn at(&self, number: u64) -> Option<PinnedGen> {
+        self.ring.at(number)
+    }
+
     /// Applies a SPARQL Update through the sequenced writer: the update joins the
     /// writer's current group-commit window and this call **blocks until the generation
     /// containing it is published** (group-commit ack). Failed updates stay atomic to
     /// clients — the writer applies batches to a private working copy, skips the failing
     /// update, and re-forks, so the published chain never contains a partial effect.
     ///
-    /// On success, advances the commit watch so active subscriptions re-evaluate (T23).
-    /// The advance happens strictly *after* the publish (submit returns the published
-    /// generation number), so a woken subscription always pins a generation at least as
-    /// new as the commit it was woken for. Blocking (window + batch application): call
-    /// it on the blocking pool.
-    pub fn apply_update(&self, sparql: &str) -> Result<(), String> {
+    /// On success, advances the commit watch so active subscriptions re-evaluate (T23)
+    /// and returns the number of the published generation containing the update — the
+    /// read-your-writes token a client can later pin with `?generation=N` (time travel)
+    /// or compare against `Sparq-Generation` response headers. The advance happens
+    /// strictly *after* the publish (submit returns the published generation number),
+    /// so a woken subscription always pins a generation at least as new as the commit
+    /// it was woken for. Blocking (window + batch application): call it on the
+    /// blocking pool.
+    pub fn apply_update(&self, sparql: &str) -> Result<u64, String> {
         match self.writer.submit(sparql.to_string(), [PodId::new(GLOBAL_POD)]) {
             Ok(number) => {
                 // Monotonic max: batch-mates share a generation number and may ack in
@@ -277,7 +327,7 @@ impl AppState {
                         false
                     }
                 });
-                Ok(())
+                Ok(number)
             }
             Err(WriteError::Rejected(e)) => Err(e),
             Err(WriteError::Shutdown) => Err("update writer has shut down".to_string()),
@@ -410,6 +460,96 @@ fn explain_mode(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Time-travel pinning (opt-in `time-travel` cargo feature)
+// ---------------------------------------------------------------------------
+
+/// Resolves the generation a query request is pinned to (opt-in `time-travel`
+/// feature). `generation=N` — URL query string, or the url-encoded POST body,
+/// the body winning (same precedence as `explain`) — pins the retained
+/// generation N for the whole request: the response is the store *as of* that
+/// generation. Chosen over an `As-Of` timestamp header because it fits the
+/// endpoint's existing parameter contract (`query=`, `explain=`) and the number
+/// is the exact token the server itself hands out in `Sparq-Generation` (the
+/// read-your-writes / shard_seq concept — no clock resolution or skew
+/// ambiguity); callers that track timestamps resolve them via the library's
+/// `GenerationRing::as_of`.
+///
+/// Errors per the endpoint's status semantics: unparsable number → 400; not yet
+/// published → 400 (the client cannot have obtained that token from this
+/// server); published but no longer retained → **410 Gone** (it aged out of the
+/// retention window — gone permanently, retrying cannot help).
+#[cfg(feature = "time-travel")]
+fn resolve_pin(
+    state: &AppState,
+    url_params: &HashMap<String, String>,
+    body_params: Option<&HashMap<String, String>>,
+) -> Result<PinnedGen, Response> {
+    let raw = match body_params.and_then(|m| m.get("generation")).or_else(|| url_params.get("generation")) {
+        Some(raw) => raw,
+        None => return Ok(state.current()),
+    };
+    let number: u64 = raw
+        .parse()
+        .map_err(|_| bad_request(&format!("invalid 'generation' parameter '{raw}': expected a generation number")))?;
+    let current = state.current();
+    if number > current.number() {
+        return Err(bad_request(&format!(
+            "generation {number} has not been published yet (current generation: {})",
+            current.number()
+        )));
+    }
+    if number == current.number() {
+        return Ok(current);
+    }
+    state.ring.at(number).ok_or_else(|| {
+        json_error(
+            StatusCode::GONE,
+            &format!(
+                "generation {number} has aged out of the retention window (oldest retained: {}, current: {}); \
+                 raise --time-travel-generations / --time-travel-max-age to keep more history",
+                state.ring.oldest_retained(),
+                current.number()
+            ),
+        )
+    })
+}
+
+/// Without the `time-travel` feature the parameter handling is compiled out:
+/// every query runs against the current generation and a `generation` parameter
+/// is just an ignored unknown parameter (like any other).
+#[cfg(not(feature = "time-travel"))]
+#[inline(always)]
+fn resolve_pin(
+    state: &AppState,
+    _url_params: &HashMap<String, String>,
+    _body_params: Option<&HashMap<String, String>>,
+) -> Result<PinnedGen, Response> {
+    Ok(state.current())
+}
+
+/// Stamps the `Sparq-Generation` response header (opt-in `time-travel` feature):
+/// the generation number the response was produced against — the current
+/// generation for unpinned queries (capture it as the time-travel /
+/// read-your-writes token; the same generation-number concept as the
+/// horizontal-scaling ADR's `shard_seq`), the pin for pinned queries, and the
+/// generation containing the update for a 204 update ack.
+#[cfg(feature = "time-travel")]
+fn with_generation_header(mut resp: Response, number: u64) -> Response {
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("sparq-generation"),
+        header::HeaderValue::from(number),
+    );
+    resp
+}
+
+/// Without the `time-travel` feature there is no generation header (identity).
+#[cfg(not(feature = "time-travel"))]
+#[inline(always)]
+fn with_generation_header(resp: Response, _number: u64) -> Response {
+    resp
+}
+
 async fn sparql_endpoint(
     State(state): State<AppState>,
     method: Method,
@@ -424,8 +564,12 @@ async fn sparql_endpoint(
             // GET without a `query` parameter is a malformed request (400).
             match url_params.get("query") {
                 Some(q) => {
+                    let pin = match resolve_pin(&state, &url_params, None) {
+                        Ok(pin) => pin,
+                        Err(resp) => return resp,
+                    };
                     let explain = explain_mode(&url_params, None, &headers);
-                    run_query(&state, q, &headers, method == Method::HEAD, explain).await
+                    run_query(&state, q, &headers, method == Method::HEAD, explain, pin).await
                 }
                 None => bad_request("missing 'query' parameter"),
             }
@@ -446,8 +590,12 @@ async fn handle_post(
         // POST directly — body IS the SPARQL query.
         match std::str::from_utf8(body) {
             Ok(q) => {
+                let pin = match resolve_pin(state, url_params, None) {
+                    Ok(pin) => pin,
+                    Err(resp) => return resp,
+                };
                 let explain = explain_mode(url_params, None, headers);
-                run_query(state, q, headers, false, explain).await
+                run_query(state, q, headers, false, explain, pin).await
             }
             Err(_) => bad_request("request body is not valid UTF-8"),
         }
@@ -460,8 +608,12 @@ async fn handle_post(
         let params = parse_form(s);
         match params.get("query") {
             Some(q) => {
+                let pin = match resolve_pin(state, url_params, Some(&params)) {
+                    Ok(pin) => pin,
+                    Err(resp) => return resp,
+                };
                 let explain = explain_mode(url_params, Some(&params), headers);
-                run_query(state, q, headers, false, explain).await
+                run_query(state, q, headers, false, explain, pin).await
             }
             None => bad_request("missing 'query' parameter in url-encoded body"),
         }
@@ -469,15 +621,27 @@ async fn handle_post(
         // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
         // `apply_update` blocks for the writer's group-commit ack (window + batch
         // application, which includes an O(graph) fork), so it runs off the async workers.
+        // Time travel is a READ concept: an update can only apply to the current
+        // generation, so a `generation` pin on an update is an honest refusal, not
+        // a silent ignore.
+        #[cfg(feature = "time-travel")]
+        if url_params.contains_key("generation") {
+            return bad_request(
+                "the 'generation' parameter pins queries to a retained generation; \
+                 updates always apply to the current generation",
+            );
+        }
         match std::str::from_utf8(body) {
             Ok(u) => {
                 let st = state.clone();
                 let u = u.to_string();
                 let joined = tokio::task::spawn_blocking(move || st.apply_update(&u)).await;
                 match joined {
-                    Ok(Ok(())) => {
+                    Ok(Ok(number)) => {
                         state.metrics().inc_updates();
-                        StatusCode::NO_CONTENT.into_response()
+                        // The 204 carries the generation containing the update (the
+                        // read-your-writes token) under the time-travel feature.
+                        with_generation_header(StatusCode::NO_CONTENT.into_response(), number)
                     }
                     Ok(Err(e)) => bad_request(&format!("update failed: {e}")),
                     Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
@@ -494,21 +658,44 @@ async fn handle_post(
     }
 }
 
-/// Executes a query string and renders the negotiated representation.
+/// Executes a query string against the request's pinned generation and renders the
+/// negotiated representation, stamped with the `Sparq-Generation` header under the
+/// `time-travel` feature.
 ///
 /// The engine call is synchronous + CPU-bound, so it runs on the blocking pool under a
 /// cooperative [`QueryBudget`] (deadline + SELECT row cap). The await is additionally
 /// hard-capped at `timeout + TIMEOUT_GRACE` so a worker stuck in an uninstrumented
 /// stretch still gets its 503 on time (the worker itself stops at its next budget check).
-async fn run_query(state: &AppState, sparql: &str, headers: &HeaderMap, head_only: bool, explain: ExplainMode) -> Response {
+async fn run_query(
+    state: &AppState,
+    sparql: &str,
+    headers: &HeaderMap,
+    head_only: bool,
+    explain: ExplainMode,
+    gen: PinnedGen,
+) -> Response {
+    let number = gen.number();
+    let resp = run_query_pinned(state, sparql, headers, head_only, explain, gen).await;
+    with_generation_header(resp, number)
+}
+
+async fn run_query_pinned(
+    state: &AppState,
+    sparql: &str,
+    headers: &HeaderMap,
+    head_only: bool,
+    explain: ExplainMode,
+    gen: PinnedGen,
+) -> Response {
     let prepared = match prepare(sparql) {
         Ok(p) => p,
         Err(PrepareError::Malformed(msg)) => return bad_request(&format!("malformed query: {msg}")),
     };
-    // Pin the generation ONCE per request; every evaluation below (and the streamed
-    // JSON body) reads this snapshot, so the response is consistent with query start
-    // even while the writer publishes new generations concurrently.
-    let gen = state.current();
+    // The generation was pinned ONCE per request (the caller's `resolve_pin`: the
+    // current generation, or — under the `time-travel` feature — the requested
+    // retained one); every evaluation below (and the streamed JSON body) reads this
+    // snapshot, so the response is consistent with its pin even while the writer
+    // publishes new generations concurrently.
     // T22 EXPLAIN: answer with the plan text instead of (plan-only) / alongside
     // executing (analyze). Plan-only is a planning dry run — no budget needed —
     // but both run on the blocking pool and under the worker timeout cap anyway;

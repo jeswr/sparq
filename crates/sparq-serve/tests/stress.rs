@@ -57,7 +57,7 @@ fn concurrent_readers_pin_across_many_publishes_without_torn_reads() {
     let live = Arc::new(AtomicUsize::new(0));
     let ring = Arc::new(GenerationRing::with_config(
         MockSnapshot::new(0, &live),
-        RingConfig { retain: 4 },
+        RingConfig { retain: 4, ..RingConfig::default() },
     ));
     let done = Arc::new(AtomicBool::new(false));
 

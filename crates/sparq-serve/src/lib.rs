@@ -27,6 +27,16 @@
 //! production decision (O(graph) fork per batch today) and the deferred
 //! cheap-fork follow-up.
 //!
+//! Opt-in time travel: a retained generation IS a queryable snapshot, so
+//! [`RingConfig::time_travel`] ([`TimeTravelConfig`]) extends retention beyond the
+//! concurrency bound K (count and/or age bounded; K stays the floor) and
+//! [`GenerationRing::at`] / [`GenerationRing::as_of`] resolve a generation number /
+//! "as of T" timestamp to a pinned historical generation ([`Generation::published_at`]
+//! is stamped by the ring's injectable clock). Memory cost is honest and documented on
+//! [`TimeTravelConfig`]: each retained generation is a FULL `Graph` until the
+//! structural-fork follow-up lands; the API is shaped so delta-chain retention can
+//! replace full graphs later without an API change.
+//!
 //! Library-first rule (§6.1): sync, runtime-agnostic, no HTTP and no async-runtime
 //! types anywhere in the API (the writer uses `std::thread` + channels internally).
 //! The scheduler, result cache, and stream admission (`Shed(SnapshotPressure)` at
@@ -49,5 +59,5 @@ mod writer;
 
 pub use applier::GraphApplier;
 pub use epoch::{Epoch, PodEpochs, PodId};
-pub use ring::{Generation, GenerationRing, RingConfig, DEFAULT_RETAIN};
+pub use ring::{Generation, GenerationRing, RingConfig, TimeTravelConfig, DEFAULT_RETAIN};
 pub use writer::{ApplyUpdates, WriteError, Writer, WriterConfig, DEFAULT_MAX_BATCH, DEFAULT_WINDOW};

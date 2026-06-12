@@ -56,6 +56,66 @@ and an unknown `geof:` IRI is the usual hard "unsupported SPARQL function"
 error (a 500). Feature-gated tests: `cargo test -p sparq-server --features geo`
 (see `tests/geo.rs`).
 
+## Time-travel queries — opt-in `time-travel` feature
+
+Built with `--features time-travel` (default **off** — opt-in is the contract), a
+query can be pinned to a **retained generation**: the sparq-serve generation ring
+already keeps recent generations alive for concurrency, and a retained generation *is*
+a queryable snapshot.
+
+```sh
+# every /sparql response carries the generation it was produced against
+curl -siG http://127.0.0.1:3030/sparql --data-urlencode query='ASK { ?s ?p ?o }' \
+  | grep -i sparq-generation
+# sparq-generation: 17
+
+# an update's 204 carries the generation CONTAINING the update (read-your-writes token)
+curl -si http://127.0.0.1:3030/sparql -H 'content-type: application/sparql-update' \
+  --data 'INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> }' | grep -i sparq-generation
+# sparq-generation: 18
+
+# pin a query to a captured generation: the response is the store AS OF that generation
+curl -G http://127.0.0.1:3030/sparql \
+  --data-urlencode query='SELECT ?s WHERE { ?s ?p ?o }' --data-urlencode generation=17
+```
+
+* **Mechanism.** `generation=N` — URL query string or the url-encoded POST body (body
+  wins, same precedence as `explain`). A generation *number* rather than an `As-Of`
+  timestamp because it fits the endpoint's existing parameter contract and is the exact
+  token the server hands out in the `Sparq-Generation` response header (the same
+  generation-number concept as the horizontal-scaling read-your-writes `shard_seq`
+  token) — no clock-resolution or skew ambiguity. Callers that track timestamps resolve
+  them through the library (`sparq_serve::GenerationRing::as_of` over
+  `Generation::published_at`).
+* **Status semantics** (additions to the table below): pinned success → `200` +
+  `Sparq-Generation`; generation aged out of the retention window → **`410 Gone`**
+  (the error body names the oldest retained generation); generation never published,
+  unparsable, or a pin on an *update* (updates always apply to the current generation)
+  → `400`.
+* **Retention.** `--time-travel-generations N` [16, env
+  `SPARQ_TIME_TRAVEL_GENERATIONS`] keeps N generations older than current queryable;
+  `--time-travel-max-age SECS` [off, env `SPARQ_TIME_TRAVEL_MAX_AGE`] additionally ages
+  them out (pruned at the next publish, never mid-request — a pinned response always
+  completes). The ring's concurrency bound K = 4 is a **floor**: time travel extends
+  retention, never shrinks it below K (so `--time-travel-generations 2` still leaves
+  the K window queryable).
+* **Memory cost, stated honestly.** Each retained generation is a **full `Graph`**
+  today (the writer's per-batch fork shares no structure — the recorded A2 trade), so
+  the budget is `N × full graph`: ~780 MB per generation at 1 M triples. Size
+  `--time-travel-generations` accordingly. When the structural-fork follow-up lands
+  (persistent/COW indexes), retained generations become delta chains and this cost
+  collapses; the API is number/timestamp-based so that swap needs no contract change
+  (an OSTRICH-style delta-chain archive is the recorded follow-up).
+* **Scope.** `/sparql` queries only: the Graph Store read endpoints and
+  `/subscriptions` always serve the current generation; SPARQL-syntax-level `AS OF`
+  and cross-generation diffs are out of scope.
+
+With the feature **off** (the default) the parameter handling is compiled out:
+`?generation=` is just an ignored unknown parameter, no `Sparq-Generation` header
+exists, and the ring keeps only its concurrency window. Feature-gated tests run both
+ways — `cargo test -p sparq-server` and `cargo test -p sparq-server --features
+time-travel` (see `tests/time_travel.rs`).
+
 ## Hardening flags (T15)
 
 The endpoint ships with guards that make it safe to expose publicly. Each flag overrides
@@ -116,7 +176,11 @@ generation-ring update path (Wave A): sequential visibility (group-commit ack �
 update's generation is published), atomicity + recovery after a refused update,
 concurrent reads proceeding unstalled while updates commit (over HTTP and in-process),
 generation pinning across commits — plus the `#[ignore]`d 1M-triple update-cost
-benchmark.
+benchmark. `tests/time_travel.rs` compiles both ways (run it with and without
+`--features time-travel`): with the feature, `?generation=N` pinning end to end
+(old data after subsequent updates, `Sparq-Generation` tokens, `410` on aged-out,
+`400` on misuse, the K-floor retention composition); without it, that the parameter
+handling is compiled out (no header, `?generation=` ignored).
 
 ## Endpoints
 
@@ -312,6 +376,11 @@ All error bodies are structured JSON: `{"error": "..."}`.
 * **Update durability.** The served graph is in-memory; updates are not persisted across
   a restart (the engine's WAL-backed directory graphs are a CLI/embedding feature the
   server does not use yet).
+* **Time-travel retention cost.** With the opt-in `time-travel` feature, every retained
+  generation is a full `Graph` (see the section above). The recorded follow-up — gated
+  on the structural-fork (persistent/COW index) work — is delta-chain retention
+  (OSTRICH-style snapshot + delta archive), which the number/timestamp-based API
+  already accommodates without a contract change.
 * **ASK** is implemented by rewriting the `ASK` to a `SELECT *` over the same pattern and
   testing for any solution — exact, and reuses the engine's verified evaluation, but does
   not yet short-circuit on the first match (it uses the engine's `count`).

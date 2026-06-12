@@ -32,7 +32,7 @@ Interfaces:
 | crate / package | what |
 |---|---|
 | [`sparq-cli`](crates/sparq-cli) | command line: query, build/query-mmap (out-of-core), reason, bench, scaling sweeps, save/recompress |
-| [`sparq-server`](crates/sparq-server) | W3C SPARQL 1.1 Protocol HTTP server: query + update, Graph Store read, streaming results, WebSocket subscriptions, EXPLAIN, Prometheus `/metrics` |
+| [`sparq-server`](crates/sparq-server) | W3C SPARQL 1.1 Protocol HTTP server: query + update, Graph Store read, streaming results, WebSocket subscriptions, EXPLAIN, Prometheus `/metrics`, opt-in time-travel queries (`?generation=N`) |
 | [`sparq-wasm`](crates/sparq-wasm) | WebAssembly build of the core engine (browser; tracked minimal bundle) |
 | [`js/`](js/) | `@jeswr/sparq` — RDF/JS-typed npm package over the wasm build (zero runtime deps) |
 | [`sparq-py`](crates/sparq-py) | Python bindings (`sparq` package, pyo3/maturin) |
@@ -148,9 +148,11 @@ a memory-bounded out-of-core path.
   byte — old raw directories keep loading.
 - **HTTP server** (`sparq-server`) — W3C SPARQL 1.1 Protocol query + update endpoints, Graph
   Store read, result formats JSON / XML / CSV / TSV; content negotiation; **EXPLAIN /
-  EXPLAIN ANALYZE** plan introspection (`?explain=…`) and a **Prometheus `/metrics`**
-  endpoint (see [`crates/sparq-server/README.md`](crates/sparq-server/README.md)). Docker
-  image via the release workflow (see [`docs/release.md`](docs/release.md)).
+  EXPLAIN ANALYZE** plan introspection (`?explain=…`); a **Prometheus `/metrics`**
+  endpoint; opt-in **time-travel queries** (`--features time-travel`: `?generation=N`
+  pins a retained generation, `Sparq-Generation` response tokens, honest 410 when
+  history ages out) (see [`crates/sparq-server/README.md`](crates/sparq-server/README.md)).
+  Docker image via the release workflow (see [`docs/release.md`](docs/release.md)).
 - **WebAssembly** — the core engine builds for the browser with a minimal, CI-tracked bundle.
 
 ## Documentation

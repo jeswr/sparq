@@ -28,6 +28,17 @@ required-features = ["server"]
 # pure serializer library (XML/CSV/TSV) without dragging in the runtime.
 default = ["server"]
 server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json"]
+# `time-travel` (default OFF — opt-in is the contract, user-approved) lets a query pin
+# a RETAINED generation: `?generation=N` on /sparql serves the store as of generation N
+# (410 Gone once it ages out of the retention window), every /sparql response carries
+# the `Sparq-Generation` header (the same generation-number token the horizontal-scaling
+# ADR's read-your-writes shard_seq concept uses), and the ring's retention extends per
+# `--time-travel-generations` / `--time-travel-max-age`. Off, the parameter handling is
+# compiled out entirely (`?generation` is just an ignored unknown parameter, no header)
+# and the ring keeps only its concurrency window. Non-default because the memory cost is
+# real: each retained generation is a FULL Graph until the structural-fork follow-up
+# lands (see sparq_serve::TimeTravelConfig).
+time-travel = ["server"]
 # `geo` (default OFF) installs sparq-geo's geof: extension-function registry
 # (GeoSPARQL distance / sf* relations / envelope / boundary / convexHull) on the
 # query, update and subscription paths — see docs/extension-functions.md. Off, the
