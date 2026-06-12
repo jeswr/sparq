@@ -1,0 +1,631 @@
+{
+  "timestamp": "2026-06-12T22:41:13.971309",
+  "n_small": 1,
+  "n_big": 8,
+  "benchmarks": {
+    "eq_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2883
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3145
+      },
+      "per_call_estimate": 37.42857142857143,
+      "setup_estimate": 2845.5714285714284
+    },
+    "ne_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2883
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3145
+      },
+      "per_call_estimate": 37.42857142857143,
+      "setup_estimate": 2845.5714285714284
+    },
+    "lt_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2916
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3421
+      },
+      "per_call_estimate": 72.14285714285714,
+      "setup_estimate": 2843.8571428571427
+    },
+    "le_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2925
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3493
+      },
+      "per_call_estimate": 81.14285714285714,
+      "setup_estimate": 2843.8571428571427
+    },
+    "gt_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2926
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3501
+      },
+      "per_call_estimate": 82.14285714285714,
+      "setup_estimate": 2843.8571428571427
+    },
+    "ge_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2917
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3429
+      },
+      "per_call_estimate": 73.14285714285714,
+      "setup_estimate": 2843.8571428571427
+    },
+    "floor_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3855
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5842
+      },
+      "per_call_estimate": 283.85714285714283,
+      "setup_estimate": 3571.1428571428573
+    },
+    "ceil_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3856
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5850
+      },
+      "per_call_estimate": 284.85714285714283,
+      "setup_estimate": 3571.1428571428573
+    },
+    "trunc_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3840
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5718
+      },
+      "per_call_estimate": 268.2857142857143,
+      "setup_estimate": 3571.714285714286
+    },
+    "round_ties_even_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3862
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5900
+      },
+      "per_call_estimate": 291.14285714285717,
+      "setup_estimate": 3570.8571428571427
+    },
+    "sqrt_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 8232
+      },
+      "per_call_estimate": 587.4285714285714,
+      "setup_estimate": 3532.5714285714284
+    },
+    "to_u64_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3626
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4553
+      },
+      "per_call_estimate": 132.42857142857142,
+      "setup_estimate": 3493.5714285714284
+    },
+    "to_i64_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3648
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4727
+      },
+      "per_call_estimate": 154.14285714285714,
+      "setup_estimate": 3493.8571428571427
+    },
+    "eq_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2881
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3134
+      },
+      "per_call_estimate": 36.142857142857146,
+      "setup_estimate": 2844.8571428571427
+    },
+    "ne_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2881
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3134
+      },
+      "per_call_estimate": 36.142857142857146,
+      "setup_estimate": 2844.8571428571427
+    },
+    "lt_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2916
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3414
+      },
+      "per_call_estimate": 71.14285714285714,
+      "setup_estimate": 2844.8571428571427
+    },
+    "le_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2925
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3486
+      },
+      "per_call_estimate": 80.14285714285714,
+      "setup_estimate": 2844.8571428571427
+    },
+    "gt_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2926
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3494
+      },
+      "per_call_estimate": 81.14285714285714,
+      "setup_estimate": 2844.8571428571427
+    },
+    "ge_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2917
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3422
+      },
+      "per_call_estimate": 72.14285714285714,
+      "setup_estimate": 2844.8571428571427
+    },
+    "floor_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3495
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5427
+      },
+      "per_call_estimate": 276.0,
+      "setup_estimate": 3219.0
+    },
+    "ceil_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3496
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5435
+      },
+      "per_call_estimate": 277.0,
+      "setup_estimate": 3219.0
+    },
+    "trunc_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3480
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5303
+      },
+      "per_call_estimate": 260.42857142857144,
+      "setup_estimate": 3219.5714285714284
+    },
+    "round_ties_even_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3502
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5485
+      },
+      "per_call_estimate": 283.2857142857143,
+      "setup_estimate": 3218.714285714286
+    },
+    "sqrt_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4641
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 6800
+      },
+      "per_call_estimate": 308.42857142857144,
+      "setup_estimate": 4332.571428571428
+    },
+    "to_u64_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3295
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4240
+      },
+      "per_call_estimate": 135.0,
+      "setup_estimate": 3160.0
+    },
+    "to_i64_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3317
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4414
+      },
+      "per_call_estimate": 156.71428571428572,
+      "setup_estimate": 3160.285714285714
+    },
+    "eq_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2901
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3226
+      },
+      "per_call_estimate": 46.42857142857143,
+      "setup_estimate": 2854.5714285714284
+    },
+    "ne_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2901
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3226
+      },
+      "per_call_estimate": 46.42857142857143,
+      "setup_estimate": 2854.5714285714284
+    },
+    "lt_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2938
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3534
+      },
+      "per_call_estimate": 85.14285714285714,
+      "setup_estimate": 2852.8571428571427
+    },
+    "le_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2947
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3606
+      },
+      "per_call_estimate": 94.14285714285714,
+      "setup_estimate": 2852.8571428571427
+    },
+    "gt_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2948
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3614
+      },
+      "per_call_estimate": 95.14285714285714,
+      "setup_estimate": 2852.8571428571427
+    },
+    "ge_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2939
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3542
+      },
+      "per_call_estimate": 86.14285714285714,
+      "setup_estimate": 2852.8571428571427
+    },
+    "floor_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3856
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5988
+      },
+      "per_call_estimate": 304.57142857142856,
+      "setup_estimate": 3551.4285714285716
+    },
+    "ceil_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3857
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5996
+      },
+      "per_call_estimate": 305.57142857142856,
+      "setup_estimate": 3551.4285714285716
+    },
+    "trunc_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3841
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5864
+      },
+      "per_call_estimate": 289.0,
+      "setup_estimate": 3552.0
+    },
+    "round_ties_even_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3863
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 6046
+      },
+      "per_call_estimate": 311.85714285714283,
+      "setup_estimate": 3551.1428571428573
+    },
+    "sqrt_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 8232
+      },
+      "per_call_estimate": 587.4285714285714,
+      "setup_estimate": 3532.5714285714284
+    },
+    "to_u64_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3639
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4661
+      },
+      "per_call_estimate": 146.0,
+      "setup_estimate": 3493.0
+    },
+    "to_i64_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 3661
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4835
+      },
+      "per_call_estimate": 167.71428571428572,
+      "setup_estimate": 3493.285714285714
+    },
+    "eq_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2871
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3258
+      },
+      "per_call_estimate": 55.285714285714285,
+      "setup_estimate": 2815.714285714286
+    },
+    "ne_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2871
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3258
+      },
+      "per_call_estimate": 55.285714285714285,
+      "setup_estimate": 2815.714285714286
+    },
+    "lt_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2930
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3738
+      },
+      "per_call_estimate": 115.42857142857143,
+      "setup_estimate": 2814.5714285714284
+    },
+    "le_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2939
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3810
+      },
+      "per_call_estimate": 124.42857142857143,
+      "setup_estimate": 2814.5714285714284
+    },
+    "gt_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2940
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3818
+      },
+      "per_call_estimate": 125.42857142857143,
+      "setup_estimate": 2814.5714285714284
+    },
+    "ge_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2931
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 3746
+      },
+      "per_call_estimate": 116.42857142857143,
+      "setup_estimate": 2814.5714285714284
+    },
+    "floor_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4521
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 7203
+      },
+      "per_call_estimate": 383.14285714285717,
+      "setup_estimate": 4137.857142857143
+    },
+    "ceil_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4522
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 7211
+      },
+      "per_call_estimate": 384.14285714285717,
+      "setup_estimate": 4137.857142857143
+    },
+    "trunc_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4499
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 7027
+      },
+      "per_call_estimate": 361.14285714285717,
+      "setup_estimate": 4137.857142857143
+    },
+    "round_ties_even_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4531
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 7287
+      },
+      "per_call_estimate": 393.7142857142857,
+      "setup_estimate": 4137.285714285715
+    },
+    "sqrt_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4782
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 8270
+      },
+      "per_call_estimate": 498.2857142857143,
+      "setup_estimate": 4283.714285714285
+    },
+    "to_u64_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2941
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 168.42857142857142,
+      "setup_estimate": 2772.5714285714284
+    },
+    "to_i64_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 2960
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 165.71428571428572,
+      "setup_estimate": 2794.285714285714
+    }
+  }
+}

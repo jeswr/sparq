@@ -41,34 +41,92 @@ OPS = {
     "div": "/",
 }
 
+# Boolean predicates, unary methods, and casts are measured with the
+# conversion-harness pattern: a private array of input witnesses keeps every
+# call live (no CSE) and the results are XOR-folded. Per-call estimates for
+# these therefore include one `new()` decode per call.
+PREDICATE_OPS = ["eq", "ne", "lt", "le", "gt", "ge"]
+UNARY_OPS = ["floor", "ceil", "trunc", "round_ties_even", "sqrt"]
+CAST_OPS = ["to_u64", "to_i64"]
+METHOD_OPS = PREDICATE_OPS + UNARY_OPS + CAST_OPS
+
 
 def benchmark_names() -> list[str]:
-    return [f"{op}_{fmt}" for fmt in FORMATS for op in OPS]
+    return [f"{op}_{fmt}" for fmt in FORMATS for op in list(OPS) + METHOD_OPS]
 
 
 def render_main(fmt_name: str, op: str, calls: int) -> str:
     spec = FORMATS[fmt_name]
     float_type = spec["type"]
     uint_type = spec["uint"]
-    symbol = OPS[op]
-    body = [
-        f"let a: {float_type} = {float_type}::new(a_bits);",
-        f"let b: {float_type} = {float_type}::new(b_bits);",
-        f"let mut acc: {float_type} = a;",
-    ]
 
-    for _index in range(calls):
-        body.append(f"acc = acc {symbol} b;")
+    if op in OPS:
+        symbol = OPS[op]
+        body = [
+            f"let a: {float_type} = {float_type}::new(a_bits);",
+            f"let b: {float_type} = {float_type}::new(b_bits);",
+            f"let mut acc: {float_type} = a;",
+        ]
 
-    body.append("acc.bits()")
-    rendered_body = "\n    ".join(body)
+        for _index in range(calls):
+            body.append(f"acc = acc {symbol} b;")
 
-    return f"""use sparq_ieee754::{{f128, f16, f32, f64}};
+        body.append("acc.bits()")
+        rendered_body = "\n    ".join(body)
+
+        return f"""use sparq_ieee754::{{f128, f16, f32, f64}};
 
 fn main(a_bits: pub {uint_type}, b_bits: pub {uint_type}) -> pub {uint_type} {{
     {rendered_body}
 }}
 """
+
+    if op in PREDICATE_OPS:
+        return f"""use sparq_ieee754::{{f128, f16, f32, f64}};
+
+fn main(a_bits: [{uint_type}; {calls}], b_bits: pub {uint_type}) -> pub bool {{
+    let b: {float_type} = {float_type}::new(b_bits);
+    let mut acc: bool = false;
+
+    for index in 0..{calls} {{
+        acc = acc ^ {float_type}::new(a_bits[index]).{op}(b);
+    }}
+
+    acc
+}}
+"""
+
+    if op in UNARY_OPS:
+        return f"""use sparq_ieee754::{{f128, f16, f32, f64}};
+
+fn main(a_bits: [{uint_type}; {calls}]) -> pub {uint_type} {{
+    let mut acc: {uint_type} = 0;
+
+    for index in 0..{calls} {{
+        acc = acc ^ {float_type}::new(a_bits[index]).{op}().bits();
+    }}
+
+    acc
+}}
+"""
+
+    if op in CAST_OPS:
+        cast_suffix = " as u64" if op == "to_i64" else ""
+
+        return f"""use sparq_ieee754::{{f128, f16, f32, f64}};
+
+fn main(a_bits: [{uint_type}; {calls}]) -> pub u64 {{
+    let mut acc: u64 = 0;
+
+    for index in 0..{calls} {{
+        acc = acc ^ ({float_type}::new(a_bits[index]).{op}(){cast_suffix});
+    }}
+
+    acc
+}}
+"""
+
+    raise ValueError(f"unknown op: {op}")
 
 
 def write_package(root: Path, name: str, fmt_name: str, op: str, calls: int) -> Path:
@@ -109,8 +167,8 @@ def build_and_measure(name: str, fmt_name: str, op: str, calls: int, include_bre
 
 
 def parse_name(name: str) -> tuple[str, str]:
-    op, fmt = name.split("_", 1)
-    if op not in OPS or fmt not in FORMATS:
+    op, fmt = name.rsplit("_", 1)
+    if (op not in OPS and op not in METHOD_OPS) or fmt not in FORMATS:
         raise ValueError(f"unknown benchmark: {name}")
     return fmt, op
 
@@ -135,8 +193,8 @@ def main() -> int:
         "benchmarks": {},
     }
 
-    print(f"{'benchmark':<12} {'gates@small':>12} {'gates@big':>12} {'per-call':>12} {'setup':>12}")
-    print("-" * 64)
+    print(f"{'benchmark':<22} {'gates@small':>12} {'gates@big':>12} {'per-call':>12} {'setup':>12}")
+    print("-" * 74)
 
     for name in args.ops:
         fmt_name, op = parse_name(name)
@@ -152,7 +210,7 @@ def main() -> int:
             "setup_estimate": setup,
         }
 
-        print(f"{name:<12} {small['circuit_size']:>12} {big['circuit_size']:>12} {per_call:>12.1f} {setup:>12.1f}")
+        print(f"{name:<22} {small['circuit_size']:>12} {big['circuit_size']:>12} {per_call:>12.1f} {setup:>12.1f}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(results, indent=2) + "\n")
