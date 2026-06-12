@@ -208,11 +208,60 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
     run_query_test_on(entry, None)
 }
 
+/// The answer restriction of the SPARQL 1.1 Entailment Regimes spec, applied
+/// to engine solutions produced by query-over-materialized-closure evaluation
+/// (the closure may entail solutions the regime's conditions exclude).
+pub struct EntailmentAnswerFilter {
+    /// Blank-node labels occurring in the queried graph SG (the test's input
+    /// data, BEFORE materialization). Condition (C1) of every regime requires
+    /// `sk(P(BGP))` to be ground, and the Skolemization function `sk` is
+    /// defined exactly for the blank nodes of SG — so a binding to any OTHER
+    /// blank node (e.g. one introduced by the saturation) leaves `sk(P(BGP))`
+    /// non-ground and is never a solution (Entailment Regimes §2 condition C1;
+    /// §3.1: "new blank nodes introduced in the saturation process are not to
+    /// be returned in the solutions").
+    pub data_bnodes: rustc_hash::FxHashSet<String>,
+    /// Variables standing in class-name / property-name positions of the BGP,
+    /// populated when the test's expected answers are sanctioned under the
+    /// OWL 2 Direct Semantics regime (`sd:entailmentRegime` includes
+    /// OWL-Direct). Under that regime variables stand "in place of class
+    /// names, object property names, datatype property names, individual
+    /// names, or literals" (Entailment Regimes §7) — an anonymous class
+    /// expression (a blank node) is not a class NAME, so a bnode binding for
+    /// such a variable is not a solution there, and the suite's expected
+    /// results for the dual-tagged (OWL-Direct + OWL-RDF-Based) tests are the
+    /// Direct-regime answers.
+    pub name_position_vars: rustc_hash::FxHashSet<String>,
+}
+
+impl EntailmentAnswerFilter {
+    /// True when the regime's conditions exclude this solution.
+    fn drops(&self, order: &[String], row: &Row) -> bool {
+        row.iter().zip(order.iter()).any(|(t, v)| match t {
+            Some(Term::BlankNode(b)) => {
+                !self.data_bnodes.contains(b.as_str()) || self.name_position_vars.contains(v)
+            }
+            _ => false,
+        })
+    }
+}
+
 /// As [`run_query_test`], but with an optional N-Quads DATA OVERRIDE replacing
 /// the entry's own data files — the entailment-regime runner materializes the
 /// closure first and evaluates the query over it (and deliberately bypasses
 /// the `unsupported_feature` skip, which exists for the plain SPARQL runner).
 pub fn run_query_test_on(entry: &TestEntry, data_override: Option<String>) -> Status {
+    run_query_test_filtered(entry, data_override, None)
+}
+
+/// As [`run_query_test_on`], with the entailment regimes' answer restriction
+/// applied to the engine's solutions before comparison (SELECT/ASK only; the
+/// suite's entailment tests are all SELECT).
+pub fn run_query_test_filtered(
+    entry: &TestEntry,
+    data_override: Option<String>,
+    filter: Option<&EntailmentAnswerFilter>,
+) -> Status {
     let Some(query_path) = entry.action.query.clone() else {
         return Status::Fail("manifest entry has no qt:query".into());
     };
@@ -344,7 +393,7 @@ pub fn run_query_test_on(entry: &TestEntry, data_override: Option<String>) -> St
     let order: Vec<String> = all_vars.into_iter().collect();
 
     let exp: Vec<Row> = exp_rows.iter().map(|r| align_binding(r, &order)).collect();
-    let act: Vec<Row> = actual_rows
+    let mut act: Vec<Row> = actual_rows
         .iter()
         .map(|r| {
             order
@@ -358,6 +407,9 @@ pub fn run_query_test_on(entry: &TestEntry, data_override: Option<String>) -> St
                 .collect()
         })
         .collect();
+    if let Some(f) = filter {
+        act.retain(|row| !f.drops(&order, row));
+    }
 
     // Sequence comparison only when the query orders AND the expected encoding
     // preserves order (SRX/SRJ/TSV document order, or rs:index in result-set

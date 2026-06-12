@@ -19,10 +19,13 @@
 
 use super::report::{Outcome, TestResult};
 use crate::manifest::{self, EntryKind, TestEntry};
-use crate::run::{self, Status};
+use crate::run::{self, EntailmentAnswerFilter, Status};
 use oxrdf::vocab::rdf;
 use oxrdf::Term;
 use rustc_hash::FxHashSet;
+use spargebra::algebra::GraphPattern;
+use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
+use spargebra::{Query, SparqlParser};
 use sparq_core::dict::Dict;
 use std::path::Path;
 
@@ -76,7 +79,8 @@ pub fn run_suite(rdf_tests_root: &Path, out: &mut Vec<TestResult>) -> Result<(),
             ));
             continue;
         };
-        out.push(result(entry, run_one(entry, profile)));
+        let direct_sanctioned = regimes.contains("OWL-Direct");
+        out.push(result(entry, run_one(entry, profile, direct_sanctioned)));
     }
     Ok(())
 }
@@ -96,13 +100,17 @@ fn result(entry: &TestEntry, outcome: Outcome) -> TestResult {
     }
 }
 
-fn run_one(entry: &TestEntry, profile: Profile) -> Outcome {
+fn run_one(entry: &TestEntry, profile: Profile, direct_sanctioned: bool) -> Outcome {
     if !entry.action.graph_data.is_empty() {
         return Outcome::OutOfScope("named-graph entailment dataset not wired".into());
     }
-    // Load and materialize the default-graph data.
+    // Load and materialize the default-graph data. The blank-node labels of
+    // the ORIGINAL data are recorded before materialization: condition (C1)'s
+    // Skolemization function is defined exactly for the blank nodes of the
+    // queried graph, so they delimit the bnode bindings that can be answers.
     let mut dict = Dict::new();
     let mut ids: Vec<[sparq_core::dict::Id; 3]> = Vec::new();
+    let mut data_bnodes: FxHashSet<String> = FxHashSet::default();
     for d in &entry.action.data {
         match crate::rdf::parse_file(d) {
             Ok(triples) => {
@@ -112,6 +120,11 @@ fn run_one(entry: &TestEntry, profile: Profile) -> Outcome {
                         Term::NamedNode(t.predicate),
                         t.object,
                     ];
+                    for term in &row {
+                        if let Term::BlankNode(b) = term {
+                            data_bnodes.insert(b.as_str().to_string());
+                        }
+                    }
                     ids.push([dict.intern(&row[0]), dict.intern(&row[1]), dict.intern(&row[2])]);
                 }
             }
@@ -128,6 +141,7 @@ fn run_one(entry: &TestEntry, profile: Profile) -> Outcome {
         Profile::OwlRl => {
             add_declared_reflexives(&mut dict, &mut ids, true);
             sparq_reason::materialize(sparq_reason::Profile::OwlRl, &mut dict, &mut ids);
+            add_eq_ref(&mut dict, &mut ids);
         }
     }
 
@@ -147,30 +161,159 @@ fn run_one(entry: &TestEntry, profile: Profile) -> Outcome {
         nquads.push_str(&format!("{s} {p} {o} .\n"));
     }
 
-    match run::run_query_test_on(entry, Some(nquads)) {
+    // The regimes' answer restriction on the closure's solutions:
+    //  - every regime (C1, Entailment Regimes §2/§3.1): bindings to blank
+    //    nodes NOT in the queried graph (saturation-introduced) are never
+    //    answers — sk is undefined for them, so sk(P(BGP)) is not ground;
+    //  - tests whose expected answers are also sanctioned under OWL-Direct
+    //    (§7): a variable in a class/property-NAME position cannot bind to an
+    //    anonymous class expression (a blank node is not a name).
+    let filter = EntailmentAnswerFilter {
+        data_bnodes,
+        name_position_vars: if direct_sanctioned {
+            name_position_vars(entry)
+        } else {
+            FxHashSet::default()
+        },
+    };
+
+    match run::run_query_test_filtered(entry, Some(nquads), Some(&filter)) {
         Status::Pass => Outcome::Pass,
-        Status::Fail(e) => Outcome::Fail(annotate(&entry.name, e)),
+        Status::Fail(e) => Outcome::Fail(e),
         Status::Skip(e) => Outcome::OutOfScope(e),
     }
 }
 
-/// Root-cause annotations for known structural fails (kept as FAILS — these
-/// are real engine/harness gaps, not suite errors — but the report should say
-/// WHY, for the follow-up fix threads).
-fn annotate(name: &str, reason: String) -> String {
-    let cause = match name {
-        n if n.contains("sparqldl-10") => {
-            Some("needs non-distinguished (blank-node) query-variable semantics")
-        }
-        n if n.contains("sparqldl-11") || n.contains("sparqldl-12") => Some(
-            "the regime's answer restriction (skolemization condition) excludes blank-node \
-             bindings; the harness does not yet filter them from engine results",
-        ),
-        _ => None,
+/// Variables of the query's BGPs that stand in class-name or property-name
+/// positions (Entailment Regimes §7: under the OWL 2 Direct Semantics regime
+/// variables stand "in place of class names, object property names, datatype
+/// property names, individual names, or literals"; the extended grammar of
+/// §7.1.2 substitutes them for the *name* productions, so an anonymous class
+/// expression — a blank node — is not a legal binding for them). Detection is
+/// positional over the schema vocabulary; property paths don't occur in the
+/// entailment suite's queries.
+fn name_position_vars(entry: &TestEntry) -> FxHashSet<String> {
+    let mut vars = FxHashSet::default();
+    let Some(query_path) = &entry.action.query else {
+        return vars;
     };
-    match cause {
-        Some(c) => format!("{reason} [root cause: {c}]"),
-        None => reason,
+    let Ok(query_text) = std::fs::read_to_string(query_path) else {
+        return vars;
+    };
+    let base = crate::rdf::file_iri(query_path);
+    let Ok(parser) = SparqlParser::new().with_base_iri(&base) else {
+        return vars;
+    };
+    let pattern = match parser.parse_query(&query_text) {
+        Ok(Query::Select { pattern, .. }) | Ok(Query::Ask { pattern, .. }) => pattern,
+        _ => return vars,
+    };
+    collect_name_position_vars(&pattern, &mut vars);
+    vars
+}
+
+const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
+const OWL: &str = "http://www.w3.org/2002/07/owl#";
+
+fn collect_name_position_vars(p: &GraphPattern, vars: &mut FxHashSet<String>) {
+    match p {
+        GraphPattern::Bgp { patterns } => {
+            for tp in patterns {
+                triple_name_positions(tp, vars);
+            }
+        }
+        GraphPattern::Path { .. } | GraphPattern::Values { .. } => {}
+        GraphPattern::Join { left, right }
+        | GraphPattern::LeftJoin { left, right, .. }
+        | GraphPattern::Lateral { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right } => {
+            collect_name_position_vars(left, vars);
+            collect_name_position_vars(right, vars);
+        }
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Graph { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Group { inner, .. }
+        | GraphPattern::Service { inner, .. } => collect_name_position_vars(inner, vars),
+    }
+}
+
+fn triple_name_positions(tp: &TriplePattern, vars: &mut FxHashSet<String>) {
+    // A variable in predicate position is a property-name position.
+    let NamedNodePattern::NamedNode(pred) = &tp.predicate else {
+        if let NamedNodePattern::Variable(v) = &tp.predicate {
+            vars.insert(v.as_str().to_string());
+        }
+        return;
+    };
+    let pred = pred.as_str();
+    let mut grab = |t: &TermPattern| {
+        if let TermPattern::Variable(v) = t {
+            vars.insert(v.as_str().to_string());
+        }
+    };
+    // Object is a class-name position.
+    if pred == rdf::TYPE.as_str()
+        || pred == format!("{RDFS}domain")
+        || pred == format!("{RDFS}range")
+        || pred == format!("{OWL}someValuesFrom")
+        || pred == format!("{OWL}allValuesFrom")
+        || pred == format!("{OWL}onClass")
+    {
+        grab(&tp.object);
+    }
+    // Both ends are class-name positions.
+    if pred == format!("{RDFS}subClassOf")
+        || pred == format!("{OWL}equivalentClass")
+        || pred == format!("{OWL}disjointWith")
+        || pred == format!("{OWL}complementOf")
+    {
+        grab(&tp.subject);
+        grab(&tp.object);
+    }
+    // Subject is a property-name position.
+    if pred == format!("{RDFS}domain") || pred == format!("{RDFS}range") {
+        grab(&tp.subject);
+    }
+    // Both ends are property-name positions.
+    if pred == format!("{RDFS}subPropertyOf")
+        || pred == format!("{OWL}equivalentProperty")
+        || pred == format!("{OWL}propertyDisjointWith")
+        || pred == format!("{OWL}inverseOf")
+    {
+        grab(&tp.subject);
+        grab(&tp.object);
+    }
+    // Object is a property-name position.
+    if pred == format!("{OWL}onProperty") {
+        grab(&tp.object);
+    }
+}
+
+/// eq-ref (OWL 2 Profiles §4.3, Table 4): `T(?s ?p ?o) → T(?s owl:sameAs ?s),
+/// T(?p owl:sameAs ?p), T(?o owl:sameAs ?o)`. The production materializer
+/// deliberately omits the full reflexive owl:sameAs layer (store bloat, like
+/// the declared reflexives above), but the regime's answers need it — e.g.
+/// sparqldl-10 walks `?a owl:sameAs ?b` over individuals with NO asserted
+/// sameAs. Literal subjects would be generalized triples and are skipped.
+fn add_eq_ref(dict: &mut Dict, ids: &mut Vec<[sparq_core::dict::Id; 3]>) {
+    let same_as = dict.intern_iri("http://www.w3.org/2002/07/owl#sameAs");
+    let mut terms: FxHashSet<sparq_core::dict::Id> = FxHashSet::default();
+    for &[s, p, o] in ids.iter() {
+        terms.insert(s);
+        terms.insert(p);
+        terms.insert(o);
+    }
+    for t in terms {
+        if !matches!(dict.term(t), Term::Literal(_)) {
+            ids.push([t, same_as, t]);
+        }
     }
 }
 
