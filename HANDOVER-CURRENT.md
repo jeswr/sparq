@@ -11,7 +11,7 @@ If this file describes running agents/instances and you are a fresh session, ver
 
 ## Running agents (worktrees; agents NEVER push/merge; each keeps STATUS.md current)
 - zk-core (../sparq-zk-core): resuming from 1c57a2d — rdf-canon suite, bnode guard, criterion benches, wasm-off check.
-- zk-ieee754-kernels (../sparq-zk-kernels): resuming from 373d5cb — finish gate benches for new kernels, regression vs beta-21 baseline.
+- DONE zk-ieee754-kernels: MERGED+PUSHED (2b66ba7, gate 674/0, wasm 1,643,095). Comparisons/rounding/sqrt/casts kernels + 52 gate-bench rows + 121/121 oracle vectors. Follow-up noted: sqrt_f16 circuit byte-identical to sqrt_f64 (correct per oracle; possibly missing narrow remainder bound).
 - zk-xpath (../sparq-zk-xpath): resuming from 81d08c5 — verify beta.21 claim, run/sample ~241 test packages, VENDOR.md + function inventory.
 - dict-spill (../sparq-dictspill, from 49a37cd): external/spillable build-time term dictionary per memtier requirements; audit 137fb39 consolidation spill machinery first; byte-identity preferred; wasm stays 1,643,095.
 
