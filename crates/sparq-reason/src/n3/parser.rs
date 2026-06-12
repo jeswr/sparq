@@ -8,12 +8,19 @@
 //! - `{ … }` formulae (graph terms), `( … )` collections (RDF lists)
 //! - predicate sugar `=>` (log:implies), `<=` (reverse implies), `=` (owl:sameAs),
 //!   `is EXPR of` (inverse predicate) and `has EXPR`
-//! - paths (`!`/`^`), relative-IRI resolution against a document base, cwm's
-//!   undeclared-`:`-prefix-as-`<#>` convention
+//! - paths (`!`/`^`, also in predicate position), inverted predicates (`<-`),
+//!   relative-IRI resolution against a document base (RFC 3986 incl. dot
+//!   segments and query-only references), cwm's undeclared-`:`-prefix-as-`<#>`
+//!   and well-known-prefix conventions
+//! - `@forAll`/`@forSome` quantifiers (document and formula scope), `@keywords`
+//!   (bare words as `:word`; the explicit `@a`/`@true`/`@false` forms),
+//!   `[id :s …]` iriPropertyLists, zero-predicate statements, `{}` = `true`
 //! - statement structure with `;` (predicate lists) and `,` (object lists)
 //!
-//! Not yet covered: explicit `@forAll`/`@forSome`, `@keywords`, nested quoting beyond
-//! formulae. These are roadmap items toward full EYE parity.
+//! [`parse_turtle_with_base`] runs the same parser as STRICT W3C TURTLE:
+//! every N3-only construct is rejected, statements must be `.`-terminated,
+//! prefixes must be declared, and PN_LOCAL/LANGTAG/escape rules are enforced
+//! (the TurtleTests suite passes 297/297 in this mode).
 
 use super::model::{Rule, Term};
 
@@ -22,7 +29,10 @@ pub const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 pub const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 pub const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 pub const LOG_IMPLIES: &str = "http://www.w3.org/2000/10/swap/log#implies";
-pub const LOG_IMPLIED_BY: &str = "http://www.w3.org/2000/10/swap/log#impliedBy";
+/// The modern N3 CG spelling; `<=` parses to this.
+pub const LOG_IMPLIED_BY: &str = "http://www.w3.org/2000/10/swap/log#isImpliedBy";
+/// cwm's historical spelling — accepted on input, normalized to [`LOG_IMPLIED_BY`].
+pub const LOG_IMPLIED_BY_LEGACY: &str = "http://www.w3.org/2000/10/swap/log#impliedBy";
 pub const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
 pub const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 pub const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
@@ -38,10 +48,25 @@ pub struct Parsed {
     /// `{ conclusion } <= { premise }` BACKWARD rules — goal-directed, never fired forward.
     /// `{ conclusion } <= true.` is a backward rule with an empty (always-provable) premise.
     pub backward_rules: Vec<Rule>,
+    /// The document's base IRI ("" when none) — log:parsedAsN3/log:semantics
+    /// resolve relative IRIs against it.
+    pub base: String,
 }
 
 pub fn parse(src: &str) -> Result<Parsed, String> {
     parse_with_base(src, "")
+}
+
+/// Parse `src` as STRICT TURTLE (the W3C Turtle grammar): every N3-only
+/// construct — formulae, `?vars`, paths, `=>`/`<=`/`=`, `is…of`/`has`,
+/// quantifiers, undeclared-prefix leniency — is a syntax error, and
+/// statements must be `.`-terminated.
+pub fn parse_turtle_with_base(src: &str, base: &str) -> Result<Parsed, String> {
+    let mut p = Parser::new(src);
+    p.base = base.to_string();
+    p.strict = true;
+    let stmts = p.document()?;
+    Ok(Parsed { facts: stmts, rules: Vec::new(), backward_rules: Vec::new(), base: base.to_string() })
 }
 
 /// As [`parse`], but resolves relative IRIs (in IRIREFs and `@prefix`/`@base`
@@ -66,13 +91,22 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
             // Verified against eyereasoner/eye reasoning/backward: the premise is often a
             // pure builtin over the goal's bindings, which can ONLY be evaluated once the
             // goal instantiates the variables — a forward reversal would derive nothing.
-            (Term::Iri(i), Term::Formula(concl), Term::Formula(prem)) if i == LOG_IMPLIED_BY => {
+            (Term::Iri(i), Term::Formula(concl), Term::Formula(prem))
+                if i == LOG_IMPLIED_BY || i == LOG_IMPLIED_BY_LEGACY =>
+            {
                 backward_rules.push(Rule { premise: prem.clone(), conclusion: concl.clone() });
+            }
+            // `{} => { conclusion }` — `{}` IS the literal true (N3 CG), an
+            // always-true premise: fires unconditionally.
+            (Term::Iri(i), Term::Lit(v, _, _), Term::Formula(concl))
+                if i == LOG_IMPLIES && v == "true" =>
+            {
+                rules.push(Rule { premise: Vec::new(), conclusion: concl.clone() });
             }
             // { conclusion } <= true. — an always-provable backward fact schema (EYE's
             // idiom for backward base cases).
             (Term::Iri(i), Term::Formula(concl), Term::Lit(v, _, _))
-                if i == LOG_IMPLIED_BY && v == "true" =>
+                if (i == LOG_IMPLIED_BY || i == LOG_IMPLIED_BY_LEGACY) && v == "true" =>
             {
                 backward_rules.push(Rule { premise: Vec::new(), conclusion: concl.clone() });
             }
@@ -83,11 +117,14 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
     // premise it matches anything (like a variable), and a premise-bound
     // label shared with the conclusion carries its binding (the cwm/EYE
     // `[is :p of :x]`-in-premise idiom). Rewrite rule-scoped premise blanks
-    // to fresh per-rule variables so the matcher treats them so; blanks
-    // appearing ONLY in a conclusion stay blanks.
+    // to fresh per-rule variables so the matcher treats them so. Blanks
+    // INSIDE quoted `{ … }` formulae are NOT rewritten — a quoted graph's
+    // existentials belong to that graph (log:includes scoping needs them as
+    // graph-local terms, not rule variables); blanks appearing ONLY in a
+    // conclusion also stay blanks (instantiated fresh per firing).
     for (ri, r) in rules.iter_mut().chain(backward_rules.iter_mut()).enumerate() {
         let mut premise_blanks: std::collections::HashSet<String> = Default::default();
-        collect_blanks(&r.premise, &mut premise_blanks);
+        collect_blanks(&r.premise, false, &mut premise_blanks);
         if premise_blanks.is_empty() {
             continue;
         }
@@ -98,35 +135,84 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
                 }
             }
         };
-        rewrite_terms(&mut r.premise, &rename);
-        rewrite_terms(&mut r.conclusion, &rename);
+        rewrite_terms(&mut r.premise, false, &rename);
+        rewrite_terms(&mut r.conclusion, false, &rename);
     }
-    Ok(Parsed { facts, rules, backward_rules })
+    Ok(Parsed { facts, rules, backward_rules, base: base.to_string() })
 }
 
-fn collect_blanks(stmts: &[[Term; 3]], out: &mut std::collections::HashSet<String>) {
+/// The prefixes cwm resolves without declaration (its reference outputs rely
+/// on them).
+fn well_known_prefix(pfx: &str) -> Option<&'static str> {
+    Some(match pfx {
+        "rdf" => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "rdfs" => "http://www.w3.org/2000/01/rdf-schema#",
+        "owl" => "http://www.w3.org/2002/07/owl#",
+        "xsd" => "http://www.w3.org/2001/XMLSchema#",
+        "log" => "http://www.w3.org/2000/10/swap/log#",
+        "math" => "http://www.w3.org/2000/10/swap/math#",
+        "string" => "http://www.w3.org/2000/10/swap/string#",
+        "list" => "http://www.w3.org/2000/10/swap/list#",
+        "time" => "http://www.w3.org/2000/10/swap/time#",
+        _ => return None,
+    })
+}
+
+/// `rdf:nil` IS the empty list — normalize the IRI spelling to `Term::List([])`
+/// so `()` and `rdf:nil` are one value (cwm/EYE agree).
+fn nil_to_list(t: Term) -> Term {
+    match t {
+        Term::Iri(i) if i == RDF_NIL => Term::List(Vec::new()),
+        other => other,
+    }
+}
+
+/// Collect blank labels; `into_formulae` controls whether quoted `{ … }`
+/// graphs are descended into (lists always are — they are plain structure).
+fn collect_blanks(stmts: &[[Term; 3]], into_formulae: bool, out: &mut std::collections::HashSet<String>) {
     for row in stmts {
         for t in row {
-            match t {
-                Term::Blank(l) => {
-                    out.insert(l.clone());
-                }
-                Term::Formula(inner) => collect_blanks(inner, out),
-                _ => {}
-            }
+            collect_blanks_term(t, into_formulae, out);
         }
     }
 }
 
-fn rewrite_terms(stmts: &mut [[Term; 3]], f: &impl Fn(&mut Term)) {
-    for row in stmts.iter_mut() {
-        for t in row.iter_mut() {
-            if let Term::Formula(inner) = t {
-                rewrite_terms(inner, f);
-            } else {
-                f(t);
+fn collect_blanks_term(t: &Term, into_formulae: bool, out: &mut std::collections::HashSet<String>) {
+    match t {
+        Term::Blank(l) => {
+            out.insert(l.clone());
+        }
+        Term::Formula(inner) if into_formulae => collect_blanks(inner, into_formulae, out),
+        Term::List(ms) => {
+            for m in ms {
+                collect_blanks_term(m, into_formulae, out);
             }
         }
+        _ => {}
+    }
+}
+
+fn rewrite_terms(stmts: &mut [[Term; 3]], into_formulae: bool, f: &impl Fn(&mut Term)) {
+    for row in stmts.iter_mut() {
+        for t in row.iter_mut() {
+            rewrite_term(t, into_formulae, f);
+        }
+    }
+}
+
+fn rewrite_term(t: &mut Term, into_formulae: bool, f: &impl Fn(&mut Term)) {
+    match t {
+        Term::Formula(inner) => {
+            if into_formulae {
+                rewrite_terms(inner, into_formulae, f);
+            }
+        }
+        Term::List(ms) => {
+            for m in ms.iter_mut() {
+                rewrite_term(m, into_formulae, f);
+            }
+        }
+        _ => f(t),
     }
 }
 
@@ -135,6 +221,16 @@ struct Parser<'a> {
     i: usize,
     base: String,
     prefixes: std::collections::HashMap<String, String>,
+    /// `@forAll`/`@forSome` quantifier scopes (document level at index 0, one
+    /// frame per open formula): resolved IRI → the Var/Blank it stands for.
+    quants: Vec<std::collections::HashMap<String, Term>>,
+    /// STRICT TURTLE mode: reject every N3-only construct (formulae,
+    /// variables, paths, rule arrows, quantifiers, undeclared prefixes) and
+    /// require `.`-terminated statements — the W3C Turtle grammar.
+    strict: bool,
+    /// `@keywords` (cwm): when declared, BARE words read as `:word` in the
+    /// default prefix unless listed as keywords.
+    keywords: Option<std::collections::HashSet<String>>,
     bnode: usize,
     pathvar: usize,
     /// Current `{`/`(`/`[` nesting depth — bounded so pathological inputs
@@ -144,11 +240,22 @@ struct Parser<'a> {
 }
 
 /// Maximum bracket-nesting depth (see `Parser::depth`).
-const MAX_DEPTH: usize = 1024;
+const MAX_DEPTH: usize = 4096;
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str) -> Parser<'a> {
-        Parser { s: src.as_bytes(), i: 0, base: String::new(), prefixes: Default::default(), bnode: 0, pathvar: 0, depth: 0 }
+        Parser {
+            s: src.as_bytes(),
+            i: 0,
+            base: String::new(),
+            prefixes: Default::default(),
+            quants: vec![Default::default()],
+            strict: false,
+            keywords: None,
+            bnode: 0,
+            pathvar: 0,
+            depth: 0,
+        }
     }
 
     // ---- lexing helpers ------------------------------------------------------
@@ -182,6 +289,17 @@ impl<'a> Parser<'a> {
         self.ws();
         self.s[self.i..].starts_with(kw.as_bytes())
     }
+    /// Case-insensitive keyword test (the SPARQL-style `PREFIX`/`BASE`
+    /// directives are case-insensitive in Turtle), as a WHOLE token.
+    fn starts_with_ci(&mut self, kw: &str) -> bool {
+        self.ws();
+        let end = self.i + kw.len();
+        if end > self.s.len() {
+            return false;
+        }
+        self.s[self.i..end].eq_ignore_ascii_case(kw.as_bytes())
+            && self.s.get(end).is_none_or(|c| (*c as char).is_whitespace() || *c == b'<' || *c == b':')
+    }
 
     // ---- top level -----------------------------------------------------------
     fn document(&mut self) -> Result<Vec<[Term; 3]>, String> {
@@ -191,10 +309,20 @@ impl<'a> Parser<'a> {
             if self.i >= self.s.len() {
                 break;
             }
-            if self.starts_with("@prefix") || self.starts_with("PREFIX") {
+            if self.starts_with("@prefix") || self.starts_with_ci("PREFIX") {
                 self.directive_prefix()?;
-            } else if self.starts_with("@base") || self.starts_with("BASE") {
+            } else if self.starts_with("@base") || self.starts_with_ci("BASE") {
                 self.directive_base()?;
+            } else if self.starts_with("@forAll") || self.starts_with("@forSome") {
+                if self.strict {
+                    return Err("quantifiers are not Turtle".into());
+                }
+                self.directive_quantifier()?;
+            } else if self.starts_with("@keywords") {
+                if self.strict {
+                    return Err("@keywords is not Turtle".into());
+                }
+                self.directive_keywords()?;
             } else {
                 self.statement(&mut out)?;
             }
@@ -202,30 +330,130 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
+    /// `@forAll t1, t2 .` / `@forSome t1, t2 .` — declare quantified terms for
+    /// the CURRENT scope (document, or the innermost open formula). Each
+    /// declared IRI thereafter reads as a variable (forAll) or an existential
+    /// blank (forSome) within that scope. Names derive from the IRI so the
+    /// same declaration in two documents (action vs reference) compares equal.
+    fn directive_quantifier(&mut self) -> Result<(), String> {
+        let universal = self.starts_with("@forAll");
+        self.i += if universal { 7 } else { 8 };
+        loop {
+            self.ws();
+            let iri = match self.peek() {
+                Some(b'<') => self.read_iriref()?,
+                _ => match self.read_prefixed_name()? {
+                    Term::Iri(i) => i,
+                    other => return Err(format!("expected IRI in quantifier, got {other:?}")),
+                },
+            };
+            let local = iri.rsplit(['#', '/']).next().unwrap_or(&iri).to_string();
+            let term = if universal {
+                Term::Var(format!("__ua_{local}"))
+            } else {
+                Term::Blank(format!("__ex_{local}"))
+            };
+            self.quants.last_mut().expect("scope stack").insert(iri, term);
+            if !self.eat(b',') {
+                break;
+            }
+        }
+        self.eat(b'.');
+        Ok(())
+    }
+
+    /// The quantified stand-in for `iri`, innermost scope first.
+    fn quantified(&self, iri: &str) -> Option<Term> {
+        self.quants.iter().rev().find_map(|frame| frame.get(iri).cloned())
+    }
+
     fn directive_prefix(&mut self) -> Result<(), String> {
-        self.i += if self.starts_with("@prefix") { 7 } else { 6 };
+        let at_form = self.starts_with("@prefix");
+        self.i += if at_form { 7 } else { 6 };
         self.ws();
         let pfx = self.read_pname_prefix()?;
         self.ws();
         let iri = self.read_iriref()?;
         self.prefixes.insert(pfx, iri);
-        self.eat(b'.');
+        let dotted = self.eat(b'.');
+        if self.strict && at_form != dotted {
+            return Err("'@prefix' needs a final '.'; SPARQL-style PREFIX must not have one".into());
+        }
         Ok(())
     }
     fn directive_base(&mut self) -> Result<(), String> {
-        self.i += if self.starts_with("@base") { 5 } else { 4 };
+        let at_form = self.starts_with("@base");
+        self.i += if at_form { 5 } else { 4 };
         self.ws();
         // read_iriref already resolves the new base against the current one.
         self.base = self.read_iriref()?;
-        self.eat(b'.');
+        let dotted = self.eat(b'.');
+        if self.strict && at_form != dotted {
+            return Err("'@base' needs a final '.'; SPARQL-style BASE must not have one".into());
+        }
         Ok(())
     }
 
-    /// `subject predicateObjectList .` with `;` and `,`.
-    fn statement(&mut self, out: &mut Vec<[Term; 3]>) -> Result<(), String> {
-        let subj = self.term(out)?;
-        self.predicate_object_list(&subj, out)?;
+    /// `@keywords a, is, of.` (cwm) — thereafter BARE words are `:word` names
+    /// unless they appear in the declared keyword list.
+    fn directive_keywords(&mut self) -> Result<(), String> {
+        self.i += 9;
+        let mut kws = std::collections::HashSet::new();
+        loop {
+            self.ws();
+            if self.peek() == Some(b'.') {
+                break;
+            }
+            let name = self.read_name();
+            if name.is_empty() {
+                break;
+            }
+            kws.insert(name);
+            if !self.eat(b',') {
+                break;
+            }
+        }
         self.eat(b'.');
+        if kws.is_empty() {
+            // `@keywords .` (no keywords at all) is rejected — the N3 CG
+            // suite marks the empty form invalid (cwm_syntax keywords1/2)
+            // while the with_keywords corpus always declares a non-empty set.
+            return Err("@keywords requires at least one keyword".into());
+        }
+        self.keywords = Some(kws);
+        Ok(())
+    }
+
+    /// `subject predicateObjectList .` with `;` and `,`. A bare
+    /// blankNodePropertyList (`[ :p :o ] .`) needs no predicateObjectList —
+    /// its triples were already emitted while reading the subject; N3 also
+    /// allows a bare subject (`:a .`, `{:b} .` — zero predicates).
+    fn statement(&mut self, out: &mut Vec<[Term; 3]>) -> Result<(), String> {
+        self.ws();
+        let bracket_subject = self.peek() == Some(b'[');
+        let subj = self.term(out)?;
+        if self.strict
+            && !matches!(subj, Term::Iri(_) | Term::Blank(_) | Term::List(_))
+        {
+            return Err(format!("invalid Turtle subject {subj:?}"));
+        }
+        self.ws();
+        if matches!(self.peek(), Some(b'.') | Some(b'}') | None)
+            && (if self.strict {
+                bracket_subject
+            } else {
+                true // N3: zero-predicate statements are legal
+            })
+        {
+            if !self.eat(b'.') && self.strict {
+                return Err("statement must end with '.'".into());
+            }
+            return Ok(());
+        }
+        self.predicate_object_list(&subj, out)?;
+        if !self.eat(b'.') && self.strict {
+            return Err("statement must end with '.'".into());
+        }
         Ok(())
     }
 
@@ -247,10 +475,10 @@ impl<'a> Parser<'a> {
             if !self.eat(b';') {
                 break;
             }
-            // allow trailing `;`
+            while self.eat(b';') {} // `;;` is legal (empty list items)
             self.ws();
             if matches!(self.peek(), Some(b'.') | Some(b']') | Some(b'}') | None) {
-                break;
+                break; // trailing `;`
             }
         }
         Ok(())
@@ -261,48 +489,96 @@ impl<'a> Parser<'a> {
     /// trade places); `has EXPR` is the explicit forward form.
     fn verb(&mut self, _out: &mut Vec<[Term; 3]>) -> Result<(Term, bool), String> {
         self.ws();
-        if self.starts_with("=>") {
-            self.i += 2;
-            return Ok((Term::Iri(LOG_IMPLIES.into()), false));
+        if !self.strict {
+            if self.starts_with("=>") {
+                self.i += 2;
+                return Ok((Term::Iri(LOG_IMPLIES.into()), false));
+            }
+            if self.starts_with("<=") {
+                self.i += 2;
+                // `conclusion <= premise` — log:isImpliedBy; `parse` routes it into
+                // the backward-rule set (goal-directed resolution, see module doc).
+                return Ok((Term::Iri(LOG_IMPLIED_BY.into()), false));
+            }
+            // `<- expr` — inverted predicate (N3 2023): `:s <- :p :o` ≡ `:o :p :s`.
+            // Disambiguate from an IRIREF `<-s>`: an IRI closes with '>' before
+            // any whitespace.
+            if self.starts_with("<-") && !self.iri_ahead() {
+                self.i += 2;
+                let pred = self.term(_out)?;
+                return Ok((pred, true));
+            }
+            if self.peek() == Some(b'=') {
+                self.i += 1;
+                return Ok((Term::Iri(OWL_SAME_AS.into()), false));
+            }
         }
-        if self.starts_with("<=") {
-            self.i += 2;
-            // `conclusion <= premise` — emit log:impliedBy; `parse` routes it into the
-            // backward-rule set (goal-directed resolution, see the module doc).
-            return Ok((Term::Iri(LOG_IMPLIED_BY.into()), false));
-        }
-        if self.eat(b'=') {
-            return Ok((Term::Iri(OWL_SAME_AS.into()), false));
-        }
-        // `a` keyword (rdf:type) — only when a standalone token.
-        if self.starts_with("a") {
+        // `a` keyword (rdf:type) — only when a standalone token. Under
+        // `@keywords` the bare form needs 'a' declared; `@a` always works.
+        let a_allowed = match &self.keywords {
+            Some(kws) => kws.contains("a"),
+            None => true,
+        };
+        if a_allowed && self.starts_with("a") {
             let j = self.i + 1;
             if j >= self.s.len() || (self.s[j] as char).is_whitespace() || self.s[j] == b'<' {
                 self.i += 1;
                 return Ok((Term::Iri(RDF_TYPE.into()), false));
             }
         }
-        // `is EXPR of` — inverse predicate; `has EXPR` — explicit forward.
-        if self.keyword("is") {
-            let pred = self.term(_out)?;
-            self.ws();
-            if !self.keyword("of") {
-                return Err(format!("expected 'of' after 'is <pred>' at byte {}", self.i));
+        if !self.strict && self.starts_with("@a") {
+            let j = self.i + 2;
+            if j >= self.s.len() || (self.s[j] as char).is_whitespace() {
+                self.i += 2;
+                return Ok((Term::Iri(RDF_TYPE.into()), false));
             }
-            return Ok((pred, true));
         }
-        if self.keyword("has") {
-            return Ok((self.term(_out)?, false));
+        // `is EXPR of` — inverse predicate; `has EXPR` — explicit forward.
+        if !self.strict {
+            if self.keyword("is") {
+                let pred = self.term(_out)?;
+                self.ws();
+                if !self.keyword("of") {
+                    return Err(format!("expected 'of' after 'is <pred>' at byte {}", self.i));
+                }
+                return Ok((pred, true));
+            }
+            if self.keyword("has") {
+                return Ok((self.term(_out)?, false));
+            }
         }
-        Ok((self.atom(_out)?, false))
+        let pred = self.term(_out)?; // N3 allows paths in predicate position
+        if self.strict && !matches!(pred, Term::Iri(_)) {
+            return Err(format!("invalid Turtle predicate {pred:?}"));
+        }
+        Ok((pred, false))
     }
 
-    /// Consume `kw` when it stands as a whole token (followed by whitespace).
+    /// After `<`, does an IRIREF close (a '>' before any whitespace)?
+    fn iri_ahead(&self) -> bool {
+        let mut j = self.i + 1;
+        while let Some(&c) = self.s.get(j) {
+            match c {
+                b'>' => return true,
+                b'<' => return false, // a second '<' — not inside any IRIREF
+                c if (c as char).is_whitespace() => return false,
+                _ => j += 1,
+            }
+        }
+        false
+    }
+
+    /// Consume `kw` when it stands as a whole token (followed by whitespace);
+    /// under `@keywords`, the explicit `@kw` form is always a keyword.
     fn keyword(&mut self, kw: &str) -> bool {
         self.ws();
-        let end = self.i + kw.len();
-        if self.s[self.i..].starts_with(kw.as_bytes())
-            && self.s.get(end).is_none_or(|c| (*c as char).is_whitespace())
+        let at = self.peek() == Some(b'@');
+        let start = self.i + usize::from(at);
+        let end = start + kw.len();
+        if self.s[start..].starts_with(kw.as_bytes())
+            && self.s.get(end).is_none_or(|c| {
+                (*c as char).is_whitespace() || matches!(c, b'.' | b';' | b',' | b')' | b']' | b'}')
+            })
         {
             self.i = end;
             true
@@ -318,6 +594,9 @@ impl<'a> Parser<'a> {
     /// rule premises join correctly).
     fn term(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
         let mut base = self.atom(out)?;
+        if self.strict {
+            return Ok(base); // paths are not Turtle
+        }
         loop {
             self.ws();
             match self.peek() {
@@ -327,6 +606,12 @@ impl<'a> Parser<'a> {
                     let next = self.fresh_pathvar();
                     out.push([base, pred, next.clone()]);
                     base = next;
+                }
+                Some(b'^') if self.s.get(self.i + 1) == Some(&b'^') => {
+                    // a `^^dt` cast on a non-literal term (old euler/N3QL
+                    // surface): consume and ignore the datatype.
+                    self.i += 2;
+                    let _ = self.read_iri_or_prefixed()?;
                 }
                 Some(b'^') => {
                     self.i += 1;
@@ -342,41 +627,87 @@ impl<'a> Parser<'a> {
     }
 
     fn fresh_pathvar(&mut self) -> Term {
+        // Path steps mint EXISTENTIALS (cwm prints them as bnodes); inside a
+        // rule premise the blank→variable rewrite turns them into join vars.
         self.pathvar += 1;
-        Term::Var(format!("__path{}", self.pathvar))
+        Term::Blank(format!("__path{}", self.pathvar))
     }
 
     /// A single atomic term (no path operators).
     fn atom(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
         self.ws();
         match self.peek() {
-            Some(b'<') => Ok(Term::Iri(self.read_iriref()?)),
+            Some(b'<') => {
+                let iri = self.read_iriref()?;
+                if let Some(q) = self.quantified(&iri) {
+                    return Ok(q);
+                }
+                Ok(nil_to_list(Term::Iri(iri)))
+            }
             Some(b'"') | Some(b'\'') => self.read_literal(),
             Some(b'?') => {
+                if self.strict {
+                    return Err("variables are not Turtle".into());
+                }
                 self.i += 1;
-                Ok(Term::Var(self.read_name()))
+                let v = self.read_name();
+                if self.peek() == Some(b'@') {
+                    // `?D@de` (euler-era language cast on a variable): ignore.
+                    self.i += 1;
+                    let _ = self.read_name();
+                }
+                Ok(Term::Var(v))
             }
             Some(b'_') => {
                 // _:label
                 self.i += 1;
                 self.eat(b':');
-                Ok(Term::Blank(self.read_name()))
+                Ok(Term::Blank(self.read_blank_label()))
             }
-            Some(b'{') => self.read_formula(),
+            Some(b'{') => {
+                if self.strict {
+                    return Err("formulae are not Turtle".into());
+                }
+                self.read_formula()
+            }
             Some(b'(') => self.read_collection(out),
             Some(b'[') => self.read_bnode_propertylist(out),
             Some(c) if c.is_ascii_digit() || c == b'+' || c == b'-' || c == b'.' => self.read_number(),
-            Some(_) => {
-                // prefixed name, `true`/`false`, or `a`
-                if self.starts_with("true") {
-                    self.i += 4;
+            Some(b'@') if !self.strict => {
+                // `@true` / `@false` (the explicit keyword forms under @keywords)
+                if self.starts_with("@true") {
+                    self.i += 5;
                     return Ok(Term::Lit("true".into(), XSD_BOOLEAN.into(), None));
                 }
-                if self.starts_with("false") {
-                    self.i += 5;
+                if self.starts_with("@false") {
+                    self.i += 6;
                     return Ok(Term::Lit("false".into(), XSD_BOOLEAN.into(), None));
                 }
-                self.read_prefixed_name()
+                Err(format!("unexpected '@' token at byte {}", self.i))
+            }
+            Some(_) => {
+                // prefixed name, `true`/`false`, or `a`
+                let bool_allowed = |kws: &Option<std::collections::HashSet<String>>, w: &str| {
+                    match kws {
+                        Some(set) => set.contains(w),
+                        None => true,
+                    }
+                };
+                if bool_allowed(&self.keywords, "true") && self.keyword("true") {
+                    return Ok(Term::Lit("true".into(), XSD_BOOLEAN.into(), None));
+                }
+                if bool_allowed(&self.keywords, "false") && self.keyword("false") {
+                    return Ok(Term::Lit("false".into(), XSD_BOOLEAN.into(), None));
+                }
+                match self.read_prefixed_name()? {
+                    Term::Iri(i) => {
+                        if let Some(q) = self.quantified(&i) {
+                            return Ok(q);
+                        }
+                        Ok(nil_to_list(Term::Iri(i)))
+                    }
+                    other => Ok(other),
+                }
             }
             None => Err("unexpected end of input".into()),
         }
@@ -386,45 +717,162 @@ impl<'a> Parser<'a> {
         if !self.eat(b'<') {
             return Err(format!("expected IRI at byte {}", self.i));
         }
-        let start = self.i;
-        while self.i < self.s.len() && self.s[self.i] != b'>' {
-            self.i += 1;
+        let mut iri = String::new();
+        loop {
+            let Some(c) = self.peek() else { return Err("unterminated IRI".into()) };
+            match c {
+                b'>' => {
+                    self.i += 1;
+                    break;
+                }
+                b'\\' => {
+                    // only \uXXXX / \UXXXXXXXX are legal inside an IRIREF —
+                    // and the DECODED character is held to the same charset.
+                    self.i += 1;
+                    let ch = self.read_unicode_escape()?;
+                    if (ch as u32) <= 0x20 || matches!(ch, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`') {
+                        return Err(format!("escaped character {ch:?} is not allowed in an IRI"));
+                    }
+                    iri.push(ch);
+                }
+                // IRIREF excludes control chars, space and <>"{}|^`
+                0x00..=0x20 | b'<' | b'"' | b'{' | b'}' | b'|' | b'^' | b'`' => {
+                    return Err(format!("illegal character 0x{c:02x} in IRI"));
+                }
+                _ => {
+                    let len = utf8_len(c);
+                    iri.push_str(
+                        std::str::from_utf8(&self.s[self.i..self.i + len])
+                            .map_err(|e| e.to_string())?,
+                    );
+                    self.i += len;
+                }
+            }
         }
-        let iri = std::str::from_utf8(&self.s[start..self.i]).map_err(|e| e.to_string())?.to_string();
-        self.i += 1; // '>'
         Ok(resolve_iri(&self.base, &iri))
     }
 
+    /// `\uXXXX` or `\UXXXXXXXX` with the backslash already consumed.
+    fn read_unicode_escape(&mut self) -> Result<char, String> {
+        let kind = self.peek().ok_or("truncated escape")?;
+        let digits = match kind {
+            b'u' => 4,
+            b'U' => 8,
+            other => return Err(format!("illegal escape '\\{}'", other as char)),
+        };
+        self.i += 1;
+        if self.i + digits > self.s.len() {
+            return Err("truncated unicode escape".into());
+        }
+        let hex = std::str::from_utf8(&self.s[self.i..self.i + digits]).map_err(|e| e.to_string())?;
+        let cp = u32::from_str_radix(hex, 16).map_err(|_| format!("bad unicode escape '{hex}'"))?;
+        self.i += digits;
+        char::from_u32(cp).ok_or_else(|| format!("invalid code point U+{cp:X}"))
+    }
+
     fn read_pname_prefix(&mut self) -> Result<String, String> {
-        // read up to ':'
+        // read up to ':' (dots are legal inside a prefix name: `e.g:`)
         let start = self.i;
         while self.i < self.s.len() && self.s[self.i] != b':' && !(self.s[self.i] as char).is_whitespace() {
             self.i += 1;
         }
         let pfx = std::str::from_utf8(&self.s[start..self.i]).unwrap().to_string();
-        self.eat(b':');
+        if self.peek() != Some(b':') {
+            return Err(format!("expected ':' after prefix name at byte {}", self.i));
+        }
+        self.i += 1;
         Ok(pfx)
     }
 
     fn read_prefixed_name(&mut self) -> Result<Term, String> {
         let start = self.i;
+        let mut tok = String::new();
         while self.i < self.s.len() {
             let c = self.s[self.i];
             if (c as char).is_whitespace()
-                || matches!(c, b'.' | b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{' | b'!' | b'^')
+                || matches!(c, b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{' | b'!' | b'^' | b'#')
             {
-                break;
+                break; // '#' starts a comment — never part of an (unescaped) pname
             }
-            self.i += 1;
+            if c == b'\\' {
+                // PN_LOCAL_ESC: the escaped punctuation char, literally.
+                self.i += 1;
+                let Some(e) = self.peek() else { return Err("truncated pname escape".into()) };
+                if !br"_~.-!$&'()*+,;=/?#@%".contains(&e) {
+                    return Err(format!("illegal pname escape '\\{}'", e as char));
+                }
+                tok.push(e as char);
+                self.i += 1;
+                continue;
+            }
+            if c == b'.' {
+                // a dot is part of the name only when followed by another
+                // name character (`:a.b` yes; `:a. ` no — statement dot).
+                let cont = self.s.get(self.i + 1).is_some_and(|&n| {
+                    (n as char).is_alphanumeric()
+                        || matches!(n, b'_' | b'-' | b'.' | b'%' | b'\\' | b':')
+                        || n >= 0x80
+                });
+                if !cont {
+                    break;
+                }
+                if self.strict && tok.ends_with(':') {
+                    return Err("local name cannot start with '.'".into());
+                }
+                tok.push('.');
+                self.i += 1;
+                continue;
+            }
+            if self.strict {
+                // W3C Turtle PN rules on the RAW characters (escapes were
+                // handled above): '%' needs two hex digits; other ASCII
+                // punctuation must be escaped; locals cannot start with '-'.
+                if c == b'%' {
+                    let ok = self.s.get(self.i + 1).is_some_and(u8::is_ascii_hexdigit)
+                        && self.s.get(self.i + 2).is_some_and(u8::is_ascii_hexdigit);
+                    if !ok {
+                        return Err("bad %-sequence in prefixed name".into());
+                    }
+                } else if c == b'-' && tok.ends_with(':') {
+                    return Err("local name cannot start with '-'".into());
+                } else if c.is_ascii()
+                    && !c.is_ascii_alphanumeric()
+                    && !matches!(c, b'_' | b'-' | b'.' | b':' | b'%')
+                {
+                    return Err(format!("character '{}' must be escaped in a local name", c as char));
+                }
+            }
+            let len = utf8_len(c);
+            tok.push_str(std::str::from_utf8(&self.s[self.i..self.i + len]).map_err(|e| e.to_string())?);
+            self.i += len;
         }
-        let tok = std::str::from_utf8(&self.s[start..self.i]).unwrap();
-        let (pfx, local) = tok.split_once(':').ok_or_else(|| format!("bad token '{tok}' at {start}"))?;
+        let tok = tok.as_str();
+        let Some((pfx, local)) = tok.split_once(':') else {
+            // a BARE word: legal only under `@keywords` (cwm) — it reads as
+            // `:word` in the default prefix unless declared a keyword.
+            if let Some(kws) = &self.keywords {
+                if !tok.is_empty() && !kws.contains(tok) {
+                    let ns = match self.prefixes.get("") {
+                        Some(ns) => ns.clone(),
+                        None => resolve_iri(&self.base, "#"),
+                    };
+                    return Ok(Term::Iri(format!("{ns}{tok}")));
+                }
+            }
+            return Err(format!("bad token '{tok}' at {start}"));
+        };
         let ns = match self.prefixes.get(pfx) {
             Some(ns) => ns.clone(),
+            None if self.strict => return Err(format!("unknown prefix '{pfx}:'")),
             // cwm/EYE treat an undeclared default prefix as `@prefix : <#>.`
             // (document-local names); honor that for ':' only.
             None if pfx.is_empty() => resolve_iri(&self.base, "#"),
-            None => return Err(format!("unknown prefix '{pfx}:'")),
+            // cwm's reference outputs use the well-known SWAP/RDF prefixes
+            // without declaring them — resolve those like cwm does.
+            None => match well_known_prefix(pfx) {
+                Some(ns) => ns.to_string(),
+                None => return Err(format!("unknown prefix '{pfx}:'")),
+            },
         };
         Ok(Term::Iri(format!("{ns}{local}")))
     }
@@ -433,13 +881,33 @@ impl<'a> Parser<'a> {
         let start = self.i;
         while self.i < self.s.len() {
             let c = self.s[self.i];
-            if (c as char).is_alphanumeric() || c == b'_' || c == b'-' {
+            if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
                 self.i += 1;
+            } else if c >= 0x80 {
+                self.i += utf8_len(c); // whole code point (PN_CHARS go beyond ASCII)
             } else {
                 break;
             }
         }
-        std::str::from_utf8(&self.s[start..self.i]).unwrap().to_string()
+        String::from_utf8_lossy(&self.s[start..self.i]).into_owned()
+    }
+
+    /// A blank-node label: like a name, but dots are allowed INSIDE
+    /// (`_:b.0` — Turtle BLANK_NODE_LABEL).
+    fn read_blank_label(&mut self) -> String {
+        let mut label = self.read_name();
+        while self.peek() == Some(b'.') {
+            let cont = self.s.get(self.i + 1).is_some_and(|&n| {
+                n.is_ascii_alphanumeric() || matches!(n, b'_' | b'-') || n >= 0x80
+            });
+            if !cont {
+                break;
+            }
+            self.i += 1;
+            label.push('.');
+            label.push_str(&self.read_name());
+        }
+        label
     }
 
     fn read_literal(&mut self) -> Result<Term, String> {
@@ -459,16 +927,22 @@ impl<'a> Parser<'a> {
             let c = self.s[self.i];
             if c == b'\\' {
                 self.i += 1;
-                let e = self.s[self.i];
-                val.push(match e {
-                    b'n' => '\n',
-                    b't' => '\t',
-                    b'r' => '\r',
-                    b'"' => '"',
-                    b'\'' => '\'',
-                    b'\\' => '\\',
-                    other => other as char,
-                });
+                let Some(e) = self.peek() else { return Err("truncated escape".into()) };
+                match e {
+                    b'n' => val.push('\n'),
+                    b't' => val.push('\t'),
+                    b'r' => val.push('\r'),
+                    b'b' => val.push('\u{8}'),
+                    b'f' => val.push('\u{c}'),
+                    b'"' => val.push('"'),
+                    b'\'' => val.push('\''),
+                    b'\\' => val.push('\\'),
+                    b'u' | b'U' => {
+                        val.push(self.read_unicode_escape()?);
+                        continue;
+                    }
+                    other => return Err(format!("illegal string escape '\\{}'", other as char)),
+                }
                 self.i += 1;
                 continue;
             }
@@ -496,7 +970,22 @@ impl<'a> Parser<'a> {
         } else if self.peek() == Some(b'@') {
             self.i += 1;
             let lang = self.read_name();
-            Ok(Term::Lit(val, "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(), Some(lang)))
+            // LANGTAG: [a-zA-Z]+('-'[a-zA-Z0-9]+)*; canonical form is lowercase.
+            let valid = !lang.is_empty()
+                && lang.split('-').enumerate().all(|(k, part)| {
+                    !part.is_empty()
+                        && part.bytes().all(|c| {
+                            c.is_ascii_alphabetic() || (k > 0 && c.is_ascii_digit())
+                        })
+                });
+            if !valid {
+                return Err(format!("invalid language tag '@{lang}'"));
+            }
+            Ok(Term::Lit(
+                val,
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(),
+                Some(lang.to_ascii_lowercase()),
+            ))
         } else {
             Ok(Term::Lit(val, "http://www.w3.org/2001/XMLSchema#string".into(), None))
         }
@@ -518,17 +1007,34 @@ impl<'a> Parser<'a> {
         let start = self.i;
         let mut is_decimal = false;
         let mut is_double = false;
+        let mut digits = 0usize;
         if matches!(self.peek(), Some(b'+') | Some(b'-')) {
             self.i += 1;
         }
         while self.i < self.s.len() {
             let c = self.s[self.i];
+            let exp_next = |j: usize, s: &[u8]| {
+                matches!(s.get(j), Some(b'e') | Some(b'E'))
+                    && match s.get(j + 1) {
+                        Some(b'+') | Some(b'-') => s.get(j + 2).is_some_and(u8::is_ascii_digit),
+                        Some(d) => d.is_ascii_digit(),
+                        None => false,
+                    }
+            };
             if c.is_ascii_digit() {
+                digits += 1;
                 self.i += 1;
-            } else if c == b'.' && self.i + 1 < self.s.len() && self.s[self.i + 1].is_ascii_digit() {
+            } else if c == b'.'
+                && !is_decimal
+                && !is_double
+                && (self.s.get(self.i + 1).is_some_and(u8::is_ascii_digit)
+                    || exp_next(self.i + 1, self.s))
+            {
+                // `1.5`, or `123.E+1` (Turtle DOUBLE allows an empty fraction)
                 is_decimal = true;
                 self.i += 1;
-            } else if c == b'e' || c == b'E' {
+            } else if (c == b'e' || c == b'E') && digits > 0 && !is_double && exp_next(self.i, self.s)
+            {
                 is_double = true;
                 self.i += 1;
                 if matches!(self.peek(), Some(b'+') | Some(b'-')) {
@@ -537,6 +1043,9 @@ impl<'a> Parser<'a> {
             } else {
                 break;
             }
+        }
+        if digits == 0 {
+            return Err(format!("expected a number at byte {start}"));
         }
         let txt = std::str::from_utf8(&self.s[start..self.i]).unwrap().to_string();
         let dt = if is_double { XSD_DOUBLE } else if is_decimal { XSD_DECIMAL } else { XSD_INTEGER };
@@ -554,6 +1063,7 @@ impl<'a> Parser<'a> {
     fn read_formula(&mut self) -> Result<Term, String> {
         self.enter()?;
         self.eat(b'{');
+        self.quants.push(Default::default()); // formula-local quantifier scope
         let mut triples = Vec::new();
         loop {
             self.ws();
@@ -563,9 +1073,22 @@ impl<'a> Parser<'a> {
             if self.i >= self.s.len() {
                 return Err("unterminated formula".into());
             }
-            self.statement(&mut triples)?;
+            if self.starts_with("@forAll") || self.starts_with("@forSome") {
+                self.directive_quantifier()?;
+            } else if self.starts_with("@prefix") {
+                self.directive_prefix()?;
+            } else if self.starts_with("@base") {
+                self.directive_base()?;
+            } else {
+                self.statement(&mut triples)?;
+            }
         }
+        self.quants.pop();
         self.depth -= 1;
+        if triples.is_empty() {
+            // `{}` IS the literal true (N3 CG: the empty graph holds vacuously).
+            return Ok(Term::Lit("true".into(), XSD_BOOLEAN.into(), None));
+        }
         Ok(Term::Formula(triples))
     }
 
@@ -578,27 +1101,31 @@ impl<'a> Parser<'a> {
             if self.eat(b')') {
                 break;
             }
+            if self.i >= self.s.len() {
+                return Err("unterminated collection".into());
+            }
             items.push(self.term(out)?);
         }
         self.depth -= 1;
-        // Build an rdf:List (first/rest/nil) and return its head; empty → rdf:nil.
-        if items.is_empty() {
-            return Ok(Term::Iri(RDF_NIL.into()));
-        }
-        let mut head = Term::Iri(RDF_NIL.into());
-        for it in items.into_iter().rev() {
-            let node = self.fresh_bnode();
-            out.push([node.clone(), Term::Iri(RDF_FIRST.into()), it]);
-            out.push([node.clone(), Term::Iri(RDF_REST.into()), head]);
-            head = node;
-        }
-        Ok(head)
+        // A collection is a FIRST-CLASS list term (N3 semantics); `()` = rdf:nil
+        // = the empty list.
+        Ok(Term::List(items))
     }
 
     fn read_bnode_propertylist(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
         self.enter()?;
         self.eat(b'[');
-        let node = self.fresh_bnode();
+        self.ws();
+        // N3's iriPropertyList: `[id :s :p :o]` names the node :s (not a bnode).
+        let node = if !self.strict && self.keyword("id") {
+            let named = self.term(out)?;
+            if !matches!(named, Term::Iri(_)) {
+                return Err(format!("iriPropertyList id must be an IRI, got {named:?}"));
+            }
+            named
+        } else {
+            self.fresh_bnode()
+        };
         self.ws();
         if !self.eat(b']') {
             self.predicate_object_list(&node, out)?;
@@ -643,6 +1170,10 @@ pub(super) fn resolve_iri(base: &str, iri: &str) -> String {
     if let Some(frag) = iri.strip_prefix('#') {
         return format!("{base}#{frag}");
     }
+    if iri.starts_with('?') {
+        // query-only reference: replace the base's query, keep its path
+        return format!("{}{iri}", base.split('?').next().unwrap_or(base));
+    }
     // scheme = up to ':'; authority = '//…' if present.
     let scheme_end = base.find(':').map(|i| i + 1).unwrap_or(0);
     let (authority_end, has_authority) = if base[scheme_end..].starts_with("//") {
@@ -666,19 +1197,34 @@ pub(super) fn resolve_iri(base: &str, iri: &str) -> String {
             format!("{dir}/{iri}")
         }
     };
-    // Remove dot segments in the path part (after the authority).
-    let (prefix, path) = merged.split_at(authority_end.min(merged.len()));
+    // Remove dot segments in the path part (after the authority); the
+    // query/fragment must not take part (RFC 3986 §5.2.4).
+    let (prefix, rest) = merged.split_at(authority_end.min(merged.len()));
+    let qpos = rest.find(['?', '#']).unwrap_or(rest.len());
+    let (path, tail) = rest.split_at(qpos);
     let mut out: Vec<&str> = Vec::new();
+    let mut trailing_slash = path.ends_with('/');
     for seg in path.split('/') {
         match seg {
-            "." => {}
+            "." => trailing_slash = true,
             ".." => {
-                out.pop();
+                // never pop the leading empty segment (the path root)
+                if out.len() > 1 || (out.len() == 1 && !out[0].is_empty()) {
+                    out.pop();
+                }
+                trailing_slash = true;
             }
-            s => out.push(s),
+            s => {
+                trailing_slash = s.is_empty();
+                out.push(s);
+            }
         }
     }
-    format!("{prefix}{}", out.join("/"))
+    let mut joined = out.join("/");
+    if trailing_slash && !joined.ends_with('/') {
+        joined.push('/');
+    }
+    format!("{prefix}{joined}{tail}")
 }
 
 fn utf8_len(b: u8) -> usize {

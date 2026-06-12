@@ -14,12 +14,17 @@ test-case export `all.rdf` (Internet Archive snapshot `20160703034201`, sha256-p
 |---|---:|---:|---:|---:|---:|---:|
 | RDF Semantics (rdf-mt, 48 active entries) | 48 | **48** | 0 | 0 | 0 | **100%** |
 | OWL 2 RL (RL-profile ∧ RDF-based, Approved) | 91 | **78** | 0 | 13 | 36 | **100%** (pass+div) |
-| N3 — reasoner manifest (89) | 88 | **52** | 36 | 0 | 1 | 59.1% |
-| N3 — parser manifest (230) | 230 | **189** | 41 | 0 | 0 | 82.2% |
-| N3 — extended manifest (978) | 978 | **880** | 98 | 0 | 0 | 90.0% |
-| N3 — TurtleTests through the N3 parser (297) | 297 | **210** | 87 | 0 | 0 | 70.7% |
+| N3 — reasoner manifest (89) | 86 | **83** | 1 | 2 | 3 | **98.8%** (pass+div) |
+| N3 — parser manifest (230) | 214 | **213** | 0 | 1 | 16 | **100%** (pass+div) |
+| N3 — extended manifest (978) | 871 | **871** | 0 | 0 | 107 | **100%** |
+| N3 — TurtleTests, N3 parser in STRICT Turtle mode (297) | 297 | **297** | 0 | 0 | 0 | **100%** |
 | SPARQL 1.1 entailment regimes (70) | 47 | **44** | 3 | 0 | 23 | 93.6% |
-| **all suites** | **1779** | **1501** | **265** | **13** | **60** | **85.1%** |
+| **all suites** | **1654** | **1634** | **4** | **16** | **185** | **99.8%** |
+
+N3 out-of-scope = `rdft:Rejected` entries (upstream explicitly rejected them — e.g. biR's
+bare `+` list element, "not allowed in turtle nor n3"), 2 `test:strings`
+(log:outputString) + 1 `test:filter` reasoner options. Before the n3-completeness thread
+the N3 lines were 52/88, 189/230, 880/978, 210/297 (59–90%).
 
 The gating SPARQL harness is untouched and still at 1225 pass + 4 divergences = 1229/1229.
 
@@ -125,42 +130,63 @@ Out-of-scope: 30 non-Approved cases (22 status-absent + 8 Proposed), 3 functiona
 
 ## 3. N3 — engine and builtin inventory vs EYE/cwm
 
-Reasoner manifest: **52/88** (59.1%). Fixed this thread (suite-driven):
-`is EXPR of`/`has EXPR` syntax, undeclared `:` prefix = `<#>`, RFC 3986 base resolution,
-premise blank nodes as existentials, EXACT integer/decimal builtin arithmetic
-(scaled i128), numeric comparison of ground objects across numeric types, string-coerced
-numerics, INF/NaN, round-half-UP + decimal result typing, integer floor/ceiling, unary ops
-rejecting list args, `math:negation` reverse mode, data-list walking for
-`list:length/first/last/member/in`, `rdf:nil` = empty list,
-`string:equalIgnoringCase/notEqualIgnoringCase/notGreaterThan/notLessThan`, parser
-nesting-depth guard (a stress file previously ABORTED the process by stack overflow).
+Reasoner manifest: **83 pass + 2 documented divergences of 86 run** (98.8%); parser
+**213+1div/214**, extended **871/871**, TurtleTests **297/297** (the N3 parser in strict
+Turtle mode). The n3-completeness thread (this branch) closed the audit's gap list:
 
-### Remaining reasoner-manifest gaps (36 fails, by root cause)
+- **First-class lists (`Term::List`)**: `( … )` is a term; structural unification in
+  forward joins and backward goals; lists constructible in conclusions; `list:append`,
+  `list:iterate`, virtual `rdf:first`/`rdf:rest` over list terms; `rdf:nil` ≡ `()`;
+  dictionary interning expands list values back to first/rest chains.
+- **Quantifiers**: `@forAll`/`@forSome` at document and formula scope (IRI-derived
+  deterministic names); premise blanks are existential VARIABLES only outside quoted
+  formulae; conclusion blanks instantiate FRESH per (rule, conclusion-binding) firing
+  (cwm quant-implies).
+- **log:includes scoping**: containment over the subject formula with pattern
+  existentials as wildcards, rule variables binding, scope-side quantified terms as
+  opaque constants (the cwm quantifiers_limited matrix); `{}` is the literal true (the
+  empty formula — includes nothing); `log:supports` closes the scope under its own rules
+  first; unbound/non-formula subjects keep the store-scoped NAF idiom.
+- **Unification through quoting**: formula-vs-formula multiset unification in join atoms
+  (cwm unify1/unify2); `<=` is `log:isImpliedBy` (legacy `log#impliedBy` accepted).
+- **Builtin readiness ordering**: premises reorder so builtins run after their input
+  producers (cwm "when ready" coroutining).
+- **Math**: exact integer/decimal arithmetic incl. decimal^int; real-valued family
+  (trig, log, atan2, degrees/radians) always xsd:double with cwm e-notation lexicals and
+  REVERSE modes; IEEE INF/NaN propagation (and double division by zero) vs domain errors
+  failing the premise; integer-only divisor-sign `math:remainder`; empty sum/product.
+- **Builtins added**: list:append/iterate, log:conclusion/parsedAsN3/langlit/supports,
+  log:semantics/log:content (opt-in resolver), string:containsRoughly, cwm
+  encodeForURI/encodeForFragID, time:dayOfWeek/timeZone/inSeconds (bidirectional) and
+  cwm singular hour/minute/second.
+- **Policy (document access)**: the engine performs NO I/O; `log:semantics`/`log:content`
+  evaluate only when the caller passes a `Resolver` (`reason_n3_terms_with_resolver`).
+  The harness supplies a strictly-offline resolver mapping the suite's canonical
+  `https://w3c.github.io/N3/tests/` IRIs into the pinned clone, and parses all documents
+  against that canonical base (the TurtleTests `.nt` expectations bake those IRIs in).
 
-| root cause | tests | notes |
+### Remaining N3 fails/divergences (all annotated in the report)
+
+| entry | class | cause |
 |---|---|---|
-| `@forAll` / `@forSome` quantifiers not parsed | cwm_includes_quantifiers_limited, log_parsedAsN3, cwm_includes_t2, (+6 extended-suite files) | parser feature; moderate |
-| log:includes / log:notIncludes scoping subtleties (non-ground scopes, nested formulae, `=>` inside includes) | cwm_includes_t6/t10/t11/builtins/conclusion*/quant-implies, cwm_supports_simple | the engine's scoped-negation handles the common cases; full cwm semantics needs formula quantification |
-| first-class list values (`list:append`, list unification in join atoms, lists as conclusions) | cwm_list_unify2-5, cwm_list_append, cwm_list_r1, cwm_list_bug1, cwm_list_builtin_generated_match, list_iterate, cwm_includes_concat | needs `Term::List`; known documented gap (module doc) |
-| log:content / log:semantics / log:outputString (document access / output builtins) | log_content, (strings: 1 out-of-scope) | deliberately excluded (pure-function reasoner); decide policy before implementing |
-| bnode-conclusion instantiation (fresh bnode per binding) | cwm_includes_bnode, cwm_includes_conjunction | conclusion bnodes are currently shared constants |
-| lang-tagged literal handling in builtins | log_langlit | cheap |
-| double formatting / e-notation output, INF corner cases | math_inf, math_corners, math_trig, math_exponentiation (1 case), math_remainder (negative operands), string_concatenation (1 IRI-resolution case) | mostly output-lexical-form mismatches vs cwm refs |
-| `string:tokenize`-era cwm builtins (uriEncode, roughly), `time:` full formats | cwm_string_uriEncode, cwm_string_roughly, cwm_time_t1 | small builtins, check EYE's table before adding |
-| unification through quoting | cwm_unify_unify1/2, cwm_reason_t9 (passes? see report) | formula-term unification in joins |
+| cwm_includes_conclusion | FAIL | needs byte-equal `log:conclusion` closure of three chained DAML documents (daml-ex/invalid-ex/schema-rules via log:semantics + conjunction); our closure of the conjoined schema rules differs from the 2003 cwm run |
+| cwm_includes_t11 | documented divergence | the vendored ref reflects a cwm run whose `log:semantics <t10a.n3>` failed and that purged with an unrecorded `--purge`; our resolver derives the schema-checking conclusions |
+| cwm_unify_unify1 | documented divergence | vendored ref says `:test a :Successful` (rdf:type) but the action concludes `:test :a ?x` (predicate `<#a>`) — ref generated from an older action |
+| numbers.n3 | documented divergence | expected output keeps ONE statement under the generating author's local base (`file:/home/syosi/...#is`) |
+| bad_prefix2 | documented divergence | suite-internal conflict: expects undeclared `:` rejected, while the reasoner manifest's own cwm actions (unify1.n3) require cwm's undeclared-`:`-is-`<#>` convention |
+| sparqldl-10/11/12 | FAIL (sparql-entailment) | unchanged: bnode answer filtering (audit §5 item 6, not taken by this thread) |
 
 ### Parser posture (syntax suites)
 
-- parser manifest 189/230: 12 eval mismatches (formula/quoting round-trips), 8
-  negative-syntax leniency, the rest single-feature gaps (`@keywords`, string escapes).
-- extended 880/978: dominated by `@forAll/@forSome` (and files needing full N3 paths /
-  `@keywords`); 1 non-UTF8 file.
-- TurtleTests 210/297 through the N3 parser: 46 negative-syntax tests ACCEPTED (the
-  hand-rolled parser is deliberately permissive — e.g. bare `\uXXXX` validation, datatype
-  position checks), 21 eval mismatches (mostly `\u` escape decoding and numeric-literal
-  canonicalization), a handful of `PreFIX`-case / exotic-token errors. NOTE: sparq's
-  product Turtle path is oxttl (covered by the gating SPARQL harness); this measures the
-  N3 subsystem's parser only.
+The hand-rolled parser now has two dialects: full N3 (quantifiers, @keywords, paths —
+also in predicate position, inverted `<-` predicates, iriPropertyLists, zero-predicate
+statements, `{}`=true) and STRICT W3C Turtle (`parse_turtle_with_base`: rejects every
+N3-only construct, enforces statement termination, declared prefixes, PN_LOCAL/LANGTAG/
+escape rules; 297/297 TurtleTests). Both dialects validate IRIREF characters and decode
+`\uXXXX`/`\UXXXXXXXX` (escaped forbidden characters are rejected), normalize language
+tags to lowercase, and resolve relative IRIs per RFC 3986 (dot segments, query-only
+references). NOTE: sparq's product Turtle path is still oxttl (gating SPARQL harness);
+the strict mode exists for the N3 subsystem's own surface.
 
 ## 4. SPARQL 1.1 entailment regimes
 
@@ -176,26 +202,32 @@ Remaining 3 fails (annotated in the report):
 - `sparqldl-11/12` — the regime's answer restriction (skolemization) excludes bnode
   bindings; the harness doesn't filter engine results yet.
 
-## 5. Prioritized gap map for follow-up fix threads
+## 5. Prioritized gap map — status after the n3-completeness thread
 
-1. **N3 `Term::List`** (first-class list values): unlocks ~9 reasoner tests
-   (list unification, `list:append`, lists in conclusions, backward goals over lists —
-   EYE's fibonacci/collatz class of programs). The single biggest N3 step. (structural)
-2. **`@forAll`/`@forSome`** parsing (+ mapping to Var/fresh-bnode): ~3 reasoner + ~8
-   syntax tests. (parser, moderate)
-3. **Conclusion-bnode instantiation** (fresh bnode per rule firing): 2 reasoner tests,
-   semantic correctness issue worth fixing regardless. (small-medium)
-4. **log:includes full scoping** (quantified formula containment): ~7 reasoner tests.
-   (semantics, medium)
-5. **N3-parser Turtle strictness pass** (\u escapes, negative-syntax rejections,
-   `@keywords`): ~60 syntax tests, mechanical. (parser, low risk)
-6. **SPARQL-regime answer filtering** (drop bnode bindings per skolemization condition):
-   2 tests; needs a result post-filter hook in the runner or engine. (small)
-7. ~~**OWL leftovers**: cls-oo typing, cls-maxqc1/2 clashes, scm-hv/svf/avf~~ — DONE
+1. **N3 `Term::List`** — ✅ DONE (first-class list terms, unification, construction,
+   append/iterate, virtual first/rest; backward goals over list arguments unify
+   structurally).
+2. **`@forAll`/`@forSome`** — ✅ DONE (document + formula scope, includes-matrix
+   semantics).
+3. **Conclusion-bnode instantiation** — ✅ DONE (fresh existentials per
+   (rule, conclusion-binding) firing).
+4. **log:includes full scoping** — ✅ DONE (formula containment with quantifier
+   semantics, `{}` = true, log:supports; store-NAF kept for unbound subjects).
+5. **N3-parser Turtle strictness pass** — ✅ DONE (strict dialect; TurtleTests 297/297;
+   escape/IRI validation shared with the N3 dialect).
+6. **SPARQL-regime answer filtering** (sparqldl-10/11/12) — ❌ NOT TAKEN by this thread
+   (sparql-entailment runner change; unchanged at 44/47).
+7. **OWL leftovers** (cls-oo, cls-maxqc1/2, scm-hv/svf/avf) — ✅ DONE
    (owl-rl-completion thread, 2026-06): the §2 table is now fully ✅ or explicitly
    by-design; every implemented rule has a hand-computed-closure unit test.
-8. **Decide policy** on document-access builtins (log:semantics/content/outputString) —
-   excluded today by design; an opt-in resolver could lift 2+ tests and real EYE use-cases.
+8. **Document-access policy** — ✅ DECIDED + IMPLEMENTED: opt-in `Resolver` hook
+   (`reason_n3_terms_with_resolver`); engine stays I/O-free by default;
+   `log:semantics`/`log:content` work under the harness's offline resolver.
+   `log:outputString` (test:strings, 2 entries) remains out of scope.
+
+Remaining N3 work, in suite-pressure order: cwm_includes_conclusion (deep multi-document
+log:conclusion parity — the single honest reasoner fail), `log:collectAllIn` (no suite
+pressure), EYE backward list-state idioms beyond what the suite exercises.
 
 ## 6. Reproduction
 

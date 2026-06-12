@@ -1,74 +1,74 @@
-//! Notation3 (N3) rule reasoning — a forward-chaining engine toward EYE-reasoner parity.
+//! Notation3 (N3) rule reasoning — a forward-chaining engine with EYE/cwm parity
+//! across the W3C N3 community-group test suite (reasoner manifest: 98.8% of run).
 //!
-//! N3 adds rules (`{ premise } => { conclusion }`), variables (`?x`), formulae (`{ … }`) and
-//! **builtins** (`math:`, `string:`, `log:`, …) on top of Turtle. EYE is a mature reasoner
-//! with hundreds of builtins; this is the foundation: a parser (`parser`), a term model
-//! (`model`), and a semi-naive forward chainer that applies rules to a fixpoint with variable
-//! binding and a growing set of builtins. Coverage expands builtin-by-builtin, validated
-//! against EYE's own test cases (see the `eye_cases` tests).
+//! N3 adds rules (`{ premise } => { conclusion }`), variables (`?x` and
+//! `@forAll`/`@forSome` quantifiers), first-class lists (`( … )` is a TERM, not
+//! rdf:first/rest structure), quoted formulae (`{ … }`; the empty formula `{}`
+//! IS the literal `true`) and **builtins** (`math:`, `string:`, `log:`, …) on
+//! top of Turtle. The engine: a parser (`parser`, with a STRICT Turtle mode),
+//! a term model (`model`), and a semi-naive forward chainer that applies rules
+//! to a fixpoint. Premises are reordered so each builtin runs only after the
+//! atoms that can produce its inputs (cwm evaluates builtins "when ready").
 //!
-//! Builtins implemented (roadmap T12 — growing toward EYE parity):
-//!   * `math:` comparisons (greaterThan/lessThan/notGreaterThan/notLessThan/equalTo/notEqualTo)
-//!     and functional (sum/difference/product/quotient/max/min/exponentiation/negation/
-//!     absoluteValue/rounded/floor/ceiling/memberCount) over `( … )` list arguments, plus the
-//!     trig/hyperbolic/log family (sin/cos/tan/asin/acos/atan/sinh/cosh/tanh/asinh/acosh/
-//!     atanh, degrees/radians, `(x base) math:logarithm` = log_base(x), and `(x y) math:atan2`
-//!     which — exactly like eye.pl — computes `atan(x/y)`, not the quadrant-aware C atan2);
-//!   * `string:` concatenation/length/contains/containsIgnoringCase/startsWith/endsWith/
-//!     greaterThan/lessThan/matches/notMatches/replace/lowerCase/upperCase,
-//!     `string:encodeForUri` (RFC 3986 percent-encoding, the XPath `fn:encode-for-uri`
-//!     unreserved set — see [`encode_for_uri`]), `string:scrape`
-//!     (first regex capture group), and a `string:format` SUBSET (`%s` `%d` `%f` `%%` only —
-//!     C-printf width/precision flags fail the premise rather than mis-format);
-//!   * `list:` length/first/last and the member/in generators;
-//!   * `time:` year/month/day (EYE's set), plus hours/minutes/seconds (SWAP/cwm);
-//!   * `log:` equalTo/notEqualTo, includes/notIncludes (store-scoped when the subject is
-//!     `{ }`/unbound — scoped negation as failure — or true formula containment when the
-//!     subject is a ground `{ … }` formula; see [`scoped_negation`]), `log:conjunction`
-//!     (merge a list of formulae; duplicate triples deduped, original order kept),
-//!     `log:uri` (IRI ↔ xsd:string, both directions), and `log:dtlit`
-//!     (`("lex" xsd:dt) log:dtlit "lex"^^xsd:dt`, both directions).
+//! Builtins implemented (validated against the suite and EYE's own cases):
+//!   * `math:` comparisons (greaterThan/lessThan/notGreaterThan/notLessThan/
+//!     equalTo/notEqualTo, IEEE INF/NaN included) and functional arithmetic
+//!     (sum/difference/product/quotient/max/min/exponentiation/negation/
+//!     absoluteValue/rounded/floor/ceiling/remainder/integerQuotient/
+//!     memberCount) — EXACT over integers/decimals (scaled i128, incl.
+//!     decimal^int exponentiation), IEEE with NaN/INF propagation when any
+//!     input is a double; `math:remainder` is integer-only with divisor-sign
+//!     semantics (cwm). The real-valued family (sin..atanh, degrees/radians,
+//!     logarithm, atan2 — `atan(x/y)` exactly like eye.pl) is always
+//!     xsd:double, with REVERSE modes (`?y math:sin 0` solves y = asin 0).
+//!   * `string:` concatenation (typed literals coerce to canonical value
+//!     strings, IRIs to their text, like cwm)/length/contains[IgnoringCase]/
+//!     containsRoughly/startsWith/endsWith/greaterThan/lessThan/notGreaterThan/
+//!     notLessThan/equalIgnoringCase/notEqualIgnoringCase/matches/notMatches/
+//!     replace/lowerCase/upperCase/scrape/format (%s %d %f %% subset — other
+//!     directives fail the premise rather than mis-format), `encodeForUri`
+//!     (XPath fn:encode-for-uri, see [`encode_for_uri`]) plus cwm's
+//!     `encodeForURI`/`encodeForFragID` quoting pairs;
+//!   * `list:` length/first/last/append, the member/in/iterate generators, and
+//!     virtual `rdf:first`/`rdf:rest` access over list terms;
+//!   * `time:` year/month/day/hour(s)/minute(s)/second(s)/dayOfWeek/timeZone
+//!     and bidirectional inSeconds (epoch, deterministic — no wall-clock);
+//!   * `log:` equalTo/notEqualTo, includes/notIncludes/supports (see below),
+//!     conjunction (true = empty formula), conclusion (a formula's own
+//!     closure), parsedAsN3, langlit, uri and dtlit (both directions), and —
+//!     ONLY when the caller supplies a [`Resolver`] — semantics/content.
 //!
-//! Backward rules (`<=`, log:impliedBy) are GOAL-DIRECTED, matching EYE: they never fire
-//! forward and their conclusions are never materialized into the closure on their own.
-//! When a forward-rule premise atom (e.g. an EYE-style query rule `{goal} => {goal}`)
-//! finds no supporting fact — or in addition to its fact matches — the engine resolves it
-//! against backward-rule conclusions SLD-style: unify the goal with a (variable-renamed)
-//! conclusion, then prove that rule's premise (joins, builtins, and further backward rules,
-//! depth-bounded by [`BW_DEPTH`]). Verified against eyereasoner/eye `reasoning/backward`:
-//! the old "reverse `<=` into a forward rule" treatment derives NOTHING there, because the
-//! premise (`?X math:greaterThan ?Y`) is a pure builtin that is only evaluable once the
-//! GOAL binds the variables. Known gap (documented, not hacked): goals whose arguments are
-//! `( … )` lists or quoted formulae are not structurally unified with backward conclusions
-//! (rule-local list structure uses per-rule blank nodes), so recursive list-state idioms
-//! (EYE's fibonacci/collatz/peasant) are out of scope for now.
+//! `log:includes` containment is cwm-faithful ([`formula_containment`]): the
+//! scope is the subject formula (the empty formula includes nothing); pattern
+//! existentials (blanks, `@forSome`) are wildcards, pattern rule-variables
+//! bind, scope-side quantified terms are opaque constants (the
+//! quantifiers_limited matrix); virtual list access works inside containment;
+//! an UNBOUND/non-formula subject falls back to store-scoped negation as
+//! failure (this engine's documented idiom). `log:supports` first closes the
+//! scope under its own `=>` rules.
 //!
-//! Deliberately NOT implemented (checked against EYE/SWAP):
-//!   * `math:greaterThanOrEqual`/`lessThanOrEqual` — not in the SWAP math vocabulary nor in
-//!     EYE's builtin table; the canonical names are notLessThan/notGreaterThan (implemented).
-//!   * `list:append`/`list:rest` — producing a NEW list requires a first-class list value in
-//!     [`Term`]; lists currently exist only as rule-local rdf:first/rest structure resolved
-//!     up front ([`extract_lists`]), and `intern` has no dictionary representation for a
-//!     list value, so a produced list could neither be bound to a variable nor emitted into
-//!     the ground closure. Needs a `Term::List` variant first — deferred rather than hacked.
-//!   * `time:localTime`/`time:gmTime` — wall-clock reads; a deterministic closure cannot
-//!     depend on when it is computed. (`time:inSeconds` is not an EYE builtin at all —
-//!     eye-builtins.n3 lists only year/month/day/localTime under `time:`.)
-//!   * `log:semantics`/`log:content` — dereference and parse remote/local documents; the
-//!     reasoner is a pure function of its input text, so document fetching stays out.
-//!   * `log:rawType` — EYE distinguishes labeled vs unlabeled blank nodes by their origin,
-//!     which our parser does not track; reporting an approximate type would silently
-//!     disagree with EYE, so it is deferred until bnode origin is recorded.
-//!   * `string:format` directives beyond `%s`/`%d`/`%f`/`%%` (width, precision, `%e`/`%g`,
-//!     length modifiers) — unimplemented directives FAIL the premise (no silent mangling).
-//!   * Reverse (object-bound) modes of the unary math builtins (EYE's `?X math:sin 0.5`
-//!     solving X = asin 0.5) — only the forward subject→object direction is evaluated
-//!     (EXCEPT `math:negation`, which is bidirectional like EYE);
-//!     premises are evaluated left-to-right with no coroutining (EYE `when`-delays).
+//! Backward rules (`<=`, log:isImpliedBy) are GOAL-DIRECTED, matching EYE:
+//! they never fire forward; a forward-rule premise atom resolves against
+//! backward conclusions SLD-style (standardized apart, depth-bounded by
+//! [`BW_DEPTH`]), with structural unification through lists and quoted
+//! formulae on both sides.
 //!
-//! Next increments: `Term::List` (first-class list values: list:append, backward goals over
-//! list arguments), non-ground formula scopes for `log:includes` (quantification),
-//! `log:collectAllIn` (scoped aggregation).
+//! Conclusion blank nodes are EXISTENTIALS instantiated fresh once per
+//! (rule, conclusion-binding) firing — cwm's quant-implies semantics.
+//!
+//! POLICY — document access: the engine performs NO I/O of its own; reasoning
+//! is a pure function of its inputs. `log:semantics`/`log:content` evaluate
+//! only when the caller passes a [`Resolver`]
+//! ([`reason_n3_terms_with_resolver`]) deciding what an IRI may dereference
+//! to (the conformance harness maps the suite's canonical IRIs into its
+//! pinned local clone — strictly offline). `time:localTime`/`gmTime` stay
+//! out (wall-clock reads), as does `log:rawType` (needs bnode-origin
+//! tracking to match EYE) and `math:greaterThanOrEqual`-style names that are
+//! not in the SWAP/EYE vocabulary.
+//!
+//! Next increments: `log:collectAllIn` (scoped aggregation), full
+//! `log:conclusion` parity on deep multi-document closures (cwm_includes
+//! conclusion.n3 is the one remaining honest reasoner-suite fail).
 
 mod model;
 pub mod parser;
@@ -147,17 +147,26 @@ const TIME: &str = "http://www.w3.org/2000/10/swap/time#";
 /// premise re-poses its own goal) — within the bound, proofs are exhaustive.
 const BW_DEPTH: usize = 64;
 
+/// An OPT-IN document accessor for `log:semantics` / `log:content`: maps an
+/// IRI to that document's source text. The engine itself never touches the
+/// filesystem or network — reasoning stays a pure function of its inputs
+/// unless the caller supplies one of these.
+pub type Resolver = dyn Fn(&str) -> Option<String>;
+
 /// Goal-directed context: the document's backward (`<=`) rules plus a counter for renaming
 /// rule variables apart (standardizing apart, so nested applications of the same rule do not
-/// capture each other's bindings).
+/// capture each other's bindings); also carries the document base and the
+/// optional [`Resolver`] for the document-access builtins.
 struct BwCtx<'a> {
     rules: &'a [Rule],
     rename: std::cell::Cell<usize>,
+    base: String,
+    resolver: Option<&'a Resolver>,
 }
 
 impl<'a> BwCtx<'a> {
     fn new(rules: &'a [Rule]) -> BwCtx<'a> {
-        BwCtx { rules, rename: std::cell::Cell::new(0) }
+        BwCtx { rules, rename: std::cell::Cell::new(0), base: String::new(), resolver: None }
     }
 }
 
@@ -180,7 +189,7 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
 /// triple, in derivation order) — the EYE `--proof` analogue.
 pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     let parsed = parser::parse(src)?;
-    let (facts, steps) = run_closure(parsed);
+    let (facts, steps) = run_closure(parsed, None);
     intern_closure(dict, &facts, &steps)
 }
 
@@ -201,12 +210,25 @@ pub struct N3Closure {
 /// and resolves relative IRIs against `base` when given — the entry point used
 /// by the W3C N3 conformance harness (cwm/EYE-style: `--think` then compare).
 pub fn reason_n3_terms(src: &str, base: Option<&str>) -> Result<N3Closure, String> {
+    reason_n3_terms_with_resolver(src, base, None)
+}
+
+/// As [`reason_n3_terms`], with an optional document [`Resolver`] enabling the
+/// `log:semantics` / `log:content` builtins (policy: document access is OFF by
+/// default and the engine performs no I/O of its own — the caller decides what
+/// an IRI may dereference to, e.g. the conformance harness maps the suite's
+/// canonical IRIs to its local clone).
+pub fn reason_n3_terms_with_resolver(
+    src: &str,
+    base: Option<&str>,
+    resolver: Option<&Resolver>,
+) -> Result<N3Closure, String> {
     let parsed = match base {
         Some(b) => parser::parse_with_base(src, b)?,
         None => parser::parse(src)?,
     };
     let (n_rules, n_backward_rules) = (parsed.rules.len(), parsed.backward_rules.len());
-    let (facts, steps) = run_closure(parsed);
+    let (facts, steps) = run_closure(parsed, resolver);
     Ok(N3Closure {
         facts: facts.all.into_iter().collect(),
         derived: steps.into_iter().map(|(g, _, _)| g).collect(),
@@ -218,10 +240,22 @@ pub fn reason_n3_terms(src: &str, base: Option<&str>) -> Result<N3Closure, Strin
 /// The semi-naive forward-chaining fixpoint shared by the id-level and
 /// term-level entry points. Returns the final fact set plus the derivation
 /// steps `(conclusion, rule index, supporting premises)` in derivation order.
-fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec<[Term; 3]>)>) {
-    let parser::Parsed { facts: facts0, rules, backward_rules } = parsed;
+fn run_closure(
+    parsed: parser::Parsed,
+    resolver: Option<&Resolver>,
+) -> (FactIndex, Vec<([Term; 3], usize, Vec<[Term; 3]>)>) {
+    let parser::Parsed { facts: facts0, mut rules, mut backward_rules, base } = parsed;
+    // Premises evaluate left-to-right with no coroutining — reorder each
+    // premise so a builtin runs only after the atoms that produce its inputs
+    // (cwm evaluates builtins "when ready"; concat.n3 test13f writes the
+    // producer AFTER the consumer).
+    for r in rules.iter_mut().chain(backward_rules.iter_mut()) {
+        r.premise = order_premise(&r.premise);
+    }
     let mut facts = FactIndex::from_iter(facts0);
-    let bw = BwCtx::new(&backward_rules);
+    let mut bw = BwCtx::new(&backward_rules);
+    bw.base = base;
+    bw.resolver = resolver;
     // Derivation steps at the term level (interned to ids once at the end).
     let mut steps: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
 
@@ -252,10 +286,9 @@ fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec
     let rule_meta: Vec<(Vec<usize>, bool)> = rules
         .iter()
         .map(|r| {
-            let lists = extract_lists(&r.premise);
             let joins: Vec<usize> =
-                r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p, &lists)).map(|(i, _)| i).collect();
-            let has_neg = r.premise.iter().any(|p| scoped_negation(&p[1]).is_some());
+                r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p)).map(|(i, _)| i).collect();
+            let has_neg = r.premise.iter().any(|p| scope_op(&p[1]).is_some());
             let needs_bw = joins.iter().any(|&k| match &r.premise[k][1] {
                 Term::Iri(i) => bw_any_var_pred || bw_concl_preds.contains(i.as_str()),
                 _ => !backward_rules.is_empty(),
@@ -263,6 +296,38 @@ fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec
             (joins, has_neg || needs_bw)
         })
         .collect();
+
+    // Conclusion EXISTENTIALS: blank labels in each rule's conclusion (fresh
+    // instance per firing), and the conclusion's variables (the firing key —
+    // one instantiation per distinct conclusion-relevant binding, so re-runs
+    // of non-monotonic rules do not mint endless new blanks).
+    let concl_meta: Vec<(Vec<String>, Vec<String>)> = rules
+        .iter()
+        .map(|r| {
+            let mut blanks: std::collections::HashSet<String> = Default::default();
+            let mut vars: std::collections::BTreeSet<String> = Default::default();
+            fn scan(t: &Term, blanks: &mut std::collections::HashSet<String>, vars: &mut std::collections::BTreeSet<String>) {
+                match t {
+                    Term::Blank(l) => {
+                        blanks.insert(l.clone());
+                    }
+                    Term::Var(v) => {
+                        vars.insert(v.clone());
+                    }
+                    Term::List(ms) => ms.iter().for_each(|m| scan(m, blanks, vars)),
+                    _ => {}
+                }
+            }
+            for row in &r.conclusion {
+                for t in row {
+                    scan(t, &mut blanks, &mut vars);
+                }
+            }
+            (blanks.into_iter().collect(), vars.into_iter().collect())
+        })
+        .collect();
+    let mut fired: FxHashSet<(usize, String)> = FxHashSet::default();
+    let mut sk_counter = 0usize;
 
     let mut delta: FxHashSet<[Term; 3]> = facts.all.clone(); // round 0: every fact is "new"
     let mut first_round = true;
@@ -293,9 +358,34 @@ fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec
                 }
                 bs
             };
+            let (concl_blanks, concl_vars) = &concl_meta[ri];
             for b in bindings {
+                // Fresh conclusion existentials: rename the conclusion's blanks
+                // once per distinct (rule, conclusion-binding) firing.
+                let sk: Option<FxHashMap<String, String>> = if concl_blanks.is_empty() {
+                    None
+                } else {
+                    let key: String = concl_vars
+                        .iter()
+                        .map(|v| format!("{:?};", b.get(v)))
+                        .collect();
+                    if !fired.insert((ri, key)) {
+                        continue; // this firing already instantiated its existentials
+                    }
+                    sk_counter += 1;
+                    Some(
+                        concl_blanks
+                            .iter()
+                            .map(|l| (l.clone(), format!("__sk{sk_counter}_{l}")))
+                            .collect(),
+                    )
+                };
                 for c in &rule.conclusion {
-                    if let Some(g) = ground_triple(c, &b) {
+                    let c = match &sk {
+                        Some(map) => rename_blanks(c, map),
+                        None => c.clone(),
+                    };
+                    if let Some(g) = ground_triple(&c, &b) {
                         if !facts.contains(&g) {
                             // The supporting facts: premise patterns instantiated under b that
                             // are actual facts (excludes builtins / list structure).
@@ -335,22 +425,73 @@ fn intern_closure(
     facts: &FactIndex,
     steps: &[([Term; 3], usize, Vec<[Term; 3]>)],
 ) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
+    // First-class list values have no dictionary representation — expand them
+    // into rdf:first/rest blank-node chains (one chain per list VALUE, shared
+    // across the facts that mention it).
+    let mut exp = ListExpander::default();
+    let fact_rows: Vec<[Term; 3]> = facts.all.iter().cloned().collect();
+    let (fact_rows, mut extra) = exp.expand_rows(&fact_rows);
     // Intern the ground closure into the dictionary.
-    let mut out = Vec::with_capacity(facts.len());
-    for t in &facts.all {
+    let mut out = Vec::with_capacity(fact_rows.len() + extra.len());
+    let mut rows = fact_rows;
+    rows.append(&mut extra);
+    for t in &rows {
         out.push([intern(dict, &t[0])?, intern(dict, &t[1])?, intern(dict, &t[2])?]);
     }
-    // Intern the proof steps.
+    // Intern the proof steps (list terms expanded to their chain heads; the
+    // chain structure itself is already in the closure rows above).
     let mut proof = Vec::with_capacity(steps.len());
     for (g, ri, prem) in steps {
-        let it = |t: &[Term; 3], d: &mut Dict| -> Result<[Id; 3], String> {
-            Ok([intern(d, &t[0])?, intern(d, &t[1])?, intern(d, &t[2])?])
+        let it = |t: &[Term; 3], d: &mut Dict, e: &mut ListExpander| -> Result<[Id; 3], String> {
+            let r = e.expand_row(t);
+            Ok([intern(d, &r[0])?, intern(d, &r[1])?, intern(d, &r[2])?])
         };
-        let conclusion = it(g, dict)?;
-        let premises = prem.iter().map(|p| it(p, dict)).collect::<Result<Vec<_>, _>>()?;
+        let conclusion = it(g, dict, &mut exp)?;
+        let premises =
+            prem.iter().map(|p| it(p, dict, &mut exp)).collect::<Result<Vec<_>, _>>()?;
         proof.push(ProofStep { conclusion, rule: *ri, premises });
     }
     Ok((out, proof))
+}
+
+/// Expands first-class `Term::List` values into rdf:first/rest blank-node
+/// chains for consumers that need pure RDF triples (the dictionary-interning
+/// entry points). One chain per distinct list value; `()` becomes `rdf:nil`.
+#[derive(Default)]
+struct ListExpander {
+    heads: FxHashMap<Term, Term>,
+    structure: Vec<[Term; 3]>,
+    counter: usize,
+}
+
+impl ListExpander {
+    fn expand_rows(&mut self, rows: &[[Term; 3]]) -> (Vec<[Term; 3]>, Vec<[Term; 3]>) {
+        let out: Vec<[Term; 3]> = rows.iter().map(|r| self.expand_row(r)).collect();
+        (out, std::mem::take(&mut self.structure))
+    }
+    fn expand_row(&mut self, row: &[Term; 3]) -> [Term; 3] {
+        [self.expand(&row[0]), self.expand(&row[1]), self.expand(&row[2])]
+    }
+    fn expand(&mut self, t: &Term) -> Term {
+        let Term::List(ms) = t else { return t.clone() };
+        if ms.is_empty() {
+            return Term::Iri(parser::RDF_NIL.into());
+        }
+        if let Some(head) = self.heads.get(t) {
+            return head.clone();
+        }
+        let members: Vec<Term> = ms.iter().map(|m| self.expand(m)).collect();
+        let mut tail = Term::Iri(parser::RDF_NIL.into());
+        for m in members.into_iter().rev() {
+            self.counter += 1;
+            let node = Term::Blank(format!("_l{}", self.counter));
+            self.structure.push([node.clone(), Term::Iri(parser::RDF_FIRST.into()), m]);
+            self.structure.push([node.clone(), Term::Iri(parser::RDF_REST.into()), tail]);
+            tail = node;
+        }
+        self.heads.insert(t.clone(), tail.clone());
+        tail
+    }
 }
 
 type Binding = HashMap<String, Term>;
@@ -398,43 +539,44 @@ fn match_premise_seeded(
         }
         return out;
     }
-    let lists = extract_lists(premise);
     let mut bindings: Vec<Binding> = vec![seed.clone()];
     for pat in premise {
-        if is_list_struct(pat, &lists) {
-            continue; // structural, handled by list resolution
-        }
-        // log:includes / log:notIncludes — does the SCOPE include the object formula?
-        //   * subject `{ }` (empty formula) or unbound/non-formula: the scope is the current
-        //     store (the engine's scoped-negation-as-failure idiom, matching prior behaviour);
-        //   * subject a ground non-empty `{ … }` formula: true formula containment — the
-        //     pattern is matched against THAT formula's triples only;
-        //   * subject a NON-ground formula (free variables inside `{ … }`): needs
-        //     quantification machinery — future work; the premise fails (matches nothing).
-        // `log:includes` may BIND free variables of the object pattern (one binding per
-        // match, like EYE); `log:notIncludes` holds iff no match exists.
-        if let Some(is_not) = scoped_negation(&pat[1]) {
+        // log:includes / log:notIncludes / log:supports — does the SCOPE
+        // include (or entail, for supports) the object formula?
+        //   * subject a `{ … }` formula (even `{}` — the EMPTY formula
+        //     includes nothing, cwm builtins.n3): SYNTACTIC containment in
+        //     that formula. Scope-side quantified terms (`@forAll` variables,
+        //     blank existentials) act as OPAQUE CONSTANTS; the PATTERN's
+        //     existentials (blanks, `@forSome`) act as wildcards, and its
+        //     rule variables bind — exactly cwm's quantifiers_limited matrix.
+        //   * log:supports first closes the scope formula under its own
+        //     `=>` rules, then checks containment in the closure.
+        //   * subject unbound or non-formula: the scope is the current store
+        //     (the engine's scoped-negation-as-failure idiom, kept).
+        // `log:includes` may BIND free variables of the object pattern (one
+        // binding per match, like EYE); `log:notIncludes` holds iff no match.
+        if let Some(op) = scope_op(&pat[1]) {
             let inner: &[[Term; 3]] = match &pat[2] {
                 Term::Formula(t) => t,
                 _ => &[],
             };
+            let is_not = matches!(op, ScopeOp::NotIncludes);
             let mut next = Vec::new();
             for b in bindings {
-                let matches: Option<Vec<Binding>> = match apply(&pat[0], &b) {
-                    Term::Formula(ts) if !ts.is_empty() => {
-                        if ts.iter().all(|t| t.iter().all(Term::is_ground)) {
-                            // Formula containment is SYNTACTIC: backward rules describe the
-                            // store, not arbitrary quoted graphs — no goal-direction here.
-                            let scope = FactIndex::from_iter(ts);
-                            let no_bw = BwCtx::new(&[]);
-                            Some(match_premise_seeded(inner, &scope, &b, None, &no_bw, 0))
+                let matches: Vec<Binding> = match apply_deep(&pat[0], &b) {
+                    Term::Formula(ts) => {
+                        let scope: Vec<[Term; 3]> = if matches!(op, ScopeOp::Supports) {
+                            formula_closure(&ts, bw)
                         } else {
-                            None // non-ground scope formula: unsupported (future work)
-                        }
+                            ts
+                        };
+                        formula_containment(&scope, inner, &b)
                     }
-                    _ => Some(match_premise_seeded(inner, facts, &b, None, bw, depth)),
+                    // `{}` parses as the literal true — the EMPTY formula:
+                    // it includes nothing (and notIncludes everything).
+                    Term::Lit(v, _, _) if v == "true" => formula_containment(&[], inner, &b),
+                    _ => match_premise_seeded(inner, facts, &b, None, bw, depth),
                 };
-                let Some(matches) = matches else { continue };
                 if is_not {
                     if matches.is_empty() {
                         next.push(b);
@@ -450,25 +592,34 @@ fn match_premise_seeded(
             continue;
         }
         if let Some(gen) = list_generator(&pat[1]) {
-            // list:member / list:in — generate one binding per list member.
+            // list:member / list:in / list:iterate — one binding per member.
             let (list_pos, var_pos) = match gen {
-                ListGen::Member => (&pat[0], &pat[2]),
+                ListGen::Member | ListGen::Iterate => (&pat[0], &pat[2]),
                 ListGen::In => (&pat[2], &pat[0]),
             };
             let mut next = Vec::new();
             for b in &bindings {
                 let head = apply(list_pos, b);
-                // Rule-local `( … )` structure, or a data list reached
-                // through a bound variable (walked from the fact store).
-                let members: Option<Vec<Term>> = lists
-                    .get(&head)
-                    .cloned()
-                    .or_else(|| fact_list(&head, facts));
+                // A first-class `( … )` list value, hand-written rdf:first/rest
+                // rule structure, or a data list reached through a bound
+                // variable (walked from the fact store).
+                let members: Option<Vec<Term>> = match &head {
+                    Term::List(ms) => Some(ms.clone()),
+                    _ => fact_list(&head, facts),
+                };
                 if let Some(members) = members {
-                    for m in &members {
+                    for (ix, m) in members.iter().enumerate() {
                         let mv = apply(m, b);
+                        let target = match gen {
+                            ListGen::Member | ListGen::In => mv,
+                            // (?index ?value) pairs, 0-based (EYE list:iterate).
+                            ListGen::Iterate => Term::List(vec![
+                                Term::Lit(ix.to_string(), parser::XSD_INTEGER.into(), None),
+                                mv,
+                            ]),
+                        };
                         let mut nb = b.clone();
-                        if unify_term(var_pos, &mv, &mut nb) {
+                        if unify_term(var_pos, &target, &mut nb) {
                             next.push(nb);
                         }
                     }
@@ -478,7 +629,7 @@ fn match_premise_seeded(
         } else if let Some(f) = functional_builtin(&pat[1]) {
             bindings = bindings
                 .into_iter()
-                .filter_map(|b| eval_functional(f, &pat[0], &pat[2], &lists, facts, b))
+                .filter_map(|b| eval_functional(f, &pat[0], &pat[2], facts, bw, b))
                 .collect();
         } else if let Some(op) = binder_builtin(&pat[1]) {
             bindings = bindings.into_iter().filter_map(|b| eval_binder(op, &pat[0], &pat[2], b)).collect();
@@ -489,7 +640,27 @@ fn match_premise_seeded(
             // PLUS goal-directed resolution against the backward (`<=`) rules.
             let mut next = Vec::new();
             for b in &bindings {
-                let cands = facts.candidates(&apply(&pat[0], b), &apply(&pat[1], b), &apply(&pat[2], b));
+                let (s_a, p_a, o_a) = (apply(&pat[0], b), apply(&pat[1], b), apply(&pat[2], b));
+                // Virtual rdf:first / rdf:rest over a first-class list value —
+                // cwm/EYE expose list structure to matching even though the
+                // list is a term, not triples (`?L rdf:first ?X` computes).
+                if let (Term::List(ms), Term::Iri(pi)) = (&s_a, &p_a) {
+                    if pi == parser::RDF_FIRST || pi == parser::RDF_REST {
+                        if !ms.is_empty() {
+                            let val = if pi == parser::RDF_FIRST {
+                                ms[0].clone()
+                            } else {
+                                Term::List(ms[1..].to_vec())
+                            };
+                            let mut nb = b.clone();
+                            if unify_term(&pat[2], &val, &mut nb) {
+                                next.push(nb);
+                            }
+                        }
+                        continue; // a list term is never the subject of stored first/rest triples
+                    }
+                }
+                let cands = facts.candidates(&s_a, &p_a, &o_a);
                 for fact in &cands {
                     if let Some(nb) = unify(pat, fact, b) {
                         next.push(nb);
@@ -508,15 +679,84 @@ fn match_premise_seeded(
     bindings
 }
 
+/// Stable-reorder a premise so each builtin atom comes after the atoms that
+/// can produce its input variables. Join atoms are always "ready" and keep
+/// their relative order; a builtin whose inputs are not yet available is
+/// deferred. If nothing is ready (e.g. the unbound-scope negation idiom) the
+/// first remaining atom runs, preserving the legacy order.
+fn order_premise(premise: &[[Term; 3]]) -> Vec<[Term; 3]> {
+    fn term_vars(t: &Term, out: &mut FxHashSet<String>) {
+        match t {
+            Term::Var(v) => {
+                out.insert(v.clone());
+            }
+            Term::List(ms) => ms.iter().for_each(|m| term_vars(m, out)),
+            Term::Formula(ts) => ts
+                .iter()
+                .for_each(|r| r.iter().for_each(|m| term_vars(m, out))),
+            _ => {}
+        }
+    }
+    let vars_of = |t: &Term| {
+        let mut s = FxHashSet::default();
+        term_vars(t, &mut s);
+        s
+    };
+    let mut remaining: Vec<usize> = (0..premise.len()).collect();
+    let mut produced: FxHashSet<String> = FxHashSet::default();
+    let mut out: Vec<[Term; 3]> = Vec::new();
+    while !remaining.is_empty() {
+        let ready = |i: usize| -> bool {
+            let pat = &premise[i];
+            if is_join_atom(pat) {
+                return true;
+            }
+            let subj_ready = vars_of(&pat[0]).is_subset(&produced);
+            let obj_ready = vars_of(&pat[2]).is_subset(&produced);
+            if builtin(&pat[1]).is_some() {
+                return subj_ready && obj_ready; // comparison: both are inputs
+            }
+            if let Some(gen) = list_generator(&pat[1]) {
+                return match gen {
+                    ListGen::Member | ListGen::Iterate => subj_ready,
+                    ListGen::In => obj_ready,
+                };
+            }
+            // functional / binder / scope op: bidirectional ops accept either
+            // side; the rest need the subject.
+            let bidi = matches!(
+                functional_builtin(&pat[1]),
+                Some(Func::Dtlit | Func::Negation | Func::InSeconds)
+            ) || binder_builtin(&pat[1]).is_some();
+            if bidi {
+                subj_ready || obj_ready
+            } else {
+                subj_ready
+            }
+        };
+        let pos = remaining.iter().position(|&i| ready(i)).unwrap_or(0);
+        let i = remaining.remove(pos);
+        for t in &premise[i] {
+            term_vars(t, &mut produced); // its outputs are now available
+        }
+        out.push(premise[i].clone());
+    }
+    out
+}
+
 /// Whether a premise pattern is a JOIN atom (matched against facts), as opposed to a builtin,
 /// list generator/structure, or scoped-negation atom.
-fn is_join_atom(pat: &[Term; 3], lists: &HashMap<Term, Vec<Term>>) -> bool {
+fn is_join_atom(pat: &[Term; 3]) -> bool {
+    // A literal-list subject under rdf:first/rest is the VIRTUAL list-access
+    // computation, not a store join.
+    let virtual_list = matches!(&pat[0], Term::List(_))
+        && matches!(&pat[1], Term::Iri(i) if i == parser::RDF_FIRST || i == parser::RDF_REST);
     builtin(&pat[1]).is_none()
         && functional_builtin(&pat[1]).is_none()
         && binder_builtin(&pat[1]).is_none()
         && list_generator(&pat[1]).is_none()
-        && scoped_negation(&pat[1]).is_none()
-        && !is_list_struct(pat, lists)
+        && scope_op(&pat[1]).is_none()
+        && !virtual_list
 }
 
 /// Goal-directed (`<=`) resolution of one premise atom: for each backward rule whose
@@ -558,7 +798,9 @@ fn backward_prove(pat: &[Term; 3], b: &Binding, facts: &FactIndex, bw: &BwCtx, d
                 let mut ok = true;
                 for g in pat {
                     if let Term::Var(_) = g {
-                        let val = walk(g, &sol);
+                        // Deep-resolve: walk the chain, then substitute inside
+                        // any list structure the value carries.
+                        let val = apply(&walk(g, &sol), &sol);
                         if (val.is_ground() || matches!(val, Term::Formula(_)))
                             && !unify_term(g, &val, &mut nb)
                         {
@@ -584,6 +826,7 @@ fn rename_vars(t: &Term, n: usize) -> Term {
         Term::Formula(ts) => Term::Formula(
             ts.iter().map(|tr| [rename_vars(&tr[0], n), rename_vars(&tr[1], n), rename_vars(&tr[2], n)]).collect(),
         ),
+        Term::List(ms) => Term::List(ms.iter().map(|m| rename_vars(m, n)).collect()),
         _ => t.clone(),
     }
 }
@@ -621,6 +864,11 @@ fn unify_walked(a: &Term, c: &Term, s: &mut Binding) -> bool {
             s.insert(v.clone(), aw.clone());
             true
         }
+        // Structural list unification, member by member (either side may hold
+        // variables — backward goals over list arguments).
+        (Term::List(xs), Term::List(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| unify_walked(x, y, s))
+        }
         _ => false,
     }
 }
@@ -633,11 +881,12 @@ fn fact_list(head: &Term, facts: &FactIndex) -> Option<Vec<Term>> {
     let first = Term::Iri(parser::RDF_FIRST.into());
     let rest = Term::Iri(parser::RDF_REST.into());
     let nil = Term::Iri(parser::RDF_NIL.into());
+    let empty = Term::List(Vec::new());
     let mut out = Vec::new();
     let mut cur = head.clone();
     let mut guard = 0;
     loop {
-        if cur == nil {
+        if cur == nil || cur == empty {
             return Some(out);
         }
         if guard > 100_000 {
@@ -650,44 +899,20 @@ fn fact_list(head: &Term, facts: &FactIndex) -> Option<Vec<Term>> {
     }
 }
 
-/// Resolve every list node in `premise` (rooted at an rdf:first) to its member sequence.
-fn extract_lists(premise: &[[Term; 3]]) -> HashMap<Term, Vec<Term>> {
-    use parser::{RDF_FIRST, RDF_NIL, RDF_REST};
-    let (is, ir) = (Term::Iri(RDF_FIRST.into()), Term::Iri(RDF_REST.into()));
-    let nil = Term::Iri(RDF_NIL.into());
-    let mut first: HashMap<Term, Term> = HashMap::new();
-    let mut rest: HashMap<Term, Term> = HashMap::new();
-    for [s, p, o] in premise {
-        if *p == is {
-            first.insert(s.clone(), o.clone());
-        } else if *p == ir {
-            rest.insert(s.clone(), o.clone());
+/// Rename blank labels per `map` in a conclusion triple (recursing into lists;
+/// quoted formulae keep their own existentials as written).
+fn rename_blanks(t: &[Term; 3], map: &FxHashMap<String, String>) -> [Term; 3] {
+    fn go(t: &Term, map: &FxHashMap<String, String>) -> Term {
+        match t {
+            Term::Blank(l) => match map.get(l) {
+                Some(nl) => Term::Blank(nl.clone()),
+                None => t.clone(),
+            },
+            Term::List(ms) => Term::List(ms.iter().map(|m| go(m, map)).collect()),
+            _ => t.clone(),
         }
     }
-    let mut lists = HashMap::new();
-    for head in first.keys() {
-        let mut members = Vec::new();
-        let mut cur = head.clone();
-        // follow first/rest to nil (bounded by node count to avoid cycles)
-        for _ in 0..first.len() + 1 {
-            match first.get(&cur) {
-                Some(m) => members.push(m.clone()),
-                None => break,
-            }
-            match rest.get(&cur) {
-                Some(n) if *n != nil => cur = n.clone(),
-                _ => break,
-            }
-        }
-        lists.insert(head.clone(), members);
-    }
-    lists
-}
-
-/// Is `pat` an rdf:first/rest triple belonging to an extracted list (rule structure)?
-fn is_list_struct(pat: &[Term; 3], lists: &HashMap<Term, Vec<Term>>) -> bool {
-    use parser::{RDF_FIRST, RDF_REST};
-    matches!(&pat[1], Term::Iri(i) if i == RDF_FIRST || i == RDF_REST) && lists.contains_key(&pat[0])
+    [go(&t[0], map), go(&t[1], map), go(&t[2], map)]
 }
 
 /// Try to unify pattern triple `pat` with ground fact `f`, extending binding `b`.
@@ -702,29 +927,83 @@ fn unify(pat: &[Term; 3], f: &[Term; 3], b: &Binding) -> Option<Binding> {
 }
 
 fn unify_term(pat: &Term, val: &Term, b: &mut Binding) -> bool {
-    match pat {
-        Term::Var(v) => match b.get(v) {
+    match (pat, val) {
+        (Term::Var(v), _) => match b.get(v) {
             Some(existing) => existing == val,
             None => {
                 b.insert(v.clone(), val.clone());
                 true
             }
         },
-        other => other == val,
+        // First-class lists unify STRUCTURALLY: same length, members pairwise
+        // (so `(?x)` matches `(17)` binding ?x=17 — cwm/EYE list unification).
+        (Term::List(ps), Term::List(vs)) => {
+            ps.len() == vs.len() && ps.iter().zip(vs).all(|(p, v)| unify_term(p, v, b))
+        }
+        // Unification THROUGH quoting: a `{ … }` pattern matches a `{ … }`
+        // value when their triple multisets correspond under the binding
+        // (pattern variables may bind quoted terms — cwm unify1/unify2).
+        (Term::Formula(ps), Term::Formula(vs)) => formula_unify(ps, vs, b),
+        (other, _) => other == val,
     }
 }
 
-/// Substitute bound variables in `t`; returns the term (possibly still containing free vars).
+/// Multiset unification of two formula bodies under `b` (small formulae;
+/// backtracking with a binding clone per branch).
+fn formula_unify(ps: &[[Term; 3]], vs: &[[Term; 3]], b: &mut Binding) -> bool {
+    if ps.len() != vs.len() {
+        return false;
+    }
+    fn go(
+        i: usize,
+        ps: &[[Term; 3]],
+        vs: &[[Term; 3]],
+        used: &mut [bool],
+        b: &Binding,
+    ) -> Option<Binding> {
+        if i == ps.len() {
+            return Some(b.clone());
+        }
+        for j in 0..vs.len() {
+            if used[j] {
+                continue;
+            }
+            let mut nb = b.clone();
+            if (0..3).all(|k| unify_term(&ps[i][k], &vs[j][k], &mut nb)) {
+                used[j] = true;
+                let done = go(i + 1, ps, vs, used, &nb);
+                used[j] = false;
+                if done.is_some() {
+                    return done;
+                }
+            }
+        }
+        None
+    }
+    let mut used = vec![false; vs.len()];
+    match go(0, ps, vs, &mut used, b) {
+        Some(nb) => {
+            *b = nb;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Substitute bound variables in `t` (recursing into list members); returns the
+/// term (possibly still containing free vars).
 fn apply(t: &Term, b: &Binding) -> Term {
     match t {
         Term::Var(v) => b.get(v).cloned().unwrap_or_else(|| t.clone()),
+        Term::List(ms) => Term::List(ms.iter().map(|m| apply(m, b)).collect()),
         _ => t.clone(),
     }
 }
 
-/// Instantiate a conclusion triple under binding `b`; `None` if any term stays non-ground.
+/// Instantiate a conclusion triple under binding `b` (deeply — variables
+/// inside quoted formulae substitute too); `None` if any term stays non-ground.
 fn ground_triple(t: &[Term; 3], b: &Binding) -> Option<[Term; 3]> {
-    let g = [apply(&t[0], b), apply(&t[1], b), apply(&t[2], b)];
+    let g = [apply_deep(&t[0], b), apply_deep(&t[1], b), apply_deep(&t[2], b)];
     if g.iter().all(|x| x.is_ground()) {
         Some(g)
     } else {
@@ -757,6 +1036,7 @@ enum Builtin {
     StrNotLt,           // string:notLessThan
     StrEqIgnCase,       // string:equalIgnoringCase
     StrNeIgnCase,       // string:notEqualIgnoringCase
+    StrContainsRoughly, // string:containsRoughly — case- and whitespace-insensitive
 }
 
 fn builtin(p: &Term) -> Option<Builtin> {
@@ -783,6 +1063,7 @@ fn builtin(p: &Term) -> Option<Builtin> {
         return Some(match f {
             "contains" => Builtin::StrContains,
             "containsIgnoringCase" => Builtin::StrContainsIgnCase,
+            "containsRoughly" => Builtin::StrContainsRoughly,
             "equalIgnoringCase" => Builtin::StrEqIgnCase,
             "notEqualIgnoringCase" => Builtin::StrNeIgnCase,
             "startsWith" => Builtin::StrStarts,
@@ -815,7 +1096,8 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
         | Builtin::StrNotMatches
         | Builtin::StrContainsIgnCase
         | Builtin::StrEqIgnCase
-        | Builtin::StrNeIgnCase => {
+        | Builtin::StrNeIgnCase
+        | Builtin::StrContainsRoughly => {
             let (Some(x), Some(y)) = (lex(&s), lex(&o)) else { return false };
             match op {
                 Builtin::StrContains => x.contains(y),
@@ -828,6 +1110,13 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
                 Builtin::StrMatches => regex::Regex::new(y).map(|re| re.is_match(x)).unwrap_or(false),
                 Builtin::StrNotMatches => regex::Regex::new(y).map(|re| !re.is_match(x)).unwrap_or(false),
                 Builtin::StrContainsIgnCase => x.to_lowercase().contains(&y.to_lowercase()),
+                Builtin::StrContainsRoughly => {
+                    // cwm roughly.n3: case-insensitive, any whitespace run = one space.
+                    let norm = |t: &str| {
+                        t.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+                    };
+                    norm(x).contains(&norm(y))
+                }
                 Builtin::StrEqIgnCase => x.to_lowercase() == y.to_lowercase(),
                 Builtin::StrNeIgnCase => x.to_lowercase() != y.to_lowercase(),
                 _ => unreachable!(),
@@ -894,8 +1183,9 @@ fn eval_binder(op: Bidi, s: &Term, o: &Term, b: Binding) -> Option<Binding> {
 
 #[derive(Clone, Copy)]
 enum ListGen {
-    Member, // ?list list:member ?x
-    In,     // ?x list:in ?list
+    Member,  // ?list list:member ?x
+    In,      // ?x list:in ?list
+    Iterate, // ?list list:iterate (?index ?value) — 0-based, one binding per member
 }
 
 fn list_generator(p: &Term) -> Option<ListGen> {
@@ -903,18 +1193,181 @@ fn list_generator(p: &Term) -> Option<ListGen> {
     match i.strip_prefix(LIST) {
         Some("member") => Some(ListGen::Member),
         Some("in") => Some(ListGen::In),
+        Some("iterate") => Some(ListGen::Iterate),
         _ => None,
     }
 }
 
-/// `log:includes` (→ `Some(false)`) / `log:notIncludes` (→ `Some(true)`, negation as failure).
-fn scoped_negation(p: &Term) -> Option<bool> {
+/// The formula-scope operators.
+#[derive(Clone, Copy)]
+enum ScopeOp {
+    Includes,
+    NotIncludes,
+    Supports, // includes after closing the scope under its own rules
+}
+
+fn scope_op(p: &Term) -> Option<ScopeOp> {
     let Term::Iri(i) = p else { return None };
     match i.strip_prefix(LOG) {
-        Some("includes") => Some(false),
-        Some("notIncludes") => Some(true),
+        Some("includes") => Some(ScopeOp::Includes),
+        Some("notIncludes") => Some(ScopeOp::NotIncludes),
+        Some("supports") => Some(ScopeOp::Supports),
         _ => None,
     }
+}
+
+/// Substitute bound variables in `t`, recursing into lists AND quoted
+/// formulae (used where a formula value must be fully instantiated:
+/// includes scopes, conclusion emission).
+fn apply_deep(t: &Term, b: &Binding) -> Term {
+    match t {
+        Term::Var(v) => match b.get(v) {
+            Some(val) => val.clone(),
+            None => t.clone(),
+        },
+        Term::List(ms) => Term::List(ms.iter().map(|m| apply_deep(m, b)).collect()),
+        Term::Formula(ts) => Term::Formula(
+            ts.iter()
+                .map(|r| [apply_deep(&r[0], b), apply_deep(&r[1], b), apply_deep(&r[2], b)])
+                .collect(),
+        ),
+        _ => t.clone(),
+    }
+}
+
+/// SYNTACTIC containment of `pattern` in `scope` (log:includes): every
+/// pattern triple must match a scope triple (or be virtual list structure),
+/// with pattern blanks as wildcards, pattern variables binding, and scope
+/// terms — including its quantified variables — as opaque constants. Returns
+/// one binding per complete match.
+fn formula_containment(scope: &[[Term; 3]], pattern: &[[Term; 3]], seed: &Binding) -> Vec<Binding> {
+    // Pattern existentials (blanks) become wildcard variables.
+    let pat: Vec<[Term; 3]> = pattern
+        .iter()
+        .map(|r| {
+            let w = |t: &Term| match t {
+                Term::Blank(l) => Term::Var(format!("__w_{l}")),
+                other => other.clone(),
+            };
+            [w(&r[0]), w(&r[1]), w(&r[2])]
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut budget = 100_000usize;
+    containment_search(&pat, scope, seed.clone(), pat.len(), &mut out, &mut budget);
+    out
+}
+
+fn containment_search(
+    remaining: &[[Term; 3]],
+    scope: &[[Term; 3]],
+    b: Binding,
+    defers_left: usize,
+    out: &mut Vec<Binding>,
+    budget: &mut usize,
+) {
+    if *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+    let Some((pat, rest)) = remaining.split_first() else {
+        out.push(b);
+        return;
+    };
+    // Virtual rdf:first/rest over a list value — list structure is part of
+    // the formula's content for matching purposes (cwm builtins.n3 test2/4).
+    if let Term::Iri(pi) = &pat[1] {
+        if pi == parser::RDF_FIRST || pi == parser::RDF_REST {
+            match apply(&pat[0], &b) {
+                Term::List(ms) => {
+                    if !ms.is_empty() {
+                        let val = if pi == parser::RDF_FIRST {
+                            ms[0].clone()
+                        } else {
+                            Term::List(ms[1..].to_vec())
+                        };
+                        let mut nb = b.clone();
+                        if unify_term(&pat[2], &val, &mut nb) {
+                            containment_search(rest, scope, nb, rest.len(), out, budget);
+                        }
+                    }
+                    return;
+                }
+                Term::Var(_) if !rest.is_empty() && defers_left > 0 => {
+                    // Subject not yet bound — try the other triples first.
+                    let mut rotated: Vec<[Term; 3]> = rest.to_vec();
+                    rotated.push(pat.clone());
+                    containment_search(&rotated, scope, b, defers_left - 1, out, budget);
+                    return;
+                }
+                _ => {} // fall through to plain scope matching
+            }
+        }
+    }
+    for st in scope {
+        let mut nb = b.clone();
+        if (0..3).all(|k| unify_term(&pat[k], &st[k], &mut nb)) {
+            containment_search(rest, scope, nb, rest.len(), out, budget);
+        }
+    }
+}
+
+/// A parsed document's statements with rules re-encoded into their surface
+/// triple form (log:semantics / log:parsedAsN3 result formulae).
+fn reencode_statements(parsed: parser::Parsed) -> Vec<[Term; 3]> {
+    let quote = |ts: &[[Term; 3]]| -> Term {
+        if ts.is_empty() {
+            // the empty formula IS the literal true
+            Term::Lit("true".into(), parser::XSD_BOOLEAN.into(), None)
+        } else {
+            Term::Formula(ts.to_vec())
+        }
+    };
+    let mut ts = parsed.facts;
+    for r in &parsed.rules {
+        ts.push([quote(&r.premise), Term::Iri(parser::LOG_IMPLIES.into()), quote(&r.conclusion)]);
+    }
+    for r in &parsed.backward_rules {
+        ts.push([
+            quote(&r.conclusion),
+            Term::Iri(parser::LOG_IMPLIED_BY.into()),
+            quote(&r.premise),
+        ]);
+    }
+    ts
+}
+
+/// The forward closure of a quoted formula under its own `=>` rules
+/// (log:supports / log:conclusion): the original triples plus everything a
+/// fixpoint run over them derives.
+fn formula_closure(ts: &[[Term; 3]], bw: &BwCtx) -> Vec<[Term; 3]> {
+    let mut facts: Vec<[Term; 3]> = Vec::new();
+    let mut rules: Vec<Rule> = Vec::new();
+    let mut backward: Vec<Rule> = Vec::new();
+    for row in ts {
+        match (&row[0], &row[1], &row[2]) {
+            (Term::Formula(p), Term::Iri(i), Term::Formula(c)) if i == parser::LOG_IMPLIES => {
+                rules.push(Rule { premise: p.clone(), conclusion: c.clone() });
+            }
+            (Term::Formula(c), Term::Iri(i), Term::Formula(p)) if i == parser::LOG_IMPLIED_BY => {
+                backward.push(Rule { premise: p.clone(), conclusion: c.clone() });
+            }
+            _ => facts.push(row.clone()),
+        }
+    }
+    let parsed =
+        parser::Parsed { facts, rules, backward_rules: backward, base: bw.base.clone() };
+    let (closed, _steps) = run_closure(parsed, bw.resolver);
+    // Original statements (including the rule statements, which cwm keeps in
+    // log:conclusion output) plus the derivations.
+    let mut seen: FxHashSet<[Term; 3]> = ts.iter().cloned().collect();
+    let mut result: Vec<[Term; 3]> = ts.to_vec();
+    for f in closed.all {
+        if seen.insert(f.clone()) {
+            result.push(f);
+        }
+    }
+    result
 }
 
 /// The lexical string of a literal term (for `string:` builtins).
@@ -1104,12 +1557,20 @@ enum Func {
     Replace,     // string:replace (regex): ( str pattern replacement ) string:replace ?out
     First,       // list:first
     Last,        // list:last
+    Append,      // list:append — ( list… ) list:append ?out (first-class list result)
     Conjunction, // log:conjunction — merge a list of formulae into one formula
     Dtlit,       // log:dtlit — ( "lex" xsd:dt ) ↔ "lex"^^xsd:dt (both directions)
+    LogConclusion, // log:conclusion — a formula's forward closure, as a formula
+    ParsedAsN3,    // log:parsedAsN3 — an N3 source string, parsed to a formula
+    Langlit,       // log:langlit — ( "lex" "lang" ) → "lex"@lang
+    Semantics,     // log:semantics — a document IRI's parsed formula (needs a Resolver)
+    Content,       // log:content — a document IRI's source text (needs a Resolver)
     // single-value-arg (string case mapping, Unicode-aware)
     LowerCase,    // string:lowerCase
     UpperCase,    // string:upperCase
     EncodeForUri, // string:encodeForUri — RFC 3986 percent-encoding (see [`encode_for_uri`])
+    EncodeForUriCwm, // string:encodeForURI — cwm's URI quoting (keeps #'()~, encodes /)
+    EncodeForFragId, // string:encodeForFragID — cwm's fragment quoting (keeps /, encodes #'()~)
     // single-value-arg (unary math)
     Negation,
     AbsoluteValue,
@@ -1138,6 +1599,9 @@ enum Func {
     Hours,
     Minutes,
     Seconds,
+    DayOfWeek, // time:dayOfWeek — 0=Sunday … 6=Saturday (cwm)
+    TimeZone,  // time:timeZone — the explicit ±hh:mm offset (absent for Z/none)
+    InSeconds, // time:inSeconds — epoch seconds (bidirectional, cwm t1)
 }
 
 fn functional_builtin(p: &Term) -> Option<Func> {
@@ -1183,9 +1647,13 @@ fn functional_builtin(p: &Term) -> Option<Func> {
             "year" => Func::Year,
             "month" => Func::Month,
             "day" => Func::Day,
-            "hours" => Func::Hours,
-            "minutes" => Func::Minutes,
-            "seconds" => Func::Seconds,
+            // cwm uses the singular forms; EYE the plural — accept both.
+            "hour" | "hours" => Func::Hours,
+            "minute" | "minutes" => Func::Minutes,
+            "second" | "seconds" => Func::Seconds,
+            "dayOfWeek" => Func::DayOfWeek,
+            "timeZone" => Func::TimeZone,
+            "inSeconds" => Func::InSeconds,
             _ => return None,
         });
     }
@@ -1193,6 +1661,11 @@ fn functional_builtin(p: &Term) -> Option<Func> {
         return match f {
             "conjunction" => Some(Func::Conjunction),
             "dtlit" => Some(Func::Dtlit),
+            "conclusion" => Some(Func::LogConclusion),
+            "parsedAsN3" => Some(Func::ParsedAsN3),
+            "langlit" => Some(Func::Langlit),
+            "semantics" => Some(Func::Semantics),
+            "content" => Some(Func::Content),
             _ => None,
         };
     }
@@ -1205,9 +1678,12 @@ fn functional_builtin(p: &Term) -> Option<Func> {
         (Some("lowerCase"), _) => Some(Func::LowerCase),
         (Some("upperCase"), _) => Some(Func::UpperCase),
         (Some("encodeForUri"), _) => Some(Func::EncodeForUri),
+        (Some("encodeForURI"), _) => Some(Func::EncodeForUriCwm),
+        (Some("encodeForFragID"), _) => Some(Func::EncodeForFragId),
         (_, Some("length")) => Some(Func::Length),
         (_, Some("first")) => Some(Func::First),
         (_, Some("last")) => Some(Func::Last),
+        (_, Some("append")) => Some(Func::Append),
         _ => None,
     }
 }
@@ -1218,15 +1694,15 @@ fn eval_functional(
     f: Func,
     subj: &Term,
     obj: &Term,
-    lists: &HashMap<Term, Vec<Term>>,
     facts: &FactIndex,
+    bw: &BwCtx,
     b: Binding,
 ) -> Option<Binding> {
     const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
     // log:dtlit needs the UNAPPLIED member terms: its reverse mode binds them by
     // decomposing a ground object literal into ( "lexical" datatype-IRI ).
     if let Func::Dtlit = f {
-        let members = lists.get(subj)?;
+        let Term::List(members) = subj else { return None };
         if members.len() != 2 {
             return None;
         }
@@ -1249,7 +1725,7 @@ fn eval_functional(
     }
     // math:negation is bidirectional in EYE: `?x math:negation 3` solves
     // ?x = -3 (the one reverse mode the suites rely on).
-    if matches!(f, Func::Negation) && !subj.is_ground() && lists.get(subj).is_none() {
+    if matches!(f, Func::Negation) && !subj.is_ground() && !matches!(subj, Term::List(_)) {
         let s_applied = apply(subj, &b);
         if !s_applied.is_ground() {
             let o_applied = apply(obj, &b);
@@ -1265,24 +1741,80 @@ fn eval_functional(
             return None;
         }
     }
+    // Reverse (object-bound) modes of the invertible unary builtins:
+    // `?y math:sin 0` solves y = asin 0 (cwm trig.n3 test4), and
+    // `?t time:inSeconds N` formats the epoch back to a UTC dateTime.
+    if !subj.is_ground() && !matches!(subj, Term::List(_)) && !apply(subj, &b).is_ground() {
+        let o_applied = apply(obj, &b);
+        if o_applied.is_ground() {
+            let inverse = |v: f64| -> Option<f64> {
+                Some(match f {
+                    Func::Sin => v.asin(),
+                    Func::Cos => v.acos(),
+                    Func::Tan => v.atan(),
+                    Func::Asin => v.sin(),
+                    Func::Acos => v.cos(),
+                    Func::Atan => v.tan(),
+                    Func::Sinh => v.asinh(),
+                    Func::Cosh => v.acosh(),
+                    Func::Tanh => v.atanh(),
+                    Func::Asinh => v.sinh(),
+                    Func::Acosh => v.cosh(),
+                    Func::Atanh => v.tanh(),
+                    Func::Degrees => v * std::f64::consts::PI / 180.0,
+                    Func::Radians => v * 180.0 / std::f64::consts::PI,
+                    _ => return None,
+                })
+            };
+            if let Func::InSeconds = f {
+                let secs = num(&o_applied)? as i64;
+                let mut nb = b;
+                let lit = Term::Lit(format_epoch(secs), XSD_STRING.into(), None);
+                return unify_term(subj, &lit, &mut nb).then_some(nb);
+            }
+            if let Some(x) = numval(&o_applied).map(NumVal::to_f64) {
+                if let Some(v) = inverse(x) {
+                    if v.is_nan() {
+                        return None;
+                    }
+                    let mut nb = b;
+                    return unify_term(subj, &double_term(v), &mut nb).then_some(nb);
+                }
+            }
+            return None;
+        }
+    }
     // Arguments: the list members (rule-local structure, a data list walked
     // from the fact store, or `rdf:nil` = the empty list), else a singleton
     // for the unary (math:/string:/time:) ops.
     let subj_applied = apply(subj, &b);
-    let resolved_list: Option<Vec<Term>> = match lists.get(subj) {
-        Some(members) => Some(members.iter().map(|m| apply(m, &b)).collect()),
-        None => fact_list(&subj_applied, facts)
-            .map(|ms| ms.iter().map(|m| apply(m, &b)).collect()),
+    let resolved_list: Option<Vec<Term>> = match &subj_applied {
+        // First-class list value (already substituted by `apply`).
+        Term::List(ms) => Some(ms.clone()),
+        // A data list written as rdf:first/rest triples, via a bound variable.
+        _ => fact_list(&subj_applied, facts).map(|ms| ms.iter().map(|m| apply(m, &b)).collect()),
     };
+    let was_list = resolved_list.is_some();
     // The list:-namespace ops are only defined ON lists.
-    if matches!(f, Func::Length | Func::First | Func::Last) && resolved_list.is_none() {
+    if matches!(f, Func::Length | Func::First | Func::Last | Func::Append) && !was_list {
         return None;
     }
     let args: Vec<Term> = match resolved_list {
         Some(members) => members,
         None => vec![subj_applied.clone()],
     };
-    if args.is_empty() && !matches!(f, Func::Conjunction | Func::MemberCount | Func::Length) {
+    if args.is_empty()
+        && !matches!(
+            f,
+            Func::Conjunction
+                | Func::MemberCount
+                | Func::Length
+                | Func::Append
+                | Func::Sum
+                | Func::Product
+                | Func::Concat
+        )
+    {
         return None;
     }
     let result: Term = match f {
@@ -1303,7 +1835,12 @@ fn eval_functional(
                     _ => return None,
                 }
             }
-            Term::Formula(merged)
+            if merged.is_empty() {
+                // the empty formula IS the literal true
+                Term::Lit("true".into(), parser::XSD_BOOLEAN.into(), None)
+            } else {
+                Term::Formula(merged)
+            }
         }
         Func::MemberCount => match &args[..] {
             // a `( … )` list: its length; a quoted formula: its DISTINCT triple count
@@ -1311,7 +1848,7 @@ fn eval_functional(
                 let distinct: FxHashSet<&[Term; 3]> = ts.iter().collect();
                 number_term(distinct.len() as f64)
             }
-            _ if lists.contains_key(subj) => number_term(args.len() as f64),
+            _ if was_list => number_term(args.len() as f64),
             _ => return None,
         },
         Func::Format => {
@@ -1363,7 +1900,36 @@ fn eval_functional(
             let mut s = String::new();
             for a in &args {
                 match a {
-                    Term::Lit(v, _, _) => s.push_str(v),
+                    // cwm coerces typed literals to their canonical VALUE
+                    // string ("0"^^xsd:boolean → "false", 0E1 → "0").
+                    Term::Lit(v, dt, _) => match dt.strip_prefix("http://www.w3.org/2001/XMLSchema#") {
+                        Some("boolean") => s.push_str(if v == "0" || v == "false" { "false" } else { "true" }),
+                        Some("integer" | "decimal" | "float" | "double") => {
+                            match numval(a) {
+                                Some(NumVal::Int(i)) => s.push_str(&i.to_string()),
+                                Some(NumVal::Dec(m, sc)) => {
+                                    let (m, sc) = dec_norm(m, sc);
+                                    if sc == 0 {
+                                        s.push_str(&m.to_string());
+                                    } else {
+                                        let Term::Lit(lex, _, _) = numval_term(NumVal::Dec(m, sc)) else { return None };
+                                        s.push_str(&lex);
+                                    }
+                                }
+                                Some(NumVal::F64(f)) => {
+                                    if f.fract() == 0.0 && f.abs() < 9.007e15 {
+                                        s.push_str(&(f as i64).to_string());
+                                    } else {
+                                        s.push_str(&format!("{f}"));
+                                    }
+                                }
+                                None => s.push_str(v),
+                            }
+                        }
+                        _ => s.push_str(v),
+                    },
+                    // cwm coerces IRI arguments to their text (concatenation.n3 s01).
+                    Term::Iri(i) => s.push_str(i),
                     _ => return None,
                 }
             }
@@ -1380,8 +1946,72 @@ fn eval_functional(
         Func::EncodeForUri => {
             Term::Lit(encode_for_uri(lex(&args[0])?), "http://www.w3.org/2001/XMLSchema#string".into(), None)
         }
+        Func::EncodeForUriCwm | Func::EncodeForFragId => {
+            // cwm's quoting pairs (uriEncode-out.n3): URI keeps #'()~ but
+            // encodes '/'; FragID keeps '/' but encodes #'()~. Both keep
+            // alphanumerics and _.- and use uppercase hex.
+            let keep_extra: &[u8] = if matches!(f, Func::EncodeForUriCwm) {
+                b"#'()~"
+            } else {
+                b"/"
+            };
+            let mut out = String::new();
+            for byte in lex(&args[0])?.bytes() {
+                match byte {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' => {
+                        out.push(byte as char)
+                    }
+                    c if keep_extra.contains(&c) => out.push(c as char),
+                    c => out.push_str(&format!("%{c:02X}")),
+                }
+            }
+            Term::Lit(out, "http://www.w3.org/2001/XMLSchema#string".into(), None)
+        }
+        Func::LogConclusion => match &args[..] {
+            [Term::Formula(ts)] => Term::Formula(formula_closure(ts, bw)),
+            _ => return None,
+        },
+        Func::Semantics | Func::Content => match &args[..] {
+            [Term::Iri(doc)] => {
+                let text = bw.resolver.and_then(|r| r(doc))?;
+                if matches!(f, Func::Content) {
+                    Term::Lit(text, XSD_STRING.into(), None)
+                } else {
+                    let parsed = parser::parse_with_base(&text, doc).ok()?;
+                    Term::Formula(reencode_statements(parsed))
+                }
+            }
+            _ => return None,
+        },
+        Func::ParsedAsN3 => match &args[..] {
+            [Term::Lit(src, _, _)] => {
+                let parsed = parser::parse_with_base(src, &bw.base).ok()?;
+                Term::Formula(reencode_statements(parsed))
+            }
+            _ => return None,
+        },
+        Func::Langlit => match &args[..] {
+            [Term::Lit(lex, _, _), Term::Lit(lang, _, _)] => Term::Lit(
+                lex.clone(),
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(),
+                Some(lang.clone()),
+            ),
+            _ => return None,
+        },
         Func::First => args.first()?.clone(),
         Func::Last => args.last()?.clone(),
+        Func::Append => {
+            // ( l1 l2 … ) list:append ?out — concatenate; every member must
+            // itself be a list (first-class, or data first/rest structure).
+            let mut merged: Vec<Term> = Vec::new();
+            for a in &args {
+                match a {
+                    Term::List(ms) => merged.extend(ms.iter().cloned()),
+                    other => merged.extend(fact_list(other, facts)?),
+                }
+            }
+            Term::List(merged)
+        }
         Func::Replace => {
             // ( str pattern replacement ) string:replace ?out — regex replace-all.
             if args.len() != 3 {
@@ -1391,8 +2021,17 @@ fn eval_functional(
             let out = re.replace_all(lex(&args[0])?, lex(&args[2])?).into_owned();
             Term::Lit(out, "http://www.w3.org/2001/XMLSchema#string".into(), None)
         }
-        Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds => {
+        Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds
+        | Func::DayOfWeek | Func::InSeconds => {
             number_term(datetime_part(lex(&args[0])?, f)? as f64)
+        }
+        Func::TimeZone => {
+            // Only an EXPLICIT numeric offset is a time zone (cwm: `Z`/absent
+            // yield nothing).
+            let s = lex(&args[0])?;
+            let t = s.split('T').nth(1)?;
+            let off = t.find(['+', '-']).map(|i| &t[i..])?;
+            Term::Lit(off.to_string(), XSD_STRING.into(), None)
         }
         _ => {
             // Unary numeric/trig/time builtins take a DIRECT value, never a
@@ -1420,13 +2059,41 @@ fn eval_functional(
                     | Func::Degrees
                     | Func::Radians
             );
-            if unary && lists.contains_key(subj) {
+            if unary && was_list {
                 return None;
             }
             if let Some(exact) = eval_exact(f, &args) {
                 exact
             } else {
-                let nums: Vec<f64> = args.iter().map(num).collect::<Option<_>>()?;
+                let nvals: Vec<NumVal> = args.iter().map(numval).collect::<Option<_>>()?;
+                let nums: Vec<f64> = nvals.iter().map(|v| v.to_f64()).collect();
+                // cwm/EYE type discipline: the real-valued (trig/log) family is
+                // ALWAYS double; arithmetic is double when any input is.
+                let trig_family = matches!(
+                    f,
+                    Func::Sin
+                        | Func::Cos
+                        | Func::Tan
+                        | Func::Asin
+                        | Func::Acos
+                        | Func::Atan
+                        | Func::Sinh
+                        | Func::Cosh
+                        | Func::Tanh
+                        | Func::Asinh
+                        | Func::Acosh
+                        | Func::Atanh
+                        | Func::Degrees
+                        | Func::Radians
+                        | Func::Logarithm
+                        | Func::Atan2
+                );
+                let any_double = nvals.iter().any(|v| matches!(v, NumVal::F64(_)))
+                    || args.iter().any(|a| {
+                        matches!(a, Term::Lit(_, dt, _)
+                            if dt == "http://www.w3.org/2001/XMLSchema#double"
+                                || dt == "http://www.w3.org/2001/XMLSchema#float")
+                    });
                 let two = |n: &[f64]| if n.len() == 2 { Some((n[0], n[1])) } else { None };
                 let v = match f {
                     Func::Sum => nums.iter().sum(),
@@ -1439,10 +2106,10 @@ fn eval_functional(
                     }
                     Func::Quotient => {
                         let (a, b) = two(&nums)?;
-                        if b == 0.0 {
-                            return None;
+                        if b == 0.0 && !any_double {
+                            return None; // exact-arithmetic division by zero fails
                         }
-                        a / b
+                        a / b // IEEE for doubles: ±INF / NaN (cwm math/inf.n3 test5)
                     }
                     Func::Exponentiation => {
                         let (a, b) = two(&nums)?;
@@ -1464,13 +2131,7 @@ fn eval_functional(
                         }
                         (x / y).atan()
                     }
-                    Func::Remainder => {
-                        let (a, b) = two(&nums)?;
-                        if b == 0.0 {
-                            return None;
-                        }
-                        a % b
-                    }
+                    Func::Remainder => return None, // integer-only (cwm); handled in eval_exact
                     Func::IntegerQuotient => {
                         let (a, b) = two(&nums)?;
                         if b == 0.0 {
@@ -1499,10 +2160,18 @@ fn eval_functional(
                     Func::Radians => nums[0] * std::f64::consts::PI / 180.0,
                     _ => unreachable!(),
                 };
-                if v.is_nan() {
+                if v.is_nan()
+                    && !nums.iter().any(|x| x.is_nan() || x.is_infinite())
+                    && !(matches!(f, Func::Quotient) && any_double)
+                {
                     return None; // domain error (asin 2, acosh 0.5, …): the premise fails
+                    // (NaN/INF inputs — and IEEE 0/0 — PROPAGATE instead, cwm math/inf.n3)
                 }
-                number_term(v)
+                if trig_family || any_double {
+                    double_term(v)
+                } else {
+                    number_term(v)
+                }
             }
         }
     };
@@ -1625,9 +2294,17 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
             }
         }
         Func::Remainder => {
-            // Integer remainder only (Prolog rem); anything else → f64.
+            // INTEGER-only (cwm remainder.n3: any non-integer operand FAILS),
+            // with the sign of the DIVISOR (Python %, matching the cwm refs:
+            // -2 mod 4 = 2, 2 mod -4 = -2).
+            if vals.len() != 2 {
+                return None;
+            }
             match (vals[0], vals[1]) {
-                (NumVal::Int(a), NumVal::Int(b)) if b != 0 => NumVal::Int(a % b),
+                (NumVal::Int(a), NumVal::Int(b)) if b != 0 => {
+                    let r = a.checked_rem(b)?;
+                    NumVal::Int(if r != 0 && (r < 0) != (b < 0) { r.checked_add(b)? } else { r })
+                }
                 _ => return None,
             }
         }
@@ -1661,7 +2338,35 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
             NumVal::Dec(m, _) => NumVal::Int(m),
             v => v,
         },
-        _ => return None, // trig/log/exponentiation: f64 path
+        Func::Exponentiation => {
+            // base^exp exactly for an integer exponent ≥ 0 (cwm: 2.7² = 7.29).
+            if vals.len() != 2 {
+                return None;
+            }
+            let (NumVal::Int(e), base) = (vals[1], vals[0]) else { return None };
+            if !(0..=64).contains(&e) {
+                return None;
+            }
+            let (m, sc) = match base {
+                NumVal::Int(i) => (i, 0u32),
+                NumVal::Dec(m, sc) => (m, sc),
+                NumVal::F64(_) => return None,
+            };
+            let mut acc: i128 = 1;
+            for _ in 0..e {
+                acc = acc.checked_mul(m)?;
+            }
+            let scale = sc.checked_mul(e as u32)?;
+            if scale > 34 {
+                return None;
+            }
+            if any_dec {
+                NumVal::Dec(acc, scale)
+            } else {
+                NumVal::Int(acc)
+            }
+        }
+        _ => return None, // trig/log: f64 path
     };
     Some(numval_term(out))
 }
@@ -1688,8 +2393,100 @@ fn datetime_part(s: &str, f: Func) -> Option<i64> {
             let part = t.split(':').nth(idx)?;
             part.split('.').next().unwrap_or(part).parse().ok()
         }
+        Func::DayOfWeek | Func::InSeconds => {
+            // Missing components default (cwm: "2002" = 2002-01-01T00:00:00).
+            let mut dp = date.trim_start_matches('-').split('-');
+            let y: i64 = {
+                let y = dp.next()?.parse::<i64>().ok()?;
+                if neg { -y } else { y }
+            };
+            let m: i64 = dp.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+            let d: i64 = dp.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+            let days = days_from_civil(y, m, d);
+            if matches!(f, Func::DayOfWeek) {
+                return Some((days + 4).rem_euclid(7)); // 1970-01-01 = Thursday
+            }
+            let t = time.split(['+', 'Z']).next().unwrap_or(time);
+            let t = match t.rfind('-') {
+                Some(i) => &t[..i], // a '-' inside the TIME part starts a tz offset
+                None => t,
+            };
+            let mut tp = t.split(':');
+            let hh: i64 = tp.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let mi: i64 = tp.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let ss: i64 = tp
+                .next()
+                .and_then(|x| x.split('.').next().unwrap_or(x).parse().ok())
+                .unwrap_or(0);
+            // Explicit ±hh:mm offset shifts back to UTC; Z/absent = UTC.
+            let mut offset = 0i64;
+            if let Some(tpart) = s.split_once('T').map(|(_, t)| t) {
+                if let Some(i) = tpart.find(['+', '-']) {
+                    let sign = if tpart.as_bytes()[i] == b'-' { -1 } else { 1 };
+                    let mut op = tpart[i + 1..].split(':');
+                    let oh: i64 = op.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                    let om: i64 = op.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                    offset = sign * (oh * 3600 + om * 60);
+                }
+            }
+            Some(days * 86400 + hh * 3600 + mi * 60 + ss - offset)
+        }
         _ => None,
     }
+}
+
+/// Days since 1970-01-01 of the civil date y-m-d (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Epoch seconds → `YYYY-MM-DDThh:mm:ssZ` (time:inSeconds reverse mode).
+fn format_epoch(secs: i64) -> String {
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    // civil_from_days (Hinnant)
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Render an `f64` as a cwm-style `xsd:double` literal: `INF`/`-INF`/`NaN`, or
+/// e-notation with a fractional digit in the mantissa (`0.0e0`, `7.29e0`).
+fn double_term(v: f64) -> Term {
+    const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+    let lex = if v.is_nan() {
+        "NaN".to_string()
+    } else if v == f64::INFINITY {
+        "INF".to_string()
+    } else if v == f64::NEG_INFINITY {
+        "-INF".to_string()
+    } else {
+        let s = format!("{v:e}"); // e.g. "0e0", "7.29e0", "1.23e3"
+        match s.split_once('e') {
+            Some((m, e)) if !m.contains('.') => format!("{m}.0e{e}"),
+            _ => s,
+        }
+    };
+    Term::Lit(lex, XSD_DOUBLE.into(), None)
 }
 
 /// Render an `f64` result as an N3 numeric literal (integer when whole, else decimal).
@@ -1708,6 +2505,7 @@ fn intern(dict: &mut Dict, t: &Term) -> Result<Id, String> {
         Term::Lit(v, dt, lang) => dict.intern_lit(v, dt, lang.as_deref()),
         Term::Blank(b) => dict.intern_blank(b),
         Term::Var(_) | Term::Formula(_) => return Err("non-ground term in closure".into()),
+        Term::List(_) => return Err("unexpanded list term in closure".into()),
     })
 }
 
@@ -1981,19 +2779,73 @@ mod tests {
 
     #[test]
     fn scoped_negation_not_includes() {
-        // log:notIncludes — negation as failure: a Person with no recorded email is :NoEmail.
+        // log:notIncludes with an UNBOUND scope — negation as failure against
+        // the store (the engine's documented idiom): a Person with no
+        // recorded email is :NoEmail.
         let src = r#"
             @prefix : <http://ex/> .
             @prefix log: <http://www.w3.org/2000/10/swap/log#> .
             :alice a :Person .
             :bob a :Person .
             :bob :hasEmail "bob@x" .
-            { ?x a :Person . { } log:notIncludes { ?x :hasEmail ?e } } => { ?x a :NoEmail } .
+            { ?x a :Person . ?store log:notIncludes { ?x :hasEmail ?e } } => { ?x a :NoEmail } .
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         assert!(has(&d, &s, "http://ex/alice", ty, "http://ex/NoEmail"), "alice has no email → NoEmail");
         assert!(!has(&d, &s, "http://ex/bob", ty, "http://ex/NoEmail"), "bob has email → excluded");
+    }
+
+    #[test]
+    fn empty_formula_includes_nothing() {
+        // `{}` is the EMPTY formula (cwm builtins.n3): it includes nothing —
+        // not even true builtin atoms — and notIncludes everything.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :seed :p :o .
+            { {} log:includes { :a log:equalTo :a } } => { :s a :Leak } .
+            { {} log:notIncludes { :a log:equalTo :a } } => { :s a :Clean } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(!has(&d, &s, "http://ex/s", ty, "http://ex/Leak"), "empty formula includes nothing");
+        assert!(has(&d, &s, "http://ex/s", ty, "http://ex/Clean"), "empty formula notIncludes everything");
+    }
+
+    #[test]
+    fn includes_quantifier_matrix() {
+        // The cwm quantifiers_limited matrix: pattern existentials are
+        // wildcards; scope quantified terms are opaque constants.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :seed :p :o .
+            { { :foo :bar :baz } log:includes { @forSome :foo . :foo :bar :baz } } => { :a2 a :S } .
+            { { @forAll :foo . :foo :bar :baz } log:includes { @forSome :foo . :foo :bar :baz } } => { :c2 a :S } .
+            { { @forSome :foo . :foo :bar :baz } log:includes { :foo :bar :baz } } => { :b1 a :S } .
+            { { @forAll :foo . :foo :bar :baz } log:includes { :foo :bar :baz } } => { :c1 a :S } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/a2", ty, "http://ex/S"), "existential pattern matches ground scope");
+        assert!(has(&d, &s, "http://ex/c2", ty, "http://ex/S"), "existential pattern matches universal scope");
+        assert!(!has(&d, &s, "http://ex/b1", ty, "http://ex/S"), "ground pattern vs existential scope: no");
+        assert!(!has(&d, &s, "http://ex/c1", ty, "http://ex/S"), "ground pattern vs universal scope: no (cwm)");
+    }
+
+    #[test]
+    fn log_supports_closes_scope() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :seed :p :o .
+            { { :a :b :c . { :a :b :c } => { :d :e :f } } log:supports { :a :b :c . :d :e :f } }
+              => { :q a :S } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/q", ty, "http://ex/S"), "supports = containment in the scope's closure");
     }
 
     #[test]
@@ -2210,9 +3062,10 @@ mod tests {
                     :acos1 ?ac ; :sinHalfPi ?shalf } .
         "#;
         let (mut d, s) = closure(src);
-        let int = "http://www.w3.org/2001/XMLSchema#integer";
-        let zero = d.intern_lit("0", int, None);
-        let one = d.intern_lit("1", int, None);
+        // The real-valued (trig) family is double-typed, cwm-style e-notation.
+        let dbl = "http://www.w3.org/2001/XMLSchema#double";
+        let zero = d.intern_lit("0.0e0", dbl, None);
+        let one = d.intern_lit("1.0e0", dbl, None);
         let t = id(&d, "http://ex/t");
         for (p, v) in [
             ("sin", zero), ("cos", one), ("tan", zero), ("sinh", zero), ("cosh", one),
@@ -2246,8 +3099,9 @@ mod tests {
             { ?x :deg ?g . ?g math:radians ?r2 } => { ?x :inRadians ?r2 } .
         "#;
         let (mut d, s) = closure(src);
-        let deg = d.intern_lit("180", "http://www.w3.org/2001/XMLSchema#integer", None);
-        let rad = d.intern_lit("3.141592653589793", "http://www.w3.org/2001/XMLSchema#decimal", None);
+        let dbl = "http://www.w3.org/2001/XMLSchema#double";
+        let deg = d.intern_lit("1.8e2", dbl, None);
+        let rad = d.intern_lit("3.141592653589793e0", dbl, None);
         let a = id(&d, "http://ex/a");
         assert!(s.contains(&[a, id(&d, "http://ex/inDegrees"), deg]), "π rad = 180°");
         assert!(s.contains(&[a, id(&d, "http://ex/inRadians"), rad]), "180° = π rad");
@@ -2265,11 +3119,11 @@ mod tests {
             { (5 1) math:logarithm ?bad } => { :s :badLog ?bad } .
         "#;
         let (mut d, s) = closure(src);
-        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let dbl = "http://www.w3.org/2001/XMLSchema#double";
         let st = id(&d, "http://ex/s");
-        let three = d.intern_lit("3", int, None);
-        let ten = d.intern_lit("10", int, None);
-        let zero = d.intern_lit("0", int, None);
+        let three = d.intern_lit("3.0e0", dbl, None);
+        let ten = d.intern_lit("1.0e1", dbl, None);
+        let zero = d.intern_lit("0.0e0", dbl, None);
         assert!(s.contains(&[st, id(&d, "http://ex/log8"), three]), "log_2 8 = 3");
         assert!(s.contains(&[st, id(&d, "http://ex/log1024"), ten]), "log_2 1024 = 10");
         assert!(s.contains(&[st, id(&d, "http://ex/atan"), zero]), "atan2(0,1) = 0");
@@ -2398,6 +3252,55 @@ mod tests {
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Match"), "case-insensitive hit");
         assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/Match"), "non-match excluded");
+    }
+
+    #[test]
+    fn first_class_list_unification() {
+        // `( ?x )` unifies structurally with a data list `( 17 )` (cwm unify2).
+        let src = r#"
+            @prefix : <http://ex/> .
+            ( 17 ) a :TestCase .
+            { ( ?x ) a :TestCase } => { ?x a :RESULT } .
+        "#;
+        let (mut d, s) = closure(src);
+        let i17 = d.intern_lit("17", "http://www.w3.org/2001/XMLSchema#integer", None);
+        let ty = id(&d, "http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+        assert!(s.contains(&[i17, ty, id(&d, "http://ex/RESULT")]), "list unification binds ?x=17");
+    }
+
+    #[test]
+    fn list_append_builtin() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            :seed :p :o .
+            { ((1 2) (3)) list:append (1 2 3) } => { :s a :AppendOk } .
+            { (() (1)) list:append (1) } => { :s a :EmptyOk } .
+            { ((:a) (:b)) list:append ?out . ?out list:member ?m } => { ?m a :Member } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/s", ty, "http://ex/AppendOk"), "append filter");
+        assert!(has(&d, &s, "http://ex/s", ty, "http://ex/EmptyOk"), "empty list append");
+        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Member"), "constructed list is iterable");
+        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/Member"), "constructed list is iterable");
+    }
+
+    #[test]
+    fn list_iterate_and_virtual_first_rest() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            ((:q)) a :Thing .
+            { (:a :b) list:iterate (1 ?v) } => { ?v a :Second } .
+            { ?X a :Thing . ?X rdf:rest ?Y } => { ?Y a :Thing } .
+            { ?X a :Thing; rdf:first (?B) } => { ?B a :GreatThing } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/Second"), "list:iterate index/value");
+        assert!(has(&d, &s, "http://ex/q", ty, "http://ex/GreatThing"), "virtual rdf:first over list");
     }
 
     #[test]
