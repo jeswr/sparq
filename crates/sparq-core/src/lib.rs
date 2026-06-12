@@ -59,6 +59,12 @@ enum NumData {
     #[cfg(feature = "mmap")]
     Mapped(memmap2::Mmap, rustc_hash::FxHashMap<Id, f64>),
     Sparse(rustc_hash::FxHashMap<Id, f64>),
+    /// A FORKED graph's cache: the base graph's cache SHARED immutably (Arc) plus a
+    /// small side map for terms interned after the fork — the in-RAM twin of
+    /// `Mapped`'s grow-over-immutable-base shape. Lookup: base first, side map as the
+    /// fallback (the side map only ever holds ids the base does not cover).
+    /// INVARIANT: the inner cache is never itself `Forked` (fork flattens one level).
+    Forked { base: std::sync::Arc<NumData>, extra: rustc_hash::FxHashMap<Id, f64> },
 }
 
 impl NumData {
@@ -83,6 +89,9 @@ impl NumData {
                     Some(v)
                 }
             }
+            NumData::Forked { base, extra } => {
+                base.lookup(id).or_else(|| extra.get(&id).copied())
+            }
         }
     }
 
@@ -106,7 +115,67 @@ impl NumData {
                         extra.insert(id, v);
                     }
                 }
+                NumData::Forked { extra, .. } => {
+                    if !v.is_nan() {
+                        extra.insert(id, v);
+                    }
+                }
             }
+        }
+    }
+
+    /// The cache for a structurally FORKED graph: the base cache shared immutably,
+    /// new terms recorded in a per-fork side map. Forking a fork shares the same
+    /// base Arc and copies the (small) side map; the FIRST fork of a flat cache
+    /// pays a one-time O(n) copy to freeze the shareable base (the mmap'd backing
+    /// is materialised — an `Mmap` cannot be cloned; forked graphs are in-memory).
+    fn fork(&self) -> NumData {
+        match self {
+            NumData::Forked { base, extra } => NumData::Forked {
+                base: std::sync::Arc::clone(base),
+                extra: extra.clone(),
+            },
+            NumData::Owned(v) => NumData::Forked {
+                base: std::sync::Arc::new(NumData::Owned(v.clone())),
+                extra: rustc_hash::FxHashMap::default(),
+            },
+            NumData::Sparse(m) => NumData::Forked {
+                base: std::sync::Arc::new(NumData::Sparse(m.clone())),
+                extra: rustc_hash::FxHashMap::default(),
+            },
+            #[cfg(feature = "mmap")]
+            NumData::Mapped(_, extra) => NumData::Forked {
+                // Materialise the mmap'd dense part (an `Mmap` cannot be cloned);
+                // ids the file does not cover stay in the carried side map.
+                base: std::sync::Arc::new(NumData::Owned(self.as_slice().to_vec())),
+                extra: extra.clone(),
+            },
+        }
+    }
+
+    /// Folds a forked cache flat again (compaction): one dense/sparse backing
+    /// covering the whole dictionary, so the side map stops growing and the next
+    /// fork freezes a fresh base. Non-forked backings are returned as-is.
+    fn fold(self, dict_len: usize) -> NumData {
+        match self {
+            NumData::Forked { base, extra, .. } => match &*base {
+                NumData::Owned(v) => {
+                    let mut dense = v.clone();
+                    dense.resize(dict_len, f64::NAN);
+                    for (&id, &val) in &extra {
+                        dense[(id - 1) as usize] = val;
+                    }
+                    NumData::Owned(dense)
+                }
+                NumData::Sparse(m) => {
+                    let mut m = m.clone();
+                    m.extend(extra);
+                    NumData::Sparse(m)
+                }
+                // `fork` never freezes a Forked or Mapped base (invariant above).
+                _ => unreachable!("a forked numeric cache's base is Owned or Sparse"),
+            },
+            other => other,
         }
     }
 
@@ -126,6 +195,7 @@ impl NumData {
                 unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<f64>(), n) }
             }
             NumData::Sparse(_) => unreachable!("as_slice on a sparse numeric cache"),
+            NumData::Forked { .. } => unreachable!("as_slice on a forked numeric cache"),
         }
     }
 
@@ -138,6 +208,9 @@ impl NumData {
             NumData::Mapped(_, extra) => extra.capacity() * 17,
             // hashbrown: ~(8-byte key + 8-byte f64 + 1 control byte) per slot.
             NumData::Sparse(m) => m.capacity() * 17,
+            // The shared base is charged to the graph that owns it; only the side map
+            // is this fork's own heap.
+            NumData::Forked { extra, .. } => extra.capacity() * 17,
         }
     }
 
@@ -178,6 +251,9 @@ enum TempData {
     #[cfg(feature = "mmap")]
     Mapped(memmap2::Mmap, rustc_hash::FxHashMap<Id, Temporal>),
     Sparse(rustc_hash::FxHashMap<Id, Temporal>),
+    /// A FORKED graph's cache — see [`NumData::Forked`]: shared immutable base + a
+    /// per-fork side map for terms interned after the fork.
+    Forked { base: std::sync::Arc<TempData>, extra: rustc_hash::FxHashMap<Id, Temporal> },
 }
 
 /// Dense-cache flag byte of a temporal value: kind + timezone presence. 0 = not temporal.
@@ -211,6 +287,7 @@ impl TempData {
         match self {
             TempData::Owned(cells) => cells.get(i).and_then(|c| temp_unflag(c.flag, c.instant)),
             TempData::Sparse(m) => m.get(&id).copied(),
+            TempData::Forked { base, extra } => base.lookup(id).or_else(|| extra.get(&id).copied()),
             #[cfg(feature = "mmap")]
             TempData::Mapped(m, extra) => {
                 let n = Self::mapped_len(m);
@@ -255,7 +332,67 @@ impl TempData {
                         extra.insert(id, t);
                     }
                 }
+                TempData::Forked { extra, .. } => {
+                    if let Some(t) = t {
+                        extra.insert(id, t);
+                    }
+                }
             }
+        }
+    }
+
+    /// The cache for a structurally FORKED graph — mirror of [`NumData::fork`].
+    fn fork(&self) -> TempData {
+        match self {
+            TempData::Forked { base, extra } => TempData::Forked {
+                base: std::sync::Arc::clone(base),
+                extra: extra.clone(),
+            },
+            TempData::Owned(cells) => TempData::Forked {
+                base: std::sync::Arc::new(TempData::Owned(cells.clone())),
+                extra: rustc_hash::FxHashMap::default(),
+            },
+            TempData::Sparse(m) => TempData::Forked {
+                base: std::sync::Arc::new(TempData::Sparse(m.clone())),
+                extra: rustc_hash::FxHashMap::default(),
+            },
+            #[cfg(feature = "mmap")]
+            TempData::Mapped(m, extra) => {
+                // Materialise the mmap'd cells (an `Mmap` cannot be cloned).
+                let n = Self::mapped_len(m);
+                // SAFETY: instants are `n` little-endian f64 at offset 0 (page-aligned).
+                let instants = unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<f64>(), n) };
+                let cells: Vec<TempCell> = (0..n)
+                    .map(|i| TempCell { instant: instants[i], flag: m[n * 8 + i] })
+                    .collect();
+                TempData::Forked {
+                    base: std::sync::Arc::new(TempData::Owned(cells)),
+                    extra: extra.clone(),
+                }
+            }
+        }
+    }
+
+    /// Folds a forked cache flat again (compaction) — mirror of [`NumData::fold`].
+    fn fold(self, dict_len: usize) -> TempData {
+        match self {
+            TempData::Forked { base, extra } => match &*base {
+                TempData::Owned(cells) => {
+                    let mut cells = cells.clone();
+                    cells.resize(dict_len, TempCell { instant: f64::NAN, flag: 0 });
+                    for (&id, &t) in &extra {
+                        cells[(id - 1) as usize] = TempCell { instant: t.instant, flag: temp_flag(t) };
+                    }
+                    TempData::Owned(cells)
+                }
+                TempData::Sparse(m) => {
+                    let mut m = m.clone();
+                    m.extend(extra);
+                    TempData::Sparse(m)
+                }
+                _ => unreachable!("a forked temporal cache's base is Owned or Sparse"),
+            },
+            other => other,
         }
     }
 
@@ -268,6 +405,8 @@ impl TempData {
             TempData::Mapped(_, extra) => extra.capacity() * 25,
             // hashbrown: ~(4-byte key pad to 8 + 16-byte Temporal + control) per slot.
             TempData::Sparse(m) => m.capacity() * 25,
+            // The shared base is charged to the graph that owns it.
+            TempData::Forked { extra, .. } => extra.capacity() * 25,
         }
     }
 
@@ -1258,6 +1397,51 @@ impl Graph {
         TripleIdIter { scan: self.store.scan_sorted(&[None, None, None], col), i: 0 }
     }
 
+    // ---- Structural fork (snapshot generations) --------------------------------------
+
+    /// A STRUCTURAL FORK of this graph: a new, independently mutable `Graph` that
+    /// SHARES the base's immutable storage — the six permutation indexes, the planner
+    /// stats, the dictionary's frozen base and the numeric/temporal caches are all
+    /// `Arc`-shared — and carries only the small per-generation delta by value (the
+    /// pending store overlay, the dictionary extension, the cache side maps). Cost:
+    /// O(pending delta), NOT O(graph) — except the FIRST fork of a flat (never-forked)
+    /// graph, which pays a one-time O(n) dictionary/cache freeze to mint the shared
+    /// base (the indexes are born shareable and never need freezing).
+    ///
+    /// The fork and the base then evolve independently through
+    /// [`apply_delta`](Self::apply_delta): neither ever mutates shared storage, so
+    /// concurrent readers of the base are unaffected (the snapshot-generation pattern:
+    /// fork → apply a batch → publish, with [`compact`](Self::compact) folding the
+    /// accumulated delta back into flat storage when it grows past a threshold —
+    /// which also re-freezes the dictionary so later forks stay cheap).
+    ///
+    /// New terms interned in a fork get ids above the shared base's high-water mark
+    /// (still below the inline-integer range), so a term in the shared base resolves
+    /// to the SAME id in every generation. Named graphs are forked recursively. The
+    /// fork carries NO write-ahead log (`apply_delta` on it is overlay-only): the
+    /// generation pattern is an in-memory serving construct — durability stays with
+    /// whatever owns the base.
+    pub fn fork(&self) -> Graph {
+        Graph {
+            dict: self.dict.fork(),
+            store: self.store.fork(),
+            numerics: self.numerics.fork(),
+            temporals: self.temporals.fork(),
+            named: self.named.iter().map(|(name, g)| (name.clone(), g.fork())).collect(),
+            #[cfg(feature = "mmap")]
+            wal: None,
+        }
+    }
+
+    /// Total pending-delta size carried by this graph (and its named graphs): store
+    /// overlay entries + dictionary extension terms. This is what a [`fork`](Self::fork)
+    /// copies by value — the input to a compaction threshold policy.
+    pub fn pending_delta_len(&self) -> usize {
+        self.store.overlay_len()
+            + self.dict.appended_len()
+            + self.named.iter().map(|(_, g)| g.pending_delta_len()).sum::<usize>()
+    }
+
     // ---- Incremental updates (T17): delta-overlay + WAL durability ------------------
 
     /// Applies an incremental update batch — `deletes` first, then `inserts` (SPARQL's
@@ -1310,6 +1494,21 @@ impl Graph {
     pub fn compact(&mut self) -> Result<(), String> {
         #[cfg(feature = "mmap")]
         let dir = self.wal.as_ref().map(|w| w.dir.clone());
+        // Fold the structural-fork layers first (ids unchanged throughout): named
+        // graphs recursively, then this graph's dictionary extension into a fresh
+        // frozen base (so the NEXT fork is O(1) again) and the forked caches flat.
+        // No-ops on a never-forked graph.
+        for (_, g) in &mut self.named {
+            g.compact()?;
+        }
+        if self.dict.is_forked() {
+            self.dict = self.dict.compacted();
+            let n = self.dict.len();
+            let numerics = std::mem::replace(&mut self.numerics, NumData::Sparse(rustc_hash::FxHashMap::default()));
+            self.numerics = numerics.fold(n);
+            let temporals = std::mem::replace(&mut self.temporals, TempData::Sparse(rustc_hash::FxHashMap::default()));
+            self.temporals = temporals.fold(n);
+        }
         if self.store.has_overlay() {
             let triples: Vec<[Id; 3]> = {
                 let scan = self.store.scan(&[None, None, None]);

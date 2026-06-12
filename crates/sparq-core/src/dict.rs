@@ -85,7 +85,11 @@ pub fn inline_id_of_int(v: i64) -> Option<Id> {
 /// directives target) plus a per-term suffix, and literal datatypes are deduplicated in
 /// `datatypes` — so a long repeated `http://…/` is stored once, not per term, and the
 /// per-term slot (`Stored`) is far smaller than a full `oxrdf::Term`.
-#[derive(Default)]
+/// `Clone` exists for [`fork`](Dict::fork): on an already-forked dict it bumps the
+/// shared-base `Arc`s and copies only the small extension; on a flat dict it is the
+/// O(n) deep copy that `fork` freezes ONCE into the shared base. It is not intended
+/// as a general-purpose copy (a `Graph` remains deliberately non-`Clone`).
+#[derive(Default, Clone)]
 pub struct Dict {
     prefixes: Vec<Box<str>>,                  // id -> IRI namespace prefix
     prefix_ids: FxHashMap<Box<str>, u32>,     // prefix -> id
@@ -100,13 +104,24 @@ pub struct Dict {
     blob: Option<(Vec<u8>, Vec<u32>)>,
     // When `Some` (after `open_mmap`), term(id)/term_parts/lookup are served from mmap'd
     // files and `terms`/`table` are empty — the out-of-core, minimal-RAM dictionary.
+    // Behind an `Arc` so a fork shares the (immutable) mapping instead of re-mmapping.
     #[cfg(feature = "mmap")]
-    mapped: Option<MappedDict>,
+    mapped: Option<std::sync::Arc<MappedDict>>,
     // APPEND-ONLY growth over the compacted storage modes (delta-overlay updates, T17):
     // ids `1..=base` are served by the blob / mmap'd record store; freshly interned terms
     // go to the `terms` arena with ids `base + i + 1`. Always 0 in the plain arena mode,
     // so the arena hot paths are unchanged (one predictable comparison).
     base: usize,
+    // The SHARED IMMUTABLE BASE of a forked dictionary ([`fork`](Dict::fork)): ids
+    // `1..=base` resolve through this complete, never-mutated dict (Arc-shared across
+    // snapshot generations); freshly interned terms append to the local `terms` arena
+    // above `base`, exactly like the blob/mmap growth modes. `None` for every
+    // non-forked dict, so the bulk-load and flat-read hot paths pay only a predictable
+    // never-taken branch. INVARIANT: a frozen base is itself flat (`frozen: None`),
+    // so delegation never recurses more than one level; the fork's `prefixes` /
+    // `datatypes` tables start as clones of the base's, keeping base record prefix /
+    // datatype indices valid against the fork's tables.
+    frozen: Option<std::sync::Arc<Dict>>,
 }
 
 /// The compact per-term storage. An IRI is `(prefix id, suffix)`; a literal is
@@ -114,6 +129,7 @@ pub struct Dict {
 /// TRIPLE TERM (`<<( s p o )>>`) is stored STRUCTURALLY as the ids of its three
 /// components (which are interned first, so a child id is always lower than — or an
 /// inline id distinct from — the triple's own id; nesting recurses through the object).
+#[derive(Clone)]
 enum Stored {
     Iri { prefix: u32, suffix: Box<str> },
     Lit { value: Box<str>, datatype: u32, lang: Option<Box<str>> },
@@ -674,16 +690,102 @@ impl Dict {
         }
     }
 
+    // ---- Non-mutating finders shared by the intern and lookup paths ----------------
+    // Search order per term kind: the mmap'd base index (when mapped), then the FROZEN
+    // shared base of a forked dict (its own complete finder — one level, the base is
+    // flat by invariant), then the table (blob base + appended arena). On a plain
+    // arena dict only the table branch does work, so the bulk-load hot path keeps its
+    // shape (two predictable never-taken branches).
+
+    #[inline]
+    fn find_iri(&self, hash: u64, iri: &str) -> Option<Id> {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_iri(s, iri, &self.prefixes)) {
+            return Some(id);
+        }
+        if let Some(f) = &self.frozen {
+            if let Some(id) = f.find_iri(hash, iri) {
+                return Some(id);
+            }
+        }
+        self.table.find(hash, |&id| self.tabled_is_iri(id, iri)).copied()
+    }
+
+    #[inline]
+    fn find_iri_parts(&self, hash: u64, prefix: &str, suffix: &str) -> Option<Id> {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_iri_parts(s, prefix, suffix, &self.prefixes)) {
+            return Some(id);
+        }
+        if let Some(f) = &self.frozen {
+            if let Some(id) = f.find_iri_parts(hash, prefix, suffix) {
+                return Some(id);
+            }
+        }
+        self.table.find(hash, |&id| self.tabled_is_iri_parts(id, prefix, suffix)).copied()
+    }
+
+    #[inline]
+    fn find_lit(&self, hash: u64, value: &str, datatype: &str, lang: Option<&str>) -> Option<Id> {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_lit(s, value, datatype, lang, &self.datatypes)) {
+            return Some(id);
+        }
+        if let Some(f) = &self.frozen {
+            if let Some(id) = f.find_lit(hash, value, datatype, lang) {
+                return Some(id);
+            }
+        }
+        self.table.find(hash, |&id| self.tabled_is_lit(id, value, datatype, lang)).copied()
+    }
+
+    #[inline]
+    fn find_blank(&self, hash: u64, label: &str) -> Option<Id> {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Blank(b) if *b == label)) {
+            return Some(id);
+        }
+        if let Some(f) = &self.frozen {
+            if let Some(id) = f.find_blank(hash, label) {
+                return Some(id);
+            }
+        }
+        self.table.find(hash, |&id| self.tabled_is_blank(id, label)).copied()
+    }
+
+    #[inline]
+    fn find_triple_ids(&self, hash: u64, ids: [Id; 3]) -> Option<Id> {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Triple(x) if *x == ids)) {
+            return Some(id);
+        }
+        if let Some(f) = &self.frozen {
+            if let Some(id) = f.find_triple_ids(hash, ids) {
+                return Some(id);
+            }
+        }
+        self.table.find(hash, |&id| self.tabled_is_triple(id, ids)).copied()
+    }
+
+    #[inline]
+    fn find_term(&self, hash: u64, term: &Term) -> Option<Id> {
+        #[cfg(feature = "mmap")]
+        if let Some(id) = self.mapped_find(hash, |s| stored_ref_eq_term(s, term, &self.prefixes, &self.datatypes)) {
+            return Some(id);
+        }
+        if let Some(f) = &self.frozen {
+            if let Some(id) = f.find_term(hash, term) {
+                return Some(id);
+            }
+        }
+        self.table.find(hash, |&id| self.tabled_eq_term(id, term)).copied()
+    }
+
     /// Interns an IRI term from its string, returning its id.
     #[inline]
     pub fn intern_iri(&mut self, iri: &str) -> Id {
         let hash = hash_iri(iri);
-        // Mapped base terms live in the mmap'd sorted index, not the table.
-        #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_iri(s, iri, &self.prefixes)) {
-            return id;
-        }
-        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_iri(id, iri)) {
+        if let Some(id) = self.find_iri(hash, iri) {
             return id;
         }
         let (p, suffix) = split_iri(iri);
@@ -696,11 +798,7 @@ impl Dict {
     #[inline]
     fn intern_iri_parts(&mut self, prefix: &str, suffix: &str) -> Id {
         let hash = hash_iri_parts(prefix, suffix);
-        #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_iri_parts(s, prefix, suffix, &self.prefixes)) {
-            return id;
-        }
-        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_iri_parts(id, prefix, suffix)) {
+        if let Some(id) = self.find_iri_parts(hash, prefix, suffix) {
             return id;
         }
         let prefix = self.intern_prefix(prefix);
@@ -715,11 +813,7 @@ impl Dict {
             return id;
         }
         let hash = hash_lit(value, datatype, lang);
-        #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_lit(s, value, datatype, lang, &self.datatypes)) {
-            return id;
-        }
-        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_lit(id, value, datatype, lang)) {
+        if let Some(id) = self.find_lit(hash, value, datatype, lang) {
             return id;
         }
         let datatype = self.intern_datatype(datatype);
@@ -730,11 +824,7 @@ impl Dict {
     #[inline]
     pub fn intern_blank(&mut self, label: &str) -> Id {
         let hash = hash_blank(label);
-        #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Blank(b) if *b == label)) {
-            return id;
-        }
-        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_blank(id, label)) {
+        if let Some(id) = self.find_blank(hash, label) {
             return id;
         }
         self.push(hash, Stored::Blank(label.into()))
@@ -745,11 +835,7 @@ impl Dict {
     /// separately-interned identical triples share one id.
     fn intern_triple_ids(&mut self, ids: [Id; 3]) -> Id {
         let hash = hash_triple_ids(ids);
-        #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Triple(x) if *x == ids)) {
-            return id;
-        }
-        if let Some(&id) = self.table.find(hash, |&id| self.tabled_is_triple(id, ids)) {
+        if let Some(id) = self.find_triple_ids(hash, ids) {
             return id;
         }
         self.push(hash, Stored::Triple(ids))
@@ -819,13 +905,10 @@ impl Dict {
         }
         let hash = hash_term(term);
         // Mapped base first (binary search of the sorted hash index, verifying each
-        // equal-hash candidate — content hashes can collide), then the table, which
-        // covers the blob base and any APPENDED terms (delta-overlay growth).
-        #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| stored_ref_eq_term(s, term, &self.prefixes, &self.datatypes)) {
-            return id;
-        }
-        self.table.find(hash, |&id| self.tabled_eq_term(id, term)).copied().unwrap_or(NO_ID)
+        // equal-hash candidate — content hashes can collide), then the frozen shared
+        // base of a forked dict, then the table, which covers the blob base and any
+        // APPENDED terms (delta-overlay growth).
+        self.find_term(hash, term).unwrap_or(NO_ID)
     }
 
     /// Returns the id for a literal given its components, else `NO_ID` — [`lookup`]
@@ -838,22 +921,14 @@ impl Dict {
             return id;
         }
         let hash = hash_lit(value, datatype, lang);
-        #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| stored_ref_is_lit(s, value, datatype, lang, &self.datatypes)) {
-            return id;
-        }
-        self.table.find(hash, |&id| self.tabled_is_lit(id, value, datatype, lang)).copied().unwrap_or(NO_ID)
+        self.find_lit(hash, value, datatype, lang).unwrap_or(NO_ID)
     }
 
     /// Returns the id of a triple term whose components resolved to `ids`, else `NO_ID`.
     /// Serves all three storage modes (arena, blob, mmap).
     fn lookup_triple_ids(&self, ids: [Id; 3]) -> Id {
         let hash = hash_triple_ids(ids);
-        #[cfg(feature = "mmap")]
-        if let Some(id) = self.mapped_find(hash, |s| matches!(s, StoredRef::Triple(x) if *x == ids)) {
-            return id;
-        }
-        self.table.find(hash, |&id| self.tabled_is_triple(id, ids)).copied().unwrap_or(NO_ID)
+        self.find_triple_ids(hash, ids).unwrap_or(NO_ID)
     }
 
     /// Borrows a dictionary term's components WITHOUT reconstructing an `oxrdf::Term`
@@ -893,6 +968,9 @@ impl Dict {
         if i >= self.base {
             return stored_as_ref(&self.terms[i - self.base]);
         }
+        if let Some(f) = &self.frozen {
+            return f.record(id); // the shared immutable base of a forked dict
+        }
         #[cfg(feature = "mmap")]
         if let Some(m) = &self.mapped {
             return m.stored(id);
@@ -910,6 +988,9 @@ impl Dict {
         #[cfg(feature = "mmap")]
         if self.mapped.is_some() {
             return self;
+        }
+        if self.frozen.is_some() {
+            return self; // forked: the base is already compact-shared; ids must keep resolving through it
         }
         if self.blob.is_some() || self.terms.is_empty() {
             return self;
@@ -1101,6 +1182,7 @@ impl Dict {
             #[cfg(feature = "mmap")]
             mapped: None,
             base: 0,
+            frozen: None,
         })
     }
 
@@ -1185,7 +1267,115 @@ impl Dict {
             hashes: map("dict-hash.bin")?,
             hashids: map("dict-hid.bin")?,
         };
-        Ok(Dict { prefixes, datatypes, mapped: Some(mapped), base: len, ..Default::default() })
+        Ok(Dict { prefixes, datatypes, mapped: Some(std::sync::Arc::new(mapped)), base: len, ..Default::default() })
+    }
+
+    /// A structural FORK of this dictionary (the dict half of `Graph::fork`): the
+    /// immutable base is SHARED (an `Arc` bump) and only the small extension — terms
+    /// interned since the base was frozen, plus the prefix/datatype tables — is
+    /// copied. New terms interned in the fork get ids above the base's high-water
+    /// mark (`base + 1 ..`), still below [`INLINE_BASE`], so the id-space partition
+    /// (dict / inline-integer / local-vocab) is untouched and ids never collide
+    /// across generations: a term present in the shared base resolves to the SAME id
+    /// in every fork.
+    ///
+    /// The FIRST fork of a flat (never-forked) dict pays a one-time O(n) deep copy
+    /// to freeze the shared base; every later fork of the resulting lineage is
+    /// O(extension). `Graph::compact` re-freezes (folds the extension into a fresh
+    /// shared base), so the extension — and with it the per-fork cost — stays
+    /// bounded by the compaction policy.
+    pub fn fork(&self) -> Dict {
+        if self.frozen.is_some() {
+            // Already forked: Clone bumps the frozen (and mapped) Arcs and copies
+            // only the extension arena/table + the small prefix/datatype tables.
+            return self.clone();
+        }
+        let base_len = self.len();
+        Dict {
+            prefixes: self.prefixes.clone(),
+            prefix_ids: self.prefix_ids.clone(),
+            datatypes: self.datatypes.clone(),
+            datatype_ids: self.datatype_ids.clone(),
+            terms: Vec::new(),
+            table: HashTable::new(),
+            blob: None,
+            #[cfg(feature = "mmap")]
+            mapped: None,
+            base: base_len,
+            // The one-time freeze: a full copy of the flat dict becomes the shared
+            // immutable base (`self` itself cannot be moved into the Arc — it stays
+            // usable, and is typically a published snapshot behind its own Arc).
+            frozen: Some(std::sync::Arc::new(self.clone())),
+        }
+    }
+
+    /// Whether this dictionary was produced by [`fork`](Self::fork) (it resolves a
+    /// shared frozen base plus a local extension).
+    pub fn is_forked(&self) -> bool {
+        self.frozen.is_some()
+    }
+
+    /// Number of terms in the growth extension above the (blob / mmap'd / frozen)
+    /// base — the dict half of a fork's per-generation copy cost, and an input to
+    /// the compaction threshold policy. 0 for a plain arena dict.
+    pub fn appended_len(&self) -> usize {
+        if self.base > 0 || self.frozen.is_some() {
+            self.terms.len()
+        } else {
+            0
+        }
+    }
+
+    /// Folds a forked dictionary's extension into a FRESH frozen base (ids
+    /// unchanged), so subsequent [`fork`](Self::fork)s are O(1) again — the dict
+    /// half of `Graph::compact`. Non-forked dicts are returned unchanged (well,
+    /// cloned); O(n) — call it from a compaction path only.
+    pub fn compacted(&self) -> Dict {
+        if self.frozen.is_none() {
+            return self.clone();
+        }
+        let n = self.len();
+        let mut terms: Vec<Stored> = Vec::with_capacity(n);
+        for id in 1..=n as Id {
+            terms.push(match self.record(id) {
+                StoredRef::Iri { prefix, suffix } => Stored::Iri { prefix, suffix: suffix.into() },
+                StoredRef::Lit { value, datatype, lang } => {
+                    Stored::Lit { value: value.into(), datatype, lang: lang.map(Into::into) }
+                }
+                StoredRef::Blank(b) => Stored::Blank(b.into()),
+                StoredRef::Triple(ids) => Stored::Triple(ids),
+            });
+        }
+        // The fork's prefix/datatype tables are supersets of the frozen base's with
+        // identical indices (fork-time clone + append-only growth), so every record
+        // copied above stays valid against them.
+        let mut flat = Dict {
+            prefixes: self.prefixes.clone(),
+            prefix_ids: self.prefix_ids.clone(),
+            datatypes: self.datatypes.clone(),
+            datatype_ids: self.datatype_ids.clone(),
+            terms,
+            table: HashTable::new(),
+            blob: None,
+            #[cfg(feature = "mmap")]
+            mapped: None,
+            base: 0,
+            frozen: None,
+        };
+        flat.build_table();
+        Dict {
+            prefixes: flat.prefixes.clone(),
+            prefix_ids: flat.prefix_ids.clone(),
+            datatypes: flat.datatypes.clone(),
+            datatype_ids: flat.datatype_ids.clone(),
+            terms: Vec::new(),
+            table: HashTable::new(),
+            blob: None,
+            #[cfg(feature = "mmap")]
+            mapped: None,
+            base: n,
+            frozen: Some(std::sync::Arc::new(flat)),
+        }
     }
 
     pub fn len(&self) -> usize {
