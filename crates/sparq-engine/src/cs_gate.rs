@@ -242,6 +242,35 @@ fn cs_gate_synthetic_correlated_stars() {
     assert_cs_wins("synthetic", ps_q, cs_q);
 }
 
+/// An installed CS table may only change JOIN ORDER — query RESULTS must be
+/// identical with and without it (including multi-pattern stars, mixed
+/// star/chain shapes, OPTIONAL and FILTER around the BGP).
+#[test]
+fn cs_table_never_changes_results() {
+    let ttl = "@prefix : <http://ex/> .
+        :a :p :x ; :q 1 ; :r :b . :b :p :y ; :q 2 . :c :p :x ; :s :a .
+        :d :q 3 ; :r :c . :e :p :z ; :q 4 ; :r :a ; :s :b .";
+    let graph = Graph::load_str(ttl, "turtle").unwrap();
+    let table = cs_table_of(&graph);
+    for q in [
+        "PREFIX : <http://ex/> SELECT * WHERE { ?s :p ?o . ?s :q ?n }",
+        "PREFIX : <http://ex/> SELECT * WHERE { ?s :p ?o . ?s :q ?n . ?s :r ?t }",
+        "PREFIX : <http://ex/> SELECT * WHERE { ?s :r ?m . ?m :p ?o . ?s :q ?n }",
+        "PREFIX : <http://ex/> SELECT ?s WHERE { ?s :p ?o . ?s :q ?n . FILTER(?n > 1) OPTIONAL { ?s :s ?w } } ORDER BY ?s",
+        "PREFIX : <http://ex/> SELECT * WHERE { ?s :p ?a . ?s :p ?b . ?s :q ?n }",
+    ] {
+        let plain = crate::query(&graph, q).unwrap();
+        let with_cs = crate::cs::with_cs_table(&table, || crate::query(&graph, q)).unwrap();
+        assert_eq!(plain.vars, with_cs.vars, "vars diverged for {q}");
+        let norm = |r: &crate::QueryResult| {
+            let mut rows: Vec<String> = r.rows.iter().map(|row| format!("{row:?}")).collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(norm(&plain), norm(&with_cs), "results diverged for {q}");
+    }
+}
+
 /// The olympics gate (1.78M triples). Skips (passes with a note) when the fixture
 /// is absent; `#[ignore]`d so the default suite stays fast — run explicitly:
 /// `cargo test -p sparq-engine --release --features cs-planner -- --ignored cs_gate_olympics --nocapture`
