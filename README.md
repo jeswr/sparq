@@ -45,6 +45,7 @@ Opt-in capability crates (none is a dependency of the core; zero wasm impact, en
 | [`sparq-shacl`](crates/sparq-shacl) | SHACL Core validation — 100% of the W3C core suite |
 | [`sparq-solid`](crates/sparq-solid) | [Solid](https://solidproject.org/) pod access control: WAC/ACP as N3 rules over a triples-native auth view; per-(WebID, client) session-filtered SPARQL, fail-closed |
 | [`sparq-geo`](crates/sparq-geo) | GeoSPARQL: WKT, `geof:` functions callable from SPARQL, DE-9IM relations, R-tree index |
+| [`sparq-text`](crates/sparq-text) | full-text search: owned BM25 inverted index over string literals, `text:` magic predicates rewritten into plain SPARQL |
 | [`sparq-rsp`](crates/sparq-rsp) | RDF stream processing: deterministic RSP-QL windows, R/I/DSTREAM diffs |
 | [`sparq-hdt`](crates/sparq-hdt) | load HDT archives into a graph |
 | [`sparq-introspect`](crates/sparq-introspect) | one-scan schema introspection: characteristic sets, class/predicate profiles, LLM-ready digests |
