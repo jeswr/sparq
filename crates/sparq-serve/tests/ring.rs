@@ -46,7 +46,7 @@ fn initial_state_is_generation_zero() {
 #[test]
 fn readers_pin_old_generations_while_writer_publishes_past() {
     let live = Arc::new(AtomicUsize::new(0));
-    let ring = GenerationRing::with_config(MockSnapshot::new(0, &live), RingConfig { retain: 2 });
+    let ring = GenerationRing::with_config(MockSnapshot::new(0, &live), RingConfig { retain: 2, ..RingConfig::default() });
 
     // A reader pins generation 0 (e.g. a long-lived stream).
     let pinned = ring.current();
@@ -76,7 +76,7 @@ fn readers_pin_old_generations_while_writer_publishes_past() {
 #[test]
 fn retention_bound_drops_ring_references_but_not_reader_pins() {
     let live = Arc::new(AtomicUsize::new(0));
-    let ring = GenerationRing::with_config(MockSnapshot::new(0, &live), RingConfig { retain: 3 });
+    let ring = GenerationRing::with_config(MockSnapshot::new(0, &live), RingConfig { retain: 3, ..RingConfig::default() });
 
     // No readers: beyond current + K, forgotten generations are freed promptly.
     for i in 1..=10u64 {
@@ -148,7 +148,7 @@ fn publish_with_no_touched_pods_keeps_epochs() {
 #[test]
 fn retain_zero_keeps_only_current() {
     let live = Arc::new(AtomicUsize::new(0));
-    let ring = GenerationRing::with_config(MockSnapshot::new(0, &live), RingConfig { retain: 0 });
+    let ring = GenerationRing::with_config(MockSnapshot::new(0, &live), RingConfig { retain: 0, ..RingConfig::default() });
     for i in 1..=5u64 {
         ring.publish(MockSnapshot::new(i, &live), std::iter::empty());
     }

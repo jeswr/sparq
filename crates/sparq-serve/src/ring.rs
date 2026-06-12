@@ -18,6 +18,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwap;
 use rustc_hash::FxHashSet;
@@ -30,6 +31,42 @@ use crate::epoch::{PodEpochs, PodId};
 /// deployment via [`RingConfig`].
 pub const DEFAULT_RETAIN: usize = 4;
 
+/// Opt-in extended retention for time-travel queries: keep generations beyond the
+/// concurrency bound K so [`GenerationRing::at`] / [`GenerationRing::as_of`] can
+/// serve them as queryable historical snapshots.
+///
+/// **Memory cost, stated honestly:** with today's [`GraphApplier`](crate::GraphApplier)
+/// every published generation is a FULL `Graph` (the per-batch O(graph) fork shares no
+/// structure), so time-travel retention costs `M × full graph` — at the measured
+/// ~780 MB/1 M-triple graph, `max_generations: 16` can pin ~12 GB of history. Budget
+/// `max_generations` (and/or `max_age`) accordingly. When the recorded structural-fork
+/// follow-up lands (persistent/COW indexes — see the applier module docs), retained
+/// generations become delta chains and this cost collapses; the API here is
+/// deliberately number/timestamp-based so that swap needs **no API change** (an
+/// OSTRICH-style delta-chain archive is the named follow-up, out of scope for Wave A).
+#[derive(Clone, Debug)]
+pub struct TimeTravelConfig {
+    /// Keep up to this many generations older than current available for time
+    /// travel. Composes with the concurrency bound K as a **floor**: the ring
+    /// retains `max(retain, max_generations)` older generations (time travel can
+    /// extend retention, never shrink it below K).
+    pub max_generations: usize,
+    /// Additionally evict time-travel generations older than this age (measured
+    /// against the ring's clock at publish time). The age bound applies only to
+    /// the time-travel *extension* — the K newest older-than-current generations
+    /// are never age-evicted (the concurrency floor wins). `None` = count-bounded
+    /// only. Eviction is publish-driven (no background timer): an over-age
+    /// generation stays retained — and `at()`-servable — until the next publish
+    /// prunes it.
+    pub max_age: Option<Duration>,
+}
+
+impl Default for TimeTravelConfig {
+    fn default() -> Self {
+        TimeTravelConfig { max_generations: 16, max_age: None }
+    }
+}
+
 /// Configuration for a [`GenerationRing`].
 #[derive(Clone, Debug)]
 pub struct RingConfig {
@@ -37,11 +74,20 @@ pub struct RingConfig {
     /// its own strong reference to. Beyond K the ring forgets its reference — the
     /// generation then lives exactly as long as its last reader `Arc`.
     pub retain: usize,
+    /// Opt-in time-travel retention (default `None` — no extended retention, no
+    /// behaviour change). See [`TimeTravelConfig`] for the memory-cost contract.
+    pub time_travel: Option<TimeTravelConfig>,
+    /// The clock that stamps [`Generation::published_at`] and drives `max_age`
+    /// eviction. A plain `fn` pointer (not a closure) keeps `RingConfig` `Clone +
+    /// Debug` and the default zero-cost; tests inject a deterministic clock (e.g.
+    /// reading an atomic) so timestamp assertions never race wall time. Defaults
+    /// to [`SystemTime::now`].
+    pub clock: fn() -> SystemTime,
 }
 
 impl Default for RingConfig {
     fn default() -> Self {
-        RingConfig { retain: DEFAULT_RETAIN }
+        RingConfig { retain: DEFAULT_RETAIN, time_travel: None, clock: SystemTime::now }
     }
 }
 
@@ -58,6 +104,7 @@ pub struct Generation<S> {
     number: u64,
     snapshot: S,
     epochs: PodEpochs,
+    published_at: SystemTime,
 }
 
 impl<S> Generation<S> {
@@ -75,6 +122,16 @@ impl<S> Generation<S> {
     /// hook, §6.3).
     pub fn epochs(&self) -> &PodEpochs {
         &self.epochs
+    }
+
+    /// When this generation was published, per the ring's configured clock
+    /// ([`RingConfig::clock`]; generation 0 is stamped at ring construction).
+    /// Lets callers resolve "as of T" to a generation number
+    /// ([`GenerationRing::as_of`]). Only as trustworthy as the clock: the default
+    /// `SystemTime::now` is wall time (non-monotonic under clock steps); inject a
+    /// deterministic clock in tests.
+    pub fn published_at(&self) -> SystemTime {
+        self.published_at
     }
 }
 
@@ -94,6 +151,10 @@ pub struct GenerationRing<S> {
     current: ArcSwap<Generation<S>>,
     /// Retention bound K (immutable after construction).
     retain: usize,
+    /// Opt-in time-travel retention (immutable after construction).
+    time_travel: Option<TimeTravelConfig>,
+    /// Stamps `published_at` and drives `max_age` eviction.
+    clock: fn() -> SystemTime,
     /// Writer/introspection-side state; never touched by `current()`.
     inner: Mutex<RingInner<S>>,
 }
@@ -121,6 +182,7 @@ impl<S> GenerationRing<S> {
             number: 0,
             snapshot: initial,
             epochs: PodEpochs::default(),
+            published_at: (config.clock)(),
         });
         let inner = RingInner {
             retained: VecDeque::from([gen0.clone()]),
@@ -129,6 +191,8 @@ impl<S> GenerationRing<S> {
         GenerationRing {
             current: ArcSwap::from(gen0),
             retain: config.retain,
+            time_travel: config.time_travel,
+            clock: config.clock,
             inner: Mutex::new(inner),
         }
     }
@@ -160,24 +224,78 @@ impl<S> GenerationRing<S> {
                 epochs.bump(pod);
             }
         }
+        let now = (self.clock)();
         let next = Arc::new(Generation {
             number: prev.number + 1,
             snapshot,
             epochs,
+            published_at: now,
         });
         drop(prev);
         // Swap the read pointer first: readers see the new generation immediately;
         // retention bookkeeping below is invisible to them.
         self.current.store(next.clone());
         inner.retained.push_back(next.clone());
-        // Forget the ring's own reference beyond current + K. If a reader still
-        // pins the forgotten generation it stays alive through that reader's Arc.
-        while inner.retained.len() > self.retain + 1 {
+        // Forget the ring's own reference beyond the retention bound. If a reader
+        // still pins a forgotten generation it stays alive through that reader's
+        // Arc. Retention composition (documented on [`TimeTravelConfig`]): the
+        // concurrency bound K is a FLOOR — the K newest older-than-current
+        // generations are always kept; the time-travel extension keeps a
+        // generation only while it satisfies BOTH its count bound
+        // (`max_generations`) and its age bound (`max_age`). The deque is
+        // oldest-first, so once the front survives, everything behind it does too.
+        while let Some(front) = inner.retained.front() {
+            let older_than_current = inner.retained.len() - 1;
+            if older_than_current <= self.retain {
+                break; // the K floor: never evicted, time travel or not
+            }
+            let keep_for_time_travel = self.time_travel.as_ref().is_some_and(|tt| {
+                older_than_current <= tt.max_generations.max(self.retain)
+                    && tt.max_age.is_none_or(|max| {
+                        // A clock that stepped backwards makes the front look
+                        // future-published; keep it (conservative, never lies
+                        // about retention it still holds).
+                        now.duration_since(front.published_at).map_or(true, |age| age <= max)
+                    })
+            });
+            if keep_for_time_travel {
+                break;
+            }
             inner.retained.pop_front();
         }
         inner.registry.retain(|w| w.strong_count() > 0);
         inner.registry.push_back(Arc::downgrade(&next));
         next
+    }
+
+    /// The retained generation numbered `number`, pinned — time travel's lookup
+    /// (a retained generation IS a queryable snapshot). Returns `None` when the
+    /// generation is not retained: never published yet (`number` beyond current),
+    /// or aged out of the retention window (evicted by the K/`max_generations`/
+    /// `max_age` bounds — see [`TimeTravelConfig`]). A generation a *reader*
+    /// still pins but the ring has forgotten is honestly `None` too: the ring
+    /// only serves retention it owns.
+    ///
+    /// Takes the writer-side mutex briefly (O(1) — retained numbers are
+    /// contiguous); not for the per-request hot path unless time travel was
+    /// requested.
+    pub fn at(&self, number: u64) -> Option<Arc<Generation<S>>> {
+        let inner = self.inner.lock().expect("generation ring poisoned");
+        let front = inner.retained.front()?.number();
+        let idx = number.checked_sub(front)?;
+        inner.retained.get(usize::try_from(idx).ok()?).cloned()
+    }
+
+    /// Resolves "as of `t`" to the generation that was current at `t`: the
+    /// newest retained generation with `published_at <= t`, pinned. `None` when
+    /// that generation is no longer retained (aged out) or `t` predates the
+    /// ring's first retained generation — never silently substitutes a different
+    /// point in time. Timestamps come from the configured clock; with the
+    /// default wall clock, ties/steps resolve toward the newest qualifying
+    /// generation (O(retained) scan — robust to non-monotonic clocks).
+    pub fn as_of(&self, t: SystemTime) -> Option<Arc<Generation<S>>> {
+        let inner = self.inner.lock().expect("generation ring poisoned");
+        inner.retained.iter().rev().find(|g| g.published_at <= t).cloned()
     }
 
     /// How many generations are still alive anywhere — retained by the ring *or*
