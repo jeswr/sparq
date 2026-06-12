@@ -130,6 +130,77 @@ def test_ask():
         graph.ask("DESCRIBE <http://ex/alice>")
 
 
+# --- construct / describe ----------------------------------------------------
+
+
+def test_construct_triples_and_dedup():
+    triples = g().construct(
+        "PREFIX ex: <http://ex/> "
+        "CONSTRUCT { ?s a ex:Person } WHERE { ?s ex:age ?a }"
+    )
+    assert len(triples) == 3  # one per subject (a set, deduplicated)
+    s, p, o = triples[0]
+    assert s.kind == "uri"
+    assert p.value == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+    assert o.value == "http://ex/Person"
+    assert {str(s) for s, _, _ in triples} == {
+        "http://ex/alice",
+        "http://ex/bob",
+        "http://ex/carol",
+    }
+
+
+def test_construct_drops_unbound_template_triples():
+    # carol knows nobody, so her ex:knows template triple is silently dropped
+    triples = g().construct(
+        "PREFIX ex: <http://ex/> "
+        "CONSTRUCT { ?s ex:knows ?k } WHERE { ?s ex:age ?a OPTIONAL { ?s ex:knows ?k } }"
+    )
+    assert len(triples) == 2
+
+
+def test_construct_literal_terms():
+    triples = g().construct(
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ex:bob ex:name ?n . BIND(ex:bob AS ?s) }"
+    )
+    ((_, _, o),) = triples
+    assert o.kind == "literal" and o.value == "Bob" and o.language == "en"
+
+
+def test_construct_requires_construct_query():
+    with pytest.raises(ValueError):
+        g().construct("SELECT * WHERE { ?s ?p ?o }")
+
+
+def test_describe_iri_and_var():
+    triples = g().describe("DESCRIBE <http://ex/alice>")
+    assert {(str(s), str(p)) for s, p, _ in triples} == {
+        ("http://ex/alice", "http://ex/knows"),
+        ("http://ex/alice", "http://ex/age"),
+        ("http://ex/alice", "http://ex/name"),
+    }
+    via_var = g().describe(
+        "PREFIX ex: <http://ex/> DESCRIBE ?s WHERE { ?s ex:name \"Alice\" }"
+    )
+    assert {t for t in via_var} == {t for t in triples}
+
+
+def test_describe_cbd_recurses_blank_nodes():
+    data = """
+    @prefix ex: <http://ex/> .
+    ex:alice ex:addr [ ex:city "Berlin" ] .
+    """
+    triples = sparq.Graph.load(data).describe("DESCRIBE <http://ex/alice>")
+    # the anonymous address node's own triples are part of alice's CBD
+    assert len(triples) == 2
+    assert any(o.value == "Berlin" for _, _, o in triples)
+
+
+def test_describe_requires_describe_query():
+    with pytest.raises(ValueError):
+        g().describe("PREFIX ex: <http://ex/> ASK { ex:alice ?p ?o }")
+
+
 # --- update -----------------------------------------------------------------
 
 
@@ -158,6 +229,33 @@ def test_update_error_leaves_graph_unchanged():
     with pytest.raises(ValueError):
         graph.update("NOT SPARQL")
     assert len(graph) == 7
+
+
+def test_update_named_graphs():
+    graph = g()
+    graph.update("INSERT DATA { GRAPH <http://ex/g1> { <http://ex/a> <http://ex/p> <http://ex/b> } }")
+    assert len(graph) == 7  # default graph untouched
+    assert graph.ask("ASK { GRAPH <http://ex/g1> { <http://ex/a> <http://ex/p> <http://ex/b> } }")
+    # GRAPH-scoped DELETE/INSERT ... WHERE
+    graph.update(
+        "DELETE { GRAPH <http://ex/g1> { ?s <http://ex/p> ?o } } "
+        "INSERT { GRAPH <http://ex/g1> { ?s <http://ex/q> ?o } } "
+        "WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p> ?o } }"
+    )
+    assert graph.ask("ASK { GRAPH <http://ex/g1> { <http://ex/a> <http://ex/q> <http://ex/b> } }")
+    graph.update("DROP GRAPH <http://ex/g1>")
+    assert not graph.ask("ASK { GRAPH <http://ex/g1> { ?s ?p ?o } }")
+
+
+def test_update_named_graphs_survive_default_graph_ops():
+    nq = (
+        "<http://ex/a> <http://ex/p> <http://ex/b> .\n"
+        "<http://ex/c> <http://ex/p> <http://ex/d> <http://ex/g1> .\n"
+    )
+    graph = sparq.Graph.load(nq, format="nquads")
+    graph.update("INSERT DATA { <http://ex/e> <http://ex/p> <http://ex/f> }")
+    assert len(graph) == 2
+    assert graph.ask("ASK { GRAPH <http://ex/g1> { <http://ex/c> <http://ex/p> <http://ex/d> } }")
 
 
 # --- reasoning --------------------------------------------------------------
@@ -208,6 +306,109 @@ def test_load_n3_forward_chaining():
     """
     graph = sparq.Graph.load_n3(n3)
     assert graph.ask("PREFIX ex: <http://ex/> ASK { ex:socrates a ex:Mortal }")
+
+
+def test_reason_preserves_named_graphs():
+    nq = (
+        "<http://ex/Dog> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex/Animal> .\n"
+        "<http://ex/rex> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Dog> .\n"
+        "<http://ex/c> <http://ex/p> <http://ex/d> <http://ex/g1> .\n"
+    )
+    graph = sparq.Graph.load(nq, format="nquads")
+    assert graph.reason("rdfs") >= 1
+    assert graph.ask("PREFIX ex: <http://ex/> ASK { ex:rex a ex:Animal }")
+    assert graph.ask("ASK { GRAPH <http://ex/g1> { <http://ex/c> <http://ex/p> <http://ex/d> } }")
+
+
+RULES = """
+@prefix ex: <http://ex/> .
+{ ?x a ex:Man } => { ?x a ex:Mortal } .
+"""
+
+
+def test_reason_n3_with_rules():
+    graph = sparq.Graph.load("@prefix ex: <http://ex/> . ex:socrates a ex:Man .")
+    q = "PREFIX ex: <http://ex/> ASK { ex:socrates a ex:Mortal }"
+    assert not graph.ask(q)
+    added = graph.reason_n3_with(RULES)
+    assert added == 1
+    assert graph.ask(q)
+    assert graph.reason_n3_with(RULES) == 0  # idempotent
+
+
+def test_reason_n3_with_builtins_and_literals():
+    graph = sparq.Graph.load(DATA)
+    added = graph.reason_n3_with(
+        """
+        @prefix ex: <http://ex/> .
+        @prefix math: <http://www.w3.org/2000/10/swap/math#> .
+        { ?x ex:age ?a . ?a math:notLessThan 30 } => { ?x a ex:Adult } .
+        """
+    )
+    assert added == 2  # alice (30) and carol (35)
+    res = graph.query("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s a ex:Adult } ORDER BY ?s")
+    assert [str(r["s"]) for r in res] == ["http://ex/alice", "http://ex/carol"]
+    # the original facts (incl. language-tagged literals) survive the round trip
+    assert graph.ask('PREFIX ex: <http://ex/> ASK { ex:bob ex:name "Bob"@en }')
+
+
+def test_reason_n3_with_facts_in_rules_document():
+    graph = sparq.Graph.load("@prefix ex: <http://ex/> . ex:socrates a ex:Man .")
+    graph.reason_n3_with("@prefix ex: <http://ex/> . ex:plato a ex:Man .")
+    assert graph.ask("PREFIX ex: <http://ex/> ASK { ex:plato a ex:Man }")
+
+
+def test_reason_n3_with_preserves_named_graphs():
+    nq = (
+        "<http://ex/socrates> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Man> .\n"
+        "<http://ex/c> <http://ex/p> <http://ex/d> <http://ex/g1> .\n"
+    )
+    graph = sparq.Graph.load(nq, format="nquads")
+    assert graph.reason_n3_with(RULES) == 1
+    assert graph.ask("ASK { GRAPH <http://ex/g1> { <http://ex/c> <http://ex/p> <http://ex/d> } }")
+
+
+def test_reason_n3_with_error_leaves_graph_unchanged():
+    graph = g()
+    with pytest.raises(ValueError):
+        graph.reason_n3_with("{ this is } not => valid n3 @@@")
+    assert len(graph) == 7
+    assert graph.ask("PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }")
+
+
+# --- inconsistencies ----------------------------------------------------------
+
+
+def test_inconsistencies_clean_graph():
+    assert g().inconsistencies() == []
+
+
+def test_inconsistencies_disjoint_classes():
+    data = """
+    @prefix ex: <http://ex/> .
+    @prefix owl: <http://www.w3.org/2002/07/owl#> .
+    ex:Cat owl:disjointWith ex:Dog .
+    ex:felix a ex:Cat , ex:Dog .
+    """
+    clashes = sparq.Graph.load(data).inconsistencies()
+    assert len(clashes) >= 1
+    assert any("felix" in c for c in clashes)
+
+
+def test_inconsistencies_after_owl_reasoning():
+    # the clash only follows by entailment (subclass membership): reason first
+    data = """
+    @prefix ex: <http://ex/> .
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+    @prefix owl: <http://www.w3.org/2002/07/owl#> .
+    ex:Cat owl:disjointWith ex:Dog .
+    ex:Tabby rdfs:subClassOf ex:Cat .
+    ex:felix a ex:Tabby , ex:Dog .
+    """
+    graph = sparq.Graph.load(data)
+    assert graph.inconsistencies() == []  # asserted triples alone do not clash
+    graph.reason("owl")
+    assert len(graph.inconsistencies()) >= 1
 
 
 # --- save / open ------------------------------------------------------------

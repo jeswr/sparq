@@ -47,6 +47,6 @@ sparq-engine = { path = "../sparq-engine" }
 # crate never enters the engine/CLI/wasm dependency graphs through this edge.
 sparq-reason = { path = "../sparq-reason" }
 oxrdf.workspace = true
-# Used only to classify ASK vs SELECT and rewrite ASK -> SELECT (the same trick
-# sparq-server uses): the engine has no native ASK entry point yet.
+# Used only to classify the query form in `Graph.ask` (ASK runs the engine's
+# native early-exiting entry point; SELECT is answered via the lazy count).
 spargebra.workspace = true

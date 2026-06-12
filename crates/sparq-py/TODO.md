@@ -6,34 +6,39 @@ their owning crates.
 
 ## Engine (sparq-engine)
 
-- ~~**No native ASK / CONSTRUCT / DESCRIBE.**~~ **STALE — engine fixed (T16);
-  bindings follow-up.** `sparq_engine` now has native `ask` (early-exiting),
-  `construct`, `describe`, `construct_ntriples` (+ `_with_budget` and `_prepared`
-  variants). The Python workaround is now the gap: rewire `Graph.ask` to
-  `sparq_engine::ask` and route CONSTRUCT / DESCRIBE in `Graph.query` instead of
-  raising `ValueError`. (Recorded for the bindings wave; the engine-seams wave does
-  not touch sparq-py source.)
-- ~~**Update drops named graphs.**~~ **STALE — engine fixed (update v2, F19).**
-  `sparq_engine::update` / `update_in_place` model the full dataset: named graphs
-  survive every operation, and GRAPH-scoped data ops, graph templates in
-  DELETE/INSERT…WHERE, USING (NAMED), CLEAR/DROP/CREATE/ADD/COPY/MOVE and LOAD are
-  implemented (engine tests `named_graph_updates`, `add_copy_move`). Bindings
-  follow-up: drop the named-graph caveats from the Python docs/tests.
+- ~~**No native ASK / CONSTRUCT / DESCRIBE.**~~ **DONE (py-parity wave).**
+  `Graph.ask` runs `sparq_engine::ask_prepared` (early-exiting; SELECT still
+  accepted via the lazy count), and `Graph.construct` / `Graph.describe` return
+  `(s, p, o)` `Term`-tuple lists.
+- ~~**Update drops named graphs.**~~ **DONE (py-parity wave, on top of update v2/F19).**
+  Named-graph caveats dropped from the Python docs/docstrings; GRAPH-scoped data
+  ops, graph templates and DROP covered by pytest.
+- **Full-text (`text:` magic predicates) is NOT reachable through `Graph.query`.**
+  Verified: `sparq-text` is deliberately a standalone opt-in crate — no other crate
+  (including sparq-engine and sparq-py) depends on it, and the `text:` rewrite only
+  runs through `sparq_text::query_text(graph, &TextIndex, sparql)`. Exposing it in
+  Python means adding the dependency plus a `TextIndex` lifecycle on the wrapper
+  (build lazily, invalidate on every update/reason swap) — real new surface, left
+  as a follow-up rather than wired in quietly.
 
 ## Reasoning (sparq-reason)
 
-- **`reason_n3` has no graph-input entry point.** `reason_n3(&mut Dict, src: &str)`
-  parses facts AND rules from one N3 document; there is no way to combine an
-  already-loaded graph with a separate rules document. So `graph.reason("n3")` is
-  rejected with a pointer to `Graph.load_n3(text)` (document-level N3 closure).
-  A `reason_n3_with(dict, triples, rules_src)` API would unlock
-  `graph.reason("n3", rules=...)`.
-- **Reasoning rebuilds, and drops named graphs** for the same reason as update:
-  the closure is materialized over the default graph's triples and the graph is
-  rebuilt with `from_parts` (which starts with no named graphs).
-- `inconsistencies()` (OWL clash detection) is not yet surfaced in Python; it
-  needs (dict, triples) access at the right moment — easy follow-up in
-  `Graph.reason("owl")` if wanted (e.g. return or raise on clashes).
+- ~~**`reason_n3` has no graph-input entry point.**~~ **DONE (py-parity wave).**
+  `Graph.reason_n3_with(rules)` applies a caller-supplied N3 rules document to an
+  already-loaded graph: the default graph is rendered as N-Triples (a syntactic
+  subset of N3) under the rules document and run through `reason_n3` — the same
+  composition `MaterializedN3Graph` uses in fallback mode, so list expansion and
+  builtins behave identically to `load_n3`. (A native
+  `reason_n3_with(dict, triples, rules_src)` seam in sparq-reason would skip the
+  serialize/reparse round trip; worth it only if profiling says so.)
+- ~~**Reasoning rebuilds, and drops named graphs.**~~ **DONE (py-parity wave).**
+  `reason` / `reason_n3_with` carry `Graph.named` across the rebuild (reasoning
+  itself still materializes over the default graph only).
+- ~~`inconsistencies()` not surfaced in Python.~~ **DONE (py-parity wave).**
+  `Graph.inconsistencies()` returns the clash descriptions (run `reason("owl")`
+  first for entailed clashes). It stays a separate query rather than a raise
+  inside `reason("owl")` — detection is over asserted triples, and callers may
+  want the closure even when inconsistent.
 
 ## Core (sparq-core)
 
