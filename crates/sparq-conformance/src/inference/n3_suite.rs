@@ -206,7 +206,12 @@ fn parse_with_watchdog_mode(
 }
 
 fn read(path: &Path) -> Result<String, Outcome> {
-    std::fs::read_to_string(path).map_err(|e| Outcome::Fail(format!("read {}: {e}", path.display())))
+    match std::fs::read(path) {
+        // Lossy: one legacy suite file (07test/utf8.n3) carries a stray
+        // non-UTF-8 byte; the replacement character keeps it parseable.
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) => Err(Outcome::Fail(format!("read {}: {e}", path.display()))),
+    }
 }
 
 fn syntax_test(action: &Path, tests_root: &Path, positive: bool, strict: bool) -> Outcome {
@@ -283,9 +288,6 @@ fn eval_test_turtle(
     tests_root: &Path,
     positive: bool,
 ) -> Outcome {
-    let Some(result) = result else {
-        return Outcome::Fail("eval test without mf:result".into());
-    };
     let src = match read(action) {
         Ok(s) => s,
         Err(o) => return o,
@@ -302,6 +304,16 @@ fn eval_test_turtle(
             }
             Err(e) => return Outcome::Fail(e),
         };
+    let Some(result) = result else {
+        // A NegativeEval without mf:result: the document must not evaluate —
+        // accepting it (we parsed fine and there is nothing to compare
+        // against) is a failure only for positive tests.
+        return if positive {
+            Outcome::Fail("eval test without mf:result".into())
+        } else {
+            Outcome::Fail("negative eval accepted (parsed; no result to refute)".into())
+        };
+    };
     // Expected side: N-Triples/Turtle ground graph via oxttl.
     let expected = match crate::rdf::parse_file(result) {
         Ok(t) => t,
@@ -427,7 +439,15 @@ fn options(g: &MiniGraph, node: &oxrdf::NamedOrBlankNode) -> Options {
 
 /// Suite entries whose REFERENCE disagrees with their action document —
 /// failing them is not an engine gap. Kept as documented divergences.
-const DOCUMENTED_DIVERGENCES: &[(&str, &str, &str)] = &[(
+const DOCUMENTED_DIVERGENCES: &[(&str, &str, &str)] = &[
+    (
+        "bad_prefix2",
+        "suite-internal conflict",
+        "extra/bad_prefix2.n3 expects an UNDECLARED ':' prefix to be rejected, but the \
+         reasoner manifest's own cwm actions (e.g. cwm_unify/unify1.n3) rely on cwm's \
+         undeclared-':'-means-<#> convention — the engine keeps the cwm behavior",
+    ),
+    (
     "cwm_unify_unify1",
     "upstream ref/action mismatch",
     "the action concludes `:test :a ?x` (predicate <unify1.n3#a>) but unify1-ref.n3 \

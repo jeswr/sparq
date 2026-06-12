@@ -233,7 +233,7 @@ struct Parser<'a> {
 }
 
 /// Maximum bracket-nesting depth (see `Parser::depth`).
-const MAX_DEPTH: usize = 1024;
+const MAX_DEPTH: usize = 4096;
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str) -> Parser<'a> {
@@ -369,8 +369,8 @@ impl<'a> Parser<'a> {
         let iri = self.read_iriref()?;
         self.prefixes.insert(pfx, iri);
         let dotted = self.eat(b'.');
-        if self.strict && at_form && !dotted {
-            return Err("@prefix directive must end with '.'".into());
+        if self.strict && at_form != dotted {
+            return Err("'@prefix' needs a final '.'; SPARQL-style PREFIX must not have one".into());
         }
         Ok(())
     }
@@ -381,8 +381,8 @@ impl<'a> Parser<'a> {
         // read_iriref already resolves the new base against the current one.
         self.base = self.read_iriref()?;
         let dotted = self.eat(b'.');
-        if self.strict && at_form && !dotted {
-            return Err("@base directive must end with '.'".into());
+        if self.strict && at_form != dotted {
+            return Err("'@base' needs a final '.'; SPARQL-style BASE must not have one".into());
         }
         Ok(())
     }
@@ -407,6 +407,12 @@ impl<'a> Parser<'a> {
             }
         }
         self.eat(b'.');
+        if kws.is_empty() {
+            // `@keywords .` (no keywords at all) is rejected — the N3 CG
+            // suite marks the empty form invalid (cwm_syntax keywords1/2)
+            // while the with_keywords corpus always declares a non-empty set.
+            return Err("@keywords requires at least one keyword".into());
+        }
         self.keywords = Some(kws);
         Ok(())
     }
@@ -500,11 +506,23 @@ impl<'a> Parser<'a> {
                 return Ok((Term::Iri(OWL_SAME_AS.into()), false));
             }
         }
-        // `a` keyword (rdf:type) — only when a standalone token.
-        if self.starts_with("a") {
+        // `a` keyword (rdf:type) — only when a standalone token. Under
+        // `@keywords` the bare form needs 'a' declared; `@a` always works.
+        let a_allowed = match &self.keywords {
+            Some(kws) => kws.contains("a"),
+            None => true,
+        };
+        if a_allowed && self.starts_with("a") {
             let j = self.i + 1;
             if j >= self.s.len() || (self.s[j] as char).is_whitespace() || self.s[j] == b'<' {
                 self.i += 1;
+                return Ok((Term::Iri(RDF_TYPE.into()), false));
+            }
+        }
+        if !self.strict && self.starts_with("@a") {
+            let j = self.i + 2;
+            if j >= self.s.len() || (self.s[j] as char).is_whitespace() {
+                self.i += 2;
                 return Ok((Term::Iri(RDF_TYPE.into()), false));
             }
         }
@@ -535,6 +553,7 @@ impl<'a> Parser<'a> {
         while let Some(&c) = self.s.get(j) {
             match c {
                 b'>' => return true,
+                b'<' => return false, // a second '<' — not inside any IRIREF
                 c if (c as char).is_whitespace() => return false,
                 _ => j += 1,
             }
@@ -542,12 +561,17 @@ impl<'a> Parser<'a> {
         false
     }
 
-    /// Consume `kw` when it stands as a whole token (followed by whitespace).
+    /// Consume `kw` when it stands as a whole token (followed by whitespace);
+    /// under `@keywords`, the explicit `@kw` form is always a keyword.
     fn keyword(&mut self, kw: &str) -> bool {
         self.ws();
-        let end = self.i + kw.len();
-        if self.s[self.i..].starts_with(kw.as_bytes())
-            && self.s.get(end).is_none_or(|c| (*c as char).is_whitespace())
+        let at = self.peek() == Some(b'@');
+        let start = self.i + usize::from(at);
+        let end = start + kw.len();
+        if self.s[start..].starts_with(kw.as_bytes())
+            && self.s.get(end).is_none_or(|c| {
+                (*c as char).is_whitespace() || matches!(c, b'.' | b';' | b',' | b')' | b']' | b'}')
+            })
         {
             self.i = end;
             true
@@ -596,8 +620,10 @@ impl<'a> Parser<'a> {
     }
 
     fn fresh_pathvar(&mut self) -> Term {
+        // Path steps mint EXISTENTIALS (cwm prints them as bnodes); inside a
+        // rule premise the blank→variable rewrite turns them into join vars.
         self.pathvar += 1;
-        Term::Var(format!("__path{}", self.pathvar))
+        Term::Blank(format!("__path{}", self.pathvar))
     }
 
     /// A single atomic term (no path operators).
@@ -617,13 +643,19 @@ impl<'a> Parser<'a> {
                     return Err("variables are not Turtle".into());
                 }
                 self.i += 1;
-                Ok(Term::Var(self.read_name()))
+                let v = self.read_name();
+                if self.peek() == Some(b'@') {
+                    // `?D@de` (euler-era language cast on a variable): ignore.
+                    self.i += 1;
+                    let _ = self.read_name();
+                }
+                Ok(Term::Var(v))
             }
             Some(b'_') => {
                 // _:label
                 self.i += 1;
                 self.eat(b':');
-                Ok(Term::Blank(self.read_name()))
+                Ok(Term::Blank(self.read_blank_label()))
             }
             Some(b'{') => {
                 if self.strict {
@@ -634,14 +666,30 @@ impl<'a> Parser<'a> {
             Some(b'(') => self.read_collection(out),
             Some(b'[') => self.read_bnode_propertylist(out),
             Some(c) if c.is_ascii_digit() || c == b'+' || c == b'-' || c == b'.' => self.read_number(),
-            Some(_) => {
-                // prefixed name, `true`/`false`, or `a`
-                if self.starts_with("true") {
-                    self.i += 4;
+            Some(b'@') if !self.strict => {
+                // `@true` / `@false` (the explicit keyword forms under @keywords)
+                if self.starts_with("@true") {
+                    self.i += 5;
                     return Ok(Term::Lit("true".into(), XSD_BOOLEAN.into(), None));
                 }
-                if self.starts_with("false") {
-                    self.i += 5;
+                if self.starts_with("@false") {
+                    self.i += 6;
+                    return Ok(Term::Lit("false".into(), XSD_BOOLEAN.into(), None));
+                }
+                Err(format!("unexpected '@' token at byte {}", self.i))
+            }
+            Some(_) => {
+                // prefixed name, `true`/`false`, or `a`
+                let bool_allowed = |kws: &Option<std::collections::HashSet<String>>, w: &str| {
+                    match kws {
+                        Some(set) => set.contains(w),
+                        None => true,
+                    }
+                };
+                if bool_allowed(&self.keywords, "true") && self.keyword("true") {
+                    return Ok(Term::Lit("true".into(), XSD_BOOLEAN.into(), None));
+                }
+                if bool_allowed(&self.keywords, "false") && self.keyword("false") {
                     return Ok(Term::Lit("false".into(), XSD_BOOLEAN.into(), None));
                 }
                 match self.read_prefixed_name()? {
@@ -730,9 +778,9 @@ impl<'a> Parser<'a> {
         while self.i < self.s.len() {
             let c = self.s[self.i];
             if (c as char).is_whitespace()
-                || matches!(c, b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{' | b'!' | b'^')
+                || matches!(c, b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{' | b'!' | b'^' | b'#')
             {
-                break;
+                break; // '#' starts a comment — never part of an (unescaped) pname
             }
             if c == b'\\' {
                 // PN_LOCAL_ESC: the escaped punctuation char, literally.
@@ -756,9 +804,31 @@ impl<'a> Parser<'a> {
                 if !cont {
                     break;
                 }
+                if self.strict && tok.ends_with(':') {
+                    return Err("local name cannot start with '.'".into());
+                }
                 tok.push('.');
                 self.i += 1;
                 continue;
+            }
+            if self.strict {
+                // W3C Turtle PN rules on the RAW characters (escapes were
+                // handled above): '%' needs two hex digits; other ASCII
+                // punctuation must be escaped; locals cannot start with '-'.
+                if c == b'%' {
+                    let ok = self.s.get(self.i + 1).is_some_and(u8::is_ascii_hexdigit)
+                        && self.s.get(self.i + 2).is_some_and(u8::is_ascii_hexdigit);
+                    if !ok {
+                        return Err("bad %-sequence in prefixed name".into());
+                    }
+                } else if c == b'-' && tok.ends_with(':') {
+                    return Err("local name cannot start with '-'".into());
+                } else if c.is_ascii()
+                    && !c.is_ascii_alphanumeric()
+                    && !matches!(c, b'_' | b'-' | b'.' | b':' | b'%')
+                {
+                    return Err(format!("character '{}' must be escaped in a local name", c as char));
+                }
             }
             let len = utf8_len(c);
             tok.push_str(std::str::from_utf8(&self.s[self.i..self.i + len]).map_err(|e| e.to_string())?);
@@ -799,13 +869,33 @@ impl<'a> Parser<'a> {
         let start = self.i;
         while self.i < self.s.len() {
             let c = self.s[self.i];
-            if (c as char).is_alphanumeric() || c == b'_' || c == b'-' {
+            if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
                 self.i += 1;
+            } else if c >= 0x80 {
+                self.i += utf8_len(c); // whole code point (PN_CHARS go beyond ASCII)
             } else {
                 break;
             }
         }
-        std::str::from_utf8(&self.s[start..self.i]).unwrap().to_string()
+        String::from_utf8_lossy(&self.s[start..self.i]).into_owned()
+    }
+
+    /// A blank-node label: like a name, but dots are allowed INSIDE
+    /// (`_:b.0` — Turtle BLANK_NODE_LABEL).
+    fn read_blank_label(&mut self) -> String {
+        let mut label = self.read_name();
+        while self.peek() == Some(b'.') {
+            let cont = self.s.get(self.i + 1).is_some_and(|&n| {
+                n.is_ascii_alphanumeric() || matches!(n, b'_' | b'-') || n >= 0x80
+            });
+            if !cont {
+                break;
+            }
+            self.i += 1;
+            label.push('.');
+            label.push_str(&self.read_name());
+        }
+        label
     }
 
     fn read_literal(&mut self) -> Result<Term, String> {
@@ -868,7 +958,22 @@ impl<'a> Parser<'a> {
         } else if self.peek() == Some(b'@') {
             self.i += 1;
             let lang = self.read_name();
-            Ok(Term::Lit(val, "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(), Some(lang)))
+            // LANGTAG: [a-zA-Z]+('-'[a-zA-Z0-9]+)*; canonical form is lowercase.
+            let valid = !lang.is_empty()
+                && lang.split('-').enumerate().all(|(k, part)| {
+                    !part.is_empty()
+                        && part.bytes().all(|c| {
+                            c.is_ascii_alphabetic() || (k > 0 && c.is_ascii_digit())
+                        })
+                });
+            if !valid {
+                return Err(format!("invalid language tag '@{lang}'"));
+            }
+            Ok(Term::Lit(
+                val,
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(),
+                Some(lang.to_ascii_lowercase()),
+            ))
         } else {
             Ok(Term::Lit(val, "http://www.w3.org/2001/XMLSchema#string".into(), None))
         }
