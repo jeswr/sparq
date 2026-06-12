@@ -1523,13 +1523,6 @@ fn remap_extend(out: &mut Vec<[Id; 3]>, triples: Vec<[Id; 3]>, remap: &[Id]) {
     }
 }
 
-/// Isolated micro-benchmark of the latency-bound `remap_extend` gather (the build-path
-/// bottleneck the per-ISA prefetch targets). Builds `n` synthetic triples whose ids scatter
-/// randomly across a `dict_size`-entry remap table (so the gather misses cache like a real large
-/// global dictionary), then times `remap_extend` over `iters` runs and returns the best (ms).
-/// Honours `SPARQ_NO_PREFETCH=1`. Used to measure the prefetch's effect per hardware in isolation,
-/// undiluted by parsing. Not part of the query/build path.
-#[cfg(feature = "parallel")]
 /// Borrowing iterator over a graph's default-graph triples as canonical
 /// `[subject, predicate, object]` ids — see [`Graph::iter_ids`] /
 /// [`Graph::iter_ids_sorted`]. Holds the underlying index scan (a zero-copy
@@ -1557,6 +1550,13 @@ impl Iterator for TripleIdIter<'_> {
 
 impl ExactSizeIterator for TripleIdIter<'_> {}
 
+/// Isolated micro-benchmark of the latency-bound `remap_extend` gather (the build-path
+/// bottleneck the per-ISA prefetch targets). Builds `n` synthetic triples whose ids scatter
+/// randomly across a `dict_size`-entry remap table (so the gather misses cache like a real large
+/// global dictionary), then times `remap_extend` over `iters` runs and returns the best (ms).
+/// Honours `SPARQ_NO_PREFETCH=1`. Used to measure the prefetch's effect per hardware in isolation,
+/// undiluted by parsing. Not part of the query/build path.
+#[cfg(feature = "parallel")]
 pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
     // Cheap deterministic LCG scatter (no rand dep, no Date/Random harness restrictions).
     let mut x: u64 = 0x9E3779B97F4A7C15;
