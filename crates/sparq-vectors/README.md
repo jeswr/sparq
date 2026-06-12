@@ -14,7 +14,15 @@ Opt-in **embedding storage + nearest-neighbour search** for the
   of the file — is paged in by the OS on access. All-zero vectors are
   rejected at `put` (cosine is undefined on them), and an all-zero *query*
   returns no results from both searchers, so exact and HNSW agree even on
-  degenerate inputs.
+  degenerate inputs. `open_from_bytes` opens a store held entirely in memory
+  (filesystem-less environments), with identical validation.
+- **`StreamingWriter`** — builds stores **bigger than RAM**: each `put`
+  appends the vector straight to the file's data section and spills the id to
+  a sidecar, so build-phase memory is O(1) (`finalize` transiently holds the
+  8-byte-per-vector index to sort it — 192× less than the 384-d f32 data the
+  in-RAM builder would hold). Output is byte-identical to
+  `create`/`put`/`finalize`; duplicate ids are reported at `finalize` (the
+  sort reveals them) instead of at `put`.
 - **`nearest_exact` / `VectorIndex`** — exact brute-force cosine top-`k` (the
   ground-truth baseline) and an HNSW approximate index
   ([`instant-distance`](https://crates.io/crates/instant-distance), pure
@@ -40,10 +48,12 @@ Opt-in **embedding storage + nearest-neighbour search** for the
   per entity (`rdfs:label` > `skos:prefLabel` > `foaf:name` > `schema:name`
   > `dc:title`, configurable via `LabelConfig`), scanning each predicate's
   contiguous index block rather than the whole graph.
-- **`fuse_rrf` / `fuse_scores`** — rank/score **fusion for hybrid search**:
-  combine the text-vector ranking with another ranked signal (typically
-  [`sparq-sim`](../sparq-sim)'s structural similarity) with reciprocal-rank
-  fusion or a normalized alpha-blend.
+- **`fuse_rrf` / `fuse_rrf_weighted` / `fuse_scores`** — rank/score **fusion
+  for hybrid search**: combine the text-vector ranking with another ranked
+  signal (typically [`sparq-sim`](../sparq-sim)'s structural similarity) with
+  reciprocal-rank fusion (optionally per-list weighted, Elasticsearch-style —
+  down-weight a noisier signal without dropping it) or a normalized
+  alpha-blend.
 
 This is a **separate crate** by design: nothing in the workspace depends on
 it (the wasm build in particular is untouched), and the default engine build
@@ -221,7 +231,9 @@ store per process rather than persisted; out-of-core persistent ANN
 ## Tests
 
 - `tests/store.rs` — `.spqv` round-trip, sparse/unsorted ids, build-phase
-  error paths, garbage/truncated/overflowing-header/corrupt-index rejection.
+  error paths, garbage/truncated/overflowing-header/corrupt-index rejection,
+  streaming-writer byte-identity with the in-RAM builder (+ sidecar cleanup,
+  duplicate-at-finalize detection), and `open_from_bytes` parity/validation.
 - `tests/recall.rs` — the recall@10 ≥ 0.95 gate plus exact/HNSW agreement on
   separable clusters.
 - `tests/labels.rs` — `embed_labels` predicate priority, literal filtering,
@@ -230,8 +242,9 @@ store per process rather than persisted; out-of-core persistent ANN
   template shape, language preference + fallback, predicate priority, type
   naming (label vs local name), prefixes and value caps, char-budget
   truncation, type-only skip, embed coverage/determinism/dim mismatch.
-- `src/fuse.rs` unit tests — hand-computed RRF scores, rank-only invariance,
-  min-max blend, tie-break determinism, input validation.
+- `src/fuse.rs` unit tests — hand-computed RRF scores (plain and weighted,
+  incl. unit-weight equivalence and zero-weight muting), rank-only
+  invariance, min-max blend, tie-break determinism, input validation.
 - `tests/olympics.rs` — the real 1.78M-triple olympics dataset (137k labels):
   embed → finalize → HNSW → `nearest_term`, with a same-type sanity check on
   the neighbours. **Skips (passes with a stderr note) when

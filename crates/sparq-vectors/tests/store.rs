@@ -145,3 +145,114 @@ fn open_rejects_corrupt_index() {
     assert!(VectorStore::open(file_with_index("idx-bad-slot.spqv", &[(5, 0), (9, 7)])).is_err());
     assert!(VectorStore::open(file_with_index("idx-dup-slot.spqv", &[(5, 0), (9, 0)])).is_err());
 }
+
+// ------------------------------------------------------------- streaming writer
+
+#[test]
+fn streaming_writer_produces_byte_identical_store() {
+    use sparq_vectors::StreamingWriter;
+    // Same put sequence through both builders → byte-identical .spqv files.
+    let a_path = tmp_path("stream-a.spqv");
+    let b_path = tmp_path("stream-b.spqv");
+    let puts: &[(u32, [f32; 3])] = &[
+        (42, [1.0, 2.0, 3.0]),
+        (7, [4.0, 5.0, 6.0]),
+        (1_000_000, [-1.5, 0.0, 2.5]),
+    ];
+    let mut in_ram = VectorStore::create(&a_path, 3).unwrap();
+    let mut streaming = StreamingWriter::create(&b_path, 3).unwrap();
+    for (id, v) in puts {
+        in_ram.put(*id, v).unwrap();
+        streaming.put(*id, v).unwrap();
+    }
+    in_ram.finalize().unwrap();
+    assert_eq!(streaming.len(), 3);
+    let store = streaming.finalize().unwrap();
+    assert_eq!(std::fs::read(&a_path).unwrap(), std::fs::read(&b_path).unwrap());
+
+    // The returned handle is a normal opened store.
+    assert_eq!(store.dim(), 3);
+    assert_eq!(store.len(), 3);
+    assert_eq!(store.get(7), Some(&[4.0f32, 5.0, 6.0][..]));
+    assert_eq!(store.get(8), None);
+    let pairs: Vec<u32> = store.iter().map(|(id, _)| id).collect();
+    assert_eq!(pairs, [42, 7, 1_000_000], "insertion-slot order");
+
+    // The sidecar id spill is gone.
+    let mut sidecar = b_path.clone().into_os_string();
+    sidecar.push(".ids-tmp");
+    assert!(!std::path::PathBuf::from(sidecar).exists());
+}
+
+#[test]
+fn streaming_writer_empty_and_validation() {
+    use sparq_vectors::StreamingWriter;
+    let path = tmp_path("stream-empty.spqv");
+    let w = StreamingWriter::create(&path, 4).unwrap();
+    assert!(w.is_empty());
+    let store = w.finalize().unwrap();
+    assert!(store.is_empty());
+    assert!(VectorStore::open(&path).is_ok());
+
+    let mut w = StreamingWriter::create(tmp_path("stream-bad.spqv"), 2).unwrap();
+    assert!(w.put(1, &[1.0]).is_err(), "dim mismatch");
+    assert!(w.put(1, &[f32::NAN, 1.0]).is_err(), "non-finite");
+    assert!(w.put(1, &[0.0, 0.0]).is_err(), "all-zero");
+    assert!(StreamingWriter::create(tmp_path("zero-dim.spqv"), 0).is_err());
+}
+
+#[test]
+fn streaming_writer_detects_duplicates_at_finalize_and_cleans_up() {
+    use sparq_vectors::StreamingWriter;
+    let path = tmp_path("stream-dup.spqv");
+    let mut w = StreamingWriter::create(&path, 2).unwrap();
+    w.put(5, &[1.0, 0.0]).unwrap();
+    w.put(5, &[0.0, 1.0]).unwrap(); // duplicate id: accepted here…
+    let err = match w.finalize() {
+        Ok(_) => panic!("duplicate id must fail finalize"),
+        Err(e) => e, // …reported here
+    };
+    assert!(err.contains("duplicate"), "{err}");
+    // On error both the partial store and the sidecar are removed.
+    assert!(!path.exists());
+    let mut sidecar = path.clone().into_os_string();
+    sidecar.push(".ids-tmp");
+    assert!(!std::path::PathBuf::from(sidecar).exists());
+}
+
+// ------------------------------------------------------------- bytes-backed open
+
+#[test]
+fn open_from_bytes_matches_mmap_open() {
+    let path = tmp_path("bytes.spqv");
+    let mut store = VectorStore::create(&path, 3).unwrap();
+    store.put(42, &[1.0, 2.0, 3.0]).unwrap();
+    store.put(7, &[4.0, 5.0, 6.0]).unwrap();
+    store.finalize().unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    let mem = VectorStore::open_from_bytes(bytes).unwrap();
+    assert_eq!(mem.dim(), 3);
+    assert_eq!(mem.len(), 2);
+    assert_eq!(mem.get(42), Some(&[1.0f32, 2.0, 3.0][..]));
+    assert_eq!(mem.get(7), Some(&[4.0f32, 5.0, 6.0][..]));
+    assert_eq!(mem.get(8), None);
+    let pairs: Vec<u32> = mem.iter().map(|(id, _)| id).collect();
+    assert_eq!(pairs, [42, 7]);
+}
+
+#[test]
+fn open_from_bytes_validates_like_open() {
+    assert!(VectorStore::open_from_bytes(b"garbage".to_vec()).is_err());
+    let mut bad_magic = vec![0u8; 32];
+    bad_magic[0..4].copy_from_slice(b"NOPE");
+    assert!(VectorStore::open_from_bytes(bad_magic).is_err());
+    // A truncated copy of a valid store must be rejected by the size check.
+    let path = tmp_path("bytes-trunc.spqv");
+    let mut store = VectorStore::create(&path, 2).unwrap();
+    store.put(1, &[1.0, 2.0]).unwrap();
+    store.finalize().unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.truncate(bytes.len() - 1);
+    assert!(VectorStore::open_from_bytes(bytes).is_err());
+}

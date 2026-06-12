@@ -51,13 +51,37 @@ pub fn fuse_rrf<T: Clone + Eq + Hash>(
     k: f64,
     top_k: usize,
 ) -> Vec<(T, f64)> {
+    let weighted: Vec<(&[(T, f64)], f64)> = lists.iter().map(|&l| (l, 1.0)).collect();
+    fuse_rrf_weighted(&weighted, k, top_k)
+}
+
+/// **Weighted Reciprocal Rank Fusion** (Elasticsearch-style): like
+/// [`fuse_rrf`] but each list carries a non-negative weight —
+/// `score(item) = Σ_lists weight_l / (k + rank_l)`, ranks 1-based. Use it to
+/// down-weight a noisier signal without dropping it (e.g. text 1.0,
+/// structural 0.5); weight 0 mutes a list entirely (its items still appear,
+/// scored only by the other lists), and all-1.0 weights reduce to plain
+/// [`fuse_rrf`]. Ties break by first appearance across `(list, rank)` order,
+/// deterministically.
+///
+/// # Panics
+/// If `k ≤ 0`, or any weight is negative or non-finite.
+pub fn fuse_rrf_weighted<T: Clone + Eq + Hash>(
+    lists: &[(&[(T, f64)], f64)],
+    k: f64,
+    top_k: usize,
+) -> Vec<(T, f64)> {
     assert!(k > 0.0, "RRF k must be positive");
+    assert!(
+        lists.iter().all(|&(_, w)| w.is_finite() && w >= 0.0),
+        "RRF list weights must be finite and non-negative"
+    );
     // item -> (fused score, first-seen order for deterministic ties)
     let mut acc: FxHashMap<T, (f64, usize)> = FxHashMap::default();
     let mut order = 0usize;
-    for list in lists {
+    for (list, weight) in lists {
         for (rank0, (item, _)) in list.iter().enumerate() {
-            let contribution = 1.0 / (k + (rank0 + 1) as f64);
+            let contribution = weight / (k + (rank0 + 1) as f64);
             let entry = acc.entry(item.clone()).or_insert_with(|| {
                 order += 1;
                 (0.0, order)
@@ -194,5 +218,45 @@ mod tests {
         let a: Vec<(&str, f64)> = vec![];
         let b: Vec<(&str, f64)> = vec![];
         fuse_scores(&a, &b, 1.5, 1);
+    }
+
+    #[test]
+    fn weighted_rrf_hand_computed_and_reduces_to_plain() {
+        let a: Vec<(&str, f64)> = vec![("x", 0.9), ("y", 0.8)];
+        let b: Vec<(&str, f64)> = vec![("y", 0.3), ("z", 0.2)];
+        // Unit weights ≡ plain RRF (scores and order).
+        let plain = fuse_rrf(&[&a, &b], 60.0, 10);
+        let unit = fuse_rrf_weighted(&[(&a, 1.0), (&b, 1.0)], 60.0, 10);
+        assert_eq!(plain, unit);
+        // Down-weight list b to 0.5: y = 1/61·0 + … hand-computed.
+        let fused = fuse_rrf_weighted(&[(&a, 1.0), (&b, 0.5)], 60.0, 10);
+        // x: 1/61; y: 1/62 + 0.5/61; z: 0.5/62.
+        assert_eq!(fused[0].0, "y");
+        assert!((fused[0].1 - (1.0 / 62.0 + 0.5 / 61.0)).abs() < 1e-12);
+        assert_eq!(fused[1].0, "x");
+        assert!((fused[1].1 - 1.0 / 61.0).abs() < 1e-12);
+        assert_eq!(fused[2].0, "z");
+        assert!((fused[2].1 - 0.5 / 62.0).abs() < 1e-12);
+        // Weight strong enough to flip the consensus winner:
+        // x = 3/61 ≈ 0.04918 must beat y = 3/62 + 0.01/61 ≈ 0.04855.
+        let text_heavy = fuse_rrf_weighted(&[(&a, 3.0), (&b, 0.01)], 60.0, 10);
+        assert_eq!(text_heavy[0].0, "x");
+    }
+
+    #[test]
+    fn weighted_rrf_zero_weight_mutes_a_list() {
+        let a: Vec<(&str, f64)> = vec![("x", 1.0)];
+        let b: Vec<(&str, f64)> = vec![("y", 1.0), ("x", 0.5)];
+        let fused = fuse_rrf_weighted(&[(&a, 0.0), (&b, 1.0)], 60.0, 10);
+        // x still appears (rank 2 in b) but a contributes nothing.
+        assert_eq!(fused[0].0, "y");
+        assert!((fused[1].1 - 1.0 / 62.0).abs() < 1e-12);
+    }
+
+    #[test]
+    #[should_panic(expected = "weights must be finite and non-negative")]
+    fn weighted_rrf_rejects_negative_weight() {
+        let a: Vec<(&str, f64)> = vec![("x", 1.0)];
+        fuse_rrf_weighted(&[(&a, -0.1)], 60.0, 1);
     }
 }
