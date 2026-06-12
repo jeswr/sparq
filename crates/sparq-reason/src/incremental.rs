@@ -56,6 +56,15 @@ use crate::Vocab;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
+/// Opt-in `why()` provers (the `explain` feature) — a child module so it can reach the
+/// private maintenance state, kept in its own file. Everything explanation-related is
+/// cfg'd out entirely without the feature.
+#[cfg(feature = "explain")]
+#[path = "incremental_explain.rs"]
+mod incremental_explain;
+#[cfg(feature = "explain")]
+use incremental_explain::RdfsExplain;
+
 const OWL_NS: &str = "http://www.w3.org/2002/07/owl#";
 const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
 
@@ -86,6 +95,10 @@ pub struct MaterializedGraph {
     /// How many times the v1 full-rematerialization fallback ran (TBox mutations). The initial
     /// materialization in [`new`](Self::new) is not counted. Exposed for tests/telemetry.
     rebuilds: usize,
+    /// Explanation state (`explain` feature): raw TBox edge maps + base reverse indexes —
+    /// everything `why()` needs to reconstruct a derivation deterministically.
+    #[cfg(feature = "explain")]
+    explain: RdfsExplain,
 }
 
 impl MaterializedGraph {
@@ -106,6 +119,8 @@ impl MaterializedGraph {
             dom_full: FxHashMap::default(),
             rng_full: FxHashMap::default(),
             rebuilds: 0,
+            #[cfg(feature = "explain")]
+            explain: RdfsExplain::default(),
         };
         g.rematerialize();
         g.rebuilds = 0; // the initial materialization is not a fallback
@@ -168,6 +183,8 @@ impl MaterializedGraph {
         for (&p, qs) in &self.sp_closure {
             self.schema_facts.extend(qs.iter().map(|&q| [p, v.sub_prop, q]));
         }
+        #[cfg(feature = "explain")]
+        self.explain.rebuild(&self.base, sc, sp, dom, rng);
     }
 
     /// All one-step consequences (the exact emission multiset) of `triples` against the
@@ -206,6 +223,8 @@ impl MaterializedGraph {
             self.rematerialize();
             return added.len();
         }
+        #[cfg(feature = "explain")]
+        self.explain.add_triples(&added);
         for t in self.consequences(&added) {
             *self.counts.entry(t).or_insert(0) += 1;
         }
@@ -235,6 +254,8 @@ impl MaterializedGraph {
             self.rematerialize();
             return removed.len();
         }
+        #[cfg(feature = "explain")]
+        self.explain.remove_triples(&removed);
         for t in self.consequences(&removed) {
             match self.counts.get_mut(&t) {
                 Some(c) if *c > 1 => *c -= 1,
