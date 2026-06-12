@@ -3,13 +3,16 @@
 //!
 //! # Time-window semantics (read this; the tests pin it down)
 //!
-//! * Windows are **half-open intervals `[start, end)`** with `start = k·step`,
+//! * Windows are **half-open intervals `[start, end)`** with `start = t0 + k·step`,
 //!   `end = start + range`, for `k = 0, 1, 2, …` — i.e. the window origin
-//!   `t0` is fixed at timestamp `0` (RSP-QL parameterises `t0`; we don't — a
-//!   documented divergence, see the crate README). A triple with timestamp `t`
-//!   belongs to window `k` iff `start ≤ t < end`: the start bound is
-//!   INCLUSIVE, the end bound EXCLUSIVE, so `RANGE 10 STEP 10` windows
-//!   `[0,10) [10,20) …` partition the timeline with no double-counting.
+//!   `t0` defaults to timestamp `0` (the RSP-QL parameterised origin is set
+//!   with [`WindowSpec::with_t0`]). A triple with timestamp `t` belongs to
+//!   window `k` iff `start ≤ t < end`: the start bound is INCLUSIVE, the end
+//!   bound EXCLUSIVE, so `RANGE 10 STEP 10` windows `[0,10) [10,20) …`
+//!   partition the timeline with no double-counting. A triple with `t < t0`
+//!   predates the stream origin: it belongs to no window (and is not counted
+//!   late — no window ever covered it), but it still advances the watermark,
+//!   exactly like a gap arrival.
 //! * **Closure is watermark-driven, never wall-clock-driven.** The watermark is
 //!   `max_ts_seen − max_delay` (saturating). Window `k` CLOSES — its content is
 //!   frozen and reported — as soon as the watermark reaches its `end`. Time
@@ -48,7 +51,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use oxrdf::Term;
 
-use crate::stream::{TimestampedTriple, TripleStream};
+use crate::stream::{Timestamped, TripleStream};
 
 /// A window specification (the S2R operator of RSP-QL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,14 +60,16 @@ pub enum WindowSpec {
     /// time window. `max_delay` is the out-of-order tolerance: the watermark
     /// lags the maximum seen timestamp by this much, holding windows open for
     /// late arrivals (0 = closed at the first sight of a newer-window triple).
-    Time { range: u64, step: u64, max_delay: u64 },
+    /// `t0` is the RSP-QL window origin: window `k` covers
+    /// `[t0 + k·step, t0 + k·step + range)`.
+    Time { range: u64, step: u64, max_delay: u64, t0: u64 },
     /// `ROWS rows` — count window over the last `rows` arrivals, reported
     /// every `slide` arrivals (CQL default: every arrival, `slide = 1`).
     Count { rows: usize, slide: usize },
 }
 
 impl WindowSpec {
-    /// `RANGE range STEP step`, no lateness tolerance.
+    /// `RANGE range STEP step`, no lateness tolerance, origin `t0 = 0`.
     ///
     /// # Panics
     /// If `range == 0` or `step == 0` (a zero-width or non-advancing window
@@ -72,7 +77,7 @@ impl WindowSpec {
     pub fn time(range: u64, step: u64) -> Self {
         assert!(range > 0, "window RANGE must be > 0");
         assert!(step > 0, "window STEP must be > 0");
-        WindowSpec::Time { range, step, max_delay: 0 }
+        WindowSpec::Time { range, step, max_delay: 0, t0: 0 }
     }
 
     /// `ROWS rows`, reported on every arrival.
@@ -91,8 +96,26 @@ impl WindowSpec {
     /// not apply).
     pub fn with_max_delay(self, max_delay: u64) -> Self {
         match self {
-            WindowSpec::Time { range, step, .. } => WindowSpec::Time { range, step, max_delay },
+            WindowSpec::Time { range, step, t0, .. } => {
+                WindowSpec::Time { range, step, max_delay, t0 }
+            }
             WindowSpec::Count { .. } => panic!("max_delay applies to time windows only"),
+        }
+    }
+
+    /// Sets the window origin `t0` of a time window (the RSP-QL `t0`
+    /// parameter): window `k` covers `[t0 + k·step, t0 + k·step + range)`.
+    /// Arrivals with `ts < t0` predate the stream origin — they enter no
+    /// window (and are not counted late) but still advance the watermark.
+    ///
+    /// # Panics
+    /// On a count window (count windows have no time axis).
+    pub fn with_t0(self, t0: u64) -> Self {
+        match self {
+            WindowSpec::Time { range, step, max_delay, .. } => {
+                WindowSpec::Time { range, step, max_delay, t0 }
+            }
+            WindowSpec::Count { .. } => panic!("t0 applies to time windows only"),
         }
     }
 
@@ -111,24 +134,26 @@ impl WindowSpec {
 }
 
 /// One CLOSED (time) or REPORTED (count) window: bounds + frozen content.
+/// Generic over the stream payload (the public API works with `[Term; 3]`;
+/// the persistent-dictionary evaluation mode windows `[Id; 3]`s).
 #[derive(Debug, Clone)]
-pub struct Window {
-    /// Time window: inclusive start `k·step`. Count window: `ts` of the oldest
-    /// content triple.
+pub struct Window<T = [Term; 3]> {
+    /// Time window: inclusive start `t0 + k·step`. Count window: `ts` of the
+    /// oldest content triple.
     pub start: u64,
     /// Time window: EXCLUSIVE end `start + range`. Count window: INCLUSIVE
     /// `ts` of the newest content triple.
     pub end: u64,
     /// Content. Time windows: timestamp order (arrival order within equal
     /// timestamps). Count windows: arrival order.
-    pub triples: Vec<TimestampedTriple>,
+    pub triples: Vec<Timestamped<T>>,
 }
 
 /// Maintains the active window content of one stream incrementally and
 /// surfaces windows as they close.
 ///
 /// Time windows buffer by timestamp in a `BTreeMap<ts, Vec<triple>>`; closing
-/// window `k` is a range read `[k·step, k·step+range)` and sliding evicts every
+/// window `k` is a range read `[start, start+range)` and sliding evicts every
 /// entry older than the next window's start with one `split_off`. Count windows
 /// are a ring buffer (`VecDeque`) capped at `rows`.
 ///
@@ -136,11 +161,11 @@ pub struct Window {
 /// [`take_closed`](Self::take_closed) (or let [`ContinuousQuery`](crate::ContinuousQuery)
 /// drive the whole loop).
 #[derive(Debug)]
-pub struct WindowedStream {
+pub struct WindowedStream<T = [Term; 3]> {
     spec: WindowSpec,
     /// Time-window buffer: triples (in arrival order per timestamp) keyed by ts.
     /// Holds everything from the oldest OPEN window's start upwards.
-    buffer: BTreeMap<u64, Vec<[Term; 3]>>,
+    buffer: BTreeMap<u64, Vec<T>>,
     /// Index `k` of the oldest window not yet closed; `None` until the first
     /// accepted push fixes the starting window.
     next_close: Option<u64>,
@@ -149,14 +174,14 @@ pub struct WindowedStream {
     /// Too-late arrivals dropped (every covering window already closed).
     late_dropped: u64,
     /// Count-window ring buffer (last `rows` arrivals).
-    ring: VecDeque<TimestampedTriple>,
+    ring: VecDeque<Timestamped<T>>,
     /// Count-window arrival counter (drives `slide`).
     arrivals: u64,
     /// Windows closed/reported but not yet taken.
-    closed: Vec<Window>,
+    closed: Vec<Window<T>>,
 }
 
-impl WindowedStream {
+impl WindowedStream<[Term; 3]> {
     /// A windowed view over a scripted stream: every buffered element is
     /// pushed in order. Drain whatever already closed with
     /// [`take_closed`](Self::take_closed); keep pushing live elements with
@@ -168,7 +193,9 @@ impl WindowedStream {
         }
         ws
     }
+}
 
+impl<T: Clone> WindowedStream<T> {
     /// A windowed view with no history (live pushes only).
     pub fn empty(spec: WindowSpec) -> Self {
         WindowedStream {
@@ -190,21 +217,21 @@ impl WindowedStream {
 
     /// Pushes one stream element. Any window this closes is queued for
     /// [`take_closed`](Self::take_closed).
-    pub fn push(&mut self, triple: [Term; 3], ts: u64) {
+    pub fn push(&mut self, triple: T, ts: u64) {
         match self.spec {
-            WindowSpec::Time { range, step, max_delay } => {
-                self.push_time(triple, ts, range, step, max_delay)
+            WindowSpec::Time { range, step, max_delay, t0 } => {
+                self.push_time(triple, ts, range, step, max_delay, t0)
             }
             WindowSpec::Count { rows, slide } => self.push_count(triple, ts, rows, slide),
         }
     }
 
-    fn push_time(&mut self, triple: [Term; 3], ts: u64, range: u64, step: u64, max_delay: u64) {
+    fn push_time(&mut self, triple: T, ts: u64, range: u64, step: u64, max_delay: u64, t0: u64) {
         // The FIRST arrival fixes the starting window: the oldest window its
         // WATERMARK (ts − max_delay) still holds open, i.e. the first k with
-        // k·step + range > ts − max_delay. Anchoring on the watermark instead
-        // of on ts keeps the lateness contract honest from the very first
-        // push — with max_delay = 5, a first push at ts = 12 must leave
+        // t0 + k·step + range > ts − max_delay. Anchoring on the watermark
+        // instead of on ts keeps the lateness contract honest from the very
+        // first push — with max_delay = 5, a first push at ts = 12 must leave
         // [0,10) open for a subsequent ts = 8 (watermark 7 < 10). With
         // max_delay = 0 this is exactly the first window covering ts, so the
         // all-empty prefix of the axis is still skipped. GAP arrivals
@@ -212,22 +239,27 @@ impl WindowedStream {
         // the windows their watermark holds open must be tracked — and
         // eventually emitted empty — not silently skipped (roborev 1693).
         if self.next_close.is_none() {
-            let wm = ts.saturating_sub(max_delay);
+            let wm = ts.saturating_sub(max_delay).saturating_sub(t0);
             let k_min = if wm >= range { (wm - range) / step + 1 } else { 0 };
             self.next_close = Some(k_min);
         }
-        // Window k covers [k·step, k·step + range). The LAST window covering
-        // ts is k_max = ts / step — valid only if ts actually falls inside it
-        // (ts % step < range can fail when step > range: gap timestamps are
-        // covered by no window).
-        let k_max = ts / step;
-        if ts - k_max * step < range {
-            if k_max < self.next_close.expect("anchored above") {
-                // Every window covering ts already closed: too late.
-                self.late_dropped += 1;
-                return;
+        // Window k covers [t0 + k·step, t0 + k·step + range). The LAST window
+        // covering ts is k_max = (ts − t0) / step — valid only if ts actually
+        // falls inside it ((ts − t0) % step < range can fail when step > range:
+        // gap timestamps are covered by no window) and ts ≥ t0 at all (a
+        // pre-origin timestamp belongs to no window — like a gap arrival, it
+        // only advances the watermark).
+        if ts >= t0 {
+            let rel = ts - t0;
+            let k_max = rel / step;
+            if rel - k_max * step < range {
+                if k_max < self.next_close.expect("anchored above") {
+                    // Every window covering ts already closed: too late.
+                    self.late_dropped += 1;
+                    return;
+                }
+                self.buffer.entry(ts).or_default().push(triple);
             }
-            self.buffer.entry(ts).or_default().push(triple);
         }
         // A gap triple (step > range) enters no window, but it is still
         // evidence of event time passing: it advances the watermark and can
@@ -238,35 +270,35 @@ impl WindowedStream {
         // Close every window whose end the watermark has reached.
         let watermark = self.max_ts.saturating_sub(max_delay);
         while let Some(k) = self.next_close {
-            let start = k * step;
+            let start = t0 + k * step;
             if watermark < start + range {
                 break;
             }
-            self.close_time_window(k, range, step);
+            self.close_time_window(k, range, step, t0);
         }
     }
 
     /// Freezes window `k`'s content, queues it, slides to `k + 1` and evicts
     /// everything older than the new oldest open window.
-    fn close_time_window(&mut self, k: u64, range: u64, step: u64) {
-        let start = k * step;
+    fn close_time_window(&mut self, k: u64, range: u64, step: u64, t0: u64) {
+        let start = t0 + k * step;
         let end = start + range;
         let triples = self
             .buffer
             .range(start..end)
             .flat_map(|(&ts, ts_triples)| {
-                ts_triples.iter().map(move |t| TimestampedTriple { triple: t.clone(), ts })
+                ts_triples.iter().map(move |t| Timestamped { triple: t.clone(), ts })
             })
             .collect();
         self.closed.push(Window { start, end, triples });
         self.next_close = Some(k + 1);
         // Evict: nothing below the next window's start can be read again.
-        self.buffer = self.buffer.split_off(&((k + 1) * step));
+        self.buffer = self.buffer.split_off(&(t0 + (k + 1) * step));
     }
 
-    fn push_count(&mut self, triple: [Term; 3], ts: u64, rows: usize, slide: usize) {
+    fn push_count(&mut self, triple: T, ts: u64, rows: usize, slide: usize) {
         self.arrivals += 1;
-        self.ring.push_back(TimestampedTriple { triple, ts });
+        self.ring.push_back(Timestamped { triple, ts });
         if self.ring.len() > rows {
             self.ring.pop_front();
         }
@@ -283,20 +315,20 @@ impl WindowedStream {
     /// pending windows (the flushed ones plus any not yet taken). No-op for
     /// count windows beyond draining. After a flush, further pushes at or
     /// below the flushed horizon count as late.
-    pub fn flush(&mut self) -> Vec<Window> {
-        if let WindowSpec::Time { range, step, .. } = self.spec {
+    pub fn flush(&mut self) -> Vec<Window<T>> {
+        if let WindowSpec::Time { range, step, t0, .. } = self.spec {
             while let Some(k) = self.next_close {
-                if k * step > self.max_ts {
+                if t0 + k * step > self.max_ts {
                     break; // window starts after every triple we ever saw
                 }
-                self.close_time_window(k, range, step);
+                self.close_time_window(k, range, step, t0);
             }
         }
         self.take_closed()
     }
 
     /// Drains the windows that closed since the last call, oldest first.
-    pub fn take_closed(&mut self) -> Vec<Window> {
+    pub fn take_closed(&mut self) -> Vec<Window<T>> {
         std::mem::take(&mut self.closed)
     }
 

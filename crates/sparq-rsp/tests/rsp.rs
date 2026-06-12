@@ -462,3 +462,202 @@ fn window_materialisation_has_set_semantics() {
     q.flush(&mut sink).unwrap();
     assert_eq!(counts, vec![Some(Term::from(Literal::from(1)))]);
 }
+
+// ---------------------------------------------------------------- window origin t0
+
+/// The RSP-QL window origin: with t0 = 3, RANGE 10 STEP 10 windows are
+/// [3,13) [13,23) … — and a pre-origin timestamp belongs to no window (it is
+/// NOT late: no window ever covered it) while still advancing the watermark.
+#[test]
+fn t0_shifts_window_origin_and_pre_origin_arrivals_join_no_window() {
+    let mut ws = WindowedStream::empty(WindowSpec::time(10, 10).with_t0(3));
+    ws.push(t("s", "p", "pre"), 1); // before t0: no window, not late
+    ws.push(t("s", "p", "a"), 3);
+    ws.push(t("s", "p", "b"), 12);
+    ws.push(t("s", "p", "c"), 13); // closes [3,13), belongs to [13,23)
+    let closed = ws.take_closed();
+    assert_eq!(closed.len(), 1);
+    assert_eq!((closed[0].start, closed[0].end), (3, 13));
+    assert_eq!(objs(&closed[0]), ["a", "b"]);
+    let rest = ws.flush();
+    assert_eq!((rest[0].start, rest[0].end), (13, 23));
+    assert_eq!(objs(&rest[0]), ["c"]);
+    assert_eq!(ws.late_dropped(), 0, "pre-origin arrivals are not late");
+}
+
+/// t0 anchoring skips the empty prefix relative to t0, exactly like t0 = 0.
+#[test]
+fn t0_far_first_arrival_does_not_replay_empty_prefix() {
+    let mut ws = WindowedStream::empty(WindowSpec::time(10, 10).with_t0(5));
+    ws.push(t("s", "p", "a"), 1_002); // first window is [995,1005), not [5,15)
+    let windows = ws.flush();
+    assert_eq!(windows.len(), 1);
+    assert_eq!((windows[0].start, windows[0].end), (995, 1005));
+}
+
+#[test]
+#[should_panic(expected = "t0 applies to time windows only")]
+fn t0_on_count_window_panics() {
+    let _ = WindowSpec::count(3).with_t0(1);
+}
+
+// ---------------------------------------------------------------- eval modes
+
+/// All three materialisation strategies are OBSERVATIONALLY IDENTICAL: the
+/// same scripted stream (sliding overlap, duplicate triples across windows,
+/// numeric aggregation, empty windows) produces the same per-window results.
+#[test]
+fn eval_modes_produce_identical_results() {
+    use sparq_rsp::EvalMode;
+    type Rows = Vec<Vec<Option<Term>>>;
+    let run = |mode: EvalMode| -> Vec<(u64, u64, Rows)> {
+        let mut q = ContinuousQuery::register(
+            "SELECT ?s (AVG(?v) AS ?avg) WHERE { ?s <http://ex/value> ?v } GROUP BY ?s ORDER BY ?s",
+            WindowSpec::time(10, 5), // sliding: consecutive windows share a suffix
+        )
+        .unwrap()
+        .with_mode(mode);
+        assert_eq!(q.mode(), mode);
+        let mut out = Vec::new();
+        let mut sink = |r: sparq_rsp::WindowResult| out.push((r.start, r.end, r.rows));
+        for ts in 0..40u64 {
+            // Two sensors; duplicate the SAME triple at several timestamps so
+            // set semantics and the delta diff are both exercised.
+            q.push(val(&format!("s{}", ts % 2), (ts % 7) as i32), ts, &mut sink).unwrap();
+        }
+        q.push(t("x", "p", "gap"), 60, &mut sink).unwrap(); // empty windows in between
+        q.flush(&mut sink).unwrap();
+        out
+    };
+    let rebuild = run(EvalMode::Rebuild);
+    let persistent = run(EvalMode::PersistentDict);
+    let delta = run(EvalMode::Delta);
+    assert!(!rebuild.is_empty());
+    assert_eq!(rebuild, persistent, "PersistentDict diverged from the rebuild baseline");
+    assert_eq!(rebuild, delta, "Delta diverged from the rebuild baseline");
+}
+
+/// Delta mode stays correct across overlay compactions (churn > window) and
+/// respects set semantics when a triple occurs at several timestamps and only
+/// some of them are evicted by the slide.
+#[test]
+fn delta_mode_compaction_and_multi_timestamp_eviction() {
+    use sparq_rsp::EvalMode;
+    let run = |mode: EvalMode| -> Vec<Vec<Vec<Option<Term>>>> {
+        let mut q = ContinuousQuery::register(
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }",
+            WindowSpec::time(100, 50),
+        )
+        .unwrap()
+        .with_mode(mode);
+        let mut out = Vec::new();
+        let mut sink = |r: sparq_rsp::WindowResult| out.push(r.rows);
+        for ts in 0..1500u64 {
+            // Distinct triple per tick → enough churn to cross the compaction
+            // threshold several times…
+            q.push(t("s", "p", &format!("o{ts}")), ts, &mut sink).unwrap();
+            // …plus one RECURRING triple every 30 ticks: present at several
+            // timestamps per window, evicted only when ALL occurrences leave.
+            if ts % 30 == 0 {
+                q.push(t("s", "p", "recurring"), ts, &mut sink).unwrap();
+            }
+        }
+        q.flush(&mut sink).unwrap();
+        out
+    };
+    assert_eq!(run(EvalMode::Delta), run(EvalMode::Rebuild));
+}
+
+// ---------------------------------------------------------------- CONSTRUCT / ASK
+
+fn construct_objs(triples: &[oxrdf::Triple]) -> Vec<String> {
+    triples
+        .iter()
+        .map(|t| match &t.object {
+            Term::NamedNode(n) => n.as_str().trim_start_matches("http://ex/").to_owned(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+/// CONSTRUCT per window: stream-to-stream transformation, RSTREAM default.
+#[test]
+fn continuous_construct_emits_transformed_window_graphs() {
+    use sparq_rsp::ContinuousConstruct;
+    let mut q = ContinuousConstruct::register(
+        "CONSTRUCT { ?s <http://ex/seen> ?o } WHERE { ?s <http://ex/p> ?o }",
+        WindowSpec::time(10, 10),
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    let mut sink = |r: sparq_rsp::GraphResult| out.push(r);
+    q.push(t("s", "p", "a"), 1, &mut sink).unwrap();
+    q.push(t("s", "p", "a"), 5, &mut sink).unwrap(); // duplicate: sets stay sets
+    q.push(t("s", "p", "b"), 12, &mut sink).unwrap(); // closes [0,10)
+    q.flush(&mut sink).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!((out[0].start, out[0].end), (0, 10));
+    assert_eq!(construct_objs(&out[0].triples), ["a"]);
+    assert!(out[0].triples.iter().all(|t| t.predicate.as_str() == "http://ex/seen"));
+    assert_eq!(construct_objs(&out[1].triples), ["b"]);
+}
+
+/// CONSTRUCT ISTREAM/DSTREAM are exact SET differences of consecutive
+/// windows' constructed graphs.
+#[test]
+fn continuous_construct_istream_dstream_set_diffs() {
+    use sparq_rsp::ContinuousConstruct;
+    let sparql = "CONSTRUCT { ?s <http://ex/seen> ?o } WHERE { ?s <http://ex/p> ?o }";
+    let script: &[([Term; 3], u64)] = &[
+        (t("s", "p", "a"), 1),
+        (t("s", "p", "b"), 5),
+        (t("s", "p", "a"), 12), // [10,20): a stays, b leaves
+        (t("s", "p", "c"), 15),
+    ];
+    let run = |r2s: R2S| -> Vec<Vec<String>> {
+        let mut q = ContinuousConstruct::register(sparql, WindowSpec::time(10, 10))
+            .unwrap()
+            .with_r2s(r2s);
+        let mut out = Vec::new();
+        let mut sink = |r: sparq_rsp::GraphResult| out.push(construct_objs(&r.triples));
+        for (triple, ts) in script {
+            q.push(triple.clone(), *ts, &mut sink).unwrap();
+        }
+        q.flush(&mut sink).unwrap();
+        out
+    };
+    let v = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(run(R2S::RStream), vec![v(&["a", "b"]), v(&["a", "c"])]);
+    assert_eq!(run(R2S::IStream), vec![v(&["a", "b"]), v(&["c"])]);
+    assert_eq!(run(R2S::DStream), vec![v(&[]), v(&["b"])]);
+}
+
+/// ASK per window: one boolean per closed window, including empty windows.
+#[test]
+fn continuous_ask_reports_per_window_booleans() {
+    use sparq_rsp::ContinuousAsk;
+    let mut q = ContinuousAsk::register(
+        "ASK { ?s <http://ex/p> <http://ex/alert> }",
+        WindowSpec::time(10, 10),
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    let mut sink = |r: sparq_rsp::AskResult| out.push((r.start, r.value));
+    q.push(t("s", "p", "alert"), 1, &mut sink).unwrap();
+    q.push(t("s", "p", "calm"), 12, &mut sink).unwrap();
+    q.push(t("s", "p", "alert"), 35, &mut sink).unwrap(); // [20,30) closes empty
+    q.flush(&mut sink).unwrap();
+    assert_eq!(out, vec![(0, true), (10, false), (20, false), (30, true)]);
+}
+
+/// CONSTRUCT/ASK registration validates the query form up front.
+#[test]
+fn construct_and_ask_registration_validate_query_form() {
+    use sparq_rsp::{ContinuousAsk, ContinuousConstruct};
+    let spec = WindowSpec::time(10, 10);
+    assert!(ContinuousConstruct::register("SELECT * WHERE { ?s ?p ?o }", spec).is_err());
+    assert!(ContinuousConstruct::register("ASK { ?s ?p ?o }", spec).is_err());
+    assert!(ContinuousConstruct::register("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", spec).is_ok());
+    assert!(ContinuousAsk::register("SELECT * WHERE { ?s ?p ?o }", spec).is_err());
+    assert!(ContinuousAsk::register("ASK { ?s ?p ?o }", spec).is_ok());
+}

@@ -26,9 +26,14 @@ The classic RSP-QL pipeline, one type each:
 | stage | type | role |
 |---|---|---|
 | stream | `TripleStream` / push API | `(triple, u64 timestamp)` elements, app-supplied timestamps |
-| S2R | `WindowSpec` + `WindowedStream` | `RANGE w STEP s` time windows / `ROWS n [SLIDE s]` count windows, incremental |
-| R2R | registered SPARQL SELECT | each closed window materialised into a `sparq_core::Graph`, evaluated by `sparq-engine` |
+| S2R | `WindowSpec` + `WindowedStream` | `RANGE w STEP s [t0]` time windows / `ROWS n [SLIDE s]` count windows, incremental |
+| R2R | registered SPARQL | each closed window materialised into a `sparq_core::Graph` (per `EvalMode`, below), evaluated by `sparq-engine` |
 | R2S | `R2S::{RStream, IStream, DStream}` | full / added / removed rows per window, delivered as `WindowResult` callbacks |
+
+Three query forms: `ContinuousQuery` (SELECT → `WindowResult` rows),
+`ContinuousConstruct` (CONSTRUCT → `GraphResult` triples — stream-to-stream
+transformation, with R2S as exact set diffs over the constructed graphs), and
+`ContinuousAsk` (ASK → one `AskResult` boolean per window).
 
 ## Design: deterministic by construction
 
@@ -48,12 +53,13 @@ The classic RSP-QL pipeline, one type each:
 
 **Time windows** (`WindowSpec::time(range, step)`):
 
-- Windows are **half-open intervals `[k·step, k·step + range)`**, `k = 0, 1, 2, …`
-  — start bound **inclusive**, end bound **exclusive**. `RANGE 10 STEP 10`
-  yields `[0,10) [10,20) …`: a triple at `ts = 10` belongs to `[10,20)` only —
-  tumbling windows partition the timeline with no double counting.
-  (RSP-QL parameterises the window origin `t0`; we fix `t0 = 0` — a documented
-  divergence that keeps window identity canonical.)
+- Windows are **half-open intervals `[t0 + k·step, t0 + k·step + range)`**,
+  `k = 0, 1, 2, …` — start bound **inclusive**, end bound **exclusive**.
+  `RANGE 10 STEP 10` yields `[0,10) [10,20) …`: a triple at `ts = 10` belongs
+  to `[10,20)` only — tumbling windows partition the timeline with no double
+  counting. The RSP-QL window origin `t0` defaults to 0 and is set with
+  `.with_t0(t0)`; an arrival before `t0` belongs to no window (not counted
+  late — no window ever covered it) but still advances the watermark.
 - `step < range` ⇒ sliding windows **overlap**: with `RANGE 10 STEP 5`, a
   triple at `ts = 7` is in both `[0,10)` and `[5,15)`.
 - A window **closes** — its content is frozen, the query runs, the callback
@@ -101,32 +107,58 @@ DSTREAM that of the previous window. (A 64-bit hash collision between two
 distinct rows of one query could suppress a diff; accepted as vanishingly
 unlikely.)
 
+## Evaluation modes (R2R materialisation)
+
+How each closed window becomes the graph the engine evaluates is the
+`EvalMode` (`.with_mode(…)`, same results in all three — pinned by tests):
+
+- **`Rebuild`** — the v1 baseline: fresh dictionary + fresh indexes per
+  window. Nothing persists between windows, so memory is bounded by one
+  window even on unbounded-vocabulary streams.
+- **`PersistentDict`** (default) — ONE dictionary for the continuous query's
+  lifetime: terms interned once at push time, per-window graphs built from
+  already-interned `[Id; 3]`s via `Graph::from_parts`. Removes term
+  hashing/allocation from the window loop; the dictionary grows monotonically
+  with the stream's distinct vocabulary (documented trade).
+- **`Delta`** — ONE live graph + `Graph::apply_delta(inserts, deletes)` per
+  slide (set-semantic diff between consecutive windows), compacted when the
+  pending overlay outgrows the window. Measured slower than `PersistentDict`
+  everywhere (see below); kept because its per-slide work is O(changes).
+
 ## Throughput
 
 `cargo run --release -p sparq-rsp --example throughput` — 1 M synthetic sensor
-readings (100 sensors, 1 triple per tick), tumbling time windows, Apple M1,
-rustc 1.89:
+readings (100 sensors, 1 triple per tick), time windows, Apple M1, rustc 1.93
+(triples/s; windowing only — no query — runs at 2.33 M triples/s):
 
-| scenario | throughput | windows/s |
-|---|---|---|
-| windowing only (no query), RANGE 1000 | 2.26 M triples/s | 2 257 |
-| `AVG(?v)` per window, RANGE 100 (100 triples/window) | 1.14 M triples/s | 11 446 |
-| `AVG(?v)` per window, RANGE 1000 | 1.66 M triples/s | 1 661 |
-| `AVG(?v)` per window, RANGE 10000 | 1.66 M triples/s | 166 |
-| `AVG(?v)` per sensor (GROUP BY), RANGE 1000 | 1.45 M triples/s | 1 454 |
+| scenario | Rebuild (v1) | PersistentDict | Delta |
+|---|---|---|---|
+| `AVG(?v)`, RANGE 100 STEP 100 (tumbling) | 1.13 M | **1.51 M** | 1.07 M |
+| `AVG(?v)`, RANGE 1000 STEP 1000 (tumbling) | 1.55 M | **1.93 M** | 1.87 M |
+| `AVG(?v)`, RANGE 10000 STEP 10000 (tumbling) | 1.61 M | **3.08 M** | 1.70 M |
+| `AVG(?v)`, RANGE 1000 STEP 100 (sliding 10×) | 0.26 M | **0.95 M** | 0.29 M |
+| `AVG(?v)`, RANGE 10000 STEP 1000 (sliding 10×) | 0.27 M | **1.44 M** | 0.36 M |
+| `AVG` per sensor (GROUP BY), RANGE 1000 | 1.68 M | **2.52 M** | 2.01 M |
 
-The dominant cost is per-window: each closed window builds a fresh
-dictionary-encoded graph and runs the engine, so throughput scales with
-triples-per-window until materialisation dominates (~1.6 M triples/s plateau).
-Windowing alone (push + eviction) is `BTreeMap` insert + range-read +
-`split_off` per window — the 2.3 M triples/s line.
+`PersistentDict` wins every scenario (1.2–5.3× over the v1 rebuild — the
+sliding rows are exactly the "~90 % of each build is redone work" case the v1
+TODO predicted) and is the default. `Delta` never wins: `apply_delta` works at
+the term level (interning inserts, `id_of` per delete) and overlay rows are
+re-sorted per scan, so its savings are eaten before the engine runs. The
+remaining per-window cost in `PersistentDict` is the index build
+(`TripleStore::from_triples`) plus the numeric/temporal caches (O(dictionary)
+per window) — removing those needs the core cheap-snapshot seam (see TODO).
 
 ## Tests
 
-`cargo test -p sparq-rsp` — 23 integration tests + 2 doctests pinning:
+`cargo test -p sparq-rsp` — 32 integration tests + 3 doctests pinning:
 boundary inclusivity (`[start, end)`), tumbling partition / sliding overlap,
-empty-window reporting, `step > range` gaps, out-of-order within `max_delay`
-vs. too-late drops, ROWS / SLIDE / arrival-order membership, scripted ISTREAM
-and DSTREAM traces (including disappearance via an empty window), multiset
-diff semantics, set-semantic materialisation, register-time validation, and
-end-to-end AVG-per-window.
+window origin `t0` (shifted bounds, pre-origin arrivals, anchor far from the
+origin), empty-window reporting, `step > range` gaps, out-of-order within
+`max_delay` vs. too-late drops, ROWS / SLIDE / arrival-order membership,
+scripted ISTREAM and DSTREAM traces (including disappearance via an empty
+window), multiset diff semantics, set-semantic materialisation, three-way
+eval-mode equivalence (incl. delta compaction + multi-timestamp eviction),
+CONSTRUCT (RSTREAM/ISTREAM/DSTREAM set diffs) and ASK per window,
+register-time validation of all three query forms, and end-to-end
+AVG-per-window.

@@ -7,14 +7,21 @@
 
 use oxrdf::Term;
 
-/// One stream element: a triple paired with its application-supplied timestamp.
+/// One stream element: a payload paired with its application-supplied
+/// timestamp. The payload is generic so the same window machinery serves both
+/// term triples (`[Term; 3]`, the public stream surface) and already-interned
+/// id triples (`[Id; 3]`, the persistent-dictionary evaluation mode — see
+/// [`EvalMode`](crate::EvalMode)).
 #[derive(Debug, Clone, PartialEq)]
-pub struct TimestampedTriple {
-    /// Subject / predicate / object.
-    pub triple: [Term; 3],
+pub struct Timestamped<T> {
+    /// The stream element (a subject/predicate/object triple in the public API).
+    pub triple: T,
     /// Application timestamp (logical or epoch — any monotone-ish `u64` scale).
     pub ts: u64,
 }
+
+/// One stream element: a triple paired with its application-supplied timestamp.
+pub type TimestampedTriple = Timestamped<[Term; 3]>;
 
 /// A scripted RDF stream: a builder accepting pushes.
 ///

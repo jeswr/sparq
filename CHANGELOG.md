@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Overlay window evaluation, t0, CONSTRUCT/ASK (`sparq-rsp`)** — closed
+  windows are no longer rebuilt from scratch: the new `EvalMode` selects the
+  R2R materialisation strategy — `PersistentDict` (one dictionary per
+  continuous query, terms interned once at push time, per-window graphs from
+  already-interned ids; the new default — wins every benchmark scenario,
+  1.2–5.3× over the v1 rebuild, biggest on sliding windows), `Delta` (one
+  live graph + set-semantic `apply_delta` per slide with churn-driven
+  compaction; measured slower everywhere, kept opt-in), and `Rebuild` (the v1
+  baseline, still right for unbounded-vocabulary streams). Plus: RSP-QL
+  window origin `t0` (`WindowSpec::with_t0`), and continuous CONSTRUCT
+  (`ContinuousConstruct` — stream-to-stream transformation with exact
+  set-diff ISTREAM/DSTREAM) and ASK (`ContinuousAsk`) query forms. All three
+  modes are observationally identical (pinned by tests); README throughput
+  table re-measured per mode. Zero wasm-bundle impact (opt-in crate).
+
 - **OWL 2 RL rule completion (`sparq-reason`)** — the remaining OWL 2 RL/RDF rules
   (Profiles §4.3): `cls-oo` (oneOf member typing), `cls-maxqc1/2`
   (qualified-cardinality-0 clashes in `inconsistencies()`), the schema-level
