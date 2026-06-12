@@ -1,0 +1,6 @@
+[package]
+name = "ieee754"
+type = "lib"
+authors = [""]
+
+[dependencies]
