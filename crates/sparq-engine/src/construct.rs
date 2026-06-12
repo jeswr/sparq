@@ -27,7 +27,7 @@ use sparq_core::Graph;
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{Query, SparqlParser};
 
-use crate::{QueryBudget, QueryResult};
+use crate::{PreparedQuery, QueryBudget, QueryResult};
 
 /// Executes a CONSTRUCT query, returning the constructed graph as a deduplicated
 /// triple list (an RDF graph is a set; first-production order is preserved).
@@ -37,15 +37,29 @@ pub fn construct(graph: &Graph, sparql: &str) -> Result<Vec<Triple>, String> {
 
 /// [`construct`] under a cooperative [`QueryBudget`] (deadline / max WHERE-solution rows).
 pub fn construct_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<Triple>, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-    let active = crate::active_dataset(graph, &q);
+    construct_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
+}
+
+/// [`construct`] over a [`PreparedQuery`] — no per-execution parse.
+pub fn construct_prepared(graph: &Graph, prepared: &PreparedQuery) -> Result<Vec<Triple>, String> {
+    construct_prepared_with_budget(graph, prepared, &QueryBudget::unlimited())
+}
+
+/// [`construct_prepared`] under a cooperative [`QueryBudget`].
+pub fn construct_prepared_with_budget(
+    graph: &Graph,
+    prepared: &PreparedQuery,
+    budget: &QueryBudget,
+) -> Result<Vec<Triple>, String> {
+    let q = prepared.query();
+    let active = crate::active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);
     match q {
         Query::Construct { template, pattern, .. } => {
             let _guard = crate::exec::budget::install(budget);
-            let solutions = crate::exec::eval_select(graph, &pattern)?;
-            Ok(instantiate(&template, &solutions))
+            let solutions = crate::exec::eval_select(graph, pattern)?;
+            Ok(instantiate(template, &solutions))
         }
         _ => Err("construct() requires a CONSTRUCT query".into()),
     }
@@ -59,14 +73,28 @@ pub fn describe(graph: &Graph, sparql: &str) -> Result<Vec<Triple>, String> {
 
 /// [`describe`] under a cooperative [`QueryBudget`] (deadline / max rows).
 pub fn describe_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<Triple>, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-    let active = crate::active_dataset(graph, &q);
+    describe_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
+}
+
+/// [`describe`] over a [`PreparedQuery`] — no per-execution parse.
+pub fn describe_prepared(graph: &Graph, prepared: &PreparedQuery) -> Result<Vec<Triple>, String> {
+    describe_prepared_with_budget(graph, prepared, &QueryBudget::unlimited())
+}
+
+/// [`describe_prepared`] under a cooperative [`QueryBudget`].
+pub fn describe_prepared_with_budget(
+    graph: &Graph,
+    prepared: &PreparedQuery,
+    budget: &QueryBudget,
+) -> Result<Vec<Triple>, String> {
+    let q = prepared.query();
+    let active = crate::active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = crate::view_scope(&active);
     match q {
         Query::Describe { pattern, .. } => {
             let _guard = crate::exec::budget::install(budget);
-            let solutions = crate::exec::eval_select(graph, &pattern)?;
+            let solutions = crate::exec::eval_select(graph, pattern)?;
             cbd(graph, &solutions)
         }
         _ => Err("describe() requires a DESCRIBE query".into()),
