@@ -51,6 +51,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in full-text search over literals (`sparq-text`, new crate)** — a small,
+  owned BM25 inverted index over a graph's string literals (UAX #29 tokenizer +
+  Unicode lowercasing via `unicode-segmentation`; deliberately no tantivy) where
+  the dictionary term id IS the document id, so hits join back to triples through
+  the ordinary permutation indexes. `TextIndex::build` scans the dict once
+  (rayon-sharded under `parallel`); `apply_delta` mirrors `Graph::apply_delta`
+  batches incrementally (pinned equal to a rebuild by a differential test).
+  Query surface: AND (`search`), OR (`search_any`), `*`-suffix prefix tokens
+  (autocomplete), BM25 scores — and, behind the default-on `engine` feature, the
+  `text:` magic predicates (`http://sparq.dev/text#`): `?lit text:matches "q"` /
+  `text:matchesAny` / `text:score ?s`, rewritten at the spargebra-algebra level
+  into inline `VALUES` over the hits and executed through the engine's existing
+  `PreparedQuery: From<spargebra::Query>` seam — zero engine changes, zero wasm
+  impact (bundle byte-checked; the crate sits outside every default dependency
+  graph, like `sparq-geo`/`sparq-vectors`). 1M synthetic 8-word literals: build
+  ~0.75 s, ~101 MiB heap, 2-term AND ~170 µs/query (contended-machine rough
+  figures; `crates/sparq-text/README.md`).
 - **GeoSPARQL function completion (`sparq-geo`)** — the `geof:` registry grows from
   12 to 35 functions: `geof:getSRID` (`xsd:anyURI`), the generic DE-9IM
   `geof:relate`, the full Egenhofer (`geof:eh*`, 8) and RCC8 (`geof:rcc8*`, 8)

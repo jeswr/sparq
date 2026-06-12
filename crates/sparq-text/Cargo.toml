@@ -1,0 +1,51 @@
+[package]
+name = "sparq-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in full-text search over literals for the sparq RDF engine: an owned BM25 inverted index keyed by dictionary term ids, plus text: magic predicates rewritten into plain SPARQL"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# Opt-in full-text search. This is a SEPARATE crate (the sparq-geo shape) so the core
+# engine — and in particular the wasm build — carries zero text-search code or
+# dependencies; full-text support is engaged only by depending on this crate. The
+# index is small and OWNED (tokenizer + posting lists in-house, no tantivy/lucene
+# port): the dictionary term id of a string literal IS its document id, so search
+# results join back to triples through the store's ordinary permutation indexes.
+
+[features]
+# `engine` (default on): the [`rewrite`] module — `text:matches` / `text:matchesAny` /
+# `text:score` magic predicates rewritten into inline `VALUES` over the index's hits,
+# executed by sparq-engine's prepared-query seam (`PreparedQuery: From<spargebra::Query>`).
+# Disable default features for the pure index (tokenizer, TextIndex, BM25) without the
+# engine in the dependency graph.
+# `parallel` (default on, mirroring sparq-engine): rayon-sharded dictionary scan in
+# `TextIndex::build`; the index built is identical to the serial one.
+default = ["engine", "parallel"]
+engine = ["dep:sparq-engine", "dep:spargebra"]
+parallel = ["dep:rayon", "sparq-core/parallel"]
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (required to publish — crates.io strips `path`).
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+# Behind the `engine` feature (the dependency direction is sparq-text -> sparq-engine,
+# exactly like sparq-geo; the engine itself stays text-search-free, and so does the
+# wasm bundle).
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", optional = true }
+spargebra = { workspace = true, optional = true }
+oxrdf.workspace = true
+rustc-hash.workspace = true
+rayon = { workspace = true, optional = true }
+# UAX #29 word segmentation for the tokenizer — pure Rust, zero transitive deps
+# (deliberately NOT tantivy: the index here is a few hundred lines of owned code).
+unicode-segmentation = "1"
+
+[dev-dependencies]
+# Deterministic random literals/deltas for the differential test + the benchmark example.
+rand = "0.9"
