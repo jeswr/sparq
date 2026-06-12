@@ -26,7 +26,9 @@ mod incremental;
 pub mod n3;
 mod owl;
 mod rdfs;
-pub use incremental::MaterializedGraph;
+pub use incremental::{
+    MaterializedGraph, MaterializedN3Graph, MaterializedOwlGraph, N3Mode, OwlMode,
+};
 pub use n3::{reason_n3, reason_n3_proof, reason_n3_terms, N3Closure, ProofStep};
 pub use owl::{inconsistencies, materialize_owl_rl};
 pub use rdfs::materialize_rdfs;

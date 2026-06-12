@@ -96,6 +96,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     planner recurrence vs true cardinalities, synthetic correlated stars): PredStat
     median 1.83 / gmean 7.02 / max 1283 vs **CS 1.00 / 1.00 / 1.00**.
 
+- **Incremental inference maintenance (`sparq-reason`)** — counting-based incremental
+  closure maintenance under base inserts AND deletes (deletion costs the same as
+  insertion: exact derivation counts, no overdelete/rederive pass), extending T18's
+  RDFS `MaterializedGraph` to two new opt-in, zero-wasm-impact siblings:
+  - `MaterializedOwlGraph` (OWL 2 RL): the monotone assertional rules (prp-spo1,
+    cax-sco, prp-dom/rng, prp-inv1/2, prp-symp, prp-eqp1/2, cax-eqc1/2) maintained via
+    a property-orientation closure mirroring the batch `PropExpand`; `prp-trp` via a
+    dedicated exact transitive layer (per-property effective-edge multisets, closure
+    recomputed on touch — cost proportional to the transitive subgraph — and diffed
+    into the counts). TBox mutations / scm-* and the recursive/equality features
+    (sameAs, Functional/InverseFunctional, chains, restrictions, cardinality, hasKey,
+    oneOf, intersection/union) take documented re-materialization fallbacks
+    (`OwlMode` telemetry + `full_rebuilds()`).
+  - `MaterializedN3Graph` (Notation3): a counting fast path for rule sets that
+    ANALYSIS proves monotone with input-stratified negation — ground IRI predicates,
+    a verified-parity builtin whitelist (log:uri, log:equalTo/notEqualTo,
+    string:concatenation/scrape/encodeForUri), `?UNSCOPED log:notIncludes` only over
+    predicates no rule derives (guard deltas rebuild), recursion via recursive-SCC
+    layers; everything else (and out-of-whitelist data, sticky) falls back to the
+    batch engine per mutation. The sparq-solid WAC rules and ACP strata a/b qualify;
+    acp-c does not (variable conclusion predicate) — asserted by test.
+  Differential property tests hold every maintained profile equal to its from-scratch
+  batch closure after every randomized edit batch (RDFS/OWL/N3). Benchmarks
+  (`bench/inference/incremental-bench.md`, olympics scale + a 1k-doc WAC pod):
+  1-triple deltas maintain in microseconds vs ~1s re-materialization (~10⁵–10⁶x);
+  10k-triple deltas 16–500x; live WAC ACL edits 11–162 ms vs the 0.84 s engine re-run,
+  with the incremental initial build itself beating the batch engine (anchored
+  premise evaluation). Conformance and the batch paths are untouched.
+
 ### Changed
 
 - **`sparq-geo` depends on geo 0.33** (was 0.30; clean API compatibility): brings

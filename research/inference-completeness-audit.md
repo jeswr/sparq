@@ -276,6 +276,38 @@ carries the owl-bench.sh closure numbers (RDFS 2.1 M-triple closure in
 the fixpoint-opt thread; +8 B over the tracked 1,573,887 B baseline,
 attributable to the `ground_triple` fix).
 
+## 5c. Incremental maintenance (incremental-inference thread, 2026-06-12)
+
+All three profiles now have **counting-based incremental closure maintenance** under base
+inserts AND deletes — opt-in, zero wasm impact, batch paths untouched (the conformance
+scoreboard above is the proof: unchanged at 1637/0/17).
+
+| profile | API | incremental | documented fallback (full re-materialization) |
+|---|---|---|---|
+| RDFS (T18) | `MaterializedGraph` | all ABox rules (one-step counting against the closed TBox) | TBox mutations (subClassOf/subPropertyOf/domain/range) |
+| OWL 2 RL | `MaterializedOwlGraph` | monotone assertional rules (prp-spo1, cax-sco, prp-dom/rng, prp-inv1/2, prp-symp, prp-eqp1/2, cax-eqc1/2) via the px property-orientation closure; prp-trp via an exact transitive layer (per-property effective-edge multisets, closure diffing) | TBox mutations (incl. scm-*: they can only fire on TBox facts); sameAs / Functional / InverseFunctional / chains / restrictions / cardinality / hasKey / oneOf / intersection / union (recursive-equality features → `OwlMode::Fallback`); occurrence-guarded vocab deltas (owl:Thing/Nothing, XSD tower) |
+| N3 | `MaterializedN3Graph` | rule sets ANALYSIS proves monotone with input-stratified negation: ground IRI predicates, builtin-parity whitelist (log:uri, log:equalTo/notEqualTo, string:concatenation/scrape/encodeForUri), `?UNSCOPED log:notIncludes` only over underived predicates, recursion via recursive-SCC layers | disqualified rule sets (any other builtin, formula containment, backward rules, conclusion existentials, variable conclusion predicates); guard-predicate deltas; implies-as-data; out-of-whitelist data (sticky) — all re-run the batch engine, always correct |
+
+Correctness: differential property tests (tests/incremental_prop.rs,
+incremental_owl_prop.rs, incremental_n3_prop.rs) hold each maintained closure equal to its
+from-scratch batch run after EVERY randomized edit batch, including fallback-mode profiles
+and guard/TBox rebuild paths. Deletion is exact (counting, no DRed overdelete/rederive) and
+costs the same order as insertion.
+
+Numbers (bench/inference/incremental-bench.md; olympics 1.78 M triples + a 1k-doc WAC pod):
+1-triple deltas ~1–4 µs vs ~1–1.7 s re-materialization; 10k-triple deltas 16–512×; WAC ACL
+edits 11–162 ms vs the 0.84 s engine re-run. The sparq-solid qualification matrix:
+common+wac COUNTING, acp-a/b COUNTING, acp-c FALLBACK (`{ ?p ?pred ?r }` variable
+conclusion predicate — restructure to ground predicates to qualify).
+
+Merge note (owned by the owl.rs/rdfs.rs thread): `MaterializedOwlGraph::emit_std`
+deliberately mirrors a batch quirk — on the monotone `PropExpand` path, a domain/range-only
+property absent from the property-orientation map emits NO domain/range typing (the full
+fixpoint path does emit it; likely `rdfs::build_prop_expand`'s `all_props` missing
+domain/range-only properties). If that batch bug is fixed, drop the mirrored
+`None => return` arm in `emit_std` and the px-quirk notes; the differential tests will
+flag the divergence automatically.
+
 ## 6. Reproduction
 
 ```sh

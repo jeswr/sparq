@@ -23,6 +23,13 @@ homepage.workspace = true
 # name matches the `#[pymodule] fn sparq` so no [tool.maturin] module-name is needed.
 name = "sparq"
 crate-type = ["cdylib"]
+# No Rust tests live here (the test suite is tests/test_basic.py, run via maturin/pytest).
+# Disable the auto lib-test harness: pyo3's `extension-module` emits the required
+# `-undefined dynamic_lookup` only as cdylib link args (`cargo:rustc-cdylib-link-arg`),
+# so the test binary fails to link on macOS (missing _Py* symbols) — a known pyo3
+# cargo-test limitation. Without this, `cargo test --workspace` cannot run on macOS.
+test = false
+doctest = false
 
 [build-dependencies]
 # build.rs: emit the macOS `-undefined dynamic_lookup` link args for extension modules.
