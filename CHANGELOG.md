@@ -43,6 +43,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GeoSPARQL function completion (`sparq-geo`)** — the `geof:` registry grows from
+  12 to 35 functions: `geof:getSRID` (`xsd:anyURI`), the generic DE-9IM
+  `geof:relate`, the full Egenhofer (`geof:eh*`, 8) and RCC8 (`geof:rcc8*`, 8)
+  relation families (GeoSPARQL 1.0 Req 25/26 matrix patterns), the set operations
+  `geof:intersection`/`union`/`difference`/`symDifference` (polygonal operands via
+  geo's `BooleanOps`; other operand types are a clear per-row expression error),
+  and `geof:buffer` (unlocked by the geo 0.30→0.33 bump; metric radii buffer in a
+  local equirectangular metre frame). All exercised through real SPARQL.
+- **GeoIndex: antimeridian, named graphs, incremental updates (`sparq-geo`)** —
+  ball queries crossing ±180° split into two longitude windows (merged, deduped;
+  brute-force-verified near the seam); `GeoIndex::build` scans every named graph
+  and entries record their origin graph + `geo:asWKT` node; new
+  `GeoIndex::apply_delta` mirrors a `Graph::apply_delta` batch into the R-tree
+  incrementally (rstar insert/remove, O(batch·log n) — no rebuild), including
+  `geo:hasGeometry` ownership re-keying.
+- **CRS reprojection (`sparq-geo`, opt-in `reproject` feature)** — pure-Rust
+  proj4 (`proj4rs`; no C dependency) behind a curated EPSG table (27700 — verified
+  against the Ordnance Survey worked example to ~1e-6°, 3857, 2154, 25832/25833,
+  UTM 326xx/327xx): `reproject::to_crs84` brings projected literals into the
+  geographic machinery (metric distance, GeoIndex).
+- **HDT quality-of-life (`sparq-hdt`)** — GZipped containers (`.hdt.gz`) are
+  detected by magic bytes (not file names) and decompressed on the fly in every
+  entry point; new `header()`/`header_reader()` expose the HDT header (dataset
+  metadata triples — VoID statistics, provenance) as a queryable sparq `Graph`.
+- **CLI HDT ingestion (`sparq-cli`, opt-in `hdt` feature)** — `--features hdt`
+  wires sparq-hdt into the loader dispatch: format argument `hdt` or a
+  `.hdt`/`.hdt.gz` extension loads through `sparq_hdt::load`; without the feature
+  the CLI exits with a rebuild hint. Off by default (MSRV 1.87 vs the CLI's 1.85
+  floor + decode-stack weight; rationale in `crates/sparq-cli/Cargo.toml`).
+
+### Changed
+
+- **`sparq-geo` depends on geo 0.33** (was 0.30; clean API compatibility): brings
+  the `Buffer` trait that makes `geof:buffer` implementable.
+- **`GeoIndex::entries()` returns an iterator** (was a slice): entry slots are
+  tombstoned/reused by incremental deletes.
+
 - **OWL 2 RL rule completion (`sparq-reason`)** — the remaining OWL 2 RL/RDF rules
   (Profiles §4.3): `cls-oo` (oneOf member typing), `cls-maxqc1/2`
   (qualified-cardinality-0 clashes in `inconsistencies()`), the schema-level

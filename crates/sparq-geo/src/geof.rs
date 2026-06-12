@@ -9,10 +9,15 @@
 //!   approximation between two EXTENDED geometries — see [`distance_meters`]).
 //! - the eight simple-features relations (`geof:sfEquals`, `sfDisjoint`,
 //!   `sfIntersects`, `sfTouches`, `sfCrosses`, `sfWithin`, `sfContains`,
-//!   `sfOverlaps`) — DE-9IM intersection matrices via `geo`'s `Relate`.
+//!   `sfOverlaps`) — DE-9IM intersection matrices via `geo`'s `Relate` — plus
+//!   the generic [`relate`] (`geof:relate`, arbitrary DE-9IM pattern) and the
+//!   Egenhofer (`geof:eh*`) and RCC8 (`geof:rcc8*`) families (the GeoSPARQL
+//!   1.0 Req 25/26 matrix patterns over the same machinery).
 //! - [`envelope`] / [`boundary`] / [`convex_hull`] — `geof:envelope`,
-//!   `geof:boundary`, `geof:convexHull`. (`geof:buffer` needs a buffer op the
-//!   `geo` crate does not ship at 0.30 — see TODO.md.)
+//!   `geof:boundary`, `geof:convexHull` — and [`buffer`] (`geof:buffer`, geo
+//!   0.33's `Buffer`; metric radii via a local equirectangular frame).
+//! - the set operations [`intersection`] / [`union`] / [`difference`] /
+//!   [`sym_difference`] — POLYGONAL operands only (`geo`'s `BooleanOps`).
 //!
 //! The [`lex`] sub-module mirrors every function at the lexical level
 //! (wkt-literal strings in, values out) — the shape a SPARQL engine builtin
@@ -22,11 +27,11 @@
 use crate::literal::{Crs, GeoGeometry};
 use crate::GeoError;
 use geo::{
-    BoundingRect, Closest, ConvexHull, CoordsIter, Distance, Euclidean, Haversine,
-    HaversineClosestPoint, Intersects, MapCoords, Relate,
+    BooleanOps, BoundingRect, Buffer, Closest, ConvexHull, CoordsIter, Distance, Euclidean,
+    Haversine, HaversineClosestPoint, Intersects, MapCoords, Relate,
 };
 use geo_types::{
-    Coord, Geometry, LineString, MultiLineString, MultiPoint, Point, Polygon,
+    Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
 };
 
 /// Mean-Earth-radius metres per degree of arc (GRS80 mean radius 6 371 008.8 m,
@@ -225,6 +230,112 @@ sf_relation!(
     sf_overlaps, is_overlaps
 );
 
+// ---- Generic DE-9IM + Egenhofer / RCC8 relation families ---------------------------
+
+/// `geof:relate` — generic DE-9IM pattern test (GeoSPARQL 1.0 §9 / Simple
+/// Features `Relate`): `true` iff the intersection matrix of `a` against `b`
+/// matches `pattern` (nine of `T` / `F` / `*` / `0` / `1` / `2`).
+pub fn relate(a: &GeoGeometry, b: &GeoGeometry, pattern: &str) -> Result<bool, GeoError> {
+    ensure_compatible(a, b)?;
+    a.geometry
+        .relate(&b.geometry)
+        .matches(pattern)
+        .map_err(|e| GeoError::Parse(format!("invalid DE-9IM pattern {pattern:?}: {e}")))
+}
+
+/// `true` iff the DE-9IM matrix of `a` vs `b` matches ANY of `patterns`
+/// (the spec defines some relations as a disjunction of matrices).
+fn relate_any(a: &GeoGeometry, b: &GeoGeometry, patterns: &[&str]) -> Result<bool, GeoError> {
+    ensure_compatible(a, b)?;
+    let matrix = a.geometry.relate(&b.geometry);
+    for p in patterns {
+        // Patterns are compile-time constants below — a failure is a crate bug.
+        if matrix.matches(p).expect("valid built-in DE-9IM pattern") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+macro_rules! de9im_relation {
+    ($(#[$doc:meta])* $name:ident, [$($pattern:literal),+]) => {
+        $(#[$doc])*
+        pub fn $name(a: &GeoGeometry, b: &GeoGeometry) -> Result<bool, GeoError> {
+            relate_any(a, b, &[$($pattern),+])
+        }
+    };
+}
+
+// The Egenhofer relation family (GeoSPARQL 1.0 Req 25 / 1.1 §9 — the standard
+// DE-9IM matrix patterns for each relation).
+de9im_relation!(
+    /// `geof:ehEquals` — Egenhofer equal.
+    eh_equals, ["TFFFTFFFT"]
+);
+de9im_relation!(
+    /// `geof:ehDisjoint` — Egenhofer disjoint.
+    eh_disjoint, ["FF*FF****"]
+);
+de9im_relation!(
+    /// `geof:ehMeet` — Egenhofer meet (boundaries in contact, interiors not).
+    eh_meet, ["FT*******", "F**T*****", "F***T****"]
+);
+de9im_relation!(
+    /// `geof:ehOverlap` — Egenhofer overlap.
+    eh_overlap, ["T*T***T**"]
+);
+de9im_relation!(
+    /// `geof:ehCovers` — Egenhofer covers.
+    eh_covers, ["T*TFT*FF*"]
+);
+de9im_relation!(
+    /// `geof:ehCoveredBy` — Egenhofer coveredBy.
+    eh_covered_by, ["TFF*TFT**"]
+);
+de9im_relation!(
+    /// `geof:ehInside` — Egenhofer inside.
+    eh_inside, ["TFF*FFT**"]
+);
+de9im_relation!(
+    /// `geof:ehContains` — Egenhofer contains.
+    eh_contains, ["T*TFF*FF*"]
+);
+
+// The RCC8 relation family (GeoSPARQL 1.0 Req 26 / 1.1 §9). RCC8 is defined
+// over REGIONS (non-empty interiors); the matrices below are the spec's.
+de9im_relation!(
+    /// `geof:rcc8eq` — equal.
+    rcc8_eq, ["TFFFTFFFT"]
+);
+de9im_relation!(
+    /// `geof:rcc8dc` — disconnected.
+    rcc8_dc, ["FFTFFTTTT"]
+);
+de9im_relation!(
+    /// `geof:rcc8ec` — externally connected (boundaries touch).
+    rcc8_ec, ["FFTFTTTTT"]
+);
+de9im_relation!(
+    /// `geof:rcc8po` — partially overlapping.
+    rcc8_po, ["TTTTTTTTT"]
+);
+de9im_relation!(
+    /// `geof:rcc8tppi` — tangential proper part inverse.
+    rcc8_tppi, ["TTTFTTFFT"]
+);
+de9im_relation!(
+    /// `geof:rcc8tpp` — tangential proper part.
+    rcc8_tpp, ["TFFTTFTTT"]
+);
+de9im_relation!(
+    /// `geof:rcc8ntpp` — non-tangential proper part.
+    rcc8_ntpp, ["TFFTFFTTT"]
+);
+de9im_relation!(
+    /// `geof:rcc8ntppi` — non-tangential proper part inverse.
+    rcc8_ntppi, ["TTTFFTFFT"]
+);
+
 // ---- Geometry-producing functions -------------------------------------------------
 
 /// `geof:envelope` — the minimum bounding rectangle, as a polygon (degenerate
@@ -301,6 +412,128 @@ fn boundary_geometry(g: &Geometry<f64>) -> Result<Geometry<f64>, GeoError> {
             ))
         }
     })
+}
+
+// ---- Set operations (polygonal subset via geo's BooleanOps) -----------------------
+
+/// The geometry as a multipolygon, if it is polygonal (POLYGON, MULTIPOLYGON,
+/// or the rect/triangle shorthands). `None` for points, curves, collections.
+fn polygonal(g: &Geometry<f64>) -> Option<MultiPolygon<f64>> {
+    match g {
+        Geometry::Polygon(p) => Some(MultiPolygon(vec![p.clone()])),
+        Geometry::MultiPolygon(mp) => Some(mp.clone()),
+        Geometry::Rect(r) => Some(MultiPolygon(vec![r.to_polygon()])),
+        Geometry::Triangle(t) => Some(MultiPolygon(vec![t.to_polygon()])),
+        _ => None,
+    }
+}
+
+/// Shared front end of the four set operations: CRS compatibility + the
+/// POLYGONAL-OPERANDS-ONLY restriction (geo's `BooleanOps` is a polygon
+/// overlay; general line/point overlays are not implemented — see TODO.md).
+fn polygonal_pair(
+    name: &str,
+    a: &GeoGeometry,
+    b: &GeoGeometry,
+) -> Result<(MultiPolygon<f64>, MultiPolygon<f64>), GeoError> {
+    ensure_compatible(a, b)?;
+    match (polygonal(&a.geometry), polygonal(&b.geometry)) {
+        (Some(pa), Some(pb)) => Ok((pa, pb)),
+        _ => Err(GeoError::Unsupported(format!(
+            "geof:{name} supports polygonal operands only (POLYGON/MULTIPOLYGON), got {} and {}",
+            wkt_type_name(&a.geometry),
+            wkt_type_name(&b.geometry)
+        ))),
+    }
+}
+
+/// The WKT keyword for a geometry variant (for error messages).
+fn wkt_type_name(g: &Geometry<f64>) -> &'static str {
+    match g {
+        Geometry::Point(_) => "POINT",
+        Geometry::Line(_) | Geometry::LineString(_) => "LINESTRING",
+        Geometry::Polygon(_) | Geometry::Rect(_) | Geometry::Triangle(_) => "POLYGON",
+        Geometry::MultiPoint(_) => "MULTIPOINT",
+        Geometry::MultiLineString(_) => "MULTILINESTRING",
+        Geometry::MultiPolygon(_) => "MULTIPOLYGON",
+        Geometry::GeometryCollection(_) => "GEOMETRYCOLLECTION",
+    }
+}
+
+macro_rules! set_operation {
+    ($(#[$doc:meta])* $name:ident, $geof_name:literal, $op:ident) => {
+        $(#[$doc])*
+        ///
+        /// POLYGONAL operands only (the result is a MULTIPOLYGON in the
+        /// operands' CRS); any other operand type is a [`GeoError::Unsupported`].
+        pub fn $name(a: &GeoGeometry, b: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
+            let (pa, pb) = polygonal_pair($geof_name, a, b)?;
+            Ok(GeoGeometry { crs: a.crs.clone(), geometry: Geometry::MultiPolygon(pa.$op(&pb)) })
+        }
+    };
+}
+
+set_operation!(
+    /// `geof:intersection` — points in both `a` and `b`.
+    intersection, "intersection", intersection
+);
+set_operation!(
+    /// `geof:union` — points in `a` or `b`.
+    union, "union", union
+);
+set_operation!(
+    /// `geof:difference` — points in `a` but not in `b`.
+    difference, "difference", difference
+);
+set_operation!(
+    /// `geof:symDifference` — points in exactly one of `a`, `b`.
+    sym_difference, "symDifference", xor
+);
+
+// ---- geof:buffer -------------------------------------------------------------------
+
+/// `geof:buffer(geom, radius, units)` — all points within `radius` of the
+/// geometry, as a MULTIPOLYGON (geo 0.33's `Buffer`, rounded joins/caps).
+///
+/// - Metric units require a geographic CRS: the geometry is projected into a
+///   LOCAL EQUIRECTANGULAR metre frame about its mean latitude, buffered
+///   there, and unprojected — accurate at local scale (the same approximation
+///   as extended-extended [`distance_meters`]), increasingly distorted for
+///   continent-scale geometries or near the poles.
+/// - [`Unit::Degree`] / [`Unit::Radian`] buffer in euclidean coordinate space
+///   (degrees for geographic CRSs, raw units for [`Crs::Other`]).
+pub fn buffer(g: &GeoGeometry, radius: f64, unit: Unit) -> Result<GeoGeometry, GeoError> {
+    let buffered = match unit.meters_scale() {
+        Some(scale) => {
+            if !g.crs.is_geographic() {
+                return Err(GeoError::NonGeographicCrs(g.crs.iri().to_string()));
+            }
+            let rect = g.geometry.bounding_rect().ok_or_else(|| {
+                GeoError::Unsupported("geof:buffer of an empty geometry".to_string())
+            })?;
+            // Local equirectangular frame about the geometry's mean latitude.
+            let kx = METERS_PER_DEGREE * rect.center().y.to_radians().cos();
+            if kx <= 0.0 {
+                return Err(GeoError::Unsupported(
+                    "geof:buffer with metric units at the poles".to_string(),
+                ));
+            }
+            let meters = radius * scale;
+            let projected =
+                g.geometry.map_coords(|c| Coord { x: c.x * kx, y: c.y * METERS_PER_DEGREE });
+            projected
+                .buffer(meters)
+                .map_coords(|c| Coord { x: c.x / kx, y: c.y / METERS_PER_DEGREE })
+        }
+        None => {
+            let d = match unit {
+                Unit::Radian => radius.to_degrees(),
+                _ => radius,
+            };
+            g.geometry.buffer(d)
+        }
+    };
+    Ok(GeoGeometry { crs: g.crs.clone(), geometry: Geometry::MultiPolygon(buffered) })
 }
 
 // ---- Lexical-level mirrors (the engine-builtin shape) ------------------------------
@@ -383,4 +616,111 @@ pub mod lex {
         /// `geof:boundary(?a)` -> wktLiteral lexical form.
         boundary
     );
+
+    /// `geof:getSRID(?a)` -> the geometry's CRS IRI (an `xsd:anyURI` value).
+    pub fn get_srid(a: &str) -> Result<String, GeoError> {
+        Ok(parse_wkt_literal(a)?.crs.iri().to_string())
+    }
+
+    /// `geof:relate(?a, ?b, ?de9imPattern)`.
+    pub fn relate(a: &str, b: &str, pattern: &str) -> Result<bool, GeoError> {
+        super::relate(&parse_wkt_literal(a)?, &parse_wkt_literal(b)?, pattern)
+    }
+
+    lex_relation!(
+        /// `geof:ehEquals(?a, ?b)`.
+        eh_equals
+    );
+    lex_relation!(
+        /// `geof:ehDisjoint(?a, ?b)`.
+        eh_disjoint
+    );
+    lex_relation!(
+        /// `geof:ehMeet(?a, ?b)`.
+        eh_meet
+    );
+    lex_relation!(
+        /// `geof:ehOverlap(?a, ?b)`.
+        eh_overlap
+    );
+    lex_relation!(
+        /// `geof:ehCovers(?a, ?b)`.
+        eh_covers
+    );
+    lex_relation!(
+        /// `geof:ehCoveredBy(?a, ?b)`.
+        eh_covered_by
+    );
+    lex_relation!(
+        /// `geof:ehInside(?a, ?b)`.
+        eh_inside
+    );
+    lex_relation!(
+        /// `geof:ehContains(?a, ?b)`.
+        eh_contains
+    );
+    lex_relation!(
+        /// `geof:rcc8eq(?a, ?b)`.
+        rcc8_eq
+    );
+    lex_relation!(
+        /// `geof:rcc8dc(?a, ?b)`.
+        rcc8_dc
+    );
+    lex_relation!(
+        /// `geof:rcc8ec(?a, ?b)`.
+        rcc8_ec
+    );
+    lex_relation!(
+        /// `geof:rcc8po(?a, ?b)`.
+        rcc8_po
+    );
+    lex_relation!(
+        /// `geof:rcc8tppi(?a, ?b)`.
+        rcc8_tppi
+    );
+    lex_relation!(
+        /// `geof:rcc8tpp(?a, ?b)`.
+        rcc8_tpp
+    );
+    lex_relation!(
+        /// `geof:rcc8ntpp(?a, ?b)`.
+        rcc8_ntpp
+    );
+    lex_relation!(
+        /// `geof:rcc8ntppi(?a, ?b)`.
+        rcc8_ntppi
+    );
+
+    macro_rules! lex_set_operation {
+        ($(#[$doc:meta])* $name:ident) => {
+            $(#[$doc])*
+            pub fn $name(a: &str, b: &str) -> Result<String, GeoError> {
+                Ok(super::$name(&parse_wkt_literal(a)?, &parse_wkt_literal(b)?)?.to_wkt_literal())
+            }
+        };
+    }
+
+    lex_set_operation!(
+        /// `geof:intersection(?a, ?b)` -> wktLiteral lexical form (polygonal operands only).
+        intersection
+    );
+    lex_set_operation!(
+        /// `geof:union(?a, ?b)` -> wktLiteral lexical form (polygonal operands only).
+        union
+    );
+    lex_set_operation!(
+        /// `geof:difference(?a, ?b)` -> wktLiteral lexical form (polygonal operands only).
+        difference
+    );
+    lex_set_operation!(
+        /// `geof:symDifference(?a, ?b)` -> wktLiteral lexical form (polygonal operands only).
+        sym_difference
+    );
+
+    /// `geof:buffer(?a, ?radius, ?unitIri)` -> wktLiteral lexical form.
+    pub fn buffer(a: &str, radius: f64, unit_iri: &str) -> Result<String, GeoError> {
+        Ok(super::buffer(&parse_wkt_literal(a)?, radius, Unit::from_iri(unit_iri)?)?
+            .to_wkt_literal())
+    }
 }

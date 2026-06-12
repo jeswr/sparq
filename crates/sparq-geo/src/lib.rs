@@ -7,9 +7,12 @@
 //!    leading `<CRS-IRI>` per GeoSPARQL Req 10 / section 8.5.1 (default CRS84)
 //!    and the EPSG:4326 lat/long axis order.
 //! 2. [`geof`] — the `geof:` function namespace: `geof:distance` (with unit
-//!    IRIs), the eight simple-features relation functions
-//!    (`geof:sfEquals` .. `geof:sfOverlaps`, DE-9IM via `geo`'s `Relate`),
-//!    and `geof:envelope` / `geof:boundary` / `geof:convexHull`. The
+//!    IRIs); the relation families — simple-features `geof:sfEquals` ..
+//!    `geof:sfOverlaps`, Egenhofer `geof:eh*`, RCC8 `geof:rcc8*` (all DE-9IM
+//!    via `geo`'s `Relate`) plus the generic `geof:relate`; the
+//!    geometry-producing `geof:envelope` / `boundary` / `convexHull` /
+//!    `buffer` and the polygonal set operations `geof:intersection` /
+//!    `union` / `difference` / `symDifference`; and `geof:getSRID`. The
 //!    [`geof::lex`] sub-module mirrors every function at the LEXICAL level
 //!    (wkt-literal strings in, plain values / wkt-literal strings out) — the
 //!    exact shape a SPARQL engine builtin receives; the [`registry`] module
@@ -19,9 +22,15 @@
 //!    [`sparq_engine::query_with_functions`] — see [`geof_registry`].
 //! 3. [`index`] — [`GeoIndex`]: extracts `(entity, geometry)` pairs from a
 //!    sparq [`sparq_core::Graph`] (via `geo:hasGeometry` /
-//!    `geo:hasDefaultGeometry` / `geo:asWKT`), bulk-loads an R-tree (`rstar`)
-//!    over their bounding boxes, and answers `within_distance` / `nearest` /
-//!    `intersects` queries returning entity [`oxrdf::Term`]s.
+//!    `geo:hasDefaultGeometry` / `geo:asWKT`; default graph plus named
+//!    graphs), bulk-loads an R-tree (`rstar`) over their bounding boxes, and
+//!    answers `within_distance` / `nearest` / `intersects` queries returning
+//!    entity [`oxrdf::Term`]s (antimeridian-crossing balls handled); deltas
+//!    are mirrored incrementally via [`GeoIndex::apply_delta`].
+//!
+//! The opt-in `reproject` cargo feature adds [`reproject`]: pure-Rust
+//! (proj4rs) transformation of projected EPSG literals into CRS84 for a
+//! curated EPSG set.
 //!
 //! No existing sparq crate depends on this one unconditionally (in particular
 //! the wasm build carries zero geometry code); spatial support is engaged only
@@ -33,6 +42,8 @@ pub mod index;
 pub mod literal;
 #[cfg(feature = "engine")]
 pub mod registry;
+#[cfg(feature = "reproject")]
+pub mod reproject;
 
 pub use geof::Unit;
 pub use index::GeoIndex;

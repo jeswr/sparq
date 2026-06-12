@@ -263,6 +263,201 @@ fn envelope_boundary_convex_hull() {
     assert!(geof::sf_equals(&hull, &square).unwrap(), "got {}", hull.to_wkt_literal());
 }
 
+// ---- geof:relate + Egenhofer / RCC8 ------------------------------------------------
+
+#[test]
+fn relate_generic_de9im_patterns() {
+    let poly = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    // sfWithin's pattern, evaluated generically.
+    assert!(lex::relate("POINT(1 1)", poly, "T*F**F***").unwrap());
+    assert!(!lex::relate("POINT(9 9)", poly, "T*F**F***").unwrap());
+    // Dimension digits: point-in-polygon interior intersection has dimension 0.
+    assert!(lex::relate("POINT(1 1)", poly, "0*F**F***").unwrap());
+    assert!(!lex::relate("POINT(1 1)", poly, "2*F**F***").unwrap());
+    // Malformed patterns are reported as parse errors.
+    assert!(matches!(lex::relate("POINT(1 1)", poly, "TTT"), Err(GeoError::Parse(_))));
+    assert!(matches!(lex::relate("POINT(1 1)", poly, "XXXXXXXXX"), Err(GeoError::Parse(_))));
+    // CRS compatibility is enforced like every other relation.
+    let bng = "<http://www.opengis.net/def/crs/EPSG/0/27700> POINT(0 0)";
+    assert!(matches!(lex::relate(bng, poly, "T*F**F***"), Err(GeoError::CrsMismatch(_, _))));
+}
+
+/// Region pairs and which Egenhofer/RCC8 relation holds for each — both
+/// families partition region-region space, so exactly ONE relation per family
+/// must be true for each pair.
+#[test]
+fn egenhofer_and_rcc8_partition_region_pairs() {
+    const SMALL: &str = "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))";
+    const TANGENT: &str = "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))";
+    const BIG: &str = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    const ADJACENT: &str = "POLYGON((4 0, 6 0, 6 2, 4 2, 4 0))";
+    const FAR: &str = "POLYGON((9 9, 10 9, 10 10, 9 10, 9 9))";
+    const OVERLAP: &str = "POLYGON((3 3, 6 3, 6 6, 3 6, 3 3))";
+
+    type Rel = fn(&str, &str) -> Result<bool, GeoError>;
+    let egenhofer: [(&str, Rel); 8] = [
+        ("ehEquals", lex::eh_equals),
+        ("ehDisjoint", lex::eh_disjoint),
+        ("ehMeet", lex::eh_meet),
+        ("ehOverlap", lex::eh_overlap),
+        ("ehCovers", lex::eh_covers),
+        ("ehCoveredBy", lex::eh_covered_by),
+        ("ehInside", lex::eh_inside),
+        ("ehContains", lex::eh_contains),
+    ];
+    let rcc8: [(&str, Rel); 8] = [
+        ("rcc8eq", lex::rcc8_eq),
+        ("rcc8dc", lex::rcc8_dc),
+        ("rcc8ec", lex::rcc8_ec),
+        ("rcc8po", lex::rcc8_po),
+        ("rcc8tppi", lex::rcc8_tppi),
+        ("rcc8tpp", lex::rcc8_tpp),
+        ("rcc8ntpp", lex::rcc8_ntpp),
+        ("rcc8ntppi", lex::rcc8_ntppi),
+    ];
+
+    // (a, b, the-one-true-egenhofer, the-one-true-rcc8)
+    for (a, b, eh_want, rcc8_want) in [
+        (BIG, BIG, "ehEquals", "rcc8eq"),
+        (BIG, FAR, "ehDisjoint", "rcc8dc"),
+        (BIG, ADJACENT, "ehMeet", "rcc8ec"),
+        (BIG, OVERLAP, "ehOverlap", "rcc8po"),
+        (SMALL, BIG, "ehInside", "rcc8ntpp"),
+        (BIG, SMALL, "ehContains", "rcc8ntppi"),
+        (TANGENT, BIG, "ehCoveredBy", "rcc8tpp"),
+        (BIG, TANGENT, "ehCovers", "rcc8tppi"),
+    ] {
+        for (name, f) in &egenhofer {
+            assert_eq!(f(a, b).unwrap(), name == &eh_want, "{name}({a}, {b})");
+        }
+        for (name, f) in &rcc8 {
+            assert_eq!(f(a, b).unwrap(), name == &rcc8_want, "{name}({a}, {b})");
+        }
+    }
+}
+
+#[test]
+fn egenhofer_and_rcc8_inverse_pairs_are_consistent() {
+    const PAIRS: &[(&str, &str)] = &[
+        ("POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))", "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))"),
+        ("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))"),
+        ("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", "POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))"),
+    ];
+    for (a, b) in PAIRS {
+        assert_eq!(lex::eh_inside(a, b).unwrap(), lex::eh_contains(b, a).unwrap());
+        assert_eq!(lex::eh_covered_by(a, b).unwrap(), lex::eh_covers(b, a).unwrap());
+        assert_eq!(lex::rcc8_tpp(a, b).unwrap(), lex::rcc8_tppi(b, a).unwrap());
+        assert_eq!(lex::rcc8_ntpp(a, b).unwrap(), lex::rcc8_ntppi(b, a).unwrap());
+    }
+}
+
+// ---- getSRID ----------------------------------------------------------------------
+
+#[test]
+fn get_srid_returns_the_crs_iri() {
+    assert_eq!(lex::get_srid("POINT(0 0)").unwrap(), "http://www.opengis.net/def/crs/OGC/1.3/CRS84");
+    assert_eq!(
+        lex::get_srid("<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(51.5 -0.13)").unwrap(),
+        "http://www.opengis.net/def/crs/EPSG/0/4326"
+    );
+    assert_eq!(
+        lex::get_srid("<http://www.opengis.net/def/crs/EPSG/0/27700> POINT(530000 180000)").unwrap(),
+        "http://www.opengis.net/def/crs/EPSG/0/27700"
+    );
+    assert!(lex::get_srid("PONT(0 0)").is_err());
+}
+
+// ---- Set operations (polygonal subset) ---------------------------------------------
+
+#[test]
+fn set_operations_on_polygons() {
+    let a = "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))";
+    let b = "POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))";
+
+    // intersection: the shared unit square.
+    let i = parse_wkt_literal(&lex::intersection(a, b).unwrap()).unwrap();
+    let unit = parse_wkt_literal("POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))").unwrap();
+    assert!(geof::sf_equals(&i, &unit).unwrap(), "got {}", i.to_wkt_literal());
+
+    // union of edge-adjacent squares: the 2x1 rectangle.
+    let u = parse_wkt_literal(
+        &lex::union("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", "POLYGON((1 0, 2 0, 2 1, 1 1, 1 0))")
+            .unwrap(),
+    )
+    .unwrap();
+    let rect = parse_wkt_literal("POLYGON((0 0, 2 0, 2 1, 0 1, 0 0))").unwrap();
+    assert!(geof::sf_equals(&u, &rect).unwrap(), "got {}", u.to_wkt_literal());
+
+    // difference: the L-shape.
+    let d = parse_wkt_literal(&lex::difference(a, b).unwrap()).unwrap();
+    let ell = parse_wkt_literal("POLYGON((0 0, 2 0, 2 1, 1 1, 1 2, 0 2, 0 0))").unwrap();
+    assert!(geof::sf_equals(&d, &ell).unwrap(), "got {}", d.to_wkt_literal());
+
+    // symDifference of identical operands: empty.
+    assert!(lex::sym_difference(a, a).unwrap().contains("EMPTY"));
+
+    // symDifference == union minus intersection on this pair.
+    let sym = parse_wkt_literal(&lex::sym_difference(a, b).unwrap()).unwrap();
+    let umi = parse_wkt_literal(
+        &lex::difference(&lex::union(a, b).unwrap(), &lex::intersection(a, b).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(geof::sf_equals(&sym, &umi).unwrap());
+}
+
+#[test]
+fn set_operations_reject_non_polygonal_operands_and_crs_mismatch() {
+    let poly = "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))";
+    assert!(matches!(lex::intersection("POINT(1 1)", poly), Err(GeoError::Unsupported(_))));
+    assert!(matches!(lex::union(poly, "LINESTRING(0 0, 1 1)"), Err(GeoError::Unsupported(_))));
+    let bng = "<http://www.opengis.net/def/crs/EPSG/0/27700> POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))";
+    assert!(matches!(lex::difference(poly, bng), Err(GeoError::CrsMismatch(_, _))));
+    // MULTIPOLYGON operands work; result CRS follows the operands.
+    let mp = "<http://www.opengis.net/def/crs/EPSG/0/27700> MULTIPOLYGON(((0 0, 2 0, 2 2, 0 2, 0 0)))";
+    let r = lex::intersection(mp, bng).unwrap();
+    assert!(r.starts_with("<http://www.opengis.net/def/crs/EPSG/0/27700>"), "got {r}");
+}
+
+// ---- geof:buffer -------------------------------------------------------------------
+
+#[test]
+fn buffer_metric_approximates_a_great_circle_disc() {
+    // 100 km around a point at 51°N: a point 95 km north is inside, 105 km
+    // north is outside (1 km of slack for the polygonal circle approximation).
+    let buf = lex::buffer("POINT(0 51)", 100.0, UOM_KM).unwrap();
+    assert!(buf.contains("MULTIPOLYGON"), "got {buf}");
+    let dlat_95 = 95_000.0 / 111_194.93;
+    let dlat_105 = 105_000.0 / 111_194.93;
+    assert!(lex::sf_within(&format!("POINT(0 {})", 51.0 + dlat_95), &buf).unwrap());
+    assert!(!lex::sf_within(&format!("POINT(0 {})", 51.0 + dlat_105), &buf).unwrap());
+    // …and the same east-west, where degrees are shorter (cos 51° ≈ 0.6293):
+    // the local projection must keep the disc round in METRES, not degrees.
+    let dlon_95 = 95_000.0 / (111_194.93 * (51.0f64).to_radians().cos());
+    let dlon_105 = 105_000.0 / (111_194.93 * (51.0f64).to_radians().cos());
+    assert!(lex::sf_within(&format!("POINT({dlon_95} 51)", ), &buf).unwrap());
+    assert!(!lex::sf_within(&format!("POINT({dlon_105} 51)"), &buf).unwrap());
+}
+
+#[test]
+fn buffer_grows_polygons_and_respects_units() {
+    // A point 0.5° outside the polygon falls inside its 1°-buffer.
+    let poly = "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))";
+    let buf = lex::buffer(poly, 1.0, UOM_DEGREE).unwrap();
+    assert!(lex::sf_within("POINT(2.5 1)", &buf).unwrap());
+    assert!(!lex::sf_within("POINT(3.5 1)", &buf).unwrap());
+    // Radian radius: same buffer expressed in radians.
+    let buf_rad = lex::buffer(poly, 1.0f64.to_radians(), UOM_RADIAN).unwrap();
+    assert!(lex::sf_within("POINT(2.5 1)", &buf_rad).unwrap());
+    // Degree-unit buffering works in raw coordinate space for projected CRSs…
+    let bng = "<http://www.opengis.net/def/crs/EPSG/0/27700> POINT(530000 180000)";
+    let buf_bng = lex::buffer(bng, 100.0, UOM_DEGREE).unwrap();
+    assert!(buf_bng.starts_with("<http://www.opengis.net/def/crs/EPSG/0/27700>"), "got {buf_bng}");
+    // …but METRIC buffering refuses them (no projection support).
+    assert!(matches!(lex::buffer(bng, 100.0, UOM_METRE), Err(GeoError::NonGeographicCrs(_))));
+    // Empty geometries cannot be buffered metrically (no anchor latitude).
+    assert!(matches!(lex::buffer("POINT EMPTY", 1.0, UOM_METRE), Err(GeoError::Unsupported(_))));
+}
+
 #[test]
 fn unit_iri_aliases() {
     assert_eq!(Unit::from_iri("http://qudt.org/vocab/unit/M").unwrap(), Unit::Metre);

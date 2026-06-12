@@ -12,7 +12,9 @@
 //!             `materialize` — full QueryResult of terms (default)
 //!             `json`        — materialise + serialise to SPARQL JSON (timed)
 //!
-//! `format`: turtle | ntriples | nquads | trig.
+//! `format`: turtle | ntriples | nquads | trig — plus hdt when built with the
+//! opt-in `hdt` cargo feature (`--features hdt`), which also auto-detects the
+//! `.hdt` / `.hdt.gz` file extensions regardless of the format argument.
 
 use std::io::Read;
 use std::time::Instant;
@@ -741,6 +743,16 @@ fn load_quiet(path: &str, format: &str) -> sparq_core::Graph {
         eprintln!("error loading {path}: {e}");
         std::process::exit(1);
     };
+    // HDT archives — `hdt` as the format argument, or a `.hdt`/`.hdt.gz` file
+    // extension — route through sparq-hdt (gzip is sniffed by magic bytes
+    // there, so a mislabelled extension still loads). Opt-in cargo feature:
+    // the decode stack stays out of the default build (see Cargo.toml).
+    if format == "hdt" || path.ends_with(".hdt") || path.ends_with(".hdt.gz") {
+        #[cfg(feature = "hdt")]
+        return sparq_hdt::load(path).unwrap_or_else(|e| die(e.to_string()));
+        #[cfg(not(feature = "hdt"))]
+        die("HDT support is not compiled into this binary: rebuild with `cargo build -p sparq-cli --features hdt`".to_string());
+    }
     // N-Triples streams block-by-block (parallel parse, no full decompressed copy in RAM); other
     // formats need the whole document buffered for the parallel statement-splitter.
     if matches!(format, "ntriples" | "n-triples") {

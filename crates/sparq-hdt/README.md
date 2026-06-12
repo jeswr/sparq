@@ -4,9 +4,14 @@ Opt-in [HDT](https://www.rdfhdt.org/) (Header Dictionary Triples) reader for the
 sparq RDF engine: load `.hdt` archives straight into a `sparq_core::Graph`.
 
 ```rust
-let graph = sparq_hdt::load("dataset.hdt")?;
-// query it like any other sparq graph
+let graph = sparq_hdt::load("dataset.hdt")?;   // .hdt.gz sniffed + decompressed too
+let meta  = sparq_hdt::header("dataset.hdt")?; // the HDT header (VoID stats, provenance) as a Graph
+// query them like any other sparq graph
 ```
+
+In sparq-cli (behind the opt-in `hdt` cargo feature —
+`cargo build -p sparq-cli --features hdt`), the `hdt` format argument or a
+`.hdt`/`.hdt.gz` file extension routes loading through this crate.
 
 This is a separate crate so the core engine — and in particular the wasm build —
 carries zero HDT code or dependencies. Native-only by design.
@@ -28,6 +33,12 @@ carries zero HDT code or dependencies. Native-only by design.
   both subject and object) — the term set is never materialized twice.
 - HDT term shapes covered: IRIs, blank nodes, plain / language-tagged / datatyped
   literals (lang tags normalized to lowercase, matching sparq's other loaders).
+- **GZipped containers** (`.hdt.gz`): detected by magic bytes — not file names —
+  in every entry point and decompressed on the fly (streaming, pure-Rust flate2
+  backend).
+- **Header access**: `header()` / `header_reader()` decode just the dataset
+  metadata triples (the "H" in HDT) into a queryable `Graph` without touching
+  the dictionary/triples sections.
 
 ## Validation
 
@@ -58,5 +69,6 @@ N-Triples, which is the format's main draw alongside no-text-parse loading.
 
 ## Not (yet) supported
 
-See `TODO.md`: writing HDT archives, GZipped-HDT containers, and exposing the HDT
-header metadata.
+See `TODO.md`: writing HDT archives (blocked upstream — the wrapped crate has no
+in-memory builder API, re-verified against hdt 0.6) and a decode-only fast path
+(upstream builds pattern-query indexes ingest never uses).

@@ -102,3 +102,60 @@ fn rejects_non_hdt_input() {
     let r = sparq_hdt::load_reader(std::io::Cursor::new(b"not an hdt file".to_vec()));
     assert!(r.is_err());
 }
+
+/// GZips the fixture in memory (single member; the decoder also accepts
+/// multi-member streams).
+fn gzipped_snikmeta() -> Option<Vec<u8>> {
+    use std::io::Write;
+    let hdt_path = fixture("snikmeta.hdt");
+    if !hdt_path.exists() {
+        eprintln!("skipping: fixture {} absent", hdt_path.display());
+        return None;
+    }
+    let bytes = std::fs::read(&hdt_path).unwrap();
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(&bytes).unwrap();
+    Some(enc.finish().unwrap())
+}
+
+/// `.hdt.gz` containers are detected by MAGIC BYTES (not file name) and
+/// decompressed transparently, from both a path and a reader.
+#[test]
+fn gzipped_hdt_loads_transparently() {
+    let Some(gz) = gzipped_snikmeta() else { return };
+    // Through a reader…
+    let g = sparq_hdt::load_reader(std::io::Cursor::new(gz.clone())).unwrap();
+    assert_eq!(g.store.len(), 328);
+    assert_eq!(triple_set(&g), triple_set(&sparq_hdt::load(fixture("snikmeta.hdt")).unwrap()));
+    // …and through a path with NO .gz extension (content sniffing, not names).
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-gz");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("disguised.hdt");
+    std::fs::write(&path, &gz).unwrap();
+    assert_eq!(sparq_hdt::load(&path).unwrap().store.len(), 328);
+}
+
+/// The HDT header (dataset metadata triples) is exposed as a queryable graph,
+/// for plain and gzipped archives alike.
+#[test]
+fn header_exposes_dataset_metadata() {
+    let hdt_path = fixture("snikmeta.hdt");
+    if !hdt_path.exists() {
+        eprintln!("skipping: fixture {} absent", hdt_path.display());
+        return;
+    }
+    let h = sparq_hdt::header(&hdt_path).unwrap();
+    assert!(!h.is_empty(), "snikmeta carries header metadata");
+    // The VoID statistics agree with the actual triple count.
+    let triples: Vec<[String; 3]> = triple_set(&h)
+        .into_iter()
+        .filter(|[_, p, _]| p == "<http://rdfs.org/ns/void#triples>")
+        .collect();
+    assert_eq!(triples.len(), 1);
+    assert_eq!(triples[0][2], "\"328\"");
+    // Same through a gzipped stream.
+    if let Some(gz) = gzipped_snikmeta() {
+        let h2 = sparq_hdt::header_reader(std::io::Cursor::new(gz)).unwrap();
+        assert_eq!(triple_set(&h2), triple_set(&h));
+    }
+}

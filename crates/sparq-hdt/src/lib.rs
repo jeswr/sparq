@@ -16,10 +16,16 @@
 //! decompressed to its term string ONCE, interned into the sparq [`Dict`], and the
 //! mapping memoized in a flat per-section table — so the term set is never
 //! materialized twice and the per-triple work is three array lookups.
+//!
+//! GZipped containers (`.hdt.gz`) are detected by MAGIC BYTES (not file name)
+//! and decompressed on the fly by every entry point; [`header`] exposes the
+//! archive's metadata triples (the H in HDT) as a queryable sparq [`Graph`].
 
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph;
 
+use hdt::containers::ControlInfo;
+use hdt::header::Header;
 use hdt::{Hdt, IdKind};
 use std::io::BufRead;
 use std::path::Path;
@@ -68,11 +74,36 @@ impl From<hdt::hdt::Error> for Error {
     }
 }
 
+/// Whether the stream starts with the gzip magic bytes (0x1f 0x8b). Peeks via
+/// the reader's buffer without consuming.
+fn is_gzip<R: BufRead>(reader: &mut R) -> std::io::Result<bool> {
+    let buf = reader.fill_buf()?;
+    Ok(buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b)
+}
+
+/// Runs `f` over the (transparently decompressed) HDT byte stream: a stream
+/// starting with the gzip magic is wrapped in a streaming `MultiGzDecoder`
+/// (`.hdt.gz` containers as some publishers ship); anything else is passed
+/// through. Detection is by CONTENT, not file name.
+fn with_hdt_stream<T>(
+    mut reader: impl BufRead,
+    f: impl FnOnce(&mut dyn BufRead) -> Result<T, Error>,
+) -> Result<T, Error> {
+    if is_gzip(&mut reader)? {
+        let mut decoder = std::io::BufReader::new(flate2::bufread::MultiGzDecoder::new(reader));
+        f(&mut decoder)
+    } else {
+        f(&mut reader)
+    }
+}
+
 /// Loads an HDT archive from a file path into a sparq [`Graph`].
 ///
 /// Supports the standard HDT v1.0 layout (FourSectionDictionary with Plain Front
 /// Coding + BitmapTriples in SPO order) as written by hdt-cpp, hdt-java and the
-/// `hdt` crate. HDT carries a single graph, so the result has no named graphs.
+/// `hdt` crate; GZipped containers (`.hdt.gz`) are detected by magic bytes and
+/// decompressed on the fly. HDT carries a single graph, so the result has no
+/// named graphs.
 pub fn load(path: impl AsRef<Path>) -> Result<Graph, Error> {
     let file = std::fs::File::open(path)?;
     load_reader(std::io::BufReader::new(file))
@@ -80,10 +111,40 @@ pub fn load(path: impl AsRef<Path>) -> Result<Graph, Error> {
 
 /// Loads an HDT archive from any buffered reader into a sparq [`Graph`].
 ///
-/// The reader must be positioned at the start of the HDT data (the `$HDT` cookie).
+/// The reader must be positioned at the start of the HDT data: the `$HDT`
+/// cookie, or the gzip magic of a compressed container (decompressed
+/// transparently, as in [`load`]).
 pub fn load_reader<R: BufRead>(reader: R) -> Result<Graph, Error> {
-    let hdt = Hdt::read(reader)?;
-    graph_from_hdt(&hdt)
+    with_hdt_stream(reader, |r| graph_from_hdt(&Hdt::read(r)?))
+}
+
+/// Reads ONLY the HDT header — the dataset-metadata triples every archive
+/// carries (the "H" in HDT: VoID statistics, format/provenance notes) — as a
+/// queryable sparq [`Graph`], without decoding the dictionary or triples
+/// sections. GZipped containers are handled as in [`load`].
+///
+/// (The wrapped `hdt` crate decodes the header during `Hdt::read` but keeps it
+/// private, so this re-reads the head of the stream — it is a few KB.)
+pub fn header(path: impl AsRef<Path>) -> Result<Graph, Error> {
+    let file = std::fs::File::open(path)?;
+    header_reader(std::io::BufReader::new(file))
+}
+
+/// [`header`] from any buffered reader positioned at the start of the HDT data.
+pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error> {
+    with_hdt_stream(reader, |mut r| {
+        ControlInfo::read(&mut r).map_err(hdt::hdt::Error::from)?;
+        let header = Header::read(&mut r).map_err(hdt::hdt::Error::from)?;
+        // The in-crate Header stores parsed triples whose Display is their
+        // N-Triples line (Header::write round-trips through it): render and
+        // hand them to sparq's own N-Triples loader.
+        let mut nt = String::new();
+        for triple in &header.body {
+            nt.push_str(&triple.to_string());
+            nt.push('\n');
+        }
+        Graph::load_str(&nt, "ntriples").map_err(Error::Term)
+    })
 }
 
 /// Converts an already-decoded [`hdt::Hdt`] into a sparq [`Graph`] — the seam for
