@@ -21,6 +21,11 @@ readme = "../../README.md"
 # native builds; disable (default-features = false) for single-threaded / wasm targets.
 default = ["parallel"]
 parallel = ["dep:rayon", "sparq-core/parallel"]
+# OPT-IN derivation explanations ("proof trees"): `why(triple)` on the Materialized*Graph
+# handles + the `explain` module. NON-DEFAULT by design — when off, every explanation
+# structure and hook is cfg'd out entirely (zero hot-path cost, byte-identical behavior,
+# zero wasm impact: sparq-reason is never in the wasm dependency graph anyway).
+explain = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

@@ -23,9 +23,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
 mod incremental;
+#[cfg(feature = "explain")]
+pub mod explain;
 pub mod n3;
 mod owl;
 mod rdfs;
+#[cfg(feature = "explain")]
+pub use explain::{ExplainOpts, ProofNode, ProofTree};
 pub use incremental::{
     MaterializedGraph, MaterializedN3Graph, MaterializedOwlGraph, N3Mode, OwlMode,
 };
