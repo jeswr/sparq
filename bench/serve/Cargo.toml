@@ -1,0 +1,53 @@
+# RESEARCH SPIKES for the concurrent-serving design (research/concurrent-serving.md).
+# Deliberately a STANDALONE cargo project (own [workspace] table) so the repo's root
+# workspace — and every crate other agents own — is untouched. Nothing here is
+# production code; each bin is a measurement harness whose numbers are recorded in
+# the research document.
+[package]
+name = "serve-spikes"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# The root workspace patches spargebra with the vendored W3C-conformance fork; the
+# engine's behaviour (and build) depends on it, so this detached project must apply
+# the same patch.
+[patch.crates-io]
+spargebra = { path = "../../vendor/spargebra" }
+
+[dependencies]
+sparq-core = { path = "../../crates/sparq-core" }
+sparq-engine = { path = "../../crates/sparq-engine" }
+sparq-server = { path = "../../crates/sparq-server" }
+spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
+mimalloc = "0.1"
+
+[[bin]]
+name = "loadgen"
+path = "src/bin/loadgen.rs"
+
+[[bin]]
+name = "cache_spike"
+path = "src/bin/cache_spike.rs"
+
+[[bin]]
+name = "snapshot_spike"
+path = "src/bin/snapshot_spike.rs"
+
+[[bin]]
+name = "stream_spike"
+path = "src/bin/stream_spike.rs"
+
+[profile.release]
+debug = false
+lto = "thin"
+
+[[bin]]
+name = "point_spike"
+path = "src/bin/point_spike.rs"
+
+[[bin]]
+name = "update_stream_spike"
+path = "src/bin/update_stream_spike.rs"
