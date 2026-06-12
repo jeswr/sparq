@@ -1,0 +1,60 @@
+=== pair 1: 6perm synth ===
+rss_kb	after_open	2336
+query	q02_type_person	1250000	4.0	5.7	8317.6
+query	q03_star3	1250000	27894.7	30330.5	228439.9
+query	q04_follows_name	4999991	41994.9	45492.2	166245.0
+query	q06_filter_age	140625	6.7	10.1	7446.3
+query	q09_count_edges	1	6.7	10.0	2357.5
+query	q10_optional_age	1250000	5134.3	5428.9	8768.0
+suite_total_min_us	75041.3
+rss_kb	after_battery	108272
+=== pair 1: 3perm synth ===
+rss_kb	after_open	2336
+query	q02_type_person	1250000	8.5	13.1	765.2
+query	q03_star3	1250000	112429.8	120013.0	225902.2
+query	q04_follows_name	4999991	67491.1	69486.8	81259.7
+query	q06_filter_age	140625	6.5	8.2	184.2
+query	q09_count_edges	1	12.6	17.8	204.7
+query	q10_optional_age	1250000	55237.0	58522.5	69221.2
+suite_total_min_us	235185.5
+rss_kb	after_battery	121936
+=== pair 2: 6perm synth ===
+rss_kb	after_open	2336
+query	q02_type_person	1250000	3.7	4.5	126.8
+query	q03_star3	1250000	23812.3	28867.8	30786.8
+query	q04_follows_name	4999991	40568.8	42179.7	52425.2
+query	q06_filter_age	140625	6.6	10.0	175.2
+query	q09_count_edges	1	13.5	19.1	112.0
+query	q10_optional_age	1250000	4637.8	5211.4	8683.0
+suite_total_min_us	69042.8
+rss_kb	after_battery	108272
+=== pair 2: 3perm synth ===
+rss_kb	after_open	2304
+query	q02_type_person	1250000	8.5	10.0	195.9
+query	q03_star3	1250000	108781.9	117687.2	127465.7
+query	q04_follows_name	4999991	57015.0	67157.7	75874.9
+query	q06_filter_age	140625	13.5	18.0	556.4
+query	q09_count_edges	1	12.3	14.5	106.5
+query	q10_optional_age	1250000	60008.1	66536.0	68808.9
+suite_total_min_us	225839.4
+rss_kb	after_battery	121920
+=== pair 3: 6perm synth ===
+rss_kb	after_open	2336
+query	q02_type_person	1250000	4.0	4.7	133.3
+query	q03_star3	1250000	25460.8	31778.3	34534.1
+query	q04_follows_name	4999991	39106.0	42513.2	46681.0
+query	q06_filter_age	140625	13.2	18.7	169.3
+query	q09_count_edges	1	13.5	16.1	139.4
+query	q10_optional_age	1250000	4615.3	5198.3	7850.9
+suite_total_min_us	69212.7
+rss_kb	after_battery	108272
+=== pair 3: 3perm synth ===
+rss_kb	after_open	2320
+query	q02_type_person	1250000	4.0	6.7	134.0
+query	q03_star3	1250000	117430.7	123622.1	125683.5
+query	q04_follows_name	4999991	65076.0	70713.1	79531.9
+query	q06_filter_age	140625	6.4	7.9	71.5
+query	q09_count_edges	1	7.2	9.0	81.1
+query	q10_optional_age	1250000	53135.5	55730.0	64005.9
+suite_total_min_us	235659.7
+rss_kb	after_battery	121888

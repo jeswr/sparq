@@ -1,0 +1,7 @@
+rows	9999991	probes	2000000
+baseline_probe	825.42 ns/probe	(1.651 s best-of-5)
+probe_plus_atomic	828.81 ns/probe	(1.658 s best-of-5)
+probe_plus_sampled64	810.90 ns/probe	(1.622 s best-of-5)
+raw_fetch_add	3.21 ns/op
+contended_4thr_probe_plus_atomic	734.12 ns/probe (per-thread)
+overhead	atomic	0.4%	sampled64	-1.8%

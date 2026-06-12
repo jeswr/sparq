@@ -1,0 +1,7 @@
+file	data/synth10m-raw/perm2.bin	119999892 bytes	7325 pages of 16384
+resident_untouched	0	(0.0%)
+first_touch_all_s	0.217	resident	7325	(100.0%)
+warm_touch_all_s	0.000
+madvise_dontneed_rc	0
+resident_after_dontneed	7325	(100.0%)
+retouch_after_dontneed_s	0.009	resident	7325	(100.0%)

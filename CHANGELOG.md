@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Persisted per-predicate stats never loaded on `open` (`sparq-core`)** —
+  `load_pred_stats` read the predicate id as 8 bytes while `save_pred_stats` writes a
+  4-byte `Id`, mis-framing every record: the load always failed and `open()` silently
+  fell back to recomputing the stats, which paged the ENTIRE POS+PSO permutations into
+  RAM (the dominant out-of-core open cost the persisted file exists to avoid). Measured
+  on the 10M-triple synthetic dir: open 0.52 s → 0.019 s, RSS after open 236 MB →
+  2.3 MB (research/memory-tiering.md). Regression-tested
+  (`pred_stats_load_is_some_and_exact`).
+
 - **Domain/range typing for TBox-orphan properties on the monotone OWL route
   (`sparq-reason`)** — on the batch single-pass path (`rdfs_closure` with the
   property-orientation closure active, i.e. any `owl:inverseOf`/`owl:SymmetricProperty`

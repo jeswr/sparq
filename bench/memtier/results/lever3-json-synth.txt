@@ -1,0 +1,36 @@
+config	perms=6	iters=5	decompress=false	mode=json
+rss_kb	start	1920
+open_s	0.014
+triples	9999991
+heap_bytes	total_after_open	156
+heap_bytes	dict_after_open	156
+rss_kb	after_open	2320
+query	q02_type_person	61388938	29371.0	35580.4	142113.3
+query	q03_star3	287916741	328193.4	364064.9	405165.6
+query	q04_follows_name	701663341	849154.5	1209499.3	1218738.5
+query	q06_filter_age	19562560	13397.6	15111.0	18926.5
+query	q09_count_edges	145	6.2	15.5	103.9
+query	q10_optional_age	229027836	189537.9	213475.9	363332.2
+suite_total_min_us	1409660.5
+rss_kb	after_battery	1745680
+heap_bytes	total_after_battery	156
+residency	dict-hash.bin	50	1282	3.9%	0.8 MB resident
+residency	dict-hid.bin	6	641	0.9%	0.1 MB resident
+residency	dict-meta.bin	0	1	0.0%	0.0 MB resident
+residency	dict-offs.bin	1282	1282	100.0%	21.0 MB resident
+residency	dict-terms.bin	2879	2879	100.0%	47.2 MB resident
+residency	numerics.bin	0	1282	0.0%	0.0 MB resident
+residency	perm0.bin(SPO)	1	7325	0.0%	0.0 MB resident
+residency_hist	perm0.bin(SPO)	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+residency	perm1.bin(SOP)	1	7325	0.0%	0.0 MB resident
+residency_hist	perm1.bin(SOP)	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+residency	perm2.bin(PSO)	2772	7325	37.8%	45.4 MB resident
+residency_hist	perm2.bin(PSO)	0,0,51,100,100,100,100,100,100,99,1,0,0,0,0,0,0,0,0,3
+residency	perm3.bin(POS)	4775	7325	65.2%	78.2 MB resident
+residency_hist	perm3.bin(POS)	100,100,52,1,1,7,2,38,2,2,100,100,100,100,100,100,100,100,100,100
+residency	perm4.bin(OSP)	1	7325	0.0%	0.0 MB resident
+residency_hist	perm4.bin(OSP)	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+residency	perm5.bin(OPS)	1	7325	0.0%	0.0 MB resident
+residency_hist	perm5.bin(OPS)	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+residency	predstats.bin	0	1	0.0%	0.0 MB resident
+residency	temporals.bin	0	1442	0.0%	0.0 MB resident

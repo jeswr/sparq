@@ -1,0 +1,53 @@
+# RESEARCH SPIKES for the memory-tiering investigation (research/memory-tiering.md).
+# Deliberately a STANDALONE cargo project (own [workspace] table, like bench/serve) so
+# the repo's root workspace is untouched. Nothing here is production code; each bin is
+# a measurement harness whose numbers are recorded in the research document.
+[package]
+name = "memtier-spikes"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# The root workspace patches spargebra with the vendored W3C-conformance fork; the
+# engine's behaviour (and build) depends on it, so this detached project must apply
+# the same patch.
+[patch.crates-io]
+spargebra = { path = "../../vendor/spargebra" }
+
+[features]
+# Build the spike against the wasm 3-permutation index set {SPO, POS, OSP} — the
+# "dropped permutations" configuration for the perm-dropping measurements. Build the
+# same bins twice (default = 6 perms, --features compact = 3 perms) and compare.
+compact = ["sparq-core/compact-index"]
+
+[dependencies]
+sparq-core = { path = "../../crates/sparq-core", features = ["mmap"] }
+sparq-engine = { path = "../../crates/sparq-engine" }
+libc = "0.2"
+rayon = "1"
+
+[[bin]]
+name = "suite"
+path = "src/bin/suite.rs"
+
+[[bin]]
+name = "mix"
+path = "src/bin/mix.rs"
+
+[[bin]]
+name = "rebuild"
+path = "src/bin/rebuild.rs"
+
+[[bin]]
+name = "atomic_cost"
+path = "src/bin/atomic_cost.rs"
+
+[[bin]]
+name = "madvise"
+path = "src/bin/madvise.rs"
+
+[profile.release]
+debug = false
+lto = "thin"

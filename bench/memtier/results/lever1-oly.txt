@@ -1,0 +1,84 @@
+=== pair 1: 6perm oly ===
+rss_kb	after_open	3184
+query	q01_count_all	1	9.4	15.5	5588.7
+query	q02_type_person	134730	8.2	12.2	3964.0
+query	q03_athlete_star4	152847	4573.4	4889.8	21183.0
+query	q04_result_athlete_age	485297	4201.8	4681.8	12667.2
+query	q05_result_star3	269625	5070.9	5988.1	20803.3
+query	q06_filter_height	8209	605.0	791.7	4356.0
+query	q07_medal_athlete_gender	39834	15918.5	17641.6	31228.7
+query	q08_label_age	180609	2857.6	3109.6	6701.2
+query	q09_count_by_gender	2	5646.5	6478.0	9069.0
+query	q10_optional_height	182286	1282.5	1469.0	1554.9
+suite_total_min_us	40173.8
+rss_kb	after_battery	72160
+=== pair 1: 3perm oly ===
+rss_kb	after_open	3136
+query	q01_count_all	1	10.1	16.3	2468.3
+query	q02_type_person	134730	8.1	13.4	102.2
+query	q03_athlete_star4	152847	12623.7	14473.2	26802.7
+query	q04_result_athlete_age	485297	6793.3	7878.0	8749.3
+query	q05_result_star3	269625	18445.1	20536.9	33508.2
+query	q06_filter_height	8209	623.5	707.2	1024.8
+query	q07_medal_athlete_gender	39834	19930.1	25166.2	43612.8
+query	q08_label_age	180609	7860.6	8787.3	10957.4
+query	q09_count_by_gender	2	5013.5	17917.1	33627.8
+query	q10_optional_height	182286	5454.2	7417.5	8356.6
+suite_total_min_us	76762.2
+rss_kb	after_battery	72320
+=== pair 2: 6perm oly ===
+rss_kb	after_open	3152
+query	q01_count_all	1	17.7	22.9	219.4
+query	q02_type_person	134730	12.6	17.6	151.0
+query	q03_athlete_star4	152847	3915.5	3936.5	4440.4
+query	q04_result_athlete_age	485297	3815.1	3826.6	4131.7
+query	q05_result_star3	269625	4866.5	5260.6	15973.7
+query	q06_filter_height	8209	792.8	804.2	991.4
+query	q07_medal_athlete_gender	39834	25981.8	48178.7	120221.8
+query	q08_label_age	180609	2568.5	2832.9	3019.9
+query	q09_count_by_gender	2	15451.6	25281.6	80510.3
+query	q10_optional_height	182286	1197.9	1207.8	1276.2
+suite_total_min_us	58620.1
+rss_kb	after_battery	80768
+=== pair 2: 3perm oly ===
+rss_kb	after_open	3168
+query	q01_count_all	1	9.8	12.6	127.9
+query	q02_type_person	134730	8.8	10.3	72.7
+query	q03_athlete_star4	152847	12263.7	13467.6	14624.1
+query	q04_result_athlete_age	485297	7390.9	7437.5	9145.1
+query	q05_result_star3	269625	20351.7	21027.0	25827.3
+query	q06_filter_height	8209	606.0	614.1	685.2
+query	q07_medal_athlete_gender	39834	21701.0	34486.8	77415.4
+query	q08_label_age	180609	8343.9	9126.9	10401.5
+query	q09_count_by_gender	2	6454.1	8670.4	45746.0
+query	q10_optional_height	182286	5618.0	5787.2	6795.3
+suite_total_min_us	82747.8
+rss_kb	after_battery	69488
+=== pair 3: 6perm oly ===
+rss_kb	after_open	3152
+query	q01_count_all	1	8.4	24.4	127.1
+query	q02_type_person	134730	6.2	10.2	63.7
+query	q03_athlete_star4	152847	3994.7	4275.0	4944.5
+query	q04_result_athlete_age	485297	3816.0	4683.1	5822.2
+query	q05_result_star3	269625	4877.5	5081.8	7087.6
+query	q06_filter_height	8209	562.8	608.6	983.3
+query	q07_medal_athlete_gender	39834	13200.8	13796.5	23395.3
+query	q08_label_age	180609	2542.5	2697.0	2971.4
+query	q09_count_by_gender	2	4202.4	5441.6	8248.5
+query	q10_optional_height	182286	1196.1	1207.7	1285.5
+suite_total_min_us	34407.3
+rss_kb	after_battery	66064
+=== pair 3: 3perm oly ===
+rss_kb	after_open	3168
+query	q01_count_all	1	8.3	13.1	129.3
+query	q02_type_person	134730	6.9	10.1	70.9
+query	q03_athlete_star4	152847	11386.7	12117.5	13588.7
+query	q04_result_athlete_age	485297	6179.1	6623.8	6900.5
+query	q05_result_star3	269625	16866.7	17448.1	20502.9
+query	q06_filter_height	8209	554.4	609.6	702.4
+query	q07_medal_athlete_gender	39834	21067.3	25108.7	60072.0
+query	q08_label_age	180609	7201.3	7210.0	7453.7
+query	q09_count_by_gender	2	4145.8	5615.8	15357.2
+query	q10_optional_height	182286	5371.2	5620.1	5879.9
+suite_total_min_us	72787.7
+rss_kb	after_battery	73472
