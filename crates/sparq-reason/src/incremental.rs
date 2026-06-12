@@ -63,7 +63,7 @@ use sparq_core::dict::{Dict, Id};
 #[path = "incremental_explain.rs"]
 mod incremental_explain;
 #[cfg(feature = "explain")]
-use incremental_explain::RdfsExplain;
+use incremental_explain::{OwlExplain, RdfsExplain};
 
 const OWL_NS: &str = "http://www.w3.org/2002/07/owl#";
 const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
@@ -556,6 +556,10 @@ pub struct MaterializedOwlGraph {
     tbox_preds: FxHashSet<Id>,
     axiom_types: FxHashSet<Id>,
     rebuilds: usize,
+    /// Explanation state (`explain` feature): raw TBox edges with origins + base reverse
+    /// indexes — everything `why()` needs to reconstruct a derivation deterministically.
+    #[cfg(feature = "explain")]
+    explain: OwlExplain,
 }
 
 impl MaterializedOwlGraph {
@@ -613,6 +617,8 @@ impl MaterializedOwlGraph {
             tbox_preds,
             axiom_types,
             rebuilds: 0,
+            #[cfg(feature = "explain")]
+            explain: OwlExplain::default(),
         };
         g.rematerialize(dict);
         g.rebuilds = 0; // the initial materialization is not a fallback
@@ -630,6 +636,8 @@ impl MaterializedOwlGraph {
     /// whichever [`OwlMode`] the base now supports).
     fn rematerialize(&mut self, dict: &mut Dict) {
         self.rebuilds += 1;
+        #[cfg(feature = "explain")]
+        self.explain.rebuild(&self.base, &self.v, &self.ow);
         self.counts.clear();
         self.schema_facts.clear();
         self.virtual_facts.clear();
@@ -1145,6 +1153,8 @@ impl MaterializedOwlGraph {
             self.rematerialize(dict);
             return added.len();
         }
+        #[cfg(feature = "explain")]
+        self.explain.add_triples(&added);
         for t in self.count_sweep(&added) {
             *self.counts.entry(t).or_insert(0) += 1;
         }
@@ -1173,6 +1183,8 @@ impl MaterializedOwlGraph {
             self.rematerialize(dict);
             return removed.len();
         }
+        #[cfg(feature = "explain")]
+        self.explain.remove_triples(&removed);
         for t in self.count_sweep(&removed) {
             self.decrement(t);
         }
