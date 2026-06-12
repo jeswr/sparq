@@ -182,14 +182,18 @@ pub struct ProofStep {
 /// Parse N3 `src`, run the rule closure, and return the entailed GROUND triples interned into
 /// `dict`. The rules/formulae/variables are consumed by reasoning; only ground facts remain.
 pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
-    Ok(reason_n3_proof(dict, src)?.0)
+    // No derivation tracking ([`StepMode::None`]): skips per-firing premise materialization
+    // in the hot loop and the proof-step interning pass entirely.
+    let parsed = parser::parse(src)?;
+    let (facts, steps) = run_closure(parsed, None, StepMode::None);
+    Ok(intern_closure(dict, &facts, &steps)?.0)
 }
 
 /// As [`reason_n3`], but also return the derivation (a [`ProofStep`] for each NEWLY-derived
 /// triple, in derivation order) — the EYE `--proof` analogue.
 pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     let parsed = parser::parse(src)?;
-    let (facts, steps) = run_closure(parsed, None);
+    let (facts, steps) = run_closure(parsed, None, StepMode::Full);
     intern_closure(dict, &facts, &steps)
 }
 
@@ -228,7 +232,8 @@ pub fn reason_n3_terms_with_resolver(
         None => parser::parse(src)?,
     };
     let (n_rules, n_backward_rules) = (parsed.rules.len(), parsed.backward_rules.len());
-    let (facts, steps) = run_closure(parsed, resolver);
+    // `derived` needs the conclusions in derivation order but never the premises.
+    let (facts, steps) = run_closure(parsed, resolver, StepMode::Conclusions);
     Ok(N3Closure {
         facts: facts.all.into_iter().collect(),
         derived: steps.into_iter().map(|(g, _, _)| g).collect(),
@@ -237,12 +242,29 @@ pub fn reason_n3_terms_with_resolver(
     })
 }
 
+/// How much derivation history [`run_closure`] records. Premise materialization (the
+/// supporting ground facts of each firing) costs an extra instantiation + fact lookup per
+/// premise atom per NEW fact, and the conclusions an extra clone — skip whatever the caller
+/// will discard.
+#[derive(Clone, Copy, PartialEq)]
+enum StepMode {
+    /// No steps at all (closure-only callers: [`reason_n3`], `formula_closure`).
+    None,
+    /// `(conclusion, rule, [])` per new fact — derivation order without premises
+    /// ([`reason_n3_terms`]'s `derived`).
+    Conclusions,
+    /// Full [`ProofStep`] data ([`reason_n3_proof`]).
+    Full,
+}
+
 /// The semi-naive forward-chaining fixpoint shared by the id-level and
 /// term-level entry points. Returns the final fact set plus the derivation
-/// steps `(conclusion, rule index, supporting premises)` in derivation order.
+/// steps `(conclusion, rule index, supporting premises)` in derivation order
+/// (as much of them as `mode` asks for).
 fn run_closure(
     parsed: parser::Parsed,
     resolver: Option<&Resolver>,
+    mode: StepMode,
 ) -> (FactIndex, Vec<([Term; 3], usize, Vec<[Term; 3]>)>) {
     let parser::Parsed { facts: facts0, mut rules, mut backward_rules, base } = parsed;
     // Premises evaluate left-to-right with no coroutining — reorder each
@@ -425,8 +447,11 @@ fn run_closure(
                         for z in zs {
                             let g = [f[0].clone(), st.pred.clone(), z.clone()];
                             if !facts.contains(&g) {
-                                let prem =
-                                    vec![f.clone(), [f[2].clone(), st.pred.clone(), z.clone()]];
+                                let prem = if mode == StepMode::Full {
+                                    vec![f.clone(), [f[2].clone(), st.pred.clone(), z.clone()]]
+                                } else {
+                                    Vec::new()
+                                };
                                 produced.push((g, ri, prem));
                             }
                         }
@@ -438,10 +463,14 @@ fn run_closure(
                             for x in xs {
                                 let g = [x.clone(), st.pred.clone(), f[2].clone()];
                                 if !facts.contains(&g) {
-                                    let prem = vec![
-                                        [x.clone(), st.pred.clone(), f[0].clone()],
-                                        f.clone(),
-                                    ];
+                                    let prem = if mode == StepMode::Full {
+                                        vec![
+                                            [x.clone(), st.pred.clone(), f[0].clone()],
+                                            f.clone(),
+                                        ]
+                                    } else {
+                                        Vec::new()
+                                    };
                                     produced.push((g, ri, prem));
                                 }
                             }
@@ -505,12 +534,15 @@ fn run_closure(
                         if !facts.contains(&g) {
                             // The supporting facts: premise patterns instantiated under b that
                             // are actual facts (excludes builtins / list structure).
-                            let prem: Vec<[Term; 3]> = rule
-                                .premise
-                                .iter()
-                                .filter_map(|p| ground_triple(p, &b))
-                                .filter(|t| facts.contains(t))
-                                .collect();
+                            let prem: Vec<[Term; 3]> = if mode == StepMode::Full {
+                                rule.premise
+                                    .iter()
+                                    .filter_map(|p| ground_triple(p, &b))
+                                    .filter(|t| facts.contains(t))
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
                             produced.push((g, ri, prem));
                         }
                     }
@@ -533,7 +565,7 @@ fn run_closure(
             {
                 *trans_new.entry(g.clone()).or_insert(false) |= !trans_rules.contains_key(&ri);
             }
-            if is_new {
+            if is_new && mode != StepMode::None {
                 steps.push((g, ri, prem));
             }
         }
@@ -1511,7 +1543,7 @@ fn formula_closure(ts: &[[Term; 3]], bw: &BwCtx) -> Vec<[Term; 3]> {
     }
     let parsed =
         parser::Parsed { facts, rules, backward_rules: backward, base: bw.base.clone() };
-    let (closed, _steps) = run_closure(parsed, bw.resolver);
+    let (closed, _steps) = run_closure(parsed, bw.resolver, StepMode::None);
     // Original statements (including the rule statements, which cwm keeps in
     // log:conclusion output) plus the derivations.
     let mut seen: FxHashSet<[Term; 3]> = ts.iter().cloned().collect();
