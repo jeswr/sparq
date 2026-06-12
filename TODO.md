@@ -1,12 +1,10 @@
 # TODO
 
-## sparq-engine: `#[derive(Debug)]` on `QueryResult`
+## sparq-engine: `#[derive(Debug)]` on `QueryResult` — DONE
 
-`sparq_engine::QueryResult` does not implement `Debug` (its fields — `Vec<Variable>`,
-`Vec<Vec<Option<Term>>>` — all do). Downstream crates that embed it in their own
-types (`sparq-nlq`'s `Answer`) have to hand-write a summarising `Debug` impl instead
-of deriving. One-line, zero-cost derive; recorded here rather than patched in place
-because GenAI crates do not modify core crates (research/genai-design.md §0).
+Implemented in the engine-seams wave: `QueryResult` now derives `Debug`.
+(`sparq-nlq`'s hand-written summarising impl can be dropped at its owner's leisure
+— it still compiles either way.)
 
 ## sparq-core: cheap graph snapshot API (would simplify the server's update path)
 
@@ -38,3 +36,9 @@ Requirements for the API: snapshots must be (1) O(overlay), never O(triples);
 calls on the master (compaction must not invalidate live snapshots — e.g. the new
 base goes into fresh `Arc`s). The server-side wiring keeps its shape: publish slot
 `RwLock<Arc<Graph>>` + single-writer mutex; only `Writer`'s buffer juggling collapses.
+
+STATUS (engine-seams wave audit): still open, deliberately deferred. Meeting the
+three requirements means moving `TripleStore`'s permutation storage and the
+dictionary's compacted arena behind `Arc`s (a structural change to every storage
+mode, incl. mmap + compressed) — far beyond an additive seam; sparq-rsp's overlay
+item 3 and sparq-py's `Graph.copy()` both remain blocked on it.

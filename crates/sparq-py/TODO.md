@@ -6,16 +6,19 @@ their owning crates.
 
 ## Engine (sparq-engine)
 
-- **No native ASK / CONSTRUCT / DESCRIBE.** `sparq_engine::{query, query_json, count}`
-  accept only SELECT. `Graph.ask` therefore rewrites ASK → `SELECT *` over the same
-  pattern via spargebra and answers `count > 0` — the same workaround
-  `sparq-server::exec::prepare` uses. Exact, but it cannot short-circuit after the
-  first solution (no `LIMIT 1`-style early exit through the lazy count path).
-  CONSTRUCT / DESCRIBE raise `ValueError` from `Graph.query`.
-- **Update drops named graphs.** `sparq_engine::update` collects only the default
-  graph's triples and rebuilds; a dataset loaded from N-Quads/TriG loses its named
-  graphs after `Graph.update`. (Named-graph targets inside the update itself are
-  already rejected by the engine with an error.)
+- ~~**No native ASK / CONSTRUCT / DESCRIBE.**~~ **STALE — engine fixed (T16);
+  bindings follow-up.** `sparq_engine` now has native `ask` (early-exiting),
+  `construct`, `describe`, `construct_ntriples` (+ `_with_budget` and `_prepared`
+  variants). The Python workaround is now the gap: rewire `Graph.ask` to
+  `sparq_engine::ask` and route CONSTRUCT / DESCRIBE in `Graph.query` instead of
+  raising `ValueError`. (Recorded for the bindings wave; the engine-seams wave does
+  not touch sparq-py source.)
+- ~~**Update drops named graphs.**~~ **STALE — engine fixed (update v2, F19).**
+  `sparq_engine::update` / `update_in_place` model the full dataset: named graphs
+  survive every operation, and GRAPH-scoped data ops, graph templates in
+  DELETE/INSERT…WHERE, USING (NAMED), CLEAR/DROP/CREATE/ADD/COPY/MOVE and LOAD are
+  implemented (engine tests `named_graph_updates`, `add_copy_move`). Bindings
+  follow-up: drop the named-graph caveats from the Python docs/tests.
 
 ## Reasoning (sparq-reason)
 
@@ -34,13 +37,17 @@ their owning crates.
 
 ## Core (sparq-core)
 
-- **`Dict`/`Graph` are not `Clone`,** so `Graph.copy()` cannot be offered cheaply;
-  `reason()` works around it by moving the public `dict`/`store` fields out and
-  re-deriving the triples with a full-store scan.
-- **`Graph::save` panics on a sparse numeric cache** (`NumData::as_slice`
-  unreachable). Not reachable through these bindings today (we never call
-  `into_compressed`), but worth a `Result` upstream before exposing a compressed
-  mode in Python.
+- **`Dict`/`Graph` are not `Clone`** — STILL OPEN (audited, deferred with reason):
+  a naive `Clone` would deep-copy the dictionary arena + six permutations (O(n))
+  and is wrong for the mmap-backed mode; the designed fix is the cheap-snapshot
+  API in the workspace `TODO.md` (Arc-shared immutable base), deferred as a
+  structural storage change. `Graph.copy()` stays blocked on it.
+- ~~**`Graph::save` panics on a sparse numeric cache**~~ **STALE — already fixed.**
+  `save`/`save_compressed` recompute a dense cache from the dictionary when the
+  in-memory cache is sparse (`dense_numerics`' fallback arm); the engine-seams
+  wave added the pinning regression test
+  (`sparq-core::tests::save_after_into_compressed_sparse_numerics`). A compressed
+  mode in Python is unblocked.
 
 ## Packaging
 

@@ -24,7 +24,11 @@ crate README. These are the deliberate cuts, in rough priority order:
   `research/genai-text-embedding-practices.md`. Remaining cut: per-list
   *weights* for RRF (Elasticsearch-style weighted RRF) — add a weighted
   variant if a third signal ever needs down-weighting.
-- **Planner cardinality hook** (GNCE-style) — explicitly out of v1.
+- **Planner cardinality hook** (GNCE-style) — explicitly out of v1. (Engine-seams
+  wave note: sparq-engine's opt-in `cs-planner` feature now demonstrates the
+  injection shape — an external estimator installed via `with_cs_table` and
+  consulted by the greedy planner for star joins; a learned/GNCE estimator could
+  follow the same pattern. Still deferred here.)
 - **WASM.** Nothing here is wasm-hostile except memmap2 (the build-phase store
   and the in-RAM index are pure computation); a wasm feature would need a
   bytes-backed `VectorStore::open_from_bytes`. Not wired up because the wasm

@@ -14,6 +14,10 @@ Still open from that design note: the registry evaluates `geof:` post-hoc
 (per row, after pattern matching). Pushing `geof:` filters down into a
 `GeoIndex` window query (the performant plan shape) additionally needs a
 planner hook — much bigger; not specified here.
+(Engine-seams wave audit: still DEFERRED — this is a physical-operator
+substitution (FILTER → index window scan), not a statistics injection, so the
+new `cs-planner` estimator seam does not cover it; it needs its own design —
+a rewrite hook where a registered predicate+filter shape claims a scan.)
 
 ## geof: functions not in v1
 

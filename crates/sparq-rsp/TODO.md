@@ -31,11 +31,14 @@ needed:
    recorded in the workspace `TODO.md` ("sparq-core: cheap graph snapshot API")
    would let the window loop keep one mutable graph and hand the engine an O(1)
    immutable snapshot per closed window.
-4. **Parse/plan once**: cache the parsed `spargebra` algebra at `register` time
-   and add a `sparq_engine` entry point taking pre-parsed algebra (today only
-   the SPARQL string API is public). Parsing is microseconds — only worth it
-   for very small windows at high window rates (the RANGE 100 line in the
-   README).
+4. **Parse/plan once** — **engine side DONE (engine-seams wave)**:
+   `sparq_engine::PreparedQuery` (parse / `From<spargebra::Query>`) with
+   `query_prepared` / `ask_prepared` / `count_prepared` / `construct_prepared`
+   (+ `_with_budget`) entry points; the string APIs are thin wrappers, so
+   semantics are identical. Remaining (rsp-side, this crate's owner): cache a
+   `PreparedQuery` at `register` time and call `query_prepared` in the window
+   loop. Parsing is microseconds — only worth it for very small windows at high
+   window rates (the RANGE 100 line in the README).
 
 ## Smaller gaps
 

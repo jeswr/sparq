@@ -1,5 +1,45 @@
 # sparq-introspect TODO
 
+## Planner tie-in: characteristic sets → cardinality estimation — DONE (engine-seams wave)
+
+Implemented exactly as recorded below, with the gate passed:
+
+- **Engine seam**: sparq-engine grew the **`cs-planner` cargo feature**
+  (NON-default; the wasm bundle and default native build carry zero CS code).
+  `sparq_engine::cs::CsTable` holds the table in dict-id space
+  (`star_subjects(Q) = Σ_{C⊇Q} count(C)`,
+  `star_cardinality(Q) = Σ_{C⊇Q} count(C)·Π_{p∈Q} avg_mult(C,p)` — Neumann &
+  Moerkotte) and `with_cs_table(&Arc<CsTable>, f)` installs it thread-scoped
+  around execution, mirroring `QueryBudget`/`DatasetView` installation.
+- **Hook points wired** (`exec::CsCtx`, a zero-sized no-op without the feature):
+  `goo_pick` scores a star candidate by the conditional expansion
+  `star(Q ∪ {p}) / star(Q)` instead of the independence product (selectivity over
+  other shared variables keeps the marginal model), and `record_pattern_ndv` uses
+  `Σ_{C⊇Q} count(C)` as the subject-variable ndv. The EXPLAIN replay shares the
+  same context. Join ORDER only — results identical; full suite green with the
+  feature on. Note on the third recorded hook (seed choice): the seed is the
+  smallest SINGLE-pattern cardinality, which `store.estimate` answers exactly
+  (index range length) — there is no independence product in it for CS to
+  replace, so the seed logic is intentionally unchanged.
+- **This crate's accessor**: `characteristic_set_ids(graph) -> Vec<CsIdSet>` —
+  the EXACT pre-resolution table in dict-id space (no string parsing, no caps;
+  one SPO scan), feedable straight into `cs::CsTable`.
+- **GATE — PASSED** (`sparq-engine/src/cs_gate.rs`, both estimators measured
+  through the REAL planner recurrence vs true cardinalities; q-error =
+  max(est/true, true/est), floored at 1). WatDiv is not in the repo, so the
+  workload is star queries over the local bench data:
+  - olympics (1,781,625 triples, 19 star queries from top-CS prefixes |Q|∈2..4
+    plus cross-CS pairs): PredStat median 1.00 / gmean 6.58 / max **180,604**
+    vs CS median 1.00 / gmean **1.00** / max **1.0**. The blow-ups are
+    predicate-correlation cases (cross-CS pairs that are empty on the data:
+    independence estimates ~135k–181k rows, CS says 0). Re-run with:
+    `cargo test -p sparq-engine --release --features cs-planner -- --ignored cs_gate_olympics --nocapture`
+  - synthetic correlated shapes (always-on CI gate, 12 queries):
+    PredStat median 1.83 / gmean 7.02 / max 1283 vs CS 1.00 / 1.00 / 1.0; the CS
+    estimator is asserted EXACT on pure stars over the builder's own data.
+
+The original analysis is kept below for the record.
+
 ## Planner tie-in: characteristic sets → cardinality estimation (the dual use)
 
 The design doc (§5.4, introspection report §1.2) prescribes building the
@@ -36,13 +76,13 @@ engine's star-join cardinality estimator. The precise hook, read from
 
 ## Public-API gaps hit during implementation (sparq-core)
 
-- **No public dictionary iterator**: vocabulary detection iterates ids `1..=dict.len()`
-  and calls `term_parts(id)` — valid today (ids are dense, 1-based) but it leans on the
-  id-assignment contract; a `Dict::iter()` (or `terms()`) would make it official.
-- **Internal CS ids**: this crate resolves predicates/classes to IRI strings at build
-  time (LLM-facing). For the planner tie-in the table should stay in dict-id space —
-  keep the pre-resolution `FxHashMap<Box<[Id]>, CsAcc>` form behind a (future)
-  `cs-planner`-facing accessor instead of re-parsing strings.
+- ~~**No public dictionary iterator**~~ **DONE (engine-seams wave)**: `Dict::iter()`
+  yields `(Id, TermParts)` over exactly `1..=len()` — the dense-id contract is now
+  official API. This crate's hand-rolled `1..=dict.len()` loops still work and can
+  be migrated at leisure.
+- ~~**Internal CS ids**~~ **DONE (engine-seams wave)**: `characteristic_set_ids()`
+  exposes the pre-resolution table in dict-id space (see the planner-tie-in status
+  above); the LLM-facing build is unchanged.
 - `store.pred_stat` already holds `count / ndv_subj / ndv_obj`; this crate recomputes
   them in its own scans (storage-mode-proof, and the same pass also needs domain
   histograms) — fine, but if a sidecar/persisted introspection lands, dedupe.

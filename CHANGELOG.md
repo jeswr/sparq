@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Recorded engine/core API seams (audit of the opt-in crates' TODOs)** — the
+  cross-crate seams the "modify no existing crate" waves recorded, now implemented:
+  - `sparq-core`: `Graph::load_str_with_base` / `parse_to_triples_with_base`
+    (base-IRI resolution for Turtle/TriG — removes sparq-shacl's oxttl+`from_parts`
+    workaround); `Dict::iter()` (the official dense-1-based-id term iterator
+    sparq-introspect leaned on by hand); `Graph::iter_ids` / `iter_ids_sorted(col)`
+    (borrowing canonical-id triple iterator, overlay-merged, zero alloc per row —
+    sparq-shacl's term scans, sparq-sim's distinct subject/object enumeration);
+    regression test pinning `Graph::save` on a SPARSE numeric cache (the panic
+    sparq-py recorded was already fixed by `dense_numerics`; now pinned).
+  - `sparq-engine`: **`PreparedQuery`** — parse-once / execute-many entry points
+    (`query`/`ask`/`count`/`query_json`/`construct`/`describe`
+    `*_prepared(_with_budget)` twins; the string APIs are now thin wrappers), the
+    seam sparq-rsp recorded for per-window evaluation without re-parsing; and
+    `#[derive(Debug)]` on `QueryResult` (workspace TODO, recorded by sparq-nlq).
+  - `sparq-engine` **`cs-planner` feature (opt-in, non-default)** + `sparq-introspect`
+    `characteristic_set_ids()`: characteristic-set star-join cardinality estimation
+    (Neumann & Moerkotte) injected via `cs::CsTable` / `with_cs_table`; the greedy
+    planner scores star candidates by the conditional CS expansion and uses
+    `Σ_{C⊇Q} count(C)` as the subject-variable ndv (join order only — results
+    identical; zero code in the wasm/default builds). Gate (q-error through the real
+    planner recurrence vs true cardinalities, synthetic correlated stars): PredStat
+    median 1.83 / gmean 7.02 / max 1283 vs **CS 1.00 / 1.00 / 1.00**.
+
 - **OWL 2 RL rule completion (`sparq-reason`)** — the remaining OWL 2 RL/RDF rules
   (Profiles §4.3): `cls-oo` (oneOf member typing), `cls-maxqc1/2`
   (qualified-cardinality-0 clashes in `inconsistencies()`), the schema-level
