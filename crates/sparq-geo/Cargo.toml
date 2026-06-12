@@ -42,7 +42,7 @@ oxrdf.workspace = true
 # WKT lexical forms <-> geo-types geometries.
 wkt = "0.14"
 # Geometry algorithms: DE-9IM relate, convex hull, bounding rect, distances.
-geo = "0.30"
+geo = "0.33"
 geo-types = "0.7"
 # R-tree (bulk-loaded STR) over geometry bounding boxes.
 rstar = "0.12"
