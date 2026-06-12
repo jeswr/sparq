@@ -13,3 +13,4 @@ export {
   type QueryForm,
 } from './sparql.js';
 export { init } from './wasm.js';
+export { decompress, decompressToString, sniffCodec, type CompressionCodec } from './decompress.js';

@@ -6,6 +6,7 @@
  */
 import type * as RDF from '@rdfjs/types';
 import { Bindings } from './bindings.js';
+import { decompressToString, type CompressionCodec } from './decompress.js';
 import {
   detectQueryForm,
   quadsToNQuads,
@@ -86,6 +87,22 @@ export class SparqStore {
   /** Builds a store from RDF/JS quads (serialised internally to N-Quads). */
   static async fromQuads(quads: Iterable<RDF.Quad>, options: SparqStoreOptions = {}): Promise<SparqStore> {
     return SparqStore.fromString(quadsToNQuads(quads), 'nquads', options);
+  }
+
+  /**
+   * Parses a COMPRESSED RDF document — `.nt.zst` / `.ttl.gz` / the
+   * multi-frame zstd streams sparq's `CompressedSink` emits — decompressing
+   * on the JS side (zstd via pure-JS `fzstd`, dynamically imported; gzip via
+   * the platform) and loading with [`fromString`]. The codec is sniffed from
+   * the payload's magic number unless `options.codec` names it.
+   */
+  static async fromCompressed(
+    bytes: Uint8Array,
+    format: RdfFormat = 'turtle',
+    options: SparqStoreOptions & { codec?: CompressionCodec } = {},
+  ): Promise<SparqStore> {
+    const { codec, ...rest } = options;
+    return SparqStore.fromString(await decompressToString(bytes, codec), format, rest);
   }
 
   /**
