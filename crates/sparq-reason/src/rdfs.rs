@@ -209,22 +209,27 @@ pub(crate) fn emit_consequences(
         if let Some(ds) = sc_closure.get(&o) {
             out.extend(ds.iter().map(|&d| [s, v.ty, d]));
         }
-    } else if let Some(px) = px {
+    } else if let Some(px) = px.filter(|px| px.map.contains_key(&p)) {
         // Monotone-OWL path: rewrite the predicate AND orient through inverse/symmetric, then
         // type via domain/range of the (oriented) derived predicate.
-        if let Some(rs) = px.map.get(&p) {
-            for &(r, swapped) in rs {
-                let (rs_, ro_) = if swapped { (o, s) } else { (s, o) };
-                out.push([rs_, r, ro_]); // rdfs7 / prp-inv / prp-symp / prp-eqp
-                if let Some(cs) = dom_full.get(&r) {
-                    out.extend(cs.iter().map(|&c| [rs_, v.ty, c])); // rdfs2 (+rdfs9)
-                }
-                if let Some(cs) = rng_full.get(&r) {
-                    out.extend(cs.iter().map(|&c| [ro_, v.ty, c])); // rdfs3 (+rdfs9)
-                }
+        for &(r, swapped) in &px.map[&p] {
+            let (rs_, ro_) = if swapped { (o, s) } else { (s, o) };
+            out.push([rs_, r, ro_]); // rdfs7 / prp-inv / prp-symp / prp-eqp
+            if let Some(cs) = dom_full.get(&r) {
+                out.extend(cs.iter().map(|&c| [rs_, v.ty, c])); // rdfs2 (+rdfs9)
+            }
+            if let Some(cs) = rng_full.get(&r) {
+                out.extend(cs.iter().map(|&c| [ro_, v.ty, c])); // rdfs3 (+rdfs9)
             }
         }
     } else {
+        // No PropExpand active, OR `p` never appears in the property-orientation TBox (no
+        // subPropertyOf/inverseOf/symmetric/equivalent edge) — its expansion is the trivial
+        // {(p, false)}, i.e. exactly the plain-RDFS emission below. Falling through here (not
+        // skipping!) keeps domain/range typing for properties that have ONLY a domain/range
+        // declaration: build_prop_expand's all_props never collects those, so an early
+        // `px.map.get(&p) → None` return used to silently drop their rdfs2/rdfs3 typing while
+        // the full fixpoint path emitted it.
         // rdfs7: (s p o), (p sp* q) ⊢ (s q o)
         if let Some(qs) = sp_closure.get(&p) {
             out.extend(qs.iter().map(|&q| [s, q, o]));
@@ -593,6 +598,34 @@ mod tests {
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         assert!(has(&dict, &set, "http://ex/s", "http://ex/q", "http://ex/o"), "rdfs7");
         assert!(has(&dict, &set, "http://ex/s", rdf::TYPE.as_str(), "http://ex/C"), "rdfs7->rdfs2 interaction");
+    }
+
+    #[test]
+    fn prop_expand_keeps_domain_range_only_properties() {
+        // REGRESSION: with PropExpand active (any inverseOf/symmetric axiom in the ontology), a
+        // property that has a domain/range but NO property-orientation edge (no subPropertyOf /
+        // inverseOf / symmetric / equivalent) was absent from the px map, and emit_consequences
+        // dropped its rdfs2/rdfs3 typing entirely — diverging from the full fixpoint path.
+        let mut dict = Dict::new();
+        let (p, q, r, c, d, a, b) = (
+            ex(&mut dict, "p"), ex(&mut dict, "q"), ex(&mut dict, "r"), ex(&mut dict, "C"),
+            ex(&mut dict, "D"), ex(&mut dict, "a"), ex(&mut dict, "b"),
+        );
+        let (dom, rng, ty) = (
+            iri(&mut dict, rdfs::DOMAIN.as_str()),
+            iri(&mut dict, rdfs::RANGE.as_str()),
+            iri(&mut dict, rdf::TYPE.as_str()),
+        );
+        // q owl:inverseOf r activates PropExpand; p has ONLY domain/range declarations.
+        let mono = MonoOwl {
+            inverse: [(q, vec![r]), (r, vec![q])].into_iter().collect(),
+            ..MonoOwl::default()
+        };
+        let mut triples = vec![[p, dom, c], [p, rng, d], [a, p, b]];
+        rdfs_closure(&mut dict, &mut triples, false, &mono);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[a, ty, c]), "rdfs2 domain typing must survive active PropExpand");
+        assert!(set.contains(&[b, ty, d]), "rdfs3 range typing must survive active PropExpand");
     }
 
     #[test]
