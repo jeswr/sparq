@@ -62,7 +62,8 @@
 //!   * `string:format` directives beyond `%s`/`%d`/`%f`/`%%` (width, precision, `%e`/`%g`,
 //!     length modifiers) — unimplemented directives FAIL the premise (no silent mangling).
 //!   * Reverse (object-bound) modes of the unary math builtins (EYE's `?X math:sin 0.5`
-//!     solving X = asin 0.5) — only the forward subject→object direction is evaluated;
+//!     solving X = asin 0.5) — only the forward subject→object direction is evaluated
+//!     (EXCEPT `math:negation`, which is bidirectional like EYE);
 //!     premises are evaluated left-to-right with no coroutining (EYE `when`-delays).
 //!
 //! Next increments: `Term::List` (first-class list values: list:append, backward goals over

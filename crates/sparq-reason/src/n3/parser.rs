@@ -6,11 +6,14 @@
 //! - literals: `"s"`, `"s"^^<dt>`, `"s"@lang`, integers, decimals, doubles, `true`/`false`
 //! - `_:blank`, `?var` (universally-quantified N3 variables)
 //! - `{ … }` formulae (graph terms), `( … )` collections (RDF lists)
-//! - predicate sugar `=>` (log:implies), `<=` (reverse implies), `=` (owl:sameAs)
+//! - predicate sugar `=>` (log:implies), `<=` (reverse implies), `=` (owl:sameAs),
+//!   `is EXPR of` (inverse predicate) and `has EXPR`
+//! - paths (`!`/`^`), relative-IRI resolution against a document base, cwm's
+//!   undeclared-`:`-prefix-as-`<#>` convention
 //! - statement structure with `;` (predicate lists) and `,` (object lists)
 //!
-//! Not yet covered: paths (`!`/`^`), explicit `@forAll`/`@forSome`, `@keywords`, nested
-//! quoting beyond formulae. These are roadmap items toward full EYE parity.
+//! Not yet covered: explicit `@forAll`/`@forSome`, `@keywords`, nested quoting beyond
+//! formulae. These are roadmap items toward full EYE parity.
 
 use super::model::{Rule, Term};
 
