@@ -225,6 +225,12 @@ synthetic.nt (one run): gz streaming 0.699 s vs two-stage 0.823 s; zst 0.706 vs
   sum on the same run). The baseline's 0.30–0.40 s ideal assumed the cooler
   session's 0.296 s parse+build; the *ratio* conclusion stands, the absolute
   target was not reached in this session.
+- A later, cooler run (after the block-size-parameterisation refactor, same
+  binary semantics) measured gz streaming **0.429 s** / zst **0.359 s** vs
+  two-stage 0.514 / 0.413 s — i.e. streaming beat two-stage by 1.15–1.20× and
+  zstd streaming landed inside the baseline's 0.30–0.40 s ideal band. Thermal
+  state moves every number on this fanless machine; the paired
+  streaming-vs-two-stage ordering was stable across all 4 runs.
 - Regression cover: `load_reader_parallel_short_reads_match_sequential`
   (sparq-core) pins short reads, mid-line read boundaries, EOF without trailing
   newline, empty input, and parse-error propagation through the pipeline.

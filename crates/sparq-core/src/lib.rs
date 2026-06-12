@@ -589,8 +589,15 @@ impl Graph {
         if !matches!(format, "ntriples" | "n-triples") {
             return Self::load_reader(reader, format);
         }
+        Self::load_ntriples_pipelined(reader, 32 << 20)
+    }
+
+    /// The pipelined N-Triples loader behind [`load_reader_parallel`], with the block size
+    /// as a parameter so tests can exercise the multi-block / boundary-straddling paths
+    /// cheaply (production always passes 32 MiB).
+    #[cfg(feature = "parallel")]
+    fn load_ntriples_pipelined<R: std::io::Read + Send>(reader: R, block_size: usize) -> Result<Graph, String> {
         use std::sync::mpsc::sync_channel;
-        const BLOCK: usize = 32 << 20;
         // ≥2 rayon threads: ONE sharded dict spans all blocks, so the per-block dict merge
         // — the measured serial `merge_remap` that capped load scaling at ~1.8× on 4
         // identical cores — runs parallel across hash-shards; triples carry temporary
@@ -611,11 +618,11 @@ impl Graph {
             // newline-aligned FULL blocks: loop `read()` until the block is full or EOF.
             let producer = scope.spawn(move || -> Result<(), String> {
                 let mut reader = reader;
-                let mut readbuf = vec![0u8; BLOCK];
+                let mut readbuf = vec![0u8; block_size];
                 let mut carry: Vec<u8> = Vec::new();
                 loop {
                     let mut filled = 0;
-                    while filled < BLOCK {
+                    while filled < block_size {
                         let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
                         if n == 0 {
                             break;
@@ -2460,6 +2467,22 @@ mod tests {
             assert_eq!(par.dict.len(), seq.dict.len(), "dict size differs at max={max}");
             assert_eq!(dump_terms(&par), dump_terms(&seq), "stored triples differ at max={max}");
         }
+        // MULTI-BLOCK: a small block size (vs the production 32 MiB) makes the same
+        // document span ~60 blocks, with triple lines (each ~70-100 B, never a multiple
+        // of 4096) straddling every block boundary and partial lines carried across
+        // pipelined rounds — and the per-block dict merges must still agree.
+        for (block, max) in [(4096usize, 997usize), (4096, 1 << 16), (8192, 7)] {
+            let par = Graph::load_ntriples_pipelined(ShortReader { data: nt.as_bytes(), pos: 0, max }, block).unwrap();
+            assert_eq!(par.len(), seq.len(), "triple count differs at block={block} max={max}");
+            assert_eq!(par.dict.len(), seq.dict.len(), "dict size differs at block={block} max={max}");
+            assert_eq!(dump_terms(&par), dump_terms(&seq), "stored triples differ at block={block} max={max}");
+        }
+        // A single line LONGER than the block size (carry outgrows the block).
+        let long = format!("<http://ex/s> <http://ex/p> \"{}\" .\n<http://ex/s2> <http://ex/p> \"x\" .", "y".repeat(20_000));
+        let lseq = Graph::load_reader(long.as_bytes(), "ntriples").unwrap();
+        let lpar = Graph::load_ntriples_pipelined(ShortReader { data: long.as_bytes(), pos: 0, max: 333 }, 4096).unwrap();
+        assert_eq!(lpar.len(), lseq.len());
+        assert_eq!(dump_terms(&lpar), dump_terms(&lseq));
         // Empty input and input with no final newline at all.
         let empty = Graph::load_reader_parallel(ShortReader { data: b"", pos: 0, max: 7 }, "ntriples").unwrap();
         assert_eq!(empty.len(), 0);
