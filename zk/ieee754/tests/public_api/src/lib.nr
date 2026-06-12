@@ -33,6 +33,33 @@ fn comparison_predicates_are_public_api() {
 }
 
 #[test]
+fn round_to_integral_methods_are_public_api() {
+    let half_one_point_five = f16::new(0x3e00 as u16);
+    let single_two_point_five = f32::new(0x40200000 as u32);
+    let double_neg_half = f64::new(0xbfe0000000000000 as u64);
+    let quad_one_point_five = f128::new(0x3fff8000000000000000000000000000 as u128);
+
+    assert_eq(half_one_point_five.floor().bits(), 0x3c00 as u16);
+    assert_eq(half_one_point_five.ceil().bits(), 0x4000 as u16);
+    assert_eq(single_two_point_five.round_ties_even().bits(), 0x40000000 as u32);
+    assert_eq(double_neg_half.trunc().bits(), 0x8000000000000000 as u64);
+    assert_eq(quad_one_point_five.floor().bits(), 0x3fff0000000000000000000000000000 as u128);
+}
+
+#[test]
+fn float_to_int_casts_are_public_api() {
+    let half_max = f16::new(0x7bff as u16);
+    let single_five_point_five = f32::new(0x40b00000 as u32);
+    let double_neg_three_point_seven_five = f64::new(0xc00e000000000000 as u64);
+    let quad_two_pow_63 = f128::new(0x403e0000000000000000000000000000 as u128);
+
+    assert_eq(half_max.to_u64(), 65504 as u64);
+    assert_eq(single_five_point_five.to_i64(), 5);
+    assert_eq(double_neg_three_point_seven_five.to_i64(), -3);
+    assert_eq(quad_two_pow_63.to_u64(), 0x8000000000000000 as u64);
+}
+
+#[test]
 fn integer_conversions_are_public_api() {
     let negative_round_down: i32 = -16_777_217;
 

@@ -38,6 +38,36 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
     let compare_call = quote {
         $crate::ops::compare_parts::<$exp_type, $mant_type, $exp_size>(self.to_parts(), other.to_parts())
     };
+    let floor_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::round_to_integral_wide::<0_u8>(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::round_to_integral::<$exp_type, $mant_type, $exp_size, $mant_size, 0_u8>(self.to_parts())) }
+    };
+    let ceil_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::round_to_integral_wide::<1_u8>(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::round_to_integral::<$exp_type, $mant_type, $exp_size, $mant_size, 1_u8>(self.to_parts())) }
+    };
+    let trunc_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::round_to_integral_wide::<2_u8>(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::round_to_integral::<$exp_type, $mant_type, $exp_size, $mant_size, 2_u8>(self.to_parts())) }
+    };
+    let round_ties_even_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::round_to_integral_wide::<3_u8>(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::round_to_integral::<$exp_type, $mant_type, $exp_size, $mant_size, 3_u8>(self.to_parts())) }
+    };
+    let to_u64_call = if bits == 128 {
+        quote { $crate::ops::float_to_u64_wide(self.to_parts()) }
+    } else {
+        quote { $crate::ops::float_to_u64::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts()) }
+    };
+    let to_i64_call = if bits == 128 {
+        quote { $crate::ops::float_to_i64_wide(self.to_parts()) }
+    } else {
+        quote { $crate::ops::float_to_i64::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts()) }
+    };
     let sign_scale = (1 as u128) << ((bits - 1) as u128);
     let exponent_scale = (1 as u128) << (mant_size as u128);
     let exponent_mask = ((1 as u128) << (exp_size as u128)) - 1;
@@ -145,6 +175,52 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
                 let (unordered, less, _equal) = $compare_call;
 
                 !unordered & !less
+            }
+
+            // Round-to-integral family (IEEE 754 roundToIntegral*). All four
+            // return floats, propagate NaN (canonicalised), pass infinities
+            // through unchanged, and preserve the sign of zero results
+            // (e.g. (-0.3).ceil() == -0).
+
+            /// Round toward negative infinity (roundToIntegralTowardNegative).
+            pub fn floor(self) -> Self {
+                $floor_call
+            }
+
+            /// Round toward positive infinity (roundToIntegralTowardPositive).
+            pub fn ceil(self) -> Self {
+                $ceil_call
+            }
+
+            /// Round toward zero (roundToIntegralTowardZero).
+            pub fn trunc(self) -> Self {
+                $trunc_call
+            }
+
+            /// Round to nearest integer with ties to even
+            /// (roundToIntegralTiesToEven).
+            pub fn round_ties_even(self) -> Self {
+                $round_ties_even_call
+            }
+
+            // Float-to-integer casts with XPath 2.0 F&O semantics (the
+            // SPARQL/XPath consumer): truncate toward zero, then range-check.
+            // NaN and infinities assert (err:FOCA0002), as do results outside
+            // the target range (err:FOCA0003). Negative inputs above -1
+            // truncate to 0 and are therefore valid for to_u64. Pre-screen
+            // with the comparison predicates (`x.ne(x)` is the NaN test) when
+            // failure must remain provable.
+
+            /// Truncating cast to u64; asserts on NaN, infinity, values at or
+            /// above 2^64, and values at or below -1.
+            pub fn to_u64(self) -> u64 {
+                $to_u64_call
+            }
+
+            /// Truncating cast to i64; asserts on NaN, infinity, and values
+            /// outside [-2^63, 2^63 - 1] after truncation.
+            pub fn to_i64(self) -> i64 {
+                $to_i64_call
             }
         }
 

@@ -97,13 +97,19 @@ unconstrained fn pow2_hint_bits<let BITS: u32>(shift: u16) -> (Field, [bool; BIT
     (pow2, bits)
 }
 
-unconstrained fn pow2_pair_hint_bits<let BITS: u32>(shift: u16, total_bits: u16) -> (Field, Field, [bool; BITS]) {
-    let (pow2, bits) = pow2_hint_bits::<BITS>(shift);
+unconstrained fn pow2_complement_hint(shift: u16, total_bits: u16) -> Field {
     let mut complement = 1 as Field;
 
     for _step in 0..(total_bits - shift) {
         complement = complement * 2;
     }
+
+    complement
+}
+
+unconstrained fn pow2_pair_hint_bits<let BITS: u32>(shift: u16, total_bits: u16) -> (Field, Field, [bool; BITS]) {
+    let (pow2, bits) = pow2_hint_bits::<BITS>(shift);
+    let complement = pow2_complement_hint(shift, total_bits);
 
     (pow2, complement, bits)
 }
@@ -1466,6 +1472,301 @@ where
     };
 
     from_u64_work_parts(result)
+}
+
+fn truncate_split_u64<let TOTAL_BITS: u32>(value: u64, shift: u16) -> (u64, u64) {
+    // Safety: the reconstruction checks below pin the hinted split.
+    let (quotient, remainder): (u64, u64) = unsafe { shift_right_jam_u64_unconstrained(value, shift) };
+
+    let pow2 = if TOTAL_BITS <= 14 {
+        verified_pow2_bits_bounded::<4>(shift)
+    } else if TOTAL_BITS <= 27 {
+        verified_pow2_bits_bounded::<5>(shift)
+    } else {
+        verified_pow2_bits_bounded::<6>(shift)
+    };
+    // Safety: the complement only has to exist; the product equation pins it.
+    let pow2_complement: Field = unsafe { pow2_complement_hint(shift, TOTAL_BITS as u16) };
+
+    assert(pow2 * pow2_complement == const_pow2_field_u32::<TOTAL_BITS>());
+    assert(value as Field == (quotient as Field) * pow2 + (remainder as Field));
+    ((remainder as Field) * pow2_complement).assert_max_bit_size::<TOTAL_BITS>();
+
+    (quotient, remainder)
+}
+
+fn truncate_split_wide(value: u128, shift: u16) -> (u128, u128) {
+    // Safety: the reconstruction checks below pin the hinted split.
+    let (quotient, remainder): (u128, u128) = unsafe { shift_right_jam_unconstrained(value, shift) };
+
+    let pow2 = verified_pow2_bits_bounded::<7>(shift);
+    // Safety: the complement only has to exist; the product equation pins it.
+    let pow2_complement: Field = unsafe { pow2_complement_hint(shift, 114_u16) };
+
+    assert(pow2 * pow2_complement == 0x40000000000000000000000000000 as Field);
+    assert(value as Field == (quotient as Field) * pow2 + (remainder as Field));
+    ((remainder as Field) * pow2_complement).assert_max_bit_size::<114>();
+
+    (quotient, remainder)
+}
+
+/// Round-to-integral mode selector: 0 = toward negative infinity (floor),
+/// 1 = toward positive infinity (ceil), 2 = toward zero (trunc),
+/// 3 = to nearest with ties to even.
+pub(crate) fn round_to_integral<E, M, let EXPONENT_BITS: u8, let MANTISSA_BITS: u8, let MODE: u8>(
+    input: FloatParts<E, M>,
+) -> FloatParts<E, M>
+where
+    E: Into<u16>,
+    M: Into<u64>,
+    u16: AsPrimitive<E>,
+    u64: AsPrimitive<M>,
+{
+    std::static_assert(MODE <= 3, "Unsupported round-to-integral mode");
+
+    let parts = to_u64_work_parts(input);
+    let (nan, infinite, zero) = classify_u64::<EXPONENT_BITS>(parts);
+    let result = if nan {
+        canonical_nan_u64::<EXPONENT_BITS, MANTISSA_BITS>()
+    } else if infinite | zero {
+        parts
+    } else {
+        let offset = exponent_offset();
+        let integral_threshold = offset + (MANTISSA_BITS as u16);
+        let work_exp = work_exponent_u64::<EXPONENT_BITS>(parts);
+
+        if work_exp >= integral_threshold {
+            parts
+        } else {
+            // Split the significand below the integer boundary keeping one
+            // guard bit, clamped so tiny values (|x| < 1, including
+            // subnormals) collapse to quotient zero with the whole
+            // significand in the remainder.
+            let significand = significand_u64::<MANTISSA_BITS>(parts);
+            let max_split_shift = (MANTISSA_BITS as u16) + 1;
+            let shift = integral_threshold - work_exp;
+            let split_shift = if (shift - 1) > max_split_shift { max_split_shift } else { shift - 1 };
+            let (half_quotient, low_remainder) = if MANTISSA_BITS == 10 {
+                truncate_split_u64::<12>(significand, split_shift)
+            } else if MANTISSA_BITS == 23 {
+                truncate_split_u64::<25>(significand, split_shift)
+            } else {
+                truncate_split_u64::<54>(significand, split_shift)
+            };
+            let guard = half_quotient % 2;
+            let integer_part = half_quotient / 2;
+            let fraction_nonzero = (guard != 0) | (low_remainder != 0);
+            let increment = if MODE == 0 {
+                parts.sign & fraction_nonzero
+            } else if MODE == 1 {
+                (!parts.sign) & fraction_nonzero
+            } else if MODE == 2 {
+                false
+            } else {
+                (guard == 1) & ((low_remainder != 0) | ((integer_part % 2) == 1))
+            };
+            let magnitude = integer_part + (increment as u64);
+
+            if MANTISSA_BITS == 10 {
+                uint_to_float_parts_u64::<EXPONENT_BITS, MANTISSA_BITS, 16>(parts.sign, magnitude as u128)
+            } else if MANTISSA_BITS == 23 {
+                uint_to_float_parts_u64::<EXPONENT_BITS, MANTISSA_BITS, 32>(parts.sign, magnitude as u128)
+            } else {
+                uint_to_float_parts_u64::<EXPONENT_BITS, MANTISSA_BITS, 64>(parts.sign, magnitude as u128)
+            }
+        }
+    };
+
+    from_u64_work_parts(result)
+}
+
+pub(crate) fn round_to_integral_wide<let MODE: u8>(
+    parts: FloatParts<u16, u128>,
+) -> FloatParts<u16, u128> {
+    std::static_assert(MODE <= 3, "Unsupported round-to-integral mode");
+
+    let (nan, infinite, zero) = classify(parts);
+
+    if nan {
+        canonical_nan()
+    } else if infinite | zero {
+        parts
+    } else {
+        let offset = exponent_offset();
+        let integral_threshold = offset + 112;
+        let work_exp = work_exponent(parts);
+
+        if work_exp >= integral_threshold {
+            parts
+        } else {
+            let significand = significand(parts);
+            let max_split_shift = 113 as u16;
+            let shift = integral_threshold - work_exp;
+            let split_shift = if (shift - 1) > max_split_shift { max_split_shift } else { shift - 1 };
+            let (half_quotient, low_remainder) = truncate_split_wide(significand, split_shift);
+            let guard = half_quotient % 2;
+            let integer_part = half_quotient / 2;
+            let fraction_nonzero = (guard != 0) | (low_remainder != 0);
+            let increment = if MODE == 0 {
+                parts.sign & fraction_nonzero
+            } else if MODE == 1 {
+                (!parts.sign) & fraction_nonzero
+            } else if MODE == 2 {
+                false
+            } else {
+                (guard == 1) & ((low_remainder != 0) | ((integer_part % 2) == 1))
+            };
+            let magnitude = integer_part + (increment as u128);
+
+            uint_to_float_parts_wide::<128>(parts.sign, magnitude)
+        }
+    }
+}
+
+/// Truncate a finite float toward zero into `(sign, integer magnitude)`.
+///
+/// Cast semantics follow XPath 2.0 F&O casting from xs:float / xs:double to
+/// integer types (the downstream SPARQL consumer): the fractional part is
+/// discarded (round toward zero), casting NaN or an infinity raises
+/// err:FOCA0002, and a result outside the target range raises err:FOCA0003.
+/// Inside a circuit both dynamic errors become assertion failures, so callers
+/// must pre-screen with the comparison predicates (`x.ne(x)` is the NaN test)
+/// when an out-of-range input must remain provable.
+fn float_truncate_magnitude_u64<let EXPONENT_BITS: u8, let MANTISSA_BITS: u8>(
+    parts: FloatParts<u16, u64>,
+) -> (bool, u64) {
+    let (nan, infinite, _zero) = classify_u64::<EXPONENT_BITS>(parts);
+
+    // err:FOCA0002: NaN and infinities have no integer value.
+    assert(!nan & !infinite);
+
+    let offset = exponent_offset();
+    let work_exp = work_exponent_u64::<EXPONENT_BITS>(parts);
+
+    // err:FOCA0003: |value| >= 2^64 cannot fit any supported integer target.
+    assert(work_exp <= offset + 63);
+
+    let significand = significand_u64::<MANTISSA_BITS>(parts);
+    let integral_threshold = offset + (MANTISSA_BITS as u16);
+    let magnitude = if work_exp >= integral_threshold {
+        let shift = work_exp - integral_threshold;
+
+        if MANTISSA_BITS == 10 {
+            left_shift_exact_u64_bounded::<54>(significand, shift)
+        } else if MANTISSA_BITS == 23 {
+            left_shift_exact_u64_bounded::<41>(significand, shift)
+        } else {
+            left_shift_exact_u64_bounded::<12>(significand, shift)
+        }
+    } else {
+        let max_shift = (MANTISSA_BITS as u16) + 1;
+        let shift = integral_threshold - work_exp;
+        let clamped_shift = if shift > max_shift { max_shift } else { shift };
+        let (quotient, _remainder) = if MANTISSA_BITS == 10 {
+            truncate_split_u64::<12>(significand, clamped_shift)
+        } else if MANTISSA_BITS == 23 {
+            truncate_split_u64::<25>(significand, clamped_shift)
+        } else {
+            truncate_split_u64::<54>(significand, clamped_shift)
+        };
+
+        quotient
+    };
+
+    (parts.sign, magnitude)
+}
+
+fn float_truncate_magnitude_wide(parts: FloatParts<u16, u128>) -> (bool, u64) {
+    let (nan, infinite, _zero) = classify(parts);
+
+    // err:FOCA0002: NaN and infinities have no integer value.
+    assert(!nan & !infinite);
+
+    let offset = exponent_offset();
+    let work_exp = work_exponent(parts);
+
+    // err:FOCA0003: |value| >= 2^64 cannot fit any supported integer target.
+    assert(work_exp <= offset + 63);
+
+    // The binary128 significand has 112 fraction bits and the magnitude bound
+    // caps the exponent at 63, so truncation is always a right shift by at
+    // least 49 and the quotient always fits u64.
+    let significand = significand(parts);
+    let max_shift = 113 as u16;
+    let shift = offset + 112 - work_exp;
+    let clamped_shift = if shift > max_shift { max_shift } else { shift };
+    let (quotient, _remainder) = truncate_split_wide(significand, clamped_shift);
+
+    (parts.sign, quotient as u64)
+}
+
+fn signed_from_sign_magnitude_u64(sign: bool, magnitude: u64) -> i64 {
+    if sign {
+        // err:FOCA0003 below -2^63.
+        assert(magnitude <= 0x8000000000000000);
+
+        if magnitude == 0 {
+            0
+        } else {
+            // Two's complement of the magnitude, bit-cast into i64; the
+            // magnitude bound above makes the result exact (including
+            // i64::MIN at exactly 2^63).
+            ((0xffffffffffffffff - magnitude) + 1) as i64
+        }
+    } else {
+        // err:FOCA0003 above 2^63 - 1.
+        assert(magnitude <= 0x7fffffffffffffff);
+
+        magnitude as i64
+    }
+}
+
+pub(crate) fn float_to_u64<E, M, let EXPONENT_BITS: u8, let MANTISSA_BITS: u8>(
+    parts: FloatParts<E, M>,
+) -> u64
+where
+    E: Into<u16>,
+    M: Into<u64>,
+{
+    let (sign, magnitude) =
+        float_truncate_magnitude_u64::<EXPONENT_BITS, MANTISSA_BITS>(to_u64_work_parts(parts));
+
+    // Truncation happens before the range check, so negative inputs above -1
+    // (magnitude 0 after truncation, including -0) are in range; everything
+    // else negative is err:FOCA0003.
+    assert(!sign | (magnitude == 0));
+
+    magnitude
+}
+
+pub(crate) fn float_to_i64<E, M, let EXPONENT_BITS: u8, let MANTISSA_BITS: u8>(
+    parts: FloatParts<E, M>,
+) -> i64
+where
+    E: Into<u16>,
+    M: Into<u64>,
+{
+    let (sign, magnitude) =
+        float_truncate_magnitude_u64::<EXPONENT_BITS, MANTISSA_BITS>(to_u64_work_parts(parts));
+
+    signed_from_sign_magnitude_u64(sign, magnitude)
+}
+
+pub(crate) fn float_to_u64_wide(parts: FloatParts<u16, u128>) -> u64 {
+    let (sign, magnitude) = float_truncate_magnitude_wide(parts);
+
+    // Truncation happens before the range check, so negative inputs above -1
+    // (magnitude 0 after truncation, including -0) are in range; everything
+    // else negative is err:FOCA0003.
+    assert(!sign | (magnitude == 0));
+
+    magnitude
+}
+
+pub(crate) fn float_to_i64_wide(parts: FloatParts<u16, u128>) -> i64 {
+    let (sign, magnitude) = float_truncate_magnitude_wide(parts);
+
+    signed_from_sign_magnitude_u64(sign, magnitude)
 }
 
 fn to_u64_work_parts<E, M>(parts: FloatParts<E, M>) -> FloatParts<u16, u64>
