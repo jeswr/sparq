@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "RDF parsing and compressed-I/O experiments for sparq (empty scaffold; design gated on the measured baseline in research/custom-parsers-baseline.md)"
+description = "Compressed (multi-member gzip / multi-frame zstd) serialization of sparq query results; design gated on the measured baseline in research/custom-parsers-baseline.md"
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -12,8 +12,14 @@ categories.workspace = true
 readme = "../../README.md"
 publish = false
 
-# Deliberately NO dependencies yet. What goes in this crate (custom parsers,
-# fused decompress+parse, parallel compression) is decided by the measured
-# baseline, not the other way round. This crate must never enter the
-# sparq-wasm dependency graph.
+# Codec deps live HERE and nowhere closer to the engine: this crate must never
+# enter the sparq-wasm dependency graph (guard: `cargo tree -p sparq-wasm -e
+# normal` shows no sparq-parse/zstd/flate2). Same flate2/zstd versions the CLI
+# pins, so the lockfile stays single-versioned.
 [dependencies]
+# Multi-member gzip (one RFC 1952 member per result chunk).
+flate2 = "1"
+# Multi-frame zstd + dictionary training/compression (zdict_builder is a default feature).
+zstd = "0.13"
+# Parallel chunk compression (CompressedSink Mode::Parallel).
+rayon = { workspace = true }

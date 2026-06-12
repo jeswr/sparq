@@ -2846,6 +2846,11 @@ dependencies = [
 [[package]]
 name = "sparq-parse"
 version = "0.1.0"
+dependencies = [
+ "flate2",
+ "rayon",
+ "zstd",
+]
 
 [[package]]
 name = "sparq-py"

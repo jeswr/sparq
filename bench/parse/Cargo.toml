@@ -21,6 +21,10 @@ spargebra = { path = "../../vendor/spargebra" }
 [dependencies]
 # The incumbent ingestion path under test.
 sparq-core = { path = "../../crates/sparq-core", features = ["parallel"] }
+# Produces the SPARQL-JSON result chunks the D4 compress-bench compresses.
+sparq-engine = { path = "../../crates/sparq-engine" }
+# The D4 deliverable under test (CompressedSink, dictionaries).
+sparq-parse = { path = "../../crates/sparq-parse" }
 # Reference parsers (same versions the workspace pins).
 oxttl = { version = "0.2", features = ["rdf-12"] }
 oxrdf = { version = "0.3", features = ["rdf-12"] }
@@ -35,6 +39,11 @@ mimalloc = "0.1"
 [[bin]]
 name = "parse-baseline"
 path = "src/main.rs"
+
+# D4 (zipped result serialization) measurements: research/custom-parsers-D4-*.md.
+[[bin]]
+name = "compress-bench"
+path = "src/compress.rs"
 
 # Match the root workspace release profile (sparq-cli ships with fat LTO).
 [profile.release]
