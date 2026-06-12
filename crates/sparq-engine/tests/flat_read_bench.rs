@@ -54,9 +54,12 @@ fn flat_read_hot_paths() {
 
     // 2. Point-probe storm: bound-subject scans + estimates (bind-join inner shape).
     // Subject ids resolved through the dictionary, not assumed from interning order
-    // (roborev 1927).
+    // (roborev 1927), over the SAME subject breadth the original bench probed —
+    // all nsubj subjects (capped at the probe count), not a small hot working set
+    // that could mask read-path regressions (roborev 1945).
     let nsubj = (n / 10).max(1);
-    let subj_ids: Vec<Id> = (0..nsubj.min(1000))
+    let probes = 200_000usize;
+    let subj_ids: Vec<Id> = (0..nsubj.min(probes))
         .map(|i| {
             g.id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
                 "http://ex/s{i}"
@@ -64,7 +67,6 @@ fn flat_read_hot_paths() {
             .expect("benchmark subject must be present")
         })
         .collect();
-    let probes = 200_000usize;
     let t = Instant::now();
     let mut found = 0usize;
     for i in 0..probes {

@@ -1410,6 +1410,10 @@ impl Dict {
         // A memory-mapped dictionary keeps only the small prefix/datatype tables resident;
         // the term blob + offsets + lookup index are mmap'd (OS page cache, not the heap).
         // Appended (delta-overlay) terms live in the in-RAM arena in every mode.
+        // A forked dict's Arc-shared frozen base counts in full (reachable footprint,
+        // like the store's Arc-shared permutations) — after `compacted()` the ENTIRE
+        // dictionary lives there (roborev 1945, same omission class as the caches).
+        let frozen_base: usize = self.frozen.as_ref().map_or(0, |f| f.heap_bytes());
         let appended: usize = self.terms.capacity() * std::mem::size_of::<Stored>()
             + self.terms.iter().map(stored_owned_bytes).sum::<usize>();
         #[cfg(feature = "mmap")]
@@ -1417,7 +1421,7 @@ impl Dict {
             let prefix_bytes: usize = self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum();
             let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
             let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
-            return appended + table + prefix_bytes + dt_bytes;
+            return frozen_base + appended + table + prefix_bytes + dt_bytes;
         }
         // Compacted (blob) mode: the term blob + u32 offsets + the kept hash table, plus
         // the small prefix/datatype tables — no per-`Stored` slot or per-`Box<str>` term.
@@ -1425,7 +1429,7 @@ impl Dict {
             let prefix_bytes: usize = self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum::<usize>() * 2;
             let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
             let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
-            return appended + blob.capacity() + offs.capacity() * 4 + table + prefix_bytes + dt_bytes;
+            return frozen_base + appended + blob.capacity() + offs.capacity() * 4 + table + prefix_bytes + dt_bytes;
         }
         let term_slots = self.terms.capacity() * std::mem::size_of::<Stored>();
         let owned: usize = self.terms.iter().map(stored_owned_bytes).sum();
@@ -1433,7 +1437,7 @@ impl Dict {
             self.prefixes.iter().map(|p| p.len() + std::mem::size_of::<Box<str>>()).sum::<usize>() * 2; // Vec + map key
         let dt_bytes: usize = self.datatypes.iter().map(|d| d.as_str().len() + 32).sum();
         let table = self.table.capacity() * (std::mem::size_of::<Id>() + 1);
-        term_slots + owned + prefix_bytes + dt_bytes + table
+        frozen_base + term_slots + owned + prefix_bytes + dt_bytes + table
     }
 }
 

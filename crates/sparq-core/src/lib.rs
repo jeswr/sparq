@@ -213,9 +213,11 @@ impl NumData {
             NumData::Mapped(_, extra) => extra.capacity() * 17,
             // hashbrown: ~(8-byte key + 8-byte f64 + 1 control byte) per slot.
             NumData::Sparse(m) => m.capacity() * 17,
-            // The shared base is charged to the graph that owns it; only the side map
-            // is this fork's own heap.
-            NumData::Forked { extra, .. } => extra.capacity() * 17,
+            // Reachable footprint: the Arc-shared base is counted in full (like the
+            // store's Arc-shared permutations), so a compacted graph — whose whole
+            // cache lives in the folded base — still reports its memory. Forks that
+            // share a base each report it (roborev 1945).
+            NumData::Forked { base, extra } => base.heap_bytes() + extra.capacity() * 17,
         }
     }
 
@@ -414,8 +416,9 @@ impl TempData {
             TempData::Mapped(_, extra) => extra.capacity() * 25,
             // hashbrown: ~(4-byte key pad to 8 + 16-byte Temporal + control) per slot.
             TempData::Sparse(m) => m.capacity() * 25,
-            // The shared base is charged to the graph that owns it.
-            TempData::Forked { extra, .. } => extra.capacity() * 25,
+            // Reachable footprint: the Arc-shared base is counted in full — see the
+            // matching NumData::Forked arm (roborev 1945).
+            TempData::Forked { base, extra } => base.heap_bytes() + extra.capacity() * 25,
         }
     }
 
