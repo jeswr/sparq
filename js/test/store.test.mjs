@@ -224,6 +224,109 @@ test('SPARQL update: INSERT DATA / DELETE DATA / DELETE-INSERT WHERE / CLEAR', a
   assert.equal(store.size, 0);
 });
 
+const DATASET = `<http://ex/d> <http://ex/p> "default" .
+<http://ex/a> <http://ex/p> "in-g1" <http://ex/g1> .
+<http://ex/a> <http://ex/q> "also-g1" <http://ex/g1> .
+<http://ex/b> <http://ex/p> "in-g2" <http://ex/g2> .`;
+
+const loadDataset = () => SparqStore.fromString(DATASET, 'nquads', { dataset: true });
+
+test('dataset stores preserve named graphs (GRAPH / FROM / FROM NAMED)', async () => {
+  const store = await loadDataset();
+  assert.equal(store.size, 1); // size reports the default graph
+
+  const g1 = store.queryBindings('SELECT ?o WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p> ?o } }');
+  assert.equal(g1.length, 1);
+  assert.equal(g1[0].get('o').value, 'in-g1');
+
+  const all = store.queryBindings('SELECT ?g ?o WHERE { GRAPH ?g { ?s ?p ?o } }');
+  assert.equal(all.length, 3);
+  assert.deepEqual([...new Set(all.map(r => r.get('g').value))].sort(), ['http://ex/g1', 'http://ex/g2']);
+
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g2> { ?s ?p "in-g2" } }'), true);
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g2> { ?s ?p "in-g1" } }'), false);
+
+  // FROM merges the named graph into the active default graph
+  const from = store.queryBindings('SELECT ?o FROM <http://ex/g1> WHERE { ?s <http://ex/p> ?o }');
+  assert.deepEqual(from.map(r => r.get('o').value), ['in-g1']);
+  // FROM NAMED scopes which graphs GRAPH ?g ranges over
+  const fromNamed = store.queryBindings(
+    'SELECT ?o FROM NAMED <http://ex/g2> WHERE { GRAPH ?g { ?s ?p ?o } }',
+  );
+  assert.deepEqual(fromNamed.map(r => r.get('o').value), ['in-g2']);
+
+  // folding (the default) is unchanged
+  const folded = await SparqStore.fromString(DATASET, 'nquads');
+  assert.equal(folded.size, 4);
+  // dataset + compressed is rejected with a clear error
+  await assert.rejects(SparqStore.fromString(DATASET, 'nquads', { dataset: true, compressed: true }), /compressed/);
+});
+
+test('SPARQL update addresses named graphs (GRAPH blocks, CLEAR GRAPH)', async () => {
+  const store = await loadDataset();
+  store.update('INSERT DATA { GRAPH <http://ex/g3> { <http://ex/c> <http://ex/p> "in-g3" } }');
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g3> { ?s ?p "in-g3" } }'), true);
+  assert.equal(store.size, 1); // default graph untouched
+
+  store.update('DELETE DATA { GRAPH <http://ex/g1> { <http://ex/a> <http://ex/p> "in-g1" } }');
+  assert.equal(store.count('SELECT ?o WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }'), 1);
+
+  // DELETE/INSERT with a GRAPH template moves data between graphs
+  store.update(
+    'DELETE { GRAPH <http://ex/g2> { ?s ?p ?o } } INSERT { GRAPH <http://ex/g3> { ?s ?p ?o } } WHERE { GRAPH <http://ex/g2> { ?s ?p ?o } }',
+  );
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g2> { ?s ?p ?o } }'), false);
+  assert.equal(store.count('SELECT ?o WHERE { GRAPH <http://ex/g3> { ?s ?p ?o } }'), 2);
+
+  store.update('CLEAR GRAPH <http://ex/g3>');
+  assert.equal(store.queryBoolean('ASK { GRAPH ?g { ?s ?p ?o } }'), store.count('SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } }') > 0);
+  assert.equal(store.count('SELECT ?o WHERE { GRAPH <http://ex/g3> { ?s ?p ?o } }'), 0);
+});
+
+test('match()/countQuads are graph-aware on dataset stores', async () => {
+  const store = await loadDataset();
+  const g1 = DF.namedNode('http://ex/g1');
+
+  // graph wildcard spans default + named graphs
+  const all = store.match();
+  assert.equal(all.length, 4);
+  assert.equal(all.filter(q => q.graph.termType === 'DefaultGraph').length, 1);
+  assert.equal(all.filter(q => q.graph.equals(g1)).length, 2);
+
+  // constant graph
+  const inG1 = store.match(null, null, null, g1);
+  assert.equal(inG1.length, 2);
+  assert.ok(inG1.every(q => q.graph.equals(g1)));
+  assert.ok(inG1.some(q => q.object.equals(DF.literal('also-g1'))));
+
+  // constant graph + constant triple positions
+  assert.equal(store.match(DF.namedNode('http://ex/a'), DF.namedNode('http://ex/p'), DF.literal('in-g1'), g1).length, 1);
+  assert.equal(store.match(DF.namedNode('http://ex/a'), DF.namedNode('http://ex/p'), DF.literal('in-g1'), DF.defaultGraph()).length, 0);
+
+  // default graph scoping
+  assert.equal(store.match(null, null, null, DF.defaultGraph()).length, 1);
+
+  // counts agree (count path is non-materialising where possible)
+  assert.equal(store.countQuads(), 4);
+  assert.equal(store.countQuads(null, null, null, g1), 2);
+  assert.equal(store.countQuads(null, null, null, DF.defaultGraph()), 1);
+  assert.equal(store.countQuads(null, null, null, DF.namedNode('http://ex/absent')), 0);
+});
+
+test('fromQuads preserves named graphs under options.dataset', async () => {
+  const ex = v => DF.namedNode(`http://ex/${v}`);
+  const quads = [
+    DF.quad(ex('s'), ex('p'), DF.literal('default')),
+    DF.quad(ex('s'), ex('p'), DF.literal('named'), ex('g')),
+  ];
+  const store = await SparqStore.fromQuads(quads, { dataset: true });
+  assert.equal(store.size, 1);
+  assert.equal(store.countQuads(), 2);
+  const [named] = store.match(null, null, null, ex('g'));
+  assert.ok(named.object.equals(DF.literal('named')));
+  assert.ok(named.graph.equals(ex('g')));
+});
+
 test('engine errors surface as JS exceptions', async () => {
   const store = await load();
   assert.throws(() => store.queryBindings('SELECT ?s WHERE { broken'), /error|expected/i);

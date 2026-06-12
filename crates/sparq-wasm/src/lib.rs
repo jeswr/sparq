@@ -28,6 +28,19 @@ impl Store {
         Ok(Store { graph })
     }
 
+    /// Like [`load`](Self::load) but preserves NAMED GRAPHS from N-Quads / TriG as
+    /// separate sub-graphs, so `GRAPH <iri> { … }` / `GRAPH ?g { … }` patterns,
+    /// `FROM` / `FROM NAMED` dataset clauses, and SPARQL Updates with `GRAPH`
+    /// blocks (including `CLEAR GRAPH` / `DROP GRAPH`) all see the dataset.
+    /// Formats without named graphs ("turtle" / "ntriples") load as [`load`].
+    /// [`size`](Self::size) / [`heapBytes`](Self::heap_bytes) report the DEFAULT
+    /// graph only (count the dataset with `GRAPH ?g` queries).
+    #[wasm_bindgen(js_name = loadDataset)]
+    pub fn load_dataset(text: &str, format: &str) -> Result<Store, JsError> {
+        let graph = Graph::load_dataset(text, format).map_err(|e| JsError::new(&e))?;
+        Ok(Store { graph })
+    }
+
     /// Like [`load`](Self::load) but stores the index BLOCK-COMPRESSED (~4-6 B/triple vs
     /// 12 — roughly half the index memory, measured −49% on the 6-perm set / −60% on the
     /// 3-perm compact set the browser uses). Query results are identical; scans pay a
