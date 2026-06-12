@@ -14,3 +14,14 @@ export {
 } from './sparql.js';
 export { init } from './wasm.js';
 export { decompress, decompressToString, sniffCodec, type CompressionCodec } from './decompress.js';
+export {
+  SparqDictionaryClient,
+  dictIdOf,
+  verifyDictId,
+  parseZstdDictId,
+  SPARQ_DICTIONARY_HEADER,
+  SPARQ_DICTIONARY_CURRENT_HEADER,
+  type DictionaryDecoder,
+  type DictionaryFetchResult,
+  type SparqDictionaryClientOptions,
+} from './dictionary.js';
