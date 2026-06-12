@@ -1928,9 +1928,11 @@ pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression])
 /// Evaluate a SPARQL property path `subject <path> object` into bindings over its endpoint
 /// variables. Computes the path's (start,end) id-pair relation recursively — transitive `+`/`*`
 /// via BFS, zero-length `*`/`?` add identity over the graph's nodes — then constrains it by any
-/// bound or repeated endpoint. Correctness-first: the relation is materialised (the common
-/// bound-endpoint case is cheap; a both-unbound `*` over a huge graph is expensive — a future
-/// optimisation can push a bound endpoint into a directed traversal).
+/// bound or repeated endpoint. Bound endpoints are PUSHED DOWN into the relation computation
+/// ([`PathEnds`]): a bound subject turns `+`/`*` into a single-source directed BFS over sorted
+/// range scans, a bound object traverses in reverse, and both-bound is a reachability test with
+/// early exit — so `:s p+ ?x` costs `O(edges reachable)`, not the all-pairs closure. The
+/// post-filter below stays as the correctness backstop (the pushdown contract allows supersets).
 fn eval_path(
     graph: &Graph,
     local: &mut LocalVocab,
@@ -1989,7 +1991,26 @@ fn eval_path(
     // scope — exactly the empty-graph evaluation. The zero-length constant
     // solutions below still apply (`<s> p* <s>` holds even on an empty graph).
     if !view::default_is_empty() && !(matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
-        for (s, o) in path_pairs(graph, path)? {
+        let ends = PathEnds { s: s_bound, o: o_bound };
+        // `?x p ?x` (same variable at both ends — necessarily both unbound): only
+        // diagonal pairs survive the filter, and for the recursive operators the
+        // diagonal is computable WITHOUT the all-pairs closure: the zero-length
+        // operators' diagonal is exactly the node domain, and `p+`'s diagonal is
+        // the set of nodes on a directed cycle (SCC size >= 2, or a self-loop).
+        let pairs: FxHashSet<(Id, Id)> = if same_var {
+            match path {
+                PropertyPathExpression::ZeroOrMore(_) | PropertyPathExpression::ZeroOrOne(_) => {
+                    graph_nodes(graph).into_iter().map(|n| (n, n)).collect()
+                }
+                PropertyPathExpression::OneOrMore(a) => {
+                    cyclic_nodes(graph, a)?.into_iter().map(|n| (n, n)).collect()
+                }
+                _ => path_pairs(graph, path, ends)?,
+            }
+        } else {
+            path_pairs(graph, path, ends)?
+        };
+        for (s, o) in pairs {
             if s_bound.is_some_and(|b| s != b) || o_bound.is_some_and(|b| o != b) || (same_var && s != o) {
                 continue;
             }
@@ -2033,66 +2054,329 @@ fn eval_path(
     Ok(Bindings::unsorted(vars, rows))
 }
 
-/// All `(subject, object)` id pairs connected by a property path expression.
-fn path_pairs(graph: &Graph, path: &PropertyPathExpression) -> Result<FxHashSet<(Id, Id)>, String> {
+/// Endpoint constraints pushed down into a path-relation computation (`None` =
+/// that end is unbound). CONTRACT: `path_pairs(graph, path, ends)` returns a
+/// SUBSET of the path's full (start,end) relation that contains EVERY pair
+/// satisfying the bounds. A sub-evaluation is free to IGNORE the hint and
+/// return extra relation pairs (callers always post-filter), but must never
+/// invent pairs outside the relation — so the pushdown is purely an
+/// optimisation and the post-filter in `eval_path` is the correctness backstop.
+#[derive(Clone, Copy, Default)]
+struct PathEnds {
+    s: Option<Id>,
+    o: Option<Id>,
+}
+
+impl PathEnds {
+    const NONE: PathEnds = PathEnds { s: None, o: None };
+    /// The constraint seen through `^path` (endpoints exchange roles).
+    #[inline]
+    fn swapped(self) -> PathEnds {
+        PathEnds { s: self.o, o: self.s }
+    }
+}
+
+/// When a `Sequence` has a bound outer endpoint, the midpoints reached by the
+/// near hop are pushed one at a time into the far hop — but only while the
+/// fan-out stays below this limit. Above it, the per-midpoint sub-evaluations
+/// (each at least a binary search; a whole traversal for a recursive hop)
+/// can exceed the single bulk evaluation they replace, so the far hop then
+/// DELIBERATELY gets only the outer endpoint pushed and the midpoints meet in
+/// the hash join instead.
+const SEQ_MIDPOINT_FANOUT_LIMIT: usize = 1024;
+
+/// All `(subject, object)` id pairs connected by a property path expression,
+/// narrowed by any bound endpoints (see [`PathEnds`] for the exact contract).
+/// Bound endpoints reach the leaves as range-scan prefixes and turn the
+/// recursive operators into single-source directed traversals.
+fn path_pairs(graph: &Graph, path: &PropertyPathExpression, ends: PathEnds) -> Result<FxHashSet<(Id, Id)>, String> {
     use PropertyPathExpression as P;
     Ok(match path {
-        P::NamedNode(p) => predicate_pairs(graph, p),
-        P::Reverse(a) => path_pairs(graph, a)?.into_iter().map(|(s, o)| (o, s)).collect(),
+        P::NamedNode(p) => predicate_pairs(graph, p, ends),
+        P::Reverse(a) => path_pairs(graph, a, ends.swapped())?.into_iter().map(|(s, o)| (o, s)).collect(),
         P::Sequence(a, c) => {
-            let (av, cv) = (path_pairs(graph, a)?, path_pairs(graph, c)?);
-            let mut by_start: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
-            for (m, o) in cv {
-                by_start.entry(m).or_default().push(o);
+            if let Some(s) = ends.s {
+                // Bound start: evaluate the near hop from `s` only, then push each
+                // reached midpoint into the far hop (which also receives the bound
+                // object, enabling early exit deeper down).
+                let av = path_pairs(graph, a, PathEnds { s: Some(s), o: None })?;
+                let mids: FxHashSet<Id> = av.iter().filter(|&&(x, _)| x == s).map(|&(_, m)| m).collect();
+                if mids.len() <= SEQ_MIDPOINT_FANOUT_LIMIT {
+                    let mut out = FxHashSet::default();
+                    for &m in &mids {
+                        for (m2, o) in path_pairs(graph, c, PathEnds { s: Some(m), o: ends.o })? {
+                            if m2 == m {
+                                out.insert((s, o));
+                            }
+                        }
+                    }
+                    out
+                } else {
+                    // Fan-out too large for per-midpoint pushes: the far hop gets
+                    // only the outer bound endpoint.
+                    join_seq(av, path_pairs(graph, c, PathEnds { s: None, o: ends.o })?)
+                }
+            } else if let Some(o) = ends.o {
+                // Bound object only: mirror image — far hop backwards from `o`,
+                // midpoints pushed into the near hop as bound objects.
+                let cv = path_pairs(graph, c, PathEnds { s: None, o: Some(o) })?;
+                let mids: FxHashSet<Id> = cv.iter().filter(|&&(_, y)| y == o).map(|&(m, _)| m).collect();
+                if mids.len() <= SEQ_MIDPOINT_FANOUT_LIMIT {
+                    let mut out = FxHashSet::default();
+                    for &m in &mids {
+                        for (s, m2) in path_pairs(graph, a, PathEnds { s: None, o: Some(m) })? {
+                            if m2 == m {
+                                out.insert((s, o));
+                            }
+                        }
+                    }
+                    out
+                } else {
+                    join_seq(path_pairs(graph, a, PathEnds::NONE)?, cv)
+                }
+            } else {
+                join_seq(path_pairs(graph, a, PathEnds::NONE)?, path_pairs(graph, c, PathEnds::NONE)?)
             }
-            let mut out = FxHashSet::default();
-            for (s, m) in av {
-                if let Some(os) = by_start.get(&m) {
-                    for &o in os {
-                        out.insert((s, o));
+        }
+        // Endpoints push into BOTH branches of an alternative unchanged.
+        P::Alternative(a, c) => {
+            let mut s = path_pairs(graph, a, ends)?;
+            s.extend(path_pairs(graph, c, ends)?);
+            s
+        }
+        P::OneOrMore(a) => match (ends.s, ends.o) {
+            (Some(s), _) => directed_reach(graph, a, s, ends.o, Dir::Fwd)?.into_iter().map(|r| (s, r)).collect(),
+            (None, Some(o)) => directed_reach(graph, a, o, None, Dir::Rev)?.into_iter().map(|r| (r, o)).collect(),
+            (None, None) => transitive_closure_pairs(path_pairs(graph, a, PathEnds::NONE)?),
+        },
+        P::ZeroOrMore(a) => match (ends.s, ends.o) {
+            // A bound endpoint needs only ITS reflexive pair, not the whole node
+            // domain (`<s> p* <s>` holds for any term, see the zero-length rules).
+            (Some(s), _) => {
+                let mut c: FxHashSet<(Id, Id)> =
+                    directed_reach(graph, a, s, ends.o, Dir::Fwd)?.into_iter().map(|r| (s, r)).collect();
+                c.insert((s, s));
+                c
+            }
+            (None, Some(o)) => {
+                let mut c: FxHashSet<(Id, Id)> =
+                    directed_reach(graph, a, o, None, Dir::Rev)?.into_iter().map(|r| (r, o)).collect();
+                c.insert((o, o));
+                c
+            }
+            (None, None) => {
+                let mut c = transitive_closure_pairs(path_pairs(graph, a, PathEnds::NONE)?);
+                c.extend(graph_nodes(graph).into_iter().map(|n| (n, n)));
+                c
+            }
+        },
+        P::ZeroOrOne(a) => {
+            let mut s = path_pairs(graph, a, ends)?;
+            match (ends.s, ends.o) {
+                // Bound endpoint: only its own reflexive pair (no full-store node scan).
+                (Some(x), None) | (None, Some(x)) => {
+                    s.insert((x, x));
+                }
+                (Some(x), Some(y)) => {
+                    if x == y {
+                        s.insert((x, x));
                     }
                 }
+                (None, None) => s.extend(graph_nodes(graph).into_iter().map(|n| (n, n))),
             }
-            out
-        }
-        P::Alternative(a, c) => {
-            let mut s = path_pairs(graph, a)?;
-            s.extend(path_pairs(graph, c)?);
             s
         }
-        P::OneOrMore(a) => transitive_closure_pairs(path_pairs(graph, a)?),
-        P::ZeroOrMore(a) => {
-            let mut c = transitive_closure_pairs(path_pairs(graph, a)?);
-            c.extend(graph_nodes(graph).into_iter().map(|n| (n, n)));
-            c
-        }
-        P::ZeroOrOne(a) => {
-            let mut s = path_pairs(graph, a)?;
-            s.extend(graph_nodes(graph).into_iter().map(|n| (n, n)));
-            s
-        }
-        P::NegatedPropertySet(props) => {
-            let excluded: FxHashSet<Id> =
-                props.iter().filter_map(|p| graph.id_of(&Term::NamedNode(p.clone()))).collect();
-            let pat: IdPattern = [None, None, None];
-            let scan = graph.store.scan(&pat);
-            scan.rows
-                .iter()
-                .filter_map(|r| {
-                    let t = scan.to_spo(r);
-                    (!excluded.contains(&t[1])).then_some((t[0], t[2]))
-                })
-                .collect()
-        }
+        P::NegatedPropertySet(props) => negated_property_pairs(graph, props, ends),
     })
 }
 
-/// All `(s, o)` for a single predicate IRI (empty if the predicate isn't in the graph).
-fn predicate_pairs(graph: &Graph, p: &oxrdf::NamedNode) -> FxHashSet<(Id, Id)> {
+/// Hash join of two path relations on the shared midpoint (`a.end == c.start`).
+fn join_seq(av: FxHashSet<(Id, Id)>, cv: FxHashSet<(Id, Id)>) -> FxHashSet<(Id, Id)> {
+    let mut by_start: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for (m, o) in cv {
+        by_start.entry(m).or_default().push(o);
+    }
+    let mut out = FxHashSet::default();
+    for (s, m) in av {
+        if let Some(os) = by_start.get(&m) {
+            for &o in os {
+                out.insert((s, o));
+            }
+        }
+    }
+    out
+}
+
+/// Traversal direction for [`directed_reach`]: forward follows the sub-path
+/// from a bound SUBJECT; reverse walks it backwards from a bound OBJECT (the
+/// O-leading permutations answer the reversed leaf scans).
+#[derive(Clone, Copy, PartialEq)]
+enum Dir {
+    Fwd,
+    Rev,
+}
+
+/// Single-source reachability (one or more steps) from `start` under the
+/// sub-path: a budget-checked BFS whose frontier expansion is a bounded
+/// sub-evaluation — for a plain-predicate sub-path, one sorted range scan
+/// (`[Some(n), Some(p), None]`, or `[None, Some(p), Some(n)]` reversed) per
+/// node. With `target` bound the walk is a reachability TEST and stops as soon
+/// as the target is reached.
+fn directed_reach(
+    graph: &Graph,
+    sub: &PropertyPathExpression,
+    start: Id,
+    target: Option<Id>,
+    dir: Dir,
+) -> Result<FxHashSet<Id>, String> {
+    // Plain-predicate fast path: successors come straight from a range scan
+    // (no per-node relation set). `Some(None)` = predicate not in the
+    // dictionary, hence no edges at all.
+    let pid: Option<Option<Id>> = match sub {
+        PropertyPathExpression::NamedNode(p) => Some(graph.id_of(&Term::NamedNode(p.clone()))),
+        _ => None,
+    };
+    let step = |node: Id, out: &mut Vec<Id>| -> Result<(), String> {
+        match pid {
+            Some(None) => {}
+            Some(Some(pid)) => {
+                let pat: IdPattern = match dir {
+                    Dir::Fwd => [Some(node), Some(pid), None],
+                    Dir::Rev => [None, Some(pid), Some(node)],
+                };
+                let scan = graph.store.scan(&pat);
+                let col = match dir {
+                    Dir::Fwd => 2,
+                    Dir::Rev => 0,
+                };
+                out.extend(scan.rows.iter().map(|r| scan.to_spo(r)[col]));
+            }
+            // Composite sub-path: one bounded sub-evaluation per node (its own
+            // endpoints push recursively). The filter enforces the contract's
+            // "may return extra relation pairs" clause.
+            None => {
+                let ends = match dir {
+                    Dir::Fwd => PathEnds { s: Some(node), o: None },
+                    Dir::Rev => PathEnds { s: None, o: Some(node) },
+                };
+                for (s, o) in path_pairs(graph, sub, ends)? {
+                    match dir {
+                        Dir::Fwd if s == node => out.push(o),
+                        Dir::Rev if o == node => out.push(s),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    };
+    let mut seen: FxHashSet<Id> = FxHashSet::default();
+    let mut stack: Vec<Id> = Vec::new();
+    step(start, &mut stack)?;
+    let mut pops = 0usize;
+    while let Some(n) = stack.pop() {
+        // Budget granularity: check INSIDE the walk (every 1024 pops), so one
+        // runaway traversal respects the budget promptly.
+        pops += 1;
+        if pops & 0x3FF == 0 {
+            budget::check(seen.len())?;
+        }
+        if seen.insert(n) {
+            if target == Some(n) {
+                break;
+            }
+            step(n, &mut stack)?;
+        }
+    }
+    Ok(seen)
+}
+
+/// The nodes lying on a directed cycle of the sub-path's relation — exactly the
+/// solutions of `?x p+ ?x` — via Kosaraju SCC over the base relation: every
+/// member of an SCC of size >= 2, plus self-loop nodes. `O(V + E)` instead of
+/// the all-pairs closure's `O(V·E)`.
+fn cyclic_nodes(graph: &Graph, sub: &PropertyPathExpression) -> Result<FxHashSet<Id>, String> {
+    let base = path_pairs(graph, sub, PathEnds::NONE)?;
+    let mut adj: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    let mut radj: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    let mut cyclic: FxHashSet<Id> = FxHashSet::default();
+    for &(s, o) in &base {
+        if s == o {
+            cyclic.insert(s); // self-loop: a 1-cycle
+        }
+        adj.entry(s).or_default().push(o);
+        radj.entry(o).or_default().push(s);
+    }
+    // Pass 1: iterative DFS post-order (every node with an out-edge is a root
+    // candidate; sinks are reached as children — a cycle member always has an
+    // out-edge, so coverage is complete).
+    let mut order: Vec<Id> = Vec::new();
+    let mut visited: FxHashSet<Id> = FxHashSet::default();
+    let mut steps = 0usize;
+    let roots: Vec<Id> = adj.keys().copied().collect();
+    for &root in &roots {
+        if !visited.insert(root) {
+            continue;
+        }
+        let mut stack: Vec<(Id, usize)> = vec![(root, 0)];
+        while let Some(frame) = stack.last_mut() {
+            steps += 1;
+            if steps & 0x3FF == 0 {
+                budget::check(order.len())?;
+            }
+            let (n, i) = *frame;
+            match adj.get(&n).and_then(|v| v.get(i).copied()) {
+                Some(m) => {
+                    frame.1 += 1;
+                    if visited.insert(m) {
+                        stack.push((m, 0));
+                    }
+                }
+                None => {
+                    order.push(n);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    // Pass 2: components of the TRANSPOSE graph, roots taken in reverse
+    // post-order; a component of >= 2 members is a cycle through all of them.
+    let mut assigned: FxHashSet<Id> = FxHashSet::default();
+    for &root in order.iter().rev() {
+        if !assigned.insert(root) {
+            continue;
+        }
+        let mut members: Vec<Id> = vec![root];
+        let mut stack: Vec<Id> = vec![root];
+        while let Some(n) = stack.pop() {
+            steps += 1;
+            if steps & 0x3FF == 0 {
+                budget::check(members.len())?;
+            }
+            if let Some(ps) = radj.get(&n) {
+                for &m in ps {
+                    if assigned.insert(m) {
+                        members.push(m);
+                        stack.push(m);
+                    }
+                }
+            }
+        }
+        if members.len() >= 2 {
+            cyclic.extend(members);
+        }
+    }
+    Ok(cyclic)
+}
+
+/// All `(s, o)` for a single predicate IRI (empty if the predicate isn't in the
+/// graph), narrowed by any bound endpoints — `[s?, p, o?]` is always a single
+/// contiguous range in some built permutation.
+fn predicate_pairs(graph: &Graph, p: &oxrdf::NamedNode, ends: PathEnds) -> FxHashSet<(Id, Id)> {
     match graph.id_of(&Term::NamedNode(p.clone())) {
         None => FxHashSet::default(),
         Some(pid) => {
-            let pat: IdPattern = [None, Some(pid), None];
+            let pat: IdPattern = [ends.s, Some(pid), ends.o];
             let scan = graph.store.scan(&pat);
             scan.rows
                 .iter()
@@ -2103,6 +2387,55 @@ fn predicate_pairs(graph: &Graph, p: &oxrdf::NamedNode) -> FxHashSet<(Id, Id)> {
                 .collect()
         }
     }
+}
+
+/// `!(...)` — every edge whose predicate is NOT in the excluded set. A bound
+/// endpoint narrows the scan to that one node's triples; the fully-unbound case
+/// walks a P-leading permutation and skips each excluded predicate's contiguous
+/// block wholesale (binary search to the block end — no per-triple set probe
+/// over the excluded mass).
+fn negated_property_pairs(graph: &Graph, props: &[oxrdf::NamedNode], ends: PathEnds) -> FxHashSet<(Id, Id)> {
+    let excluded: FxHashSet<Id> = props.iter().filter_map(|p| graph.id_of(&Term::NamedNode(p.clone()))).collect();
+    if ends.s.is_some() || ends.o.is_some() {
+        let pat: IdPattern = [ends.s, None, ends.o];
+        let scan = graph.store.scan(&pat);
+        return scan
+            .rows
+            .iter()
+            .filter_map(|r| {
+                let t = scan.to_spo(r);
+                (!excluded.contains(&t[1])).then_some((t[0], t[2]))
+            })
+            .collect();
+    }
+    // Both BUILT index sets contain a P-leading permutation (PSO full / POS
+    // compact), so `scan_sorted` finds one; the fallback filter-scan defends
+    // against a future index set where it doesn't.
+    let scan = graph.store.scan_sorted(&[None, None, None], 1);
+    let rows = &scan.rows[..];
+    let mut out = FxHashSet::default();
+    if scan.perm.order()[0] == 1 {
+        let mut i = 0;
+        while i < rows.len() {
+            let p = rows[i][0];
+            let j = i + rows[i..].partition_point(|r| r[0] == p);
+            if !excluded.contains(&p) {
+                for r in &rows[i..j] {
+                    let t = scan.to_spo(r);
+                    out.insert((t[0], t[2]));
+                }
+            }
+            i = j;
+        }
+    } else {
+        for r in rows {
+            let t = scan.to_spo(r);
+            if !excluded.contains(&t[1]) {
+                out.insert((t[0], t[2]));
+            }
+        }
+    }
+    out
 }
 
 /// Every id that appears as a subject or object (the domain of zero-length path matches).
@@ -2126,15 +2459,22 @@ fn transitive_closure_pairs(pairs: FxHashSet<(Id, Id)>) -> FxHashSet<(Id, Id)> {
     }
     let mut out: FxHashSet<(Id, Id)> = FxHashSet::default();
     let starts: Vec<Id> = adj.keys().copied().collect();
+    let mut pops = 0usize;
     for start in starts {
-        // Coarse budget check once per BFS start node (sticky; the caller's next
-        // check raises the error).
+        // Budget check per BFS start node (sticky; the caller's next check
+        // raises the error)…
         if budget::exhausted(out.len()) {
             break;
         }
         let mut seen: FxHashSet<Id> = FxHashSet::default();
         let mut stack: Vec<Id> = adj.get(&start).cloned().unwrap_or_default();
         while let Some(n) = stack.pop() {
+            // …and every 1024 expansions INSIDE the walk, so one runaway start
+            // node cannot overshoot the budget by a whole graph traversal.
+            pops += 1;
+            if pops & 0x3FF == 0 && budget::exhausted(out.len()) {
+                return out;
+            }
             if seen.insert(n) {
                 out.insert((start, n));
                 if let Some(nexts) = adj.get(&n) {
@@ -7143,5 +7483,258 @@ mod path_tests {
         assert_eq!(one("PREFIX : <http://ex/> SELECT (OBJECT(TRIPLE(:a, :b, :c)) AS ?x) {}").unwrap(), "<http://ex/c>");
         // A literal subject is a type error -> unbound.
         assert_eq!(one("PREFIX : <http://ex/> SELECT (TRIPLE(1, :b, :c) AS ?t) {}"), None);
+    }
+}
+
+#[cfg(test)]
+mod path_pushdown_tests {
+    //! Differential tests for the bound-endpoint pushdown: for every operator ×
+    //! every binding shape (subject bound / object bound / both / neither /
+    //! same-variable), the pushed-down evaluation must agree with the
+    //! full-relation evaluation filtered after the fact — over random graphs
+    //! containing cycles, diamonds, self-loops and disconnected components.
+    use super::*;
+
+    /// Random multigraph over predicates `:e` / `:f`, plus deterministic
+    /// adversarial shapes: a diamond (d0→{d1,d2}→d3), a directed 3-cycle
+    /// (c0→c1→c2→c0), a self-loop (s0→s0) and a disconnected island (i0→i1).
+    fn random_graph(seed0: u64, n_nodes: u32, n_edges: usize) -> Graph {
+        let mut seed = seed0;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let mut ttl = String::from("@prefix : <http://ex/> .\n");
+        for _ in 0..n_edges {
+            let (a, b) = (next() % n_nodes, next() % n_nodes);
+            let p = if next() % 3 == 0 { "f" } else { "e" };
+            ttl.push_str(&format!(":n{a} :{p} :n{b} .\n"));
+        }
+        ttl.push_str(":d0 :e :d1 . :d0 :e :d2 . :d1 :e :d3 . :d2 :e :d3 .\n");
+        ttl.push_str(":c0 :e :c1 . :c1 :e :c2 . :c2 :e :c0 . :s0 :e :s0 .\n");
+        ttl.push_str(":i0 :f :i1 .\n");
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
+    /// Sorted row-strings of a result (paths have set semantics, order-free).
+    fn rowset(r: &crate::QueryResult) -> Vec<String> {
+        let mut v: Vec<String> = r
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|t| t.as_ref().map(|t| t.to_string()).unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            })
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    const PFX: &str = "PREFIX : <http://ex/> ";
+
+    /// Every path operator and the compositions whose pushdown rules differ
+    /// (inverse-of-recursive, recursive inside sequence on either side,
+    /// alternative-of-recursive, negated sets, zero-length operators).
+    const PATHS: &[&str] = &[
+        ":e",
+        "^:e",
+        ":e+",
+        ":e*",
+        ":e?",
+        "^:e+",
+        "(^:e)+",
+        ":e/:f",
+        ":e/:f+",
+        ":e+/:f",
+        ":e+/:f+",
+        ":e|:f",
+        "(:e|:f)+",
+        "(:e|^:f)*",
+        "!:e",
+        "!(:e|:f)",
+        "^(:e/:f)",
+        ":e*/:f?",
+    ];
+
+    /// Endpoints sampled from every adversarial shape (all exist in each graph).
+    const NODES: &[&str] = &["n0", "n1", "n2", "d0", "d3", "c0", "c1", "s0", "i0", "i1"];
+
+    #[test]
+    fn pushdown_matches_full_closure_for_all_operators_and_binding_shapes() {
+        for seed in [0x1111u64, 0xACE1, 0xDEADBEEF] {
+            let g = random_graph(seed, 12, 40);
+            for path in PATHS {
+                // Reference: the full (both-unbound) relation, post-filtered here.
+                let full = rowset(&crate::query(&g, &format!("{PFX}SELECT ?x ?y WHERE {{ ?x {path} ?y }}")).unwrap());
+                let pairs: Vec<(String, String)> = full
+                    .iter()
+                    .map(|r| {
+                        let (x, y) = r.split_once('\t').unwrap();
+                        (x.to_string(), y.to_string())
+                    })
+                    .collect();
+                // Same variable at both ends: the diagonal.
+                let diag = rowset(&crate::query(&g, &format!("{PFX}SELECT ?x WHERE {{ ?x {path} ?x }}")).unwrap());
+                let mut want_diag: Vec<String> =
+                    pairs.iter().filter(|(x, y)| x == y).map(|(x, _)| x.clone()).collect();
+                want_diag.sort();
+                want_diag.dedup();
+                assert_eq!(diag, want_diag, "same-var disagrees for `{path}` (seed {seed:#x})");
+                for node in NODES {
+                    let iri = format!("<http://ex/{node}>");
+                    // Subject bound.
+                    let got =
+                        rowset(&crate::query(&g, &format!("{PFX}SELECT ?y WHERE {{ :{node} {path} ?y }}")).unwrap());
+                    let mut want: Vec<String> =
+                        pairs.iter().filter(|(x, _)| *x == iri).map(|(_, y)| y.clone()).collect();
+                    want.sort();
+                    want.dedup();
+                    assert_eq!(got, want, "bound-subject :{node} disagrees for `{path}` (seed {seed:#x})");
+                    // Object bound.
+                    let got =
+                        rowset(&crate::query(&g, &format!("{PFX}SELECT ?x WHERE {{ ?x {path} :{node} }}")).unwrap());
+                    let mut want: Vec<String> =
+                        pairs.iter().filter(|(_, y)| *y == iri).map(|(x, _)| x.clone()).collect();
+                    want.sort();
+                    want.dedup();
+                    assert_eq!(got, want, "bound-object :{node} disagrees for `{path}` (seed {seed:#x})");
+                }
+                // Both bound: membership must match the full relation exactly.
+                for (a, b) in
+                    [("n0", "n1"), ("d0", "d3"), ("c0", "c0"), ("c0", "c2"), ("s0", "s0"), ("i0", "i1"), ("n0", "i0")]
+                {
+                    let row = format!("<http://ex/{a}>\t<http://ex/{b}>");
+                    let got = crate::query(&g, &format!("{PFX}SELECT * WHERE {{ :{a} {path} :{b} }}")).unwrap();
+                    assert_eq!(
+                        !got.rows.is_empty(),
+                        full.contains(&row),
+                        "both-bound :{a}/:{b} disagrees for `{path}` (seed {seed:#x})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The negated-property-set block-skip scan must agree with an INDEPENDENT
+    /// evaluation path: a plain scan + FILTER on the predicate.
+    #[test]
+    fn negated_property_set_matches_filter_oracle() {
+        for seed in [0x5EEDu64, 0xBEEF] {
+            let g = random_graph(seed, 10, 60);
+            for (path, cond) in [("!:e", "?p != :e"), ("!(:e|:f)", "?p != :e && ?p != :f")] {
+                let got = rowset(&crate::query(&g, &format!("{PFX}SELECT ?x ?y WHERE {{ ?x {path} ?y }}")).unwrap());
+                let oracle = rowset(
+                    &crate::query(
+                        &g,
+                        &format!("{PFX}SELECT DISTINCT ?x ?y WHERE {{ ?x ?p ?y FILTER({cond}) }}"),
+                    )
+                    .unwrap(),
+                );
+                assert_eq!(got, oracle, "`{path}` disagrees with filter oracle (seed {seed:#x})");
+            }
+        }
+    }
+
+    /// The row budget must fire INSIDE a single-source traversal (not only
+    /// between traversal roots): one long chain, one start node, tiny budget.
+    #[test]
+    fn budget_fires_inside_directed_traversal() {
+        let mut ttl = String::from("@prefix : <http://ex/> .\n");
+        for k in 0..20_000u32 {
+            ttl.push_str(&format!(":m{k} :e :m{} .\n", k + 1));
+        }
+        let g = Graph::load_str(&ttl, "turtle").unwrap();
+        let budget = crate::QueryBudget { deadline: None, max_rows: Some(64) };
+        let err = crate::query_with_budget(&g, "PREFIX : <http://ex/> SELECT ?y WHERE { :m0 :e+ ?y }", &budget)
+            .unwrap_err();
+        assert!(err.contains("budget"), "expected a budget error, got: {err}");
+    }
+
+    /// PAIRED micro-benchmark (same process, same graph) for bound-subject
+    /// `knows+` at ~1M edges: the single-source pushdown vs the previous
+    /// full-closure-then-filter algorithm. Clustered social graph — 100k
+    /// people in 1000 clusters of 100, ten random in-cluster `knows` edges
+    /// each — so the full closure is feasible to measure at all (~10M pairs;
+    /// an unclustered 1M-edge graph would make "before" run for hours, which
+    /// is the pathology being fixed). Run manually:
+    ///   cargo test -p sparq-engine --release bench_bound_endpoint -- --ignored --nocapture
+    /// Absolute times on a shared machine are contended; the RATIO is the result.
+    #[test]
+    #[ignore]
+    fn bench_bound_endpoint_pushdown_1m_edges() {
+        use std::time::Instant;
+        const CLUSTERS: u32 = 1_000;
+        const SIZE: u32 = 100;
+        const OUT_DEG: u32 = 10;
+        let mut seed = 0x5EEDu64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let mut ttl = String::with_capacity(48 << 20);
+        ttl.push_str("@prefix : <http://ex/> .\n");
+        for c in 0..CLUSTERS {
+            for m in 0..SIZE {
+                let a = c * SIZE + m;
+                for _ in 0..OUT_DEG {
+                    let b = c * SIZE + next() % SIZE;
+                    ttl.push_str(&format!(":p{a} :knows :p{b} .\n"));
+                }
+            }
+        }
+        let t = Instant::now();
+        let g = Graph::load_str(&ttl, "turtle").unwrap();
+        eprintln!("loaded {} triples in {:.2?}", g.store.len(), t.elapsed());
+
+        let knows = PropertyPathExpression::NamedNode(oxrdf::NamedNode::new("http://ex/knows").unwrap());
+        let plus = PropertyPathExpression::OneOrMore(Box::new(knows.clone()));
+        let id = |k: u32| g.id_of(&Term::NamedNode(oxrdf::NamedNode::new(format!("http://ex/p{k}")).unwrap())).unwrap();
+
+        // AFTER: bound-subject pushdown, median over many random starts.
+        let starts: Vec<Id> = (0..200).map(|_| id(next() % (CLUSTERS * SIZE))).collect();
+        let mut times: Vec<f64> = Vec::new();
+        let mut rows = 0usize;
+        for &s in &starts {
+            let t = Instant::now();
+            let r = path_pairs(&g, &plus, PathEnds { s: Some(s), o: None }).unwrap();
+            times.push(t.elapsed().as_secs_f64());
+            rows += r.len();
+        }
+        times.sort_by(f64::total_cmp);
+        let after = times[times.len() / 2];
+        eprintln!("bound-subject pushdown: median {:.3?} over {} starts ({} total rows)",
+            std::time::Duration::from_secs_f64(after), starts.len(), rows);
+
+        // BEFORE: the previous algorithm — full all-pairs closure, then filter.
+        let t = Instant::now();
+        let full = transitive_closure_pairs(path_pairs(&g, &knows, PathEnds::NONE).unwrap());
+        let before = t.elapsed().as_secs_f64();
+        let s0 = starts[0];
+        let filtered = full.iter().filter(|&&(x, _)| x == s0).count();
+        eprintln!("full closure (old algorithm): {:.3?} ({} pairs; {} for one start)",
+            std::time::Duration::from_secs_f64(before), full.len(), filtered);
+        eprintln!("PAIRED RATIO full-closure / single-source = {:.0}x", before / after);
+
+        // Both-bound reachability with early exit (hit and miss), and bound object.
+        let (a, hit, miss) = (id(0), id(SIZE - 1), id(SIZE)); // same cluster / next cluster
+        let t = Instant::now();
+        for _ in 0..100 {
+            let _ = path_pairs(&g, &plus, PathEnds { s: Some(a), o: Some(hit) }).unwrap();
+        }
+        eprintln!("both-bound (hit, early exit): {:.3?}/iter", t.elapsed() / 100);
+        let t = Instant::now();
+        for _ in 0..100 {
+            let r = path_pairs(&g, &plus, PathEnds { s: Some(a), o: Some(miss) }).unwrap();
+            assert!(!r.iter().any(|&(_, y)| y == miss));
+        }
+        eprintln!("both-bound (miss, cluster exhausted): {:.3?}/iter", t.elapsed() / 100);
+        let t = Instant::now();
+        for _ in 0..100 {
+            let _ = path_pairs(&g, &plus, PathEnds { s: None, o: Some(a) }).unwrap();
+        }
+        eprintln!("bound-object reverse traversal: {:.3?}/iter", t.elapsed() / 100);
     }
 }
