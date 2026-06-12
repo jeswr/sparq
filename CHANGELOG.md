@@ -43,6 +43,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in time-travel queries (`sparq-serve`, `sparq-server`)** — a retained
+  generation IS a queryable snapshot. Library: `RingConfig::time_travel`
+  (`TimeTravelConfig { max_generations, max_age }`, default `None`) extends ring
+  retention beyond the concurrency bound K (K stays a floor — time travel extends,
+  never shrinks); `GenerationRing::at(n)` pins a retained generation,
+  `Generation::published_at` (stamped by the injectable `RingConfig::clock`) +
+  `GenerationRing::as_of(t)` resolve "as of T" to a generation, honest `None` once
+  history ages out. Server (non-default `time-travel` cargo feature):
+  `?generation=N` on `/sparql` (URL or url-encoded body) serves the store as of
+  that generation; every `/sparql` response carries a `Sparq-Generation` header
+  (update 204s carry the generation containing the update — the read-your-writes
+  token, the horizontal-scaling ADR's shard_seq concept); aged-out → `410 Gone`,
+  never-published/unparsable/pinned-update → `400`; retention via
+  `--time-travel-generations` [16] / `--time-travel-max-age` [off]. Feature off:
+  the parameter handling is compiled out (tests cover both compilations). Memory
+  cost recorded honestly: each retained generation is a FULL `Graph` until the
+  structural-fork follow-up lands (delta-chain/OSTRICH-style retention is the
+  named follow-up; the API needs no change for it). Wasm bundle unchanged.
 - **GeoSPARQL function completion (`sparq-geo`)** — the `geof:` registry grows from
   12 to 35 functions: `geof:getSRID` (`xsd:anyURI`), the generic DE-9IM
   `geof:relate`, the full Egenhofer (`geof:eh*`, 8) and RCC8 (`geof:rcc8*`, 8)
