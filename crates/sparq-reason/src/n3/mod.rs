@@ -148,17 +148,26 @@ const TIME: &str = "http://www.w3.org/2000/10/swap/time#";
 /// premise re-poses its own goal) — within the bound, proofs are exhaustive.
 const BW_DEPTH: usize = 64;
 
+/// An OPT-IN document accessor for `log:semantics` / `log:content`: maps an
+/// IRI to that document's source text. The engine itself never touches the
+/// filesystem or network — reasoning stays a pure function of its inputs
+/// unless the caller supplies one of these.
+pub type Resolver = dyn Fn(&str) -> Option<String>;
+
 /// Goal-directed context: the document's backward (`<=`) rules plus a counter for renaming
 /// rule variables apart (standardizing apart, so nested applications of the same rule do not
-/// capture each other's bindings).
+/// capture each other's bindings); also carries the document base and the
+/// optional [`Resolver`] for the document-access builtins.
 struct BwCtx<'a> {
     rules: &'a [Rule],
     rename: std::cell::Cell<usize>,
+    base: String,
+    resolver: Option<&'a Resolver>,
 }
 
 impl<'a> BwCtx<'a> {
     fn new(rules: &'a [Rule]) -> BwCtx<'a> {
-        BwCtx { rules, rename: std::cell::Cell::new(0) }
+        BwCtx { rules, rename: std::cell::Cell::new(0), base: String::new(), resolver: None }
     }
 }
 
@@ -181,7 +190,7 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
 /// triple, in derivation order) — the EYE `--proof` analogue.
 pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     let parsed = parser::parse(src)?;
-    let (facts, steps) = run_closure(parsed);
+    let (facts, steps) = run_closure(parsed, None);
     intern_closure(dict, &facts, &steps)
 }
 
@@ -202,12 +211,25 @@ pub struct N3Closure {
 /// and resolves relative IRIs against `base` when given — the entry point used
 /// by the W3C N3 conformance harness (cwm/EYE-style: `--think` then compare).
 pub fn reason_n3_terms(src: &str, base: Option<&str>) -> Result<N3Closure, String> {
+    reason_n3_terms_with_resolver(src, base, None)
+}
+
+/// As [`reason_n3_terms`], with an optional document [`Resolver`] enabling the
+/// `log:semantics` / `log:content` builtins (policy: document access is OFF by
+/// default and the engine performs no I/O of its own — the caller decides what
+/// an IRI may dereference to, e.g. the conformance harness maps the suite's
+/// canonical IRIs to its local clone).
+pub fn reason_n3_terms_with_resolver(
+    src: &str,
+    base: Option<&str>,
+    resolver: Option<&Resolver>,
+) -> Result<N3Closure, String> {
     let parsed = match base {
         Some(b) => parser::parse_with_base(src, b)?,
         None => parser::parse(src)?,
     };
     let (n_rules, n_backward_rules) = (parsed.rules.len(), parsed.backward_rules.len());
-    let (facts, steps) = run_closure(parsed);
+    let (facts, steps) = run_closure(parsed, resolver);
     Ok(N3Closure {
         facts: facts.all.into_iter().collect(),
         derived: steps.into_iter().map(|(g, _, _)| g).collect(),
@@ -219,8 +241,11 @@ pub fn reason_n3_terms(src: &str, base: Option<&str>) -> Result<N3Closure, Strin
 /// The semi-naive forward-chaining fixpoint shared by the id-level and
 /// term-level entry points. Returns the final fact set plus the derivation
 /// steps `(conclusion, rule index, supporting premises)` in derivation order.
-fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec<[Term; 3]>)>) {
-    let parser::Parsed { facts: facts0, mut rules, mut backward_rules } = parsed;
+fn run_closure(
+    parsed: parser::Parsed,
+    resolver: Option<&Resolver>,
+) -> (FactIndex, Vec<([Term; 3], usize, Vec<[Term; 3]>)>) {
+    let parser::Parsed { facts: facts0, mut rules, mut backward_rules, base } = parsed;
     // Premises evaluate left-to-right with no coroutining — reorder each
     // premise so a builtin runs only after the atoms that produce its inputs
     // (cwm evaluates builtins "when ready"; concat.n3 test13f writes the
@@ -229,7 +254,9 @@ fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec
         r.premise = order_premise(&r.premise);
     }
     let mut facts = FactIndex::from_iter(facts0);
-    let bw = BwCtx::new(&backward_rules);
+    let mut bw = BwCtx::new(&backward_rules);
+    bw.base = base;
+    bw.resolver = resolver;
     // Derivation steps at the term level (interned to ids once at the end).
     let mut steps: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
 
@@ -540,7 +567,7 @@ fn match_premise_seeded(
                 let matches: Vec<Binding> = match apply_deep(&pat[0], &b) {
                     Term::Formula(ts) => {
                         let scope: Vec<[Term; 3]> = if matches!(op, ScopeOp::Supports) {
-                            formula_closure(&ts)
+                            formula_closure(&ts, bw)
                         } else {
                             ts
                         };
@@ -600,7 +627,7 @@ fn match_premise_seeded(
         } else if let Some(f) = functional_builtin(&pat[1]) {
             bindings = bindings
                 .into_iter()
-                .filter_map(|b| eval_functional(f, &pat[0], &pat[2], facts, b))
+                .filter_map(|b| eval_functional(f, &pat[0], &pat[2], facts, bw, b))
                 .collect();
         } else if let Some(op) = binder_builtin(&pat[1]) {
             bindings = bindings.into_iter().filter_map(|b| eval_binder(op, &pat[0], &pat[2], b)).collect();
@@ -1283,10 +1310,31 @@ fn containment_search(
     }
 }
 
+/// A parsed document's statements with rules re-encoded into their surface
+/// triple form (log:semantics / log:parsedAsN3 result formulae).
+fn reencode_statements(parsed: parser::Parsed) -> Vec<[Term; 3]> {
+    let mut ts = parsed.facts;
+    for r in &parsed.rules {
+        ts.push([
+            Term::Formula(r.premise.clone()),
+            Term::Iri(parser::LOG_IMPLIES.into()),
+            Term::Formula(r.conclusion.clone()),
+        ]);
+    }
+    for r in &parsed.backward_rules {
+        ts.push([
+            Term::Formula(r.conclusion.clone()),
+            Term::Iri(parser::LOG_IMPLIED_BY.into()),
+            Term::Formula(r.premise.clone()),
+        ]);
+    }
+    ts
+}
+
 /// The forward closure of a quoted formula under its own `=>` rules
 /// (log:supports / log:conclusion): the original triples plus everything a
 /// fixpoint run over them derives.
-fn formula_closure(ts: &[[Term; 3]]) -> Vec<[Term; 3]> {
+fn formula_closure(ts: &[[Term; 3]], bw: &BwCtx) -> Vec<[Term; 3]> {
     let mut facts: Vec<[Term; 3]> = Vec::new();
     let mut rules: Vec<Rule> = Vec::new();
     let mut backward: Vec<Rule> = Vec::new();
@@ -1301,8 +1349,9 @@ fn formula_closure(ts: &[[Term; 3]]) -> Vec<[Term; 3]> {
             _ => facts.push(row.clone()),
         }
     }
-    let parsed = parser::Parsed { facts, rules, backward_rules: backward };
-    let (closed, _steps) = run_closure(parsed);
+    let parsed =
+        parser::Parsed { facts, rules, backward_rules: backward, base: bw.base.clone() };
+    let (closed, _steps) = run_closure(parsed, bw.resolver);
     // Original statements (including the rule statements, which cwm keeps in
     // log:conclusion output) plus the derivations.
     let mut seen: FxHashSet<[Term; 3]> = ts.iter().cloned().collect();
@@ -1508,10 +1557,14 @@ enum Func {
     LogConclusion, // log:conclusion — a formula's forward closure, as a formula
     ParsedAsN3,    // log:parsedAsN3 — an N3 source string, parsed to a formula
     Langlit,       // log:langlit — ( "lex" "lang" ) → "lex"@lang
+    Semantics,     // log:semantics — a document IRI's parsed formula (needs a Resolver)
+    Content,       // log:content — a document IRI's source text (needs a Resolver)
     // single-value-arg (string case mapping, Unicode-aware)
     LowerCase,    // string:lowerCase
     UpperCase,    // string:upperCase
     EncodeForUri, // string:encodeForUri — RFC 3986 percent-encoding (see [`encode_for_uri`])
+    EncodeForUriCwm, // string:encodeForURI — cwm's URI quoting (keeps #'()~, encodes /)
+    EncodeForFragId, // string:encodeForFragID — cwm's fragment quoting (keeps /, encodes #'()~)
     // single-value-arg (unary math)
     Negation,
     AbsoluteValue,
@@ -1605,6 +1658,8 @@ fn functional_builtin(p: &Term) -> Option<Func> {
             "conclusion" => Some(Func::LogConclusion),
             "parsedAsN3" => Some(Func::ParsedAsN3),
             "langlit" => Some(Func::Langlit),
+            "semantics" => Some(Func::Semantics),
+            "content" => Some(Func::Content),
             _ => None,
         };
     }
@@ -1616,7 +1671,9 @@ fn functional_builtin(p: &Term) -> Option<Func> {
         (Some("replace"), _) => Some(Func::Replace),
         (Some("lowerCase"), _) => Some(Func::LowerCase),
         (Some("upperCase"), _) => Some(Func::UpperCase),
-        (Some("encodeForUri"), _) | (Some("encodeForURI"), _) => Some(Func::EncodeForUri),
+        (Some("encodeForUri"), _) => Some(Func::EncodeForUri),
+        (Some("encodeForURI"), _) => Some(Func::EncodeForUriCwm),
+        (Some("encodeForFragID"), _) => Some(Func::EncodeForFragId),
         (_, Some("length")) => Some(Func::Length),
         (_, Some("first")) => Some(Func::First),
         (_, Some("last")) => Some(Func::Last),
@@ -1632,6 +1689,7 @@ fn eval_functional(
     subj: &Term,
     obj: &Term,
     facts: &FactIndex,
+    bw: &BwCtx,
     b: Binding,
 ) -> Option<Binding> {
     const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -1848,29 +1906,47 @@ fn eval_functional(
         Func::EncodeForUri => {
             Term::Lit(encode_for_uri(lex(&args[0])?), "http://www.w3.org/2001/XMLSchema#string".into(), None)
         }
+        Func::EncodeForUriCwm | Func::EncodeForFragId => {
+            // cwm's quoting pairs (uriEncode-out.n3): URI keeps #'()~ but
+            // encodes '/'; FragID keeps '/' but encodes #'()~. Both keep
+            // alphanumerics and _.- and use uppercase hex.
+            let keep_extra: &[u8] = if matches!(f, Func::EncodeForUriCwm) {
+                b"#'()~"
+            } else {
+                b"/"
+            };
+            let mut out = String::new();
+            for byte in lex(&args[0])?.bytes() {
+                match byte {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' => {
+                        out.push(byte as char)
+                    }
+                    c if keep_extra.contains(&c) => out.push(c as char),
+                    c => out.push_str(&format!("%{c:02X}")),
+                }
+            }
+            Term::Lit(out, "http://www.w3.org/2001/XMLSchema#string".into(), None)
+        }
         Func::LogConclusion => match &args[..] {
-            [Term::Formula(ts)] => Term::Formula(formula_closure(ts)),
+            [Term::Formula(ts)] => Term::Formula(formula_closure(ts, bw)),
+            _ => return None,
+        },
+        Func::Semantics | Func::Content => match &args[..] {
+            [Term::Iri(doc)] => {
+                let text = bw.resolver.and_then(|r| r(doc))?;
+                if matches!(f, Func::Content) {
+                    Term::Lit(text, XSD_STRING.into(), None)
+                } else {
+                    let parsed = parser::parse_with_base(&text, doc).ok()?;
+                    Term::Formula(reencode_statements(parsed))
+                }
+            }
             _ => return None,
         },
         Func::ParsedAsN3 => match &args[..] {
             [Term::Lit(src, _, _)] => {
-                let parsed = parser::parse(src).ok()?;
-                let mut ts = parsed.facts;
-                for r in &parsed.rules {
-                    ts.push([
-                        Term::Formula(r.premise.clone()),
-                        Term::Iri(parser::LOG_IMPLIES.into()),
-                        Term::Formula(r.conclusion.clone()),
-                    ]);
-                }
-                for r in &parsed.backward_rules {
-                    ts.push([
-                        Term::Formula(r.conclusion.clone()),
-                        Term::Iri(parser::LOG_IMPLIED_BY.into()),
-                        Term::Formula(r.premise.clone()),
-                    ]);
-                }
-                Term::Formula(ts)
+                let parsed = parser::parse_with_base(src, &bw.base).ok()?;
+                Term::Formula(reencode_statements(parsed))
             }
             _ => return None,
         },
@@ -1990,10 +2066,10 @@ fn eval_functional(
                     }
                     Func::Quotient => {
                         let (a, b) = two(&nums)?;
-                        if b == 0.0 {
-                            return None;
+                        if b == 0.0 && !any_double {
+                            return None; // exact-arithmetic division by zero fails
                         }
-                        a / b
+                        a / b // IEEE for doubles: ±INF / NaN (cwm math/inf.n3 test5)
                     }
                     Func::Exponentiation => {
                         let (a, b) = two(&nums)?;
@@ -2044,9 +2120,12 @@ fn eval_functional(
                     Func::Radians => nums[0] * std::f64::consts::PI / 180.0,
                     _ => unreachable!(),
                 };
-                if v.is_nan() && !nums.iter().any(|x| x.is_nan() || x.is_infinite()) {
+                if v.is_nan()
+                    && !nums.iter().any(|x| x.is_nan() || x.is_infinite())
+                    && !(matches!(f, Func::Quotient) && any_double)
+                {
                     return None; // domain error (asin 2, acosh 0.5, …): the premise fails
-                    // (NaN/INF inputs PROPAGATE instead — cwm math/inf.n3)
+                    // (NaN/INF inputs — and IEEE 0/0 — PROPAGATE instead, cwm math/inf.n3)
                 }
                 if trig_family || any_double {
                     double_term(v)

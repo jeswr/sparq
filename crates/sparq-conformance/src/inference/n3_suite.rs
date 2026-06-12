@@ -47,6 +47,32 @@ pub fn notes() -> Vec<String> {
     ]
 }
 
+/// The suite's CANONICAL base: w3c/N3 documents and references resolve
+/// against `https://w3c.github.io/N3/tests/…` (the TurtleTests `.nt`
+/// expectations and the cwm reference outputs both bake those IRIs in).
+const CANONICAL_BASE: &str = "https://w3c.github.io/N3/tests/";
+
+fn canonical_iri(tests_root: &Path, file: &Path) -> String {
+    match file.strip_prefix(tests_root) {
+        Ok(rel) => format!("{CANONICAL_BASE}{}", rel.display()),
+        Err(_) => crate::rdf::file_iri(file),
+    }
+}
+
+/// The [`sparq_reason::n3::Resolver`] for `log:semantics`/`log:content`:
+/// canonical suite IRIs map back into the local pinned clone — strictly
+/// offline, nothing outside the tests directory is readable.
+fn suite_resolver(tests_root: std::path::PathBuf) -> impl Fn(&str) -> Option<String> {
+    move |iri: &str| {
+        let rel = iri.strip_prefix(CANONICAL_BASE)?;
+        let rel = rel.split(['#', '?']).next().unwrap_or(rel);
+        if rel.contains("..") {
+            return None;
+        }
+        std::fs::read_to_string(tests_root.join(rel)).ok()
+    }
+}
+
 pub fn run_suite(n3_root: &Path, out: &mut Vec<TestResult>) -> Result<(), String> {
     let tests = n3_root.join("tests");
     if !tests.is_dir() {
@@ -61,12 +87,17 @@ pub fn run_suite(n3_root: &Path, out: &mut Vec<TestResult>) -> Result<(), String
         ("n3/extended", "N3Tests/manifest-extended.ttl"),
         ("n3/turtle", "TurtleTests/manifest.ttl"),
     ] {
-        run_manifest(&tests.join(manifest), suite, out)?;
+        run_manifest(&tests.join(manifest), suite, &tests, out)?;
     }
     Ok(())
 }
 
-fn run_manifest(path: &Path, suite: &str, out: &mut Vec<TestResult>) -> Result<(), String> {
+fn run_manifest(
+    path: &Path,
+    suite: &str,
+    tests_root: &Path,
+    out: &mut Vec<TestResult>,
+) -> Result<(), String> {
     let g = MiniGraph::load(path)?;
     // Walk by declared type (robust against the one malformed entries-list
     // token upstream), in manifest order via the subjects' first occurrence.
@@ -110,12 +141,18 @@ fn run_manifest(path: &Path, suite: &str, out: &mut Vec<TestResult>) -> Result<(
         };
         let result = file("result");
         let mut outcome = match kind {
-            "TestN3PositiveSyntax" | "TurtlePositiveSyntax" => syntax_test(&action, true),
-            "TestN3NegativeSyntax" | "TurtleNegativeSyntax" => syntax_test(&action, false),
-            "TestN3Eval" => eval_test_n3(&action, result.as_deref()),
-            "TurtleEval" => eval_test_turtle(&action, result.as_deref(), true),
-            "TurtleNegativeEval" => eval_test_turtle(&action, result.as_deref(), false),
-            "TestN3Reason" => reason_test(&g, &node, &action, result.as_deref()),
+            "TestN3PositiveSyntax" | "TurtlePositiveSyntax" => {
+                syntax_test(&action, tests_root, true)
+            }
+            "TestN3NegativeSyntax" | "TurtleNegativeSyntax" => {
+                syntax_test(&action, tests_root, false)
+            }
+            "TestN3Eval" => eval_test_n3(&action, result.as_deref(), tests_root),
+            "TurtleEval" => eval_test_turtle(&action, result.as_deref(), tests_root, true),
+            "TurtleNegativeEval" => {
+                eval_test_turtle(&action, result.as_deref(), tests_root, false)
+            }
+            "TestN3Reason" => reason_test(&g, &node, &action, result.as_deref(), tests_root),
             other => Outcome::OutOfScope(format!("unhandled test type {other}")),
         };
         if let Outcome::Fail(e) = &outcome {
@@ -158,12 +195,12 @@ fn read(path: &Path) -> Result<String, Outcome> {
     std::fs::read_to_string(path).map_err(|e| Outcome::Fail(format!("read {}: {e}", path.display())))
 }
 
-fn syntax_test(action: &Path, positive: bool) -> Outcome {
+fn syntax_test(action: &Path, tests_root: &Path, positive: bool) -> Outcome {
     let src = match read(action) {
         Ok(s) => s,
         Err(o) => return o,
     };
-    let base = crate::rdf::file_iri(action);
+    let base = canonical_iri(tests_root, action);
     match parse_with_watchdog(src, base) {
         Ok(Ok(_)) if positive => Outcome::Pass,
         Ok(Ok(_)) => Outcome::Fail("negative syntax: parser accepted an invalid document".into()),
@@ -199,7 +236,7 @@ fn statements(p: &Parsed) -> Vec<[NTerm; 3]> {
     stmts
 }
 
-fn eval_test_n3(action: &Path, result: Option<&Path>) -> Outcome {
+fn eval_test_n3(action: &Path, result: Option<&Path>, tests_root: &Path) -> Outcome {
     let Some(result) = result else {
         return Outcome::Fail("TestN3Eval without mf:result".into());
     };
@@ -207,7 +244,7 @@ fn eval_test_n3(action: &Path, result: Option<&Path>) -> Outcome {
         (Ok(a), Ok(b)) => (a, b),
         (Err(o), _) | (_, Err(o)) => return o,
     };
-    let parsed = match parse_with_watchdog(src, crate::rdf::file_iri(action)) {
+    let parsed = match parse_with_watchdog(src, canonical_iri(tests_root, action)) {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => return Outcome::Fail(format!("action parse error: {e}")),
         Err(e) => return Outcome::Fail(e),
@@ -215,7 +252,7 @@ fn eval_test_n3(action: &Path, result: Option<&Path>) -> Outcome {
     // cwm generated the reference files against the ACTION document's base
     // (their headers say so) — relative IRIs in a `-ref.n3` resolve against
     // the action, not the ref file itself.
-    let expected = match parse_with_watchdog(expected_src, crate::rdf::file_iri(action)) {
+    let expected = match parse_with_watchdog(expected_src, canonical_iri(tests_root, action)) {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => return Outcome::Fail(format!("expected parse error: {e}")),
         Err(e) => return Outcome::Fail(e),
@@ -227,7 +264,12 @@ fn eval_test_n3(action: &Path, result: Option<&Path>) -> Outcome {
     }
 }
 
-fn eval_test_turtle(action: &Path, result: Option<&Path>, positive: bool) -> Outcome {
+fn eval_test_turtle(
+    action: &Path,
+    result: Option<&Path>,
+    tests_root: &Path,
+    positive: bool,
+) -> Outcome {
     let Some(result) = result else {
         return Outcome::Fail("eval test without mf:result".into());
     };
@@ -235,7 +277,7 @@ fn eval_test_turtle(action: &Path, result: Option<&Path>, positive: bool) -> Out
         Ok(s) => s,
         Err(o) => return o,
     };
-    let parsed = match parse_with_watchdog(src, crate::rdf::file_iri(action)) {
+    let parsed = match parse_with_watchdog(src, canonical_iri(tests_root, action)) {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             return if positive {
@@ -384,6 +426,7 @@ fn reason_test(
     node: &oxrdf::NamedOrBlankNode,
     action: &Path,
     result: Option<&Path>,
+    tests_root: &Path,
 ) -> Outcome {
     let opts = options(g, node);
     if opts.strings {
@@ -400,15 +443,24 @@ fn reason_test(
         (Err(o), _) | (_, Err(o)) => return o,
     };
 
-    // Closure on a watchdog thread.
-    let base = crate::rdf::file_iri(action);
+    // Closure on a watchdog thread (with the offline suite resolver enabling
+    // log:semantics/log:content over the pinned clone).
+    let base = canonical_iri(tests_root, action);
     let (tx, rx) = mpsc::channel();
     {
         let (src, base) = (src.clone(), base.clone());
+        let root = tests_root.to_path_buf();
         let _ = std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
-                let r = std::panic::catch_unwind(|| sparq_reason::reason_n3_terms(&src, Some(&base)));
+                let resolver = suite_resolver(root);
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    sparq_reason::n3::reason_n3_terms_with_resolver(
+                        &src,
+                        Some(&base),
+                        Some(&resolver),
+                    )
+                }));
                 let _ = tx.send(r);
             });
     }
@@ -424,36 +476,51 @@ fn reason_test(
         }
     };
 
-    // Shape the output per the cwm options.
-    let mut actual: Vec<[NTerm; 3]> = if opts.conclusions {
-        // `--conclusions`: ONLY what the rules derived.
-        closure.derived.clone()
-    } else {
-        closure.facts.clone()
+    // Shape the output per the cwm options. The vendored cwm `-out.n3`/-ref
+    // references are INCONSISTENT for identical `test:conclusions` options
+    // (string/contains-out.n3 holds only the derivations; string/roughly-out.n3
+    // holds data + derivations — the out-files were produced by different cwm
+    // command lines than the manifest reconstruction suggests), so under
+    // `conclusions` BOTH shapings are acceptable; `data` drops formula-valued
+    // statements; the default output re-adds the rule statements.
+    let data_filter = |rows: &mut Vec<[NTerm; 3]>| {
+        if opts.data {
+            rows.retain(|row| !row.iter().any(|t| matches!(t, NTerm::Formula(_))));
+        }
     };
-    if opts.data {
-        // `--data`: drop formula-valued statements (rules are already not in
-        // the fact set). `--conclusions` KEEPS them — derived formula facts
-        // (log:conjunction results etc.) are conclusions.
-        actual.retain(|row| !row.iter().any(|t| matches!(t, NTerm::Formula(_))));
-    }
-    dedup(&mut actual);
-    if !opts.data && !opts.conclusions {
-        // Full-store output keeps the document's rules as statements.
-        let parsed = match parse_with_watchdog(src, base) {
-            Ok(Ok(p)) => p,
-            Ok(Err(e)) => return Outcome::Fail(format!("action parse error: {e}")),
-            Err(e) => return Outcome::Fail(e),
-        };
-        actual.extend(statements(&Parsed {
-            facts: Vec::new(),
-            rules: parsed.rules,
-            backward_rules: parsed.backward_rules,
-        }));
+    let mut variants: Vec<Vec<[NTerm; 3]>> = Vec::new();
+    if opts.conclusions {
+        let mut derived = closure.derived.clone();
+        data_filter(&mut derived);
+        dedup(&mut derived);
+        variants.push(derived);
+        let mut full = closure.facts.clone();
+        data_filter(&mut full);
+        dedup(&mut full);
+        variants.push(full);
+    } else {
+        let mut full = closure.facts.clone();
+        data_filter(&mut full);
+        dedup(&mut full);
+        if !opts.data {
+            // Full-store output keeps the document's rules as statements.
+            let parsed = match parse_with_watchdog(src, base.clone()) {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => return Outcome::Fail(format!("action parse error: {e}")),
+                Err(e) => return Outcome::Fail(e),
+            };
+            full.extend(statements(&Parsed {
+                facts: Vec::new(),
+                rules: parsed.rules,
+                backward_rules: parsed.backward_rules,
+                base: String::new(),
+            }));
+        }
+        variants.push(full);
     }
 
     // cwm generated the reference against the ACTION's base (see headers).
-    let expected = match parse_with_watchdog(expected_src, crate::rdf::file_iri(action)) {
+    let expected = match parse_with_watchdog(expected_src, base) {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => return Outcome::Fail(format!("expected parse error: {e}")),
         Err(e) => return Outcome::Fail(e),
@@ -461,14 +528,15 @@ fn reason_test(
     let mut expected_stmts = statements(&expected);
     dedup(&mut expected_stmts);
 
-    if n3_iso(&actual, &expected_stmts) {
+    if variants.iter().any(|v| n3_iso(v, &expected_stmts)) {
         Outcome::Pass
     } else {
+        let actual = &variants[0];
         Outcome::Fail(format!(
             "output not isomorphic to the reference ({} vs {} statements{})",
             actual.len(),
             expected_stmts.len(),
-            diff_hint(&actual, &expected_stmts)
+            diff_hint(actual, &expected_stmts)
         ))
     }
 }

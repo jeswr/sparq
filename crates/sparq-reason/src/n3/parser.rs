@@ -38,6 +38,9 @@ pub struct Parsed {
     /// `{ conclusion } <= { premise }` BACKWARD rules — goal-directed, never fired forward.
     /// `{ conclusion } <= true.` is a backward rule with an empty (always-provable) premise.
     pub backward_rules: Vec<Rule>,
+    /// The document's base IRI ("" when none) — log:parsedAsN3/log:semantics
+    /// resolve relative IRIs against it.
+    pub base: String,
 }
 
 pub fn parse(src: &str) -> Result<Parsed, String> {
@@ -104,7 +107,7 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
         rewrite_terms(&mut r.premise, false, &rename);
         rewrite_terms(&mut r.conclusion, false, &rename);
     }
-    Ok(Parsed { facts, rules, backward_rules })
+    Ok(Parsed { facts, rules, backward_rules, base: base.to_string() })
 }
 
 /// The prefixes cwm resolves without declaration (its reference outputs rely
