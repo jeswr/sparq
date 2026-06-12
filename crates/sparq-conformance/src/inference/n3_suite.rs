@@ -487,12 +487,27 @@ const DOCUMENTED_DIVERGENCES: &[(&str, &str, &str)] = &[
          t10a.n3 and ran with an unrecorded --purge",
     ),
     (
-    "cwm_unify_unify1",
-    "upstream ref/action mismatch",
-    "the action concludes `:test :a ?x` (predicate <unify1.n3#a>) but unify1-ref.n3 \
-     says `:test a :Successful` (rdf:type) — the vendored cwm reference was generated \
-     from an older revision of the action",
-)];
+        "cwm_unify_unify1",
+        "upstream ref/action mismatch",
+        "the action concludes `:test :a ?x` (predicate <unify1.n3#a>) but unify1-ref.n3 \
+         says `:test a :Successful` (rdf:type) — the vendored cwm reference was generated \
+         from an older revision of the action",
+    ),
+    (
+        "cwm_includes_conclusion",
+        "upstream ref from older sources, and not deductively closed",
+        "the engine now derives the `:result :is { … }` conclusion formula, but the \
+         vendored conclusion-ref.n3 cannot match the vendored sources: (1) its quoted \
+         daml:comment for :Animal reads `…number of\\nontological…` while the vendored \
+         daml-ex.n3 has `…number of\\n\\tontological…` (TAB) — the 2003 cwm run used an \
+         older daml-ex.n3 revision; (2) the ref formula is not closed under its OWN quoted \
+         rules (it holds `d:father daml:range d:Man`, `daml:range = rdfs:range` and the \
+         rule `{?x ?p1 ?y. ?p1 = ?p2} => {?x ?p2 ?y}`, yet lacks `d:father rdfs:range \
+         d:Man`) — log:conclusion (\"all statements which can be deduced\") legitimately \
+         derives 31 statements the 2003 run did not (instantiated transitivity rules and \
+         the consequent type/schema facts)",
+    ),
+];
 
 fn reason_test(
     g: &MiniGraph,

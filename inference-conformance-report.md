@@ -2,7 +2,7 @@
 
 - rdf-tests commit: `f25dbc092c654d792974848e81bb519d7328f0e8`
 - w3c/N3 commit: `23ccf3d56b25cb60a68878a04aae0d52493080f0`
-- sparq commit: `6a8e67d4a9b26bb3ccb16dc7700100643ae58c7c`
+- sparq commit: `16ca0f982733ce0d33db84895567be2ac2fe558a`
 
 Every manifest entry lands in exactly one bucket — pass, fail, documented divergence, or out-of-scope WITH its reason (no silent skips). Pass rate is `(pass + divergence) / run`; out-of-scope entries are excluded from the rate but counted in coverage.
 
@@ -81,14 +81,16 @@ Source: w3c/N3 `tests/` (pinned clone). The reasoner manifest measures EYE/cwm p
 |---|---:|---:|---:|---:|---:|
 | n3/extended | 871 | 0 | 0 | 107 | 100.0% |
 | n3/parser | 213 | 0 | 1 | 16 | 100.0% |
-| n3/reasoner | 83 | 1 | 2 | 3 | 98.8% |
+| n3/reasoner | 83 | 0 | 3 | 3 | 100.0% |
 | n3/turtle | 297 | 0 | 0 | 0 | 100.0% |
-| **total** | **1464** | **1** | **3** | **126** | **99.9%** |
+| **total** | **1464** | **0** | **4** | **126** | **100.0%** |
 
-**Overall (N3 (w3c/N3 community-group suite)): 1464 pass / 1 fail / 3 documented divergence / 126 out-of-scope — pass+divergence 99.9% of run, 92.0% of all in-scope tests.**
+**Overall (N3 (w3c/N3 community-group suite)): 1464 pass / 0 fail / 4 documented divergence / 126 out-of-scope — pass+divergence 100.0% of run, 92.1% of all in-scope tests.**
 
 ### Documented divergences
 
+- `n3/reasoner` — **cwm_includes_conclusion**: the engine now derives the `:result :is { … }` conclusion formula, but the vendored conclusion-ref.n3 cannot match the vendored sources: (1) its quoted daml:comment for :Animal reads `…number of\nontological…` while the vendored daml-ex.n3 has `…number of\n\tontological…` (TAB) — the 2003 cwm run used an older daml-ex.n3 revision; (2) the ref formula is not closed under its OWN quoted rules (it holds `d:father daml:range d:Man`, `daml:range = rdfs:range` and the rule `{?x ?p1 ?y. ?p1 = ?p2} => {?x ?p2 ?y}`, yet lacks `d:father rdfs:range d:Man`) — log:conclusion ("all statements which can be deduced") legitimately derives 31 statements the 2003 run did not (instantiated transitivity rules and the consequent type/schema facts).
+  *observed*: output not isomorphic to the reference (2 vs 1 statements; expected-only e.g. [Iri("https://w3c.github.io/N3/tests/N3Tests/cwm_includes/foo.n3#result"), Iri("https://w3c.github.io/N3/tests/N3Tests/cwm_includes/foo.n3#is"), Formula([[Iri("https://w3c.github.io/N3/tests/N3Tests/cwm_other/daml-ex.n3"), Iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"), Iri("http://www.daml.org/2001/03/daml+oil#Ontology")], [Iri("https://w3c.github.io/N3/tests/N3Tests/)
 - `n3/reasoner` — **cwm_includes_t11**: with the offline resolver the engine derives the schema-checking conclusions over <t10a.n3> (test_undefined etc.); t11-ref.n3 holds only the two foo.n3 conclusions and even omits t11's own data facts — the cwm run that produced it never resolved t10a.n3 and ran with an unrecorded --purge.
   *observed*: output not isomorphic to the reference (11 vs 2 statements; actual-only e.g. [Iri("https://w3c.github.io/N3/tests/N3Tests/cwm_includes/foo.n3#test_undefined"), Iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"), Iri("https://w3c.github.io/N3/tests/N3Tests/cwm_includes/foo.n3#UsedProperty")])
 - `n3/reasoner` — **cwm_unify_unify1**: the action concludes `:test :a ?x` (predicate <unify1.n3#a>) but unify1-ref.n3 says `:test a :Successful` (rdf:type) — the vendored cwm reference was generated from an older revision of the action.
@@ -103,22 +105,16 @@ Source: w3c/N3 `tests/` (pinned clone). The reasoner manifest measures EYE/cwm p
 | rdft:Rejected upstream | 125 |
 | log:outputString (test:strings) not implemented | 1 |
 
-<details><summary>All failures (1)</summary>
-
-- `n3/reasoner` — **cwm_includes_conclusion**: output not isomorphic to the reference (1 vs 1 statements; expected-only e.g. [Iri("https://w3c.github.io/N3/tests/N3Tests/cwm_includes/foo.n3#result"), Iri("https://w3c.github.io/N3/tests/N3Tests/cwm_includes/foo.n3#is"), Formula([[Iri("https://w3c.github.io/N3/tests/N3Tests/cwm_other/daml-ex.n3"), Iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"), Iri("http://www.daml.org/2001/03/daml+oil#Ontology")], [Iri("https://w3c.github.io/N3/tests/N3Tests/)
-
-</details>
-
 ## SPARQL 1.1 entailment regimes (sparql11/entailment)
 
 Source: `sparql11/entailment` from the pinned rdf-tests clone. Each test runs as query-over-materialized-closure through the same evaluation/comparison machinery as the gating SPARQL harness; the regime materialized is the strongest the reasoner supports of the test's `sd:entailmentRegime` set (RDFS ⊃ RDF; OWL-RDF-Based via the OWL RL rules, a sound subset — its incompleteness shows up as listed fails). D-only / OWL-Direct-only / RIF tests are out of scope with their reason.
 
 | suite | pass | fail | divergence | out-of-scope | pass-rate (of run) |
 |---|---:|---:|---:|---:|---:|
-| sparql11/entailment | 44 | 3 | 0 | 23 | 93.6% |
-| **total** | **44** | **3** | **0** | **23** | **93.6%** |
+| sparql11/entailment | 47 | 0 | 0 | 23 | 100.0% |
+| **total** | **47** | **0** | **0** | **23** | **100.0%** |
 
-**Overall (SPARQL 1.1 entailment regimes (sparql11/entailment)): 44 pass / 3 fail / 0 documented divergence / 23 out-of-scope — pass+divergence 93.6% of run, 62.9% of all in-scope tests.**
+**Overall (SPARQL 1.1 entailment regimes (sparql11/entailment)): 47 pass / 0 fail / 0 documented divergence / 23 out-of-scope — pass+divergence 100.0% of run, 67.1% of all in-scope tests.**
 
 ### Out-of-scope reasons
 
@@ -128,14 +124,6 @@ Source: `sparql11/entailment` from the pinned rdf-tests clone. Each test runs as
 | entailment regime(s) RIF not supported (no materialization mapping) | 4 |
 | entailment regime(s) D not supported (no materialization mapping) | 1 |
 
-<details><summary>All failures (3)</summary>
-
-- `sparql11/entailment` — **sparqldl-10.rq: undist vars test**: result mismatch: expected 3 solution(s), got 0; expected-only e.g. {?X=<http://example.org/test#a> ?Y=<http://example.org/test#b>}, {?X=<http://example.org/test#a> ?Y=<http://example.org/test#b>} [root cause: needs non-distinguished (blank-node) query-variable semantics]
-- `sparql11/entailment` — **sparqldl-11.rq: domain test**: result mismatch: expected 2 solution(s), got 3; actual-only e.g. {?C=_:e67ae01fc507f647b38d0a0a678c5de3} [root cause: the regime's answer restriction (skolemization condition) excludes blank-node bindings; the harness does not yet filter them from engine results]
-- `sparql11/entailment` — **sparqldl-12.rq: range test**: result mismatch: expected 2 solution(s), got 3; actual-only e.g. {?C=_:fe03d550aebbe83148506869f7dbdf4d} [root cause: the regime's answer restriction (skolemization condition) excludes blank-node bindings; the harness does not yet filter them from engine results]
-
-</details>
-
 ## Overall (all inference suites)
 
-**1634 pass / 4 fail / 16 documented divergence / 185 out-of-scope — pass+divergence 99.8% of run, 89.7% of all in-scope tests.**
+**1637 pass / 0 fail / 17 documented divergence / 185 out-of-scope — pass+divergence 100.0% of run, 89.9% of all in-scope tests.**

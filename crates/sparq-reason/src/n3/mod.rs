@@ -1002,9 +1002,24 @@ fn apply(t: &Term, b: &Binding) -> Term {
 
 /// Instantiate a conclusion triple under binding `b` (deeply — variables
 /// inside quoted formulae substitute too); `None` if any term stays non-ground.
+///
+/// A quoted formula is a VALUE: variables remaining inside it after
+/// substitution are the formula's OWN quantified variables (e.g. concluding
+/// `{ :result :is ?G }` where ?G is bound to a `log:conclusion` closure whose
+/// statements include rules — cwm keeps those rule variables quoted in the
+/// emitted formula). Only a variable at the triple level (or inside a list)
+/// leaves the conclusion genuinely uninstantiated.
 fn ground_triple(t: &[Term; 3], b: &Binding) -> Option<[Term; 3]> {
+    fn instantiated(t: &Term) -> bool {
+        match t {
+            Term::Var(_) => false,
+            Term::List(ms) => ms.iter().all(instantiated),
+            Term::Formula(_) => true, // opaque value; inner vars are formula-scoped
+            _ => true,
+        }
+    }
     let g = [apply_deep(&t[0], b), apply_deep(&t[1], b), apply_deep(&t[2], b)];
-    if g.iter().all(|x| x.is_ground()) {
+    if g.iter().all(instantiated) {
         Some(g)
     } else {
         None
