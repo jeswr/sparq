@@ -327,6 +327,75 @@ test('fromQuads preserves named graphs under options.dataset', async () => {
   assert.ok(named.graph.equals(ex('g')));
 });
 
+test('applyDelta: incremental quad-level inserts and removals (no rebuild)', async () => {
+  const ex = v => DF.namedNode(`http://ex/${v}`);
+  const store = await load();
+
+  // insert: new terms (typed + language literals) grow the dictionary append-only
+  store.addQuads([
+    DF.quad(ex('carol'), ex('name'), DF.literal('Carol')),
+    DF.quad(ex('carol'), ex('age'), DF.literal('28', DF.namedNode(`${XSD}integer`))),
+    DF.quad(ex('carol'), ex('greets'), DF.literal('hallo', 'de')),
+  ]);
+  assert.equal(store.size, 9);
+  assert.equal(store.queryBoolean('ASK { ?s ?p "28"^^<http://www.w3.org/2001/XMLSchema#integer> }'), true);
+  // numeric filter cache covers the appended literal
+  assert.equal(store.queryBoolean('PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a = 28) }'), true);
+
+  // remove: delete one of them again + a no-op delete of an absent triple
+  store.removeQuads([
+    DF.quad(ex('carol'), ex('greets'), DF.literal('hallo', 'de')),
+    DF.quad(ex('nobody'), ex('name'), DF.literal('Nobody')),
+  ]);
+  assert.equal(store.size, 8);
+
+  // deletes are applied before inserts within one batch
+  store.applyDelta(
+    [DF.quad(ex('carol'), ex('name'), DF.literal('Caroline'))],
+    [DF.quad(ex('carol'), ex('name'), DF.literal('Carol'))],
+  );
+  assert.equal(store.match(ex('carol'), ex('name')).length, 1);
+  assert.equal(store.match(ex('carol'), ex('name'))[0].object.value, 'Caroline');
+
+  // bnode triples are retractable BY LABEL (impossible via SPARQL DELETE DATA)
+  const [orgQuad] = store.match(null, null, DF.literal('ACME'));
+  assert.equal(orgQuad.subject.termType, 'BlankNode');
+  store.removeQuads([orgQuad]);
+  assert.equal(store.match(null, null, DF.literal('ACME')).length, 0);
+});
+
+test('applyDelta routes named-graph quads (auto-creating graphs)', async () => {
+  const ex = v => DF.namedNode(`http://ex/${v}`);
+  const store = await loadDataset();
+  store.applyDelta(
+    [
+      DF.quad(ex('c'), ex('p'), DF.literal('new-default')),
+      DF.quad(ex('c'), ex('p'), DF.literal('new-in-g1'), ex('g1')),
+      DF.quad(ex('c'), ex('p'), DF.literal('new-in-g9'), ex('g9')), // absent graph: auto-created
+    ],
+    [DF.quad(ex('a'), ex('p'), DF.literal('in-g1'), ex('g1'))],
+  );
+  assert.equal(store.size, 2);
+  assert.equal(store.countQuads(null, null, null, ex('g1')), 2); // -1 +1
+  assert.equal(store.countQuads(null, null, null, ex('g9')), 1);
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g9> { ?s ?p "new-in-g9" } }'), true);
+  // delete-only against an absent graph is a no-op, and never creates the graph
+  store.removeQuads([DF.quad(ex('z'), ex('p'), DF.literal('x'), ex('never'))]);
+  assert.equal(store.count('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }'), 3); // g1 g2 g9
+});
+
+test('update() applies in place: handle stays valid, named graphs preserved', async () => {
+  const store = await loadDataset();
+  store.update('INSERT DATA { <http://ex/n> <http://ex/p> "via-update" }');
+  store.update('DELETE DATA { <http://ex/d> <http://ex/p> "default" }');
+  assert.equal(store.size, 1);
+  // named graphs survive default-graph data operations
+  assert.equal(store.countQuads(null, null, null, DF.namedNode('http://ex/g1')), 2);
+  // interleave with quad-level deltas on the same handle
+  store.addQuads([DF.quad(DF.namedNode('http://ex/n2'), DF.namedNode('http://ex/p'), DF.literal('mixed'))]);
+  assert.equal(store.size, 2);
+});
+
 test('engine errors surface as JS exceptions', async () => {
   const store = await load();
   assert.throws(() => store.queryBindings('SELECT ?s WHERE { broken'), /error|expected/i);

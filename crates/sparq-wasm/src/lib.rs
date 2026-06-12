@@ -120,10 +120,32 @@ impl Store {
     /// Applies a SPARQL 1.1 Update (`INSERT DATA`, `DELETE DATA`, `CLEAR`,
     /// `DELETE/INSERT … WHERE` on the default graph) and returns the **new** store —
     /// the receiver is immutable and remains valid. Mirrors `sparq_engine::update`'s
-    /// rebuild semantics.
+    /// rebuild semantics. Prefer [`updateInPlace`](Self::update_in_place), which is
+    /// O(batch) instead of O(store) for the data operations.
     pub fn update(&self, sparql: &str) -> Result<Store, JsError> {
         let graph = sparq_engine::update(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
         Ok(Store { graph })
+    }
+
+    /// Applies a SPARQL 1.1 Update IN PLACE through the store's delta overlay
+    /// (`sparq_engine::update_in_place`): data operations are O(batch) per target
+    /// graph — no index rebuild — and `GRAPH` blocks / graph templates / `CLEAR` /
+    /// `DROP` / `CREATE` address named graphs. The dictionary grows append-only,
+    /// so existing term ids stay valid.
+    #[wasm_bindgen(js_name = updateInPlace)]
+    pub fn update_in_place(&mut self, sparql: &str) -> Result<(), JsError> {
+        sparq_engine::update_in_place(&mut self.graph, sparql).map_err(|e| JsError::new(&e))
+    }
+
+    /// Incremental quad-level delta, mirroring `Graph::apply_delta`: parses
+    /// `inserts` and `deletes` as N-Quads (N-Triples for default-graph data) and
+    /// applies them as ONE batch — deletes first, then inserts, routed per graph
+    /// (named graphs auto-created on first insert) — through the delta overlay:
+    /// O(batch), no rebuild. Blank nodes denote concrete nodes BY LABEL, so bnode
+    /// triples CAN be retracted (impossible via SPARQL `DELETE DATA`).
+    #[wasm_bindgen(js_name = applyDelta)]
+    pub fn apply_delta(&mut self, inserts: &str, deletes: &str) -> Result<(), JsError> {
+        self.graph.apply_delta_nquads(inserts, deletes).map_err(|e| JsError::new(&e))
     }
 }
 

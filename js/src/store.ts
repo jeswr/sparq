@@ -1,7 +1,8 @@
 /**
  * `SparqStore`: an RDF/JS-flavoured wrapper around the sparq wasm engine — an
  * immutable-index, dictionary-encoded in-memory store with SPARQL SELECT/ASK
- * (both evaluated natively by the engine) and SPARQL Update (rebuild semantics).
+ * (both evaluated natively by the engine) and SPARQL Update / quad-level
+ * deltas (applied in place through the engine's delta overlay, O(batch)).
  */
 import type * as RDF from '@rdfjs/types';
 import { Bindings } from './bindings.js';
@@ -276,15 +277,35 @@ export class SparqStore {
    * Applies a SPARQL 1.1 Update (`INSERT DATA`, `DELETE DATA`, `CLEAR`,
    * `DELETE/INSERT … WHERE`, `DROP`/`CREATE`/`ADD`/`COPY`/`MOVE`) over the
    * full dataset — `GRAPH` blocks and graph templates address named graphs
-   * (load with `options.dataset` to start from a dataset). The engine
-   * rebuilds the immutable index (O(store) per update batch), and this
-   * wrapper swaps the handle in place, so the `SparqStore` mutates as
-   * callers expect.
+   * (load with `options.dataset` to start from a dataset). Applied IN PLACE
+   * through the engine's delta overlay: data operations are O(batch) per
+   * target graph (no index rebuild), and the dictionary grows append-only.
    */
   update(sparql: string): void {
-    const next = this.#inner.update(sparql);
-    this.#inner.free();
-    this.#inner = next;
+    this.#inner.updateInPlace(sparql);
+  }
+
+  /**
+   * Incremental quad-level delta, mirroring the Rust `Graph::apply_delta`
+   * API: applies `deletes` first, then `inserts`, as one O(batch) batch
+   * through the delta overlay — no index rebuild — routed per graph (named
+   * graphs are auto-created on first insert; load with `options.dataset` for
+   * named-graph data to be addressable). Unlike SPARQL `DELETE DATA`, blank
+   * nodes here denote concrete nodes BY LABEL, so bnode triples can be
+   * retracted.
+   */
+  applyDelta(inserts: Iterable<RDF.Quad>, deletes: Iterable<RDF.Quad> = []): void {
+    this.#inner.applyDelta(quadsToNQuads(inserts), quadsToNQuads(deletes));
+  }
+
+  /** `applyDelta(quads, [])` — incremental O(batch) insertion. */
+  addQuads(quads: Iterable<RDF.Quad>): void {
+    this.applyDelta(quads, []);
+  }
+
+  /** `applyDelta([], quads)` — incremental O(batch) removal (bnodes by label). */
+  removeQuads(quads: Iterable<RDF.Quad>): void {
+    this.applyDelta([], quads);
   }
 
   /** Releases the wasm-side memory. The store must not be used afterwards. */
