@@ -105,15 +105,18 @@ jobs:
           path: conformance-report.md
 
   inference-conformance:
-    # INFORMATIONAL (non-gating) inference/reasoning conformance: RDF Semantics
-    # (rdf-mt), OWL 2 RL (W3C OWL WG test cases), the w3c/N3 community-group
-    # suite, and sparql11/entailment — run against sparq-reason by the
+    # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
+    # (W3C OWL WG test cases), the w3c/N3 community-group suite, and
+    # sparql11/entailment — run against sparq-reason by the
     # sparq-inference-conformance binary. Current snapshot (2026-06): rdf-mt
-    # 48/48; OWL 2 RL 78 pass / 0 fail / 13 documented divergences; N3 1331
-    # pass / 262 fail; sparql11/entailment 44 pass / 3 fail. A gating ratchet
-    # (like the SPARQL job above) follows once the N3 score stabilizes —
-    # research/inference-completeness-audit.md is the per-gap map.
-    name: Inference conformance (informational)
+    # 48/48; OWL 2 RL 78 pass + 13 documented divergences / 0 fail; N3 1464
+    # pass + 4 divergences / 0 fail; sparql11/entailment 47 pass / 0 fail —
+    # overall 1637 pass + 17 documented divergences = 1654, 0 fail (100.0% of
+    # run). Every divergence carries its rationale in the report;
+    # research/inference-completeness-audit.md is the per-gap map. This job
+    # GATES exactly like the SPARQL ratchet above: a drop below the count is a
+    # conformance regression and fails CI. Never lower the ratchet.
+    name: Inference conformance (ratchet >= 1654 pass+divergence)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -125,6 +128,19 @@ jobs:
         run: cargo run --release -p sparq-conformance --bin sparq-inference-conformance
       - name: Summarize
         run: cat inference-conformance-report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Enforce ratchet (pass+divergence count must not regress)
+        run: |
+          RATCHET=1654
+          # The Overall section emits:
+          # **<N> pass / <M> fail / <D> documented divergence / <K> out-of-scope — ...**
+          # (suite subtotals use the same shape, so parse the line after the
+          # final "## Overall (all inference suites)")
+          OVERALL=$(grep -A2 '^## Overall (all inference suites)' inference-conformance-report.md | grep -E '\*\*[0-9]+ pass /')
+          PASS=$(echo "$OVERALL" | grep -oE '[0-9]+ pass' | grep -oE '[0-9]+' | head -1)
+          DIV=$(echo "$OVERALL" | grep -oE '[0-9]+ documented divergence' | grep -oE '[0-9]+' | head -1)
+          TOTAL=$(( ${PASS:-0} + ${DIV:-0} ))
+          echo "pass: ${PASS:-unknown} + documented divergences: ${DIV:-0} = $TOTAL (ratchet: $RATCHET)"
+          [ -n "$PASS" ] && [ "$TOTAL" -ge "$RATCHET" ] || { echo "::error::inference conformance regressed below the ratchet ($TOTAL < $RATCHET)"; exit 1; }
       - name: Upload report
         uses: actions/upload-artifact@v4
         if: always()
