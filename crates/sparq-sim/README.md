@@ -90,10 +90,10 @@ Reproduce: `cargo run -p sparq-sim --example olympics_eval --release`.
 
 | Metric | Result | Gate |
 |---|---|---|
-| precision@10 (`most_similar`, same-class) | **0.999** (1498/1500) | > 0.7 ✅ |
+| precision@10 (`most_similar`, same-class) | **0.999** (2398/2400, FULL coverage) | > 0.7 ✅ |
 | AUC, `Predicates` mode (class separation) | **1.000** | > 0.8 ✅ |
-| AUC, `PredicateNeighbor` mode (pairwise) | 0.610 | (see note) |
-| `most_similar(k=10)` latency, 240 calls | mean **0.77 ms**, p50 **0.13 ms**, p95 **4.9 ms**, max 7.1 ms | ms-level ✅ |
+| AUC, `PredicateNeighbor` mode (pairwise) | 0.605 | (see note) |
+| `most_similar(k=10)` latency, 240 calls | mean **1.75 ms**, p50 **0.77 ms**, p95 **10.4 ms**, max 16.3 ms | ms-level ✅ |
 | Load 1.78M triples + `Sim::new` | 0.9 s | — |
 
 **Note on the two AUCs.** Pairwise AUC asks "do two random same-class entities score
@@ -103,14 +103,21 @@ at 0 — by design: that mode measures shared context, not class membership. Rol
 similarity is the `Predicates` mode's job, where class separation is perfect (1.000).
 The ranking task the crate is built for — `most_similar` retrieving same-class
 entities — is measured by precision@10: 0.999. Per-class: Person 1.000, SportsEvent
-1.000, Olympics 1.000, SportsTeam 1.000, City 0.500 (2/4), Sport — (0 candidates);
-see [`TODO.md`](TODO.md) for the neighbor-sparse candidate-generation gap behind the
-last two.
+1.000, Olympics 1.000, SportsTeam 1.000, Sport 1.000, City 0.995.
+
+Sport and City are served by the **neighbor-sparse profile fallback**
+(`SimConfig::profile_fallback`, default on): v1 returned Sport 0/0 (no candidates —
+every event names exactly one sport, so no two sports share a concrete neighbor) and
+City 2/4; the fallback fills starved slots with role-profile matches, taking those
+classes to 400/400 and 398/400 at a latency cost of ~0.3 ms on the mean (v1: mean
+1.48 ms, p95 8.9 ms). See `TODO.md` for the before/after table.
 
 ## Tests
 
-- 11 unit tests (`src/lib.rs`): Jaccard math hand-checks, symmetry, direction,
-  IDF ordering, exclusions, mode semantics, hub-cap behaviour, and a generated-taxonomy
+- 13 unit tests (`src/lib.rs`): Jaccard math hand-checks, symmetry, direction,
+  IDF ordering, exclusions, mode semantics, hub-cap behaviour (with and without the
+  fallback), neighbor-sparse fallback semantics (starved star topology, exact-first
+  ranking, no fallback when generation suffices), and a generated-taxonomy
   AUC gate (> 0.9, deterministic).
 - 1 integration test (`tests/olympics.rs`): API sanity at 1.78M-triple scale —
   skips (passes with a note) when the fixture is absent; override the path with

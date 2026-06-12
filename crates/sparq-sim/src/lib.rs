@@ -60,6 +60,14 @@ pub struct SimConfig {
     /// dominate the cost). Exact similarity scoring is unaffected; see
     /// [`Sim::most_similar`] for what this approximates. Default: 10 000.
     pub max_pair_frequency: usize,
+    /// Neighbor-sparse fallback (default `true`): when `most_similar`'s
+    /// index-driven `(predicate, neighbor)` candidate generation yields fewer than
+    /// `k` results — typical for entities whose signature elements all point at
+    /// degree-1 neighbors (every event names exactly one sport) — fill the remaining
+    /// slots with [`SignatureMode::Predicates`]-style candidates, ranked below every
+    /// exactly-scored result and scored by the predicate-profile Jaccard. `false`
+    /// restores the strict v1 behaviour (only neighbor-level evidence is returned).
+    pub profile_fallback: bool,
 }
 
 impl Default for SimConfig {
@@ -69,6 +77,7 @@ impl Default for SimConfig {
             idf: true,
             exclude_predicates: Vec::new(),
             max_pair_frequency: 10_000,
+            profile_fallback: true,
         }
     }
 }
@@ -117,6 +126,7 @@ pub struct Sim<'g> {
     idf: bool,
     excluded: Vec<Id>,
     max_pair_frequency: usize,
+    profile_fallback: bool,
     /// |G| as f64, the IDF numerator.
     n_triples: f64,
 }
@@ -142,6 +152,7 @@ impl<'g> Sim<'g> {
             idf: cfg.idf,
             excluded,
             max_pair_frequency: cfg.max_pair_frequency,
+            profile_fallback: cfg.profile_fallback,
             n_triples: graph.len().max(1) as f64,
         }
     }
@@ -172,8 +183,11 @@ impl<'g> Sim<'g> {
     }
 
     fn signature_of_id(&self, id: Id) -> Signature {
+        self.signature_of_id_mode(id, self.mode == SignatureMode::PredicateNeighbor)
+    }
+
+    fn signature_of_id_mode(&self, id: Id, keep_neighbor: bool) -> Signature {
         let mut elems: Vec<(u8, Id, Id)> = Vec::new();
-        let keep_neighbor = self.mode == SignatureMode::PredicateNeighbor;
         // Outgoing: (id, p, o) — one contiguous SPO range.
         let scan = self.graph.store.scan(&[Some(id), None, None]);
         for row in scan.rows.iter() {
@@ -232,6 +246,14 @@ impl<'g> Sim<'g> {
     /// be found iff it shares at least one sub-cap element with `a`; re-scoring is
     /// always exact over full signatures. Raise the cap (or set it to `usize::MAX`) for
     /// exact-but-slower candidate generation.
+    ///
+    /// **Neighbor-sparse fallback** (on by default, [`SimConfig::profile_fallback`]):
+    /// when generation yields fewer than `k` candidates, the remaining slots are
+    /// filled with entities sharing a `(direction, predicate)` ROLE with `a`,
+    /// ranked below every exactly-scored result and scored by the predicate-profile
+    /// Jaccard (what [`similarity`](Self::similarity) would return in
+    /// [`SignatureMode::Predicates`]). Fallback scores are comparable among
+    /// themselves, not with the exactly-scored block.
     pub fn most_similar(&self, a: &Term, k: usize) -> Vec<(Term, f64)> {
         let Some(id) = self.graph.id_of(a) else {
             return Vec::new();
@@ -299,7 +321,100 @@ impl<'g> Sim<'g> {
             .collect();
         scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         scored.truncate(k);
+        // 4. Neighbor-sparse fallback: when index-driven generation starves
+        // (fewer than k candidates), fill the remaining slots with
+        // predicate-PROFILE matches (see `profile_fallback`).
+        if self.profile_fallback && self.mode == SignatureMode::PredicateNeighbor && scored.len() < k
+        {
+            self.fill_profile_fallback(sig, k, exclude, &mut scored);
+        }
         scored.into_iter().map(|(c, s)| (self.graph.dict.term(c), s)).collect()
+    }
+
+    /// The neighbor-sparse fallback of [`most_similar`](Self::most_similar):
+    /// when `(direction, predicate, neighbor)` candidate generation yields
+    /// fewer than `k` results (every signature element points at degree-1
+    /// neighbors — e.g. each event names exactly one sport, so the reverse
+    /// scan from each neighbor finds only the query entity itself), the
+    /// remaining slots are filled by [`SignatureMode::Predicates`]-style
+    /// generation: entities sharing a `(direction, predicate)` ROLE with the
+    /// query, scored by the **predicate-profile weighted Jaccard** (the score
+    /// `similarity` would return in `Predicates` mode).
+    ///
+    /// Fallback entries always rank BELOW every exactly-scored primary result
+    /// (neighbor-level evidence outranks role-only evidence), and their scores
+    /// are profile Jaccards — comparable among themselves, not with the
+    /// primary block. Predicate blocks are scanned most-selective-first and
+    /// generation stops once `max(4k, 64)` fallback candidates accumulate, so
+    /// a hub predicate is only scanned when the starvation is real and nothing
+    /// cheaper fills the budget.
+    fn fill_profile_fallback(
+        &self,
+        sig: &Signature,
+        k: usize,
+        exclude: Option<Id>,
+        scored: &mut Vec<(Id, f64)>,
+    ) {
+        let have: rustc_hash::FxHashSet<Id> = scored.iter().map(|&(c, _)| c).collect();
+        // Distinct (direction, predicate) roles of the query's signature,
+        // most selective predicate block first.
+        let mut roles: Vec<(u8, Id, usize)> = Vec::new();
+        for &(dir, p, _) in sig.elems.iter() {
+            if roles.iter().all(|&(d, q, _)| (d, q) != (dir, p)) {
+                let est = self.graph.store.estimate(&[None, Some(p), None]);
+                roles.push((dir, p, est));
+            }
+        }
+        roles.sort_unstable_by_key(|&(_, _, est)| est);
+        let budget = (4 * k).max(64);
+        let mut acc: FxHashMap<Id, f64> = FxHashMap::default();
+        for &(dir, p, _) in &roles {
+            // Who else plays this role? Every subject (OUT) / object (IN) of
+            // the predicate's block.
+            let sorted_by = if dir == OUT { 0 } else { 2 };
+            let scan = self.graph.store.scan_sorted(&[None, Some(p), None], sorted_by);
+            let mut last: Option<Id> = None;
+            for row in scan.rows.iter() {
+                let cand = scan.to_spo(row)[sorted_by];
+                if last == Some(cand) {
+                    continue;
+                }
+                last = Some(cand);
+                if Some(cand) == exclude || have.contains(&cand) || !self.is_entity(cand) {
+                    continue;
+                }
+                if !acc.contains_key(&cand) && acc.len() >= budget {
+                    continue; // budget full: existing candidates may still accrue
+                }
+                *acc.entry(cand).or_insert(0.0) += self.weight(p);
+            }
+            if acc.len() >= budget {
+                break;
+            }
+        }
+        // Re-score by predicate-profile Jaccard and fill the remaining slots.
+        let probe = self.profile_of(sig);
+        let mut fb: Vec<(Id, f64)> = acc
+            .into_keys()
+            .map(|c| (c, weighted_jaccard(&probe, &self.signature_of_id_mode(c, false))))
+            .filter(|&(_, s)| s > 0.0)
+            .collect();
+        fb.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        fb.truncate(k - scored.len());
+        scored.extend(fb);
+    }
+
+    /// Collapses a signature to its predicate profile: distinct
+    /// `(direction, predicate)` elements (neighbor = [`NO_ID`]), weighted like
+    /// a [`SignatureMode::Predicates`] signature.
+    fn profile_of(&self, sig: &Signature) -> Signature {
+        let mut elems: Vec<(u8, Id, Id)> =
+            sig.elems.iter().map(|&(d, p, _)| (d, p, NO_ID)).collect();
+        elems.sort_unstable();
+        elems.dedup();
+        let weights: Vec<f64> = elems.iter().map(|&(_, p, _)| self.weight(p)).collect();
+        let total = weights.iter().sum();
+        Signature { elems, weights, total }
     }
 
     /// Whether an id names an entity (IRI or blank node) — literals (incl. inline
@@ -499,15 +614,86 @@ mod tests {
             ttl.push_str(&format!(" :{e} :p :hub ."));
         }
         let g = graph(&ttl);
+        let strict = Sim::with_config(
+            &g,
+            SimConfig {
+                idf: false,
+                max_pair_frequency: 5,
+                profile_fallback: false,
+                ..SimConfig::default()
+            },
+        );
+        let top = strict.most_similar(&iri("a"), 10);
+        assert_eq!(top[0].0.to_string(), "<http://ex.org/b>");
+        assert_eq!(top[0].1, 1.0, "re-score must include the capped hub element");
+        // c..f share only the capped hub element → not generated (the approximation;
+        // fallback disabled pins the strict v1 behaviour).
+        assert_eq!(top.len(), 1);
+        // With the default fallback, the starved slots fill with role-similar
+        // entities — BELOW the exactly-scored :b, scored by profile Jaccard
+        // (c..f share 1 of a's 2 roles → 0.5).
         let sim = Sim::with_config(
             &g,
             SimConfig { idf: false, max_pair_frequency: 5, ..SimConfig::default() },
         );
         let top = sim.most_similar(&iri("a"), 10);
         assert_eq!(top[0].0.to_string(), "<http://ex.org/b>");
-        assert_eq!(top[0].1, 1.0, "re-score must include the capped hub element");
-        // c..f share only the capped hub element → not generated (the approximation).
-        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].1, 1.0);
+        assert_eq!(top.len(), 5, "fallback fills with c..f");
+        assert!(top[1..].iter().all(|(_, s)| *s == 0.5));
+    }
+
+    /// The neighbor-sparse fallback (olympics Sport 0/0): entities whose every
+    /// signature element points at a degree-1 neighbor generate NO candidates
+    /// through (predicate, neighbor) ranges — every event names exactly one
+    /// sport, so the reverse scan finds only the query itself. The fallback
+    /// fills with role-similar entities scored by profile Jaccard.
+    #[test]
+    fn neighbor_sparse_entities_fall_back_to_profile_candidates() {
+        // Star topology: each sport is named by its own events, via one predicate.
+        let g = graph(
+            ":e1 :inSport :s1 . :e2 :inSport :s1 .
+             :e3 :inSport :s2 . :e4 :inSport :s3 .",
+        );
+        let strict = Sim::with_config(
+            &g,
+            SimConfig { idf: false, profile_fallback: false, ..SimConfig::default() },
+        );
+        assert!(
+            strict.most_similar(&iri("s1"), 5).is_empty(),
+            "v1 starvation: no shared (predicate, neighbor) element"
+        );
+        let sim = unweighted(&g);
+        let top = sim.most_similar(&iri("s1"), 5);
+        let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
+        assert_eq!(names, ["<http://ex.org/s2>", "<http://ex.org/s3>"]);
+        // Both share s1's full role profile {(In, inSport)} → profile Jaccard 1.
+        assert!(top.iter().all(|(_, s)| *s == 1.0));
+        // The events do NOT leak in: e1..e4 have OUTGOING :inSport, not incoming.
+        assert!(!names.iter().any(|n| n.starts_with("<http://ex.org/e")));
+    }
+
+    /// Exactly-scored candidates always rank ABOVE fallback entries, even when
+    /// the fallback profile score is numerically higher.
+    #[test]
+    fn fallback_entries_rank_below_exact_matches() {
+        // :a shares a concrete neighbor with :twin (exact score < 1) and only a
+        // role with :role (profile score 1.0).
+        let g = graph(
+            ":a :knows :bob ; :likes :x1 .
+             :twin :knows :bob ; :likes :x2 .
+             :role :knows :y1 ; :likes :y2 .",
+        );
+        let sim = unweighted(&g);
+        let top = sim.most_similar(&iri("a"), 5);
+        let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
+        assert_eq!(names[0], "<http://ex.org/twin>", "exact match first: {names:?}");
+        assert_eq!(top[0].1, sim.similarity(&iri("a"), &iri("twin")));
+        assert!(names.contains(&"<http://ex.org/role>".to_string()), "{names:?}");
+        // No fallback when generation already yields k candidates.
+        let top1 = sim.most_similar(&iri("a"), 1);
+        assert_eq!(top1.len(), 1);
+        assert_eq!(top1[0].0.to_string(), "<http://ex.org/twin>");
     }
 
     /// The accuracy gate on a GENERATED TAXONOMY (research/genai-design.md §4): entities
