@@ -141,9 +141,12 @@ export function detectQueryForm(sparql: string): { form: QueryForm; index: numbe
 }
 
 /**
- * Rewrites an ASK query to an equivalent `SELECT *` query (the engine
- * evaluates SELECT only; the caller tests result-count > 0). `ASK WHERE {…}`
+ * Rewrites an ASK query to an equivalent `SELECT *` query. `ASK WHERE {…}`
  * and `ASK {…}` are both valid SPARQL after substituting `SELECT *`.
+ *
+ * Legacy helper: the engine now evaluates ASK natively (with first-solution
+ * early exit), so `SparqStore` no longer rewrites — kept for callers that
+ * target SELECT-only endpoints.
  */
 export function askToSelect(sparql: string): string {
   const form = detectQueryForm(sparql);

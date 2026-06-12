@@ -1,12 +1,11 @@
 /**
  * `SparqStore`: an RDF/JS-flavoured wrapper around the sparq wasm engine — an
  * immutable-index, dictionary-encoded in-memory store with SPARQL SELECT/ASK
- * (ASK via SELECT rewrite) and SPARQL Update (rebuild semantics).
+ * (both evaluated natively by the engine) and SPARQL Update (rebuild semantics).
  */
 import type * as RDF from '@rdfjs/types';
 import { Bindings } from './bindings.js';
 import {
-  askToSelect,
   detectQueryForm,
   quadsToNQuads,
   termFromSparqlJson,
@@ -95,17 +94,20 @@ export class SparqStore {
   }
 
   /**
-   * Runs an ASK query (rewritten to `SELECT *` — the engine evaluates SELECT
-   * only — and answered from the engine's no-materialise count path).
+   * Runs an ASK query natively in the engine (evaluation early-exits at the
+   * first solution; a single-pattern ASK is answered straight from the index).
+   * Returns the `boolean` of the engine's SPARQL 1.1 JSON results form.
    */
   queryBoolean(sparql: string): boolean {
-    return this.#inner.count(askToSelect(sparql)) > 0;
+    const json = JSON.parse(this.#inner.query(sparql)) as SparqlJsonResults;
+    if (typeof json.boolean !== 'boolean') throw new Error('queryBoolean() requires an ASK query');
+    return json.boolean;
   }
 
   /**
-   * The raw engine output for a SELECT query: a SPARQL 1.1 JSON results
-   * string (`application/sparql-results+json`), with no JS-side term
-   * materialisation.
+   * The raw engine output for a SELECT or ASK query: a SPARQL 1.1 JSON
+   * results string (`application/sparql-results+json` — the boolean form for
+   * ASK), with no JS-side term materialisation.
    */
   queryJson(sparql: string): string {
     return this.#inner.query(sparql);

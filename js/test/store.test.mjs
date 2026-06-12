@@ -96,6 +96,37 @@ test('ASK queries (both ASK {…} and ASK WHERE {…})', async () => {
   );
 });
 
+test('ASK is evaluated natively (boolean JSON form, FILTER honoured)', async () => {
+  const store = await load();
+  // queryJson returns the SPARQL 1.1 boolean results form for ASK
+  assert.deepEqual(JSON.parse(store.queryJson('PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }')), {
+    head: {},
+    boolean: true,
+  });
+  // ASK over a pattern with a FILTER (exercises real evaluation, not just a count)
+  assert.equal(store.queryBoolean('PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 28) }'), true);
+  assert.equal(store.queryBoolean('PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 99) }'), false);
+  // queryBoolean rejects non-ASK forms
+  assert.throws(() => store.queryBoolean('SELECT * WHERE { ?s ?p ?o }'), /ASK/);
+});
+
+test('full-text-style matching via plain SPARQL string functions', async () => {
+  // sparq's full-text crate (sparq-text) rewrites text: magic predicates into
+  // plain SPARQL — which the wasm engine evaluates directly. This pins the
+  // plain-SPARQL substring path that browser callers get.
+  const store = await load();
+  const rows = store.queryBindings(
+    'SELECT ?s WHERE { ?s ?p ?o FILTER(isLiteral(?o) && CONTAINS(LCASE(STR(?o)), "ali")) }',
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].get('s').value, 'http://ex/alice');
+  assert.equal(store.queryBoolean('ASK { ?s ?p ?o FILTER(STRSTARTS(STR(?o), "AC")) }'), true); // "ACME"
+  assert.equal(store.queryBoolean('ASK { ?s ?p ?o FILTER(CONTAINS(STR(?o), "zzz")) }'), false);
+  // REGEX/REPLACE are deliberately compiled out of the wasm build (the engine's
+  // non-default `regex` cargo feature) to keep the bundle small — pin the error.
+  assert.throws(() => store.queryBoolean('ASK { ?s ?p ?o FILTER(REGEX(STR(?o), "z")) }'), /Regex/);
+});
+
 test('query() dispatches on the query form', async () => {
   const store = await load();
   assert.equal(store.query('ASK { ?s ?p ?o }'), true);
