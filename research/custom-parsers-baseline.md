@@ -189,3 +189,47 @@ should exist at all (vs patches to sparq-core) should be revisited after the
 fusion fix lands — the crate currently stays an empty scaffold.
 
 Reproduce: `bench/parse/README.md`.
+
+## Post-fix measurements (2026-06-12, streaming-ingest fix)
+
+`Graph::load_reader_parallel` rewritten (sparq-core) to the external build's
+3-stage pipeline: a producer thread **fills the full 32 MiB block across
+`read()` calls** (was: one parse+merge round per `read()`, i.e. per 0.38–1.6 MB
+decompressor return) and runs the decode **concurrently** with the rayon parse
+and the dict merge. Same machine/harness; numbers are medians of 3 harness runs
+(each itself a median-of-3), with the run-to-run range shown — this session ran
+warmer/noisier than the baseline session (today's 8T `load_str` reference:
+0.435 s vs 0.296 s baseline; serial parse replicates within 5%, decode-only
+measured faster at 0.19–0.36 s gz / 0.07–0.12 s zst).
+
+| task (wikidata slice, 8T) | baseline | post-fix (median) | range | speedup |
+|---|---|---|---|---|
+| gzip streaming → `load_reader_parallel` | 5.589 s | **0.661 s** | 0.585–0.692 | **8.5×** |
+| zstd streaming → `load_reader_parallel` | 3.947 s | **0.576 s** | 0.541–0.739 | **6.9×** |
+| gzip two-stage decode → `load_str` (same runs) | 1.124 s | 0.741 s | 0.646–1.079 | — |
+| zstd two-stage decode → `load_str` (same runs) | 1.144 s | 0.576 s | 0.568–0.776 | — |
+
+synthetic.nt (one run): gz streaming 0.699 s vs two-stage 0.823 s; zst 0.706 vs
+0.697 s (baseline streaming: 4.905 / 4.167 s).
+
+- **Streaming now matches or beats two-stage in every paired run** (gz 1.12×
+  faster on medians; zst parity) instead of being 3.5–5× slower — and it never
+  materialises the 173 MB decompressed copy.
+- **vs the ideal:** ideal = max(decode, parse+build) measured *today* is
+  ~0.44 s (parse+build 0.435 s dominates both codecs). Streaming lands at
+  0.58–0.66 s, i.e. ~1.3–1.5× over ideal, not at it. The residual gap is the
+  parts that cannot overlap the decode: the final `finish_sharded` remap + the
+  6-permutation sort/build after the last block, plus per-block carry copies
+  and 6 merge rounds vs `load_str`'s single round. The decode itself is fully
+  hidden (streaming 0.585 s < decode 0.19 + load_str 0.435 = 0.625 s sequential
+  sum on the same run). The baseline's 0.30–0.40 s ideal assumed the cooler
+  session's 0.296 s parse+build; the *ratio* conclusion stands, the absolute
+  target was not reached in this session.
+- Regression cover: `load_reader_parallel_short_reads_match_sequential`
+  (sparq-core) pins short reads, mid-line read boundaries, EOF without trailing
+  newline, empty input, and parse-error propagation through the pipeline.
+  `cargo test -p sparq-core --release`: 27 passed. Wasm guard:
+  `sparq_wasm.wasm` 1,573,895 B (unchanged — the parallel path isn't compiled
+  for wasm).
+- API note: `load_reader_parallel` now requires `R: Read + Send` (the producer
+  thread); `sparq-cli`'s `open_reader` returns `Box<dyn Read + Send>`.

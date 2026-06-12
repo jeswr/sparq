@@ -323,8 +323,10 @@ fn bench_zip(path: &str) {
 }
 
 /// Diagnostic: what does one `read()` into a 32 MiB buffer actually return for each
-/// decompressor? Graph::load_reader_parallel flushes a parse block per read() call, so
-/// small reads mean tiny parse blocks (the streaming-slowdown hypothesis).
+/// decompressor? Graph::load_reader_parallel used to flush a parse block per read()
+/// call, so small reads meant tiny parse blocks (the confirmed streaming-slowdown root
+/// cause — fixed by the fill-loop + pipelined rewrite, see the baseline doc's post-fix
+/// section).
 fn probe_read(path: &str) {
     let gz = std::fs::read(format!("{path}.gz")).unwrap();
     let zst = std::fs::read(format!("{path}.zst")).unwrap();
