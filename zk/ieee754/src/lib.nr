@@ -388,6 +388,62 @@ fn float_to_int_casts_truncate_toward_zero() {
 	assert_eq(quad_neg_two_point_five.to_i64(), -2);
 }
 
+#[test]
+fn sqrt_handles_exact_and_rounded_roots() {
+	let four = f16::new(0x4400 as u16);
+	let nine = f16::new(0x4880 as u16);
+	let one = f16::new(0x3c00 as u16);
+	let two = f16::new(0x4000 as u16);
+	let quarter = f16::new(0x3400 as u16);
+	let half = f16::new(0x3800 as u16);
+
+	assert_eq(four.sqrt().bits(), 0x4000 as u16);
+	assert_eq(nine.sqrt().bits(), 0x4200 as u16);
+	assert_eq(one.sqrt().bits(), 0x3c00 as u16);
+	// sqrt(2) and sqrt(0.5) exercise both exponent parities.
+	assert_eq(two.sqrt().bits(), 0x3da8 as u16);
+	assert_eq(half.sqrt().bits(), 0x39a8 as u16);
+	assert_eq(quarter.sqrt().bits(), 0x3800 as u16);
+
+	// Subnormal input: sqrt(2^-24) = 2^-12 is normal.
+	assert_eq(f16::new(0x0001 as u16).sqrt().bits(), 0x0c00 as u16);
+
+	let single_two = f32::new(0x40000000 as u32);
+	let double_two = f64::new(0x4000000000000000 as u64);
+
+	assert_eq(single_two.sqrt().bits(), 0x3fb504f3 as u32);
+	assert_eq(double_two.sqrt().bits(), 0x3ff6a09e667f3bcd as u64);
+
+	let quad_four = f128::new(0x40010000000000000000000000000000 as u128);
+	let quad_two_point_two_five = f128::new(0x40002000000000000000000000000000 as u128);
+
+	assert_eq(quad_four.sqrt().bits(), 0x40000000000000000000000000000000 as u128);
+	assert_eq(quad_two_point_two_five.sqrt().bits(), 0x3fff8000000000000000000000000000 as u128);
+}
+
+#[test]
+fn sqrt_handles_special_values() {
+	let pos_zero = f16::new(0x0000 as u16);
+	let neg_zero = f16::new(0x8000 as u16);
+	let pos_inf = f16::new(0x7c00 as u16);
+	let neg_inf = f16::new(0xfc00 as u16);
+	let neg_one = f16::new(0xbc00 as u16);
+	let nan = f16::new(0x7e01 as u16);
+
+	assert_eq(pos_zero.sqrt().bits(), 0x0000 as u16);
+	assert_eq(neg_zero.sqrt().bits(), 0x8000 as u16);
+	assert_eq(pos_inf.sqrt().bits(), 0x7c00 as u16);
+	assert_eq(neg_inf.sqrt().bits(), 0x7e00 as u16);
+	assert_eq(neg_one.sqrt().bits(), 0x7e00 as u16);
+	assert_eq(nan.sqrt().bits(), 0x7e00 as u16);
+
+	let double_neg = f64::new(0xbff0000000000000 as u64);
+	let quad_neg_inf = f128::new(0xffff0000000000000000000000000000 as u128);
+
+	assert_eq(double_neg.sqrt().bits(), 0x7ff8000000000000 as u64);
+	assert_eq(quad_neg_inf.sqrt().bits(), 0x7fff8000000000000000000000000000 as u128);
+}
+
 #[test(should_fail)]
 fn float_to_u64_rejects_nan() {
 	let _ = f64::new(0x7ff8000000000000 as u64).to_u64();

@@ -63,6 +63,11 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
     } else {
         quote { $crate::ops::float_to_u64::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts()) }
     };
+    let sqrt_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::sqrt_wide(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::sqrt_op::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts())) }
+    };
     let to_i64_call = if bits == 128 {
         quote { $crate::ops::float_to_i64_wide(self.to_parts()) }
     } else {
@@ -201,6 +206,13 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
             /// (roundToIntegralTiesToEven).
             pub fn round_ties_even(self) -> Self {
                 $round_ties_even_call
+            }
+
+            /// IEEE 754 squareRoot with round-to-nearest-even. NaN inputs and
+            /// negative non-zero inputs (including -inf) return the canonical
+            /// NaN; sqrt(+-0) preserves the zero's sign; sqrt(+inf) is +inf.
+            pub fn sqrt(self) -> Self {
+                $sqrt_call
             }
 
             // Float-to-integer casts with XPath 2.0 F&O semantics (the

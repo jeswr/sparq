@@ -1474,6 +1474,128 @@ where
     from_u64_work_parts(result)
 }
 
+unconstrained fn isqrt_field_hint<let ROOT_BITS: u32>(radicand: Field) -> Field {
+    let mut bit_pow = 1 as Field;
+
+    for _step in 0..(ROOT_BITS - 1) {
+        bit_pow = bit_pow * 2;
+    }
+
+    let mut root = 0 as Field;
+
+    for _step in 0..ROOT_BITS {
+        let candidate = root + bit_pow;
+
+        if !radicand.lt(candidate * candidate) {
+            root = candidate;
+        }
+
+        bit_pow = bit_pow / 2;
+    }
+
+    root
+}
+
+unconstrained fn isqrt_hint_u64(radicand: Field) -> u64 {
+    isqrt_field_hint::<56>(radicand) as u64
+}
+
+unconstrained fn isqrt_hint_u128(radicand: Field) -> u128 {
+    isqrt_field_hint::<116>(radicand) as u128
+}
+
+/// Verifies `root = floor(sqrt(radicand))` and returns the sticky flag
+/// `radicand != root^2`. The two bit-size bounds pin `root^2 <= radicand`
+/// and `radicand <= root^2 + 2*root < (root + 1)^2`, which determine the
+/// root uniquely as long as the caller keeps `root^2` below the field
+/// modulus.
+fn assert_isqrt_split<let REMAINDER_BITS: u32>(radicand: Field, root: Field) -> bool {
+    let remainder = radicand - root * root;
+
+    remainder.assert_max_bit_size::<REMAINDER_BITS>();
+    (root + root - remainder).assert_max_bit_size::<REMAINDER_BITS>();
+
+    remainder != 0
+}
+
+/// IEEE 754 squareRoot with round-to-nearest-even.
+///
+/// sqrt(NaN) and sqrt of any negative non-zero value (including -inf) are the
+/// canonical NaN; sqrt(+-0) preserves the zero's sign; sqrt(+inf) is +inf.
+/// The finite path witnesses the integer square root of the significand
+/// scaled to keep three round bits, verifies it with two bit-size bounds,
+/// jams the sticky bit, and reuses the normalized round-pack. Square roots
+/// are never exactly halfway between representable values, so guard bits
+/// plus sticky give correct round-to-nearest-even.
+pub(crate) fn sqrt_op<E, M, let EXPONENT_BITS: u8, let MANTISSA_BITS: u8>(
+    input: FloatParts<E, M>,
+) -> FloatParts<E, M>
+where
+    E: Into<u16>,
+    M: Into<u64>,
+    u16: AsPrimitive<E>,
+    u64: AsPrimitive<M>,
+{
+    let parts = to_u64_work_parts(input);
+    let (nan, infinite, zero) = classify_u64::<EXPONENT_BITS>(parts);
+    let result = if nan | (parts.sign & !zero) {
+        canonical_nan_u64::<EXPONENT_BITS, MANTISSA_BITS>()
+    } else if infinite | zero {
+        parts
+    } else {
+        let (significand, work_exp) = normalized_finite_u64::<EXPONENT_BITS, MANTISSA_BITS>(parts);
+        // The offset is even, so this is the parity of the unbiased exponent;
+        // odd exponents double the significand so the radicand exponent is
+        // even.
+        let parity = work_exp % 2;
+        let adjusted = significand * ((1 + parity) as u64);
+        let radicand = (adjusted as Field) * ((hidden_bit_u64(MANTISSA_BITS) as Field) * 64);
+        // Safety: the remainder/slack bounds pin root = floor(sqrt(radicand)).
+        let root: u64 = unsafe { isqrt_hint_u64(radicand) };
+        let sticky = if MANTISSA_BITS == 10 {
+            assert_isqrt_split::<15>(radicand, root as Field)
+        } else if MANTISSA_BITS == 23 {
+            assert_isqrt_split::<28>(radicand, root as Field)
+        } else {
+            assert_isqrt_split::<57>(radicand, root as Field)
+        };
+        let raw_significand = jam_low_bit_u64(root, sticky);
+        let result_exponent =
+            (((work_exp as u32) + (exponent_offset() as u32) - (parity as u32)) / 2) as u16;
+
+        round_pack_normalized_u64::<EXPONENT_BITS, MANTISSA_BITS>(false, result_exponent, raw_significand)
+    };
+
+    from_u64_work_parts(result)
+}
+
+pub(crate) fn sqrt_wide(parts: FloatParts<u16, u128>) -> FloatParts<u16, u128> {
+    let (nan, infinite, zero) = classify(parts);
+
+    if nan | (parts.sign & !zero) {
+        canonical_nan()
+    } else if infinite | zero {
+        parts
+    } else {
+        let (significand, work_exp) = normalized_finite(parts);
+        let parity = work_exp % 2;
+        let adjusted = significand * ((1 + parity) as u128);
+        let radicand = (adjusted as Field) * ((hidden_bit() as Field) * 64);
+        // Safety: the remainder/slack bounds pin root = floor(sqrt(radicand)).
+        let root: u128 = unsafe { isqrt_hint_u128(radicand) };
+
+        // Keep root^2 far below the field modulus so the split is exact.
+        (root as Field).assert_max_bit_size::<117>();
+
+        let sticky = assert_isqrt_split::<117>(radicand, root as Field);
+        let raw_significand = jam_low_bit(root, sticky);
+        let result_exponent =
+            (((work_exp as u32) + (exponent_offset() as u32) - (parity as u32)) / 2) as u16;
+
+        round_pack_normalized(false, result_exponent, raw_significand)
+    }
+}
+
 fn truncate_split_u64<let TOTAL_BITS: u32>(value: u64, shift: u16) -> (u64, u64) {
     // Safety: the reconstruction checks below pin the hinted split.
     let (quotient, remainder): (u64, u64) = unsafe { shift_right_jam_u64_unconstrained(value, shift) };

@@ -60,6 +60,19 @@ fn float_to_int_casts_are_public_api() {
 }
 
 #[test]
+fn sqrt_is_public_api() {
+    let half_four = f16::new(0x4400 as u16);
+    let single_two = f32::new(0x40000000 as u32);
+    let double_two = f64::new(0x4000000000000000 as u64);
+    let quad_four = f128::new(0x40010000000000000000000000000000 as u128);
+
+    assert_eq(half_four.sqrt().bits(), 0x4000 as u16);
+    assert_eq(single_two.sqrt().bits(), 0x3fb504f3 as u32);
+    assert_eq(double_two.sqrt().bits(), 0x3ff6a09e667f3bcd as u64);
+    assert_eq(quad_four.sqrt().bits(), 0x40000000000000000000000000000000 as u128);
+}
+
+#[test]
 fn integer_conversions_are_public_api() {
     let negative_round_down: i32 = -16_777_217;
 

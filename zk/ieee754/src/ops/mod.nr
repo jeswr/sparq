@@ -16,6 +16,8 @@ pub(crate) use kernels::{
     mul_wide,
     round_to_integral,
     round_to_integral_wide,
+    sqrt_op,
+    sqrt_wide,
     sub,
     sub_wide,
     uint_to_float_parts_u64,
