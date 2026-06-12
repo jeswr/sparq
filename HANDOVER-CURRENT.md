@@ -30,5 +30,8 @@ The global plan meter is not accessible from inside a session and local token co
 - EC2 cap raised to $30 TOTAL (~$0.78 spent): 8B full-truthy Wikidata run AUTHORIZED + other instance needs. Sequencing: 8B low-resource run REQUIRES dict-spill merge first (dict ~280-330GiB unspillable otherwise). Prep (runbook/scripts, zero spend) proceeding in parallel.
 - PUBLISHING AUTHORIZED: packages may be published under Jesse's accounts (npm @jeswr/sparq, crates.io, GitHub release v0.1.0 — T14/T20 were user-gated, now unblocked).
 
+## IEEE754 upstreaming directive (Jesse, 2026-06-13)
+test-lib content REPLACES the published noir IEEE754 repo (old main preserved, e.g. moved to a `deprecated` branch) ONCE test-lib has the same level of testing/benchmarking/CI as the old repo. Sequence: (1) audit agent — old repo's CI/test/bench inventory, test-lib state (76 unpushed commits + dirty kernels.nr), delta sparq zk/ieee754 vs test-lib (new kernels/benches to flow back); (2) gap-closure work in test-lib; (3) orchestrator executes swap: push `deprecated` branch first, verify, then replace main with test-lib history (+ sparq-side kernel additions). test-lib repo is now WRITABLE for this work (directive supersedes read-only-reference rule for test-lib only).
+
 ## Awaiting Jesse
-test-lib push (76 commits ahead), horizontal-scaling ADR answers, RDFox license decision.
+horizontal-scaling ADR answers, RDFox license decision. (test-lib push subsumed by the upstreaming directive above.)
