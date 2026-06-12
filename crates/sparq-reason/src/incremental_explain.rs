@@ -1091,3 +1091,101 @@ impl OwlProver<'_> {
         self.traces.trans = Some(trace);
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+// N3 — MaterializedN3Graph
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+/// Render an N3 term as its serialized form (the engine's own writer).
+fn n3_term_string(t: &N3Term) -> String {
+    let mut s = String::new();
+    n3_write_term(t, &mut s);
+    s
+}
+
+impl MaterializedN3Graph {
+    /// One derivation of `fact` from the current asserted base under the graph's rules, or
+    /// `None` if `fact` is not in the closure (or cannot be matched to a derivation — e.g.
+    /// conclusions containing freshly-minted existential blanks, whose labels differ
+    /// between runs; documented limitation).
+    ///
+    /// Unlike the RDFS/OWL siblings there is no incremental bookkeeping to reconstruct
+    /// from (counted N3 firings are rule-and-binding specific), so this RE-RUNS the batch
+    /// engine with proof recording over the rules + the current base — cost is a full
+    /// materialization per call, paid only when asked. Rules are identified as
+    /// `n3-rule-<i>`, `i` indexing the rules document's forward rules in order.
+    pub fn why(&self, fact: &[N3Term; 3]) -> Option<ProofTree> {
+        self.why_with(fact, ExplainOpts::default())
+    }
+
+    /// [`why`](Self::why) with explicit depth/size caps.
+    pub fn why_with(&self, fact: &[N3Term; 3], opts: ExplainOpts) -> Option<ProofTree> {
+        if !self.contains(fact) {
+            return None;
+        }
+        let mut b = ProofBuilder::new(opts);
+        if self.base.contains(fact) {
+            let root = b.push(fact.clone().map(|t| n3_term_string(&t)), "asserted", vec![])?;
+            return Some(b.finish(root));
+        }
+        // Deterministic re-derivation: serialize the base SORTED so rule-firing order (and
+        // therefore the chosen witness) is stable across calls.
+        let mut lines: Vec<String> = self.base.iter().map(|f| n3_serialize(std::iter::once(f))).collect();
+        lines.sort_unstable();
+        let src = format!("{}\n{}", self.rules_src, lines.concat());
+        let (_facts, steps) = crate::n3::reason_n3_terms_proof(&src).ok()?;
+        // One step per derived fact (first derivation wins).
+        let mut step_map: FxHashMap<&[N3Term; 3], (usize, &[[N3Term; 3]])> = FxHashMap::default();
+        for (conclusion, rule, premises) in &steps {
+            step_map.entry(conclusion).or_insert((*rule, premises.as_slice()));
+        }
+        let mut p = N3Prover {
+            base: &self.base,
+            step_map,
+            b,
+            memo: FxHashMap::default(),
+            stack: FxHashSet::default(),
+        };
+        let root = p.prove(fact, 0)?;
+        Some(p.b.finish(root))
+    }
+}
+
+struct N3Prover<'a> {
+    base: &'a FxHashSet<[N3Term; 3]>,
+    step_map: FxHashMap<&'a [N3Term; 3], (usize, &'a [[N3Term; 3]])>,
+    b: ProofBuilder,
+    memo: FxHashMap<[N3Term; 3], u32>,
+    stack: FxHashSet<[N3Term; 3]>,
+}
+
+impl N3Prover<'_> {
+    fn prove(&mut self, f: &[N3Term; 3], depth: usize) -> Option<u32> {
+        if let Some(&ix) = self.memo.get(f) {
+            return Some(ix);
+        }
+        if depth > self.b.opts.max_depth || !self.stack.insert(f.clone()) {
+            return None;
+        }
+        let r = self.prove_inner(f, depth);
+        self.stack.remove(f);
+        r
+    }
+
+    fn prove_inner(&mut self, f: &[N3Term; 3], depth: usize) -> Option<u32> {
+        let rendered = f.clone().map(|t| n3_term_string(&t));
+        if self.base.contains(f) {
+            let ix = self.b.push(rendered, "asserted", vec![])?;
+            self.memo.insert(f.clone(), ix);
+            return Some(ix);
+        }
+        let (rule, premises) = *self.step_map.get(f)?;
+        let mut prem_nodes = Vec::with_capacity(premises.len());
+        for p in premises {
+            prem_nodes.push(self.prove(p, depth + 1)?);
+        }
+        let ix = self.b.push(rendered, &format!("n3-rule-{rule}"), prem_nodes)?;
+        self.memo.insert(f.clone(), ix);
+        Some(ix)
+    }
+}

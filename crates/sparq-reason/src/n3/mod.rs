@@ -197,6 +197,18 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
     intern_closure(dict, &facts, &steps)
 }
 
+/// TERM-level closure + full derivation steps `(conclusion, rule index, premises)` —
+/// the `explain` feature's N3 entry point ([`crate::MaterializedN3Graph::why`]).
+#[cfg(feature = "explain")]
+#[allow(clippy::type_complexity)]
+pub(crate) fn reason_n3_terms_proof(
+    src: &str,
+) -> Result<(FxHashSet<[Term; 3]>, Vec<([Term; 3], usize, Vec<[Term; 3]>)>), String> {
+    let parsed = parser::parse(src)?;
+    let (facts, steps) = run_closure(parsed, None, StepMode::Full);
+    Ok((facts.all, steps))
+}
+
 /// Term-level closure result — what [`reason_n3_terms`] returns. Unlike
 /// [`reason_n3`], nothing is interned: facts may contain `{ … }` formula terms
 /// (which have no dictionary representation) and survive here untouched.

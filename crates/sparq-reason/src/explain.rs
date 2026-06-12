@@ -327,3 +327,71 @@ mod tests {
         assert_eq!(bfs_path(3u32, 0, succ), None);
     }
 }
+
+/// Build a [`ProofTree`] for `target` from a [`reason_n3_proof`](crate::reason_n3_proof)
+/// run (the id-level batch N3 entry point): `steps` is that call's derivation record.
+/// A fact with no derivation step of its own is treated as an asserted input (`steps`
+/// covers every NEWLY-derived triple, so inputs are exactly the step-less facts).
+/// Returns `None` if `target` has no step and so is not derived (explain it as asserted
+/// yourself), or if a cap is exceeded.
+pub fn n3_proof_tree(
+    dict: &sparq_core::dict::Dict,
+    steps: &[crate::n3::ProofStep],
+    target: [sparq_core::dict::Id; 3],
+    opts: ExplainOpts,
+) -> Option<ProofTree> {
+    type Id3 = [sparq_core::dict::Id; 3];
+    let mut step_map: FxHashMap<Id3, &crate::n3::ProofStep> = FxHashMap::default();
+    for s in steps {
+        step_map.entry(s.conclusion).or_insert(s);
+    }
+    if !step_map.contains_key(&target) {
+        return None;
+    }
+    struct P<'a> {
+        dict: &'a sparq_core::dict::Dict,
+        step_map: FxHashMap<[sparq_core::dict::Id; 3], &'a crate::n3::ProofStep>,
+        b: ProofBuilder,
+        memo: FxHashMap<[sparq_core::dict::Id; 3], u32>,
+        stack: rustc_hash::FxHashSet<[sparq_core::dict::Id; 3]>,
+    }
+    impl P<'_> {
+        fn prove(&mut self, t: [sparq_core::dict::Id; 3], depth: usize) -> Option<u32> {
+            if let Some(&ix) = self.memo.get(&t) {
+                return Some(ix);
+            }
+            if depth > self.b.opts.max_depth || !self.stack.insert(t) {
+                return None;
+            }
+            let r = (|| {
+                let Some(&step) = self.step_map.get(&t) else {
+                    let ix = self.b.push(id_triple_strings(self.dict, t), "asserted", vec![])?;
+                    self.memo.insert(t, ix);
+                    return Some(ix);
+                };
+                let mut prem = Vec::with_capacity(step.premises.len());
+                for &p in &step.premises {
+                    prem.push(self.prove(p, depth + 1)?);
+                }
+                let ix = self.b.push(
+                    id_triple_strings(self.dict, t),
+                    &format!("n3-rule-{}", step.rule),
+                    prem,
+                )?;
+                self.memo.insert(t, ix);
+                Some(ix)
+            })();
+            self.stack.remove(&t);
+            r
+        }
+    }
+    let mut p = P {
+        dict,
+        step_map,
+        b: ProofBuilder::new(opts),
+        memo: FxHashMap::default(),
+        stack: rustc_hash::FxHashSet::default(),
+    };
+    let root = p.prove(target, 0)?;
+    Some(p.b.finish(root))
+}
