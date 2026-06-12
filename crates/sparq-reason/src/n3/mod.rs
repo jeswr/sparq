@@ -329,11 +329,127 @@ fn run_closure(
     let mut fired: FxHashSet<(usize, String)> = FxHashSet::default();
     let mut sk_counter = 0usize;
 
+    // TRANSITIVITY fast path: rules of the exact shape `{?x P ?y. ?y P ?z} => {?x P ?z}`
+    // (ground predicate, three distinct variables, single conclusion, no existentials, not
+    // needs_full). The generic semi-naive join is NONLINEAR for these — a new fact joins the
+    // FULL P-relation, so on an N-chain every closure pair is re-derived once per intermediate
+    // node, O(N³) bindings. Instead evaluate the LINEAR equivalent `R(x,y), GEN(y,z) ⊢ R(x,z)`
+    // where GEN is the set of P-edges NOT derived by the transitive rule itself (input facts +
+    // facts from other rules): TC(GEN) = TC(R), and each closure pair is derived once per
+    // incoming generator edge — O(N²) total. Delta directions: a new fact extends forward
+    // through `gen_out` only; a new GENERATOR edge extends every existing path ending at its
+    // start backward through the full `po` index. Facts derived by both a transitive rule and
+    // another rule may be marked generator or not — both are sound (GEN ⊆ R) and complete
+    // (every fact with no transitive-rule derivation is marked).
+    struct TransState {
+        pred: Term,                          // the ground predicate P
+        gen_out: FxHashMap<Term, Vec<Term>>, // generator edges: subject -> objects
+        gen_set: FxHashSet<[Term; 3]>,       // generator membership
+    }
+    let mut trans_states: Vec<TransState> = Vec::new();
+    let mut trans_rules: FxHashMap<usize, usize> = FxHashMap::default(); // rule -> state index
+    for (ri, rule) in rules.iter().enumerate() {
+        let (joins, needs_full) = &rule_meta[ri];
+        if *needs_full
+            || rule.premise.len() != 2
+            || joins.len() != 2
+            || rule.conclusion.len() != 1
+            || !concl_meta[ri].0.is_empty()
+        {
+            continue;
+        }
+        // Accept the two premise atoms in either textual order.
+        let detect = |a: &[Term; 3], b: &[Term; 3]| -> Option<(String, String)> {
+            match (&a[0], &a[1], &a[2], &b[0], &b[1], &b[2]) {
+                (
+                    Term::Var(x),
+                    Term::Iri(p1),
+                    Term::Var(y1),
+                    Term::Var(y2),
+                    Term::Iri(p2),
+                    Term::Var(z),
+                ) if p1 == p2 && y1 == y2 && x != y1 && y1 != z && x != z => {
+                    Some((x.clone(), z.clone()))
+                }
+                _ => None,
+            }
+        };
+        let (xz, pred) = match detect(&rule.premise[0], &rule.premise[1]) {
+            Some(m) => (m, rule.premise[0][1].clone()),
+            None => match detect(&rule.premise[1], &rule.premise[0]) {
+                Some(m) => (m, rule.premise[0][1].clone()),
+                None => continue,
+            },
+        };
+        let c = &rule.conclusion[0];
+        let is_var = |t: &Term, n: &str| matches!(t, Term::Var(v) if v == n);
+        if c[1] == pred && is_var(&c[0], &xz.0) && is_var(&c[2], &xz.1) {
+            let si = match trans_states.iter().position(|st| st.pred == pred) {
+                Some(i) => i,
+                None => {
+                    trans_states.push(TransState {
+                        pred,
+                        gen_out: FxHashMap::default(),
+                        gen_set: FxHashSet::default(),
+                    });
+                    trans_states.len() - 1
+                }
+            };
+            trans_rules.insert(ri, si);
+        }
+    }
+    // Seed the generators: every input P-edge.
+    for st in trans_states.iter_mut() {
+        for f in &facts.all {
+            if f[1] == st.pred && st.gen_set.insert(f.clone()) {
+                st.gen_out.entry(f[0].clone()).or_default().push(f[2].clone());
+            }
+        }
+    }
+
     let mut delta: FxHashSet<[Term; 3]> = facts.all.clone(); // round 0: every fact is "new"
     let mut first_round = true;
     loop {
         let mut produced: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
         for (ri, rule) in rules.iter().enumerate() {
+            if let Some(&si) = trans_rules.get(&ri) {
+                // Transitivity fast path (linearized; see `TransState` above). Bypasses the
+                // generic binding machinery: the join is two adjacency lookups per delta fact.
+                let st = &trans_states[si];
+                for f in &delta {
+                    if f[1] != st.pred {
+                        continue;
+                    }
+                    // forward: Δ ⋈ GEN — extend the new path by generator edges at its end.
+                    if let Some(zs) = st.gen_out.get(&f[2]) {
+                        for z in zs {
+                            let g = [f[0].clone(), st.pred.clone(), z.clone()];
+                            if !facts.contains(&g) {
+                                let prem =
+                                    vec![f.clone(), [f[2].clone(), st.pred.clone(), z.clone()]];
+                                produced.push((g, ri, prem));
+                            }
+                        }
+                    }
+                    // backward: full ⋈ Δgen — a new GENERATOR edge extends every existing
+                    // path ending at its start (the po index, incl. same-round delta paths).
+                    if st.gen_set.contains(f) {
+                        if let Some(xs) = facts.po.get(&(st.pred.clone(), f[0].clone())) {
+                            for x in xs {
+                                let g = [x.clone(), st.pred.clone(), f[2].clone()];
+                                if !facts.contains(&g) {
+                                    let prem = vec![
+                                        [x.clone(), st.pred.clone(), f[0].clone()],
+                                        f.clone(),
+                                    ];
+                                    produced.push((g, ri, prem));
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             let (joins, needs_full) = &rule_meta[ri];
             let bindings: Vec<Binding> = if *needs_full || joins.is_empty() {
                 // non-monotonic / backward-supported / constant rule: full evaluation
@@ -402,10 +518,33 @@ fn run_closure(
             }
         }
         let mut new_delta: FxHashSet<[Term; 3]> = FxHashSet::default();
+        // Generator marking for the transitivity fast path: among this round's NEW facts on a
+        // transitive predicate, those with at least one NON-transitive-rule derivation are
+        // generators (a fact may be produced by several rules in one round — OR the flags).
+        let mut trans_new: FxHashMap<[Term; 3], bool> = FxHashMap::default();
         for (g, ri, prem) in produced {
-            if facts.insert(g.clone()) {
+            let is_new = facts.insert(g.clone());
+            if is_new {
                 new_delta.insert(g.clone());
+            }
+            if !trans_states.is_empty()
+                && (is_new || new_delta.contains(&g))
+                && trans_states.iter().any(|st| st.pred == g[1])
+            {
+                *trans_new.entry(g.clone()).or_insert(false) |= !trans_rules.contains_key(&ri);
+            }
+            if is_new {
                 steps.push((g, ri, prem));
+            }
+        }
+        for (g, non_trans) in trans_new {
+            if !non_trans {
+                continue;
+            }
+            if let Some(st) = trans_states.iter_mut().find(|st| st.pred == g[1]) {
+                if st.gen_set.insert(g.clone()) {
+                    st.gen_out.entry(g[0].clone()).or_default().push(g[2].clone());
+                }
             }
         }
         first_round = false;
