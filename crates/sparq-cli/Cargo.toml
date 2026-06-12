@@ -18,6 +18,13 @@ readme = "../../README.md"
 default = ["mmap", "mimalloc"]
 mmap = ["sparq-core/mmap"]
 mimalloc = ["dep:mimalloc"]
+# HDT ingestion (`<file>.hdt[.gz]` / format "hdt") via the opt-in sparq-hdt crate.
+# OFF by default for two deliberate reasons: (1) sparq-hdt's MSRV is 1.87 (the
+# wrapped hdt crate) vs this crate's workspace floor of 1.85 — a default dep
+# would silently raise the CLI's MSRV; (2) the hdt decode stack is dead weight
+# for the common load-and-query paths. Enable with
+# `cargo build -p sparq-cli --features hdt`.
+hdt = ["dep:sparq-hdt"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the
@@ -33,6 +40,8 @@ mimalloc = { version = "0.1", optional = true }
 # Opt-in reasoning (RDFS/OWL-RL materialization) — engaged only by `--reason` / the `reason`
 # subcommand; the default query/build path never touches it.
 sparq-reason = { path = "../sparq-reason", version = "0.1.0" }
+# Opt-in HDT ingestion (the `hdt` feature; see [features] for why it is not default).
+sparq-hdt = { path = "../sparq-hdt", version = "0.1.0", optional = true }
 oxttl.workspace = true
 oxrdf.workspace = true
 # Streaming decompression: gzip + bzip2, and zstd (the fast, parallel-friendly bulk

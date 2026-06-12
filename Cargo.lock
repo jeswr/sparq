@@ -2723,6 +2723,7 @@ dependencies = [
  "rayon",
  "sparq-core",
  "sparq-engine",
+ "sparq-hdt",
  "sparq-reason",
  "zstd",
 ]
