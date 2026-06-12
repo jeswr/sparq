@@ -22,15 +22,19 @@ Geometry parsing and algorithms wrap the standard pure-Rust geo stack
 | --- | --- | --- |
 | 8.5.1 (Req 10–12) | `geo:wktLiteral` lexical form: WKT body, optional leading `<CRS-IRI>`, default CRS84 | ✅ `parse_wkt_literal` / `GeoGeometry::to_wkt_literal` |
 | — | WKT geometry types | ✅ POINT, LINESTRING, POLYGON (holes), MULTIPOINT/-LINESTRING/-POLYGON, GEOMETRYCOLLECTION; empties parse to geo-types' empty representations |
-| — | CRS | ✅ CRS84 (default), EPSG:4326 (lat/long axis order normalised internally); ✅ other CRS IRIs carried verbatim (relations work within the same CRS); ❌ no CRS transformation / projected-metric support |
+| — | CRS | ✅ CRS84 (default), EPSG:4326 (lat/long axis order normalised internally); ✅ other CRS IRIs carried verbatim (relations work within the same CRS); ✅ opt-in reprojection to CRS84 (`reproject` cargo feature, pure-Rust proj4rs) for a curated EPSG set: 27700, 3857, 2154, 25832/25833, UTM 326xx/327xx |
 | 8.7 / F.1 | `geof:distance(g1, g2, units)` | ✅ unit IRIs: OGC `uom:metre`/`kilometre`/`degree`/`radian` + QUDT `M`/`KiloM`/`MI`/`DEG`/`RAD` (see accuracy notes below) |
 | 9.3–9.5 (Req 22–24) | Simple-features relation functions `geof:sfEquals/sfDisjoint/sfIntersects/sfTouches/sfCrosses/sfWithin/sfContains/sfOverlaps` | ✅ DE-9IM via `geo`'s `Relate` (planar, in coordinate/degree space) |
+| 9.4 (Req 25) | Egenhofer relation functions `geof:ehEquals/ehDisjoint/ehMeet/ehOverlap/ehCovers/ehCoveredBy/ehInside/ehContains` | ✅ the spec's DE-9IM matrix patterns over the same machinery |
+| 9.5 (Req 26) | RCC8 relation functions `geof:rcc8eq/rcc8dc/rcc8ec/rcc8po/rcc8tppi/rcc8tpp/rcc8ntpp/rcc8ntppi` | ✅ ditto |
+| 9 | `geof:relate(g1, g2, pattern)` — generic DE-9IM test | ✅ `IntersectionMatrix::matches` |
 | 8.7 | `geof:envelope`, `geof:boundary`, `geof:convexHull` | ✅ (`boundary` of a GEOMETRYCOLLECTION unsupported) |
-| 8.7 | `geof:buffer` | ❌ `geo` 0.30 has no buffer op (TODO.md) |
-| 8.7 | `geof:intersection/union/difference/symDifference`, `geof:getSRID` | ❌ not in v1 (TODO.md) |
-| 8.3/8.4 | Core RDF shape: `geo:hasGeometry`, `geo:hasDefaultGeometry`, `geo:asWKT` | ✅ extracted by `GeoIndex::build` |
-| 8.5.2 | `geo:gmlLiteral` | ❌ WKT only |
-| 7 / 9 | RIF/SPARQL rewrite rules, `geor:` query rewriting, Egenhofer/RCC8 relation families | ❌ out of scope for v1 |
+| 8.7 | `geof:buffer(g, radius, units)` | ✅ geo 0.33 `Buffer`; metric radii via a local equirectangular metre frame (accuracy notes below); result MULTIPOLYGON |
+| 8.7 | `geof:intersection/union/difference/symDifference` | ✅ POLYGONAL operands (geo `BooleanOps`); other operand types are a per-row expression error |
+| 8.7 | `geof:getSRID` | ✅ the CRS IRI as `xsd:anyURI` |
+| 8.3/8.4 | Core RDF shape: `geo:hasGeometry`, `geo:hasDefaultGeometry`, `geo:asWKT` | ✅ extracted by `GeoIndex::build` (default + named graphs) |
+| 8.5.2 | `geo:gmlLiteral` | ❌ WKT only (no maintained pure-Rust GML parser — TODO.md) |
+| 7 / 9 | RIF/SPARQL rewrite rules, `geor:` query rewriting | ❌ needs engine-level query rewriting (TODO.md) |
 
 Formal OGC conformance testing is **skipped** (the official suite needs a full
 SPARQL endpoint harness); the table above is the implemented subset.
@@ -96,15 +100,18 @@ let r = query_with_functions(&g, r#"
     }"#, &geof_registry())?;
 ```
 
-Registered IRIs (all under `http://www.opengis.net/def/function/geosparql/`):
-`distance` (3rd arg a unit IRI, result `xsd:double`), the eight
-simple-features relations `sfEquals` … `sfOverlaps` (`xsd:boolean`), and
-`envelope` / `boundary` / `convexHull` (`geo:wktLiteral`). Geometry arguments
-must be `geo:wktLiteral` literals. Any geo error (malformed WKT, wrong
-datatype, CRS mismatch, unknown unit, wrong arity) is a per-row SPARQL
+Registered IRIs (35, all under `http://www.opengis.net/def/function/geosparql/`):
+`distance` (3rd arg a unit IRI, result `xsd:double`); the relation families
+`sfEquals` … `sfOverlaps`, `ehEquals` … `ehContains`, `rcc8eq` … `rcc8ntppi`
+plus the generic `relate(g1, g2, de9imPattern)` (all `xsd:boolean`);
+`envelope` / `boundary` / `convexHull` and `buffer(g, radius, unitIri)` /
+`intersection` / `union` / `difference` / `symDifference` (`geo:wktLiteral`);
+`getSRID` (`xsd:anyURI`). Geometry arguments must be `geo:wktLiteral`
+literals. Any geo error (malformed WKT, wrong datatype, CRS mismatch, unknown
+unit, non-polygonal set-operation operands, wrong arity) is a per-row SPARQL
 *expression* error — the row is dropped by a `FILTER`, left unbound by a
-`BIND` — exactly like the builtin functions; an IRI not in the registry (e.g.
-`geof:buffer`, not in v1) stays a hard query error.
+`BIND` — exactly like the builtin functions; an IRI not in the registry stays
+a hard query error.
 
 Build the registry **once** and reuse it: it is cheaply cloneable and
 `Send + Sync`. sparq-server exposes exactly this wiring behind its opt-in
@@ -132,8 +139,12 @@ true geometry:
   seeded from the data extent; exact under the same metric.
 - `intersects(geometry)` — AABB window + `geo::Intersects` refinement.
 
-Geometries crossing the **antimeridian** are not wrapped in v1, and the index
-covers the **default graph** only (see TODO.md).
+Query balls crossing the **antimeridian** split into two longitude windows
+(two tree walks, merged + deduped); the index covers the default graph **and
+every named graph** (each `Entry` records its origin graph and `geo:asWKT`
+node). `GeoIndex::apply_delta(graph, inserts, deletes)` mirrors a
+`Graph::apply_delta` batch incrementally (rstar insert/remove, O(batch·log n)
+— no rebuild), including `geo:hasGeometry` ownership re-keying.
 
 ## Benchmark
 

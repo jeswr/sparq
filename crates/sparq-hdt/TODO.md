@@ -1,48 +1,63 @@
 # sparq-hdt — gaps / follow-ups
 
-## CLI hook (one line, for a sparq-cli maintainer)
+Status audit 2026-06-12: every item from the previous revision of this file is
+either IMPLEMENTED (with tests) or explicitly DEFERRED below with its reason.
 
-sparq-cli was deliberately not modified (T24a scope: new opt-in crate only). To
-expose HDT loading, add `sparq-hdt = { path = "../sparq-hdt", version = "0.1.0" }`
-to `crates/sparq-cli/Cargo.toml` and route the format in the loader dispatch:
+## CLI hook — DONE
 
-```rust
-"hdt" => sparq_hdt::load(path)?,   // alongside the existing "ntriples"/"turtle"/… arms
-```
+sparq-cli wires this crate in behind an opt-in `hdt` cargo feature
+(`cargo build -p sparq-cli --features hdt`): the loader dispatch routes the
+`hdt` format argument and the `.hdt` / `.hdt.gz` file extensions through
+`sparq_hdt::load`; without the feature the CLI exits with a rebuild hint.
+Opt-in rather than default because sparq-hdt's MSRV is 1.87 (the wrapped
+`hdt` crate) vs sparq-cli's workspace floor of 1.85, and the HDT decode stack
+is dead weight on non-HDT paths — rationale documented in
+`crates/sparq-cli/Cargo.toml`. End-to-end binary tests:
+`cargo test -p sparq-cli --features hdt`.
 
-(keyed off `--format hdt` or a `.hdt` file extension).
+## GZipped containers — DONE
 
-## Write support
+`.hdt.gz` archives are detected by MAGIC BYTES (0x1f 0x8b — file names are
+ignored) in every entry point and decompressed on the fly with a streaming
+`MultiGzDecoder` (flate2, pure-Rust backend).
 
-Not implemented. The wrapped `hdt` 0.4 crate can write an `Hdt` it already holds
-(`Hdt::write`) and can build one from an N-Triples FILE (`Hdt::read_nt`, used by
-our tests/bench to generate fixtures), but there is no in-memory
-triples -> FourSectDict builder API, so `Graph -> .hdt` would mean serializing the
-graph to a temp N-Triples file first — not "cheap". Revisit if upstream grows a
-builder API (its `nt` module is evolving in 0.6+); reading is the community win.
+## HDT header — DONE
 
-## hdt crate version pin
+`header(path)` / `header_reader(reader)` expose the dataset metadata triples
+(VoID statistics, format/provenance — the "H" in HDT) as a queryable sparq
+`Graph`, decoding only the head of the stream. The wrapped crate parses the
+header during `Hdt::read` but keeps the field private, so these re-read the
+control info + header sections directly (a few KB); if upstream makes
+`Hdt::header` public, `graph_from_hdt` callers could get it without the
+re-read.
 
-Pinned to `hdt = 0.4` (not 0.6): hdt 0.6 depends on `qwt`, whose default
-`prefetch` feature requires NIGHTLY rustc on aarch64 (`#![feature(stdarch_aarch64_prefetch)]`),
-breaking stable Apple-Silicon builds. Bump when upstream drops/feature-gates that
-(tracked upstream: qwt prefetch is a default feature hdt does not disable).
-hdt 0.4's MSRV is 1.87, so this crate declares `rust-version = "1.87"` (workspace
-floor is 1.85).
+## Write support — DEFERRED (blocked-upstream; re-verified 2026-06-12)
 
-## Loader gaps (upstream API shape)
+Not implemented. Checked hdt 0.6.0 (latest on crates.io): there is STILL no
+in-memory triples -> FourSectDict builder API — `Hdt::read_nt` takes a file
+*path* (its `nt` module builds dictionaries from files via a lasso interner),
+so `Graph -> .hdt` would mean serializing the graph to a temp N-Triples file
+first — not "cheap". The wrapped crate can write an `Hdt` it already holds
+(`Hdt::write`, used by our tests to generate fixtures). Revisit when upstream
+grows an in-memory builder; reading is the community win.
+
+## hdt crate version pin — KEPT (re-verified 2026-06-12)
+
+Pinned to `hdt = 0.4` (not 0.6). Re-checked against the currently published
+versions: hdt 0.6.0 depends on `qwt = 0.3.4` with DEFAULT features, and qwt
+0.3.4 still has `default = ["prefetch"]` whose aarch64 path requires NIGHTLY
+rustc (`#![feature(stdarch_aarch64_prefetch)]`) — stable Apple-Silicon builds
+break. Bump when qwt drops/feature-gates that or hdt disables the feature.
+hdt 0.4's MSRV is 1.87, so this crate declares `rust-version = "1.87"`
+(workspace floor is 1.85).
+
+## Loader gaps (upstream API shape) — DEFERRED (blocked-upstream)
 
 - `Hdt::read` eagerly builds its own object-position index (and in 0.6 a wavelet
   matrix) for pattern queries we never run — pure ingest could skip it. An
   upstream "decode only" entry point would cut HDT->Graph load time.
-- GZipped HDT containers (`.hdt.gz` as emitted by some publishers) are not
-  auto-detected; callers can wrap the reader in a `GzDecoder` themselves via
-  `load_reader` only after decompressing to a buffered stream.
-- The HDT header (dataset metadata triples) is decoded by the wrapped crate but
-  not exposed through `sparq_hdt`; `graph_from_hdt` is the seam if a caller wants
-  it today.
 
 ## sparq-core gaps encountered
 
-None — `Dict::intern_iri/intern_lit/intern_blank` + `Graph::from_parts` were
-sufficient; no existing crate needed modification.
+None — `Dict::intern_iri/intern_lit/intern_blank` + `Graph::from_parts` +
+`Graph::load_str` were sufficient; no existing crate needed modification.
