@@ -45,3 +45,17 @@ bzcat /path/to/truthy.nt.bz2 | head -n 1500000 > data/wikidata-slice.nt
 
 Each number is the median of 3 runs, wall clock. MB/s is over the
 *decompressed* input bytes. Run on an otherwise idle machine.
+
+## D4: compressed result serialization (`compress-bench`)
+
+Measures `crates/sparq-parse`'s `CompressedSink` (multi-member gzip /
+multi-frame zstd, serial vs rayon-parallel, zstd vocabulary dictionaries).
+Results + analysis: `research/custom-parsers-D4-compressed-serialization.md`.
+
+```sh
+./target/release/compress-bench big   data/wikidata-slice.nt   # large-result: ratio, serial vs parallel walls,
+                                                               # end-to-end serialize+compress, paced-replay TTFB proxy
+./target/release/compress-bench small data/wikidata-slice.nt   # point-query responses: zstd 1-3 ±dict vs gzip -1/-6
+./target/release/compress-bench artifacts data/wikidata-slice.nt data/d4   # streams + dict for external
+                                                               # reference-decoder checks (gzip -d, python gzip, zstd CLI)
+```
