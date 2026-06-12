@@ -349,13 +349,12 @@ impl MaterializedGraph {
 // The differential property test (tests/incremental_owl_prop.rs) holds the closure equal to
 // from-scratch `materialize_owl_rl` after every batch of a randomized edit sequence.
 //
-// NOTE for the merge (batch-engine quirk, deliberately mirrored here): on the batch monotone
-// path (`rdfs_closure` with an active `PropExpand`), a property that has a domain/range but
-// appears nowhere in the property-orientation TBox (no subPropertyOf/inverseOf/symmetric/
-// equivalent edge) is absent from the px map, so its assertions emit NO domain/range typing —
-// the full fixpoint path *does* emit it. Likely a batch completeness bug in
-// `rdfs::build_prop_expand` (all_props never includes domain/range-only properties); owned by
-// the owl.rs/rdfs.rs thread. `emit_std` below reproduces it so the differential tests hold.
+// NOTE (px fall-through, kept in lockstep with the batch engine): a property that has a
+// domain/range but appears nowhere in the property-orientation TBox (no subPropertyOf/
+// inverseOf/symmetric/equivalent edge) is absent from the px map. The batch monotone path
+// (`rdfs::emit_consequences`) falls through to the plain RDFS emission for such properties
+// (regression test `prop_expand_keeps_domain_range_only_properties`); `emit_std` below does
+// the same via the identity orientation, so the differential tests hold.
 
 /// OWL vocabulary ids for the incremental OWL-RL graph, interned once at construction
 /// (mirrors the private `owl::Owl` — owned by the owl.rs thread, so duplicated additively).
@@ -907,8 +906,8 @@ impl MaterializedOwlGraph {
     }
 
     /// All one-step consequences (exact emission multiset) of one triple against the closed
-    /// TBox — the OWL analogue of `rdfs::emit_consequences` (see the merge note on the
-    /// monotone-path px quirk this mirrors).
+    /// TBox — the OWL analogue of `rdfs::emit_consequences` (see the note on the px
+    /// fall-through this mirrors).
     fn emit_owl(&self, [s, p, o]: [Id; 3], out: &mut Vec<[Id; 3]>) {
         let v = &self.v;
         if p == v.ty {
@@ -930,13 +929,11 @@ impl MaterializedOwlGraph {
     fn emit_std(&self, [s, p, o]: [Id; 3], out: &mut Vec<[Id; 3]>) {
         let v = &self.v;
         if self.px_active {
-            let entries: &[(Id, bool)] = match self.px.get(&p) {
-                Some(e) => e,
-                // Monotone batch path: px-absent properties emit nothing (mirrored quirk).
-                // Fixpoint batch path: identity — domain/range typing still applies.
-                None if self.mode == OwlMode::CountingFixpoint => &[],
-                None => return,
-            };
+            // px-absent (e.g. a domain/range-only property): fall through to the identity
+            // orientation — plain RDFS emission, matching the fixed batch path
+            // (`rdfs::emit_consequences`; regression test
+            // `prop_expand_keeps_domain_range_only_properties`).
+            let entries: &[(Id, bool)] = self.px.get(&p).map_or(&[], |e| e);
             let identity = [(p, false)];
             let entries = if entries.is_empty() { &identity[..] } else { entries };
             for &(r, swap) in entries {
@@ -1243,7 +1240,8 @@ fn px_entries(px: &FxHashMap<Id, Vec<(Id, bool)>>, q: Id) -> &[(Id, bool)] {
 /// The property-orientation closure: BFS over `(property, orientation)` through subPropertyOf
 /// (same orientation; equivalentProperty pre-folded), inverseOf (flip) and SymmetricProperty
 /// (flip, same property). Mirrors `rdfs::build_prop_expand` exactly — including its `all_props`
-/// domain (see the px-quirk merge note) — so emissions match the batch engine.
+/// domain; px-absent properties take the identity fall-through in `emit_std` (see the px
+/// fall-through note) — so emissions match the batch engine.
 fn build_px(
     sp_closure: &FxHashMap<Id, Vec<Id>>,
     inverse: &FxHashMap<Id, Vec<Id>>,
@@ -3027,6 +3025,37 @@ mod tests {
         assert!(!g.contains(&[y, po, x]) && !g.contains(&[x, hp, y]));
         assert_owl_oracle(&g, &mut dict, &set);
         assert_eq!(g.full_rebuilds(), 0);
+    }
+
+    #[test]
+    fn owl_domain_range_only_property_under_active_px() {
+        // REGRESSION (mirrors rdfs::prop_expand_keeps_domain_range_only_properties): with the
+        // property-orientation closure active (CountingMono via the inverse pair), a property
+        // that has ONLY domain/range declarations is absent from the px map — emit_std must
+        // fall through to the identity orientation (plain RDFS emission, matching the fixed
+        // batch path), not drop its rdfs2/rdfs3 typing.
+        let mut dict = Dict::new();
+        let v = vocab(&mut dict);
+        let inv = owl_id(&mut dict, "inverseOf");
+        let (q, r, p) = (ex(&mut dict, "q"), ex(&mut dict, "r"), ex(&mut dict, "p"));
+        let (c, d, a, b) =
+            (ex(&mut dict, "C"), ex(&mut dict, "D"), ex(&mut dict, "a"), ex(&mut dict, "b"));
+        let base = vec![[q, inv, r], [p, v.dom, c], [p, v.rng, d]];
+        let mut g = MaterializedOwlGraph::new(&mut dict, &base);
+        assert_eq!(g.mode(), crate::OwlMode::CountingMono);
+        let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
+
+        g.insert(&mut dict, &[[a, p, b]]);
+        set.insert([a, p, b]);
+        assert_eq!(g.full_rebuilds(), 0, "ABox insert must stay incremental");
+        assert!(g.contains(&[a, v.ty, c]), "rdfs2 domain typing under active px");
+        assert!(g.contains(&[b, v.ty, d]), "rdfs3 range typing under active px");
+        assert_owl_oracle(&g, &mut dict, &set);
+
+        g.delete(&mut dict, &[[a, p, b]]);
+        set.remove(&[a, p, b]);
+        assert!(!g.contains(&[a, v.ty, c]), "domain typing retracts with its support");
+        assert_owl_oracle(&g, &mut dict, &set);
     }
 
     #[test]
