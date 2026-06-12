@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Pipelined streaming N-Triples ingest (`sparq-core`)** — `Graph::load_reader_parallel`
+  now fills its 32 MiB block from repeated short `read()`s and overlaps decompression
+  with parallel parse (producer thread → bounded channel → rayon parse → dict merge),
+  matching the `build_external_ntriples_parallel` pipeline. Streaming ingest of a 173 MB
+  gzip/zstd N-Triples file: 5.59 s → 0.66 s (gzip, 8.5×) and 3.95 s → 0.58 s (zstd, 6.9×);
+  streaming now matches or beats decompress-then-parse. `load_reader_parallel` requires
+  `R: Read + Send`. See `research/custom-parsers-baseline.md`.
+
 - **Inference fixpoint linearization + delta-driven evaluation (`sparq-reason`,
   fixpoint-opt thread)** — the chain-transitivity derivation storms are gone, and
   closure-only callers stop paying for proof bookkeeping:
