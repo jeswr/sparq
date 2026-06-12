@@ -3232,6 +3232,10 @@ fn build_trie(
 
     let scan = graph.store.scan(id_pat);
     let mut tuples: Vec<Vec<Id>> = Vec::with_capacity(scan.rows.len());
+    // zk-trace hook: the WCOJ path's per-pattern input set is the trie's
+    // source scan (the consistency-passing rows), recorded pre-projection.
+    #[cfg(feature = "zk")]
+    let mut zk_matched: Vec<[Id; 3]> = Vec::new();
     for row in scan.rows.iter() {
         let spo = scan.to_spo(row);
         let mut tup = Vec::with_capacity(var_positions.len());
@@ -3245,8 +3249,16 @@ fn build_trie(
             tup.push(v0);
         }
         if ok {
+            #[cfg(feature = "zk")]
+            if crate::zk::enabled() {
+                zk_matched.push(spo);
+            }
             tuples.push(tup);
         }
+    }
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        crate::zk::record_scan_ids(graph, id_pat, pos_vars, &zk_matched, false);
     }
     tuples.sort_unstable();
     tuples.dedup();
@@ -3500,6 +3512,20 @@ fn scan_to_bindings(graph: &Graph, id_pat: &IdPattern, pos_vars: &[Option<Variab
         }
         Some(out)
     };
+
+    // zk-trace hook (feature `zk`, armed recorder only): record the matched
+    // triples of this pattern scan — the rows `build_row` keeps, BEFORE
+    // projection (the witness needs whole triples, not just variable columns).
+    // One `enabled()` check per scan; zero per-row cost when disarmed.
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        let kept: Vec<[Id; 3]> = scan_rows
+            .iter()
+            .filter(|r| build_row(r).is_some())
+            .map(|r| scan.to_spo(r))
+            .collect();
+        crate::zk::record_scan_ids(graph, id_pat, pos_vars, &kept, false);
+    }
 
     // No LIMIT and a large relation: build the rows in parallel (order-preserving).
     #[cfg(feature = "parallel")]
@@ -3793,6 +3819,11 @@ fn bind_join(
     }
 
     let mut out_rows: Vec<Row> = Vec::new();
+    // zk-trace hook: accumulate the matched triples across all bound rescans
+    // of this pattern (recorded once, under the pattern's ORIGINAL key, so
+    // the input set merges with any full scans of the same pattern).
+    #[cfg(feature = "zk")]
+    let mut zk_matched: Vec<[Id; 3]> = Vec::new();
     for (val, ris) in groups {
         // Coarse budget check once per distinct join value.
         if budget::exhausted(out_rows.len()) {
@@ -3808,6 +3839,10 @@ fn bind_join(
                     continue;
                 }
             }
+            #[cfg(feature = "zk")]
+            if crate::zk::enabled() {
+                zk_matched.push(pspo);
+            }
             let new_vals: SmallVec<[Id; 4]> = new_positions.iter().map(|&p| pspo[p]).collect();
             for &ri in &ris {
                 let mut combined = result.rows[ri].clone();
@@ -3815,6 +3850,10 @@ fn bind_join(
                 out_rows.push(combined);
             }
         }
+    }
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        crate::zk::record_scan_ids(graph, id_pat, pos_vars, &zk_matched, true);
     }
     Bindings::unsorted(out_vars, out_rows)
 }
@@ -4747,6 +4786,21 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
         }
         keep
     };
+    // zk-trace hook: record the FILTER obligation — expression, in-scope
+    // variables, and per-row operand bindings with the verdict (the witness
+    // builder needs the operands of every hidden-filter application).
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        let rows: Vec<(Vec<Option<Term>>, bool)> = b
+            .rows
+            .iter()
+            .zip(keep.iter())
+            .map(|(row, &k)| {
+                (b.vars.iter().enumerate().map(|(c, _)| term_of(graph, local, row[c])).collect(), k)
+            })
+            .collect();
+        crate::zk::record_filter(format!("{expr:?}"), &b.vars, rows);
+    }
     let mut i = 0;
     b.rows.retain(|_| {
         let k = keep[i];

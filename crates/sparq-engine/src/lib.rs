@@ -24,6 +24,10 @@ mod exec;
 mod explain;
 pub mod json;
 mod update;
+// zk-trace seam (NON-DEFAULT `zk` feature; consumed only by `sparq-zk`).
+// When off, zero zk code is compiled — default builds and wasm are untouched.
+#[cfg(feature = "zk")]
+pub mod zk;
 pub use construct::{
     construct, construct_ntriples, construct_ntriples_with_budget, construct_prepared,
     construct_prepared_with_budget, construct_with_budget, describe, describe_prepared,
