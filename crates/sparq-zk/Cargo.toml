@@ -1,0 +1,49 @@
+[package]
+name = "sparq-zk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "ZK derived-credential commitment pipeline + zk-trace seam for sparq (RDFC10 canonicalization, Poseidon2-BN254 per-graph commitments, <urn:sparq:zk> registry plumbing)"
+publish = false
+
+# NOTHING in the workspace depends on this crate: default builds, the wasm
+# artifact, and every other crate's dependency graph are untouched by it.
+# (Verified by the byte-identical wasm gate in the zk-core branch report.)
+
+[dependencies]
+# sparq term model / store / engine. The engine dep turns on its non-default
+# `zk` feature (the zk-trace executor seam); that feature only exists inside
+# sparq-zk's own dependency graph.
+sparq-core = { path = "../sparq-core" }
+sparq-engine = { path = "../sparq-engine", features = ["zk"] }
+oxrdf = { workspace = true }
+oxttl = { workspace = true }
+spargebra = { workspace = true }
+
+# RDFC10 (W3C RDF Dataset Canonicalization). Maintained zkp-ld implementation;
+# it speaks oxrdf 0.2, so we bridge from sparq's oxrdf 0.3 via canonical
+# N-Quads text (see src/canon.rs for why this is the clean seam).
+rdf-canon = "0.15.3"
+oxrdf02 = { package = "oxrdf", version = "0.2.4" }
+oxttl01 = { package = "oxttl", version = "0.1.8" }
+
+# BN254 scalar field (the Noir `Field`) for Poseidon2.
+ark-bn254 = { version = "0.5", default-features = false, features = ["curve"] }
+ark-ff = { version = "0.5", default-features = false }
+
+# Off-circuit string hash h_s (plan §2.2: Enc_t(term) = h_2(type_code, h_s(value))).
+blake3 = "1"
+
+[dev-dependencies]
+serde_json = "1"
+# SHA-384 parameterized-hash cases of the W3C rdf-canon suite (test075).
+sha2 = "0.10"
+
+[[bin]]
+name = "sparq-zk-bench"
+path = "src/bin/bench.rs"
