@@ -19,6 +19,23 @@ pub struct Store {
     graph: Graph,
 }
 
+/// The ordered chunk sequence of one query result (see [`Store::query_chunks`]):
+/// concatenating every chunk yields exactly [`Store::query`]'s JSON string. Chunks
+/// split only at solution-row boundaries (~64 KiB flushes), so a consumer can parse
+/// rows incrementally without ever holding the whole result as one JS string.
+#[wasm_bindgen]
+pub struct QueryChunks {
+    chunks: std::vec::IntoIter<String>,
+}
+
+#[wasm_bindgen]
+impl QueryChunks {
+    /// The next chunk, or `undefined` when the sequence is exhausted.
+    pub fn next(&mut self) -> Option<String> {
+        self.chunks.next()
+    }
+}
+
 #[wasm_bindgen]
 impl Store {
     /// Parses an RDF document into a store. `format`: `"turtle"` | `"ntriples"` |
@@ -75,6 +92,21 @@ impl Store {
         // Serialise straight from ids to SPARQL-JSON — no intermediate oxrdf::Term per
         // cell (the allocator-bound cost of returning a large result in the browser).
         sparq_engine::query_json(&self.graph, sparql).map_err(|e| JsError::new(&e))
+    }
+
+    /// Like [`query`](Self::query) but returns the SPARQL 1.1 JSON document as an
+    /// ordered sequence of ~64 KiB chunks (split only at solution-row boundaries)
+    /// instead of one string — so large results cross the wasm boundary piecewise
+    /// and the caller can surface rows incrementally. The chunk sequence is
+    /// produced eagerly inside wasm (the engine's chunked serialiser, which never
+    /// concatenates a whole-result string); the streaming win is on the JS side,
+    /// which holds at most one chunk at a time.
+    #[wasm_bindgen(js_name = queryChunks)]
+    pub fn query_chunks(&self, sparql: &str) -> Result<QueryChunks, JsError> {
+        let chunks =
+            sparq_engine::query_json_chunks_with_budget(&self.graph, sparql, &sparq_engine::QueryBudget::unlimited())
+                .map_err(|e| JsError::new(&e))?;
+        Ok(QueryChunks { chunks: chunks.into_iter() })
     }
 
     /// Counts the solutions of a SELECT query *without* materialising them — for a

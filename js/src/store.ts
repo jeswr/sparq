@@ -8,9 +8,11 @@ import { Bindings } from './bindings.js';
 import {
   detectQueryForm,
   quadsToNQuads,
+  SparqlJsonRowsParser,
   termFromSparqlJson,
   termToNT,
   type SparqlJsonResults,
+  type SparqlJsonTerm,
 } from './sparql.js';
 import { DataFactory, Quad, Variable } from './terms.js';
 import { init, WasmStore } from './wasm.js';
@@ -34,6 +36,15 @@ export interface SparqStoreOptions {
 }
 
 type MatchTerm = RDF.Term | null | undefined;
+
+/** One SPARQL-JSON solution row as an RDF/JS `Bindings`. */
+function bindingsFromRow(row: Record<string, SparqlJsonTerm>): Bindings {
+  const entries: [RDF.Variable, RDF.Term][] = [];
+  for (const [name, term] of Object.entries(row)) {
+    entries.push([new Variable(name), termFromSparqlJson(term)]);
+  }
+  return new Bindings(entries);
+}
 
 /** A position of a triple pattern: either an inline SPARQL constant or a variable. */
 function position(term: MatchTerm, variable: string): { sparql: string; fixed: RDF.Term | undefined } {
@@ -104,13 +115,53 @@ export class SparqStore {
   queryBindings(sparql: string): Bindings[] {
     const json = JSON.parse(this.#inner.query(sparql)) as SparqlJsonResults;
     const rows = json.results?.bindings ?? [];
-    return rows.map(row => {
-      const entries: [RDF.Variable, RDF.Term][] = [];
-      for (const [name, term] of Object.entries(row)) {
-        entries.push([new Variable(name), termFromSparqlJson(term)]);
+    return rows.map(bindingsFromRow);
+  }
+
+  /**
+   * Streams a SELECT query's solutions as RDF/JS `Bindings`, one at a time,
+   * without ever materialising the whole result on the JS side — neither as
+   * one JSON string nor as one `Bindings[]`. The engine serialises in ~64 KiB
+   * chunks that cross the wasm boundary piecewise; at most one chunk (plus
+   * one partial row) is held at a time. Works with both `for…of` and
+   * `for await…of`; abandoning the iterator early (`break`) frees the
+   * wasm-side cursor.
+   */
+  *queryBindingsStream(sparql: string): Generator<Bindings, void, undefined> {
+    const cursor = this.#inner.queryChunks(sparql);
+    try {
+      const parser = new SparqlJsonRowsParser();
+      for (;;) {
+        const chunk = cursor.next();
+        if (chunk === undefined) break;
+        for (const row of parser.push(chunk)) yield bindingsFromRow(row);
       }
-      return new Bindings(entries);
-    });
+      if (parser.boolean !== undefined) {
+        throw new Error('queryBindingsStream() requires a SELECT query (got an ASK boolean result)');
+      }
+    } finally {
+      cursor.free();
+    }
+  }
+
+  /**
+   * Streams the raw SPARQL 1.1 JSON results document as the engine's chunk
+   * sequence (~64 KiB each, split only at solution-row boundaries); the
+   * concatenation of the chunks is byte-identical to `queryJson()`. For
+   * forwarding large results to a network sink or incremental parser with no
+   * JS-side term materialisation.
+   */
+  *queryJsonChunks(sparql: string): Generator<string, void, undefined> {
+    const cursor = this.#inner.queryChunks(sparql);
+    try {
+      for (;;) {
+        const chunk = cursor.next();
+        if (chunk === undefined) break;
+        yield chunk;
+      }
+    } finally {
+      cursor.free();
+    }
   }
 
   /**

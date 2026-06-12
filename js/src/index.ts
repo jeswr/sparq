@@ -7,6 +7,7 @@ export {
   quadsToNQuads,
   detectQueryForm,
   askToSelect,
+  SparqlJsonRowsParser,
   type SparqlJsonTerm,
   type SparqlJsonResults,
   type QueryForm,
