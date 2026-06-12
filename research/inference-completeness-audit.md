@@ -260,10 +260,15 @@ fix; the residual mismatch is upstream-reference rot, documented as a divergence
 
 ## 5b. Performance evidence (inference-endgame, 2026-06)
 
-`bench/inference/eye-comparison.md` records the EYE head-to-head (same machine,
-min-of-3, full parse→closure→serialize pipeline both sides) plus the owl-bench.sh
-closure-throughput numbers. Wasm artifact: 1,573,895 B (cargo wasm32 release;
-+8 B over the previous 1,573,887 B baseline, attributable to the `ground_triple` fix).
+`bench/inference/eye-comparison.md` records the EYE v11.24.4 head-to-head (same
+machine, full parse→closure→serialize pipeline both sides): sparq wins every
+workload — DeepTaxonomy 62×–2,840× (sparq linear-in-closure, EYE ≈N², dt100k
+0.73 s vs extrapolated ≈9 h), grid reachability 67×, pure transitive chain 3.6×
+(anc500, sparq's worst ratio — the O(N³) chain-transitivity derivation storm is
+the noted optimization target, also visible as owl-bench's owl-transitive 54 s).
+Same doc carries the owl-bench.sh closure numbers (RDFS 2.1 M-triple closure in
+0.047 s). Wasm artifact: 1,573,895 B (cargo wasm32 release; +8 B over the tracked
+1,573,887 B baseline, attributable to the `ground_triple` fix).
 
 ## 6. Reproduction
 

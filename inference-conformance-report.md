@@ -2,7 +2,7 @@
 
 - rdf-tests commit: `f25dbc092c654d792974848e81bb519d7328f0e8`
 - w3c/N3 commit: `23ccf3d56b25cb60a68878a04aae0d52493080f0`
-- sparq commit: `16ca0f982733ce0d33db84895567be2ac2fe558a`
+- sparq commit: `8dd5582e7c3bc3c72c3d7b462922180f22630e89`
 
 Every manifest entry lands in exactly one bucket — pass, fail, documented divergence, or out-of-scope WITH its reason (no silent skips). Pass rate is `(pass + divergence) / run`; out-of-scope entries are excluded from the rate but counted in coverage.
 
@@ -107,7 +107,7 @@ Source: w3c/N3 `tests/` (pinned clone). The reasoner manifest measures EYE/cwm p
 
 ## SPARQL 1.1 entailment regimes (sparql11/entailment)
 
-Source: `sparql11/entailment` from the pinned rdf-tests clone. Each test runs as query-over-materialized-closure through the same evaluation/comparison machinery as the gating SPARQL harness; the regime materialized is the strongest the reasoner supports of the test's `sd:entailmentRegime` set (RDFS ⊃ RDF; OWL-RDF-Based via the OWL RL rules, a sound subset — its incompleteness shows up as listed fails). D-only / OWL-Direct-only / RIF tests are out of scope with their reason.
+Source: `sparql11/entailment` from the pinned rdf-tests clone. Each test runs as query-over-materialized-closure through the same evaluation/comparison machinery as the gating SPARQL harness; the regime materialized is the strongest the reasoner supports of the test's `sd:entailmentRegime` set (RDFS ⊃ RDF; OWL-RDF-Based via the OWL RL rules, a sound subset — its incompleteness shows up as listed fails). The OwlRl closure adds a harness-side eq-ref layer (OWL 2 Profiles §4.3 Table 4: reflexive owl:sameAs for every closure term — omitted by the production materializer as store bloat). The regimes' ANSWER RESTRICTION is applied to engine solutions before comparison (SPARQL 1.1 Entailment Regimes): (C1/skolemization, §2/§3.1) bindings to blank nodes not in the queried graph — i.e. introduced by the saturation — are never answers; and for tests whose expectations are sanctioned under OWL-Direct (§7), variables in class/property-NAME positions cannot bind to anonymous class expressions (a bnode is not a name). D-only / OWL-Direct-only / RIF tests are out of scope with their reason.
 
 | suite | pass | fail | divergence | out-of-scope | pass-rate (of run) |
 |---|---:|---:|---:|---:|---:|
