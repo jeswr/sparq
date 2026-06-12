@@ -22,8 +22,8 @@ If this file describes running agents/instances and you are a fresh session, ver
 5. FINAL DELIVERABLE: research/zk-test-bench-design.md — how the ZK test suites/benchmarks are designed — handed to Jesse for comment.
 6. DONE: Wikidata stage-1 doc committed (1B results + cost ledger). Follow-on engineering item: dictionary spill-to-disk (prerequisite for full truthy ~280-330GiB dict; slots into memtier track).
 
-## Usage-aware shutdown protocol (user mandate)
-Check `npx -y ccusage@latest blocks --json` between waves (reference reading: 140.6M tokens in the 20:00→01:00 UTC block at the time of writing). Near the limit: launch nothing new; agents already carry the STATUS.md/incremental-commit crash protocol.
+## Crash-resilience protocol (user mandate, revised)
+The global plan meter is not accessible from inside a session and local token counts don't predict it — no usage polling. Instead: every agent brief mandates incremental commits + live STATUS.md; this file stays current each wave; cloud resources are first priority in any recovery.
 
 ## Awaiting Jesse
 test-lib push (76 commits ahead), horizontal-scaling ADR answers, RDFox license decision, 8B-run budget sign-off.
