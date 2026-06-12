@@ -1,8 +1,9 @@
 # Inference feature-completeness audit (W3C suites)
 
-**Thread:** inference-suites · **Date:** 2026-06 · **Harness:** `crates/sparq-conformance`,
-binary `sparq-inference-conformance` (fetch once with `scripts/fetch-inference-suites.sh`,
-then fully offline; report regenerated as `inference-conformance-report.md`).
+**Thread:** inference-suites (updated by inference-endgame, 2026-06) · **Harness:**
+`crates/sparq-conformance`, binary `sparq-inference-conformance` (fetch once with
+`scripts/fetch-inference-suites.sh`, then fully offline; report regenerated as
+`inference-conformance-report.md`).
 
 Pinned sources: w3c/rdf-tests `f25dbc092c654d792974848e81bb519d7328f0e8` (shared with the
 gating SPARQL harness), w3c/N3 `23ccf3d56b25cb60a68878a04aae0d52493080f0`, OWL 2 WG
@@ -14,12 +15,19 @@ test-case export `all.rdf` (Internet Archive snapshot `20160703034201`, sha256-p
 |---|---:|---:|---:|---:|---:|---:|
 | RDF Semantics (rdf-mt, 48 active entries) | 48 | **48** | 0 | 0 | 0 | **100%** |
 | OWL 2 RL (RL-profile ∧ RDF-based, Approved) | 91 | **78** | 0 | 13 | 36 | **100%** (pass+div) |
-| N3 — reasoner manifest (89) | 86 | **83** | 1 | 2 | 3 | **98.8%** (pass+div) |
+| N3 — reasoner manifest (89) | 86 | **83** | 0 | 3 | 3 | **100%** (pass+div) |
 | N3 — parser manifest (230) | 214 | **213** | 0 | 1 | 16 | **100%** (pass+div) |
 | N3 — extended manifest (978) | 871 | **871** | 0 | 0 | 107 | **100%** |
 | N3 — TurtleTests, N3 parser in STRICT Turtle mode (297) | 297 | **297** | 0 | 0 | 0 | **100%** |
-| SPARQL 1.1 entailment regimes (70) | 47 | **44** | 3 | 0 | 23 | 93.6% |
-| **all suites** | **1654** | **1634** | **4** | **16** | **185** | **99.8%** |
+| SPARQL 1.1 entailment regimes (70) | 47 | **47** | 0 | 0 | 23 | **100%** |
+| **all suites** | **1654** | **1637** | **0** | **17** | **185** | **100.0%** |
+
+**ZERO fails.** The inference CI job now GATES with a ratchet at pass+divergence ≥ 1654
+(mirrors the SPARQL ratchet; ci.yml `inference-conformance`). Endgame changes:
+sparqldl-10/11/12 fixed (entailment-regime answer restriction + harness eq-ref layer,
+see §4); cwm_includes_conclusion engine-side fixed (`ground_triple` formula-value
+semantics) and reclassified as a documented divergence — the vendored 2003 reference
+is byte-provably from older sources and not deductively closed (see §3 table).
 
 N3 out-of-scope = `rdft:Rejected` entries (upstream explicitly rejected them — e.g. biR's
 bare `+` list element, "not allowed in turtle nor n3"), 2 `test:strings`
@@ -169,12 +177,12 @@ Turtle mode). The n3-completeness thread (this branch) closed the audit's gap li
 
 | entry | class | cause |
 |---|---|---|
-| cwm_includes_conclusion | FAIL | needs byte-equal `log:conclusion` closure of three chained DAML documents (daml-ex/invalid-ex/schema-rules via log:semantics + conjunction); our closure of the conjoined schema rules differs from the 2003 cwm run |
+| cwm_includes_conclusion | documented divergence | engine now derives the `:result :is {…}` formula (`ground_triple` fix: quoted formulae are VALUES, their remaining variables formula-scoped). The vendored ref still cannot match: (1) its quoted `daml:comment` lacks the TAB present in the vendored daml-ex.n3 (`…of\n\tontological…` vs `…of\nontological…`, byte-verified) — generated from an older daml-ex.n3; (2) the ref formula is not closed under its OWN quoted rules (holds `d:father daml:range d:Man`, `daml:range = rdfs:range`, the `{?x ?p1 ?y. ?p1 = ?p2}=>{?x ?p2 ?y}` rule, yet lacks `d:father rdfs:range d:Man`) — we derive 31 statements the 2003 cwm run did not |
 | cwm_includes_t11 | documented divergence | the vendored ref reflects a cwm run whose `log:semantics <t10a.n3>` failed and that purged with an unrecorded `--purge`; our resolver derives the schema-checking conclusions |
 | cwm_unify_unify1 | documented divergence | vendored ref says `:test a :Successful` (rdf:type) but the action concludes `:test :a ?x` (predicate `<#a>`) — ref generated from an older action |
 | numbers.n3 | documented divergence | expected output keeps ONE statement under the generating author's local base (`file:/home/syosi/...#is`) |
 | bad_prefix2 | documented divergence | suite-internal conflict: expects undeclared `:` rejected, while the reasoner manifest's own cwm actions (unify1.n3) require cwm's undeclared-`:`-is-`<#>` convention |
-| sparqldl-10/11/12 | FAIL (sparql-entailment) | unchanged: bnode answer filtering (audit §5 item 6, not taken by this thread) |
+| sparqldl-10/11/12 | FIXED (inference-endgame) | entailment-regime answer restriction + harness eq-ref layer — see §4 |
 
 ### Parser posture (syntax suites)
 
@@ -190,17 +198,36 @@ the strict mode exists for the N3 subsystem's own surface.
 
 ## 4. SPARQL 1.1 entailment regimes
 
-44/47 run pass (RDF + RDFS + OWL-RDF-Based mappings); 23 out-of-scope with reasons
+47/47 run pass (RDF + RDFS + OWL-RDF-Based mappings); 23 out-of-scope with reasons
 (18 OWL-Direct-only, 4 RIF, 1 D-only). Regime layer added by the runner: rdfD2 predicate
 typing, declared-class/property reflexives (rdfs6/10, scm-cls/op/dp), Thing/Nothing edges,
-Thing-typing of NamedIndividuals. Engine fixes this thread: inverseOf domain/range
-transposition; reflexive sameAs pairs within merged equivalence classes (eq-ref on touched
-terms).
+Thing-typing of NamedIndividuals; (endgame) a harness-side **eq-ref** layer over the OwlRl
+closure (OWL 2 Profiles §4.3 Table 4 — reflexive `owl:sameAs` for every closure term; the
+production materializer omits it as store bloat).
 
-Remaining 3 fails (annotated in the report):
-- `sparqldl-10` — non-distinguished (blank-node) query variables.
-- `sparqldl-11/12` — the regime's answer restriction (skolemization) excludes bnode
-  bindings; the harness doesn't filter engine results yet.
+The former 3 fails, fixed by the endgame thread's **answer restriction**
+(`run::EntailmentAnswerFilter`, applied to engine solutions before comparison):
+
+- **C1/skolemization filter** (Entailment Regimes §2 condition C1, §3.1): the
+  Skolemization function `sk` is defined exactly for the blank nodes of the queried
+  graph SG, so a binding to any blank node NOT in SG (e.g. saturation-introduced)
+  leaves `sk(P(BGP))` non-ground and is never a solution — §3.1: *"new blank nodes
+  introduced in the saturation process are not to be returned in the solutions"*.
+  Bindings to bnodes that DO occur in SG are kept (owlds02, "bnodes are not
+  existentials with answer", expects one).
+- **OWL-Direct name-position filter** (`sparqldl-11/12`): the dual-tagged
+  (OWL-Direct + OWL-RDF-Based) tests' vendored expectations are the **Direct-regime**
+  answers. Under §7 variables stand *"in place of class names, object property names,
+  datatype property names, individual names, or literals"* (extended grammar §7.1.2) —
+  an anonymous class expression (bnode) is not a name, so for tests whose regime set
+  includes OWL-Direct, bnode bindings for variables in class/property-name positions
+  are dropped. (Honesty note: under pure RDF-Based semantics the data's restriction
+  bnode WOULD be an answer — §6.4.5 treats bnodes as first-order constants; the filter
+  exists because the suite's expected answers were generated under Direct semantics.)
+- **`sparqldl-10`** needed no non-distinguished-variable machinery at all: with the
+  eq-ref layer in the closure, plain BGP evaluation yields exactly the expected 3
+  (duplicate) rows — the query's projected-away variables bind to named individuals
+  via `b owl:sameAs b`.
 
 ## 5. Prioritized gap map — status after the n3-completeness thread
 
@@ -215,8 +242,9 @@ Remaining 3 fails (annotated in the report):
    semantics, `{}` = true, log:supports; store-NAF kept for unbound subjects).
 5. **N3-parser Turtle strictness pass** — ✅ DONE (strict dialect; TurtleTests 297/297;
    escape/IRI validation shared with the N3 dialect).
-6. **SPARQL-regime answer filtering** (sparqldl-10/11/12) — ❌ NOT TAKEN by this thread
-   (sparql-entailment runner change; unchanged at 44/47).
+6. **SPARQL-regime answer filtering** (sparqldl-10/11/12) — ✅ DONE
+   (inference-endgame thread, 2026-06): entailment-regime answer restriction
+   (C1/skolemization + OWL-Direct name positions) and harness eq-ref layer; 47/47 — §4.
 7. **OWL leftovers** (cls-oo, cls-maxqc1/2, scm-hv/svf/avf) — ✅ DONE
    (owl-rl-completion thread, 2026-06): the §2 table is now fully ✅ or explicitly
    by-design; every implemented rule has a hand-computed-closure unit test.
@@ -225,9 +253,17 @@ Remaining 3 fails (annotated in the report):
    `log:semantics`/`log:content` work under the harness's offline resolver.
    `log:outputString` (test:strings, 2 entries) remains out of scope.
 
-Remaining N3 work, in suite-pressure order: cwm_includes_conclusion (deep multi-document
-log:conclusion parity — the single honest reasoner fail), `log:collectAllIn` (no suite
-pressure), EYE backward list-state idioms beyond what the suite exercises.
+Remaining N3 work, in suite-pressure order (none has suite pressure left — all suites at
+0 fails): `log:collectAllIn`, EYE backward list-state idioms beyond what the suite
+exercises. cwm_includes_conclusion is engine-side DONE (the `ground_triple` formula-value
+fix; the residual mismatch is upstream-reference rot, documented as a divergence).
+
+## 5b. Performance evidence (inference-endgame, 2026-06)
+
+`bench/inference/eye-comparison.md` records the EYE head-to-head (same machine,
+min-of-3, full parse→closure→serialize pipeline both sides) plus the owl-bench.sh
+closure-throughput numbers. Wasm artifact: 1,573,895 B (cargo wasm32 release;
++8 B over the previous 1,573,887 B baseline, attributable to the `ground_triple` fix).
 
 ## 6. Reproduction
 
