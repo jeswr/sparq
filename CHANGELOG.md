@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in inference proof trees (`sparq-reason`, non-default `explain` feature)** —
+  `why(triple)` on `MaterializedGraph` / `MaterializedOwlGraph` / `MaterializedN3Graph`
+  returns a `ProofTree` for any closure triple: which rule fired (W3C spec rule ids —
+  `rdfs2..11`, `cax-sco`, `prp-trp`, `scm-*` — or documented engine rules `inv-dom`/
+  `inv-rng`/`sym-dif`, `n3-rule-<i>`) from which premises, recursively to asserted facts.
+  The shape is flat and ZK-witness-friendly (premises-before-conclusion node list, root
+  last, shared sub-proofs deduplicated, deterministic, terms as self-contained strings —
+  a planned ZKP module can consume it as a derivation witness); JSON + indented-text
+  renderings; depth/size caps (`ExplainOpts`). Proofs are *a witness, not all witnesses*,
+  and always reflect the CURRENT base: after a delta, retracted supports are never served
+  (an alternative support is found, or the triple no longer explains).
+  Design: derivations are *reconstructed* from the counting engines' closed TBox +
+  deterministic emission functions (plus raw TBox edge maps and base reverse indexes kept
+  under the feature) rather than stored per derivation. OWL fallback mode (recursive/
+  equality features) is documented as unexplained; N3 `why()` re-runs the batch engine
+  with proof recording per call. Id-level batch N3 proofs bridge via
+  `explain::n3_proof_tree`. The feature is cfg'd out entirely by default: zero hot-path
+  cost, zero wasm impact.
+
 ### Fixed
+
+- **N3 incremental maintenance: base↔layer ownership transfer (`sparq-reason`)** —
+  deleting a fact that is both asserted and derivable by a recursive-SCC layer made the
+  fact re-enter the layer's derived set during a delete round (it stops seeding the local
+  fixpoint), tripping the sign-homogeneity `debug_assert` (panic in debug builds, a
+  needless *sticky* engine fallback in release). Now recovered with a non-sticky full
+  re-materialization; the graph stays on the counting fast path. Found by the `explain`
+  retraction tests; regression-tested against the from-scratch oracle.
 
 - **Domain/range typing for TBox-orphan properties on the monotone OWL route
   (`sparq-reason`)** — on the batch single-pass path (`rdfs_closure` with the

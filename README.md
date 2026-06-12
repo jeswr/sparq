@@ -132,7 +132,10 @@ a memory-bounded out-of-core path.
   directional language tags, JSON/XML result rendering.
 - **Inference** (opt-in `sparq-reason`) — RDFS, OWL-RL, and a Notation3 engine (EYE-validated
   builtins, goal-directed `<=`), with single-pass materialization and **incremental closure
-  maintenance** (counting-based; deltas ~10³–10⁴× faster than re-materialization).
+  maintenance** (counting-based; deltas ~10³–10⁴× faster than re-materialization). With the
+  non-default `explain` feature, `why(triple)` returns a **proof tree** for any inferred
+  triple (rule + premises, recursively to asserted facts; flat, ZK-witness-friendly shape;
+  JSON + human-readable renderings).
 - **Validation** (opt-in `sparq-shacl`) — SHACL Core at **100% of the W3C core suite**.
 - **Solid access control** (opt-in `sparq-solid`) — pods as named-graph-per-document;
   WAC/ACP evaluated as N3 rules materializing a queryable, triples-native authorization
