@@ -1476,6 +1476,68 @@ impl Graph {
         Ok(())
     }
 
+    /// [`apply_delta`](Self::apply_delta) over the whole DATASET, parsing the batch
+    /// from two N-Quads documents (N-Triples is the default-graph subset): `deletes`
+    /// first, then `inserts`, grouped and applied PER GRAPH — default-graph statements
+    /// to this graph, named-graph statements to the matching [`named`](Self::named)
+    /// sub-graph (auto-created on first insert; deleting from an absent graph is a
+    /// no-op). O(batch) through each graph's delta overlay, no index rebuild. Blank
+    /// nodes denote concrete nodes BY LABEL (unlike SPARQL `DELETE DATA`, which cannot
+    /// name a bnode), which is what makes quad-level retraction of bnode triples
+    /// possible. The string-parsing entry point for bindings (wasm/python) callers.
+    pub fn apply_delta_nquads(&mut self, inserts: &str, deletes: &str) -> Result<(), String> {
+        use oxrdf::GraphName;
+        type Slot = Option<Term>;
+        fn parse(text: &str) -> Result<Vec<(Slot, [Term; 3])>, String> {
+            let mut out = Vec::new();
+            for q in NQuadsParser::new().for_slice(text.as_bytes()) {
+                let q = q.map_err(|e| e.to_string())?;
+                let slot = match q.graph_name {
+                    GraphName::DefaultGraph => None,
+                    GraphName::NamedNode(n) => Some(Term::NamedNode(n)),
+                    GraphName::BlankNode(b) => Some(Term::BlankNode(b)),
+                };
+                out.push((slot, [subject_term(&q.subject), Term::NamedNode(q.predicate), q.object]));
+            }
+            Ok(out)
+        }
+        // Group per slot preserving first-seen order (datasets hold few graphs, so a
+        // linear scan beats hashing Terms), keeping each slot's deletes and inserts
+        // together so they go through ONE apply_delta call (deletes applied first).
+        let mut slots: Vec<(Slot, Vec<[Term; 3]>, Vec<[Term; 3]>)> = Vec::new();
+        for (is_insert, items) in [(false, parse(deletes)?), (true, parse(inserts)?)] {
+            for (slot, t) in items {
+                let entry = match slots.iter_mut().find(|(s, _, _)| *s == slot) {
+                    Some(e) => e,
+                    None => {
+                        slots.push((slot, Vec::new(), Vec::new()));
+                        slots.last_mut().expect("just pushed")
+                    }
+                };
+                if is_insert {
+                    entry.1.push(t);
+                } else {
+                    entry.2.push(t);
+                }
+            }
+        }
+        for (slot, ins, del) in slots {
+            match slot {
+                None => self.apply_delta(&ins, &del)?,
+                Some(name) => {
+                    if let Some(i) = self.named.iter().position(|(n, _)| *n == name) {
+                        self.named[i].1.apply_delta(&ins, &del)?;
+                    } else if !ins.is_empty() {
+                        let mut g = Graph::from_parts(Dict::new(), Vec::new());
+                        g.apply_delta(&ins, &[])?;
+                        self.named.push((name, g));
+                    } // deletes against an absent graph: no-op
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The in-memory half of [`apply_delta`](Self::apply_delta) (no WAL append) — also
     /// the target the WAL replays into on [`open`](Self::open).
     fn apply_delta_mem(&mut self, inserts: &[[Term; 3]], deletes: &[[Term; 3]]) {
@@ -3231,6 +3293,45 @@ mod tests {
 
 #[cfg(test)]
 mod dir_roundtrip_test {
+    /// `apply_delta_nquads` routes per graph: default-graph lines to the main graph,
+    /// named-graph lines to the matching sub-graph (auto-created on first insert),
+    /// deletes-before-inserts, bnodes matched by label, absent-graph deletes a no-op.
+    #[test]
+    fn apply_delta_nquads_routes_per_graph() {
+        use oxrdf::{Literal, NamedNode, Term};
+        let mut g = crate::Graph::load_dataset(
+            "<http://ex/a> <http://ex/p> \"keep\" .\n\
+             <http://ex/a> <http://ex/p> \"drop\" .\n\
+             _:b <http://ex/p> \"bnode\" .\n\
+             <http://ex/x> <http://ex/p> \"g1-drop\" <http://ex/g1> .",
+            "nquads",
+        )
+        .unwrap();
+        g.apply_delta_nquads(
+            // inserts: default graph, existing named graph, and a NEW named graph
+            "<http://ex/a> <http://ex/p> \"new\" .\n\
+             <http://ex/x> <http://ex/p> \"g1-new\" <http://ex/g1> .\n\
+             <http://ex/y> <http://ex/p> \"g2-new\" <http://ex/g2> .",
+            // deletes: default-graph literal, a bnode triple BY LABEL, and one
+            // against an absent graph (must be a no-op, not an error)
+            "<http://ex/a> <http://ex/p> \"drop\" .\n\
+             _:b <http://ex/p> \"bnode\" .\n\
+             <http://ex/x> <http://ex/p> \"g1-drop\" <http://ex/g1> .\n\
+             <http://ex/z> <http://ex/p> \"nope\" <http://ex/absent> .",
+        )
+        .unwrap();
+        let lit = |v: &str| Term::Literal(Literal::new_simple_literal(v));
+        assert_eq!(g.len(), 2); // keep + new (drop and the bnode triple retracted)
+        assert!(g.id_of(&lit("keep")).is_some() && g.id_of(&lit("new")).is_some());
+        let named = |g: &crate::Graph, name: &str| {
+            let name = Term::NamedNode(NamedNode::new_unchecked(name));
+            g.named.iter().find(|(n, _)| *n == name).map(|(_, sub)| sub.len())
+        };
+        assert_eq!(named(&g, "http://ex/g1"), Some(1)); // g1-drop out, g1-new in
+        assert_eq!(named(&g, "http://ex/g2"), Some(1)); // auto-created
+        assert_eq!(named(&g, "http://ex/absent"), None); // delete-only: never created
+    }
+
     #[test]
     fn dir_literal_roundtrip() {
         let g = crate::Graph::load_str("@prefix : <http://ex/> . :a :p \"abc\"@en--ltr .", "turtle").unwrap();

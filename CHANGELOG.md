@@ -25,6 +25,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through plain `Graph.query` — `sparq-text` is a deliberately standalone opt-in
   crate, so exposing it needs a `TextIndex` lifecycle on the wrapper (left as a
   documented follow-up in `crates/sparq-py/TODO.md`, not wired in quietly).
+- **JS/wasm parity wave (`@jeswr/sparq` + `sparq-wasm` + `sparq-core`)** — six recorded
+  parity gaps closed; wasm bundle 1,593,075 → 1,643,103 B (+50,028 B, +3.14%, all from
+  three new wasm capabilities, measured per feature; JS-only features byte-identical):
+  - **ASK from JS** (0 B): `queryBoolean()` now uses the engine's native ASK (boolean
+    JSON form, first-solution early exit) instead of the SELECT-rewrite + count path;
+    `queryJson()` serves ASK too. Plus a test pinning full-text-style matching via plain
+    SPARQL string functions (and that `REGEX` stays compiled out of wasm by design —
+    the engine's non-default `regex` cargo feature).
+  - **Named graphs** (+16,906 B): wasm `Store.loadDataset` (N-Quads/TriG named graphs
+    preserved); JS `options.dataset` on `fromString`/`fromQuads`; `GRAPH`/`FROM`/
+    `FROM NAMED` queries and full-dataset SPARQL Update (already compiled in) now
+    reachable; `match()`/`countQuads()` graph-aware (wildcard spans named graphs via a
+    `UNION { GRAPH ?g … }`).
+  - **Streaming results** (+4,575 B): wasm `Store.queryChunks` cursor over the engine's
+    chunked SPARQL-JSON serialiser (~64 KiB, row-boundary splits, concatenation
+    byte-identical to `query()`); JS `queryBindingsStream()` generator (`for…of` and
+    `for await…of`) backed by a chunk-boundary-agnostic incremental row parser
+    (`SparqlJsonRowsParser`), `queryJsonChunks()` for raw forwarding.
+  - **Incremental updates from JS** (+28,547 B: `applyDelta` +14,895, `updateInPlace`
+    +13,652): new core API `Graph::apply_delta_nquads` (N-Quads batch, deletes-first,
+    routed per graph, named graphs auto-created, bnodes by label); wasm
+    `Store.applyDelta` + `Store.updateInPlace` (engine `update_in_place`); JS
+    `applyDelta`/`addQuads`/`removeQuads`, and `update()` now applies in place —
+    O(batch), no index rebuild.
+  - **Compressed ingest in the browser** (0 B, JS-only): `fromCompressed()` /
+    `decompress()` — zstd via pure-JS `fzstd` (dynamically imported; decodes the
+    multi-frame streams `CompressedSink` emits — re-verified), gzip via `node:zlib`
+    (multi-member) / `DecompressionStream` (single-member, browser caveat documented
+    per the D4 §3 matrix). `fzstd` is the package's single runtime dependency now.
+  - **Dictionary-fetch protocol client** (0 B, JS-only): `SparqDictionaryClient`
+    implements D4 §4 — `Sparq-Dictionary`/`Sparq-Dictionary-Current` negotiation,
+    content-addressed (truncated-id, prefix-verified) dictionary caching with
+    background warm-up from `GET /dictionary/{dict-id}`, pluggable dict-capable
+    decoder hook (fzstd has no dictionary API), RFC 8878 frame-header dictID parsing.
+  - JS test suite 16 → 42 (`node --test`), +1 native `sparq-core` unit test.
+
 - **Opt-in inference proof trees (`sparq-reason`, non-default `explain` feature)** —
   `why(triple)` on `MaterializedGraph` / `MaterializedOwlGraph` / `MaterializedN3Graph`
   returns a `ProofTree` for any closure triple: which rule fired (W3C spec rule ids —

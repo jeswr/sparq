@@ -19,12 +19,42 @@ pub struct Store {
     graph: Graph,
 }
 
+/// The ordered chunk sequence of one query result (see [`Store::query_chunks`]):
+/// concatenating every chunk yields exactly [`Store::query`]'s JSON string. Chunks
+/// split only at solution-row boundaries (~64 KiB flushes), so a consumer can parse
+/// rows incrementally without ever holding the whole result as one JS string.
+#[wasm_bindgen]
+pub struct QueryChunks {
+    chunks: std::vec::IntoIter<String>,
+}
+
+#[wasm_bindgen]
+impl QueryChunks {
+    /// The next chunk, or `undefined` when the sequence is exhausted.
+    pub fn next(&mut self) -> Option<String> {
+        self.chunks.next()
+    }
+}
+
 #[wasm_bindgen]
 impl Store {
     /// Parses an RDF document into a store. `format`: `"turtle"` | `"ntriples"` |
     /// `"nquads"` | `"trig"` (named graphs are folded into the default graph).
     pub fn load(text: &str, format: &str) -> Result<Store, JsError> {
         let graph = Graph::load_str(text, format).map_err(|e| JsError::new(&e))?;
+        Ok(Store { graph })
+    }
+
+    /// Like [`load`](Self::load) but preserves NAMED GRAPHS from N-Quads / TriG as
+    /// separate sub-graphs, so `GRAPH <iri> { … }` / `GRAPH ?g { … }` patterns,
+    /// `FROM` / `FROM NAMED` dataset clauses, and SPARQL Updates with `GRAPH`
+    /// blocks (including `CLEAR GRAPH` / `DROP GRAPH`) all see the dataset.
+    /// Formats without named graphs ("turtle" / "ntriples") load as [`load`].
+    /// [`size`](Self::size) / [`heapBytes`](Self::heap_bytes) report the DEFAULT
+    /// graph only (count the dataset with `GRAPH ?g` queries).
+    #[wasm_bindgen(js_name = loadDataset)]
+    pub fn load_dataset(text: &str, format: &str) -> Result<Store, JsError> {
+        let graph = Graph::load_dataset(text, format).map_err(|e| JsError::new(&e))?;
         Ok(Store { graph })
     }
 
@@ -64,6 +94,21 @@ impl Store {
         sparq_engine::query_json(&self.graph, sparql).map_err(|e| JsError::new(&e))
     }
 
+    /// Like [`query`](Self::query) but returns the SPARQL 1.1 JSON document as an
+    /// ordered sequence of ~64 KiB chunks (split only at solution-row boundaries)
+    /// instead of one string — so large results cross the wasm boundary piecewise
+    /// and the caller can surface rows incrementally. The chunk sequence is
+    /// produced eagerly inside wasm (the engine's chunked serialiser, which never
+    /// concatenates a whole-result string); the streaming win is on the JS side,
+    /// which holds at most one chunk at a time.
+    #[wasm_bindgen(js_name = queryChunks)]
+    pub fn query_chunks(&self, sparql: &str) -> Result<QueryChunks, JsError> {
+        let chunks =
+            sparq_engine::query_json_chunks_with_budget(&self.graph, sparql, &sparq_engine::QueryBudget::unlimited())
+                .map_err(|e| JsError::new(&e))?;
+        Ok(QueryChunks { chunks: chunks.into_iter() })
+    }
+
     /// Counts the solutions of a SELECT query *without* materialising them — for a
     /// single-pattern scan or a two-pattern join the count is read straight from
     /// the index (no result rows built). Ideal for "how many?" UI queries on a
@@ -75,10 +120,32 @@ impl Store {
     /// Applies a SPARQL 1.1 Update (`INSERT DATA`, `DELETE DATA`, `CLEAR`,
     /// `DELETE/INSERT … WHERE` on the default graph) and returns the **new** store —
     /// the receiver is immutable and remains valid. Mirrors `sparq_engine::update`'s
-    /// rebuild semantics.
+    /// rebuild semantics. Prefer [`updateInPlace`](Self::update_in_place), which is
+    /// O(batch) instead of O(store) for the data operations.
     pub fn update(&self, sparql: &str) -> Result<Store, JsError> {
         let graph = sparq_engine::update(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
         Ok(Store { graph })
+    }
+
+    /// Applies a SPARQL 1.1 Update IN PLACE through the store's delta overlay
+    /// (`sparq_engine::update_in_place`): data operations are O(batch) per target
+    /// graph — no index rebuild — and `GRAPH` blocks / graph templates / `CLEAR` /
+    /// `DROP` / `CREATE` address named graphs. The dictionary grows append-only,
+    /// so existing term ids stay valid.
+    #[wasm_bindgen(js_name = updateInPlace)]
+    pub fn update_in_place(&mut self, sparql: &str) -> Result<(), JsError> {
+        sparq_engine::update_in_place(&mut self.graph, sparql).map_err(|e| JsError::new(&e))
+    }
+
+    /// Incremental quad-level delta, mirroring `Graph::apply_delta`: parses
+    /// `inserts` and `deletes` as N-Quads (N-Triples for default-graph data) and
+    /// applies them as ONE batch — deletes first, then inserts, routed per graph
+    /// (named graphs auto-created on first insert) — through the delta overlay:
+    /// O(batch), no rebuild. Blank nodes denote concrete nodes BY LABEL, so bnode
+    /// triples CAN be retracted (impossible via SPARQL `DELETE DATA`).
+    #[wasm_bindgen(js_name = applyDelta)]
+    pub fn apply_delta(&mut self, inserts: &str, deletes: &str) -> Result<(), JsError> {
+        self.graph.apply_delta_nquads(inserts, deletes).map_err(|e| JsError::new(&e))
     }
 }
 

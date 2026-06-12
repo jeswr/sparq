@@ -96,6 +96,37 @@ test('ASK queries (both ASK {…} and ASK WHERE {…})', async () => {
   );
 });
 
+test('ASK is evaluated natively (boolean JSON form, FILTER honoured)', async () => {
+  const store = await load();
+  // queryJson returns the SPARQL 1.1 boolean results form for ASK
+  assert.deepEqual(JSON.parse(store.queryJson('PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }')), {
+    head: {},
+    boolean: true,
+  });
+  // ASK over a pattern with a FILTER (exercises real evaluation, not just a count)
+  assert.equal(store.queryBoolean('PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 28) }'), true);
+  assert.equal(store.queryBoolean('PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 99) }'), false);
+  // queryBoolean rejects non-ASK forms
+  assert.throws(() => store.queryBoolean('SELECT * WHERE { ?s ?p ?o }'), /ASK/);
+});
+
+test('full-text-style matching via plain SPARQL string functions', async () => {
+  // sparq's full-text crate (sparq-text) rewrites text: magic predicates into
+  // plain SPARQL — which the wasm engine evaluates directly. This pins the
+  // plain-SPARQL substring path that browser callers get.
+  const store = await load();
+  const rows = store.queryBindings(
+    'SELECT ?s WHERE { ?s ?p ?o FILTER(isLiteral(?o) && CONTAINS(LCASE(STR(?o)), "ali")) }',
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].get('s').value, 'http://ex/alice');
+  assert.equal(store.queryBoolean('ASK { ?s ?p ?o FILTER(STRSTARTS(STR(?o), "AC")) }'), true); // "ACME"
+  assert.equal(store.queryBoolean('ASK { ?s ?p ?o FILTER(CONTAINS(STR(?o), "zzz")) }'), false);
+  // REGEX/REPLACE are deliberately compiled out of the wasm build (the engine's
+  // non-default `regex` cargo feature) to keep the bundle small — pin the error.
+  assert.throws(() => store.queryBoolean('ASK { ?s ?p ?o FILTER(REGEX(STR(?o), "z")) }'), /Regex/);
+});
+
 test('query() dispatches on the query form', async () => {
   const store = await load();
   assert.equal(store.query('ASK { ?s ?p ?o }'), true);
@@ -191,6 +222,178 @@ test('SPARQL update: INSERT DATA / DELETE DATA / DELETE-INSERT WHERE / CLEAR', a
 
   store.update('CLEAR ALL');
   assert.equal(store.size, 0);
+});
+
+const DATASET = `<http://ex/d> <http://ex/p> "default" .
+<http://ex/a> <http://ex/p> "in-g1" <http://ex/g1> .
+<http://ex/a> <http://ex/q> "also-g1" <http://ex/g1> .
+<http://ex/b> <http://ex/p> "in-g2" <http://ex/g2> .`;
+
+const loadDataset = () => SparqStore.fromString(DATASET, 'nquads', { dataset: true });
+
+test('dataset stores preserve named graphs (GRAPH / FROM / FROM NAMED)', async () => {
+  const store = await loadDataset();
+  assert.equal(store.size, 1); // size reports the default graph
+
+  const g1 = store.queryBindings('SELECT ?o WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p> ?o } }');
+  assert.equal(g1.length, 1);
+  assert.equal(g1[0].get('o').value, 'in-g1');
+
+  const all = store.queryBindings('SELECT ?g ?o WHERE { GRAPH ?g { ?s ?p ?o } }');
+  assert.equal(all.length, 3);
+  assert.deepEqual([...new Set(all.map(r => r.get('g').value))].sort(), ['http://ex/g1', 'http://ex/g2']);
+
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g2> { ?s ?p "in-g2" } }'), true);
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g2> { ?s ?p "in-g1" } }'), false);
+
+  // FROM merges the named graph into the active default graph
+  const from = store.queryBindings('SELECT ?o FROM <http://ex/g1> WHERE { ?s <http://ex/p> ?o }');
+  assert.deepEqual(from.map(r => r.get('o').value), ['in-g1']);
+  // FROM NAMED scopes which graphs GRAPH ?g ranges over
+  const fromNamed = store.queryBindings(
+    'SELECT ?o FROM NAMED <http://ex/g2> WHERE { GRAPH ?g { ?s ?p ?o } }',
+  );
+  assert.deepEqual(fromNamed.map(r => r.get('o').value), ['in-g2']);
+
+  // folding (the default) is unchanged
+  const folded = await SparqStore.fromString(DATASET, 'nquads');
+  assert.equal(folded.size, 4);
+  // dataset + compressed is rejected with a clear error
+  await assert.rejects(SparqStore.fromString(DATASET, 'nquads', { dataset: true, compressed: true }), /compressed/);
+});
+
+test('SPARQL update addresses named graphs (GRAPH blocks, CLEAR GRAPH)', async () => {
+  const store = await loadDataset();
+  store.update('INSERT DATA { GRAPH <http://ex/g3> { <http://ex/c> <http://ex/p> "in-g3" } }');
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g3> { ?s ?p "in-g3" } }'), true);
+  assert.equal(store.size, 1); // default graph untouched
+
+  store.update('DELETE DATA { GRAPH <http://ex/g1> { <http://ex/a> <http://ex/p> "in-g1" } }');
+  assert.equal(store.count('SELECT ?o WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }'), 1);
+
+  // DELETE/INSERT with a GRAPH template moves data between graphs
+  store.update(
+    'DELETE { GRAPH <http://ex/g2> { ?s ?p ?o } } INSERT { GRAPH <http://ex/g3> { ?s ?p ?o } } WHERE { GRAPH <http://ex/g2> { ?s ?p ?o } }',
+  );
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g2> { ?s ?p ?o } }'), false);
+  assert.equal(store.count('SELECT ?o WHERE { GRAPH <http://ex/g3> { ?s ?p ?o } }'), 2);
+
+  store.update('CLEAR GRAPH <http://ex/g3>');
+  assert.equal(store.queryBoolean('ASK { GRAPH ?g { ?s ?p ?o } }'), store.count('SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } }') > 0);
+  assert.equal(store.count('SELECT ?o WHERE { GRAPH <http://ex/g3> { ?s ?p ?o } }'), 0);
+});
+
+test('match()/countQuads are graph-aware on dataset stores', async () => {
+  const store = await loadDataset();
+  const g1 = DF.namedNode('http://ex/g1');
+
+  // graph wildcard spans default + named graphs
+  const all = store.match();
+  assert.equal(all.length, 4);
+  assert.equal(all.filter(q => q.graph.termType === 'DefaultGraph').length, 1);
+  assert.equal(all.filter(q => q.graph.equals(g1)).length, 2);
+
+  // constant graph
+  const inG1 = store.match(null, null, null, g1);
+  assert.equal(inG1.length, 2);
+  assert.ok(inG1.every(q => q.graph.equals(g1)));
+  assert.ok(inG1.some(q => q.object.equals(DF.literal('also-g1'))));
+
+  // constant graph + constant triple positions
+  assert.equal(store.match(DF.namedNode('http://ex/a'), DF.namedNode('http://ex/p'), DF.literal('in-g1'), g1).length, 1);
+  assert.equal(store.match(DF.namedNode('http://ex/a'), DF.namedNode('http://ex/p'), DF.literal('in-g1'), DF.defaultGraph()).length, 0);
+
+  // default graph scoping
+  assert.equal(store.match(null, null, null, DF.defaultGraph()).length, 1);
+
+  // counts agree (count path is non-materialising where possible)
+  assert.equal(store.countQuads(), 4);
+  assert.equal(store.countQuads(null, null, null, g1), 2);
+  assert.equal(store.countQuads(null, null, null, DF.defaultGraph()), 1);
+  assert.equal(store.countQuads(null, null, null, DF.namedNode('http://ex/absent')), 0);
+});
+
+test('fromQuads preserves named graphs under options.dataset', async () => {
+  const ex = v => DF.namedNode(`http://ex/${v}`);
+  const quads = [
+    DF.quad(ex('s'), ex('p'), DF.literal('default')),
+    DF.quad(ex('s'), ex('p'), DF.literal('named'), ex('g')),
+  ];
+  const store = await SparqStore.fromQuads(quads, { dataset: true });
+  assert.equal(store.size, 1);
+  assert.equal(store.countQuads(), 2);
+  const [named] = store.match(null, null, null, ex('g'));
+  assert.ok(named.object.equals(DF.literal('named')));
+  assert.ok(named.graph.equals(ex('g')));
+});
+
+test('applyDelta: incremental quad-level inserts and removals (no rebuild)', async () => {
+  const ex = v => DF.namedNode(`http://ex/${v}`);
+  const store = await load();
+
+  // insert: new terms (typed + language literals) grow the dictionary append-only
+  store.addQuads([
+    DF.quad(ex('carol'), ex('name'), DF.literal('Carol')),
+    DF.quad(ex('carol'), ex('age'), DF.literal('28', DF.namedNode(`${XSD}integer`))),
+    DF.quad(ex('carol'), ex('greets'), DF.literal('hallo', 'de')),
+  ]);
+  assert.equal(store.size, 9);
+  assert.equal(store.queryBoolean('ASK { ?s ?p "28"^^<http://www.w3.org/2001/XMLSchema#integer> }'), true);
+  // numeric filter cache covers the appended literal
+  assert.equal(store.queryBoolean('PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a = 28) }'), true);
+
+  // remove: delete one of them again + a no-op delete of an absent triple
+  store.removeQuads([
+    DF.quad(ex('carol'), ex('greets'), DF.literal('hallo', 'de')),
+    DF.quad(ex('nobody'), ex('name'), DF.literal('Nobody')),
+  ]);
+  assert.equal(store.size, 8);
+
+  // deletes are applied before inserts within one batch
+  store.applyDelta(
+    [DF.quad(ex('carol'), ex('name'), DF.literal('Caroline'))],
+    [DF.quad(ex('carol'), ex('name'), DF.literal('Carol'))],
+  );
+  assert.equal(store.match(ex('carol'), ex('name')).length, 1);
+  assert.equal(store.match(ex('carol'), ex('name'))[0].object.value, 'Caroline');
+
+  // bnode triples are retractable BY LABEL (impossible via SPARQL DELETE DATA)
+  const [orgQuad] = store.match(null, null, DF.literal('ACME'));
+  assert.equal(orgQuad.subject.termType, 'BlankNode');
+  store.removeQuads([orgQuad]);
+  assert.equal(store.match(null, null, DF.literal('ACME')).length, 0);
+});
+
+test('applyDelta routes named-graph quads (auto-creating graphs)', async () => {
+  const ex = v => DF.namedNode(`http://ex/${v}`);
+  const store = await loadDataset();
+  store.applyDelta(
+    [
+      DF.quad(ex('c'), ex('p'), DF.literal('new-default')),
+      DF.quad(ex('c'), ex('p'), DF.literal('new-in-g1'), ex('g1')),
+      DF.quad(ex('c'), ex('p'), DF.literal('new-in-g9'), ex('g9')), // absent graph: auto-created
+    ],
+    [DF.quad(ex('a'), ex('p'), DF.literal('in-g1'), ex('g1'))],
+  );
+  assert.equal(store.size, 2);
+  assert.equal(store.countQuads(null, null, null, ex('g1')), 2); // -1 +1
+  assert.equal(store.countQuads(null, null, null, ex('g9')), 1);
+  assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g9> { ?s ?p "new-in-g9" } }'), true);
+  // delete-only against an absent graph is a no-op, and never creates the graph
+  store.removeQuads([DF.quad(ex('z'), ex('p'), DF.literal('x'), ex('never'))]);
+  assert.equal(store.count('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }'), 3); // g1 g2 g9
+});
+
+test('update() applies in place: handle stays valid, named graphs preserved', async () => {
+  const store = await loadDataset();
+  store.update('INSERT DATA { <http://ex/n> <http://ex/p> "via-update" }');
+  store.update('DELETE DATA { <http://ex/d> <http://ex/p> "default" }');
+  assert.equal(store.size, 1);
+  // named graphs survive default-graph data operations
+  assert.equal(store.countQuads(null, null, null, DF.namedNode('http://ex/g1')), 2);
+  // interleave with quad-level deltas on the same handle
+  store.addQuads([DF.quad(DF.namedNode('http://ex/n2'), DF.namedNode('http://ex/p'), DF.literal('mixed'))]);
+  assert.equal(store.size, 2);
 });
 
 test('engine errors surface as JS exceptions', async () => {

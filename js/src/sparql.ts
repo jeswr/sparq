@@ -37,6 +37,83 @@ export function termFromSparqlJson(term: SparqlJsonTerm): RDF.Term {
   }
 }
 
+/**
+ * Incremental parser for a *chunked* SPARQL 1.1 JSON results document (the
+ * engine's chunk sequence concatenates to one valid document): feed chunks
+ * with `push()`, get back the solution rows completed by each chunk. Holds at
+ * most one chunk plus a partial row in memory — never the whole document.
+ * Rows are extracted with a string-aware brace scanner, so it stays correct
+ * even if a future engine splits a chunk mid-row.
+ */
+export class SparqlJsonRowsParser {
+  #buf = '';
+  #inBindings = false;
+  #done = false;
+
+  /** Set when the document is the ASK boolean form (it then has no rows). */
+  boolean: boolean | undefined;
+
+  /** Feeds the next chunk; returns the rows it completed. */
+  push(chunk: string): Record<string, SparqlJsonTerm>[] {
+    if (this.#done) return [];
+    this.#buf += chunk;
+    if (!this.#inBindings) {
+      const start = this.#buf.indexOf('"bindings":[');
+      if (start < 0) {
+        // The ASK boolean form has no bindings array at all.
+        const bool = /"boolean"\s*:\s*(true|false)/.exec(this.#buf);
+        if (bool) {
+          this.boolean = bool[1] === 'true';
+          this.#done = true;
+          this.#buf = '';
+        }
+        return []; // head not complete yet — keep buffering
+      }
+      this.#buf = this.#buf.slice(start + '"bindings":['.length);
+      this.#inBindings = true;
+    }
+    return this.#scanRows();
+  }
+
+  /** Extracts the complete top-level `{…}` row objects currently buffered. */
+  #scanRows(): Record<string, SparqlJsonTerm>[] {
+    const rows: Record<string, SparqlJsonTerm>[] = [];
+    const buf = this.#buf;
+    let i = 0;
+    while (i < buf.length) {
+      const c = buf[i]!;
+      if (c === ',' || c === ' ' || c === '\n' || c === '\t' || c === '\r') {
+        i++;
+      } else if (c === ']') {
+        this.#done = true; // end of the bindings array; trailing "}}"' ignored
+        this.#buf = '';
+        return rows;
+      } else if (c === '{') {
+        // Scan to the matching close brace, JSON-string-aware.
+        let depth = 0;
+        let inString = false;
+        let j = i;
+        for (; j < buf.length; j++) {
+          const ch = buf[j]!;
+          if (inString) {
+            if (ch === '\\') j++;
+            else if (ch === '"') inString = false;
+          } else if (ch === '"') inString = true;
+          else if (ch === '{') depth++;
+          else if (ch === '}' && --depth === 0) break;
+        }
+        if (j >= buf.length) break; // row incomplete — wait for the next chunk
+        rows.push(JSON.parse(buf.slice(i, j + 1)) as Record<string, SparqlJsonTerm>);
+        i = j + 1;
+      } else {
+        throw new Error(`malformed SPARQL JSON results: unexpected ${JSON.stringify(c)} in bindings array`);
+      }
+    }
+    this.#buf = buf.slice(i);
+    return rows;
+  }
+}
+
 // --- RDF/JS terms → N-Triples / SPARQL syntax ---------------------------------------------------
 
 function escapeLiteral(value: string): string {
@@ -141,9 +218,12 @@ export function detectQueryForm(sparql: string): { form: QueryForm; index: numbe
 }
 
 /**
- * Rewrites an ASK query to an equivalent `SELECT *` query (the engine
- * evaluates SELECT only; the caller tests result-count > 0). `ASK WHERE {…}`
+ * Rewrites an ASK query to an equivalent `SELECT *` query. `ASK WHERE {…}`
  * and `ASK {…}` are both valid SPARQL after substituting `SELECT *`.
+ *
+ * Legacy helper: the engine now evaluates ASK natively (with first-solution
+ * early exit), so `SparqStore` no longer rewrites — kept for callers that
+ * target SELECT-only endpoints.
  */
 export function askToSelect(sparql: string): string {
   const form = detectQueryForm(sparql);
