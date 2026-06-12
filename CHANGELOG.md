@@ -26,7 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   equality features) is documented as unexplained; N3 `why()` re-runs the batch engine
   with proof recording per call. Id-level batch N3 proofs bridge via
   `explain::n3_proof_tree`. The feature is cfg'd out entirely by default: zero hot-path
-  cost, zero wasm impact.
+  cost, zero wasm impact (sparq-reason is not in the wasm graph; bundle byte-identical).
+  Measured cost when ON (olympics 1.78M triples, paired best-of-2, M1 Air): batch
+  `materialize_*` unchanged (untouched code); incremental handles pay for the base
+  reverse indexes — initial build ≈1.9–2.2× (RDFS 0.27→0.61 s, OWL-mono 0.30→0.64 s,
+  OWL-fixpoint 0.34→0.66 s), 10k-triple deltas ≈1.5–2.1× (all still ms-scale,
+  ≥89× faster than re-materialization); N3 unchanged (no extra maintenance state).
+  Design lever if that ever matters: build the indexes lazily on first `why()`.
 
 ### Fixed
 

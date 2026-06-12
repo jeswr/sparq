@@ -36,8 +36,12 @@ use crate::explain::{
 /// incrementally on ABox deltas.
 #[derive(Default)]
 pub(super) struct RdfsExplain {
-    by_subj: FxHashMap<Id, Vec<[Id; 3]>>,
-    by_obj: FxHashMap<Id, Vec<[Id; 3]>>,
+    /// Reverse indexes over the base. HASH-SET buckets: deletes must be O(1) per entry
+    /// (Vec + position scan measured a 38x cliff on 10k-delete deltas — popular objects
+    /// like a common class make buckets huge). Determinism is unaffected: `candidates()`
+    /// sorts at query time.
+    by_subj: FxHashMap<Id, FxHashSet<[Id; 3]>>,
+    by_obj: FxHashMap<Id, FxHashSet<[Id; 3]>>,
     sc_raw: FxHashMap<Id, Vec<Id>>,
     sp_raw: FxHashMap<Id, Vec<Id>>,
     dom_raw: FxHashMap<Id, Vec<Id>>,
@@ -73,21 +77,17 @@ impl RdfsExplain {
     pub(super) fn remove_triples(&mut self, removed: &[[Id; 3]]) {
         for t in removed {
             if let Some(v) = self.by_subj.get_mut(&t[0]) {
-                if let Some(ix) = v.iter().position(|x| x == t) {
-                    v.swap_remove(ix);
-                }
+                v.remove(t);
             }
             if let Some(v) = self.by_obj.get_mut(&t[2]) {
-                if let Some(ix) = v.iter().position(|x| x == t) {
-                    v.swap_remove(ix);
-                }
+                v.remove(t);
             }
         }
     }
 
     fn index(&mut self, t: [Id; 3]) {
-        self.by_subj.entry(t[0]).or_default().push(t);
-        self.by_obj.entry(t[2]).or_default().push(t);
+        self.by_subj.entry(t[0]).or_default().insert(t);
+        self.by_obj.entry(t[2]).or_default().insert(t);
     }
 
     /// Base triples whose emissions can have `id` as the conclusion's subject — i.e. every
@@ -96,10 +96,10 @@ impl RdfsExplain {
     fn candidates(&self, id: Id) -> Vec<[Id; 3]> {
         let mut c: Vec<[Id; 3]> = Vec::new();
         if let Some(v) = self.by_subj.get(&id) {
-            c.extend_from_slice(v);
+            c.extend(v.iter().copied());
         }
         if let Some(v) = self.by_obj.get(&id) {
-            c.extend_from_slice(v);
+            c.extend(v.iter().copied());
         }
         c.sort_unstable();
         c.dedup();
@@ -328,8 +328,9 @@ enum EdgeOrigin {
 /// scan in `rematerialize`), so no plumbing into the maintenance internals is needed.
 #[derive(Default)]
 pub(super) struct OwlExplain {
-    by_subj: FxHashMap<Id, Vec<[Id; 3]>>,
-    by_obj: FxHashMap<Id, Vec<[Id; 3]>>,
+    /// Reverse indexes over the base (hash-set buckets — see [`RdfsExplain`]).
+    by_subj: FxHashMap<Id, FxHashSet<[Id; 3]>>,
+    by_obj: FxHashMap<Id, FxHashSet<[Id; 3]>>,
     sc_raw: FxHashMap<Id, Vec<(Id, EdgeOrigin)>>,
     sp_raw: FxHashMap<Id, Vec<(Id, EdgeOrigin)>>,
     /// Base-asserted domain/range classes per property.
@@ -346,8 +347,8 @@ impl OwlExplain {
         *self = OwlExplain::default();
         let mut occurring: FxHashSet<Id> = FxHashSet::default();
         for &t in base {
-            self.by_subj.entry(t[0]).or_default().push(t);
-            self.by_obj.entry(t[2]).or_default().push(t);
+            self.by_subj.entry(t[0]).or_default().insert(t);
+            self.by_obj.entry(t[2]).or_default().insert(t);
             let [s, p, o] = t;
             if p == v.sub_class {
                 self.sc_raw.entry(s).or_default().push((o, EdgeOrigin::Base));
@@ -394,22 +395,18 @@ impl OwlExplain {
         // ABox-only by construction: TBox/axiom/special deltas rebuild instead (the
         // maintenance path enforces it), so only the reverse indexes can change here.
         for &t in added {
-            self.by_subj.entry(t[0]).or_default().push(t);
-            self.by_obj.entry(t[2]).or_default().push(t);
+            self.by_subj.entry(t[0]).or_default().insert(t);
+            self.by_obj.entry(t[2]).or_default().insert(t);
         }
     }
 
     pub(super) fn remove_triples(&mut self, removed: &[[Id; 3]]) {
         for t in removed {
             if let Some(v) = self.by_subj.get_mut(&t[0]) {
-                if let Some(ix) = v.iter().position(|x| x == t) {
-                    v.swap_remove(ix);
-                }
+                v.remove(t);
             }
             if let Some(v) = self.by_obj.get_mut(&t[2]) {
-                if let Some(ix) = v.iter().position(|x| x == t) {
-                    v.swap_remove(ix);
-                }
+                v.remove(t);
             }
         }
     }
@@ -417,10 +414,10 @@ impl OwlExplain {
     fn candidates(&self, id: Id) -> Vec<[Id; 3]> {
         let mut c: Vec<[Id; 3]> = Vec::new();
         if let Some(v) = self.by_subj.get(&id) {
-            c.extend_from_slice(v);
+            c.extend(v.iter().copied());
         }
         if let Some(v) = self.by_obj.get(&id) {
-            c.extend_from_slice(v);
+            c.extend(v.iter().copied());
         }
         c.sort_unstable();
         c.dedup();
