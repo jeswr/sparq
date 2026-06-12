@@ -88,6 +88,14 @@ Measured with `bb 5.0.0-nightly.20260324` and `nargo 1.0.0-beta.21`, using `--n-
 | `f64` | `367.3` | `367.4` | `307.6` | `273.4` |
 | `f128` | `630.1` | `630.1` | `543.9` | `524.6` |
 
+The SPARQL kernels (comparisons `eq`/`ne`/`lt`/`le`/`gt`/`ge`, the
+round-to-integral family, `sqrt`, and `to_u64`/`to_i64`) are measured with the
+XOR-fold harness pattern, so their per-call estimates include one `new()`
+decode per call; see the table in `bench/README.md` and
+`bench/float_ops_baseline-kernels.json`. `bench/float_ops_latest.json` carries
+all 68 rows, so the default `compare_float_benchmarks.py` run guards both the
+arithmetic and the kernel operations.
+
 The current f32/f64 add, mul, and div counts are below the May-2026 `noir_IEEE754` reference amortized counts:
 
 | Size | Add/Sub | Mul | Div |

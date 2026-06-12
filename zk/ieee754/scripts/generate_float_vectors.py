@@ -11,6 +11,7 @@ into the generated Noir tests as an additional corpus source.
 from __future__ import annotations
 
 import argparse
+import math
 import random
 import re
 import urllib.error
@@ -285,6 +286,432 @@ def bits_for_fraction(fmt: FloatFormat, value: Fraction) -> int:
     return pack_finite(fmt, False, value)
 
 
+COMPARE_OPS = ["eq", "ne", "lt", "le", "gt", "ge"]
+ROUND_OPS = ["floor", "ceil", "trunc", "round_ties_even"]
+CAST_OPS = ["to_u64", "to_i64"]
+
+
+def signed_extended_value(fmt: FloatFormat, bits: int):
+    """Numeric value of a non-NaN float as Fraction or +/-inf float."""
+    sign, exponent, _mantissa = split_bits(fmt, bits)
+
+    if is_infinite(fmt, bits):
+        return float("-inf") if sign else float("inf")
+
+    value_sign, magnitude = finite_fraction(fmt, bits)
+    return -magnitude if value_sign else magnitude
+
+
+def reference_compare(fmt: FloatFormat, op: str, left: int, right: int) -> bool:
+    if is_nan(fmt, left) or is_nan(fmt, right):
+        return op == "ne"
+
+    a = signed_extended_value(fmt, left)
+    b = signed_extended_value(fmt, right)
+
+    if op == "eq":
+        return a == b
+    if op == "ne":
+        return a != b
+    if op == "lt":
+        return a < b
+    if op == "le":
+        return a <= b
+    if op == "gt":
+        return a > b
+    if op == "ge":
+        return a >= b
+    raise ValueError(f"unsupported comparison: {op}")
+
+
+def reference_round_integral(fmt: FloatFormat, op: str, bits: int) -> int:
+    if is_nan(fmt, bits):
+        return canonical_nan(fmt)
+    if is_infinite(fmt, bits) or is_zero(fmt, bits):
+        return bits
+
+    sign, magnitude = finite_fraction(fmt, bits)
+    value = -magnitude if sign else magnitude
+
+    if op == "floor":
+        result = math.floor(value)
+    elif op == "ceil":
+        result = math.ceil(value)
+    elif op == "trunc":
+        result = int(value)
+    elif op == "round_ties_even":
+        lower = math.floor(value)
+        fraction = value - lower
+        if fraction > Fraction(1, 2):
+            result = lower + 1
+        elif fraction < Fraction(1, 2):
+            result = lower
+        elif lower % 2 == 0:
+            result = lower
+        else:
+            result = lower + 1
+    else:
+        raise ValueError(f"unsupported rounding op: {op}")
+
+    if result == 0:
+        return zero(fmt, sign)
+    return pack_finite(fmt, result < 0, Fraction(abs(result)))
+
+
+def reference_sqrt(fmt: FloatFormat, bits: int) -> int:
+    if is_nan(fmt, bits):
+        return canonical_nan(fmt)
+    if is_zero(fmt, bits):
+        return bits
+
+    sign, _exponent, _mantissa = split_bits(fmt, bits)
+    if sign:
+        return canonical_nan(fmt)
+    if is_infinite(fmt, bits):
+        return bits
+
+    _value_sign, magnitude = finite_fraction(fmt, bits)
+    exponent = floor_log2(magnitude) // 2  # sqrt(magnitude) in [2^e, 2^(e+1))
+    scaled = scale_by_power_of_two(magnitude, 2 * (fmt.mantissa_bits - exponent))
+    numerator, denominator = scaled.numerator, scaled.denominator
+
+    # floor(sqrt(scaled)) with exact integer arithmetic.
+    root = math.isqrt(numerator // denominator)
+    while (root + 1) * (root + 1) * denominator <= numerator:
+        root += 1
+    while root * root * denominator > numerator:
+        root -= 1
+
+    # Round to nearest, ties to even: compare scaled against (root + 1/2)^2.
+    tie_compare = 4 * numerator - ((2 * root + 1) ** 2) * denominator
+    if tie_compare > 0:
+        rounded = root + 1
+    elif tie_compare < 0:
+        rounded = root
+    elif root % 2 == 0:
+        rounded = root
+    else:
+        rounded = root + 1
+
+    if rounded == fmt.hidden_bit << 1:
+        rounded = fmt.hidden_bit
+        exponent += 1
+
+    exponent_field = exponent + fmt.bias
+    assert 0 < exponent_field < fmt.max_exponent, "sqrt cannot overflow or go subnormal"
+    return (exponent_field << fmt.mantissa_bits) | (rounded - fmt.hidden_bit)
+
+
+def reference_to_int(fmt: FloatFormat, op: str, bits: int) -> tuple[bool, int]:
+    """XPath F&O cast semantics: trunc toward zero, then range check."""
+    if is_nan(fmt, bits) or is_infinite(fmt, bits):
+        return (False, 0)
+
+    sign, magnitude = finite_fraction(fmt, bits)
+    value = -magnitude if sign else magnitude
+    truncated = int(value)
+
+    if op == "to_u64":
+        return (0 <= truncated <= (1 << 64) - 1, truncated)
+    if op == "to_i64":
+        return (-(1 << 63) <= truncated <= (1 << 63) - 1, truncated)
+    raise ValueError(f"unsupported cast: {op}")
+
+
+@dataclass(frozen=True)
+class CompareVector:
+    fmt: FloatFormat
+    op: str
+    left: int
+    right: int
+    expected: bool
+    source: str
+
+    def key(self):
+        return ("cmp", self.fmt.name, self.op, self.left, self.right)
+
+
+@dataclass(frozen=True)
+class UnaryVector:
+    fmt: FloatFormat
+    op: str
+    input: int
+    expected: int
+    source: str
+
+    def key(self):
+        return ("unary", self.fmt.name, self.op, self.input)
+
+
+@dataclass(frozen=True)
+class CastVector:
+    fmt: FloatFormat
+    op: str
+    input: int
+    valid: bool
+    expected: int
+    source: str
+
+    def key(self):
+        return ("cast", self.fmt.name, self.op, self.input)
+
+
+def compare_pairs(fmt: FloatFormat) -> list[tuple[int, int]]:
+    v = interesting_values(fmt)
+    neg = lambda bits: bits ^ fmt.sign_mask
+
+    return [
+        (v["one"], v["two"]),
+        (v["two"], v["one"]),
+        (v["one"], v["one"]),
+        (v["one"], v["one_next"]),
+        (v["neg_one"], v["one"]),
+        (v["one"], v["neg_one"]),
+        (v["neg_one"], neg(v["two"])),
+        (neg(v["two"]), v["neg_one"]),
+        (v["pos_zero"], v["neg_zero"]),
+        (v["neg_zero"], v["pos_zero"]),
+        (v["pos_zero"], v["pos_zero"]),
+        (v["neg_zero"], v["min_sub"]),
+        (v["min_sub"], v["two_min_sub"]),
+        (v["max_sub"], v["min_norm"]),
+        (v["max_finite"], v["pos_inf"]),
+        (v["pos_inf"], v["pos_inf"]),
+        (v["neg_inf"], v["pos_inf"]),
+        (v["neg_inf"], v["neg_inf"]),
+        (v["nan"], v["nan"]),
+        (v["nan"], v["one"]),
+        (v["one"], v["nan"]),
+        (v["nan"], v["pos_inf"]),
+        (v["neg_zero"], v["nan"]),
+    ]
+
+
+def round_inputs(fmt: FloatFormat) -> list[int]:
+    v = interesting_values(fmt)
+    neg = lambda bits: bits ^ fmt.sign_mask
+    half_ulp_below_max_int = bits_for_fraction(fmt, Fraction((fmt.hidden_bit << 1) - 1, 2))
+
+    return [
+        v["pos_zero"],
+        v["neg_zero"],
+        v["one"],
+        v["neg_one"],
+        v["one_next"],
+        neg(v["one_next"]),
+        v["half"],
+        neg(v["half"]),
+        v["one_point_five"],
+        neg(v["one_point_five"]),
+        bits_for_fraction(fmt, Fraction(5, 2)),
+        bits_for_fraction(fmt, Fraction(-5, 2)),
+        bits_for_fraction(fmt, Fraction(7, 2)),
+        bits_for_fraction(fmt, Fraction(1, 4)),
+        bits_for_fraction(fmt, Fraction(-1, 4)),
+        v["min_sub"],
+        neg(v["min_sub"]),
+        v["max_sub"],
+        neg(v["max_sub"]),
+        v["min_norm"],
+        half_ulp_below_max_int,
+        neg(half_ulp_below_max_int),
+        bits_for_fraction(fmt, Fraction(fmt.hidden_bit)),
+        v["max_finite"],
+        v["pos_inf"],
+        v["neg_inf"],
+        v["nan"],
+    ]
+
+
+def sqrt_inputs(fmt: FloatFormat) -> list[int]:
+    v = interesting_values(fmt)
+
+    return [
+        v["pos_zero"],
+        v["neg_zero"],
+        v["one"],
+        v["two"],
+        v["three"],
+        bits_for_fraction(fmt, Fraction(4)),
+        bits_for_fraction(fmt, Fraction(9)),
+        v["half"],
+        bits_for_fraction(fmt, Fraction(1, 4)),
+        v["one_point_five"],
+        v["one_next"],
+        v["min_sub"],
+        v["two_min_sub"],
+        v["max_sub"],
+        v["min_norm"],
+        v["max_finite"],
+        v["pos_inf"],
+        v["neg_inf"],
+        v["neg_one"],
+        v["nan"],
+    ]
+
+
+def cast_inputs(fmt: FloatFormat) -> list[int]:
+    v = interesting_values(fmt)
+    neg = lambda bits: bits ^ fmt.sign_mask
+    candidates = [
+        v["pos_zero"],
+        v["neg_zero"],
+        v["one"],
+        v["neg_one"],
+        v["half"],
+        neg(v["half"]),
+        v["one_point_five"],
+        neg(v["one_point_five"]),
+        v["min_sub"],
+        neg(v["min_sub"]),
+        v["max_finite"],
+        v["pos_inf"],
+        v["neg_inf"],
+        v["nan"],
+        bits_for_fraction(fmt, Fraction(1 << 63)),
+        bits_for_fraction(fmt, Fraction(-(1 << 63))),
+        bits_for_fraction(fmt, Fraction((1 << 64))),
+        bits_for_fraction(fmt, Fraction((1 << 63) - 1)),
+        bits_for_fraction(fmt, Fraction(-(1 << 63) - 1)),
+        bits_for_fraction(fmt, Fraction((1 << 64) - 1)),
+    ]
+
+    return candidates
+
+
+def new_op_vectors(fmt: FloatFormat, per_op: int, seed: int):
+    rng = random.Random(seed + fmt.total_bits + 7541)
+    compares: list[CompareVector] = []
+    unaries: list[UnaryVector] = []
+    casts: list[CastVector] = []
+
+    pairs = compare_pairs(fmt)
+    random_pairs = [
+        (random_finite_bits(fmt, rng), random_finite_bits(fmt, rng)) for _ in range(per_op)
+    ]
+    for op in COMPARE_OPS:
+        for index, (left, right) in enumerate(pairs):
+            compares.append(CompareVector(fmt, op, left, right, reference_compare(fmt, op, left, right), f"curated:{index}"))
+        for index, (left, right) in enumerate(random_pairs):
+            compares.append(CompareVector(fmt, op, left, right, reference_compare(fmt, op, left, right), f"random:{seed}:{index}"))
+
+    round_random = [random_finite_bits(fmt, rng) for _ in range(per_op)]
+    for op in ROUND_OPS:
+        for index, bits in enumerate(round_inputs(fmt)):
+            unaries.append(UnaryVector(fmt, op, bits, reference_round_integral(fmt, op, bits), f"curated:{index}"))
+        for index, bits in enumerate(round_random):
+            unaries.append(UnaryVector(fmt, op, bits, reference_round_integral(fmt, op, bits), f"random:{seed}:{index}"))
+
+    for index, bits in enumerate(sqrt_inputs(fmt)):
+        unaries.append(UnaryVector(fmt, "sqrt", bits, reference_sqrt(fmt, bits), f"curated:{index}"))
+    for index in range(per_op):
+        bits = random_finite_bits(fmt, rng)
+        unaries.append(UnaryVector(fmt, "sqrt", bits, reference_sqrt(fmt, bits), f"random:{seed}:{index}"))
+
+    for op in CAST_OPS:
+        for index, bits in enumerate(cast_inputs(fmt)):
+            valid, expected = reference_to_int(fmt, op, bits)
+            casts.append(CastVector(fmt, op, bits, valid, expected, f"curated:{index}"))
+        emitted = 0
+        attempt = 0
+        while emitted < per_op and attempt < per_op * 20:
+            attempt += 1
+            bits = random_finite_bits(fmt, rng)
+            valid, expected = reference_to_int(fmt, op, bits)
+            if not valid:
+                continue
+            casts.append(CastVector(fmt, op, bits, valid, expected, f"random:{seed}:{emitted}"))
+            emitted += 1
+
+    return compares, unaries, casts
+
+
+def dedupe_keyed(vectors):
+    seen = set()
+    unique = []
+    for vector in vectors:
+        key = vector.key()
+        if key not in seen:
+            unique.append(vector)
+            seen.add(key)
+    return unique
+
+
+def render_i64_literal(value: int) -> str:
+    if value == -(1 << 63):
+        return "-9223372036854775807 - 1"
+    return str(value)
+
+
+def render_new_op_tests(lines: list[str], compares, unaries, casts) -> None:
+    compare_groups: dict[tuple[str, str], list[CompareVector]] = {}
+    for vector in compares:
+        compare_groups.setdefault((vector.fmt.name, vector.op), []).append(vector)
+
+    for (fmt_name, op), group in compare_groups.items():
+        fmt = FORMAT_BY_NAME[fmt_name]
+        lines.append("#[test]")
+        lines.append(f"fn generated_{fmt_name}_{op}_vectors_match_reference() {{")
+        for vector in group:
+            lines.append(f"    // {vector.source}")
+            lines.append(
+                f"    assert_eq({fmt_name}::new({literal(fmt, vector.left)}).{op}("
+                f"{fmt_name}::new({literal(fmt, vector.right)})), {str(vector.expected).lower()});"
+            )
+        lines.append("}")
+        lines.append("")
+
+    unary_groups: dict[tuple[str, str], list[UnaryVector]] = {}
+    for vector in unaries:
+        unary_groups.setdefault((vector.fmt.name, vector.op), []).append(vector)
+
+    for (fmt_name, op), group in unary_groups.items():
+        fmt = FORMAT_BY_NAME[fmt_name]
+        lines.append("#[test]")
+        lines.append(f"fn generated_{fmt_name}_{op}_vectors_match_reference() {{")
+        for vector in group:
+            lines.append(f"    // {vector.source}")
+            lines.append(
+                f"    assert_eq({fmt_name}::new({literal(fmt, vector.input)}).{op}().bits(), "
+                f"{literal(fmt, vector.expected)});"
+            )
+        lines.append("}")
+        lines.append("")
+
+    cast_groups: dict[tuple[str, str], list[CastVector]] = {}
+    for vector in casts:
+        cast_groups.setdefault((vector.fmt.name, vector.op), []).append(vector)
+
+    for (fmt_name, op), group in cast_groups.items():
+        fmt = FORMAT_BY_NAME[fmt_name]
+        valid_vectors = [vector for vector in group if vector.valid]
+        invalid_vectors = [vector for vector in group if not vector.valid]
+
+        if valid_vectors:
+            lines.append("#[test]")
+            lines.append(f"fn generated_{fmt_name}_{op}_vectors_match_reference() {{")
+            for vector in valid_vectors:
+                if op == "to_u64":
+                    expected_literal = f"{vector.expected} as u64"
+                else:
+                    expected_literal = render_i64_literal(vector.expected)
+                lines.append(f"    // {vector.source}")
+                lines.append(
+                    f"    assert_eq({fmt_name}::new({literal(fmt, vector.input)}).{op}(), {expected_literal});"
+                )
+            lines.append("}")
+            lines.append("")
+
+        for index, vector in enumerate(invalid_vectors):
+            lines.append("// out-of-range or non-numeric cast must fail to prove")
+            lines.append(f"// {vector.source}")
+            lines.append("#[test(should_fail)]")
+            lines.append(f"fn generated_{fmt_name}_{op}_invalid_{index}() {{")
+            lines.append(f"    let _ = {fmt_name}::new({literal(fmt, vector.input)}).{op}();")
+            lines.append("}")
+            lines.append("")
+
+
 def interesting_values(fmt: FloatFormat) -> dict[str, int]:
     one_exp = fmt.bias << fmt.mantissa_bits
     two_exp = (fmt.bias + 1) << fmt.mantissa_bits
@@ -502,7 +929,7 @@ def test_name(fmt: FloatFormat, op: str) -> str:
     return f"generated_{fmt.name}_{op}_vectors_match_reference"
 
 
-def render_noir(vectors: list[Vector]) -> str:
+def render_noir(vectors: list[Vector], compares, unaries, casts) -> str:
     lines = [
         "// Generated by scripts/generate_float_vectors.py. Do not edit by hand.",
         "use sparq_ieee754::{f128, f16, f32, f64};",
@@ -533,6 +960,8 @@ def render_noir(vectors: list[Vector]) -> str:
                     lines.append("")
             lines.append("}")
             lines.append("")
+
+    render_new_op_tests(lines, compares, unaries, casts)
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -566,17 +995,37 @@ def main() -> None:
     args = parser.parse_args()
 
     vectors = build_vectors(args)
+    selected_formats = [FORMAT_BY_NAME[name] for name in args.formats]
+    all_compares: list[CompareVector] = []
+    all_unaries: list[UnaryVector] = []
+    all_casts: list[CastVector] = []
+
+    for fmt in selected_formats:
+        compares, unaries, casts = new_op_vectors(fmt, args.random_per_op, args.seed)
+        all_compares.extend(compares)
+        all_unaries.extend(unaries)
+        all_casts.extend(casts)
+
+    all_compares = dedupe_keyed(all_compares)
+    all_unaries = dedupe_keyed(all_unaries)
+    all_casts = dedupe_keyed(all_casts)
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(render_noir(vectors))
+    args.output.write_text(render_noir(vectors, all_compares, all_unaries, all_casts))
 
     counts: dict[tuple[str, str], int] = {}
     for vector in vectors:
         key = (vector.fmt.name, vector.op)
         counts[key] = counts.get(key, 0) + 1
+    for vector in all_compares + all_unaries + all_casts:
+        key = (vector.fmt.name, vector.op)
+        counts[key] = counts.get(key, 0) + 1
 
-    print(f"wrote {len(vectors)} vectors to {args.output}")
+    total = len(vectors) + len(all_compares) + len(all_unaries) + len(all_casts)
+    print(f"wrote {total} vectors to {args.output}")
+    ops_order = list(OP_SYMBOLS) + COMPARE_OPS + ROUND_OPS + ["sqrt"] + CAST_OPS
     for fmt in FORMATS:
-        for op in OP_SYMBOLS:
+        for op in ops_order:
             count = counts.get((fmt.name, op), 0)
             if count:
                 print(f"  {fmt.name} {op}: {count}")

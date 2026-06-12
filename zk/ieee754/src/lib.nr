@@ -158,6 +158,324 @@ fn signed_integer_conversions_preserve_sign_and_rounding() {
 }
 
 #[test]
+fn comparison_predicates_follow_ieee_semantics() {
+	let one = f16::new(0x3c00 as u16);
+	let two = f16::new(0x4000 as u16);
+	let neg_one = f16::new(0xbc00 as u16);
+	let neg_two = f16::new(0xc000 as u16);
+	let pos_zero = f16::new(0x0000 as u16);
+	let neg_zero = f16::new(0x8000 as u16);
+	let nan = f16::new(0x7e00 as u16);
+	let pos_inf = f16::new(0x7c00 as u16);
+	let neg_inf = f16::new(0xfc00 as u16);
+	let min_sub = f16::new(0x0001 as u16);
+
+	// Ordinary total ordering on non-NaN values.
+	assert(one.lt(two));
+	assert(!two.lt(one));
+	assert(one.le(two));
+	assert(one.le(one));
+	assert(two.gt(one));
+	assert(two.ge(two));
+	assert(one.eq(one));
+	assert(!one.eq(two));
+	assert(one.ne(two));
+	assert(!one.ne(one));
+
+	// Sign handling, including negative magnitude reversal.
+	assert(neg_two.lt(neg_one));
+	assert(!neg_one.lt(neg_two));
+	assert(neg_one.lt(one));
+	assert(neg_zero.lt(min_sub));
+	assert(neg_inf.lt(neg_two));
+	assert(two.lt(pos_inf));
+	assert(pos_inf.eq(pos_inf));
+	assert(neg_inf.lt(pos_inf));
+
+	// -0 == +0 in every predicate.
+	assert(pos_zero.eq(neg_zero));
+	assert(neg_zero.eq(pos_zero));
+	assert(!pos_zero.lt(neg_zero));
+	assert(!neg_zero.lt(pos_zero));
+	assert(pos_zero.le(neg_zero));
+	assert(neg_zero.ge(pos_zero));
+	assert(!pos_zero.ne(neg_zero));
+
+	// NaN is unordered against everything, including itself.
+	assert(!nan.eq(nan));
+	assert(nan.ne(nan));
+	assert(!nan.lt(one));
+	assert(!one.lt(nan));
+	assert(!nan.le(nan));
+	assert(!nan.gt(one));
+	assert(!nan.ge(one));
+	assert(!pos_inf.lt(nan));
+	assert(nan.ne(one));
+}
+
+#[test]
+fn comparison_predicates_scale_across_widths() {
+	let single_one = f32::new(0x3f800000 as u32);
+	let single_one_next = f32::new(0x3f800001 as u32);
+	let single_nan = f32::new(0x7fc00000 as u32);
+
+	assert(single_one.lt(single_one_next));
+	assert(single_one_next.gt(single_one));
+	assert(!single_nan.eq(single_nan));
+
+	let double_neg_zero = f64::new(0x8000000000000000 as u64);
+	let double_pos_zero = f64::new(0x0000000000000000 as u64);
+	let double_min_sub = f64::new(0x0000000000000001 as u64);
+
+	assert(double_neg_zero.eq(double_pos_zero));
+	assert(double_neg_zero.lt(double_min_sub));
+	assert(double_min_sub.gt(double_pos_zero));
+
+	let quad_one = f128::new(0x3fff0000000000000000000000000000 as u128);
+	let quad_one_next = f128::new(0x3fff0000000000000000000000000001 as u128);
+	let quad_neg_one = f128::new(0xbfff0000000000000000000000000000 as u128);
+	let quad_nan = f128::new(0x7fff8000000000000000000000000000 as u128);
+
+	assert(quad_one.lt(quad_one_next));
+	assert(quad_neg_one.lt(quad_one));
+	assert(quad_one.ge(quad_one));
+	assert(!quad_nan.le(quad_one));
+	assert(quad_nan.ne(quad_nan));
+}
+
+#[test]
+fn round_to_integral_handles_modes_and_signs() {
+	let one_point_five = f16::new(0x3e00 as u16);
+	let neg_one_point_five = f16::new(0xbe00 as u16);
+	let two_point_five = f16::new(0x4100 as u16);
+	let half = f16::new(0x3800 as u16);
+	let neg_half = f16::new(0xb800 as u16);
+	let quarter = f16::new(0x3400 as u16);
+	let one_next = f16::new(0x3c01 as u16);
+
+	// floor / ceil / trunc / ties-even on 1.5 and -1.5.
+	assert_eq(one_point_five.floor().bits(), 0x3c00 as u16);
+	assert_eq(one_point_five.ceil().bits(), 0x4000 as u16);
+	assert_eq(one_point_five.trunc().bits(), 0x3c00 as u16);
+	assert_eq(one_point_five.round_ties_even().bits(), 0x4000 as u16);
+	assert_eq(neg_one_point_five.floor().bits(), 0xc000 as u16);
+	assert_eq(neg_one_point_five.ceil().bits(), 0xbc00 as u16);
+	assert_eq(neg_one_point_five.trunc().bits(), 0xbc00 as u16);
+	assert_eq(neg_one_point_five.round_ties_even().bits(), 0xc000 as u16);
+
+	// Ties to even: 2.5 -> 2, 0.5 -> 0, -0.5 -> -0.
+	assert_eq(two_point_five.round_ties_even().bits(), 0x4000 as u16);
+	assert_eq(half.round_ties_even().bits(), 0x0000 as u16);
+	assert_eq(neg_half.round_ties_even().bits(), 0x8000 as u16);
+	assert_eq(half.ceil().bits(), 0x3c00 as u16);
+	assert_eq(half.floor().bits(), 0x0000 as u16);
+	assert_eq(neg_half.floor().bits(), 0xbc00 as u16);
+	assert_eq(neg_half.ceil().bits(), 0x8000 as u16);
+	assert_eq(neg_half.trunc().bits(), 0x8000 as u16);
+
+	// |x| < 0.5 and a value just above one.
+	assert_eq(quarter.round_ties_even().bits(), 0x0000 as u16);
+	assert_eq(one_next.floor().bits(), 0x3c00 as u16);
+	assert_eq(one_next.ceil().bits(), 0x4000 as u16);
+	assert_eq(one_next.round_ties_even().bits(), 0x3c00 as u16);
+
+	// 1023.5 sits exactly between 1023 (odd) and 1024 (even).
+	let near_max_half = f16::new(0x63ff as u16);
+
+	assert_eq(near_max_half.round_ties_even().bits(), 0x6400 as u16);
+	assert_eq(near_max_half.floor().bits(), 0x63fe as u16);
+	assert_eq(near_max_half.ceil().bits(), 0x6400 as u16);
+}
+
+#[test]
+fn round_to_integral_handles_specials_and_subnormals() {
+	let nan = f16::new(0x7e01 as u16);
+	let pos_inf = f16::new(0x7c00 as u16);
+	let neg_inf = f16::new(0xfc00 as u16);
+	let pos_zero = f16::new(0x0000 as u16);
+	let neg_zero = f16::new(0x8000 as u16);
+	let min_sub = f16::new(0x0001 as u16);
+	let neg_max_sub = f16::new(0x83ff as u16);
+	let big_integral = f16::new(0x6800 as u16);
+
+	assert_eq(nan.floor().bits(), 0x7e00 as u16);
+	assert_eq(nan.round_ties_even().bits(), 0x7e00 as u16);
+	assert_eq(pos_inf.ceil().bits(), 0x7c00 as u16);
+	assert_eq(neg_inf.floor().bits(), 0xfc00 as u16);
+	assert_eq(pos_zero.floor().bits(), 0x0000 as u16);
+	assert_eq(neg_zero.ceil().bits(), 0x8000 as u16);
+	assert_eq(min_sub.floor().bits(), 0x0000 as u16);
+	assert_eq(min_sub.ceil().bits(), 0x3c00 as u16);
+	assert_eq(min_sub.trunc().bits(), 0x0000 as u16);
+	assert_eq(min_sub.round_ties_even().bits(), 0x0000 as u16);
+	assert_eq(neg_max_sub.floor().bits(), 0xbc00 as u16);
+	assert_eq(neg_max_sub.ceil().bits(), 0x8000 as u16);
+	assert_eq(big_integral.floor().bits(), 0x6800 as u16);
+	assert_eq(big_integral.round_ties_even().bits(), 0x6800 as u16);
+}
+
+#[test]
+fn round_to_integral_scales_across_widths() {
+	let single_two_point_five = f32::new(0x40200000 as u32);
+	let single_neg_small = f32::new(0xbe99999a as u32);
+
+	assert_eq(single_two_point_five.round_ties_even().bits(), 0x40000000 as u32);
+	assert_eq(single_two_point_five.ceil().bits(), 0x40400000 as u32);
+	assert_eq(single_neg_small.ceil().bits(), 0x80000000 as u32);
+	assert_eq(single_neg_small.floor().bits(), 0xbf800000 as u32);
+
+	let double_one_point_five = f64::new(0x3ff8000000000000 as u64);
+	let double_neg_two_point_five = f64::new(0xc004000000000000 as u64);
+	let double_max_half = f64::new(0x432fffffffffffff as u64);
+
+	assert_eq(double_one_point_five.floor().bits(), 0x3ff0000000000000 as u64);
+	assert_eq(double_one_point_five.round_ties_even().bits(), 0x4000000000000000 as u64);
+	assert_eq(double_neg_two_point_five.round_ties_even().bits(), 0xc000000000000000 as u64);
+	assert_eq(double_neg_two_point_five.floor().bits(), 0xc008000000000000 as u64);
+	assert_eq(double_neg_two_point_five.ceil().bits(), 0xc000000000000000 as u64);
+	// 2^52 - 0.5 ties to 2^52.
+	assert_eq(double_max_half.round_ties_even().bits(), 0x4330000000000000 as u64);
+	assert_eq(double_max_half.trunc().bits(), 0x432ffffffffffffe as u64);
+
+	let quad_one_point_five = f128::new(0x3fff8000000000000000000000000000 as u128);
+	let quad_neg_half = f128::new(0xbffe0000000000000000000000000000 as u128);
+
+	assert_eq(quad_one_point_five.floor().bits(), 0x3fff0000000000000000000000000000 as u128);
+	assert_eq(quad_one_point_five.round_ties_even().bits(), 0x40000000000000000000000000000000 as u128);
+	assert_eq(quad_neg_half.round_ties_even().bits(), 0x80000000000000000000000000000000 as u128);
+	assert_eq(quad_neg_half.floor().bits(), 0xbfff0000000000000000000000000000 as u128);
+}
+
+#[test]
+fn float_to_int_casts_truncate_toward_zero() {
+	let double_three_point_seven_five = f64::new(0x400e000000000000 as u64);
+	let double_neg_three_point_seven_five = f64::new(0xc00e000000000000 as u64);
+	let double_neg_half = f64::new(0xbfe0000000000000 as u64);
+	let double_neg_zero = f64::new(0x8000000000000000 as u64);
+	let double_two_pow_63 = f64::new(0x43e0000000000000 as u64);
+	let double_neg_two_pow_63 = f64::new(0xc3e0000000000000 as u64);
+	let double_near_two_pow_64 = f64::new(0x43efffffffffffff as u64);
+
+	assert_eq(double_three_point_seven_five.to_u64(), 3 as u64);
+	assert_eq(double_three_point_seven_five.to_i64(), 3);
+	assert_eq(double_neg_three_point_seven_five.to_i64(), -3);
+	assert_eq(double_neg_half.to_u64(), 0 as u64);
+	assert_eq(double_neg_half.to_i64(), 0);
+	assert_eq(double_neg_zero.to_u64(), 0 as u64);
+	assert_eq(double_two_pow_63.to_u64(), 0x8000000000000000 as u64);
+	assert_eq(double_neg_two_pow_63.to_i64(), -9223372036854775807 - 1);
+	assert_eq(double_near_two_pow_64.to_u64(), 0xfffffffffffff800 as u64);
+
+	let half_max = f16::new(0x7bff as u16);
+	let half_neg_one = f16::new(0xbc00 as u16);
+
+	assert_eq(half_max.to_u64(), 65504 as u64);
+	assert_eq(half_max.to_i64(), 65504);
+	assert_eq(half_neg_one.to_i64(), -1);
+
+	let single_five_point_five = f32::new(0x40b00000 as u32);
+	let single_two_pow_63 = f32::new(0x5f000000 as u32);
+
+	assert_eq(single_five_point_five.to_u64(), 5 as u64);
+	assert_eq(single_two_pow_63.to_u64(), 0x8000000000000000 as u64);
+
+	let quad_one_point_five = f128::new(0x3fff8000000000000000000000000000 as u128);
+	let quad_two_pow_63 = f128::new(0x403e0000000000000000000000000000 as u128);
+	let quad_neg_two_point_five = f128::new(0xc0004000000000000000000000000000 as u128);
+
+	assert_eq(quad_one_point_five.to_u64(), 1 as u64);
+	assert_eq(quad_two_pow_63.to_u64(), 0x8000000000000000 as u64);
+	assert_eq(quad_neg_two_point_five.to_i64(), -2);
+}
+
+#[test]
+fn sqrt_handles_exact_and_rounded_roots() {
+	let four = f16::new(0x4400 as u16);
+	let nine = f16::new(0x4880 as u16);
+	let one = f16::new(0x3c00 as u16);
+	let two = f16::new(0x4000 as u16);
+	let quarter = f16::new(0x3400 as u16);
+	let half = f16::new(0x3800 as u16);
+
+	assert_eq(four.sqrt().bits(), 0x4000 as u16);
+	assert_eq(nine.sqrt().bits(), 0x4200 as u16);
+	assert_eq(one.sqrt().bits(), 0x3c00 as u16);
+	// sqrt(2) and sqrt(0.5) exercise both exponent parities.
+	assert_eq(two.sqrt().bits(), 0x3da8 as u16);
+	assert_eq(half.sqrt().bits(), 0x39a8 as u16);
+	assert_eq(quarter.sqrt().bits(), 0x3800 as u16);
+
+	// Subnormal input: sqrt(2^-24) = 2^-12 is normal.
+	assert_eq(f16::new(0x0001 as u16).sqrt().bits(), 0x0c00 as u16);
+
+	let single_two = f32::new(0x40000000 as u32);
+	let double_two = f64::new(0x4000000000000000 as u64);
+
+	assert_eq(single_two.sqrt().bits(), 0x3fb504f3 as u32);
+	assert_eq(double_two.sqrt().bits(), 0x3ff6a09e667f3bcd as u64);
+
+	let quad_four = f128::new(0x40010000000000000000000000000000 as u128);
+	let quad_two_point_two_five = f128::new(0x40002000000000000000000000000000 as u128);
+
+	assert_eq(quad_four.sqrt().bits(), 0x40000000000000000000000000000000 as u128);
+	assert_eq(quad_two_point_two_five.sqrt().bits(), 0x3fff8000000000000000000000000000 as u128);
+}
+
+#[test]
+fn sqrt_handles_special_values() {
+	let pos_zero = f16::new(0x0000 as u16);
+	let neg_zero = f16::new(0x8000 as u16);
+	let pos_inf = f16::new(0x7c00 as u16);
+	let neg_inf = f16::new(0xfc00 as u16);
+	let neg_one = f16::new(0xbc00 as u16);
+	let nan = f16::new(0x7e01 as u16);
+
+	assert_eq(pos_zero.sqrt().bits(), 0x0000 as u16);
+	assert_eq(neg_zero.sqrt().bits(), 0x8000 as u16);
+	assert_eq(pos_inf.sqrt().bits(), 0x7c00 as u16);
+	assert_eq(neg_inf.sqrt().bits(), 0x7e00 as u16);
+	assert_eq(neg_one.sqrt().bits(), 0x7e00 as u16);
+	assert_eq(nan.sqrt().bits(), 0x7e00 as u16);
+
+	let double_neg = f64::new(0xbff0000000000000 as u64);
+	let quad_neg_inf = f128::new(0xffff0000000000000000000000000000 as u128);
+
+	assert_eq(double_neg.sqrt().bits(), 0x7ff8000000000000 as u64);
+	assert_eq(quad_neg_inf.sqrt().bits(), 0x7fff8000000000000000000000000000 as u128);
+}
+
+#[test(should_fail)]
+fn float_to_u64_rejects_nan() {
+	let _ = f64::new(0x7ff8000000000000 as u64).to_u64();
+}
+
+#[test(should_fail)]
+fn float_to_i64_rejects_infinity() {
+	let _ = f64::new(0x7ff0000000000000 as u64).to_i64();
+}
+
+#[test(should_fail)]
+fn float_to_u64_rejects_negative_values() {
+	let _ = f64::new(0xc00e000000000000 as u64).to_u64();
+}
+
+#[test(should_fail)]
+fn float_to_u64_rejects_two_pow_64() {
+	let _ = f64::new(0x43f0000000000000 as u64).to_u64();
+}
+
+#[test(should_fail)]
+fn float_to_i64_rejects_two_pow_63() {
+	let _ = f64::new(0x43e0000000000000 as u64).to_i64();
+}
+
+#[test(should_fail)]
+fn float_to_i64_rejects_below_min() {
+	// -(2^63 + 2^11) truncates below i64::MIN.
+	let _ = f64::new(0xc3e0000000000001 as u64).to_i64();
+}
+
+#[test]
 fn uint_types_match_float_component_sizes() {
 	comptime {
 		assert_eq(sizing::uint_type(5), quote { u8 }.as_type());

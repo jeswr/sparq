@@ -35,6 +35,44 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
     } else {
         quote { $crate::ops::from_u64_work_parts::<$exp_type, $mant_type>($crate::ops::uint_to_float_parts_u64::<$exp_size, $mant_size, INPUT_BITS>(sign, magnitude)) }
     };
+    let compare_call = quote {
+        $crate::ops::compare_parts::<$exp_type, $mant_type, $exp_size>(self.to_parts(), other.to_parts())
+    };
+    let floor_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::round_to_integral_wide::<0_u8>(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::round_to_integral::<$exp_type, $mant_type, $exp_size, $mant_size, 0_u8>(self.to_parts())) }
+    };
+    let ceil_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::round_to_integral_wide::<1_u8>(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::round_to_integral::<$exp_type, $mant_type, $exp_size, $mant_size, 1_u8>(self.to_parts())) }
+    };
+    let trunc_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::round_to_integral_wide::<2_u8>(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::round_to_integral::<$exp_type, $mant_type, $exp_size, $mant_size, 2_u8>(self.to_parts())) }
+    };
+    let round_ties_even_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::round_to_integral_wide::<3_u8>(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::round_to_integral::<$exp_type, $mant_type, $exp_size, $mant_size, 3_u8>(self.to_parts())) }
+    };
+    let to_u64_call = if bits == 128 {
+        quote { $crate::ops::float_to_u64_wide(self.to_parts()) }
+    } else {
+        quote { $crate::ops::float_to_u64::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts()) }
+    };
+    let sqrt_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::sqrt_wide(self.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::sqrt_op::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts())) }
+    };
+    let to_i64_call = if bits == 128 {
+        quote { $crate::ops::float_to_i64_wide(self.to_parts()) }
+    } else {
+        quote { $crate::ops::float_to_i64::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts()) }
+    };
     let sign_scale = (1 as u128) << ((bits - 1) as u128);
     let exponent_scale = (1 as u128) << (mant_size as u128);
     let exponent_mask = ((1 as u128) << (exp_size as u128)) - 1;
@@ -92,6 +130,110 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
                 Self::from_parts($from_magnitude_parts)
             }
 
+            // IEEE 754 comparison predicates. These are deliberately inherent
+            // methods rather than std::cmp::Eq / std::cmp::Ord impls: those
+            // traits assume a reflexive equality and a total order, and IEEE
+            // floats have neither (NaN is unordered against everything,
+            // including itself, while -0 == +0 makes bit-distinct values
+            // equal). All six predicates evaluate both operands
+            // unconditionally, so the gate count does not depend on the
+            // secret values.
+
+            /// IEEE numeric equality: false when either side is NaN; -0 == +0.
+            pub fn eq(self, other: Self) -> bool {
+                let (_unordered, _less, equal) = $compare_call;
+
+                equal
+            }
+
+            /// IEEE numeric inequality: true when either side is NaN.
+            /// `x.ne(x)` is the idiomatic NaN test.
+            pub fn ne(self, other: Self) -> bool {
+                let (_unordered, _less, equal) = $compare_call;
+
+                !equal
+            }
+
+            /// IEEE less-than: false when either side is NaN.
+            pub fn lt(self, other: Self) -> bool {
+                let (_unordered, less, _equal) = $compare_call;
+
+                less
+            }
+
+            /// IEEE less-than-or-equal: false when either side is NaN.
+            pub fn le(self, other: Self) -> bool {
+                let (_unordered, less, equal) = $compare_call;
+
+                less | equal
+            }
+
+            /// IEEE greater-than: false when either side is NaN.
+            pub fn gt(self, other: Self) -> bool {
+                let (unordered, less, equal) = $compare_call;
+
+                !unordered & !less & !equal
+            }
+
+            /// IEEE greater-than-or-equal: false when either side is NaN.
+            pub fn ge(self, other: Self) -> bool {
+                let (unordered, less, _equal) = $compare_call;
+
+                !unordered & !less
+            }
+
+            // Round-to-integral family (IEEE 754 roundToIntegral*). All four
+            // return floats, propagate NaN (canonicalised), pass infinities
+            // through unchanged, and preserve the sign of zero results
+            // (e.g. (-0.3).ceil() == -0).
+
+            /// Round toward negative infinity (roundToIntegralTowardNegative).
+            pub fn floor(self) -> Self {
+                $floor_call
+            }
+
+            /// Round toward positive infinity (roundToIntegralTowardPositive).
+            pub fn ceil(self) -> Self {
+                $ceil_call
+            }
+
+            /// Round toward zero (roundToIntegralTowardZero).
+            pub fn trunc(self) -> Self {
+                $trunc_call
+            }
+
+            /// Round to nearest integer with ties to even
+            /// (roundToIntegralTiesToEven).
+            pub fn round_ties_even(self) -> Self {
+                $round_ties_even_call
+            }
+
+            /// IEEE 754 squareRoot with round-to-nearest-even. NaN inputs and
+            /// negative non-zero inputs (including -inf) return the canonical
+            /// NaN; sqrt(+-0) preserves the zero's sign; sqrt(+inf) is +inf.
+            pub fn sqrt(self) -> Self {
+                $sqrt_call
+            }
+
+            // Float-to-integer casts with XPath 2.0 F&O semantics (the
+            // SPARQL/XPath consumer): truncate toward zero, then range-check.
+            // NaN and infinities assert (err:FOCA0002), as do results outside
+            // the target range (err:FOCA0003). Negative inputs above -1
+            // truncate to 0 and are therefore valid for to_u64. Pre-screen
+            // with the comparison predicates (`x.ne(x)` is the NaN test) when
+            // failure must remain provable.
+
+            /// Truncating cast to u64; asserts on NaN, infinity, values at or
+            /// above 2^64, and values at or below -1.
+            pub fn to_u64(self) -> u64 {
+                $to_u64_call
+            }
+
+            /// Truncating cast to i64; asserts on NaN, infinity, and values
+            /// outside [-2^63, 2^63 - 1] after truncation.
+            pub fn to_i64(self) -> i64 {
+                $to_i64_call
+            }
         }
 
         impl std::ops::Add for $type_name {
