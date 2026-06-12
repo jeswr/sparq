@@ -34,6 +34,36 @@ The current f32/f64 add, mul, and div figures are below the May-2026 reference
 `noir_IEEE754` amortised counts (`add`: `634.7`/`643.6`, `mul`:
 `533.7`/`541.0`, `div`: `577.3`/`586.3`).
 
+The SPARQL-needed kernels (comparison predicates, round-to-integral family,
+`sqrt`, and the XPath float-to-integer casts) are measured by the same
+`benchmark_float_ops.py` harness using a conversion-style pattern: a private
+array of input witnesses keeps every call live, and the boolean/bit results
+are XOR-folded. Per-call estimates for these therefore include one `new()`
+decode per call, unlike the arithmetic rows above where the accumulator stays
+decoded. Measured with the same toolchain and `--n-small 1 --n-big 8`,
+`float_ops_baseline-kernels.json` has these per-call estimates:
+
+| Op | `f16` | `f32` | `f64` | `f128` |
+| --- | ---: | ---: | ---: | ---: |
+| `eq` | `37.4` | `36.1` | `46.4` | `55.3` |
+| `ne` | `37.4` | `36.1` | `46.4` | `55.3` |
+| `lt` | `72.1` | `71.1` | `85.1` | `115.4` |
+| `le` | `81.1` | `80.1` | `94.1` | `124.4` |
+| `gt` | `82.1` | `81.1` | `95.1` | `125.4` |
+| `ge` | `73.1` | `72.1` | `86.1` | `116.4` |
+| `floor` | `283.9` | `276.0` | `304.6` | `383.1` |
+| `ceil` | `284.9` | `277.0` | `305.6` | `384.1` |
+| `trunc` | `268.3` | `260.4` | `289.0` | `361.1` |
+| `round_ties_even` | `291.1` | `283.3` | `311.9` | `393.7` |
+| `sqrt` | `587.4` | `308.4` | `587.4` | `498.3` |
+| `to_u64` | `132.4` | `135.0` | `146.0` | `168.4` |
+| `to_i64` | `154.1` | `156.7` | `167.7` | `165.7` |
+
+`float_ops_latest.json` carries the union of the arithmetic and kernel rows so
+`compare_float_benchmarks.py` guards all of them by default; the add/sub/mul/div
+rows were re-measured alongside the new kernels with zero delta against
+`float_ops_baseline-nargo-beta21.json`.
+
 Integer conversion gates are measured by `scripts/benchmark_float_conversions.py`.
 The harness feeds private arrays of integer witnesses through the generated
 `From` impls and XORs the resulting `bits()` values so each conversion remains
