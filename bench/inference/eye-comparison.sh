@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# sparq-reason (N3 engine) vs EYE — same machine, same workloads, min-of-3
-# wall seconds. Both engines parse the document, run the forward closure, and
-# SERIALIZE the full closure (sparq: `reason <f> n3 n3 /dev/null`; EYE:
-# `--pass > /dev/null`), so the comparison covers the whole pipeline.
+# sparq-reason (N3 engine) vs EYE — same machine, same workloads, wall
+# seconds (sparq min-of-3; EYE min-of-3 on the quick cells, single run on the
+# minutes-long ones, dt100k skipped — see the loop). Both engines parse the
+# document, run the forward closure, and SERIALIZE the full closure (sparq:
+# `reason <f> n3 n3 /dev/null`; EYE: `--pass > /dev/null`), so the comparison
+# covers the whole pipeline.
 #
 #   EYE=$HOME/.local/bin/eye SPARQ_CLI=target/release/sparq-cli \
 #     bench/inference/eye-comparison.sh
@@ -54,10 +56,16 @@ mon() { # min-of-N wall seconds: mon <runs> <cmd…>
 
 printf '%-10s %12s %12s\n' workload sparq eye
 for w in socrates dt1k dt10k dt100k anc500 grid30; do
-  # dt100k runs EYE once (minutes per run); everything else is min-of-3.
-  eruns=3; [ "$w" = dt100k ] && eruns=1
   s=$(mon 3 "$CLI" reason "$B/$w.n3" n3 n3 /dev/null)
   printf '%-10s %11ss ' "$w" "$s"
+  # EYE on dt100k is ≈9 h at its observed ≈N^1.95 DT scaling — never run it by
+  # default (set EYE_DT100K=1 if you truly mean it). dt10k/anc500/grid30 are
+  # minutes per EYE run: single run, documented as such in eye-comparison.md.
+  if [ "$w" = dt100k ] && [ -z "${EYE_DT100K:-}" ]; then
+    printf '%12s\n' 'skipped'
+    continue
+  fi
+  eruns=3; case "$w" in dt10k|dt100k|anc500|grid30) eruns=1;; esac
   e=$(mon "$eruns" "$EYE" --quiet --nope "$B/$w.n3" --pass)
   printf '%11ss\n' "$e"
 done
