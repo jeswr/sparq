@@ -57,6 +57,21 @@ impl Recognized {
     pub fn contains(&self, dt: &str) -> bool {
         self.0.contains(dt)
     }
+    /// The standard recognized set (every datatype this checker has a value
+    /// mapping for) — what an OWL 2 datatype map always includes.
+    pub fn standard() -> Recognized {
+        let mut iris: FxHashSet<String> = [
+            "string", "normalizedString", "token", "boolean", "integer", "long", "int",
+            "short", "byte", "nonNegativeInteger", "positiveInteger", "nonPositiveInteger",
+            "negativeInteger", "unsignedLong", "unsignedInt", "unsignedShort", "unsignedByte",
+            "decimal", "float", "double",
+        ]
+        .iter()
+        .map(|l| format!("{XSD}{l}"))
+        .collect();
+        iris.insert(RDF_XML_LITERAL.to_string());
+        Recognized::with_defaults(iris)
+    }
 }
 
 /// Computes the closure of `premise` under `regime`. The core rule engine is
@@ -507,25 +522,40 @@ fn term_eq(a: &Term, b: &Term, d: &Recognized) -> bool {
 /// conclusion graphs in the suites are tiny.
 pub fn entails(closure: &[Row], conclusion: &[Row], d: &Recognized) -> bool {
     let mut map: FxHashMap<String, Term> = FxHashMap::default();
-    solve(0, conclusion, closure, &mut map, d)
+    // Most-constrained-first: ground triples, then by bnode count — keeps the
+    // backtracker shallow on conclusion graphs with many blank nodes.
+    let mut ordered: Vec<&Row> = conclusion.iter().collect();
+    let bnodes = |r: &Row| r.iter().filter(|t| matches!(t, Term::BlankNode(_))).count();
+    ordered.sort_by_key(|r| bnodes(r));
+    let mut steps = 0usize;
+    solve(0, &ordered, closure, &mut map, d, &mut steps)
 }
+
+/// Backtracking budget — exceeding it reports non-entailment (a conservative
+/// answer that surfaces as a FAIL to investigate, never a silent pass).
+const MAX_STEPS: usize = 5_000_000;
 
 fn solve(
     i: usize,
-    conclusion: &[Row],
+    conclusion: &[&Row],
     closure: &[Row],
     map: &mut FxHashMap<String, Term>,
     d: &Recognized,
+    steps: &mut usize,
 ) -> bool {
     if i == conclusion.len() {
         return true;
     }
-    let pat = &conclusion[i];
+    let pat = conclusion[i];
     for row in closure {
+        *steps += 1;
+        if *steps > MAX_STEPS {
+            return false;
+        }
         let mut bound: Vec<String> = Vec::new();
         let ok = (0..3).all(|k| pat_match(&pat[k], &row[k], map, &mut bound, d));
         if ok {
-            if solve(i + 1, conclusion, closure, map, d) {
+            if solve(i + 1, conclusion, closure, map, d, steps) {
                 return true;
             }
         }

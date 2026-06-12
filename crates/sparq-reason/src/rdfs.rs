@@ -428,7 +428,6 @@ pub(crate) fn rdfs_closure(
     mono: &MonoOwl,
 ) -> usize {
     let v = Vocab::intern(dict);
-    let before = triples.len();
     let original: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
 
     // 1. Raw schema maps from the input.
@@ -503,10 +502,15 @@ pub(crate) fn rdfs_closure(
     // 4. De-duplicate the derived facts, drop those already asserted, sort for determinism.
     let derived = dedup_derived(emitted, &original);
 
+    let added = derived.len();
     triples.clear();
     triples.extend(original_in_order(&original));
     triples.extend(derived);
-    triples.len() - before
+    // NOT `triples.len() - before`: a caller may pass DUPLICATE input triples
+    // (e.g. RDF/XML loaders emit repeated declarations), which the rebuild
+    // dedups — the subtraction then underflows. The new-triple count is the
+    // derived set's size by construction.
+    added
 }
 
 

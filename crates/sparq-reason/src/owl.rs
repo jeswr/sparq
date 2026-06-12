@@ -532,6 +532,126 @@ fn monotone_only(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> Option<crate::rdfs:
 
 /// Expand `triples` in place with the OWL 2 RL (+ RDFS) closure. Returns NEW triple count.
 pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
+    // Monotone single-shot layers around the core fixpoint:
+    // - pre: `owl:differentFrom` symmetry + the XSD datatype hierarchy (subClassOf
+    //   edges for the numeric tower of every datatype IRI that occurs), so the
+    //   in-closure rules (rdfs9/11, scm-rng1/scm-dom1) see them;
+    // - post: scm-eqc2 / scm-eqp2 (mutual subClassOf/subPropertyOf ⊢ equivalence) —
+    //   sound to run once because equivalence edges over already-mutual pairs feed
+    //   no further rule anything new (both subsumptions already hold).
+    let pre = pre_monotone(dict, triples);
+    let main = owl_rl_closure(dict, triples);
+    let post = post_equivalences(dict, triples);
+    pre + main + post
+}
+
+/// The XSD numeric-tower subsumptions (direct edges; rdfs11 closes them).
+/// OWL 2 RDF-based semantics gives every datatype map these inclusions.
+const XSD_HIERARCHY: &[(&str, &str)] = &[
+    ("byte", "short"),
+    ("short", "int"),
+    ("int", "long"),
+    ("long", "integer"),
+    ("integer", "decimal"),
+    ("unsignedByte", "unsignedShort"),
+    ("unsignedShort", "unsignedInt"),
+    ("unsignedInt", "unsignedLong"),
+    ("unsignedLong", "nonNegativeInteger"),
+    ("nonNegativeInteger", "integer"),
+    ("positiveInteger", "nonNegativeInteger"),
+    ("negativeInteger", "nonPositiveInteger"),
+    ("nonPositiveInteger", "integer"),
+];
+
+/// Pre-closure monotone facts: symmetric `owl:differentFrom` edges (the relation
+/// is symmetric in the OWL semantics; deriving the mirror once up front is
+/// complete because nothing else derives differentFrom) and the upward XSD
+/// datatype-hierarchy chain for every XSD datatype IRI occurring in the data.
+fn pre_monotone(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+    let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+    let occurring: FxHashSet<Id> = triples.iter().flat_map(|t| t.iter().copied()).collect();
+    let mut add: Vec<[Id; 3]> = Vec::new();
+
+    // differentFrom symmetry.
+    let different_from = dict.intern_iri(&format!("{OWL}differentFrom"));
+    for &[s, p, o] in triples.iter() {
+        if p == different_from && !set.contains(&[o, p, s]) {
+            add.push([o, p, s]);
+        }
+    }
+
+    // XSD hierarchy: for each occurring datatype, add its upward chain.
+    let sub_class = dict.intern_iri(oxrdf::vocab::rdfs::SUB_CLASS_OF.as_str());
+    let mut chain: Vec<(Id, Id)> = Vec::new();
+    for &(sub, sup) in XSD_HIERARCHY {
+        // Cheap occurrence probe: only intern when the SUB side already occurs
+        // (or was introduced as a sup earlier in this pass).
+        let sub_id = dict.intern_iri(&format!("{XSD}{sub}"));
+        if occurring.contains(&sub_id) || chain.iter().any(|&(_, b)| b == sub_id) {
+            let sup_id = dict.intern_iri(&format!("{XSD}{sup}"));
+            chain.push((sub_id, sup_id));
+        }
+    }
+    // XSD_HIERARCHY is topologically ordered (subs before sups), so one pass
+    // suffices to follow chains introduced within this pass.
+    for (sub_id, sup_id) in chain {
+        if !set.contains(&[sub_id, sub_class, sup_id]) {
+            add.push([sub_id, sub_class, sup_id]);
+        }
+    }
+
+    let mut added = 0;
+    let mut seen = set;
+    for t in add {
+        if seen.insert(t) {
+            triples.push(t);
+            added += 1;
+        }
+    }
+    added
+}
+
+/// Post-closure scm-eqc2 / scm-eqp2: mutual `rdfs:subClassOf` ⊢
+/// `owl:equivalentClass` (and the property analogue), both orientations.
+fn post_equivalences(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
+    let v = Vocab::intern(dict);
+    let equiv_class = dict.intern_iri(&format!("{OWL}equivalentClass"));
+    let equiv_prop = dict.intern_iri(&format!("{OWL}equivalentProperty"));
+    let mut set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+    let mut sc: FxHashSet<(Id, Id)> = FxHashSet::default();
+    let mut sp: FxHashSet<(Id, Id)> = FxHashSet::default();
+    for &[s, p, o] in triples.iter() {
+        if p == v.sub_class {
+            sc.insert((s, o));
+        } else if p == v.sub_prop {
+            sp.insert((s, o));
+        }
+    }
+    let mut added = 0;
+    let mut emit = |pairs: &FxHashSet<(Id, Id)>,
+                    eq: Id,
+                    set: &mut FxHashSet<[Id; 3]>,
+                    triples: &mut Vec<[Id; 3]>,
+                    added: &mut usize| {
+        for &(a, b) in pairs.iter() {
+            if a != b && pairs.contains(&(b, a)) {
+                for t in [[a, eq, b], [b, eq, a]] {
+                    if set.insert(t) {
+                        triples.push(t);
+                        *added += 1;
+                    }
+                }
+            }
+        }
+    };
+    emit(&sc, equiv_class, &mut set, triples, &mut added);
+    emit(&sp, equiv_prop, &mut set, triples, &mut added);
+    added
+}
+
+/// The OWL 2 RL fixpoint core (see [`materialize_owl_rl`]).
+fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let v = Vocab::intern(dict);
     let o = Owl::intern(dict);
 
@@ -555,7 +675,6 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
         return crate::rdfs::rdfs_closure(dict, triples, true, &mono);
     }
 
-    let before = triples.len();
     let mut all: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
 
     // owl:sameAs entity rewriting: seed the union-find from explicit sameAs, then reason over
@@ -1159,19 +1278,25 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
         base.sort_unstable();
         (base, derived)
     };
+    let added = derived.len();
     triples.clear();
     triples.append(&mut base);
     triples.extend(derived);
     if prof {
         eprintln!("OWL-PROF finalsort={:.3}", __t.elapsed().as_secs_f64());
     }
-    triples.len() - before
+    // NOT `triples.len() - before`: duplicate input triples dedup away in the
+    // rebuild and the subtraction underflows (see rdfs_closure).
+    added
 }
 
 /// Detect OWL 2 RL inconsistencies (clashes) in a triple set — run it AFTER materialization
 /// so entailed types are present. Returns human-readable clash descriptions (empty = no
-/// detected inconsistency). Covers cax-dw (disjointWith), cls-com (complementOf), eq-diff
-/// (sameAs ∩ differentFrom), and cls-nothing (owl:Nothing instances).
+/// detected inconsistency). Covers cax-dw (disjointWith), cax-adc (AllDisjointClasses),
+/// cls-com (complementOf), cls-nothing (owl:Nothing instances), cls-maxc1, eq-diff1/2/3
+/// (sameAs ∩ differentFrom / AllDifferent), prp-asyp / prp-irp (asymmetric & irreflexive
+/// violations), prp-pdw / prp-adp (disjoint properties), prp-npa1/2 (negative property
+/// assertions), and sameAs forced between distinct literal values (dt-diff ⊢ eq-diff1).
 pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
     use oxrdf::{NamedNode, Term as OTerm};
     let look = |iri: String| dict.lookup(&OTerm::NamedNode(NamedNode::new_unchecked(iri)));
@@ -1210,6 +1335,181 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
     }
     let mut out = Vec::new();
     let term = |id: Id| dict.term(id).to_string();
+
+    // Extended clash rules need (predicate → pairs), (subject,predicate) → object,
+    // and RDF-list access over the same triple set.
+    let asym = look(format!("{OWL}AsymmetricProperty"));
+    let irrefl = look(format!("{OWL}IrreflexiveProperty"));
+    let pdw = look(format!("{OWL}propertyDisjointWith"));
+    let adp = look(format!("{OWL}AllDisjointProperties"));
+    let adc = look(format!("{OWL}AllDisjointClasses"));
+    let all_different = look(format!("{OWL}AllDifferent"));
+    let members_p = look(format!("{OWL}members"));
+    let distinct_members = look(format!("{OWL}distinctMembers"));
+    let source_individual = look(format!("{OWL}sourceIndividual"));
+    let assertion_property = look(format!("{OWL}assertionProperty"));
+    let target_individual = look(format!("{OWL}targetIndividual"));
+    let target_value = look(format!("{OWL}targetValue"));
+    let rdf_first = look(format!("{RDF}first"));
+    let rdf_rest = look(format!("{RDF}rest"));
+    let rdf_nil = look(format!("{RDF}nil"));
+    let mut po: FxHashMap<Id, Vec<(Id, Id)>> = FxHashMap::default();
+    let mut first_obj: FxHashMap<(Id, Id), Id> = FxHashMap::default();
+    for &[s, p, ob] in &all {
+        po.entry(p).or_default().push((s, ob));
+        first_obj.entry((s, p)).or_insert(ob);
+    }
+    let list = |head: Id| -> Vec<Id> {
+        let mut items = Vec::new();
+        let mut cur = head;
+        let mut guard = 0;
+        while cur != rdf_nil && guard < 10_000 {
+            guard += 1;
+            match first_obj.get(&(cur, rdf_first)) {
+                Some(&f) => items.push(f),
+                None => break,
+            }
+            match first_obj.get(&(cur, rdf_rest)) {
+                Some(&r) => cur = r,
+                None => break,
+            }
+        }
+        items
+    };
+
+    // prp-asyp: an asymmetric property holding in both directions.
+    if asym != 0 {
+        for (p, ts) in &subj_types {
+            if ts.contains(&asym) {
+                if let Some(pairs) = po.get(p) {
+                    for &(x, y) in pairs {
+                        if all.contains(&[y, *p, x]) {
+                            out.push(format!(
+                                "asymmetric {} holds both ways between {} and {}",
+                                term(*p), term(x), term(y)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // prp-irp: an irreflexive property relating a node to itself.
+    if irrefl != 0 {
+        for (p, ts) in &subj_types {
+            if ts.contains(&irrefl) {
+                if let Some(pairs) = po.get(p) {
+                    for &(x, y) in pairs {
+                        if x == y {
+                            out.push(format!(
+                                "irreflexive {} relates {} to itself",
+                                term(*p), term(x)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // prp-pdw + prp-adp: disjoint properties sharing a (subject, object) pair.
+    let mut disjoint_props: Vec<(Id, Id)> = po.get(&pdw).cloned().unwrap_or_default();
+    if adp != 0 && members_p != 0 {
+        for (z, ts) in &subj_types {
+            if ts.contains(&adp) {
+                if let Some(&head) = first_obj.get(&(*z, members_p)) {
+                    let ms = list(head);
+                    for (i, &a) in ms.iter().enumerate() {
+                        for &b in &ms[i + 1..] {
+                            disjoint_props.push((a, b));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (p, q) in disjoint_props {
+        if let Some(pairs) = po.get(&p) {
+            for &(x, y) in pairs {
+                if all.contains(&[x, q, y]) {
+                    out.push(format!(
+                        "disjoint properties {} and {} share the pair ({}, {})",
+                        term(p), term(q), term(x), term(y)
+                    ));
+                }
+            }
+        }
+    }
+    // cax-adc: an individual typed by two members of an AllDisjointClasses set.
+    if adc != 0 && members_p != 0 {
+        for (z, ts) in &subj_types {
+            if ts.contains(&adc) {
+                if let Some(&head) = first_obj.get(&(*z, members_p)) {
+                    let cs = list(head);
+                    for (x, xts) in &subj_types {
+                        if cs.iter().filter(|c| xts.contains(c)).count() >= 2 {
+                            out.push(format!(
+                                "{} is typed by two members of an AllDisjointClasses set",
+                                term(*x)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // prp-npa1/2: a negative property assertion that nevertheless holds.
+    if let Some(srcs) = po.get(&source_individual) {
+        for &(z, x) in srcs {
+            if let Some(&p) = first_obj.get(&(z, assertion_property)) {
+                let targets = [
+                    first_obj.get(&(z, target_individual)).copied(),
+                    first_obj.get(&(z, target_value)).copied(),
+                ];
+                for y in targets.into_iter().flatten() {
+                    if all.contains(&[x, p, y]) {
+                        out.push(format!(
+                            "negative property assertion violated: {} {} {}",
+                            term(x), term(p), term(y)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // eq-diff2/3: sameAs (or identical) members of an AllDifferent set.
+    if all_different != 0 {
+        for (z, ts) in &subj_types {
+            if ts.contains(&all_different) {
+                for mp in [members_p, distinct_members] {
+                    if mp == 0 {
+                        continue;
+                    }
+                    if let Some(&head) = first_obj.get(&(*z, mp)) {
+                        let xs = list(head);
+                        for (i, &a) in xs.iter().enumerate() {
+                            for &b in &xs[i + 1..] {
+                                if a == b || same.contains(&(a.min(b), a.max(b))) {
+                                    out.push(format!(
+                                        "AllDifferent members {} and {} are the same",
+                                        term(a), term(b)
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // dt-diff ⊢ eq-diff1: equality forced between literals with distinct values
+    // (e.g. a FunctionalProperty with two different literal values).
+    for &(a, b) in &same {
+        if let (oxrdf::Term::Literal(la), oxrdf::Term::Literal(lb)) = (dict.term(a), dict.term(b)) {
+            if literal_values_differ(&la, &lb) {
+                out.push(format!("distinct literal values {la} and {lb} forced sameAs"));
+            }
+        }
+    }
     // cax-dw / cls-com: an individual typed by two disjoint/complementary classes.
     for (c1, c2) in disjoint.iter().chain(complement.iter()) {
         for (x, ts) in &subj_types {
@@ -1298,6 +1598,39 @@ impl Axioms {
         }
         ax
     }
+}
+
+/// Do two literals PROVABLY denote different values? Conservative: only judges
+/// the numeric tower (by value), and same-datatype string-family literals (by
+/// lexical form); everything else is "cannot tell" = false.
+fn literal_values_differ(a: &oxrdf::Literal, b: &oxrdf::Literal) -> bool {
+    if a == b {
+        return false;
+    }
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+    let numeric = |d: &str| {
+        matches!(
+            d.strip_prefix(XSD),
+            Some(
+                "integer" | "decimal" | "long" | "int" | "short" | "byte"
+                    | "nonNegativeInteger" | "positiveInteger" | "nonPositiveInteger"
+                    | "negativeInteger" | "unsignedLong" | "unsignedInt" | "unsignedShort"
+                    | "unsignedByte"
+            )
+        )
+    };
+    let (da, db) = (a.datatype(), b.datatype());
+    if numeric(da.as_str()) && numeric(db.as_str()) {
+        if let (Ok(x), Ok(y)) = (a.value().parse::<f64>(), b.value().parse::<f64>()) {
+            return x != y;
+        }
+        return false;
+    }
+    if da == db && a.language() == b.language() {
+        return matches!(da.as_str().strip_prefix(XSD), Some("string"))
+            || da.as_str() == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+    }
+    false
 }
 
 #[cfg(test)]
