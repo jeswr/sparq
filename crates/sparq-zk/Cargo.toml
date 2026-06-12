@@ -43,7 +43,3 @@ blake3 = "1"
 serde_json = "1"
 # SHA-384 parameterized-hash cases of the W3C rdf-canon suite (test075).
 sha2 = "0.10"
-
-[[bin]]
-name = "sparq-zk-bench"
-path = "src/bin/bench.rs"
