@@ -83,7 +83,9 @@ log that make sharding/replication a later, mechanical step (§6.8).
 ## 2. Literature review
 
 (Searched and compiled 2026-06-12; key sources only, each with the design implication
-that survives contact with our measurements.)
+that survives contact with our measurements. Extended citation trail — including
+BSBM/LDBC/WatDiv/IGUANA benchmark specifics used in §7 — in
+`research/concurrent-serving-litreview-{A,B,C}-*.md`.)
 
 ### 2.1 MQO / work sharing
 
