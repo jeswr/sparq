@@ -389,19 +389,29 @@ impl TripleStore {
     fn load_pred_stats(dir: &std::path::Path) -> Option<FxHashMap<Id, PredStat>> {
         use std::io::Read;
         let mut r = std::io::BufReader::new(std::fs::File::open(dir.join("predstats.bin")).ok()?);
-        let mut buf8 = [0u8; 8];
-        let mut rd = || -> Option<u64> {
-            r.read_exact(&mut buf8).ok()?;
-            Some(u64::from_le_bytes(buf8))
-        };
-        let n = rd()? as usize;
+        fn rd8(r: &mut impl Read) -> Option<u64> {
+            let mut b = [0u8; 8];
+            r.read_exact(&mut b).ok()?;
+            Some(u64::from_le_bytes(b))
+        }
+        // The predicate id is written as a little-endian `Id` (u32, 4 bytes) by
+        // `save_pred_stats` — this loader used to read 8 bytes for it, mis-framing every
+        // record, so the load ALWAYS failed and `open` silently fell back to recomputing
+        // the stats, paging in the whole POS+PSO indexes (~24 B/triple of resident memory
+        // and most of the out-of-core open time). Measured in research/memory-tiering.md.
+        fn rd_id(r: &mut impl Read) -> Option<Id> {
+            let mut b = [0u8; std::mem::size_of::<Id>()];
+            r.read_exact(&mut b).ok()?;
+            Some(Id::from_le_bytes(b))
+        }
+        let n = rd8(&mut r)? as usize;
         let mut stats = FxHashMap::default();
         stats.reserve(n);
         for _ in 0..n {
-            let p = rd()? as Id;
-            let count = rd()? as usize;
-            let ndv_subj = rd()? as usize;
-            let ndv_obj = rd()? as usize;
+            let p = rd_id(&mut r)?;
+            let count = rd8(&mut r)? as usize;
+            let ndv_subj = rd8(&mut r)? as usize;
+            let ndv_obj = rd8(&mut r)? as usize;
             stats.insert(p, PredStat { count, ndv_subj, ndv_obj });
         }
         Some(stats)
@@ -846,6 +856,35 @@ mod tests {
             assert_eq!(raw.pred_stat(p), refallback.pred_stat(p), "recomputed pred_stat differs for {p}");
         }
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `load_pred_stats` must actually LOAD the persisted file — not silently return
+    /// `None` and let `open` fall back to recomputing (which pages in the whole POS+PSO
+    /// indexes, defeating the point of persisting the stats). Regression test for the
+    /// id-width mis-framing bug: the predicate id is written as a 4-byte `Id`, and the
+    /// loader read 8 — so every load failed and `compressed_save_open_roundtrip` above
+    /// still passed (recomputed == recomputed). Asserts the load is `Some` AND exact.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn pred_stats_load_is_some_and_exact() {
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        let mut st = 0xACCE55u32;
+        let mut rng = || {
+            st ^= st << 13;
+            st ^= st >> 17;
+            st ^= st << 5;
+            st
+        };
+        for _ in 0..30_000 {
+            triples.push([1 + rng() % 900, 1 + rng() % 23, 1 + rng() % 4000]);
+        }
+        let store = TripleStore::from_triples(triples);
+        let dir = std::env::temp_dir().join(format!("sparq_predstats_{}", std::process::id()));
+        store.save(&dir).unwrap();
+        let loaded = TripleStore::load_pred_stats(&dir)
+            .expect("persisted predstats.bin must load, not fall back to a POS+PSO re-scan");
+        assert_eq!(loaded, store.pred_stats, "loaded pred stats must equal the saved ones");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The delta-overlay must be INVISIBLE in results: a store with an overlay must answer
