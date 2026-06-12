@@ -2507,12 +2507,16 @@ impl MaterializedN3Graph {
                         Some("evaluation met data outside the builtin-parity whitelist".into());
                     return false;
                 }
-                // Monotone rules + fixed guards ⇒ diffs share the round's sign; anything else
-                // would be a bug — recover correctness by full re-materialization.
+                // Monotone rules + fixed guards ⇒ diffs normally share the round's sign.
+                // The exception is a base↔layer OWNERSHIP TRANSFER: a fact that is both
+                // asserted and layer-derivable is excluded from `layer_derived` while
+                // asserted (it seeds the local fixpoint), so deleting its base copy makes
+                // it APPEAR in the layer diff (and inserting an already-derived fact makes
+                // it vanish) without its closure membership changing. The sign-homogeneous
+                // propagation below cannot express that hand-off — recover correctness by
+                // a full re-materialization (NON-sticky: the rules still qualify for
+                // counting; this is a state hand-off, not a data disqualification).
                 if (inserting && !removed.is_empty()) || (!inserting && !added.is_empty()) {
-                    debug_assert!(false, "wrong-sign layer diff under monotone rules");
-                    self.data_fallback =
-                        Some("non-monotone layer diff (engine fallback)".into());
                     return false;
                 }
                 for f in added {

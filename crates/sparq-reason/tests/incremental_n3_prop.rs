@@ -373,3 +373,38 @@ fn wac_small_pod_differential() {
     assert_eq!(g.full_rebuilds(), before + 1, "ownAcl delta must rebuild");
     assert_equal(&g, &rules, &base, "after ownAcl insert");
 }
+
+#[test]
+fn delete_of_asserted_layer_derivable_fact_is_an_ownership_transfer() {
+    // REGRESSION: a fact both ASSERTED and derivable by a recursive layer is excluded from
+    // the layer's derived set while asserted (it seeds the local fixpoint). Deleting its
+    // base copy therefore makes it APPEAR in the layer diff during a DELETE round — which
+    // the sign-homogeneity check used to debug-panic on (and sticky-fallback in release).
+    // It is an ownership transfer, not non-monotonicity: the fact stays in the closure,
+    // now owned by the layer, and the graph must stay on the counting fast path.
+    let rules = "@prefix : <http://ex/> .\n\
+                 { ?x :parent ?y } => { ?x :ancestor ?y } .\n\
+                 { ?x :ancestor ?y . ?y :ancestor ?z } => { ?x :ancestor ?z } .\n";
+    let base = vec![
+        [ex("a"), ex("parent"), ex("b")],
+        [ex("b"), ex("parent"), ex("c")],
+        [ex("a"), ex("ancestor"), ex("c")], // asserted AND layer-derivable
+    ];
+    let mut g = MaterializedN3Graph::new(rules, &base).unwrap();
+    assert_eq!(g.mode(), N3Mode::Counting);
+    g.delete(&[[ex("a"), ex("ancestor"), ex("c")]]);
+    assert!(g.contains(&[ex("a"), ex("ancestor"), ex("c")]), "fact stays via the layer");
+    assert_eq!(g.mode(), N3Mode::Counting, "no sticky fallback for an ownership transfer");
+    assert!(g.fallback_reason().is_none(), "not a data disqualification");
+    // Oracle: closure equals a from-scratch run on the current base.
+    let mirror: FxHashSet<[Term; 3]> = base[..2].iter().cloned().collect();
+    let src = format!("{rules}\n{}", serialize(&mirror));
+    let oracle: FxHashSet<[Term; 3]> =
+        reason_n3_terms(&src, None).unwrap().facts.into_iter().collect();
+    let got: FxHashSet<[Term; 3]> = g.closure().into_iter().collect();
+    assert_eq!(got, oracle, "closure must equal the from-scratch oracle");
+    // And the INSERT direction of the transfer: asserting an already-derived fact.
+    g.insert(&[[ex("a"), ex("ancestor"), ex("c")]]);
+    assert!(g.contains(&[ex("a"), ex("ancestor"), ex("c")]));
+    assert_eq!(g.mode(), N3Mode::Counting);
+}
