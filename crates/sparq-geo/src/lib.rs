@@ -33,6 +33,8 @@ pub mod index;
 pub mod literal;
 #[cfg(feature = "engine")]
 pub mod registry;
+#[cfg(feature = "reproject")]
+pub mod reproject;
 
 pub use geof::Unit;
 pub use index::GeoIndex;

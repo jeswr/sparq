@@ -28,8 +28,14 @@ readme = "README.md"
 # `sparq_engine::query_with_functions`. Disable default features for the pure
 # geometry library (WKT literals, geof: as plain Rust, GeoIndex) without the
 # engine in the dependency graph.
+# `reproject` (opt-in): the [`reproject`] module — pure-Rust coordinate
+# transformation (proj4rs) from a small curated set of projected EPSG CRSs
+# into CRS84, so projected literals can join the geographic machinery
+# (GeoIndex, metric distance). Off by default: most deployments never see
+# projected literals.
 default = ["engine"]
 engine = ["dep:sparq-engine"]
+reproject = ["dep:proj4rs"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -46,6 +52,9 @@ geo = "0.33"
 geo-types = "0.7"
 # R-tree (bulk-loaded STR) over geometry bounding boxes.
 rstar = "0.12"
+# Behind the `reproject` feature: pure-Rust proj4 (NOT the C `proj` binding —
+# the workspace's pure-Rust constraint holds). One transitive dep (thiserror).
+proj4rs = { version = "0.1", optional = true }
 # Fast hash maps for the geometry-node -> feature mapping during index build.
 rustc-hash.workspace = true
 
