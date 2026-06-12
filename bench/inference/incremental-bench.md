@@ -119,5 +119,6 @@ follow-up with the rules' owner.
   incremental timings.
 * The WAC pod is synthetic but loader-shaped (sparq-solid's `assemble_input` output schema);
   the real fixture lives behind sparq-solid's private loader. The engine-re-run baseline
-  (0.84 s) is consistent with the ~1 s full `materialize_wac` pipeline measured by
-  `cargo run -p sparq-solid --example bench --release` on the real 1.1k-graph fixture.
+  (0.84 s) matches the real-fixture full `materialize_wac` pipeline measured the same day
+  on this machine: 808.90 ms best-of-3 (`cargo run -p sparq-solid --example bench
+  --release`, 1,148-graph WAC fixture → 3,783 auth triples, closure 15,475).
