@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OWL 2 RL rule completion (`sparq-reason`)** — the remaining OWL 2 RL/RDF rules
+  (Profiles §4.3): `cls-oo` (oneOf member typing), `cls-maxqc1/2`
+  (qualified-cardinality-0 clashes in `inconsistencies()`), the schema-level
+  restriction-subsumption family `scm-hv`/`scm-svf1`/`scm-svf2`/`scm-avf1`/`scm-avf2`
+  (indexed/guarded joins grouped by onProperty resp. filler — never the naive
+  quadratic restriction×restriction pass), and the premise-free
+  `cls-thing`/`cls-nothing1` axioms (occurrence-guarded). The rule-coverage table in
+  `research/inference-completeness-audit.md` is now fully implemented or explicitly
+  by-design (prp-ap, eq-ref, dt-*, reflexive scm-* — each argued). Conformance scores
+  and closure throughput unchanged; zero wasm-bundle impact.
+
 - **EXPLAIN / EXPLAIN ANALYZE (`sparq-engine`, `sparq-server`, T22)** — query-plan
   introspection: engine `explain()` renders the algebra tree plus a planning-only dry
   run of the BGP planner (greedy GOO join order with cardinality estimates, per-step
