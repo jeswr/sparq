@@ -1,0 +1,39 @@
+# sparq-serve: the concurrent-serving core (research/concurrent-serving.md §6).
+#
+# LIBRARY-FIRST RULE (§6.1): this crate is sync, runtime-agnostic, and exposes NO
+# HTTP types and NO async-runtime types in its API. Consumers (sparq-server's axum
+# endpoint, the QLever-compat endpoint mode, wasm/python bindings) wrap the sync
+# core; async adapters, when they come, live behind a feature flag — never in core.
+#
+# DEPENDENCY DIRECTION: sparq-wasm must NOT be able to reach this crate (it would
+# drag server-side machinery into the browser build). Nothing under crates/ may add
+# sparq-serve as a dependency of anything in sparq-wasm's graph; CI-checkable with
+#   cargo tree -p sparq-wasm -e normal | grep -c serve   # expect 0
+[package]
+name = "sparq-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Concurrent serving core for sparq: lock-free generation ring (arc-swapped immutable snapshots), bounded retention, per-pod epoch vectors"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+# Lock-free current-generation pointer (§6.4): readers `load()` in ~10-20 ns and
+# never block the writer. Deliberately a direct dependency of THIS crate only (not
+# a workspace dependency) — no other crate should reach for it casually; the
+# generation ring is the one sanctioned place for arc-swap in the tree.
+arc-swap = "1"
+rustc-hash.workspace = true
+
+[dev-dependencies]
+# The real store, used only to prove the ring composes with the production snapshot
+# type (`Arc<sparq_core::Graph>` clones — the 27 ns mechanism measured in §4.3).
+# A *dev*-dependency on purpose: A1's ring is generic over the snapshot handle, so
+# the library itself needs nothing from the store yet; later waves (writer, cache)
+# will promote sparq-core/sparq-engine to normal dependencies.
+sparq-core = { path = "../sparq-core" }
