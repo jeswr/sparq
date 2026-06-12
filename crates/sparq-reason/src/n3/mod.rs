@@ -573,6 +573,9 @@ fn match_premise_seeded(
                         };
                         formula_containment(&scope, inner, &b)
                     }
+                    // `{}` parses as the literal true — the EMPTY formula:
+                    // it includes nothing (and notIncludes everything).
+                    Term::Lit(v, _, _) if v == "true" => formula_containment(&[], inner, &b),
                     _ => match_premise_seeded(inner, facts, &b, None, bw, depth),
                 };
                 if is_not {
@@ -1313,19 +1316,23 @@ fn containment_search(
 /// A parsed document's statements with rules re-encoded into their surface
 /// triple form (log:semantics / log:parsedAsN3 result formulae).
 fn reencode_statements(parsed: parser::Parsed) -> Vec<[Term; 3]> {
+    let quote = |ts: &[[Term; 3]]| -> Term {
+        if ts.is_empty() {
+            // the empty formula IS the literal true
+            Term::Lit("true".into(), parser::XSD_BOOLEAN.into(), None)
+        } else {
+            Term::Formula(ts.to_vec())
+        }
+    };
     let mut ts = parsed.facts;
     for r in &parsed.rules {
-        ts.push([
-            Term::Formula(r.premise.clone()),
-            Term::Iri(parser::LOG_IMPLIES.into()),
-            Term::Formula(r.conclusion.clone()),
-        ]);
+        ts.push([quote(&r.premise), Term::Iri(parser::LOG_IMPLIES.into()), quote(&r.conclusion)]);
     }
     for r in &parsed.backward_rules {
         ts.push([
-            Term::Formula(r.conclusion.clone()),
+            quote(&r.conclusion),
             Term::Iri(parser::LOG_IMPLIED_BY.into()),
-            Term::Formula(r.premise.clone()),
+            quote(&r.premise),
         ]);
     }
     ts
@@ -1890,6 +1897,8 @@ fn eval_functional(
             for a in &args {
                 match a {
                     Term::Lit(v, _, _) => s.push_str(v),
+                    // cwm coerces IRI arguments to their text (concatenation.n3 s01).
+                    Term::Iri(i) => s.push_str(i),
                     _ => return None,
                 }
             }
@@ -2257,6 +2266,9 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
             // INTEGER-only (cwm remainder.n3: any non-integer operand FAILS),
             // with the sign of the DIVISOR (Python %, matching the cwm refs:
             // -2 mod 4 = 2, 2 mod -4 = -2).
+            if vals.len() != 2 {
+                return None;
+            }
             match (vals[0], vals[1]) {
                 (NumVal::Int(a), NumVal::Int(b)) if b != 0 => {
                     let r = a.checked_rem(b)?;

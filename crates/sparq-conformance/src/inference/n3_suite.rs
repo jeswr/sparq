@@ -32,7 +32,8 @@ const MF: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#";
 const TEST: &str = "https://w3c.github.io/N3/tests/test.n3#";
 const RDFT: &str = "http://www.w3.org/ns/rdftest#";
 const LOG_IMPLIES: &str = "http://www.w3.org/2000/10/swap/log#implies";
-const LOG_IMPLIED_BY: &str = "http://www.w3.org/2000/10/swap/log#impliedBy";
+const LOG_IMPLIED_BY: &str = "http://www.w3.org/2000/10/swap/log#isImpliedBy";
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -141,12 +142,10 @@ fn run_manifest(
         };
         let result = file("result");
         let mut outcome = match kind {
-            "TestN3PositiveSyntax" | "TurtlePositiveSyntax" => {
-                syntax_test(&action, tests_root, true)
-            }
-            "TestN3NegativeSyntax" | "TurtleNegativeSyntax" => {
-                syntax_test(&action, tests_root, false)
-            }
+            "TestN3PositiveSyntax" => syntax_test(&action, tests_root, true, false),
+            "TurtlePositiveSyntax" => syntax_test(&action, tests_root, true, true),
+            "TestN3NegativeSyntax" => syntax_test(&action, tests_root, false, false),
+            "TurtleNegativeSyntax" => syntax_test(&action, tests_root, false, true),
             "TestN3Eval" => eval_test_n3(&action, result.as_deref(), tests_root),
             "TurtleEval" => eval_test_turtle(&action, result.as_deref(), tests_root, true),
             "TurtleNegativeEval" => {
@@ -174,13 +173,28 @@ fn run_manifest(
 /// Parse on a watchdog thread (the recursive-descent parser may loop on
 /// pathological input — that becomes a recorded FAIL, not a hung harness).
 fn parse_with_watchdog(src: String, base: String) -> Result<Result<Parsed, String>, String> {
+    parse_with_watchdog_mode(src, base, false)
+}
+
+/// `strict` = the W3C Turtle grammar (for the TurtleTests suite).
+fn parse_with_watchdog_mode(
+    src: String,
+    base: String,
+    strict: bool,
+) -> Result<Result<Parsed, String>, String> {
     let (tx, rx) = mpsc::channel();
     // Generous stack: the stress-test files nest deeply and the parser
     // recurses per nesting level (bounded by its MAX_DEPTH guard).
     let _ = std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            let result = std::panic::catch_unwind(|| parser::parse_with_base(&src, &base));
+            let result = std::panic::catch_unwind(|| {
+                if strict {
+                    parser::parse_turtle_with_base(&src, &base)
+                } else {
+                    parser::parse_with_base(&src, &base)
+                }
+            });
             let _ = tx.send(result);
         });
     match rx.recv_timeout(TEST_TIMEOUT) {
@@ -195,13 +209,13 @@ fn read(path: &Path) -> Result<String, Outcome> {
     std::fs::read_to_string(path).map_err(|e| Outcome::Fail(format!("read {}: {e}", path.display())))
 }
 
-fn syntax_test(action: &Path, tests_root: &Path, positive: bool) -> Outcome {
+fn syntax_test(action: &Path, tests_root: &Path, positive: bool, strict: bool) -> Outcome {
     let src = match read(action) {
         Ok(s) => s,
         Err(o) => return o,
     };
     let base = canonical_iri(tests_root, action);
-    match parse_with_watchdog(src, base) {
+    match parse_with_watchdog_mode(src, base, strict) {
         Ok(Ok(_)) if positive => Outcome::Pass,
         Ok(Ok(_)) => Outcome::Fail("negative syntax: parser accepted an invalid document".into()),
         Ok(Err(_)) if !positive => Outcome::Pass,
@@ -218,20 +232,19 @@ fn syntax_test(action: &Path, tests_root: &Path, positive: bool) -> Outcome {
 /// All statements of a parsed document, with rules re-encoded back into their
 /// surface triple form so eval comparisons see them.
 fn statements(p: &Parsed) -> Vec<[NTerm; 3]> {
+    let quote = |ts: &[[NTerm; 3]]| -> NTerm {
+        if ts.is_empty() {
+            NTerm::Lit("true".into(), XSD_BOOLEAN.into(), None) // `{}` = true
+        } else {
+            NTerm::Formula(ts.to_vec())
+        }
+    };
     let mut stmts = p.facts.clone();
     for r in &p.rules {
-        stmts.push([
-            NTerm::Formula(r.premise.clone()),
-            NTerm::Iri(LOG_IMPLIES.into()),
-            NTerm::Formula(r.conclusion.clone()),
-        ]);
+        stmts.push([quote(&r.premise), NTerm::Iri(LOG_IMPLIES.into()), quote(&r.conclusion)]);
     }
     for r in &p.backward_rules {
-        stmts.push([
-            NTerm::Formula(r.conclusion.clone()),
-            NTerm::Iri(LOG_IMPLIED_BY.into()),
-            NTerm::Formula(r.premise.clone()),
-        ]);
+        stmts.push([quote(&r.conclusion), NTerm::Iri(LOG_IMPLIED_BY.into()), quote(&r.premise)]);
     }
     stmts
 }
@@ -277,17 +290,18 @@ fn eval_test_turtle(
         Ok(s) => s,
         Err(o) => return o,
     };
-    let parsed = match parse_with_watchdog(src, canonical_iri(tests_root, action)) {
-        Ok(Ok(p)) => p,
-        Ok(Err(e)) => {
-            return if positive {
-                Outcome::Fail(format!("action parse error: {e}"))
-            } else {
-                Outcome::Pass // rejecting the document certainly avoids the wrong graph
-            };
-        }
-        Err(e) => return Outcome::Fail(e),
-    };
+    let parsed =
+        match parse_with_watchdog_mode(src, canonical_iri(tests_root, action), true) {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                return if positive {
+                    Outcome::Fail(format!("action parse error: {e}"))
+                } else {
+                    Outcome::Pass // rejecting the document certainly avoids the wrong graph
+                };
+            }
+            Err(e) => return Outcome::Fail(e),
+        };
     // Expected side: N-Triples/Turtle ground graph via oxttl.
     let expected = match crate::rdf::parse_file(result) {
         Ok(t) => t,
