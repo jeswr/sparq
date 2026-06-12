@@ -18,14 +18,24 @@
 //! **incrementally** under inserts/deletes (exact derivation counting; see the
 //! `incremental` module docs) so a data update costs time proportional to the change, not
 //! a full re-materialization.
+//!
+//! With the **non-default `explain` feature**, the materialized handles answer
+//! `why(triple)` with a [`ProofTree`](explain::ProofTree) — which rule fired from which
+//! premises, recursively down to asserted facts (see the [`explain`] module docs for the
+//! flat, ZK-witness-friendly shape and the consistency model). Off by default: zero cost,
+//! zero wasm impact.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
 mod incremental;
+#[cfg(feature = "explain")]
+pub mod explain;
 pub mod n3;
 mod owl;
 mod rdfs;
+#[cfg(feature = "explain")]
+pub use explain::{ExplainOpts, ProofNode, ProofTree};
 pub use incremental::{
     MaterializedGraph, MaterializedN3Graph, MaterializedOwlGraph, N3Mode, OwlMode,
 };
