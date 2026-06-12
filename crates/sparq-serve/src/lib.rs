@@ -15,11 +15,24 @@
 //! - `current()` is lock-free (`ArcSwap::load`, ~10–20 ns); only `publish()` and
 //!   the introspection accessors take the (writer-side) mutex.
 //!
+//! Wave A deliverable 2 (§6.5): the **single sequenced writer** with a
+//! group-commit window — [`Writer`] owns the sole right to publish generations;
+//! updates arriving within a window (default 3 ms / 256 updates) are applied to
+//! one working copy and published as ONE generation, epochs bumped for the union
+//! of touched pods. Sync ([`Writer::submit`], returns the generation number) and
+//! fire-and-forget ([`Writer::submit_detached`]) submission; failed updates are
+//! reported to their submitter and skipped, never poisoning the batch (policy
+//! documented in the `writer` module). [`GraphApplier`] is the production
+//! [`ApplyUpdates`] strategy — its module docs record the honest snapshot-
+//! production decision (O(graph) fork per batch today) and the deferred
+//! cheap-fork follow-up.
+//!
 //! Library-first rule (§6.1): sync, runtime-agnostic, no HTTP and no async-runtime
-//! types anywhere in the API. The sequenced writer, group-commit window, scheduler,
-//! result cache, and stream admission (`Shed(SnapshotPressure)` at the bound) are
-//! LATER waves; this crate ships the foundation they compose over and exposes the
-//! introspection (live-generation count, oldest retained number) they will need.
+//! types anywhere in the API (the writer uses `std::thread` + channels internally).
+//! The scheduler, result cache, and stream admission (`Shed(SnapshotPressure)` at
+//! the bound) are LATER waves; this crate ships the foundation they compose over
+//! and exposes the introspection (live-generation count, oldest retained number)
+//! they will need.
 //!
 //! Snapshot integration decision: §6.4 sketches `Generation { id, graph: Arc<Graph>,
 //! epochs }`. The production snapshot mechanism is exactly an `Arc<sparq_core::Graph>`
@@ -29,8 +42,12 @@
 //! The integration test `tests/real_store.rs` instantiates the ring with the real
 //! `Graph`; unit tests use an instrumented mock to observe drops.
 
+mod applier;
 mod epoch;
 mod ring;
+mod writer;
 
+pub use applier::GraphApplier;
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use ring::{Generation, GenerationRing, RingConfig, DEFAULT_RETAIN};
+pub use writer::{ApplyUpdates, WriteError, Writer, WriterConfig, DEFAULT_MAX_BATCH, DEFAULT_WINDOW};

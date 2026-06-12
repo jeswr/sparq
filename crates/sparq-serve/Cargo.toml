@@ -29,11 +29,11 @@ readme = "../../README.md"
 # generation ring is the one sanctioned place for arc-swap in the tree.
 arc-swap = "1"
 rustc-hash.workspace = true
-
-[dev-dependencies]
-# The real store, used only to prove the ring composes with the production snapshot
-# type (`Arc<sparq_core::Graph>` clones — the 27 ns mechanism measured in §4.3).
-# A *dev*-dependency on purpose: A1's ring is generic over the snapshot handle, so
-# the library itself needs nothing from the store yet; later waves (writer, cache)
-# will promote sparq-core/sparq-engine to normal dependencies.
-sparq-core = { path = "../sparq-core" }
+# Promoted from dev-dependencies by Wave A2 (as the A1 comment anticipated): the
+# sequenced writer's production `ApplyUpdates` strategy (`GraphApplier`) applies
+# SPARQL Updates to the real store — `sparq_engine::update` for the per-batch
+# O(graph) fork, `update_in_place` for the O(batch) delta-overlay path. The ring
+# and `Writer` stay generic over the snapshot/update types; only `GraphApplier`
+# touches these. (This crate never enters sparq-wasm's graph — guard above.)
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
