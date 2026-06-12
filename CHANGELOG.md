@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Neighbor-sparse fallback for `most_similar` (`sparq-sim`)** — entities whose
+  signature elements all point at degree-1 neighbors (every event names exactly
+  one sport) generated NO candidates in v1. `SimConfig::profile_fallback`
+  (default on) fills starved slots with predicate-profile (role) matches, ranked
+  below every exactly-scored result; predicate blocks are scanned
+  most-selective-first with a `max(4k, 64)` stop. Re-measured on the real
+  olympics eval: Sport precision@10 0.000 (0/0) → 1.000 (400/400), City 0.500
+  (2/4) → 0.995 (398/400), full 2400/2400 candidate coverage, ~0.3 ms mean
+  latency cost. The per-element IDF hub budget recorded in the TODO is
+  measured-and-rejected (the eval is saturated); numbers in `sparq-sim/TODO.md`.
+
+- **Streaming store builds, weighted RRF, bytes-backed open (`sparq-vectors`)**
+  — `StreamingWriter` removes the build-phase RAM ceiling (vectors append
+  straight to the `.spqv` data section, the id→slot index spills to a sidecar;
+  output byte-identical to the in-RAM builder — no format change; duplicates
+  reported at finalize), `fuse_rrf_weighted` (Elasticsearch-style per-list
+  weights, unit weights ≡ `fuse_rrf`), and `VectorStore::open_from_bytes`
+  (filesystem-less environments; validation identical to `open`, all read paths
+  shared). No wasm feature wired (deliberate — the crate stays out of the wasm
+  graph); DiskANN-style persistent ANN, quantization and big-endian remain
+  deferred with rationale in `sparq-vectors/TODO.md`.
+
 - **Overlay window evaluation, t0, CONSTRUCT/ASK (`sparq-rsp`)** — closed
   windows are no longer rebuilt from scratch: the new `EvalMode` selects the
   R2R materialisation strategy — `PersistentDict` (one dictionary per
