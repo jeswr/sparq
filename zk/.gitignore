@@ -1,0 +1,12 @@
+# Noir build artifacts
+target/
+# Prover inputs/outputs and proof artifacts
+Prover.toml
+Verifier.toml
+proofs/
+*.proof
+*.gz
+# Python bytecode from benchmark/lint scripts
+__pycache__/
+*.pyc
+.DS_Store
