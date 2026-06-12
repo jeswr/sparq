@@ -61,6 +61,20 @@ fn run_all_modes(label: &str, range: u64, step: u64, sparql: &str) {
     println!();
 }
 
+/// Bare parse cost of a registered query — the per-window work the
+/// prepared-query seam removes (queries are parsed once at `register`, each
+/// window executes the prepared algebra). Only matters at very high window
+/// rates: see the RANGE 10 scenario.
+fn run_parse_cost(label: &str, sparql: &str) {
+    const N: u32 = 100_000;
+    let start = Instant::now();
+    for _ in 0..N {
+        std::hint::black_box(sparq_engine::PreparedQuery::parse(sparql)).expect("valid query");
+    }
+    let ns = start.elapsed().as_nanos() as f64 / f64::from(N);
+    println!("parse cost ({label}): {ns:.0} ns/parse — saved per window by parse-once registration\n");
+}
+
 /// Windowing only (no query): the bare S2R operator cost.
 fn run_windowing_only(window_ticks: u64) {
     let mut ws = WindowedStream::empty(WindowSpec::time(window_ticks, window_ticks));
@@ -85,6 +99,8 @@ fn main() {
     println!("{N_TRIPLES} triples, {N_SENSORS} sensors, 1 triple/tick, time windows\n");
     run_windowing_only(1_000);
     let avg = "SELECT (AVG(?v) AS ?avg) WHERE { ?s <http://ex/value> ?v }";
+    run_parse_cost("AVG", avg);
+    run_all_modes("AVG, RANGE 10 STEP 10 (tumbling, parse-sensitive)", 10, 10, avg);
     run_all_modes("AVG, RANGE 100 STEP 100 (tumbling)", 100, 100, avg);
     run_all_modes("AVG, RANGE 1000 STEP 1000 (tumbling)", 1_000, 1_000, avg);
     run_all_modes("AVG, RANGE 10000 STEP 10000 (tumbling)", 10_000, 10_000, avg);

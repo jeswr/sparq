@@ -33,14 +33,19 @@ ladder as selectable [`EvalMode`]s, benchmarked head-to-head (README table,
    the engine an O(1) immutable snapshot per closed window. That seam would
    also remove PersistentDict's remaining per-window cost (index build +
    O(dictionary) numeric/temporal cache rebuild in `Graph::from_parts`).
-4. **Parse/plan once** — **engine side DONE (engine-seams wave)**:
+4. **Parse/plan once** — **DONE (both sides)**: engine side
    `sparq_engine::PreparedQuery` (parse / `From<spargebra::Query>`) with
    `query_prepared` / `ask_prepared` / `count_prepared` / `construct_prepared`
    (+ `_with_budget`) entry points; the string APIs are thin wrappers, so
-   semantics are identical. Remaining (rsp-side, this crate's owner): cache a
-   `PreparedQuery` at `register` time and call `query_prepared` in the window
-   loop. Parsing is microseconds — only worth it for very small windows at high
-   window rates (the RANGE 100 line in the README).
+   semantics are identical. Rsp side: all three continuous forms parse a
+   `PreparedQuery` once at `register` time (where the form check already
+   forced a parse) and execute the prepared algebra per window. Measured
+   honestly (1 M triples, interleaved A/B, 5 reps): parsing the README's AVG
+   query costs ~2.6 µs, so the saving only clears run-to-run noise at very
+   small windows — RANGE 10 PersistentDict dropped ~11.8 → ~9.8 µs/window
+   (median, ~17 %); at RANGE 100 the ~5 % saving is within noise, and above
+   that it vanishes. Adopted anyway: strictly less work per window, no API
+   change, and registration was already paying the parse.
 
 ## Smaller gaps
 

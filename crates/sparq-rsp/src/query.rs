@@ -43,7 +43,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use oxrdf::{Term, Triple, Variable};
-use spargebra::{Query, SparqlParser};
+use sparq_engine::PreparedQuery;
+use spargebra::Query;
 
 use crate::eval::{EvalMode, WindowEval};
 use crate::window::WindowSpec;
@@ -128,6 +129,9 @@ pub struct AskResult {
 /// ```
 pub struct ContinuousQuery {
     sparql: String,
+    /// Parsed once at registration; every window executes the prepared form
+    /// (sparq-engine's parse/plan-once seam) instead of re-parsing `sparql`.
+    prepared: PreparedQuery,
     eval: WindowEval,
     r2s: R2S,
     /// Previous window's full result, in engine row order, with row hashes —
@@ -140,15 +144,18 @@ impl ContinuousQuery {
     /// Registers a continuous SELECT over a windowed stream, with the RSP-QL
     /// default output operator (RSTREAM) and the default [`EvalMode`]. The
     /// query string is parsed and validated NOW — a malformed or non-SELECT
-    /// query is rejected at registration, not at the first window. (For
-    /// CONSTRUCT use [`ContinuousConstruct`], for ASK [`ContinuousAsk`].)
+    /// query is rejected at registration, not at the first window — and the
+    /// parsed form is kept: every window executes the prepared algebra, no
+    /// per-window re-parse. (For CONSTRUCT use [`ContinuousConstruct`], for
+    /// ASK [`ContinuousAsk`].)
     pub fn register(sparql: &str, spec: WindowSpec) -> Result<Self, String> {
-        let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-        if !matches!(q, Query::Select { .. }) {
+        let prepared = PreparedQuery::parse(sparql)?;
+        if !matches!(prepared.query(), Query::Select { .. }) {
             return Err("continuous queries must be SELECT queries".into());
         }
         Ok(ContinuousQuery {
             sparql: sparql.to_owned(),
+            prepared,
             eval: WindowEval::new(spec, EvalMode::default()),
             r2s: R2S::RStream,
             prev_rows: Vec::new(),
@@ -216,12 +223,12 @@ impl ContinuousQuery {
     }
 
     fn emit(&mut self, flush: bool, on_result: &mut impl FnMut(WindowResult)) -> Result<(), String> {
-        let sparql = &self.sparql;
+        let prepared = &self.prepared;
         let r2s = self.r2s;
         let prev_rows = &mut self.prev_rows;
         let prev_hashes = &mut self.prev_hashes;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
-            let result = sparq_engine::query(graph, sparql)?;
+            let result = sparq_engine::query_prepared(graph, prepared)?;
             let rows = match r2s {
                 R2S::RStream => result.rows,
                 R2S::IStream | R2S::DStream => {
@@ -261,6 +268,8 @@ impl ContinuousQuery {
 /// ```
 pub struct ContinuousConstruct {
     sparql: String,
+    /// Parsed once at registration; executed per window via the prepared seam.
+    prepared: PreparedQuery,
     eval: WindowEval,
     r2s: R2S,
     /// Previous window's constructed graph (the ISTREAM/DSTREAM diff base).
@@ -272,12 +281,13 @@ impl ContinuousConstruct {
     /// default [`EvalMode`]). Malformed or non-CONSTRUCT queries are rejected
     /// at registration.
     pub fn register(sparql: &str, spec: WindowSpec) -> Result<Self, String> {
-        let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-        if !matches!(q, Query::Construct { .. }) {
+        let prepared = PreparedQuery::parse(sparql)?;
+        if !matches!(prepared.query(), Query::Construct { .. }) {
             return Err("continuous construct queries must be CONSTRUCT queries".into());
         }
         Ok(ContinuousConstruct {
             sparql: sparql.to_owned(),
+            prepared,
             eval: WindowEval::new(spec, EvalMode::default()),
             r2s: R2S::RStream,
             prev: Vec::new(),
@@ -329,11 +339,11 @@ impl ContinuousConstruct {
     }
 
     fn emit(&mut self, flush: bool, on_result: &mut impl FnMut(GraphResult)) -> Result<(), String> {
-        let sparql = &self.sparql;
+        let prepared = &self.prepared;
         let r2s = self.r2s;
         let prev = &mut self.prev;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
-            let cur = sparq_engine::construct(graph, sparql)?;
+            let cur = sparq_engine::construct_prepared(graph, prepared)?;
             let triples = match r2s {
                 R2S::RStream => cur.clone(),
                 // Constructed graphs are SETS: exact set difference, in the
@@ -353,6 +363,8 @@ impl ContinuousConstruct {
 /// a condition: the engine's ASK path early-exits on the first solution.
 pub struct ContinuousAsk {
     sparql: String,
+    /// Parsed once at registration; executed per window via the prepared seam.
+    prepared: PreparedQuery,
     eval: WindowEval,
 }
 
@@ -361,11 +373,15 @@ impl ContinuousAsk {
     /// [`EvalMode`]). Malformed or non-ASK queries are rejected at
     /// registration.
     pub fn register(sparql: &str, spec: WindowSpec) -> Result<Self, String> {
-        let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-        if !matches!(q, Query::Ask { .. }) {
+        let prepared = PreparedQuery::parse(sparql)?;
+        if !matches!(prepared.query(), Query::Ask { .. }) {
             return Err("continuous ask queries must be ASK queries".into());
         }
-        Ok(ContinuousAsk { sparql: sparql.to_owned(), eval: WindowEval::new(spec, EvalMode::default()) })
+        Ok(ContinuousAsk {
+            sparql: sparql.to_owned(),
+            prepared,
+            eval: WindowEval::new(spec, EvalMode::default()),
+        })
     }
 
     /// Sets the window materialisation strategy (builder style). Call BEFORE
@@ -407,9 +423,9 @@ impl ContinuousAsk {
     }
 
     fn emit(&mut self, flush: bool, on_result: &mut impl FnMut(AskResult)) -> Result<(), String> {
-        let sparql = &self.sparql;
+        let prepared = &self.prepared;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
-            let value = sparq_engine::ask(graph, sparql)?;
+            let value = sparq_engine::ask_prepared(graph, prepared)?;
             on_result(AskResult { start, end, value });
             Ok(())
         })

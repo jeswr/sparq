@@ -271,7 +271,7 @@ pub(crate) fn view_scope(active: &Option<Graph>) -> Option<exec::view::Guard> {
 }
 
 /// A SPARQL query parsed ONCE for repeated execution — the parse/plan-once seam
-/// recorded by sparq-rsp (continuous queries re-evaluate the same text per window)
+/// used by sparq-rsp (continuous queries execute the same query per window)
 /// and any caller that runs one query against many graphs. Wraps the `spargebra`
 /// algebra; build with [`PreparedQuery::parse`] (or `From<spargebra::Query>` for
 /// algebra constructed/rewritten programmatically), execute with
