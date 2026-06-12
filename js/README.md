@@ -5,16 +5,33 @@
 > the first publish.
 
 [RDF/JS](https://rdf.js.org/)-style bindings for **sparq**, a Rust RDF
-triplestore + SPARQL engine compiled to WebAssembly. One ~1 MB wasm artifact,
-zero runtime npm dependencies; works in Node ≥ 18 and the browser.
+triplestore + SPARQL engine compiled to WebAssembly. One ~1.6 MB wasm artifact,
+one tiny runtime npm dependency ([`fzstd`](https://www.npmjs.com/package/fzstd),
+dynamically imported only when ingesting zstd); works in Node ≥ 18 and the
+browser.
 
-- Dictionary-encoded, immutable in-memory store (optionally block-compressed:
-  about half the index memory for a bounded scan cost).
+- Dictionary-encoded in-memory store (optionally block-compressed: about half
+  the index memory for a bounded scan cost).
 - SPARQL 1.1 SELECT (BGPs with worst-case-optimal joins, FILTER, OPTIONAL,
   UNION, MINUS, BIND, VALUES, aggregates, ORDER BY, DISTINCT/LIMIT/OFFSET,
-  sub-SELECT) and ASK (evaluated via the engine's no-materialise count path).
-- SPARQL 1.1 Update: `INSERT DATA`, `DELETE DATA`, `DELETE/INSERT … WHERE`,
-  `CLEAR` (default graph).
+  sub-SELECT) and ASK — both evaluated natively (ASK early-exits at the first
+  solution).
+- Named graphs (`options.dataset`): `GRAPH <iri>` / `GRAPH ?g` patterns,
+  `FROM` / `FROM NAMED`, graph-aware `match()`.
+- SPARQL 1.1 Update over the full dataset (`INSERT/DELETE DATA` with `GRAPH`
+  blocks, `DELETE/INSERT … WHERE` with graph templates, `CLEAR`/`DROP`/
+  `CREATE`/`ADD`/`COPY`/`MOVE`), applied in place through the engine's delta
+  overlay — O(batch), no index rebuild — plus quad-level `applyDelta` /
+  `addQuads` / `removeQuads`.
+- Streaming results: `queryBindingsStream()` yields one solution at a time
+  (`for…of` or `for await…of`) from ~64 KiB wasm-boundary chunks — no giant
+  JSON blob, no giant array; `queryJsonChunks()` exposes the raw chunks.
+- Compressed ingest: `fromCompressed()` decodes `.nt.zst` (including
+  multi-frame zstd from sparq's `CompressedSink`) via pure-JS `fzstd`, and
+  `.gz` via the platform.
+- Dictionary-fetch protocol client (`SparqDictionaryClient`): zstd
+  vocabulary-dictionary negotiation with a sparq server — content-addressed
+  dictionary caching, background warm-up, pluggable dict-capable decoder.
 - Results as RDF/JS Query-spec `Bindings` (Map-like, `.get(variable)`), terms as
   spec-compliant RDF/JS `Term`s (typed against `@rdfjs/types`).
 
@@ -63,6 +80,25 @@ store.update('PREFIX ex: <http://ex/> INSERT DATA { ex:carol ex:name "Carol" }')
 // Raw SPARQL 1.1 JSON results, skipping JS-side term materialisation
 const json = JSON.parse(store.queryJson('SELECT * WHERE { ?s ?p ?o } LIMIT 10'));
 
+// Stream large results one solution at a time (no whole-result JSON/array):
+for await (const row of store.queryBindingsStream('SELECT ?s ?o WHERE { ?s ?p ?o }')) {
+  console.log(row.get('s').value);
+}
+
+// Incremental, O(batch) quad-level updates (no index rebuild):
+store.addQuads([DF.quad(DF.namedNode('http://ex/d'), DF.namedNode('http://ex/p'), DF.literal('o'))]);
+store.removeQuads(store.match(null, DF.namedNode('http://ex/p')));
+store.applyDelta(insertQuads, deleteQuads); // deletes applied first, then inserts
+
+// Named graphs: load as a DATASET (N-Quads / TriG / fromQuads keep their graphs)
+const ds = await SparqStore.fromString(nquads, 'nquads', { dataset: true });
+ds.queryBindings('SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }');
+ds.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> "o" } }');
+ds.match(null, null, null, DF.namedNode('http://ex/g')); // graph-aware lookup
+
+// Compressed ingest: .nt.zst (multi-frame OK) / .ttl.gz, codec sniffed by magic
+const fromZst = await SparqStore.fromCompressed(zstBytes, 'ntriples');
+
 // Memory-constrained devices: block-compressed index
 const compact = await SparqStore.fromString(bigTurtle, 'turtle', { compressed: true });
 compact.heapBytes(); // rough wasm-side footprint
@@ -70,18 +106,49 @@ compact.heapBytes(); // rough wasm-side footprint
 store.free(); // release wasm memory (also `using store = …` via Symbol.dispose)
 ```
 
+### Talking to a sparq server: dictionary-fetch protocol
+
+Sparq servers compress small SPARQL responses with shared zstd *vocabulary
+dictionaries* (≈5× smaller on ≤1 KiB bodies) — but only when the client proves
+it already holds the dictionary, so no request ever waits on one.
+`SparqDictionaryClient` wraps `fetch` with the whole negotiation:
+
+```js
+import { SparqDictionaryClient } from '@jeswr/sparq';
+
+const client = new SparqDictionaryClient({
+  // fzstd cannot decode dictionary frames — supply a dict-capable decoder
+  // (zstd-wasm in the browser; node:zlib in Node). Without it the client
+  // simply never advertises dictionaries and responses stay plain zstd.
+  decodeWithDictionary: (body, dict) => zstdDecompressSync(body, { dictionary: Buffer.from(dict) }),
+});
+const { body, dictionary } = await client.fetch('https://host/sparql?query=…');
+```
+
+Held dictionaries are advertised via `Sparq-Dictionary`; the response echoes
+the one used and `Sparq-Dictionary-Current` triggers a background, content-
+verified warm-up from `GET /dictionary/{dict-id}` for the *next* request.
+
 ### Notes & limits
 
-- The store is **triple-scoped**: named graphs in the input (TriG/N-Quads or
-  `fromQuads`) are folded into the default graph; `match(s, p, o, namedGraph)`
-  returns nothing for a named graph.
-- ASK is rewritten to `SELECT *` and answered from the engine's count path
-  (the engine itself currently evaluates SELECT only).
+- Named graphs are folded into the default graph **unless** the store is
+  loaded with `options.dataset`; `size`/`heapBytes` always report the default
+  graph (use `countQuads()` for dataset totals). `dataset` is not combinable
+  with `compressed` yet.
 - CONSTRUCT / DESCRIBE / federated queries are not supported (see `TODO.md`).
+- `REGEX`/`REPLACE` are compiled out of the wasm build (the engine's
+  non-default `regex` cargo feature) to keep the bundle small — use
+  `CONTAINS`/`STRSTARTS`/… or a custom build.
 - A specific blank node in `match()` is matched by label via a post-filter
-  (SPARQL itself cannot reference a particular bnode).
-- `update()` consumes and replaces the wasm store handle; concurrent use of an
-  old handle is impossible (the old one is freed).
+  (SPARQL itself cannot reference a particular bnode); `applyDelta` deletes
+  also address bnodes by label (unlike SPARQL `DELETE DATA`).
+- `update()` and `applyDelta()` mutate in place through the engine's delta
+  overlay (append-only dictionary growth; deletes are overlay tombstones until
+  the wasm store is reloaded).
+- Browsers silently truncate **multi-member gzip** to the first member —
+  `fromCompressed` uses `node:zlib` in Node (which loops members) and
+  `DecompressionStream` in the browser (single-member only); multi-frame
+  **zstd** decodes fully everywhere via the bundled fzstd.
 
 ## Benchmarks
 
