@@ -19,9 +19,11 @@
 //! | class    | cax-eqc1/2 | `(c equivalentClass d),(x a c)` ⊢ `(x a d)` (and converse) |
 //!
 //! Coverage now includes the class-expression rules (cls-* for someValuesFrom/allValuesFrom/
-//! hasValue/intersection/union via `owl:Restriction` + RDF-list decoding), `prp-spo2`
-//! (propertyChainAxiom), cardinality/`hasKey`, the schema (scm-*) rules, and the consistency
-//! clashes (see [`inconsistencies`]). `owl:sameAs` is handled by union-find ENTITY REWRITING
+//! hasValue/oneOf/intersection/union via `owl:Restriction` + RDF-list decoding), `prp-spo2`
+//! (propertyChainAxiom), cardinality/`hasKey`, the schema (scm-*) rules incl. the
+//! restriction-subsumption family (scm-hv/svf1/svf2/avf1/avf2), the premise-free
+//! cls-thing/cls-nothing1 axioms (occurrence-guarded), and the consistency
+//! clashes incl. cls-maxqc1/2 (see [`inconsistencies`]). `owl:sameAs` is handled by union-find ENTITY REWRITING
 //! (reason over canonical representatives, expand at the end) rather than the quadratic eq-rep
 //! substitution. The fixpoint is SEMI-NAIVE: the recursive rules (RDFS transitivity + prp-trp)
 //! derive only from the previous round's new facts against incrementally-maintained indexes.
@@ -59,6 +61,7 @@ struct Owl {
     max_cardinality: Id, // owl:maxCardinality
     max_qual_card: Id,   // owl:maxQualifiedCardinality
     on_class: Id,        // owl:onClass
+    one_of: Id,          // owl:oneOf
     rdf_first: Id,
     rdf_rest: Id,
     rdf_nil: Id,
@@ -88,6 +91,7 @@ impl Owl {
             max_cardinality: i("maxCardinality"),
             max_qual_card: i("maxQualifiedCardinality"),
             on_class: i("onClass"),
+            one_of: i("oneOf"),
             rdf_first: dict.intern_iri(&format!("{RDF}first")),
             rdf_rest: dict.intern_iri(&format!("{RDF}rest")),
             rdf_nil: dict.intern_iri(&format!("{RDF}nil")),
@@ -357,6 +361,7 @@ struct ClassFeatureIdx {
     chain_head: FxHashMap<Id, Id>, // property -> propertyChainAxiom list head
     inter_head: FxHashMap<Id, Id>, // class -> intersectionOf list head
     union_head: FxHashMap<Id, Id>, // class -> unionOf list head
+    oneof_head: FxHashMap<Id, Id>, // class -> oneOf list head
     by_pred: FxHashMap<Id, FxHashMap<Id, Vec<Id>>>, // p -> (s -> [o])
     type_subj: FxHashMap<Id, Vec<Id>>, // class -> subjects
     subj_types: FxHashMap<Id, Vec<Id>>, // subject -> classes
@@ -366,6 +371,7 @@ struct ClassFeatureIdx {
     chains: FxHashMap<Id, Vec<Id>>, // property -> chain property list
     inters: FxHashMap<Id, Vec<Id>>, // class -> intersection members
     unions: FxHashMap<Id, Vec<Id>>, // class -> union members
+    oneofs: FxHashMap<Id, Vec<Id>>, // class -> oneOf (enumerated individual) members
 }
 
 impl ClassFeatureIdx {
@@ -403,6 +409,9 @@ impl ClassFeatureIdx {
             self.lists_dirty = true;
         } else if p == o.union {
             self.union_head.insert(s, obj);
+            self.lists_dirty = true;
+        } else if p == o.one_of {
+            self.oneof_head.insert(s, obj);
             self.lists_dirty = true;
         } else if p == o.rdf_first {
             self.first.insert(s, obj);
@@ -442,6 +451,7 @@ impl ClassFeatureIdx {
             (&mut self.chains, &self.chain_head),
             (&mut self.inters, &self.inter_head),
             (&mut self.unions, &self.union_head),
+            (&mut self.oneofs, &self.oneof_head),
         ] {
             dst.clear();
             for (&s, head) in heads {
@@ -472,6 +482,7 @@ fn owl_uses_features(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> bool {
         o.max_cardinality,
         o.max_qual_card,
         o.on_class,
+        o.one_of,
     ]
     .into_iter()
     .collect();
@@ -500,6 +511,7 @@ fn monotone_only(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> Option<crate::rdfs:
         o.max_cardinality,
         o.max_qual_card,
         o.on_class,
+        o.one_of,
     ]
     .into_iter()
     .collect();
@@ -565,8 +577,12 @@ const XSD_HIERARCHY: &[(&str, &str)] = &[
 
 /// Pre-closure monotone facts: symmetric `owl:differentFrom` edges (the relation
 /// is symmetric in the OWL semantics; deriving the mirror once up front is
-/// complete because nothing else derives differentFrom) and the upward XSD
-/// datatype-hierarchy chain for every XSD datatype IRI occurring in the data.
+/// complete because nothing else derives differentFrom), the upward XSD
+/// datatype-hierarchy chain for every XSD datatype IRI occurring in the data,
+/// and the cls-thing / cls-nothing1 axioms (`owl:Thing/Nothing rdf:type owl:Class`)
+/// for whichever of the two terms actually occurs (the rules are premise-free;
+/// the occurrence guard keeps closures of data that never mentions Thing/Nothing
+/// free of injected vocabulary, the same discipline as the XSD chain).
 fn pre_monotone(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
     let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
@@ -578,6 +594,18 @@ fn pre_monotone(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     for &[s, p, o] in triples.iter() {
         if p == different_from && !set.contains(&[o, p, s]) {
             add.push([o, p, s]);
+        }
+    }
+
+    // cls-thing / cls-nothing1 (Profiles §4.3 Table 6, premise-free):
+    // ⊢ T(owl:Thing, rdf:type, owl:Class) and ⊢ T(owl:Nothing, rdf:type, owl:Class),
+    // emitted only when the term occurs in the data (see the doc comment).
+    let ty = dict.intern_iri(oxrdf::vocab::rdf::TYPE.as_str());
+    let owl_class = dict.intern_iri(&format!("{OWL}Class"));
+    for frag in ["Thing", "Nothing"] {
+        let id = dict.intern_iri(&format!("{OWL}{frag}"));
+        if occurring.contains(&id) && !set.contains(&[id, ty, owl_class]) {
+            add.push([id, ty, owl_class]);
         }
     }
 
@@ -714,6 +742,7 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
         o.property_chain,
         o.intersection,
         o.union,
+        o.one_of,
     ]
     .into_iter()
     .collect();
@@ -921,6 +950,7 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                 chains,
                 inters,
                 unions,
+                oneofs,
                 by_pred,
                 type_subj,
                 subj_types,
@@ -1107,6 +1137,90 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             }
             for (&c, members) in unions {
                 cand.extend(members.iter().map(|&m| [m, v.sub_class, c]));
+            }
+            // cls-oo — oneOf: `T(?c, owl:oneOf, ?x), LIST[?x, ?y1…?yn] ⊢ T(?yi, rdf:type, ?c)`
+            // (every enumerated individual is an instance of the enumeration class). Linear in
+            // the total oneOf list length (the lists are decoded once by `refresh_lists`).
+            for (&c, members) in oneofs {
+                cand.extend(members.iter().map(|&y| [y, v.ty, c]));
+            }
+            // scm-hv / scm-svf1/2 / scm-avf1/2 — schema-level restriction subsumption
+            // (Profiles §4.3 Table 9):
+            //   scm-svf1: (c1 svf y1; onProp p) (c2 svf y2; onProp p) (y1 ⊑c y2) ⊢ c1 ⊑c c2
+            //   scm-avf1: same with allValuesFrom
+            //   scm-svf2: (c1 svf y; onProp p1) (c2 svf y; onProp p2) (p1 ⊑p p2) ⊢ c1 ⊑c c2
+            //   scm-hv:   (c1 hv i; onProp p1) (c2 hv i; onProp p2) (p1 ⊑p p2) ⊢ c1 ⊑c c2
+            //   scm-avf2: (c1 avf y; onProp p1) (c2 avf y; onProp p2) (p1 ⊑p p2) ⊢ c2 ⊑c c1
+            //              (NB the conclusion direction REVERSES — allValuesFrom is
+            //              contravariant in the property).
+            // INDEXED/GUARDED: the naive form is a quadratic restriction×restriction join.
+            // Instead restrictions are grouped by onProperty (svf1/avf1) or by filler/value
+            // (svf2/avf2/hv), and within a group only the explicit subClassOf/subPropertyOf
+            // out-edges of each member are probed — O(restrictions × direct super-edges),
+            // never all pairs. Conclusions (subClassOf between restriction nodes) re-enter
+            // the fixpoint and feed rdfs9/11 the same way the other scm-* rules do.
+            {
+                // p -> (filler -> [restrictions]) for the same-property rules.
+                let group_by_prop = |m: &FxHashMap<Id, Id>| {
+                    let mut g: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
+                    for (&r, &y) in m {
+                        if let Some(&p) = on_prop.get(&r) {
+                            g.entry(p).or_default().entry(y).or_default().push(r);
+                        }
+                    }
+                    g
+                };
+                // filler -> (p -> [restrictions]) for the same-filler rules.
+                let group_by_filler = |m: &FxHashMap<Id, Id>| {
+                    let mut g: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
+                    for (&r, &y) in m {
+                        if let Some(&p) = on_prop.get(&r) {
+                            g.entry(y).or_default().entry(p).or_default().push(r);
+                        }
+                    }
+                    g
+                };
+                // scm-svf1 / scm-avf1: same property, subClassOf-related fillers.
+                for m in [svf, avf] {
+                    for by_filler in group_by_prop(m).into_values() {
+                        for (y1, r1s) in &by_filler {
+                            if let Some(sups) = schema.sub_class.get(y1) {
+                                for y2 in sups {
+                                    if let Some(r2s) = by_filler.get(y2) {
+                                        for &r1 in r1s {
+                                            cand.extend(
+                                                r2s.iter().map(|&r2| [r1, v.sub_class, r2]),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // scm-svf2 / scm-hv (⊢ c1 ⊑ c2) and scm-avf2 (⊢ c2 ⊑ c1): same filler/value,
+                // subPropertyOf-related properties.
+                for (m, fwd) in [(svf, true), (hv, true), (avf, false)] {
+                    for by_p in group_by_filler(m).into_values() {
+                        for (p1, r1s) in &by_p {
+                            if let Some(sups) = schema.sub_prop.get(p1) {
+                                for p2 in sups {
+                                    if let Some(r2s) = by_p.get(p2) {
+                                        for &r1 in r1s {
+                                            cand.extend(r2s.iter().map(|&r2| {
+                                                if fwd {
+                                                    [r1, v.sub_class, r2]
+                                                } else {
+                                                    [r2, v.sub_class, r1]
+                                                }
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         } // uses_class_features
         t_class += __t.elapsed().as_secs_f64();
@@ -1315,14 +1429,19 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
     let same_as = look(format!("{OWL}sameAs"));
     let different_from = look(format!("{OWL}differentFrom"));
     let nothing = look(format!("{OWL}Nothing"));
+    let thing = look(format!("{OWL}Thing"));
     let on_property = look(format!("{OWL}onProperty"));
     let max_cardinality = look(format!("{OWL}maxCardinality"));
+    let max_qual_cardinality = look(format!("{OWL}maxQualifiedCardinality"));
+    let on_class_p = look(format!("{OWL}onClass"));
     let all: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
     let mut subj_types: FxHashMap<Id, FxHashSet<Id>> = FxHashMap::default();
     let mut same: FxHashSet<(Id, Id)> = FxHashSet::default();
     let (mut disjoint, mut complement, mut different) = (Vec::new(), Vec::new(), Vec::new());
     let mut on_prop: FxHashMap<Id, Id> = FxHashMap::default();
     let mut max_card0: FxHashSet<Id> = FxHashSet::default();
+    let mut max_qcard0: FxHashSet<Id> = FxHashSet::default();
+    let mut on_class: FxHashMap<Id, Id> = FxHashMap::default();
     let mut prop_subj: FxHashSet<(Id, Id)> = FxHashSet::default(); // (property, subject-with-a-value)
     for &[s, p, ob] in &all {
         if p == ty {
@@ -1339,6 +1458,10 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
             on_prop.insert(s, ob);
         } else if p == max_cardinality && lit_int(dict, ob) == Some(0) {
             max_card0.insert(s);
+        } else if p == max_qual_cardinality && lit_int(dict, ob) == Some(0) {
+            max_qcard0.insert(s);
+        } else if p == on_class_p {
+            on_class.insert(s, ob);
         }
         prop_subj.insert((p, s));
     }
@@ -1560,6 +1683,33 @@ pub fn inconsistencies(dict: &Dict, triples: &[[Id; 3]]) -> Vec<String> {
                         term(*x),
                         term(p)
                     ));
+                }
+            }
+        }
+    }
+    // cls-maxqc1/2 (Profiles §4.3 Table 6): u typed a maxQualifiedCardinality-0
+    // restriction [onProperty p; onClass c], yet u has a p-value y with y a c
+    // (cls-maxqc1) — any p-value at all when c = owl:Thing (cls-maxqc2). Guarded:
+    // only the p-edges of the (few) qualified-cardinality-0 restrictions are scanned.
+    for &r in &max_qcard0 {
+        if let (Some(&p), Some(&c)) = (on_prop.get(&r), on_class.get(&r)) {
+            if let Some(pairs) = po.get(&p) {
+                for &(u, y) in pairs {
+                    if subj_types.get(&u).is_some_and(|ts| ts.contains(&r))
+                        && (c == thing
+                            || subj_types.get(&y).is_some_and(|ts| ts.contains(&c)))
+                    {
+                        out.push(format!(
+                            "{} has a {} value{} but is maxQualifiedCardinality 0 on it",
+                            term(u),
+                            term(p),
+                            if c == thing {
+                                String::new()
+                            } else {
+                                format!(" typed {}", term(c))
+                            }
+                        ));
+                    }
                 }
             }
         }
@@ -1997,6 +2147,243 @@ mod tests {
             set.contains(&[a, sa, b]) || set.contains(&[b, sa, a]),
             "cls-maxqc ⊢ sameAs"
         );
+    }
+
+    #[test]
+    fn one_of_members_typed() {
+        // cls-oo: :Weekday owl:oneOf ( :mon :tue ) ⊢ :mon a :Weekday ; :tue a :Weekday.
+        // Hand-computed closure: the 5 input triples (oneOf head + 2 list cells) plus
+        // EXACTLY the two cls-oo type assertions — no other rule fires.
+        let mut dict = Dict::new();
+        let (weekday, mon, tue) = (
+            ex(&mut dict, "Weekday"),
+            ex(&mut dict, "mon"),
+            ex(&mut dict, "tue"),
+        );
+        let (ty, oo) = (rdf(&mut dict, "type"), owl(&mut dict, "oneOf"));
+        let mut triples = Vec::new();
+        let l = list(&mut dict, &mut triples, &[mon, tue]);
+        triples.push([weekday, oo, l]);
+        let input: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        let added = materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[mon, ty, weekday]), "cls-oo first member");
+        assert!(set.contains(&[tue, ty, weekday]), "cls-oo second member");
+        assert_eq!(added, 2, "exactly the two cls-oo conclusions");
+        assert_eq!(set.len(), input.len() + 2);
+    }
+
+    #[test]
+    fn max_qualified_cardinality_zero_clashes() {
+        // cls-maxqc1: R = [onProperty :p; maxQualifiedCardinality 0; onClass :C];
+        // :u a R ; :u :p :y ; :y a :C  → inconsistent.
+        let mut dict = Dict::new();
+        let (p, c, u, y) = (
+            ex(&mut dict, "p"),
+            ex(&mut dict, "C"),
+            ex(&mut dict, "u"),
+            ex(&mut dict, "y"),
+        );
+        let r = dict.intern_blank("_RQ0");
+        let ty = rdf(&mut dict, "type");
+        let (onp, mqc, onc) = (
+            owl(&mut dict, "onProperty"),
+            owl(&mut dict, "maxQualifiedCardinality"),
+            owl(&mut dict, "onClass"),
+        );
+        let zero = dict.intern_lit("0", "http://www.w3.org/2001/XMLSchema#nonNegativeInteger", None);
+        let mut triples = vec![
+            [r, onp, p],
+            [r, mqc, zero],
+            [r, onc, c],
+            [u, ty, r],
+            [u, p, y],
+            [y, ty, c],
+        ];
+        materialize_owl_rl(&mut dict, &mut triples);
+        assert!(!inconsistencies(&dict, &triples).is_empty(), "cls-maxqc1 clash");
+
+        // Consistent variant: the p-value is NOT a :C — no clash (the qualification matters).
+        let mut d2 = Dict::new();
+        let (p, c, u, y) = (ex(&mut d2, "p"), ex(&mut d2, "C"), ex(&mut d2, "u"), ex(&mut d2, "y"));
+        let r = d2.intern_blank("_RQ0");
+        let ty = rdf(&mut d2, "type");
+        let (onp, mqc, onc) = (
+            owl(&mut d2, "onProperty"),
+            owl(&mut d2, "maxQualifiedCardinality"),
+            owl(&mut d2, "onClass"),
+        );
+        let zero = d2.intern_lit("0", "http://www.w3.org/2001/XMLSchema#nonNegativeInteger", None);
+        let mut t2 = vec![[r, onp, p], [r, mqc, zero], [r, onc, c], [u, ty, r], [u, p, y]];
+        materialize_owl_rl(&mut d2, &mut t2);
+        assert!(inconsistencies(&d2, &t2).is_empty(), "untyped filler: no cls-maxqc1 clash");
+
+        // cls-maxqc2: onClass owl:Thing — ANY p-value clashes.
+        let mut d3 = Dict::new();
+        let (p, u, y) = (ex(&mut d3, "p"), ex(&mut d3, "u"), ex(&mut d3, "y"));
+        let r = d3.intern_blank("_RQ0");
+        let ty = rdf(&mut d3, "type");
+        let (onp, mqc, onc, thing) = (
+            owl(&mut d3, "onProperty"),
+            owl(&mut d3, "maxQualifiedCardinality"),
+            owl(&mut d3, "onClass"),
+            owl(&mut d3, "Thing"),
+        );
+        let zero = d3.intern_lit("0", "http://www.w3.org/2001/XMLSchema#nonNegativeInteger", None);
+        let mut t3 = vec![[r, onp, p], [r, mqc, zero], [r, onc, thing], [u, ty, r], [u, p, y]];
+        materialize_owl_rl(&mut d3, &mut t3);
+        assert!(!inconsistencies(&d3, &t3).is_empty(), "cls-maxqc2 clash");
+    }
+
+    #[test]
+    fn scm_svf1_restriction_subsumption() {
+        // scm-svf1: R1 = [onProperty :hasPet; someValuesFrom :Dog],
+        // R2 = [onProperty :hasPet; someValuesFrom :Animal], :Dog ⊑ :Animal ⊢ R1 ⊑ R2.
+        // Hand-computed closure: input + EXACTLY {R1 ⊑ R2 (scm-svf1), x a R2 (rdfs9)}.
+        let mut dict = Dict::new();
+        let (haspet, dog, animal, x) = (
+            ex(&mut dict, "hasPet"),
+            ex(&mut dict, "Dog"),
+            ex(&mut dict, "Animal"),
+            ex(&mut dict, "x"),
+        );
+        let (r1, r2) = (dict.intern_blank("_R1"), dict.intern_blank("_R2"));
+        let ty = rdf(&mut dict, "type");
+        let sc = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+        let (onp, svf) = (owl(&mut dict, "onProperty"), owl(&mut dict, "someValuesFrom"));
+        let mut triples = vec![
+            [dog, sc, animal],
+            [r1, onp, haspet],
+            [r1, svf, dog],
+            [r2, onp, haspet],
+            [r2, svf, animal],
+            [x, ty, r1],
+        ];
+        let added = materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[r1, sc, r2]), "scm-svf1");
+        assert!(set.contains(&[x, ty, r2]), "rdfs9 over the scm-svf1 edge (fixpoint feed)");
+        assert_eq!(added, 2, "exactly scm-svf1 + rdfs9");
+    }
+
+    #[test]
+    fn scm_svf2_and_hv_restriction_subsumption() {
+        // scm-svf2: same filler :C, :p1 ⊑p :p2 ⊢ R1 ⊑ R2.
+        // scm-hv:   same value :i, :q1 ⊑p :q2 ⊢ H1 ⊑ H2.
+        let mut dict = Dict::new();
+        let (p1, p2, c, q1, q2, i) = (
+            ex(&mut dict, "p1"),
+            ex(&mut dict, "p2"),
+            ex(&mut dict, "C"),
+            ex(&mut dict, "q1"),
+            ex(&mut dict, "q2"),
+            ex(&mut dict, "i"),
+        );
+        let (r1, r2, h1, h2) = (
+            dict.intern_blank("_R1"),
+            dict.intern_blank("_R2"),
+            dict.intern_blank("_H1"),
+            dict.intern_blank("_H2"),
+        );
+        let sc = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+        let sp = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subPropertyOf");
+        let (onp, svf, hv) = (
+            owl(&mut dict, "onProperty"),
+            owl(&mut dict, "someValuesFrom"),
+            owl(&mut dict, "hasValue"),
+        );
+        let mut triples = vec![
+            [p1, sp, p2],
+            [r1, onp, p1],
+            [r1, svf, c],
+            [r2, onp, p2],
+            [r2, svf, c],
+            [q1, sp, q2],
+            [h1, onp, q1],
+            [h1, hv, i],
+            [h2, onp, q2],
+            [h2, hv, i],
+        ];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[r1, sc, r2]), "scm-svf2");
+        assert!(!set.contains(&[r2, sc, r1]), "scm-svf2 is directional");
+        assert!(set.contains(&[h1, sc, h2]), "scm-hv");
+        assert!(!set.contains(&[h2, sc, h1]), "scm-hv is directional");
+    }
+
+    #[test]
+    fn scm_avf_restriction_subsumption() {
+        // scm-avf1: same property, :Dog ⊑c :Animal ⊢ R1 ⊑ R2 (covariant in the filler).
+        // scm-avf2: same filler, :p1 ⊑p :p2 ⊢ R2 ⊑ R1 — the conclusion REVERSES
+        // (allValuesFrom is contravariant in the property).
+        let mut dict = Dict::new();
+        let (p, dog, animal, p1, p2, c) = (
+            ex(&mut dict, "p"),
+            ex(&mut dict, "Dog"),
+            ex(&mut dict, "Animal"),
+            ex(&mut dict, "p1"),
+            ex(&mut dict, "p2"),
+            ex(&mut dict, "C"),
+        );
+        let (r1, r2, a1, a2) = (
+            dict.intern_blank("_R1"),
+            dict.intern_blank("_R2"),
+            dict.intern_blank("_A1"),
+            dict.intern_blank("_A2"),
+        );
+        let sc = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+        let sp = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subPropertyOf");
+        let (onp, avf) = (owl(&mut dict, "onProperty"), owl(&mut dict, "allValuesFrom"));
+        let mut triples = vec![
+            // scm-avf1 instance
+            [dog, sc, animal],
+            [r1, onp, p],
+            [r1, avf, dog],
+            [r2, onp, p],
+            [r2, avf, animal],
+            // scm-avf2 instance
+            [p1, sp, p2],
+            [a1, onp, p1],
+            [a1, avf, c],
+            [a2, onp, p2],
+            [a2, avf, c],
+        ];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[r1, sc, r2]), "scm-avf1");
+        assert!(!set.contains(&[r2, sc, r1]), "scm-avf1 is directional");
+        assert!(set.contains(&[a2, sc, a1]), "scm-avf2 (reversed conclusion)");
+        assert!(!set.contains(&[a1, sc, a2]), "scm-avf2 derives ONLY the reversed edge");
+    }
+
+    #[test]
+    fn thing_nothing_typed_class_when_occurring() {
+        // cls-thing: a graph that mentions owl:Thing gets `owl:Thing a owl:Class`
+        // (premise-free axiom, occurrence-guarded); ditto cls-nothing1 for owl:Nothing.
+        let mut dict = Dict::new();
+        let x = ex(&mut dict, "x");
+        let ty = rdf(&mut dict, "type");
+        let (thing, class) = (owl(&mut dict, "Thing"), owl(&mut dict, "Class"));
+        let mut triples = vec![[x, ty, thing]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[thing, ty, class]), "cls-thing");
+        let nothing = owl(&mut dict, "Nothing");
+        assert!(
+            !set.contains(&[nothing, ty, class]),
+            "owl:Nothing does not occur — guard keeps it out"
+        );
+
+        // And the Nothing side.
+        let mut d2 = Dict::new();
+        let (c2, ty2) = (ex(&mut d2, "Empty"), rdf(&mut d2, "type"));
+        let (nothing2, class2) = (owl(&mut d2, "Nothing"), owl(&mut d2, "Class"));
+        let sc2 = d2.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+        let mut t2 = vec![[c2, sc2, nothing2]];
+        materialize_owl_rl(&mut d2, &mut t2);
+        let s2: FxHashSet<[Id; 3]> = t2.iter().copied().collect();
+        assert!(s2.contains(&[nothing2, ty2, class2]), "cls-nothing1");
     }
 
     #[test]
