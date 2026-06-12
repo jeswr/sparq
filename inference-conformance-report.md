@@ -2,7 +2,7 @@
 
 - rdf-tests commit: `f25dbc092c654d792974848e81bb519d7328f0e8`
 - w3c/N3 commit: `23ccf3d56b25cb60a68878a04aae0d52493080f0`
-- sparq commit: `8dd5582e7c3bc3c72c3d7b462922180f22630e89`
+- sparq commit: `b8f001a009b704658ff0c964af4a4112b83daf14`
 
 Every manifest entry lands in exactly one bucket — pass, fail, documented divergence, or out-of-scope WITH its reason (no silent skips). Pass rate is `(pass + divergence) / run`; out-of-scope entries are excluded from the rate but counted in coverage.
 

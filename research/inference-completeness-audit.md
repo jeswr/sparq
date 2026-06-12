@@ -262,13 +262,19 @@ fix; the residual mismatch is upstream-reference rot, documented as a divergence
 
 `bench/inference/eye-comparison.md` records the EYE v11.24.4 head-to-head (same
 machine, full parse→closure→serialize pipeline both sides): sparq wins every
-workload — DeepTaxonomy 62×–2,840× (sparq linear-in-closure, EYE ≈N², dt100k
-0.73 s vs extrapolated ≈9 h), grid reachability 67×, pure transitive chain 3.6×
-(anc500, sparq's worst ratio — the O(N³) chain-transitivity derivation storm is
-the noted optimization target, also visible as owl-bench's owl-transitive 54 s).
-Same doc carries the owl-bench.sh closure numbers (RDFS 2.1 M-triple closure in
-0.047 s). Wasm artifact: 1,573,895 B (cargo wasm32 release; +8 B over the tracked
-1,573,887 B baseline, attributable to the `ground_triple` fix).
+workload — DeepTaxonomy (sparq linear-in-closure, EYE ≈N², dt100k vs
+extrapolated ≈9 h), grid reachability, and — since the fixpoint-opt thread
+(2026-06) — the pure transitive chain by ~2 orders of magnitude too: the O(N³)
+chain-transitivity derivation storm noted here as the optimization target is
+FIXED by linearizing transitivity through generator edges
+(`R(x,y), GEN(y,z) ⊢ R(x,z)`, `TC(GEN)=TC(R)`) in both the OWL prp-trp fixpoint
+(owl-bench `owl-transitive` 54 s → 0.25 s) and the N3 chainer (anc500 52 s →
+0.18 s engine-internal, closures byte-identical); closure-only callers also
+skip proof-step materialization (`StepMode`, grid30 closure −47%). Same doc
+carries the owl-bench.sh closure numbers (RDFS 2.1 M-triple closure in
+~0.05 s). Wasm artifact: 1,573,895 B (cargo wasm32 release; unchanged through
+the fixpoint-opt thread; +8 B over the tracked 1,573,887 B baseline,
+attributable to the `ground_triple` fix).
 
 ## 6. Reproduction
 

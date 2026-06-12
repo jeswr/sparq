@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Domain/range typing for TBox-orphan properties on the monotone OWL route
+  (`sparq-reason`)** — on the batch single-pass path (`rdfs_closure` with the
+  property-orientation closure active, i.e. any `owl:inverseOf`/`owl:SymmetricProperty`
+  axiom present), a property with an `rdfs:domain`/`rdfs:range` declaration but no
+  subPropertyOf/inverseOf/symmetric/equivalentProperty edge emitted NO rdfs2/rdfs3
+  typing for its assertions (absent from the orientation map, the emission
+  short-circuited) — diverging from the full fixpoint path. Such properties now fall
+  through to the plain-RDFS emission (their expansion is the trivial identity).
+  Regression-tested; conformance unchanged (1637/0/17 — no suite test hits the
+  combination, which is how it survived).
+
+### Changed
+
+- **Inference fixpoint linearization + delta-driven evaluation (`sparq-reason`,
+  fixpoint-opt thread)** — the chain-transitivity derivation storms are gone, and
+  closure-only callers stop paying for proof bookkeeping:
+  * OWL-RL `prp-trp` is evaluated as the LINEAR rule `R(x,y), GEN(y,z) ⊢ R(x,z)` over
+    generator edges (edges not derived by prp-trp itself; `TC(GEN) = TC(R)`), with the
+    per-round schema rebuild and `prp-fp`/`prp-ifp` moved into the delta sweep —
+    owl-bench `owl-transitive` (2k-edge chain, ~2M-pair closure): **54 s → 0.25 s**.
+  * The N3 forward chainer detects transitivity-shaped rules
+    (`{?x P ?y. ?y P ?z} => {?x P ?z}`) and runs the same linearization, bypassing the
+    generic binding machinery — anc500 (500-link `:ancestor` chain): **52 s → 0.18 s**
+    engine-internal (closure byte-identical, 125,250).
+  * `run_closure` takes a `StepMode`: premise materialization and proof-step interning
+    are skipped when the caller discards them (`reason_n3`, the CLI closure path;
+    conformance keeps conclusions only) — grid30 closure 1.94 s → 1.02 s (−47%),
+    dt100k −18% (engine-internal min-of-5, identical closures).
+  Inference conformance unchanged (1637 pass / 0 fail / 17 documented divergences);
+  wasm artifact size unchanged; refreshed EYE head-to-head in
+  `bench/inference/eye-comparison.md`.
+
 ### Added
 
 - **OWL 2 RL rule completion (`sparq-reason`)** — the remaining OWL 2 RL/RDF rules

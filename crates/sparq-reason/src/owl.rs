@@ -211,6 +211,45 @@ fn build_adjacency(
     }
 }
 
+/// GENERATOR edges for the LINEAR (right-recursive) prp-trp evaluation: for each transitive
+/// property `p`, the edges NOT derived by prp-trp itself (input edges + edges derived by any
+/// other rule). The transitive closure of the generators equals the closure of the full
+/// relation, so prp-trp can be evaluated as the LINEAR rule `R(x,y), GEN(y,z) ⊢ R(x,z)`
+/// instead of the nonlinear `R ⋈ R`: each closure pair is then derived O(in-degree) times
+/// (O(N²) total work on an N-chain) instead of once per intermediate node (O(N³)). Marking a
+/// fact as generator is always SOUND (generators ⊆ R, so TC(gen) ⊆ R) and marking is COMPLETE
+/// as long as every fact without a prp-trp derivation is included (then R ⊆ TC(gen)); facts
+/// derived by both prp-trp and another rule may be marked either way.
+#[derive(Default)]
+struct TrpGen {
+    /// p -> (subject -> [objects]) over generator edges only (the forward-join index).
+    out: FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
+    /// Generator membership (drives the backward `full ⋈ Δgen` join direction).
+    set: FxHashSet<[Id; 3]>,
+}
+impl TrpGen {
+    fn mark(&mut self, [s, p, o]: [Id; 3]) {
+        if self.set.insert([s, p, o]) {
+            self.out.entry(p).or_default().entry(s).or_default().push(o);
+        }
+    }
+    /// Conservative rebuild (used at seed time and after a sameAs merge rewrites ids): every
+    /// transitive-property edge in `all` becomes a generator. Correct — TC(R) = R — merely
+    /// redundant for edges that were prp-trp-derived.
+    fn rebuild(&mut self, all: &FxHashSet<[Id; 3]>, transitive: &FxHashSet<Id>) {
+        self.out.clear();
+        self.set.clear();
+        if transitive.is_empty() {
+            return;
+        }
+        for &t in all {
+            if transitive.contains(&t[1]) {
+                self.mark(t);
+            }
+        }
+    }
+}
+
 /// Commit one round's candidates: a derived `sameAs` merges in the union-find (never stored);
 /// anything else is canonicalized and inserted into `all` (+ the incremental `rdfs_idx` and
 /// `out`/`inc` adjacency), with genuinely-new facts pushed to `new_delta`. Returns whether any
@@ -227,8 +266,13 @@ fn commit_serial(
     out: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
     inc: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
     new_delta: &mut Vec<[Id; 3]>,
+    // prp-trp generator marking: `Some((gen, transitive))` for candidate batches NOT produced
+    // by prp-trp (their new transitive-property edges are generators); `None` for the prp-trp
+    // batch (its facts are TC-paths of existing generators — never generators themselves).
+    gen_mark: Option<(&mut TrpGen, &FxHashSet<Id>)>,
 ) -> bool {
     let mut merged = false;
+    let mut gen_mark = gen_mark;
     for t in cand {
         if t[1] == same_as {
             // A derived sameAs (prp-fp/ifp, cls-maxc2/maxqc, …) → merge, don't store.
@@ -242,6 +286,11 @@ fn commit_serial(
                 if need.contains(&c[1]) {
                     out.entry(c[1]).or_default().entry(c[0]).or_default().push(c[2]);
                     inc.entry(c[1]).or_default().entry(c[2]).or_default().push(c[0]);
+                }
+                if let Some((gen, transitive)) = gen_mark.as_mut() {
+                    if transitive.contains(&c[1]) {
+                        gen.mark(c);
+                    }
                 }
                 new_delta.push(c);
             }
@@ -266,6 +315,8 @@ fn commit_serial(
 fn commit_candidates(
     cand: Vec<[Id; 3]>,
     chunks: Vec<Vec<[Id; 3]>>,
+    trp_cand: Vec<[Id; 3]>,
+    trp_chunks: Vec<Vec<[Id; 3]>>,
     same_as: Id,
     v: &Vocab,
     uf: &mut UnionFind,
@@ -275,24 +326,45 @@ fn commit_candidates(
     out: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
     inc: &mut FxHashMap<Id, FxHashMap<Id, Vec<Id>>>,
     new_delta: &mut Vec<[Id; 3]>,
+    gen: &mut TrpGen,
+    transitive: &FxHashSet<Id>,
 ) -> bool {
     use rayon::prelude::*;
-    let total = cand.len() + chunks.iter().map(Vec::len).sum::<usize>();
+    let total = cand.len()
+        + chunks.iter().map(Vec::len).sum::<usize>()
+        + trp_cand.len()
+        + trp_chunks.iter().map(Vec::len).sum::<usize>();
     if total < PAR_THRESHOLD {
-        let mut merged =
-            commit_serial(cand, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta);
+        let mut merged = commit_serial(
+            cand, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta,
+            Some((gen, transitive)),
+        );
         for ch in chunks {
-            merged |=
-                commit_serial(ch, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta);
+            merged |= commit_serial(
+                ch, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta,
+                Some((gen, transitive)),
+            );
+        }
+        merged |= commit_serial(
+            trp_cand, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta, None,
+        );
+        for ch in trp_chunks {
+            merged |= commit_serial(
+                ch, same_as, v, uf, all, rdfs_idx, need, out, inc, new_delta, None,
+            );
         }
         return merged;
     }
     let prof = std::env::var("SPARQ_OWL_PROF").is_ok(); // TEMP PROFILING (removed before merge)
     let t0 = std::time::Instant::now();
-    let parts: Vec<&Vec<[Id; 3]>> = std::iter::once(&cand).chain(chunks.iter()).collect();
-    // 1. sameAs merges first (serial union-find; parallel extraction).
-    let same: Vec<(Id, Id)> = parts
+    let main_parts: Vec<&Vec<[Id; 3]>> = std::iter::once(&cand).chain(chunks.iter()).collect();
+    let trp_parts: Vec<&Vec<[Id; 3]>> =
+        std::iter::once(&trp_cand).chain(trp_chunks.iter()).collect();
+    // 1. sameAs merges first (serial union-find; parallel extraction). prp-trp never derives
+    //    sameAs but the scan is uniform (and cheap) over both candidate streams.
+    let same: Vec<(Id, Id)> = main_parts
         .par_iter()
+        .chain(trp_parts.par_iter())
         .flat_map_iter(|ch| ch.iter().filter(|t| t[1] == same_as).map(|t| (t[0], t[2])))
         .collect();
     let mut merged = false;
@@ -302,38 +374,51 @@ fn commit_candidates(
         }
     }
     let t1 = std::time::Instant::now();
-    // 2. canonicalize + prefilter against `all` in parallel.
-    let mut surv: Vec<[Id; 3]> = parts
-        .par_iter()
-        .flat_map_iter(|ch| {
-            ch.iter()
-                .filter(|t| t[1] != same_as)
-                .map(|&[s, p, o]| [uf.find_ro(s), uf.find_ro(p), uf.find_ro(o)])
-                .filter(|c| !all.contains(c))
-        })
-        .collect();
-    let t2 = std::time::Instant::now();
-    // 3. one-shot dedup of the survivors, then the serial insert pass.
-    surv.par_sort_unstable();
-    surv.dedup();
+    // 2. canonicalize + prefilter against `all` in parallel — separately per stream, so the
+    //    insert pass below knows which new facts are prp-trp-derived (→ not generators).
+    let prefilter = |parts: &[&Vec<[Id; 3]>]| -> Vec<[Id; 3]> {
+        let mut surv: Vec<[Id; 3]> = parts
+            .par_iter()
+            .flat_map_iter(|ch| {
+                ch.iter()
+                    .filter(|t| t[1] != same_as)
+                    .map(|&[s, p, o]| [uf.find_ro(s), uf.find_ro(p), uf.find_ro(o)])
+                    .filter(|c| !all.contains(c))
+            })
+            .collect();
+        // 3. one-shot dedup of the survivors (parallel sort).
+        surv.par_sort_unstable();
+        surv.dedup();
+        surv
+    };
+    let surv_main = prefilter(&main_parts);
+    let surv_trp = prefilter(&trp_parts);
     let t3 = std::time::Instant::now();
-    let ns = surv.len();
-    for c in surv {
-        if all.insert(c) {
-            rdfs_idx.insert(c, v);
-            if need.contains(&c[1]) {
-                out.entry(c[1]).or_default().entry(c[0]).or_default().push(c[2]);
-                inc.entry(c[1]).or_default().entry(c[2]).or_default().push(c[0]);
+    let ns = surv_main.len() + surv_trp.len();
+    // 4. serial insert pass. A fact surviving in BOTH streams keeps whichever marking inserts
+    //    first — facts with a prp-trp derivation may be generator or not, both are correct
+    //    (see [`TrpGen`]); only facts with NO prp-trp derivation must be marked, and those
+    //    only ever appear in `surv_main`.
+    for (surv, is_trp) in [(surv_main, false), (surv_trp, true)] {
+        for c in surv {
+            if all.insert(c) {
+                rdfs_idx.insert(c, v);
+                if need.contains(&c[1]) {
+                    out.entry(c[1]).or_default().entry(c[0]).or_default().push(c[2]);
+                    inc.entry(c[1]).or_default().entry(c[2]).or_default().push(c[0]);
+                }
+                if !is_trp && transitive.contains(&c[1]) {
+                    gen.mark(c);
+                }
+                new_delta.push(c);
             }
-            new_delta.push(c);
         }
     }
     if prof {
         eprintln!(
-            "OWL-PROF-COMMIT cand={total} surv={ns} union={:.3} prefilter={:.3} sort={:.3} insert={:.3}",
+            "OWL-PROF-COMMIT cand={total} surv={ns} union={:.3} prefilter+sort={:.3} insert={:.3}",
             (t1 - t0).as_secs_f64(),
-            (t2 - t1).as_secs_f64(),
-            (t3 - t2).as_secs_f64(),
+            (t3 - t1).as_secs_f64(),
             t3.elapsed().as_secs_f64()
         );
     }
@@ -761,6 +846,16 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let mut out: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
     let mut inc: FxHashMap<Id, FxHashMap<Id, Vec<Id>>> = FxHashMap::default();
     build_adjacency(&all, &need, &mut out, &mut inc);
+    // prp-trp generator edges (linear transitive-closure evaluation — see [`TrpGen`]).
+    let mut gen = TrpGen::default();
+    gen.rebuild(&all, &ax.transitive);
+
+    // The schema (subClassOf/subPropertyOf/domain/range view) is rebuilt — and the scm-dom/rng
+    // rules re-fired — only on rounds whose delta actually contains a schema predicate (plus
+    // round 1 and after merges). On long transitive-chain runs the rounds are O(chain length),
+    // and an unconditional per-round O(|all|) schema scan would dominate.
+    let mut schema = Schema::default();
+    let mut schema_stale = true;
 
     // TEMP PROFILING (dev only, removed before merge): SPARQ_OWL_PROF=1 prints phase totals.
     let prof = std::env::var("SPARQ_OWL_PROF").is_ok();
@@ -772,9 +867,18 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     loop {
         rounds += 1;
         let __t = now();
-        let schema = Schema::build(&all, &v);
+        let schema_dirty = schema_stale
+            || delta.iter().any(|t| {
+                let p = t[1];
+                p == v.sub_class || p == v.sub_prop || p == v.domain || p == v.range
+            });
+        if schema_dirty {
+            schema = Schema::build(&all, &v);
+            schema_stale = false;
+        }
         t_schema += __t.elapsed().as_secs_f64();
         let mut cand: Vec<[Id; 3]> = Vec::new();
+        let mut trp_cand: Vec<[Id; 3]> = Vec::new();
         let __t = now();
 
         // Delta-driven rules, fused into ONE per-fact emitter so the sweep over `delta` can fan
@@ -784,12 +888,21 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
         //    never re-scanning the whole closure.
         //  - Property/class-equivalence rules: single-premise over assertions joined against the
         //    fixed property axioms (axiom side never changes).
-        //  - prp-trp: (x p y),(y p z) ⊢ (x p z) — SEMI-NAIVE, join only the NEW edges in `delta`
-        //    (each against the full incremental adjacency `out`/`inc`), not the whole closure.
-        //    The one-step transitive rule has two delta directions for a new edge (x p y): as the
-        //    FIRST premise it extends forward through out[y]; as the SECOND premise it extends
-        //    backward through inc[x]. (Δ⋈full ∪ full⋈Δ; Δ⋈Δ double-counts but dedup absorbs.)
-        let emit_delta = |[s, p, obj]: [Id; 3], cand: &mut Vec<[Id; 3]>| {
+        //  - prp-fp/prp-ifp: delta-driven — a new edge pairs against the existing edges of the
+        //    same subject (fp) / object (ifp) in the incremental adjacency. Each conflicting
+        //    pair is emitted when its LATER edge arrives; both-new-this-round pairs are covered
+        //    because `out`/`inc` already contain the current delta (appended at the previous
+        //    commit). Replaces the old per-round FULL adjacency scan, which would dominate on
+        //    long (many-round) fixpoints.
+        //  - prp-trp: (x p y),(y p z) ⊢ (x p z) — LINEARIZED semi-naive (see [`TrpGen`]): a new
+        //    fact extends forward ONLY through the generator edges `gen.out[y]` (not the whole
+        //    relation), and a new GENERATOR edge extends every existing path ending at its
+        //    start backward through the full `inc[x]`. Candidates go to the separate `trp`
+        //    stream so the commit can mark generators. This is the chain-transitivity fix:
+        //    the nonlinear Δ⋈full join derived each closure pair once per intermediate node
+        //    (O(N³) candidates on an N-chain); the linear form derives it once per incoming
+        //    generator edge (O(N²) total).
+        let emit_delta = |[s, p, obj]: [Id; 3], cand: &mut Vec<[Id; 3]>, trp: &mut Vec<[Id; 3]>| {
             rdfs_idx.derive([s, p, obj], &v, cand);
             // (eq-sym / eq-rep are handled by the union-find, not as rules.)
             // --- property axioms on assertion (s p obj) ------------------------------
@@ -816,13 +929,29 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                 cand.push([s, v.sub_prop, obj]);
                 cand.push([obj, v.sub_prop, s]);
             }
-            // --- prp-trp against the incremental adjacency ---------------------------
-            if ax.transitive.contains(&p) {
-                if let Some(zs) = out.get(&p).and_then(|m| m.get(&obj)) {
-                    cand.extend(zs.iter().map(|&z| [s, p, z]));
+            // --- prp-fp / prp-ifp (delta-driven; see the block comment above) --------
+            if ax.functional.contains(&p) {
+                if let Some(ys) = out.get(&p).and_then(|m| m.get(&s)) {
+                    cand.extend(ys.iter().filter(|&&y| y != obj).map(|&y| [obj, o.same_as, y]));
                 }
-                if let Some(ws) = inc.get(&p).and_then(|m| m.get(&s)) {
-                    cand.extend(ws.iter().map(|&w| [w, p, obj]));
+            }
+            if ax.inv_functional.contains(&p) {
+                if let Some(xs) = inc.get(&p).and_then(|m| m.get(&obj)) {
+                    cand.extend(xs.iter().filter(|&&x| x != s).map(|&x| [s, o.same_as, x]));
+                }
+            }
+            // --- prp-trp, linearized against the generator edges ---------------------
+            if ax.transitive.contains(&p) {
+                // forward: Δ ⋈ GEN — extend the new path by the generator edges at its end.
+                if let Some(zs) = gen.out.get(&p).and_then(|m| m.get(&obj)) {
+                    trp.extend(zs.iter().map(|&z| [s, p, z]));
+                }
+                // backward: full ⋈ Δgen — a new generator edge extends every existing path
+                // ending at its start (incl. same-round delta paths, already in `inc`).
+                if gen.set.contains(&[s, p, obj]) {
+                    if let Some(ws) = inc.get(&p).and_then(|m| m.get(&s)) {
+                        trp.extend(ws.iter().map(|&w| [w, p, obj]));
+                    }
                 }
             }
         };
@@ -832,60 +961,68 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
         #[cfg(feature = "parallel")]
         let mut cand_chunks: Vec<Vec<[Id; 3]>> = Vec::new();
         #[cfg(feature = "parallel")]
+        let mut trp_chunks: Vec<Vec<[Id; 3]>> = Vec::new();
+        #[cfg(feature = "parallel")]
         if delta.len() >= PAR_THRESHOLD {
             use rayon::prelude::*;
             let chunk = (delta.len() / (rayon::current_num_threads() * 8)).max(1024);
-            cand_chunks = delta
+            (cand_chunks, trp_chunks) = delta
                 .par_chunks(chunk)
                 .map(|ch| {
                     let mut acc = Vec::new();
+                    let mut acc_trp = Vec::new();
                     for &t in ch {
-                        emit_delta(t, &mut acc);
+                        emit_delta(t, &mut acc, &mut acc_trp);
                     }
-                    acc
+                    (acc, acc_trp)
                 })
-                .collect();
+                .unzip();
         } else {
             for &t in &delta {
-                emit_delta(t, &mut cand);
+                emit_delta(t, &mut cand, &mut trp_cand);
             }
         }
         #[cfg(not(feature = "parallel"))]
         for &t in &delta {
-            emit_delta(t, &mut cand);
+            emit_delta(t, &mut cand, &mut trp_cand);
         }
         t_gen += __t.elapsed().as_secs_f64();
         let __t = now();
 
         // --- scm-dom1/2, scm-rng1/2: domain/range propagate UP subClassOf and DOWN
-        // subPropertyOf (makes the schema-level domain/range closure explicit). ----------
-        let mut subprop_inv: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
-        for (&p2, supers) in &schema.sub_prop {
-            for &sup in supers {
-                subprop_inv.entry(sup).or_default().push(p2);
+        // subPropertyOf (makes the schema-level domain/range closure explicit). Re-fired only
+        // when the schema changed this round — with an unchanged schema (and unchanged axioms;
+        // those only change on merge, which forces `schema_dirty`) the block would re-emit
+        // exactly the previous round's candidates, all duplicates. ----------
+        if schema_dirty {
+            let mut subprop_inv: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+            for (&p2, supers) in &schema.sub_prop {
+                for &sup in supers {
+                    subprop_inv.entry(sup).or_default().push(p2);
+                }
             }
-        }
-        for (which, map) in [(v.domain, &schema.domain), (v.range, &schema.range)] {
-            for (&p, classes) in map {
-                for &c in classes {
-                    // scm-dom1/rng1: (p domain/range c), (c subClassOf d) ⊢ (p domain/range d).
-                    if let Some(ds) = schema.sub_class.get(&c) {
-                        cand.extend(ds.iter().map(|&d| [p, which, d]));
+            for (which, map) in [(v.domain, &schema.domain), (v.range, &schema.range)] {
+                for (&p, classes) in map {
+                    for &c in classes {
+                        // scm-dom1/rng1: (p domain/range c), (c subClassOf d) ⊢ (p domain/range d).
+                        if let Some(ds) = schema.sub_class.get(&c) {
+                            cand.extend(ds.iter().map(|&d| [p, which, d]));
+                        }
                     }
-                }
-                // scm-dom2/rng2: (p2 subPropertyOf p), (p domain/range c) ⊢ (p2 domain/range c).
-                if let Some(subs) = subprop_inv.get(&p) {
-                    for &p2 in subs {
-                        cand.extend(classes.iter().map(|&c| [p2, which, c]));
+                    // scm-dom2/rng2: (p2 subPropertyOf p), (p domain/range c) ⊢ (p2 domain/range c).
+                    if let Some(subs) = subprop_inv.get(&p) {
+                        for &p2 in subs {
+                            cand.extend(classes.iter().map(|&c| [p2, which, c]));
+                        }
                     }
-                }
-                // inverse transposition: (p inverseOf q), (p domain c) ⊢ (q range c)
-                // and (p range c) ⊢ (q domain c) — a valid OWL (RDF-based)
-                // entailment the sparql11/entailment suite exercises.
-                if let Some(invs) = ax.inverse.get(&p) {
-                    let other = if which == v.domain { v.range } else { v.domain };
-                    for &q in invs {
-                        cand.extend(classes.iter().map(|&c| [q, other, c]));
+                    // inverse transposition: (p inverseOf q), (p domain c) ⊢ (q range c)
+                    // and (p range c) ⊢ (q domain c) — a valid OWL (RDF-based)
+                    // entailment the sparql11/entailment suite exercises.
+                    if let Some(invs) = ax.inverse.get(&p) {
+                        let other = if which == v.domain { v.range } else { v.domain };
+                        for &q in invs {
+                            cand.extend(classes.iter().map(|&c| [q, other, c]));
+                        }
                     }
                 }
             }
@@ -893,37 +1030,8 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
 
         t_scm += __t.elapsed().as_secs_f64();
         let __t = now();
-        // --- joins that need an adjacency index (prp-fp / prp-ifp; prp-trp is fused into the
-        // delta sweep above) ----------
-        // `out`/`inc` are maintained incrementally (seeded before the loop, delta edges appended
-        // at the bottom), so no per-round rebuild here.
-        if !need.is_empty() {
-            // prp-fp: functional ⊢ the two objects of one subject are sameAs.
-            for &p in &ax.functional {
-                if let Some(adj) = out.get(&p) {
-                    for ys in adj.values() {
-                        for i in 0..ys.len() {
-                            for j in (i + 1)..ys.len() {
-                                cand.push([ys[i], o.same_as, ys[j]]);
-                            }
-                        }
-                    }
-                }
-            }
-            // prp-ifp: inverse-functional ⊢ the two subjects of one object are sameAs.
-            for &p in &ax.inv_functional {
-                if let Some(adj) = inc.get(&p) {
-                    for xs in adj.values() {
-                        for i in 0..xs.len() {
-                            for j in (i + 1)..xs.len() {
-                                cand.push([xs[i], o.same_as, xs[j]]);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+        // (prp-fp / prp-ifp / prp-trp are fused into the delta sweep above — all delta-driven
+        // against the incrementally-maintained `out`/`inc`/`gen` adjacency.)
         t_fpifp += __t.elapsed().as_secs_f64();
         let __t = now();
         // --- list/restriction rules (prp-spo2, cls-svf/avf/hv, cls-int, scm-uni) ------
@@ -1231,6 +1339,8 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
         let merged = commit_candidates(
             cand,
             cand_chunks,
+            trp_cand,
+            trp_chunks,
             o.same_as,
             &v,
             &mut uf,
@@ -1240,20 +1350,39 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             &mut out,
             &mut inc,
             &mut new_delta,
+            &mut gen,
+            &ax.transitive,
         );
         #[cfg(not(feature = "parallel"))]
-        let merged = commit_serial(
-            cand,
-            o.same_as,
-            &v,
-            &mut uf,
-            &mut all,
-            &mut rdfs_idx,
-            &need,
-            &mut out,
-            &mut inc,
-            &mut new_delta,
-        );
+        let merged = {
+            let mut m = commit_serial(
+                cand,
+                o.same_as,
+                &v,
+                &mut uf,
+                &mut all,
+                &mut rdfs_idx,
+                &need,
+                &mut out,
+                &mut inc,
+                &mut new_delta,
+                Some((&mut gen, &ax.transitive)),
+            );
+            m |= commit_serial(
+                trp_cand,
+                o.same_as,
+                &v,
+                &mut uf,
+                &mut all,
+                &mut rdfs_idx,
+                &need,
+                &mut out,
+                &mut inc,
+                &mut new_delta,
+                None,
+            );
+            m
+        };
         t_commit += __t.elapsed().as_secs_f64();
         let __t = now();
         if merged {
@@ -1265,6 +1394,8 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             need =
                 ax.transitive.iter().chain(ax.functional.iter()).chain(ax.inv_functional.iter()).copied().collect();
             build_adjacency(&all, &need, &mut out, &mut inc);
+            gen.rebuild(&all, &ax.transitive);
+            schema_stale = true;
             rdfs_idx = RdfsIndex::default();
             for &t in &all {
                 rdfs_idx.insert(t, &v);
