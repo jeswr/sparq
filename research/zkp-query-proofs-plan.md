@@ -1,19 +1,88 @@
 # ZKP query-correctness proofs for sparq — derived credentials over issuer-signed named graphs (OPTIONAL module)
 
-Status: **design v2 for review — nothing implemented, no code touched.**
-Author: research agent, 2026-06-12 (v1), revised same day (v2) per Jesse's
-review. Reviewer: Jesse Wright.
+Status: **design v3 for review — nothing implemented, no code touched.**
+Author: research agent, 2026-06-12 (v1), revised same day (v2, v3) per
+Jesse's reviews. Reviewer: Jesse Wright.
 Inputs: `research/zkp-noir-context.md` (reconstruction of the sparql_noir /
 sparql_noir_modular line), sparq source (`sparq-core`, `sparq-serve`,
 `sparq-reason`, `sparq-solid`), `research/concurrent-serving.md`,
 `research/solid-access-control-design.md`, the zkp-sparql-workspace research
 notes (reused, not re-derived), and fresh web research (June 2026). Every
 uncited number is marked **[judgement]**. Open questions for Jesse are
-numbered §9 and referenced inline as (Q*n*). Proving-performance landscape
-(hardware, proof systems beyond Noir/UltraHonk, ACIR reuse) is being surveyed
-separately into `research/zkp-performance-landscape.md` (forthcoming);
-this plan keeps v1's measured anchors and defers proof-system selection
-questions to that document.
+numbered §9 and referenced inline as (Q*n*). Two companion documents landed
+between v2 and v3 and are cited throughout: `zkp-performance-landscape.md`
+(proving-performance synthesis — verdict: stay on Noir/UltraHonk/bb.js,
+with Longfellow/Ligero and data-parallel GKR as named hedges) and
+`zkp-noir-inventory-2026-06-12.md` (verified on-disk inventory of the Noir
+estate — it corrects several memory-based assumptions, and this plan
+defers to it wherever memory and disk disagree).
+
+## v3 changelog (what changed since v2, and why)
+
+Jesse's v2 review answered most of §9 and reset the target. The headline
+items:
+
+1. **Architecture fixed: B with a two-module split** — a `zk-trace` module
+   in sparq that efficiently identifies the minimal input sets per
+   per-property proof obligation, plus a composition package modeled on
+   `sparql_noir_modular` (§4.E). Work proceeds **in the sparq repo**
+   (`sparq-zk`); the zkp-sparql-workspace is frozen as an archive (Q1
+   resolved).
+2. **Noir dependency estate pinned against the verified inventory** —
+   which repos become dependencies, the state change each needs (test-lib
+   push = Jesse action; noir_XPath toolchain bump), and a recommendation
+   on the IEEE754 float-API fork: finish PR-#39 now, defer the test_lib
+   migration — grounded in test_lib's missing comparison ops (§4.E).
+3. **Inference resolved: support both, recorded in the proof object** — an
+   `entailmentRegime` field, ontology-graph commitments in the signed-input
+   set, derivation witnesses from sparq's `proof-trees` branch, and the
+   `sparql_noir_modular` extension surface spelled out (§5; Q2 resolved).
+4. **Issuer-signature recommendation (Q3)**: custom VC-DI cryptosuite over
+   the Poseidon2 commitment as primary (the live service is its own first
+   issuer), in-circuit standard-suite verification as a per-credential
+   interop fallback, Longfellow/Ligero as the hedge (§2.3).
+5. **Commitment scope recommendation (Q4)**: commit the full VC envelope;
+   validity-window checks in-circuit against a verifier-supplied "now"
+   (§2.2).
+6. **Union sizing is dynamic (Q5)**: a circuit *family* over a small
+   (k, n) lattice; the verifier re-derives the required circuit id from
+   the public statement and rejects mismatches; prover and verifier use
+   different pinned artifacts per bucket (§2.4).
+7. **Blank nodes are not skolemised (Q6, confirmed)**: protections in both
+   prover and verifier against cross-graph bnode correlation — graph-scoped
+   id domains in-circuit, a zk-trace plan check, a verifier re-derivation
+   check, and per-graph salting of RDFC10 canonical labels (§2.2, §2.4).
+8. **Revocation designed and promoted to v1-include (Q7)**: hidden-index
+   status-list inclusion; accumulators as the upgrade path (§2.6).
+9. **Holder binding explained (Q8)**: challenge-binding vs holder
+   proof-of-possession are distinct concerns; both shipped as per-proof
+   `binding` modes, use-case dependent (§2.5).
+10. **Poseidon2 default confirmed (Q10)**: Pedersen `h_2`/`h_4` retired
+    everywhere (§2.2, §6.3).
+11. **ISWC framing dropped (Q11)**: the target is an actual live Solid
+    server service; §7 gains an operational-posture section (async proving
+    jobs, key rotation, generation-bound proof caching, versioned
+    manifests, metrics) and the sparq house rules (roborev every commit,
+    orchestrator merge-gates).
+12. **Trust establishment (Q12)**: manifests carry `did:` key references +
+    cryptosuite ids; the issuer set becomes a trust-framework reference —
+    a signed issuer-registry graph, itself a named graph in the store
+    (§2.8).
+13. **Metadata conventions fixed (Q13)**: `<D>?proof` proof graphs
+    inheriting the document ACL; an enriched `<urn:sparq:zk>` registry,
+    Control-only readable (§2.1).
+14. **§9 rewritten**: twelve questions move to the resolved block with
+    one-line dispositions; the genuinely open remainder is aggregation
+    posture (Q9, reframed), trust-framework specifics, test-lib completion
+    ownership, and Jesse's veto window on the v3 recommendations.
+
+Empirical-honesty notes carried from the inventory: the remembered "trace
+module" **does not exist as code** anywhere in the Noir estate — what
+exists is sparq's explain-analyze operator trace (rows/timings only) and
+`compileQuery`'s AST walk; the zk-trace module is *new work* on those two
+seams (§4). And `test_lib`, the preferred float library, currently has
+**no comparison operators at all** — the single capability SPARQL FILTER
+needs most (§4.E).
 
 ## v2 changelog (what changed since v1, and why)
 
@@ -83,7 +152,8 @@ plus a proof of the statement
 
 Public inputs: `Q`, `R`, the disclosed issuer-key set `K = {X, Y, Z}`, the
 union arity `k` (or an upper bound, §2.4), a verifier-supplied challenge
-(replay binding, §2.5), and revocation epoch data if used (§2.6). Private
+(replay binding, §2.5), and revocation status-list versions (§2.6 —
+v1-include). Private
 witnesses: the graphs, commitments, signatures, and key selectors.
 
 Two properties of this statement deserve emphasis:
@@ -124,9 +194,12 @@ sparq is the holder's credential store and query engine. Its roles:
    Comunica/n3 to build witnesses **[judgement on current pipeline
    detail]**). The sparq wasm build makes this available *in the browser*,
    next to bb.js proving.
-3. **The proving stack itself comes from Jesse's existing repos**
-   (`sparql_noir`, `sparql_noir_modular`); sparq supplies commitments,
-   metadata, and traces — not circuits.
+3. **The proving stack builds on Jesse's existing Noir repos** — but as of
+   v3 the integration code lives *here*: a `sparq-zk` crate hosts the
+   zk-trace module and the composition package, consuming the
+   `sparql_noir_modular`-lineage circuits and the float/XPath libraries as
+   clean pushed dependencies (§4.E). sparq supplies commitments, metadata,
+   and traces; the Noir repos supply circuits.
 
 ### 1.3 Secondary (optional) track — untrusted server proofs
 
@@ -151,8 +224,9 @@ is **downgraded to optional**. Honest assessment of what it still buys:
 Out of scope for this plan: proving *updates* were authorised (the Solid
 auth layer's job), MPC/federation (DPhil RQ2), proof of non-tampering of
 the server binary (zkVM territory; baseline only), and the verifier-side
-trust establishment for issuer keys themselves (DID resolution / trust
-registries — manifest format hook only, Q12).
+trust establishment for issuer keys themselves (DID resolution and
+registry operation — the manifest's key references and the trust-framework
+hook are specced in §2.8 (Q12); the resolution machinery is not).
 
 ---
 
@@ -175,8 +249,11 @@ three for credentials:
 - **The credential's proof graph is metadata, not content.** A VC-DI proof
   is graph-valued (`sec:proof` is an `@graph` container in JSON-LD), so it
   arrives as a separate graph naturally. It is stored as its own named
-  graph adjacent to `<D>` (naming convention analogous to `.acl` — exact
-  convention Q13) and is **excluded from the dataset the proof statement
+  graph **`<D + "?proof">`** (Q13 — resolved convention: a query-string
+  suffix on the document IRI, mirroring the document-location convention
+  for the content itself; addressable, collision-free against real pod
+  resources, trivially derivable from `<D>`), **inheriting the ACL of
+  `<D>`**, and is **excluded from the dataset the proof statement
   quantifies over**: `merge(G_1…G_k)` is over content graphs only. Signature
   bytes are not facts the holder asserts; they are evidence *about* `<D>`.
 - **One reserved synthesized graph `<urn:sparq:zk>`** (vocabulary
@@ -189,8 +266,11 @@ three for credentials:
   <https://dmv.example/vc/lic-123>
       zk:commitment      "0x1a2b…"^^zk:field ;
       zk:scheme          zk:poseidon2-rdfc10-v1 ;
+      zk:cryptosuite     zk:poseidon2-schnorr-v1 ;
       zk:issuerKey       <did:example:dmv#key-1> ;
       zk:signatureGraph  <https://dmv.example/vc/lic-123?proof> ;
+      zk:statusList      <https://dmv.example/status/3#94> ;
+      zk:rdfc10Salt      "0x9f3c…"^^zk:field ;
       zk:status          zk:active ;
       zk:ingested        "2026-06-12T…"^^xsd:dateTime .
   ```
@@ -199,9 +279,13 @@ three for credentials:
   reserved IRI space, pre-existing copies are stripped on load, only the
   ingest path writes it, and it is excluded from query-visible datasets
   (the verifier never sees it; the prover reads it as its witness index).
-  Reading it through the access-controlled path can be gated like `.acl`
-  graphs are (Control-holders only) — it reveals exactly which credentials
-  the holder possesses, the most sensitive inventory in the store.
+  Access rule (Q13 — resolved): `<urn:sparq:zk>` is readable only by
+  **Control-holders of the referenced documents** (mirroring `.acl`
+  readability in the access-control design), and proof graphs inherit the
+  ACL of their document. The individual commitments are *not* secret —
+  they are issuer-signed public values — but the registry as a whole is
+  the catalogue of every credential the holder possesses, the most
+  sensitive inventory in the store; hence Control-only.
 
 This is deliberately the access-control design's shape: content graphs stay
 ordinary and queryable (D1 of that doc), derived/bookkeeping state lives in
@@ -225,13 +309,18 @@ Q5: RDFC10 at export vs skolemized-only). The new model closes both:
   small but ingest should still cap canonicalization work — §8.)
 
 Encoding stays Jesse's: `Enc_t(term) = h_2(type_code, h_s(value))` with
-`h_s` = Blake3 off-circuit and `h_2` = Poseidon2 (flip the spec's Pedersen
-default, Q10). **Bnode encoding gains graph scoping**: encode a blank node
-as `h_2(BlankNode_code, h_2(C_pre(G), blake3(canonical_label)))` (with
-`C_pre` a pre-commitment over the label-free structure, or simply the
-issuer-assigned document IRI hash — exact construction to be specced). This
-makes bnodes from different graphs *distinct by construction*, which is
-precisely RDF **merge** semantics — see §2.4.
+`h_s` = Blake3 off-circuit and `h_2` = Poseidon2 (the spec's Pedersen
+default is retired — Q10 resolved, §6.3). **Bnode encoding gains graph
+scoping and a per-graph salt**: encode a blank node as
+`h_2(BlankNode_code, h_2(salt_G, blake3(canonical_label)))`, where
+`salt_G` is a per-graph salt fixed at issuance/ingest and recorded as
+`zk:rdfc10Salt` in `<urn:sparq:zk>` (§2.1). The salt matters because
+RDFC10 produces *canonical* labels (`c14n0`, `c14n1`, …) that recur across
+unrelated graphs: unsalted, identical canonical labels in different graphs
+would hash to equal leaf components, and equal leaf-level material across
+commitments is exactly the cross-graph correlation channel Q6 closes
+(§2.4). Salted, bnodes from different graphs are *distinct by
+construction*, which is precisely RDF **merge** semantics — see §2.4.
 
 **Two commitment shapes, chosen by graph size:**
 
@@ -265,6 +354,20 @@ The committed-dictionary bridge of v1 (§2.1 there, `DictRoot` over
 avoid re-hashing terms in a mutable 10⁸-quad store. Holder-side, terms are
 hashed once at ingest and the commitment is term-level already. Likewise
 the inline-id arithmetic lever survives only as a server-track note (§6.8).
+
+**Commitment scope (Q4 — resolved by recommendation, pending Jesse veto).**
+Commit the **full VC envelope** — issuer, validity window, credential
+type, and `credentialSubject` — not the claims alone. Rationale:
+validity-window and type checks are things verifiers will demand *proven*,
+and they are only cheap if the relevant terms are inside the commitment.
+Validity windows are checked **in-circuit against a disclosed "now"**: the
+verifier's challenge (§2.5) carries a timestamp, and the circuit
+range-checks `validFrom ≤ now ≤ validUntil` over the committed values —
+two field comparisons, noise next to the hashing budget — **without
+disclosing the credential's actual dates**, which would otherwise be a
+fingerprinting channel (issuance dates are nearly unique per credential).
+Claims-only commitments are recorded as a **non-goal**: they save a
+handful of triples per credential and forfeit provable validity and type.
 
 ### 2.3 Issuer signatures and VC pragmatics
 
@@ -302,7 +405,27 @@ private). Two issuance realities:
   outside the circuit while binding a hidden message equal to a Pedersen
   commitment shared with the Noir circuit — the zkp-ld/rdf-proofs
   neighborhood [RDFPROOFS]); or paying the in-circuit cliff natively for
-  k=1 flows. Which to target first is Q3.
+  k=1 flows.
+
+**Q3 — resolved by recommendation, pending Jesse veto: target (a) first,
+keep (b) as a flagged fallback.** The adoption argument has changed now
+that the target is a live Solid service rather than an ISWC eval (Q11):
+the service controls both ends initially — it can act as its **own first
+issuer** (signing pod-resident facts and service-issued attestations as
+credentials under the custom cryptosuite) and verify its own suite, so the
+cold-start problem that made (a) look optimistic in v2 does not block
+launch; third-party issuers join one at a time. Keep **(b) in-circuit
+standard-suite verification behind a per-credential flag** as the interop
+fallback: a credential whose registry entry carries a standard cryptosuite
+routes to the expensive circuit family (~270–430 k gates/credential,
+native-only), everything else stays on the cheap path — the flag is paid
+per credential, not by the whole presentation. For exactly that hash-heavy
+case, `zkp-performance-landscape.md` (§2.7, Hedge 1) names the hedge:
+**Longfellow-zk/Ligero** [LONGFELLOW] — shipping in Google Wallet, proving
+ECDSA-P256+SHA-256 credential statements in hundreds of ms on phones — is
+the system to spike *before* writing any in-circuit SHA-256. The
+re-signing bridge and BBS+ commitment bridge remain stage-4 options
+unchanged.
 
 **Does the named-graph-commitment approach subsume BBS+ selective
 disclosure? Largely yes — with one honest caveat.** BBS+ in the VC stack
@@ -338,12 +461,38 @@ manifest).
 
 `merge(G_1…G_k)` — RDF **merge**, not naive union: blank nodes are
 graph-scoped, so identically-labelled bnodes in different credentials must
-*not* be identified. The §2.2 graph-scoped bnode encoding makes this hold
-by construction: cross-graph joins happen on IRIs and literals (the only
-terms with cross-credential identity), and a cross-graph bnode join is
-impossible — which is semantically correct. If a use case genuinely needs
-cross-credential bnode identity it needs issuer-side skolemization, not
-circuit machinery (Q6).
+*not* be identified. Jesse confirms (Q6): **blank nodes are not
+skolemised**, so accidental cross-graph correlation must be engineered
+out, in *both* prover and verifier. Four layers:
+
+1. **In-circuit, by construction**: bnode identifiers are effectively
+   *(graph, local-id)* pairs — the §2.2 salted, graph-scoped encoding
+   means equal local labels in different graphs *cannot* produce equal
+   field elements, so they cannot unify in any join the circuit evaluates.
+   Cross-graph joins happen on IRIs and literals only (the only terms with
+   cross-credential identity) — which is semantically correct merge
+   behaviour.
+2. **Prover-side plan check**: the zk-trace module (§4.E) rejects, at
+   witness-build time, any query plan that would join on a bnode-valued
+   variable across graph boundaries — failing closed with a diagnostic
+   rather than emitting a proof whose join silently matches nothing (or
+   leaks, via shape or timing, which graphs were tried).
+3. **Verifier-side re-derivation check**: the verifier re-runs the same
+   static check over the manifest (it already re-derives obligations from
+   the query text, §4.E) and rejects any manifest whose join edges assume
+   a cross-graph bnode equality. Prover and verifier enforce the rule
+   independently; a malicious prover cannot smuggle a correlating join
+   past an honest verifier.
+4. **Commitment-layer salting** (§2.2): RDFC10's per-graph canonical
+   labels recur across graphs (`c14n0` appears everywhere), so leaf hashes
+   are salted per graph — identical canonical labels in different graphs
+   never yield equal leaf hashes, closing the correlation channel *below*
+   the join layer too (an issuer–verifier coalition comparing leaf-level
+   material across commitments learns nothing).
+
+If a use case genuinely needs cross-credential bnode identity it needs
+issuer-side skolemization (mint IRIs at issuance) — an issuer convention,
+not circuit machinery.
 
 **k roots, not one super-structure.** The circuit takes `k` per-graph
 witness blocks; there is no benefit to a holder-built super-tree over the
@@ -356,8 +505,28 @@ encoding); the circuit recomputes each `C(G_i)`, verifies each
 over the concatenated slot array with per-slot graph tags. Sizing: e.g.
 `k_max = 4`, `n_max = 64` ⇒ 256 slots ⇒ ~40 k gates of hashing — well
 inside the browser ceiling (~2¹⁹–2²⁰ constraints [V8WASM] [NOIR2543]).
-Fixed-`k_max`-with-padding leaks only an upper bound on the union arity;
-whether to ship a small circuit family (k ∈ {1,2,4,8}) instead is Q5.
+
+**Union sizing is dynamic (Q5 — resolved).** Jesse asked whether the
+sizing can be dynamic; it can — as a circuit **family**, not a
+dynamically-shaped circuit (UltraHonk circuits are fixed-shape): compile
+the commit/union circuit over a small (k, n) lattice — **k ∈ {1, 2, 4, 8}
+× n ∈ {16, 64, 256}** — and have the proof manifest carry the **circuit
+identifier** of the bucket used. Prover and verifier therefore use
+*different artifacts per bucket*, exactly as Jesse anticipated:
+verification keys are pinned per family member and distributed
+**content-addressed in the manifest format**. The soundness rule is that
+the verifier **re-derives the required circuit id from the same public
+statement** (the declared k, the query shape, the disclosed result) and
+rejects mismatches — so a prover can neither pick a smaller-padding bucket
+to leak less than the statement implies nor a larger one to hide more
+graphs than the statement admits. What padding leaks is only the envelope
+bucket — a (4, 64) proof says "at most 4 graphs of at most 64 triples",
+nothing finer — and that is the deliberate trade. Operationally, the live
+server (Q11) compiles family members **lazily and caches them**; the
+12-member lattice keeps the artifact set enumerable, and the largest
+member ((8, 256) ⇒ 2,048 slots ≈ ~300 k gates of hashing **[judgement,
+same per-triple anchor]**) is native-only by design — browser flows live
+in the small buckets.
 
 **GRAPH visibility**: the merge is presented to the query as the default
 graph; `GRAPH ?g` over undisclosed graph names is contradictory with
@@ -375,45 +544,87 @@ disclosure, per the house rule).
 - **Duplicate-inclusion pitfall (new, real).** With graph-scoped bnode
   encodings, including the *same* credential twice at different block
   indices would mint distinct bnodes per inclusion only if the scope tag
-  were the block index — so the scope tag must be commitment-derived
-  (§2.2), making double-inclusion idempotent on bnodes; and the circuit
+  were the block index — so the scope tag must be graph-derived (§2.2's
+  per-graph salt, fixed at ingest, never the block index), making
+  double-inclusion idempotent on bnodes; and the circuit
   additionally enforces strict ordering `C(G_1) < C(G_2) < … < C(G_k)`
   (numeric, on the field representative) to force pairwise-distinct graphs.
   Without this, COUNT-style derived claims ("I hold ≥ 2 tickets") are
   forgeable by including one ticket twice. Aggregates are not in the v1
   fragment, but the ordering constraint is ~free and closes the class now.
-- **Replay / holder binding.** A derived credential proven once could be
-  replayed by anyone who obtains the manifest. Minimum: the verifier's
-  challenge (nonce + audience) is a public input baked into every
-  constituent proof's claim hash — proofs are per-presentation. This makes
-  **holder-side proving latency the binding UX constraint**, which the
-  small-circuit envelope is sized for. Whether to *also* bind a holder key
-  in-circuit (proof-of-possession, enabling offline-presentable derived
-  credentials with their own lifetime) is Q8.
+- **Replay / holder binding (Q8 — explained; resolved as
+  use-case-dependent, both modes supported).** Jesse asked what this
+  question is really about, and whether it is proof of knowledge of a
+  signature. It is **two distinct concerns** that v2 folded into one:
 
-### 2.6 Revocation hooks (open question, flagged not solved)
+  - **Challenge-binding** answers *replay*: the verifier's challenge
+    (nonce + audience + timestamp — the same "now" that §2.2's validity
+    check consumes) is a public input baked into every constituent proof's
+    claim hash, making the proof **single-use**. Anyone replaying the
+    manifest fails the next verifier's fresh nonce. Cost: nothing
+    in-circuit beyond hashing the challenge into the claim. This makes
+    holder-side proving latency the binding UX constraint, which the
+    small-circuit envelope is sized for.
+  - **Holder proof-of-possession** answers *theft/transfer*: the
+    credential carries the holder's public key in the VC `cnf`
+    (confirmation) claim, and the circuit proves knowledge of the matching
+    secret — so yes, Jesse's reading is right: this is **proof of
+    knowledge of a signature/secret** (a Schnorr-style PoK over the
+    embedded curve, the same cost class as one issuer-signature check).
+    It is what makes a derived credential *re-presentable*: an artifact
+    with its own lifetime that only the legitimate holder can present.
+
+  Which a presentation needs is **use-case dependent, exactly as Jesse
+  says** — so the proof object carries a **`binding` mode**:
+  `binding: challenge` for one-shot interactive presentations (the live
+  service's default) and `binding: holder-pop` for re-presentable derived
+  credentials (also the consumer that makes recursion-compression
+  interesting, Q9). The two compose: a holder-pop derived credential is
+  still challenge-bound at each presentation.
+
+### 2.6 Revocation (Q7 — resolved by recommendation: hidden-index status list, v1-include)
 
 Issuer-signed commitments are forever; real credentials get revoked. The VC
 ecosystem's standard answer — Bitstring Status List [VC-STATUS] — has the
 verifier fetch a list and check an index, which is unusable here directly
-(the index identifies the credential). ZK-compatible hooks, in rough order
-of pragmatism:
+(the index identifies the credential). **v1 design — hidden-index
+status-list inclusion**, the concrete proposal Jesse asked for:
 
-1. **Hidden-index status-list inclusion**: commit the (issuer-published,
-   issuer-signed) status bitstring as a Merkle tree; the circuit proves
-   "bit at my credential's (hidden) index = 0" against the *disclosed*
-   status-list root — one extra Merkle path (~1–2 k gates **[judgement]**)
-   plus one extra issuer-signature check per credential. Freshness = the
-   status root's epoch is a public input.
-2. **Cryptographic accumulators** (CL02 dynamic accumulators [CL02],
-   AnonCreds-style pairing/VB accumulators): non-membership witnesses,
-   issuer-maintained; stronger privacy, heavier in-circuit cost on BN254,
-   witness-update burden on holders.
+- The issuer maintains a **signed status-list credential**: a bitstring
+  (bit *i* = revocation state of the credential issued with status index
+  *i*), committed as a Poseidon2 Merkle tree over fixed-size chunks, with
+  the root plus a version/timestamp signed by the issuer.
+- Each credential's committed envelope (Q4, §2.2) carries its status
+  index. The circuit proves, **without revealing the index**: Merkle
+  inclusion of the chunk containing the index against the **disclosed**
+  status-list version/commitment, plus an in-circuit bit-extraction check
+  that the bit is 0. Cost: one Merkle path + bit arithmetic ≈ **a few
+  thousand gates per credential [judgement]** — small next to the
+  signature checks.
+- **Freshness is verifier-side and in the clear**: the issuer's signed
+  timestamp on the status-list version is disclosed, and the verifier
+  demands a commitment **no older than its policy window** (24 h for
+  tickets, 30 days for diplomas — its call). No circuit cost; freshness
+  policy is the verifier's business, not the proof's.
+- The registry (§2.1, `zk:statusList`) records each credential's
+  status-list reference; the live service refreshes status lists in the
+  background so proving never blocks on an issuer fetch.
 
-Both change the statement S (conjoin per-credential non-revocation at a
-disclosed epoch). Which mechanism, and what freshness semantics verifiers
-actually demand, is Q7 — coordinate with what the VC ecosystem converges on
-rather than inventing here.
+**Why v1-include rather than a stage-4 option**: the target is a live
+service (Q11). A service issuing derived credentials without revocation
+cannot honestly claim those credentials are trustworthy — the first
+suspended driver's license that still proves "valid license" is a
+product-killing failure, not a research footnote.
+
+**Upgrade path, explicitly deferred**: dynamic universal accumulators
+(CL02 [CL02], AnonCreds-style pairing/VB accumulators) give non-membership
+without list structure and stronger privacy at scale, at real costs:
+issuer-maintained witness updates pushed to every holder on every
+revocation, heavier non-native arithmetic on BN254, and a less
+standardized trust story. Adopt only if status lists break (revisit
+trigger: an issuer with >10⁶ outstanding credentials or sub-hour
+revocation SLAs). Either way the statement S conjoins per-credential
+non-revocation at a disclosed list version.
 
 ### 2.7 What survives from v1's server-side machinery
 
@@ -428,6 +639,34 @@ rather than inventing here.
   it survives as the invalidation map for commitment maintenance.
 - **Committed dictionary + inline-id circuits** (v1 §2.1): server-track
   only, as noted in §2.2.
+
+### 2.8 Verifier trust establishment and the manifest's key material (Q12 — resolved)
+
+Yes (per Jesse): the manifest carries **key references as `did:` URLs plus
+cryptosuite identifiers** — never bare key bytes. Verification resolves
+the DID document, extracts the verification method, and checks the
+cryptosuite id against the circuit family the manifest names.
+DID-method-agnostic by design; **`did:key` and `did:web` are the required
+minimum** (did:key for fixtures and offline tests; did:web because every
+issuer in the Solid setting already has a web origin).
+
+**Trust frameworks (Jesse is actively thinking about this — a starting
+shape, not a final design).** The disclosed issuer set `K` should not be a
+bare key list the verifier eyeballs; express it as a **trust-framework
+reference**: a signed **issuer-registry graph** — itself an ordinary named
+graph in the store, with its own commitment and signature, **dogfooding
+exactly the credential model this plan builds** — listing member issuer
+DIDs, their roles, and key-validity windows. The manifest then asserts
+"all k signatures verify against keys in framework F (registry-graph
+commitment X, signed by framework operator Y)", and the **verifier's
+policy decides which frameworks it accepts** — the proof attests
+membership; the verifier attests trust. This keeps trust establishment out
+of circuit scope: the in-circuit check stays `pk_i ∈ K`, and K's
+*derivation* from F starts verifier-side (it can move in-circuit later if
+framework-membership privacy is ever needed). Specifics — framework
+vocabulary, registry update semantics, cross-framework bridging — remain
+an open design area (§9, open item 2), to be co-designed with Jesse's
+trust-framework thinking.
 
 ---
 
@@ -475,10 +714,15 @@ suite; Bitstring Status List [VC-STATUS] is the standardized revocation
 mechanism. Consequences for this design are worked through in §2.3/§2.6.
 
 **Primitives (numbers used in §4/§6 cost models; v1's measured anchors,
-kept).** Deeper/fresher proving-performance data — GPU/hardware provers,
-proof systems beyond UltraHonk, ACIR portability — is the forthcoming
-`zkp-performance-landscape.md`'s remit; nothing below should be re-derived
-there, and nothing there is anticipated here.
+kept).** The proving-performance survey has since landed
+(`zkp-performance-landscape.md`); its verdict: **stay on
+Noir/UltraHonk/bb.js**. The neutral M1 benchmark (PSE csp-benchmarks) puts
+Barretenberg at 610 ms for a comparable-size hash circuit; in-browser
+bb.js has independently proven ~2M-constraint circuits in <3 s on an M1
+Air (~20× our budget); GPU, zkVM, and Nova-family folding alternatives are
+disqualified *by measurement* at this scale; and Longfellow-zk/Ligero is
+the named hedge for the standard-suite interop cliff (§2.3). The constants
+below are unchanged by it.
 
 - Poseidon2 permutation = **74 UltraHonk gates** (pinned constant in
   Barretenberg master [BBGATES]); Blake3 compression 2,159; SHA-256 6,703;
@@ -508,7 +752,14 @@ trace** (per-row matched slot indices, scan boundaries, executed join
 order), so witness generation is index arithmetic over structures sparq
 maintains anyway — now per-named-graph and mostly trivial (flat-committed
 graphs are their own witness). A `TraceSink` on the executor behind a
-feature flag, zero cost when disabled.
+feature flag, zero cost when disabled. Honesty note, per
+`zkp-noir-inventory-2026-06-12.md` §d: the "trace module" remembered from
+the workspace **does not exist as code anywhere** — what exists today is
+sparq's explain-analyze operator trace (`crates/sparq-engine/src/exec.rs`,
+`pub(crate) mod trace`: per-operator labels, row counts, timings — *not*
+proof-input sets) and `sparql_noir_modular`'s `compileQuery` AST walk. The
+zk-trace module specced in §4.E is **new work grafted onto those two
+seams**, not a port of something that exists.
 
 ### A. Monolith per-query circuit (reuse `sparql_noir`)
 
@@ -555,10 +806,13 @@ a plain verifier over the manifest. New module work v2 needs:
 - **Aggregation, honestly (recalculated)**: Ultra-in-Ultra recursion at
   ~682 k gates per inner verify [BBGATES] still costs more prover time than
   it saves — but the derived-credential setting adds a real consumer for
-  compression: a *re-presentable* derived credential (Q8) wants one small
-  artifact. Posture unchanged: manifest-of-proofs first; recursion as
-  opt-in compression; CHONK/Goblin (11.8 k gates inner verify) the
-  watch-item — performance doc to adjudicate. (Q9)
+  compression: a *re-presentable* derived credential (`binding:
+  holder-pop`, §2.5) wants one small artifact. Posture unchanged:
+  manifest-of-proofs first; recursion as opt-in compression; CHONK/Goblin
+  (11.8 k gates inner verify) the watch-item —
+  `zkp-performance-landscape.md` adjudicated: CHONK is **confirmed
+  unusable for non-Aztec Noir programs as of mid-2026**, so
+  manifest-of-proofs stands until its revisit triggers fire. (Q9)
 - **Pros/cons**: as v1 (parallel proving, compile-once-ever modules,
   G1–G5 soundness programme, Lean story per-module / composition cons),
   plus: one new module family is the *entire* circuit delta for v2.
@@ -575,9 +829,11 @@ result sets materialise.
 ### D. zkVM re-execution (RISC Zero / SP1) — the baseline to beat
 
 Unchanged: 23 triples `SELECT *` ≈ 7.5 min on M1 [CEUR4085]; modern GPU
-zkVMs faster (**[judgement, vendor-influenced]** — performance doc will
-pin) but per-instruction proving of an engine stays orders of magnitude
-above circuit cost at credential scale. Keep as paper baseline; note the
+zkVMs are faster only on datacenter hardware — `zkp-performance-landscape.md`
+pinned the client-side anchor (RISC0: 18.5 s + 1.47 GB for a *single small
+hash* on M1, independent csp-benchmarks) — so per-instruction proving of
+an engine stays 2–3 documented orders of magnitude above circuit cost at
+credential scale. Keep as paper baseline; note the
 baseline comparison is now *more* favourable since v2's circuits got
 smaller while the zkVM's engine-execution floor did not.
 
@@ -585,34 +841,167 @@ smaller while the zkVM's engine-execution floor did not.
 single-artifact alternative (and stays the conformance oracle: same
 witness, both provers, results must agree); C parked harder; D baseline.
 
+### E. Chosen shape (v3): B as a two-module split — `zk-trace` + composition package
+
+Jesse's v2 review fixes the shape: "a zero knowledge specific module —
+similar to the trace module — which efficiently identifies the sets of
+inputs that need to go into the per-property proofs per [architecture B].
+Then this package can be something similar to the existing 'modular'
+package to do the property proofs and compose a full proof."
+
+**(i) `zk-trace` — input identification (new module in sparq).** Given an
+*executed* query, it identifies the **minimal input set per per-property
+proof obligation**. It grafts onto two existing seams: the explain-analyze
+operator trace in `crates/sparq-engine/src/exec.rs` (which today records
+only `{label, depth, rows, nanos}` per operator) and the Stage-2 executor
+`TraceSink` this plan already designs. What it records per execution:
+
+- **per-row matched leaf/slot indices** — for each disclosed result row
+  and each triple pattern, which slot(s) in which graph's witness block
+  matched;
+- **scan boundaries** — the slot ranges each scan actually swept (the
+  completeness witness: the linear-sweep circuits must know what
+  "everything" was);
+- **the executed join order** — so manifest edges mirror the real plan,
+  not a re-derived one;
+- **per-obligation witness sets** — the resolved deliverable: for every
+  obligation the obligation compiler will emit (one filter application,
+  one pattern match, one consistency edge, one derivation step §5, one
+  non-revocation check §2.6), exactly the slot indices, salts, and
+  signature selectors its witness builder needs, deduplicated across
+  obligations;
+- the **cross-graph bnode-join check** (§2.4, layer 2), failing closed at
+  witness-build time.
+
+Witness building then is array indexing over the `<urn:sparq:zk>` registry
+plus the trace — no re-evaluation, no second engine — and it runs in the
+browser via the sparq wasm build next to bb.js.
+
+**(ii) The composition package — modeled on `sparql_noir_modular`.** The
+inventory (§e) describes the existing architecture precisely, and it is
+the right one — **extend, don't reinvent**: per-property circuits (one
+tiny bin package per atomic obligation, poseidon-only deps);
+**proof-vs-clear dispatch** (hidden operand → ZK proof, all-disclosed →
+plain check — the repo's stated architectural innovation, kept); **manifest
+composition** (`ProofManifest {disclosed, modules, edges}`; joins / UNION /
+OPTIONAL as plain-checked edges); and **verifier re-derivation** (re-run
+obligation compilation from the query text, verify every proof, recompute
+public-input hashes, enforce complete-cover, re-classify to reject
+proof→clear downgrade attacks). v3 deltas: the deterministic obligation
+enumerator (`compileQuery`'s contract) stays the shared prover/verifier
+TCB, but its *input identification* is fed by zk-trace's execution-derived
+witness sets instead of an AST walk; new module families
+`graph_commit_recompute[(k,n)]` (§2.4 lattice), `status_nonrevoked`
+(§2.6), and `derivation_step` (§5) join the existing
+`filter_*`/`bgp_match`/`binding_consistency` set; and the manifest gains
+the circuit-id, `entailmentRegime`, `binding`-mode, and `did:`
+key-reference fields specced across §2.
+
+**(iii) Where the work lives (Q1 — resolved by Jesse).** In **this repo**:
+a new `sparq-zk` crate (zk-trace, witness building, manifest types; the
+TS/wasm prover-verifier surface starts as a package under it). Jesse: "the
+zk-sparql-workspace got a little out of control … I would like to pick up
+work here." The inventory (§f) confirms the diagnosis — ~27 working copies
+in one repo, every checkout on a different feature branch, a fragile
+`../../../../` cross-repo path dependency, unpushed crown jewels — so the
+**workspace is frozen as an archive** (its notes, decisions, and Lean
+proofs remain citable; no new development there), and the Noir libraries
+are consumed as **clean pushed git dependencies, pinned by tag**. Required
+state changes per dependency, from the inventory:
+
+| Repo | Role | Required state change |
+|---|---|---|
+| `jeswr/sparql_noir_modular` | composition-package ancestor: circuits + TS prover/verifier patterns | confirm `v0.4-g5-filter-ne-lang` is merged to main; tag a release; extend per (ii) |
+| `jeswr/test-lib` (pkg `test_lib`) | the better-abstractions float library (comptime-generated `f16`–`f128`, private fields, committed gate baselines) | **JESSE ACTION** (private repo; only he can): push the **76 unpushed commits** and commit the dirty `src/ops/kernels.nr` — the newest float work currently exists on one machine only |
+| `jeswr/noir_XPath` | XPath 2.0 F&O for FILTER semantics | toolchain bump **beta.16 → current** (26 `nargo check` errors on beta.21 today; its version-check CI fails daily) + the float-API decision below |
+| `jeswr/noir_IEEE754` | the pushed, complete float library (v0.3.1 tag; new `Float<E,M,RM>` API on branches) | land the new Float API on main and tag it — the PR-#39 blocker |
+| `noir-lang/poseidon` v0.1.1 | the modular circuits' only dependency | none |
+| `jeswr/sparql_noir` (monolith) | conformance oracle (architecture A) | none required; pin GitHub main (pushed 2026-05-23); ignore the stale local copies |
+
+**The float-API fork — recommendation: finish PR-#39 now; defer the
+test_lib migration.** Jesse flags that the best IEEE754 library is not the
+pushed one but the one with better abstractions, living "under a folder by
+a completely different name" — the inventory resolves it:
+`~/Documents/GitHub/jeswr/test-lib`, package `test_lib`. He is right about
+the abstractions (truly private fields, generated `f64`-style global type
+names, f128 support, committed gate baselines + regression harness —
+inventory §b). But the inventory's honest gap is decisive for
+*sequencing*: **`test_lib` has no comparison operators at all** (no
+Eq/Ord/lt anywhere), no sqrt, no rounding-mode surface in the public API,
+and ~22 tests against noir_IEEE754's 44 MPFR-oracle packages — and
+comparison predicates are precisely what XPath/FILTER consumes most (the
+whole `filter_lt/gt` family; `filter_lt` is already the costliest shipped
+module at 2,925 gates). Migrating XPath to test_lib today means writing
+the very kernels FILTER needs before any proof can run, plus rewriting
+~1.4 k lines of `numeric_types.nr` glue and regenerating float test
+packages (inventory §c's estimate: a few hundred lines of new kernels +
+tests, plus the glue rewrite). The competing path — **PR #39, migrating
+noir_XPath to noir_IEEE754's new `Float<E,M,RM>` API — is already ~done**
+on the workspace branch, blocked only on landing the API on noir_IEEE754
+main and replacing a TODO relative-path dep with a tag. So: **ship PR-#39
+first**, and treat **test_lib as the long-term destination** once it gains
+comparisons / rounding-to-integral / casts — at which point the entire
+XPath float surface is one file (`numeric_types.nr`, the only place
+IEEE754 is referenced) and the second migration is cheap. This sequencing
+reads against the grain of Jesse's preference for test_lib; the
+measurement (missing comparators vs an almost-finished PR) is why, and it
+is his call to override (§9, open item 3).
+
 ---
 
-## 5. The inference question (open — flagged for Jesse, not decided)
+## 5. Inference (Q2 — resolved: support both, recorded in the proof object)
 
-Unchanged in structure from v1, sharpened by the credential framing:
-**I1 (commit the materialized closure) is now clearly unacceptable for the
-primary path** — the issuer signed base facts, not the holder's closure;
-a commitment over holder-side derived triples proves nothing to a verifier.
-That was v1's own caveat; v2 makes it the default situation. So:
+Jesse's call: **proofs must work with and without inference, and which one
+applies is part of the proof object.** Concretely:
 
-- **I2 — prove derivations on demand** is the natural fit and a genuine
-  contribution: a derived row carries a derivation witness (rule id + base
-  triple inclusions in the *signed* graphs + TBox inclusion — and "TBox"
-  here means an ontology graph that is itself one of the signed/committed
-  graphs in the union, possibly issued by a *different* authority: schema
-  publishers become issuers in K). `sparq-reason`'s counting-engine
-  `emit_consequences` and the N3 `ProofStep` trees are exactly the witness
-  generators. Cost at credential scale: ≈ a few array lookups + ~10² gates
-  per derived row **[judgement]**.
-- **I3 — dual commitment** (base + closure, plus an epoch proof that one is
-  the closure of the other) only makes sense holder-side if verifiers
-  demand *completeness under entailment* ("no derivable answer missing"),
-  which for k small graphs can alternatively be done by materializing the
-  closure of the merge *inside the witness* and sweeping it — feasible at
-  this scale, unlike v1's server setting **[judgement; needs a worked
-  bound on closure size]**.
+- The manifest carries an **`entailmentRegime` field**:
+  `none | rdfs | owl-rl | n3`. `none` remains the stage-1 scope. The
+  verifier's re-derivation (§4.E) treats the regime as part of the public
+  statement: a proof under `rdfs` is *not* interchangeable with one under
+  `none`, and the verifier's policy decides which regimes it accepts.
+- **When the regime ≠ `none`, ontology graphs join the signed-input set**:
+  their commitments enter the union exactly like credential graphs —
+  schema publishers become issuers in `K` (v2's I2 insight, kept). A
+  derivation is only as trustworthy as its TBox, and the proof says whose
+  TBox it was.
+- **The derivation witness comes from sparq's `proof-trees` branch**
+  (feature `explain`, in `sparq-reason`): `Materialized*Graph::why(triple)`
+  returns a `ProofTree` that is **flat, id-based, and deterministic** — a
+  `Vec<ProofNode {conclusion, rule, premises}>` in
+  premises-before-conclusion order, root last, shared sub-proofs
+  deduplicated (a DAG), every internal choice point iterated sorted. That
+  is exactly the linear-scan witness shape a derivation circuit wants —
+  the branch's module docs were written against this plan's §5, and the
+  shape was verified on the branch for v3. zk-trace (§4.E) pulls one
+  `ProofTree` per derived row in the result and translates node indices to
+  witness slot indices.
+- **The `sparql_noir_modular` extension surface** (the inventory §e
+  confirms the modular repo has *zero* inference code today and documents
+  the drop-in extension pattern, so this is exactly the extension Jesse
+  anticipated): one new property module, **`derivation_step`**, verifying
+  a single rule application — public inputs anchor (rule id, premise
+  slot/row hashes, conclusion hash) into a claim hash; the circuit checks
+  the conclusion follows from the premises under the identified rule, with
+  rule semantics as a small in-circuit table per supported regime — plus a
+  witness builder in `src/modules/`, and an obligation-compiler
+  classification branch emitting one `derivation_step` obligation per
+  `ProofNode` of each derived row, with `binding_consistency`-style edges
+  chaining premises to earlier conclusions. Cost at credential scale: a
+  few array lookups + ~10² gates per node **[judgement, as v2]**. Proof
+  construction is capped engine-side
+  (`ExplainOpts {max_depth: 128, max_nodes: 65 536}`); realistic
+  credential derivations are a handful of nodes.
+- **I1 (commit the materialized closure) stays unacceptable** for the
+  primary path — the issuer signed base facts, not the holder's closure.
+  **I3-style completeness under entailment** ("no derivable answer
+  missing") is retained as an opt-in for verifiers that demand it:
+  materialize the closure of the merge *inside the witness* and sweep it —
+  feasible at credential scale **[judgement; a worked bound on closure
+  size is still owed]** — and it is the natural reading of completeness
+  when `entailmentRegime ≠ none`.
 
-Recommendation deferred (Q2). Stage 1 ships with inference **off**.
+Stage 1 still ships `entailmentRegime: none`; `derivation_step` lands in
+stage 3 (§7).
 
 ---
 
@@ -633,10 +1022,14 @@ membership machinery.
    **[judgement]**. This is where the cooperative-cryptosuite decision (Q3)
    is worth more than every other lever combined. Precise non-native-curve
    and alternative-proof-system numbers: `zkp-performance-landscape.md`.
-3. **Hash split unchanged**: Poseidon2 in-circuit (74 gates), Blake3
-   off-circuit, retire the Pedersen `h_2`/`h_4` default (Q10). Never hash
-   strings in-circuit — which is exactly why the standard-suite cliff
-   (§2.3) is a cliff.
+3. **Hash split unchanged; Pedersen retired (Q10 — resolved: yes, flip
+   everywhere)**: Poseidon2 in-circuit (74 gates), Blake3 off-circuit.
+   The flip is now safe and worth taking: issuers sign fresh commitments
+   under the suite we spec (§2.3), so the legacy-compatibility constraint
+   is gone; Poseidon2 is the cheapest in-circuit hash in UltraHonk; and
+   one uniform hash across `h_2`/`h_4`/commitments removes a whole class
+   of cross-suite bugs. Never hash strings in-circuit — which is exactly
+   why the standard-suite cliff (§2.3) is a cliff.
 4. **Batch modules to amortise fixed per-proof overhead (~1 s observed).**
    With total gates ~10⁵, the ~1 s/proof constant is the *largest single
    line item* — fold the whole union+signature check into one
@@ -667,7 +1060,8 @@ membership machinery.
 
 ## 7. Recommended architecture and staged adoption
 
-**Recommendation: B on per-named-graph commitments.** RDFC10-canonical,
+**Recommendation: B on per-named-graph commitments, in the §4.E two-module
+shape (`sparq-zk` = zk-trace + composition package).** RDFC10-canonical,
 Poseidon2 flat-hash commitments per credential graph (Merkle fallback for
 large graphs), recorded with issuer signatures in `<urn:sparq:zk>` at
 ingest; modular Noir proofs — one union-commitment/signature circuit plus
@@ -678,8 +1072,8 @@ and the server track deferred behind explicit triggers.
 
 ### Stage 1 — holder flow end-to-end, zero engine impact
 
-New optional crate `sparq-zk` (or a consumer in the zkp workspace — Q1)
-using **existing public APIs only**: ingest 3–5 real-shaped W3C VCs
+New optional crate `sparq-zk` in this repo (Q1 — resolved; the workspace
+stays frozen, §4.E) using **existing public APIs only**: ingest 3–5 real-shaped W3C VCs
 (cooperative-issuer mock: re-sign Poseidon2 commitments with Schnorr over
 fixture keys), store content graphs + a hand-maintained `<urn:sparq:zk>`
 registry, evaluate the query out-of-process, build witnesses, prove with
@@ -710,26 +1104,71 @@ query **[judgement]**; (d) feature-off builds byte-identical benchmarks.
 
 ### Stage 3 — union hardening, revocation prototype, honest benchmarks
 
-k up to k_max=4 with padding; duplicate-ordering and bnode-scoping
-adversarial tests promoted to CI; hidden-index status-list non-revocation
-prototype (§2.6 option 1); NOT EXISTS / MINUS over the in-circuit sweep;
-first honest benchmark table: v2-modular vs monolith-A (same witnesses,
-conformance oracle) vs the zkVM baseline on identical derived-credential
-queries.
+Circuit-family buckets beyond the stage-1 default (§2.4 lattice, lazy
+compile + cache, verifier-side circuit-id re-derivation);
+duplicate-ordering and bnode-scoping adversarial tests promoted to CI
+(including the §2.4 prover/verifier cross-graph-bnode checks); hidden-index
+status-list non-revocation prototype (§2.6 — v1-include, so this stage is
+its landing slot); first `derivation_step` module +
+`entailmentRegime: rdfs` end-to-end over a `proof-trees` witness (§5);
+NOT EXISTS / MINUS over the in-circuit sweep; first honest benchmark
+table: v3-modular vs monolith-A (same witnesses, conformance oracle) vs
+the zkVM baseline on identical derived-credential queries.
 **Exit criteria**: non-revocation adds ≤ 25 % prover time **[judgement]**;
 ≥ 10× beat vs the zkVM baseline on the 23-triple query and on a k=3
 credential union; comparison table published.
 
 ### Stage 4 — research options, each behind a trigger
 
-Standard VC-DI in-circuit verification or commitment-bridge (trigger: Q3
-decision + `zkp-performance-landscape.md` findings on non-native-curve and
-SHA-256 costs); recursion-tree compression / CHONK (trigger: re-presentable
-derived credentials wanted, or documented non-Aztec ClientIVC); derivation
-proofs I2 (trigger: Jesse's call on Q2); **server track** (v1's T1:
-per-pod super-roots over per-graph commitments, generation-pinned proofs,
-ACL-scoped completeness — trigger: an actual untrusted-server deployment
-need); accumulator revocation (trigger: ecosystem convergence).
+Standard VC-DI in-circuit verification behind the per-credential flag, or
+the commitment-bridge (trigger: first real third-party-credential demand —
+run the Longfellow/libzk spike first, per `zkp-performance-landscape.md`
+Hedge 1); recursion-tree compression / CHONK (trigger:
+`binding: holder-pop` re-presentable credentials wanted, or documented
+non-Aztec ClientIVC); I3-style completeness under entailment (trigger: a
+verifier demands it, §5); **server track** (v1's T1: per-pod super-roots
+over per-graph commitments, generation-pinned proofs, ACL-scoped
+completeness — trigger: an actual untrusted-server deployment need);
+accumulator revocation (trigger: §2.6's scale/SLA thresholds).
+
+### Live-service posture (Q11 — resolved: ISWC framing dropped)
+
+Jesse: "I no longer care about ISWC, this is about building this for an
+actual Solid server that is a live service." Consequences, spelled out:
+
+- **Proof generation is an async job, not a blocking request.** Even 2–5 s
+  of proving does not belong on a request thread; the service exposes
+  create-job / progress / fetch-result, and the browser path mirrors it
+  with a worker + progress events. SLO thinking applies from day one:
+  queue depth, per-bucket latency percentiles, and a warm cache of circuit
+  artifacts (§2.4's lazy-compiled family members).
+- **Key rotation and issuer-key history.** Issuers rotate keys; proofs
+  must verify against the key that was valid **at issuance time**, not at
+  resolution time. The registry records the key reference per credential
+  (§2.1); DID-document key history — or the trust-framework registry graph
+  (§2.8), which carries key-validity windows — supplies the history; the
+  verifier checks key-valid-at-issuance in the clear.
+- **Proof caching is generation-bound.** A proof attests a result over
+  specific graph commitments, so sparq's generation/time-travel machinery
+  is the invalidation index: a cached proof is bound to the generation(s)
+  of its constituent graphs and is invalidated when a write touches any of
+  them — per-graph commitment maintenance in the apply path (§2.7) is
+  exactly the hook. Status-list freshness (§2.6) invalidates on its own
+  clock, independent of graph writes.
+- **Versioned manifest format with a compatibility policy.** Manifests
+  carry a format version, circuit-family ids, and cryptosuite ids
+  (content-addressed VKs, §2.4); the service commits to verifying N−1
+  manifest versions across upgrades; and circuit-id pinning means a
+  bb/Noir toolchain bump produces a *new* family version, never a silent
+  change — the bb-churn risk (§8) becomes an operational procedure instead
+  of an ambush.
+- **Operational metrics**: proving time by bucket and stage, witness-build
+  time, verification failures by cause (signature / completeness /
+  re-classification / binding / staleness), status-list refresh lag,
+  artifact-cache hit rate.
+- **House rules**: this is sparq-repo work — roborev review on every
+  commit and orchestrator-controlled merge gates apply, as for the rest of
+  the repo; the workspace freeze (§4.E) is part of the same discipline.
 
 ---
 
@@ -743,8 +1182,10 @@ need); accumulator revocation (trigger: ecosystem convergence).
 - **The interop cliff is a product risk, not just a cost line.** If
   verifiers/issuers won't move off standard cryptosuites, every cost sketch
   in §4 triples-or-worse and browser proving dies (§2.3). The plan's bet is
-  the custom-cryptosuite path (a); stage 4 holds the fallbacks. Decide
-  early (Q3).
+  the custom-cryptosuite path (a) — now the standing recommendation
+  (§2.3), softened by the live-service setting (the service is its own
+  first issuer) and hedged by the Longfellow/libzk spike; stage 4 holds
+  the fallbacks.
 - **RDFC10 at ingest is attacker-facing**: pathological bnode structures
   blow up canonicalization; cap work per document at ingest (credentials
   are small; reject outliers, fail closed).
@@ -757,73 +1198,104 @@ need); accumulator revocation (trigger: ecosystem convergence).
 - **Numbers are extrapolations** from ≤ 10⁴-quad measurements and v1
   anchors; flat-hash circuits, Schnorr-embedded costs, and browser
   end-to-end are unmeasured. Stage gates exist to falsify them early;
-  `zkp-performance-landscape.md` will tighten the proving-side constants.
+  `zkp-performance-landscape.md` tightened the system-level constants but
+  explicitly notes no published benchmark covers our exact workload —
+  stage 1 measures it.
 - **Dual evaluation drift** (stage 1 evaluates outside sparq): divergence
   would make proofs attest the wrong answer. Stage 2's trace removes the
   class.
+- **The float-library estate is a live dependency risk.** The best float
+  work (`test_lib`) sits unpushed on one machine (76 commits + a dirty
+  `kernels.nr` — Jesse action, §4.E) and lacks the comparison kernels
+  FILTER needs most; noir_XPath does not compile on the current toolchain
+  (26 errors on beta.21; daily-failing version-check CI). Until PR-#39
+  lands and the toolchain is bumped, FILTER-over-floats has no clean
+  dependency path — which is exactly why §4.E sequences it first.
+- **Live-service surface is new risk territory**: key-rotation mistakes,
+  stale status lists, and cache-invalidation bugs are *soundness* failures
+  as experienced by verifiers, not lab artifacts. §7's operational posture
+  is the mitigation, and it needs the same adversarial-test discipline as
+  the circuits.
 
 ## 9. Open questions for Jesse
 
-Resolved by the v2 feedback (recorded, removed from the open list):
-*v1 Q3* threat-model priority → holder-side derived credentials primary,
-server track optional. *v1 Q4* leaf encoding → store-independent
-term-hash/RDFC10 commitments (three-party trust boundary forces it;
-rebuild cost is trivial at credential scale); id-leaves survive only in the
-server track. *v1 Q5* bnode canonicalization → RDFC10 per graph at ingest,
-graph-scoped bnode encoding (§2.2). *v1 Q10* scale ambition → eval at
-credential scale (10¹–10³ triples/graph, k ≤ ~8), pod/server scale moves to
-the optional track.
+**Resolved by the v2 feedback (recorded):** *v1 Q3* threat-model priority →
+holder-side derived credentials primary, server track optional. *v1 Q4*
+leaf encoding → store-independent term-hash/RDFC10 commitments; id-leaves
+survive only in the server track. *v1 Q5* bnode canonicalization → RDFC10
+per graph at ingest, graph-scoped bnode encoding (§2.2). *v1 Q10* scale
+ambition → credential scale primary; pod/server scale optional track.
 
-Open:
+**Resolved by the v3 review (Jesse's answers + the recommendations he
+asked for — dispositions one line each):**
 
-1. **Where does this live?** A `sparq-zk` crate here, or a consumer in
-   `zkp-sparql-workspace` depending on sparq as a library? (Unchanged
-   recommendation: commitment/trace/metadata seams in sparq, prover +
-   circuits in the workspace — your call.)
-2. **Inference semantics**: I1/I2/I3 (§5)? Is derivation-witnessing (I2,
-   now over issuer-signed base graphs, with ontologies as signed graphs
-   from schema-publisher issuers) an ISWC contribution or post-paper?
-3. **Issuer-signature reality (the big one)**: target first — (a) custom
-   VC-DI cryptosuite signing the Poseidon2 graph commitment (cheap, needs
-   issuer adoption), (b) in-circuit standard-suite verification (no
-   adoption needed, 3×10⁵+ gates/credential), or (c) a re-signing /
-   BBS+-commitment bridge (new trust assumptions)? §2.3 lays out the
-   trade; absorbs v1 Q6's scheme choice.
-4. **Commitment content scope**: commit `credentialSubject` claims only, or
-   the full VC envelope (issuer, validity window, type)? Where do
-   validity-window checks live — in-circuit comparison against a disclosed
-   "now", or disclosed dates checked verifier-side?
-5. **Union sizing**: one `k_max/n_max` circuit with padding (leaks bounds
-   only) vs a small circuit family (k ∈ {1,2,4,8} × n ∈ {16,64,256})?
-   What envelope should the eval target?
-6. **Cross-credential bnode identity**: confirm merge semantics (no bnode
-   joins across graphs, §2.4) covers the intended use cases, or do any
-   require issuer-side skolemization conventions?
-7. **Revocation**: hidden-index status-list inclusion vs accumulators
-   (§2.6); what freshness semantics do target verifiers demand, and does
-   v1 of the eval include it at all?
-8. **Holder binding & replay**: is challenge-binding per presentation
-   enough, or should derived credentials be re-presentable artifacts with
-   in-circuit holder proof-of-possession (which also strengthens the case
-   for recursion-compression, Q9)?
-9. **Aggregation posture**: manifest-of-proofs for the paper, or invest in
-   the Ultra recursion tree / gamble on CHONK — now also weighing the
-   re-presentable-derived-credential consumer (Q8)? Defer numbers to
-   `zkp-performance-landscape.md`?
-10. **Flip the spec's `h_2`/`h_4` default from Pedersen to Poseidon2**?
-    Now lower-stakes: issuers sign fresh commitments under whatever suite
-    we spec (Q3), so legacy-signed-dataset compatibility constrains less
-    than v1 assumed.
-11. **Timeline coupling**: does stage 1–3 feed the ISWC 2026 eval, or stay
-    decoupled until after submission? Do the roborev/no-push constraints
-    from the optimisation project apply to this module?
-12. **Verifier trust establishment for K**: DID resolution / trust
-    registries are out of circuit scope, but the manifest format must
-    carry key references — adopt `did:` URLs + cryptosuite ids now?
-13. **Metadata conventions**: exact naming for the stored VC-DI proof
-    graph (`<D>?proof`-style convention vs registry-only retention in
-    `<urn:sparq:zk>`), and the access rule for `<urn:sparq:zk>` itself
-    (Control-holders only, mirroring `.acl` readability?).
+- **Q1 (where it lives)** → resolved by Jesse: in the sparq repo
+  (`sparq-zk`, §4.E); the zkp-sparql-workspace is frozen as an archive.
+- **Q2 (inference)** → resolved by Jesse: support **both**, recorded in
+  the proof object as `entailmentRegime`; ontology commitments join the
+  signed-input set; `sparql_noir_modular` gains `derivation_step`, with
+  `ProofTree` from the `proof-trees` branch as witness source (§5).
+- **Q3 (issuer signatures)** → resolved by recommendation, pending veto:
+  custom VC-DI cryptosuite over the Poseidon2 commitment primary (the
+  live service is its own first issuer); in-circuit standard-suite
+  verification as a per-credential interop fallback; Longfellow/libzk
+  spike before any in-circuit SHA-256 (§2.3).
+- **Q4 (commitment scope)** → resolved by recommendation, pending veto:
+  commit the full VC envelope; validity windows checked in-circuit against
+  the verifier's disclosed "now"; claims-only = non-goal (§2.2).
+- **Q5 (union sizing)** → resolved: yes, it can be dynamic — a circuit
+  family over the (k, n) lattice; prover and verifier use different
+  per-bucket artifacts; the verifier re-derives the circuit id from the
+  public statement and rejects mismatches; VKs content-addressed; lazy
+  compile + cache on the server (§2.4).
+- **Q6 (blank nodes)** → resolved by Jesse: **not skolemised**; four-layer
+  protection — in-circuit (graph, local-id) scoping, zk-trace plan
+  rejection, verifier re-derivation check, per-graph salting of RDFC10
+  canonical labels (§2.2, §2.4).
+- **Q7 (revocation)** → resolved by recommendation: hidden-index
+  status-list inclusion, **v1-include** for the live service; verifier-
+  side freshness policy; accumulators as the deferred upgrade path (§2.6).
+- **Q8 (holder binding & replay)** → explained and resolved as
+  use-case-dependent: challenge-binding (replay) and holder
+  proof-of-possession (yes — proof of knowledge of a secret, bound via
+  the VC `cnf` claim) are distinct concerns; both supported as per-proof
+  `binding` modes (§2.5).
+- **Q10 (Pedersen → Poseidon2)** → resolved by recommendation: yes, flip
+  everywhere — legacy constraint gone, cheapest in-circuit hash, uniformity
+  removes cross-suite bugs (§2.2, §6.3).
+- **Q11 (timeline)** → resolved by Jesse: ISWC dropped; the target is an
+  actual live Solid server service, with §7's operational posture; sparq
+  house rules (roborev per commit, orchestrator merge-gates) apply.
+- **Q12 (key references)** → resolved by Jesse: yes — `did:` URLs +
+  cryptosuite ids in the manifest; issuer sets as trust-framework
+  references over a signed issuer-registry graph (§2.8; specifics open
+  below).
+- **Q13 (metadata conventions)** → resolved by recommendation:
+  `<D>?proof` proof graphs inheriting `<D>`'s ACL; enriched
+  `<urn:sparq:zk>` registry, readable by Control-holders of the
+  referenced documents only (§2.1).
+
+**Genuinely still open:**
+
+1. **Q9 — aggregation posture, reframed for the live service.**
+   Manifest-of-proofs remains the posture; the open question is when (if
+   ever) to invest in compression for `binding: holder-pop` re-presentable
+   credentials. CHONK/ClientIVC is confirmed unusable for non-Aztec Noir
+   as of mid-2026 (`zkp-performance-landscape.md` §2.6); its opening up is
+   the revisit trigger.
+2. **Trust-framework specifics** (Jesse actively thinking): framework
+   vocabulary, registry-graph update semantics, cross-framework bridging,
+   and whether framework membership ever needs to move in-circuit. §2.8 is
+   the proposed starting shape, not the answer.
+3. **test-lib completion: ownership and timeline.** Pushing the 76 commits
+   + dirty `kernels.nr` is a Jesse action (private repo); the
+   comparison/rounding/cast kernels that would make `test_lib` the XPath
+   float backend are currently unowned work. Until decided, PR-#39 is the
+   standing path (§4.E) — confirm or veto that sequencing.
+4. **Veto window on the v3 recommendations**: Q3 (cryptosuite-first), Q4
+   (full-envelope scope), Q7 (status-list v1-include), Q10 (Poseidon2
+   flip), Q13 (naming/ACL conventions), and PR-#39-before-test_lib — all
+   proceed as written unless overridden.
 
 ## 10. Bibliography
 
@@ -859,6 +1331,9 @@ Open:
   ESWC 2026. https://link.springer.com/chapter/10.1007/978-3-032-25156-5_16
 - [RDFPROOFS] Yamamoto et al. zkp-ld/rdf-proofs.
   https://github.com/zkp-ld/rdf-proofs
+- [LONGFELLOW] Frigo, Shelat. Longfellow-zk / libzk (Google; deployed in
+  Google Wallet). https://eprint.iacr.org/2024/2010 ·
+  https://datatracker.ietf.org/doc/draft-google-cfrg-libzk/
 - [CEUR4085] Wright. ISWC 2025 Doctoral Consortium, CEUR Vol-4085 paper 19.
 - [ZKSPARQL] Wright, Shadbolt, J. Zhao, R. Zhao, Braun. zkSPARQL (ISWC 2026
   submission). https://zksparql.org/
@@ -899,9 +1374,13 @@ Open:
   https://github.com/noir-lang/noir/issues/2543
 
 Internal sources: `research/zkp-noir-context.md`;
-`research/zkp-performance-landscape.md` (forthcoming — proving performance:
-hardware, proof systems beyond Noir, ACIR reuse);
-`zkp-sparql-workspace/{HANDOFF-WAVE17.md, decisions/sparql-noir-modular-alternative.md, notes/research/02,05,08}`;
+`research/zkp-performance-landscape.md` (delivered — proving-performance
+synthesis; the external evidence base behind §3/§4's system verdicts);
+`research/zkp-noir-inventory-2026-06-12.md` (verified on-disk inventory of
+the Noir estate; authoritative wherever memory and disk disagree);
+`zkp-sparql-workspace/{HANDOFF-WAVE17.md, decisions/sparql-noir-modular-alternative.md, notes/research/02,05,08}` (frozen archive — citable, no new development);
 `sparql_noir/spec/{encoding,algebra,proofs,preprocessing}.md`;
-sparq `crates/{sparq-core/src/{dict,store}.rs, sparq-serve/src/{epoch,ring,writer}.rs, sparq-reason/src/{incremental,lib}.rs}`;
+sparq `crates/{sparq-core/src/{dict,store}.rs, sparq-engine/src/exec.rs (mod trace), sparq-serve/src/{epoch,ring,writer}.rs, sparq-reason/src/{incremental,lib}.rs}`
+and the `proof-trees` branch (`sparq-reason` feature `explain`:
+`ProofTree`/`ProofNode`/`ExplainOpts`);
 `research/{ARCHITECTURE.md, concurrent-serving.md §2.8–2.10, solid-access-control-design.md §2–3}`.
