@@ -83,11 +83,14 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
     // premise it matches anything (like a variable), and a premise-bound
     // label shared with the conclusion carries its binding (the cwm/EYE
     // `[is :p of :x]`-in-premise idiom). Rewrite rule-scoped premise blanks
-    // to fresh per-rule variables so the matcher treats them so; blanks
-    // appearing ONLY in a conclusion stay blanks.
+    // to fresh per-rule variables so the matcher treats them so. Blanks
+    // INSIDE quoted `{ … }` formulae are NOT rewritten — a quoted graph's
+    // existentials belong to that graph (log:includes scoping needs them as
+    // graph-local terms, not rule variables); blanks appearing ONLY in a
+    // conclusion also stay blanks (instantiated fresh per firing).
     for (ri, r) in rules.iter_mut().chain(backward_rules.iter_mut()).enumerate() {
         let mut premise_blanks: std::collections::HashSet<String> = Default::default();
-        collect_blanks(&r.premise, &mut premise_blanks);
+        collect_blanks(&r.premise, false, &mut premise_blanks);
         if premise_blanks.is_empty() {
             continue;
         }
@@ -98,8 +101,8 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
                 }
             }
         };
-        rewrite_terms(&mut r.premise, &rename);
-        rewrite_terms(&mut r.conclusion, &rename);
+        rewrite_terms(&mut r.premise, false, &rename);
+        rewrite_terms(&mut r.conclusion, false, &rename);
     }
     Ok(Parsed { facts, rules, backward_rules })
 }
@@ -113,43 +116,49 @@ fn nil_to_list(t: Term) -> Term {
     }
 }
 
-fn collect_blanks(stmts: &[[Term; 3]], out: &mut std::collections::HashSet<String>) {
+/// Collect blank labels; `into_formulae` controls whether quoted `{ … }`
+/// graphs are descended into (lists always are — they are plain structure).
+fn collect_blanks(stmts: &[[Term; 3]], into_formulae: bool, out: &mut std::collections::HashSet<String>) {
     for row in stmts {
         for t in row {
-            collect_blanks_term(t, out);
+            collect_blanks_term(t, into_formulae, out);
         }
     }
 }
 
-fn collect_blanks_term(t: &Term, out: &mut std::collections::HashSet<String>) {
+fn collect_blanks_term(t: &Term, into_formulae: bool, out: &mut std::collections::HashSet<String>) {
     match t {
         Term::Blank(l) => {
             out.insert(l.clone());
         }
-        Term::Formula(inner) => collect_blanks(inner, out),
+        Term::Formula(inner) if into_formulae => collect_blanks(inner, into_formulae, out),
         Term::List(ms) => {
             for m in ms {
-                collect_blanks_term(m, out);
+                collect_blanks_term(m, into_formulae, out);
             }
         }
         _ => {}
     }
 }
 
-fn rewrite_terms(stmts: &mut [[Term; 3]], f: &impl Fn(&mut Term)) {
+fn rewrite_terms(stmts: &mut [[Term; 3]], into_formulae: bool, f: &impl Fn(&mut Term)) {
     for row in stmts.iter_mut() {
         for t in row.iter_mut() {
-            rewrite_term(t, f);
+            rewrite_term(t, into_formulae, f);
         }
     }
 }
 
-fn rewrite_term(t: &mut Term, f: &impl Fn(&mut Term)) {
+fn rewrite_term(t: &mut Term, into_formulae: bool, f: &impl Fn(&mut Term)) {
     match t {
-        Term::Formula(inner) => rewrite_terms(inner, f),
+        Term::Formula(inner) => {
+            if into_formulae {
+                rewrite_terms(inner, into_formulae, f);
+            }
+        }
         Term::List(ms) => {
             for m in ms.iter_mut() {
-                rewrite_term(m, f);
+                rewrite_term(m, into_formulae, f);
             }
         }
         _ => f(t),
@@ -161,6 +170,9 @@ struct Parser<'a> {
     i: usize,
     base: String,
     prefixes: std::collections::HashMap<String, String>,
+    /// `@forAll`/`@forSome` quantifier scopes (document level at index 0, one
+    /// frame per open formula): resolved IRI → the Var/Blank it stands for.
+    quants: Vec<std::collections::HashMap<String, Term>>,
     bnode: usize,
     pathvar: usize,
     /// Current `{`/`(`/`[` nesting depth — bounded so pathological inputs
@@ -174,7 +186,16 @@ const MAX_DEPTH: usize = 1024;
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str) -> Parser<'a> {
-        Parser { s: src.as_bytes(), i: 0, base: String::new(), prefixes: Default::default(), bnode: 0, pathvar: 0, depth: 0 }
+        Parser {
+            s: src.as_bytes(),
+            i: 0,
+            base: String::new(),
+            prefixes: Default::default(),
+            quants: vec![Default::default()],
+            bnode: 0,
+            pathvar: 0,
+            depth: 0,
+        }
     }
 
     // ---- lexing helpers ------------------------------------------------------
@@ -221,11 +242,50 @@ impl<'a> Parser<'a> {
                 self.directive_prefix()?;
             } else if self.starts_with("@base") || self.starts_with("BASE") {
                 self.directive_base()?;
+            } else if self.starts_with("@forAll") || self.starts_with("@forSome") {
+                self.directive_quantifier()?;
             } else {
                 self.statement(&mut out)?;
             }
         }
         Ok(out)
+    }
+
+    /// `@forAll t1, t2 .` / `@forSome t1, t2 .` — declare quantified terms for
+    /// the CURRENT scope (document, or the innermost open formula). Each
+    /// declared IRI thereafter reads as a variable (forAll) or an existential
+    /// blank (forSome) within that scope. Names derive from the IRI so the
+    /// same declaration in two documents (action vs reference) compares equal.
+    fn directive_quantifier(&mut self) -> Result<(), String> {
+        let universal = self.starts_with("@forAll");
+        self.i += if universal { 7 } else { 8 };
+        loop {
+            self.ws();
+            let iri = match self.peek() {
+                Some(b'<') => self.read_iriref()?,
+                _ => match self.read_prefixed_name()? {
+                    Term::Iri(i) => i,
+                    other => return Err(format!("expected IRI in quantifier, got {other:?}")),
+                },
+            };
+            let local = iri.rsplit(['#', '/']).next().unwrap_or(&iri).to_string();
+            let term = if universal {
+                Term::Var(format!("__ua_{local}"))
+            } else {
+                Term::Blank(format!("__ex_{local}"))
+            };
+            self.quants.last_mut().expect("scope stack").insert(iri, term);
+            if !self.eat(b',') {
+                break;
+            }
+        }
+        self.eat(b'.');
+        Ok(())
+    }
+
+    /// The quantified stand-in for `iri`, innermost scope first.
+    fn quantified(&self, iri: &str) -> Option<Term> {
+        self.quants.iter().rev().find_map(|frame| frame.get(iri).cloned())
     }
 
     fn directive_prefix(&mut self) -> Result<(), String> {
@@ -247,9 +307,18 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// `subject predicateObjectList .` with `;` and `,`.
+    /// `subject predicateObjectList .` with `;` and `,`. A bare
+    /// blankNodePropertyList (`[ :p :o ] .`) needs no predicateObjectList —
+    /// its triples were already emitted while reading the subject.
     fn statement(&mut self, out: &mut Vec<[Term; 3]>) -> Result<(), String> {
         let subj = self.term(out)?;
+        self.ws();
+        if matches!(self.peek(), Some(b'.') | Some(b'}') | None)
+            && matches!(subj, Term::Blank(_) | Term::Formula(_))
+        {
+            self.eat(b'.');
+            return Ok(());
+        }
         self.predicate_object_list(&subj, out)?;
         self.eat(b'.');
         Ok(())
@@ -376,7 +445,13 @@ impl<'a> Parser<'a> {
     fn atom(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
         self.ws();
         match self.peek() {
-            Some(b'<') => Ok(nil_to_list(Term::Iri(self.read_iriref()?))),
+            Some(b'<') => {
+                let iri = self.read_iriref()?;
+                if let Some(q) = self.quantified(&iri) {
+                    return Ok(q);
+                }
+                Ok(nil_to_list(Term::Iri(iri)))
+            }
             Some(b'"') | Some(b'\'') => self.read_literal(),
             Some(b'?') => {
                 self.i += 1;
@@ -402,7 +477,15 @@ impl<'a> Parser<'a> {
                     self.i += 5;
                     return Ok(Term::Lit("false".into(), XSD_BOOLEAN.into(), None));
                 }
-                self.read_prefixed_name().map(nil_to_list)
+                match self.read_prefixed_name()? {
+                    Term::Iri(i) => {
+                        if let Some(q) = self.quantified(&i) {
+                            return Ok(q);
+                        }
+                        Ok(nil_to_list(Term::Iri(i)))
+                    }
+                    other => Ok(other),
+                }
             }
             None => Err("unexpected end of input".into()),
         }
@@ -580,6 +663,7 @@ impl<'a> Parser<'a> {
     fn read_formula(&mut self) -> Result<Term, String> {
         self.enter()?;
         self.eat(b'{');
+        self.quants.push(Default::default()); // formula-local quantifier scope
         let mut triples = Vec::new();
         loop {
             self.ws();
@@ -589,8 +673,17 @@ impl<'a> Parser<'a> {
             if self.i >= self.s.len() {
                 return Err("unterminated formula".into());
             }
-            self.statement(&mut triples)?;
+            if self.starts_with("@forAll") || self.starts_with("@forSome") {
+                self.directive_quantifier()?;
+            } else if self.starts_with("@prefix") {
+                self.directive_prefix()?;
+            } else if self.starts_with("@base") {
+                self.directive_base()?;
+            } else {
+                self.statement(&mut triples)?;
+            }
         }
+        self.quants.pop();
         self.depth -= 1;
         Ok(Term::Formula(triples))
     }

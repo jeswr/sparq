@@ -263,6 +263,38 @@ fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec
         })
         .collect();
 
+    // Conclusion EXISTENTIALS: blank labels in each rule's conclusion (fresh
+    // instance per firing), and the conclusion's variables (the firing key —
+    // one instantiation per distinct conclusion-relevant binding, so re-runs
+    // of non-monotonic rules do not mint endless new blanks).
+    let concl_meta: Vec<(Vec<String>, Vec<String>)> = rules
+        .iter()
+        .map(|r| {
+            let mut blanks: std::collections::HashSet<String> = Default::default();
+            let mut vars: std::collections::BTreeSet<String> = Default::default();
+            fn scan(t: &Term, blanks: &mut std::collections::HashSet<String>, vars: &mut std::collections::BTreeSet<String>) {
+                match t {
+                    Term::Blank(l) => {
+                        blanks.insert(l.clone());
+                    }
+                    Term::Var(v) => {
+                        vars.insert(v.clone());
+                    }
+                    Term::List(ms) => ms.iter().for_each(|m| scan(m, blanks, vars)),
+                    _ => {}
+                }
+            }
+            for row in &r.conclusion {
+                for t in row {
+                    scan(t, &mut blanks, &mut vars);
+                }
+            }
+            (blanks.into_iter().collect(), vars.into_iter().collect())
+        })
+        .collect();
+    let mut fired: FxHashSet<(usize, String)> = FxHashSet::default();
+    let mut sk_counter = 0usize;
+
     let mut delta: FxHashSet<[Term; 3]> = facts.all.clone(); // round 0: every fact is "new"
     let mut first_round = true;
     loop {
@@ -292,9 +324,34 @@ fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec
                 }
                 bs
             };
+            let (concl_blanks, concl_vars) = &concl_meta[ri];
             for b in bindings {
+                // Fresh conclusion existentials: rename the conclusion's blanks
+                // once per distinct (rule, conclusion-binding) firing.
+                let sk: Option<FxHashMap<String, String>> = if concl_blanks.is_empty() {
+                    None
+                } else {
+                    let key: String = concl_vars
+                        .iter()
+                        .map(|v| format!("{:?};", b.get(v)))
+                        .collect();
+                    if !fired.insert((ri, key)) {
+                        continue; // this firing already instantiated its existentials
+                    }
+                    sk_counter += 1;
+                    Some(
+                        concl_blanks
+                            .iter()
+                            .map(|l| (l.clone(), format!("__sk{sk_counter}_{l}")))
+                            .collect(),
+                    )
+                };
                 for c in &rule.conclusion {
-                    if let Some(g) = ground_triple(c, &b) {
+                    let c = match &sk {
+                        Some(map) => rename_blanks(c, map),
+                        None => c.clone(),
+                    };
+                    if let Some(g) = ground_triple(&c, &b) {
                         if !facts.contains(&g) {
                             // The supporting facts: premise patterns instantiated under b that
                             // are actual facts (excludes builtins / list structure).
@@ -738,6 +795,22 @@ fn fact_list(head: &Term, facts: &FactIndex) -> Option<Vec<Term>> {
     }
 }
 
+/// Rename blank labels per `map` in a conclusion triple (recursing into lists;
+/// quoted formulae keep their own existentials as written).
+fn rename_blanks(t: &[Term; 3], map: &FxHashMap<String, String>) -> [Term; 3] {
+    fn go(t: &Term, map: &FxHashMap<String, String>) -> Term {
+        match t {
+            Term::Blank(l) => match map.get(l) {
+                Some(nl) => Term::Blank(nl.clone()),
+                None => t.clone(),
+            },
+            Term::List(ms) => Term::List(ms.iter().map(|m| go(m, map)).collect()),
+            _ => t.clone(),
+        }
+    }
+    [go(&t[0], map), go(&t[1], map), go(&t[2], map)]
+}
+
 /// Try to unify pattern triple `pat` with ground fact `f`, extending binding `b`.
 fn unify(pat: &[Term; 3], f: &[Term; 3], b: &Binding) -> Option<Binding> {
     let mut nb = b.clone();
@@ -763,7 +836,53 @@ fn unify_term(pat: &Term, val: &Term, b: &mut Binding) -> bool {
         (Term::List(ps), Term::List(vs)) => {
             ps.len() == vs.len() && ps.iter().zip(vs).all(|(p, v)| unify_term(p, v, b))
         }
+        // Unification THROUGH quoting: a `{ … }` pattern matches a `{ … }`
+        // value when their triple multisets correspond under the binding
+        // (pattern variables may bind quoted terms — cwm unify1/unify2).
+        (Term::Formula(ps), Term::Formula(vs)) => formula_unify(ps, vs, b),
         (other, _) => other == val,
+    }
+}
+
+/// Multiset unification of two formula bodies under `b` (small formulae;
+/// backtracking with a binding clone per branch).
+fn formula_unify(ps: &[[Term; 3]], vs: &[[Term; 3]], b: &mut Binding) -> bool {
+    if ps.len() != vs.len() {
+        return false;
+    }
+    fn go(
+        i: usize,
+        ps: &[[Term; 3]],
+        vs: &[[Term; 3]],
+        used: &mut [bool],
+        b: &Binding,
+    ) -> Option<Binding> {
+        if i == ps.len() {
+            return Some(b.clone());
+        }
+        for j in 0..vs.len() {
+            if used[j] {
+                continue;
+            }
+            let mut nb = b.clone();
+            if (0..3).all(|k| unify_term(&ps[i][k], &vs[j][k], &mut nb)) {
+                used[j] = true;
+                let done = go(i + 1, ps, vs, used, &nb);
+                used[j] = false;
+                if done.is_some() {
+                    return done;
+                }
+            }
+        }
+        None
+    }
+    let mut used = vec![false; vs.len()];
+    match go(0, ps, vs, &mut used, b) {
+        Some(nb) => {
+            *b = nb;
+            true
+        }
+        None => false,
     }
 }
 
