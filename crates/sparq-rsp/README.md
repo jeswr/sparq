@@ -149,6 +149,13 @@ remaining per-window cost in `PersistentDict` is the index build
 (`TripleStore::from_triples`) plus the numeric/temporal caches (O(dictionary)
 per window) — removing those needs the core cheap-snapshot seam (see TODO).
 
+The registered query is parsed ONCE at `register` time into a
+`sparq_engine::PreparedQuery`; each window executes the prepared algebra
+(no per-window parse). Parsing the AVG query above costs ~2.6 µs, so this
+only shows up at very high window rates: RANGE 10 tumbling windows dropped
+~17 % per window (11.8 → 9.8 µs median, interleaved A/B); at RANGE 100 and
+above the saving is within run-to-run noise.
+
 ## Tests
 
 `cargo test -p sparq-rsp` — 32 integration tests + 3 doctests pinning:
