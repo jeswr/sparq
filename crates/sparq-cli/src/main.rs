@@ -721,7 +721,7 @@ fn cmd_query_mmap(args: &[String]) {
 
 /// Opens a (possibly compressed) RDF document as a streaming reader. `.gz`/`.bz2`/`.zst[d]` are
 /// decompressed transparently on the fly — the decompressed bytes are never all held at once.
-fn open_reader(path: &str) -> std::io::Result<Box<dyn std::io::Read>> {
+fn open_reader(path: &str) -> std::io::Result<Box<dyn std::io::Read + Send>> {
     let file = std::fs::File::open(path)?;
     Ok(if path.ends_with(".gz") {
         Box::new(flate2::read::MultiGzDecoder::new(file))
