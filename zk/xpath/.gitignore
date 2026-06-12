@@ -1,0 +1,11 @@
+# test_packages/
+scripts/qt3tests/
+__pycache__/
+*.pyc
+
+# Noir build artifacts (self-contained here; do not rely on a zk/.gitignore existing)
+target/
+**/target/
+Prover.toml.bak
+*.proof
+*.vk

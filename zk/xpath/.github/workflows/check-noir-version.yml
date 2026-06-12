@@ -1,0 +1,94 @@
+name: Check for New Noir Versions
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-noir-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Get latest Noir version from GitHub releases
+        id: get-latest
+        run: |
+          # Fetch latest releases from noir-lang/noir
+          LATEST=$(curl -s https://api.github.com/repos/noir-lang/noir/releases | \
+            jq -r '[.[] | select(.prerelease == false and .draft == false)] | .[0].tag_name // empty')
+          
+          # If no stable release, get latest pre-release
+          if [ -z "$LATEST" ]; then
+            LATEST=$(curl -s https://api.github.com/repos/noir-lang/noir/releases | \
+              jq -r '.[0].tag_name // empty')
+          fi
+          
+          # Remove 'v' prefix if present
+          LATEST="${LATEST#v}"
+          
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          echo "Latest Noir version: $LATEST"
+
+      - name: Read current versions
+        id: read-versions
+        run: |
+          CURRENT_LATEST=$(jq -r '.latest' .github/noir-versions.json)
+          VERSIONS=$(jq -r '.versions | join(",")' .github/noir-versions.json)
+          echo "current_latest=$CURRENT_LATEST" >> $GITHUB_OUTPUT
+          echo "versions=$VERSIONS" >> $GITHUB_OUTPUT
+          echo "Current latest: $CURRENT_LATEST"
+          echo "Current versions: $VERSIONS"
+
+      - name: Update versions if new release found
+        id: update
+        if: steps.get-latest.outputs.latest != '' && steps.get-latest.outputs.latest != steps.read-versions.outputs.current_latest
+        run: |
+          NEW_VERSION="${{ steps.get-latest.outputs.latest }}"
+          CURRENT_VERSIONS=$(jq -r '.versions' .github/noir-versions.json)
+          
+          # Add new version at the beginning and keep only 3 versions
+          NEW_VERSIONS=$(echo "$CURRENT_VERSIONS" | jq --arg v "$NEW_VERSION" '[$v] + . | .[0:3]')
+          
+          # Update the JSON file
+          jq --arg v "$NEW_VERSION" --argjson versions "$NEW_VERSIONS" \
+            '.latest = $v | .versions = $versions' \
+            .github/noir-versions.json > .github/noir-versions.json.tmp
+          mv .github/noir-versions.json.tmp .github/noir-versions.json
+          
+          echo "updated=true" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          
+          echo "Updated noir-versions.json:"
+          cat .github/noir-versions.json
+
+      - name: Create Pull Request
+        if: steps.update.outputs.updated == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "ci: add Noir ${{ steps.update.outputs.new_version }} to test matrix"
+          title: "ci: add Noir ${{ steps.update.outputs.new_version }} to test matrix"
+          body: |
+            A new version of Noir has been released: **${{ steps.update.outputs.new_version }}**
+            
+            This PR updates the CI test matrix to include the new version while keeping the 3 most recent versions.
+            
+            Updated versions:
+            ```json
+            $(cat .github/noir-versions.json)
+            ```
+            
+            ---
+            *This PR was automatically created by the version check workflow.*
+          branch: ci/noir-${{ steps.update.outputs.new_version }}
+          delete-branch: true
+          labels: |
+            ci
+            automated

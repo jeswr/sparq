@@ -1,0 +1,7 @@
+[package]
+name = "xpath_test_fnxml_to_json"
+type = "lib"
+authors = ["auto-generated"]
+
+[dependencies]
+xpath = { path = "../../xpath" }

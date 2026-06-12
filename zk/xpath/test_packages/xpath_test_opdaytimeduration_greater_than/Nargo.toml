@@ -1,0 +1,7 @@
+[package]
+name = "xpath_test_opdaytimeduration_greater_than"
+type = "lib"
+authors = ["auto-generated"]
+
+[dependencies]
+xpath = { path = "../../xpath" }

@@ -1,0 +1,7 @@
+[package]
+name = "xpath_test_opsubtract_daytimeduration_from_time"
+type = "lib"
+authors = ["auto-generated"]
+
+[dependencies]
+xpath = { path = "../../xpath" }

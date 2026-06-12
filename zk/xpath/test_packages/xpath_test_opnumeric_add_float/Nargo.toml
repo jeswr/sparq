@@ -1,0 +1,7 @@
+[package]
+name = "xpath_test_opnumeric_add_float"
+type = "lib"
+authors = ["auto-generated"]
+
+[dependencies]
+xpath = { path = "../../xpath" }
