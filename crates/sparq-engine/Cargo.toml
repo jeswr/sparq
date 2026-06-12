@@ -55,8 +55,9 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 # The dict-consolidation differential test compares the serial, sharded-parallel and
 # external (out-of-core) build paths — the tests need sparq-core's mmap feature even
-# though the library itself doesn't.
-sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap", "parallel"] }
+# though the library itself doesn't. `dict-spill` adds the spilled-dictionary build's
+# byte-identity differential (tests/dict_spill_differential.rs).
+sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap", "parallel", "dict-spill"] }
 rayon.workspace = true
 # The cs-planner q-error gate builds its characteristic-set tables through the
 # dict-id accessor (dev-only; the library never depends on introspection).

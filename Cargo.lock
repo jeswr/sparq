@@ -2735,6 +2735,7 @@ name = "sparq-core"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.15.5",
+ "libc",
  "memmap2",
  "oxrdf",
  "oxttl",

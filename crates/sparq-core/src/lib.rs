@@ -6,6 +6,8 @@
 
 pub mod compress;
 pub mod dict;
+#[cfg(feature = "dict-spill")]
+pub mod dictspill;
 #[cfg(feature = "mmap")]
 pub mod extsort;
 mod nt;
@@ -522,7 +524,13 @@ pub fn is_integer_datatype(dt: &str) -> bool {
 }
 
 fn is_numeric_dt(l: &Literal) -> bool {
-    let dt = l.datatype().as_str();
+    is_numeric_datatype_str(l.datatype().as_str())
+}
+
+/// `is_numeric_dt` by datatype IRI string — shared with the spilled-dict build, which
+/// computes the numeric cache from borrowed term components without an `oxrdf::Term`.
+/// (A language-tagged literal's datatype is `rdf:langString`, never numeric.)
+pub(crate) fn is_numeric_datatype_str(dt: &str) -> bool {
     dt == xsd::INTEGER.as_str()
         || dt == xsd::DECIMAL.as_str()
         || dt == xsd::DOUBLE.as_str()
@@ -1090,6 +1098,15 @@ impl Graph {
         dir: &std::path::Path,
         chunk: usize,
     ) -> Result<(), String> {
+        // The SPILLED dictionary (`dict-spill` feature, env-gated via SPARQ_DICT_SPILL):
+        // bounded-RSS builds for dictionaries larger than RAM. Output is byte-identical
+        // to the (default) sharded path; N-Triples only, like the sharded path.
+        #[cfg(feature = "dict-spill")]
+        if matches!(format, "ntriples" | "n-triples") {
+            if let Some(cfg) = dictspill::SpillConfig::from_env() {
+                return Self::build_external_spill(reader, format, dir, chunk, &cfg);
+            }
+        }
         // The SHARDED-dict N-Triples ingest (parallel dict consolidation) is the DEFAULT
         // when it can run (parallel build, >1 rayon thread); `SPARQ_SHARDED_DICT=0` (or
         // `off`) opts out to the serial-merge path, `=1` keeps forcing it on (its id
@@ -1293,6 +1310,103 @@ impl Graph {
         }
         // Compute per-predicate stats once (a one-time POS/PSO scan) and persist them so
         // query-open never re-scans those indexes — keeping out-of-core open fast + small.
+        let store = TripleStore::open(dir).map_err(|e| e.to_string())?;
+        store.save_pred_stats(dir).map_err(|e| e.to_string())?;
+        std::fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    /// External-memory build with the SPILLED term dictionary (`dict-spill` feature):
+    /// peak RSS is bounded by `cfg.mem_budget` (dictionary included) instead of growing
+    /// with the distinct-term count — terms spill to disk and are externally
+    /// deduplicated/ranked into EXACTLY the ids the (default) sharded in-RAM
+    /// consolidation assigns, so every output file is byte-identical to
+    /// [`build_external`](Self::build_external)'s. N-Triples only (the same RDF-star
+    /// restriction as the sharded path). Design: research/external-dictionary.md.
+    #[cfg(feature = "dict-spill")]
+    pub fn build_external_spill<R: std::io::Read + Send>(
+        reader: R,
+        format: &str,
+        dir: &std::path::Path,
+        chunk: usize,
+        cfg: &dictspill::SpillConfig,
+    ) -> Result<(), String> {
+        use store::{Perm, BUILT};
+        if !matches!(format, "ntriples" | "n-triples") {
+            return Err("the dict-spill external build supports N-Triples only".to_string());
+        }
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let tmp = dir.join("tmp");
+        std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+        dictspill::ensure_disk(&tmp, cfg.disk_floor)?;
+        let _t_build = std::time::Instant::now();
+        build_timing::reset();
+
+        // Stages 1-3: decompress + parallel parse + bounded-cache resolve + stage.
+        let mut interner =
+            dictspill::SpillInterner::new(default_shards(), &tmp, cfg).map_err(|e| e.to_string())?;
+        build_external_ntriples_dictspill(reader, &mut interner)?;
+        if build_timing::enabled() {
+            build_timing::report("parse+route+stage done", _t_build.elapsed().as_secs_f64());
+        }
+
+        // Phases 2-4: external dedup/rank. The dictionary files and the numeric/temporal
+        // caches are STREAM-written in final-id order here, so no dict-finalize thread
+        // (and no resident dictionary) exists later.
+        let t_cons = std::time::Instant::now();
+        let plan = dictspill::consolidate(interner, dir, &tmp, cfg)?;
+        if build_timing::enabled() {
+            eprintln!("[build-timing] dict consolidate (spilled): {:.2}s", t_cons.elapsed().as_secs_f64());
+        }
+
+        // Phase 5: remap the staged triples to final dense ids, spilling SPO-sorted runs.
+        let mut buf: Vec<[Id; 3]> = Vec::with_capacity(chunk.min(1 << 24));
+        let mut runs: Vec<std::path::PathBuf> = Vec::new();
+        dictspill::remap_staged(plan, &mut buf, &mut runs, &tmp, chunk)?;
+        extsort::spill_run(&mut buf, &mut runs, &tmp).map_err(|e| e.to_string())?;
+        drop(buf); // free the chunk buffer before the k-way merge + sibling sorts
+
+        // Merge the SPO runs (ids are FINAL already — no `remap_perm_file` pass needed).
+        let spo_path = dir.join(format!("perm{}.bin", Perm::Spo as usize));
+        extsort::kway_merge(&runs, &spo_path).map_err(|e| e.to_string())?;
+        if build_timing::enabled() {
+            eprintln!("[build-timing] kway_merge SPO done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+        }
+        for r in &runs {
+            std::fs::remove_file(r).ok();
+        }
+
+        // Sibling permutations: the same concurrent external sorts as
+        // `build_external_opts` (minus its dict-finalize thread).
+        let (map, n) = extsort::map_perm(&spo_path).map_err(|e| e.to_string())?;
+        // SAFETY: perm0 is a whole number of [u32;3] rows written above; map outlives the loop.
+        let spo: &[[Id; 3]] =
+            unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<[Id; 3]>(), n) };
+        let siblings: Vec<Perm> = BUILT.iter().copied().filter(|&p| p != Perm::Spo).collect();
+        let sib_sort = |perm: Perm, sub: &std::path::Path, per: usize| -> Result<(), String> {
+            std::fs::create_dir_all(sub).map_err(|e| e.to_string())?;
+            let out = dir.join(format!("perm{}.bin", perm as usize));
+            extsort::external_sort(spo.iter().copied(), perm.order(), &out, sub, per).map_err(|e| e.to_string())
+        };
+        {
+            use rayon::prelude::*;
+            let per = (chunk / siblings.len().max(1)).max(1 << 16);
+            siblings
+                .par_iter()
+                .try_for_each(|&perm| sib_sort(perm, &tmp.join(format!("p{}", perm as usize)), per))?;
+        }
+        drop(map);
+        if build_timing::enabled() {
+            eprintln!("[build-timing] sibling sorts done | {:.2}s wall to here", _t_build.elapsed().as_secs_f64());
+        }
+
+        // Empty files for the unbuilt permutations so `open` finds all six slots.
+        for i in 0..6 {
+            let p = dir.join(format!("perm{i}.bin"));
+            if !p.exists() {
+                std::fs::File::create(&p).map_err(|e| e.to_string())?;
+            }
+        }
         let store = TripleStore::open(dir).map_err(|e| e.to_string())?;
         store.save_pred_stats(dir).map_err(|e| e.to_string())?;
         std::fs::remove_dir_all(&tmp).ok();
@@ -2485,6 +2599,79 @@ fn remap_perm_file(path: &std::path::Path, base: &[u64], stride: u32) -> Result<
     ids.par_iter_mut().for_each(|id| *id = dict::remap_sharded(*id, base, stride));
     mmap.flush().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// SPILLED-dict variant of the parallel N-Triples ingest: the same decompress→parse
+/// stages as the sharded pipeline, but stage 3 routes terms through the BOUNDED spill
+/// interner (`dictspill::SpillInterner::intern_batch`) instead of in-RAM shard dicts,
+/// and triples are STAGED to disk unsorted (their final ids are unknown until the
+/// external dedup completes) rather than spilled as sorted runs. Batches flow IN ORDER,
+/// so per-shard first-occurrence order — and the final id assignment — is identical to
+/// the sharded in-RAM path.
+#[cfg(feature = "dict-spill")]
+fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
+    reader: R,
+    interner: &mut dictspill::SpillInterner,
+) -> Result<(), String> {
+    use std::sync::mpsc::sync_channel;
+    const BLOCK: usize = 64 << 20;
+    let (tx, rx) = sync_channel::<Vec<u8>>(3);
+    type Partials = Vec<(Dict, Vec<[Id; 3]>)>;
+    let (ptx, prx) = sync_channel::<Partials>(2);
+
+    std::thread::scope(|scope| -> Result<(), String> {
+        // Stage 1 — decompress (identical to the sharded pipeline).
+        let producer = scope.spawn(move || -> Result<(), String> {
+            let mut reader = reader;
+            let mut readbuf = vec![0u8; BLOCK];
+            let mut carry: Vec<u8> = Vec::new();
+            loop {
+                let mut filled = 0;
+                while filled < BLOCK {
+                    let n = reader.read(&mut readbuf[filled..]).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                if filled == 0 {
+                    if !carry.is_empty() {
+                        let _ = tx.send(std::mem::take(&mut carry));
+                    }
+                    return Ok(());
+                }
+                let mut block = std::mem::take(&mut carry);
+                block.extend_from_slice(&readbuf[..filled]);
+                let cut = block.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+                carry = block[cut..].to_vec();
+                block.truncate(cut);
+                if tx.send(block).is_err() {
+                    return Ok(());
+                }
+            }
+        });
+        // Stage 2 — parse (identical).
+        let parser = scope.spawn(move || -> Result<(), String> {
+            for block in rx {
+                if block.is_empty() {
+                    continue;
+                }
+                let partials = parse_block(&block)?;
+                if ptx.send(partials).is_err() {
+                    return Ok(());
+                }
+            }
+            Ok(())
+        });
+        // Stage 3 (this thread) — bounded-cache resolve + triple staging.
+        for partials in prx {
+            let t_merge = std::time::Instant::now();
+            interner.intern_batch(&partials)?;
+            build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        parser.join().map_err(|_| "parse thread panicked".to_string())??;
+        producer.join().map_err(|_| "decompression thread panicked".to_string())?
+    })
 }
 
 /// Parses one (complete-line) N-Triples byte block in parallel into per-chunk partial

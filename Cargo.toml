@@ -38,6 +38,9 @@ rayon = "1"
 # Memory-mapped on-disk indexes (out-of-core, native only) — query datasets larger
 # than RAM by letting the OS page in only the working set.
 memmap2 = "0.9"
+# RAM / free-disk detection for the spillable-dictionary build budget (native only,
+# behind sparq-core's `dict-spill` feature — never reaches the wasm build).
+libc = "0.2"
 # HNSW approximate nearest-neighbour search (sparq-vectors only, GenAI phase 4).
 # Chosen over hnsw_rs: pure Rust, minimal dependency tree, maintained (InstantDomain).
 instant-distance = "0.6"
