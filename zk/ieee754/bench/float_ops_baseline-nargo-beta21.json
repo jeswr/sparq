@@ -1,0 +1,199 @@
+{
+  "timestamp": "2026-06-12T21:47:35.828211",
+  "n_small": 1,
+  "n_big": 8,
+  "benchmarks": {
+    "add_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 6513
+      },
+      "per_call_estimate": 341.85714285714283,
+      "setup_estimate": 3778.1428571428573
+    },
+    "sub_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 6514
+      },
+      "per_call_estimate": 342.0,
+      "setup_estimate": 3778.0
+    },
+    "mul_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 6106
+      },
+      "per_call_estimate": 283.7142857142857,
+      "setup_estimate": 3836.285714285714
+    },
+    "div_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5909
+      },
+      "per_call_estimate": 255.57142857142858,
+      "setup_estimate": 3864.4285714285716
+    },
+    "add_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 5518
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 8640
+      },
+      "per_call_estimate": 446.0,
+      "setup_estimate": 5072.0
+    },
+    "sub_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 5519
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 8641
+      },
+      "per_call_estimate": 446.0,
+      "setup_estimate": 5073.0
+    },
+    "mul_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4903
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 7393
+      },
+      "per_call_estimate": 355.7142857142857,
+      "setup_estimate": 4547.285714285715
+    },
+    "div_f32": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4741
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 7316
+      },
+      "per_call_estimate": 367.85714285714283,
+      "setup_estimate": 4373.142857142857
+    },
+    "add_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 6691
+      },
+      "per_call_estimate": 367.2857142857143,
+      "setup_estimate": 3752.714285714286
+    },
+    "sub_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 6692
+      },
+      "per_call_estimate": 367.42857142857144,
+      "setup_estimate": 3752.5714285714284
+    },
+    "mul_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 6273
+      },
+      "per_call_estimate": 307.57142857142856,
+      "setup_estimate": 3812.4285714285716
+    },
+    "div_f64": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4120
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 6034
+      },
+      "per_call_estimate": 273.42857142857144,
+      "setup_estimate": 3846.5714285714284
+    },
+    "add_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 5012
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 9423
+      },
+      "per_call_estimate": 630.1428571428571,
+      "setup_estimate": 4381.857142857143
+    },
+    "sub_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 5013
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 9424
+      },
+      "per_call_estimate": 630.1428571428571,
+      "setup_estimate": 4382.857142857143
+    },
+    "mul_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 5139
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 8946
+      },
+      "per_call_estimate": 543.8571428571429,
+      "setup_estimate": 4595.142857142857
+    },
+    "div_f128": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4773
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 8445
+      },
+      "per_call_estimate": 524.5714285714286,
+      "setup_estimate": 4248.428571428572
+    }
+  }
+}
