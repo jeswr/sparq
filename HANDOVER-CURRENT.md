@@ -6,7 +6,7 @@ If this file describes running agents/instances and you are a fresh session, ver
 - NONE running. EC2 i-0b3e0be20affc86cf TERMINATED (verified, ~22:47Z 2026-06-12); 1B run completed, doc committed, cost ≈$0.78. NEVER touch i-090531b4ede8f2d3f (production).
 
 ## Git state (repo /Users/jesght/Documents/GitHub/rdfjs/sparq, remote `jeswr`)
-- Pushed through e1c33b9 (rsp-prepared merge). LOCAL UNPUSHED on main: 0f78cf6 (js-parity merge, wasm +50,028 accepted → new baseline ~1,643,095) + skills-vendor commit. Push blocked on the js gate (background task bcxxz1m7x): green = passed N/0 + wasm byte count; then `git push jeswr main`, `git worktree remove ../sparq-jsbind`, `git branch -d js-parity`.
+- Pushed through 29ddd13. js-parity MERGED+PUSHED (gate 674/0; wasm baseline now **1,643,095**) — BINDINGS PARITY (goal clause 4) COMPLETE. Worktree sparq-jsbind removed, branch deleted.
 - Gate command: `cargo test --workspace --exclude sparq-py --release --no-fail-fast 2>&1 | grep -aE "^test result" | awk '{s+=$4; f+=$6} END {print "passed:", s, "failed:", f}'` (-a REQUIRED) + wasm build + stat -f%z.
 
 ## Running agents (worktrees; agents NEVER push/merge; each keeps STATUS.md current)
