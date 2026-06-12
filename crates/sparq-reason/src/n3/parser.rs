@@ -107,6 +107,23 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
     Ok(Parsed { facts, rules, backward_rules })
 }
 
+/// The prefixes cwm resolves without declaration (its reference outputs rely
+/// on them).
+fn well_known_prefix(pfx: &str) -> Option<&'static str> {
+    Some(match pfx {
+        "rdf" => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "rdfs" => "http://www.w3.org/2000/01/rdf-schema#",
+        "owl" => "http://www.w3.org/2002/07/owl#",
+        "xsd" => "http://www.w3.org/2001/XMLSchema#",
+        "log" => "http://www.w3.org/2000/10/swap/log#",
+        "math" => "http://www.w3.org/2000/10/swap/math#",
+        "string" => "http://www.w3.org/2000/10/swap/string#",
+        "list" => "http://www.w3.org/2000/10/swap/list#",
+        "time" => "http://www.w3.org/2000/10/swap/time#",
+        _ => return None,
+    })
+}
+
 /// `rdf:nil` IS the empty list — normalize the IRI spelling to `Term::List([])`
 /// so `()` and `rdf:nil` are one value (cwm/EYE agree).
 fn nil_to_list(t: Term) -> Term {
@@ -533,7 +550,12 @@ impl<'a> Parser<'a> {
             // cwm/EYE treat an undeclared default prefix as `@prefix : <#>.`
             // (document-local names); honor that for ':' only.
             None if pfx.is_empty() => resolve_iri(&self.base, "#"),
-            None => return Err(format!("unknown prefix '{pfx}:'")),
+            // cwm's reference outputs use the well-known SWAP/RDF prefixes
+            // without declaring them — resolve those like cwm does.
+            None => match well_known_prefix(pfx) {
+                Some(ns) => ns.to_string(),
+                None => return Err(format!("unknown prefix '{pfx}:'")),
+            },
         };
         Ok(Term::Iri(format!("{ns}{local}")))
     }

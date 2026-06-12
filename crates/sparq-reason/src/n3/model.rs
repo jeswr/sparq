@@ -18,7 +18,11 @@ pub enum Term {
 impl Term {
     pub fn is_ground(&self) -> bool {
         match self {
-            Term::Var(_) | Term::Formula(_) => false,
+            Term::Var(_) => false,
+            // A quoted formula is a VALUE — ground when its contents are
+            // (so rules may conclude formula-valued facts: log:conjunction,
+            // log:conclusion, log:parsedAsN3 results).
+            Term::Formula(ts) => ts.iter().all(|r| r.iter().all(Term::is_ground)),
             Term::List(ms) => ms.iter().all(Term::is_ground),
             _ => true,
         }

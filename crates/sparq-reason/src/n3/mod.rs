@@ -24,7 +24,8 @@
 //!   * `time:` year/month/day (EYE's set), plus hours/minutes/seconds (SWAP/cwm);
 //!   * `log:` equalTo/notEqualTo, includes/notIncludes (store-scoped when the subject is
 //!     `{ }`/unbound — scoped negation as failure — or true formula containment when the
-//!     subject is a ground `{ … }` formula; see [`scoped_negation`]), `log:conjunction`
+//!     subject is a `{ … }` formula; see [`formula_containment`]), `log:supports`
+//!     (containment after closing the scope under its own rules), `log:conjunction`
 //!     (merge a list of formulae; duplicate triples deduped, original order kept),
 //!     `log:uri` (IRI ↔ xsd:string, both directions), and `log:dtlit`
 //!     (`("lex" xsd:dt) log:dtlit "lex"^^xsd:dt`, both directions).
@@ -254,7 +255,7 @@ fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec
         .map(|r| {
             let joins: Vec<usize> =
                 r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p)).map(|(i, _)| i).collect();
-            let has_neg = r.premise.iter().any(|p| scoped_negation(&p[1]).is_some());
+            let has_neg = r.premise.iter().any(|p| scope_op(&p[1]).is_some());
             let needs_bw = joins.iter().any(|&k| match &r.premise[k][1] {
                 Term::Iri(i) => bw_any_var_pred || bw_concl_preds.contains(i.as_str()),
                 _ => !backward_rules.is_empty(),
@@ -408,7 +409,7 @@ fn intern_closure(
     // chain structure itself is already in the closure rows above).
     let mut proof = Vec::with_capacity(steps.len());
     for (g, ri, prem) in steps {
-        let mut it = |t: &[Term; 3], d: &mut Dict, e: &mut ListExpander| -> Result<[Id; 3], String> {
+        let it = |t: &[Term; 3], d: &mut Dict, e: &mut ListExpander| -> Result<[Id; 3], String> {
             let r = e.expand_row(t);
             Ok([intern(d, &r[0])?, intern(d, &r[1])?, intern(d, &r[2])?])
         };
@@ -507,37 +508,39 @@ fn match_premise_seeded(
     }
     let mut bindings: Vec<Binding> = vec![seed.clone()];
     for pat in premise {
-        // log:includes / log:notIncludes — does the SCOPE include the object formula?
-        //   * subject `{ }` (empty formula) or unbound/non-formula: the scope is the current
-        //     store (the engine's scoped-negation-as-failure idiom, matching prior behaviour);
-        //   * subject a ground non-empty `{ … }` formula: true formula containment — the
-        //     pattern is matched against THAT formula's triples only;
-        //   * subject a NON-ground formula (free variables inside `{ … }`): needs
-        //     quantification machinery — future work; the premise fails (matches nothing).
-        // `log:includes` may BIND free variables of the object pattern (one binding per
-        // match, like EYE); `log:notIncludes` holds iff no match exists.
-        if let Some(is_not) = scoped_negation(&pat[1]) {
+        // log:includes / log:notIncludes / log:supports — does the SCOPE
+        // include (or entail, for supports) the object formula?
+        //   * subject a `{ … }` formula (even `{}` — the EMPTY formula
+        //     includes nothing, cwm builtins.n3): SYNTACTIC containment in
+        //     that formula. Scope-side quantified terms (`@forAll` variables,
+        //     blank existentials) act as OPAQUE CONSTANTS; the PATTERN's
+        //     existentials (blanks, `@forSome`) act as wildcards, and its
+        //     rule variables bind — exactly cwm's quantifiers_limited matrix.
+        //   * log:supports first closes the scope formula under its own
+        //     `=>` rules, then checks containment in the closure.
+        //   * subject unbound or non-formula: the scope is the current store
+        //     (the engine's scoped-negation-as-failure idiom, kept).
+        // `log:includes` may BIND free variables of the object pattern (one
+        // binding per match, like EYE); `log:notIncludes` holds iff no match.
+        if let Some(op) = scope_op(&pat[1]) {
             let inner: &[[Term; 3]] = match &pat[2] {
                 Term::Formula(t) => t,
                 _ => &[],
             };
+            let is_not = matches!(op, ScopeOp::NotIncludes);
             let mut next = Vec::new();
             for b in bindings {
-                let matches: Option<Vec<Binding>> = match apply(&pat[0], &b) {
-                    Term::Formula(ts) if !ts.is_empty() => {
-                        if ts.iter().all(|t| t.iter().all(Term::is_ground)) {
-                            // Formula containment is SYNTACTIC: backward rules describe the
-                            // store, not arbitrary quoted graphs — no goal-direction here.
-                            let scope = FactIndex::from_iter(ts);
-                            let no_bw = BwCtx::new(&[]);
-                            Some(match_premise_seeded(inner, &scope, &b, None, &no_bw, 0))
+                let matches: Vec<Binding> = match apply_deep(&pat[0], &b) {
+                    Term::Formula(ts) => {
+                        let scope: Vec<[Term; 3]> = if matches!(op, ScopeOp::Supports) {
+                            formula_closure(&ts)
                         } else {
-                            None // non-ground scope formula: unsupported (future work)
-                        }
+                            ts
+                        };
+                        formula_containment(&scope, inner, &b)
                     }
-                    _ => Some(match_premise_seeded(inner, facts, &b, None, bw, depth)),
+                    _ => match_premise_seeded(inner, facts, &b, None, bw, depth),
                 };
-                let Some(matches) = matches else { continue };
                 if is_not {
                     if matches.is_empty() {
                         next.push(b);
@@ -651,7 +654,7 @@ fn is_join_atom(pat: &[Term; 3]) -> bool {
         && functional_builtin(&pat[1]).is_none()
         && binder_builtin(&pat[1]).is_none()
         && list_generator(&pat[1]).is_none()
-        && scoped_negation(&pat[1]).is_none()
+        && scope_op(&pat[1]).is_none()
         && !virtual_list
 }
 
@@ -896,9 +899,10 @@ fn apply(t: &Term, b: &Binding) -> Term {
     }
 }
 
-/// Instantiate a conclusion triple under binding `b`; `None` if any term stays non-ground.
+/// Instantiate a conclusion triple under binding `b` (deeply — variables
+/// inside quoted formulae substitute too); `None` if any term stays non-ground.
 fn ground_triple(t: &[Term; 3], b: &Binding) -> Option<[Term; 3]> {
-    let g = [apply(&t[0], b), apply(&t[1], b), apply(&t[2], b)];
+    let g = [apply_deep(&t[0], b), apply_deep(&t[1], b), apply_deep(&t[2], b)];
     if g.iter().all(|x| x.is_ground()) {
         Some(g)
     } else {
@@ -1083,14 +1087,150 @@ fn list_generator(p: &Term) -> Option<ListGen> {
     }
 }
 
-/// `log:includes` (→ `Some(false)`) / `log:notIncludes` (→ `Some(true)`, negation as failure).
-fn scoped_negation(p: &Term) -> Option<bool> {
+/// The formula-scope operators.
+#[derive(Clone, Copy)]
+enum ScopeOp {
+    Includes,
+    NotIncludes,
+    Supports, // includes after closing the scope under its own rules
+}
+
+fn scope_op(p: &Term) -> Option<ScopeOp> {
     let Term::Iri(i) = p else { return None };
     match i.strip_prefix(LOG) {
-        Some("includes") => Some(false),
-        Some("notIncludes") => Some(true),
+        Some("includes") => Some(ScopeOp::Includes),
+        Some("notIncludes") => Some(ScopeOp::NotIncludes),
+        Some("supports") => Some(ScopeOp::Supports),
         _ => None,
     }
+}
+
+/// Substitute bound variables in `t`, recursing into lists AND quoted
+/// formulae (used where a formula value must be fully instantiated:
+/// includes scopes, conclusion emission).
+fn apply_deep(t: &Term, b: &Binding) -> Term {
+    match t {
+        Term::Var(v) => match b.get(v) {
+            Some(val) => val.clone(),
+            None => t.clone(),
+        },
+        Term::List(ms) => Term::List(ms.iter().map(|m| apply_deep(m, b)).collect()),
+        Term::Formula(ts) => Term::Formula(
+            ts.iter()
+                .map(|r| [apply_deep(&r[0], b), apply_deep(&r[1], b), apply_deep(&r[2], b)])
+                .collect(),
+        ),
+        _ => t.clone(),
+    }
+}
+
+/// SYNTACTIC containment of `pattern` in `scope` (log:includes): every
+/// pattern triple must match a scope triple (or be virtual list structure),
+/// with pattern blanks as wildcards, pattern variables binding, and scope
+/// terms — including its quantified variables — as opaque constants. Returns
+/// one binding per complete match.
+fn formula_containment(scope: &[[Term; 3]], pattern: &[[Term; 3]], seed: &Binding) -> Vec<Binding> {
+    // Pattern existentials (blanks) become wildcard variables.
+    let pat: Vec<[Term; 3]> = pattern
+        .iter()
+        .map(|r| {
+            let w = |t: &Term| match t {
+                Term::Blank(l) => Term::Var(format!("__w_{l}")),
+                other => other.clone(),
+            };
+            [w(&r[0]), w(&r[1]), w(&r[2])]
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut budget = 100_000usize;
+    containment_search(&pat, scope, seed.clone(), pat.len(), &mut out, &mut budget);
+    out
+}
+
+fn containment_search(
+    remaining: &[[Term; 3]],
+    scope: &[[Term; 3]],
+    b: Binding,
+    defers_left: usize,
+    out: &mut Vec<Binding>,
+    budget: &mut usize,
+) {
+    if *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+    let Some((pat, rest)) = remaining.split_first() else {
+        out.push(b);
+        return;
+    };
+    // Virtual rdf:first/rest over a list value — list structure is part of
+    // the formula's content for matching purposes (cwm builtins.n3 test2/4).
+    if let Term::Iri(pi) = &pat[1] {
+        if pi == parser::RDF_FIRST || pi == parser::RDF_REST {
+            match apply(&pat[0], &b) {
+                Term::List(ms) => {
+                    if !ms.is_empty() {
+                        let val = if pi == parser::RDF_FIRST {
+                            ms[0].clone()
+                        } else {
+                            Term::List(ms[1..].to_vec())
+                        };
+                        let mut nb = b.clone();
+                        if unify_term(&pat[2], &val, &mut nb) {
+                            containment_search(rest, scope, nb, rest.len(), out, budget);
+                        }
+                    }
+                    return;
+                }
+                Term::Var(_) if !rest.is_empty() && defers_left > 0 => {
+                    // Subject not yet bound — try the other triples first.
+                    let mut rotated: Vec<[Term; 3]> = rest.to_vec();
+                    rotated.push(pat.clone());
+                    containment_search(&rotated, scope, b, defers_left - 1, out, budget);
+                    return;
+                }
+                _ => {} // fall through to plain scope matching
+            }
+        }
+    }
+    for st in scope {
+        let mut nb = b.clone();
+        if (0..3).all(|k| unify_term(&pat[k], &st[k], &mut nb)) {
+            containment_search(rest, scope, nb, rest.len(), out, budget);
+        }
+    }
+}
+
+/// The forward closure of a quoted formula under its own `=>` rules
+/// (log:supports / log:conclusion): the original triples plus everything a
+/// fixpoint run over them derives.
+fn formula_closure(ts: &[[Term; 3]]) -> Vec<[Term; 3]> {
+    let mut facts: Vec<[Term; 3]> = Vec::new();
+    let mut rules: Vec<Rule> = Vec::new();
+    let mut backward: Vec<Rule> = Vec::new();
+    for row in ts {
+        match (&row[0], &row[1], &row[2]) {
+            (Term::Formula(p), Term::Iri(i), Term::Formula(c)) if i == parser::LOG_IMPLIES => {
+                rules.push(Rule { premise: p.clone(), conclusion: c.clone() });
+            }
+            (Term::Formula(c), Term::Iri(i), Term::Formula(p)) if i == parser::LOG_IMPLIED_BY => {
+                backward.push(Rule { premise: p.clone(), conclusion: c.clone() });
+            }
+            _ => facts.push(row.clone()),
+        }
+    }
+    let parsed = parser::Parsed { facts, rules, backward_rules: backward };
+    let (closed, _steps) = run_closure(parsed);
+    // Original statements (including the rule statements, which cwm keeps in
+    // log:conclusion output) plus the derivations.
+    let mut seen: FxHashSet<[Term; 3]> = ts.iter().cloned().collect();
+    let mut result: Vec<[Term; 3]> = ts.to_vec();
+    for f in closed.all {
+        if seen.insert(f.clone()) {
+            result.push(f);
+        }
+    }
+    result
 }
 
 /// The lexical string of a literal term (for `string:` builtins).
@@ -1283,6 +1423,9 @@ enum Func {
     Append,      // list:append — ( list… ) list:append ?out (first-class list result)
     Conjunction, // log:conjunction — merge a list of formulae into one formula
     Dtlit,       // log:dtlit — ( "lex" xsd:dt ) ↔ "lex"^^xsd:dt (both directions)
+    LogConclusion, // log:conclusion — a formula's forward closure, as a formula
+    ParsedAsN3,    // log:parsedAsN3 — an N3 source string, parsed to a formula
+    Langlit,       // log:langlit — ( "lex" "lang" ) → "lex"@lang
     // single-value-arg (string case mapping, Unicode-aware)
     LowerCase,    // string:lowerCase
     UpperCase,    // string:upperCase
@@ -1370,6 +1513,9 @@ fn functional_builtin(p: &Term) -> Option<Func> {
         return match f {
             "conjunction" => Some(Func::Conjunction),
             "dtlit" => Some(Func::Dtlit),
+            "conclusion" => Some(Func::LogConclusion),
+            "parsedAsN3" => Some(Func::ParsedAsN3),
+            "langlit" => Some(Func::Langlit),
             _ => None,
         };
     }
@@ -1462,7 +1608,15 @@ fn eval_functional(
         None => vec![subj_applied.clone()],
     };
     if args.is_empty()
-        && !matches!(f, Func::Conjunction | Func::MemberCount | Func::Length | Func::Append)
+        && !matches!(
+            f,
+            Func::Conjunction
+                | Func::MemberCount
+                | Func::Length
+                | Func::Append
+                | Func::Sum
+                | Func::Product
+        )
     {
         return None;
     }
@@ -1561,6 +1715,40 @@ fn eval_functional(
         Func::EncodeForUri => {
             Term::Lit(encode_for_uri(lex(&args[0])?), "http://www.w3.org/2001/XMLSchema#string".into(), None)
         }
+        Func::LogConclusion => match &args[..] {
+            [Term::Formula(ts)] => Term::Formula(formula_closure(ts)),
+            _ => return None,
+        },
+        Func::ParsedAsN3 => match &args[..] {
+            [Term::Lit(src, _, _)] => {
+                let parsed = parser::parse(src).ok()?;
+                let mut ts = parsed.facts;
+                for r in &parsed.rules {
+                    ts.push([
+                        Term::Formula(r.premise.clone()),
+                        Term::Iri(parser::LOG_IMPLIES.into()),
+                        Term::Formula(r.conclusion.clone()),
+                    ]);
+                }
+                for r in &parsed.backward_rules {
+                    ts.push([
+                        Term::Formula(r.conclusion.clone()),
+                        Term::Iri(parser::LOG_IMPLIED_BY.into()),
+                        Term::Formula(r.premise.clone()),
+                    ]);
+                }
+                Term::Formula(ts)
+            }
+            _ => return None,
+        },
+        Func::Langlit => match &args[..] {
+            [Term::Lit(lex, _, _), Term::Lit(lang, _, _)] => Term::Lit(
+                lex.clone(),
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(),
+                Some(lang.clone()),
+            ),
+            _ => return None,
+        },
         Func::First => args.first()?.clone(),
         Func::Last => args.last()?.clone(),
         Func::Append => {
@@ -1657,13 +1845,7 @@ fn eval_functional(
                         }
                         (x / y).atan()
                     }
-                    Func::Remainder => {
-                        let (a, b) = two(&nums)?;
-                        if b == 0.0 {
-                            return None;
-                        }
-                        a % b
-                    }
+                    Func::Remainder => return None, // integer-only (cwm); handled in eval_exact
                     Func::IntegerQuotient => {
                         let (a, b) = two(&nums)?;
                         if b == 0.0 {
@@ -1818,9 +2000,14 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
             }
         }
         Func::Remainder => {
-            // Integer remainder only (Prolog rem); anything else → f64.
+            // INTEGER-only (cwm remainder.n3: any non-integer operand FAILS),
+            // with the sign of the DIVISOR (Python %, matching the cwm refs:
+            // -2 mod 4 = 2, 2 mod -4 = -2).
             match (vals[0], vals[1]) {
-                (NumVal::Int(a), NumVal::Int(b)) if b != 0 => NumVal::Int(a % b),
+                (NumVal::Int(a), NumVal::Int(b)) if b != 0 => {
+                    let r = a.checked_rem(b)?;
+                    NumVal::Int(if r != 0 && (r < 0) != (b < 0) { r.checked_add(b)? } else { r })
+                }
                 _ => return None,
             }
         }
@@ -2175,19 +2362,73 @@ mod tests {
 
     #[test]
     fn scoped_negation_not_includes() {
-        // log:notIncludes — negation as failure: a Person with no recorded email is :NoEmail.
+        // log:notIncludes with an UNBOUND scope — negation as failure against
+        // the store (the engine's documented idiom): a Person with no
+        // recorded email is :NoEmail.
         let src = r#"
             @prefix : <http://ex/> .
             @prefix log: <http://www.w3.org/2000/10/swap/log#> .
             :alice a :Person .
             :bob a :Person .
             :bob :hasEmail "bob@x" .
-            { ?x a :Person . { } log:notIncludes { ?x :hasEmail ?e } } => { ?x a :NoEmail } .
+            { ?x a :Person . ?store log:notIncludes { ?x :hasEmail ?e } } => { ?x a :NoEmail } .
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         assert!(has(&d, &s, "http://ex/alice", ty, "http://ex/NoEmail"), "alice has no email → NoEmail");
         assert!(!has(&d, &s, "http://ex/bob", ty, "http://ex/NoEmail"), "bob has email → excluded");
+    }
+
+    #[test]
+    fn empty_formula_includes_nothing() {
+        // `{}` is the EMPTY formula (cwm builtins.n3): it includes nothing —
+        // not even true builtin atoms — and notIncludes everything.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :seed :p :o .
+            { {} log:includes { :a log:equalTo :a } } => { :s a :Leak } .
+            { {} log:notIncludes { :a log:equalTo :a } } => { :s a :Clean } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(!has(&d, &s, "http://ex/s", ty, "http://ex/Leak"), "empty formula includes nothing");
+        assert!(has(&d, &s, "http://ex/s", ty, "http://ex/Clean"), "empty formula notIncludes everything");
+    }
+
+    #[test]
+    fn includes_quantifier_matrix() {
+        // The cwm quantifiers_limited matrix: pattern existentials are
+        // wildcards; scope quantified terms are opaque constants.
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :seed :p :o .
+            { { :foo :bar :baz } log:includes { @forSome :foo . :foo :bar :baz } } => { :a2 a :S } .
+            { { @forAll :foo . :foo :bar :baz } log:includes { @forSome :foo . :foo :bar :baz } } => { :c2 a :S } .
+            { { @forSome :foo . :foo :bar :baz } log:includes { :foo :bar :baz } } => { :b1 a :S } .
+            { { @forAll :foo . :foo :bar :baz } log:includes { :foo :bar :baz } } => { :c1 a :S } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/a2", ty, "http://ex/S"), "existential pattern matches ground scope");
+        assert!(has(&d, &s, "http://ex/c2", ty, "http://ex/S"), "existential pattern matches universal scope");
+        assert!(!has(&d, &s, "http://ex/b1", ty, "http://ex/S"), "ground pattern vs existential scope: no");
+        assert!(!has(&d, &s, "http://ex/c1", ty, "http://ex/S"), "ground pattern vs universal scope: no (cwm)");
+    }
+
+    #[test]
+    fn log_supports_closes_scope() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix log: <http://www.w3.org/2000/10/swap/log#> .
+            :seed :p :o .
+            { { :a :b :c . { :a :b :c } => { :d :e :f } } log:supports { :a :b :c . :d :e :f } }
+              => { :q a :S } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/q", ty, "http://ex/S"), "supports = containment in the scope's closure");
     }
 
     #[test]
