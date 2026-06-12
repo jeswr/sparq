@@ -2,7 +2,7 @@
 
 - rdf-tests commit: `f25dbc092c654d792974848e81bb519d7328f0e8`
 - w3c/N3 commit: `23ccf3d56b25cb60a68878a04aae0d52493080f0`
-- sparq commit: `9e7155cdf2295b868965e55a856875e3faae5ade`
+- sparq commit: `6a8e67d4a9b26bb3ccb16dc7700100643ae58c7c`
 
 Every manifest entry lands in exactly one bucket — pass, fail, documented divergence, or out-of-scope WITH its reason (no silent skips). Pass rate is `(pass + divergence) / run`; out-of-scope entries are excluded from the rate but counted in coverage.
 
@@ -131,8 +131,8 @@ Source: `sparql11/entailment` from the pinned rdf-tests clone. Each test runs as
 <details><summary>All failures (3)</summary>
 
 - `sparql11/entailment` — **sparqldl-10.rq: undist vars test**: result mismatch: expected 3 solution(s), got 0; expected-only e.g. {?X=<http://example.org/test#a> ?Y=<http://example.org/test#b>}, {?X=<http://example.org/test#a> ?Y=<http://example.org/test#b>} [root cause: needs non-distinguished (blank-node) query-variable semantics]
-- `sparql11/entailment` — **sparqldl-11.rq: domain test**: result mismatch: expected 2 solution(s), got 3; actual-only e.g. {?C=_:f399138268515b80522d84ed421a5769} [root cause: the regime's answer restriction (skolemization condition) excludes blank-node bindings; the harness does not yet filter them from engine results]
-- `sparql11/entailment` — **sparqldl-12.rq: range test**: result mismatch: expected 2 solution(s), got 3; actual-only e.g. {?C=_:aef43490c50d366ef3d98058d6dde6ad} [root cause: the regime's answer restriction (skolemization condition) excludes blank-node bindings; the harness does not yet filter them from engine results]
+- `sparql11/entailment` — **sparqldl-11.rq: domain test**: result mismatch: expected 2 solution(s), got 3; actual-only e.g. {?C=_:e67ae01fc507f647b38d0a0a678c5de3} [root cause: the regime's answer restriction (skolemization condition) excludes blank-node bindings; the harness does not yet filter them from engine results]
+- `sparql11/entailment` — **sparqldl-12.rq: range test**: result mismatch: expected 2 solution(s), got 3; actual-only e.g. {?C=_:fe03d550aebbe83148506869f7dbdf4d} [root cause: the regime's answer restriction (skolemization condition) excludes blank-node bindings; the harness does not yet filter them from engine results]
 
 </details>
 
