@@ -158,6 +158,92 @@ fn signed_integer_conversions_preserve_sign_and_rounding() {
 }
 
 #[test]
+fn comparison_predicates_follow_ieee_semantics() {
+	let one = f16::new(0x3c00 as u16);
+	let two = f16::new(0x4000 as u16);
+	let neg_one = f16::new(0xbc00 as u16);
+	let neg_two = f16::new(0xc000 as u16);
+	let pos_zero = f16::new(0x0000 as u16);
+	let neg_zero = f16::new(0x8000 as u16);
+	let nan = f16::new(0x7e00 as u16);
+	let pos_inf = f16::new(0x7c00 as u16);
+	let neg_inf = f16::new(0xfc00 as u16);
+	let min_sub = f16::new(0x0001 as u16);
+
+	// Ordinary total ordering on non-NaN values.
+	assert(one.lt(two));
+	assert(!two.lt(one));
+	assert(one.le(two));
+	assert(one.le(one));
+	assert(two.gt(one));
+	assert(two.ge(two));
+	assert(one.eq(one));
+	assert(!one.eq(two));
+	assert(one.ne(two));
+	assert(!one.ne(one));
+
+	// Sign handling, including negative magnitude reversal.
+	assert(neg_two.lt(neg_one));
+	assert(!neg_one.lt(neg_two));
+	assert(neg_one.lt(one));
+	assert(neg_zero.lt(min_sub));
+	assert(neg_inf.lt(neg_two));
+	assert(two.lt(pos_inf));
+	assert(pos_inf.eq(pos_inf));
+	assert(neg_inf.lt(pos_inf));
+
+	// -0 == +0 in every predicate.
+	assert(pos_zero.eq(neg_zero));
+	assert(neg_zero.eq(pos_zero));
+	assert(!pos_zero.lt(neg_zero));
+	assert(!neg_zero.lt(pos_zero));
+	assert(pos_zero.le(neg_zero));
+	assert(neg_zero.ge(pos_zero));
+	assert(!pos_zero.ne(neg_zero));
+
+	// NaN is unordered against everything, including itself.
+	assert(!nan.eq(nan));
+	assert(nan.ne(nan));
+	assert(!nan.lt(one));
+	assert(!one.lt(nan));
+	assert(!nan.le(nan));
+	assert(!nan.gt(one));
+	assert(!nan.ge(one));
+	assert(!pos_inf.lt(nan));
+	assert(nan.ne(one));
+}
+
+#[test]
+fn comparison_predicates_scale_across_widths() {
+	let single_one = f32::new(0x3f800000 as u32);
+	let single_one_next = f32::new(0x3f800001 as u32);
+	let single_nan = f32::new(0x7fc00000 as u32);
+
+	assert(single_one.lt(single_one_next));
+	assert(single_one_next.gt(single_one));
+	assert(!single_nan.eq(single_nan));
+
+	let double_neg_zero = f64::new(0x8000000000000000 as u64);
+	let double_pos_zero = f64::new(0x0000000000000000 as u64);
+	let double_min_sub = f64::new(0x0000000000000001 as u64);
+
+	assert(double_neg_zero.eq(double_pos_zero));
+	assert(double_neg_zero.lt(double_min_sub));
+	assert(double_min_sub.gt(double_pos_zero));
+
+	let quad_one = f128::new(0x3fff0000000000000000000000000000 as u128);
+	let quad_one_next = f128::new(0x3fff0000000000000000000000000001 as u128);
+	let quad_neg_one = f128::new(0xbfff0000000000000000000000000000 as u128);
+	let quad_nan = f128::new(0x7fff8000000000000000000000000000 as u128);
+
+	assert(quad_one.lt(quad_one_next));
+	assert(quad_neg_one.lt(quad_one));
+	assert(quad_one.ge(quad_one));
+	assert(!quad_nan.le(quad_one));
+	assert(quad_nan.ne(quad_nan));
+}
+
+#[test]
 fn uint_types_match_float_component_sizes() {
 	comptime {
 		assert_eq(sizing::uint_type(5), quote { u8 }.as_type());

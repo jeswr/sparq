@@ -19,9 +19,13 @@ fn hidden_bit() -> u128 {
 
 fn max_exponent_typed<T>(exponent_bits: u8) -> T
 where
-    T: From<u8> + std::ops::Shl + std::ops::Sub,
+    T: From<u8> + std::ops::Shl + std::ops::Sub + std::ops::Add,
 {
-    (T::from(1_u8) << T::from(exponent_bits)) - T::from(1_u8)
+    // 2^n - 1 built as 2 * (2^(n-1) - 1) + 1 so the shift stays in range even
+    // when T is exactly n bits wide (e.g. the stored u8 exponent of f32).
+    let half = (T::from(1_u8) << T::from(exponent_bits - 1)) - T::from(1_u8);
+
+    half + half + T::from(1_u8)
 }
 
 fn hidden_bit_typed<T>(mantissa_bits: u8) -> T
@@ -125,7 +129,7 @@ fn verified_pow2_u64_shift_bounded<let POW_BITS: u32>(shift: u16) -> Field {
 
 fn canonical_nan_typed<E, M, let EXPONENT_BITS: u8, let MANTISSA_BITS: u8>() -> FloatParts<E, M>
 where
-    E: From<u8> + std::ops::Shl + std::ops::Sub,
+    E: From<u8> + std::ops::Shl + std::ops::Sub + std::ops::Add,
     M: From<u8> + std::ops::Shl,
 {
     FloatParts::new(false, max_exponent_typed::<E>(EXPONENT_BITS), M::from(1_u8) << M::from(MANTISSA_BITS - 1))
@@ -137,7 +141,7 @@ fn canonical_nan() -> FloatParts<u16, u128> {
 
 fn infinity_parts_typed<E, M>(sign: bool, exponent_bits: u8) -> FloatParts<E, M>
 where
-    E: From<u8> + std::ops::Shl + std::ops::Sub,
+    E: From<u8> + std::ops::Shl + std::ops::Sub + std::ops::Add,
     M: From<u8>,
 {
     FloatParts::new(sign, max_exponent_typed::<E>(exponent_bits), M::from(0_u8))
@@ -149,7 +153,7 @@ fn infinity_parts(sign: bool) -> FloatParts<u16, u128> {
 
 fn classify_typed<E, M>(parts: FloatParts<E, M>, exponent_bits: u8) -> (bool, bool, bool)
 where
-    E: From<u8> + std::ops::Shl + std::ops::Sub + Eq,
+    E: From<u8> + std::ops::Shl + std::ops::Sub + std::ops::Add + Eq,
     M: From<u8> + Eq,
 {
     let exponent_zero = parts.exponent == E::from(0_u8);
@@ -164,6 +168,44 @@ where
 
 fn classify(parts: FloatParts<u16, u128>) -> (bool, bool, bool) {
     classify_typed::<u16, u128>(parts, 15_u8)
+}
+
+/// IEEE 754 comparison flags as `(unordered, less, equal)`.
+///
+/// `unordered` is true when either operand is NaN; `less` and `equal` are then
+/// both false (NaN compares false to everything, including itself). `+0` and
+/// `-0` compare equal. Otherwise ordering is the sign-aware lexicographic
+/// order on `(exponent, mantissa)`, which matches the numeric order for IEEE
+/// bit patterns of the same sign.
+pub(crate) fn compare_parts<E, M, let EXPONENT_BITS: u8>(
+    left: FloatParts<E, M>,
+    right: FloatParts<E, M>,
+) -> (bool, bool, bool)
+where
+    E: From<u8> + std::ops::Shl + std::ops::Sub + std::ops::Add + Eq + Ord,
+    M: From<u8> + Eq + Ord,
+{
+    let (left_nan, _left_infinite, left_zero) = classify_typed::<E, M>(left, EXPONENT_BITS);
+    let (right_nan, _right_infinite, right_zero) = classify_typed::<E, M>(right, EXPONENT_BITS);
+    let unordered = left_nan | right_nan;
+    let both_zero = left_zero & right_zero;
+    let bits_equal = (left.sign == right.sign)
+        & (left.exponent == right.exponent)
+        & (left.mantissa == right.mantissa);
+    let exponents_equal = left.exponent == right.exponent;
+    let magnitude_less =
+        (left.exponent < right.exponent) | (exponents_equal & (left.mantissa < right.mantissa));
+    let magnitude_greater =
+        (right.exponent < left.exponent) | (exponents_equal & (right.mantissa < left.mantissa));
+    let strictly_less = if left.sign != right.sign {
+        left.sign
+    } else if left.sign {
+        magnitude_greater
+    } else {
+        magnitude_less
+    };
+
+    (unordered, !unordered & !both_zero & strictly_less, !unordered & (both_zero | bits_equal))
 }
 
 fn significand(parts: FloatParts<u16, u128>) -> u128 {

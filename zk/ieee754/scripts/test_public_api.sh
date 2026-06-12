@@ -84,6 +84,7 @@ hidden_symbols=(
   ops::div
   ops::uint_to_float_parts_u64
   ops::signed_magnitude_i8
+  ops::compare_parts
   uint_type
   exponent_size
   mantissa_size

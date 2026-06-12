@@ -35,6 +35,9 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
     } else {
         quote { $crate::ops::from_u64_work_parts::<$exp_type, $mant_type>($crate::ops::uint_to_float_parts_u64::<$exp_size, $mant_size, INPUT_BITS>(sign, magnitude)) }
     };
+    let compare_call = quote {
+        $crate::ops::compare_parts::<$exp_type, $mant_type, $exp_size>(self.to_parts(), other.to_parts())
+    };
     let sign_scale = (1 as u128) << ((bits - 1) as u128);
     let exponent_scale = (1 as u128) << (mant_size as u128);
     let exponent_mask = ((1 as u128) << (exp_size as u128)) - 1;
@@ -92,6 +95,57 @@ pub comptime fn float_type_from_params(bits: u8) -> Quoted {
                 Self::from_parts($from_magnitude_parts)
             }
 
+            // IEEE 754 comparison predicates. These are deliberately inherent
+            // methods rather than std::cmp::Eq / std::cmp::Ord impls: those
+            // traits assume a reflexive equality and a total order, and IEEE
+            // floats have neither (NaN is unordered against everything,
+            // including itself, while -0 == +0 makes bit-distinct values
+            // equal). All six predicates evaluate both operands
+            // unconditionally, so the gate count does not depend on the
+            // secret values.
+
+            /// IEEE numeric equality: false when either side is NaN; -0 == +0.
+            pub fn eq(self, other: Self) -> bool {
+                let (_unordered, _less, equal) = $compare_call;
+
+                equal
+            }
+
+            /// IEEE numeric inequality: true when either side is NaN.
+            /// `x.ne(x)` is the idiomatic NaN test.
+            pub fn ne(self, other: Self) -> bool {
+                let (_unordered, _less, equal) = $compare_call;
+
+                !equal
+            }
+
+            /// IEEE less-than: false when either side is NaN.
+            pub fn lt(self, other: Self) -> bool {
+                let (_unordered, less, _equal) = $compare_call;
+
+                less
+            }
+
+            /// IEEE less-than-or-equal: false when either side is NaN.
+            pub fn le(self, other: Self) -> bool {
+                let (_unordered, less, equal) = $compare_call;
+
+                less | equal
+            }
+
+            /// IEEE greater-than: false when either side is NaN.
+            pub fn gt(self, other: Self) -> bool {
+                let (unordered, less, equal) = $compare_call;
+
+                !unordered & !less & !equal
+            }
+
+            /// IEEE greater-than-or-equal: false when either side is NaN.
+            pub fn ge(self, other: Self) -> bool {
+                let (unordered, less, _equal) = $compare_call;
+
+                !unordered & !less
+            }
         }
 
         impl std::ops::Add for $type_name {

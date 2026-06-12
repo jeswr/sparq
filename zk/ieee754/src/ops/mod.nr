@@ -4,6 +4,7 @@ mod signed;
 pub(crate) use kernels::{
     add,
     add_wide,
+    compare_parts,
     div,
     div_wide,
     from_u64_work_parts,
