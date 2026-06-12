@@ -239,3 +239,63 @@ synthetic.nt (one run): gz streaming 0.699 s vs two-stage 0.823 s; zst 0.706 vs
   for wasm).
 - API note: `load_reader_parallel` now requires `R: Read + Send` (the producer
   thread); `sparq-cli`'s `open_reader` returns `Box<dyn Read + Send>`.
+
+## Post-fix measurements (2026-06-12, Turtle blank-node parallel fix)
+
+`turtle_chunks` (sparq-core) no longer bails to serial on blank nodes. The bail
+was unnecessary, not merely expensive:
+
+- **Labeled `_:x`** — oxttl preserves the written label verbatim
+  (`BlankNode::new_unchecked(label)`) and the per-chunk partial dicts merge
+  into the global `Dict` by term equality (`merge_remap` → `intern_blank`), so
+  cross-chunk occurrences of a label unify to ONE id exactly as the serial
+  document-scoped parse does. The dict merge *is* the shared label-intern map —
+  option (c) of the design sketch with zero pre-scan, no label-count threshold,
+  and no per-chunk namespacing or post-pass.
+- **Anonymous `[...]`/`(...)`** — confined to a single statement (hence one
+  chunk); oxttl mints them as random 128-bit ids (`BlankNode::default()`,
+  thread-safe), so cross-chunk distinctness carries the same probabilistic
+  guarantee the serial parser already relies on *within* one document.
+  Parallelism adds no new collision class.
+- The terminator scanner needs no bracket tracking: in valid Turtle a `.`
+  followed by whitespace/EOF/`#` cannot occur inside `[...]`/`(...)`/labels
+  outside the strings/IRIs/comments it already skips (DECIMAL/DOUBLE require a
+  digit/exponent after the dot; PN_LOCAL/BLANK_NODE_LABEL cannot end in a dot).
+  Mis-splits on *invalid* input fail chunk parsing → serial fallback, as before.
+- Bonus guard: a 1-thread rayon pool now parses serially outright (chunking
+  there was pure overhead — measured 1.300 s chunked vs 1.028 s serial at 1T).
+
+Correctness: differential tests (`parallel_turtle_bnodes_match_serial`) compare
+chunked vs serial after first-occurrence bnode renumbering — an *exact*
+equality check that subsumes isomorphism because document order is preserved
+and the label mapping is 1:1 — over shared labels in distant statements
+crossing every chunk boundary, anonymous nests + collections, an all-bnode
+chained doc, sparse Wikidata-shaped labels, and a bnode-free control. On the
+real slice itself: 8T-chunked vs plain-serial-oxttl triple sets are
+**byte-identical** (1,500,000 statements, 1,499,123 distinct triples, 41
+distinct `_:` labels — all labeled, so no renaming is even needed).
+
+Numbers (same machine/harness; the final run's thermal state matches the
+baseline session — oxttl parse-only 0.778 s vs baseline 0.732 s, 1T 1.028 s vs
+baseline 0.998 s — an earlier warmer run this session measured everything ~2×
+slower, ratios unchanged):
+
+| wikidata-slice.ttl | 1T | 8T | speedup |
+|---|---|---|---|
+| parse+intern BEFORE (baseline) | 0.998 s | **1.004 s** | **1.00×** |
+| parse+intern AFTER | 1.028 s | **0.479 s** | **2.15×** |
+| `load_str` BEFORE (baseline) | 1.375 s | 1.207 s | 1.14× |
+| `load_str` AFTER | 1.443 s | 0.613 s | 2.35× |
+
+- Real data now scales the same as bnode-free synthetic measured in the same
+  run (2.15× vs 2.21×; synthetic 1.926 → 0.870 s) — the bnode penalty is gone
+  entirely, not just reduced.
+- The baseline's headline "2.9×" synthetic ratio did not reproduce in this
+  session for synthetic either (2.21× today; the fanless M1 Air's thermal
+  state moves absolute numbers and ratios run to run). The honest claim is
+  parity with the bnode-free path, which is the most this fix could deliver:
+  wikidata Turtle 8T parse+intern 1.004 → 0.479 s (2.1×), full `load_str`
+  1.207 → 0.613 s (2.0×).
+- `cargo test -p sparq-core --release`: 28 passed (27 + the new differential).
+  Wasm guard: `sparq_wasm.wasm` 1,573,895 B (byte-identical — the parallel
+  path isn't compiled for wasm).
