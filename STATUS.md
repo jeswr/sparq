@@ -10,20 +10,18 @@ Successor agent resuming 2026-06-12. Predecessor left 3 commits, no STATUS.md.
 | 2 | Poseidon2-BN254 commitments + Noir cross-vectors | DONE (predecessor) — VERIFIED: `nargo_live_cross_check` ran live nargo 1.0.0-beta.21 (102s), bit-identical |
 | 3 | <urn:sparq:zk> registry | DONE (predecessor) — 5 registry tests pass |
 | 4 | zk-trace seam, non-default `zk` feature | DONE (predecessor) — `#[cfg(feature = "zk")]`-gated module, zero code when off; wasm gate measured separately (item 7) |
-| 5 | bnode correlation guard | PARTIAL: prover-side `bnode_guard` in trace.rs exists but UNTESTED (trace.rs has 0 tests); verifier re-check hook (plan §2.4 layer 3) NOT IMPLEMENTED (spargebra dep staged but unused) — MINE |
-| 6 | Criterion benches + baselines | NOT DONE (placeholder src/bin/bench.rs) — MINE |
-| 7 | wasm size gate (feature off) | NOT MEASURED — MINE (compare HEAD vs branch-point 4901be8) |
-| 8 | workspace tests green | NOT RUN — MINE |
+| 5 | bnode correlation guard | DONE (successor): verifier re-check hook in src/verify.rs (plan §2.4 layer 3 — independent spargebra re-parse, cross-graph join obligations, recheck()); prover guard now covered by tests/trace_guard.rs (7 integration tests incl. colliding-label rejection and the label-identified-union leak) — commit 7321168 |
+| 6 | Criterion benches + baselines | DONE (successor): standalone bench/zk (bench/parse isolation pattern), baselines in bench/zk/README.md — commit 4941c40 |
+| 7 | wasm size gate (feature off) | DONE (successor): baseline (4901be8, same path) 1,593,075 B == HEAD 1,593,075 B. NOT bit-identical: 197 bytes differ — all panic-location LINE NUMBERS in sparq-engine (cfg'd-out zk hook lines shift line numbers of following code); zero code/size change |
+| 8 | workspace tests green | IN FLIGHT: cargo test --workspace --exclude sparq-py --release --no-fail-fast running |
 
-sparq-zk test totals as of audit: 18 lib + 4 noir-cross + 2 rdf-canon = 24, all pass (release).
+sparq-zk test totals now: 24 lib (incl. 6 verify) + 4 noir-cross + 2 rdf-canon + 7 trace_guard = 37, all pass (release).
 
-## In flight
-- Writing crates/sparq-zk/src/verify.rs (verifier-side static re-check, plan §2.4 layer 3)
-  + crates/sparq-zk/tests/trace_guard.rs (prover guard + traced-execution integration tests).
+## Bench baselines (fanless M1, 2026-06-13; full table in bench/zk/README.md)
+- canon: ~73k-153k triples/s (iri/bnode, 64-1024)
+- commit end-to-end: ~4.1k-7.5k triples/s; leaves+fold: ~7k-9.7k triples/s
+- poseidon2: permutation 92.5 us, hash40 583 us (correctness-first port; headroom documented)
 
 ## Next steps if killed
-1. Finish verify.rs + trace_guard.rs, `cargo test -p sparq-zk --release`.
-2. Criterion bench crates/sparq-zk/benches/, baselines into bench/zk/README.md, drop placeholder bin.
-3. wasm gate: build sparq-wasm wasm32 release at HEAD and at 4901be8 (temp worktree), stat -f%z both.
-4. cargo test --workspace --exclude sparq-py --release --no-fail-fast | grep -aE "^test result"
-5. Update STATUS.md + final report.
+1. Await/inspect workspace test run output: grep -aE "^test result"; any failures -> check pre-existing vs mine (only sparq-zk + feature-gated engine zk code touched).
+2. Update item 8 to DONE, commit STATUS.md, final report (per-scope status, counts, wasm bytes, bench numbers, final SHA).
