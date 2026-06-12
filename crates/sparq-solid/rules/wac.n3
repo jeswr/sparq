@@ -25,11 +25,11 @@
 
 # ── effective ACL: nearest ancestor with an own ACL ("no closer ACL exists") ──────────
 { ?r solidx:parent ?p . ?p solidx:ownAcl ?acl .
-  {} log:notIncludes { ?r solidx:ownAcl ?x . } . }
+  ?UNSCOPED log:notIncludes { ?r solidx:ownAcl ?x . } . }
 => { ?r solidx:inheritedAcl ?acl . ?r solidx:inheritsFrom ?p . } .
 
 { ?r solidx:parent ?p . ?p solidx:inheritedAcl ?acl . ?p solidx:inheritsFrom ?c .
-  {} log:notIncludes { ?r solidx:ownAcl ?x . } . }
+  ?UNSCOPED log:notIncludes { ?r solidx:ownAcl ?x . } . }
 => { ?r solidx:inheritedAcl ?acl . ?r solidx:inheritsFrom ?c . } .
 
 # ── which Authorizations apply to which resource ──────────────────────────────────────
@@ -55,13 +55,13 @@
 
 # ── grants, origin-free (the negation is over acl:origin, an input predicate) ─────────
 { ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?p . ?auth acl:mode acl:Read .
-  {} log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:read ?r . } .
+  ?UNSCOPED log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:read ?r . } .
 { ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?p . ?auth acl:mode acl:Write .
-  {} log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:write ?r . } .
+  ?UNSCOPED log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:write ?r . } .
 { ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?p . ?auth acl:mode acl:Append .
-  {} log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:append ?r . } .
+  ?UNSCOPED log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:append ?r . } .
 { ?auth solidx:appliesTo ?r . ?auth solidx:grantsAgent ?p . ?auth acl:mode acl:Control .
-  {} log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:control ?r . } .
+  ?UNSCOPED log:notIncludes { ?auth acl:origin ?o . } . } => { ?p auth:control ?r . } .
 
 # ── origin-restricted grants mint a (agent, client) pair principal ────────────────────
 # Components are percent-encoded (string:encodeForUri, RFC 3986) so the minting is

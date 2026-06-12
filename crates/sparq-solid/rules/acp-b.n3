@@ -13,10 +13,10 @@
 
 # an allOf matcher that does not accept the pair's agent (resp. client) dimension
 { ?pol solidx:candPair ?k . ?k solidx:pairAgent ?pa . ?pol acp:allOf ?m .
-  {} log:notIncludes { ?m solidx:acceptsAgentP ?pa . } . }
+  ?UNSCOPED log:notIncludes { ?m solidx:acceptsAgentP ?pa . } . }
 => { ?k solidx:allOfRejected true . } .
 { ?pol solidx:candPair ?k . ?k solidx:pairClient ?pc . ?pol acp:allOf ?m .
-  {} log:notIncludes { ?m solidx:acceptsClientP ?pc . } . }
+  ?UNSCOPED log:notIncludes { ?m solidx:acceptsClientP ?pc . } . }
 => { ?k solidx:allOfRejected true . } .
 
 # at least one anyOf matcher accepts both dimensions

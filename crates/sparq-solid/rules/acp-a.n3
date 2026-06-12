@@ -45,7 +45,7 @@
 # ── accept-sets: downward-closed over the principal lattice ────────────────────────────
 { ?m solidx:agentValP ?a . } => { ?m solidx:acceptsAgentP ?a . } .
 # no agent attribute at all -> agent-unconstrained -> accepts the top
-{ ?m solidx:isMatcher true . {} log:notIncludes { ?m acp:agent ?x . } . }
+{ ?m solidx:isMatcher true . ?UNSCOPED log:notIncludes { ?m acp:agent ?x . } . }
 => { ?m solidx:acceptsAgentP auth:Public . } .
 { ?m solidx:acceptsAgentP auth:Public . }
 => { ?m solidx:acceptsAgentP auth:Authenticated . } .
@@ -53,7 +53,7 @@
 => { ?m solidx:acceptsAgentP ?a . } .
 
 { ?m solidx:clientValP ?c . } => { ?m solidx:acceptsClientP ?c . } .
-{ ?m solidx:isMatcher true . {} log:notIncludes { ?m acp:client ?x . } . }
+{ ?m solidx:isMatcher true . ?UNSCOPED log:notIncludes { ?m acp:client ?x . } . }
 => { ?m solidx:acceptsClientP auth:AnyClient . } .
 { ?m solidx:acceptsClientP auth:AnyClient . ?c solidx:isCandClient true . }
 => { ?m solidx:acceptsClientP ?c . } .

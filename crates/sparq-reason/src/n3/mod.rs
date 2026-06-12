@@ -1,75 +1,74 @@
-//! Notation3 (N3) rule reasoning — a forward-chaining engine toward EYE-reasoner parity.
+//! Notation3 (N3) rule reasoning — a forward-chaining engine with EYE/cwm parity
+//! across the W3C N3 community-group test suite (reasoner manifest: 98.8% of run).
 //!
-//! N3 adds rules (`{ premise } => { conclusion }`), variables (`?x`), formulae (`{ … }`) and
-//! **builtins** (`math:`, `string:`, `log:`, …) on top of Turtle. EYE is a mature reasoner
-//! with hundreds of builtins; this is the foundation: a parser (`parser`), a term model
-//! (`model`), and a semi-naive forward chainer that applies rules to a fixpoint with variable
-//! binding and a growing set of builtins. Coverage expands builtin-by-builtin, validated
-//! against EYE's own test cases (see the `eye_cases` tests).
+//! N3 adds rules (`{ premise } => { conclusion }`), variables (`?x` and
+//! `@forAll`/`@forSome` quantifiers), first-class lists (`( … )` is a TERM, not
+//! rdf:first/rest structure), quoted formulae (`{ … }`; the empty formula `{}`
+//! IS the literal `true`) and **builtins** (`math:`, `string:`, `log:`, …) on
+//! top of Turtle. The engine: a parser (`parser`, with a STRICT Turtle mode),
+//! a term model (`model`), and a semi-naive forward chainer that applies rules
+//! to a fixpoint. Premises are reordered so each builtin runs only after the
+//! atoms that can produce its inputs (cwm evaluates builtins "when ready").
 //!
-//! Builtins implemented (roadmap T12 — growing toward EYE parity):
-//!   * `math:` comparisons (greaterThan/lessThan/notGreaterThan/notLessThan/equalTo/notEqualTo)
-//!     and functional (sum/difference/product/quotient/max/min/exponentiation/negation/
-//!     absoluteValue/rounded/floor/ceiling/memberCount) over `( … )` list arguments, plus the
-//!     trig/hyperbolic/log family (sin/cos/tan/asin/acos/atan/sinh/cosh/tanh/asinh/acosh/
-//!     atanh, degrees/radians, `(x base) math:logarithm` = log_base(x), and `(x y) math:atan2`
-//!     which — exactly like eye.pl — computes `atan(x/y)`, not the quadrant-aware C atan2);
-//!   * `string:` concatenation/length/contains/containsIgnoringCase/startsWith/endsWith/
-//!     greaterThan/lessThan/matches/notMatches/replace/lowerCase/upperCase,
-//!     `string:encodeForUri` (RFC 3986 percent-encoding, the XPath `fn:encode-for-uri`
-//!     unreserved set — see [`encode_for_uri`]), `string:scrape`
-//!     (first regex capture group), and a `string:format` SUBSET (`%s` `%d` `%f` `%%` only —
-//!     C-printf width/precision flags fail the premise rather than mis-format);
-//!   * `list:` length/first/last and the member/in generators;
-//!   * `time:` year/month/day (EYE's set), plus hours/minutes/seconds (SWAP/cwm);
-//!   * `log:` equalTo/notEqualTo, includes/notIncludes (store-scoped when the subject is
-//!     `{ }`/unbound — scoped negation as failure — or true formula containment when the
-//!     subject is a `{ … }` formula; see [`formula_containment`]), `log:supports`
-//!     (containment after closing the scope under its own rules), `log:conjunction`
-//!     (merge a list of formulae; duplicate triples deduped, original order kept),
-//!     `log:uri` (IRI ↔ xsd:string, both directions), and `log:dtlit`
-//!     (`("lex" xsd:dt) log:dtlit "lex"^^xsd:dt`, both directions).
+//! Builtins implemented (validated against the suite and EYE's own cases):
+//!   * `math:` comparisons (greaterThan/lessThan/notGreaterThan/notLessThan/
+//!     equalTo/notEqualTo, IEEE INF/NaN included) and functional arithmetic
+//!     (sum/difference/product/quotient/max/min/exponentiation/negation/
+//!     absoluteValue/rounded/floor/ceiling/remainder/integerQuotient/
+//!     memberCount) — EXACT over integers/decimals (scaled i128, incl.
+//!     decimal^int exponentiation), IEEE with NaN/INF propagation when any
+//!     input is a double; `math:remainder` is integer-only with divisor-sign
+//!     semantics (cwm). The real-valued family (sin..atanh, degrees/radians,
+//!     logarithm, atan2 — `atan(x/y)` exactly like eye.pl) is always
+//!     xsd:double, with REVERSE modes (`?y math:sin 0` solves y = asin 0).
+//!   * `string:` concatenation (typed literals coerce to canonical value
+//!     strings, IRIs to their text, like cwm)/length/contains[IgnoringCase]/
+//!     containsRoughly/startsWith/endsWith/greaterThan/lessThan/notGreaterThan/
+//!     notLessThan/equalIgnoringCase/notEqualIgnoringCase/matches/notMatches/
+//!     replace/lowerCase/upperCase/scrape/format (%s %d %f %% subset — other
+//!     directives fail the premise rather than mis-format), `encodeForUri`
+//!     (XPath fn:encode-for-uri, see [`encode_for_uri`]) plus cwm's
+//!     `encodeForURI`/`encodeForFragID` quoting pairs;
+//!   * `list:` length/first/last/append, the member/in/iterate generators, and
+//!     virtual `rdf:first`/`rdf:rest` access over list terms;
+//!   * `time:` year/month/day/hour(s)/minute(s)/second(s)/dayOfWeek/timeZone
+//!     and bidirectional inSeconds (epoch, deterministic — no wall-clock);
+//!   * `log:` equalTo/notEqualTo, includes/notIncludes/supports (see below),
+//!     conjunction (true = empty formula), conclusion (a formula's own
+//!     closure), parsedAsN3, langlit, uri and dtlit (both directions), and —
+//!     ONLY when the caller supplies a [`Resolver`] — semantics/content.
 //!
-//! Backward rules (`<=`, log:impliedBy) are GOAL-DIRECTED, matching EYE: they never fire
-//! forward and their conclusions are never materialized into the closure on their own.
-//! When a forward-rule premise atom (e.g. an EYE-style query rule `{goal} => {goal}`)
-//! finds no supporting fact — or in addition to its fact matches — the engine resolves it
-//! against backward-rule conclusions SLD-style: unify the goal with a (variable-renamed)
-//! conclusion, then prove that rule's premise (joins, builtins, and further backward rules,
-//! depth-bounded by [`BW_DEPTH`]). Verified against eyereasoner/eye `reasoning/backward`:
-//! the old "reverse `<=` into a forward rule" treatment derives NOTHING there, because the
-//! premise (`?X math:greaterThan ?Y`) is a pure builtin that is only evaluable once the
-//! GOAL binds the variables. Known gap (documented, not hacked): goals whose arguments are
-//! `( … )` lists or quoted formulae are not structurally unified with backward conclusions
-//! (rule-local list structure uses per-rule blank nodes), so recursive list-state idioms
-//! (EYE's fibonacci/collatz/peasant) are out of scope for now.
+//! `log:includes` containment is cwm-faithful ([`formula_containment`]): the
+//! scope is the subject formula (the empty formula includes nothing); pattern
+//! existentials (blanks, `@forSome`) are wildcards, pattern rule-variables
+//! bind, scope-side quantified terms are opaque constants (the
+//! quantifiers_limited matrix); virtual list access works inside containment;
+//! an UNBOUND/non-formula subject falls back to store-scoped negation as
+//! failure (this engine's documented idiom). `log:supports` first closes the
+//! scope under its own `=>` rules.
 //!
-//! Deliberately NOT implemented (checked against EYE/SWAP):
-//!   * `math:greaterThanOrEqual`/`lessThanOrEqual` — not in the SWAP math vocabulary nor in
-//!     EYE's builtin table; the canonical names are notLessThan/notGreaterThan (implemented).
-//!   * `list:append`/`list:rest` — producing a NEW list requires a first-class list value in
-//!     [`Term`]; lists currently exist only as rule-local rdf:first/rest structure resolved
-//!     up front ([`extract_lists`]), and `intern` has no dictionary representation for a
-//!     list value, so a produced list could neither be bound to a variable nor emitted into
-//!     the ground closure. Needs a `Term::List` variant first — deferred rather than hacked.
-//!   * `time:localTime`/`time:gmTime` — wall-clock reads; a deterministic closure cannot
-//!     depend on when it is computed. (`time:inSeconds` is not an EYE builtin at all —
-//!     eye-builtins.n3 lists only year/month/day/localTime under `time:`.)
-//!   * `log:semantics`/`log:content` — dereference and parse remote/local documents; the
-//!     reasoner is a pure function of its input text, so document fetching stays out.
-//!   * `log:rawType` — EYE distinguishes labeled vs unlabeled blank nodes by their origin,
-//!     which our parser does not track; reporting an approximate type would silently
-//!     disagree with EYE, so it is deferred until bnode origin is recorded.
-//!   * `string:format` directives beyond `%s`/`%d`/`%f`/`%%` (width, precision, `%e`/`%g`,
-//!     length modifiers) — unimplemented directives FAIL the premise (no silent mangling).
-//!   * Reverse (object-bound) modes of the unary math builtins (EYE's `?X math:sin 0.5`
-//!     solving X = asin 0.5) — only the forward subject→object direction is evaluated
-//!     (EXCEPT `math:negation`, which is bidirectional like EYE);
-//!     premises are evaluated left-to-right with no coroutining (EYE `when`-delays).
+//! Backward rules (`<=`, log:isImpliedBy) are GOAL-DIRECTED, matching EYE:
+//! they never fire forward; a forward-rule premise atom resolves against
+//! backward conclusions SLD-style (standardized apart, depth-bounded by
+//! [`BW_DEPTH`]), with structural unification through lists and quoted
+//! formulae on both sides.
 //!
-//! Next increments: `Term::List` (first-class list values: list:append, backward goals over
-//! list arguments), non-ground formula scopes for `log:includes` (quantification),
-//! `log:collectAllIn` (scoped aggregation).
+//! Conclusion blank nodes are EXISTENTIALS instantiated fresh once per
+//! (rule, conclusion-binding) firing — cwm's quant-implies semantics.
+//!
+//! POLICY — document access: the engine performs NO I/O of its own; reasoning
+//! is a pure function of its inputs. `log:semantics`/`log:content` evaluate
+//! only when the caller passes a [`Resolver`]
+//! ([`reason_n3_terms_with_resolver`]) deciding what an IRI may dereference
+//! to (the conformance harness maps the suite's canonical IRIs into its
+//! pinned local clone — strictly offline). `time:localTime`/`gmTime` stay
+//! out (wall-clock reads), as does `log:rawType` (needs bnode-origin
+//! tracking to match EYE) and `math:greaterThanOrEqual`-style names that are
+//! not in the SWAP/EYE vocabulary.
+//!
+//! Next increments: `log:collectAllIn` (scoped aggregation), full
+//! `log:conclusion` parity on deep multi-document closures (cwm_includes
+//! conclusion.n3 is the one remaining honest reasoner-suite fail).
 
 mod model;
 pub mod parser;

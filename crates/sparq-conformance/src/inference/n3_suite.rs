@@ -40,10 +40,19 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub fn notes() -> Vec<String> {
     vec![
         "Source: w3c/N3 `tests/` (pinned clone). The reasoner manifest measures EYE/cwm \
-         parity of the N3 rule engine; the parser/extended/Turtle manifests measure the N3 \
-         parser subset (positive = must parse, negative = must be rejected). Reference \
-         graphs are compared under blank-node isomorphism (formulae structurally); \
-         `test:strings` (log:outputString) tests are out of scope."
+         parity of the N3 rule engine; the parser/extended manifests measure the N3 parser \
+         (positive = must parse, negative = must be rejected); TurtleTests runs the parser \
+         in STRICT Turtle mode. Documents parse against the suite's canonical \
+         https://w3c.github.io/N3/tests/ base (the .nt expectations bake those IRIs in), \
+         and an offline resolver maps those IRIs back into the pinned clone so \
+         log:semantics/log:content work without I/O. Reference graphs are compared under \
+         blank-node isomorphism (formulae structurally, lists expanded where the \
+         expectation is plain triples, same-datatype numerics by value); reason references \
+         parse against the ACTION document's base (cwm generated them so). Under \
+         test:conclusions both derived-only and store-minus-rules shapings are accepted \
+         (the vendored cwm out-files are inconsistent between the two). `rdft:Rejected` \
+         entries are out of scope (upstream rejected them); `test:strings` \
+         (log:outputString) stays out of scope."
             .to_string(),
     ]
 }
@@ -141,7 +150,16 @@ fn run_manifest(
             continue; // subjects without mf:action are manifest scaffolding
         };
         let result = file("result");
-        let mut outcome = match kind {
+        let rejected = g
+            .object(&node, "http://www.w3.org/ns/rdftest#approval")
+            .is_some_and(|t| matches!(t, oxrdf::Term::NamedNode(n) if n.as_str().ends_with("Rejected")));
+        let mut outcome = if rejected {
+            // rdft:Rejected — upstream explicitly rejected the entry from the
+            // suite (e.g. biR's bare '+' list element: "not allowed in
+            // turtle nor n3").
+            Outcome::OutOfScope("rdft:Rejected upstream".into())
+        } else {
+            match kind {
             "TestN3PositiveSyntax" => syntax_test(&action, tests_root, true, false),
             "TurtlePositiveSyntax" => syntax_test(&action, tests_root, true, true),
             "TestN3NegativeSyntax" => syntax_test(&action, tests_root, false, false),
@@ -153,6 +171,7 @@ fn run_manifest(
             }
             "TestN3Reason" => reason_test(&g, &node, &action, result.as_deref(), tests_root),
             other => Outcome::OutOfScope(format!("unhandled test type {other}")),
+            }
         };
         if let Outcome::Fail(e) = &outcome {
             if let Some((_, _why, detail)) =
@@ -275,7 +294,12 @@ fn eval_test_n3(action: &Path, result: Option<&Path>, tests_root: &Path) -> Outc
         Ok(Err(e)) => return Outcome::Fail(format!("expected parse error: {e}")),
         Err(e) => return Outcome::Fail(e),
     };
-    if n3_iso(&statements(&parsed), &statements(&expected)) {
+    // Lists expand to rdf:first/rest chains on BOTH sides: some expected
+    // outputs are N-Triples files spelling the chains out (cwm path2).
+    if n3_iso(
+        &expand_lists(&statements(&parsed)),
+        &expand_lists(&statements(&expected)),
+    ) {
         Outcome::Pass
     } else {
         Outcome::Fail("parsed statements not isomorphic to the reference".into())
@@ -453,6 +477,14 @@ const DOCUMENTED_DIVERGENCES: &[(&str, &str, &str)] = &[
         "the expected output cwm_n3/n3parser.tests_n3_10013.n3 keeps ONE statement under \
          the generating author's local base (file:/home/syosi/...#is) while the rest were \
          rebased — that statement can never match any correct parse",
+    ),
+    (
+        "cwm_includes_t11",
+        "vendored ref reflects a failed dereference",
+        "with the offline resolver the engine derives the schema-checking conclusions over \
+         <t10a.n3> (test_undefined etc.); t11-ref.n3 holds only the two foo.n3 conclusions \
+         and even omits t11's own data facts — the cwm run that produced it never resolved \
+         t10a.n3 and ran with an unrecorded --purge",
     ),
     (
     "cwm_unify_unify1",

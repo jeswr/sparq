@@ -8,12 +8,19 @@
 //! - `{ … }` formulae (graph terms), `( … )` collections (RDF lists)
 //! - predicate sugar `=>` (log:implies), `<=` (reverse implies), `=` (owl:sameAs),
 //!   `is EXPR of` (inverse predicate) and `has EXPR`
-//! - paths (`!`/`^`), relative-IRI resolution against a document base, cwm's
-//!   undeclared-`:`-prefix-as-`<#>` convention
+//! - paths (`!`/`^`, also in predicate position), inverted predicates (`<-`),
+//!   relative-IRI resolution against a document base (RFC 3986 incl. dot
+//!   segments and query-only references), cwm's undeclared-`:`-prefix-as-`<#>`
+//!   and well-known-prefix conventions
+//! - `@forAll`/`@forSome` quantifiers (document and formula scope), `@keywords`
+//!   (bare words as `:word`; the explicit `@a`/`@true`/`@false` forms),
+//!   `[id :s …]` iriPropertyLists, zero-predicate statements, `{}` = `true`
 //! - statement structure with `;` (predicate lists) and `,` (object lists)
 //!
-//! Not yet covered: explicit `@forAll`/`@forSome`, `@keywords`, nested quoting beyond
-//! formulae. These are roadmap items toward full EYE parity.
+//! [`parse_turtle_with_base`] runs the same parser as STRICT W3C TURTLE:
+//! every N3-only construct is rejected, statements must be `.`-terminated,
+//! prefixes must be declared, and PN_LOCAL/LANGTAG/escape rules are enforced
+//! (the TurtleTests suite passes 297/297 in this mode).
 
 use super::model::{Rule, Term};
 

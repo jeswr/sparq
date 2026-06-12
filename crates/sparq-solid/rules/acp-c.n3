@@ -25,10 +25,10 @@ acl:Control solidx:allowPred auth:control ; solidx:denyPred auth:denyControl .
 
 # ── policy satisfaction for a candidate pair ───────────────────────────────────────────
 { ?pol solidx:candPair ?k . ?k solidx:anyOfSat true . } => { ?k solidx:anyOfOk true . } .
-{ ?pol solidx:candPair ?k . {} log:notIncludes { ?pol acp:anyOf ?m . } . }
+{ ?pol solidx:candPair ?k . ?UNSCOPED log:notIncludes { ?pol acp:anyOf ?m . } . }
 => { ?k solidx:anyOfOk true . } .
 { ?pol solidx:candPair ?k . ?k solidx:anyOfOk true .
-  {} log:notIncludes { ?k solidx:allOfRejected true . } . }
+  ?UNSCOPED log:notIncludes { ?k solidx:allOfRejected true . } . }
 => { ?k solidx:satisfied true . } .
 
 # ── the pair's principal term: the agent when client-unconstrained, else a minted pair ─
@@ -43,11 +43,11 @@ acl:Control solidx:allowPred auth:control ; solidx:denyPred auth:denyControl .
 # ── SIMPLE grants (policy has no noneOf) ───────────────────────────────────────────────
 { ?pol solidx:candPair ?k . ?k solidx:satisfied true . ?k solidx:principal ?p .
   ?pol solidx:appliesToResource ?r . ?pol acp:allow ?mode . ?mode solidx:allowPred ?pred .
-  {} log:notIncludes { ?pol acp:noneOf ?nm . } . }
+  ?UNSCOPED log:notIncludes { ?pol acp:noneOf ?nm . } . }
 => { ?p ?pred ?r . } .
 { ?pol solidx:candPair ?k . ?k solidx:satisfied true . ?k solidx:principal ?p .
   ?pol solidx:appliesToResource ?r . ?pol acp:deny ?mode . ?mode solidx:denyPred ?pred .
-  {} log:notIncludes { ?pol acp:noneOf ?nm . } . }
+  ?UNSCOPED log:notIncludes { ?pol acp:noneOf ?nm . } . }
 => { ?p ?pred ?r . } .
 
 # ── CONDITIONAL grants (noneOf present): minted node + exception matchers ──────────────
