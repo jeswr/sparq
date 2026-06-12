@@ -81,6 +81,11 @@ plan shape) needs a planner hook in sparq-engine — an engine seam, out of
 scope for this leaf crate. Recorded for the engine roadmap; until then,
 pre-filter with `GeoIndex` and feed candidates via `VALUES`.
 
+(Engine-seams wave audit: still DEFERRED — this is a physical-operator
+substitution (FILTER → index window scan), not a statistics injection, so the
+new `cs-planner` estimator seam does not cover it; it needs its own design —
+a rewrite hook where a registered predicate+filter shape claims a scan.)
+
 ## Conformance
 
 Formal OGC GeoSPARQL conformance (the official test suite) is skipped — it

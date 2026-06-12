@@ -315,6 +315,7 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
         patterns.len()
     );
 
+    let mut cs_ctx = exec::CsCtx::new(&prepared);
     let seed = exec::goo_seed(&prepared);
     let seed_sort_col = exec::goo_seed_sort(&prepared, seed, pfilter(seed).map(|(c, _)| c));
     let mut sorted_by = predicted_sort_var(&prepared[seed], seed_sort_col);
@@ -322,9 +323,10 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
     add_vars(&mut vars, &prepared[seed]);
     let mut cur_card = prepared[seed].est as f64;
     let mut var_ndv: FxHashMap<Variable, f64> = FxHashMap::default();
-    exec::record_pattern_ndv(graph, &prepared[seed], cur_card, &mut var_ndv);
     let mut done = vec![false; prepared.len()];
     done[seed] = true;
+    cs_ctx.note_done(seed);
+    exec::record_pattern_ndv(graph, &prepared, seed, cur_card, &mut var_ndv, &cs_ctx);
 
     let _ = writeln!(
         out,
@@ -338,9 +340,13 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
 
     for step in 2..=prepared.len() {
         let est_rows_before = cur_card.max(0.0).round() as usize;
-        let (i, new_card, connected) = exec::goo_pick(graph, &prepared, &done, &var_ndv, cur_card);
+        let (i, new_card, connected) = exec::goo_pick(graph, &prepared, &done, &var_ndv, cur_card, &cs_ctx);
         cur_card = new_card;
         done[i] = true;
+        cs_ctx.note_done(i);
+        // Fold the joined pattern's ndv estimates exactly as the executor does, so
+        // the replayed pick sequence cannot drift from the executed one.
+        exec::record_pattern_ndv(graph, &prepared, i, cur_card, &mut var_ndv, &cs_ctx);
         let pr = &prepared[i];
         let filt = pfilter(i);
 

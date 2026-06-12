@@ -15,15 +15,22 @@
 //! paths.
 
 mod construct;
+#[cfg(feature = "cs-planner")]
+pub mod cs;
+#[cfg(all(test, feature = "cs-planner"))]
+mod cs_gate;
 mod dataset;
 mod exec;
 mod explain;
 pub mod json;
 mod update;
 pub use construct::{
-    construct, construct_ntriples, construct_ntriples_with_budget, construct_with_budget, describe,
-    describe_with_budget, triples_to_ntriples,
+    construct, construct_ntriples, construct_ntriples_with_budget, construct_prepared,
+    construct_prepared_with_budget, construct_with_budget, describe, describe_prepared,
+    describe_prepared_with_budget, describe_with_budget, triples_to_ntriples,
 };
+#[cfg(feature = "cs-planner")]
+pub use cs::{with_cs_table, CsSet, CsTable};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
 pub use update::{update, update_in_place};
 
@@ -263,6 +270,53 @@ pub(crate) fn view_scope(active: &Option<Graph>) -> Option<exec::view::Guard> {
     active.is_some().then(exec::view::suspend_all)
 }
 
+/// A SPARQL query parsed ONCE for repeated execution — the parse/plan-once seam
+/// recorded by sparq-rsp (continuous queries re-evaluate the same text per window)
+/// and any caller that runs one query against many graphs. Wraps the `spargebra`
+/// algebra; build with [`PreparedQuery::parse`] (or `From<spargebra::Query>` for
+/// algebra constructed/rewritten programmatically), execute with
+/// [`query_prepared`] / [`ask_prepared`] / [`count_prepared`] /
+/// [`construct_prepared`] / [`describe_prepared`] (and their `_with_budget`
+/// forms). The string entry points ([`query`], [`ask`], …) are thin wrappers:
+/// parse + execute-prepared, so both paths evaluate identically.
+#[derive(Debug, Clone)]
+pub struct PreparedQuery {
+    query: Query,
+}
+
+impl PreparedQuery {
+    /// Parses a SPARQL query string into its reusable algebra form.
+    pub fn parse(sparql: &str) -> Result<PreparedQuery, String> {
+        Ok(PreparedQuery { query: SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())? })
+    }
+
+    /// The wrapped `spargebra` algebra (e.g. to inspect the query form or dataset
+    /// clause before execution).
+    pub fn query(&self) -> &Query {
+        &self.query
+    }
+
+    /// Unwraps into the `spargebra` algebra.
+    pub fn into_query(self) -> Query {
+        self.query
+    }
+}
+
+impl From<Query> for PreparedQuery {
+    /// Wraps already-parsed (or programmatically built / rewritten) algebra.
+    fn from(query: Query) -> PreparedQuery {
+        PreparedQuery { query }
+    }
+}
+
+impl std::str::FromStr for PreparedQuery {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<PreparedQuery, String> {
+        PreparedQuery::parse(s)
+    }
+}
+
 /// Executes a SPARQL query string against a graph, materialising the solutions.
 pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
     query_with_budget(graph, sparql, &QueryBudget::unlimited())
@@ -270,19 +324,33 @@ pub fn query(graph: &Graph, sparql: &str) -> Result<QueryResult, String> {
 
 /// [`query`] under a cooperative [`QueryBudget`] (deadline / max result rows).
 pub fn query_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<QueryResult, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-    let active = active_dataset(graph, &q);
+    query_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
+}
+
+/// [`query`] over a [`PreparedQuery`] — no per-execution parse.
+pub fn query_prepared(graph: &Graph, prepared: &PreparedQuery) -> Result<QueryResult, String> {
+    query_prepared_with_budget(graph, prepared, &QueryBudget::unlimited())
+}
+
+/// [`query_prepared`] under a cooperative [`QueryBudget`] (deadline / max result rows).
+pub fn query_prepared_with_budget(
+    graph: &Graph,
+    prepared: &PreparedQuery,
+    budget: &QueryBudget,
+) -> Result<QueryResult, String> {
+    let q = &prepared.query;
+    let active = active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
-        Query::Select { pattern, .. } => exec::eval_select(graph, &pattern),
+        Query::Select { pattern, .. } => exec::eval_select(graph, pattern),
         // ASK as a QueryResult: zero variables, and one (empty) row iff the pattern
         // is satisfiable — the standard "unit row" encoding of a boolean result.
         Query::Ask { pattern, .. } => Ok(QueryResult {
             vars: Vec::new(),
-            rows: if exec::eval_ask(graph, &pattern)? { vec![Vec::new()] } else { Vec::new() },
+            rows: if exec::eval_ask(graph, pattern)? { vec![Vec::new()] } else { Vec::new() },
         }),
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
@@ -297,14 +365,24 @@ pub fn ask(graph: &Graph, sparql: &str) -> Result<bool, String> {
 
 /// [`ask`] under a cooperative [`QueryBudget`] (deadline / max result rows).
 pub fn ask_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<bool, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-    let active = active_dataset(graph, &q);
+    ask_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
+}
+
+/// [`ask`] over a [`PreparedQuery`] — no per-execution parse.
+pub fn ask_prepared(graph: &Graph, prepared: &PreparedQuery) -> Result<bool, String> {
+    ask_prepared_with_budget(graph, prepared, &QueryBudget::unlimited())
+}
+
+/// [`ask_prepared`] under a cooperative [`QueryBudget`] (deadline / max result rows).
+pub fn ask_prepared_with_budget(graph: &Graph, prepared: &PreparedQuery, budget: &QueryBudget) -> Result<bool, String> {
+    let q = &prepared.query;
+    let active = active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
-        Query::Ask { pattern, .. } => exec::eval_ask(graph, &pattern),
+        Query::Ask { pattern, .. } => exec::eval_ask(graph, pattern),
         _ => Err("ask() requires an ASK query".into()),
     }
 }
@@ -319,16 +397,30 @@ pub fn query_json(graph: &Graph, sparql: &str) -> Result<String, String> {
 
 /// [`query_json`] under a cooperative [`QueryBudget`] (deadline / max result rows).
 pub fn query_json_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-    let active = active_dataset(graph, &q);
+    query_json_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
+}
+
+/// [`query_json`] over a [`PreparedQuery`] — no per-execution parse.
+pub fn query_json_prepared(graph: &Graph, prepared: &PreparedQuery) -> Result<String, String> {
+    query_json_prepared_with_budget(graph, prepared, &QueryBudget::unlimited())
+}
+
+/// [`query_json_prepared`] under a cooperative [`QueryBudget`].
+pub fn query_json_prepared_with_budget(
+    graph: &Graph,
+    prepared: &PreparedQuery,
+    budget: &QueryBudget,
+) -> Result<String, String> {
+    let q = &prepared.query;
+    let active = active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
-        Query::Select { pattern, .. } => exec::eval_select_json(graph, &pattern),
+        Query::Select { pattern, .. } => exec::eval_select_json(graph, pattern),
         // The SPARQL 1.1 JSON results boolean form.
-        Query::Ask { pattern, .. } => Ok(format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, &pattern)?)),
+        Query::Ask { pattern, .. } => Ok(format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, pattern)?)),
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
 }
@@ -343,16 +435,17 @@ const JSON_CHUNK_BYTES: usize = 64 * 1024;
 /// HTTP body instead of concatenating a giant `String` (T16), which removes the
 /// second whole-result copy from peak memory on large SELECTs.
 pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<Vec<String>, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-    let active = active_dataset(graph, &q);
+    let prepared = PreparedQuery::parse(sparql)?;
+    let q = &prepared.query;
+    let active = active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
-        Query::Select { pattern, .. } => exec::eval_select_json_chunks(graph, &pattern, Some(JSON_CHUNK_BYTES)),
+        Query::Select { pattern, .. } => exec::eval_select_json_chunks(graph, pattern, Some(JSON_CHUNK_BYTES)),
         Query::Ask { pattern, .. } => {
-            Ok(vec![format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, &pattern)?)])
+            Ok(vec![format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, pattern)?)])
         }
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
@@ -367,20 +460,31 @@ pub fn count(graph: &Graph, sparql: &str) -> Result<usize, String> {
 
 /// [`count`] under a cooperative [`QueryBudget`] (the server's budgeted ASK path).
 pub fn count_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<usize, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-    let active = active_dataset(graph, &q);
+    count_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget)
+}
+
+/// [`count`] over a [`PreparedQuery`] — no per-execution parse.
+pub fn count_prepared(graph: &Graph, prepared: &PreparedQuery) -> Result<usize, String> {
+    count_prepared_with_budget(graph, prepared, &QueryBudget::unlimited())
+}
+
+/// [`count_prepared`] under a cooperative [`QueryBudget`].
+pub fn count_prepared_with_budget(graph: &Graph, prepared: &PreparedQuery, budget: &QueryBudget) -> Result<usize, String> {
+    let q = &prepared.query;
+    let active = active_dataset(graph, q);
     let graph = active.as_ref().unwrap_or(graph);
     let _view_scope = view_scope(&active);
     let _guard = exec::budget::install(budget);
     exec::set_query_base(q.base_iri().map(|b| b.as_str()));
     match q {
-        Query::Select { pattern, .. } => exec::count_select(graph, &pattern),
+        Query::Select { pattern, .. } => exec::count_select(graph, pattern),
         // An ASK counts its unit row: 1 when satisfiable, 0 otherwise.
-        Query::Ask { pattern, .. } => Ok(usize::from(exec::eval_ask(graph, &pattern)?)),
+        Query::Ask { pattern, .. } => Ok(usize::from(exec::eval_ask(graph, pattern)?)),
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
 }
 
+#[derive(Debug)]
 pub struct QueryResult {
     pub vars: Vec<Variable>,
     /// Each row has one entry per `vars` position; `None` is unbound.

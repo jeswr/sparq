@@ -16,10 +16,12 @@ addition would help.
    unaffected.
 2. **Hub cap is global** (`max_pair_frequency`); a per-element budget proportional to
    IDF would spend the scan budget better.
-3. **No graph-level entity enumeration in `sparq-core`'s public API** — a
-   distinct-subjects/objects iterator would allow exhaustive (non-candidate-driven)
-   evaluation modes without materialising full scans. Worked around in the eval by
-   scanning the `rdf:type` block.
+3. ~~**No graph-level entity enumeration in `sparq-core`'s public API**~~ **DONE
+   (engine-seams wave)**: `Graph::iter_ids` (S-sorted: distinct subjects fall out
+   of run boundaries) / `Graph::iter_ids_sorted(2)` (O-sorted: distinct objects),
+   plus `Dict::iter()` for vocabulary-level enumeration — all borrowing, zero
+   alloc per row. Swapping the `rdf:type`-block workaround for these is this
+   crate's owner's call.
 
 ## Deferred (per research/genai-design.md phasing)
 

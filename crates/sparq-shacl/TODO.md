@@ -23,13 +23,16 @@
   (the dictionary supports them; the SHACL spec predates them).
 
 ## Upstream (sparq-core / sparq-engine) gaps noticed — NOT changed here
-- `Graph::load_str` has no base-IRI parameter, so documents with relative
-  IRIs can't be loaded directly into a `Graph`; this crate works around it
-  with `load_turtle_with_base` (oxttl parse + `Graph::from_parts`). A
-  `load_str_with_base` on sparq-core would remove the workaround.
-- `sparq_core::Graph` exposes no term-level triple iterator; the `GraphView`
-  wrapper here materialises `oxrdf::Term`s per scan row. Fine for validation
-  workloads; a borrowing iterator (via `term_parts`) would cut allocations.
+- ~~`Graph::load_str` has no base-IRI parameter~~ **DONE (engine-seams wave)**:
+  `Graph::load_str_with_base` / `parse_to_triples_with_base` landed in sparq-core
+  (Turtle/TriG; a document's own `@base` still wins). This crate's
+  `load_turtle_with_base` workaround can be swapped for it by this crate's owner.
+- ~~`sparq_core::Graph` exposes no term-level triple iterator~~ **DONE
+  (engine-seams wave)**: `Graph::iter_ids` / `iter_ids_sorted(col)` yield
+  canonical `[Id; 3]` rows borrowing the index (overlay-merged, zero alloc per
+  row); resolve lazily via `Dict::term_parts` (borrowing) or `Dict::term`.
+  `GraphView` can iterate ids and materialise only the terms it actually
+  compares — this crate's owner's call.
 
 ## Implementation niceties
 - Severity-aware conformance: `sh:conforms` is currently `results.is_empty()`

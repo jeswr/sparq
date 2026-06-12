@@ -311,6 +311,88 @@ struct CsAcc {
     classes: FxHashMap<Id, u64>,
 }
 
+/// One characteristic set in **dictionary-id space** — the pre-resolution form the
+/// engine's `cs-planner` feature consumes (no IRI strings; ids are the queried
+/// graph's own dictionary ids). See [`characteristic_set_ids`].
+#[derive(Debug, Clone)]
+pub struct CsIdSet {
+    /// The predicate ids, ascending (the SPO scan emits each subject's predicates
+    /// sorted, so the set key is naturally ordered).
+    pub predicates: Box<[Id]>,
+    /// Subjects whose exact predicate set this is (`count(C)`).
+    pub subjects: u64,
+    /// Aligned with `predicates`: total triples those subjects emit per predicate
+    /// (`avg_mult(C, p) = predicate_triples[i] / subjects`).
+    pub predicate_triples: Box<[u64]>,
+}
+
+/// The EXACT characteristic-set table of the graph's default graph in
+/// **dictionary-id space** — the planner-facing accessor recorded in this crate's
+/// TODO ("keep the pre-resolution `FxHashMap<Box<[Id]>, CsAcc>` form behind a
+/// `cs-planner`-facing accessor"). One full SPO scan, no string resolution, no
+/// caps (unlike [`Introspection::build`]'s LLM-facing table, which resolves IRIs
+/// and elides the tail): cardinality estimation needs every set, exactly.
+///
+/// Feed it to `sparq_engine::cs::CsTable` (the engine's opt-in `cs-planner`
+/// feature) by mapping each entry to the engine's `CsSet`; the ids are only
+/// meaningful against THIS graph's dictionary, so rebuild the table whenever the
+/// graph is rebuilt. Determinism: sets are returned by descending subject count,
+/// ties by predicate-id key.
+pub fn characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet> {
+    let mut cs: FxHashMap<Box<[Id]>, (u64, Vec<u64>)> = FxHashMap::default();
+    let scan = graph.store.scan(&[None, None, None]);
+    let rows = scan.rows.as_ref();
+    let (mut ps, mut ms): (Vec<Id>, Vec<u64>) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < rows.len() {
+        let [s, ..] = scan.to_spo(&rows[i]);
+        ps.clear();
+        ms.clear();
+        // One subject run: predicates arrive sorted; count each predicate's triples.
+        let mut j = i;
+        while j < rows.len() {
+            let [s2, p, _] = scan.to_spo(&rows[j]);
+            if s2 != s {
+                break;
+            }
+            let mut k = j;
+            while k < rows.len() {
+                let [s3, p3, _] = scan.to_spo(&rows[k]);
+                if s3 != s || p3 != p {
+                    break;
+                }
+                k += 1;
+            }
+            ps.push(p);
+            ms.push((k - j) as u64);
+            j = k;
+        }
+        match cs.get_mut(ps.as_slice()) {
+            Some((subjects, triples)) => {
+                *subjects += 1;
+                for (idx, &m) in ms.iter().enumerate() {
+                    triples[idx] += m;
+                }
+            }
+            None => {
+                cs.insert(ps.clone().into_boxed_slice(), (1, ms.clone()));
+            }
+        }
+        i = j;
+    }
+    drop(scan);
+    let mut sets: Vec<CsIdSet> = cs
+        .into_iter()
+        .map(|(predicates, (subjects, triples))| CsIdSet {
+            predicates,
+            subjects,
+            predicate_triples: triples.into_boxed_slice(),
+        })
+        .collect();
+    sets.sort_unstable_by(|a, b| b.subjects.cmp(&a.subjects).then_with(|| a.predicates.cmp(&b.predicates)));
+    sets
+}
+
 impl Introspection {
     /// Builds the full introspection with default [`BuildOptions`]. Cost: one full SPO
     /// scan (characteristic sets + per-class usage + observed domains), one pass over
@@ -1281,5 +1363,56 @@ mod tests {
             .sets
             .iter()
             .all(|s| s.classes.is_empty()));
+    }
+
+    /// The dict-id accessor (`characteristic_set_ids`) must agree with the
+    /// string-resolved table `Introspection::build` produces — same sets, same
+    /// subject counts, same per-predicate triple totals — while staying in id space.
+    #[test]
+    fn characteristic_set_ids_matches_resolved_table() {
+        let g = graph(
+            ":a a :T ; :p :x ; :p :y ; :q 1 .
+             :b a :T ; :p :z ; :q 2 .
+             :c :p :w .
+             :d :q 3 ; :r :u .",
+        );
+        let ids = characteristic_set_ids(&g);
+        // Exact: 4 subjects, 4 distinct sets ({type,p,q} x2 has 2 subjects? no:
+        // :a {type,p(2),q}, :b {type,p,q} -> same SET, multiplicity differs).
+        let ix = Introspection::build(&g);
+        assert_eq!(ids.len() as u64, ix.characteristic_sets.distinct);
+        assert_eq!(ids.iter().map(|s| s.subjects).sum::<u64>(), ix.subjects);
+        // Resolve each id set to IRIs and compare against the built table.
+        let resolved: Vec<(Vec<String>, u64, Vec<u64>)> = ids
+            .iter()
+            .map(|s| {
+                let mut preds: Vec<(String, u64)> = s
+                    .predicates
+                    .iter()
+                    .zip(s.predicate_triples.iter())
+                    .map(|(&p, &t)| (g.dict.term(p).to_string().trim_matches(['<', '>']).to_string(), t))
+                    .collect();
+                preds.sort();
+                (
+                    preds.iter().map(|(p, _)| p.clone()).collect(),
+                    s.subjects,
+                    preds.iter().map(|&(_, t)| t).collect(),
+                )
+            })
+            .collect();
+        for set in &ix.characteristic_sets.sets {
+            let found = resolved
+                .iter()
+                .find(|(preds, ..)| *preds == set.predicates)
+                .unwrap_or_else(|| panic!("set {:?} missing from id table", set.predicates));
+            assert_eq!(found.1, set.subjects, "subject count for {:?}", set.predicates);
+            assert_eq!(found.2, set.predicate_triples, "triples for {:?}", set.predicates);
+        }
+        // Id-space invariants: ascending predicate ids, deterministic order.
+        assert!(ids.iter().all(|s| s.predicates.windows(2).all(|w| w[0] < w[1])));
+        assert!(ids.windows(2).all(|w| w[0].subjects >= w[1].subjects));
+        // The two-subject set {rdf:type, :p, :q} leads.
+        assert_eq!(ids[0].subjects, 2);
+        assert_eq!(ids[0].predicate_triples.iter().sum::<u64>(), 2 + 3 + 2, "type x2, p x3, q x2");
     }
 }
