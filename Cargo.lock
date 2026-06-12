@@ -2885,6 +2885,7 @@ dependencies = [
  "arc-swap",
  "rustc-hash 2.1.2",
  "sparq-core",
+ "sparq-engine",
 ]
 
 [[package]]
