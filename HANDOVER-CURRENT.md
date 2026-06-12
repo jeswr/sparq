@@ -26,5 +26,9 @@ If this file describes running agents/instances and you are a fresh session, ver
 ## Crash-resilience protocol (user mandate, revised)
 The global plan meter is not accessible from inside a session and local token counts don't predict it — no usage polling. Instead: every agent brief mandates incremental commits + live STATUS.md; this file stays current each wave; cloud resources are first priority in any recovery.
 
+## Authorizations granted 2026-06-13
+- EC2 cap raised to $30 TOTAL (~$0.78 spent): 8B full-truthy Wikidata run AUTHORIZED + other instance needs. Sequencing: 8B low-resource run REQUIRES dict-spill merge first (dict ~280-330GiB unspillable otherwise). Prep (runbook/scripts, zero spend) proceeding in parallel.
+- PUBLISHING AUTHORIZED: packages may be published under Jesse's accounts (npm @jeswr/sparq, crates.io, GitHub release v0.1.0 — T14/T20 were user-gated, now unblocked).
+
 ## Awaiting Jesse
-test-lib push (76 commits ahead), horizontal-scaling ADR answers, RDFox license decision, 8B-run budget sign-off.
+test-lib push (76 commits ahead), horizontal-scaling ADR answers, RDFox license decision.
