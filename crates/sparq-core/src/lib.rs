@@ -153,28 +153,33 @@ impl NumData {
         }
     }
 
-    /// Folds a forked cache flat again (compaction): one dense/sparse backing
-    /// covering the whole dictionary, so the side map stops growing and the next
-    /// fork freezes a fresh base. Non-forked backings are returned as-is.
+    /// Folds a forked cache's side map into a FRESH shared base (compaction): one
+    /// dense/sparse backing covering the whole dictionary, kept in the SHAREABLE
+    /// `Forked` shape (Arc base + empty side map) — so the side map stops growing
+    /// AND the next fork is still an Arc bump, never an O(dict) re-freeze.
+    /// Non-forked backings are returned as-is.
     fn fold(self, dict_len: usize) -> NumData {
         match self {
-            NumData::Forked { base, extra, .. } => match &*base {
-                NumData::Owned(v) => {
-                    let mut dense = v.clone();
-                    dense.resize(dict_len, f64::NAN);
-                    for (&id, &val) in &extra {
-                        dense[(id - 1) as usize] = val;
+            NumData::Forked { base, extra } => {
+                let folded = match &*base {
+                    NumData::Owned(v) => {
+                        let mut dense = v.clone();
+                        dense.resize(dict_len, f64::NAN);
+                        for (&id, &val) in &extra {
+                            dense[(id - 1) as usize] = val;
+                        }
+                        NumData::Owned(dense)
                     }
-                    NumData::Owned(dense)
-                }
-                NumData::Sparse(m) => {
-                    let mut m = m.clone();
-                    m.extend(extra);
-                    NumData::Sparse(m)
-                }
-                // `fork` never freezes a Forked or Mapped base (invariant above).
-                _ => unreachable!("a forked numeric cache's base is Owned or Sparse"),
-            },
+                    NumData::Sparse(m) => {
+                        let mut m = m.clone();
+                        m.extend(extra);
+                        NumData::Sparse(m)
+                    }
+                    // `fork` never freezes a Forked or Mapped base (invariant above).
+                    _ => unreachable!("a forked numeric cache's base is Owned or Sparse"),
+                };
+                NumData::Forked { base: std::sync::Arc::new(folded), extra: rustc_hash::FxHashMap::default() }
+            }
             other => other,
         }
     }
@@ -373,25 +378,29 @@ impl TempData {
         }
     }
 
-    /// Folds a forked cache flat again (compaction) — mirror of [`NumData::fold`].
+    /// Folds a forked cache's side map into a fresh shared base, keeping the
+    /// shareable `Forked` shape — mirror of [`NumData::fold`].
     fn fold(self, dict_len: usize) -> TempData {
         match self {
-            TempData::Forked { base, extra } => match &*base {
-                TempData::Owned(cells) => {
-                    let mut cells = cells.clone();
-                    cells.resize(dict_len, TempCell { instant: f64::NAN, flag: 0 });
-                    for (&id, &t) in &extra {
-                        cells[(id - 1) as usize] = TempCell { instant: t.instant, flag: temp_flag(t) };
+            TempData::Forked { base, extra } => {
+                let folded = match &*base {
+                    TempData::Owned(cells) => {
+                        let mut cells = cells.clone();
+                        cells.resize(dict_len, TempCell { instant: f64::NAN, flag: 0 });
+                        for (&id, &t) in &extra {
+                            cells[(id - 1) as usize] = TempCell { instant: t.instant, flag: temp_flag(t) };
+                        }
+                        TempData::Owned(cells)
                     }
-                    TempData::Owned(cells)
-                }
-                TempData::Sparse(m) => {
-                    let mut m = m.clone();
-                    m.extend(extra);
-                    TempData::Sparse(m)
-                }
-                _ => unreachable!("a forked temporal cache's base is Owned or Sparse"),
-            },
+                    TempData::Sparse(m) => {
+                        let mut m = m.clone();
+                        m.extend(extra);
+                        TempData::Sparse(m)
+                    }
+                    _ => unreachable!("a forked temporal cache's base is Owned or Sparse"),
+                };
+                TempData::Forked { base: std::sync::Arc::new(folded), extra: rustc_hash::FxHashMap::default() }
+            }
             other => other,
         }
     }
@@ -3225,5 +3234,50 @@ mod dir_roundtrip_test {
         let scan = g.store.scan(&[None, None, None]);
         let t = scan.to_spo(&scan.rows.as_ref()[0]);
         assert_eq!(g.dict.term(t[2]).to_string(), "\"abc\"@en--ltr");
+    }
+
+    /// Fork-after-compact must stay O(delta): compaction folds the numeric/temporal
+    /// caches into a FRESH shared base but keeps them in the shareable `Forked`
+    /// shape (Arc base + empty side map) and re-freezes the dict — so the next
+    /// `fork()` is Arc bumps, never an O(dict) cache/dict re-freeze. (Roborev
+    /// finding on the initial fold-to-flat implementation.)
+    #[test]
+    fn compact_keeps_caches_shareable_for_the_next_fork() {
+        use crate::{Graph, NumData, TempData};
+        use oxrdf::vocab::xsd;
+        use oxrdf::{Literal, NamedNode, Term};
+        let g = Graph::load_str(
+            "@prefix : <http://ex/> . :a :age 30 . :b :p :c .",
+            "turtle",
+        )
+        .unwrap();
+        let mut f = g.fork();
+        let lit = |v: &str| Term::Literal(Literal::new_typed_literal(v, xsd::DECIMAL));
+        let iri = |s: &str| Term::NamedNode(NamedNode::new_unchecked(s));
+        f.apply_delta(&[[iri("http://ex/n"), iri("http://ex/age"), lit("4.5")]], &[]).unwrap();
+        f.compact().unwrap();
+        assert_eq!(f.pending_delta_len(), 0);
+        // Caches stay in the shareable Forked shape with an EMPTY side map…
+        assert!(
+            matches!(&f.numerics, NumData::Forked { extra, .. } if extra.is_empty()),
+            "numeric cache must be folded into a fresh shared base"
+        );
+        assert!(
+            matches!(&f.temporals, TempData::Forked { extra, .. } if extra.is_empty()),
+            "temporal cache must be folded into a fresh shared base"
+        );
+        // …and still answer: the folded base covers the post-fork term.
+        let id = f.id_of(&lit("4.5")).unwrap();
+        assert_eq!(f.numeric_value(id), Some(4.5));
+        // The next fork shares those bases (no re-freeze) and keeps working.
+        let f2 = f.fork();
+        let same_base = match (&f.numerics, &f2.numerics) {
+            (NumData::Forked { base: a, .. }, NumData::Forked { base: b, .. }) => {
+                std::sync::Arc::ptr_eq(a, b)
+            }
+            _ => false,
+        };
+        assert!(same_base, "fork after compact must share the folded cache base");
+        assert_eq!(f2.numeric_value(id), Some(4.5));
     }
 }

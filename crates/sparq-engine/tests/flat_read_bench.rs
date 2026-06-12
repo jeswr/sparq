@@ -39,24 +39,36 @@ fn flat_read_hot_paths() {
     let g = build_graph(n);
     eprintln!("graph: {} triples, built in {:.2?}", g.len(), t0.elapsed());
 
-    // 1. Join-heavy query (two-hop join through p0/p1), repeated.
+    // 1. Join-heavy query (two-hop join through p0/p1), repeated. Parsed ONCE so the
+    // loop times store reads + execution, not SPARQL parse/planning (roborev 1927).
     let q_join = "PREFIX : <http://ex/> SELECT * WHERE { ?s :p0 ?m . ?m :p1 ?o }";
+    let prepared = sparq_engine::PreparedQuery::parse(q_join).unwrap();
     let reps = 20;
     let mut rows = 0;
     let t = Instant::now();
     for _ in 0..reps {
-        rows = sparq_engine::count(&g, q_join).unwrap();
+        rows = sparq_engine::count_prepared(&g, &prepared).unwrap();
     }
     let join_avg = t.elapsed() / reps;
     eprintln!("join query:   {join_avg:?}/run ({rows} rows, {reps} reps)");
 
     // 2. Point-probe storm: bound-subject scans + estimates (bind-join inner shape).
+    // Subject ids resolved through the dictionary, not assumed from interning order
+    // (roborev 1927).
+    let nsubj = (n / 10).max(1);
+    let subj_ids: Vec<Id> = (0..nsubj.min(1000))
+        .map(|i| {
+            g.id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
+                "http://ex/s{i}"
+            ))))
+            .expect("benchmark subject must be present")
+        })
+        .collect();
     let probes = 200_000usize;
     let t = Instant::now();
     let mut found = 0usize;
     for i in 0..probes {
-        // subject ids were interned after 10 predicates: ids 11..(10+nsubj)
-        let sid = 11 + (i % (n / 10).max(1)) as Id;
+        let sid = subj_ids[i % subj_ids.len()];
         let pat = [Some(sid), None, None];
         found += g.store.estimate(&pat);
         let scan = g.store.scan(&pat);
