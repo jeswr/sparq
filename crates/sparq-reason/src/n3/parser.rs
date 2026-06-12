@@ -104,29 +104,55 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
     Ok(Parsed { facts, rules, backward_rules })
 }
 
+/// `rdf:nil` IS the empty list — normalize the IRI spelling to `Term::List([])`
+/// so `()` and `rdf:nil` are one value (cwm/EYE agree).
+fn nil_to_list(t: Term) -> Term {
+    match t {
+        Term::Iri(i) if i == RDF_NIL => Term::List(Vec::new()),
+        other => other,
+    }
+}
+
 fn collect_blanks(stmts: &[[Term; 3]], out: &mut std::collections::HashSet<String>) {
     for row in stmts {
         for t in row {
-            match t {
-                Term::Blank(l) => {
-                    out.insert(l.clone());
-                }
-                Term::Formula(inner) => collect_blanks(inner, out),
-                _ => {}
+            collect_blanks_term(t, out);
+        }
+    }
+}
+
+fn collect_blanks_term(t: &Term, out: &mut std::collections::HashSet<String>) {
+    match t {
+        Term::Blank(l) => {
+            out.insert(l.clone());
+        }
+        Term::Formula(inner) => collect_blanks(inner, out),
+        Term::List(ms) => {
+            for m in ms {
+                collect_blanks_term(m, out);
             }
         }
+        _ => {}
     }
 }
 
 fn rewrite_terms(stmts: &mut [[Term; 3]], f: &impl Fn(&mut Term)) {
     for row in stmts.iter_mut() {
         for t in row.iter_mut() {
-            if let Term::Formula(inner) = t {
-                rewrite_terms(inner, f);
-            } else {
-                f(t);
+            rewrite_term(t, f);
+        }
+    }
+}
+
+fn rewrite_term(t: &mut Term, f: &impl Fn(&mut Term)) {
+    match t {
+        Term::Formula(inner) => rewrite_terms(inner, f),
+        Term::List(ms) => {
+            for m in ms.iter_mut() {
+                rewrite_term(m, f);
             }
         }
+        _ => f(t),
     }
 }
 
@@ -350,7 +376,7 @@ impl<'a> Parser<'a> {
     fn atom(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
         self.ws();
         match self.peek() {
-            Some(b'<') => Ok(Term::Iri(self.read_iriref()?)),
+            Some(b'<') => Ok(nil_to_list(Term::Iri(self.read_iriref()?))),
             Some(b'"') | Some(b'\'') => self.read_literal(),
             Some(b'?') => {
                 self.i += 1;
@@ -376,7 +402,7 @@ impl<'a> Parser<'a> {
                     self.i += 5;
                     return Ok(Term::Lit("false".into(), XSD_BOOLEAN.into(), None));
                 }
-                self.read_prefixed_name()
+                self.read_prefixed_name().map(nil_to_list)
             }
             None => Err("unexpected end of input".into()),
         }
@@ -578,21 +604,15 @@ impl<'a> Parser<'a> {
             if self.eat(b')') {
                 break;
             }
+            if self.i >= self.s.len() {
+                return Err("unterminated collection".into());
+            }
             items.push(self.term(out)?);
         }
         self.depth -= 1;
-        // Build an rdf:List (first/rest/nil) and return its head; empty → rdf:nil.
-        if items.is_empty() {
-            return Ok(Term::Iri(RDF_NIL.into()));
-        }
-        let mut head = Term::Iri(RDF_NIL.into());
-        for it in items.into_iter().rev() {
-            let node = self.fresh_bnode();
-            out.push([node.clone(), Term::Iri(RDF_FIRST.into()), it]);
-            out.push([node.clone(), Term::Iri(RDF_REST.into()), head]);
-            head = node;
-        }
-        Ok(head)
+        // A collection is a FIRST-CLASS list term (N3 semantics); `()` = rdf:nil
+        // = the empty list.
+        Ok(Term::List(items))
     }
 
     fn read_bnode_propertylist(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {

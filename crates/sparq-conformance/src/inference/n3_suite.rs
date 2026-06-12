@@ -251,12 +251,68 @@ fn eval_test_turtle(action: &Path, result: Option<&Path>, positive: bool) -> Out
             ]
         })
         .collect();
-    let iso = n3_iso(&statements(&parsed), &expected_stmts);
+    // The N3 parser yields first-class list terms; the N-Triples expectation
+    // has rdf:first/rest chains — expand the actual side to plain triples.
+    let iso = n3_iso(&expand_lists(&statements(&parsed)), &expected_stmts);
     match (iso, positive) {
         (true, true) | (false, false) => Outcome::Pass,
         (false, true) => Outcome::Fail("parsed graph not isomorphic to the reference".into()),
         (true, false) => Outcome::Fail("negative eval: graphs are isomorphic".into()),
     }
+}
+
+/// Expand first-class `Term::List` values into rdf:first/rest blank-node
+/// chains (fresh chain per occurrence, like Turtle's `( … )` sugar), so an
+/// N3-parsed graph can be compared against a plain-triple expectation.
+fn expand_lists(rows: &[[NTerm; 3]]) -> Vec<[NTerm; 3]> {
+    const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+    const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+    const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+    fn expand(t: &NTerm, counter: &mut usize, out: &mut Vec<[NTerm; 3]>) -> NTerm {
+        match t {
+            NTerm::List(ms) if ms.is_empty() => NTerm::Iri(RDF_NIL.into()),
+            NTerm::List(ms) => {
+                let members: Vec<NTerm> = ms.iter().map(|m| expand(m, counter, out)).collect();
+                let mut tail = NTerm::Iri(RDF_NIL.into());
+                for m in members.into_iter().rev() {
+                    *counter += 1;
+                    let node = NTerm::Blank(format!("__xl{counter}"));
+                    out.push([node.clone(), NTerm::Iri(RDF_FIRST.into()), m]);
+                    out.push([node.clone(), NTerm::Iri(RDF_REST.into()), tail]);
+                    tail = node;
+                }
+                tail
+            }
+            NTerm::Formula(ts) => {
+                let mut inner: Vec<[NTerm; 3]> = Vec::new();
+                let mut rows: Vec<[NTerm; 3]> = Vec::new();
+                for r in ts {
+                    let nr = [
+                        expand(&r[0], counter, &mut inner),
+                        expand(&r[1], counter, &mut inner),
+                        expand(&r[2], counter, &mut inner),
+                    ];
+                    rows.push(nr);
+                }
+                rows.append(&mut inner);
+                NTerm::Formula(rows)
+            }
+            _ => t.clone(),
+        }
+    }
+    let mut counter = 0usize;
+    let mut out: Vec<[NTerm; 3]> = Vec::new();
+    let mut structure: Vec<[NTerm; 3]> = Vec::new();
+    for r in rows {
+        let nr = [
+            expand(&r[0], &mut counter, &mut structure),
+            expand(&r[1], &mut counter, &mut structure),
+            expand(&r[2], &mut counter, &mut structure),
+        ];
+        out.push(nr);
+    }
+    out.append(&mut structure);
+    out
 }
 
 fn oxrdf_to_n3(t: &oxrdf::Term) -> NTerm {
@@ -508,6 +564,10 @@ fn term_iso(a: &NTerm, b: &NTerm, bij: &mut Bij, steps: &mut usize) -> bool {
             }
             let mut used = vec![false; y.len()];
             iso_search(0, x, y, &mut used, bij, steps)
+        }
+        // First-class lists: ordered, member by member.
+        (NTerm::List(x), NTerm::List(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| term_iso(p, q, bij, steps))
         }
         _ => a == b,
     }

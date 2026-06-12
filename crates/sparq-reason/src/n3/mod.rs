@@ -252,9 +252,8 @@ fn run_closure(parsed: parser::Parsed) -> (FactIndex, Vec<([Term; 3], usize, Vec
     let rule_meta: Vec<(Vec<usize>, bool)> = rules
         .iter()
         .map(|r| {
-            let lists = extract_lists(&r.premise);
             let joins: Vec<usize> =
-                r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p, &lists)).map(|(i, _)| i).collect();
+                r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p)).map(|(i, _)| i).collect();
             let has_neg = r.premise.iter().any(|p| scoped_negation(&p[1]).is_some());
             let needs_bw = joins.iter().any(|&k| match &r.premise[k][1] {
                 Term::Iri(i) => bw_any_var_pred || bw_concl_preds.contains(i.as_str()),
@@ -335,22 +334,73 @@ fn intern_closure(
     facts: &FactIndex,
     steps: &[([Term; 3], usize, Vec<[Term; 3]>)],
 ) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
+    // First-class list values have no dictionary representation — expand them
+    // into rdf:first/rest blank-node chains (one chain per list VALUE, shared
+    // across the facts that mention it).
+    let mut exp = ListExpander::default();
+    let fact_rows: Vec<[Term; 3]> = facts.all.iter().cloned().collect();
+    let (fact_rows, mut extra) = exp.expand_rows(&fact_rows);
     // Intern the ground closure into the dictionary.
-    let mut out = Vec::with_capacity(facts.len());
-    for t in &facts.all {
+    let mut out = Vec::with_capacity(fact_rows.len() + extra.len());
+    let mut rows = fact_rows;
+    rows.append(&mut extra);
+    for t in &rows {
         out.push([intern(dict, &t[0])?, intern(dict, &t[1])?, intern(dict, &t[2])?]);
     }
-    // Intern the proof steps.
+    // Intern the proof steps (list terms expanded to their chain heads; the
+    // chain structure itself is already in the closure rows above).
     let mut proof = Vec::with_capacity(steps.len());
     for (g, ri, prem) in steps {
-        let it = |t: &[Term; 3], d: &mut Dict| -> Result<[Id; 3], String> {
-            Ok([intern(d, &t[0])?, intern(d, &t[1])?, intern(d, &t[2])?])
+        let mut it = |t: &[Term; 3], d: &mut Dict, e: &mut ListExpander| -> Result<[Id; 3], String> {
+            let r = e.expand_row(t);
+            Ok([intern(d, &r[0])?, intern(d, &r[1])?, intern(d, &r[2])?])
         };
-        let conclusion = it(g, dict)?;
-        let premises = prem.iter().map(|p| it(p, dict)).collect::<Result<Vec<_>, _>>()?;
+        let conclusion = it(g, dict, &mut exp)?;
+        let premises =
+            prem.iter().map(|p| it(p, dict, &mut exp)).collect::<Result<Vec<_>, _>>()?;
         proof.push(ProofStep { conclusion, rule: *ri, premises });
     }
     Ok((out, proof))
+}
+
+/// Expands first-class `Term::List` values into rdf:first/rest blank-node
+/// chains for consumers that need pure RDF triples (the dictionary-interning
+/// entry points). One chain per distinct list value; `()` becomes `rdf:nil`.
+#[derive(Default)]
+struct ListExpander {
+    heads: FxHashMap<Term, Term>,
+    structure: Vec<[Term; 3]>,
+    counter: usize,
+}
+
+impl ListExpander {
+    fn expand_rows(&mut self, rows: &[[Term; 3]]) -> (Vec<[Term; 3]>, Vec<[Term; 3]>) {
+        let out: Vec<[Term; 3]> = rows.iter().map(|r| self.expand_row(r)).collect();
+        (out, std::mem::take(&mut self.structure))
+    }
+    fn expand_row(&mut self, row: &[Term; 3]) -> [Term; 3] {
+        [self.expand(&row[0]), self.expand(&row[1]), self.expand(&row[2])]
+    }
+    fn expand(&mut self, t: &Term) -> Term {
+        let Term::List(ms) = t else { return t.clone() };
+        if ms.is_empty() {
+            return Term::Iri(parser::RDF_NIL.into());
+        }
+        if let Some(head) = self.heads.get(t) {
+            return head.clone();
+        }
+        let members: Vec<Term> = ms.iter().map(|m| self.expand(m)).collect();
+        let mut tail = Term::Iri(parser::RDF_NIL.into());
+        for m in members.into_iter().rev() {
+            self.counter += 1;
+            let node = Term::Blank(format!("_l{}", self.counter));
+            self.structure.push([node.clone(), Term::Iri(parser::RDF_FIRST.into()), m]);
+            self.structure.push([node.clone(), Term::Iri(parser::RDF_REST.into()), tail]);
+            tail = node;
+        }
+        self.heads.insert(t.clone(), tail.clone());
+        tail
+    }
 }
 
 type Binding = HashMap<String, Term>;
@@ -398,12 +448,8 @@ fn match_premise_seeded(
         }
         return out;
     }
-    let lists = extract_lists(premise);
     let mut bindings: Vec<Binding> = vec![seed.clone()];
     for pat in premise {
-        if is_list_struct(pat, &lists) {
-            continue; // structural, handled by list resolution
-        }
         // log:includes / log:notIncludes — does the SCOPE include the object formula?
         //   * subject `{ }` (empty formula) or unbound/non-formula: the scope is the current
         //     store (the engine's scoped-negation-as-failure idiom, matching prior behaviour);
@@ -450,25 +496,34 @@ fn match_premise_seeded(
             continue;
         }
         if let Some(gen) = list_generator(&pat[1]) {
-            // list:member / list:in — generate one binding per list member.
+            // list:member / list:in / list:iterate — one binding per member.
             let (list_pos, var_pos) = match gen {
-                ListGen::Member => (&pat[0], &pat[2]),
+                ListGen::Member | ListGen::Iterate => (&pat[0], &pat[2]),
                 ListGen::In => (&pat[2], &pat[0]),
             };
             let mut next = Vec::new();
             for b in &bindings {
                 let head = apply(list_pos, b);
-                // Rule-local `( … )` structure, or a data list reached
-                // through a bound variable (walked from the fact store).
-                let members: Option<Vec<Term>> = lists
-                    .get(&head)
-                    .cloned()
-                    .or_else(|| fact_list(&head, facts));
+                // A first-class `( … )` list value, hand-written rdf:first/rest
+                // rule structure, or a data list reached through a bound
+                // variable (walked from the fact store).
+                let members: Option<Vec<Term>> = match &head {
+                    Term::List(ms) => Some(ms.clone()),
+                    _ => fact_list(&head, facts),
+                };
                 if let Some(members) = members {
-                    for m in &members {
+                    for (ix, m) in members.iter().enumerate() {
                         let mv = apply(m, b);
+                        let target = match gen {
+                            ListGen::Member | ListGen::In => mv,
+                            // (?index ?value) pairs, 0-based (EYE list:iterate).
+                            ListGen::Iterate => Term::List(vec![
+                                Term::Lit(ix.to_string(), parser::XSD_INTEGER.into(), None),
+                                mv,
+                            ]),
+                        };
                         let mut nb = b.clone();
-                        if unify_term(var_pos, &mv, &mut nb) {
+                        if unify_term(var_pos, &target, &mut nb) {
                             next.push(nb);
                         }
                     }
@@ -478,7 +533,7 @@ fn match_premise_seeded(
         } else if let Some(f) = functional_builtin(&pat[1]) {
             bindings = bindings
                 .into_iter()
-                .filter_map(|b| eval_functional(f, &pat[0], &pat[2], &lists, facts, b))
+                .filter_map(|b| eval_functional(f, &pat[0], &pat[2], facts, b))
                 .collect();
         } else if let Some(op) = binder_builtin(&pat[1]) {
             bindings = bindings.into_iter().filter_map(|b| eval_binder(op, &pat[0], &pat[2], b)).collect();
@@ -489,7 +544,27 @@ fn match_premise_seeded(
             // PLUS goal-directed resolution against the backward (`<=`) rules.
             let mut next = Vec::new();
             for b in &bindings {
-                let cands = facts.candidates(&apply(&pat[0], b), &apply(&pat[1], b), &apply(&pat[2], b));
+                let (s_a, p_a, o_a) = (apply(&pat[0], b), apply(&pat[1], b), apply(&pat[2], b));
+                // Virtual rdf:first / rdf:rest over a first-class list value —
+                // cwm/EYE expose list structure to matching even though the
+                // list is a term, not triples (`?L rdf:first ?X` computes).
+                if let (Term::List(ms), Term::Iri(pi)) = (&s_a, &p_a) {
+                    if pi == parser::RDF_FIRST || pi == parser::RDF_REST {
+                        if !ms.is_empty() {
+                            let val = if pi == parser::RDF_FIRST {
+                                ms[0].clone()
+                            } else {
+                                Term::List(ms[1..].to_vec())
+                            };
+                            let mut nb = b.clone();
+                            if unify_term(&pat[2], &val, &mut nb) {
+                                next.push(nb);
+                            }
+                        }
+                        continue; // a list term is never the subject of stored first/rest triples
+                    }
+                }
+                let cands = facts.candidates(&s_a, &p_a, &o_a);
                 for fact in &cands {
                     if let Some(nb) = unify(pat, fact, b) {
                         next.push(nb);
@@ -510,13 +585,17 @@ fn match_premise_seeded(
 
 /// Whether a premise pattern is a JOIN atom (matched against facts), as opposed to a builtin,
 /// list generator/structure, or scoped-negation atom.
-fn is_join_atom(pat: &[Term; 3], lists: &HashMap<Term, Vec<Term>>) -> bool {
+fn is_join_atom(pat: &[Term; 3]) -> bool {
+    // A literal-list subject under rdf:first/rest is the VIRTUAL list-access
+    // computation, not a store join.
+    let virtual_list = matches!(&pat[0], Term::List(_))
+        && matches!(&pat[1], Term::Iri(i) if i == parser::RDF_FIRST || i == parser::RDF_REST);
     builtin(&pat[1]).is_none()
         && functional_builtin(&pat[1]).is_none()
         && binder_builtin(&pat[1]).is_none()
         && list_generator(&pat[1]).is_none()
         && scoped_negation(&pat[1]).is_none()
-        && !is_list_struct(pat, lists)
+        && !virtual_list
 }
 
 /// Goal-directed (`<=`) resolution of one premise atom: for each backward rule whose
@@ -558,7 +637,9 @@ fn backward_prove(pat: &[Term; 3], b: &Binding, facts: &FactIndex, bw: &BwCtx, d
                 let mut ok = true;
                 for g in pat {
                     if let Term::Var(_) = g {
-                        let val = walk(g, &sol);
+                        // Deep-resolve: walk the chain, then substitute inside
+                        // any list structure the value carries.
+                        let val = apply(&walk(g, &sol), &sol);
                         if (val.is_ground() || matches!(val, Term::Formula(_)))
                             && !unify_term(g, &val, &mut nb)
                         {
@@ -584,6 +665,7 @@ fn rename_vars(t: &Term, n: usize) -> Term {
         Term::Formula(ts) => Term::Formula(
             ts.iter().map(|tr| [rename_vars(&tr[0], n), rename_vars(&tr[1], n), rename_vars(&tr[2], n)]).collect(),
         ),
+        Term::List(ms) => Term::List(ms.iter().map(|m| rename_vars(m, n)).collect()),
         _ => t.clone(),
     }
 }
@@ -621,6 +703,11 @@ fn unify_walked(a: &Term, c: &Term, s: &mut Binding) -> bool {
             s.insert(v.clone(), aw.clone());
             true
         }
+        // Structural list unification, member by member (either side may hold
+        // variables — backward goals over list arguments).
+        (Term::List(xs), Term::List(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| unify_walked(x, y, s))
+        }
         _ => false,
     }
 }
@@ -633,11 +720,12 @@ fn fact_list(head: &Term, facts: &FactIndex) -> Option<Vec<Term>> {
     let first = Term::Iri(parser::RDF_FIRST.into());
     let rest = Term::Iri(parser::RDF_REST.into());
     let nil = Term::Iri(parser::RDF_NIL.into());
+    let empty = Term::List(Vec::new());
     let mut out = Vec::new();
     let mut cur = head.clone();
     let mut guard = 0;
     loop {
-        if cur == nil {
+        if cur == nil || cur == empty {
             return Some(out);
         }
         if guard > 100_000 {
@@ -648,46 +736,6 @@ fn fact_list(head: &Term, facts: &FactIndex) -> Option<Vec<Term>> {
         out.push(f);
         cur = facts.ps.get(&(rest.clone(), cur.clone()))?.first()?.clone();
     }
-}
-
-/// Resolve every list node in `premise` (rooted at an rdf:first) to its member sequence.
-fn extract_lists(premise: &[[Term; 3]]) -> HashMap<Term, Vec<Term>> {
-    use parser::{RDF_FIRST, RDF_NIL, RDF_REST};
-    let (is, ir) = (Term::Iri(RDF_FIRST.into()), Term::Iri(RDF_REST.into()));
-    let nil = Term::Iri(RDF_NIL.into());
-    let mut first: HashMap<Term, Term> = HashMap::new();
-    let mut rest: HashMap<Term, Term> = HashMap::new();
-    for [s, p, o] in premise {
-        if *p == is {
-            first.insert(s.clone(), o.clone());
-        } else if *p == ir {
-            rest.insert(s.clone(), o.clone());
-        }
-    }
-    let mut lists = HashMap::new();
-    for head in first.keys() {
-        let mut members = Vec::new();
-        let mut cur = head.clone();
-        // follow first/rest to nil (bounded by node count to avoid cycles)
-        for _ in 0..first.len() + 1 {
-            match first.get(&cur) {
-                Some(m) => members.push(m.clone()),
-                None => break,
-            }
-            match rest.get(&cur) {
-                Some(n) if *n != nil => cur = n.clone(),
-                _ => break,
-            }
-        }
-        lists.insert(head.clone(), members);
-    }
-    lists
-}
-
-/// Is `pat` an rdf:first/rest triple belonging to an extracted list (rule structure)?
-fn is_list_struct(pat: &[Term; 3], lists: &HashMap<Term, Vec<Term>>) -> bool {
-    use parser::{RDF_FIRST, RDF_REST};
-    matches!(&pat[1], Term::Iri(i) if i == RDF_FIRST || i == RDF_REST) && lists.contains_key(&pat[0])
 }
 
 /// Try to unify pattern triple `pat` with ground fact `f`, extending binding `b`.
@@ -702,22 +750,29 @@ fn unify(pat: &[Term; 3], f: &[Term; 3], b: &Binding) -> Option<Binding> {
 }
 
 fn unify_term(pat: &Term, val: &Term, b: &mut Binding) -> bool {
-    match pat {
-        Term::Var(v) => match b.get(v) {
+    match (pat, val) {
+        (Term::Var(v), _) => match b.get(v) {
             Some(existing) => existing == val,
             None => {
                 b.insert(v.clone(), val.clone());
                 true
             }
         },
-        other => other == val,
+        // First-class lists unify STRUCTURALLY: same length, members pairwise
+        // (so `(?x)` matches `(17)` binding ?x=17 — cwm/EYE list unification).
+        (Term::List(ps), Term::List(vs)) => {
+            ps.len() == vs.len() && ps.iter().zip(vs).all(|(p, v)| unify_term(p, v, b))
+        }
+        (other, _) => other == val,
     }
 }
 
-/// Substitute bound variables in `t`; returns the term (possibly still containing free vars).
+/// Substitute bound variables in `t` (recursing into list members); returns the
+/// term (possibly still containing free vars).
 fn apply(t: &Term, b: &Binding) -> Term {
     match t {
         Term::Var(v) => b.get(v).cloned().unwrap_or_else(|| t.clone()),
+        Term::List(ms) => Term::List(ms.iter().map(|m| apply(m, b)).collect()),
         _ => t.clone(),
     }
 }
@@ -894,8 +949,9 @@ fn eval_binder(op: Bidi, s: &Term, o: &Term, b: Binding) -> Option<Binding> {
 
 #[derive(Clone, Copy)]
 enum ListGen {
-    Member, // ?list list:member ?x
-    In,     // ?x list:in ?list
+    Member,  // ?list list:member ?x
+    In,      // ?x list:in ?list
+    Iterate, // ?list list:iterate (?index ?value) — 0-based, one binding per member
 }
 
 fn list_generator(p: &Term) -> Option<ListGen> {
@@ -903,6 +959,7 @@ fn list_generator(p: &Term) -> Option<ListGen> {
     match i.strip_prefix(LIST) {
         Some("member") => Some(ListGen::Member),
         Some("in") => Some(ListGen::In),
+        Some("iterate") => Some(ListGen::Iterate),
         _ => None,
     }
 }
@@ -1104,6 +1161,7 @@ enum Func {
     Replace,     // string:replace (regex): ( str pattern replacement ) string:replace ?out
     First,       // list:first
     Last,        // list:last
+    Append,      // list:append — ( list… ) list:append ?out (first-class list result)
     Conjunction, // log:conjunction — merge a list of formulae into one formula
     Dtlit,       // log:dtlit — ( "lex" xsd:dt ) ↔ "lex"^^xsd:dt (both directions)
     // single-value-arg (string case mapping, Unicode-aware)
@@ -1208,6 +1266,7 @@ fn functional_builtin(p: &Term) -> Option<Func> {
         (_, Some("length")) => Some(Func::Length),
         (_, Some("first")) => Some(Func::First),
         (_, Some("last")) => Some(Func::Last),
+        (_, Some("append")) => Some(Func::Append),
         _ => None,
     }
 }
@@ -1218,7 +1277,6 @@ fn eval_functional(
     f: Func,
     subj: &Term,
     obj: &Term,
-    lists: &HashMap<Term, Vec<Term>>,
     facts: &FactIndex,
     b: Binding,
 ) -> Option<Binding> {
@@ -1226,7 +1284,7 @@ fn eval_functional(
     // log:dtlit needs the UNAPPLIED member terms: its reverse mode binds them by
     // decomposing a ground object literal into ( "lexical" datatype-IRI ).
     if let Func::Dtlit = f {
-        let members = lists.get(subj)?;
+        let Term::List(members) = subj else { return None };
         if members.len() != 2 {
             return None;
         }
@@ -1249,7 +1307,7 @@ fn eval_functional(
     }
     // math:negation is bidirectional in EYE: `?x math:negation 3` solves
     // ?x = -3 (the one reverse mode the suites rely on).
-    if matches!(f, Func::Negation) && !subj.is_ground() && lists.get(subj).is_none() {
+    if matches!(f, Func::Negation) && !subj.is_ground() && !matches!(subj, Term::List(_)) {
         let s_applied = apply(subj, &b);
         if !s_applied.is_ground() {
             let o_applied = apply(obj, &b);
@@ -1269,20 +1327,24 @@ fn eval_functional(
     // from the fact store, or `rdf:nil` = the empty list), else a singleton
     // for the unary (math:/string:/time:) ops.
     let subj_applied = apply(subj, &b);
-    let resolved_list: Option<Vec<Term>> = match lists.get(subj) {
-        Some(members) => Some(members.iter().map(|m| apply(m, &b)).collect()),
-        None => fact_list(&subj_applied, facts)
-            .map(|ms| ms.iter().map(|m| apply(m, &b)).collect()),
+    let resolved_list: Option<Vec<Term>> = match &subj_applied {
+        // First-class list value (already substituted by `apply`).
+        Term::List(ms) => Some(ms.clone()),
+        // A data list written as rdf:first/rest triples, via a bound variable.
+        _ => fact_list(&subj_applied, facts).map(|ms| ms.iter().map(|m| apply(m, &b)).collect()),
     };
+    let was_list = resolved_list.is_some();
     // The list:-namespace ops are only defined ON lists.
-    if matches!(f, Func::Length | Func::First | Func::Last) && resolved_list.is_none() {
+    if matches!(f, Func::Length | Func::First | Func::Last | Func::Append) && !was_list {
         return None;
     }
     let args: Vec<Term> = match resolved_list {
         Some(members) => members,
         None => vec![subj_applied.clone()],
     };
-    if args.is_empty() && !matches!(f, Func::Conjunction | Func::MemberCount | Func::Length) {
+    if args.is_empty()
+        && !matches!(f, Func::Conjunction | Func::MemberCount | Func::Length | Func::Append)
+    {
         return None;
     }
     let result: Term = match f {
@@ -1311,7 +1373,7 @@ fn eval_functional(
                 let distinct: FxHashSet<&[Term; 3]> = ts.iter().collect();
                 number_term(distinct.len() as f64)
             }
-            _ if lists.contains_key(subj) => number_term(args.len() as f64),
+            _ if was_list => number_term(args.len() as f64),
             _ => return None,
         },
         Func::Format => {
@@ -1382,6 +1444,18 @@ fn eval_functional(
         }
         Func::First => args.first()?.clone(),
         Func::Last => args.last()?.clone(),
+        Func::Append => {
+            // ( l1 l2 … ) list:append ?out — concatenate; every member must
+            // itself be a list (first-class, or data first/rest structure).
+            let mut merged: Vec<Term> = Vec::new();
+            for a in &args {
+                match a {
+                    Term::List(ms) => merged.extend(ms.iter().cloned()),
+                    other => merged.extend(fact_list(other, facts)?),
+                }
+            }
+            Term::List(merged)
+        }
         Func::Replace => {
             // ( str pattern replacement ) string:replace ?out — regex replace-all.
             if args.len() != 3 {
@@ -1420,7 +1494,7 @@ fn eval_functional(
                     | Func::Degrees
                     | Func::Radians
             );
-            if unary && lists.contains_key(subj) {
+            if unary && was_list {
                 return None;
             }
             if let Some(exact) = eval_exact(f, &args) {
@@ -1708,6 +1782,7 @@ fn intern(dict: &mut Dict, t: &Term) -> Result<Id, String> {
         Term::Lit(v, dt, lang) => dict.intern_lit(v, dt, lang.as_deref()),
         Term::Blank(b) => dict.intern_blank(b),
         Term::Var(_) | Term::Formula(_) => return Err("non-ground term in closure".into()),
+        Term::List(_) => return Err("unexpanded list term in closure".into()),
     })
 }
 
@@ -2398,6 +2473,55 @@ mod tests {
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Match"), "case-insensitive hit");
         assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/Match"), "non-match excluded");
+    }
+
+    #[test]
+    fn first_class_list_unification() {
+        // `( ?x )` unifies structurally with a data list `( 17 )` (cwm unify2).
+        let src = r#"
+            @prefix : <http://ex/> .
+            ( 17 ) a :TestCase .
+            { ( ?x ) a :TestCase } => { ?x a :RESULT } .
+        "#;
+        let (mut d, s) = closure(src);
+        let i17 = d.intern_lit("17", "http://www.w3.org/2001/XMLSchema#integer", None);
+        let ty = id(&d, "http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+        assert!(s.contains(&[i17, ty, id(&d, "http://ex/RESULT")]), "list unification binds ?x=17");
+    }
+
+    #[test]
+    fn list_append_builtin() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            :seed :p :o .
+            { ((1 2) (3)) list:append (1 2 3) } => { :s a :AppendOk } .
+            { (() (1)) list:append (1) } => { :s a :EmptyOk } .
+            { ((:a) (:b)) list:append ?out . ?out list:member ?m } => { ?m a :Member } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/s", ty, "http://ex/AppendOk"), "append filter");
+        assert!(has(&d, &s, "http://ex/s", ty, "http://ex/EmptyOk"), "empty list append");
+        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Member"), "constructed list is iterable");
+        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/Member"), "constructed list is iterable");
+    }
+
+    #[test]
+    fn list_iterate_and_virtual_first_rest() {
+        let src = r#"
+            @prefix : <http://ex/> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+            @prefix list: <http://www.w3.org/2000/10/swap/list#> .
+            ((:q)) a :Thing .
+            { (:a :b) list:iterate (1 ?v) } => { ?v a :Second } .
+            { ?X a :Thing . ?X rdf:rest ?Y } => { ?Y a :Thing } .
+            { ?X a :Thing; rdf:first (?B) } => { ?B a :GreatThing } .
+        "#;
+        let (d, s) = closure(src);
+        let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/Second"), "list:iterate index/value");
+        assert!(has(&d, &s, "http://ex/q", ty, "http://ex/GreatThing"), "virtual rdf:first over list");
     }
 
     #[test]
