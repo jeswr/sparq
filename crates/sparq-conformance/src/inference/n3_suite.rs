@@ -109,7 +109,7 @@ fn run_manifest(path: &Path, suite: &str, out: &mut Vec<TestResult>) -> Result<(
             continue; // subjects without mf:action are manifest scaffolding
         };
         let result = file("result");
-        let outcome = match kind {
+        let mut outcome = match kind {
             "TestN3PositiveSyntax" | "TurtlePositiveSyntax" => syntax_test(&action, true),
             "TestN3NegativeSyntax" | "TurtleNegativeSyntax" => syntax_test(&action, false),
             "TestN3Eval" => eval_test_n3(&action, result.as_deref()),
@@ -118,6 +118,13 @@ fn run_manifest(path: &Path, suite: &str, out: &mut Vec<TestResult>) -> Result<(
             "TestN3Reason" => reason_test(&g, &node, &action, result.as_deref()),
             other => Outcome::OutOfScope(format!("unhandled test type {other}")),
         };
+        if let Outcome::Fail(e) = &outcome {
+            if let Some((_, _why, detail)) =
+                DOCUMENTED_DIVERGENCES.iter().find(|(n, _, _)| *n == name)
+            {
+                outcome = Outcome::Divergence(detail, e.clone());
+            }
+        }
         out.push(TestResult {
             suite: suite.to_string(),
             name,
@@ -205,7 +212,10 @@ fn eval_test_n3(action: &Path, result: Option<&Path>) -> Outcome {
         Ok(Err(e)) => return Outcome::Fail(format!("action parse error: {e}")),
         Err(e) => return Outcome::Fail(e),
     };
-    let expected = match parse_with_watchdog(expected_src, crate::rdf::file_iri(result)) {
+    // cwm generated the reference files against the ACTION document's base
+    // (their headers say so) — relative IRIs in a `-ref.n3` resolve against
+    // the action, not the ref file itself.
+    let expected = match parse_with_watchdog(expected_src, crate::rdf::file_iri(action)) {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => return Outcome::Fail(format!("expected parse error: {e}")),
         Err(e) => return Outcome::Fail(e),
@@ -359,6 +369,16 @@ fn options(g: &MiniGraph, node: &oxrdf::NamedOrBlankNode) -> Options {
     o
 }
 
+/// Suite entries whose REFERENCE disagrees with their action document —
+/// failing them is not an engine gap. Kept as documented divergences.
+const DOCUMENTED_DIVERGENCES: &[(&str, &str, &str)] = &[(
+    "cwm_unify_unify1",
+    "upstream ref/action mismatch",
+    "the action concludes `:test :a ?x` (predicate <unify1.n3#a>) but unify1-ref.n3 \
+     says `:test a :Successful` (rdf:type) — the vendored cwm reference was generated \
+     from an older revision of the action",
+)];
+
 fn reason_test(
     g: &MiniGraph,
     node: &oxrdf::NamedOrBlankNode,
@@ -411,9 +431,10 @@ fn reason_test(
     } else {
         closure.facts.clone()
     };
-    if opts.data || opts.conclusions {
+    if opts.data {
         // `--data`: drop formula-valued statements (rules are already not in
-        // the fact set).
+        // the fact set). `--conclusions` KEEPS them — derived formula facts
+        // (log:conjunction results etc.) are conclusions.
         actual.retain(|row| !row.iter().any(|t| matches!(t, NTerm::Formula(_))));
     }
     dedup(&mut actual);
@@ -431,7 +452,8 @@ fn reason_test(
         }));
     }
 
-    let expected = match parse_with_watchdog(expected_src, crate::rdf::file_iri(result)) {
+    // cwm generated the reference against the ACTION's base (see headers).
+    let expected = match parse_with_watchdog(expected_src, crate::rdf::file_iri(action)) {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => return Outcome::Fail(format!("expected parse error: {e}")),
         Err(e) => return Outcome::Fail(e),
@@ -569,6 +591,27 @@ fn term_iso(a: &NTerm, b: &NTerm, bij: &mut Bij, steps: &mut usize) -> bool {
         (NTerm::List(x), NTerm::List(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(p, q)| term_iso(p, q, bij, steps))
         }
+        // Same-datatype numeric literals compare by VALUE (cwm's serializer
+        // and the engine may format the same number differently: 0.0e0 = 0e0,
+        // 4.0 = 4.00).
+        (NTerm::Lit(x, dtx, None), NTerm::Lit(y, dty, None)) if dtx == dty => {
+            x == y || (is_numeric_dt(dtx) && num_lex(x).zip(num_lex(y)).is_some_and(|(a, b)| a == b))
+        }
         _ => a == b,
+    }
+}
+
+fn is_numeric_dt(dt: &str) -> bool {
+    matches!(
+        dt.strip_prefix("http://www.w3.org/2001/XMLSchema#"),
+        Some("integer" | "decimal" | "double" | "float")
+    )
+}
+
+fn num_lex(s: &str) -> Option<f64> {
+    match s {
+        "INF" | "+INF" => Some(f64::INFINITY),
+        "-INF" => Some(f64::NEG_INFINITY),
+        _ => s.parse::<f64>().ok().filter(|v| !v.is_nan()),
     }
 }
