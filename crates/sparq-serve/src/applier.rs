@@ -1,46 +1,39 @@
 //! [`ApplyUpdates`] for the production store: `sparq_core::Graph` snapshots,
 //! SPARQL Update strings as the update type.
 //!
-//! ## Snapshot-production decision (A2, recorded honestly)
+//! ## Snapshot production: the STRUCTURAL FORK (supersedes the A2 rebuild)
 //!
-//! `Graph` is deliberately not `Clone` (a deep copy of the dictionary arena +
-//! six permutation indexes is O(n)) and shares no internal structure between
-//! instances, so producing the next published snapshot must mint a fresh
-//! `Graph`. The candidate paths in today's codebase:
+//! A2 originally produced each generation via a full engine rebuild
+//! (`sparq_engine::update(base, "")` — decode + re-intern + re-index), because
+//! `Graph` shared no internal structure between instances. That fork was the
+//! measured write-path bottleneck: **56 ms / 100 k triples, 1.07 s / 1 M**
+//! (release, Apple Silicon), making batch-commit cost O(graph).
 //!
-//! 1. **Double-buffer reclaim** (today's `sparq-server` Writer): get the old
-//!    published graph back via `Arc::try_unwrap` + poll, mutate in place
-//!    (O(batch)). NOT AVAILABLE under the generation ring — the ring *retains*
-//!    up to K old generations by design, so a published graph never drains back
-//!    to refcount 1; and the reclaim wait is precisely the measured §4.3/§4.4
-//!    pathology (5.4 s/32 s stall) the ring exists to remove.
-//! 2. **Engine rebuild** (`sparq_engine::update(&Graph, sparql) -> Graph`,
-//!    today's `apply_by_rebuild` slow path): decode the dictionary-encoded
-//!    store to terms, apply, rebuild dict + indexes — O(graph), works from a
-//!    shared `&Graph`. This is the only public owned-`Graph`-from-`&Graph`
-//!    path in the codebase today.
+//! [`Graph::fork`] now shares the base's immutable storage structurally — the
+//! six permutation indexes, planner stats, the dictionary's frozen base and the
+//! numeric/temporal caches are `Arc`-shared; only the pending delta (store
+//! overlay + dict extension + cache side maps) is copied by value. So:
 //!
-//! A2 therefore uses path 2 once per *batch*: [`fork`](ApplyUpdates::fork) is
-//! `sparq_engine::update(base, "")` (the empty update is valid SPARQL — zero
-//! operations, pure decode + rebuild), then each update in the batch is the
-//! O(batch) `update_in_place` delta-overlay path (measured 17 µs/update, §4.3).
+//! - [`fork`](ApplyUpdates::fork) is `base.fork()` — **O(pending delta)**, not
+//!   O(graph). (The very first fork of a freshly loaded flat graph pays a
+//!   one-time O(n) dictionary/cache freeze to mint the shared base; every later
+//!   generation is cheap, and compaction re-freezes, so the cost never recurs.)
+//! - [`apply`](ApplyUpdates::apply) is the unchanged T17 delta-overlay path
+//!   (`update_in_place`, measured 17 µs/update §4.3).
+//! - [`seal`](ApplyUpdates::seal) carries the **compaction policy**: published
+//!   generations DO retain their pending overlay now (readers' scans
+//!   merge-on-read — the overlay machinery is exactly what `update_in_place`
+//!   already exercised), so the overlay must not grow unboundedly. When the
+//!   working copy's [`pending_delta_len`](Graph::pending_delta_len) reaches
+//!   [`compact_threshold`](GraphApplier::with_compact_threshold) (default
+//!   [`DEFAULT_COMPACT_THRESHOLD`]), seal folds it flat via [`Graph::compact`]
+//!   — the old O(graph) cost, now amortised over the ~threshold/batch-size
+//!   commits between compactions instead of paid on EVERY commit, and bounding
+//!   both the merge-on-read overhead and the per-fork delta copy.
 //!
-//! **Known limitation (deliberate, deferred):** batch commit cost is dominated
-//! by the O(graph) fork — measured at 56 ms/100 k triples and 1.15 s/1 M
-//! (release, Apple Silicon, best of 3; run the `fork_cost_measurement` test
-//! with `--ignored --nocapture` to reproduce). Today's double buffer avoids
-//! this steady-state only via the reclaim that the ring makes impossible (and
-//! that was the measured stall). The group-commit window therefore bounds
-//! *queueing* delay, not end-to-end ack latency, once graphs are large; at the
-//! Solid write rate (≤ hundreds/s, ~1 update/window measured envelope §6.5)
-//! the throughput is still 10–100× over requirement, but a cheap structural
-//! fork (persistent/COW indexes) is the recorded follow-up deliverable — A2
-//! does not build a new storage layer.
-//!
-//! A free side effect: because `fork` rebuilds from decoded terms, every
-//! published generation has **no pending delta-overlay** — readers always scan
-//! the folded fast path, and the server's `compact_every` amortization is
-//! unnecessary on this path ([`seal`](ApplyUpdates::seal) is the identity).
+//! A compaction failure (impossible for the in-memory graphs this path serves —
+//! `compact` only errs on directory-backed I/O) publishes the un-compacted
+//! working copy: correct, merely uncompacted; the next seal retries.
 //!
 //! Extension functions: this applier runs the plain engine update entry points.
 //! A server that registers SPARQL extension functions (sparq-server's
@@ -51,21 +44,52 @@ use sparq_core::Graph;
 
 use crate::writer::ApplyUpdates;
 
+/// Default [`GraphApplier`] compaction threshold (pending-delta entries: overlay
+/// triples + extension terms). Measured sweep (Apple Silicon, release, 10-triple
+/// commits): per-commit cost is U-shaped in the threshold — small thresholds pay
+/// the O(graph) fold too often, large ones clone a big delta on every fork.
+/// 16 Ki sat at/near the minimum at BOTH 100 k (245 µs/commit) and 1 M
+/// (593 µs/commit) base sizes (4 Ki: 290 µs/1.97 ms, 64 Ki: 667/699 µs), and is
+/// graph-size-independent, so commit cost does not grow with the store.
+pub const DEFAULT_COMPACT_THRESHOLD: usize = 16_384;
+
 /// The production [`ApplyUpdates`]: `Graph` snapshots, SPARQL Update strings.
-/// See the module docs for the fork-cost decision and limitation.
-#[derive(Debug, Default)]
-pub struct GraphApplier;
+/// See the module docs for the structural-fork design and the compaction policy.
+#[derive(Debug)]
+pub struct GraphApplier {
+    /// Fold the working copy's pending delta flat when it reaches this size
+    /// (entries; see [`Graph::pending_delta_len`]).
+    compact_threshold: usize,
+}
+
+impl Default for GraphApplier {
+    fn default() -> Self {
+        GraphApplier { compact_threshold: DEFAULT_COMPACT_THRESHOLD }
+    }
+}
+
+impl GraphApplier {
+    /// An applier with the default compaction threshold.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An applier compacting once the pending delta reaches `threshold` entries
+    /// (values below 1 are treated as 1 — compact after every batch).
+    pub fn with_compact_threshold(threshold: usize) -> Self {
+        GraphApplier { compact_threshold: threshold.max(1) }
+    }
+}
 
 impl ApplyUpdates for GraphApplier {
     type Snapshot = Graph;
     type Working = Graph;
     type Update = String;
 
-    /// O(graph): engine rebuild of `base` (decode + re-intern + re-index),
-    /// named graphs preserved. The measured cost and why there is no cheaper
-    /// public path today are in the module docs.
+    /// O(pending delta): the structural fork — shared immutable base, copied
+    /// delta. (One-time O(n) freeze on the first-ever fork of a flat graph.)
     fn fork(&mut self, base: &Graph) -> Result<Graph, String> {
-        sparq_engine::update(base, "")
+        Ok(base.fork())
     }
 
     /// O(batch): the T17 delta-overlay path. On `Err` the graph may hold a
@@ -75,10 +99,16 @@ impl ApplyUpdates for GraphApplier {
         sparq_engine::update_in_place(working, update)
     }
 
-    /// Identity: the fork already produced a fully folded base (no overlay to
-    /// compact for the batch's own updates beyond the in-place deltas, which
-    /// the next batch's fork folds).
-    fn seal(&mut self, working: Graph) -> Graph {
+    /// The compaction policy (module docs): fold the pending delta flat once it
+    /// reaches the threshold, so overlay merge-on-read cost and per-fork delta
+    /// copies stay bounded while the O(graph) fold runs only once per
+    /// ~threshold/batch commits.
+    fn seal(&mut self, mut working: Graph) -> Graph {
+        if working.pending_delta_len() >= self.compact_threshold {
+            // In-memory compaction cannot fail; a (directory-backed) failure
+            // publishes the correct-but-uncompacted copy and retries next seal.
+            let _ = working.compact();
+        }
         working
     }
 }

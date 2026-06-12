@@ -1,8 +1,9 @@
 //! The sequenced writer over the PRODUCTION store: `GraphApplier` applying real
-//! SPARQL Updates to `sparq_core::Graph` through the engine's rebuild (fork) +
-//! delta-overlay (apply) paths. Proves the §6.5 batch semantics hold end-to-end
-//! on the real snapshot type, including failed-SPARQL isolation, and carries the
-//! `--ignored` fork-cost measurement quoted in `applier.rs`'s module docs.
+//! SPARQL Updates to `sparq_core::Graph` through the structural fork +
+//! delta-overlay (apply) + threshold-compaction (seal) paths. Proves the §6.5
+//! batch semantics hold end-to-end on the real snapshot type, including
+//! failed-SPARQL isolation and the bounded-pending-delta compaction policy, and
+//! carries the `--ignored` fork-cost measurement quoted in `applier.rs`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,7 +29,7 @@ fn sparql_batch_publishes_one_generation() {
     let ring = Arc::new(GenerationRing::new(graph_with(10)));
     let writer = Writer::spawn(
         ring.clone(),
-        GraphApplier,
+        GraphApplier::new(),
         WriterConfig { window: Duration::from_millis(200), max_batch: 64 },
     );
 
@@ -59,7 +60,7 @@ fn bad_sparql_is_isolated_from_its_batch() {
     let ring = Arc::new(GenerationRing::new(graph_with(5)));
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
-        GraphApplier,
+        GraphApplier::new(),
         WriterConfig { window: Duration::from_millis(300), max_batch: 64 },
     ));
 
@@ -99,7 +100,7 @@ fn consecutive_windows_consecutive_generations() {
     let ring = Arc::new(GenerationRing::new(graph_with(2)));
     let writer = Writer::spawn(
         ring.clone(),
-        GraphApplier,
+        GraphApplier::new(),
         WriterConfig { window: Duration::from_millis(1), max_batch: 256 },
     );
 
@@ -113,20 +114,104 @@ fn consecutive_windows_consecutive_generations() {
 
 /// The fork-cost measurement quoted in `applier.rs` (run manually):
 /// `cargo test -p sparq-serve --release fork_cost_measurement -- --ignored --nocapture`
+///
+/// Measures, per base size: the FIRST fork of a flat graph (one-time dict/cache
+/// freeze), the steady-state fork off a frozen lineage, and the full per-commit
+/// cycle (fork + 10-triple batch apply + seal) averaged over enough commits to
+/// include the amortised threshold compactions.
 #[test]
 #[ignore = "measurement, not an assertion — run with --ignored --nocapture in release"]
 fn fork_cost_measurement() {
+    use sparq_serve::ApplyUpdates;
+    let threshold: usize = std::env::var("SPARQ_COMPACT_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(sparq_serve::DEFAULT_COMPACT_THRESHOLD);
     for &n in &[100_000usize, 1_000_000] {
         let g = graph_with(n);
-        let mut applier = GraphApplier;
-        // Warm + measure (3 forks, report best — steady-state estimate).
+        let mut applier = GraphApplier::with_compact_threshold(threshold);
+
+        // First fork of the flat base: the one-time freeze.
+        let t = Instant::now();
+        let first = applier.fork(&g).unwrap();
+        let first_cost = t.elapsed();
+        assert_eq!(first.len(), n);
+        let frozen = applier.seal(first);
+
+        // Steady-state fork off the frozen lineage (no pending delta).
         let mut best = Duration::MAX;
-        for _ in 0..3 {
+        for _ in 0..5 {
             let t = Instant::now();
-            let forked = sparq_serve::ApplyUpdates::fork(&mut applier, &g).unwrap();
+            let f = applier.fork(&frozen).unwrap();
             best = best.min(t.elapsed());
-            assert_eq!(forked.len(), n);
+            assert_eq!(f.len(), n);
         }
-        println!("fork (engine rebuild) of {n} triples: {best:?} (best of 3)");
+        println!("fork of {n} triples: first (freeze) {first_cost:?}, steady-state {best:?} (best of 5)");
+
+        // Full commit cycle: fork + 10-triple INSERT DATA + seal, chained like the
+        // writer (each commit forks the previous sealed generation). 2000 commits
+        // x ~20 delta entries comfortably crosses the compaction threshold, so the
+        // average includes the amortised O(graph) folds.
+        let commits = 2000u32;
+        let mut base = frozen;
+        let t = Instant::now();
+        for c in 0..commits {
+            let mut w = applier.fork(&base).unwrap();
+            let upd = format!(
+                "INSERT DATA {{ {} }}",
+                (0..10)
+                    .map(|j| format!("<http://ex/c{c}_{j}> <http://ex/q> \"x{c}_{j}\" ."))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            applier.apply(&mut w, &upd).unwrap();
+            base = applier.seal(w);
+        }
+        let total = t.elapsed();
+        assert_eq!(base.len(), n + commits as usize * 10);
+        println!(
+            "commit cycle (fork + 10-triple apply + seal) on {n}: {:?}/commit avg over {commits} (total {total:?})",
+            total / commits
+        );
     }
+}
+
+/// The compaction policy keeps the pending delta BOUNDED under sustained updates:
+/// with a small threshold, the published generation's delta never exceeds
+/// threshold + one batch's growth, and compaction actually runs (the delta resets).
+#[test]
+fn pending_delta_stays_bounded_under_sustained_updates() {
+    use sparq_serve::ApplyUpdates;
+    let threshold = 64usize;
+    let mut applier = GraphApplier::with_compact_threshold(threshold);
+    let mut base = graph_with(200);
+    let mut compactions = 0usize;
+    let mut max_pending = 0usize;
+    for c in 0..200 {
+        let mut w = applier.fork(&base).unwrap();
+        let upd = format!(
+            "INSERT DATA {{ <http://ex/b{c}> <http://ex/q> \"y{c}\" . \
+             <http://ex/b{c}> <http://ex/r> <http://ex/t{c}> }}"
+        );
+        applier.apply(&mut w, &upd).unwrap();
+        let sealed = applier.seal(w);
+        let pending = sealed.pending_delta_len();
+        max_pending = max_pending.max(pending);
+        if pending == 0 && c > 0 {
+            compactions += 1;
+        }
+        base = sealed;
+    }
+    // Each commit adds 2 overlay triples + up to 3 new terms = ≤5 delta entries.
+    assert!(
+        max_pending < threshold + 5,
+        "pending delta must stay bounded by threshold + one batch (saw {max_pending})"
+    );
+    assert!(compactions >= 5, "compaction must keep firing (saw {compactions})");
+    assert_eq!(base.len(), 200 + 200 * 2);
+    // And the final generation still answers correctly after many fold cycles.
+    assert_eq!(
+        sparq_engine::count(&base, "SELECT * WHERE { ?s <http://ex/r> ?o }").unwrap(),
+        200
+    );
 }

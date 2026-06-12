@@ -162,7 +162,11 @@ impl PermData {
 /// batch costs O(batch) instead of the O(n) full rebuild. Invariants kept by
 /// [`TripleStore::apply_delta`]: `added` is canonical-SPO sorted + deduplicated and
 /// DISJOINT from both the base and `deleted`; `deleted` only ever holds base triples.
-#[derive(Default)]
+///
+/// `Clone` because [`TripleStore::fork`] carries the overlay into the forked store
+/// BY VALUE (O(overlay), bounded by the compaction policy) while the base indexes are
+/// shared structurally.
+#[derive(Default, Clone)]
 struct Overlay {
     added: Vec<[Id; 3]>,
     deleted: FxHashSet<[Id; 3]>,
@@ -240,9 +244,18 @@ impl Overlay {
 pub struct TripleStore {
     // Each permutation in its column order, sorted (so binary search on a bound prefix
     // is a plain lexicographic comparison of the leading columns) — owned or mmap'd.
-    perms: [PermData; 6],
+    //
+    // Behind an `Arc` so [`fork`](Self::fork) can SHARE the immutable base indexes
+    // across snapshot generations (the structural fork): every store is born
+    // shareable, a fork is an Arc bump. The only post-build mutation,
+    // [`decompress_to_ram`](Self::decompress_to_ram), goes through `Arc::get_mut`
+    // (it runs on freshly opened, never-yet-shared stores). Cost when unused: one
+    // extra pointer indirection per scan/estimate CALL (not per row) — measured in
+    // the flat-read benchmark as within noise.
+    perms: std::sync::Arc<[PermData; 6]>,
     // Per-predicate stats keyed by predicate id (for the cost-based planner).
-    pred_stats: FxHashMap<Id, PredStat>,
+    // Arc-shared across forks like the permutations (read-only after build).
+    pred_stats: std::sync::Arc<FxHashMap<Id, PredStat>>,
     // The delta-overlay of pending updates, `None` when there are none — so the scan
     // hot path pays exactly one (perfectly predicted) branch when no update happened.
     // NOTE: `pred_stats` is not overlay-adjusted (planner estimates only); `estimate`
@@ -257,7 +270,7 @@ impl TripleStore {
     pub fn from_triples(triples: Vec<[Id; 3]>) -> Self {
         let perms = Self::build_raw_perms(triples);
         let pred_stats = Self::compute_pred_stats(&perms);
-        TripleStore { perms, pred_stats, overlay: None }
+        TripleStore { perms: std::sync::Arc::new(perms), pred_stats: std::sync::Arc::new(pred_stats), overlay: None }
     }
 
     /// Like [`from_triples`](Self::from_triples) but stores each permutation
@@ -276,7 +289,7 @@ impl TripleStore {
                 }
             }
         }
-        TripleStore { perms, pred_stats, overlay: None }
+        TripleStore { perms: std::sync::Arc::new(perms), pred_stats: std::sync::Arc::new(pred_stats), overlay: None }
     }
 
     /// Builds the [`BUILT`] raw permutation indexes from canonical [s,p,o] triples (all
@@ -374,7 +387,7 @@ impl TripleStore {
         use std::io::Write;
         let mut w = std::io::BufWriter::new(std::fs::File::create(dir.join("predstats.bin"))?);
         w.write_all(&(self.pred_stats.len() as u64).to_le_bytes())?;
-        for (&p, s) in &self.pred_stats {
+        for (&p, s) in self.pred_stats.iter() {
             w.write_all(&p.to_le_bytes())?;
             w.write_all(&(s.count as u64).to_le_bytes())?;
             w.write_all(&(s.ndv_subj as u64).to_le_bytes())?;
@@ -444,7 +457,7 @@ impl TripleStore {
         // Use the persisted stats if present (no POS/PSO re-scan — keeps open fast and the
         // resident set small); else recompute (backward compatible with older saved dirs).
         let pred_stats = Self::load_pred_stats(dir).unwrap_or_else(|| Self::compute_pred_stats(&perms));
-        Ok(TripleStore { perms, pred_stats, overlay: None })
+        Ok(TripleStore { perms: std::sync::Arc::new(perms), pred_stats: std::sync::Arc::new(pred_stats), overlay: None })
     }
 
     /// Per-predicate stats: count + distinct objects from POS (always built), and
@@ -566,12 +579,38 @@ impl TripleStore {
     /// scans are pure binary-search slice borrows (zero decode cost) — the LOAD-TIME
     /// DECOMPRESSION mode for an opened compressed directory: pay one full decode up
     /// front, query at exactly raw-store speed. Raw/mapped permutations are untouched.
+    ///
+    /// Runs on freshly built/opened stores (load-time), which are never yet forked;
+    /// on a structurally SHARED store (post-[`fork`](Self::fork)) it is a no-op —
+    /// decompression is an optimisation, never a correctness requirement.
     pub fn decompress_to_ram(&mut self) {
-        for slot in &mut self.perms {
+        let Some(perms) = std::sync::Arc::get_mut(&mut self.perms) else {
+            return; // shared with a fork: leave the (immutable) base untouched
+        };
+        for slot in perms {
             if let PermData::Compressed(c) = slot {
                 *slot = PermData::Owned(c.decode_all());
             }
         }
+    }
+
+    /// A structural FORK of this store: the immutable base permutation indexes and
+    /// planner stats are SHARED (Arc bumps, O(1)); the pending delta-overlay is
+    /// carried by value (O(overlay), bounded by the compaction policy). The fork and
+    /// the original then evolve independently through [`apply_delta`](Self::apply_delta)
+    /// — neither ever mutates the shared base, so existing readers are unaffected.
+    pub fn fork(&self) -> TripleStore {
+        TripleStore {
+            perms: std::sync::Arc::clone(&self.perms),
+            pred_stats: std::sync::Arc::clone(&self.pred_stats),
+            overlay: self.overlay.clone(),
+        }
+    }
+
+    /// Number of pending overlay entries (insertions + deletions) — the input to a
+    /// compaction threshold policy (a fork costs O(this); folding it costs O(n)).
+    pub fn overlay_len(&self) -> usize {
+        self.overlay.as_ref().map_or(0, |ov| ov.added.len() + ov.deleted.len())
     }
 
     /// Heap footprint of the permutation indexes in bytes (for benchmarking). Memory-

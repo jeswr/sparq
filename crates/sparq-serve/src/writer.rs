@@ -46,7 +46,7 @@
 //! acceptable because failures are the rare path (parse errors and constraint
 //! violations, not steady state).
 //!
-//! ## Snapshot production (the §6.4 "working copy", decided honestly)
+//! ## Snapshot production (the §6.4 "working copy")
 //!
 //! §6.4 imagines a persistent writer-private working copy folded periodically.
 //! That scheme worked for the double buffer because the writer could *reclaim*
@@ -54,12 +54,12 @@
 //! measured pathology A1 removed (5.4 s/32 s pinned-snapshot stall, §4.3/§4.4)
 //! and *impossible* under the ring by design: the ring itself retains up to K
 //! old generations, so a published graph never drains back to the writer.
-//! `sparq_core::Graph` is deliberately not `Clone` and shares no internal
-//! structure, so every publish must mint a fresh `Graph`. Today's cheapest public
-//! path is one O(graph) fork per batch (engine rebuild) + O(batch) in-place
-//! overlay updates — see [`GraphApplier`](crate::GraphApplier) for the concrete
-//! numbers and the recorded limitation (a cheap structural fork is a later
-//! deliverable; A2 does not build a new storage layer).
+//! Every publish therefore mints a fresh `Graph` — via the STRUCTURAL FORK
+//! (`Graph::fork`): the immutable storage (indexes, dict base, caches) is
+//! Arc-shared with the base generation and only the small pending delta is
+//! copied, so fork is O(delta) and the periodic fold §6.4 wanted lives in
+//! [`ApplyUpdates::seal`] as a threshold compaction — see
+//! [`GraphApplier`](crate::GraphApplier) for the policy and measured numbers.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
