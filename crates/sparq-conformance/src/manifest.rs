@@ -241,8 +241,17 @@ fn parse_query_action(g: &MiniGraph, action: &NamedOrBlankNode, action_term: &Te
         action,
         "http://www.w3.org/ns/sparql-service-description#entailmentRegime",
     ) {
-        if let Term::NamedNode(n) = r {
-            qa.entailment_regimes.push(n.as_str().to_string());
+        match r {
+            Term::NamedNode(n) => qa.entailment_regimes.push(n.as_str().to_string()),
+            // The suite writes a LIST of regimes: ( ent:RDF ent:RDFS … ).
+            Term::BlankNode(_) => {
+                for item in g.list(r) {
+                    if let Term::NamedNode(n) = item {
+                        qa.entailment_regimes.push(n.as_str().to_string());
+                    }
+                }
+            }
+            _ => {}
         }
     }
     qa

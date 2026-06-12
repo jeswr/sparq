@@ -202,12 +202,20 @@ pub fn run_syntax_test(entry: &TestEntry, positive: bool, update: bool) -> Statu
 }
 
 pub fn run_query_test(entry: &TestEntry) -> Status {
-    let Some(query_path) = entry.action.query.clone() else {
-        return Status::Fail("manifest entry has no qt:query".into());
-    };
     if let Some(feat) = &entry.action.unsupported_feature {
         return Status::Skip(format!("{feat} not supported"));
     }
+    run_query_test_on(entry, None)
+}
+
+/// As [`run_query_test`], but with an optional N-Quads DATA OVERRIDE replacing
+/// the entry's own data files — the entailment-regime runner materializes the
+/// closure first and evaluates the query over it (and deliberately bypasses
+/// the `unsupported_feature` skip, which exists for the plain SPARQL runner).
+pub fn run_query_test_on(entry: &TestEntry, data_override: Option<String>) -> Status {
+    let Some(query_path) = entry.action.query.clone() else {
+        return Status::Fail("manifest entry has no qt:query".into());
+    };
     let query_text = match std::fs::read_to_string(&query_path) {
         Ok(t) => t,
         Err(e) => return Status::Fail(format!("read query: {e}")),
@@ -229,7 +237,7 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
         Ok(Query::Select { pattern, .. }) => (pattern, false),
         Ok(Query::Ask { pattern, .. }) => (pattern, true),
         Ok(Query::Construct { .. }) => {
-            return run_construct_test(entry, &query_text, &base, &graph_data);
+            return run_construct_test(entry, &query_text, &base, &graph_data, data_override);
         }
         Ok(Query::Describe { .. }) => {
             // The engine implements DESCRIBE (CBD), but the spec leaves the result
@@ -249,9 +257,12 @@ pub fn run_query_test(entry: &TestEntry) -> Status {
         Err(e) => return Status::Fail(format!("expected-result parse error: {e}")),
     };
 
-    let nquads = match build_nquads(&entry.action.data, &graph_data) {
-        Ok(n) => n,
-        Err(e) => return Status::Fail(format!("data load error: {e}")),
+    let nquads = match data_override {
+        Some(n) => n,
+        None => match build_nquads(&entry.action.data, &graph_data) {
+            Ok(n) => n,
+            Err(e) => return Status::Fail(format!("data load error: {e}")),
+        },
     };
     let query_with_base = with_base(&query_text, &base);
 
@@ -432,6 +443,7 @@ fn run_construct_test(
     query_text: &str,
     base: &str,
     graph_data: &[(String, PathBuf)],
+    data_override: Option<String>,
 ) -> Status {
     let Some(result_path) = entry.result_file.clone() else {
         return Status::Skip("no mf:result".into());
@@ -451,9 +463,12 @@ fn run_construct_test(
     };
     dedup_rows(&mut expected); // an RDF graph is a set
 
-    let nquads = match build_nquads(&entry.action.data, graph_data) {
-        Ok(n) => n,
-        Err(e) => return Status::Fail(format!("data load error: {e}")),
+    let nquads = match data_override {
+        Some(n) => n,
+        None => match build_nquads(&entry.action.data, graph_data) {
+            Ok(n) => n,
+            Err(e) => return Status::Fail(format!("data load error: {e}")),
+        },
     };
     let query_with_base = with_base(query_text, base);
 

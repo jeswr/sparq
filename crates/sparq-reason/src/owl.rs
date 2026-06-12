@@ -850,6 +850,15 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                         cand.extend(classes.iter().map(|&c| [p2, which, c]));
                     }
                 }
+                // inverse transposition: (p inverseOf q), (p domain c) ⊢ (q range c)
+                // and (p range c) ⊢ (q domain c) — a valid OWL (RDF-based)
+                // entailment the sparql11/entailment suite exercises.
+                if let Some(invs) = ax.inverse.get(&p) {
+                    let other = if which == v.domain { v.range } else { v.domain };
+                    for &q in invs {
+                        cand.extend(classes.iter().map(|&c| [q, other, c]));
+                    }
+                }
             }
         }
 
@@ -1230,13 +1239,13 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             }
             acc
         };
-        // Emit the sameAs relation (all ordered pairs within each non-singleton class).
+        // Emit the sameAs relation (all ordered pairs within each non-singleton
+        // class, INCLUDING the reflexive pairs — eq-ref restricted to the terms
+        // equality actually touches, which SPARQL-entailment answers need).
         for mem in classes.values() {
             for &a in mem {
                 for &b in mem {
-                    if a != b {
-                        expanded.push([a, o.same_as, b]);
-                    }
+                    expanded.push([a, o.same_as, b]);
                 }
             }
         }

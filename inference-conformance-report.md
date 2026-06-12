@@ -2,7 +2,7 @@
 
 - rdf-tests commit: `f25dbc092c654d792974848e81bb519d7328f0e8`
 - w3c/N3 commit: `23ccf3d56b25cb60a68878a04aae0d52493080f0`
-- sparq commit: `1e63ac02cf54a180ecdc5f6acd462cfc87369ac2`
+- sparq commit: `616f9089cdd2c5fd81626ebc5ba24f54a8c62f86`
 
 Every manifest entry lands in exactly one bucket — pass, fail, documented divergence, or out-of-scope WITH its reason (no silent skips). Pass rate is `(pass + divergence) / run`; out-of-scope entries are excluded from the rate but counted in coverage.
 
@@ -362,12 +362,31 @@ Source: w3c/N3 `tests/` (pinned clone). The reasoner manifest measures EYE/cwm p
 
 ## SPARQL 1.1 entailment regimes (sparql11/entailment)
 
+Source: `sparql11/entailment` from the pinned rdf-tests clone. Each test runs as query-over-materialized-closure through the same evaluation/comparison machinery as the gating SPARQL harness; the regime materialized is the strongest the reasoner supports of the test's `sd:entailmentRegime` set (RDFS ⊃ RDF; OWL-RDF-Based via the OWL RL rules, a sound subset — its incompleteness shows up as listed fails). D-only / OWL-Direct-only / RIF tests are out of scope with their reason.
+
 | suite | pass | fail | divergence | out-of-scope | pass-rate (of run) |
 |---|---:|---:|---:|---:|---:|
-| **total** | **0** | **0** | **0** | **0** | **—** |
+| sparql11/entailment | 44 | 3 | 0 | 23 | 93.6% |
+| **total** | **44** | **3** | **0** | **23** | **93.6%** |
 
-**Overall (SPARQL 1.1 entailment regimes (sparql11/entailment)): 0 pass / 0 fail / 0 documented divergence / 0 out-of-scope — pass+divergence — of run, — of all in-scope tests.**
+**Overall (SPARQL 1.1 entailment regimes (sparql11/entailment)): 44 pass / 3 fail / 0 documented divergence / 23 out-of-scope — pass+divergence 93.6% of run, 62.9% of all in-scope tests.**
+
+### Out-of-scope reasons
+
+| reason | tests |
+|---|---:|
+| entailment regime(s) OWL-Direct not supported (no materialization mapping) | 18 |
+| entailment regime(s) RIF not supported (no materialization mapping) | 4 |
+| entailment regime(s) D not supported (no materialization mapping) | 1 |
+
+<details><summary>All failures (3)</summary>
+
+- `sparql11/entailment` — **sparqldl-10.rq: undist vars test**: result mismatch: expected 3 solution(s), got 0; expected-only e.g. {?X=<http://example.org/test#a> ?Y=<http://example.org/test#b>}, {?X=<http://example.org/test#a> ?Y=<http://example.org/test#b>} [root cause: needs non-distinguished (blank-node) query-variable semantics]
+- `sparql11/entailment` — **sparqldl-11.rq: domain test**: result mismatch: expected 2 solution(s), got 3; actual-only e.g. {?C=_:fa6d9dbb5c1ebf8779613395c459cef5} [root cause: the regime's answer restriction (skolemization condition) excludes blank-node bindings; the harness does not yet filter them from engine results]
+- `sparql11/entailment` — **sparqldl-12.rq: range test**: result mismatch: expected 2 solution(s), got 3; actual-only e.g. {?C=_:ee1008733424fc8b17ef84b7028d2727} [root cause: the regime's answer restriction (skolemization condition) excludes blank-node bindings; the harness does not yet filter them from engine results]
+
+</details>
 
 ## Overall (all inference suites)
 
-**1457 pass / 262 fail / 13 documented divergence / 37 out-of-scope — pass+divergence 84.9% of run, 83.1% of all in-scope tests.**
+**1501 pass / 265 fail / 13 documented divergence / 60 out-of-scope — pass+divergence 85.1% of run, 82.3% of all in-scope tests.**
