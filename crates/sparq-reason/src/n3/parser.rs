@@ -76,7 +76,55 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
             _ => facts.push([s, pred, o]),
         }
     }
+    // N3 semantics: a blank node inside a rule is an EXISTENTIAL — in the
+    // premise it matches anything (like a variable), and a premise-bound
+    // label shared with the conclusion carries its binding (the cwm/EYE
+    // `[is :p of :x]`-in-premise idiom). Rewrite rule-scoped premise blanks
+    // to fresh per-rule variables so the matcher treats them so; blanks
+    // appearing ONLY in a conclusion stay blanks.
+    for (ri, r) in rules.iter_mut().chain(backward_rules.iter_mut()).enumerate() {
+        let mut premise_blanks: std::collections::HashSet<String> = Default::default();
+        collect_blanks(&r.premise, &mut premise_blanks);
+        if premise_blanks.is_empty() {
+            continue;
+        }
+        let rename = |t: &mut Term| {
+            if let Term::Blank(l) = t {
+                if premise_blanks.contains(l.as_str()) {
+                    *t = Term::Var(format!("__bn{ri}_{l}"));
+                }
+            }
+        };
+        rewrite_terms(&mut r.premise, &rename);
+        rewrite_terms(&mut r.conclusion, &rename);
+    }
     Ok(Parsed { facts, rules, backward_rules })
+}
+
+fn collect_blanks(stmts: &[[Term; 3]], out: &mut std::collections::HashSet<String>) {
+    for row in stmts {
+        for t in row {
+            match t {
+                Term::Blank(l) => {
+                    out.insert(l.clone());
+                }
+                Term::Formula(inner) => collect_blanks(inner, out),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn rewrite_terms(stmts: &mut [[Term; 3]], f: &impl Fn(&mut Term)) {
+    for row in stmts.iter_mut() {
+        for t in row.iter_mut() {
+            if let Term::Formula(inner) = t {
+                rewrite_terms(inner, f);
+            } else {
+                f(t);
+            }
+        }
+    }
 }
 
 struct Parser<'a> {
@@ -86,11 +134,18 @@ struct Parser<'a> {
     prefixes: std::collections::HashMap<String, String>,
     bnode: usize,
     pathvar: usize,
+    /// Current `{`/`(`/`[` nesting depth — bounded so pathological inputs
+    /// produce a parse ERROR instead of exhausting the stack (the recursive-
+    /// descent parser recurses per nesting level).
+    depth: usize,
 }
+
+/// Maximum bracket-nesting depth (see `Parser::depth`).
+const MAX_DEPTH: usize = 1024;
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str) -> Parser<'a> {
-        Parser { s: src.as_bytes(), i: 0, base: String::new(), prefixes: Default::default(), bnode: 0, pathvar: 0 }
+        Parser { s: src.as_bytes(), i: 0, base: String::new(), prefixes: Default::default(), bnode: 0, pathvar: 0, depth: 0 }
     }
 
     // ---- lexing helpers ------------------------------------------------------
@@ -174,10 +229,14 @@ impl<'a> Parser<'a> {
     fn predicate_object_list(&mut self, subj: &Term, out: &mut Vec<[Term; 3]>) -> Result<(), String> {
         loop {
             self.ws();
-            let pred = self.verb(out)?;
+            let (pred, swapped) = self.verb(out)?;
             loop {
                 let obj = self.term(out)?;
-                out.push([subj.clone(), pred.clone(), obj]);
+                if swapped {
+                    out.push([obj, pred.clone(), subj.clone()]);
+                } else {
+                    out.push([subj.clone(), pred.clone(), obj]);
+                }
                 if !self.eat(b',') {
                     break;
                 }
@@ -194,30 +253,59 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn verb(&mut self, _out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
+    /// A predicate position: returns `(predicate, swapped)` — `swapped` is the
+    /// classic N3 inverse-predicate syntax `is EXPR of` (object and subject
+    /// trade places); `has EXPR` is the explicit forward form.
+    fn verb(&mut self, _out: &mut Vec<[Term; 3]>) -> Result<(Term, bool), String> {
         self.ws();
         if self.starts_with("=>") {
             self.i += 2;
-            return Ok(Term::Iri(LOG_IMPLIES.into()));
+            return Ok((Term::Iri(LOG_IMPLIES.into()), false));
         }
         if self.starts_with("<=") {
             self.i += 2;
             // `conclusion <= premise` — emit log:impliedBy; `parse` routes it into the
             // backward-rule set (goal-directed resolution, see the module doc).
-            return Ok(Term::Iri(LOG_IMPLIED_BY.into()));
+            return Ok((Term::Iri(LOG_IMPLIED_BY.into()), false));
         }
         if self.eat(b'=') {
-            return Ok(Term::Iri(OWL_SAME_AS.into()));
+            return Ok((Term::Iri(OWL_SAME_AS.into()), false));
         }
         // `a` keyword (rdf:type) — only when a standalone token.
         if self.starts_with("a") {
             let j = self.i + 1;
             if j >= self.s.len() || (self.s[j] as char).is_whitespace() || self.s[j] == b'<' {
                 self.i += 1;
-                return Ok(Term::Iri(RDF_TYPE.into()));
+                return Ok((Term::Iri(RDF_TYPE.into()), false));
             }
         }
-        self.atom(_out)
+        // `is EXPR of` — inverse predicate; `has EXPR` — explicit forward.
+        if self.keyword("is") {
+            let pred = self.term(_out)?;
+            self.ws();
+            if !self.keyword("of") {
+                return Err(format!("expected 'of' after 'is <pred>' at byte {}", self.i));
+            }
+            return Ok((pred, true));
+        }
+        if self.keyword("has") {
+            return Ok((self.term(_out)?, false));
+        }
+        Ok((self.atom(_out)?, false))
+    }
+
+    /// Consume `kw` when it stands as a whole token (followed by whitespace).
+    fn keyword(&mut self, kw: &str) -> bool {
+        self.ws();
+        let end = self.i + kw.len();
+        if self.s[self.i..].starts_with(kw.as_bytes())
+            && self.s.get(end).is_none_or(|c| (*c as char).is_whitespace())
+        {
+            self.i = end;
+            true
+        } else {
+            false
+        }
     }
 
     // ---- terms ---------------------------------------------------------------
@@ -328,10 +416,13 @@ impl<'a> Parser<'a> {
         }
         let tok = std::str::from_utf8(&self.s[start..self.i]).unwrap();
         let (pfx, local) = tok.split_once(':').ok_or_else(|| format!("bad token '{tok}' at {start}"))?;
-        let ns = self
-            .prefixes
-            .get(pfx)
-            .ok_or_else(|| format!("unknown prefix '{pfx}:'"))?;
+        let ns = match self.prefixes.get(pfx) {
+            Some(ns) => ns.clone(),
+            // cwm/EYE treat an undeclared default prefix as `@prefix : <#>.`
+            // (document-local names); honor that for ':' only.
+            None if pfx.is_empty() => resolve_iri(&self.base, "#"),
+            None => return Err(format!("unknown prefix '{pfx}:'")),
+        };
         Ok(Term::Iri(format!("{ns}{local}")))
     }
 
@@ -449,7 +540,16 @@ impl<'a> Parser<'a> {
         Ok(Term::Lit(txt, dt.into(), None))
     }
 
+    fn enter(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(format!("nesting deeper than {MAX_DEPTH}"));
+        }
+        Ok(())
+    }
+
     fn read_formula(&mut self) -> Result<Term, String> {
+        self.enter()?;
         self.eat(b'{');
         let mut triples = Vec::new();
         loop {
@@ -462,10 +562,12 @@ impl<'a> Parser<'a> {
             }
             self.statement(&mut triples)?;
         }
+        self.depth -= 1;
         Ok(Term::Formula(triples))
     }
 
     fn read_collection(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
+        self.enter()?;
         self.eat(b'(');
         let mut items = Vec::new();
         loop {
@@ -475,6 +577,7 @@ impl<'a> Parser<'a> {
             }
             items.push(self.term(out)?);
         }
+        self.depth -= 1;
         // Build an rdf:List (first/rest/nil) and return its head; empty → rdf:nil.
         if items.is_empty() {
             return Ok(Term::Iri(RDF_NIL.into()));
@@ -490,6 +593,7 @@ impl<'a> Parser<'a> {
     }
 
     fn read_bnode_propertylist(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
+        self.enter()?;
         self.eat(b'[');
         let node = self.fresh_bnode();
         self.ws();
@@ -498,6 +602,7 @@ impl<'a> Parser<'a> {
             self.ws();
             self.eat(b']');
         }
+        self.depth -= 1;
         Ok(node)
     }
 

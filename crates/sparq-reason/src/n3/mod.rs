@@ -457,8 +457,14 @@ fn match_premise_seeded(
             let mut next = Vec::new();
             for b in &bindings {
                 let head = apply(list_pos, b);
-                if let Some(members) = lists.get(&head) {
-                    for m in members {
+                // Rule-local `( … )` structure, or a data list reached
+                // through a bound variable (walked from the fact store).
+                let members: Option<Vec<Term>> = lists
+                    .get(&head)
+                    .cloned()
+                    .or_else(|| fact_list(&head, facts));
+                if let Some(members) = members {
+                    for m in &members {
                         let mv = apply(m, b);
                         let mut nb = b.clone();
                         if unify_term(var_pos, &mv, &mut nb) {
@@ -471,7 +477,7 @@ fn match_premise_seeded(
         } else if let Some(f) = functional_builtin(&pat[1]) {
             bindings = bindings
                 .into_iter()
-                .filter_map(|b| eval_functional(f, &pat[0], &pat[2], &lists, b))
+                .filter_map(|b| eval_functional(f, &pat[0], &pat[2], &lists, facts, b))
                 .collect();
         } else if let Some(op) = binder_builtin(&pat[1]) {
             bindings = bindings.into_iter().filter_map(|b| eval_binder(op, &pat[0], &pat[2], b)).collect();
@@ -618,6 +624,31 @@ fn unify_walked(a: &Term, c: &Term, s: &mut Binding) -> bool {
     }
 }
 
+/// Walk an rdf:first/rest list that lives in the FACT store (a collection
+/// asserted in the data, reached through a bound variable) — the complement of
+/// [`extract_lists`], which resolves rule-local structure. `rdf:nil` is the
+/// empty list.
+fn fact_list(head: &Term, facts: &FactIndex) -> Option<Vec<Term>> {
+    let first = Term::Iri(parser::RDF_FIRST.into());
+    let rest = Term::Iri(parser::RDF_REST.into());
+    let nil = Term::Iri(parser::RDF_NIL.into());
+    let mut out = Vec::new();
+    let mut cur = head.clone();
+    let mut guard = 0;
+    loop {
+        if cur == nil {
+            return Some(out);
+        }
+        if guard > 100_000 {
+            return None;
+        }
+        guard += 1;
+        let f = facts.ps.get(&(first.clone(), cur.clone()))?.first()?.clone();
+        out.push(f);
+        cur = facts.ps.get(&(rest.clone(), cur.clone()))?.first()?.clone();
+    }
+}
+
 /// Resolve every list node in `premise` (rooted at an rdf:first) to its member sequence.
 fn extract_lists(premise: &[[Term; 3]]) -> HashMap<Term, Vec<Term>> {
     use parser::{RDF_FIRST, RDF_NIL, RDF_REST};
@@ -721,6 +752,10 @@ enum Builtin {
     StrMatches,        // string:matches (regex)
     StrNotMatches,     // string:notMatches (regex, negated; invalid regex ⇒ premise fails)
     StrContainsIgnCase, // string:containsIgnoringCase
+    StrNotGt,           // string:notGreaterThan
+    StrNotLt,           // string:notLessThan
+    StrEqIgnCase,       // string:equalIgnoringCase
+    StrNeIgnCase,       // string:notEqualIgnoringCase
 }
 
 fn builtin(p: &Term) -> Option<Builtin> {
@@ -747,10 +782,14 @@ fn builtin(p: &Term) -> Option<Builtin> {
         return Some(match f {
             "contains" => Builtin::StrContains,
             "containsIgnoringCase" => Builtin::StrContainsIgnCase,
+            "equalIgnoringCase" => Builtin::StrEqIgnCase,
+            "notEqualIgnoringCase" => Builtin::StrNeIgnCase,
             "startsWith" => Builtin::StrStarts,
             "endsWith" => Builtin::StrEnds,
             "greaterThan" => Builtin::StrGt,
             "lessThan" => Builtin::StrLt,
+            "notGreaterThan" => Builtin::StrNotGt,
+            "notLessThan" => Builtin::StrNotLt,
             "matches" => Builtin::StrMatches,
             "notMatches" => Builtin::StrNotMatches,
             _ => return None,
@@ -769,9 +808,13 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
         | Builtin::StrEnds
         | Builtin::StrGt
         | Builtin::StrLt
+        | Builtin::StrNotGt
+        | Builtin::StrNotLt
         | Builtin::StrMatches
         | Builtin::StrNotMatches
-        | Builtin::StrContainsIgnCase => {
+        | Builtin::StrContainsIgnCase
+        | Builtin::StrEqIgnCase
+        | Builtin::StrNeIgnCase => {
             let (Some(x), Some(y)) = (lex(&s), lex(&o)) else { return false };
             match op {
                 Builtin::StrContains => x.contains(y),
@@ -779,9 +822,13 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
                 Builtin::StrEnds => x.ends_with(y),
                 Builtin::StrGt => x > y,
                 Builtin::StrLt => x < y,
+                Builtin::StrNotGt => x <= y,
+                Builtin::StrNotLt => x >= y,
                 Builtin::StrMatches => regex::Regex::new(y).map(|re| re.is_match(x)).unwrap_or(false),
                 Builtin::StrNotMatches => regex::Regex::new(y).map(|re| !re.is_match(x)).unwrap_or(false),
                 Builtin::StrContainsIgnCase => x.to_lowercase().contains(&y.to_lowercase()),
+                Builtin::StrEqIgnCase => x.to_lowercase() == y.to_lowercase(),
+                Builtin::StrNeIgnCase => x.to_lowercase() != y.to_lowercase(),
                 _ => unreachable!(),
             }
         }
@@ -913,8 +960,121 @@ pub fn encode_for_uri(s: &str) -> String {
 /// The numeric value of a literal term (for `math:` builtins).
 fn num(t: &Term) -> Option<f64> {
     match t {
-        Term::Lit(v, _, _) => v.parse::<f64>().ok(),
+        Term::Lit(v, _, _) => match v.as_str() {
+            "INF" | "+INF" => Some(f64::INFINITY),
+            "-INF" => Some(f64::NEG_INFINITY),
+            "NaN" => Some(f64::NAN),
+            _ => v.parse::<f64>().ok(),
+        },
         _ => None,
+    }
+}
+
+/// EXACT numeric tower for the arithmetic `math:` builtins, matching EYE's
+/// Prolog rational arithmetic on the cases the suites exercise: integers and
+/// decimals compute exactly (scaled i128), doubles (an `e` exponent or
+/// INF/NaN) in f64. Strings coerce by lexical shape — `("2.7" "2")
+/// math:difference 0.7` must hold EXACTLY (f64 gives 0.700…0002).
+#[derive(Clone, Copy, Debug)]
+enum NumVal {
+    Int(i128),
+    /// mantissa, scale: value = mantissa / 10^scale.
+    Dec(i128, u32),
+    F64(f64),
+}
+
+fn numval(t: &Term) -> Option<NumVal> {
+    let Term::Lit(v, _, _) = t else { return None };
+    let v = v.trim();
+    match v {
+        "INF" | "+INF" => return Some(NumVal::F64(f64::INFINITY)),
+        "-INF" => return Some(NumVal::F64(f64::NEG_INFINITY)),
+        "NaN" => return Some(NumVal::F64(f64::NAN)),
+        _ => {}
+    }
+    if v.contains(['e', 'E']) {
+        return v.parse::<f64>().ok().map(NumVal::F64);
+    }
+    if let Some((int, frac)) = v.split_once('.') {
+        let digits = format!("{int}{frac}");
+        if let Ok(m) = digits.parse::<i128>() {
+            return Some(NumVal::Dec(m, frac.len() as u32));
+        }
+        return v.parse::<f64>().ok().map(NumVal::F64);
+    }
+    v.parse::<i128>()
+        .ok()
+        .map(NumVal::Int)
+        .or_else(|| v.parse::<f64>().ok().map(NumVal::F64))
+}
+
+impl NumVal {
+    fn to_f64(self) -> f64 {
+        match self {
+            NumVal::Int(i) => i as f64,
+            NumVal::Dec(m, s) => m as f64 / 10f64.powi(s as i32),
+            NumVal::F64(f) => f,
+        }
+    }
+    /// Both values as scale-aligned (mantissa, scale), when exact.
+    fn aligned(a: NumVal, b: NumVal) -> Option<(i128, i128, u32)> {
+        let part = |v: NumVal| match v {
+            NumVal::Int(i) => Some((i, 0u32)),
+            NumVal::Dec(m, s) => Some((m, s)),
+            NumVal::F64(_) => None,
+        };
+        let ((ma, sa), (mb, sb)) = (part(a)?, part(b)?);
+        let s = sa.max(sb);
+        let up = |m: i128, from: u32| -> Option<i128> {
+            m.checked_mul(10i128.checked_pow(s - from)?)
+        };
+        Some((up(ma, sa)?, up(mb, sb)?, s))
+    }
+    fn eq(a: NumVal, b: NumVal) -> bool {
+        match NumVal::aligned(a, b) {
+            Some((x, y, _)) => x == y,
+            None => a.to_f64() == b.to_f64(),
+        }
+    }
+}
+
+/// Drop trailing zero scale: Dec(700, 2) → Dec(7, 1); Dec(30, 1) → Dec(3, 0)
+/// stays a Dec (decimal-typed inputs keep the decimal type, lexical `x.0`).
+fn dec_norm(m: i128, s: u32) -> (i128, u32) {
+    let (mut m, mut s) = (m, s);
+    while s > 0 && m % 10 == 0 {
+        m /= 10;
+        s -= 1;
+    }
+    (m, s)
+}
+
+/// Render a NumVal as an N3 literal, EYE-style: Int → xsd:integer; Dec →
+/// xsd:decimal with at least one fraction digit; F64 → integer when whole
+/// (matching the old behavior), else decimal lexical.
+fn numval_term(v: NumVal) -> Term {
+    match v {
+        NumVal::Int(i) => {
+            Term::Lit(i.to_string(), "http://www.w3.org/2001/XMLSchema#integer".into(), None)
+        }
+        NumVal::Dec(m, s) => {
+            let (m, s) = dec_norm(m, s);
+            let neg = m < 0;
+            let digits = m.unsigned_abs().to_string();
+            let s = s as usize;
+            let (int, frac) = if digits.len() > s {
+                (digits[..digits.len() - s].to_string(), digits[digits.len() - s..].to_string())
+            } else {
+                ("0".to_string(), format!("{:0>width$}", digits, width = s))
+            };
+            let frac = if frac.is_empty() { "0".to_string() } else { frac };
+            Term::Lit(
+                format!("{}{int}.{frac}", if neg { "-" } else { "" }),
+                "http://www.w3.org/2001/XMLSchema#decimal".into(),
+                None,
+            )
+        }
+        NumVal::F64(f) => number_term(f),
     }
 }
 
@@ -1058,6 +1218,7 @@ fn eval_functional(
     subj: &Term,
     obj: &Term,
     lists: &HashMap<Term, Vec<Term>>,
+    facts: &FactIndex,
     b: Binding,
 ) -> Option<Binding> {
     const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -1085,12 +1246,42 @@ fn eval_functional(
             }
         };
     }
-    // Arguments: the list members, or a singleton for the unary (math:/time:) ops.
-    let args: Vec<Term> = match lists.get(subj) {
-        Some(members) => members.iter().map(|m| apply(m, &b)).collect(),
-        None => vec![apply(subj, &b)],
+    // math:negation is bidirectional in EYE: `?x math:negation 3` solves
+    // ?x = -3 (the one reverse mode the suites rely on).
+    if matches!(f, Func::Negation) && !subj.is_ground() && lists.get(subj).is_none() {
+        let s_applied = apply(subj, &b);
+        if !s_applied.is_ground() {
+            let o_applied = apply(obj, &b);
+            if let Some(v) = numval(&o_applied) {
+                let negated = match v {
+                    NumVal::Int(i) => NumVal::Int(i.checked_neg()?),
+                    NumVal::Dec(m, sc) => NumVal::Dec(m.checked_neg()?, sc),
+                    NumVal::F64(x) => NumVal::F64(-x),
+                };
+                let mut nb = b;
+                return unify_term(subj, &numval_term(negated), &mut nb).then_some(nb);
+            }
+            return None;
+        }
+    }
+    // Arguments: the list members (rule-local structure, a data list walked
+    // from the fact store, or `rdf:nil` = the empty list), else a singleton
+    // for the unary (math:/string:/time:) ops.
+    let subj_applied = apply(subj, &b);
+    let resolved_list: Option<Vec<Term>> = match lists.get(subj) {
+        Some(members) => Some(members.iter().map(|m| apply(m, &b)).collect()),
+        None => fact_list(&subj_applied, facts)
+            .map(|ms| ms.iter().map(|m| apply(m, &b)).collect()),
     };
-    if args.is_empty() && !matches!(f, Func::Conjunction | Func::MemberCount) {
+    // The list:-namespace ops are only defined ON lists.
+    if matches!(f, Func::Length | Func::First | Func::Last) && resolved_list.is_none() {
+        return None;
+    }
+    let args: Vec<Term> = match resolved_list {
+        Some(members) => members,
+        None => vec![subj_applied.clone()],
+    };
+    if args.is_empty() && !matches!(f, Func::Conjunction | Func::MemberCount | Func::Length) {
         return None;
     }
     let result: Term = match f {
@@ -1203,92 +1394,275 @@ fn eval_functional(
             number_term(datetime_part(lex(&args[0])?, f)? as f64)
         }
         _ => {
-            let nums: Vec<f64> = args.iter().map(num).collect::<Option<_>>()?;
-            let two = |n: &[f64]| if n.len() == 2 { Some((n[0], n[1])) } else { None };
-            let v = match f {
-                Func::Sum => nums.iter().sum(),
-                Func::Product => nums.iter().product(),
-                Func::Max => nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                Func::Min => nums.iter().copied().fold(f64::INFINITY, f64::min),
-                Func::Difference => {
-                    let (a, b) = two(&nums)?;
-                    a - b
-                }
-                Func::Quotient => {
-                    let (a, b) = two(&nums)?;
-                    if b == 0.0 {
-                        return None;
-                    }
-                    a / b
-                }
-                Func::Exponentiation => {
-                    let (a, b) = two(&nums)?;
-                    a.powf(b)
-                }
-                Func::Logarithm => {
-                    // (x base) → log_base(x); EYE computes log(U)/log(V).
-                    let (x, base) = two(&nums)?;
-                    if x <= 0.0 || base <= 0.0 || base == 1.0 {
-                        return None;
-                    }
-                    x.ln() / base.ln()
-                }
-                Func::Atan2 => {
-                    // EYE's eye.pl: `W is atan(U/V)` — deliberately matched (see module doc).
-                    let (x, y) = two(&nums)?;
-                    if y == 0.0 {
-                        return None;
-                    }
-                    (x / y).atan()
-                }
-                Func::Remainder => {
-                    let (a, b) = two(&nums)?;
-                    if b == 0.0 {
-                        return None;
-                    }
-                    a % b
-                }
-                Func::IntegerQuotient => {
-                    let (a, b) = two(&nums)?;
-                    if b == 0.0 {
-                        return None;
-                    }
-                    (a / b).floor()
-                }
-                Func::Negation => -nums[0],
-                Func::AbsoluteValue => nums[0].abs(),
-                Func::Rounded => nums[0].round(),
-                Func::Floor => nums[0].floor(),
-                Func::Ceiling => nums[0].ceil(),
-                Func::Sin => nums[0].sin(),
-                Func::Cos => nums[0].cos(),
-                Func::Tan => nums[0].tan(),
-                Func::Asin => nums[0].asin(),
-                Func::Acos => nums[0].acos(),
-                Func::Atan => nums[0].atan(),
-                Func::Sinh => nums[0].sinh(),
-                Func::Cosh => nums[0].cosh(),
-                Func::Tanh => nums[0].tanh(),
-                Func::Asinh => nums[0].asinh(),
-                Func::Acosh => nums[0].acosh(),
-                Func::Atanh => nums[0].atanh(),
-                Func::Degrees => nums[0] * 180.0 / std::f64::consts::PI,
-                Func::Radians => nums[0] * std::f64::consts::PI / 180.0,
-                _ => unreachable!(),
-            };
-            if !v.is_finite() {
-                return None; // domain error (asin 2, acosh 0.5, …): the premise fails
+            // Unary numeric/trig/time builtins take a DIRECT value, never a
+            // `( … )` list — `(1) math:rounded ?x` must fail (cwm/EYE agree;
+            // the suites assert it via :FAILURE rules).
+            let unary = matches!(
+                f,
+                Func::Negation
+                    | Func::AbsoluteValue
+                    | Func::Rounded
+                    | Func::Floor
+                    | Func::Ceiling
+                    | Func::Sin
+                    | Func::Cos
+                    | Func::Tan
+                    | Func::Asin
+                    | Func::Acos
+                    | Func::Atan
+                    | Func::Sinh
+                    | Func::Cosh
+                    | Func::Tanh
+                    | Func::Asinh
+                    | Func::Acosh
+                    | Func::Atanh
+                    | Func::Degrees
+                    | Func::Radians
+            );
+            if unary && lists.contains_key(subj) {
+                return None;
             }
-            number_term(v)
+            if let Some(exact) = eval_exact(f, &args) {
+                exact
+            } else {
+                let nums: Vec<f64> = args.iter().map(num).collect::<Option<_>>()?;
+                let two = |n: &[f64]| if n.len() == 2 { Some((n[0], n[1])) } else { None };
+                let v = match f {
+                    Func::Sum => nums.iter().sum(),
+                    Func::Product => nums.iter().product(),
+                    Func::Max => nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    Func::Min => nums.iter().copied().fold(f64::INFINITY, f64::min),
+                    Func::Difference => {
+                        let (a, b) = two(&nums)?;
+                        a - b
+                    }
+                    Func::Quotient => {
+                        let (a, b) = two(&nums)?;
+                        if b == 0.0 {
+                            return None;
+                        }
+                        a / b
+                    }
+                    Func::Exponentiation => {
+                        let (a, b) = two(&nums)?;
+                        a.powf(b)
+                    }
+                    Func::Logarithm => {
+                        // (x base) → log_base(x); EYE computes log(U)/log(V).
+                        let (x, base) = two(&nums)?;
+                        if x <= 0.0 || base <= 0.0 || base == 1.0 {
+                            return None;
+                        }
+                        x.ln() / base.ln()
+                    }
+                    Func::Atan2 => {
+                        // EYE's eye.pl: `W is atan(U/V)` — deliberately matched (see module doc).
+                        let (x, y) = two(&nums)?;
+                        if y == 0.0 {
+                            return None;
+                        }
+                        (x / y).atan()
+                    }
+                    Func::Remainder => {
+                        let (a, b) = two(&nums)?;
+                        if b == 0.0 {
+                            return None;
+                        }
+                        a % b
+                    }
+                    Func::IntegerQuotient => {
+                        let (a, b) = two(&nums)?;
+                        if b == 0.0 {
+                            return None;
+                        }
+                        (a / b).floor()
+                    }
+                    Func::Negation => -nums[0],
+                    Func::AbsoluteValue => nums[0].abs(),
+                    Func::Rounded => (nums[0] + 0.5).floor(), // round-half-UP (suite refs)
+                    Func::Floor => nums[0].floor(),
+                    Func::Ceiling => nums[0].ceil(),
+                    Func::Sin => nums[0].sin(),
+                    Func::Cos => nums[0].cos(),
+                    Func::Tan => nums[0].tan(),
+                    Func::Asin => nums[0].asin(),
+                    Func::Acos => nums[0].acos(),
+                    Func::Atan => nums[0].atan(),
+                    Func::Sinh => nums[0].sinh(),
+                    Func::Cosh => nums[0].cosh(),
+                    Func::Tanh => nums[0].tanh(),
+                    Func::Asinh => nums[0].asinh(),
+                    Func::Acosh => nums[0].acosh(),
+                    Func::Atanh => nums[0].atanh(),
+                    Func::Degrees => nums[0] * 180.0 / std::f64::consts::PI,
+                    Func::Radians => nums[0] * std::f64::consts::PI / 180.0,
+                    _ => unreachable!(),
+                };
+                if v.is_nan() {
+                    return None; // domain error (asin 2, acosh 0.5, …): the premise fails
+                }
+                number_term(v)
+            }
         }
     };
-    // Bind the object variable, or (if already ground) filter on equality.
+    // Bind the object variable; if it is already GROUND, compare NUMERICALLY
+    // when both sides are numbers (so `15.5` matches a computed `15.5e0` and
+    // exact-decimal results match their reference lexical forms), else
+    // structurally.
     let mut nb = b;
+    let obj_applied = apply(obj, &nb);
+    if obj_applied.is_ground() {
+        if let (Some(x), Some(y)) = (numval(&obj_applied), numval(&result)) {
+            return NumVal::eq(x, y).then_some(nb);
+        }
+    }
     if unify_term(obj, &result, &mut nb) {
         Some(nb)
     } else {
         None
     }
+}
+
+/// Exact evaluation of the arithmetic builtins when every argument is an
+/// integer or decimal (scaled-i128): returns `None` to fall back to f64
+/// (doubles involved, overflow, or a non-exact quotient). The RESULT TYPE
+/// follows EYE: all-integer in → integer out; any decimal in → decimal out
+/// (with at least one fraction digit in the lexical form).
+fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
+    let vals: Vec<NumVal> = args.iter().map(numval).collect::<Option<_>>()?;
+    if vals.iter().any(|v| matches!(v, NumVal::F64(_))) {
+        return None;
+    }
+    let any_dec = vals.iter().any(|v| matches!(v, NumVal::Dec(_, _)));
+    let pair = || -> Option<(i128, i128, u32)> {
+        if vals.len() == 2 {
+            NumVal::aligned(vals[0], vals[1])
+        } else {
+            None
+        }
+    };
+    let renorm = |m: i128, s: u32| -> NumVal {
+        if any_dec {
+            NumVal::Dec(m, s)
+        } else {
+            NumVal::Int(m) // s is 0 when no decimals were involved
+        }
+    };
+    // Unary ops: value = m / 10^s; integer-valued results keep the input's
+    // numeric type (decimal in → `x.0` out, matching the cwm references).
+    let unary_int = |round: fn(i128, i128) -> i128| -> Option<NumVal> {
+        let (m, s) = match vals[0] {
+            NumVal::Int(i) => (i, 0u32),
+            NumVal::Dec(m, s) => (m, s),
+            NumVal::F64(_) => return None,
+        };
+        let pow = 10i128.checked_pow(s)?;
+        let v = round(m, pow);
+        Some(if s == 0 { NumVal::Int(v) } else { NumVal::Dec(v, 0) })
+    };
+    let out = match f {
+        Func::Sum => {
+            let mut acc = NumVal::Int(0);
+            for &v in &vals {
+                let (a, b, s) = NumVal::aligned(acc, v)?;
+                acc = NumVal::Dec(a.checked_add(b)?, s);
+            }
+            let NumVal::Dec(m, s) = acc else { return None };
+            renorm(m, s)
+        }
+        Func::Product => {
+            let mut acc = NumVal::Int(1);
+            for &v in &vals {
+                let (ma, sa) = match acc {
+                    NumVal::Int(i) => (i, 0),
+                    NumVal::Dec(m, s) => (m, s),
+                    NumVal::F64(_) => return None,
+                };
+                let (mb, sb) = match v {
+                    NumVal::Int(i) => (i, 0),
+                    NumVal::Dec(m, s) => (m, s),
+                    NumVal::F64(_) => return None,
+                };
+                acc = NumVal::Dec(ma.checked_mul(mb)?, sa.checked_add(sb)?);
+            }
+            let NumVal::Dec(m, s) = acc else { return None };
+            renorm(m, s)
+        }
+        Func::Difference => {
+            let (a, b, s) = pair()?;
+            renorm(a.checked_sub(b)?, s)
+        }
+        Func::Max | Func::Min => {
+            let mut best = vals[0];
+            for &v in &vals[1..] {
+                let (a, b, _) = NumVal::aligned(best, v)?;
+                let take = if matches!(f, Func::Max) { b > a } else { b < a };
+                if take {
+                    best = v;
+                }
+            }
+            best
+        }
+        Func::Quotient => {
+            // Long-divide to an exact decimal if one exists within i128 range.
+            let (mut a, b, _) = pair()?;
+            if b == 0 {
+                return None;
+            }
+            let mut scale = 0u32;
+            while a % b != 0 && scale < 34 {
+                a = a.checked_mul(10)?;
+                scale += 1;
+            }
+            if a % b != 0 {
+                return None; // not exact — f64 fallback
+            }
+            if any_dec || scale > 0 {
+                NumVal::Dec(a / b, scale)
+            } else {
+                NumVal::Int(a / b)
+            }
+        }
+        Func::Remainder => {
+            // Integer remainder only (Prolog rem); anything else → f64.
+            match (vals[0], vals[1]) {
+                (NumVal::Int(a), NumVal::Int(b)) if b != 0 => NumVal::Int(a % b),
+                _ => return None,
+            }
+        }
+        Func::IntegerQuotient => {
+            let (a, b, _) = pair()?;
+            if b == 0 {
+                return None;
+            }
+            NumVal::Int(a.div_euclid(b))
+        }
+        Func::Negation => match vals[0] {
+            NumVal::Int(i) => NumVal::Int(i.checked_neg()?),
+            NumVal::Dec(m, s) => NumVal::Dec(m.checked_neg()?, s),
+            NumVal::F64(_) => return None,
+        },
+        Func::AbsoluteValue => match vals[0] {
+            NumVal::Int(i) => NumVal::Int(i.checked_abs()?),
+            NumVal::Dec(m, s) => NumVal::Dec(m.checked_abs()?, s),
+            NumVal::F64(_) => return None,
+        },
+        // round-half-UP: floor(x + 1/2) — what the suite references encode
+        // (-2.5 → -2, 0.5 → 1, 2.5 → 3). rounded keeps the decimal TYPE
+        // (`-3.0`), while floor/ceiling return integers — both per the cwm
+        // reference outputs.
+        Func::Rounded => unary_int(|m, pow| (m + pow / 2).div_euclid(pow))?,
+        Func::Floor => match unary_int(|m, pow| m.div_euclid(pow))? {
+            NumVal::Dec(m, _) => NumVal::Int(m),
+            v => v,
+        },
+        Func::Ceiling => match unary_int(|m, pow| -((-m).div_euclid(pow)))? {
+            NumVal::Dec(m, _) => NumVal::Int(m),
+            v => v,
+        },
+        _ => return None, // trig/log/exponentiation: f64 path
+    };
+    Some(numval_term(out))
 }
 
 /// Extract a component of an `xsd:dateTime`/`xsd:date` lexical form for `time:` builtins.
