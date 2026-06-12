@@ -466,6 +466,65 @@ impl Graph {
         Ok((dict, triples))
     }
 
+    /// Like [`load_str`](Self::load_str) but resolves relative IRIs in the document
+    /// against `base` — the entry point for documents that carry no `@base` of their
+    /// own (e.g. SHACL shapes graphs addressed by their location, W3C test-suite
+    /// manifests). `format`: as [`load_str`]; the line-based formats ("ntriples" /
+    /// "nquads") only allow absolute IRIs, so `base` has no effect on them.
+    pub fn load_str_with_base(text: &str, format: &str, base: &str) -> Result<Graph, String> {
+        let (dict, triples) = Self::parse_to_triples_with_base(text, format, base)?;
+        Ok(Self::from_parts(dict, triples))
+    }
+
+    /// [`parse_to_triples`](Self::parse_to_triples) with a base IRI for resolving the
+    /// document's relative IRIs (Turtle / TriG; the line-based formats have no
+    /// relative IRIs and ignore `base`). Parses serially — base-IRI documents are
+    /// typically small (shapes graphs, manifests), so the parallel chunked path is
+    /// not worth its base-rewriting complexity here.
+    pub fn parse_to_triples_with_base(
+        text: &str,
+        format: &str,
+        base: &str,
+    ) -> Result<(Dict, Vec<[Id; 3]>), String> {
+        let mut dict = Dict::new();
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        let bytes = text.as_bytes();
+
+        macro_rules! push_triple {
+            ($s:expr, $p:expr, $o:expr) => {{
+                let s = dict.intern(&subject_term($s));
+                let p = dict.intern(&Term::NamedNode($p.clone()));
+                let o = dict.intern($o);
+                triples.push([s, p, o]);
+            }};
+        }
+        match format {
+            "ntriples" | "n-triples" | "nquads" | "n-quads" => {
+                return Self::parse_to_triples(text, format);
+            }
+            "trig" | "application/trig" => {
+                let parser = TriGParser::new()
+                    .with_base_iri(base)
+                    .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
+                for q in parser.for_slice(bytes) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    push_triple!(&q.subject, &q.predicate, &q.object);
+                }
+            }
+            _ => {
+                let parser = TurtleParser::new()
+                    .with_base_iri(base)
+                    .map_err(|e| format!("invalid base IRI {base:?}: {e}"))?;
+                for t in parser.for_slice(bytes) {
+                    let t = t.map_err(|e| e.to_string())?;
+                    push_triple!(&t.subject, &t.predicate, &t.object);
+                }
+            }
+        }
+
+        Ok((dict, triples))
+    }
+
     /// Load an RDF DATASET (N-Quads / TriG) preserving NAMED GRAPHS as separate sub-graphs, so the
     /// engine can evaluate `GRAPH <iri> { … }` / `GRAPH ?g { … }`. Default-graph triples form the
     /// main graph; each named graph becomes a [`named`](Self::named) entry. Formats without named
@@ -1122,6 +1181,26 @@ impl Graph {
         Some([s, p, o])
     }
 
+    /// Iterates every triple of the DEFAULT graph as canonical `[subject, predicate,
+    /// object]` dictionary ids, in sorted (S, P, O) order — the borrowing triple
+    /// iterator for downstream crates (validation, similarity, export) that today
+    /// re-derive it from a raw `store.scan`. Zero allocation per row; resolve ids
+    /// lazily with [`Dict::term`](dict::Dict::term) (always) or
+    /// [`Dict::term_parts`](dict::Dict::term_parts) (real dictionary ids — see
+    /// [`dict::is_inline`]). Because the order is subject-sorted, distinct subjects
+    /// fall out of run boundaries; for distinct objects use
+    /// [`iter_ids_sorted`](Self::iter_ids_sorted)`(2)`.
+    pub fn iter_ids(&self) -> TripleIdIter<'_> {
+        TripleIdIter { scan: self.store.scan(&[None, None, None]), i: 0 }
+    }
+
+    /// [`iter_ids`](Self::iter_ids) sorted by the canonical column `col`
+    /// (0 = subject, 1 = predicate, 2 = object) — e.g. `iter_ids_sorted(2)` yields
+    /// object-sorted triples so distinct objects are adjacent.
+    pub fn iter_ids_sorted(&self, col: usize) -> TripleIdIter<'_> {
+        TripleIdIter { scan: self.store.scan_sorted(&[None, None, None], col), i: 0 }
+    }
+
     // ---- Incremental updates (T17): delta-overlay + WAL durability ------------------
 
     /// Applies an incremental update batch — `deletes` first, then `inserts` (SPARQL's
@@ -1451,6 +1530,33 @@ fn remap_extend(out: &mut Vec<[Id; 3]>, triples: Vec<[Id; 3]>, remap: &[Id]) {
 /// Honours `SPARQ_NO_PREFETCH=1`. Used to measure the prefetch's effect per hardware in isolation,
 /// undiluted by parsing. Not part of the query/build path.
 #[cfg(feature = "parallel")]
+/// Borrowing iterator over a graph's default-graph triples as canonical
+/// `[subject, predicate, object]` ids — see [`Graph::iter_ids`] /
+/// [`Graph::iter_ids_sorted`]. Holds the underlying index scan (a zero-copy
+/// borrow on an overlay-free store), so it borrows the graph for its lifetime.
+pub struct TripleIdIter<'g> {
+    scan: store::Scan<'g>,
+    i: usize,
+}
+
+impl Iterator for TripleIdIter<'_> {
+    type Item = [Id; 3];
+
+    #[inline]
+    fn next(&mut self) -> Option<[Id; 3]> {
+        let row = self.scan.rows.get(self.i)?;
+        self.i += 1;
+        Some(self.scan.to_spo(row))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.scan.rows.len() - self.i;
+        (n, Some(n))
+    }
+}
+
+impl ExactSizeIterator for TripleIdIter<'_> {}
+
 pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
     // Cheap deterministic LCG scatter (no rand dep, no Date/Random harness restrictions).
     let mut x: u64 = 0x9E3779B97F4A7C15;
@@ -2548,6 +2654,117 @@ mod tests {
         let g2 = Graph::open(&dir).unwrap();
         assert_eq!(dump_terms(&g2).len(), 1, "corrupt first record must stop replay at the base");
         assert_eq!(std::fs::read(&wal_path).unwrap().len(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `load_str_with_base`: relative IRIs (subjects, predicates, objects, @prefix-free
+    /// docs) resolve against the supplied base, in Turtle and TriG; an invalid base is
+    /// a clean error; line-based formats ignore the base.
+    #[test]
+    fn load_str_with_base_resolves_relative_iris() {
+        let g = Graph::load_str_with_base("<a> <p> <../up/o> .", "turtle", "http://ex/dir/").unwrap();
+        let scan = g.store.scan(&[None, None, None]);
+        let t = scan.to_spo(&scan.rows.as_ref()[0]);
+        assert_eq!(g.dict.term(t[0]).to_string(), "<http://ex/dir/a>");
+        assert_eq!(g.dict.term(t[1]).to_string(), "<http://ex/dir/p>");
+        assert_eq!(g.dict.term(t[2]).to_string(), "<http://ex/up/o>");
+
+        // A document's own @base still wins over the parameter (RFC 3986 layering).
+        let g = Graph::load_str_with_base("@base <http://other/> . <a> <p> <o> .", "turtle", "http://ex/").unwrap();
+        let scan = g.store.scan(&[None, None, None]);
+        let t = scan.to_spo(&scan.rows.as_ref()[0]);
+        assert_eq!(g.dict.term(t[0]).to_string(), "<http://other/a>");
+
+        // TriG routes through the base-aware parser too (named graphs folded, as load_str).
+        let g = Graph::load_str_with_base("<g> { <a> <p> <o> . }", "trig", "http://ex/").unwrap();
+        assert_eq!(g.len(), 1);
+
+        // N-Triples has no relative IRIs: base is accepted and ignored.
+        let g = Graph::load_str_with_base("<http://ex/a> <http://ex/p> <http://ex/o> .", "ntriples", "http://b/")
+            .unwrap();
+        assert_eq!(g.len(), 1);
+
+        assert!(Graph::load_str_with_base("<a> <p> <o> .", "turtle", "not a iri").is_err());
+    }
+
+    /// `Dict::iter` covers exactly the real ids `1..=len()` in order, with parts that
+    /// reconstruct to the same terms as `term()`.
+    #[test]
+    fn dict_iter_is_dense_and_complete() {
+        let g = Graph::load_str(
+            "@prefix : <http://ex/> . :a :p \"lit\"@en . :a :q 99999999999 . _:b :p :a .",
+            "turtle",
+        )
+        .unwrap();
+        let d = &g.dict;
+        let items: Vec<(Id, String)> = d.iter().map(|(id, _)| (id, d.term(id).to_string())).collect();
+        assert_eq!(items.len(), d.len());
+        assert_eq!(d.iter().len(), d.len(), "ExactSizeIterator must agree with len()");
+        for (i, (id, _)) in items.iter().enumerate() {
+            assert_eq!(*id, (i + 1) as Id, "ids must be dense and 1-based");
+        }
+        let all: Vec<String> = items.into_iter().map(|(_, t)| t).collect();
+        assert!(all.iter().any(|t| t == "<http://ex/a>"));
+        assert!(all.iter().any(|t| t == "\"lit\"@en"));
+    }
+
+    /// `Graph::iter_ids` / `iter_ids_sorted`: full coverage in canonical order, the
+    /// requested sort column actually sorted, and the delta-overlay merged in.
+    #[test]
+    fn graph_iter_ids_orders_and_overlay() {
+        let mut g = Graph::load_str(
+            "@prefix : <http://ex/> . :b :p :x . :a :p :y . :a :q :x . :c :r 5 .",
+            "turtle",
+        )
+        .unwrap();
+        let spo: Vec<[Id; 3]> = g.iter_ids().collect();
+        assert_eq!(spo.len(), g.len());
+        assert!(spo.windows(2).all(|w| w[0] <= w[1]), "iter_ids must be (S,P,O)-sorted");
+        // Same triple set through the object-sorted order.
+        let mut by_obj: Vec<[Id; 3]> = g.iter_ids_sorted(2).collect();
+        assert!(by_obj.windows(2).all(|w| w[0][2] <= w[1][2]), "col 2 must be sorted");
+        let mut spo_sorted = spo.clone();
+        spo_sorted.sort_unstable();
+        by_obj.sort_unstable();
+        assert_eq!(spo_sorted, by_obj);
+        // Distinct subjects via run boundaries == 3 (:a :b :c).
+        let mut subjects: Vec<Id> = spo.iter().map(|t| t[0]).collect();
+        subjects.dedup();
+        assert_eq!(subjects.len(), 3);
+        // Overlay: an applied delta must appear in (and disappear from) the iterator.
+        let t = |s: &str| Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/{s}")));
+        g.apply_delta(&[[t("z"), t("p"), t("x")]], &[]).unwrap();
+        assert_eq!(g.iter_ids().len(), 5);
+        assert_eq!(g.iter_ids().count(), 5);
+        g.apply_delta(&[], &[[t("z"), t("p"), t("x")]]).unwrap();
+        assert_eq!(g.iter_ids().count(), 4);
+    }
+
+    /// REGRESSION (sparq-py TODO): `Graph::save` on a graph whose numeric cache went
+    /// SPARSE (`into_compressed`) must not panic — the dense cache is recomputed from
+    /// the dictionary on save, and the round-trip preserves numeric query behaviour.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn save_after_into_compressed_sparse_numerics() {
+        let dir = std::env::temp_dir().join(format!("sparq_sparse_save_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let g = Graph::load_str(
+            "@prefix : <http://ex/> . :a :v 1.5 . :b :v 2.5 . :c :p :a .",
+            "turtle",
+        )
+        .unwrap()
+        .into_compressed();
+        g.save(&dir).unwrap();
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g2.len(), 3);
+        // The numeric cache must have round-tripped: 1.5 / 2.5 still resolve.
+        let vals: Vec<f64> =
+            g2.dict.iter().filter_map(|(id, _)| g2.numeric_value(id)).collect();
+        assert!(vals.contains(&1.5) && vals.contains(&2.5), "numerics must survive: {vals:?}");
+        // And save_compressed takes the same path.
+        std::fs::remove_dir_all(&dir).ok();
+        g.save_compressed(&dir).unwrap();
+        assert_eq!(Graph::open(&dir).unwrap().len(), 3);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

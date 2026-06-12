@@ -1198,6 +1198,21 @@ impl Dict {
         self.len() == 0
     }
 
+    /// Iterates every REAL dictionary term in id order as `(id, parts)` — the official
+    /// form of the dense-id contract (real ids are exactly `1..=len()`, assigned in
+    /// interning order) that downstream crates previously leaned on by hand via
+    /// `term_parts(1..=len())`. Borrowing and allocation-free per item
+    /// ([`term_parts`](Self::term_parts)); reconstruct an `oxrdf::Term` with
+    /// [`term`](Self::term) where needed. Inline integer ids (see [`is_inline`]) are
+    /// value-carrying, not dictionary entries, so they do not appear here.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (Id, TermParts<'_>)> {
+        // 0..len (a `Range<usize>`, which is ExactSize) mapped to 1-based ids.
+        (0..self.len()).map(move |i| {
+            let id = (i + 1) as Id;
+            (id, self.term_parts(id))
+        })
+    }
+
     /// A rough estimate of the dictionary's heap footprint in bytes (for
     /// benchmarking). Counts the compact `terms` arena (slots + suffix/value/lang
     /// bytes), the shared prefix + datatype tables, and the hash table (bare ids).
