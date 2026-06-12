@@ -23,6 +23,12 @@ default = ["parallel", "regex", "digest"]
 parallel = ["dep:rayon", "sparq-core/parallel"]
 regex = ["dep:regex"]
 digest = ["dep:md-5", "dep:sha1", "dep:sha2"]
+# Characteristic-set star-join cardinality estimation (Neumann & Moerkotte):
+# `cs::CsTable` + `with_cs_table` make the greedy planner consult an injected CS
+# table for star joins instead of the per-predicate independence model. OPT-IN and
+# OFF by default (the wasm bundle and the default native build carry zero CS code);
+# results are identical either way — only join order is affected.
+cs-planner = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -52,3 +58,6 @@ uuid = { version = "1", features = ["v4"] }
 # though the library itself doesn't.
 sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap", "parallel"] }
 rayon.workspace = true
+# The cs-planner q-error gate builds its characteristic-set tables through the
+# dict-id accessor (dev-only; the library never depends on introspection).
+sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }

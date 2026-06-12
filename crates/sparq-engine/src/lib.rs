@@ -15,6 +15,10 @@
 //! paths.
 
 mod construct;
+#[cfg(feature = "cs-planner")]
+pub mod cs;
+#[cfg(all(test, feature = "cs-planner"))]
+mod cs_gate;
 mod dataset;
 mod exec;
 mod explain;
@@ -25,6 +29,8 @@ pub use construct::{
     construct_prepared_with_budget, construct_with_budget, describe, describe_prepared,
     describe_prepared_with_budget, describe_with_budget, triples_to_ntriples,
 };
+#[cfg(feature = "cs-planner")]
+pub use cs::{with_cs_table, CsSet, CsTable};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
 pub use update::{update, update_in_place};
 
