@@ -922,7 +922,7 @@ mod tests {
         store.save(&dir).unwrap();
         let loaded = TripleStore::load_pred_stats(&dir)
             .expect("persisted predstats.bin must load, not fall back to a POS+PSO re-scan");
-        assert_eq!(loaded, store.pred_stats, "loaded pred stats must equal the saved ones");
+        assert_eq!(loaded, *store.pred_stats, "loaded pred stats must equal the saved ones");
         std::fs::remove_dir_all(&dir).ok();
     }
 
