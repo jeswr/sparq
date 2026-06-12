@@ -4,7 +4,8 @@
 //! actual axum server in-process and drives `/sparql` with queries/updates whose
 //! FILTER/BIND expressions call `geof:` — proving the server installs sparq-geo's
 //! registry on the query path (spawn_blocking workers) and the update path (the
-//! double-buffered writer, both the rebuild and the in-place application).
+//! sequenced writer's `ServerApplier`, both the per-batch fork and the in-place
+//! application).
 #![cfg(feature = "geo")]
 
 use sparq_core::Graph;
@@ -82,14 +83,14 @@ async fn ask_with_geof_relation() {
 async fn update_where_with_geof_filter() {
     let base = spawn().await;
     let client = reqwest::Client::new();
-    // The update path (writer rebuild + in-place): classify cities near London.
+    // The update path (writer fork + in-place application): classify cities near London.
     let update = format!(
         "{PREFIXES} INSERT {{ ?city ex:nearLondon true }} WHERE {{ \
            ex:london ex:loc ?here . ?city ex:loc ?there . \
            FILTER(?city != ex:london && geof:distance(?here, ?there, uom:kilometre) < 400) \
          }}"
     );
-    // Twice: the first update exercises apply_by_rebuild, the second apply_in_place.
+    // Twice: each batch exercises both ServerApplier::fork and ServerApplier::apply.
     for _ in 0..2 {
         let resp = client
             .post(format!("{base}/sparql"))

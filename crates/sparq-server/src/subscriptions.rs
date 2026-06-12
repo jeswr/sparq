@@ -10,13 +10,15 @@
 //!
 //! # Architecture: re-evaluate + diff per committed update
 //!
-//! * **Commit hook** — [`crate::http::AppState::apply_update`] bumps a
-//!   `tokio::sync::watch` "commit generation" *after* the atomic graph swap. Every
-//!   `/subscriptions` connection task holds a `watch::Receiver`.
+//! * **Commit hook** — [`crate::http::AppState::apply_update`] advances a
+//!   `tokio::sync::watch` channel to the published generation number *after* the
+//!   sequenced writer's group-commit ack. Every `/subscriptions` connection task holds
+//!   a `watch::Receiver`.
 //! * **Re-evaluation** — when the generation changes, the connection task re-runs each of
-//!   its active SELECTs against a fresh [`crate::http::AppState::snapshot`] on the blocking pool
-//!   (`spawn_blocking`), under the server's [`sparq_engine::QueryBudget`] (query timeout +
-//!   `--max-results` row cap), then diffs against the stored previous result.
+//!   its active SELECTs against a freshly pinned generation
+//!   ([`crate::http::AppState::current`]) on the blocking pool (`spawn_blocking`), under
+//!   the server's [`sparq_engine::QueryBudget`] (query timeout + `--max-results` row
+//!   cap), then diffs against the stored previous result.
 //! * **Diff** — each solution row is canonicalised to its SPARQL-JSON binding object
 //!   (variables sorted by `serde_json`'s map ordering) and the serialised string is the
 //!   row's identity key in a `HashMap<key, binding>`. Added = keys in the new result only;
@@ -359,8 +361,10 @@ async fn reevaluate_all(
 async fn evaluate(state: &AppState, query: String) -> Result<(Vec<String>, HashMap<String, Value>), String> {
     let config = state.config().clone();
     let budget = make_budget(&config, true);
-    let graph = state.snapshot();
-    let task = tokio::task::spawn_blocking(move || eval_rows(&graph, &query, &budget));
+    // Pin the current generation for this evaluation (lock-free; never blocked by the
+    // writer). Each re-evaluation pins afresh, so it always sees the latest commit.
+    let gen = state.current();
+    let task = tokio::task::spawn_blocking(move || eval_rows(gen.snapshot(), &query, &budget));
     let joined = match config.query_timeout {
         Some(t) => tokio::time::timeout(t + TIMEOUT_GRACE, task)
             .await

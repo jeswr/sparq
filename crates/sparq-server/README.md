@@ -69,7 +69,6 @@ the matching `SPARQ_*` environment variable; the environment overrides the defau
 | `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0` disables) | Maximum SELECT result rows, enforced inside the engine via the row budget. Exceeding it is an **honest `413` refusal** (with the limit named in the error) — never a silent truncation. It is a *working-set* bound: a query whose intermediate result exceeds the cap is refused even if a later operator would shrink it (add `LIMIT`/aggregation to stay under). ASK is existence-only and ignores it. |
 | `--max-subscriptions N` | `SPARQ_MAX_SUBSCRIPTIONS` | `256` | Maximum active subscriptions server-wide (T23); further `subscribe` requests are refused with a protocol `error`. |
 | `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | Maximum active subscriptions per WebSocket connection (T23). |
-| `--compact-every N` | `SPARQ_COMPACT_EVERY` | `1024` (`0` disables) | Fold the update delta-overlay back into a fresh immutable index after N update batches have accumulated on a buffer (see the [update concurrency model](#update-concurrency-model)). Each compaction is O(graph), amortised over N updates. |
 | `--verbose` | — | off | Per-request logging via `tower_http::trace::TraceLayer` (respects `RUST_LOG`). |
 
 Robustness, always on:
@@ -113,10 +112,11 @@ refusal and the structured JSON error bodies. `tests/subscriptions.rs` drives th
 WebSocket protocol end to end with `tokio-tungstenite`: initial result, update→diff,
 silence on non-matching updates, unsubscribe, both subscription limits, the oversized
 refusal and slot cleanup after a dropped socket. `tests/updates.rs` covers the
-double-buffered update path: sequential visibility across the buffer swap (lag replay),
-atomicity + recovery after a refused update, a steady-state-vs-rebuild latency smoke
-test, readers staying unblocked during a slow update, compaction equivalence — plus the
-`#[ignore]`d 1M-triple before/after benchmark quoted above.
+generation-ring update path (Wave A): sequential visibility (group-commit ack ⇒ the
+update's generation is published), atomicity + recovery after a refused update,
+concurrent reads proceeding unstalled while updates commit (over HTTP and in-process),
+generation pinning across commits — plus the `#[ignore]`d 1M-triple update-cost
+benchmark.
 
 ## Endpoints
 
@@ -134,52 +134,50 @@ test, readers staying unblocked during a slow update, compaction equivalence —
 
 ### Update concurrency model
 
-Readers and the writer never share a mutable graph. The current dataset is **published**
-as an immutable `Arc<Graph>` in an `RwLock` slot:
+Readers and the writer never share a mutable graph — and, since Wave A, never share a
+lock either. The server state is a **sparq-serve generation ring** (an arc-swapped chain
+of immutable `Graph` snapshots with bounded retention) plus the **single sequenced
+writer** with a group-commit window (`crates/sparq-serve`, research/concurrent-serving.md
+§6):
 
-* **Queries** take a snapshot (`Arc` clone) and evaluate against it for the whole
-  request — the read lock is held only for the refcount bump, so a query is never
-  blocked by an in-flight update beyond the instant of the publish pointer-swap, and an
-  update never waits for queries to finish. Every query sees one consistent committed
-  state (the one published when it started).
-* **Updates** are serialised by a single-writer mutex and run **double-buffered**: two
-  physical graphs alternate between the roles *published* and *spare*. An update
-  (1) *reclaims* the spare — the previously published `Arc`, unwrapped once its last
-  reader snapshot drops (bounded by the query budget: snapshots cannot outlive
-  `--query-timeout` + 2 s grace); (2) *replays* the update the spare missed while it was
-  published; (3) applies the new update via the engine's **`update_in_place`
-  delta-overlay path** (T17) — O(batch) instead of the old O(graph)
-  decode-everything-and-rebuild; (4) *publishes* it with an atomic `Arc` pointer-swap
-  and demotes the old published graph to be the next spare.
-* **Atomicity.** All mutation happens on the off-line buffer, so a failed update
-  (unsupported operation, etc.) returns `400` with **no partial effect** on the
-  published graph; the touched buffer is discarded and rebuilt lazily by the next
-  update.
-* **Subscriptions (T23).** The commit generation is bumped strictly *after* the
-  pointer-swap, so a woken subscription always snapshots a graph at least as new as the
-  commit it was woken for.
-* **Compaction.** In-place updates accumulate in a delta-overlay (scans merge it on the
-  fly); every `--compact-every` batches the buffer's overlay is folded back into a
-  fresh immutable index (O(graph), amortised) so scan speed and memory stay bounded.
+* **Queries** pin the current generation once per request (`GenerationRing::current`, a
+  lock-free arc-swap load, ~10–20 ns) and evaluate against its immutable snapshot for
+  the whole response — streamed bodies keep the generation pinned until the last chunk
+  is written, so every response is snapshot-consistent with query *start*. Readers never
+  wait on the writer, and the writer never waits on (or reclaims from) readers: old
+  generations are freed by ordinary `Arc` drop when their last holder lets go.
+* **Updates** submit to the sequenced writer (`POST` with `application/sparql-update`):
+  every update arriving within a group-commit window (3 ms / 256 updates) is applied —
+  in submission order — to one writer-private working copy and published as **one** new
+  generation; the HTTP 204 returns when that generation is published (group-commit ack).
+  Each batch pays one O(graph) fork (a fresh folded base) plus O(batch) in-place deltas;
+  concurrent submitters amortise the fork across the window.
+* **Atomicity.** A failing update is rejected (`400`) and *skipped*: the writer discards
+  the working copy, re-forks, and replays the batch's other updates, so the published
+  chain never contains a partial effect and batch-mates never see each other's failures.
+* **Subscriptions (T23).** The commit watch advances to the published generation number
+  strictly *after* the writer's ack, so a woken subscription always pins a generation at
+  least as new as the commit it was woken for.
+* **Pods.** Every generation carries a per-pod epoch vector (Wave B's cache-invalidation
+  hook). The server currently tags every update with one **global pod**
+  (`urn:sparq:pod:global`) — honest over-coarse tagging until real visibility-scope
+  extraction lands with the Wave B cache work.
 
-**Costs, honestly stated.** Steady-state update latency on a 1M-triple graph measured
-end-to-end over HTTP: **~330 µs median** (dominated by the HTTP round-trip and SPARQL
-parse; the mutation itself is microseconds) versus **~2.65 s** for the rebuild path that
-previously ran on *every* update — an ~8000x end-to-end speedup (the engine-level gap is
-larger still). The prices: (a) **~2x graph residency** — the second buffer, materialised
-lazily by the first update, which therefore still pays the old O(graph) rebuild cost
-once (as does the first update after a failed one); (b) every `--compact-every`-th
-update pays an O(graph) compaction; (c) if a reader holds a snapshot past the query
-budget, the writer stops waiting for the spare and falls back to one rebuild-priced
-update. Reproduce with:
+**What this replaced, and why.** The previous double-buffered writer (two graphs
+alternating *published*/*spare*, `Arc::try_unwrap` + 200 µs reclaim polling, lag replay,
+`--compact-every` overlay fold-back) had two measured pathologies
+(research/concurrent-serving.md §4.3/§4.4): a reader pinning a snapshot stalled the
+writer for the full reclaim wait (5.4 s, worst-case 32 s), and reclaim polling degraded
+under reader churn. The ring removes both **by design** — there is no reclaim and no
+poll — in exchange for bounded extra residency (the ring retains up to K = 4 old
+generations) and a fork-priced batch commit (the recorded A2 trade; a cheap structural
+fork is the follow-up deliverable). `--compact-every` went with it: each batch's fork
+rebuilds a freshly folded base, so overlays never accumulate across batches. Reproduce
+the update-cost numbers with:
 
 ```sh
 cargo test -p sparq-server --release --test updates -- --ignored --nocapture
 ```
-
-A future `sparq-core` cheap-snapshot API (an `Arc`-shared immutable base under a
-copy-on-write overlay) would remove the 2x residency and the first-update rebuild; the
-server-side wiring would not need to change shape.
 
 ### EXPLAIN — query-plan introspection (T22)
 
