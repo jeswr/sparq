@@ -80,14 +80,14 @@ async fn count_rows(cl: &reqwest::Client, base: &str, query: &str) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Sequential consistency + lag replay
+// Sequential consistency
 // ---------------------------------------------------------------------------
 
-/// Every update in a sequence must be visible to the immediately following query. With
-/// the double buffer, update k is applied to one buffer directly and reaches the other
-/// buffer via lag replay during update k+1 — interleaving queries after every update
-/// exercises both lines (a replay bug would drop an earlier update from every second
-/// published graph).
+/// Every update in a sequence must be visible to the immediately following query: the
+/// 204 is the writer's group-commit ack, which only returns once the generation
+/// containing the update is published — so a fresh pin (the next query) must see it.
+/// Interleaving queries after every update would expose an ack-before-publish bug or a
+/// batch that dropped an earlier update.
 #[tokio::test]
 async fn sequential_updates_are_all_visible() {
     let base = spawn_with(synthetic_graph(1_000), ServerConfig::default()).await;
@@ -111,14 +111,15 @@ async fn sequential_updates_are_all_visible() {
 // ---------------------------------------------------------------------------
 
 /// A refused update (unsupported operation) must leave the published graph untouched —
-/// including when the refusal happens after a *prefix* of the request already applied to
-/// the spare buffer — and the server must keep accepting updates afterwards.
+/// including when the refusal happens after a *prefix* of the request already applied
+/// to the writer's working copy (the writer discards it, re-forks and replays — see
+/// sparq-serve's failed-update policy) — and the server must keep accepting updates.
 #[tokio::test]
 async fn failed_update_is_atomic_and_server_recovers() {
     let base = spawn_with(synthetic_graph(1_000), ServerConfig::default()).await;
     let cl = reqwest::Client::new();
 
-    // Two good updates first, so the double buffer is in steady state.
+    // Two good updates first, so the failure lands on a non-trivial published chain.
     assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/a> <http://ex/q> <http://ex/b> }").await, 204);
     assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/c> <http://ex/q> <http://ex/d> }").await, 204);
 
@@ -135,7 +136,7 @@ async fn failed_update_is_atomic_and_server_recovers() {
     );
     assert_eq!(count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await, 2);
 
-    // The discarded buffer is rebuilt transparently: further updates still work.
+    // The discarded working copy is re-forked transparently: further updates still work.
     assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/e> <http://ex/q> <http://ex/f> }").await, 204);
     assert_eq!(post_update(&cl, &base, "INSERT DATA { <http://ex/g> <http://ex/q> <http://ex/h> }").await, 204);
     assert_eq!(count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await, 4);
