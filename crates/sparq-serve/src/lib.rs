@@ -23,9 +23,10 @@
 //! fire-and-forget ([`Writer::submit_detached`]) submission; failed updates are
 //! reported to their submitter and skipped, never poisoning the batch (policy
 //! documented in the `writer` module). [`GraphApplier`] is the production
-//! [`ApplyUpdates`] strategy — its module docs record the honest snapshot-
-//! production decision (O(graph) fork per batch today) and the deferred
-//! cheap-fork follow-up.
+//! [`ApplyUpdates`] strategy — the STRUCTURAL FORK (`Graph::fork`, Arc-shared
+//! immutable storage + per-generation delta) makes its fork O(pending delta),
+//! with a threshold compaction policy in `seal` bounding the delta (its module
+//! docs record the design and the measured before/after numbers).
 //!
 //! Library-first rule (§6.1): sync, runtime-agnostic, no HTTP and no async-runtime
 //! types anywhere in the API (the writer uses `std::thread` + channels internally).
@@ -47,7 +48,7 @@ mod epoch;
 mod ring;
 mod writer;
 
-pub use applier::GraphApplier;
+pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use ring::{Generation, GenerationRing, RingConfig, DEFAULT_RETAIN};
 pub use writer::{ApplyUpdates, WriteError, Writer, WriterConfig, DEFAULT_MAX_BATCH, DEFAULT_WINDOW};
