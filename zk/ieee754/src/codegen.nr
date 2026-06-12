@@ -1,0 +1,187 @@
+use crate::sizing::{exponent_size, mantissa_size, uint_type};
+
+pub comptime fn float_type_from_params(bits: u8) -> Quoted {
+    let exp_size: u8 = exponent_size(bits);
+    let mant_size: u8 = mantissa_size(bits);
+
+    let exp_type = uint_type(exp_size);
+    let mant_type = uint_type(mant_size);
+    let full_type = uint_type(bits);
+    let type_name = f"f{bits}".quoted_contents();
+    let add_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::add_wide(self.to_parts(), other.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::add::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts(), other.to_parts())) }
+    };
+    let sub_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::sub_wide(self.to_parts(), other.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::sub::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts(), other.to_parts())) }
+    };
+    let mul_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::mul_wide(self.to_parts(), other.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::mul::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts(), other.to_parts())) }
+    };
+    let div_call = if bits == 128 {
+        quote { Self::from_parts($crate::ops::div_wide(self.to_parts(), other.to_parts())) }
+    } else {
+        quote { Self::from_parts($crate::ops::div::<$exp_type, $mant_type, $exp_size, $mant_size>(self.to_parts(), other.to_parts())) }
+    };
+    let from_magnitude_parts = if bits == 128 {
+        quote { $crate::ops::uint_to_float_parts_wide::<INPUT_BITS>(sign, magnitude) }
+    } else if bits == 64 {
+        quote { $crate::ops::uint_to_float_parts_u64::<$exp_size, $mant_size, INPUT_BITS>(sign, magnitude) }
+    } else {
+        quote { $crate::ops::from_u64_work_parts::<$exp_type, $mant_type>($crate::ops::uint_to_float_parts_u64::<$exp_size, $mant_size, INPUT_BITS>(sign, magnitude)) }
+    };
+    let sign_scale = (1 as u128) << ((bits - 1) as u128);
+    let exponent_scale = (1 as u128) << (mant_size as u128);
+    let exponent_mask = ((1 as u128) << (exp_size as u128)) - 1;
+    let mantissa_mask = ((1 as u128) << (mant_size as u128)) - 1;
+    let exponent_pack = if bits == 128 {
+        quote { ((self.exponent as $full_type) << ($mant_size as $full_type)) }
+    } else {
+        quote { ((self.exponent as $full_type) * ($exponent_scale as $full_type)) }
+    };
+
+    quote {
+        pub struct $type_name {
+            sign: bool,
+            exponent: $exp_type,
+            mantissa: $mant_type,
+        }
+
+        impl $type_name {
+            pub fn new(bits: $full_type) -> Self {
+                // Safety: the decoded witness is constrained by re-encoding it with bits()
+                // and asserting that it exactly matches the input bit pattern.
+                let decoded = unsafe { Self::decode_unconstrained(bits) };
+                assert_eq(decoded.bits(), bits);
+
+                decoded
+            }
+
+            unconstrained fn decode_unconstrained(bits: $full_type) -> Self {
+                let sign = (bits & ($sign_scale as $full_type)) == ($sign_scale as $full_type);
+                let exponent = ((bits >> ($mant_size as $full_type)) & ($exponent_mask as $full_type)) as $exp_type;
+                let mantissa = (bits & ($mantissa_mask as $full_type)) as $mant_type;
+
+                Self { sign, exponent, mantissa }
+            }
+
+            pub fn bits(self) -> $full_type {
+                (if self.sign { $sign_scale as $full_type } else { 0 as $full_type })
+                    + $exponent_pack
+                    + (self.mantissa as $full_type)
+            }
+
+            fn from_parts(parts: $crate::parts::FloatParts<$exp_type, $mant_type>) -> Self {
+                Self {
+                    sign: parts.sign,
+                    exponent: parts.exponent,
+                    mantissa: parts.mantissa,
+                }
+            }
+
+            fn to_parts(self) -> $crate::parts::FloatParts<$exp_type, $mant_type> {
+                $crate::parts::FloatParts::new(self.sign, self.exponent, self.mantissa)
+            }
+
+            fn from_magnitude<let INPUT_BITS: u32>(sign: bool, magnitude: u128) -> Self {
+                Self::from_parts($from_magnitude_parts)
+            }
+
+        }
+
+        impl std::ops::Add for $type_name {
+            fn add(self, other: Self) -> Self {
+                $add_call
+            }
+        }
+
+        impl std::ops::Sub for $type_name {
+            fn sub(self, other: Self) -> Self {
+                $sub_call
+            }
+        }
+
+        impl std::ops::Mul for $type_name {
+            fn mul(self, other: Self) -> Self {
+                $mul_call
+            }
+        }
+
+        impl std::ops::Div for $type_name {
+            fn div(self, other: Self) -> Self {
+                $div_call
+            }
+        }
+
+        impl std::convert::From<u8> for $type_name {
+            fn from(value: u8) -> Self {
+                Self::from_magnitude::<8>(false, value as u128)
+            }
+        }
+
+        impl std::convert::From<u16> for $type_name {
+            fn from(value: u16) -> Self {
+                Self::from_magnitude::<16>(false, value as u128)
+            }
+        }
+
+        impl std::convert::From<u32> for $type_name {
+            fn from(value: u32) -> Self {
+                Self::from_magnitude::<32>(false, value as u128)
+            }
+        }
+
+        impl std::convert::From<u64> for $type_name {
+            fn from(value: u64) -> Self {
+                Self::from_magnitude::<64>(false, value as u128)
+            }
+        }
+
+        impl std::convert::From<u128> for $type_name {
+            fn from(value: u128) -> Self {
+                Self::from_magnitude::<128>(false, value)
+            }
+        }
+
+        impl std::convert::From<i8> for $type_name {
+            fn from(value: i8) -> Self {
+                let (sign, magnitude) = $crate::ops::signed_magnitude_i8(value);
+
+                Self::from_magnitude::<8>(sign, magnitude)
+            }
+        }
+
+        impl std::convert::From<i16> for $type_name {
+            fn from(value: i16) -> Self {
+                let (sign, magnitude) = $crate::ops::signed_magnitude_i16(value);
+
+                Self::from_magnitude::<16>(sign, magnitude)
+            }
+        }
+
+        impl std::convert::From<i32> for $type_name {
+            fn from(value: i32) -> Self {
+                let (sign, magnitude) = $crate::ops::signed_magnitude_i32(value);
+
+                Self::from_magnitude::<32>(sign, magnitude)
+            }
+        }
+
+        impl std::convert::From<i64> for $type_name {
+            fn from(value: i64) -> Self {
+                let (sign, magnitude) = $crate::ops::signed_magnitude_i64(value);
+
+                Self::from_magnitude::<64>(sign, magnitude)
+            }
+        }
+    }
+}
+
+pub comptime fn generate_float_type(_item: TypeDefinition, bits: u8) -> Quoted {
+    float_type_from_params(bits)
+}
