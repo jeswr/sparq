@@ -1648,23 +1648,20 @@ fn is_sparql_directive_start(bytes: &[u8], k: usize) -> bool {
 /// `#` comments. Returns the offset just past the `.`, or `None` if EOF is reached first
 /// (malformed/incomplete → caller falls back to the serial parser).
 ///
-/// Sets `*saw_bnode` if a blank node syntax (`[`, `(` collection, or `_:`) is seen in the normal
-/// state: blank-node identity is document-scoped, so independently-parsed chunks would restart
-/// blank-node numbering and collide on merge — the caller must then fall back to serial.
+/// Blank-node syntax (`[...]` property lists, `(...)` collections, `_:` labels) needs no
+/// special handling here: in VALID Turtle a `.` followed by whitespace/EOF/`#` cannot occur
+/// inside them outside of the strings/IRIs/comments already skipped — DECIMAL/DOUBLE require
+/// a digit or exponent immediately after the dot, and PN_LOCAL / BLANK_NODE_LABEL dots must
+/// be followed by a continuation character — so every offset returned is a true top-level
+/// end-of-statement. (On INVALID input a mis-split makes some chunk fail to parse, and
+/// [`parse_turtle_chunked`] redoes the document serially.) See [`turtle_chunks`] for why
+/// chunk-independent parsing of the blank nodes themselves is sound.
 #[cfg(feature = "parallel")]
-fn next_terminator(bytes: &[u8], start: usize, saw_bnode: &mut bool) -> Option<usize> {
+fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
     let n = bytes.len();
     let mut i = start;
     while i < n {
         match bytes[i] {
-            b'[' | b'(' => {
-                *saw_bnode = true;
-                i += 1;
-            }
-            b'_' if bytes.get(i + 1) == Some(&b':') => {
-                *saw_bnode = true;
-                i += 2;
-            }
             b'#' => {
                 while i < n && bytes[i] != b'\n' {
                     i += 1;
@@ -1725,14 +1722,36 @@ fn next_terminator(bytes: &[u8], start: usize, saw_bnode: &mut bool) -> Option<u
 /// `@base` directives followed by triple statements. Each chunk is `preamble + a run of
 /// statements`, so the prefixes are in scope in every chunk. Bails (→ serial) on SPARQL-style
 /// `PREFIX`/`BASE`, directives interspersed among the triples, or anything it cannot scan.
+///
+/// BLANK NODES do not force a serial fallback. (They used to bail this function out — and 42
+/// `_:` labels among the 1.5 M statements of the real Wikidata slice silently forfeited the
+/// entire ~2.9× chunk-parallel speedup.) Document-scoped blank-node identity survives
+/// chunk-independent parsing because the per-chunk partial dicts are merged into the global
+/// [`Dict`], which interns blank nodes BY LABEL (`merge_remap` → `intern_blank`):
+///
+/// - LABELED `_:x`: oxttl preserves the written label verbatim
+///   (`BlankNode::new_unchecked(label)`), so occurrences of `_:x` in *different* chunks intern
+///   to the SAME global id — exactly the document-scoped unification the serial parser
+///   produces, even for labels reused in arbitrarily distant statements. The dict merge IS the
+///   shared label-intern map; no per-chunk label namespacing, boundary scanning, or post-pass
+///   unification is needed.
+/// - ANONYMOUS `[...]` / `(...)`: a nest is confined to one statement, hence to one chunk, so
+///   anonymous nodes never need cross-chunk unification — only cross-chunk *distinctness*.
+///   oxttl mints them via `BlankNode::default()`, a fresh random 128-bit id (thread-safe), so
+///   distinctness holds with the same probabilistic guarantee the serial parser already relies
+///   on WITHIN a single document (a fresh random id colliding with another anonymous id, or
+///   with a user-written label, is equally improbable either way — parallelism adds no new
+///   collision class, only more draws from the same 2^128 space).
+///
+/// The parallel result therefore equals the serial parse up to anonymous blank-node ids,
+/// which differ run-to-run even between two serial parses.
 #[cfg(feature = "parallel")]
 fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
     let n = bytes.len();
-    let mut saw_bnode = false;
     // Phase 1: consume the leading @-directive preamble.
     let mut i = skip_ws_comments(bytes, 0);
     while i < n && bytes[i] == b'@' {
-        i = next_terminator(bytes, i, &mut saw_bnode)?;
+        i = next_terminator(bytes, i)?;
         i = skip_ws_comments(bytes, i);
     }
     if i < n && is_sparql_directive_start(bytes, i) {
@@ -1740,8 +1759,7 @@ fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
     }
     let pre_end = i;
 
-    // Phase 2: collect the body's top-level terminators; bail on any interspersed directive
-    // or any blank node (document-scoped identity can't be parsed chunk-independently).
+    // Phase 2: collect the body's top-level terminators; bail on any interspersed directive.
     let mut terms: Vec<usize> = Vec::new();
     let mut j = pre_end;
     loop {
@@ -1752,10 +1770,7 @@ fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
         if bytes[k] == b'@' || is_sparql_directive_start(bytes, k) {
             return None;
         }
-        let t = next_terminator(bytes, k, &mut saw_bnode)?;
-        if saw_bnode {
-            return None;
-        }
+        let t = next_terminator(bytes, k)?;
         terms.push(t);
         j = t;
     }
@@ -1785,15 +1800,24 @@ fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
 
 /// Parse Turtle in parallel by statement-boundary chunking (see [`turtle_chunks`]). If the input
 /// is not safely splittable, OR any chunk fails to parse (an over-eager split), it falls back to
-/// the serial parser — so the result is always identical to a plain serial Turtle parse.
+/// the serial parser — so the result always equals a plain serial Turtle parse, up to anonymous
+/// blank-node ids (which differ run-to-run even between two serial parses; labeled blank nodes
+/// and all ground terms are byte-identical).
 #[cfg(feature = "parallel")]
 fn parse_turtle_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
+    let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 8192 + 1).max(1);
+    parse_turtle_chunked(bytes, target)
+}
+
+/// [`parse_turtle_parallel`] with an explicit chunk-count target — separated so the
+/// differential tests can force small documents to fan out.
+#[cfg(feature = "parallel")]
+fn parse_turtle_chunked(bytes: &[u8], target: usize) -> Result<(Dict, Vec<[Id; 3]>), String> {
     use rayon::prelude::*;
     let serial = || {
         let mut dict = Dict::new();
         parse_turtle_chunk(bytes, &mut dict).map(|t| (dict, t))
     };
-    let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 8192 + 1).max(1);
     let chunks = match turtle_chunks(bytes, target) {
         Some(c) if c.len() > 1 => c,
         _ => return serial(),
@@ -2161,16 +2185,108 @@ mod tests {
         assert_eq!(decoded(&pd, &pt), decoded(&sd, &st), "parallel split must equal serial");
         assert!(pt.len() >= 1500);
 
-        // Blank nodes ([ ], ( ), _:label) must BAIL to the serial parser (chunk-independent
-        // parsing would collide their document-scoped identity). We can't compare anonymous
-        // blank-node labels across two parses (oxttl mints fresh ones each run), so we assert
-        // the bail itself plus a matching triple count.
-        let bn = "@prefix : <http://ex/> .\n:a :p [ :q :r ] .\n:x :y ( :i1 :i2 ) .\n_:b :z :w .\n".repeat(300);
-        assert!(turtle_chunks(bn.as_bytes(), 32).is_none(), "blank nodes must bail to serial");
-        let (_, bt) = parse_turtle_parallel(bn.as_bytes()).unwrap();
-        let mut bsd = Dict::new();
-        let bst = parse_turtle_chunk(bn.as_bytes(), &mut bsd).unwrap();
-        assert_eq!(bt.len(), bst.len(), "blank-node doc triple count must match serial");
+        // Blank-node docs fan out too (the dict merge unifies labels by term equality — see
+        // turtle_chunks). The differential coverage lives in
+        // parallel_turtle_bnodes_match_serial; here just pin that the splitter no longer bails.
+        let bn = format!(
+            "@prefix : <http://ex/> .\n{}",
+            ":a :p [ :q :r ] .\n:x :y ( :i1 :i2 ) .\n_:b :z :w .\n".repeat(300)
+        );
+        assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
+    }
+
+    /// Decodes a parsed triple sequence to strings with blank nodes renumbered by FIRST
+    /// OCCURRENCE in document order. This makes serial-vs-parallel comparison EXACT (plain
+    /// `assert_eq!`) rather than requiring graph-isomorphism search: the chunked parse
+    /// preserves document order (chunks merge in order), labeled blank nodes keep their
+    /// written labels 1:1 in both parses, and anonymous blank nodes are minted at the same
+    /// document positions — so the two parses are equivalent under a 1:1 blank-node
+    /// relabeling IFF these canonical sequences are equal (the first-occurrence renumbering
+    /// is itself the witness mapping).
+    #[cfg(feature = "parallel")]
+    fn canon_bnodes(d: &Dict, t: &[[Id; 3]]) -> Vec<[String; 3]> {
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut out = Vec::with_capacity(t.len());
+        for &[s, p, o] in t {
+            let mut conv = |id: Id| match d.term(id) {
+                Term::BlankNode(b) => {
+                    let next = seen.len();
+                    format!("_:c{}", *seen.entry(b.as_str().to_owned()).or_insert(next))
+                }
+                other => other.to_string(),
+            };
+            out.push([conv(s), conv(p), conv(o)]);
+        }
+        out
+    }
+
+    /// Differential tests for the parallel Turtle path on BLANK-NODE documents — the inputs
+    /// that previously forced a serial fallback. Each case asserts the doc actually splits
+    /// into >1 chunk and that the chunked parse equals the serial parse after canonical
+    /// blank-node renumbering (see [`canon_bnodes`]).
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_bnodes_match_serial() {
+        let differential = |ttl: &str, target: usize| {
+            let chunks = turtle_chunks(ttl.as_bytes(), target).expect("doc must fan out");
+            assert!(chunks.len() > 1, "doc must split into multiple chunks");
+            let (pd, pt) = parse_turtle_chunked(ttl.as_bytes(), target).unwrap();
+            let mut sd = Dict::new();
+            let st = parse_turtle_chunk(ttl.as_bytes(), &mut sd).unwrap();
+            assert_eq!(
+                canon_bnodes(&pd, &pt),
+                canon_bnodes(&sd, &st),
+                "chunked parse must equal serial up to anonymous bnode ids"
+            );
+        };
+
+        // 1. Same LABEL in distant statements (first and last, crossing every chunk
+        //    boundary) plus labels shared between adjacent statements: the merge must
+        //    unify each label to ONE node, exactly like the serial document-scoped parse.
+        let mut ttl = String::from("@prefix : <http://ex/> .\n_:shared :starts :here .\n");
+        for i in 0..400 {
+            ttl.push_str(&format!(":s{i} :p :o{i} .\n_:b{} :links _:b{} .\n", i / 3, i / 3 + 1));
+        }
+        ttl.push_str("_:shared :ends :here .\n");
+        differential(&ttl, 16);
+
+        // 2. Anonymous nests + collections: fresh ids must stay distinct across chunks, and
+        //    each nest's internal structure must survive chunking intact.
+        let mut anon = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..300 {
+            anon.push_str(&format!(
+                ":r{i} :has [ :p{i} [ :q \"v{i}.w\" ] ; :list ( 1 2.5 \"three\" ) ] .\n"
+            ));
+        }
+        differential(&anon, 16);
+
+        // 3. Pathological ALL-bnode doc: every subject/object a labeled bnode, chained
+        //    across consecutive statements so every chunk boundary cuts a shared label.
+        let mut chain = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..500 {
+            chain.push_str(&format!("_:n{i} :next _:n{} .\n", i + 1));
+        }
+        differential(&chain, 16);
+
+        // 4. The Wikidata shape that motivated the fix: a handful of labeled bnodes sprinkled
+        //    through a large ground-statement body (formerly: any one of them forfeited the
+        //    whole parallel parse).
+        let mut sparse = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..600 {
+            if i % 97 == 0 {
+                sparse.push_str(&format!(":s{i} :somevalue _:sv{} .\n", i / 97));
+            } else {
+                sparse.push_str(&format!(":s{i} :p :o{i} .\n"));
+            }
+        }
+        differential(&sparse, 16);
+
+        // 5. Bnode-free control through the same harness (the pre-existing fan-out case).
+        let mut ground = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..400 {
+            ground.push_str(&format!(":s{i} :p \"lit {i}\" ; :q {i}.5 .\n"));
+        }
+        differential(&ground, 16);
     }
 
     #[cfg(feature = "mmap")]
