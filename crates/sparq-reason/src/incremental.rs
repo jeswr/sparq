@@ -1729,28 +1729,93 @@ fn eval_n3_builtin(
 }
 
 /// Evaluate one rule's premise. `seed = Some((plain_ix, fact))` is the counting
-/// delta-rewriting: the seed plain atom matches exactly `fact`; plain atoms BEFORE it match
-/// the pre-delta store, atoms AFTER it the post-delta store (see [`N3Cx::atom_candidates`]).
+/// delta-rewriting: the seed plain atom matches exactly `fact`; plain atoms BEFORE it (by
+/// their ORIGINAL `plain_ix`) match the pre-delta store, atoms after it the post-delta store
+/// (see [`N3Cx::atom_candidates`]).
+///
+/// EVALUATION order is dynamic — joins are commutative, so the binding set is unchanged —
+/// to keep each step anchored: the seed atom runs first, then greedily the most-bound plain
+/// atom / any ready builtin; guards (pure filters over already-bound variables) run last,
+/// which is where the engine's `order_premise` lands them too. Without this, atoms placed
+/// before the seed in premise order would enumerate whole predicate extents per seed fact
+/// (quadratic in the extent — measured 18s on the 1k-doc WAC pod, vs ~1s with anchoring).
 fn n3_fire(rule: &N3CompiledRule, cx: &N3Cx, seed: Option<(usize, &[N3Term; 3])>) -> Vec<NB> {
     let mut binds: Vec<NB> = vec![NB::default()];
+    let mut bound: FxHashSet<String> = FxHashSet::default();
+    let mut remaining: Vec<&N3Atom> = Vec::with_capacity(rule.atoms.len());
+    // Seed first.
     for atom in &rule.atoms {
-        match atom {
-            N3Atom::Plain { pat, plain_ix } => {
+        if let (N3Atom::Plain { pat, plain_ix }, Some((six, f))) = (atom, seed) {
+            if *plain_ix == six {
                 let mut next = Vec::new();
                 for b in &binds {
-                    if let Some((six, f)) = seed {
-                        if *plain_ix == six {
-                            if let Some(nb) = n3_unify_atom(pat, f, b) {
-                                next.push(nb);
-                            }
-                            continue;
-                        }
+                    if let Some(nb) = n3_unify_atom(pat, f, b) {
+                        next.push(nb);
                     }
-                    let phase = match seed {
-                        Some((six, _)) if *plain_ix < six => N3Phase::Pre,
-                        Some(_) => N3Phase::Post,
-                        None => N3Phase::Free,
+                }
+                binds = next;
+                for t in pat {
+                    n3_term_vars(t, &mut bound);
+                }
+                continue;
+            }
+        }
+        remaining.push(atom);
+    }
+    let anchored = |t: &N3Term, bound: &FxHashSet<String>| match t {
+        N3Term::Var(v) => bound.contains(v),
+        _ => true,
+    };
+    while !remaining.is_empty() && !binds.is_empty() {
+        // Pick: ready builtin > most-anchored plain atom > guard (last).
+        let mut pick: Option<usize> = None;
+        let mut best_score = -1i32;
+        for (i, atom) in remaining.iter().enumerate() {
+            match atom {
+                N3Atom::Builtin { op, s, o } => {
+                    let s_ready = {
+                        let mut vs = FxHashSet::default();
+                        n3_term_vars(s, &mut vs);
+                        vs.is_subset(&bound)
                     };
+                    let o_ready = {
+                        let mut vs = FxHashSet::default();
+                        n3_term_vars(o, &mut vs);
+                        vs.is_subset(&bound)
+                    };
+                    let ready = match op {
+                        N3Builtin::LogEq | N3Builtin::LogNe => s_ready && o_ready,
+                        N3Builtin::LogUri => s_ready || o_ready,
+                        _ => s_ready,
+                    };
+                    if ready {
+                        pick = Some(i);
+                        break;
+                    }
+                }
+                N3Atom::Plain { pat, .. } => {
+                    let score = i32::from(anchored(&pat[0], &bound))
+                        + i32::from(anchored(&pat[2], &bound));
+                    if score > best_score {
+                        best_score = score;
+                        pick = Some(i);
+                    }
+                }
+                N3Atom::Guard { .. } => {}
+            }
+        }
+        // Only guards (or a never-ready builtin) left: take the first remaining.
+        let i = pick.unwrap_or(0);
+        let atom = remaining.remove(i);
+        match atom {
+            N3Atom::Plain { pat, plain_ix } => {
+                let phase = match seed {
+                    Some((six, _)) if *plain_ix < six => N3Phase::Pre,
+                    Some(_) => N3Phase::Post,
+                    None => N3Phase::Free,
+                };
+                let mut next = Vec::new();
+                for b in &binds {
                     let (s, o) = (n3_apply(&pat[0], b), n3_apply(&pat[2], b));
                     for f in cx.atom_candidates(&s, &pat[1], &o, phase) {
                         if let Some(nb) = n3_unify_atom(pat, &f, b) {
@@ -1759,19 +1824,21 @@ fn n3_fire(rule: &N3CompiledRule, cx: &N3Cx, seed: Option<(usize, &[N3Term; 3])>
                     }
                 }
                 binds = next;
+                for t in pat {
+                    n3_term_vars(t, &mut bound);
+                }
             }
             N3Atom::Builtin { op, s, o } => {
                 binds = binds
                     .into_iter()
                     .filter_map(|b| eval_n3_builtin(*op, s, o, &b, cx.unsupported))
                     .collect();
+                n3_term_vars(s, &mut bound);
+                n3_term_vars(o, &mut bound);
             }
             N3Atom::Guard { inner } => {
                 binds.retain(|b| !n3_guard_matches(inner, cx.guards, b));
             }
-        }
-        if binds.is_empty() {
-            break;
         }
     }
     binds
