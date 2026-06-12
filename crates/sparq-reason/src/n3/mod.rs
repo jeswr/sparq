@@ -1836,7 +1836,12 @@ fn eval_functional(
                     _ => return None,
                 }
             }
-            Term::Formula(merged)
+            if merged.is_empty() {
+                // the empty formula IS the literal true
+                Term::Lit("true".into(), parser::XSD_BOOLEAN.into(), None)
+            } else {
+                Term::Formula(merged)
+            }
         }
         Func::MemberCount => match &args[..] {
             // a `( … )` list: its length; a quoted formula: its DISTINCT triple count
