@@ -56,6 +56,9 @@ use crate::Vocab;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
+const OWL_NS: &str = "http://www.w3.org/2002/07/owl#";
+const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
+
 /// An RDFS-materialized triple set maintained **incrementally** under base inserts/deletes.
 ///
 /// Owns the base (asserted) triples, the derived set with exact derivation counts, and the
@@ -304,6 +307,1011 @@ impl MaterializedGraph {
     pub fn full_rebuilds(&self) -> usize {
         self.rebuilds
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+// Incremental OWL 2 RL maintenance
+// ════════════════════════════════════════════════════════════════════════════════════════
+//
+// Extends the T18 counting approach to the OWL 2 RL profile. The same closed-TBox argument
+// applies to the *monotone, non-recursive* OWL-RL assertional rules — prp-spo1 (rdfs7),
+// cax-sco (rdfs9), prp-dom/prp-rng (rdfs2/3), prp-inv1/2, prp-symp, prp-eqp1/2, cax-eqc1/2 —
+// because with the TBox fixed, every derivation is one deterministic step from a base triple
+// (the property-orientation closure `px` precomposes subPropertyOf/inverseOf/symmetric/
+// equivalentProperty chains, exactly like the batch engine's `PropExpand`).
+//
+// **prp-trp (TransitiveProperty)** is the one recursive-over-the-ABox rule supported here.
+// Plain counting cannot handle it (derived edges feed their own rederivation), so it gets a
+// dedicated **transitive layer**: for each transitive property the *effective edge set* (base
+// assertions oriented through `px`, plus inflow from other transitive properties' closures) is
+// maintained as an exact multiset, and the property's transitive closure is recomputed — cost
+// proportional to that property's subgraph, not the dataset — whenever a delta touches an
+// inflow predicate. The old/new closure sets are diffed and the diff is pushed through the
+// counting sweep as virtual base facts, so counts stay exact and deletes stay cheap.
+//
+// **Documented fallbacks** (each detected cheaply, counted in `full_rebuilds`):
+// * TBox mutations (subClassOf/subPropertyOf/domain/range/equivalentClass/equivalentProperty/
+//   inverseOf/sameAs/restriction-family predicates, or typing a property Symmetric/Transitive/
+//   Functional/InverseFunctional) → full re-materialization, like the RDFS v1 fallback. This
+//   covers the scm-* schema rules: they only fire on TBox facts, which makes the "scm-* rules
+//   derive TBox facts" problem a non-issue for ABox deltas — the closed TBox already includes
+//   the full scm closure (computed at rebuild), and ABox deltas can never trigger scm-*.
+// * Ontologies using the *recursive/equality* features — `owl:sameAs` (entity rewriting is
+//   non-local), Functional/InverseFunctionalProperty (derive sameAs), property chains,
+//   restrictions/cardinality/hasKey/oneOf/intersection/union — run in **fallback mode**:
+//   every mutation re-materializes via `materialize_owl_rl` (correct, just not incremental).
+//   On realistic ABox-update workloads these features live in the (static) TBox, so the mode
+//   is decided once at load; the hot path is the counting mode.
+// * Deltas mentioning the occurrence-guarded vocabulary (`owl:Thing`/`owl:Nothing`, the XSD
+//   numeric-tower datatypes) rebuild, because the batch engine's `pre_monotone` facts are
+//   occurrence-dependent.
+//
+// The differential property test (tests/incremental_owl_prop.rs) holds the closure equal to
+// from-scratch `materialize_owl_rl` after every batch of a randomized edit sequence.
+//
+// NOTE for the merge (batch-engine quirk, deliberately mirrored here): on the batch monotone
+// path (`rdfs_closure` with an active `PropExpand`), a property that has a domain/range but
+// appears nowhere in the property-orientation TBox (no subPropertyOf/inverseOf/symmetric/
+// equivalent edge) is absent from the px map, so its assertions emit NO domain/range typing —
+// the full fixpoint path *does* emit it. Likely a batch completeness bug in
+// `rdfs::build_prop_expand` (all_props never includes domain/range-only properties); owned by
+// the owl.rs/rdfs.rs thread. `emit_std` below reproduces it so the differential tests hold.
+
+/// OWL vocabulary ids for the incremental OWL-RL graph, interned once at construction
+/// (mirrors the private `owl::Owl` — owned by the owl.rs thread, so duplicated additively).
+struct OwlIds {
+    same_as: Id,
+    inverse_of: Id,
+    symmetric: Id,
+    transitive: Id,
+    equiv_prop: Id,
+    equiv_class: Id,
+    functional: Id,
+    inv_functional: Id,
+    property_chain: Id,
+    on_property: Id,
+    some_values: Id,
+    all_values: Id,
+    has_value: Id,
+    intersection: Id,
+    union: Id,
+    has_key: Id,
+    max_cardinality: Id,
+    max_qual_card: Id,
+    on_class: Id,
+    one_of: Id,
+    different_from: Id,
+    thing: Id,
+    nothing: Id,
+    owl_class: Id,
+    /// XSD numeric-tower edges `(sub, sup)`, topologically ordered subs-before-sups
+    /// (mirrors `owl::XSD_HIERARCHY`).
+    xsd: Vec<(Id, Id)>,
+    /// Occurrence-guarded ids: `owl:Thing`, `owl:Nothing`, every XSD tower datatype. A delta
+    /// triple mentioning one of these can change the batch `pre_monotone` facts → rebuild.
+    special: FxHashSet<Id>,
+}
+
+impl OwlIds {
+    fn intern(dict: &mut Dict) -> OwlIds {
+        let mut o = |frag: &str| dict.intern_iri(&format!("{OWL_NS}{frag}"));
+        let same_as = o("sameAs");
+        let inverse_of = o("inverseOf");
+        let symmetric = o("SymmetricProperty");
+        let transitive = o("TransitiveProperty");
+        let equiv_prop = o("equivalentProperty");
+        let equiv_class = o("equivalentClass");
+        let functional = o("FunctionalProperty");
+        let inv_functional = o("InverseFunctionalProperty");
+        let property_chain = o("propertyChainAxiom");
+        let on_property = o("onProperty");
+        let some_values = o("someValuesFrom");
+        let all_values = o("allValuesFrom");
+        let has_value = o("hasValue");
+        let intersection = o("intersectionOf");
+        let union = o("unionOf");
+        let has_key = o("hasKey");
+        let max_cardinality = o("maxCardinality");
+        let max_qual_card = o("maxQualifiedCardinality");
+        let on_class = o("onClass");
+        let one_of = o("oneOf");
+        let different_from = o("differentFrom");
+        let thing = o("Thing");
+        let nothing = o("Nothing");
+        let owl_class = o("Class");
+        const XSD_HIERARCHY: &[(&str, &str)] = &[
+            ("byte", "short"),
+            ("short", "int"),
+            ("int", "long"),
+            ("long", "integer"),
+            ("integer", "decimal"),
+            ("unsignedByte", "unsignedShort"),
+            ("unsignedShort", "unsignedInt"),
+            ("unsignedInt", "unsignedLong"),
+            ("unsignedLong", "nonNegativeInteger"),
+            ("nonNegativeInteger", "integer"),
+            ("positiveInteger", "nonNegativeInteger"),
+            ("negativeInteger", "nonPositiveInteger"),
+            ("nonPositiveInteger", "integer"),
+        ];
+        let xsd: Vec<(Id, Id)> = XSD_HIERARCHY
+            .iter()
+            .map(|&(a, b)| {
+                (dict.intern_iri(&format!("{XSD_NS}{a}")), dict.intern_iri(&format!("{XSD_NS}{b}")))
+            })
+            .collect();
+        let mut special: FxHashSet<Id> = xsd.iter().flat_map(|&(a, b)| [a, b]).collect();
+        special.insert(thing);
+        special.insert(nothing);
+        OwlIds {
+            same_as,
+            inverse_of,
+            symmetric,
+            transitive,
+            equiv_prop,
+            equiv_class,
+            functional,
+            inv_functional,
+            property_chain,
+            on_property,
+            some_values,
+            all_values,
+            has_value,
+            intersection,
+            union,
+            has_key,
+            max_cardinality,
+            max_qual_card,
+            on_class,
+            one_of,
+            different_from,
+            thing,
+            nothing,
+            owl_class,
+            xsd,
+            special,
+        }
+    }
+}
+
+/// Maintenance regime the current base supports (telemetry; decided at every rebuild).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwlMode {
+    /// Counting-exact, no transitive properties: mirrors the batch *monotone* fast path
+    /// (`rdfs_closure` + `MonoOwl`) — subClassOf/subPropertyOf/domain/range/equivalentClass/
+    /// equivalentProperty/inverseOf/SymmetricProperty.
+    CountingMono,
+    /// Counting-exact with TransitiveProperty: mirrors the batch *fixpoint* path; prp-trp is
+    /// handled by the exact transitive layer (see module notes).
+    CountingFixpoint,
+    /// The base uses recursive/equality features (sameAs, Functional/InverseFunctional,
+    /// chains, restrictions, cardinality, hasKey, oneOf, intersection/union) — every mutation
+    /// re-materializes via [`crate::materialize_owl_rl`] (documented fallback).
+    Fallback,
+}
+
+/// An OWL-2-RL-materialized triple set maintained **incrementally** under base inserts and
+/// deletes — the OWL sibling of [`MaterializedGraph`]. The closure always equals what
+/// [`crate::materialize_owl_rl`] would produce from scratch on the current base (the
+/// differential property tests assert exactly that after every random edit batch).
+///
+/// Unlike the RDFS sibling, mutations take `&mut Dict`: the fallback path re-materializes
+/// through the batch engine, which interns vocabulary on the fly.
+pub struct MaterializedOwlGraph {
+    v: Vocab,
+    ow: OwlIds,
+    /// Explicitly asserted triples (set semantics).
+    base: FxHashSet<[Id; 3]>,
+    mode: OwlMode,
+    /// Derived triple -> exact one-step derivation count (counting modes; empty in fallback).
+    counts: FxHashMap<[Id; 3], u32>,
+    /// TBox-derived facts rebuilt wholesale at every rebuild: subClassOf/subPropertyOf closure
+    /// triples, the domain/range (scm-dom*/rng*) closure, post-equivalences (scm-eqc2/eqp2),
+    /// and the occurrence-guarded `pre_monotone` facts plus their sweep emissions.
+    schema_facts: FxHashSet<[Id; 3]>,
+    // ---- the closed TBox (counting modes) ----
+    sc_closure: FxHashMap<Id, Vec<Id>>,
+    sp_closure: FxHashMap<Id, Vec<Id>>,
+    dom_used: FxHashMap<Id, Vec<Id>>,
+    rng_used: FxHashMap<Id, Vec<Id>>,
+    /// Property-orientation closure `p -> [(r, swapped)]` (the batch `PropExpand` semantics).
+    px: FxHashMap<Id, Vec<(Id, bool)>>,
+    /// Whether the px map is consulted at all (mono mode: only when inverseOf/symmetric
+    /// present, mirroring the batch; fixpoint mode: always, with identity default).
+    px_active: bool,
+    // ---- transitive layer (fixpoint mode) ----
+    transitive: FxHashSet<Id>,
+    /// Asserted predicate -> the transitive properties (with orientation) its edges feed.
+    inflow: FxHashMap<Id, Vec<(Id, bool)>>,
+    /// Transitive property -> other transitive properties (with orientation) reachable via px
+    /// (closure edges transfer there during the layer fixpoint).
+    trans_transfer: FxHashMap<Id, Vec<(Id, bool)>>,
+    /// Exact multiset of base-derived effective edges per transitive property.
+    e0: FxHashMap<Id, FxHashMap<(Id, Id), u32>>,
+    /// Current transitive-layer facts (each supported by +1 self count + counted emissions).
+    virtual_facts: FxHashSet<[Id; 3]>,
+    // ---- fallback mode ----
+    fallback_closure: FxHashSet<[Id; 3]>,
+    // ---- rebuild triggers ----
+    tbox_preds: FxHashSet<Id>,
+    axiom_types: FxHashSet<Id>,
+    rebuilds: usize,
+}
+
+impl MaterializedOwlGraph {
+    /// Build the graph from `base_triples` and fully materialize the OWL 2 RL closure (same
+    /// result as [`crate::materialize_owl_rl`]), recording whatever supporting state the
+    /// detected [`OwlMode`] needs for incremental updates.
+    pub fn new(dict: &mut Dict, base_triples: &[[Id; 3]]) -> Self {
+        let v = Vocab::intern(dict);
+        let ow = OwlIds::intern(dict);
+        let tbox_preds: FxHashSet<Id> = [
+            v.sub_class,
+            v.sub_prop,
+            v.domain,
+            v.range,
+            ow.equiv_class,
+            ow.equiv_prop,
+            ow.inverse_of,
+            ow.same_as,
+            ow.property_chain,
+            ow.on_property,
+            ow.some_values,
+            ow.all_values,
+            ow.has_value,
+            ow.intersection,
+            ow.union,
+            ow.has_key,
+            ow.max_cardinality,
+            ow.max_qual_card,
+            ow.on_class,
+            ow.one_of,
+        ]
+        .into_iter()
+        .collect();
+        let axiom_types: FxHashSet<Id> =
+            [ow.symmetric, ow.transitive, ow.functional, ow.inv_functional].into_iter().collect();
+        let mut g = MaterializedOwlGraph {
+            v,
+            ow,
+            base: base_triples.iter().copied().collect(),
+            mode: OwlMode::Fallback,
+            counts: FxHashMap::default(),
+            schema_facts: FxHashSet::default(),
+            sc_closure: FxHashMap::default(),
+            sp_closure: FxHashMap::default(),
+            dom_used: FxHashMap::default(),
+            rng_used: FxHashMap::default(),
+            px: FxHashMap::default(),
+            px_active: false,
+            transitive: FxHashSet::default(),
+            inflow: FxHashMap::default(),
+            trans_transfer: FxHashMap::default(),
+            e0: FxHashMap::default(),
+            virtual_facts: FxHashSet::default(),
+            fallback_closure: FxHashSet::default(),
+            tbox_preds,
+            axiom_types,
+            rebuilds: 0,
+        };
+        g.rematerialize(dict);
+        g.rebuilds = 0; // the initial materialization is not a fallback
+        g
+    }
+
+    /// Does mutating `t` require a full rebuild (TBox / axiom typing / occurrence-guarded id)?
+    fn triggers_rebuild(&self, t: &[Id; 3]) -> bool {
+        self.tbox_preds.contains(&t[1])
+            || (t[1] == self.v.ty && self.axiom_types.contains(&t[2]))
+            || t.iter().any(|id| self.ow.special.contains(id))
+    }
+
+    /// Full re-detection + re-materialization from the current base (counts/state rebuilt for
+    /// whichever [`OwlMode`] the base now supports).
+    fn rematerialize(&mut self, dict: &mut Dict) {
+        self.rebuilds += 1;
+        self.counts.clear();
+        self.schema_facts.clear();
+        self.virtual_facts.clear();
+        self.e0.clear();
+        self.fallback_closure.clear();
+
+        // ---- 1. Scan the base: raw TBox maps + feature detection + special occurrences ----
+        let (v, ow) = (&self.v, &self.ow);
+        let mut sc: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let mut sp: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let mut dom: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let mut rng: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let mut inverse: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let mut symmetric: FxHashSet<Id> = FxHashSet::default();
+        let mut transitive: FxHashSet<Id> = FxHashSet::default();
+        let mut equiv_class: Vec<(Id, Id)> = Vec::new();
+        let mut equiv_prop: Vec<(Id, Id)> = Vec::new();
+        let mut fallback = false;
+        let fallback_preds: FxHashSet<Id> = [
+            ow.same_as,
+            ow.property_chain,
+            ow.on_property,
+            ow.some_values,
+            ow.all_values,
+            ow.has_value,
+            ow.intersection,
+            ow.union,
+            ow.has_key,
+            ow.max_cardinality,
+            ow.max_qual_card,
+            ow.on_class,
+            ow.one_of,
+        ]
+        .into_iter()
+        .collect();
+        let mut occurring_special: FxHashSet<Id> = FxHashSet::default();
+        for &[s, p, o] in &self.base {
+            if p == v.sub_class {
+                sc.entry(s).or_default().push(o);
+            } else if p == v.sub_prop {
+                sp.entry(s).or_default().push(o);
+            } else if p == v.domain {
+                dom.entry(s).or_default().push(o);
+            } else if p == v.range {
+                rng.entry(s).or_default().push(o);
+            } else if p == ow.inverse_of {
+                inverse.entry(s).or_default().push(o);
+                inverse.entry(o).or_default().push(s);
+            } else if p == ow.equiv_class {
+                equiv_class.push((s, o));
+            } else if p == ow.equiv_prop {
+                equiv_prop.push((s, o));
+            } else if p == v.ty {
+                if o == ow.symmetric {
+                    symmetric.insert(s);
+                } else if o == ow.transitive {
+                    transitive.insert(s);
+                } else if o == ow.functional || o == ow.inv_functional {
+                    fallback = true;
+                }
+            }
+            if fallback_preds.contains(&p) {
+                fallback = true;
+            }
+            for id in [s, p, o] {
+                if ow.special.contains(&id) {
+                    occurring_special.insert(id);
+                }
+            }
+        }
+
+        // ---- 2. Guards: vocabulary entanglement the counting modes do not model ----
+        // (a) reserved predicates participating in the property-orientation graph;
+        // (b) OWL axiom classes reachable in the class graph (typing could *derive* an axiom).
+        if !fallback {
+            let reserved: [Id; 9] = [
+                v.ty,
+                v.sub_class,
+                v.sub_prop,
+                v.domain,
+                v.range,
+                ow.equiv_class,
+                ow.equiv_prop,
+                ow.inverse_of,
+                ow.different_from,
+            ];
+            let in_prop_graph = |id: Id| {
+                sp.contains_key(&id)
+                    || sp.values().any(|qs| qs.contains(&id))
+                    || inverse.contains_key(&id)
+                    || symmetric.contains(&id)
+                    || transitive.contains(&id)
+                    || equiv_prop.iter().any(|&(a, b)| a == id || b == id)
+                    || dom.contains_key(&id)
+                    || rng.contains_key(&id)
+            };
+            if reserved.iter().any(|&id| in_prop_graph(id)) {
+                fallback = true;
+            }
+            let axioms = [ow.symmetric, ow.transitive, ow.functional, ow.inv_functional];
+            let in_class_graph = |id: Id| {
+                sc.contains_key(&id)
+                    || sc.values().any(|ds| ds.contains(&id))
+                    || equiv_class.iter().any(|&(a, b)| a == id || b == id)
+            };
+            if axioms.iter().any(|&id| in_class_graph(id)) {
+                fallback = true;
+            }
+        }
+
+        if fallback {
+            self.mode = OwlMode::Fallback;
+            let mut all: Vec<[Id; 3]> = self.base.iter().copied().collect();
+            crate::materialize_owl_rl(dict, &mut all);
+            self.fallback_closure = all.into_iter().collect();
+            return;
+        }
+
+        // ---- 3. pre_monotone facts (occurrence-guarded; mirror owl::pre_monotone) ----
+        let mut pre_facts: Vec<[Id; 3]> = Vec::new();
+        for &id in [ow.thing, ow.nothing].iter() {
+            if occurring_special.contains(&id) {
+                pre_facts.push([id, v.ty, ow.owl_class]);
+            }
+        }
+        let mut xsd_chain: Vec<(Id, Id)> = Vec::new();
+        for &(sub, sup) in &ow.xsd {
+            if occurring_special.contains(&sub) || xsd_chain.iter().any(|&(_, b)| b == sub) {
+                xsd_chain.push((sub, sup));
+            }
+        }
+        for &(sub, sup) in &xsd_chain {
+            pre_facts.push([sub, v.sub_class, sup]);
+            sc.entry(sub).or_default().push(sup); // they join the TBox, like the batch
+        }
+
+        // ---- 4. Fold equivalences, saturate the TBox ----
+        for &(a, b) in &equiv_class {
+            sc.entry(a).or_default().push(b);
+            sc.entry(b).or_default().push(a);
+        }
+        for &(a, b) in &equiv_prop {
+            sp.entry(a).or_default().push(b);
+            sp.entry(b).or_default().push(a);
+        }
+        self.sc_closure = transitive_closure(&sc);
+        self.sp_closure = transitive_closure(&sp);
+        self.transitive = transitive;
+
+        let fixpoint_mode = !self.transitive.is_empty();
+        self.mode = if fixpoint_mode { OwlMode::CountingFixpoint } else { OwlMode::CountingMono };
+
+        // ---- 5. Domain/range closure ----
+        if fixpoint_mode {
+            // The batch FIXPOINT additionally transposes domain/range through owl:inverseOf
+            // ((p inv q),(p domain c) ⊢ (q range c) and vice versa) — iterate transposition +
+            // re-closure to the (small, TBox-only) fixpoint.
+            let (mut d, mut r) = (dom.clone(), rng.clone());
+            loop {
+                let df = close_dr(&d, &self.sp_closure, &self.sc_closure);
+                let rf = close_dr(&r, &self.sp_closure, &self.sc_closure);
+                let mut changed = false;
+                let add =
+                    |m: &mut FxHashMap<Id, Vec<Id>>, q: Id, cs: &[Id], changed: &mut bool| {
+                        let e = m.entry(q).or_default();
+                        for &c in cs {
+                            if !e.contains(&c) {
+                                e.push(c);
+                                *changed = true;
+                            }
+                        }
+                    };
+                for (&p, qs) in &inverse {
+                    for &q in qs {
+                        if let Some(cs) = df.get(&p) {
+                            add(&mut r, q, cs, &mut changed);
+                        }
+                        if let Some(cs) = rf.get(&p) {
+                            add(&mut d, q, cs, &mut changed);
+                        }
+                    }
+                }
+                if !changed {
+                    self.dom_used = df;
+                    self.rng_used = rf;
+                    break;
+                }
+            }
+        } else {
+            self.dom_used = close_dr(&dom, &self.sp_closure, &self.sc_closure);
+            self.rng_used = close_dr(&rng, &self.sp_closure, &self.sc_closure);
+        }
+
+        // ---- 6. Property-orientation closure (mirrors rdfs::build_prop_expand) ----
+        self.px_active = fixpoint_mode || !inverse.is_empty() || !symmetric.is_empty();
+        self.px = build_px(&self.sp_closure, &inverse, &symmetric);
+
+        // ---- 7. Transitive layer (fixpoint mode) ----
+        self.inflow.clear();
+        self.trans_transfer.clear();
+        if fixpoint_mode {
+            // Predicates whose asserted edges feed a transitive property's effective edge set.
+            let mut preds: FxHashSet<Id> = self.px.keys().copied().collect();
+            preds.extend(self.transitive.iter().copied());
+            for q in preds {
+                let mut feeds: Vec<(Id, bool)> = Vec::new();
+                // A transitive property with no other TBox mention has no px entry; its
+                // identity orientation still feeds its own edge set.
+                let identity = [(q, false)];
+                let entries: &[(Id, bool)] = match self.px.get(&q) {
+                    Some(e) => e,
+                    None => &identity,
+                };
+                for &(r, swap) in entries {
+                    if self.transitive.contains(&r) {
+                        feeds.push((r, swap));
+                    }
+                }
+                if !feeds.is_empty() {
+                    self.inflow.insert(q, feeds);
+                }
+            }
+            // Closure-edge transfer between transitive properties (everything in px[r] except
+            // r's own identity).
+            for &r in &self.transitive {
+                let mut tr: Vec<(Id, bool)> = Vec::new();
+                for &(r2, swap) in px_entries(&self.px, r) {
+                    if self.transitive.contains(&r2) && !(r2 == r && !swap) {
+                        tr.push((r2, swap));
+                    }
+                }
+                if !tr.is_empty() {
+                    self.trans_transfer.insert(r, tr);
+                }
+            }
+            // Exact effective-edge multisets from the asserted base.
+            for &[s, p, o] in &self.base {
+                if p == self.v.ty {
+                    continue;
+                }
+                if let Some(feeds) = self.inflow.get(&p) {
+                    for &(r, swap) in feeds {
+                        let e = if swap { (o, s) } else { (s, o) };
+                        *self.e0.entry(r).or_default().entry(e).or_insert(0) += 1;
+                    }
+                }
+            }
+            self.virtual_facts = self.compute_virtual();
+        }
+
+        // ---- 8. Counting sweep over the base + the transitive layer ----
+        let asserted: Vec<[Id; 3]> = self.base.iter().copied().collect();
+        for t in self.count_sweep(&asserted) {
+            *self.counts.entry(t).or_insert(0) += 1;
+        }
+        let virt: Vec<[Id; 3]> = self.virtual_facts.iter().copied().collect();
+        for &t in &virt {
+            *self.counts.entry(t).or_insert(0) += 1; // the layer fact itself
+        }
+        for t in self.count_sweep(&virt) {
+            *self.counts.entry(t).or_insert(0) += 1; // its one-step consequences
+        }
+
+        // ---- 9. Schema facts (rebuilt wholesale; never touched by ABox deltas) ----
+        for (&c, ds) in &self.sc_closure {
+            self.schema_facts.extend(ds.iter().map(|&d| [c, v.sub_class, d]));
+        }
+        for (&p, qs) in &self.sp_closure {
+            self.schema_facts.extend(qs.iter().map(|&q| [p, v.sub_prop, q]));
+        }
+        for (&p, cs) in &self.dom_used {
+            self.schema_facts.extend(cs.iter().map(|&c| [p, v.domain, c]));
+        }
+        for (&p, cs) in &self.rng_used {
+            self.schema_facts.extend(cs.iter().map(|&c| [p, v.range, c]));
+        }
+        // post_equivalences (scm-eqc2/eqp2): mutual subsumption ⊢ equivalence, both ways.
+        for (rel, eq) in [(&self.sc_closure, ow.equiv_class), (&self.sp_closure, ow.equiv_prop)] {
+            for (&a, bs) in rel {
+                for &b in bs {
+                    if a != b && rel.get(&b).is_some_and(|r| r.contains(&a)) {
+                        self.schema_facts.insert([a, eq, b]);
+                        self.schema_facts.insert([b, eq, a]);
+                    }
+                }
+            }
+        }
+        // pre_monotone facts + their one-step emissions.
+        let mut pre_emit = Vec::new();
+        for &t in &pre_facts {
+            self.schema_facts.insert(t);
+            self.emit_owl(t, &mut pre_emit);
+        }
+        self.schema_facts.extend(pre_emit);
+    }
+
+    /// All one-step consequences (exact emission multiset) of one triple against the closed
+    /// TBox — the OWL analogue of `rdfs::emit_consequences` (see the merge note on the
+    /// monotone-path px quirk this mirrors).
+    fn emit_owl(&self, [s, p, o]: [Id; 3], out: &mut Vec<[Id; 3]>) {
+        let v = &self.v;
+        if p == v.ty {
+            if let Some(ds) = self.sc_closure.get(&o) {
+                out.extend(ds.iter().map(|&d| [s, v.ty, d]));
+            }
+            return;
+        }
+        if p == self.ow.different_from {
+            // owl::pre_monotone adds the symmetric edge to the base before the closure, so
+            // both the mirror and the mirror's own consequences are part of this emission.
+            out.push([o, p, s]);
+            self.emit_std([o, p, s], out);
+        }
+        self.emit_std([s, p, o], out);
+    }
+
+    /// The plain-edge emission (everything except the rdf:type branch / differentFrom mirror).
+    fn emit_std(&self, [s, p, o]: [Id; 3], out: &mut Vec<[Id; 3]>) {
+        let v = &self.v;
+        if self.px_active {
+            let entries: &[(Id, bool)] = match self.px.get(&p) {
+                Some(e) => e,
+                // Monotone batch path: px-absent properties emit nothing (mirrored quirk).
+                // Fixpoint batch path: identity — domain/range typing still applies.
+                None if self.mode == OwlMode::CountingFixpoint => &[],
+                None => return,
+            };
+            let identity = [(p, false)];
+            let entries = if entries.is_empty() { &identity[..] } else { entries };
+            for &(r, swap) in entries {
+                let (rs, ro) = if swap { (o, s) } else { (s, o) };
+                if !(r == p && !swap) {
+                    out.push([rs, r, ro]);
+                }
+                if let Some(cs) = self.dom_used.get(&r) {
+                    out.extend(cs.iter().map(|&c| [rs, v.ty, c]));
+                }
+                if let Some(cs) = self.rng_used.get(&r) {
+                    out.extend(cs.iter().map(|&c| [ro, v.ty, c]));
+                }
+            }
+        } else {
+            if let Some(qs) = self.sp_closure.get(&p) {
+                out.extend(qs.iter().map(|&q| [s, q, o]));
+            }
+            if let Some(cs) = self.dom_used.get(&p) {
+                out.extend(cs.iter().map(|&c| [s, v.ty, c]));
+            }
+            if let Some(cs) = self.rng_used.get(&p) {
+                out.extend(cs.iter().map(|&c| [o, v.ty, c]));
+            }
+        }
+    }
+
+    /// [`emit_owl`] over a slice (parallel for large inputs, mirroring `rdfs::sweep`).
+    #[cfg(feature = "parallel")]
+    fn count_sweep(&self, triples: &[[Id; 3]]) -> Vec<[Id; 3]> {
+        use rayon::prelude::*;
+        const PAR_THRESHOLD: usize = 4096;
+        if triples.len() < PAR_THRESHOLD {
+            let mut out = Vec::new();
+            for &t in triples {
+                self.emit_owl(t, &mut out);
+            }
+            return out;
+        }
+        triples
+            .par_iter()
+            .fold(Vec::new, |mut acc, &t| {
+                self.emit_owl(t, &mut acc);
+                acc
+            })
+            .reduce(Vec::new, |mut a, mut b| {
+                a.append(&mut b);
+                a
+            })
+    }
+    #[cfg(not(feature = "parallel"))]
+    fn count_sweep(&self, triples: &[[Id; 3]]) -> Vec<[Id; 3]> {
+        let mut out = Vec::new();
+        for &t in triples {
+            self.emit_owl(t, &mut out);
+        }
+        out
+    }
+
+    /// The transitive layer: per transitive property, the transitive closure of its effective
+    /// edge set (e0 ∪ inflow from other transitive properties' closures), to a fixpoint across
+    /// properties. Cost is proportional to the transitive subgraph, never the whole base.
+    fn compute_virtual(&self) -> FxHashSet<[Id; 3]> {
+        let mut order: Vec<Id> = self.transitive.iter().copied().collect();
+        order.sort_unstable();
+        let mut edges: FxHashMap<Id, FxHashSet<(Id, Id)>> = FxHashMap::default();
+        for &r in &order {
+            edges.insert(r, self.e0.get(&r).map(|m| m.keys().copied().collect()).unwrap_or_default());
+        }
+        loop {
+            let mut changed = false;
+            for &r in &order {
+                let closed = tc_pairs(&edges[&r]);
+                if closed.len() != edges[&r].len() {
+                    changed = true;
+                }
+                let mut transfers: Vec<(Id, (Id, Id))> = Vec::new();
+                if let Some(tr) = self.trans_transfer.get(&r) {
+                    for &(r2, swap) in tr {
+                        for &(x, z) in &closed {
+                            transfers.push((r2, if swap { (z, x) } else { (x, z) }));
+                        }
+                    }
+                }
+                edges.insert(r, closed);
+                for (r2, e) in transfers {
+                    if edges.entry(r2).or_default().insert(e) {
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut out = FxHashSet::default();
+        for (r, es) in edges {
+            out.extend(es.into_iter().map(|(x, z)| [x, r, z]));
+        }
+        out
+    }
+
+    /// Recompute the transitive layer and apply the (usually tiny) diff to the counts: each
+    /// entering/leaving layer fact adjusts its own +1 support and its emission multiset.
+    fn refresh_virtual(&mut self) {
+        let new_virtual = self.compute_virtual();
+        let added: Vec<[Id; 3]> = new_virtual.difference(&self.virtual_facts).copied().collect();
+        let removed: Vec<[Id; 3]> = self.virtual_facts.difference(&new_virtual).copied().collect();
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
+        let mut inc_emit = self.count_sweep(&added);
+        inc_emit.extend(added.iter().copied());
+        for t in inc_emit {
+            *self.counts.entry(t).or_insert(0) += 1;
+        }
+        let mut dec_emit = self.count_sweep(&removed);
+        dec_emit.extend(removed.iter().copied());
+        for t in dec_emit {
+            self.decrement(t);
+        }
+        self.virtual_facts = new_virtual;
+    }
+
+    fn decrement(&mut self, t: [Id; 3]) {
+        match self.counts.get_mut(&t) {
+            Some(c) if *c > 1 => *c -= 1,
+            Some(_) => {
+                self.counts.remove(&t);
+            }
+            None => debug_assert!(
+                false,
+                "OWL derivation-count underflow: decremented a consequence never counted"
+            ),
+        }
+    }
+
+    /// Update the transitive layer's effective-edge multisets for a delta (sign = +1 insert,
+    /// -1 delete). Returns whether any multiset changed at the SET level (layer refresh due).
+    fn apply_e0(&mut self, delta: &[[Id; 3]], positive: bool) -> bool {
+        let mut touched = false;
+        for &[s, p, o] in delta {
+            if p == self.v.ty {
+                continue;
+            }
+            let Some(feeds) = self.inflow.get(&p) else { continue };
+            for &(r, swap) in feeds {
+                let e = if swap { (o, s) } else { (s, o) };
+                let m = self.e0.entry(r).or_default();
+                if positive {
+                    let c = m.entry(e).or_insert(0);
+                    *c += 1;
+                    if *c == 1 {
+                        touched = true;
+                    }
+                } else {
+                    match m.get_mut(&e) {
+                        Some(c) if *c > 1 => *c -= 1,
+                        Some(_) => {
+                            m.remove(&e);
+                            touched = true;
+                        }
+                        None => debug_assert!(false, "transitive-layer e0 underflow"),
+                    }
+                }
+            }
+        }
+        touched
+    }
+
+    /// Insert base triples; the closure is updated incrementally in the counting modes (one
+    /// emission sweep over the delta + a transitive-layer refresh when touched). Returns the
+    /// number of triples actually added to the base. TBox / axiom-typing / occurrence-guarded
+    /// deltas, and any mutation in fallback mode, re-materialize (see module notes).
+    pub fn insert(&mut self, dict: &mut Dict, triples: &[[Id; 3]]) -> usize {
+        let mut added: Vec<[Id; 3]> = Vec::with_capacity(triples.len());
+        let mut rebuild = false;
+        for &t in triples {
+            if self.base.insert(t) {
+                rebuild |= self.triggers_rebuild(&t);
+                added.push(t);
+            }
+        }
+        if added.is_empty() {
+            return 0;
+        }
+        if rebuild || self.mode == OwlMode::Fallback {
+            self.rematerialize(dict);
+            return added.len();
+        }
+        for t in self.count_sweep(&added) {
+            *self.counts.entry(t).or_insert(0) += 1;
+        }
+        if self.mode == OwlMode::CountingFixpoint && self.apply_e0(&added, true) {
+            self.refresh_virtual();
+        }
+        added.len()
+    }
+
+    /// Delete base triples; exact counting makes deletion as cheap as insertion (no
+    /// overdelete/rederive pass). Triples not currently asserted — including derived-only
+    /// facts — are ignored. Returns the number of triples actually removed from the base.
+    pub fn delete(&mut self, dict: &mut Dict, triples: &[[Id; 3]]) -> usize {
+        let mut removed: Vec<[Id; 3]> = Vec::with_capacity(triples.len());
+        let mut rebuild = false;
+        for t in triples {
+            if self.base.remove(t) {
+                rebuild |= self.triggers_rebuild(t);
+                removed.push(*t);
+            }
+        }
+        if removed.is_empty() {
+            return 0;
+        }
+        if rebuild || self.mode == OwlMode::Fallback {
+            self.rematerialize(dict);
+            return removed.len();
+        }
+        for t in self.count_sweep(&removed) {
+            self.decrement(t);
+        }
+        if self.mode == OwlMode::CountingFixpoint && self.apply_e0(&removed, false) {
+            self.refresh_virtual();
+        }
+        removed.len()
+    }
+
+    /// Is `t` in the materialized closure (asserted or derived)?
+    pub fn contains(&self, t: &[Id; 3]) -> bool {
+        if self.mode == OwlMode::Fallback {
+            return self.fallback_closure.contains(t);
+        }
+        self.base.contains(t) || self.counts.contains_key(t) || self.schema_facts.contains(t)
+    }
+
+    /// The full materialized closure (base ∪ derived), deduplicated and sorted — identical as
+    /// a set to running [`crate::materialize_owl_rl`] from scratch on the current base.
+    pub fn closure(&self) -> Vec<[Id; 3]> {
+        let mut set: FxHashSet<[Id; 3]> = if self.mode == OwlMode::Fallback {
+            self.fallback_closure.clone()
+        } else {
+            let mut s = self.base.clone();
+            s.extend(self.counts.keys().copied());
+            s.extend(self.schema_facts.iter().copied());
+            s
+        };
+        set.extend(self.base.iter().copied());
+        let mut out: Vec<[Id; 3]> = set.into_iter().collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Number of triples in the closure.
+    pub fn len(&self) -> usize {
+        if self.mode == OwlMode::Fallback {
+            return self.fallback_closure.len();
+        }
+        let mut n = self.base.len();
+        n += self.counts.keys().filter(|t| !self.base.contains(*t)).count();
+        n += self
+            .schema_facts
+            .iter()
+            .filter(|t| !self.base.contains(*t) && !self.counts.contains_key(*t))
+            .count();
+        n
+    }
+
+    /// Is the closure empty?
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Number of *asserted* (base) triples.
+    pub fn base_len(&self) -> usize {
+        self.base.len()
+    }
+
+    /// Iterate the *asserted* (base) triples (unsorted).
+    pub fn base_triples(&self) -> impl Iterator<Item = [Id; 3]> + '_ {
+        self.base.iter().copied()
+    }
+
+    /// The active maintenance regime (telemetry; re-decided at every rebuild).
+    pub fn mode(&self) -> OwlMode {
+        self.mode
+    }
+
+    /// How many times a mutation fell back to full re-materialization (TBox mutations,
+    /// occurrence-guarded deltas, and every mutation while in [`OwlMode::Fallback`]).
+    pub fn full_rebuilds(&self) -> usize {
+        self.rebuilds
+    }
+}
+
+/// px entries for `q`, defaulting to the empty slice.
+fn px_entries(px: &FxHashMap<Id, Vec<(Id, bool)>>, q: Id) -> &[(Id, bool)] {
+    static EMPTY: [(Id, bool); 0] = [];
+    match px.get(&q) {
+        Some(v) => v.as_slice(),
+        None => &EMPTY,
+    }
+}
+
+/// The property-orientation closure: BFS over `(property, orientation)` through subPropertyOf
+/// (same orientation; equivalentProperty pre-folded), inverseOf (flip) and SymmetricProperty
+/// (flip, same property). Mirrors `rdfs::build_prop_expand` exactly — including its `all_props`
+/// domain (see the px-quirk merge note) — so emissions match the batch engine.
+fn build_px(
+    sp_closure: &FxHashMap<Id, Vec<Id>>,
+    inverse: &FxHashMap<Id, Vec<Id>>,
+    symmetric: &FxHashSet<Id>,
+) -> FxHashMap<Id, Vec<(Id, bool)>> {
+    let mut all_props: FxHashSet<Id> = sp_closure
+        .keys()
+        .chain(inverse.keys())
+        .chain(symmetric.iter())
+        .copied()
+        .collect();
+    for sup in sp_closure.values() {
+        all_props.extend(sup.iter().copied());
+    }
+    for inv in inverse.values() {
+        all_props.extend(inv.iter().copied());
+    }
+    let mut map: FxHashMap<Id, Vec<(Id, bool)>> = FxHashMap::default();
+    for &p in &all_props {
+        let mut seen: FxHashSet<(Id, bool)> = FxHashSet::default();
+        let mut stack: Vec<(Id, bool)> = vec![(p, false)];
+        while let Some((q, or)) = stack.pop() {
+            if !seen.insert((q, or)) {
+                continue;
+            }
+            if let Some(sups) = sp_closure.get(&q) {
+                for &r in sups {
+                    if !seen.contains(&(r, or)) {
+                        stack.push((r, or));
+                    }
+                }
+            }
+            if let Some(invs) = inverse.get(&q) {
+                for &r in invs {
+                    if !seen.contains(&(r, !or)) {
+                        stack.push((r, !or));
+                    }
+                }
+            }
+            if symmetric.contains(&q) && !seen.contains(&(q, !or)) {
+                stack.push((q, !or));
+            }
+        }
+        map.insert(p, seen.into_iter().collect());
+    }
+    map
+}
+
+/// Transitive closure of a set of `(from, to)` pairs (BFS per distinct source).
+fn tc_pairs(pairs: &FxHashSet<(Id, Id)>) -> FxHashSet<(Id, Id)> {
+    let mut adj: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for &(s, o) in pairs {
+        adj.entry(s).or_default().push(o);
+    }
+    let mut out: FxHashSet<(Id, Id)> = FxHashSet::default();
+    for &src in adj.keys() {
+        let mut seen: FxHashSet<Id> = FxHashSet::default();
+        let mut stack: Vec<Id> = adj[&src].clone();
+        while let Some(n) = stack.pop() {
+            if seen.insert(n) {
+                if let Some(succ) = adj.get(&n) {
+                    stack.extend(succ.iter().copied());
+                }
+            }
+        }
+        out.extend(seen.into_iter().map(|n| (src, n)));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -557,5 +1565,122 @@ mod tests {
         assert!(g.is_empty());
         assert_eq!(g.closure(), Vec::<[Id; 3]>::new());
         assert_eq!(g.len(), 0);
+    }
+
+    // ───────────────────────── MaterializedOwlGraph (incremental OWL 2 RL) ────────────────
+
+    fn owl_id(dict: &mut Dict, frag: &str) -> Id {
+        dict.intern_iri(&format!("http://www.w3.org/2002/07/owl#{frag}"))
+    }
+
+    /// Oracle: from-scratch OWL-RL closure of `base` as a set, via the batch API.
+    fn owl_oracle(dict: &mut Dict, base: &FxHashSet<[Id; 3]>) -> FxHashSet<[Id; 3]> {
+        let mut v: Vec<[Id; 3]> = base.iter().copied().collect();
+        crate::materialize_owl_rl(dict, &mut v);
+        v.into_iter().collect()
+    }
+
+    fn assert_owl_oracle(g: &MaterializedOwlGraph, dict: &mut Dict, base: &FxHashSet<[Id; 3]>) {
+        let inc: FxHashSet<[Id; 3]> = g.closure().into_iter().collect();
+        let full = owl_oracle(dict, base);
+        assert_eq!(inc, full, "incremental OWL closure != from-scratch closure");
+        assert_eq!(g.len(), inc.len(), "len() inconsistent with closure()");
+    }
+
+    #[test]
+    fn owl_transitive_chain_insert_and_delete() {
+        // ancestorOf transitive; parentOf ⊑ ancestorOf. Insert a parent chain a→b→c→d, expect
+        // the full ancestor closure incrementally; delete the middle link, expect exactly the
+        // closure of the remainder (counting + transitive layer handles the retraction).
+        let mut dict = Dict::new();
+        let v = vocab(&mut dict);
+        let transitive = owl_id(&mut dict, "TransitiveProperty");
+        let (anc, par) = (ex(&mut dict, "ancestorOf"), ex(&mut dict, "parentOf"));
+        let (a, b, c, d) =
+            (ex(&mut dict, "a"), ex(&mut dict, "b"), ex(&mut dict, "c"), ex(&mut dict, "d"));
+        let base = vec![[anc, v.ty, transitive], [par, v.sp, anc]];
+        let mut g = MaterializedOwlGraph::new(&mut dict, &base);
+        assert_eq!(g.mode(), crate::OwlMode::CountingFixpoint);
+        let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
+
+        let chain = [[a, par, b], [b, par, c], [c, par, d]];
+        g.insert(&mut dict, &chain);
+        set.extend(chain);
+        assert_eq!(g.full_rebuilds(), 0, "ABox insert must stay incremental");
+        assert!(g.contains(&[a, anc, d]), "3-hop transitive entailment");
+        assert!(g.contains(&[a, anc, c]));
+        assert_owl_oracle(&g, &mut dict, &set);
+
+        g.delete(&mut dict, &[[b, par, c]]);
+        set.remove(&[b, par, c]);
+        assert_eq!(g.full_rebuilds(), 0, "ABox delete must stay incremental");
+        assert!(!g.contains(&[a, anc, d]), "the chain is severed");
+        assert!(g.contains(&[a, anc, b]) && g.contains(&[c, anc, d]), "the stubs remain");
+        assert_owl_oracle(&g, &mut dict, &set);
+    }
+
+    #[test]
+    fn owl_inverse_orientation_and_multi_support() {
+        // hasPart inverseOf partOf, hasPart domain Whole. (x hasPart y) ⊢ (y partOf x) and
+        // (x type Whole); the inverse-derived edge must retract with its support.
+        let mut dict = Dict::new();
+        let v = vocab(&mut dict);
+        let inv = owl_id(&mut dict, "inverseOf");
+        let (hp, po, whole) =
+            (ex(&mut dict, "hasPart"), ex(&mut dict, "partOf"), ex(&mut dict, "Whole"));
+        let (x, y) = (ex(&mut dict, "x"), ex(&mut dict, "y"));
+        let base = vec![[hp, inv, po], [hp, v.dom, whole]];
+        let mut g = MaterializedOwlGraph::new(&mut dict, &base);
+        assert_eq!(g.mode(), crate::OwlMode::CountingMono);
+        let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
+
+        g.insert(&mut dict, &[[x, hp, y]]);
+        set.insert([x, hp, y]);
+        assert!(g.contains(&[y, po, x]), "prp-inv orientation");
+        assert!(g.contains(&[x, v.ty, whole]), "domain typing");
+        assert_owl_oracle(&g, &mut dict, &set);
+
+        // Assert the derived edge too: deleting the original must keep it (multi-support
+        // via its own assertion), then deleting the assertion drops everything.
+        g.insert(&mut dict, &[[y, po, x]]);
+        set.insert([y, po, x]);
+        g.delete(&mut dict, &[[x, hp, y]]);
+        set.remove(&[x, hp, y]);
+        assert!(g.contains(&[y, po, x]), "still asserted");
+        assert!(g.contains(&[x, hp, y]), "re-derived from the inverse assertion");
+        assert_owl_oracle(&g, &mut dict, &set);
+        g.delete(&mut dict, &[[y, po, x]]);
+        set.remove(&[y, po, x]);
+        assert!(!g.contains(&[y, po, x]) && !g.contains(&[x, hp, y]));
+        assert_owl_oracle(&g, &mut dict, &set);
+        assert_eq!(g.full_rebuilds(), 0);
+    }
+
+    #[test]
+    fn owl_tbox_mutation_rebuilds() {
+        let mut dict = Dict::new();
+        let v = vocab(&mut dict);
+        let symmetric = owl_id(&mut dict, "SymmetricProperty");
+        let near = ex(&mut dict, "near");
+        let (x, y) = (ex(&mut dict, "x"), ex(&mut dict, "y"));
+        let base = vec![[x, near, y]];
+        let mut g = MaterializedOwlGraph::new(&mut dict, &base);
+        let mut set: FxHashSet<[Id; 3]> = base.iter().copied().collect();
+        assert!(!g.contains(&[y, near, x]));
+
+        // Typing the property symmetric is a TBox mutation → rebuild, then the mirror holds.
+        g.insert(&mut dict, &[[near, v.ty, symmetric]]);
+        set.insert([near, v.ty, symmetric]);
+        assert_eq!(g.full_rebuilds(), 1);
+        assert!(g.contains(&[y, near, x]), "existing ABox re-swept under the new axiom");
+        assert_owl_oracle(&g, &mut dict, &set);
+    }
+
+    #[test]
+    fn owl_empty_graph() {
+        let mut dict = Dict::new();
+        let g = MaterializedOwlGraph::new(&mut dict, &[]);
+        assert!(g.is_empty());
+        assert_eq!(g.closure(), Vec::<[Id; 3]>::new());
     }
 }
