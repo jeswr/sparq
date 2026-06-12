@@ -1,0 +1,511 @@
+{
+  "timestamp": "2026-05-20T06:08:02.983929",
+  "n_small": 1,
+  "n_big": 8,
+  "benchmarks": {
+    "u8_to_f16": {
+      "input_type": "u8",
+      "float_type": "f16",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2930
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 170.0,
+      "setup_estimate": 2760.0
+    },
+    "u16_to_f16": {
+      "input_type": "u16",
+      "float_type": "f16",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3043
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4147
+      },
+      "per_call_estimate": 157.71428571428572,
+      "setup_estimate": 2885.285714285714
+    },
+    "u32_to_f16": {
+      "input_type": "u32",
+      "float_type": "f16",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3047
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4185
+      },
+      "per_call_estimate": 162.57142857142858,
+      "setup_estimate": 2884.4285714285716
+    },
+    "u64_to_f16": {
+      "input_type": "u64",
+      "float_type": "f16",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3056
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4253
+      },
+      "per_call_estimate": 171.0,
+      "setup_estimate": 2885.0
+    },
+    "u128_to_f16": {
+      "input_type": "u128",
+      "float_type": "f16",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3070
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4363
+      },
+      "per_call_estimate": 184.71428571428572,
+      "setup_estimate": 2885.285714285714
+    },
+    "i8_to_f16": {
+      "input_type": "i8",
+      "float_type": "f16",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2936
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 169.14285714285714,
+      "setup_estimate": 2766.8571428571427
+    },
+    "i16_to_f16": {
+      "input_type": "i16",
+      "float_type": "f16",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3049
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4203
+      },
+      "per_call_estimate": 164.85714285714286,
+      "setup_estimate": 2884.1428571428573
+    },
+    "i32_to_f16": {
+      "input_type": "i32",
+      "float_type": "f16",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3054
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4243
+      },
+      "per_call_estimate": 169.85714285714286,
+      "setup_estimate": 2884.1428571428573
+    },
+    "i64_to_f16": {
+      "input_type": "i64",
+      "float_type": "f16",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3064
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4323
+      },
+      "per_call_estimate": 179.85714285714286,
+      "setup_estimate": 2884.1428571428573
+    },
+    "u8_to_f32": {
+      "input_type": "u8",
+      "float_type": "f32",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2923
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 171.0,
+      "setup_estimate": 2752.0
+    },
+    "u16_to_f32": {
+      "input_type": "u16",
+      "float_type": "f32",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2924
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 170.85714285714286,
+      "setup_estimate": 2753.1428571428573
+    },
+    "u32_to_f32": {
+      "input_type": "u32",
+      "float_type": "f32",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3022
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 156.85714285714286,
+      "setup_estimate": 2865.1428571428573
+    },
+    "u64_to_f32": {
+      "input_type": "u64",
+      "float_type": "f32",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3031
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4128
+      },
+      "per_call_estimate": 156.71428571428572,
+      "setup_estimate": 2874.285714285714
+    },
+    "u128_to_f32": {
+      "input_type": "u128",
+      "float_type": "f32",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3052
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4298
+      },
+      "per_call_estimate": 178.0,
+      "setup_estimate": 2874.0
+    },
+    "i8_to_f32": {
+      "input_type": "i8",
+      "float_type": "f32",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2929
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 170.14285714285714,
+      "setup_estimate": 2758.8571428571427
+    },
+    "i16_to_f32": {
+      "input_type": "i16",
+      "float_type": "f32",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2931
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 169.85714285714286,
+      "setup_estimate": 2761.1428571428573
+    },
+    "i32_to_f32": {
+      "input_type": "i32",
+      "float_type": "f32",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3029
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 155.85714285714286,
+      "setup_estimate": 2873.1428571428573
+    },
+    "i64_to_f32": {
+      "input_type": "i64",
+      "float_type": "f32",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3039
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4200
+      },
+      "per_call_estimate": 165.85714285714286,
+      "setup_estimate": 2873.1428571428573
+    },
+    "u8_to_f64": {
+      "input_type": "u8",
+      "float_type": "f64",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2917
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 171.85714285714286,
+      "setup_estimate": 2745.1428571428573
+    },
+    "u16_to_f64": {
+      "input_type": "u16",
+      "float_type": "f64",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2919
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 171.57142857142858,
+      "setup_estimate": 2747.4285714285716
+    },
+    "u32_to_f64": {
+      "input_type": "u32",
+      "float_type": "f64",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2930
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 170.0,
+      "setup_estimate": 2760.0
+    },
+    "u64_to_f64": {
+      "input_type": "u64",
+      "float_type": "f64",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3028
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4161
+      },
+      "per_call_estimate": 161.85714285714286,
+      "setup_estimate": 2866.1428571428573
+    },
+    "u128_to_f64": {
+      "input_type": "u128",
+      "float_type": "f64",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3042
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4271
+      },
+      "per_call_estimate": 175.57142857142858,
+      "setup_estimate": 2866.4285714285716
+    },
+    "i8_to_f64": {
+      "input_type": "i8",
+      "float_type": "f64",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2926
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 170.57142857142858,
+      "setup_estimate": 2755.4285714285716
+    },
+    "i16_to_f64": {
+      "input_type": "i16",
+      "float_type": "f64",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2927
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 170.42857142857142,
+      "setup_estimate": 2756.5714285714284
+    },
+    "i32_to_f64": {
+      "input_type": "i32",
+      "float_type": "f64",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2939
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 168.71428571428572,
+      "setup_estimate": 2770.285714285714
+    },
+    "i64_to_f64": {
+      "input_type": "i64",
+      "float_type": "f64",
+      "small": {
+        "calls": 1,
+        "circuit_size": 3038
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4245
+      },
+      "per_call_estimate": 172.42857142857142,
+      "setup_estimate": 2865.5714285714284
+    },
+    "u8_to_f128": {
+      "input_type": "u8",
+      "float_type": "f128",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2921
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 171.28571428571428,
+      "setup_estimate": 2749.714285714286
+    },
+    "u16_to_f128": {
+      "input_type": "u16",
+      "float_type": "f128",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2875
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 177.85714285714286,
+      "setup_estimate": 2697.1428571428573
+    },
+    "u32_to_f128": {
+      "input_type": "u32",
+      "float_type": "f128",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2886
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 176.28571428571428,
+      "setup_estimate": 2709.714285714286
+    },
+    "u64_to_f128": {
+      "input_type": "u64",
+      "float_type": "f128",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2933
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 169.57142857142858,
+      "setup_estimate": 2763.4285714285716
+    },
+    "u128_to_f128": {
+      "input_type": "u128",
+      "float_type": "f128",
+      "small": {
+        "calls": 1,
+        "circuit_size": 4345
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 5795
+      },
+      "per_call_estimate": 207.14285714285714,
+      "setup_estimate": 4137.857142857143
+    },
+    "i8_to_f128": {
+      "input_type": "i8",
+      "float_type": "f128",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2931
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 169.85714285714286,
+      "setup_estimate": 2761.1428571428573
+    },
+    "i16_to_f128": {
+      "input_type": "i16",
+      "float_type": "f128",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2885
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 176.42857142857142,
+      "setup_estimate": 2708.5714285714284
+    },
+    "i32_to_f128": {
+      "input_type": "i32",
+      "float_type": "f128",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2897
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 174.71428571428572,
+      "setup_estimate": 2722.285714285714
+    },
+    "i64_to_f128": {
+      "input_type": "i64",
+      "float_type": "f128",
+      "small": {
+        "calls": 1,
+        "circuit_size": 2945
+      },
+      "big": {
+        "calls": 8,
+        "circuit_size": 4120
+      },
+      "per_call_estimate": 167.85714285714286,
+      "setup_estimate": 2777.1428571428573
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-05-18T21:16:54.673117",
+  "n_small": 1,
+  "n_big": 2,
+  "benchmarks": {
+    "add_f16": {
+      "small": {
+        "calls": 1,
+        "circuit_size": 4643
+      },
+      "big": {
+        "calls": 2,
+        "circuit_size": 6265
+      },
+      "per_call_estimate": 1622.0,
+      "setup_estimate": 3021.0
+    }
+  }
+}
