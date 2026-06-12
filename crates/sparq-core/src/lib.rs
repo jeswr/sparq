@@ -1805,7 +1805,14 @@ fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
 /// and all ground terms are byte-identical).
 #[cfg(feature = "parallel")]
 fn parse_turtle_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
-    let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 8192 + 1).max(1);
+    let threads = rayon::current_num_threads().max(1);
+    if threads == 1 {
+        // No parallelism available: chunking is pure overhead (measured ~16% at 1T on the
+        // wikidata slice — 1.300 s chunked vs 1.12 s serial) — parse directly.
+        let mut dict = Dict::new();
+        return parse_turtle_chunk(bytes, &mut dict).map(|t| (dict, t));
+    }
+    let target = (threads * 4).min(bytes.len() / 8192 + 1).max(1);
     parse_turtle_chunked(bytes, target)
 }
 
