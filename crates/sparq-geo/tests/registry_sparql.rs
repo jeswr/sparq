@@ -178,13 +178,219 @@ fn geo_errors_are_expression_errors_not_query_errors() {
     assert_eq!(names(&r, 0), vec!["<http://ex/good>"]);
 }
 
+/// Evaluates one binary `geof:` relation through REAL SPARQL on a two-triple
+/// graph: `SELECT (geof:<name>(?ga, ?gb) AS ?r)`.
+fn eval_relation(name: &str, a: &str, b: &str) -> bool {
+    let g = Graph::load_str(
+        &format!(
+            r#"<http://x/a> <http://x/g> "{a}"^^<http://www.opengis.net/ont/geosparql#wktLiteral> .
+               <http://x/b> <http://x/g> "{b}"^^<http://www.opengis.net/ont/geosparql#wktLiteral> ."#
+        ),
+        "ntriples",
+    )
+    .unwrap();
+    let r = query_with_functions(
+        &g,
+        &format!(
+            "{PREFIXES} SELECT (geof:{name}(?ga, ?gb) AS ?r) WHERE {{ \
+               <http://x/a> <http://x/g> ?ga . <http://x/b> <http://x/g> ?gb }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 1);
+    match r.rows[0][0].as_ref().expect("?r must be bound").to_string().as_str() {
+        "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>" => true,
+        "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>" => false,
+        other => panic!("geof:{name} returned {other}"),
+    }
+}
+
+#[test]
+fn egenhofer_family_through_sparql() {
+    const SMALL: &str = "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))"; // strictly inside BIG
+    const TANGENT: &str = "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"; // inside BIG, shares boundary
+    const BIG: &str = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    const ADJACENT: &str = "POLYGON((4 0, 6 0, 6 2, 4 2, 4 0))"; // shares an edge with BIG
+    const FAR: &str = "POLYGON((9 9, 10 9, 10 10, 9 10, 9 9))";
+    const OVERLAP: &str = "POLYGON((3 3, 6 3, 6 6, 3 6, 3 3))"; // overlaps BIG
+
+    // (name, a, b, expected)
+    for (name, a, b, want) in [
+        ("ehEquals", BIG, BIG, true),
+        ("ehEquals", BIG, SMALL, false),
+        ("ehDisjoint", BIG, FAR, true),
+        ("ehDisjoint", BIG, OVERLAP, false),
+        ("ehMeet", BIG, ADJACENT, true),
+        ("ehMeet", BIG, OVERLAP, false),
+        ("ehOverlap", BIG, OVERLAP, true),
+        ("ehOverlap", BIG, ADJACENT, false),
+        ("ehInside", SMALL, BIG, true),
+        ("ehInside", TANGENT, BIG, false), // tangential: coveredBy, not inside
+        ("ehContains", BIG, SMALL, true),
+        ("ehContains", BIG, TANGENT, false),
+        ("ehCoveredBy", TANGENT, BIG, true),
+        ("ehCoveredBy", SMALL, BIG, false), // strict containment is inside, not coveredBy
+        ("ehCovers", BIG, TANGENT, true),
+        ("ehCovers", BIG, SMALL, false),
+    ] {
+        assert_eq!(eval_relation(name, a, b), want, "geof:{name}({a}, {b})");
+    }
+}
+
+#[test]
+fn rcc8_family_through_sparql() {
+    const SMALL: &str = "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))";
+    const TANGENT: &str = "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))";
+    const BIG: &str = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    const ADJACENT: &str = "POLYGON((4 0, 6 0, 6 2, 4 2, 4 0))";
+    const FAR: &str = "POLYGON((9 9, 10 9, 10 10, 9 10, 9 9))";
+    const OVERLAP: &str = "POLYGON((3 3, 6 3, 6 6, 3 6, 3 3))";
+
+    for (name, a, b, want) in [
+        ("rcc8eq", BIG, BIG, true),
+        ("rcc8eq", BIG, SMALL, false),
+        ("rcc8dc", BIG, FAR, true),
+        ("rcc8dc", BIG, ADJACENT, false), // touching is ec, not dc
+        ("rcc8ec", BIG, ADJACENT, true),
+        ("rcc8ec", BIG, OVERLAP, false),
+        ("rcc8po", BIG, OVERLAP, true),
+        ("rcc8po", BIG, SMALL, false),
+        ("rcc8ntpp", SMALL, BIG, true),
+        ("rcc8ntpp", TANGENT, BIG, false),
+        ("rcc8ntppi", BIG, SMALL, true),
+        ("rcc8ntppi", BIG, TANGENT, false),
+        ("rcc8tpp", TANGENT, BIG, true),
+        ("rcc8tpp", SMALL, BIG, false),
+        ("rcc8tppi", BIG, TANGENT, true),
+        ("rcc8tppi", BIG, SMALL, false),
+    ] {
+        assert_eq!(eval_relation(name, a, b), want, "geof:{name}({a}, {b})");
+    }
+}
+
+#[test]
+fn relate_generic_de9im_through_sparql() {
+    // Generic DE-9IM: the "within" pattern for a point in a polygon.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?city WHERE {{ \
+               ?city ex:loc ?pt . ex:uk ex:area ?poly . \
+               FILTER(geof:relate(?pt, ?poly, \"T*F**F***\")) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(names(&r, 0), vec!["<http://ex/london>"]);
+    // A malformed pattern is an expression error (row dropped), not a hard error.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?city WHERE {{ \
+               ?city ex:loc ?pt . ex:uk ex:area ?poly . \
+               FILTER(geof:relate(?pt, ?poly, \"BOGUS\")) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 0);
+}
+
+#[test]
+fn get_srid_through_sparql() {
+    let g = Graph::load_str(
+        r#"
+        @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:  <http://ex/> .
+        ex:default ex:loc "POINT(0 0)"^^geo:wktLiteral .
+        ex:bng ex:loc "<http://www.opengis.net/def/crs/EPSG/0/27700> POINT(530000 180000)"^^geo:wktLiteral .
+        "#,
+        "turtle",
+    )
+    .unwrap();
+    // Select entities whose geometry is in the DEFAULT CRS (CRS84).
+    let r = query_with_functions(
+        &g,
+        &format!(
+            "{PREFIXES} SELECT ?s ?srid WHERE {{ \
+               ?s ex:loc ?g . BIND(geof:getSRID(?g) AS ?srid) \
+             }} ORDER BY ?s"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(
+        names(&r, 1),
+        vec![
+            "\"http://www.opengis.net/def/crs/EPSG/0/27700\"^^<http://www.w3.org/2001/XMLSchema#anyURI>",
+            "\"http://www.opengis.net/def/crs/OGC/1.3/CRS84\"^^<http://www.w3.org/2001/XMLSchema#anyURI>",
+        ]
+    );
+}
+
+#[test]
+fn set_operations_through_sparql() {
+    // intersection / union / difference / symDifference of the UK and France
+    // boxes, each fed back into geof: relations within the same query.
+    let q = |expr: &str| {
+        query_with_functions(
+            &cities(),
+            &format!(
+                "{PREFIXES} SELECT (geof:sfContains({expr}, ?pt) AS ?r) WHERE {{ \
+                   ex:uk ex:area ?a . ex:france ex:area ?b . ex:london ex:loc ?pt }}"
+            ),
+            &geof_registry(),
+        )
+        .unwrap()
+    };
+    // London is in uk minus france, in the union, not in the overlap strip, and
+    // in the symmetric difference.
+    assert_eq!(names(&q("geof:difference(?a, ?b)"), 0)[0], "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
+    assert_eq!(names(&q("geof:union(?a, ?b)"), 0)[0], "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
+    assert_eq!(names(&q("geof:intersection(?a, ?b)"), 0)[0], "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
+    assert_eq!(names(&q("geof:symDifference(?a, ?b)"), 0)[0], "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
+    // Non-polygonal operands are per-row expression errors, not hard errors.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?pt . ex:uk ex:area ?a . \
+               FILTER(geof:sfContains(geof:union(?pt, ?a), ?pt)) }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 0);
+}
+
+#[test]
+fn buffer_through_sparql() {
+    // Cities within a 400 km buffer around London: Paris (≈343.6 km), not Lyon.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?city WHERE {{ \
+               ex:london ex:loc ?here . ?city ex:loc ?there . \
+               FILTER(?city != ex:london && \
+                      geof:sfWithin(?there, geof:buffer(?here, 400, uom:kilometre))) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(names(&r, 0), vec!["<http://ex/paris>"]);
+}
+
 #[test]
 fn unregistered_geof_iri_stays_a_hard_error() {
-    // geof:buffer is documented as not-in-v1: it is NOT in the registry, so the
-    // engine raises the same hard error as for any unknown function IRI.
+    // geof:gmlToWkt does not exist (gmlLiteral is not supported): it is NOT in
+    // the registry, so the engine raises the same hard error as for any unknown
+    // function IRI.
     let err = query_with_functions(
         &cities(),
-        &format!("{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?g . FILTER(geof:buffer(?g, 1.0) > 0) }}"),
+        &format!("{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?g . FILTER(geof:gmlToWkt(?g) = ?g) }}"),
         &geof_registry(),
     )
     .map(|r| r.len())
