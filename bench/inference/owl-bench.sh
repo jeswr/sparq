@@ -10,7 +10,7 @@
 # Prints min-of-3 seconds per workload (parses the CLI's "in Xs" line).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-CLI=target/release/sparq-cli
+CLI="${SPARQ_CLI:-target/release/sparq-cli}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 # 1+2: instance-heavy RDFS

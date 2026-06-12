@@ -56,13 +56,28 @@ ever needs it in the store, `entail::close()` is the reference implementation.
 
 ## 2. OWL 2 RL/RDF rules table (Profiles §4.3) — per-rule status in `owl.rs`
 
+**owl-rl-completion thread (2026-06):** the previously-missing rules (cls-oo,
+cls-maxqc1/2, scm-hv/svf1/svf2/avf1/avf2, cls-thing/nothing1) are now implemented —
+every row below is ✅ or an explicit, argued by-design omission. Rule definitions cite
+the OWL 2 Profiles REC §4.3 tables (Table 5 prp-*, Table 6 cls-*, Table 9 scm-*),
+<https://www.w3.org/TR/owl2-profiles/#Reasoning_in_OWL_2_RL_and_RDF_Graphs_using_Rules>.
+Suite scores are UNCHANGED (rdf-mt 48/48; OWL 2 RL 78 pass + 13 divergences, 100% of
+run; entailment 44/47) — as predicted, no Approved RL test exercises these rules, so
+none of the 13 divergence-allowlist entries went stale (verified: counts identical,
+0 fails). Closure throughput stayed within the 5% budget on the RDFS and OWL-RL bench
+workloads (`bench/inference/owl-bench.sh`). (N3 suites: not re-runnable on the macOS
+dev host — a pre-existing `n3/mod.rs` panic + runaway-memory test kills the harness
+there at the BASE commit too, before any owl.rs change; the N3 code paths are
+untouched by this thread and `cargo test -p sparq-reason` (incl. the eye_cases
+suite) stays green.)
+
 | rule | status | where / note |
 |---|---|---|
-| eq-ref | ◑ partial **by design** | reflexive sameAs emitted only for terms touched by equality (full eq-ref is O(terms)) |
+| eq-ref | ◑ partial **by design** | reflexive sameAs emitted only for terms touched by equality. Full eq-ref derives `x sameAs x` for EVERY subject/predicate/object in the graph — O(terms) store bloat that no join ever consumes (the union-find already knows reflexivity); the touched-terms restriction is exactly what SPARQL-entailment answers need, and the entailment suite passes on it. |
 | eq-sym, eq-trans, eq-rep-s/p/o | ✅ | union-find entity rewriting + full expansion at the end (RDFox approach) |
 | eq-diff1 | ✅ | `inconsistencies()` |
 | eq-diff2, eq-diff3 (AllDifferent) | ✅ **(this thread)** | `inconsistencies()`, members/distinctMembers lists |
-| prp-ap (annotation-property axioms) | ✗ N/A | axiomatic table; no suite coverage |
+| prp-ap (annotation-property axioms) | ◑ omitted **by design** | premise-free axioms typing the 9 builtin annotation properties (rdfs:label/comment/seeAlso/isDefinedBy, owl:versionInfo/deprecated/priorVersion/backwardCompatibleWith/incompatibleWith) as `owl:AnnotationProperty`. Materializing them injects vocabulary into EVERY closure (even an empty graph's closure becomes non-empty) — the same store-spam class as the RDF/RDFS axiomatic triples, which live in the harness layer by the same argument. No suite test demands them; if a regime ever does, the SPARQL-regime layer (which already adds declared-vocabulary reflexives) is the right home. |
 | prp-dom, prp-rng | ✅ | via rdfs2/3 |
 | prp-fp, prp-ifp | ✅ | derive sameAs → merge; literal-value clash detected (dt-diff ⊢ eq-diff1, **this thread**) |
 | prp-irp, prp-asyp | ✅ **(this thread)** | `inconsistencies()` |
@@ -72,27 +87,27 @@ ever needs it in the store, `entail::close()` is the reference implementation.
 | prp-pdw, prp-adp | ✅ **(this thread)** | `inconsistencies()` |
 | prp-key | ✅ | incl. data properties (literal clash) |
 | prp-npa1/2 | ✅ **(this thread)** | `inconsistencies()` |
-| cls-thing, cls-nothing1 | ✗ missing | cosmetic axioms (owl:Thing/Nothing typed Class); no test demands them |
+| cls-thing, cls-nothing1 | ✅ **(owl-rl-completion thread)** | premise-free `owl:Thing/Nothing rdf:type owl:Class`, emitted in `pre_monotone` when the term OCCURS in the data (occurrence guard = the XSD-hierarchy discipline: no injected vocabulary for graphs that never mention Thing/Nothing) |
 | cls-nothing2 | ✅ | `inconsistencies()` |
 | cls-int1/2, cls-uni | ✅ | |
 | cls-com | ✅ | clash |
 | cls-svf1/2, cls-avf, cls-hv1/2 | ✅ | |
 | cls-maxc1 | ✅ | clash |
 | cls-maxc2, cls-maxqc3/4 | ✅ | derive sameAs |
-| cls-maxqc1/2 (qualified cardinality 0 clashes) | ✗ missing | no Approved RL test exercises them; cheap follow-up |
-| cls-oo (oneOf typing) | ✗ missing | `owl:oneOf` not decoded; the only RL suite case (owl2-rl-valid-oneof) is consistency-only and passes |
+| cls-maxqc1/2 (qualified cardinality 0 clashes) | ✅ **(owl-rl-completion thread)** | `inconsistencies()`: u typed a maxQC-0 restriction [onProperty p; onClass c] with a c-typed p-value (any value when c = owl:Thing); guarded — only the p-edges of qualified-cardinality-0 restrictions are scanned |
+| cls-oo (oneOf typing) | ✅ **(owl-rl-completion thread)** | `owl:oneOf` lists decoded in `ClassFeatureIdx`; members typed as instances of the enumeration class — LINEAR in total list length (lists decoded once, not per round); oneOf added to the feature-detection sets so oneOf-only ontologies route to the fixpoint |
 | cax-sco, cax-eqc1/2 | ✅ | |
 | cax-dw | ✅ | clash |
 | cax-adc | ✅ **(this thread)** | clash, members list |
-| dt-type1/2, dt-eq, dt-not-type | ◑ harness-level | literal datatype typing/value equality live in the harness D-machinery, not the store closure |
+| dt-type1/2, dt-eq, dt-not-type | ◑ harness-level **by design** | literal datatype typing/value equality are VALUE-SPACE judgements, not triple joins: materializing dt-eq means a `sameAs` edge for every co-valued literal pair (quadratic in literals), and dt-type2 types every literal occurrence. The harness D-machinery compares values at entailment-check time instead; rdf-mt passes 48/48 incl. every datatype case. dt-diff's only rule-consequence (clash with derived sameAs) IS in the store path as the literal-sameAs clash. |
 | dt-diff | ✅ **(this thread)** | as the literal-sameAs clash |
-| scm-cls | ◑ partial by design | Thing/Nothing/reflexive edges added by the SPARQL-regime layer only |
+| scm-cls | ◑ partial **by design** | per declared class: `c ⊑ c`, `c ≡ c`, `c ⊑ owl:Thing`, `owl:Nothing ⊑ c` — reflexive tautologies plus 2·|classes| Thing/Nothing edges that no rule premise consumes (every rule joining on `subClassOf` is a no-op on reflexive edges) and no query wants un-asked. Added by the SPARQL-regime layer where the regime explicitly demands them; the entailment suite passes. |
 | scm-sco, scm-spo | ✅ | rdfs11/5 |
 | scm-eqc1, scm-eqp1 | ✅ | equivalence folded into subsumption both ways |
 | scm-eqc2, scm-eqp2 | ✅ **(this thread)** | mutual subsumption ⊢ equivalence (post-pass) |
-| scm-op, scm-dp | ◑ harness-level | declared-property reflexive subPropertyOf |
+| scm-op, scm-dp | ◑ harness-level **by design** | per declared property: `p ⊑ p`, `p ≡ p` — the same reflexive-tautology argument as scm-cls (no rule premise is enabled by a reflexive subPropertyOf edge); added by the SPARQL-regime layer only. |
 | scm-dom1/2, scm-rng1/2 | ✅ | + **(this thread)** inverseOf domain/range transposition (valid RDF-based entailment beyond the table) |
-| scm-hv, scm-svf1/2, scm-avf1/2 | ✗ missing | schema-level restriction subsumption; no Approved RL test hits them |
+| scm-hv, scm-svf1/2, scm-avf1/2 | ✅ **(owl-rl-completion thread)** | schema-level restriction subsumption in the per-round class-feature pass (conclusions re-enter the fixpoint and feed rdfs9/11 like the other scm-* rules). INDEXED/GUARDED instead of the naive quadratic restriction×restriction join: grouped by onProperty (svf1/avf1) resp. by filler/value (svf2/avf2/hv), probing only each member's explicit subClassOf/subPropertyOf out-edges — O(restrictions × direct super-edges). NB scm-avf2's conclusion reverses (`c2 ⊑ c1`, contravariant in the property) per Profiles §4.3 Table 9. |
 | scm-int, scm-uni | ✅ | schema level |
 | XSD datatype hierarchy (numeric tower ⊑) | ✅ **(this thread)** | direct edges for occurring datatype IRIs (WebOnt-I5.8) |
 
@@ -176,8 +191,9 @@ Remaining 3 fails (annotated in the report):
    `@keywords`): ~60 syntax tests, mechanical. (parser, low risk)
 6. **SPARQL-regime answer filtering** (drop bnode bindings per skolemization condition):
    2 tests; needs a result post-filter hook in the runner or engine. (small)
-7. **OWL leftovers**: cls-oo typing, cls-maxqc1/2 clashes, scm-hv/svf/avf — no current
-   test pressure; do alongside any RL hardening. (small each)
+7. ~~**OWL leftovers**: cls-oo typing, cls-maxqc1/2 clashes, scm-hv/svf/avf~~ — DONE
+   (owl-rl-completion thread, 2026-06): the §2 table is now fully ✅ or explicitly
+   by-design; every implemented rule has a hand-computed-closure unit test.
 8. **Decide policy** on document-access builtins (log:semantics/content/outputString) —
    excluded today by design; an opt-in resolver could lift 2+ tests and real EYE use-cases.
 
