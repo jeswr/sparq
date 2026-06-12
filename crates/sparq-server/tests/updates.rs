@@ -204,10 +204,12 @@ async fn concurrent_queries_proceed_while_updates_commit() {
 // Readers never block on the writer
 // ---------------------------------------------------------------------------
 
-/// While an update is doing O(graph) work (the writer's per-batch fork), readers must
-/// keep pinning generations and answering queries — `current()` is a lock-free load
-/// that never touches the writer. Each observed count must also be one of the two
-/// committed states (snapshot consistency: old or new, never partial).
+/// While an update is doing substantial writer-side work (parse + apply of a bulk
+/// INSERT DATA batch — the original single-triple update became too fast to sample
+/// once `Graph::fork` went O(delta)), readers must keep pinning generations and
+/// answering queries — `current()` is a lock-free load that never touches the writer.
+/// Each observed count must also be one of the two committed states (snapshot
+/// consistency: old or new, never partial).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn readers_are_not_blocked_during_a_slow_update() {
     let n = 200_000;
@@ -216,12 +218,19 @@ async fn readers_are_not_blocked_during_a_slow_update() {
     let before = sparq_engine::query(state.current().snapshot(), probe).unwrap().rows.len();
     assert_eq!(before, 0);
 
+    // One probe triple plus a 50k-triple bulk payload: the batch commits atomically,
+    // so the probe still observes exactly "old" (0 rows) or "new" (1 row), while the
+    // parse + apply gives the sampler a real window to observe during.
+    let mut update = String::from("INSERT DATA { <http://ex/w> <http://ex/w> <http://ex/w> .\n");
+    for i in 0..50_000 {
+        update.push_str(&format!("<http://ex/bulk/{i}> <http://ex/bulkp> <http://ex/bulko> .\n"));
+    }
+    update.push('}');
+
     let writer_state = state.clone();
     let writer = tokio::task::spawn_blocking(move || {
         let t = Instant::now();
-        writer_state
-            .apply_update("INSERT DATA { <http://ex/w> <http://ex/w> <http://ex/w> }")
-            .unwrap();
+        writer_state.apply_update(&update).unwrap();
         t.elapsed()
     });
 
