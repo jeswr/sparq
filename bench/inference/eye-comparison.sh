@@ -38,9 +38,10 @@ for i in range(N):
         if j + 1 < N: print(f':n{i}_{j} :edge :n{i}_{j+1} .')
 EOF
 
-mo3() { # min-of-3 wall seconds for "$@"
+mon() { # min-of-N wall seconds: mon <runs> <cmd…>
+  local runs="$1"; shift
   local best=""
-  for _ in 1 2 3; do
+  for _ in $(seq 1 "$runs"); do
     local t0 t1 t
     t0=$(python3 -c 'import time; print(time.time())')
     "$@" > /dev/null 2>&1
@@ -53,7 +54,10 @@ mo3() { # min-of-3 wall seconds for "$@"
 
 printf '%-10s %12s %12s\n' workload sparq eye
 for w in socrates dt1k dt10k dt100k anc500 grid30; do
-  s=$(mo3 "$CLI" reason "$B/$w.n3" n3 n3 /dev/null)
-  e=$(mo3 "$EYE" --quiet --nope "$B/$w.n3" --pass)
-  printf '%-10s %11ss %11ss\n' "$w" "$s" "$e"
+  # dt100k runs EYE once (minutes per run); everything else is min-of-3.
+  eruns=3; [ "$w" = dt100k ] && eruns=1
+  s=$(mon 3 "$CLI" reason "$B/$w.n3" n3 n3 /dev/null)
+  printf '%-10s %11ss ' "$w" "$s"
+  e=$(mon "$eruns" "$EYE" --quiet --nope "$B/$w.n3" --pass)
+  printf '%11ss\n' "$e"
 done

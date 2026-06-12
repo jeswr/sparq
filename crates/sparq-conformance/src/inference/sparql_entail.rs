@@ -35,7 +35,15 @@ pub fn notes() -> Vec<String> {
          query-over-materialized-closure through the same evaluation/comparison machinery as \
          the gating SPARQL harness; the regime materialized is the strongest the reasoner \
          supports of the test's `sd:entailmentRegime` set (RDFS ⊃ RDF; OWL-RDF-Based via the \
-         OWL RL rules, a sound subset — its incompleteness shows up as listed fails). \
+         OWL RL rules, a sound subset — its incompleteness shows up as listed fails). The \
+         OwlRl closure adds a harness-side eq-ref layer (OWL 2 Profiles §4.3 Table 4: \
+         reflexive owl:sameAs for every closure term — omitted by the production \
+         materializer as store bloat). The regimes' ANSWER RESTRICTION is applied to engine \
+         solutions before comparison (SPARQL 1.1 Entailment Regimes): (C1/skolemization, \
+         §2/§3.1) bindings to blank nodes not in the queried graph — i.e. introduced by the \
+         saturation — are never answers; and for tests whose expectations are sanctioned \
+         under OWL-Direct (§7), variables in class/property-NAME positions cannot bind to \
+         anonymous class expressions (a bnode is not a name). \
          D-only / OWL-Direct-only / RIF tests are out of scope with their reason."
             .to_string(),
     ]
