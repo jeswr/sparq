@@ -178,6 +178,115 @@ mod tests {
             .any(|t| t.predicate.as_str().ends_with("conforms")));
     }
 
+    /// `sh:conforms` counts every result regardless of severity (what the W3C
+    /// suite checks); `conforms_violations_only` is the severity-aware toggle.
+    #[test]
+    fn severity_aware_conformance_toggle() {
+        let data = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:bob a ex:Person ; ex:age "old" .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let shapes = |severity: &str| {
+            Graph::load_str(
+                &format!(
+                    r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:S a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [ sh:path ex:age ; sh:datatype xsd:integer ; sh:severity {severity} ] .
+        "#
+                ),
+                "turtle",
+            )
+            .unwrap()
+        };
+        // A warning-severity result: reported, sh:conforms false, but the
+        // violations-only toggle passes.
+        let r = validate(&data, &shapes("sh:Warning"));
+        assert!(!r.conforms);
+        assert_eq!(r.results.len(), 1);
+        assert!(r.conforms_violations_only());
+        assert_eq!(r.results_with_severity("http://www.w3.org/ns/shacl#Warning").count(), 1);
+        assert_eq!(r.results_with_severity("http://www.w3.org/ns/shacl#Violation").count(), 0);
+        // Default severity is sh:Violation: both notions of conformance fail.
+        let r = validate(&data, &shapes("sh:Violation"));
+        assert!(!r.conforms);
+        assert!(!r.conforms_violations_only());
+        // Conforming data conforms under both.
+        let ok = Graph::load_str(
+            "@prefix ex: <http://example.org/> . ex:a a ex:Person ; ex:age 3 .",
+            "turtle",
+        )
+        .unwrap();
+        let r = validate(&ok, &shapes("sh:Warning"));
+        assert!(r.conforms && r.conforms_violations_only());
+    }
+
+    /// Cyclic sh:node references stay correct under the (focus, shape)
+    /// conformance memo: re-entry counts as conforming, and results reached
+    /// through a cycle are not wrongly reused.
+    #[test]
+    fn cyclic_node_shapes_with_memo() {
+        let shapes = Graph::load_str(
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:PS a sh:NodeShape ;
+              sh:targetClass ex:Person ;
+              sh:property [ sh:path ex:knows ; sh:node ex:PS ] ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        // A mutual cycle where everyone has a name: conforms (re-entry = true).
+        let good = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:a a ex:Person ; ex:name "A" ; ex:knows ex:b .
+            ex:b a ex:Person ; ex:name "B" ; ex:knows ex:a .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let r = validate(&good, &shapes);
+        assert!(r.conforms, "{}", r.to_text());
+        // The same cycle but b is nameless: a's sh:node value fails, b's own
+        // minCount fails, and the SHARED conformance check of the nameless
+        // node (reached from both a and c) reports per route.
+        let bad = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:a a ex:Person ; ex:name "A" ; ex:knows ex:b .
+            ex:b a ex:Person ; ex:knows ex:a .
+            ex:c a ex:Person ; ex:name "C" ; ex:knows ex:b .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let r = validate(&bad, &shapes);
+        assert!(!r.conforms);
+        // b fails minCount as a target, and the nameless b makes THREE sh:node
+        // checks fail: a's value b, c's value b, and b's value a (a does not
+        // conform because ITS value b fails — the cycle propagates).
+        let node_failures: Vec<_> = r
+            .results
+            .iter()
+            .filter(|x| x.source_component.ends_with("NodeConstraintComponent"))
+            .collect();
+        assert_eq!(node_failures.len(), 3, "{}", r.to_text());
+        assert!(r
+            .results
+            .iter()
+            .any(|x| x.source_component.ends_with("MinCountConstraintComponent")));
+    }
+
     #[test]
     fn logical_and_paths() {
         let data = Graph::load_str(

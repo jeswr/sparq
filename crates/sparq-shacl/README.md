@@ -87,6 +87,10 @@ if !report.conforms {
     // Or the standard report graph:
     println!("{}", report.to_turtle());
 }
+
+// Severity-aware gating: `conforms` counts EVERY result (the spec's
+// sh:conforms); for CI-style "warnings don't fail the build" use:
+if report.conforms_violations_only() { /* only sh:Warning / sh:Info results */ }
 ```
 
 A CLI-style end-to-end run via the bundled example

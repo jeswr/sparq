@@ -1,6 +1,6 @@
 # sparq-shacl — known gaps / follow-ups
 
-## Spec coverage
+## Spec coverage (documented out of scope — unchanged)
 - **SHACL-SPARQL** (`sh:sparql`, SPARQL-based constraint components,
   pre-binding) is not implemented — the suite's `sparql/` section is out of
   scope for this crate (Core only). Doing it well would route generated
@@ -25,20 +25,39 @@
 ## Upstream (sparq-core / sparq-engine) gaps noticed — NOT changed here
 - `Graph::load_str` has no base-IRI parameter, so documents with relative
   IRIs can't be loaded directly into a `Graph`; this crate works around it
-  with `load_turtle_with_base` (oxttl parse + `Graph::from_parts`). A
-  `load_str_with_base` on sparq-core would remove the workaround.
+  with `load_turtle_with_base` (oxttl parse + `Graph::from_parts`).
+  **BLOCKED-ON-ENGINE-SEAM** (handoff recorded): the engine-seams work is
+  adding `load_str_with_base` on sparq-core; when it lands, swap
+  `load_turtle_with_base` to delegate to it (keep the public helper for
+  API stability) — do NOT remove the workaround before then.
 - `sparq_core::Graph` exposes no term-level triple iterator; the `GraphView`
   wrapper here materialises `oxrdf::Term`s per scan row. Fine for validation
-  workloads; a borrowing iterator (via `term_parts`) would cut allocations.
+  workloads; **BLOCKED-ON-ENGINE-SEAM** (same handoff): the seams agent is
+  adding a borrowing triple/term iterator (via `term_parts`) which would cut
+  allocations in `GraphView`.
 
-## Implementation niceties
-- Severity-aware conformance: `sh:conforms` is currently `results.is_empty()`
-  regardless of severity, which matches every suite expectation (including
-  `misc/severity-*`); some implementations expose a "violations only" toggle.
+## Implementation niceties — status
+- ~~Severity-aware conformance~~ **DONE**:
+  `ValidationReport::conforms_violations_only()` (true iff no result carries
+  `sh:Violation` — the "warnings don't fail the build" toggle) and
+  `results_with_severity(iri)`. The spec's `sh:conforms` field is untouched
+  (`results.is_empty()` regardless of severity — every suite expectation,
+  including `misc/severity-*`, still pinned); the API stays infallible.
 - The W3C runner compares expected blank-node values as wildcards (blank
   nodes have no cross-graph identity). A graph-isomorphism comparison would
   be stricter; with result counts + per-property matching it has not been
   needed.
-- Performance: `conforms()` re-validates shared shapes per (focus, shape)
-  pair without memoisation. The suite (incl. the SHACL-SHACL meta test) runs
-  in ~1.6s; memoise `(focus, shape) -> bool` if real workloads need it.
+- ~~Performance: `conforms()` re-validates shared shapes per (focus, shape)
+  pair without memoisation~~ **DONE**: `(focus, shape) → bool` memo with a
+  cycle-soundness rule that does NOT weaken the recursion guard — the guard
+  is unchanged; the memo additionally tracks the lowest stack depth any
+  guard re-entry pointed at, and a frame's result is stored only when no
+  re-entry escaped below it (a frame closing its own cycle is context-free
+  and may be stored; one reached mid-cycle may not). Pinned by a cyclic
+  sh:node test (conforming and violating cycles, per-route reporting
+  preserved) and the full W3C suite (98/98 unchanged). Measured on the suite
+  runner (release, quiet M1, 5 runs of the test binary): typical 0.11 s →
+  0.08 s — small in absolute terms because suite fixtures are tiny and the
+  wall time is dominated by manifest parsing; the memo's real payoff is
+  workloads where shared shapes are reached from many focus nodes/routes
+  (DAG-shaped models, sh:and/sh:or member reuse).

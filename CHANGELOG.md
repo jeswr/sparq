@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Severity-aware conformance + conformance memo (`sparq-shacl`)** —
+  `ValidationReport::conforms_violations_only()` (CI-style gating: warnings and
+  infos report but don't break conformance) and `results_with_severity(iri)`;
+  the spec's `sh:conforms` is untouched and the API stays infallible. Inside
+  the validator, `conforms()` now memoises `(focus, shape) → bool` with a
+  cycle-soundness rule that leaves the recursion guard unchanged (a result is
+  cached only when no guard re-entry escaped below its frame). W3C core suite
+  unchanged at 98/98; pinned by new cyclic-shape and severity tests.
+
 - **Neighbor-sparse fallback for `most_similar` (`sparq-sim`)** — entities whose
   signature elements all point at degree-1 neighbors (every event names exactly
   one sport) generated NO candidates in v1. `SimConfig::profile_fallback`
