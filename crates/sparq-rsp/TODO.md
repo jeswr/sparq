@@ -1,36 +1,38 @@
 # sparq-rsp — follow-ups
 
-Constraint honoured in v1: **no existing crate was modified**; nothing in the
-workspace depends on this crate, and the wasm build is untouched.
+Constraint honoured in v1 and v2: **no existing crate was modified**; nothing
+in the workspace depends on this crate, and the wasm build is untouched.
 
-## The big one: overlay evaluation instead of rebuild-per-window
+## The big one: overlay evaluation instead of rebuild-per-window — DONE (v2)
 
-v1 is honest but naive in R2R: every closed window materialises a **fresh**
-dictionary-encoded `Graph` (`Dict::intern` per term + full index build) and the
-SPARQL text is re-parsed and re-planned by `sparq_engine::query`. Overlapping
-sliding windows (`STEP < RANGE`) re-intern and re-index the shared suffix on
-every step — with `RANGE 10·STEP 1`, ~90 % of each build is redone work. The
-measured plateau (~1.6 M triples/s, see README) is exactly this per-window
-materialisation cost.
+v1 rebuilt a fresh dictionary-encoded `Graph` per closed window (the measured
+~1.6 M triples/s plateau). v2 implements the first two rungs of the overlay
+ladder as selectable [`EvalMode`]s, benchmarked head-to-head (README table,
+1 M triples, Apple M1):
 
-The fix is an **overlay / delta design**, in ascending order of core support
-needed:
-
-1. **Persistent stream dictionary** (no core change): keep ONE `Dict` for the
-   life of the `ContinuousQuery`, intern each triple once at push time, and
-   build per-window graphs from already-interned `[Id; 3]`s via
-   `Graph::from_parts` — removes term hashing/allocation from the window loop.
-   (Dictionary grows monotonically with the stream's vocabulary; needs either
-   periodic compaction or acceptance.)
-2. **Delta application** (existing core API): maintain one live `Graph` and
-   per-slide `apply_delta(inserts = new step, deletes = evicted step)` instead
-   of rebuilding — the eviction sets are exactly what `WindowedStream` already
-   computes. Worth benchmarking against (1); `apply_delta`'s rebuild threshold
-   may dominate for small windows.
-3. **True overlay snapshot** (blocked on core): the cheap-snapshot API already
-   recorded in the workspace `TODO.md` ("sparq-core: cheap graph snapshot API")
-   would let the window loop keep one mutable graph and hand the engine an O(1)
-   immutable snapshot per closed window.
+1. **Persistent stream dictionary** (`EvalMode::PersistentDict`) — DONE, and
+   the **default**: ONE `Dict` per `ContinuousQuery` lifetime, terms interned
+   once at push time, per-window graphs from already-interned `[Id; 3]`s via
+   `Graph::from_parts`. Wins every benchmark scenario (1.2–5.3× over v1;
+   biggest on sliding windows, where v1 re-interned the shared suffix every
+   step). The dictionary grows monotonically with the stream's vocabulary —
+   accepted and documented; periodic compaction remains a follow-up for
+   unbounded-vocabulary streams (use `EvalMode::Rebuild` there meanwhile).
+2. **Delta application** (`EvalMode::Delta`) — DONE, kept opt-in,
+   **measured-and-not-defaulted**: one live `Graph` + per-slide
+   `apply_delta(inserts, deletes)` (exact set-semantic diff between
+   consecutive windows; multi-timestamp duplicates handled — a triple is only
+   deleted when its LAST in-window occurrence leaves), compacting when churn
+   outgrows the window. As the v1 TODO warned, the overlay cost dominates:
+   `apply_delta` is term-level (intern + `id_of` per change) and overlay rows
+   are re-sorted per scan, so it loses to PersistentDict everywhere
+   (0.29–2.01 M; see README). Kept because its per-slide work is O(changes).
+3. **True overlay snapshot** — DEFERRED, **blocked-on-engine-seam**: needs the
+   cheap-snapshot API recorded in the workspace `TODO.md` ("sparq-core: cheap
+   graph snapshot API") so the window loop can keep one mutable graph and hand
+   the engine an O(1) immutable snapshot per closed window. That seam would
+   also remove PersistentDict's remaining per-window cost (index build +
+   O(dictionary) numeric/temporal cache rebuild in `Graph::from_parts`).
 4. **Parse/plan once** — **engine side DONE (engine-seams wave)**:
    `sparq_engine::PreparedQuery` (parse / `From<spargebra::Query>`) with
    `query_prepared` / `ask_prepared` / `count_prepared` / `construct_prepared`
@@ -42,18 +44,27 @@ needed:
 
 ## Smaller gaps
 
-- **RSP-QL surface syntax**: `register` takes plain SPARQL + a programmatic
-  `WindowSpec`; there is no `FROM NAMED WINDOW :w ON STREAM :s [RANGE PT10S
-  STEP PT5S]` parser, and no named streams / multiple windows per query
-  (RSP-QL allows joining several windows). One stream, one window, one query.
-- **Window origin `t0` is fixed at 0** (documented divergence): RSP-QL
-  parameterises it. Trivial to add to `WindowSpec::time` if needed.
-- **ASK / CONSTRUCT continuous queries**: only SELECT is accepted. CONSTRUCT
-  per window would give stream-to-stream transformation (the engine already
-  has `construct`).
-- **R2S hash collisions**: ISTREAM/DSTREAM diffs use 64-bit row hashes
+- **Window origin `t0`** — DONE: `WindowSpec::with_t0(t0)` (RSP-QL's
+  parameterised origin); windows are `[t0 + k·step, t0 + k·step + range)`,
+  pre-origin arrivals belong to no window (not late) but advance the
+  watermark. Pinned by tests.
+- **ASK / CONSTRUCT continuous queries** — DONE: `ContinuousConstruct`
+  (stream-to-stream transformation; R2S as exact set diffs over the
+  constructed graphs) and `ContinuousAsk` (one boolean per window, RSTREAM
+  semantics), both validated at registration, both honouring `EvalMode`.
+- **RSP-QL surface syntax** — DEFERRED, out-of-scope-by-design for now:
+  `register` takes plain SPARQL + a programmatic `WindowSpec`; there is no
+  `FROM NAMED WINDOW :w ON STREAM :s [RANGE PT10S STEP PT5S]` parser, and no
+  named streams / multiple windows per query (RSP-QL allows joining several
+  windows). One stream, one window, one query. Doing this properly is a
+  parser + multi-window-join design (each window needs its own S2R state and
+  the engine a dataset-per-window view) — a feature in its own right, not an
+  increment on the current pipeline; revisit if a consumer actually speaks
+  RSP-QL text.
+- **R2S hash collisions**: ISTREAM/DSTREAM SELECT diffs use 64-bit row hashes
   (documented, vanishingly unlikely to collide). Exact term-level multiset
   diffing would remove the caveat at the cost of hashing full term values.
+  (CONSTRUCT diffs are exact set differences — no caveat.)
 - **Per-window budget**: `sparq_engine::query_with_budget` exists; exposing a
   `QueryBudget` per registered query would bound worst-case window evaluation
   in embedded deployments.

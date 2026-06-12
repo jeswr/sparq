@@ -3,7 +3,10 @@
 //!
 //! - [`VectorStore`]: one f32 embedding per dictionary term id in a flat, memory-mapped
 //!   `.spqv` file, designed for **sparse coverage** (only entities get embeddings, not
-//!   every literal) — see [`store`] for the format.
+//!   every literal) — see [`store`] for the format. [`StreamingWriter`] builds stores
+//!   bigger than RAM (vectors append straight to disk, the id index spills to a
+//!   sidecar); [`VectorStore::open_from_bytes`] reads a store held in memory
+//!   (filesystem-less environments).
 //! - [`nearest_exact`] / [`VectorIndex`]: exact brute-force cosine top-`k` (the
 //!   baseline and the recall ground truth) and an HNSW approximate index
 //!   (`instant-distance`, pure Rust), both returning `(Id, cosine)` pairs;
@@ -21,9 +24,10 @@
 //!   `research/genai-text-embedding-practices.md`), and embeds it.
 //!   [`embed_labels`] (configurable via [`LabelConfig`]) is the label-only
 //!   back-compat wrapper.
-//! - [`fuse_rrf`] / [`fuse_scores`]: rank/score **fusion for hybrid retrieval** —
-//!   combine the text-vector ranking with another ranked signal (e.g. `sparq-sim`'s
-//!   structural similarity) without a dependency between the crates.
+//! - [`fuse_rrf`] / [`fuse_rrf_weighted`] / [`fuse_scores`]: rank/score **fusion for
+//!   hybrid retrieval** — combine the text-vector ranking with another ranked signal
+//!   (e.g. `sparq-sim`'s structural similarity) without a dependency between the
+//!   crates; the weighted variant down-weights a noisier list Elasticsearch-style.
 //!
 //! Everything reads `sparq-core` through its public API only; the crate is opt-in and
 //! nothing in the workspace depends on it — the default engine build does not even
@@ -38,9 +42,9 @@ pub mod verbalize;
 
 pub use ann::{cosine, nearest_exact, nearest_term_exact, HnswConfig, VectorIndex};
 pub use embed::{Embedder, HashEmbedder};
-pub use fuse::{fuse_rrf, fuse_scores, RRF_K};
+pub use fuse::{fuse_rrf, fuse_rrf_weighted, fuse_scores, RRF_K};
 pub use labels::{embed_labels, embed_labels_with, LabelConfig};
-pub use store::{VectorStore, SPQV_MAGIC, SPQV_VERSION};
+pub use store::{StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION};
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
     ObjectKind, PropertyGroup,

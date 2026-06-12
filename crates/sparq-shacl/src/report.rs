@@ -44,6 +44,26 @@ impl ValidationReport {
         }
     }
 
+    /// Severity-aware conformance: `true` iff no result carries
+    /// `sh:Violation` severity — i.e. `sh:Warning` / `sh:Info` (and custom
+    /// severities) are reported but not conformance-breaking. The spec's
+    /// `sh:conforms` ([`conforms`](Self::conforms), what the W3C suite
+    /// checks) counts EVERY result regardless of severity; this is the
+    /// "violations only" toggle several implementations expose for CI-style
+    /// gating.
+    pub fn conforms_violations_only(&self) -> bool {
+        self.results_with_severity(&format!("{SH}Violation")).next().is_none()
+    }
+
+    /// The results whose `sh:resultSeverity` is exactly `severity` (a full
+    /// IRI, e.g. `http://www.w3.org/ns/shacl#Warning` or a custom severity).
+    pub fn results_with_severity<'a>(
+        &'a self,
+        severity: &'a str,
+    ) -> impl Iterator<Item = &'a ValidationResult> + 'a {
+        self.results.iter().filter(move |r| r.severity == severity)
+    }
+
     /// The report as an RDF graph serialised to Turtle, using the SHACL
     /// validation-report vocabulary.
     pub fn to_turtle(&self) -> String {

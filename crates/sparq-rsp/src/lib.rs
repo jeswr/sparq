@@ -8,13 +8,18 @@
 //!    [`TimestampedTriple`]s into a sequence of finite [`Window`]s,
 //!    maintained incrementally by [`WindowedStream`];
 //! 2. **R2R** — each closed window is materialised into a
-//!    [`sparq_core::Graph`] and the registered SPARQL SELECT is evaluated by
+//!    [`sparq_core::Graph`] (by the configured [`EvalMode`]: rebuild /
+//!    persistent dictionary / delta — see [`EvalMode`] and the README
+//!    throughput table) and the registered SPARQL query is evaluated by
 //!    `sparq_engine`;
 //! 3. **R2S** — an [`R2S`] operator (RSTREAM / ISTREAM / DSTREAM) maps the
 //!    result back onto the output stream, delivered through a callback as
 //!    [`WindowResult`]s.
 //!
-//! [`ContinuousQuery::register`] wires the three together.
+//! [`ContinuousQuery::register`] wires the three together for SELECT;
+//! [`ContinuousConstruct`] (stream-to-stream transformation: each window's
+//! result is itself a graph, as [`GraphResult`]s) and [`ContinuousAsk`] (one
+//! boolean per window, as [`AskResult`]s) are the CONSTRUCT / ASK forms.
 //!
 //! # Design constraints (deliberate)
 //!
@@ -52,10 +57,14 @@
 //! assert_eq!(avgs, vec![Some(avg.into())]);
 //! ```
 
+mod eval;
 mod query;
 mod stream;
 mod window;
 
-pub use query::{ContinuousQuery, R2S, WindowResult};
-pub use stream::{TimestampedTriple, TripleStream};
+pub use eval::EvalMode;
+pub use query::{
+    AskResult, ContinuousAsk, ContinuousConstruct, ContinuousQuery, GraphResult, R2S, WindowResult,
+};
+pub use stream::{Timestamped, TimestampedTriple, TripleStream};
 pub use window::{Window, WindowSpec, WindowedStream};

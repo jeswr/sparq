@@ -125,6 +125,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the incremental initial build itself beating the batch engine (anchored
   premise evaluation). Conformance and the batch paths are untouched.
 
+- **Severity-aware conformance + conformance memo (`sparq-shacl`)** —
+  `ValidationReport::conforms_violations_only()` (CI-style gating: warnings and
+  infos report but don't break conformance) and `results_with_severity(iri)`;
+  the spec's `sh:conforms` is untouched and the API stays infallible. Inside
+  the validator, `conforms()` now memoises `(focus, shape) → bool` with a
+  cycle-soundness rule that leaves the recursion guard unchanged (a result is
+  cached only when no guard re-entry escaped below its frame). W3C core suite
+  unchanged at 98/98; pinned by new cyclic-shape and severity tests.
+
+- **Neighbor-sparse fallback for `most_similar` (`sparq-sim`)** — entities whose
+  signature elements all point at degree-1 neighbors (every event names exactly
+  one sport) generated NO candidates in v1. `SimConfig::profile_fallback`
+  (default on) fills starved slots with predicate-profile (role) matches, ranked
+  below every exactly-scored result; predicate blocks are scanned
+  most-selective-first with a `max(4k, 64)` stop. Re-measured on the real
+  olympics eval: Sport precision@10 0.000 (0/0) → 1.000 (400/400), City 0.500
+  (2/4) → 0.995 (398/400), full 2400/2400 candidate coverage, ~0.3 ms mean
+  latency cost. The per-element IDF hub budget recorded in the TODO is
+  measured-and-rejected (the eval is saturated); numbers in `sparq-sim/TODO.md`.
+
+- **Streaming store builds, weighted RRF, bytes-backed open (`sparq-vectors`)**
+  — `StreamingWriter` removes the build-phase RAM ceiling (vectors append
+  straight to the `.spqv` data section, the id→slot index spills to a sidecar;
+  output byte-identical to the in-RAM builder — no format change; duplicates
+  reported at finalize), `fuse_rrf_weighted` (Elasticsearch-style per-list
+  weights, unit weights ≡ `fuse_rrf`), and `VectorStore::open_from_bytes`
+  (filesystem-less environments; validation identical to `open`, all read paths
+  shared). No wasm feature wired (deliberate — the crate stays out of the wasm
+  graph); DiskANN-style persistent ANN, quantization and big-endian remain
+  deferred with rationale in `sparq-vectors/TODO.md`.
+
+- **Overlay window evaluation, t0, CONSTRUCT/ASK (`sparq-rsp`)** — closed
+  windows are no longer rebuilt from scratch: the new `EvalMode` selects the
+  R2R materialisation strategy — `PersistentDict` (one dictionary per
+  continuous query, terms interned once at push time, per-window graphs from
+  already-interned ids; the new default — wins every benchmark scenario,
+  1.2–5.3× over the v1 rebuild, biggest on sliding windows), `Delta` (one
+  live graph + set-semantic `apply_delta` per slide with churn-driven
+  compaction; measured slower everywhere, kept opt-in), and `Rebuild` (the v1
+  baseline, still right for unbounded-vocabulary streams). Plus: RSP-QL
+  window origin `t0` (`WindowSpec::with_t0`), and continuous CONSTRUCT
+  (`ContinuousConstruct` — stream-to-stream transformation with exact
+  set-diff ISTREAM/DSTREAM) and ASK (`ContinuousAsk`) query forms. All three
+  modes are observationally identical (pinned by tests); README throughput
+  table re-measured per mode. Zero wasm-bundle impact (opt-in crate).
+
 ### Changed
 
 - **`sparq-geo` depends on geo 0.33** (was 0.30; clean API compatibility): brings

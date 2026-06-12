@@ -23,6 +23,8 @@ pub(crate) fn validate_graph(data: &Graph, shapes: &ShapesModel) -> Vec<Validati
         data: GraphView::new(data),
         shapes,
         stack: Vec::new(),
+        memo: vec![FxHashMap::default(); shapes.shapes.len()],
+        min_reentry: usize::MAX,
         regexes: FxHashMap::default(),
     };
     let mut out = Vec::new();
@@ -40,6 +42,14 @@ struct Validator<'a> {
     /// (focus, shape) pairs currently being validated — the recursion guard for
     /// cyclic sh:node / sh:property references (re-entry counts as conforming).
     stack: Vec<(Term, usize)>,
+    /// `(focus, shape) → bool` conformance memo, indexed by shape id. Only
+    /// CONTEXT-FREE results are stored — see [`conforms`](Validator::conforms)
+    /// for the cycle rule that keeps this sound under the recursion guard.
+    memo: Vec<FxHashMap<Term, bool>>,
+    /// The lowest stack depth the recursion guard re-entered since the current
+    /// `conforms` frame was pushed (`usize::MAX` = none). A frame may be
+    /// memoised only if no re-entry pointed BELOW it.
+    min_reentry: usize,
     regexes: FxHashMap<String, Option<regex::Regex>>,
 }
 
@@ -59,16 +69,45 @@ impl<'a> Validator<'a> {
         crate::view::dedup(out)
     }
 
-    /// True iff `node` produces no results against `shape` (conformance checking).
+    /// True iff `node` produces no results against `shape` (conformance
+    /// checking), memoised per `(focus, shape)` pair — shared shapes reached
+    /// through several routes (sh:and members, a sh:node target re-visited per
+    /// value, …) validate once.
+    ///
+    /// # Memoisation under the recursion guard
+    ///
+    /// Re-entry of an in-progress `(node, shape)` pair counts as conforming
+    /// (recursion is undefined in SHACL), which makes a frame's result depend
+    /// on the *stack it ran under* whenever a re-entry escaped below it. The
+    /// rule that keeps the memo sound: track the LOWEST stack depth any guard
+    /// hit pointed at (`min_reentry`) and store a frame's result only when no
+    /// re-entry pointed below that frame. A frame that closes its own cycle
+    /// (re-entry at exactly its depth) is still memoisable — re-running it
+    /// from an empty stack reproduces the same self-referential assumption.
     fn conforms(&mut self, node: &Term, sid: usize) -> bool {
-        if self.stack.iter().any(|(n, s)| n == node && *s == sid) {
-            return true; // recursive re-entry: treat as conforming (recursion is undefined in SHACL)
+        if let Some(i) = self.stack.iter().position(|(n, s)| n == node && *s == sid) {
+            // Recursive re-entry: treat as conforming, and record how deep the
+            // cycle reaches so the frames above it skip the memo.
+            self.min_reentry = self.min_reentry.min(i);
+            return true;
         }
+        if let Some(&cached) = self.memo[sid].get(node) {
+            return cached;
+        }
+        let depth = self.stack.len();
+        let saved = std::mem::replace(&mut self.min_reentry, usize::MAX);
         self.stack.push((node.clone(), sid));
         let mut tmp = Vec::new();
         self.validate_shape(sid, node, &mut tmp);
         self.stack.pop();
-        tmp.is_empty()
+        let ok = tmp.is_empty();
+        if self.min_reentry >= depth {
+            // No re-entry escaped below this frame: the result is context-free.
+            self.memo[sid].insert(node.clone(), ok);
+        }
+        // Propagate cycle reach to the enclosing frame.
+        self.min_reentry = saved.min(self.min_reentry);
+        ok
     }
 
     fn validate_shape(&mut self, sid: usize, focus: &Term, out: &mut Vec<ValidationResult>) {
