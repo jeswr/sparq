@@ -14,7 +14,7 @@
 //!   (in place, same swap); `Graph.load_n3` runs the Notation3 forward-chainer
 //!   over an N3 document (facts + `{…} => {…}` rules).
 //!
-//! Long-running engine calls release the GIL (`py.allow_threads`) so other Python
+//! Long-running engine calls release the GIL (`py.detach`) so other Python
 //! threads keep running during parse / query / reasoning.
 
 use pyo3::exceptions::{PyIOError, PyValueError};
@@ -43,7 +43,9 @@ fn engine_err(e: String) -> PyErr {
 /// `language` is the language tag (if any) and `datatype` the datatype IRI
 /// (always set — plain literals carry `xsd:string`, language-tagged ones
 /// `rdf:langString`). Non-literals have `language = datatype = None`.
-#[pyclass(frozen, eq, hash, module = "sparq")]
+// `skip_from_py_object`: pyo3 0.29 makes the auto `FromPyObject` for Clone
+// pyclasses opt-in; nothing here extracts a `Term` from Python, so skip it.
+#[pyclass(frozen, eq, hash, skip_from_py_object, module = "sparq")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Term {
     #[pyo3(get)]
@@ -225,7 +227,7 @@ impl Graph {
     fn load(py: Python<'_>, source: &Bound<'_, PyAny>, format: Option<&str>) -> PyResult<Graph> {
         let (text, fmt) = resolve_source(source, format)?;
         let inner = py
-            .allow_threads(|| CoreGraph::load_dataset(&text, &fmt))
+            .detach(|| CoreGraph::load_dataset(&text, &fmt))
             .map_err(engine_err)?;
         Ok(Graph { inner })
     }
@@ -237,7 +239,7 @@ impl Graph {
     #[staticmethod]
     fn load_n3(py: Python<'_>, text: &str) -> PyResult<Graph> {
         let inner = py
-            .allow_threads(|| {
+            .detach(|| {
                 let mut dict = Dict::new();
                 let triples = sparq_reason::reason_n3(&mut dict, text)?;
                 Ok::<_, String>(CoreGraph::from_parts(dict, triples))
@@ -252,14 +254,14 @@ impl Graph {
     #[staticmethod]
     fn open(py: Python<'_>, dir: std::path::PathBuf) -> PyResult<Graph> {
         let inner = py
-            .allow_threads(|| CoreGraph::open(&dir))
+            .detach(|| CoreGraph::open(&dir))
             .map_err(|e| PyIOError::new_err(format!("cannot open {}: {e}", dir.display())))?;
         Ok(Graph { inner })
     }
 
     /// Persist the graph (indexes + dictionary) into `dir` for later `Graph.open`.
     fn save(&self, py: Python<'_>, dir: std::path::PathBuf) -> PyResult<()> {
-        py.allow_threads(|| self.inner.save(&dir))
+        py.detach(|| self.inner.save(&dir))
             .map_err(|e| PyIOError::new_err(format!("cannot save to {}: {e}", dir.display())))
     }
 
@@ -267,7 +269,7 @@ impl Graph {
     /// (`.vars` + `.rows`, where each row is a `{var: Term}` dict).
     fn query(&self, py: Python<'_>, sparql: &str) -> PyResult<QueryResult> {
         let res = py
-            .allow_threads(|| sparq_engine::query(&self.inner, sparql))
+            .detach(|| sparq_engine::query(&self.inner, sparql))
             .map_err(engine_err)?;
         let vars: Vec<String> = res.vars.iter().map(|v| v.as_str().to_string()).collect();
         let rows = PyList::empty(py);
@@ -287,7 +289,7 @@ impl Graph {
     /// `str` — the fast path: rows are serialised straight from the dictionary,
     /// skipping per-cell term materialisation.
     fn query_json(&self, py: Python<'_>, sparql: &str) -> PyResult<String> {
-        py.allow_threads(|| sparq_engine::query_json(&self.inner, sparql))
+        py.detach(|| sparq_engine::query_json(&self.inner, sparql))
             .map_err(engine_err)
     }
 
@@ -306,7 +308,7 @@ impl Graph {
             _ => return Err(PyValueError::new_err("ask() takes an ASK (or SELECT) query")),
         };
         let n = py
-            .allow_threads(|| sparq_engine::count(&self.inner, &runnable))
+            .detach(|| sparq_engine::count(&self.inner, &runnable))
             .map_err(engine_err)?;
         Ok(n > 0)
     }
@@ -317,7 +319,7 @@ impl Graph {
     /// left unchanged. Named graphs are not yet supported by the engine's update.
     fn update(&mut self, py: Python<'_>, sparql: &str) -> PyResult<()> {
         let inner = &self.inner;
-        let new = py.allow_threads(|| sparq_engine::update(inner, sparql)).map_err(engine_err)?;
+        let new = py.detach(|| sparq_engine::update(inner, sparql)).map_err(engine_err)?;
         self.inner = new;
         Ok(())
     }
@@ -340,7 +342,7 @@ impl Graph {
         // move `dict` and `store` out, re-derive the canonical triples, materialize,
         // rebuild. A placeholder empty graph holds the slot during the closure.
         let g = std::mem::replace(&mut self.inner, CoreGraph::from_parts(Dict::new(), Vec::new()));
-        let (inner, added) = py.allow_threads(move || {
+        let (inner, added) = py.detach(move || {
             let mut triples = all_triples(&g);
             let mut dict = g.dict;
             let added = sparq_reason::materialize(prof, &mut dict, &mut triples);
