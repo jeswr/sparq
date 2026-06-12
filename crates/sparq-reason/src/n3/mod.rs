@@ -1901,7 +1901,34 @@ fn eval_functional(
             let mut s = String::new();
             for a in &args {
                 match a {
-                    Term::Lit(v, _, _) => s.push_str(v),
+                    // cwm coerces typed literals to their canonical VALUE
+                    // string ("0"^^xsd:boolean → "false", 0E1 → "0").
+                    Term::Lit(v, dt, _) => match dt.strip_prefix("http://www.w3.org/2001/XMLSchema#") {
+                        Some("boolean") => s.push_str(if v == "0" || v == "false" { "false" } else { "true" }),
+                        Some("integer" | "decimal" | "float" | "double") => {
+                            match numval(a) {
+                                Some(NumVal::Int(i)) => s.push_str(&i.to_string()),
+                                Some(NumVal::Dec(m, sc)) => {
+                                    let (m, sc) = dec_norm(m, sc);
+                                    if sc == 0 {
+                                        s.push_str(&m.to_string());
+                                    } else {
+                                        let Term::Lit(lex, _, _) = numval_term(NumVal::Dec(m, sc)) else { return None };
+                                        s.push_str(&lex);
+                                    }
+                                }
+                                Some(NumVal::F64(f)) => {
+                                    if f.fract() == 0.0 && f.abs() < 9.007e15 {
+                                        s.push_str(&(f as i64).to_string());
+                                    } else {
+                                        s.push_str(&format!("{f}"));
+                                    }
+                                }
+                                None => s.push_str(v),
+                            }
+                        }
+                        _ => s.push_str(v),
+                    },
                     // cwm coerces IRI arguments to their text (concatenation.n3 s01).
                     Term::Iri(i) => s.push_str(i),
                     _ => return None,

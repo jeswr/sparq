@@ -448,6 +448,13 @@ const DOCUMENTED_DIVERGENCES: &[(&str, &str, &str)] = &[
          undeclared-':'-means-<#> convention — the engine keeps the cwm behavior",
     ),
     (
+        "numbers.n3",
+        "upstream ref base mixup",
+        "the expected output cwm_n3/n3parser.tests_n3_10013.n3 keeps ONE statement under \
+         the generating author's local base (file:/home/syosi/...#is) while the rest were \
+         rebased — that statement can never match any correct parse",
+    ),
+    (
     "cwm_unify_unify1",
     "upstream ref/action mismatch",
     "the action concludes `:test :a ?x` (predicate <unify1.n3#a>) but unify1-ref.n3 \

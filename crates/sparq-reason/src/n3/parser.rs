@@ -540,7 +540,7 @@ impl<'a> Parser<'a> {
                 return Ok((self.term(_out)?, false));
             }
         }
-        let pred = self.atom(_out)?;
+        let pred = self.term(_out)?; // N3 allows paths in predicate position
         if self.strict && !matches!(pred, Term::Iri(_)) {
             return Err(format!("invalid Turtle predicate {pred:?}"));
         }
@@ -719,9 +719,14 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 b'\\' => {
-                    // only \uXXXX / \UXXXXXXXX are legal inside an IRIREF
+                    // only \uXXXX / \UXXXXXXXX are legal inside an IRIREF —
+                    // and the DECODED character is held to the same charset.
                     self.i += 1;
-                    iri.push(self.read_unicode_escape()?);
+                    let ch = self.read_unicode_escape()?;
+                    if (ch as u32) <= 0x20 || matches!(ch, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`') {
+                        return Err(format!("escaped character {ch:?} is not allowed in an IRI"));
+                    }
+                    iri.push(ch);
                 }
                 // IRIREF excludes control chars, space and <>"{}|^`
                 0x00..=0x20 | b'<' | b'"' | b'{' | b'}' | b'|' | b'^' | b'`' => {
@@ -1106,7 +1111,11 @@ impl<'a> Parser<'a> {
         self.ws();
         // N3's iriPropertyList: `[id :s :p :o]` names the node :s (not a bnode).
         let node = if !self.strict && self.keyword("id") {
-            self.term(out)?
+            let named = self.term(out)?;
+            if !matches!(named, Term::Iri(_)) {
+                return Err(format!("iriPropertyList id must be an IRI, got {named:?}"));
+            }
+            named
         } else {
             self.fresh_bnode()
         };
@@ -1154,6 +1163,10 @@ pub(super) fn resolve_iri(base: &str, iri: &str) -> String {
     if let Some(frag) = iri.strip_prefix('#') {
         return format!("{base}#{frag}");
     }
+    if iri.starts_with('?') {
+        // query-only reference: replace the base's query, keep its path
+        return format!("{}{iri}", base.split('?').next().unwrap_or(base));
+    }
     // scheme = up to ':'; authority = '//…' if present.
     let scheme_end = base.find(':').map(|i| i + 1).unwrap_or(0);
     let (authority_end, has_authority) = if base[scheme_end..].starts_with("//") {
@@ -1177,19 +1190,34 @@ pub(super) fn resolve_iri(base: &str, iri: &str) -> String {
             format!("{dir}/{iri}")
         }
     };
-    // Remove dot segments in the path part (after the authority).
-    let (prefix, path) = merged.split_at(authority_end.min(merged.len()));
+    // Remove dot segments in the path part (after the authority); the
+    // query/fragment must not take part (RFC 3986 §5.2.4).
+    let (prefix, rest) = merged.split_at(authority_end.min(merged.len()));
+    let qpos = rest.find(['?', '#']).unwrap_or(rest.len());
+    let (path, tail) = rest.split_at(qpos);
     let mut out: Vec<&str> = Vec::new();
+    let mut trailing_slash = path.ends_with('/');
     for seg in path.split('/') {
         match seg {
-            "." => {}
+            "." => trailing_slash = true,
             ".." => {
-                out.pop();
+                // never pop the leading empty segment (the path root)
+                if out.len() > 1 || (out.len() == 1 && !out[0].is_empty()) {
+                    out.pop();
+                }
+                trailing_slash = true;
             }
-            s => out.push(s),
+            s => {
+                trailing_slash = s.is_empty();
+                out.push(s);
+            }
         }
     }
-    format!("{prefix}{}", out.join("/"))
+    let mut joined = out.join("/");
+    if trailing_slash && !joined.ends_with('/') {
+        joined.push('/');
+    }
+    format!("{prefix}{joined}{tail}")
 }
 
 fn utf8_len(b: u8) -> usize {
