@@ -1,0 +1,5 @@
+spo_read_s	0.073	rows	9999991
+rebuild	SOP	permute_s	0.007	sort_s	0.057	total_s	0.064
+rebuild	PSO	permute_s	0.007	sort_s	0.124	total_s	0.131
+rebuild	OPS	permute_s	0.008	sort_s	0.119	total_s	0.127
+reload_from_disk	SOP	first_s	0.081	best_s	0.043

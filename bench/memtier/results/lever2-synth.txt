@@ -1,0 +1,144 @@
+=== 1 raw ===
+heap_bytes	total_after_open	156
+rss_kb	after_open	2336
+query	q02_type_person	1250000	4.1	6.0	8723.6
+query	q03_star3	1250000	25370.9	31893.3	87374.3
+query	q04_follows_name	4999991	39101.3	44499.3	149100.0
+query	q06_filter_age	140625	7.2	12.8	5064.2
+query	q09_count_edges	1	6.9	10.1	2003.7
+query	q10_optional_age	1250000	5092.5	5322.0	6023.2
+suite_total_min_us	69582.9
+rss_kb	after_battery	108304
+=== 1 mixed ===
+heap_bytes	total_after_open	3750156
+rss_kb	after_open	9712
+query	q02_type_person	1250000	4.3	5.3	136.9
+query	q03_star3	1250000	24711.8	25410.1	29059.9
+query	q04_follows_name	4999991	44862.1	47273.1	50249.5
+query	q06_filter_age	140625	13.4	20.2	167.8
+query	q09_count_edges	1	14.0	17.2	104.5
+query	q10_optional_age	1250000	5017.0	5947.8	9759.2
+suite_total_min_us	74622.5
+rss_kb	after_battery	115632
+=== 1 comp-lazy ===
+heap_bytes	total_after_open	7500156
+rss_kb	after_open	17040
+query	q02_type_person	1250000	5.2	10.5	418.1
+query	q03_star3	1250000	56555.1	68641.1	94212.6
+query	q04_follows_name	4999991	101918.1	123065.2	164829.2
+query	q06_filter_age	140625	9229.1	9542.5	17321.4
+query	q09_count_edges	1	7.9	12.7	88.0
+query	q10_optional_age	1250000	22732.8	23265.0	27796.0
+suite_total_min_us	190448.3
+rss_kb	after_battery	171856
+=== 1 comp-eager ===
+heap_bytes	total_after_open	7500156
+rss_kb	after_open	17056
+decompress_s	0.861
+heap_bytes	total_after_decompress	719999508
+rss_kb	after_decompress	712992
+query	q02_type_person	1250000	4.7	5.8	110.9
+query	q03_star3	1250000	26459.9	27322.5	29679.6
+query	q04_follows_name	4999991	39547.4	43679.2	46001.7
+query	q06_filter_age	140625	7.2	9.5	80.9
+query	q09_count_edges	1	13.5	20.7	106.7
+query	q10_optional_age	1250000	4818.9	6515.6	6788.4
+suite_total_min_us	70851.5
+rss_kb	after_battery	715088
+heap_bytes	total_after_battery	719999508
+=== 2 raw ===
+heap_bytes	total_after_open	156
+rss_kb	after_open	2336
+query	q02_type_person	1250000	4.1	6.0	181.8
+query	q03_star3	1250000	28972.3	30785.5	35653.4
+query	q04_follows_name	4999991	45134.6	47342.1	54035.0
+query	q06_filter_age	140625	6.6	9.2	103.5
+query	q09_count_edges	1	6.5	9.4	88.8
+query	q10_optional_age	1250000	6186.8	7906.8	9666.4
+suite_total_min_us	80310.8
+rss_kb	after_battery	108320
+=== 2 mixed ===
+heap_bytes	total_after_open	3750156
+rss_kb	after_open	9712
+query	q02_type_person	1250000	5.0	8.9	135.4
+query	q03_star3	1250000	34403.8	38489.5	40644.4
+query	q04_follows_name	4999991	51104.5	54163.0	57428.2
+query	q06_filter_age	140625	13.9	23.4	116.3
+query	q09_count_edges	1	14.2	23.9	216.7
+query	q10_optional_age	1250000	6520.2	7810.4	9303.2
+suite_total_min_us	92061.6
+rss_kb	after_battery	115664
+=== 2 comp-lazy ===
+heap_bytes	total_after_open	7500156
+rss_kb	after_open	17056
+query	q02_type_person	1250000	4.7	8.1	110.2
+query	q03_star3	1250000	71713.4	82264.4	105924.7
+query	q04_follows_name	4999991	111204.8	121892.8	131970.2
+query	q06_filter_age	140625	11483.1	13253.2	25341.9
+query	q09_count_edges	1	7.8	10.3	96.3
+query	q10_optional_age	1250000	32405.8	37550.5	47644.2
+suite_total_min_us	226819.6
+rss_kb	after_battery	171904
+=== 2 comp-eager ===
+heap_bytes	total_after_open	7500156
+rss_kb	after_open	17072
+decompress_s	0.677
+heap_bytes	total_after_decompress	719999508
+rss_kb	after_decompress	713008
+query	q02_type_person	1250000	9.0	10.4	228.0
+query	q03_star3	1250000	33526.5	41664.2	44574.1
+query	q04_follows_name	4999991	40988.4	46037.6	55168.4
+query	q06_filter_age	140625	7.6	13.6	165.7
+query	q09_count_edges	1	5.8	7.8	65.2
+query	q10_optional_age	1250000	5283.5	6719.5	7632.6
+suite_total_min_us	79820.8
+rss_kb	after_battery	715104
+heap_bytes	total_after_battery	719999508
+=== 3 raw ===
+heap_bytes	total_after_open	156
+rss_kb	after_open	2336
+query	q02_type_person	1250000	4.2	5.0	135.7
+query	q03_star3	1250000	23276.1	23930.2	26094.5
+query	q04_follows_name	4999991	36579.7	40476.1	43199.0
+query	q06_filter_age	140625	6.6	9.8	171.8
+query	q09_count_edges	1	6.0	7.4	96.4
+query	q10_optional_age	1250000	4694.8	5306.1	5953.1
+suite_total_min_us	64567.3
+rss_kb	after_battery	108288
+=== 3 mixed ===
+heap_bytes	total_after_open	3750156
+rss_kb	after_open	9712
+query	q02_type_person	1250000	4.0	5.0	140.2
+query	q03_star3	1250000	23372.9	24105.7	28616.3
+query	q04_follows_name	4999991	38181.7	39753.0	43257.7
+query	q06_filter_age	140625	6.6	9.9	106.4
+query	q09_count_edges	1	6.0	8.8	61.3
+query	q10_optional_age	1250000	4739.7	5431.1	6003.3
+suite_total_min_us	66310.8
+rss_kb	after_battery	115696
+=== 3 comp-lazy ===
+heap_bytes	total_after_open	7500156
+rss_kb	after_open	17040
+query	q02_type_person	1250000	5.1	7.8	115.1
+query	q03_star3	1250000	50221.6	53824.2	57562.8
+query	q04_follows_name	4999991	93986.2	98994.8	110826.7
+query	q06_filter_age	140625	9744.0	10101.3	10287.7
+query	q09_count_edges	1	7.2	9.2	91.3
+query	q10_optional_age	1250000	23795.7	24557.7	33464.1
+suite_total_min_us	177759.8
+rss_kb	after_battery	171824
+=== 3 comp-eager ===
+heap_bytes	total_after_open	7500156
+rss_kb	after_open	17072
+decompress_s	0.573
+heap_bytes	total_after_decompress	719999508
+rss_kb	after_decompress	713008
+query	q02_type_person	1250000	4.1	4.9	135.5
+query	q03_star3	1250000	26344.8	27011.5	30860.5
+query	q04_follows_name	4999991	39569.8	39822.9	44170.5
+query	q06_filter_age	140625	7.5	11.7	118.7
+query	q09_count_edges	1	6.8	9.8	61.6
+query	q10_optional_age	1250000	4631.2	5010.1	5178.5
+suite_total_min_us	70564.2
+rss_kb	after_battery	715152
+heap_bytes	total_after_battery	719999508

@@ -1,0 +1,18 @@
+=== 1 raw ===
+suite_total_min_us	27738.2
+rss_kb	after_battery	69728
+=== 1 mixed ===
+suite_total_min_us	33498.3
+rss_kb	after_battery	68176
+=== 1 comp-lazy ===
+suite_total_min_us	51059.7
+rss_kb	after_battery	69568
+=== 2 raw ===
+suite_total_min_us	31300.2
+rss_kb	after_battery	68736
+=== 2 mixed ===
+suite_total_min_us	31983.7
+rss_kb	after_battery	68432
+=== 2 comp-lazy ===
+suite_total_min_us	49939.7
+rss_kb	after_battery	71248
