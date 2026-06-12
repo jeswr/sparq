@@ -1,0 +1,19 @@
+[package]
+name = "sparq-parse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "RDF parsing and compressed-I/O experiments for sparq (empty scaffold; design gated on the measured baseline in research/custom-parsers-baseline.md)"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+publish = false
+
+# Deliberately NO dependencies yet. What goes in this crate (custom parsers,
+# fused decompress+parse, parallel compression) is decided by the measured
+# baseline, not the other way round. This crate must never enter the
+# sparq-wasm dependency graph.
+[dependencies]
