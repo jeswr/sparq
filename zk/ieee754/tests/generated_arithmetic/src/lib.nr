@@ -792,3 +792,3672 @@ fn generated_f128_div_vectors_match_reference() {
     // random:754:7
     assert_eq((f128::new(0x80007a48ceb5a9bbcd1998b785c8040d as u128) / f128::new(0x4eef888ad9c0b0463c8a82b7613fd88b as u128)).bits(), 0x80000000000000000000000000000000 as u128);
 }
+
+#[test]
+fn generated_f16_eq_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x3c00 as u16).eq(f16::new(0x4000 as u16)), false);
+    // curated:1
+    assert_eq(f16::new(0x4000 as u16).eq(f16::new(0x3c00 as u16)), false);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).eq(f16::new(0x3c00 as u16)), true);
+    // curated:3
+    assert_eq(f16::new(0x3c00 as u16).eq(f16::new(0x3c01 as u16)), false);
+    // curated:4
+    assert_eq(f16::new(0xbc00 as u16).eq(f16::new(0x3c00 as u16)), false);
+    // curated:5
+    assert_eq(f16::new(0x3c00 as u16).eq(f16::new(0xbc00 as u16)), false);
+    // curated:6
+    assert_eq(f16::new(0xbc00 as u16).eq(f16::new(0xc000 as u16)), false);
+    // curated:7
+    assert_eq(f16::new(0xc000 as u16).eq(f16::new(0xbc00 as u16)), false);
+    // curated:8
+    assert_eq(f16::new(0x0000 as u16).eq(f16::new(0x8000 as u16)), true);
+    // curated:9
+    assert_eq(f16::new(0x8000 as u16).eq(f16::new(0x0000 as u16)), true);
+    // curated:10
+    assert_eq(f16::new(0x0000 as u16).eq(f16::new(0x0000 as u16)), true);
+    // curated:11
+    assert_eq(f16::new(0x8000 as u16).eq(f16::new(0x0001 as u16)), false);
+    // curated:12
+    assert_eq(f16::new(0x0001 as u16).eq(f16::new(0x0002 as u16)), false);
+    // curated:13
+    assert_eq(f16::new(0x03ff as u16).eq(f16::new(0x0400 as u16)), false);
+    // curated:14
+    assert_eq(f16::new(0x7bff as u16).eq(f16::new(0x7c00 as u16)), false);
+    // curated:15
+    assert_eq(f16::new(0x7c00 as u16).eq(f16::new(0x7c00 as u16)), true);
+    // curated:16
+    assert_eq(f16::new(0xfc00 as u16).eq(f16::new(0x7c00 as u16)), false);
+    // curated:17
+    assert_eq(f16::new(0xfc00 as u16).eq(f16::new(0xfc00 as u16)), true);
+    // curated:18
+    assert_eq(f16::new(0x7e00 as u16).eq(f16::new(0x7e00 as u16)), false);
+    // curated:19
+    assert_eq(f16::new(0x7e00 as u16).eq(f16::new(0x3c00 as u16)), false);
+    // curated:20
+    assert_eq(f16::new(0x3c00 as u16).eq(f16::new(0x7e00 as u16)), false);
+    // curated:21
+    assert_eq(f16::new(0x7e00 as u16).eq(f16::new(0x7c00 as u16)), false);
+    // curated:22
+    assert_eq(f16::new(0x8000 as u16).eq(f16::new(0x7e00 as u16)), false);
+    // random:754:0
+    assert_eq(f16::new(0x8b2f as u16).eq(f16::new(0x9a26 as u16)), false);
+    // random:754:1
+    assert_eq(f16::new(0x8325 as u16).eq(f16::new(0x3b2f as u16)), false);
+    // random:754:2
+    assert_eq(f16::new(0x0195 as u16).eq(f16::new(0x2756 as u16)), false);
+    // random:754:3
+    assert_eq(f16::new(0x04ab as u16).eq(f16::new(0x6e1a as u16)), false);
+    // random:754:4
+    assert_eq(f16::new(0x0230 as u16).eq(f16::new(0x5939 as u16)), false);
+    // random:754:5
+    assert_eq(f16::new(0xe322 as u16).eq(f16::new(0x0506 as u16)), false);
+    // random:754:6
+    assert_eq(f16::new(0x1c37 as u16).eq(f16::new(0x83ef as u16)), false);
+    // random:754:7
+    assert_eq(f16::new(0x0000 as u16).eq(f16::new(0x2a0e as u16)), false);
+}
+
+#[test]
+fn generated_f16_ne_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x3c00 as u16).ne(f16::new(0x4000 as u16)), true);
+    // curated:1
+    assert_eq(f16::new(0x4000 as u16).ne(f16::new(0x3c00 as u16)), true);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).ne(f16::new(0x3c00 as u16)), false);
+    // curated:3
+    assert_eq(f16::new(0x3c00 as u16).ne(f16::new(0x3c01 as u16)), true);
+    // curated:4
+    assert_eq(f16::new(0xbc00 as u16).ne(f16::new(0x3c00 as u16)), true);
+    // curated:5
+    assert_eq(f16::new(0x3c00 as u16).ne(f16::new(0xbc00 as u16)), true);
+    // curated:6
+    assert_eq(f16::new(0xbc00 as u16).ne(f16::new(0xc000 as u16)), true);
+    // curated:7
+    assert_eq(f16::new(0xc000 as u16).ne(f16::new(0xbc00 as u16)), true);
+    // curated:8
+    assert_eq(f16::new(0x0000 as u16).ne(f16::new(0x8000 as u16)), false);
+    // curated:9
+    assert_eq(f16::new(0x8000 as u16).ne(f16::new(0x0000 as u16)), false);
+    // curated:10
+    assert_eq(f16::new(0x0000 as u16).ne(f16::new(0x0000 as u16)), false);
+    // curated:11
+    assert_eq(f16::new(0x8000 as u16).ne(f16::new(0x0001 as u16)), true);
+    // curated:12
+    assert_eq(f16::new(0x0001 as u16).ne(f16::new(0x0002 as u16)), true);
+    // curated:13
+    assert_eq(f16::new(0x03ff as u16).ne(f16::new(0x0400 as u16)), true);
+    // curated:14
+    assert_eq(f16::new(0x7bff as u16).ne(f16::new(0x7c00 as u16)), true);
+    // curated:15
+    assert_eq(f16::new(0x7c00 as u16).ne(f16::new(0x7c00 as u16)), false);
+    // curated:16
+    assert_eq(f16::new(0xfc00 as u16).ne(f16::new(0x7c00 as u16)), true);
+    // curated:17
+    assert_eq(f16::new(0xfc00 as u16).ne(f16::new(0xfc00 as u16)), false);
+    // curated:18
+    assert_eq(f16::new(0x7e00 as u16).ne(f16::new(0x7e00 as u16)), true);
+    // curated:19
+    assert_eq(f16::new(0x7e00 as u16).ne(f16::new(0x3c00 as u16)), true);
+    // curated:20
+    assert_eq(f16::new(0x3c00 as u16).ne(f16::new(0x7e00 as u16)), true);
+    // curated:21
+    assert_eq(f16::new(0x7e00 as u16).ne(f16::new(0x7c00 as u16)), true);
+    // curated:22
+    assert_eq(f16::new(0x8000 as u16).ne(f16::new(0x7e00 as u16)), true);
+    // random:754:0
+    assert_eq(f16::new(0x8b2f as u16).ne(f16::new(0x9a26 as u16)), true);
+    // random:754:1
+    assert_eq(f16::new(0x8325 as u16).ne(f16::new(0x3b2f as u16)), true);
+    // random:754:2
+    assert_eq(f16::new(0x0195 as u16).ne(f16::new(0x2756 as u16)), true);
+    // random:754:3
+    assert_eq(f16::new(0x04ab as u16).ne(f16::new(0x6e1a as u16)), true);
+    // random:754:4
+    assert_eq(f16::new(0x0230 as u16).ne(f16::new(0x5939 as u16)), true);
+    // random:754:5
+    assert_eq(f16::new(0xe322 as u16).ne(f16::new(0x0506 as u16)), true);
+    // random:754:6
+    assert_eq(f16::new(0x1c37 as u16).ne(f16::new(0x83ef as u16)), true);
+    // random:754:7
+    assert_eq(f16::new(0x0000 as u16).ne(f16::new(0x2a0e as u16)), true);
+}
+
+#[test]
+fn generated_f16_lt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x3c00 as u16).lt(f16::new(0x4000 as u16)), true);
+    // curated:1
+    assert_eq(f16::new(0x4000 as u16).lt(f16::new(0x3c00 as u16)), false);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).lt(f16::new(0x3c00 as u16)), false);
+    // curated:3
+    assert_eq(f16::new(0x3c00 as u16).lt(f16::new(0x3c01 as u16)), true);
+    // curated:4
+    assert_eq(f16::new(0xbc00 as u16).lt(f16::new(0x3c00 as u16)), true);
+    // curated:5
+    assert_eq(f16::new(0x3c00 as u16).lt(f16::new(0xbc00 as u16)), false);
+    // curated:6
+    assert_eq(f16::new(0xbc00 as u16).lt(f16::new(0xc000 as u16)), false);
+    // curated:7
+    assert_eq(f16::new(0xc000 as u16).lt(f16::new(0xbc00 as u16)), true);
+    // curated:8
+    assert_eq(f16::new(0x0000 as u16).lt(f16::new(0x8000 as u16)), false);
+    // curated:9
+    assert_eq(f16::new(0x8000 as u16).lt(f16::new(0x0000 as u16)), false);
+    // curated:10
+    assert_eq(f16::new(0x0000 as u16).lt(f16::new(0x0000 as u16)), false);
+    // curated:11
+    assert_eq(f16::new(0x8000 as u16).lt(f16::new(0x0001 as u16)), true);
+    // curated:12
+    assert_eq(f16::new(0x0001 as u16).lt(f16::new(0x0002 as u16)), true);
+    // curated:13
+    assert_eq(f16::new(0x03ff as u16).lt(f16::new(0x0400 as u16)), true);
+    // curated:14
+    assert_eq(f16::new(0x7bff as u16).lt(f16::new(0x7c00 as u16)), true);
+    // curated:15
+    assert_eq(f16::new(0x7c00 as u16).lt(f16::new(0x7c00 as u16)), false);
+    // curated:16
+    assert_eq(f16::new(0xfc00 as u16).lt(f16::new(0x7c00 as u16)), true);
+    // curated:17
+    assert_eq(f16::new(0xfc00 as u16).lt(f16::new(0xfc00 as u16)), false);
+    // curated:18
+    assert_eq(f16::new(0x7e00 as u16).lt(f16::new(0x7e00 as u16)), false);
+    // curated:19
+    assert_eq(f16::new(0x7e00 as u16).lt(f16::new(0x3c00 as u16)), false);
+    // curated:20
+    assert_eq(f16::new(0x3c00 as u16).lt(f16::new(0x7e00 as u16)), false);
+    // curated:21
+    assert_eq(f16::new(0x7e00 as u16).lt(f16::new(0x7c00 as u16)), false);
+    // curated:22
+    assert_eq(f16::new(0x8000 as u16).lt(f16::new(0x7e00 as u16)), false);
+    // random:754:0
+    assert_eq(f16::new(0x8b2f as u16).lt(f16::new(0x9a26 as u16)), false);
+    // random:754:1
+    assert_eq(f16::new(0x8325 as u16).lt(f16::new(0x3b2f as u16)), true);
+    // random:754:2
+    assert_eq(f16::new(0x0195 as u16).lt(f16::new(0x2756 as u16)), true);
+    // random:754:3
+    assert_eq(f16::new(0x04ab as u16).lt(f16::new(0x6e1a as u16)), true);
+    // random:754:4
+    assert_eq(f16::new(0x0230 as u16).lt(f16::new(0x5939 as u16)), true);
+    // random:754:5
+    assert_eq(f16::new(0xe322 as u16).lt(f16::new(0x0506 as u16)), true);
+    // random:754:6
+    assert_eq(f16::new(0x1c37 as u16).lt(f16::new(0x83ef as u16)), false);
+    // random:754:7
+    assert_eq(f16::new(0x0000 as u16).lt(f16::new(0x2a0e as u16)), true);
+}
+
+#[test]
+fn generated_f16_le_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x3c00 as u16).le(f16::new(0x4000 as u16)), true);
+    // curated:1
+    assert_eq(f16::new(0x4000 as u16).le(f16::new(0x3c00 as u16)), false);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).le(f16::new(0x3c00 as u16)), true);
+    // curated:3
+    assert_eq(f16::new(0x3c00 as u16).le(f16::new(0x3c01 as u16)), true);
+    // curated:4
+    assert_eq(f16::new(0xbc00 as u16).le(f16::new(0x3c00 as u16)), true);
+    // curated:5
+    assert_eq(f16::new(0x3c00 as u16).le(f16::new(0xbc00 as u16)), false);
+    // curated:6
+    assert_eq(f16::new(0xbc00 as u16).le(f16::new(0xc000 as u16)), false);
+    // curated:7
+    assert_eq(f16::new(0xc000 as u16).le(f16::new(0xbc00 as u16)), true);
+    // curated:8
+    assert_eq(f16::new(0x0000 as u16).le(f16::new(0x8000 as u16)), true);
+    // curated:9
+    assert_eq(f16::new(0x8000 as u16).le(f16::new(0x0000 as u16)), true);
+    // curated:10
+    assert_eq(f16::new(0x0000 as u16).le(f16::new(0x0000 as u16)), true);
+    // curated:11
+    assert_eq(f16::new(0x8000 as u16).le(f16::new(0x0001 as u16)), true);
+    // curated:12
+    assert_eq(f16::new(0x0001 as u16).le(f16::new(0x0002 as u16)), true);
+    // curated:13
+    assert_eq(f16::new(0x03ff as u16).le(f16::new(0x0400 as u16)), true);
+    // curated:14
+    assert_eq(f16::new(0x7bff as u16).le(f16::new(0x7c00 as u16)), true);
+    // curated:15
+    assert_eq(f16::new(0x7c00 as u16).le(f16::new(0x7c00 as u16)), true);
+    // curated:16
+    assert_eq(f16::new(0xfc00 as u16).le(f16::new(0x7c00 as u16)), true);
+    // curated:17
+    assert_eq(f16::new(0xfc00 as u16).le(f16::new(0xfc00 as u16)), true);
+    // curated:18
+    assert_eq(f16::new(0x7e00 as u16).le(f16::new(0x7e00 as u16)), false);
+    // curated:19
+    assert_eq(f16::new(0x7e00 as u16).le(f16::new(0x3c00 as u16)), false);
+    // curated:20
+    assert_eq(f16::new(0x3c00 as u16).le(f16::new(0x7e00 as u16)), false);
+    // curated:21
+    assert_eq(f16::new(0x7e00 as u16).le(f16::new(0x7c00 as u16)), false);
+    // curated:22
+    assert_eq(f16::new(0x8000 as u16).le(f16::new(0x7e00 as u16)), false);
+    // random:754:0
+    assert_eq(f16::new(0x8b2f as u16).le(f16::new(0x9a26 as u16)), false);
+    // random:754:1
+    assert_eq(f16::new(0x8325 as u16).le(f16::new(0x3b2f as u16)), true);
+    // random:754:2
+    assert_eq(f16::new(0x0195 as u16).le(f16::new(0x2756 as u16)), true);
+    // random:754:3
+    assert_eq(f16::new(0x04ab as u16).le(f16::new(0x6e1a as u16)), true);
+    // random:754:4
+    assert_eq(f16::new(0x0230 as u16).le(f16::new(0x5939 as u16)), true);
+    // random:754:5
+    assert_eq(f16::new(0xe322 as u16).le(f16::new(0x0506 as u16)), true);
+    // random:754:6
+    assert_eq(f16::new(0x1c37 as u16).le(f16::new(0x83ef as u16)), false);
+    // random:754:7
+    assert_eq(f16::new(0x0000 as u16).le(f16::new(0x2a0e as u16)), true);
+}
+
+#[test]
+fn generated_f16_gt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x3c00 as u16).gt(f16::new(0x4000 as u16)), false);
+    // curated:1
+    assert_eq(f16::new(0x4000 as u16).gt(f16::new(0x3c00 as u16)), true);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).gt(f16::new(0x3c00 as u16)), false);
+    // curated:3
+    assert_eq(f16::new(0x3c00 as u16).gt(f16::new(0x3c01 as u16)), false);
+    // curated:4
+    assert_eq(f16::new(0xbc00 as u16).gt(f16::new(0x3c00 as u16)), false);
+    // curated:5
+    assert_eq(f16::new(0x3c00 as u16).gt(f16::new(0xbc00 as u16)), true);
+    // curated:6
+    assert_eq(f16::new(0xbc00 as u16).gt(f16::new(0xc000 as u16)), true);
+    // curated:7
+    assert_eq(f16::new(0xc000 as u16).gt(f16::new(0xbc00 as u16)), false);
+    // curated:8
+    assert_eq(f16::new(0x0000 as u16).gt(f16::new(0x8000 as u16)), false);
+    // curated:9
+    assert_eq(f16::new(0x8000 as u16).gt(f16::new(0x0000 as u16)), false);
+    // curated:10
+    assert_eq(f16::new(0x0000 as u16).gt(f16::new(0x0000 as u16)), false);
+    // curated:11
+    assert_eq(f16::new(0x8000 as u16).gt(f16::new(0x0001 as u16)), false);
+    // curated:12
+    assert_eq(f16::new(0x0001 as u16).gt(f16::new(0x0002 as u16)), false);
+    // curated:13
+    assert_eq(f16::new(0x03ff as u16).gt(f16::new(0x0400 as u16)), false);
+    // curated:14
+    assert_eq(f16::new(0x7bff as u16).gt(f16::new(0x7c00 as u16)), false);
+    // curated:15
+    assert_eq(f16::new(0x7c00 as u16).gt(f16::new(0x7c00 as u16)), false);
+    // curated:16
+    assert_eq(f16::new(0xfc00 as u16).gt(f16::new(0x7c00 as u16)), false);
+    // curated:17
+    assert_eq(f16::new(0xfc00 as u16).gt(f16::new(0xfc00 as u16)), false);
+    // curated:18
+    assert_eq(f16::new(0x7e00 as u16).gt(f16::new(0x7e00 as u16)), false);
+    // curated:19
+    assert_eq(f16::new(0x7e00 as u16).gt(f16::new(0x3c00 as u16)), false);
+    // curated:20
+    assert_eq(f16::new(0x3c00 as u16).gt(f16::new(0x7e00 as u16)), false);
+    // curated:21
+    assert_eq(f16::new(0x7e00 as u16).gt(f16::new(0x7c00 as u16)), false);
+    // curated:22
+    assert_eq(f16::new(0x8000 as u16).gt(f16::new(0x7e00 as u16)), false);
+    // random:754:0
+    assert_eq(f16::new(0x8b2f as u16).gt(f16::new(0x9a26 as u16)), true);
+    // random:754:1
+    assert_eq(f16::new(0x8325 as u16).gt(f16::new(0x3b2f as u16)), false);
+    // random:754:2
+    assert_eq(f16::new(0x0195 as u16).gt(f16::new(0x2756 as u16)), false);
+    // random:754:3
+    assert_eq(f16::new(0x04ab as u16).gt(f16::new(0x6e1a as u16)), false);
+    // random:754:4
+    assert_eq(f16::new(0x0230 as u16).gt(f16::new(0x5939 as u16)), false);
+    // random:754:5
+    assert_eq(f16::new(0xe322 as u16).gt(f16::new(0x0506 as u16)), false);
+    // random:754:6
+    assert_eq(f16::new(0x1c37 as u16).gt(f16::new(0x83ef as u16)), true);
+    // random:754:7
+    assert_eq(f16::new(0x0000 as u16).gt(f16::new(0x2a0e as u16)), false);
+}
+
+#[test]
+fn generated_f16_ge_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x3c00 as u16).ge(f16::new(0x4000 as u16)), false);
+    // curated:1
+    assert_eq(f16::new(0x4000 as u16).ge(f16::new(0x3c00 as u16)), true);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).ge(f16::new(0x3c00 as u16)), true);
+    // curated:3
+    assert_eq(f16::new(0x3c00 as u16).ge(f16::new(0x3c01 as u16)), false);
+    // curated:4
+    assert_eq(f16::new(0xbc00 as u16).ge(f16::new(0x3c00 as u16)), false);
+    // curated:5
+    assert_eq(f16::new(0x3c00 as u16).ge(f16::new(0xbc00 as u16)), true);
+    // curated:6
+    assert_eq(f16::new(0xbc00 as u16).ge(f16::new(0xc000 as u16)), true);
+    // curated:7
+    assert_eq(f16::new(0xc000 as u16).ge(f16::new(0xbc00 as u16)), false);
+    // curated:8
+    assert_eq(f16::new(0x0000 as u16).ge(f16::new(0x8000 as u16)), true);
+    // curated:9
+    assert_eq(f16::new(0x8000 as u16).ge(f16::new(0x0000 as u16)), true);
+    // curated:10
+    assert_eq(f16::new(0x0000 as u16).ge(f16::new(0x0000 as u16)), true);
+    // curated:11
+    assert_eq(f16::new(0x8000 as u16).ge(f16::new(0x0001 as u16)), false);
+    // curated:12
+    assert_eq(f16::new(0x0001 as u16).ge(f16::new(0x0002 as u16)), false);
+    // curated:13
+    assert_eq(f16::new(0x03ff as u16).ge(f16::new(0x0400 as u16)), false);
+    // curated:14
+    assert_eq(f16::new(0x7bff as u16).ge(f16::new(0x7c00 as u16)), false);
+    // curated:15
+    assert_eq(f16::new(0x7c00 as u16).ge(f16::new(0x7c00 as u16)), true);
+    // curated:16
+    assert_eq(f16::new(0xfc00 as u16).ge(f16::new(0x7c00 as u16)), false);
+    // curated:17
+    assert_eq(f16::new(0xfc00 as u16).ge(f16::new(0xfc00 as u16)), true);
+    // curated:18
+    assert_eq(f16::new(0x7e00 as u16).ge(f16::new(0x7e00 as u16)), false);
+    // curated:19
+    assert_eq(f16::new(0x7e00 as u16).ge(f16::new(0x3c00 as u16)), false);
+    // curated:20
+    assert_eq(f16::new(0x3c00 as u16).ge(f16::new(0x7e00 as u16)), false);
+    // curated:21
+    assert_eq(f16::new(0x7e00 as u16).ge(f16::new(0x7c00 as u16)), false);
+    // curated:22
+    assert_eq(f16::new(0x8000 as u16).ge(f16::new(0x7e00 as u16)), false);
+    // random:754:0
+    assert_eq(f16::new(0x8b2f as u16).ge(f16::new(0x9a26 as u16)), true);
+    // random:754:1
+    assert_eq(f16::new(0x8325 as u16).ge(f16::new(0x3b2f as u16)), false);
+    // random:754:2
+    assert_eq(f16::new(0x0195 as u16).ge(f16::new(0x2756 as u16)), false);
+    // random:754:3
+    assert_eq(f16::new(0x04ab as u16).ge(f16::new(0x6e1a as u16)), false);
+    // random:754:4
+    assert_eq(f16::new(0x0230 as u16).ge(f16::new(0x5939 as u16)), false);
+    // random:754:5
+    assert_eq(f16::new(0xe322 as u16).ge(f16::new(0x0506 as u16)), false);
+    // random:754:6
+    assert_eq(f16::new(0x1c37 as u16).ge(f16::new(0x83ef as u16)), true);
+    // random:754:7
+    assert_eq(f16::new(0x0000 as u16).ge(f16::new(0x2a0e as u16)), false);
+}
+
+#[test]
+fn generated_f32_eq_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x3f800000 as u32).eq(f32::new(0x40000000 as u32)), false);
+    // curated:1
+    assert_eq(f32::new(0x40000000 as u32).eq(f32::new(0x3f800000 as u32)), false);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).eq(f32::new(0x3f800000 as u32)), true);
+    // curated:3
+    assert_eq(f32::new(0x3f800000 as u32).eq(f32::new(0x3f800001 as u32)), false);
+    // curated:4
+    assert_eq(f32::new(0xbf800000 as u32).eq(f32::new(0x3f800000 as u32)), false);
+    // curated:5
+    assert_eq(f32::new(0x3f800000 as u32).eq(f32::new(0xbf800000 as u32)), false);
+    // curated:6
+    assert_eq(f32::new(0xbf800000 as u32).eq(f32::new(0xc0000000 as u32)), false);
+    // curated:7
+    assert_eq(f32::new(0xc0000000 as u32).eq(f32::new(0xbf800000 as u32)), false);
+    // curated:8
+    assert_eq(f32::new(0x00000000 as u32).eq(f32::new(0x80000000 as u32)), true);
+    // curated:9
+    assert_eq(f32::new(0x80000000 as u32).eq(f32::new(0x00000000 as u32)), true);
+    // curated:10
+    assert_eq(f32::new(0x00000000 as u32).eq(f32::new(0x00000000 as u32)), true);
+    // curated:11
+    assert_eq(f32::new(0x80000000 as u32).eq(f32::new(0x00000001 as u32)), false);
+    // curated:12
+    assert_eq(f32::new(0x00000001 as u32).eq(f32::new(0x00000002 as u32)), false);
+    // curated:13
+    assert_eq(f32::new(0x007fffff as u32).eq(f32::new(0x00800000 as u32)), false);
+    // curated:14
+    assert_eq(f32::new(0x7f7fffff as u32).eq(f32::new(0x7f800000 as u32)), false);
+    // curated:15
+    assert_eq(f32::new(0x7f800000 as u32).eq(f32::new(0x7f800000 as u32)), true);
+    // curated:16
+    assert_eq(f32::new(0xff800000 as u32).eq(f32::new(0x7f800000 as u32)), false);
+    // curated:17
+    assert_eq(f32::new(0xff800000 as u32).eq(f32::new(0xff800000 as u32)), true);
+    // curated:18
+    assert_eq(f32::new(0x7fc00000 as u32).eq(f32::new(0x7fc00000 as u32)), false);
+    // curated:19
+    assert_eq(f32::new(0x7fc00000 as u32).eq(f32::new(0x3f800000 as u32)), false);
+    // curated:20
+    assert_eq(f32::new(0x3f800000 as u32).eq(f32::new(0x7fc00000 as u32)), false);
+    // curated:21
+    assert_eq(f32::new(0x7fc00000 as u32).eq(f32::new(0x7f800000 as u32)), false);
+    // curated:22
+    assert_eq(f32::new(0x80000000 as u32).eq(f32::new(0x7fc00000 as u32)), false);
+    // random:754:0
+    assert_eq(f32::new(0x8be10345 as u32).eq(f32::new(0x4c659441 as u32)), false);
+    // random:754:1
+    assert_eq(f32::new(0xf83c7139 as u32).eq(f32::new(0x80000000 as u32)), false);
+    // random:754:2
+    assert_eq(f32::new(0xf59a48e6 as u32).eq(f32::new(0x223be2d8 as u32)), false);
+    // random:754:3
+    assert_eq(f32::new(0x731bf07f as u32).eq(f32::new(0x0d6a5567 as u32)), false);
+    // random:754:4
+    assert_eq(f32::new(0x80000000 as u32).eq(f32::new(0xaafffb57 as u32)), false);
+    // random:754:5
+    assert_eq(f32::new(0x34f02e54 as u32).eq(f32::new(0x0058b040 as u32)), false);
+    // random:754:6
+    assert_eq(f32::new(0xbbc59c2c as u32).eq(f32::new(0x414cabd9 as u32)), false);
+    // random:754:7
+    assert_eq(f32::new(0x00000000 as u32).eq(f32::new(0xf474862e as u32)), false);
+}
+
+#[test]
+fn generated_f32_ne_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x3f800000 as u32).ne(f32::new(0x40000000 as u32)), true);
+    // curated:1
+    assert_eq(f32::new(0x40000000 as u32).ne(f32::new(0x3f800000 as u32)), true);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).ne(f32::new(0x3f800000 as u32)), false);
+    // curated:3
+    assert_eq(f32::new(0x3f800000 as u32).ne(f32::new(0x3f800001 as u32)), true);
+    // curated:4
+    assert_eq(f32::new(0xbf800000 as u32).ne(f32::new(0x3f800000 as u32)), true);
+    // curated:5
+    assert_eq(f32::new(0x3f800000 as u32).ne(f32::new(0xbf800000 as u32)), true);
+    // curated:6
+    assert_eq(f32::new(0xbf800000 as u32).ne(f32::new(0xc0000000 as u32)), true);
+    // curated:7
+    assert_eq(f32::new(0xc0000000 as u32).ne(f32::new(0xbf800000 as u32)), true);
+    // curated:8
+    assert_eq(f32::new(0x00000000 as u32).ne(f32::new(0x80000000 as u32)), false);
+    // curated:9
+    assert_eq(f32::new(0x80000000 as u32).ne(f32::new(0x00000000 as u32)), false);
+    // curated:10
+    assert_eq(f32::new(0x00000000 as u32).ne(f32::new(0x00000000 as u32)), false);
+    // curated:11
+    assert_eq(f32::new(0x80000000 as u32).ne(f32::new(0x00000001 as u32)), true);
+    // curated:12
+    assert_eq(f32::new(0x00000001 as u32).ne(f32::new(0x00000002 as u32)), true);
+    // curated:13
+    assert_eq(f32::new(0x007fffff as u32).ne(f32::new(0x00800000 as u32)), true);
+    // curated:14
+    assert_eq(f32::new(0x7f7fffff as u32).ne(f32::new(0x7f800000 as u32)), true);
+    // curated:15
+    assert_eq(f32::new(0x7f800000 as u32).ne(f32::new(0x7f800000 as u32)), false);
+    // curated:16
+    assert_eq(f32::new(0xff800000 as u32).ne(f32::new(0x7f800000 as u32)), true);
+    // curated:17
+    assert_eq(f32::new(0xff800000 as u32).ne(f32::new(0xff800000 as u32)), false);
+    // curated:18
+    assert_eq(f32::new(0x7fc00000 as u32).ne(f32::new(0x7fc00000 as u32)), true);
+    // curated:19
+    assert_eq(f32::new(0x7fc00000 as u32).ne(f32::new(0x3f800000 as u32)), true);
+    // curated:20
+    assert_eq(f32::new(0x3f800000 as u32).ne(f32::new(0x7fc00000 as u32)), true);
+    // curated:21
+    assert_eq(f32::new(0x7fc00000 as u32).ne(f32::new(0x7f800000 as u32)), true);
+    // curated:22
+    assert_eq(f32::new(0x80000000 as u32).ne(f32::new(0x7fc00000 as u32)), true);
+    // random:754:0
+    assert_eq(f32::new(0x8be10345 as u32).ne(f32::new(0x4c659441 as u32)), true);
+    // random:754:1
+    assert_eq(f32::new(0xf83c7139 as u32).ne(f32::new(0x80000000 as u32)), true);
+    // random:754:2
+    assert_eq(f32::new(0xf59a48e6 as u32).ne(f32::new(0x223be2d8 as u32)), true);
+    // random:754:3
+    assert_eq(f32::new(0x731bf07f as u32).ne(f32::new(0x0d6a5567 as u32)), true);
+    // random:754:4
+    assert_eq(f32::new(0x80000000 as u32).ne(f32::new(0xaafffb57 as u32)), true);
+    // random:754:5
+    assert_eq(f32::new(0x34f02e54 as u32).ne(f32::new(0x0058b040 as u32)), true);
+    // random:754:6
+    assert_eq(f32::new(0xbbc59c2c as u32).ne(f32::new(0x414cabd9 as u32)), true);
+    // random:754:7
+    assert_eq(f32::new(0x00000000 as u32).ne(f32::new(0xf474862e as u32)), true);
+}
+
+#[test]
+fn generated_f32_lt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x3f800000 as u32).lt(f32::new(0x40000000 as u32)), true);
+    // curated:1
+    assert_eq(f32::new(0x40000000 as u32).lt(f32::new(0x3f800000 as u32)), false);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).lt(f32::new(0x3f800000 as u32)), false);
+    // curated:3
+    assert_eq(f32::new(0x3f800000 as u32).lt(f32::new(0x3f800001 as u32)), true);
+    // curated:4
+    assert_eq(f32::new(0xbf800000 as u32).lt(f32::new(0x3f800000 as u32)), true);
+    // curated:5
+    assert_eq(f32::new(0x3f800000 as u32).lt(f32::new(0xbf800000 as u32)), false);
+    // curated:6
+    assert_eq(f32::new(0xbf800000 as u32).lt(f32::new(0xc0000000 as u32)), false);
+    // curated:7
+    assert_eq(f32::new(0xc0000000 as u32).lt(f32::new(0xbf800000 as u32)), true);
+    // curated:8
+    assert_eq(f32::new(0x00000000 as u32).lt(f32::new(0x80000000 as u32)), false);
+    // curated:9
+    assert_eq(f32::new(0x80000000 as u32).lt(f32::new(0x00000000 as u32)), false);
+    // curated:10
+    assert_eq(f32::new(0x00000000 as u32).lt(f32::new(0x00000000 as u32)), false);
+    // curated:11
+    assert_eq(f32::new(0x80000000 as u32).lt(f32::new(0x00000001 as u32)), true);
+    // curated:12
+    assert_eq(f32::new(0x00000001 as u32).lt(f32::new(0x00000002 as u32)), true);
+    // curated:13
+    assert_eq(f32::new(0x007fffff as u32).lt(f32::new(0x00800000 as u32)), true);
+    // curated:14
+    assert_eq(f32::new(0x7f7fffff as u32).lt(f32::new(0x7f800000 as u32)), true);
+    // curated:15
+    assert_eq(f32::new(0x7f800000 as u32).lt(f32::new(0x7f800000 as u32)), false);
+    // curated:16
+    assert_eq(f32::new(0xff800000 as u32).lt(f32::new(0x7f800000 as u32)), true);
+    // curated:17
+    assert_eq(f32::new(0xff800000 as u32).lt(f32::new(0xff800000 as u32)), false);
+    // curated:18
+    assert_eq(f32::new(0x7fc00000 as u32).lt(f32::new(0x7fc00000 as u32)), false);
+    // curated:19
+    assert_eq(f32::new(0x7fc00000 as u32).lt(f32::new(0x3f800000 as u32)), false);
+    // curated:20
+    assert_eq(f32::new(0x3f800000 as u32).lt(f32::new(0x7fc00000 as u32)), false);
+    // curated:21
+    assert_eq(f32::new(0x7fc00000 as u32).lt(f32::new(0x7f800000 as u32)), false);
+    // curated:22
+    assert_eq(f32::new(0x80000000 as u32).lt(f32::new(0x7fc00000 as u32)), false);
+    // random:754:0
+    assert_eq(f32::new(0x8be10345 as u32).lt(f32::new(0x4c659441 as u32)), true);
+    // random:754:1
+    assert_eq(f32::new(0xf83c7139 as u32).lt(f32::new(0x80000000 as u32)), true);
+    // random:754:2
+    assert_eq(f32::new(0xf59a48e6 as u32).lt(f32::new(0x223be2d8 as u32)), true);
+    // random:754:3
+    assert_eq(f32::new(0x731bf07f as u32).lt(f32::new(0x0d6a5567 as u32)), false);
+    // random:754:4
+    assert_eq(f32::new(0x80000000 as u32).lt(f32::new(0xaafffb57 as u32)), false);
+    // random:754:5
+    assert_eq(f32::new(0x34f02e54 as u32).lt(f32::new(0x0058b040 as u32)), false);
+    // random:754:6
+    assert_eq(f32::new(0xbbc59c2c as u32).lt(f32::new(0x414cabd9 as u32)), true);
+    // random:754:7
+    assert_eq(f32::new(0x00000000 as u32).lt(f32::new(0xf474862e as u32)), false);
+}
+
+#[test]
+fn generated_f32_le_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x3f800000 as u32).le(f32::new(0x40000000 as u32)), true);
+    // curated:1
+    assert_eq(f32::new(0x40000000 as u32).le(f32::new(0x3f800000 as u32)), false);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).le(f32::new(0x3f800000 as u32)), true);
+    // curated:3
+    assert_eq(f32::new(0x3f800000 as u32).le(f32::new(0x3f800001 as u32)), true);
+    // curated:4
+    assert_eq(f32::new(0xbf800000 as u32).le(f32::new(0x3f800000 as u32)), true);
+    // curated:5
+    assert_eq(f32::new(0x3f800000 as u32).le(f32::new(0xbf800000 as u32)), false);
+    // curated:6
+    assert_eq(f32::new(0xbf800000 as u32).le(f32::new(0xc0000000 as u32)), false);
+    // curated:7
+    assert_eq(f32::new(0xc0000000 as u32).le(f32::new(0xbf800000 as u32)), true);
+    // curated:8
+    assert_eq(f32::new(0x00000000 as u32).le(f32::new(0x80000000 as u32)), true);
+    // curated:9
+    assert_eq(f32::new(0x80000000 as u32).le(f32::new(0x00000000 as u32)), true);
+    // curated:10
+    assert_eq(f32::new(0x00000000 as u32).le(f32::new(0x00000000 as u32)), true);
+    // curated:11
+    assert_eq(f32::new(0x80000000 as u32).le(f32::new(0x00000001 as u32)), true);
+    // curated:12
+    assert_eq(f32::new(0x00000001 as u32).le(f32::new(0x00000002 as u32)), true);
+    // curated:13
+    assert_eq(f32::new(0x007fffff as u32).le(f32::new(0x00800000 as u32)), true);
+    // curated:14
+    assert_eq(f32::new(0x7f7fffff as u32).le(f32::new(0x7f800000 as u32)), true);
+    // curated:15
+    assert_eq(f32::new(0x7f800000 as u32).le(f32::new(0x7f800000 as u32)), true);
+    // curated:16
+    assert_eq(f32::new(0xff800000 as u32).le(f32::new(0x7f800000 as u32)), true);
+    // curated:17
+    assert_eq(f32::new(0xff800000 as u32).le(f32::new(0xff800000 as u32)), true);
+    // curated:18
+    assert_eq(f32::new(0x7fc00000 as u32).le(f32::new(0x7fc00000 as u32)), false);
+    // curated:19
+    assert_eq(f32::new(0x7fc00000 as u32).le(f32::new(0x3f800000 as u32)), false);
+    // curated:20
+    assert_eq(f32::new(0x3f800000 as u32).le(f32::new(0x7fc00000 as u32)), false);
+    // curated:21
+    assert_eq(f32::new(0x7fc00000 as u32).le(f32::new(0x7f800000 as u32)), false);
+    // curated:22
+    assert_eq(f32::new(0x80000000 as u32).le(f32::new(0x7fc00000 as u32)), false);
+    // random:754:0
+    assert_eq(f32::new(0x8be10345 as u32).le(f32::new(0x4c659441 as u32)), true);
+    // random:754:1
+    assert_eq(f32::new(0xf83c7139 as u32).le(f32::new(0x80000000 as u32)), true);
+    // random:754:2
+    assert_eq(f32::new(0xf59a48e6 as u32).le(f32::new(0x223be2d8 as u32)), true);
+    // random:754:3
+    assert_eq(f32::new(0x731bf07f as u32).le(f32::new(0x0d6a5567 as u32)), false);
+    // random:754:4
+    assert_eq(f32::new(0x80000000 as u32).le(f32::new(0xaafffb57 as u32)), false);
+    // random:754:5
+    assert_eq(f32::new(0x34f02e54 as u32).le(f32::new(0x0058b040 as u32)), false);
+    // random:754:6
+    assert_eq(f32::new(0xbbc59c2c as u32).le(f32::new(0x414cabd9 as u32)), true);
+    // random:754:7
+    assert_eq(f32::new(0x00000000 as u32).le(f32::new(0xf474862e as u32)), false);
+}
+
+#[test]
+fn generated_f32_gt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x3f800000 as u32).gt(f32::new(0x40000000 as u32)), false);
+    // curated:1
+    assert_eq(f32::new(0x40000000 as u32).gt(f32::new(0x3f800000 as u32)), true);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).gt(f32::new(0x3f800000 as u32)), false);
+    // curated:3
+    assert_eq(f32::new(0x3f800000 as u32).gt(f32::new(0x3f800001 as u32)), false);
+    // curated:4
+    assert_eq(f32::new(0xbf800000 as u32).gt(f32::new(0x3f800000 as u32)), false);
+    // curated:5
+    assert_eq(f32::new(0x3f800000 as u32).gt(f32::new(0xbf800000 as u32)), true);
+    // curated:6
+    assert_eq(f32::new(0xbf800000 as u32).gt(f32::new(0xc0000000 as u32)), true);
+    // curated:7
+    assert_eq(f32::new(0xc0000000 as u32).gt(f32::new(0xbf800000 as u32)), false);
+    // curated:8
+    assert_eq(f32::new(0x00000000 as u32).gt(f32::new(0x80000000 as u32)), false);
+    // curated:9
+    assert_eq(f32::new(0x80000000 as u32).gt(f32::new(0x00000000 as u32)), false);
+    // curated:10
+    assert_eq(f32::new(0x00000000 as u32).gt(f32::new(0x00000000 as u32)), false);
+    // curated:11
+    assert_eq(f32::new(0x80000000 as u32).gt(f32::new(0x00000001 as u32)), false);
+    // curated:12
+    assert_eq(f32::new(0x00000001 as u32).gt(f32::new(0x00000002 as u32)), false);
+    // curated:13
+    assert_eq(f32::new(0x007fffff as u32).gt(f32::new(0x00800000 as u32)), false);
+    // curated:14
+    assert_eq(f32::new(0x7f7fffff as u32).gt(f32::new(0x7f800000 as u32)), false);
+    // curated:15
+    assert_eq(f32::new(0x7f800000 as u32).gt(f32::new(0x7f800000 as u32)), false);
+    // curated:16
+    assert_eq(f32::new(0xff800000 as u32).gt(f32::new(0x7f800000 as u32)), false);
+    // curated:17
+    assert_eq(f32::new(0xff800000 as u32).gt(f32::new(0xff800000 as u32)), false);
+    // curated:18
+    assert_eq(f32::new(0x7fc00000 as u32).gt(f32::new(0x7fc00000 as u32)), false);
+    // curated:19
+    assert_eq(f32::new(0x7fc00000 as u32).gt(f32::new(0x3f800000 as u32)), false);
+    // curated:20
+    assert_eq(f32::new(0x3f800000 as u32).gt(f32::new(0x7fc00000 as u32)), false);
+    // curated:21
+    assert_eq(f32::new(0x7fc00000 as u32).gt(f32::new(0x7f800000 as u32)), false);
+    // curated:22
+    assert_eq(f32::new(0x80000000 as u32).gt(f32::new(0x7fc00000 as u32)), false);
+    // random:754:0
+    assert_eq(f32::new(0x8be10345 as u32).gt(f32::new(0x4c659441 as u32)), false);
+    // random:754:1
+    assert_eq(f32::new(0xf83c7139 as u32).gt(f32::new(0x80000000 as u32)), false);
+    // random:754:2
+    assert_eq(f32::new(0xf59a48e6 as u32).gt(f32::new(0x223be2d8 as u32)), false);
+    // random:754:3
+    assert_eq(f32::new(0x731bf07f as u32).gt(f32::new(0x0d6a5567 as u32)), true);
+    // random:754:4
+    assert_eq(f32::new(0x80000000 as u32).gt(f32::new(0xaafffb57 as u32)), true);
+    // random:754:5
+    assert_eq(f32::new(0x34f02e54 as u32).gt(f32::new(0x0058b040 as u32)), true);
+    // random:754:6
+    assert_eq(f32::new(0xbbc59c2c as u32).gt(f32::new(0x414cabd9 as u32)), false);
+    // random:754:7
+    assert_eq(f32::new(0x00000000 as u32).gt(f32::new(0xf474862e as u32)), true);
+}
+
+#[test]
+fn generated_f32_ge_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x3f800000 as u32).ge(f32::new(0x40000000 as u32)), false);
+    // curated:1
+    assert_eq(f32::new(0x40000000 as u32).ge(f32::new(0x3f800000 as u32)), true);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).ge(f32::new(0x3f800000 as u32)), true);
+    // curated:3
+    assert_eq(f32::new(0x3f800000 as u32).ge(f32::new(0x3f800001 as u32)), false);
+    // curated:4
+    assert_eq(f32::new(0xbf800000 as u32).ge(f32::new(0x3f800000 as u32)), false);
+    // curated:5
+    assert_eq(f32::new(0x3f800000 as u32).ge(f32::new(0xbf800000 as u32)), true);
+    // curated:6
+    assert_eq(f32::new(0xbf800000 as u32).ge(f32::new(0xc0000000 as u32)), true);
+    // curated:7
+    assert_eq(f32::new(0xc0000000 as u32).ge(f32::new(0xbf800000 as u32)), false);
+    // curated:8
+    assert_eq(f32::new(0x00000000 as u32).ge(f32::new(0x80000000 as u32)), true);
+    // curated:9
+    assert_eq(f32::new(0x80000000 as u32).ge(f32::new(0x00000000 as u32)), true);
+    // curated:10
+    assert_eq(f32::new(0x00000000 as u32).ge(f32::new(0x00000000 as u32)), true);
+    // curated:11
+    assert_eq(f32::new(0x80000000 as u32).ge(f32::new(0x00000001 as u32)), false);
+    // curated:12
+    assert_eq(f32::new(0x00000001 as u32).ge(f32::new(0x00000002 as u32)), false);
+    // curated:13
+    assert_eq(f32::new(0x007fffff as u32).ge(f32::new(0x00800000 as u32)), false);
+    // curated:14
+    assert_eq(f32::new(0x7f7fffff as u32).ge(f32::new(0x7f800000 as u32)), false);
+    // curated:15
+    assert_eq(f32::new(0x7f800000 as u32).ge(f32::new(0x7f800000 as u32)), true);
+    // curated:16
+    assert_eq(f32::new(0xff800000 as u32).ge(f32::new(0x7f800000 as u32)), false);
+    // curated:17
+    assert_eq(f32::new(0xff800000 as u32).ge(f32::new(0xff800000 as u32)), true);
+    // curated:18
+    assert_eq(f32::new(0x7fc00000 as u32).ge(f32::new(0x7fc00000 as u32)), false);
+    // curated:19
+    assert_eq(f32::new(0x7fc00000 as u32).ge(f32::new(0x3f800000 as u32)), false);
+    // curated:20
+    assert_eq(f32::new(0x3f800000 as u32).ge(f32::new(0x7fc00000 as u32)), false);
+    // curated:21
+    assert_eq(f32::new(0x7fc00000 as u32).ge(f32::new(0x7f800000 as u32)), false);
+    // curated:22
+    assert_eq(f32::new(0x80000000 as u32).ge(f32::new(0x7fc00000 as u32)), false);
+    // random:754:0
+    assert_eq(f32::new(0x8be10345 as u32).ge(f32::new(0x4c659441 as u32)), false);
+    // random:754:1
+    assert_eq(f32::new(0xf83c7139 as u32).ge(f32::new(0x80000000 as u32)), false);
+    // random:754:2
+    assert_eq(f32::new(0xf59a48e6 as u32).ge(f32::new(0x223be2d8 as u32)), false);
+    // random:754:3
+    assert_eq(f32::new(0x731bf07f as u32).ge(f32::new(0x0d6a5567 as u32)), true);
+    // random:754:4
+    assert_eq(f32::new(0x80000000 as u32).ge(f32::new(0xaafffb57 as u32)), true);
+    // random:754:5
+    assert_eq(f32::new(0x34f02e54 as u32).ge(f32::new(0x0058b040 as u32)), true);
+    // random:754:6
+    assert_eq(f32::new(0xbbc59c2c as u32).ge(f32::new(0x414cabd9 as u32)), false);
+    // random:754:7
+    assert_eq(f32::new(0x00000000 as u32).ge(f32::new(0xf474862e as u32)), true);
+}
+
+#[test]
+fn generated_f64_eq_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x3ff0000000000000 as u64).eq(f64::new(0x4000000000000000 as u64)), false);
+    // curated:1
+    assert_eq(f64::new(0x4000000000000000 as u64).eq(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).eq(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:3
+    assert_eq(f64::new(0x3ff0000000000000 as u64).eq(f64::new(0x3ff0000000000001 as u64)), false);
+    // curated:4
+    assert_eq(f64::new(0xbff0000000000000 as u64).eq(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:5
+    assert_eq(f64::new(0x3ff0000000000000 as u64).eq(f64::new(0xbff0000000000000 as u64)), false);
+    // curated:6
+    assert_eq(f64::new(0xbff0000000000000 as u64).eq(f64::new(0xc000000000000000 as u64)), false);
+    // curated:7
+    assert_eq(f64::new(0xc000000000000000 as u64).eq(f64::new(0xbff0000000000000 as u64)), false);
+    // curated:8
+    assert_eq(f64::new(0x0000000000000000 as u64).eq(f64::new(0x8000000000000000 as u64)), true);
+    // curated:9
+    assert_eq(f64::new(0x8000000000000000 as u64).eq(f64::new(0x0000000000000000 as u64)), true);
+    // curated:10
+    assert_eq(f64::new(0x0000000000000000 as u64).eq(f64::new(0x0000000000000000 as u64)), true);
+    // curated:11
+    assert_eq(f64::new(0x8000000000000000 as u64).eq(f64::new(0x0000000000000001 as u64)), false);
+    // curated:12
+    assert_eq(f64::new(0x0000000000000001 as u64).eq(f64::new(0x0000000000000002 as u64)), false);
+    // curated:13
+    assert_eq(f64::new(0x000fffffffffffff as u64).eq(f64::new(0x0010000000000000 as u64)), false);
+    // curated:14
+    assert_eq(f64::new(0x7fefffffffffffff as u64).eq(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:15
+    assert_eq(f64::new(0x7ff0000000000000 as u64).eq(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:16
+    assert_eq(f64::new(0xfff0000000000000 as u64).eq(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:17
+    assert_eq(f64::new(0xfff0000000000000 as u64).eq(f64::new(0xfff0000000000000 as u64)), true);
+    // curated:18
+    assert_eq(f64::new(0x7ff8000000000000 as u64).eq(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:19
+    assert_eq(f64::new(0x7ff8000000000000 as u64).eq(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:20
+    assert_eq(f64::new(0x3ff0000000000000 as u64).eq(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:21
+    assert_eq(f64::new(0x7ff8000000000000 as u64).eq(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:22
+    assert_eq(f64::new(0x8000000000000000 as u64).eq(f64::new(0x7ff8000000000000 as u64)), false);
+    // random:754:0
+    assert_eq(f64::new(0x1e0d892d98666926 as u64).eq(f64::new(0xa0d3a78a68a6171e as u64)), false);
+    // random:754:1
+    assert_eq(f64::new(0x00087e1147000404 as u64).eq(f64::new(0x5574eb283cc54f9b as u64)), false);
+    // random:754:2
+    assert_eq(f64::new(0x857834836cae1efa as u64).eq(f64::new(0xcb46c979bc04a209 as u64)), false);
+    // random:754:3
+    assert_eq(f64::new(0x39ef481db16963ab as u64).eq(f64::new(0xd580701331dae96a as u64)), false);
+    // random:754:4
+    assert_eq(f64::new(0xff35a184072ac715 as u64).eq(f64::new(0x000fd96f58c90ff7 as u64)), false);
+    // random:754:5
+    assert_eq(f64::new(0xa6fae19f4baf69b4 as u64).eq(f64::new(0xacc88edc1ea55866 as u64)), false);
+    // random:754:6
+    assert_eq(f64::new(0xb1bcf6aaccf6c1fc as u64).eq(f64::new(0x1a101fe99569cbc7 as u64)), false);
+    // random:754:7
+    assert_eq(f64::new(0x12e7a7fe47f99526 as u64).eq(f64::new(0x0000000000000000 as u64)), false);
+}
+
+#[test]
+fn generated_f64_ne_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ne(f64::new(0x4000000000000000 as u64)), true);
+    // curated:1
+    assert_eq(f64::new(0x4000000000000000 as u64).ne(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ne(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:3
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ne(f64::new(0x3ff0000000000001 as u64)), true);
+    // curated:4
+    assert_eq(f64::new(0xbff0000000000000 as u64).ne(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:5
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ne(f64::new(0xbff0000000000000 as u64)), true);
+    // curated:6
+    assert_eq(f64::new(0xbff0000000000000 as u64).ne(f64::new(0xc000000000000000 as u64)), true);
+    // curated:7
+    assert_eq(f64::new(0xc000000000000000 as u64).ne(f64::new(0xbff0000000000000 as u64)), true);
+    // curated:8
+    assert_eq(f64::new(0x0000000000000000 as u64).ne(f64::new(0x8000000000000000 as u64)), false);
+    // curated:9
+    assert_eq(f64::new(0x8000000000000000 as u64).ne(f64::new(0x0000000000000000 as u64)), false);
+    // curated:10
+    assert_eq(f64::new(0x0000000000000000 as u64).ne(f64::new(0x0000000000000000 as u64)), false);
+    // curated:11
+    assert_eq(f64::new(0x8000000000000000 as u64).ne(f64::new(0x0000000000000001 as u64)), true);
+    // curated:12
+    assert_eq(f64::new(0x0000000000000001 as u64).ne(f64::new(0x0000000000000002 as u64)), true);
+    // curated:13
+    assert_eq(f64::new(0x000fffffffffffff as u64).ne(f64::new(0x0010000000000000 as u64)), true);
+    // curated:14
+    assert_eq(f64::new(0x7fefffffffffffff as u64).ne(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:15
+    assert_eq(f64::new(0x7ff0000000000000 as u64).ne(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:16
+    assert_eq(f64::new(0xfff0000000000000 as u64).ne(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:17
+    assert_eq(f64::new(0xfff0000000000000 as u64).ne(f64::new(0xfff0000000000000 as u64)), false);
+    // curated:18
+    assert_eq(f64::new(0x7ff8000000000000 as u64).ne(f64::new(0x7ff8000000000000 as u64)), true);
+    // curated:19
+    assert_eq(f64::new(0x7ff8000000000000 as u64).ne(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:20
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ne(f64::new(0x7ff8000000000000 as u64)), true);
+    // curated:21
+    assert_eq(f64::new(0x7ff8000000000000 as u64).ne(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:22
+    assert_eq(f64::new(0x8000000000000000 as u64).ne(f64::new(0x7ff8000000000000 as u64)), true);
+    // random:754:0
+    assert_eq(f64::new(0x1e0d892d98666926 as u64).ne(f64::new(0xa0d3a78a68a6171e as u64)), true);
+    // random:754:1
+    assert_eq(f64::new(0x00087e1147000404 as u64).ne(f64::new(0x5574eb283cc54f9b as u64)), true);
+    // random:754:2
+    assert_eq(f64::new(0x857834836cae1efa as u64).ne(f64::new(0xcb46c979bc04a209 as u64)), true);
+    // random:754:3
+    assert_eq(f64::new(0x39ef481db16963ab as u64).ne(f64::new(0xd580701331dae96a as u64)), true);
+    // random:754:4
+    assert_eq(f64::new(0xff35a184072ac715 as u64).ne(f64::new(0x000fd96f58c90ff7 as u64)), true);
+    // random:754:5
+    assert_eq(f64::new(0xa6fae19f4baf69b4 as u64).ne(f64::new(0xacc88edc1ea55866 as u64)), true);
+    // random:754:6
+    assert_eq(f64::new(0xb1bcf6aaccf6c1fc as u64).ne(f64::new(0x1a101fe99569cbc7 as u64)), true);
+    // random:754:7
+    assert_eq(f64::new(0x12e7a7fe47f99526 as u64).ne(f64::new(0x0000000000000000 as u64)), true);
+}
+
+#[test]
+fn generated_f64_lt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x3ff0000000000000 as u64).lt(f64::new(0x4000000000000000 as u64)), true);
+    // curated:1
+    assert_eq(f64::new(0x4000000000000000 as u64).lt(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).lt(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:3
+    assert_eq(f64::new(0x3ff0000000000000 as u64).lt(f64::new(0x3ff0000000000001 as u64)), true);
+    // curated:4
+    assert_eq(f64::new(0xbff0000000000000 as u64).lt(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:5
+    assert_eq(f64::new(0x3ff0000000000000 as u64).lt(f64::new(0xbff0000000000000 as u64)), false);
+    // curated:6
+    assert_eq(f64::new(0xbff0000000000000 as u64).lt(f64::new(0xc000000000000000 as u64)), false);
+    // curated:7
+    assert_eq(f64::new(0xc000000000000000 as u64).lt(f64::new(0xbff0000000000000 as u64)), true);
+    // curated:8
+    assert_eq(f64::new(0x0000000000000000 as u64).lt(f64::new(0x8000000000000000 as u64)), false);
+    // curated:9
+    assert_eq(f64::new(0x8000000000000000 as u64).lt(f64::new(0x0000000000000000 as u64)), false);
+    // curated:10
+    assert_eq(f64::new(0x0000000000000000 as u64).lt(f64::new(0x0000000000000000 as u64)), false);
+    // curated:11
+    assert_eq(f64::new(0x8000000000000000 as u64).lt(f64::new(0x0000000000000001 as u64)), true);
+    // curated:12
+    assert_eq(f64::new(0x0000000000000001 as u64).lt(f64::new(0x0000000000000002 as u64)), true);
+    // curated:13
+    assert_eq(f64::new(0x000fffffffffffff as u64).lt(f64::new(0x0010000000000000 as u64)), true);
+    // curated:14
+    assert_eq(f64::new(0x7fefffffffffffff as u64).lt(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:15
+    assert_eq(f64::new(0x7ff0000000000000 as u64).lt(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:16
+    assert_eq(f64::new(0xfff0000000000000 as u64).lt(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:17
+    assert_eq(f64::new(0xfff0000000000000 as u64).lt(f64::new(0xfff0000000000000 as u64)), false);
+    // curated:18
+    assert_eq(f64::new(0x7ff8000000000000 as u64).lt(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:19
+    assert_eq(f64::new(0x7ff8000000000000 as u64).lt(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:20
+    assert_eq(f64::new(0x3ff0000000000000 as u64).lt(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:21
+    assert_eq(f64::new(0x7ff8000000000000 as u64).lt(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:22
+    assert_eq(f64::new(0x8000000000000000 as u64).lt(f64::new(0x7ff8000000000000 as u64)), false);
+    // random:754:0
+    assert_eq(f64::new(0x1e0d892d98666926 as u64).lt(f64::new(0xa0d3a78a68a6171e as u64)), false);
+    // random:754:1
+    assert_eq(f64::new(0x00087e1147000404 as u64).lt(f64::new(0x5574eb283cc54f9b as u64)), true);
+    // random:754:2
+    assert_eq(f64::new(0x857834836cae1efa as u64).lt(f64::new(0xcb46c979bc04a209 as u64)), false);
+    // random:754:3
+    assert_eq(f64::new(0x39ef481db16963ab as u64).lt(f64::new(0xd580701331dae96a as u64)), false);
+    // random:754:4
+    assert_eq(f64::new(0xff35a184072ac715 as u64).lt(f64::new(0x000fd96f58c90ff7 as u64)), true);
+    // random:754:5
+    assert_eq(f64::new(0xa6fae19f4baf69b4 as u64).lt(f64::new(0xacc88edc1ea55866 as u64)), false);
+    // random:754:6
+    assert_eq(f64::new(0xb1bcf6aaccf6c1fc as u64).lt(f64::new(0x1a101fe99569cbc7 as u64)), true);
+    // random:754:7
+    assert_eq(f64::new(0x12e7a7fe47f99526 as u64).lt(f64::new(0x0000000000000000 as u64)), false);
+}
+
+#[test]
+fn generated_f64_le_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x3ff0000000000000 as u64).le(f64::new(0x4000000000000000 as u64)), true);
+    // curated:1
+    assert_eq(f64::new(0x4000000000000000 as u64).le(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).le(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:3
+    assert_eq(f64::new(0x3ff0000000000000 as u64).le(f64::new(0x3ff0000000000001 as u64)), true);
+    // curated:4
+    assert_eq(f64::new(0xbff0000000000000 as u64).le(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:5
+    assert_eq(f64::new(0x3ff0000000000000 as u64).le(f64::new(0xbff0000000000000 as u64)), false);
+    // curated:6
+    assert_eq(f64::new(0xbff0000000000000 as u64).le(f64::new(0xc000000000000000 as u64)), false);
+    // curated:7
+    assert_eq(f64::new(0xc000000000000000 as u64).le(f64::new(0xbff0000000000000 as u64)), true);
+    // curated:8
+    assert_eq(f64::new(0x0000000000000000 as u64).le(f64::new(0x8000000000000000 as u64)), true);
+    // curated:9
+    assert_eq(f64::new(0x8000000000000000 as u64).le(f64::new(0x0000000000000000 as u64)), true);
+    // curated:10
+    assert_eq(f64::new(0x0000000000000000 as u64).le(f64::new(0x0000000000000000 as u64)), true);
+    // curated:11
+    assert_eq(f64::new(0x8000000000000000 as u64).le(f64::new(0x0000000000000001 as u64)), true);
+    // curated:12
+    assert_eq(f64::new(0x0000000000000001 as u64).le(f64::new(0x0000000000000002 as u64)), true);
+    // curated:13
+    assert_eq(f64::new(0x000fffffffffffff as u64).le(f64::new(0x0010000000000000 as u64)), true);
+    // curated:14
+    assert_eq(f64::new(0x7fefffffffffffff as u64).le(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:15
+    assert_eq(f64::new(0x7ff0000000000000 as u64).le(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:16
+    assert_eq(f64::new(0xfff0000000000000 as u64).le(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:17
+    assert_eq(f64::new(0xfff0000000000000 as u64).le(f64::new(0xfff0000000000000 as u64)), true);
+    // curated:18
+    assert_eq(f64::new(0x7ff8000000000000 as u64).le(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:19
+    assert_eq(f64::new(0x7ff8000000000000 as u64).le(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:20
+    assert_eq(f64::new(0x3ff0000000000000 as u64).le(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:21
+    assert_eq(f64::new(0x7ff8000000000000 as u64).le(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:22
+    assert_eq(f64::new(0x8000000000000000 as u64).le(f64::new(0x7ff8000000000000 as u64)), false);
+    // random:754:0
+    assert_eq(f64::new(0x1e0d892d98666926 as u64).le(f64::new(0xa0d3a78a68a6171e as u64)), false);
+    // random:754:1
+    assert_eq(f64::new(0x00087e1147000404 as u64).le(f64::new(0x5574eb283cc54f9b as u64)), true);
+    // random:754:2
+    assert_eq(f64::new(0x857834836cae1efa as u64).le(f64::new(0xcb46c979bc04a209 as u64)), false);
+    // random:754:3
+    assert_eq(f64::new(0x39ef481db16963ab as u64).le(f64::new(0xd580701331dae96a as u64)), false);
+    // random:754:4
+    assert_eq(f64::new(0xff35a184072ac715 as u64).le(f64::new(0x000fd96f58c90ff7 as u64)), true);
+    // random:754:5
+    assert_eq(f64::new(0xa6fae19f4baf69b4 as u64).le(f64::new(0xacc88edc1ea55866 as u64)), false);
+    // random:754:6
+    assert_eq(f64::new(0xb1bcf6aaccf6c1fc as u64).le(f64::new(0x1a101fe99569cbc7 as u64)), true);
+    // random:754:7
+    assert_eq(f64::new(0x12e7a7fe47f99526 as u64).le(f64::new(0x0000000000000000 as u64)), false);
+}
+
+#[test]
+fn generated_f64_gt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x3ff0000000000000 as u64).gt(f64::new(0x4000000000000000 as u64)), false);
+    // curated:1
+    assert_eq(f64::new(0x4000000000000000 as u64).gt(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).gt(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:3
+    assert_eq(f64::new(0x3ff0000000000000 as u64).gt(f64::new(0x3ff0000000000001 as u64)), false);
+    // curated:4
+    assert_eq(f64::new(0xbff0000000000000 as u64).gt(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:5
+    assert_eq(f64::new(0x3ff0000000000000 as u64).gt(f64::new(0xbff0000000000000 as u64)), true);
+    // curated:6
+    assert_eq(f64::new(0xbff0000000000000 as u64).gt(f64::new(0xc000000000000000 as u64)), true);
+    // curated:7
+    assert_eq(f64::new(0xc000000000000000 as u64).gt(f64::new(0xbff0000000000000 as u64)), false);
+    // curated:8
+    assert_eq(f64::new(0x0000000000000000 as u64).gt(f64::new(0x8000000000000000 as u64)), false);
+    // curated:9
+    assert_eq(f64::new(0x8000000000000000 as u64).gt(f64::new(0x0000000000000000 as u64)), false);
+    // curated:10
+    assert_eq(f64::new(0x0000000000000000 as u64).gt(f64::new(0x0000000000000000 as u64)), false);
+    // curated:11
+    assert_eq(f64::new(0x8000000000000000 as u64).gt(f64::new(0x0000000000000001 as u64)), false);
+    // curated:12
+    assert_eq(f64::new(0x0000000000000001 as u64).gt(f64::new(0x0000000000000002 as u64)), false);
+    // curated:13
+    assert_eq(f64::new(0x000fffffffffffff as u64).gt(f64::new(0x0010000000000000 as u64)), false);
+    // curated:14
+    assert_eq(f64::new(0x7fefffffffffffff as u64).gt(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:15
+    assert_eq(f64::new(0x7ff0000000000000 as u64).gt(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:16
+    assert_eq(f64::new(0xfff0000000000000 as u64).gt(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:17
+    assert_eq(f64::new(0xfff0000000000000 as u64).gt(f64::new(0xfff0000000000000 as u64)), false);
+    // curated:18
+    assert_eq(f64::new(0x7ff8000000000000 as u64).gt(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:19
+    assert_eq(f64::new(0x7ff8000000000000 as u64).gt(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:20
+    assert_eq(f64::new(0x3ff0000000000000 as u64).gt(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:21
+    assert_eq(f64::new(0x7ff8000000000000 as u64).gt(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:22
+    assert_eq(f64::new(0x8000000000000000 as u64).gt(f64::new(0x7ff8000000000000 as u64)), false);
+    // random:754:0
+    assert_eq(f64::new(0x1e0d892d98666926 as u64).gt(f64::new(0xa0d3a78a68a6171e as u64)), true);
+    // random:754:1
+    assert_eq(f64::new(0x00087e1147000404 as u64).gt(f64::new(0x5574eb283cc54f9b as u64)), false);
+    // random:754:2
+    assert_eq(f64::new(0x857834836cae1efa as u64).gt(f64::new(0xcb46c979bc04a209 as u64)), true);
+    // random:754:3
+    assert_eq(f64::new(0x39ef481db16963ab as u64).gt(f64::new(0xd580701331dae96a as u64)), true);
+    // random:754:4
+    assert_eq(f64::new(0xff35a184072ac715 as u64).gt(f64::new(0x000fd96f58c90ff7 as u64)), false);
+    // random:754:5
+    assert_eq(f64::new(0xa6fae19f4baf69b4 as u64).gt(f64::new(0xacc88edc1ea55866 as u64)), true);
+    // random:754:6
+    assert_eq(f64::new(0xb1bcf6aaccf6c1fc as u64).gt(f64::new(0x1a101fe99569cbc7 as u64)), false);
+    // random:754:7
+    assert_eq(f64::new(0x12e7a7fe47f99526 as u64).gt(f64::new(0x0000000000000000 as u64)), true);
+}
+
+#[test]
+fn generated_f64_ge_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ge(f64::new(0x4000000000000000 as u64)), false);
+    // curated:1
+    assert_eq(f64::new(0x4000000000000000 as u64).ge(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ge(f64::new(0x3ff0000000000000 as u64)), true);
+    // curated:3
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ge(f64::new(0x3ff0000000000001 as u64)), false);
+    // curated:4
+    assert_eq(f64::new(0xbff0000000000000 as u64).ge(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:5
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ge(f64::new(0xbff0000000000000 as u64)), true);
+    // curated:6
+    assert_eq(f64::new(0xbff0000000000000 as u64).ge(f64::new(0xc000000000000000 as u64)), true);
+    // curated:7
+    assert_eq(f64::new(0xc000000000000000 as u64).ge(f64::new(0xbff0000000000000 as u64)), false);
+    // curated:8
+    assert_eq(f64::new(0x0000000000000000 as u64).ge(f64::new(0x8000000000000000 as u64)), true);
+    // curated:9
+    assert_eq(f64::new(0x8000000000000000 as u64).ge(f64::new(0x0000000000000000 as u64)), true);
+    // curated:10
+    assert_eq(f64::new(0x0000000000000000 as u64).ge(f64::new(0x0000000000000000 as u64)), true);
+    // curated:11
+    assert_eq(f64::new(0x8000000000000000 as u64).ge(f64::new(0x0000000000000001 as u64)), false);
+    // curated:12
+    assert_eq(f64::new(0x0000000000000001 as u64).ge(f64::new(0x0000000000000002 as u64)), false);
+    // curated:13
+    assert_eq(f64::new(0x000fffffffffffff as u64).ge(f64::new(0x0010000000000000 as u64)), false);
+    // curated:14
+    assert_eq(f64::new(0x7fefffffffffffff as u64).ge(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:15
+    assert_eq(f64::new(0x7ff0000000000000 as u64).ge(f64::new(0x7ff0000000000000 as u64)), true);
+    // curated:16
+    assert_eq(f64::new(0xfff0000000000000 as u64).ge(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:17
+    assert_eq(f64::new(0xfff0000000000000 as u64).ge(f64::new(0xfff0000000000000 as u64)), true);
+    // curated:18
+    assert_eq(f64::new(0x7ff8000000000000 as u64).ge(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:19
+    assert_eq(f64::new(0x7ff8000000000000 as u64).ge(f64::new(0x3ff0000000000000 as u64)), false);
+    // curated:20
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ge(f64::new(0x7ff8000000000000 as u64)), false);
+    // curated:21
+    assert_eq(f64::new(0x7ff8000000000000 as u64).ge(f64::new(0x7ff0000000000000 as u64)), false);
+    // curated:22
+    assert_eq(f64::new(0x8000000000000000 as u64).ge(f64::new(0x7ff8000000000000 as u64)), false);
+    // random:754:0
+    assert_eq(f64::new(0x1e0d892d98666926 as u64).ge(f64::new(0xa0d3a78a68a6171e as u64)), true);
+    // random:754:1
+    assert_eq(f64::new(0x00087e1147000404 as u64).ge(f64::new(0x5574eb283cc54f9b as u64)), false);
+    // random:754:2
+    assert_eq(f64::new(0x857834836cae1efa as u64).ge(f64::new(0xcb46c979bc04a209 as u64)), true);
+    // random:754:3
+    assert_eq(f64::new(0x39ef481db16963ab as u64).ge(f64::new(0xd580701331dae96a as u64)), true);
+    // random:754:4
+    assert_eq(f64::new(0xff35a184072ac715 as u64).ge(f64::new(0x000fd96f58c90ff7 as u64)), false);
+    // random:754:5
+    assert_eq(f64::new(0xa6fae19f4baf69b4 as u64).ge(f64::new(0xacc88edc1ea55866 as u64)), true);
+    // random:754:6
+    assert_eq(f64::new(0xb1bcf6aaccf6c1fc as u64).ge(f64::new(0x1a101fe99569cbc7 as u64)), false);
+    // random:754:7
+    assert_eq(f64::new(0x12e7a7fe47f99526 as u64).ge(f64::new(0x0000000000000000 as u64)), true);
+}
+
+#[test]
+fn generated_f128_eq_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).eq(f128::new(0x40000000000000000000000000000000 as u128)), false);
+    // curated:1
+    assert_eq(f128::new(0x40000000000000000000000000000000 as u128).eq(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).eq(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:3
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).eq(f128::new(0x3fff0000000000000000000000000001 as u128)), false);
+    // curated:4
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).eq(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:5
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).eq(f128::new(0xbfff0000000000000000000000000000 as u128)), false);
+    // curated:6
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).eq(f128::new(0xc0000000000000000000000000000000 as u128)), false);
+    // curated:7
+    assert_eq(f128::new(0xc0000000000000000000000000000000 as u128).eq(f128::new(0xbfff0000000000000000000000000000 as u128)), false);
+    // curated:8
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).eq(f128::new(0x80000000000000000000000000000000 as u128)), true);
+    // curated:9
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).eq(f128::new(0x00000000000000000000000000000000 as u128)), true);
+    // curated:10
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).eq(f128::new(0x00000000000000000000000000000000 as u128)), true);
+    // curated:11
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).eq(f128::new(0x00000000000000000000000000000001 as u128)), false);
+    // curated:12
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).eq(f128::new(0x00000000000000000000000000000002 as u128)), false);
+    // curated:13
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).eq(f128::new(0x00010000000000000000000000000000 as u128)), false);
+    // curated:14
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).eq(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:15
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).eq(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:16
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).eq(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:17
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).eq(f128::new(0xffff0000000000000000000000000000 as u128)), true);
+    // curated:18
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).eq(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:19
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).eq(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:20
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).eq(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:21
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).eq(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:22
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).eq(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // random:754:0
+    assert_eq(f128::new(0x86ff6ca30f37dd9f10f5cc80441a1fb7 as u128).eq(f128::new(0x79b3231f4cb7c4fa6b19868f306b4224 as u128)), false);
+    // random:754:1
+    assert_eq(f128::new(0x983c0ee9c92037f70e33076d23aab8e8 as u128).eq(f128::new(0x2dd001cd1459e3b145c93301fe1fd94a as u128)), false);
+    // random:754:2
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).eq(f128::new(0x80000000000000000000000000000000 as u128)), true);
+    // random:754:3
+    assert_eq(f128::new(0x2378ba6992ab2098710d557af2fef72c as u128).eq(f128::new(0xa6dd8aa52c18854eeae774092dfb0d64 as u128)), false);
+    // random:754:4
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).eq(f128::new(0x87ea1b5b5003ca3fb7fc48d603021353 as u128)), false);
+    // random:754:5
+    assert_eq(f128::new(0x080e3916819ebd5d4d77017249cb7ee3 as u128).eq(f128::new(0x12479ed01d92156968209bf502db1a8b as u128)), false);
+    // random:754:6
+    assert_eq(f128::new(0x80003dc1e73008e6f55b70910d3787b0 as u128).eq(f128::new(0xbd447f115ba8e9963e4ec3eb555afb40 as u128)), false);
+    // random:754:7
+    assert_eq(f128::new(0x87e9d054d979406d97b9321049e8e3c2 as u128).eq(f128::new(0x4cbfc2cc6b10c2a2a63894fcdcce504e as u128)), false);
+}
+
+#[test]
+fn generated_f128_ne_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ne(f128::new(0x40000000000000000000000000000000 as u128)), true);
+    // curated:1
+    assert_eq(f128::new(0x40000000000000000000000000000000 as u128).ne(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ne(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:3
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ne(f128::new(0x3fff0000000000000000000000000001 as u128)), true);
+    // curated:4
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).ne(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:5
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ne(f128::new(0xbfff0000000000000000000000000000 as u128)), true);
+    // curated:6
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).ne(f128::new(0xc0000000000000000000000000000000 as u128)), true);
+    // curated:7
+    assert_eq(f128::new(0xc0000000000000000000000000000000 as u128).ne(f128::new(0xbfff0000000000000000000000000000 as u128)), true);
+    // curated:8
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).ne(f128::new(0x80000000000000000000000000000000 as u128)), false);
+    // curated:9
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).ne(f128::new(0x00000000000000000000000000000000 as u128)), false);
+    // curated:10
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).ne(f128::new(0x00000000000000000000000000000000 as u128)), false);
+    // curated:11
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).ne(f128::new(0x00000000000000000000000000000001 as u128)), true);
+    // curated:12
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).ne(f128::new(0x00000000000000000000000000000002 as u128)), true);
+    // curated:13
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).ne(f128::new(0x00010000000000000000000000000000 as u128)), true);
+    // curated:14
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).ne(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:15
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).ne(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:16
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).ne(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:17
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).ne(f128::new(0xffff0000000000000000000000000000 as u128)), false);
+    // curated:18
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).ne(f128::new(0x7fff8000000000000000000000000000 as u128)), true);
+    // curated:19
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).ne(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:20
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ne(f128::new(0x7fff8000000000000000000000000000 as u128)), true);
+    // curated:21
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).ne(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:22
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).ne(f128::new(0x7fff8000000000000000000000000000 as u128)), true);
+    // random:754:0
+    assert_eq(f128::new(0x86ff6ca30f37dd9f10f5cc80441a1fb7 as u128).ne(f128::new(0x79b3231f4cb7c4fa6b19868f306b4224 as u128)), true);
+    // random:754:1
+    assert_eq(f128::new(0x983c0ee9c92037f70e33076d23aab8e8 as u128).ne(f128::new(0x2dd001cd1459e3b145c93301fe1fd94a as u128)), true);
+    // random:754:2
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).ne(f128::new(0x80000000000000000000000000000000 as u128)), false);
+    // random:754:3
+    assert_eq(f128::new(0x2378ba6992ab2098710d557af2fef72c as u128).ne(f128::new(0xa6dd8aa52c18854eeae774092dfb0d64 as u128)), true);
+    // random:754:4
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).ne(f128::new(0x87ea1b5b5003ca3fb7fc48d603021353 as u128)), true);
+    // random:754:5
+    assert_eq(f128::new(0x080e3916819ebd5d4d77017249cb7ee3 as u128).ne(f128::new(0x12479ed01d92156968209bf502db1a8b as u128)), true);
+    // random:754:6
+    assert_eq(f128::new(0x80003dc1e73008e6f55b70910d3787b0 as u128).ne(f128::new(0xbd447f115ba8e9963e4ec3eb555afb40 as u128)), true);
+    // random:754:7
+    assert_eq(f128::new(0x87e9d054d979406d97b9321049e8e3c2 as u128).ne(f128::new(0x4cbfc2cc6b10c2a2a63894fcdcce504e as u128)), true);
+}
+
+#[test]
+fn generated_f128_lt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).lt(f128::new(0x40000000000000000000000000000000 as u128)), true);
+    // curated:1
+    assert_eq(f128::new(0x40000000000000000000000000000000 as u128).lt(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).lt(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:3
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).lt(f128::new(0x3fff0000000000000000000000000001 as u128)), true);
+    // curated:4
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).lt(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:5
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).lt(f128::new(0xbfff0000000000000000000000000000 as u128)), false);
+    // curated:6
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).lt(f128::new(0xc0000000000000000000000000000000 as u128)), false);
+    // curated:7
+    assert_eq(f128::new(0xc0000000000000000000000000000000 as u128).lt(f128::new(0xbfff0000000000000000000000000000 as u128)), true);
+    // curated:8
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).lt(f128::new(0x80000000000000000000000000000000 as u128)), false);
+    // curated:9
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).lt(f128::new(0x00000000000000000000000000000000 as u128)), false);
+    // curated:10
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).lt(f128::new(0x00000000000000000000000000000000 as u128)), false);
+    // curated:11
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).lt(f128::new(0x00000000000000000000000000000001 as u128)), true);
+    // curated:12
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).lt(f128::new(0x00000000000000000000000000000002 as u128)), true);
+    // curated:13
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).lt(f128::new(0x00010000000000000000000000000000 as u128)), true);
+    // curated:14
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).lt(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:15
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).lt(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:16
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).lt(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:17
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).lt(f128::new(0xffff0000000000000000000000000000 as u128)), false);
+    // curated:18
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).lt(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:19
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).lt(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:20
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).lt(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:21
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).lt(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:22
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).lt(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // random:754:0
+    assert_eq(f128::new(0x86ff6ca30f37dd9f10f5cc80441a1fb7 as u128).lt(f128::new(0x79b3231f4cb7c4fa6b19868f306b4224 as u128)), true);
+    // random:754:1
+    assert_eq(f128::new(0x983c0ee9c92037f70e33076d23aab8e8 as u128).lt(f128::new(0x2dd001cd1459e3b145c93301fe1fd94a as u128)), true);
+    // random:754:2
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).lt(f128::new(0x80000000000000000000000000000000 as u128)), false);
+    // random:754:3
+    assert_eq(f128::new(0x2378ba6992ab2098710d557af2fef72c as u128).lt(f128::new(0xa6dd8aa52c18854eeae774092dfb0d64 as u128)), false);
+    // random:754:4
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).lt(f128::new(0x87ea1b5b5003ca3fb7fc48d603021353 as u128)), false);
+    // random:754:5
+    assert_eq(f128::new(0x080e3916819ebd5d4d77017249cb7ee3 as u128).lt(f128::new(0x12479ed01d92156968209bf502db1a8b as u128)), true);
+    // random:754:6
+    assert_eq(f128::new(0x80003dc1e73008e6f55b70910d3787b0 as u128).lt(f128::new(0xbd447f115ba8e9963e4ec3eb555afb40 as u128)), false);
+    // random:754:7
+    assert_eq(f128::new(0x87e9d054d979406d97b9321049e8e3c2 as u128).lt(f128::new(0x4cbfc2cc6b10c2a2a63894fcdcce504e as u128)), true);
+}
+
+#[test]
+fn generated_f128_le_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).le(f128::new(0x40000000000000000000000000000000 as u128)), true);
+    // curated:1
+    assert_eq(f128::new(0x40000000000000000000000000000000 as u128).le(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).le(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:3
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).le(f128::new(0x3fff0000000000000000000000000001 as u128)), true);
+    // curated:4
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).le(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:5
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).le(f128::new(0xbfff0000000000000000000000000000 as u128)), false);
+    // curated:6
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).le(f128::new(0xc0000000000000000000000000000000 as u128)), false);
+    // curated:7
+    assert_eq(f128::new(0xc0000000000000000000000000000000 as u128).le(f128::new(0xbfff0000000000000000000000000000 as u128)), true);
+    // curated:8
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).le(f128::new(0x80000000000000000000000000000000 as u128)), true);
+    // curated:9
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).le(f128::new(0x00000000000000000000000000000000 as u128)), true);
+    // curated:10
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).le(f128::new(0x00000000000000000000000000000000 as u128)), true);
+    // curated:11
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).le(f128::new(0x00000000000000000000000000000001 as u128)), true);
+    // curated:12
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).le(f128::new(0x00000000000000000000000000000002 as u128)), true);
+    // curated:13
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).le(f128::new(0x00010000000000000000000000000000 as u128)), true);
+    // curated:14
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).le(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:15
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).le(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:16
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).le(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:17
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).le(f128::new(0xffff0000000000000000000000000000 as u128)), true);
+    // curated:18
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).le(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:19
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).le(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:20
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).le(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:21
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).le(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:22
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).le(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // random:754:0
+    assert_eq(f128::new(0x86ff6ca30f37dd9f10f5cc80441a1fb7 as u128).le(f128::new(0x79b3231f4cb7c4fa6b19868f306b4224 as u128)), true);
+    // random:754:1
+    assert_eq(f128::new(0x983c0ee9c92037f70e33076d23aab8e8 as u128).le(f128::new(0x2dd001cd1459e3b145c93301fe1fd94a as u128)), true);
+    // random:754:2
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).le(f128::new(0x80000000000000000000000000000000 as u128)), true);
+    // random:754:3
+    assert_eq(f128::new(0x2378ba6992ab2098710d557af2fef72c as u128).le(f128::new(0xa6dd8aa52c18854eeae774092dfb0d64 as u128)), false);
+    // random:754:4
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).le(f128::new(0x87ea1b5b5003ca3fb7fc48d603021353 as u128)), false);
+    // random:754:5
+    assert_eq(f128::new(0x080e3916819ebd5d4d77017249cb7ee3 as u128).le(f128::new(0x12479ed01d92156968209bf502db1a8b as u128)), true);
+    // random:754:6
+    assert_eq(f128::new(0x80003dc1e73008e6f55b70910d3787b0 as u128).le(f128::new(0xbd447f115ba8e9963e4ec3eb555afb40 as u128)), false);
+    // random:754:7
+    assert_eq(f128::new(0x87e9d054d979406d97b9321049e8e3c2 as u128).le(f128::new(0x4cbfc2cc6b10c2a2a63894fcdcce504e as u128)), true);
+}
+
+#[test]
+fn generated_f128_gt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).gt(f128::new(0x40000000000000000000000000000000 as u128)), false);
+    // curated:1
+    assert_eq(f128::new(0x40000000000000000000000000000000 as u128).gt(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).gt(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:3
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).gt(f128::new(0x3fff0000000000000000000000000001 as u128)), false);
+    // curated:4
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).gt(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:5
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).gt(f128::new(0xbfff0000000000000000000000000000 as u128)), true);
+    // curated:6
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).gt(f128::new(0xc0000000000000000000000000000000 as u128)), true);
+    // curated:7
+    assert_eq(f128::new(0xc0000000000000000000000000000000 as u128).gt(f128::new(0xbfff0000000000000000000000000000 as u128)), false);
+    // curated:8
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).gt(f128::new(0x80000000000000000000000000000000 as u128)), false);
+    // curated:9
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).gt(f128::new(0x00000000000000000000000000000000 as u128)), false);
+    // curated:10
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).gt(f128::new(0x00000000000000000000000000000000 as u128)), false);
+    // curated:11
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).gt(f128::new(0x00000000000000000000000000000001 as u128)), false);
+    // curated:12
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).gt(f128::new(0x00000000000000000000000000000002 as u128)), false);
+    // curated:13
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).gt(f128::new(0x00010000000000000000000000000000 as u128)), false);
+    // curated:14
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).gt(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:15
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).gt(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:16
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).gt(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:17
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).gt(f128::new(0xffff0000000000000000000000000000 as u128)), false);
+    // curated:18
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).gt(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:19
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).gt(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:20
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).gt(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:21
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).gt(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:22
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).gt(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // random:754:0
+    assert_eq(f128::new(0x86ff6ca30f37dd9f10f5cc80441a1fb7 as u128).gt(f128::new(0x79b3231f4cb7c4fa6b19868f306b4224 as u128)), false);
+    // random:754:1
+    assert_eq(f128::new(0x983c0ee9c92037f70e33076d23aab8e8 as u128).gt(f128::new(0x2dd001cd1459e3b145c93301fe1fd94a as u128)), false);
+    // random:754:2
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).gt(f128::new(0x80000000000000000000000000000000 as u128)), false);
+    // random:754:3
+    assert_eq(f128::new(0x2378ba6992ab2098710d557af2fef72c as u128).gt(f128::new(0xa6dd8aa52c18854eeae774092dfb0d64 as u128)), true);
+    // random:754:4
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).gt(f128::new(0x87ea1b5b5003ca3fb7fc48d603021353 as u128)), true);
+    // random:754:5
+    assert_eq(f128::new(0x080e3916819ebd5d4d77017249cb7ee3 as u128).gt(f128::new(0x12479ed01d92156968209bf502db1a8b as u128)), false);
+    // random:754:6
+    assert_eq(f128::new(0x80003dc1e73008e6f55b70910d3787b0 as u128).gt(f128::new(0xbd447f115ba8e9963e4ec3eb555afb40 as u128)), true);
+    // random:754:7
+    assert_eq(f128::new(0x87e9d054d979406d97b9321049e8e3c2 as u128).gt(f128::new(0x4cbfc2cc6b10c2a2a63894fcdcce504e as u128)), false);
+}
+
+#[test]
+fn generated_f128_ge_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ge(f128::new(0x40000000000000000000000000000000 as u128)), false);
+    // curated:1
+    assert_eq(f128::new(0x40000000000000000000000000000000 as u128).ge(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ge(f128::new(0x3fff0000000000000000000000000000 as u128)), true);
+    // curated:3
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ge(f128::new(0x3fff0000000000000000000000000001 as u128)), false);
+    // curated:4
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).ge(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:5
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ge(f128::new(0xbfff0000000000000000000000000000 as u128)), true);
+    // curated:6
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).ge(f128::new(0xc0000000000000000000000000000000 as u128)), true);
+    // curated:7
+    assert_eq(f128::new(0xc0000000000000000000000000000000 as u128).ge(f128::new(0xbfff0000000000000000000000000000 as u128)), false);
+    // curated:8
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).ge(f128::new(0x80000000000000000000000000000000 as u128)), true);
+    // curated:9
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).ge(f128::new(0x00000000000000000000000000000000 as u128)), true);
+    // curated:10
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).ge(f128::new(0x00000000000000000000000000000000 as u128)), true);
+    // curated:11
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).ge(f128::new(0x00000000000000000000000000000001 as u128)), false);
+    // curated:12
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).ge(f128::new(0x00000000000000000000000000000002 as u128)), false);
+    // curated:13
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).ge(f128::new(0x00010000000000000000000000000000 as u128)), false);
+    // curated:14
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).ge(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:15
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).ge(f128::new(0x7fff0000000000000000000000000000 as u128)), true);
+    // curated:16
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).ge(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:17
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).ge(f128::new(0xffff0000000000000000000000000000 as u128)), true);
+    // curated:18
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).ge(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:19
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).ge(f128::new(0x3fff0000000000000000000000000000 as u128)), false);
+    // curated:20
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ge(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // curated:21
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).ge(f128::new(0x7fff0000000000000000000000000000 as u128)), false);
+    // curated:22
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).ge(f128::new(0x7fff8000000000000000000000000000 as u128)), false);
+    // random:754:0
+    assert_eq(f128::new(0x86ff6ca30f37dd9f10f5cc80441a1fb7 as u128).ge(f128::new(0x79b3231f4cb7c4fa6b19868f306b4224 as u128)), false);
+    // random:754:1
+    assert_eq(f128::new(0x983c0ee9c92037f70e33076d23aab8e8 as u128).ge(f128::new(0x2dd001cd1459e3b145c93301fe1fd94a as u128)), false);
+    // random:754:2
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).ge(f128::new(0x80000000000000000000000000000000 as u128)), true);
+    // random:754:3
+    assert_eq(f128::new(0x2378ba6992ab2098710d557af2fef72c as u128).ge(f128::new(0xa6dd8aa52c18854eeae774092dfb0d64 as u128)), true);
+    // random:754:4
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).ge(f128::new(0x87ea1b5b5003ca3fb7fc48d603021353 as u128)), true);
+    // random:754:5
+    assert_eq(f128::new(0x080e3916819ebd5d4d77017249cb7ee3 as u128).ge(f128::new(0x12479ed01d92156968209bf502db1a8b as u128)), false);
+    // random:754:6
+    assert_eq(f128::new(0x80003dc1e73008e6f55b70910d3787b0 as u128).ge(f128::new(0xbd447f115ba8e9963e4ec3eb555afb40 as u128)), true);
+    // random:754:7
+    assert_eq(f128::new(0x87e9d054d979406d97b9321049e8e3c2 as u128).ge(f128::new(0x4cbfc2cc6b10c2a2a63894fcdcce504e as u128)), false);
+}
+
+#[test]
+fn generated_f16_floor_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x0000 as u16).floor().bits(), 0x0000 as u16);
+    // curated:1
+    assert_eq(f16::new(0x8000 as u16).floor().bits(), 0x8000 as u16);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).floor().bits(), 0x3c00 as u16);
+    // curated:3
+    assert_eq(f16::new(0xbc00 as u16).floor().bits(), 0xbc00 as u16);
+    // curated:4
+    assert_eq(f16::new(0x3c01 as u16).floor().bits(), 0x3c00 as u16);
+    // curated:5
+    assert_eq(f16::new(0xbc01 as u16).floor().bits(), 0xc000 as u16);
+    // curated:6
+    assert_eq(f16::new(0x3800 as u16).floor().bits(), 0x0000 as u16);
+    // curated:7
+    assert_eq(f16::new(0xb800 as u16).floor().bits(), 0xbc00 as u16);
+    // curated:8
+    assert_eq(f16::new(0x3e00 as u16).floor().bits(), 0x3c00 as u16);
+    // curated:9
+    assert_eq(f16::new(0xbe00 as u16).floor().bits(), 0xc000 as u16);
+    // curated:10
+    assert_eq(f16::new(0x4100 as u16).floor().bits(), 0x4000 as u16);
+    // curated:11
+    assert_eq(f16::new(0xc100 as u16).floor().bits(), 0xc200 as u16);
+    // curated:12
+    assert_eq(f16::new(0x4300 as u16).floor().bits(), 0x4200 as u16);
+    // curated:13
+    assert_eq(f16::new(0x3400 as u16).floor().bits(), 0x0000 as u16);
+    // curated:14
+    assert_eq(f16::new(0xb400 as u16).floor().bits(), 0xbc00 as u16);
+    // curated:15
+    assert_eq(f16::new(0x0001 as u16).floor().bits(), 0x0000 as u16);
+    // curated:16
+    assert_eq(f16::new(0x8001 as u16).floor().bits(), 0xbc00 as u16);
+    // curated:17
+    assert_eq(f16::new(0x03ff as u16).floor().bits(), 0x0000 as u16);
+    // curated:18
+    assert_eq(f16::new(0x83ff as u16).floor().bits(), 0xbc00 as u16);
+    // curated:19
+    assert_eq(f16::new(0x0400 as u16).floor().bits(), 0x0000 as u16);
+    // curated:20
+    assert_eq(f16::new(0x63ff as u16).floor().bits(), 0x63fe as u16);
+    // curated:21
+    assert_eq(f16::new(0xe3ff as u16).floor().bits(), 0xe400 as u16);
+    // curated:22
+    assert_eq(f16::new(0x6400 as u16).floor().bits(), 0x6400 as u16);
+    // curated:23
+    assert_eq(f16::new(0x7bff as u16).floor().bits(), 0x7bff as u16);
+    // curated:24
+    assert_eq(f16::new(0x7c00 as u16).floor().bits(), 0x7c00 as u16);
+    // curated:25
+    assert_eq(f16::new(0xfc00 as u16).floor().bits(), 0xfc00 as u16);
+    // curated:26
+    assert_eq(f16::new(0x7e00 as u16).floor().bits(), 0x7e00 as u16);
+    // random:754:0
+    assert_eq(f16::new(0x812d as u16).floor().bits(), 0xbc00 as u16);
+    // random:754:1
+    assert_eq(f16::new(0x1f05 as u16).floor().bits(), 0x0000 as u16);
+    // random:754:2
+    assert_eq(f16::new(0x57a6 as u16).floor().bits(), 0x57a0 as u16);
+    // random:754:3
+    assert_eq(f16::new(0x01ae as u16).floor().bits(), 0x0000 as u16);
+    // random:754:4
+    assert_eq(f16::new(0x63b9 as u16).floor().bits(), 0x63b8 as u16);
+    // random:754:5
+    assert_eq(f16::new(0x0117 as u16).floor().bits(), 0x0000 as u16);
+    // random:754:6
+    assert_eq(f16::new(0x8fb1 as u16).floor().bits(), 0xbc00 as u16);
+    // random:754:7
+    assert_eq(f16::new(0x96ab as u16).floor().bits(), 0xbc00 as u16);
+}
+
+#[test]
+fn generated_f16_ceil_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x0000 as u16).ceil().bits(), 0x0000 as u16);
+    // curated:1
+    assert_eq(f16::new(0x8000 as u16).ceil().bits(), 0x8000 as u16);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).ceil().bits(), 0x3c00 as u16);
+    // curated:3
+    assert_eq(f16::new(0xbc00 as u16).ceil().bits(), 0xbc00 as u16);
+    // curated:4
+    assert_eq(f16::new(0x3c01 as u16).ceil().bits(), 0x4000 as u16);
+    // curated:5
+    assert_eq(f16::new(0xbc01 as u16).ceil().bits(), 0xbc00 as u16);
+    // curated:6
+    assert_eq(f16::new(0x3800 as u16).ceil().bits(), 0x3c00 as u16);
+    // curated:7
+    assert_eq(f16::new(0xb800 as u16).ceil().bits(), 0x8000 as u16);
+    // curated:8
+    assert_eq(f16::new(0x3e00 as u16).ceil().bits(), 0x4000 as u16);
+    // curated:9
+    assert_eq(f16::new(0xbe00 as u16).ceil().bits(), 0xbc00 as u16);
+    // curated:10
+    assert_eq(f16::new(0x4100 as u16).ceil().bits(), 0x4200 as u16);
+    // curated:11
+    assert_eq(f16::new(0xc100 as u16).ceil().bits(), 0xc000 as u16);
+    // curated:12
+    assert_eq(f16::new(0x4300 as u16).ceil().bits(), 0x4400 as u16);
+    // curated:13
+    assert_eq(f16::new(0x3400 as u16).ceil().bits(), 0x3c00 as u16);
+    // curated:14
+    assert_eq(f16::new(0xb400 as u16).ceil().bits(), 0x8000 as u16);
+    // curated:15
+    assert_eq(f16::new(0x0001 as u16).ceil().bits(), 0x3c00 as u16);
+    // curated:16
+    assert_eq(f16::new(0x8001 as u16).ceil().bits(), 0x8000 as u16);
+    // curated:17
+    assert_eq(f16::new(0x03ff as u16).ceil().bits(), 0x3c00 as u16);
+    // curated:18
+    assert_eq(f16::new(0x83ff as u16).ceil().bits(), 0x8000 as u16);
+    // curated:19
+    assert_eq(f16::new(0x0400 as u16).ceil().bits(), 0x3c00 as u16);
+    // curated:20
+    assert_eq(f16::new(0x63ff as u16).ceil().bits(), 0x6400 as u16);
+    // curated:21
+    assert_eq(f16::new(0xe3ff as u16).ceil().bits(), 0xe3fe as u16);
+    // curated:22
+    assert_eq(f16::new(0x6400 as u16).ceil().bits(), 0x6400 as u16);
+    // curated:23
+    assert_eq(f16::new(0x7bff as u16).ceil().bits(), 0x7bff as u16);
+    // curated:24
+    assert_eq(f16::new(0x7c00 as u16).ceil().bits(), 0x7c00 as u16);
+    // curated:25
+    assert_eq(f16::new(0xfc00 as u16).ceil().bits(), 0xfc00 as u16);
+    // curated:26
+    assert_eq(f16::new(0x7e00 as u16).ceil().bits(), 0x7e00 as u16);
+    // random:754:0
+    assert_eq(f16::new(0x812d as u16).ceil().bits(), 0x8000 as u16);
+    // random:754:1
+    assert_eq(f16::new(0x1f05 as u16).ceil().bits(), 0x3c00 as u16);
+    // random:754:2
+    assert_eq(f16::new(0x57a6 as u16).ceil().bits(), 0x57b0 as u16);
+    // random:754:3
+    assert_eq(f16::new(0x01ae as u16).ceil().bits(), 0x3c00 as u16);
+    // random:754:4
+    assert_eq(f16::new(0x63b9 as u16).ceil().bits(), 0x63ba as u16);
+    // random:754:5
+    assert_eq(f16::new(0x0117 as u16).ceil().bits(), 0x3c00 as u16);
+    // random:754:6
+    assert_eq(f16::new(0x8fb1 as u16).ceil().bits(), 0x8000 as u16);
+    // random:754:7
+    assert_eq(f16::new(0x96ab as u16).ceil().bits(), 0x8000 as u16);
+}
+
+#[test]
+fn generated_f16_trunc_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x0000 as u16).trunc().bits(), 0x0000 as u16);
+    // curated:1
+    assert_eq(f16::new(0x8000 as u16).trunc().bits(), 0x8000 as u16);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).trunc().bits(), 0x3c00 as u16);
+    // curated:3
+    assert_eq(f16::new(0xbc00 as u16).trunc().bits(), 0xbc00 as u16);
+    // curated:4
+    assert_eq(f16::new(0x3c01 as u16).trunc().bits(), 0x3c00 as u16);
+    // curated:5
+    assert_eq(f16::new(0xbc01 as u16).trunc().bits(), 0xbc00 as u16);
+    // curated:6
+    assert_eq(f16::new(0x3800 as u16).trunc().bits(), 0x0000 as u16);
+    // curated:7
+    assert_eq(f16::new(0xb800 as u16).trunc().bits(), 0x8000 as u16);
+    // curated:8
+    assert_eq(f16::new(0x3e00 as u16).trunc().bits(), 0x3c00 as u16);
+    // curated:9
+    assert_eq(f16::new(0xbe00 as u16).trunc().bits(), 0xbc00 as u16);
+    // curated:10
+    assert_eq(f16::new(0x4100 as u16).trunc().bits(), 0x4000 as u16);
+    // curated:11
+    assert_eq(f16::new(0xc100 as u16).trunc().bits(), 0xc000 as u16);
+    // curated:12
+    assert_eq(f16::new(0x4300 as u16).trunc().bits(), 0x4200 as u16);
+    // curated:13
+    assert_eq(f16::new(0x3400 as u16).trunc().bits(), 0x0000 as u16);
+    // curated:14
+    assert_eq(f16::new(0xb400 as u16).trunc().bits(), 0x8000 as u16);
+    // curated:15
+    assert_eq(f16::new(0x0001 as u16).trunc().bits(), 0x0000 as u16);
+    // curated:16
+    assert_eq(f16::new(0x8001 as u16).trunc().bits(), 0x8000 as u16);
+    // curated:17
+    assert_eq(f16::new(0x03ff as u16).trunc().bits(), 0x0000 as u16);
+    // curated:18
+    assert_eq(f16::new(0x83ff as u16).trunc().bits(), 0x8000 as u16);
+    // curated:19
+    assert_eq(f16::new(0x0400 as u16).trunc().bits(), 0x0000 as u16);
+    // curated:20
+    assert_eq(f16::new(0x63ff as u16).trunc().bits(), 0x63fe as u16);
+    // curated:21
+    assert_eq(f16::new(0xe3ff as u16).trunc().bits(), 0xe3fe as u16);
+    // curated:22
+    assert_eq(f16::new(0x6400 as u16).trunc().bits(), 0x6400 as u16);
+    // curated:23
+    assert_eq(f16::new(0x7bff as u16).trunc().bits(), 0x7bff as u16);
+    // curated:24
+    assert_eq(f16::new(0x7c00 as u16).trunc().bits(), 0x7c00 as u16);
+    // curated:25
+    assert_eq(f16::new(0xfc00 as u16).trunc().bits(), 0xfc00 as u16);
+    // curated:26
+    assert_eq(f16::new(0x7e00 as u16).trunc().bits(), 0x7e00 as u16);
+    // random:754:0
+    assert_eq(f16::new(0x812d as u16).trunc().bits(), 0x8000 as u16);
+    // random:754:1
+    assert_eq(f16::new(0x1f05 as u16).trunc().bits(), 0x0000 as u16);
+    // random:754:2
+    assert_eq(f16::new(0x57a6 as u16).trunc().bits(), 0x57a0 as u16);
+    // random:754:3
+    assert_eq(f16::new(0x01ae as u16).trunc().bits(), 0x0000 as u16);
+    // random:754:4
+    assert_eq(f16::new(0x63b9 as u16).trunc().bits(), 0x63b8 as u16);
+    // random:754:5
+    assert_eq(f16::new(0x0117 as u16).trunc().bits(), 0x0000 as u16);
+    // random:754:6
+    assert_eq(f16::new(0x8fb1 as u16).trunc().bits(), 0x8000 as u16);
+    // random:754:7
+    assert_eq(f16::new(0x96ab as u16).trunc().bits(), 0x8000 as u16);
+}
+
+#[test]
+fn generated_f16_round_ties_even_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x0000 as u16).round_ties_even().bits(), 0x0000 as u16);
+    // curated:1
+    assert_eq(f16::new(0x8000 as u16).round_ties_even().bits(), 0x8000 as u16);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).round_ties_even().bits(), 0x3c00 as u16);
+    // curated:3
+    assert_eq(f16::new(0xbc00 as u16).round_ties_even().bits(), 0xbc00 as u16);
+    // curated:4
+    assert_eq(f16::new(0x3c01 as u16).round_ties_even().bits(), 0x3c00 as u16);
+    // curated:5
+    assert_eq(f16::new(0xbc01 as u16).round_ties_even().bits(), 0xbc00 as u16);
+    // curated:6
+    assert_eq(f16::new(0x3800 as u16).round_ties_even().bits(), 0x0000 as u16);
+    // curated:7
+    assert_eq(f16::new(0xb800 as u16).round_ties_even().bits(), 0x8000 as u16);
+    // curated:8
+    assert_eq(f16::new(0x3e00 as u16).round_ties_even().bits(), 0x4000 as u16);
+    // curated:9
+    assert_eq(f16::new(0xbe00 as u16).round_ties_even().bits(), 0xc000 as u16);
+    // curated:10
+    assert_eq(f16::new(0x4100 as u16).round_ties_even().bits(), 0x4000 as u16);
+    // curated:11
+    assert_eq(f16::new(0xc100 as u16).round_ties_even().bits(), 0xc000 as u16);
+    // curated:12
+    assert_eq(f16::new(0x4300 as u16).round_ties_even().bits(), 0x4400 as u16);
+    // curated:13
+    assert_eq(f16::new(0x3400 as u16).round_ties_even().bits(), 0x0000 as u16);
+    // curated:14
+    assert_eq(f16::new(0xb400 as u16).round_ties_even().bits(), 0x8000 as u16);
+    // curated:15
+    assert_eq(f16::new(0x0001 as u16).round_ties_even().bits(), 0x0000 as u16);
+    // curated:16
+    assert_eq(f16::new(0x8001 as u16).round_ties_even().bits(), 0x8000 as u16);
+    // curated:17
+    assert_eq(f16::new(0x03ff as u16).round_ties_even().bits(), 0x0000 as u16);
+    // curated:18
+    assert_eq(f16::new(0x83ff as u16).round_ties_even().bits(), 0x8000 as u16);
+    // curated:19
+    assert_eq(f16::new(0x0400 as u16).round_ties_even().bits(), 0x0000 as u16);
+    // curated:20
+    assert_eq(f16::new(0x63ff as u16).round_ties_even().bits(), 0x6400 as u16);
+    // curated:21
+    assert_eq(f16::new(0xe3ff as u16).round_ties_even().bits(), 0xe400 as u16);
+    // curated:22
+    assert_eq(f16::new(0x6400 as u16).round_ties_even().bits(), 0x6400 as u16);
+    // curated:23
+    assert_eq(f16::new(0x7bff as u16).round_ties_even().bits(), 0x7bff as u16);
+    // curated:24
+    assert_eq(f16::new(0x7c00 as u16).round_ties_even().bits(), 0x7c00 as u16);
+    // curated:25
+    assert_eq(f16::new(0xfc00 as u16).round_ties_even().bits(), 0xfc00 as u16);
+    // curated:26
+    assert_eq(f16::new(0x7e00 as u16).round_ties_even().bits(), 0x7e00 as u16);
+    // random:754:0
+    assert_eq(f16::new(0x812d as u16).round_ties_even().bits(), 0x8000 as u16);
+    // random:754:1
+    assert_eq(f16::new(0x1f05 as u16).round_ties_even().bits(), 0x0000 as u16);
+    // random:754:2
+    assert_eq(f16::new(0x57a6 as u16).round_ties_even().bits(), 0x57a0 as u16);
+    // random:754:3
+    assert_eq(f16::new(0x01ae as u16).round_ties_even().bits(), 0x0000 as u16);
+    // random:754:4
+    assert_eq(f16::new(0x63b9 as u16).round_ties_even().bits(), 0x63b8 as u16);
+    // random:754:5
+    assert_eq(f16::new(0x0117 as u16).round_ties_even().bits(), 0x0000 as u16);
+    // random:754:6
+    assert_eq(f16::new(0x8fb1 as u16).round_ties_even().bits(), 0x8000 as u16);
+    // random:754:7
+    assert_eq(f16::new(0x96ab as u16).round_ties_even().bits(), 0x8000 as u16);
+}
+
+#[test]
+fn generated_f16_sqrt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x0000 as u16).sqrt().bits(), 0x0000 as u16);
+    // curated:1
+    assert_eq(f16::new(0x8000 as u16).sqrt().bits(), 0x8000 as u16);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).sqrt().bits(), 0x3c00 as u16);
+    // curated:3
+    assert_eq(f16::new(0x4000 as u16).sqrt().bits(), 0x3da8 as u16);
+    // curated:4
+    assert_eq(f16::new(0x4200 as u16).sqrt().bits(), 0x3eee as u16);
+    // curated:5
+    assert_eq(f16::new(0x4400 as u16).sqrt().bits(), 0x4000 as u16);
+    // curated:6
+    assert_eq(f16::new(0x4880 as u16).sqrt().bits(), 0x4200 as u16);
+    // curated:7
+    assert_eq(f16::new(0x3800 as u16).sqrt().bits(), 0x39a8 as u16);
+    // curated:8
+    assert_eq(f16::new(0x3400 as u16).sqrt().bits(), 0x3800 as u16);
+    // curated:9
+    assert_eq(f16::new(0x3e00 as u16).sqrt().bits(), 0x3ce6 as u16);
+    // curated:10
+    assert_eq(f16::new(0x3c01 as u16).sqrt().bits(), 0x3c00 as u16);
+    // curated:11
+    assert_eq(f16::new(0x0001 as u16).sqrt().bits(), 0x0c00 as u16);
+    // curated:12
+    assert_eq(f16::new(0x0002 as u16).sqrt().bits(), 0x0da8 as u16);
+    // curated:13
+    assert_eq(f16::new(0x03ff as u16).sqrt().bits(), 0x1fff as u16);
+    // curated:14
+    assert_eq(f16::new(0x0400 as u16).sqrt().bits(), 0x2000 as u16);
+    // curated:15
+    assert_eq(f16::new(0x7bff as u16).sqrt().bits(), 0x5bff as u16);
+    // curated:16
+    assert_eq(f16::new(0x7c00 as u16).sqrt().bits(), 0x7c00 as u16);
+    // curated:17
+    assert_eq(f16::new(0xfc00 as u16).sqrt().bits(), 0x7e00 as u16);
+    // curated:18
+    assert_eq(f16::new(0xbc00 as u16).sqrt().bits(), 0x7e00 as u16);
+    // curated:19
+    assert_eq(f16::new(0x7e00 as u16).sqrt().bits(), 0x7e00 as u16);
+    // random:754:0
+    assert_eq(f16::new(0xad73 as u16).sqrt().bits(), 0x7e00 as u16);
+    // random:754:1
+    assert_eq(f16::new(0xbfea as u16).sqrt().bits(), 0x7e00 as u16);
+    // random:754:2
+    assert_eq(f16::new(0x8068 as u16).sqrt().bits(), 0x7e00 as u16);
+    // random:754:3
+    assert_eq(f16::new(0xa9c5 as u16).sqrt().bits(), 0x7e00 as u16);
+    // random:754:4
+    assert_eq(f16::new(0x814d as u16).sqrt().bits(), 0x7e00 as u16);
+    // random:754:5
+    assert_eq(f16::new(0x9c86 as u16).sqrt().bits(), 0x7e00 as u16);
+    // random:754:6
+    assert_eq(f16::new(0xc67e as u16).sqrt().bits(), 0x7e00 as u16);
+    // random:754:7
+    assert_eq(f16::new(0x7a27 as u16).sqrt().bits(), 0x5b04 as u16);
+}
+
+#[test]
+fn generated_f32_floor_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x00000000 as u32).floor().bits(), 0x00000000 as u32);
+    // curated:1
+    assert_eq(f32::new(0x80000000 as u32).floor().bits(), 0x80000000 as u32);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).floor().bits(), 0x3f800000 as u32);
+    // curated:3
+    assert_eq(f32::new(0xbf800000 as u32).floor().bits(), 0xbf800000 as u32);
+    // curated:4
+    assert_eq(f32::new(0x3f800001 as u32).floor().bits(), 0x3f800000 as u32);
+    // curated:5
+    assert_eq(f32::new(0xbf800001 as u32).floor().bits(), 0xc0000000 as u32);
+    // curated:6
+    assert_eq(f32::new(0x3f000000 as u32).floor().bits(), 0x00000000 as u32);
+    // curated:7
+    assert_eq(f32::new(0xbf000000 as u32).floor().bits(), 0xbf800000 as u32);
+    // curated:8
+    assert_eq(f32::new(0x3fc00000 as u32).floor().bits(), 0x3f800000 as u32);
+    // curated:9
+    assert_eq(f32::new(0xbfc00000 as u32).floor().bits(), 0xc0000000 as u32);
+    // curated:10
+    assert_eq(f32::new(0x40200000 as u32).floor().bits(), 0x40000000 as u32);
+    // curated:11
+    assert_eq(f32::new(0xc0200000 as u32).floor().bits(), 0xc0400000 as u32);
+    // curated:12
+    assert_eq(f32::new(0x40600000 as u32).floor().bits(), 0x40400000 as u32);
+    // curated:13
+    assert_eq(f32::new(0x3e800000 as u32).floor().bits(), 0x00000000 as u32);
+    // curated:14
+    assert_eq(f32::new(0xbe800000 as u32).floor().bits(), 0xbf800000 as u32);
+    // curated:15
+    assert_eq(f32::new(0x00000001 as u32).floor().bits(), 0x00000000 as u32);
+    // curated:16
+    assert_eq(f32::new(0x80000001 as u32).floor().bits(), 0xbf800000 as u32);
+    // curated:17
+    assert_eq(f32::new(0x007fffff as u32).floor().bits(), 0x00000000 as u32);
+    // curated:18
+    assert_eq(f32::new(0x807fffff as u32).floor().bits(), 0xbf800000 as u32);
+    // curated:19
+    assert_eq(f32::new(0x00800000 as u32).floor().bits(), 0x00000000 as u32);
+    // curated:20
+    assert_eq(f32::new(0x4affffff as u32).floor().bits(), 0x4afffffe as u32);
+    // curated:21
+    assert_eq(f32::new(0xcaffffff as u32).floor().bits(), 0xcb000000 as u32);
+    // curated:22
+    assert_eq(f32::new(0x4b000000 as u32).floor().bits(), 0x4b000000 as u32);
+    // curated:23
+    assert_eq(f32::new(0x7f7fffff as u32).floor().bits(), 0x7f7fffff as u32);
+    // curated:24
+    assert_eq(f32::new(0x7f800000 as u32).floor().bits(), 0x7f800000 as u32);
+    // curated:25
+    assert_eq(f32::new(0xff800000 as u32).floor().bits(), 0xff800000 as u32);
+    // curated:26
+    assert_eq(f32::new(0x7fc00000 as u32).floor().bits(), 0x7fc00000 as u32);
+    // random:754:0
+    assert_eq(f32::new(0x40a95fa2 as u32).floor().bits(), 0x40a00000 as u32);
+    // random:754:1
+    assert_eq(f32::new(0x4d8eaa53 as u32).floor().bits(), 0x4d8eaa53 as u32);
+    // random:754:2
+    assert_eq(f32::new(0x806c7368 as u32).floor().bits(), 0xbf800000 as u32);
+    // random:754:3
+    assert_eq(f32::new(0x9bac18aa as u32).floor().bits(), 0xbf800000 as u32);
+    // random:754:4
+    assert_eq(f32::new(0x0048d2d7 as u32).floor().bits(), 0x00000000 as u32);
+    // random:754:5
+    assert_eq(f32::new(0x00746a35 as u32).floor().bits(), 0x00000000 as u32);
+    // random:754:6
+    assert_eq(f32::new(0x7b3e0dcd as u32).floor().bits(), 0x7b3e0dcd as u32);
+    // random:754:7
+    assert_eq(f32::new(0x1da5a02b as u32).floor().bits(), 0x00000000 as u32);
+}
+
+#[test]
+fn generated_f32_ceil_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x00000000 as u32).ceil().bits(), 0x00000000 as u32);
+    // curated:1
+    assert_eq(f32::new(0x80000000 as u32).ceil().bits(), 0x80000000 as u32);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).ceil().bits(), 0x3f800000 as u32);
+    // curated:3
+    assert_eq(f32::new(0xbf800000 as u32).ceil().bits(), 0xbf800000 as u32);
+    // curated:4
+    assert_eq(f32::new(0x3f800001 as u32).ceil().bits(), 0x40000000 as u32);
+    // curated:5
+    assert_eq(f32::new(0xbf800001 as u32).ceil().bits(), 0xbf800000 as u32);
+    // curated:6
+    assert_eq(f32::new(0x3f000000 as u32).ceil().bits(), 0x3f800000 as u32);
+    // curated:7
+    assert_eq(f32::new(0xbf000000 as u32).ceil().bits(), 0x80000000 as u32);
+    // curated:8
+    assert_eq(f32::new(0x3fc00000 as u32).ceil().bits(), 0x40000000 as u32);
+    // curated:9
+    assert_eq(f32::new(0xbfc00000 as u32).ceil().bits(), 0xbf800000 as u32);
+    // curated:10
+    assert_eq(f32::new(0x40200000 as u32).ceil().bits(), 0x40400000 as u32);
+    // curated:11
+    assert_eq(f32::new(0xc0200000 as u32).ceil().bits(), 0xc0000000 as u32);
+    // curated:12
+    assert_eq(f32::new(0x40600000 as u32).ceil().bits(), 0x40800000 as u32);
+    // curated:13
+    assert_eq(f32::new(0x3e800000 as u32).ceil().bits(), 0x3f800000 as u32);
+    // curated:14
+    assert_eq(f32::new(0xbe800000 as u32).ceil().bits(), 0x80000000 as u32);
+    // curated:15
+    assert_eq(f32::new(0x00000001 as u32).ceil().bits(), 0x3f800000 as u32);
+    // curated:16
+    assert_eq(f32::new(0x80000001 as u32).ceil().bits(), 0x80000000 as u32);
+    // curated:17
+    assert_eq(f32::new(0x007fffff as u32).ceil().bits(), 0x3f800000 as u32);
+    // curated:18
+    assert_eq(f32::new(0x807fffff as u32).ceil().bits(), 0x80000000 as u32);
+    // curated:19
+    assert_eq(f32::new(0x00800000 as u32).ceil().bits(), 0x3f800000 as u32);
+    // curated:20
+    assert_eq(f32::new(0x4affffff as u32).ceil().bits(), 0x4b000000 as u32);
+    // curated:21
+    assert_eq(f32::new(0xcaffffff as u32).ceil().bits(), 0xcafffffe as u32);
+    // curated:22
+    assert_eq(f32::new(0x4b000000 as u32).ceil().bits(), 0x4b000000 as u32);
+    // curated:23
+    assert_eq(f32::new(0x7f7fffff as u32).ceil().bits(), 0x7f7fffff as u32);
+    // curated:24
+    assert_eq(f32::new(0x7f800000 as u32).ceil().bits(), 0x7f800000 as u32);
+    // curated:25
+    assert_eq(f32::new(0xff800000 as u32).ceil().bits(), 0xff800000 as u32);
+    // curated:26
+    assert_eq(f32::new(0x7fc00000 as u32).ceil().bits(), 0x7fc00000 as u32);
+    // random:754:0
+    assert_eq(f32::new(0x40a95fa2 as u32).ceil().bits(), 0x40c00000 as u32);
+    // random:754:1
+    assert_eq(f32::new(0x4d8eaa53 as u32).ceil().bits(), 0x4d8eaa53 as u32);
+    // random:754:2
+    assert_eq(f32::new(0x806c7368 as u32).ceil().bits(), 0x80000000 as u32);
+    // random:754:3
+    assert_eq(f32::new(0x9bac18aa as u32).ceil().bits(), 0x80000000 as u32);
+    // random:754:4
+    assert_eq(f32::new(0x0048d2d7 as u32).ceil().bits(), 0x3f800000 as u32);
+    // random:754:5
+    assert_eq(f32::new(0x00746a35 as u32).ceil().bits(), 0x3f800000 as u32);
+    // random:754:6
+    assert_eq(f32::new(0x7b3e0dcd as u32).ceil().bits(), 0x7b3e0dcd as u32);
+    // random:754:7
+    assert_eq(f32::new(0x1da5a02b as u32).ceil().bits(), 0x3f800000 as u32);
+}
+
+#[test]
+fn generated_f32_trunc_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x00000000 as u32).trunc().bits(), 0x00000000 as u32);
+    // curated:1
+    assert_eq(f32::new(0x80000000 as u32).trunc().bits(), 0x80000000 as u32);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).trunc().bits(), 0x3f800000 as u32);
+    // curated:3
+    assert_eq(f32::new(0xbf800000 as u32).trunc().bits(), 0xbf800000 as u32);
+    // curated:4
+    assert_eq(f32::new(0x3f800001 as u32).trunc().bits(), 0x3f800000 as u32);
+    // curated:5
+    assert_eq(f32::new(0xbf800001 as u32).trunc().bits(), 0xbf800000 as u32);
+    // curated:6
+    assert_eq(f32::new(0x3f000000 as u32).trunc().bits(), 0x00000000 as u32);
+    // curated:7
+    assert_eq(f32::new(0xbf000000 as u32).trunc().bits(), 0x80000000 as u32);
+    // curated:8
+    assert_eq(f32::new(0x3fc00000 as u32).trunc().bits(), 0x3f800000 as u32);
+    // curated:9
+    assert_eq(f32::new(0xbfc00000 as u32).trunc().bits(), 0xbf800000 as u32);
+    // curated:10
+    assert_eq(f32::new(0x40200000 as u32).trunc().bits(), 0x40000000 as u32);
+    // curated:11
+    assert_eq(f32::new(0xc0200000 as u32).trunc().bits(), 0xc0000000 as u32);
+    // curated:12
+    assert_eq(f32::new(0x40600000 as u32).trunc().bits(), 0x40400000 as u32);
+    // curated:13
+    assert_eq(f32::new(0x3e800000 as u32).trunc().bits(), 0x00000000 as u32);
+    // curated:14
+    assert_eq(f32::new(0xbe800000 as u32).trunc().bits(), 0x80000000 as u32);
+    // curated:15
+    assert_eq(f32::new(0x00000001 as u32).trunc().bits(), 0x00000000 as u32);
+    // curated:16
+    assert_eq(f32::new(0x80000001 as u32).trunc().bits(), 0x80000000 as u32);
+    // curated:17
+    assert_eq(f32::new(0x007fffff as u32).trunc().bits(), 0x00000000 as u32);
+    // curated:18
+    assert_eq(f32::new(0x807fffff as u32).trunc().bits(), 0x80000000 as u32);
+    // curated:19
+    assert_eq(f32::new(0x00800000 as u32).trunc().bits(), 0x00000000 as u32);
+    // curated:20
+    assert_eq(f32::new(0x4affffff as u32).trunc().bits(), 0x4afffffe as u32);
+    // curated:21
+    assert_eq(f32::new(0xcaffffff as u32).trunc().bits(), 0xcafffffe as u32);
+    // curated:22
+    assert_eq(f32::new(0x4b000000 as u32).trunc().bits(), 0x4b000000 as u32);
+    // curated:23
+    assert_eq(f32::new(0x7f7fffff as u32).trunc().bits(), 0x7f7fffff as u32);
+    // curated:24
+    assert_eq(f32::new(0x7f800000 as u32).trunc().bits(), 0x7f800000 as u32);
+    // curated:25
+    assert_eq(f32::new(0xff800000 as u32).trunc().bits(), 0xff800000 as u32);
+    // curated:26
+    assert_eq(f32::new(0x7fc00000 as u32).trunc().bits(), 0x7fc00000 as u32);
+    // random:754:0
+    assert_eq(f32::new(0x40a95fa2 as u32).trunc().bits(), 0x40a00000 as u32);
+    // random:754:1
+    assert_eq(f32::new(0x4d8eaa53 as u32).trunc().bits(), 0x4d8eaa53 as u32);
+    // random:754:2
+    assert_eq(f32::new(0x806c7368 as u32).trunc().bits(), 0x80000000 as u32);
+    // random:754:3
+    assert_eq(f32::new(0x9bac18aa as u32).trunc().bits(), 0x80000000 as u32);
+    // random:754:4
+    assert_eq(f32::new(0x0048d2d7 as u32).trunc().bits(), 0x00000000 as u32);
+    // random:754:5
+    assert_eq(f32::new(0x00746a35 as u32).trunc().bits(), 0x00000000 as u32);
+    // random:754:6
+    assert_eq(f32::new(0x7b3e0dcd as u32).trunc().bits(), 0x7b3e0dcd as u32);
+    // random:754:7
+    assert_eq(f32::new(0x1da5a02b as u32).trunc().bits(), 0x00000000 as u32);
+}
+
+#[test]
+fn generated_f32_round_ties_even_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x00000000 as u32).round_ties_even().bits(), 0x00000000 as u32);
+    // curated:1
+    assert_eq(f32::new(0x80000000 as u32).round_ties_even().bits(), 0x80000000 as u32);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).round_ties_even().bits(), 0x3f800000 as u32);
+    // curated:3
+    assert_eq(f32::new(0xbf800000 as u32).round_ties_even().bits(), 0xbf800000 as u32);
+    // curated:4
+    assert_eq(f32::new(0x3f800001 as u32).round_ties_even().bits(), 0x3f800000 as u32);
+    // curated:5
+    assert_eq(f32::new(0xbf800001 as u32).round_ties_even().bits(), 0xbf800000 as u32);
+    // curated:6
+    assert_eq(f32::new(0x3f000000 as u32).round_ties_even().bits(), 0x00000000 as u32);
+    // curated:7
+    assert_eq(f32::new(0xbf000000 as u32).round_ties_even().bits(), 0x80000000 as u32);
+    // curated:8
+    assert_eq(f32::new(0x3fc00000 as u32).round_ties_even().bits(), 0x40000000 as u32);
+    // curated:9
+    assert_eq(f32::new(0xbfc00000 as u32).round_ties_even().bits(), 0xc0000000 as u32);
+    // curated:10
+    assert_eq(f32::new(0x40200000 as u32).round_ties_even().bits(), 0x40000000 as u32);
+    // curated:11
+    assert_eq(f32::new(0xc0200000 as u32).round_ties_even().bits(), 0xc0000000 as u32);
+    // curated:12
+    assert_eq(f32::new(0x40600000 as u32).round_ties_even().bits(), 0x40800000 as u32);
+    // curated:13
+    assert_eq(f32::new(0x3e800000 as u32).round_ties_even().bits(), 0x00000000 as u32);
+    // curated:14
+    assert_eq(f32::new(0xbe800000 as u32).round_ties_even().bits(), 0x80000000 as u32);
+    // curated:15
+    assert_eq(f32::new(0x00000001 as u32).round_ties_even().bits(), 0x00000000 as u32);
+    // curated:16
+    assert_eq(f32::new(0x80000001 as u32).round_ties_even().bits(), 0x80000000 as u32);
+    // curated:17
+    assert_eq(f32::new(0x007fffff as u32).round_ties_even().bits(), 0x00000000 as u32);
+    // curated:18
+    assert_eq(f32::new(0x807fffff as u32).round_ties_even().bits(), 0x80000000 as u32);
+    // curated:19
+    assert_eq(f32::new(0x00800000 as u32).round_ties_even().bits(), 0x00000000 as u32);
+    // curated:20
+    assert_eq(f32::new(0x4affffff as u32).round_ties_even().bits(), 0x4b000000 as u32);
+    // curated:21
+    assert_eq(f32::new(0xcaffffff as u32).round_ties_even().bits(), 0xcb000000 as u32);
+    // curated:22
+    assert_eq(f32::new(0x4b000000 as u32).round_ties_even().bits(), 0x4b000000 as u32);
+    // curated:23
+    assert_eq(f32::new(0x7f7fffff as u32).round_ties_even().bits(), 0x7f7fffff as u32);
+    // curated:24
+    assert_eq(f32::new(0x7f800000 as u32).round_ties_even().bits(), 0x7f800000 as u32);
+    // curated:25
+    assert_eq(f32::new(0xff800000 as u32).round_ties_even().bits(), 0xff800000 as u32);
+    // curated:26
+    assert_eq(f32::new(0x7fc00000 as u32).round_ties_even().bits(), 0x7fc00000 as u32);
+    // random:754:0
+    assert_eq(f32::new(0x40a95fa2 as u32).round_ties_even().bits(), 0x40a00000 as u32);
+    // random:754:1
+    assert_eq(f32::new(0x4d8eaa53 as u32).round_ties_even().bits(), 0x4d8eaa53 as u32);
+    // random:754:2
+    assert_eq(f32::new(0x806c7368 as u32).round_ties_even().bits(), 0x80000000 as u32);
+    // random:754:3
+    assert_eq(f32::new(0x9bac18aa as u32).round_ties_even().bits(), 0x80000000 as u32);
+    // random:754:4
+    assert_eq(f32::new(0x0048d2d7 as u32).round_ties_even().bits(), 0x00000000 as u32);
+    // random:754:5
+    assert_eq(f32::new(0x00746a35 as u32).round_ties_even().bits(), 0x00000000 as u32);
+    // random:754:6
+    assert_eq(f32::new(0x7b3e0dcd as u32).round_ties_even().bits(), 0x7b3e0dcd as u32);
+    // random:754:7
+    assert_eq(f32::new(0x1da5a02b as u32).round_ties_even().bits(), 0x00000000 as u32);
+}
+
+#[test]
+fn generated_f32_sqrt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x00000000 as u32).sqrt().bits(), 0x00000000 as u32);
+    // curated:1
+    assert_eq(f32::new(0x80000000 as u32).sqrt().bits(), 0x80000000 as u32);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).sqrt().bits(), 0x3f800000 as u32);
+    // curated:3
+    assert_eq(f32::new(0x40000000 as u32).sqrt().bits(), 0x3fb504f3 as u32);
+    // curated:4
+    assert_eq(f32::new(0x40400000 as u32).sqrt().bits(), 0x3fddb3d7 as u32);
+    // curated:5
+    assert_eq(f32::new(0x40800000 as u32).sqrt().bits(), 0x40000000 as u32);
+    // curated:6
+    assert_eq(f32::new(0x41100000 as u32).sqrt().bits(), 0x40400000 as u32);
+    // curated:7
+    assert_eq(f32::new(0x3f000000 as u32).sqrt().bits(), 0x3f3504f3 as u32);
+    // curated:8
+    assert_eq(f32::new(0x3e800000 as u32).sqrt().bits(), 0x3f000000 as u32);
+    // curated:9
+    assert_eq(f32::new(0x3fc00000 as u32).sqrt().bits(), 0x3f9cc471 as u32);
+    // curated:10
+    assert_eq(f32::new(0x3f800001 as u32).sqrt().bits(), 0x3f800000 as u32);
+    // curated:11
+    assert_eq(f32::new(0x00000001 as u32).sqrt().bits(), 0x1a3504f3 as u32);
+    // curated:12
+    assert_eq(f32::new(0x00000002 as u32).sqrt().bits(), 0x1a800000 as u32);
+    // curated:13
+    assert_eq(f32::new(0x007fffff as u32).sqrt().bits(), 0x1fffffff as u32);
+    // curated:14
+    assert_eq(f32::new(0x00800000 as u32).sqrt().bits(), 0x20000000 as u32);
+    // curated:15
+    assert_eq(f32::new(0x7f7fffff as u32).sqrt().bits(), 0x5f7fffff as u32);
+    // curated:16
+    assert_eq(f32::new(0x7f800000 as u32).sqrt().bits(), 0x7f800000 as u32);
+    // curated:17
+    assert_eq(f32::new(0xff800000 as u32).sqrt().bits(), 0x7fc00000 as u32);
+    // curated:18
+    assert_eq(f32::new(0xbf800000 as u32).sqrt().bits(), 0x7fc00000 as u32);
+    // curated:19
+    assert_eq(f32::new(0x7fc00000 as u32).sqrt().bits(), 0x7fc00000 as u32);
+    // random:754:0
+    assert_eq(f32::new(0x80034e3a as u32).sqrt().bits(), 0x7fc00000 as u32);
+    // random:754:1
+    assert_eq(f32::new(0x443ce602 as u32).sqrt().bits(), 0x41dbe790 as u32);
+    // random:754:2
+    assert_eq(f32::new(0x28d32a56 as u32).sqrt().bits(), 0x342467cf as u32);
+    // random:754:4
+    assert_eq(f32::new(0x6feb9c03 as u32).sqrt().bits(), 0x57ada91d as u32);
+    // random:754:5
+    assert_eq(f32::new(0x4c61b204 as u32).sqrt().bits(), 0x45f05ede as u32);
+    // random:754:6
+    assert_eq(f32::new(0xc0ee45f7 as u32).sqrt().bits(), 0x7fc00000 as u32);
+    // random:754:7
+    assert_eq(f32::new(0x6f129105 as u32).sqrt().bits(), 0x5741b414 as u32);
+}
+
+#[test]
+fn generated_f64_floor_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x0000000000000000 as u64).floor().bits(), 0x0000000000000000 as u64);
+    // curated:1
+    assert_eq(f64::new(0x8000000000000000 as u64).floor().bits(), 0x8000000000000000 as u64);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).floor().bits(), 0x3ff0000000000000 as u64);
+    // curated:3
+    assert_eq(f64::new(0xbff0000000000000 as u64).floor().bits(), 0xbff0000000000000 as u64);
+    // curated:4
+    assert_eq(f64::new(0x3ff0000000000001 as u64).floor().bits(), 0x3ff0000000000000 as u64);
+    // curated:5
+    assert_eq(f64::new(0xbff0000000000001 as u64).floor().bits(), 0xc000000000000000 as u64);
+    // curated:6
+    assert_eq(f64::new(0x3fe0000000000000 as u64).floor().bits(), 0x0000000000000000 as u64);
+    // curated:7
+    assert_eq(f64::new(0xbfe0000000000000 as u64).floor().bits(), 0xbff0000000000000 as u64);
+    // curated:8
+    assert_eq(f64::new(0x3ff8000000000000 as u64).floor().bits(), 0x3ff0000000000000 as u64);
+    // curated:9
+    assert_eq(f64::new(0xbff8000000000000 as u64).floor().bits(), 0xc000000000000000 as u64);
+    // curated:10
+    assert_eq(f64::new(0x4004000000000000 as u64).floor().bits(), 0x4000000000000000 as u64);
+    // curated:11
+    assert_eq(f64::new(0xc004000000000000 as u64).floor().bits(), 0xc008000000000000 as u64);
+    // curated:12
+    assert_eq(f64::new(0x400c000000000000 as u64).floor().bits(), 0x4008000000000000 as u64);
+    // curated:13
+    assert_eq(f64::new(0x3fd0000000000000 as u64).floor().bits(), 0x0000000000000000 as u64);
+    // curated:14
+    assert_eq(f64::new(0xbfd0000000000000 as u64).floor().bits(), 0xbff0000000000000 as u64);
+    // curated:15
+    assert_eq(f64::new(0x0000000000000001 as u64).floor().bits(), 0x0000000000000000 as u64);
+    // curated:16
+    assert_eq(f64::new(0x8000000000000001 as u64).floor().bits(), 0xbff0000000000000 as u64);
+    // curated:17
+    assert_eq(f64::new(0x000fffffffffffff as u64).floor().bits(), 0x0000000000000000 as u64);
+    // curated:18
+    assert_eq(f64::new(0x800fffffffffffff as u64).floor().bits(), 0xbff0000000000000 as u64);
+    // curated:19
+    assert_eq(f64::new(0x0010000000000000 as u64).floor().bits(), 0x0000000000000000 as u64);
+    // curated:20
+    assert_eq(f64::new(0x432fffffffffffff as u64).floor().bits(), 0x432ffffffffffffe as u64);
+    // curated:21
+    assert_eq(f64::new(0xc32fffffffffffff as u64).floor().bits(), 0xc330000000000000 as u64);
+    // curated:22
+    assert_eq(f64::new(0x4330000000000000 as u64).floor().bits(), 0x4330000000000000 as u64);
+    // curated:23
+    assert_eq(f64::new(0x7fefffffffffffff as u64).floor().bits(), 0x7fefffffffffffff as u64);
+    // curated:24
+    assert_eq(f64::new(0x7ff0000000000000 as u64).floor().bits(), 0x7ff0000000000000 as u64);
+    // curated:25
+    assert_eq(f64::new(0xfff0000000000000 as u64).floor().bits(), 0xfff0000000000000 as u64);
+    // curated:26
+    assert_eq(f64::new(0x7ff8000000000000 as u64).floor().bits(), 0x7ff8000000000000 as u64);
+    // random:754:0
+    assert_eq(f64::new(0xf58a4d74668d54f9 as u64).floor().bits(), 0xf58a4d74668d54f9 as u64);
+    // random:754:1
+    assert_eq(f64::new(0xaab6b362e94080b3 as u64).floor().bits(), 0xbff0000000000000 as u64);
+    // random:754:2
+    assert_eq(f64::new(0x86b7ee82e621f2e4 as u64).floor().bits(), 0xbff0000000000000 as u64);
+    // random:754:3
+    assert_eq(f64::new(0x4ce94d1c1b1efbfa as u64).floor().bits(), 0x4ce94d1c1b1efbfa as u64);
+    // random:754:4
+    assert_eq(f64::new(0x000fb62f894fbbfa as u64).floor().bits(), 0x0000000000000000 as u64);
+    // random:754:5
+    assert_eq(f64::new(0x800dd3745755d302 as u64).floor().bits(), 0xbff0000000000000 as u64);
+    // random:754:7
+    assert_eq(f64::new(0xa5d35d73d259ead1 as u64).floor().bits(), 0xbff0000000000000 as u64);
+}
+
+#[test]
+fn generated_f64_ceil_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x0000000000000000 as u64).ceil().bits(), 0x0000000000000000 as u64);
+    // curated:1
+    assert_eq(f64::new(0x8000000000000000 as u64).ceil().bits(), 0x8000000000000000 as u64);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).ceil().bits(), 0x3ff0000000000000 as u64);
+    // curated:3
+    assert_eq(f64::new(0xbff0000000000000 as u64).ceil().bits(), 0xbff0000000000000 as u64);
+    // curated:4
+    assert_eq(f64::new(0x3ff0000000000001 as u64).ceil().bits(), 0x4000000000000000 as u64);
+    // curated:5
+    assert_eq(f64::new(0xbff0000000000001 as u64).ceil().bits(), 0xbff0000000000000 as u64);
+    // curated:6
+    assert_eq(f64::new(0x3fe0000000000000 as u64).ceil().bits(), 0x3ff0000000000000 as u64);
+    // curated:7
+    assert_eq(f64::new(0xbfe0000000000000 as u64).ceil().bits(), 0x8000000000000000 as u64);
+    // curated:8
+    assert_eq(f64::new(0x3ff8000000000000 as u64).ceil().bits(), 0x4000000000000000 as u64);
+    // curated:9
+    assert_eq(f64::new(0xbff8000000000000 as u64).ceil().bits(), 0xbff0000000000000 as u64);
+    // curated:10
+    assert_eq(f64::new(0x4004000000000000 as u64).ceil().bits(), 0x4008000000000000 as u64);
+    // curated:11
+    assert_eq(f64::new(0xc004000000000000 as u64).ceil().bits(), 0xc000000000000000 as u64);
+    // curated:12
+    assert_eq(f64::new(0x400c000000000000 as u64).ceil().bits(), 0x4010000000000000 as u64);
+    // curated:13
+    assert_eq(f64::new(0x3fd0000000000000 as u64).ceil().bits(), 0x3ff0000000000000 as u64);
+    // curated:14
+    assert_eq(f64::new(0xbfd0000000000000 as u64).ceil().bits(), 0x8000000000000000 as u64);
+    // curated:15
+    assert_eq(f64::new(0x0000000000000001 as u64).ceil().bits(), 0x3ff0000000000000 as u64);
+    // curated:16
+    assert_eq(f64::new(0x8000000000000001 as u64).ceil().bits(), 0x8000000000000000 as u64);
+    // curated:17
+    assert_eq(f64::new(0x000fffffffffffff as u64).ceil().bits(), 0x3ff0000000000000 as u64);
+    // curated:18
+    assert_eq(f64::new(0x800fffffffffffff as u64).ceil().bits(), 0x8000000000000000 as u64);
+    // curated:19
+    assert_eq(f64::new(0x0010000000000000 as u64).ceil().bits(), 0x3ff0000000000000 as u64);
+    // curated:20
+    assert_eq(f64::new(0x432fffffffffffff as u64).ceil().bits(), 0x4330000000000000 as u64);
+    // curated:21
+    assert_eq(f64::new(0xc32fffffffffffff as u64).ceil().bits(), 0xc32ffffffffffffe as u64);
+    // curated:22
+    assert_eq(f64::new(0x4330000000000000 as u64).ceil().bits(), 0x4330000000000000 as u64);
+    // curated:23
+    assert_eq(f64::new(0x7fefffffffffffff as u64).ceil().bits(), 0x7fefffffffffffff as u64);
+    // curated:24
+    assert_eq(f64::new(0x7ff0000000000000 as u64).ceil().bits(), 0x7ff0000000000000 as u64);
+    // curated:25
+    assert_eq(f64::new(0xfff0000000000000 as u64).ceil().bits(), 0xfff0000000000000 as u64);
+    // curated:26
+    assert_eq(f64::new(0x7ff8000000000000 as u64).ceil().bits(), 0x7ff8000000000000 as u64);
+    // random:754:0
+    assert_eq(f64::new(0xf58a4d74668d54f9 as u64).ceil().bits(), 0xf58a4d74668d54f9 as u64);
+    // random:754:1
+    assert_eq(f64::new(0xaab6b362e94080b3 as u64).ceil().bits(), 0x8000000000000000 as u64);
+    // random:754:2
+    assert_eq(f64::new(0x86b7ee82e621f2e4 as u64).ceil().bits(), 0x8000000000000000 as u64);
+    // random:754:3
+    assert_eq(f64::new(0x4ce94d1c1b1efbfa as u64).ceil().bits(), 0x4ce94d1c1b1efbfa as u64);
+    // random:754:4
+    assert_eq(f64::new(0x000fb62f894fbbfa as u64).ceil().bits(), 0x3ff0000000000000 as u64);
+    // random:754:5
+    assert_eq(f64::new(0x800dd3745755d302 as u64).ceil().bits(), 0x8000000000000000 as u64);
+    // random:754:7
+    assert_eq(f64::new(0xa5d35d73d259ead1 as u64).ceil().bits(), 0x8000000000000000 as u64);
+}
+
+#[test]
+fn generated_f64_trunc_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x0000000000000000 as u64).trunc().bits(), 0x0000000000000000 as u64);
+    // curated:1
+    assert_eq(f64::new(0x8000000000000000 as u64).trunc().bits(), 0x8000000000000000 as u64);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).trunc().bits(), 0x3ff0000000000000 as u64);
+    // curated:3
+    assert_eq(f64::new(0xbff0000000000000 as u64).trunc().bits(), 0xbff0000000000000 as u64);
+    // curated:4
+    assert_eq(f64::new(0x3ff0000000000001 as u64).trunc().bits(), 0x3ff0000000000000 as u64);
+    // curated:5
+    assert_eq(f64::new(0xbff0000000000001 as u64).trunc().bits(), 0xbff0000000000000 as u64);
+    // curated:6
+    assert_eq(f64::new(0x3fe0000000000000 as u64).trunc().bits(), 0x0000000000000000 as u64);
+    // curated:7
+    assert_eq(f64::new(0xbfe0000000000000 as u64).trunc().bits(), 0x8000000000000000 as u64);
+    // curated:8
+    assert_eq(f64::new(0x3ff8000000000000 as u64).trunc().bits(), 0x3ff0000000000000 as u64);
+    // curated:9
+    assert_eq(f64::new(0xbff8000000000000 as u64).trunc().bits(), 0xbff0000000000000 as u64);
+    // curated:10
+    assert_eq(f64::new(0x4004000000000000 as u64).trunc().bits(), 0x4000000000000000 as u64);
+    // curated:11
+    assert_eq(f64::new(0xc004000000000000 as u64).trunc().bits(), 0xc000000000000000 as u64);
+    // curated:12
+    assert_eq(f64::new(0x400c000000000000 as u64).trunc().bits(), 0x4008000000000000 as u64);
+    // curated:13
+    assert_eq(f64::new(0x3fd0000000000000 as u64).trunc().bits(), 0x0000000000000000 as u64);
+    // curated:14
+    assert_eq(f64::new(0xbfd0000000000000 as u64).trunc().bits(), 0x8000000000000000 as u64);
+    // curated:15
+    assert_eq(f64::new(0x0000000000000001 as u64).trunc().bits(), 0x0000000000000000 as u64);
+    // curated:16
+    assert_eq(f64::new(0x8000000000000001 as u64).trunc().bits(), 0x8000000000000000 as u64);
+    // curated:17
+    assert_eq(f64::new(0x000fffffffffffff as u64).trunc().bits(), 0x0000000000000000 as u64);
+    // curated:18
+    assert_eq(f64::new(0x800fffffffffffff as u64).trunc().bits(), 0x8000000000000000 as u64);
+    // curated:19
+    assert_eq(f64::new(0x0010000000000000 as u64).trunc().bits(), 0x0000000000000000 as u64);
+    // curated:20
+    assert_eq(f64::new(0x432fffffffffffff as u64).trunc().bits(), 0x432ffffffffffffe as u64);
+    // curated:21
+    assert_eq(f64::new(0xc32fffffffffffff as u64).trunc().bits(), 0xc32ffffffffffffe as u64);
+    // curated:22
+    assert_eq(f64::new(0x4330000000000000 as u64).trunc().bits(), 0x4330000000000000 as u64);
+    // curated:23
+    assert_eq(f64::new(0x7fefffffffffffff as u64).trunc().bits(), 0x7fefffffffffffff as u64);
+    // curated:24
+    assert_eq(f64::new(0x7ff0000000000000 as u64).trunc().bits(), 0x7ff0000000000000 as u64);
+    // curated:25
+    assert_eq(f64::new(0xfff0000000000000 as u64).trunc().bits(), 0xfff0000000000000 as u64);
+    // curated:26
+    assert_eq(f64::new(0x7ff8000000000000 as u64).trunc().bits(), 0x7ff8000000000000 as u64);
+    // random:754:0
+    assert_eq(f64::new(0xf58a4d74668d54f9 as u64).trunc().bits(), 0xf58a4d74668d54f9 as u64);
+    // random:754:1
+    assert_eq(f64::new(0xaab6b362e94080b3 as u64).trunc().bits(), 0x8000000000000000 as u64);
+    // random:754:2
+    assert_eq(f64::new(0x86b7ee82e621f2e4 as u64).trunc().bits(), 0x8000000000000000 as u64);
+    // random:754:3
+    assert_eq(f64::new(0x4ce94d1c1b1efbfa as u64).trunc().bits(), 0x4ce94d1c1b1efbfa as u64);
+    // random:754:4
+    assert_eq(f64::new(0x000fb62f894fbbfa as u64).trunc().bits(), 0x0000000000000000 as u64);
+    // random:754:5
+    assert_eq(f64::new(0x800dd3745755d302 as u64).trunc().bits(), 0x8000000000000000 as u64);
+    // random:754:7
+    assert_eq(f64::new(0xa5d35d73d259ead1 as u64).trunc().bits(), 0x8000000000000000 as u64);
+}
+
+#[test]
+fn generated_f64_round_ties_even_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x0000000000000000 as u64).round_ties_even().bits(), 0x0000000000000000 as u64);
+    // curated:1
+    assert_eq(f64::new(0x8000000000000000 as u64).round_ties_even().bits(), 0x8000000000000000 as u64);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).round_ties_even().bits(), 0x3ff0000000000000 as u64);
+    // curated:3
+    assert_eq(f64::new(0xbff0000000000000 as u64).round_ties_even().bits(), 0xbff0000000000000 as u64);
+    // curated:4
+    assert_eq(f64::new(0x3ff0000000000001 as u64).round_ties_even().bits(), 0x3ff0000000000000 as u64);
+    // curated:5
+    assert_eq(f64::new(0xbff0000000000001 as u64).round_ties_even().bits(), 0xbff0000000000000 as u64);
+    // curated:6
+    assert_eq(f64::new(0x3fe0000000000000 as u64).round_ties_even().bits(), 0x0000000000000000 as u64);
+    // curated:7
+    assert_eq(f64::new(0xbfe0000000000000 as u64).round_ties_even().bits(), 0x8000000000000000 as u64);
+    // curated:8
+    assert_eq(f64::new(0x3ff8000000000000 as u64).round_ties_even().bits(), 0x4000000000000000 as u64);
+    // curated:9
+    assert_eq(f64::new(0xbff8000000000000 as u64).round_ties_even().bits(), 0xc000000000000000 as u64);
+    // curated:10
+    assert_eq(f64::new(0x4004000000000000 as u64).round_ties_even().bits(), 0x4000000000000000 as u64);
+    // curated:11
+    assert_eq(f64::new(0xc004000000000000 as u64).round_ties_even().bits(), 0xc000000000000000 as u64);
+    // curated:12
+    assert_eq(f64::new(0x400c000000000000 as u64).round_ties_even().bits(), 0x4010000000000000 as u64);
+    // curated:13
+    assert_eq(f64::new(0x3fd0000000000000 as u64).round_ties_even().bits(), 0x0000000000000000 as u64);
+    // curated:14
+    assert_eq(f64::new(0xbfd0000000000000 as u64).round_ties_even().bits(), 0x8000000000000000 as u64);
+    // curated:15
+    assert_eq(f64::new(0x0000000000000001 as u64).round_ties_even().bits(), 0x0000000000000000 as u64);
+    // curated:16
+    assert_eq(f64::new(0x8000000000000001 as u64).round_ties_even().bits(), 0x8000000000000000 as u64);
+    // curated:17
+    assert_eq(f64::new(0x000fffffffffffff as u64).round_ties_even().bits(), 0x0000000000000000 as u64);
+    // curated:18
+    assert_eq(f64::new(0x800fffffffffffff as u64).round_ties_even().bits(), 0x8000000000000000 as u64);
+    // curated:19
+    assert_eq(f64::new(0x0010000000000000 as u64).round_ties_even().bits(), 0x0000000000000000 as u64);
+    // curated:20
+    assert_eq(f64::new(0x432fffffffffffff as u64).round_ties_even().bits(), 0x4330000000000000 as u64);
+    // curated:21
+    assert_eq(f64::new(0xc32fffffffffffff as u64).round_ties_even().bits(), 0xc330000000000000 as u64);
+    // curated:22
+    assert_eq(f64::new(0x4330000000000000 as u64).round_ties_even().bits(), 0x4330000000000000 as u64);
+    // curated:23
+    assert_eq(f64::new(0x7fefffffffffffff as u64).round_ties_even().bits(), 0x7fefffffffffffff as u64);
+    // curated:24
+    assert_eq(f64::new(0x7ff0000000000000 as u64).round_ties_even().bits(), 0x7ff0000000000000 as u64);
+    // curated:25
+    assert_eq(f64::new(0xfff0000000000000 as u64).round_ties_even().bits(), 0xfff0000000000000 as u64);
+    // curated:26
+    assert_eq(f64::new(0x7ff8000000000000 as u64).round_ties_even().bits(), 0x7ff8000000000000 as u64);
+    // random:754:0
+    assert_eq(f64::new(0xf58a4d74668d54f9 as u64).round_ties_even().bits(), 0xf58a4d74668d54f9 as u64);
+    // random:754:1
+    assert_eq(f64::new(0xaab6b362e94080b3 as u64).round_ties_even().bits(), 0x8000000000000000 as u64);
+    // random:754:2
+    assert_eq(f64::new(0x86b7ee82e621f2e4 as u64).round_ties_even().bits(), 0x8000000000000000 as u64);
+    // random:754:3
+    assert_eq(f64::new(0x4ce94d1c1b1efbfa as u64).round_ties_even().bits(), 0x4ce94d1c1b1efbfa as u64);
+    // random:754:4
+    assert_eq(f64::new(0x000fb62f894fbbfa as u64).round_ties_even().bits(), 0x0000000000000000 as u64);
+    // random:754:5
+    assert_eq(f64::new(0x800dd3745755d302 as u64).round_ties_even().bits(), 0x8000000000000000 as u64);
+    // random:754:7
+    assert_eq(f64::new(0xa5d35d73d259ead1 as u64).round_ties_even().bits(), 0x8000000000000000 as u64);
+}
+
+#[test]
+fn generated_f64_sqrt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x0000000000000000 as u64).sqrt().bits(), 0x0000000000000000 as u64);
+    // curated:1
+    assert_eq(f64::new(0x8000000000000000 as u64).sqrt().bits(), 0x8000000000000000 as u64);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).sqrt().bits(), 0x3ff0000000000000 as u64);
+    // curated:3
+    assert_eq(f64::new(0x4000000000000000 as u64).sqrt().bits(), 0x3ff6a09e667f3bcd as u64);
+    // curated:4
+    assert_eq(f64::new(0x4008000000000000 as u64).sqrt().bits(), 0x3ffbb67ae8584caa as u64);
+    // curated:5
+    assert_eq(f64::new(0x4010000000000000 as u64).sqrt().bits(), 0x4000000000000000 as u64);
+    // curated:6
+    assert_eq(f64::new(0x4022000000000000 as u64).sqrt().bits(), 0x4008000000000000 as u64);
+    // curated:7
+    assert_eq(f64::new(0x3fe0000000000000 as u64).sqrt().bits(), 0x3fe6a09e667f3bcd as u64);
+    // curated:8
+    assert_eq(f64::new(0x3fd0000000000000 as u64).sqrt().bits(), 0x3fe0000000000000 as u64);
+    // curated:9
+    assert_eq(f64::new(0x3ff8000000000000 as u64).sqrt().bits(), 0x3ff3988e1409212e as u64);
+    // curated:10
+    assert_eq(f64::new(0x3ff0000000000001 as u64).sqrt().bits(), 0x3ff0000000000000 as u64);
+    // curated:11
+    assert_eq(f64::new(0x0000000000000001 as u64).sqrt().bits(), 0x1e60000000000000 as u64);
+    // curated:12
+    assert_eq(f64::new(0x0000000000000002 as u64).sqrt().bits(), 0x1e66a09e667f3bcd as u64);
+    // curated:13
+    assert_eq(f64::new(0x000fffffffffffff as u64).sqrt().bits(), 0x1fffffffffffffff as u64);
+    // curated:14
+    assert_eq(f64::new(0x0010000000000000 as u64).sqrt().bits(), 0x2000000000000000 as u64);
+    // curated:15
+    assert_eq(f64::new(0x7fefffffffffffff as u64).sqrt().bits(), 0x5fefffffffffffff as u64);
+    // curated:16
+    assert_eq(f64::new(0x7ff0000000000000 as u64).sqrt().bits(), 0x7ff0000000000000 as u64);
+    // curated:17
+    assert_eq(f64::new(0xfff0000000000000 as u64).sqrt().bits(), 0x7ff8000000000000 as u64);
+    // curated:18
+    assert_eq(f64::new(0xbff0000000000000 as u64).sqrt().bits(), 0x7ff8000000000000 as u64);
+    // curated:19
+    assert_eq(f64::new(0x7ff8000000000000 as u64).sqrt().bits(), 0x7ff8000000000000 as u64);
+    // random:754:0
+    assert_eq(f64::new(0x800617d5d97f04b6 as u64).sqrt().bits(), 0x7ff8000000000000 as u64);
+    // random:754:1
+    assert_eq(f64::new(0x06b299797a31eb35 as u64).sqrt().bits(), 0x2351403855fdf0e8 as u64);
+    // random:754:2
+    assert_eq(f64::new(0x42f1edda42aa8216 as u64).sqrt().bits(), 0x4170efe69dff2b35 as u64);
+    // random:754:4
+    assert_eq(f64::new(0x30062b959a1267c7 as u64).sqrt().bits(), 0x37faa2ade5f1f6dd as u64);
+    // random:754:5
+    assert_eq(f64::new(0x800a7b269b8e0bc7 as u64).sqrt().bits(), 0x7ff8000000000000 as u64);
+    // random:754:6
+    assert_eq(f64::new(0x199fd16a5b858bf6 as u64).sqrt().bits(), 0x2cc6902009ab65db as u64);
+    // random:754:7
+    assert_eq(f64::new(0x48038a453a95688a as u64).sqrt().bits(), 0x43f90173f1b9bb22 as u64);
+}
+
+#[test]
+fn generated_f128_floor_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).floor().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:1
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).floor().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).floor().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:3
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).floor().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:4
+    assert_eq(f128::new(0x3fff0000000000000000000000000001 as u128).floor().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:5
+    assert_eq(f128::new(0xbfff0000000000000000000000000001 as u128).floor().bits(), 0xc0000000000000000000000000000000 as u128);
+    // curated:6
+    assert_eq(f128::new(0x3ffe0000000000000000000000000000 as u128).floor().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:7
+    assert_eq(f128::new(0xbffe0000000000000000000000000000 as u128).floor().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:8
+    assert_eq(f128::new(0x3fff8000000000000000000000000000 as u128).floor().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:9
+    assert_eq(f128::new(0xbfff8000000000000000000000000000 as u128).floor().bits(), 0xc0000000000000000000000000000000 as u128);
+    // curated:10
+    assert_eq(f128::new(0x40004000000000000000000000000000 as u128).floor().bits(), 0x40000000000000000000000000000000 as u128);
+    // curated:11
+    assert_eq(f128::new(0xc0004000000000000000000000000000 as u128).floor().bits(), 0xc0008000000000000000000000000000 as u128);
+    // curated:12
+    assert_eq(f128::new(0x4000c000000000000000000000000000 as u128).floor().bits(), 0x40008000000000000000000000000000 as u128);
+    // curated:13
+    assert_eq(f128::new(0x3ffd0000000000000000000000000000 as u128).floor().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:14
+    assert_eq(f128::new(0xbffd0000000000000000000000000000 as u128).floor().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:15
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).floor().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:16
+    assert_eq(f128::new(0x80000000000000000000000000000001 as u128).floor().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:17
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).floor().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:18
+    assert_eq(f128::new(0x8000ffffffffffffffffffffffffffff as u128).floor().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:19
+    assert_eq(f128::new(0x00010000000000000000000000000000 as u128).floor().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:20
+    assert_eq(f128::new(0x406effffffffffffffffffffffffffff as u128).floor().bits(), 0x406efffffffffffffffffffffffffffe as u128);
+    // curated:21
+    assert_eq(f128::new(0xc06effffffffffffffffffffffffffff as u128).floor().bits(), 0xc06f0000000000000000000000000000 as u128);
+    // curated:22
+    assert_eq(f128::new(0x406f0000000000000000000000000000 as u128).floor().bits(), 0x406f0000000000000000000000000000 as u128);
+    // curated:23
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).floor().bits(), 0x7ffeffffffffffffffffffffffffffff as u128);
+    // curated:24
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).floor().bits(), 0x7fff0000000000000000000000000000 as u128);
+    // curated:25
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).floor().bits(), 0xffff0000000000000000000000000000 as u128);
+    // curated:26
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).floor().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // random:754:1
+    assert_eq(f128::new(0x018bfea15e37943d7e640d2c7a187da0 as u128).floor().bits(), 0x00000000000000000000000000000000 as u128);
+    // random:754:2
+    assert_eq(f128::new(0xd5ca80a7e96c6064c6f7d00093ac9128 as u128).floor().bits(), 0xd5ca80a7e96c6064c6f7d00093ac9128 as u128);
+    // random:754:3
+    assert_eq(f128::new(0xbf57af47b436569f1e85b6414d138c40 as u128).floor().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // random:754:4
+    assert_eq(f128::new(0x49b0484fa6948afd22d5e9fc6d8fc9c6 as u128).floor().bits(), 0x49b0484fa6948afd22d5e9fc6d8fc9c6 as u128);
+    // random:754:5
+    assert_eq(f128::new(0x1d3b0631434e5eda8ed83f8569ca0910 as u128).floor().bits(), 0x00000000000000000000000000000000 as u128);
+    // random:754:6
+    assert_eq(f128::new(0x4a74b1b7d13c469b74b64f236a533ab6 as u128).floor().bits(), 0x4a74b1b7d13c469b74b64f236a533ab6 as u128);
+    // random:754:7
+    assert_eq(f128::new(0x80003e9fa569deb5eefd419de6c974b3 as u128).floor().bits(), 0xbfff0000000000000000000000000000 as u128);
+}
+
+#[test]
+fn generated_f128_ceil_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).ceil().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:1
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).ceil().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).ceil().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:3
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).ceil().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:4
+    assert_eq(f128::new(0x3fff0000000000000000000000000001 as u128).ceil().bits(), 0x40000000000000000000000000000000 as u128);
+    // curated:5
+    assert_eq(f128::new(0xbfff0000000000000000000000000001 as u128).ceil().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:6
+    assert_eq(f128::new(0x3ffe0000000000000000000000000000 as u128).ceil().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:7
+    assert_eq(f128::new(0xbffe0000000000000000000000000000 as u128).ceil().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:8
+    assert_eq(f128::new(0x3fff8000000000000000000000000000 as u128).ceil().bits(), 0x40000000000000000000000000000000 as u128);
+    // curated:9
+    assert_eq(f128::new(0xbfff8000000000000000000000000000 as u128).ceil().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:10
+    assert_eq(f128::new(0x40004000000000000000000000000000 as u128).ceil().bits(), 0x40008000000000000000000000000000 as u128);
+    // curated:11
+    assert_eq(f128::new(0xc0004000000000000000000000000000 as u128).ceil().bits(), 0xc0000000000000000000000000000000 as u128);
+    // curated:12
+    assert_eq(f128::new(0x4000c000000000000000000000000000 as u128).ceil().bits(), 0x40010000000000000000000000000000 as u128);
+    // curated:13
+    assert_eq(f128::new(0x3ffd0000000000000000000000000000 as u128).ceil().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:14
+    assert_eq(f128::new(0xbffd0000000000000000000000000000 as u128).ceil().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:15
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).ceil().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:16
+    assert_eq(f128::new(0x80000000000000000000000000000001 as u128).ceil().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:17
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).ceil().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:18
+    assert_eq(f128::new(0x8000ffffffffffffffffffffffffffff as u128).ceil().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:19
+    assert_eq(f128::new(0x00010000000000000000000000000000 as u128).ceil().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:20
+    assert_eq(f128::new(0x406effffffffffffffffffffffffffff as u128).ceil().bits(), 0x406f0000000000000000000000000000 as u128);
+    // curated:21
+    assert_eq(f128::new(0xc06effffffffffffffffffffffffffff as u128).ceil().bits(), 0xc06efffffffffffffffffffffffffffe as u128);
+    // curated:22
+    assert_eq(f128::new(0x406f0000000000000000000000000000 as u128).ceil().bits(), 0x406f0000000000000000000000000000 as u128);
+    // curated:23
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).ceil().bits(), 0x7ffeffffffffffffffffffffffffffff as u128);
+    // curated:24
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).ceil().bits(), 0x7fff0000000000000000000000000000 as u128);
+    // curated:25
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).ceil().bits(), 0xffff0000000000000000000000000000 as u128);
+    // curated:26
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).ceil().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // random:754:1
+    assert_eq(f128::new(0x018bfea15e37943d7e640d2c7a187da0 as u128).ceil().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // random:754:2
+    assert_eq(f128::new(0xd5ca80a7e96c6064c6f7d00093ac9128 as u128).ceil().bits(), 0xd5ca80a7e96c6064c6f7d00093ac9128 as u128);
+    // random:754:3
+    assert_eq(f128::new(0xbf57af47b436569f1e85b6414d138c40 as u128).ceil().bits(), 0x80000000000000000000000000000000 as u128);
+    // random:754:4
+    assert_eq(f128::new(0x49b0484fa6948afd22d5e9fc6d8fc9c6 as u128).ceil().bits(), 0x49b0484fa6948afd22d5e9fc6d8fc9c6 as u128);
+    // random:754:5
+    assert_eq(f128::new(0x1d3b0631434e5eda8ed83f8569ca0910 as u128).ceil().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // random:754:6
+    assert_eq(f128::new(0x4a74b1b7d13c469b74b64f236a533ab6 as u128).ceil().bits(), 0x4a74b1b7d13c469b74b64f236a533ab6 as u128);
+    // random:754:7
+    assert_eq(f128::new(0x80003e9fa569deb5eefd419de6c974b3 as u128).ceil().bits(), 0x80000000000000000000000000000000 as u128);
+}
+
+#[test]
+fn generated_f128_trunc_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).trunc().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:1
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).trunc().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).trunc().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:3
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).trunc().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:4
+    assert_eq(f128::new(0x3fff0000000000000000000000000001 as u128).trunc().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:5
+    assert_eq(f128::new(0xbfff0000000000000000000000000001 as u128).trunc().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:6
+    assert_eq(f128::new(0x3ffe0000000000000000000000000000 as u128).trunc().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:7
+    assert_eq(f128::new(0xbffe0000000000000000000000000000 as u128).trunc().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:8
+    assert_eq(f128::new(0x3fff8000000000000000000000000000 as u128).trunc().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:9
+    assert_eq(f128::new(0xbfff8000000000000000000000000000 as u128).trunc().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:10
+    assert_eq(f128::new(0x40004000000000000000000000000000 as u128).trunc().bits(), 0x40000000000000000000000000000000 as u128);
+    // curated:11
+    assert_eq(f128::new(0xc0004000000000000000000000000000 as u128).trunc().bits(), 0xc0000000000000000000000000000000 as u128);
+    // curated:12
+    assert_eq(f128::new(0x4000c000000000000000000000000000 as u128).trunc().bits(), 0x40008000000000000000000000000000 as u128);
+    // curated:13
+    assert_eq(f128::new(0x3ffd0000000000000000000000000000 as u128).trunc().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:14
+    assert_eq(f128::new(0xbffd0000000000000000000000000000 as u128).trunc().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:15
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).trunc().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:16
+    assert_eq(f128::new(0x80000000000000000000000000000001 as u128).trunc().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:17
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).trunc().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:18
+    assert_eq(f128::new(0x8000ffffffffffffffffffffffffffff as u128).trunc().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:19
+    assert_eq(f128::new(0x00010000000000000000000000000000 as u128).trunc().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:20
+    assert_eq(f128::new(0x406effffffffffffffffffffffffffff as u128).trunc().bits(), 0x406efffffffffffffffffffffffffffe as u128);
+    // curated:21
+    assert_eq(f128::new(0xc06effffffffffffffffffffffffffff as u128).trunc().bits(), 0xc06efffffffffffffffffffffffffffe as u128);
+    // curated:22
+    assert_eq(f128::new(0x406f0000000000000000000000000000 as u128).trunc().bits(), 0x406f0000000000000000000000000000 as u128);
+    // curated:23
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).trunc().bits(), 0x7ffeffffffffffffffffffffffffffff as u128);
+    // curated:24
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).trunc().bits(), 0x7fff0000000000000000000000000000 as u128);
+    // curated:25
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).trunc().bits(), 0xffff0000000000000000000000000000 as u128);
+    // curated:26
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).trunc().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // random:754:1
+    assert_eq(f128::new(0x018bfea15e37943d7e640d2c7a187da0 as u128).trunc().bits(), 0x00000000000000000000000000000000 as u128);
+    // random:754:2
+    assert_eq(f128::new(0xd5ca80a7e96c6064c6f7d00093ac9128 as u128).trunc().bits(), 0xd5ca80a7e96c6064c6f7d00093ac9128 as u128);
+    // random:754:3
+    assert_eq(f128::new(0xbf57af47b436569f1e85b6414d138c40 as u128).trunc().bits(), 0x80000000000000000000000000000000 as u128);
+    // random:754:4
+    assert_eq(f128::new(0x49b0484fa6948afd22d5e9fc6d8fc9c6 as u128).trunc().bits(), 0x49b0484fa6948afd22d5e9fc6d8fc9c6 as u128);
+    // random:754:5
+    assert_eq(f128::new(0x1d3b0631434e5eda8ed83f8569ca0910 as u128).trunc().bits(), 0x00000000000000000000000000000000 as u128);
+    // random:754:6
+    assert_eq(f128::new(0x4a74b1b7d13c469b74b64f236a533ab6 as u128).trunc().bits(), 0x4a74b1b7d13c469b74b64f236a533ab6 as u128);
+    // random:754:7
+    assert_eq(f128::new(0x80003e9fa569deb5eefd419de6c974b3 as u128).trunc().bits(), 0x80000000000000000000000000000000 as u128);
+}
+
+#[test]
+fn generated_f128_round_ties_even_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).round_ties_even().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:1
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).round_ties_even().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).round_ties_even().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:3
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).round_ties_even().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:4
+    assert_eq(f128::new(0x3fff0000000000000000000000000001 as u128).round_ties_even().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:5
+    assert_eq(f128::new(0xbfff0000000000000000000000000001 as u128).round_ties_even().bits(), 0xbfff0000000000000000000000000000 as u128);
+    // curated:6
+    assert_eq(f128::new(0x3ffe0000000000000000000000000000 as u128).round_ties_even().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:7
+    assert_eq(f128::new(0xbffe0000000000000000000000000000 as u128).round_ties_even().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:8
+    assert_eq(f128::new(0x3fff8000000000000000000000000000 as u128).round_ties_even().bits(), 0x40000000000000000000000000000000 as u128);
+    // curated:9
+    assert_eq(f128::new(0xbfff8000000000000000000000000000 as u128).round_ties_even().bits(), 0xc0000000000000000000000000000000 as u128);
+    // curated:10
+    assert_eq(f128::new(0x40004000000000000000000000000000 as u128).round_ties_even().bits(), 0x40000000000000000000000000000000 as u128);
+    // curated:11
+    assert_eq(f128::new(0xc0004000000000000000000000000000 as u128).round_ties_even().bits(), 0xc0000000000000000000000000000000 as u128);
+    // curated:12
+    assert_eq(f128::new(0x4000c000000000000000000000000000 as u128).round_ties_even().bits(), 0x40010000000000000000000000000000 as u128);
+    // curated:13
+    assert_eq(f128::new(0x3ffd0000000000000000000000000000 as u128).round_ties_even().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:14
+    assert_eq(f128::new(0xbffd0000000000000000000000000000 as u128).round_ties_even().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:15
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).round_ties_even().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:16
+    assert_eq(f128::new(0x80000000000000000000000000000001 as u128).round_ties_even().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:17
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).round_ties_even().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:18
+    assert_eq(f128::new(0x8000ffffffffffffffffffffffffffff as u128).round_ties_even().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:19
+    assert_eq(f128::new(0x00010000000000000000000000000000 as u128).round_ties_even().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:20
+    assert_eq(f128::new(0x406effffffffffffffffffffffffffff as u128).round_ties_even().bits(), 0x406f0000000000000000000000000000 as u128);
+    // curated:21
+    assert_eq(f128::new(0xc06effffffffffffffffffffffffffff as u128).round_ties_even().bits(), 0xc06f0000000000000000000000000000 as u128);
+    // curated:22
+    assert_eq(f128::new(0x406f0000000000000000000000000000 as u128).round_ties_even().bits(), 0x406f0000000000000000000000000000 as u128);
+    // curated:23
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).round_ties_even().bits(), 0x7ffeffffffffffffffffffffffffffff as u128);
+    // curated:24
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).round_ties_even().bits(), 0x7fff0000000000000000000000000000 as u128);
+    // curated:25
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).round_ties_even().bits(), 0xffff0000000000000000000000000000 as u128);
+    // curated:26
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).round_ties_even().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // random:754:1
+    assert_eq(f128::new(0x018bfea15e37943d7e640d2c7a187da0 as u128).round_ties_even().bits(), 0x00000000000000000000000000000000 as u128);
+    // random:754:2
+    assert_eq(f128::new(0xd5ca80a7e96c6064c6f7d00093ac9128 as u128).round_ties_even().bits(), 0xd5ca80a7e96c6064c6f7d00093ac9128 as u128);
+    // random:754:3
+    assert_eq(f128::new(0xbf57af47b436569f1e85b6414d138c40 as u128).round_ties_even().bits(), 0x80000000000000000000000000000000 as u128);
+    // random:754:4
+    assert_eq(f128::new(0x49b0484fa6948afd22d5e9fc6d8fc9c6 as u128).round_ties_even().bits(), 0x49b0484fa6948afd22d5e9fc6d8fc9c6 as u128);
+    // random:754:5
+    assert_eq(f128::new(0x1d3b0631434e5eda8ed83f8569ca0910 as u128).round_ties_even().bits(), 0x00000000000000000000000000000000 as u128);
+    // random:754:6
+    assert_eq(f128::new(0x4a74b1b7d13c469b74b64f236a533ab6 as u128).round_ties_even().bits(), 0x4a74b1b7d13c469b74b64f236a533ab6 as u128);
+    // random:754:7
+    assert_eq(f128::new(0x80003e9fa569deb5eefd419de6c974b3 as u128).round_ties_even().bits(), 0x80000000000000000000000000000000 as u128);
+}
+
+#[test]
+fn generated_f128_sqrt_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).sqrt().bits(), 0x00000000000000000000000000000000 as u128);
+    // curated:1
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).sqrt().bits(), 0x80000000000000000000000000000000 as u128);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).sqrt().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:3
+    assert_eq(f128::new(0x40000000000000000000000000000000 as u128).sqrt().bits(), 0x3fff6a09e667f3bcc908b2fb1366ea95 as u128);
+    // curated:4
+    assert_eq(f128::new(0x40008000000000000000000000000000 as u128).sqrt().bits(), 0x3fffbb67ae8584caa73b25742d7078b8 as u128);
+    // curated:5
+    assert_eq(f128::new(0x40010000000000000000000000000000 as u128).sqrt().bits(), 0x40000000000000000000000000000000 as u128);
+    // curated:6
+    assert_eq(f128::new(0x40022000000000000000000000000000 as u128).sqrt().bits(), 0x40008000000000000000000000000000 as u128);
+    // curated:7
+    assert_eq(f128::new(0x3ffe0000000000000000000000000000 as u128).sqrt().bits(), 0x3ffe6a09e667f3bcc908b2fb1366ea95 as u128);
+    // curated:8
+    assert_eq(f128::new(0x3ffd0000000000000000000000000000 as u128).sqrt().bits(), 0x3ffe0000000000000000000000000000 as u128);
+    // curated:9
+    assert_eq(f128::new(0x3fff8000000000000000000000000000 as u128).sqrt().bits(), 0x3fff3988e1409212e7d0321914321a55 as u128);
+    // curated:10
+    assert_eq(f128::new(0x3fff0000000000000000000000000001 as u128).sqrt().bits(), 0x3fff0000000000000000000000000000 as u128);
+    // curated:11
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).sqrt().bits(), 0x1fc80000000000000000000000000000 as u128);
+    // curated:12
+    assert_eq(f128::new(0x00000000000000000000000000000002 as u128).sqrt().bits(), 0x1fc86a09e667f3bcc908b2fb1366ea95 as u128);
+    // curated:13
+    assert_eq(f128::new(0x0000ffffffffffffffffffffffffffff as u128).sqrt().bits(), 0x1fffffffffffffffffffffffffffffff as u128);
+    // curated:14
+    assert_eq(f128::new(0x00010000000000000000000000000000 as u128).sqrt().bits(), 0x20000000000000000000000000000000 as u128);
+    // curated:15
+    assert_eq(f128::new(0x7ffeffffffffffffffffffffffffffff as u128).sqrt().bits(), 0x5ffeffffffffffffffffffffffffffff as u128);
+    // curated:16
+    assert_eq(f128::new(0x7fff0000000000000000000000000000 as u128).sqrt().bits(), 0x7fff0000000000000000000000000000 as u128);
+    // curated:17
+    assert_eq(f128::new(0xffff0000000000000000000000000000 as u128).sqrt().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // curated:18
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).sqrt().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // curated:19
+    assert_eq(f128::new(0x7fff8000000000000000000000000000 as u128).sqrt().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // random:754:0
+    assert_eq(f128::new(0xde25e010c760d8fa6332f46820688fba as u128).sqrt().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // random:754:1
+    assert_eq(f128::new(0x000072999b3841cd01f84bc8da301c9f as u128).sqrt().bits(), 0x1fff569081fc75374d4fe79767b51b3c as u128);
+    // random:754:2
+    assert_eq(f128::new(0x8000ed6786dd6ee4fffde626b95e5aa2 as u128).sqrt().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // random:754:3
+    assert_eq(f128::new(0xddf66226820b41af2efd5a5acef7edf0 as u128).sqrt().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // random:754:4
+    assert_eq(f128::new(0x8000e96c108d690ca5ed75b1c182626a as u128).sqrt().bits(), 0x7fff8000000000000000000000000000 as u128);
+    // random:754:5
+    assert_eq(f128::new(0x568671a755509fa8fe8ec363b61a0b17 as u128).sqrt().bits(), 0x4b42b30b153af91524bca45f35a94d02 as u128);
+    // random:754:6
+    assert_eq(f128::new(0x1dd527e3ea80ec5f113bf6ff015183d3 as u128).sqrt().bits(), 0x2eea13393047dc4895f03244355425cb as u128);
+    // random:754:7
+    assert_eq(f128::new(0x059a79ef424bd7632f12d65e8bd97aa1 as u128).sqrt().bits(), 0x22ccb7e3a354bc70e2d2f08cd61673e9 as u128);
+}
+
+#[test]
+fn generated_f16_to_u64_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x0000 as u16).to_u64(), 0 as u64);
+    // curated:1
+    assert_eq(f16::new(0x8000 as u16).to_u64(), 0 as u64);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).to_u64(), 1 as u64);
+    // curated:4
+    assert_eq(f16::new(0x3800 as u16).to_u64(), 0 as u64);
+    // curated:5
+    assert_eq(f16::new(0xb800 as u16).to_u64(), 0 as u64);
+    // curated:6
+    assert_eq(f16::new(0x3e00 as u16).to_u64(), 1 as u64);
+    // curated:8
+    assert_eq(f16::new(0x0001 as u16).to_u64(), 0 as u64);
+    // curated:9
+    assert_eq(f16::new(0x8001 as u16).to_u64(), 0 as u64);
+    // curated:10
+    assert_eq(f16::new(0x7bff as u16).to_u64(), 65504 as u64);
+    // random:754:0
+    assert_eq(f16::new(0x53ba as u16).to_u64(), 61 as u64);
+    // random:754:1
+    assert_eq(f16::new(0x1884 as u16).to_u64(), 0 as u64);
+    // random:754:2
+    assert_eq(f16::new(0x8071 as u16).to_u64(), 0 as u64);
+    // random:754:3
+    assert_eq(f16::new(0x0114 as u16).to_u64(), 0 as u64);
+    // random:754:5
+    assert_eq(f16::new(0x01cc as u16).to_u64(), 0 as u64);
+    // random:754:7
+    assert_eq(f16::new(0x10c9 as u16).to_u64(), 0 as u64);
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:3
+#[test(should_fail)]
+fn generated_f16_to_u64_invalid_0() {
+    let _ = f16::new(0xbc00 as u16).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:7
+#[test(should_fail)]
+fn generated_f16_to_u64_invalid_1() {
+    let _ = f16::new(0xbe00 as u16).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:11
+#[test(should_fail)]
+fn generated_f16_to_u64_invalid_2() {
+    let _ = f16::new(0x7c00 as u16).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:12
+#[test(should_fail)]
+fn generated_f16_to_u64_invalid_3() {
+    let _ = f16::new(0xfc00 as u16).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:13
+#[test(should_fail)]
+fn generated_f16_to_u64_invalid_4() {
+    let _ = f16::new(0x7e00 as u16).to_u64();
+}
+
+#[test]
+fn generated_f16_to_i64_vectors_match_reference() {
+    // curated:0
+    assert_eq(f16::new(0x0000 as u16).to_i64(), 0);
+    // curated:1
+    assert_eq(f16::new(0x8000 as u16).to_i64(), 0);
+    // curated:2
+    assert_eq(f16::new(0x3c00 as u16).to_i64(), 1);
+    // curated:3
+    assert_eq(f16::new(0xbc00 as u16).to_i64(), -1);
+    // curated:4
+    assert_eq(f16::new(0x3800 as u16).to_i64(), 0);
+    // curated:5
+    assert_eq(f16::new(0xb800 as u16).to_i64(), 0);
+    // curated:6
+    assert_eq(f16::new(0x3e00 as u16).to_i64(), 1);
+    // curated:7
+    assert_eq(f16::new(0xbe00 as u16).to_i64(), -1);
+    // curated:8
+    assert_eq(f16::new(0x0001 as u16).to_i64(), 0);
+    // curated:9
+    assert_eq(f16::new(0x8001 as u16).to_i64(), 0);
+    // curated:10
+    assert_eq(f16::new(0x7bff as u16).to_i64(), 65504);
+    // random:754:0
+    assert_eq(f16::new(0x009e as u16).to_i64(), 0);
+    // random:754:1
+    assert_eq(f16::new(0xa450 as u16).to_i64(), 0);
+    // random:754:2
+    assert_eq(f16::new(0xedc7 as u16).to_i64(), -5916);
+    // random:754:3
+    assert_eq(f16::new(0xd295 as u16).to_i64(), -52);
+    // random:754:4
+    assert_eq(f16::new(0xed69 as u16).to_i64(), -5540);
+    // random:754:5
+    assert_eq(f16::new(0xb1e0 as u16).to_i64(), 0);
+    // random:754:7
+    assert_eq(f16::new(0x819f as u16).to_i64(), 0);
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:11
+#[test(should_fail)]
+fn generated_f16_to_i64_invalid_0() {
+    let _ = f16::new(0x7c00 as u16).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:12
+#[test(should_fail)]
+fn generated_f16_to_i64_invalid_1() {
+    let _ = f16::new(0xfc00 as u16).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:13
+#[test(should_fail)]
+fn generated_f16_to_i64_invalid_2() {
+    let _ = f16::new(0x7e00 as u16).to_i64();
+}
+
+#[test]
+fn generated_f32_to_u64_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x00000000 as u32).to_u64(), 0 as u64);
+    // curated:1
+    assert_eq(f32::new(0x80000000 as u32).to_u64(), 0 as u64);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).to_u64(), 1 as u64);
+    // curated:4
+    assert_eq(f32::new(0x3f000000 as u32).to_u64(), 0 as u64);
+    // curated:5
+    assert_eq(f32::new(0xbf000000 as u32).to_u64(), 0 as u64);
+    // curated:6
+    assert_eq(f32::new(0x3fc00000 as u32).to_u64(), 1 as u64);
+    // curated:8
+    assert_eq(f32::new(0x00000001 as u32).to_u64(), 0 as u64);
+    // curated:9
+    assert_eq(f32::new(0x80000001 as u32).to_u64(), 0 as u64);
+    // curated:14
+    assert_eq(f32::new(0x5f000000 as u32).to_u64(), 9223372036854775808 as u64);
+    // random:754:0
+    assert_eq(f32::new(0x12365426 as u32).to_u64(), 0 as u64);
+    // random:754:1
+    assert_eq(f32::new(0x354f6cd1 as u32).to_u64(), 0 as u64);
+    // random:754:2
+    assert_eq(f32::new(0x0e4927e8 as u32).to_u64(), 0 as u64);
+    // random:754:3
+    assert_eq(f32::new(0x5a4ff8cc as u32).to_u64(), 14634718809030656 as u64);
+    // random:754:4
+    assert_eq(f32::new(0xad3ad24d as u32).to_u64(), 0 as u64);
+    // random:754:5
+    assert_eq(f32::new(0xb164bbb4 as u32).to_u64(), 0 as u64);
+    // random:754:6
+    assert_eq(f32::new(0x00051bc2 as u32).to_u64(), 0 as u64);
+    // random:754:7
+    assert_eq(f32::new(0x0060eb44 as u32).to_u64(), 0 as u64);
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:3
+#[test(should_fail)]
+fn generated_f32_to_u64_invalid_0() {
+    let _ = f32::new(0xbf800000 as u32).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:7
+#[test(should_fail)]
+fn generated_f32_to_u64_invalid_1() {
+    let _ = f32::new(0xbfc00000 as u32).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:10
+#[test(should_fail)]
+fn generated_f32_to_u64_invalid_2() {
+    let _ = f32::new(0x7f7fffff as u32).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:11
+#[test(should_fail)]
+fn generated_f32_to_u64_invalid_3() {
+    let _ = f32::new(0x7f800000 as u32).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:12
+#[test(should_fail)]
+fn generated_f32_to_u64_invalid_4() {
+    let _ = f32::new(0xff800000 as u32).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:13
+#[test(should_fail)]
+fn generated_f32_to_u64_invalid_5() {
+    let _ = f32::new(0x7fc00000 as u32).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:15
+#[test(should_fail)]
+fn generated_f32_to_u64_invalid_6() {
+    let _ = f32::new(0xdf000000 as u32).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:16
+#[test(should_fail)]
+fn generated_f32_to_u64_invalid_7() {
+    let _ = f32::new(0x5f800000 as u32).to_u64();
+}
+
+#[test]
+fn generated_f32_to_i64_vectors_match_reference() {
+    // curated:0
+    assert_eq(f32::new(0x00000000 as u32).to_i64(), 0);
+    // curated:1
+    assert_eq(f32::new(0x80000000 as u32).to_i64(), 0);
+    // curated:2
+    assert_eq(f32::new(0x3f800000 as u32).to_i64(), 1);
+    // curated:3
+    assert_eq(f32::new(0xbf800000 as u32).to_i64(), -1);
+    // curated:4
+    assert_eq(f32::new(0x3f000000 as u32).to_i64(), 0);
+    // curated:5
+    assert_eq(f32::new(0xbf000000 as u32).to_i64(), 0);
+    // curated:6
+    assert_eq(f32::new(0x3fc00000 as u32).to_i64(), 1);
+    // curated:7
+    assert_eq(f32::new(0xbfc00000 as u32).to_i64(), -1);
+    // curated:8
+    assert_eq(f32::new(0x00000001 as u32).to_i64(), 0);
+    // curated:9
+    assert_eq(f32::new(0x80000001 as u32).to_i64(), 0);
+    // curated:15
+    assert_eq(f32::new(0xdf000000 as u32).to_i64(), -9223372036854775807 - 1);
+    // random:754:0
+    assert_eq(f32::new(0x1115482e as u32).to_i64(), 0);
+    // random:754:1
+    assert_eq(f32::new(0xad93f3e5 as u32).to_i64(), 0);
+    // random:754:2
+    assert_eq(f32::new(0xde64a16f as u32).to_i64(), -4118642739422167040);
+    // random:754:3
+    assert_eq(f32::new(0x2352712a as u32).to_i64(), 0);
+    // random:754:4
+    assert_eq(f32::new(0x806eb66f as u32).to_i64(), 0);
+    // random:754:5
+    assert_eq(f32::new(0x10f3d513 as u32).to_i64(), 0);
+    // random:754:6
+    assert_eq(f32::new(0x801189db as u32).to_i64(), 0);
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:10
+#[test(should_fail)]
+fn generated_f32_to_i64_invalid_0() {
+    let _ = f32::new(0x7f7fffff as u32).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:11
+#[test(should_fail)]
+fn generated_f32_to_i64_invalid_1() {
+    let _ = f32::new(0x7f800000 as u32).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:12
+#[test(should_fail)]
+fn generated_f32_to_i64_invalid_2() {
+    let _ = f32::new(0xff800000 as u32).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:13
+#[test(should_fail)]
+fn generated_f32_to_i64_invalid_3() {
+    let _ = f32::new(0x7fc00000 as u32).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:14
+#[test(should_fail)]
+fn generated_f32_to_i64_invalid_4() {
+    let _ = f32::new(0x5f000000 as u32).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:16
+#[test(should_fail)]
+fn generated_f32_to_i64_invalid_5() {
+    let _ = f32::new(0x5f800000 as u32).to_i64();
+}
+
+#[test]
+fn generated_f64_to_u64_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x0000000000000000 as u64).to_u64(), 0 as u64);
+    // curated:1
+    assert_eq(f64::new(0x8000000000000000 as u64).to_u64(), 0 as u64);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).to_u64(), 1 as u64);
+    // curated:4
+    assert_eq(f64::new(0x3fe0000000000000 as u64).to_u64(), 0 as u64);
+    // curated:5
+    assert_eq(f64::new(0xbfe0000000000000 as u64).to_u64(), 0 as u64);
+    // curated:6
+    assert_eq(f64::new(0x3ff8000000000000 as u64).to_u64(), 1 as u64);
+    // curated:8
+    assert_eq(f64::new(0x0000000000000001 as u64).to_u64(), 0 as u64);
+    // curated:9
+    assert_eq(f64::new(0x8000000000000001 as u64).to_u64(), 0 as u64);
+    // curated:14
+    assert_eq(f64::new(0x43e0000000000000 as u64).to_u64(), 9223372036854775808 as u64);
+    // random:754:0
+    assert_eq(f64::new(0x3733926f400cd347 as u64).to_u64(), 0 as u64);
+    // random:754:2
+    assert_eq(f64::new(0x9172bfa7b27a6083 as u64).to_u64(), 0 as u64);
+    // random:754:3
+    assert_eq(f64::new(0x9f3cfa2128032158 as u64).to_u64(), 0 as u64);
+    // random:754:4
+    assert_eq(f64::new(0x00062428b7b52b31 as u64).to_u64(), 0 as u64);
+    // random:754:5
+    assert_eq(f64::new(0x000e15f42485c420 as u64).to_u64(), 0 as u64);
+    // random:754:6
+    assert_eq(f64::new(0x1a217f3f239deef8 as u64).to_u64(), 0 as u64);
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:3
+#[test(should_fail)]
+fn generated_f64_to_u64_invalid_0() {
+    let _ = f64::new(0xbff0000000000000 as u64).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:7
+#[test(should_fail)]
+fn generated_f64_to_u64_invalid_1() {
+    let _ = f64::new(0xbff8000000000000 as u64).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:10
+#[test(should_fail)]
+fn generated_f64_to_u64_invalid_2() {
+    let _ = f64::new(0x7fefffffffffffff as u64).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:11
+#[test(should_fail)]
+fn generated_f64_to_u64_invalid_3() {
+    let _ = f64::new(0x7ff0000000000000 as u64).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:12
+#[test(should_fail)]
+fn generated_f64_to_u64_invalid_4() {
+    let _ = f64::new(0xfff0000000000000 as u64).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:13
+#[test(should_fail)]
+fn generated_f64_to_u64_invalid_5() {
+    let _ = f64::new(0x7ff8000000000000 as u64).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:15
+#[test(should_fail)]
+fn generated_f64_to_u64_invalid_6() {
+    let _ = f64::new(0xc3e0000000000000 as u64).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:16
+#[test(should_fail)]
+fn generated_f64_to_u64_invalid_7() {
+    let _ = f64::new(0x43f0000000000000 as u64).to_u64();
+}
+
+#[test]
+fn generated_f64_to_i64_vectors_match_reference() {
+    // curated:0
+    assert_eq(f64::new(0x0000000000000000 as u64).to_i64(), 0);
+    // curated:1
+    assert_eq(f64::new(0x8000000000000000 as u64).to_i64(), 0);
+    // curated:2
+    assert_eq(f64::new(0x3ff0000000000000 as u64).to_i64(), 1);
+    // curated:3
+    assert_eq(f64::new(0xbff0000000000000 as u64).to_i64(), -1);
+    // curated:4
+    assert_eq(f64::new(0x3fe0000000000000 as u64).to_i64(), 0);
+    // curated:5
+    assert_eq(f64::new(0xbfe0000000000000 as u64).to_i64(), 0);
+    // curated:6
+    assert_eq(f64::new(0x3ff8000000000000 as u64).to_i64(), 1);
+    // curated:7
+    assert_eq(f64::new(0xbff8000000000000 as u64).to_i64(), -1);
+    // curated:8
+    assert_eq(f64::new(0x0000000000000001 as u64).to_i64(), 0);
+    // curated:9
+    assert_eq(f64::new(0x8000000000000001 as u64).to_i64(), 0);
+    // curated:15
+    assert_eq(f64::new(0xc3e0000000000000 as u64).to_i64(), -9223372036854775807 - 1);
+    // random:754:0
+    assert_eq(f64::new(0x8003de53843f8430 as u64).to_i64(), 0);
+    // random:754:1
+    assert_eq(f64::new(0xb895bd1025d64282 as u64).to_i64(), 0);
+    // random:754:2
+    assert_eq(f64::new(0x000b2ea62113a7ee as u64).to_i64(), 0);
+    // random:754:3
+    assert_eq(f64::new(0x1b0850adece90d42 as u64).to_i64(), 0);
+    // random:754:4
+    assert_eq(f64::new(0x8009db30e00f3c2f as u64).to_i64(), 0);
+    // random:754:5
+    assert_eq(f64::new(0x99dd4e031e506196 as u64).to_i64(), 0);
+    // random:754:6
+    assert_eq(f64::new(0x800d31fb39bb7fbe as u64).to_i64(), 0);
+    // random:754:7
+    assert_eq(f64::new(0x00094d50e0167827 as u64).to_i64(), 0);
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:10
+#[test(should_fail)]
+fn generated_f64_to_i64_invalid_0() {
+    let _ = f64::new(0x7fefffffffffffff as u64).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:11
+#[test(should_fail)]
+fn generated_f64_to_i64_invalid_1() {
+    let _ = f64::new(0x7ff0000000000000 as u64).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:12
+#[test(should_fail)]
+fn generated_f64_to_i64_invalid_2() {
+    let _ = f64::new(0xfff0000000000000 as u64).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:13
+#[test(should_fail)]
+fn generated_f64_to_i64_invalid_3() {
+    let _ = f64::new(0x7ff8000000000000 as u64).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:14
+#[test(should_fail)]
+fn generated_f64_to_i64_invalid_4() {
+    let _ = f64::new(0x43e0000000000000 as u64).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:16
+#[test(should_fail)]
+fn generated_f64_to_i64_invalid_5() {
+    let _ = f64::new(0x43f0000000000000 as u64).to_i64();
+}
+
+#[test]
+fn generated_f128_to_u64_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).to_u64(), 0 as u64);
+    // curated:1
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).to_u64(), 0 as u64);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).to_u64(), 1 as u64);
+    // curated:4
+    assert_eq(f128::new(0x3ffe0000000000000000000000000000 as u128).to_u64(), 0 as u64);
+    // curated:5
+    assert_eq(f128::new(0xbffe0000000000000000000000000000 as u128).to_u64(), 0 as u64);
+    // curated:6
+    assert_eq(f128::new(0x3fff8000000000000000000000000000 as u128).to_u64(), 1 as u64);
+    // curated:8
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).to_u64(), 0 as u64);
+    // curated:9
+    assert_eq(f128::new(0x80000000000000000000000000000001 as u128).to_u64(), 0 as u64);
+    // curated:14
+    assert_eq(f128::new(0x403e0000000000000000000000000000 as u128).to_u64(), 9223372036854775808 as u64);
+    // curated:17
+    assert_eq(f128::new(0x403dfffffffffffffffc000000000000 as u128).to_u64(), 9223372036854775807 as u64);
+    // curated:19
+    assert_eq(f128::new(0x403efffffffffffffffe000000000000 as u128).to_u64(), 18446744073709551615 as u64);
+    // random:754:0
+    assert_eq(f128::new(0x32b71d8d12012c9258e8a82c83e005f8 as u128).to_u64(), 0 as u64);
+    // random:754:1
+    assert_eq(f128::new(0x800096035c0e7fd3dbfd255f25374f72 as u128).to_u64(), 0 as u64);
+    // random:754:2
+    assert_eq(f128::new(0x0000fa16848d9e19d9393525574ec5cf as u128).to_u64(), 0 as u64);
+    // random:754:4
+    assert_eq(f128::new(0x80003b02b6e4321073d336041cde0154 as u128).to_u64(), 0 as u64);
+    // random:754:6
+    assert_eq(f128::new(0x33b393a3c23c9997432f74980f4773ce as u128).to_u64(), 0 as u64);
+    // random:754:7
+    assert_eq(f128::new(0x80006ffc4c2386b5f0f2e8c164fcc373 as u128).to_u64(), 0 as u64);
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:3
+#[test(should_fail)]
+fn generated_f128_to_u64_invalid_0() {
+    let _ = f128::new(0xbfff0000000000000000000000000000 as u128).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:7
+#[test(should_fail)]
+fn generated_f128_to_u64_invalid_1() {
+    let _ = f128::new(0xbfff8000000000000000000000000000 as u128).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:10
+#[test(should_fail)]
+fn generated_f128_to_u64_invalid_2() {
+    let _ = f128::new(0x7ffeffffffffffffffffffffffffffff as u128).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:11
+#[test(should_fail)]
+fn generated_f128_to_u64_invalid_3() {
+    let _ = f128::new(0x7fff0000000000000000000000000000 as u128).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:12
+#[test(should_fail)]
+fn generated_f128_to_u64_invalid_4() {
+    let _ = f128::new(0xffff0000000000000000000000000000 as u128).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:13
+#[test(should_fail)]
+fn generated_f128_to_u64_invalid_5() {
+    let _ = f128::new(0x7fff8000000000000000000000000000 as u128).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:15
+#[test(should_fail)]
+fn generated_f128_to_u64_invalid_6() {
+    let _ = f128::new(0xc03e0000000000000000000000000000 as u128).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:16
+#[test(should_fail)]
+fn generated_f128_to_u64_invalid_7() {
+    let _ = f128::new(0x403f0000000000000000000000000000 as u128).to_u64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:18
+#[test(should_fail)]
+fn generated_f128_to_u64_invalid_8() {
+    let _ = f128::new(0xc03e0000000000000002000000000000 as u128).to_u64();
+}
+
+#[test]
+fn generated_f128_to_i64_vectors_match_reference() {
+    // curated:0
+    assert_eq(f128::new(0x00000000000000000000000000000000 as u128).to_i64(), 0);
+    // curated:1
+    assert_eq(f128::new(0x80000000000000000000000000000000 as u128).to_i64(), 0);
+    // curated:2
+    assert_eq(f128::new(0x3fff0000000000000000000000000000 as u128).to_i64(), 1);
+    // curated:3
+    assert_eq(f128::new(0xbfff0000000000000000000000000000 as u128).to_i64(), -1);
+    // curated:4
+    assert_eq(f128::new(0x3ffe0000000000000000000000000000 as u128).to_i64(), 0);
+    // curated:5
+    assert_eq(f128::new(0xbffe0000000000000000000000000000 as u128).to_i64(), 0);
+    // curated:6
+    assert_eq(f128::new(0x3fff8000000000000000000000000000 as u128).to_i64(), 1);
+    // curated:7
+    assert_eq(f128::new(0xbfff8000000000000000000000000000 as u128).to_i64(), -1);
+    // curated:8
+    assert_eq(f128::new(0x00000000000000000000000000000001 as u128).to_i64(), 0);
+    // curated:9
+    assert_eq(f128::new(0x80000000000000000000000000000001 as u128).to_i64(), 0);
+    // curated:15
+    assert_eq(f128::new(0xc03e0000000000000000000000000000 as u128).to_i64(), -9223372036854775807 - 1);
+    // curated:17
+    assert_eq(f128::new(0x403dfffffffffffffffc000000000000 as u128).to_i64(), 9223372036854775807);
+    // random:754:0
+    assert_eq(f128::new(0x8000efaa2a831ac879dd917ce0ec2cd5 as u128).to_i64(), 0);
+    // random:754:1
+    assert_eq(f128::new(0x3f9413cdef7371934753b6e7a6ab148c as u128).to_i64(), 0);
+    // random:754:2
+    assert_eq(f128::new(0x00005930a5e8c7e5662c708db10f80a2 as u128).to_i64(), 0);
+    // random:754:3
+    assert_eq(f128::new(0x80007ad501c04f82b5f761505430e610 as u128).to_i64(), 0);
+    // random:754:4
+    assert_eq(f128::new(0x000074b50e7894fef9e860d6210baed8 as u128).to_i64(), 0);
+    // random:754:5
+    assert_eq(f128::new(0x8000c068faf62b1153c023bf3db4f557 as u128).to_i64(), 0);
+    // random:754:6
+    assert_eq(f128::new(0x07b56118974034250f469fe19079e34d as u128).to_i64(), 0);
+    // random:754:7
+    assert_eq(f128::new(0x8000c9efc1e591a2e00b5d387344e7ec as u128).to_i64(), 0);
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:10
+#[test(should_fail)]
+fn generated_f128_to_i64_invalid_0() {
+    let _ = f128::new(0x7ffeffffffffffffffffffffffffffff as u128).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:11
+#[test(should_fail)]
+fn generated_f128_to_i64_invalid_1() {
+    let _ = f128::new(0x7fff0000000000000000000000000000 as u128).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:12
+#[test(should_fail)]
+fn generated_f128_to_i64_invalid_2() {
+    let _ = f128::new(0xffff0000000000000000000000000000 as u128).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:13
+#[test(should_fail)]
+fn generated_f128_to_i64_invalid_3() {
+    let _ = f128::new(0x7fff8000000000000000000000000000 as u128).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:14
+#[test(should_fail)]
+fn generated_f128_to_i64_invalid_4() {
+    let _ = f128::new(0x403e0000000000000000000000000000 as u128).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:16
+#[test(should_fail)]
+fn generated_f128_to_i64_invalid_5() {
+    let _ = f128::new(0x403f0000000000000000000000000000 as u128).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:18
+#[test(should_fail)]
+fn generated_f128_to_i64_invalid_6() {
+    let _ = f128::new(0xc03e0000000000000002000000000000 as u128).to_i64();
+}
+
+// out-of-range or non-numeric cast must fail to prove
+// curated:19
+#[test(should_fail)]
+fn generated_f128_to_i64_invalid_7() {
+    let _ = f128::new(0x403efffffffffffffffe000000000000 as u128).to_i64();
+}
