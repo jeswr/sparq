@@ -33,6 +33,7 @@ fn main() {
         Some("bench-nt") => bench_nt(&args[2]),
         Some("bench-ttl") => bench_ttl(&args[2]),
         Some("bench-zip") => bench_zip(&args[2]),
+        Some("probe-read") => probe_read(&args[2]),
         _ => {
             eprintln!("usage: parse-baseline gen|to-ttl|compress|bench-nt|bench-ttl|bench-zip ...");
             std::process::exit(2);
@@ -319,6 +320,35 @@ fn bench_zip(path: &str) {
         });
         row(name, &format!("{codec} streaming decode->load_reader_parallel"), ncpu, secs, raw.len(), triples);
     }
+}
+
+/// Diagnostic: what does one `read()` into a 32 MiB buffer actually return for each
+/// decompressor? Graph::load_reader_parallel flushes a parse block per read() call, so
+/// small reads mean tiny parse blocks (the streaming-slowdown hypothesis).
+fn probe_read(path: &str) {
+    let gz = std::fs::read(format!("{path}.gz")).unwrap();
+    let zst = std::fs::read(format!("{path}.zst")).unwrap();
+    let mut buf = vec![0u8; 32 << 20];
+
+    let mut stats = |name: &str, mut r: Box<dyn Read>| {
+        let (mut reads, mut total, mut min, mut max) = (0usize, 0usize, usize::MAX, 0usize);
+        loop {
+            let n = r.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            reads += 1;
+            total += n;
+            min = min.min(n);
+            max = max.max(n);
+        }
+        eprintln!(
+            "{name}: {reads} reads, avg {} B, min {min} B, max {max} B (into a 32 MiB buffer)",
+            total / reads.max(1)
+        );
+    };
+    stats("gzip (MultiGzDecoder)", Box::new(flate2::read::MultiGzDecoder::new(std::io::Cursor::new(gz))));
+    stats("zstd (Decoder)", Box::new(zstd::stream::read::Decoder::new(std::io::Cursor::new(zst)).unwrap()));
 }
 
 // ---------------------------------------------------------------------------
