@@ -3,16 +3,19 @@
 //! A thin, allocation-conscious wrapper over the workspace's public APIs:
 //!
 //! * [`Graph`] wraps `sparq_core::Graph` (load / save / open / len).
-//! * `Graph.query` / `Graph.query_json` / `Graph.ask` call `sparq_engine`.
-//!   ASK is rewritten to a `SELECT *` over the same pattern and answered via the
-//!   engine's lazy `count` — exactly the trick `sparq-server::exec::prepare` uses,
-//!   because the engine has no native ASK entry point yet.
+//! * `Graph.query` / `Graph.query_json` / `Graph.ask` / `Graph.construct` /
+//!   `Graph.describe` call `sparq_engine` (all four query forms are native:
+//!   ASK early-exits, CONSTRUCT/DESCRIBE return term triples).
 //! * `Graph.update` applies SPARQL Update; the engine returns a NEW graph
 //!   (immutable store, rebuild semantics), which the wrapper swaps in place so
-//!   Python sees an in-place mutation.
+//!   Python sees an in-place mutation. Named graphs survive every operation
+//!   (GRAPH-scoped data ops, graph templates, USING, CLEAR/DROP/ADD/COPY/MOVE).
 //! * `Graph.reason` materializes the RDFS / OWL-RL closure via `sparq_reason`
-//!   (in place, same swap); `Graph.load_n3` runs the Notation3 forward-chainer
-//!   over an N3 document (facts + `{…} => {…}` rules).
+//!   (in place, same swap; named graphs are carried across the rebuild);
+//!   `Graph.inconsistencies` reports OWL 2 RL clashes; `Graph.load_n3` runs the
+//!   Notation3 forward-chainer over an N3 document (facts + `{…} => {…}` rules)
+//!   and `Graph.reason_n3_with(rules)` runs caller-supplied N3 rules over an
+//!   already-loaded graph.
 //!
 //! Long-running engine calls release the GIL (`py.detach`) so other Python
 //! threads keep running during parse / query / reasoning.
@@ -206,6 +209,16 @@ fn all_triples(g: &CoreGraph) -> Vec<[Id; 3]> {
     scan.rows.iter().map(|r| scan.to_spo(r)).collect()
 }
 
+/// An engine `oxrdf::Triple` as a Python `(subject, predicate, object)` tuple
+/// of [`Term`]s (the same term convention `Graph.query` rows use).
+fn triple_terms(t: &oxrdf::Triple) -> (Term, Term, Term) {
+    (
+        Term::from_oxrdf(&oxrdf::Term::from(t.subject.clone())),
+        Term::from_oxrdf(&oxrdf::Term::from(t.predicate.clone())),
+        Term::from_oxrdf(&t.object),
+    )
+}
+
 /// An immutable, dictionary-encoded RDF graph with SPARQL query / update and
 /// opt-in reasoning. Build one with `Graph.load(...)`, `Graph.load_n3(...)`,
 /// or `Graph.open(...)`.
@@ -234,8 +247,8 @@ impl Graph {
 
     /// Parse a Notation3 document (facts + `{ premise } => { conclusion }` rules)
     /// and forward-chain the rules to fixpoint; the resulting graph contains the
-    /// full ground closure. This is the N3 reasoning entry point (`reason("n3")`
-    /// is not possible on an already-loaded graph: the rules live in the N3 text).
+    /// full ground closure. To apply N3 rules to an already-loaded graph instead,
+    /// use `Graph.reason_n3_with(rules)`.
     #[staticmethod]
     fn load_n3(py: Python<'_>, text: &str) -> PyResult<Graph> {
         let inner = py
@@ -295,28 +308,55 @@ impl Graph {
 
     /// Answer an ASK query (a SELECT is also accepted: True iff it has rows).
     ///
-    /// The engine has no native ASK, so — like sparq-server — the ASK is rewritten
-    /// to a `SELECT *` over the same WHERE pattern and answered by the engine's
-    /// lazy solution count (`count > 0`). Exact, just not short-circuiting.
+    /// ASK runs on the engine's native entry point (evaluation early-exits at the
+    /// first solution); a SELECT is answered by the engine's lazy solution count.
     fn ask(&self, py: Python<'_>, sparql: &str) -> PyResult<bool> {
         let parsed = SparqlParser::new().parse_query(sparql).map_err(|e| engine_err(e.to_string()))?;
-        let runnable = match parsed {
-            Query::Ask { pattern, dataset, base_iri } => {
-                Query::Select { pattern, dataset, base_iri }.to_string()
+        match parsed {
+            Query::Ask { .. } => {
+                let prepared = parsed.into();
+                py.detach(|| sparq_engine::ask_prepared(&self.inner, &prepared)).map_err(engine_err)
             }
-            Query::Select { .. } => sparql.to_string(),
-            _ => return Err(PyValueError::new_err("ask() takes an ASK (or SELECT) query")),
-        };
-        let n = py
-            .detach(|| sparq_engine::count(&self.inner, &runnable))
+            Query::Select { .. } => {
+                let prepared = parsed.into();
+                let n = py
+                    .detach(|| sparq_engine::count_prepared(&self.inner, &prepared))
+                    .map_err(engine_err)?;
+                Ok(n > 0)
+            }
+            _ => Err(PyValueError::new_err("ask() takes an ASK (or SELECT) query")),
+        }
+    }
+
+    /// Run a SPARQL CONSTRUCT, returning the constructed graph as a list of
+    /// `(subject, predicate, object)` `Term` triples — a deduplicated set in
+    /// first-production order (per SPARQL 1.1 §16.2: template triples with an
+    /// unbound variable or an illegal RDF position are silently dropped, and
+    /// template blank nodes are fresh per solution).
+    fn construct(&self, py: Python<'_>, sparql: &str) -> PyResult<Vec<(Term, Term, Term)>> {
+        let triples = py
+            .detach(|| sparq_engine::construct(&self.inner, sparql))
             .map_err(engine_err)?;
-        Ok(n > 0)
+        Ok(triples.iter().map(triple_terms).collect())
+    }
+
+    /// Run a SPARQL DESCRIBE, returning the union of the concise bounded
+    /// descriptions (CBD: every triple whose subject is the resource, recursing
+    /// through blank-node objects) of each described resource, as a list of
+    /// `(subject, predicate, object)` `Term` triples.
+    fn describe(&self, py: Python<'_>, sparql: &str) -> PyResult<Vec<(Term, Term, Term)>> {
+        let triples = py
+            .detach(|| sparq_engine::describe(&self.inner, sparql))
+            .map_err(engine_err)?;
+        Ok(triples.iter().map(triple_terms).collect())
     }
 
     /// Apply a SPARQL Update (`INSERT DATA` / `DELETE DATA` / `DELETE/INSERT …
-    /// WHERE` / `CLEAR`) in place. The engine's store is immutable, so the update
-    /// produces a NEW graph which this wrapper swaps in; on error the graph is
-    /// left unchanged. Named graphs are not yet supported by the engine's update.
+    /// WHERE` / `CLEAR` / `DROP` / `CREATE` / `ADD` / `COPY` / `MOVE`) in place.
+    /// The engine's store is immutable, so the update produces a NEW graph which
+    /// this wrapper swaps in; on error the graph is left unchanged. The full
+    /// dataset is modelled: `GRAPH`-scoped data and templates, `USING (NAMED)`,
+    /// and the graph-management operations all work on named graphs.
     fn update(&mut self, py: Python<'_>, sparql: &str) -> PyResult<()> {
         let inner = &self.inner;
         let new = py.detach(|| sparq_engine::update(inner, sparql)).map_err(engine_err)?;
@@ -326,13 +366,16 @@ impl Graph {
 
     /// Materialize the entailed closure for `profile` (`"rdfs"` or `"owl"`)
     /// in place, returning the number of NEW triples added. Idempotent.
+    /// Reasoning runs over the default graph; named graphs are carried across
+    /// the rebuild untouched.
     ///
-    /// `"n3"` is not valid here — N3 rules live in the N3 document itself, so use
-    /// `Graph.load_n3(text)` instead.
+    /// `"n3"` is not valid here — N3 rules live in an N3 document, so use
+    /// `Graph.load_n3(text)` (rules + facts in one document) or
+    /// `Graph.reason_n3_with(rules)` (rules applied to this graph) instead.
     fn reason(&mut self, py: Python<'_>, profile: &str) -> PyResult<usize> {
         if profile.eq_ignore_ascii_case("n3") {
             return Err(PyValueError::new_err(
-                "N3 rules are part of the N3 document; use Graph.load_n3(text) instead of reason(\"n3\")",
+                "N3 rules live in an N3 document; use Graph.load_n3(text) or Graph.reason_n3_with(rules) instead of reason(\"n3\")",
             ));
         }
         let prof = sparq_reason::Profile::parse(profile).ok_or_else(|| {
@@ -340,16 +383,81 @@ impl Graph {
         })?;
         // Take the graph apart through its public fields (no Clone on Dict/Graph):
         // move `dict` and `store` out, re-derive the canonical triples, materialize,
-        // rebuild. A placeholder empty graph holds the slot during the closure.
+        // rebuild (re-attaching the named graphs, which reasoning does not touch).
+        // A placeholder empty graph holds the slot during the closure.
         let g = std::mem::replace(&mut self.inner, CoreGraph::from_parts(Dict::new(), Vec::new()));
         let (inner, added) = py.detach(move || {
             let mut triples = all_triples(&g);
+            let named = g.named;
             let mut dict = g.dict;
             let added = sparq_reason::materialize(prof, &mut dict, &mut triples);
-            (CoreGraph::from_parts(dict, triples), added)
+            let mut rebuilt = CoreGraph::from_parts(dict, triples);
+            rebuilt.named = named;
+            (rebuilt, added)
         });
         self.inner = inner;
         Ok(added)
+    }
+
+    /// Forward-chain caller-supplied Notation3 `rules` (an N3 document: `{ premise }
+    /// => { conclusion }` rules, plus any facts it contains) over THIS graph's
+    /// default graph, in place, returning the number of NEW triples added.
+    /// Named graphs are carried across the rebuild untouched; on error (e.g. a
+    /// rules parse failure) the graph is left unchanged.
+    ///
+    /// The graph's triples join the document as ground facts (blank nodes keep
+    /// their labels, so a label shared with the rules document denotes the same
+    /// node — N3 merge semantics). RDF-star triple terms have no N3 form and are
+    /// rejected.
+    fn reason_n3_with(&mut self, py: Python<'_>, rules: &str) -> PyResult<usize> {
+        use std::fmt::Write as _;
+        let inner = &self.inner;
+        let before = inner.len();
+        // Render the default graph as N-Triples (a syntactic subset of N3) under
+        // the rules document and run the same chainer as `load_n3` — exactly the
+        // composition sparq-reason's own MaterializedN3Graph uses in fallback mode.
+        let mut new = py
+            .detach(|| {
+                let rows = all_triples(inner);
+                let mut src = String::with_capacity(rules.len() + 1 + 64 * rows.len());
+                src.push_str(rules);
+                src.push('\n');
+                for [s, p, o] in rows {
+                    for id in [s, p, o] {
+                        let term = inner.dict.term(id);
+                        if matches!(term, oxrdf::Term::Triple(_)) {
+                            return Err("RDF-star triple terms cannot participate in N3 reasoning".into());
+                        }
+                        let _ = write!(src, "{term} ");
+                    }
+                    src.push_str(".\n");
+                }
+                let mut dict = Dict::new();
+                let triples = sparq_reason::reason_n3(&mut dict, &src)?;
+                Ok::<_, String>(CoreGraph::from_parts(dict, triples))
+            })
+            .map_err(engine_err)?;
+        new.named = std::mem::take(&mut self.inner.named);
+        let added = new.len().saturating_sub(before);
+        self.inner = new;
+        Ok(added)
+    }
+
+    /// Detect OWL 2 RL inconsistencies (clashes) in the default graph, returning
+    /// one human-readable description per clash (empty list = no detected
+    /// inconsistency). Covers the OWL 2 RL false rules: cax-dw (disjointWith) /
+    /// cax-adc (AllDisjointClasses), cls-com (complementOf), cls-nothing
+    /// (owl:Nothing instances), cls-maxc1 / cls-maxqc1/2 (cardinality-0
+    /// violations), eq-diff1/2/3 (sameAs vs differentFrom / AllDifferent,
+    /// including sameAs forced between distinct literal values), prp-asyp /
+    /// prp-irp (asymmetric & irreflexive violations), prp-pdw / prp-adp
+    /// (disjoint properties), and prp-npa1/2 (negative property assertions).
+    ///
+    /// Detection is over ASSERTED triples: run `reason("owl")` first to surface
+    /// clashes that only follow by entailment.
+    fn inconsistencies(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let inner = &self.inner;
+        Ok(py.detach(|| sparq_reason::inconsistencies(&inner.dict, &all_triples(inner))))
     }
 
     /// Number of triples in the default graph.

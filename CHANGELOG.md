@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Python bindings parity wave (`sparq-py`)** — the Python `Graph` catches up with
+  the engine/reasoner surface: native `ask()` (engine early-exit instead of the
+  SELECT-count rewrite; SELECT still accepted), new `construct()` / `describe()`
+  (lists of `(s, p, o)` `Term` tuples; DESCRIBE is concise-bounded-description),
+  named-graph parity (the stale "named graphs unsupported by update / dropped by
+  reason" caveats removed: updates ride engine update v2, and `reason()` /
+  `reason_n3_with()` now carry `Graph.named` across the rebuild), new
+  `inconsistencies()` (OWL 2 RL clash report from `sparq_reason::inconsistencies`),
+  and new `reason_n3_with(rules)` (caller-supplied N3 rules over an already-loaded
+  graph, composed exactly like `MaterializedN3Graph`'s fallback: default graph
+  rendered as N-Triples under the rules document, run through `reason_n3`; on error
+  the graph is unchanged). 18 new pytest cases (20 → 38); README/TODO refreshed.
+  Verified non-gap recorded honestly: full-text `text:` predicates do NOT work
+  through plain `Graph.query` — `sparq-text` is a deliberately standalone opt-in
+  crate, so exposing it needs a `TextIndex` lifecycle on the wrapper (left as a
+  documented follow-up in `crates/sparq-py/TODO.md`, not wired in quietly).
 - **Opt-in inference proof trees (`sparq-reason`, non-default `explain` feature)** —
   `why(triple)` on `MaterializedGraph` / `MaterializedOwlGraph` / `MaterializedN3Graph`
   returns a `ProofTree` for any closure triple: which rule fired (W3C spec rule ids —
