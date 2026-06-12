@@ -1,0 +1,8 @@
+[package]
+name = "xpath"
+type = "lib"
+authors = ["jeswr"]
+
+[dependencies]
+ieee754 = { tag = "v0.3.1", git = "https://github.com/jeswr/noir_IEEE754", directory = "ieee754" }
+json_parser = { tag = "main", git = "https://github.com/noir-lang/noir_json_parser" }

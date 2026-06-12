@@ -1,0 +1,7 @@
+[package]
+name = "xpath_test_fnadjust_date_to_timezone"
+type = "lib"
+authors = ["auto-generated"]
+
+[dependencies]
+xpath = { path = "../../xpath" }

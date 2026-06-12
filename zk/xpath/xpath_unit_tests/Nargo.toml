@@ -1,0 +1,8 @@
+[package]
+name = "xpath_unit_tests"
+type = "bin"
+authors = ["jeswr"]
+description = "Unit tests for xpath library"
+
+[dependencies]
+xpath = { path = "../xpath" }

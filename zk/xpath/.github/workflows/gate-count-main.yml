@@ -1,0 +1,66 @@
+name: Update Gate Counts on Main
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-gate-counts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read Noir version
+        id: noir-version
+        run: |
+          LATEST=$(jq -r '.latest' .github/noir-versions.json)
+          echo "version=$LATEST" >> $GITHUB_OUTPUT
+          echo "Using Noir version: $LATEST"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Noir
+        uses: noir-lang/noirup@v0.1.4
+        with:
+          toolchain: ${{ steps.noir-version.outputs.version }}
+
+      - name: Verify Noir installation
+        run: |
+          echo "PATH: $PATH"
+          which nargo || echo "nargo not found in PATH"
+          nargo --version || echo "nargo command failed"
+
+      - name: Run gate count benchmark
+        run: |
+          python3 scripts/benchmark_gates.py --output gate_counts.json
+          echo "Gate counts benchmark completed"
+
+      - name: Check for changes
+        id: check-changes
+        run: |
+          if git diff --quiet gate_counts.json; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No changes to gate_counts.json"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "gate_counts.json has been updated"
+          fi
+
+      - name: Commit and push gate counts
+        if: steps.check-changes.outputs.changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add gate_counts.json
+          git commit -m "chore: update gate counts [skip ci]"
+          git push

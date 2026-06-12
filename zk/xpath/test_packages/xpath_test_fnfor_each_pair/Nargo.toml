@@ -1,0 +1,7 @@
+[package]
+name = "xpath_test_fnfor_each_pair"
+type = "lib"
+authors = ["auto-generated"]
+
+[dependencies]
+xpath = { path = "../../xpath" }

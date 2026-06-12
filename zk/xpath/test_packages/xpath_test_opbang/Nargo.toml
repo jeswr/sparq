@@ -1,0 +1,7 @@
+[package]
+name = "xpath_test_opbang"
+type = "lib"
+authors = ["auto-generated"]
+
+[dependencies]
+xpath = { path = "../../xpath" }

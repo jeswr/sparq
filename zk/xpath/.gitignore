@@ -1,0 +1,4 @@
+# test_packages/
+scripts/qt3tests/
+__pycache__/
+*.pyc
