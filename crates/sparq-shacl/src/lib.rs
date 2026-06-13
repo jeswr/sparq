@@ -287,6 +287,82 @@ mod tests {
             .any(|x| x.source_component.ends_with("MinCountConstraintComponent")));
     }
 
+    // [OPUS-4.8] Regression for review 1616: a cyclic sh:property reference must NOT overflow the
+    // stack. The Property component recurses through validate_shape directly, bypassing the
+    // conforms() (focus, shape) guard; without an equivalent guard a self-referential property
+    // shape over cyclic data recurses forever. Re-entry counts as conforming (SHACL leaves
+    // recursion undefined), so the data conforms.
+    #[test]
+    fn cyclic_property_shape_does_not_overflow() {
+        let shapes = Graph::load_str(
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            # A node shape A with a property to B, and B with a property back to A.
+            ex:A a sh:NodeShape ;
+              sh:targetNode ex:a ;
+              sh:property ex:PtoB .
+            ex:PtoB a sh:PropertyShape ;
+              sh:path ex:next ;
+              sh:property ex:PtoA .
+            ex:PtoA a sh:PropertyShape ;
+              sh:path ex:next ;
+              sh:property ex:PtoB .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        // Cyclic data: a -> b -> a. Without the guard this recurses unboundedly.
+        let data = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:a ex:next ex:b .
+            ex:b ex:next ex:a .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        // The point of the test is that this returns at all (no stack overflow). The cycle is
+        // treated as conforming, and no constraint forces a violation.
+        let r = validate(&data, &shapes);
+        assert!(r.conforms, "cyclic sh:property must terminate and conform: {}", r.to_text());
+    }
+
+    // [OPUS-4.8] Regression for review 1616 (implicit class shape discovery): a node that is an
+    // rdfs:Class with SHACL constraints — but NOT explicitly typed sh:NodeShape and with no
+    // sh:target* — is an implicit node shape with an implicit class target. Root discovery
+    // previously skipped it, silently ignoring its constraints; it must now be validated.
+    #[test]
+    fn implicit_class_shape_is_discovered() {
+        let shapes = Graph::load_str(
+            r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix ex: <http://example.org/> .
+            # rdfs:Class + SHACL constraint, but NO sh:NodeShape type and NO sh:target*.
+            ex:Person a rdfs:Class ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        // An instance missing ex:name must now fail (implicit class target on ex:Person).
+        let data = Graph::load_str(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:alice a ex:Person .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "implicit class shape must validate its instances: {}", r.to_text());
+        assert!(r
+            .results
+            .iter()
+            .any(|x| x.source_component.ends_with("MinCountConstraintComponent")));
+    }
+
     #[test]
     fn logical_and_paths() {
         let data = Graph::load_str(
