@@ -4,7 +4,10 @@
 # Adapted from stage-1 (/tmp/sparq-wdbench archive) and hwrun/launch.sh.
 # DRY-RUN by default; EXECUTE=1 to launch for real. ZERO retries up the size
 # ladder on purpose — the low-resource spec IS the experiment.
-set -uo pipefail
+# [OPUS-4.8] roborev 2016 (Med): errexit added so a failed step (SG creation,
+# run-instances, SSH wait, ...) aborts immediately instead of falling through to
+# the "Launched" success message and leaving partial, misleading AWS state.
+set -euo pipefail
 . "$(dirname "$0")/config.sh"
 banner
 
@@ -61,6 +64,10 @@ XS "create SG + allow 22 from MYIP/32 only" "
 UDATA="$STATE/udata.txt"
 printf '#!/bin/bash\nshutdown -P +%s\n' "$DEADMAN_MIN" > "$UDATA"
 
+# [OPUS-4.8] roborev 2016 (Med): tag the root EBS volume too (ResourceType=volume),
+# not just the instance. terminate.sh's "confirm nothing tagged is left" check
+# scans volumes by purpose tag; an untagged root volume would be invisible to
+# that safety confirmation, so a leaked volume could go unnoticed.
 XS "run-instances $INSTANCE_TYPE + gp3 ${VOL_GB}GB/${VOL_IOPS}iops/${VOL_THROUGHPUT}MBps (dead-man +${DEADMAN_MIN}m)" "
   IID=\$(aws ec2 run-instances --region '$REGION' --image-id '$AMI' --instance-type '$INSTANCE_TYPE' \
     --key-name '$KEY_NAME' --security-group-ids \"\$(cat '$STATE/sg-id')\" --subnet-id '$SUBNET' \
@@ -68,7 +75,7 @@ XS "run-instances $INSTANCE_TYPE + gp3 ${VOL_GB}GB/${VOL_IOPS}iops/${VOL_THROUGH
     --user-data 'file://$UDATA' \
     --instance-initiated-shutdown-behavior terminate \
     --block-device-mappings '[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":$VOL_GB,\"VolumeType\":\"gp3\",\"Iops\":$VOL_IOPS,\"Throughput\":$VOL_THROUGHPUT,\"DeleteOnTermination\":true}}]' \
-    --tag-specifications 'ResourceType=instance,Tags=[{Key=purpose,Value=$TAG_PURPOSE},{Key=Name,Value=sparq-wd8b}]' \
+    --tag-specifications 'ResourceType=instance,Tags=[{Key=purpose,Value=$TAG_PURPOSE},{Key=Name,Value=sparq-wd8b}]' 'ResourceType=volume,Tags=[{Key=purpose,Value=$TAG_PURPOSE},{Key=Name,Value=sparq-wd8b}]' \
     --query 'Instances[0].InstanceId' --output text) &&
   echo \"\$IID\" > '$STATE/instance-id' &&
   echo '$KEY_NAME' > '$STATE/key-name' &&
