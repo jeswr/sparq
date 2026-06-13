@@ -31,16 +31,36 @@ streaming / tier-0 inline-execution remain later waves.)
       execution, snapshot consistency preserved under concurrent writes.
 - [x] CHANGELOG entry (Wave B).
 
-## In flight / next exact command
+## Verification — DONE (all green)
 
-- [ ] Run scheduler tests:
-      `cargo test -p sparq-serve --release --test scheduler --test scheduler_real_store`
-- [ ] Full gate:
-      `cargo test --workspace --exclude sparq-py --release --no-fail-fast 2>&1 | grep -aE "^test result"`
-- [ ] wasm unchanged:
-      `cargo build -p sparq-wasm --target wasm32-unknown-unknown --release` + stat byte count;
-      `cargo tree -p sparq-wasm -e normal | grep -c serve` == 0.
-- [ ] Final commit + record SHA here.
+- [x] Scheduler tests: `scheduler.rs` 11 passed, `scheduler_real_store.rs` 2 passed.
+- [x] Full gate `cargo test --workspace --exclude sparq-py --release --no-fail-fast`:
+      exit 0, 118 `test result` lines, **746 passed / 0 failed / 10 ignored**.
+- [x] wasm byte count = **1,643,103** (== A2 baseline; brief's 1,643,095 is the
+      pre-existing 8-byte branch/brief discrepancy A2 already recorded — Wave B
+      added ZERO wasm bytes: std-only, no new deps, not in wasm graph).
+- [x] wasm-graph guard: `cargo tree -p sparq-wasm -e normal | sed 's| (/[^)]*)||g'
+      | grep -cE 'sparq-serve\b'` == **0**. (The naive `grep -c serve` reports a
+      false positive because the worktree dir is `sparq-serveb` — strip paths first.)
+- [x] Implementation commit: 5ec347b.
+
+## Headline empirical results (MEASURED UNDER CONCURRENT LOAD — caveat applies)
+
+- **HoL (the win):** lane-split cheap p99 ~0.5–5 ms under 8 concurrent 200 ms scans;
+  FIFO single-lane cheap p99 ~**398 ms** under the same load → ~80–750× HoL
+  containment. A 200 ms scan never leaks into cheap p99 with the scheduler.
+- **Starvation:** the heavy job completes alongside 1000+ flooded cheap jobs
+  (reserved heavy slot runs it in parallel; aging guarantees no indefinite postpone).
+- **No-regression (HONEST, non-zero):** all-cheap micro-workload (N=20k, ~300 ns/job
+  work): scheduler ~2.2× a plain pool = **~0.5 µs/job** added absolute overhead
+  (per-job ticket alloc + mutex/condvar vs a plain channel). ~6% of a 9 µs point
+  query, negligible against anything heavier — but NOT zero, reported as such. Gate
+  is 3.5× (a tripwire for a real machinery blow-up); the absolute-ns datum the test
+  prints is the honest measure.
+- Numbers taken while other heavy agents shared the machine — ratios are the signal;
+  absolute throughput would need a quiet re-run for final claims. Structural
+  properties (ordering, no-starvation, result equality, bounded concurrency) are
+  load-independent and asserted hard.
 
 ## Honesty notes
 
