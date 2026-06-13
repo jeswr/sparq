@@ -16,11 +16,16 @@ Status: experimental research engine; the API is unstable.
 
 Usage instructions for each public surface are packaged as Agent Skills under [`skills/`](skills/) (the [agentskills.io](https://agentskills.io) open format — `name`/`description` frontmatter + Markdown). Read the one that matches the surface you are integrating:
 
-- [`skills/rust-api/SKILL.md`](skills/rust-api/SKILL.md) — `sparq-core` + `sparq-engine` from Rust.
+Read [`skills/SKILL.md`](skills/SKILL.md) first — it is the router skill that lists every surface and points you at the right one. The main entry points:
+
+- [`skills/sparql-query/SKILL.md`](skills/sparql-query/SKILL.md) — run SPARQL from Rust (`sparq-core` + `sparq-engine`).
+- [`skills/data-formats/SKILL.md`](skills/data-formats/SKILL.md) — parse/load RDF (Turtle/N-Triples/N-Quads/TriG, HDT) into a Graph.
 - [`skills/cli/SKILL.md`](skills/cli/SKILL.md) — the `sparq` CLI (query, mmap build/query, reason, bench).
 - [`skills/http-server/SKILL.md`](skills/http-server/SKILL.md) — the SPARQL 1.1 Protocol HTTP server.
-- [`skills/js/SKILL.md`](skills/js/SKILL.md) — the `@jeswr/sparq` npm package.
+- [`skills/javascript-wasm/SKILL.md`](skills/javascript-wasm/SKILL.md) — the `@jeswr/sparq` npm package.
 - [`skills/python/SKILL.md`](skills/python/SKILL.md) — the `sparq` Python package.
+
+The capability surfaces (reasoning, SHACL, full-text, vector, GeoSPARQL, streaming RSP-QL, ZK query proofs, MPC, GenAI retrieval) each have their own `skills/<surface>/SKILL.md` — the router in [`skills/SKILL.md`](skills/SKILL.md) enumerates them.
 
 If your agent runtime supports the Agent Skills standard, these load via progressive disclosure (name+description first, body on demand). If not, just read the SKILL.md files directly.
 
@@ -41,7 +46,7 @@ If your agent runtime supports the Agent Skills standard, these load via progres
 - an HTTP route, query/body parameter, or response shape in `sparq-server`;
 - a Python binding (the `sparq` package) or a JS/RDF-JS binding (`@jeswr/sparq`).
 
-Then edit the corresponding `skills/<surface>/SKILL.md` (rust-api / cli / http-server / python / js) so its instructions and examples still compile and run against the new surface. Do not split this across a follow-up PR — a skill that documents a removed flag or a changed signature is worse than no skill. If the change spans surfaces (e.g. a new query option exposed in both the CLI and the HTTP server), update every affected `SKILL.md`. Keep each `SKILL.md` body under ~500 lines; move long flag/route tables and runnable examples into that skill's `references/` and `scripts/`.
+Then edit the corresponding `skills/<surface>/SKILL.md` (sparql-query / data-formats / cli / http-server / python / javascript-wasm) so its instructions and examples still compile and run against the new surface. Do not split this across a follow-up PR — a skill that documents a removed flag or a changed signature is worse than no skill. If the change spans surfaces (e.g. a new query option exposed in both the CLI and the HTTP server), update every affected `SKILL.md`. Keep each `SKILL.md` body under ~500 lines; move long flag/route tables and runnable examples into that skill's `references/` and `scripts/`.
 
 If you add a brand-new public surface, add a new `skills/<surface>/` (dir name == the skill's `name` frontmatter) and link it from the list above and from the README.
 

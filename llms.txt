@@ -1,0 +1,37 @@
+# sparq
+
+> A from-scratch RDF triplestore and SPARQL 1.1/1.2 engine in Rust — dictionary-encoded, six sorted permutation indexes, parallel + streaming execution, RDFS/OWL-RL/N3 inference, an out-of-core (mmap) mode, a WebAssembly build, and a W3C-conformant HTTP server. Shipped as Rust crates (crates.io), an npm package (`@jeswr/sparq`), and a Python package (`sparq`, PyPI).
+
+This file is an orientation hint for LLMs and coding agents — not a registry. To *use* sparq, the authoritative usage docs are packaged as [Agent Skills](https://agentskills.io) (the open `SKILL.md` format).
+
+## Start here
+
+- [AGENTS.md](AGENTS.md): a README for coding agents working on or with this repo — what sparq is, the skills index, and the public-API maintenance rule.
+- [skills/SKILL.md](skills/SKILL.md): the router skill — read first, then follow it to the per-surface skill that matches your task.
+- [README.md](README.md): human-facing overview, package map, usage examples, and benchmarks.
+
+## Per-surface usage skills
+
+- [skills/sparql-query/SKILL.md](skills/sparql-query/SKILL.md): run SPARQL 1.1/1.2 (SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE) from Rust.
+- [skills/data-formats/SKILL.md](skills/data-formats/SKILL.md): parse/load RDF (Turtle/N-Triples/N-Quads/TriG, HDT) into a Graph.
+- [skills/cli/SKILL.md](skills/cli/SKILL.md): the `sparq` command-line tool.
+- [skills/http-server/SKILL.md](skills/http-server/SKILL.md): the SPARQL 1.1 Protocol HTTP server.
+- [skills/python/SKILL.md](skills/python/SKILL.md): the `sparq` Python package.
+- [skills/javascript-wasm/SKILL.md](skills/javascript-wasm/SKILL.md): the `@jeswr/sparq` npm/WASM package.
+
+## Capability surfaces
+
+- [skills/inference/SKILL.md](skills/inference/SKILL.md): RDFS / OWL 2 RL / Notation3 reasoning.
+- [skills/shacl-validation/SKILL.md](skills/shacl-validation/SKILL.md): SHACL Core + SHACL-SPARQL validation.
+- [skills/full-text-search/SKILL.md](skills/full-text-search/SKILL.md): BM25 full-text search over literals.
+- [skills/vector-search/SKILL.md](skills/vector-search/SKILL.md): embedding / ANN vector search.
+- [skills/geosparql/SKILL.md](skills/geosparql/SKILL.md): GeoSPARQL spatial functions and index.
+- [skills/streaming-rsp/SKILL.md](skills/streaming-rsp/SKILL.md): RSP-QL streaming / windowed queries.
+- [skills/genai-retrieval/SKILL.md](skills/genai-retrieval/SKILL.md): NL→SPARQL and schema introspection for grounding.
+- [skills/zk-query-proofs/SKILL.md](skills/zk-query-proofs/SKILL.md): zero-knowledge proofs of SPARQL results (experimental).
+- [skills/mpc/SKILL.md](skills/mpc/SKILL.md): multi-party SPARQL over distrusting holders (research).
+
+## Optional
+
+- [research/ARCHITECTURE.md](research/ARCHITECTURE.md): design blueprint.
+- [.claude-plugin/](.claude-plugin/): Claude Code plugin packaging of the skills (`/plugin marketplace add jeswr/sparq` then `/plugin install sparq@sparq-tools`).
