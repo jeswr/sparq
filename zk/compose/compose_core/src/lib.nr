@@ -17,5 +17,6 @@ pub mod scan;
 pub mod filter_int;
 pub mod filter_float;
 pub mod revoke;
+pub mod issuer;
 
 mod tests;
