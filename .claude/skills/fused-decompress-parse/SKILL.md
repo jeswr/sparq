@@ -28,10 +28,12 @@ reusing code that already existed:
    `build_external_ntriples_parallel` (sparq-core `lib.rs`) and just wasn't used
    by the in-memory path.
 
-After both fixes (same machine/harness): gzip streaming **5.589 → 0.661 s
-(8.5×)**, zstd streaming **3.947 → 0.576 s (6.9×)**, and streaming now **matches
-or beats two-stage in every paired run** while never materialising the
-decompressed copy.
+After both fixes (same machine/harness), streaming ingest of the slice dropped by
+~8–9× (gzip) and ~7× (zstd) and now **matches or beats two-stage in every paired
+run** while never materialising the decompressed copy. (Absolute figures drift with
+thermal state / machine — they live in `research/custom-parsers-baseline.md` and the
+`bench/parse/` harness; cite that, not baked numbers. The load-bearing fact is the
+ratio + the "matches-or-beats two-stage" conclusion.)
 
 ## The fusion bound — what "ideal" means
 
@@ -51,13 +53,13 @@ last block. Thermal state on a fanless M1 moves every absolute number; the
 
 ## Codec choice — measured, not assumed
 
-- **zstd beats gzip on both axes.** On the real slice: zstd −3 = 12.6× ratio and
-  decodes at **1,236 MB/s**; gzip −6 = 11.7× and **438 MB/s** (zstd decode is
-  2.8× faster *and* compresses smaller). Prefer zstd for sparq-controlled paths.
+- **zstd beats gzip on both axes.** On the real slice zstd −3 has a slightly
+  better ratio than gzip −6 *and* decodes several × faster (figures:
+  `research/custom-parsers-baseline.md`). Prefer zstd for sparq-controlled paths.
 - **bzip2 is the real enemy.** The actual Wikidata "truthy" dump is `.bz2`
-  (42.8 GB → 1.08 TB, ~25× ratio). Single-stream `bzcat` = **123 MB/s ≈ 1.06
-  M/s** → ~147 min for the full file regardless of downstream speed; it was 70%
-  of E2E wall-time. **Verdict (stands): recompress `.bz2` → `.zst` once**
+  (42.8 GB → 1.08 TB, ~25× ratio). Single-stream `bzcat` decodes ~1 M triples/s
+  → over two hours for the full file regardless of downstream speed; it was the
+  dominant share of E2E wall-time. **Verdict (stands): recompress `.bz2` → `.zst` once**
   (`zstd -9 -T0`, parallel, one-time) rather than building a parallel bzip2
   decoder. After that, ingest is parse/sort-bound, projected ~30 min for 9.4 B
   triples — RDFox-competitive (their 24 min).

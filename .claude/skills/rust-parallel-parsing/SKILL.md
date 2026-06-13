@@ -17,16 +17,17 @@ before quoting it — those are the source of truth and were measured on an M1 A
 parallel parser; byte-scanning is **0.4% of memory bandwidth** (60 GB/s memscan
 vs ~234 MB/s parse). The cost is in interning + index build, not in scanning.
 
-Measured facts to anchor on (M1, real Wikidata slice):
+Measured facts to anchor on (M1, real Wikidata slice; absolute throughput numbers
+drift with hardware — they live in `research/custom-parsers-baseline.md` and the
+`bench/parse/` harness, cite that, but the *ratios* below are the load-bearing point):
 
-- Custom serial NT parse+intern = **234 MB/s / 2.02 Mt/s**, already **1.27×
-  faster than oxttl parse-only** (185 MB/s) — it parses *and* interns in less
-  time than oxttl takes to parse and throw triples away.
-- Parallel NT parse+intern scales **3.84×** on 4P+4E → 896 MB/s; full ingest
-  585 MB/s / 5.06 Mt/s @ 8T.
-- A *zero-cost* scanner would cap full serial ingest at 1.118→0.62 s (1.8×); a
-  realistic 2× scanner → **≤1.2× end-to-end at 8T** because intern+build are
-  65%+ of the parallel path. **Not worth a second parser to differential-test.**
+- Custom serial NT parse+intern is already **~1.27× faster than oxttl parse-only**
+  — it parses *and* interns in less time than oxttl takes to parse and throw
+  triples away.
+- Parallel NT parse+intern scales ~**3.84×** on 4P+4E; full ingest scales similarly.
+- A *zero-cost* scanner would cap full serial ingest at only ~1.8×, and a realistic
+  2× scanner at **≤1.2× end-to-end at 8T**, because intern+build are 65%+ of the
+  parallel path. **Not worth a second parser to differential-test.**
 
 ## Chunk-parallel scheme (the shipped design)
 
