@@ -7584,6 +7584,123 @@ mod path_tests {
         assert_eq!(n("SELECT ?o WHERE { GRAPH ?g { <http://ex/b> <http://ex/p> ?o } }"), 1);
     }
 
+    /// [OPUS-4.8] sq-wij: GRAPH-scoped zero-length property paths (`*` / `?`) must
+    /// bind each node to ITSELF over the NAMED graph's node domain — and the domain
+    /// must be the named graph alone, never leaking nodes from the default graph or a
+    /// sibling named graph. A zero-length path inside `GRAPH <g> { … }` evaluates
+    /// against `g`'s self-contained sub-`Graph`, so `graph_nodes` already sees only
+    /// `g`; these tests lock that scoping in (and would catch a regression that read
+    /// the default/union node set instead).
+    #[test]
+    fn graph_scoped_zero_length_paths() {
+        use std::collections::BTreeSet;
+        // g1 nodes (as subject/object): a, b, c, d  (a-p->b, c-p->d).
+        // g2 nodes:                      e, f        (e-p->f).
+        // default-graph nodes:           m, n        (m-p->n)  — must NOT leak into a GRAPH.
+        let nq = "<http://ex/m> <http://ex/p> <http://ex/n> .\n\
+                  <http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .\n\
+                  <http://ex/c> <http://ex/p> <http://ex/d> <http://ex/g1> .\n\
+                  <http://ex/e> <http://ex/p> <http://ex/f> <http://ex/g2> .\n";
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+
+        // Collect the set of local-names a query binds to ?x (subject position),
+        // asserting the path solution per row is reflexive (?x == ?y) when both are
+        // selected. Returns the sorted set of subject local-names.
+        let diag = |q: &str| -> BTreeSet<String> {
+            let r = crate::query(&g, q).unwrap();
+            let xi = r.vars.iter().position(|v| v.as_str() == "x").unwrap();
+            let yi = r.vars.iter().position(|v| v.as_str() == "y");
+            let mut out = BTreeSet::new();
+            for row in &r.rows {
+                let x = row[xi].as_ref().unwrap();
+                if let Some(yi) = yi {
+                    // Zero-length diagonal: the two ends are the SAME term.
+                    assert_eq!(&row[yi], &Some(x.clone()), "expected reflexive bind, row {row:?}");
+                }
+                let s = match x {
+                    Term::NamedNode(n) => n.as_str().rsplit('/').next().unwrap().to_string(),
+                    other => panic!("unexpected term {other:?}"),
+                };
+                out.insert(s);
+            }
+            out
+        };
+        let set = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        const P: &str = "PREFIX : <http://ex/> ";
+
+        // --- `:p*` with a VARIABLE start: reflexive over the graph domain UNION the
+        //     forward closure. Inside GRAPH <g1> the domain is exactly {a,b,c,d}; the
+        //     default-graph nodes m,n and g2's e,f must NOT appear. -----------------
+        // `?x :p* ?x` (same var) is purely the diagonal = the node domain of g1.
+        assert_eq!(
+            diag(&format!("{P}SELECT ?x ?y WHERE {{ GRAPH :g1 {{ ?x :p* ?y FILTER(?x = ?y) }} }}")),
+            set(&["a", "b", "c", "d"]),
+            "p* diagonal inside GRAPH <g1> must be g1's nodes only"
+        );
+        // g2 has a disjoint domain {e,f}: the wrong (union/default) scope would leak.
+        assert_eq!(
+            diag(&format!("{P}SELECT ?x ?y WHERE {{ GRAPH :g2 {{ ?x :p* ?y FILTER(?x = ?y) }} }}")),
+            set(&["e", "f"]),
+            "p* diagonal inside GRAPH <g2> must be g2's nodes only"
+        );
+
+        // --- `:p?` (ZeroOrOne) reflexive bindings inside GRAPH: a bound start yields
+        //     its own self-pair plus the one-step neighbour, scoped to the graph. ---
+        // `<a> :p? ?y` in g1 -> {a (zero), b (one)}.
+        let p_opt_g1: BTreeSet<String> = {
+            let r = crate::query(&g, &format!("{P}SELECT ?y WHERE {{ GRAPH :g1 {{ :a :p? ?y }} }}")).unwrap();
+            r.rows.iter().map(|row| match row[0].as_ref().unwrap() {
+                Term::NamedNode(n) => n.as_str().rsplit('/').next().unwrap().to_string(),
+                other => panic!("{other:?}"),
+            }).collect()
+        };
+        assert_eq!(p_opt_g1, set(&["a", "b"]), ":p? in GRAPH <g1> = self + one hop");
+        // `?x :p? ?x` (same var) inside GRAPH <g1>: the diagonal = g1's node domain.
+        assert_eq!(
+            diag(&format!("{P}SELECT ?x ?y WHERE {{ GRAPH :g1 {{ ?x :p? ?y FILTER(?x = ?y) }} }}")),
+            set(&["a", "b", "c", "d"]),
+            ":p? diagonal inside GRAPH <g1> must be g1's nodes only"
+        );
+
+        // --- The default graph's own zero-length diagonal is {m,n} — confirming the
+        //     GRAPH scopes above genuinely excluded these nodes. -------------------
+        assert_eq!(
+            diag(&format!("{P}SELECT ?x ?y WHERE {{ ?x :p* ?y FILTER(?x = ?y) }}")),
+            set(&["m", "n"]),
+            "default-graph p* diagonal must be the default graph's nodes only"
+        );
+
+        // --- `GRAPH ?g { ?x :p* ?y FILTER(?x=?y) }`: the diagonal per named graph,
+        //     unioned, binds ?g to the SOURCE graph. The full set of subjects is the
+        //     union of each named graph's domain (g1 ∪ g2), never the default graph. -
+        let r = crate::query(
+            &g,
+            &format!("{P}SELECT ?g ?x ?y WHERE {{ GRAPH ?g {{ ?x :p* ?y FILTER(?x = ?y) }} }}"),
+        )
+        .unwrap();
+        let (gi, xi, yi) = (
+            r.vars.iter().position(|v| v.as_str() == "g").unwrap(),
+            r.vars.iter().position(|v| v.as_str() == "x").unwrap(),
+            r.vars.iter().position(|v| v.as_str() == "y").unwrap(),
+        );
+        let local = |t: &Term| match t {
+            Term::NamedNode(n) => n.as_str().rsplit('/').next().unwrap().to_string(),
+            other => panic!("{other:?}"),
+        };
+        let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
+        for row in &r.rows {
+            assert_eq!(&row[yi], &row[xi], "GRAPH ?g p* diagonal must be reflexive");
+            pairs.insert((local(row[gi].as_ref().unwrap()), local(row[xi].as_ref().unwrap())));
+        }
+        let expected: BTreeSet<(String, String)> = [
+            ("g1", "a"), ("g1", "b"), ("g1", "c"), ("g1", "d"), ("g2", "e"), ("g2", "f"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        assert_eq!(pairs, expected, "GRAPH ?g zero-length nodes must be scoped per named graph");
+    }
+
     #[test]
     fn rdf_star_concrete_triple_terms() {
         // RDF 1.2 triple terms load and CONCRETE `<< … >>` patterns match via the
