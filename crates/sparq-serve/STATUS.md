@@ -20,11 +20,13 @@ delta). Completing = writing those + batch-atomicity test + benches.
 
 ## Plan / checklist
 
-- [ ] Commit kept delta (read_your_writes primitive + doc fixes)        — A3 substrate
-- [ ] tests/commute.rs        — CommuteGroup correctness == serial (differential), barrier handling
-- [ ] tests/tokens.rs         — RYW: submit() token satisfied on this ring; not-yet on a lagging ring
-- [ ] tests/batch_atomicity.rs— 50k-triple bulk update: reader sees 0-or-all (mirrors readers_are_not_blocked)
-- [ ] bench/serve update_writer_spike — writer throughput @ batch 1/16/256; reader p50/p99 vs A1
+- [x] Commit kept delta (read_your_writes primitive + doc fixes)  — A3 substrate (23bd7d6)
+- [x] tests/commute.rs        — 4 tests, CommuteGroup == serial differential + grouping + fuzz. PASS
+- [x] tests/tokens.rs         — 4 tests, RYW satisfied on acking ring / refused on lagging replica. PASS
+- [x] tests/batch_atomicity.rs— 2 tests, 50k bulk = 0-or-all + pinned-under-sustained-writes. PASS
+      KEY FINDING: Graph::len() counts the DEFAULT graph only; commute.rs counts
+      all graphs via a UNION SPARQL count (named graphs are the §6.5 conflict unit).
+- [ ] bench/serve writer_spike — writer throughput @ batch 1/16/256; reader p50/p99 vs A1
 - [ ] CHANGELOG entry
 - [ ] Gate: cargo test --workspace --exclude sparq-py --release --no-fail-fast | grep -aE "^test result"
 - [ ] wasm byte count unchanged @ 1,643,095 (sparq-serve must NOT enter wasm builds)
