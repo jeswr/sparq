@@ -1,0 +1,3 @@
+# run-time state (instance ids, ssh keys, ledger) and collected results stay local
+state/
+results/
