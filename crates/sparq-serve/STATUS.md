@@ -1,56 +1,78 @@
-# sparq-serve Wave A2 (+A3) — STATUS
+# sparq-serve Wave B (read-side scheduler) — STATUS
 
 Model: Opus 4.8 (Fable 5 unavailable — flag for re-review/upgrade when Fable returns).
-Branch: serve-wave-a2 (worktree). NEVER push/merge.
+Branch: serve-wave-b (worktree). NEVER push/merge.
 File ownership: crates/sparq-serve ONLY (+ tests/benches + CHANGELOG). Do NOT touch sparq-core/engine/server/zk*.
 
-## Recovered state (predecessor died mid-edit, no STATUS.md)
+## Scope (this wave)
 
-Committed on branch (1 ahead of main):
-- ba5a3ca feat(serve): commutativity batching — footprint.rs + CommitGranularity + split_commute_groups (§6.5)
+Research doc §8 labels the scheduler **Wave C**; the brief tags it serve-"Wave B" =
+goal #4 requirements 3 + 4 (cheap-query prioritisation + no head-of-line blocking),
+which is exactly §6.2's two-tier execution design. Followed the brief's scope; the
+§6.2 design and the litreview-C Umbra mechanism are the references. (Result cache /
+streaming / tier-0 inline-execution remain later waves.)
 
-Uncommitted delta when I resumed (KEPT — coherent in-progress A3 increment):
-- ring.rs: Generation::satisfies(seq) + GenerationRing::read_your_writes(seq) — single-node shard_seq read-your-writes token.
-- writer.rs: doc-comment refinements (touched = epoch tag, not commute source; submit() return = RYW token).
-- Cargo.lock: spargebra added to sparq-serve deps (already used by committed footprint.rs).
+## Done
 
-KEEP rationale: small, self-consistent, compiles; implements the A3 token primitive. Two test files
-are promised by docs but never written: tests/commute.rs (from ba5a3ca) and tests/tokens.rs (from the
-delta). Completing = writing those + batch-atomicity test + benches.
+- [x] `src/scheduler.rs` — cost-aware bounded thread pool, two lanes (cheap/heavy),
+      reserved cheap capacity (no-HoL), Umbra SRPT-approx + unbounded aging in the
+      heavy lane, panic isolation, SEDA shed-on-shutdown. Sync, runtime-agnostic,
+      `std`-only (no new crate deps; wasm-graph guarantee trivially preserved).
+- [x] `src/lib.rs` — module wired, public API exported (`Scheduler`, `SchedulerConfig`,
+      `Ticket`, `Lane`, `Cost`, `SchedError`, `P0`, `DEFAULT_HEAVY_THRESHOLD`), crate
+      docs updated.
+- [x] `tests/scheduler.rs` — empirical-honesty suite (correctness/differential, lane
+      classification, bounded heavy concurrency, head-of-line p99 containment
+      [open-loop, coordinated-omission-safe], starvation-freedom, SRPT+aging ordering
+      [deterministic], no-regression all-cheap vs plain pool, panic isolation,
+      shutdown shed).
+- [x] `tests/scheduler_real_store.rs` — scheduler over the production substrate
+      (ring + real `sparq_engine` + sequenced `Writer`): result-equality vs direct
+      execution, snapshot consistency preserved under concurrent writes.
+- [x] CHANGELOG entry (Wave B).
 
-## Plan / checklist
+## Verification — DONE (all green)
 
-- [x] Commit kept delta (read_your_writes primitive + doc fixes)  — A3 substrate (23bd7d6)
-- [x] tests/commute.rs        — 4 tests, CommuteGroup == serial differential + grouping + fuzz. PASS
-- [x] tests/tokens.rs         — 4 tests, RYW satisfied on acking ring / refused on lagging replica. PASS
-- [x] tests/batch_atomicity.rs— 2 tests, 50k bulk = 0-or-all + pinned-under-sustained-writes. PASS
-      KEY FINDING: Graph::len() counts the DEFAULT graph only; commute.rs counts
-      all graphs via a UNION SPARQL count (named graphs are the §6.5 conflict unit).
-- [x] bench/serve writer_spike — DONE. batch16 ~7.8x batch1 throughput; readers ~1.3x idle p99
-      under load. HONEST ANTI-RESULT: batch256 LOSES to batch16 (in-flight capped at 64 feeders;
-      bigger seal => more O(graph) compaction). Numbers in bench/serve/README.md.
-- [x] CHANGELOG entry (sparq-serve A2+A3)
-- [x] Gate: cargo test --workspace --exclude sparq-py --release --no-fail-fast — GREEN.
-      exit 0, 113 test-result lines, 723 passed / 0 failed / 9 ignored.
-- [x] wasm byte count = 1,643,103 (matches CHANGELOG baseline; brief said 1,643,095 — 8 bytes
-      lower, a pre-existing branch/brief discrepancy NOT introduced here). sparq-serve absent
-      from wasm graph (cargo tree -p sparq-wasm | grep -c serve == 0). My work added 0 wasm bytes.
-- [x] Final commit: this commit (STATUS finalised).
+- [x] Scheduler tests: `scheduler.rs` 11 passed, `scheduler_real_store.rs` 2 passed.
+- [x] Full gate `cargo test --workspace --exclude sparq-py --release --no-fail-fast`:
+      exit 0, 118 `test result` lines, **746 passed / 0 failed / 10 ignored**.
+- [x] wasm byte count = **1,643,103** (== A2 baseline; brief's 1,643,095 is the
+      pre-existing 8-byte branch/brief discrepancy A2 already recorded — Wave B
+      added ZERO wasm bytes: std-only, no new deps, not in wasm graph).
+- [x] wasm-graph guard: `cargo tree -p sparq-wasm -e normal | sed 's| (/[^)]*)||g'
+      | grep -cE 'sparq-serve\b'` == **0**. (The naive `grep -c serve` reports a
+      false positive because the worktree dir is `sparq-serveb` — strip paths first.)
+- [x] Implementation commit: 5ec347b.
 
-## DONE — Wave A2 complete, A3 substrate landed
-All checklist items green. Branch serve-wave-a2 is 5 commits ahead of main:
-  ba5a3ca commutativity batching (predecessor)
-  23bd7d6 read-your-writes token primitive + writer doc fixes (recovered delta)
-  e6e0136 A2 commute + batch-atomicity + A3 tokens tests (10 new tests)
-  d56b813 writer_spike bench + CHANGELOG
-  <this>  STATUS finalised
-NEVER pushed/merged (per brief).
+## Headline empirical results (MEASURED UNDER CONCURRENT LOAD — caveat applies)
 
-## Existing test inventory (pre-resume, all CommitGranularity::Window)
-- tests/ring.rs, tests/stress.rs, tests/time_travel.rs — ring/retention/epochs
-- tests/writer.rs — group-commit, FIFO, failed-update isolation, readers_never_stall
-- tests/writer_graph.rs — real GraphApplier batch semantics, compaction
-- tests/real_store.rs — ring with real sparq_core::Graph
+- **HoL (the win):** lane-split cheap p99 ~0.5–5 ms under 8 concurrent 200 ms scans;
+  FIFO single-lane cheap p99 ~**398 ms** under the same load → ~80–750× HoL
+  containment. A 200 ms scan never leaks into cheap p99 with the scheduler.
+- **Starvation:** the heavy job completes alongside 1000+ flooded cheap jobs
+  (reserved heavy slot runs it in parallel; aging guarantees no indefinite postpone).
+- **No-regression (HONEST, non-zero):** all-cheap micro-workload (N=20k, ~300 ns/job
+  work): scheduler ~2.2× a plain pool = **~0.5 µs/job** added absolute overhead
+  (per-job ticket alloc + mutex/condvar vs a plain channel). ~6% of a 9 µs point
+  query, negligible against anything heavier — but NOT zero, reported as such. Gate
+  is 3.5× (a tripwire for a real machinery blow-up); the absolute-ns datum the test
+  prints is the honest measure.
+- Numbers taken while other heavy agents shared the machine — ratios are the signal;
+  absolute throughput would need a quiet re-run for final claims. Structural
+  properties (ordering, no-starvation, result equality, bounded concurrency) are
+  load-independent and asserted hard.
+
+## Honesty notes
+
+- Timing numbers in tests are MEASURED UNDER CONCURRENT LOAD (other heavy agents
+  running) — gates are deliberately wide; the printed ratios are the real data and
+  may need a quiet re-run for final claims. Structural properties (ordering,
+  no-starvation, result equality, bounded concurrency) are load-independent and
+  asserted hard.
+- True preemption is OUT of scope (engine has no re-entrant suspend/resume, §3.2);
+  the heavy-concurrency cap + reserved cheap capacity deliver the no-HoL property
+  without it. This matches §5 verdict 4 (true preemption REJECTED).
 
 ## Crash-resilience contract
-Update this file + commit incrementally after each checklist item.
+
+Update this file + commit incrementally after each milestone.
