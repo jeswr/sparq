@@ -82,15 +82,51 @@ ladder as selectable [`EvalMode`]s, benchmarked head-to-head (README table,
   (stream-to-stream transformation; R2S as exact set diffs over the
   constructed graphs) and `ContinuousAsk` (one boolean per window, RSTREAM
   semantics), both validated at registration, both honouring `EvalMode`.
-- **RSP-QL surface syntax** — DEFERRED, out-of-scope-by-design for now:
-  `register` takes plain SPARQL + a programmatic `WindowSpec`; there is no
-  `FROM NAMED WINDOW :w ON STREAM :s [RANGE PT10S STEP PT5S]` parser, and no
-  named streams / multiple windows per query (RSP-QL allows joining several
-  windows). One stream, one window, one query. Doing this properly is a
-  parser + multi-window-join design (each window needs its own S2R state and
-  the engine a dataset-per-window view) — a feature in its own right, not an
-  increment on the current pipeline; revisit if a consumer actually speaks
-  RSP-QL text.
+- **RSP-QL surface syntax + multi-window joins (sq-9u1)** — DONE [OPUS-4.8].
+  Two pieces:
+  1. **Surface-syntax parser** (`RspqlQuery::parse`, `rspql.rs`). Parses the
+     RSP-QL textual extensions AROUND the embedded SPARQL and reuses spargebra
+     for the BGP/algebra: `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM] <out> AS`
+     (→ `R2S`), `FROM NAMED WINDOW <w> ON <s> [RANGE <dur> [STEP <dur>]]`
+     (→ a `WindowSpec` per window, tumbling when STEP is omitted), and
+     `WHERE { WINDOW <w> { … } … }` rewritten to standard `GRAPH <w> { … }`.
+     Durations: ISO-8601 (`PT10S`, `PT1M30S`, `PT2H`, `P1D` — seconds
+     resolution) or a bare integer (logical ticks). IRIs may be `<…>` or
+     prefixed names (`ex:w1`, `:w1`) resolved against the body's `PREFIX`/`BASE`.
+     The scanner skips `<…>` IRIs and quoted strings (UTF-8-safe), so a `WINDOW`
+     substring inside data is not rewritten.
+     - SCOPED OUT (documented in the module): window VARIABLES
+       (`FROM NAMED WINDOW ?w`, `WINDOW ?w { … }` — rejected with a clear
+       error); `ROWS` count windows (no standard textual form — use the
+       programmatic `WindowSpec::count`); the `t0` origin / `max_delay`
+       (no place in the surface grammar — set on the parsed `WindowSpec` via the
+       builders); `NOW-PT…TO…` relative window bounds and `UNDER ENTAILMENT
+       REGIME` (parsed-away/ignored as metadata); years/months/weeks durations
+       (no fixed second count — rejected).
+  2. **Multi-window joins** (`ContinuousMultiQuery`, `multi.rs`). A query opening
+     ≥ 2 named windows (possibly over different streams / `RANGE`/`STEP`) and
+     joining across them. Each window keeps its OWN `WindowedStream` S2R state;
+     a push is tagged with its stream and routed to the windows `ON` it. All
+     windows share ONE event-time clock: a triple on one stream advances the
+     watermark of windows on the others (new `WindowedStream::advance(ts)`
+     heartbeat — closes/empty-reports without buffering, anchored like a gap
+     arrival), so closure is synchronized (the deterministic Window-Close
+     report policy). At each synchronized tick every window contributes its
+     latest-closed content as a NAMED GRAPH keyed by the window IRI; they are
+     assembled into one `Graph` (empty default + one named sub-graph per window)
+     and the rewritten `GRAPH <w>` query is evaluated — the engine's existing
+     cross-named-graph id translation (`eval_graph_named`) makes a variable
+     shared between `WINDOW <w1>` and `WINDOW <w2>` JOIN correctly. RSTREAM
+     (full per-tick result) only for now.
+     - FOLLOW-UPS (deferred): ISTREAM/DSTREAM over a multi-window join (the diff
+       base would be the previous tick's full result; `diff_rows` applies
+       mechanically but is not wired); a SLOW window that closes MULTIPLE windows
+       between a fast window's ticks contributes only its LATEST-closed content
+       at each tick (documented snapshot rule — a per-tick exact-overlap policy
+       would be a different, heavier semantics); window VARIABLES; `ROWS` in the
+       multi form. The persistent-dictionary `EvalMode` is NOT applied per
+       sub-graph here (each tick builds fresh per-window sub-graphs via
+       `from_parts`) — wiring `EvalMode` through the multi path is a follow-up.
 - **R2S hash collisions**: ISTREAM/DSTREAM SELECT diffs use 64-bit row hashes
   (documented, vanishingly unlikely to collide). Exact term-level multiset
   diffing would remove the caveat at the cost of hashing full term values.

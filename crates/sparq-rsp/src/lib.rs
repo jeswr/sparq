@@ -21,14 +21,18 @@
 //! result is itself a graph, as [`GraphResult`]s) and [`ContinuousAsk`] (one
 //! boolean per window, as [`AskResult`]s) are the CONSTRUCT / ASK forms.
 //!
-//! # RSP-QL surface syntax ([OPUS-4.8], sq-9u1 part 1)
+//! # RSP-QL surface syntax + multi-window joins ([OPUS-4.8], sq-9u1)
 //!
 //! The above is the *programmatic* API (build a [`WindowSpec`], register plain
 //! SPARQL). [`RspqlQuery::parse`] additionally parses the **RSP-QL textual query
 //! language** — `REGISTER … AS`, `FROM NAMED WINDOW <w> ON <s> [RANGE … STEP …]`,
 //! and `WINDOW <w> { … }` graph patterns — into that representation, reusing
-//! spargebra for the embedded SPARQL. See [`RspqlQuery`] for the supported
-//! subset and the scoped-out constructs.
+//! spargebra for the embedded SPARQL. [`ContinuousMultiQuery`] is the front end
+//! for queries that open MORE THAN ONE named window and JOIN across them: each
+//! window keeps its own S2R state over its stream, and at each synchronized tick
+//! the windows are assembled as named graphs and joined by the engine. See
+//! [`RspqlQuery`] and [`ContinuousMultiQuery`] for the supported subset and the
+//! scoped-out constructs.
 //!
 //! # Design constraints (deliberate)
 //!
@@ -67,12 +71,14 @@
 //! ```
 
 mod eval;
+mod multi;
 mod query;
 mod rspql;
 mod stream;
 mod window;
 
 pub use eval::EvalMode;
+pub use multi::ContinuousMultiQuery;
 pub use query::{
     AskResult, ContinuousAsk, ContinuousConstruct, ContinuousQuery, GraphResult, R2S, WindowResult,
 };
