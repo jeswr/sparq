@@ -156,6 +156,22 @@ impl WindowEval {
         }
     }
 
+    /// [OPUS-4.8] The number of distinct non-inline terms currently held by the
+    /// persistent dictionary, or `None` for the modes without a lifetime
+    /// dictionary ([`EvalMode::Rebuild`] builds and drops one per window;
+    /// [`EvalMode::Delta`] keeps the live graph's dictionary, not exposed here).
+    /// An observability hook: this is the quantity that compaction bounds, so an
+    /// embedder running a long continuous query can watch it stay bounded
+    /// instead of growing with the all-time vocabulary.
+    pub fn dict_len(&self) -> Option<usize> {
+        match &self.m {
+            Materializer::PersistentDict { dict, .. } => {
+                Some(dict.as_ref().expect("dict restored between evaluations").len())
+            }
+            _ => None,
+        }
+    }
+
     pub fn push(&mut self, triple: [Term; 3], ts: u64) {
         match &mut self.m {
             Materializer::Rebuild { window } | Materializer::Delta { window, .. } => {

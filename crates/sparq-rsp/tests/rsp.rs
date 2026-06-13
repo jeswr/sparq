@@ -568,6 +568,107 @@ fn delta_mode_compaction_and_multi_timestamp_eviction() {
     assert_eq!(run(EvalMode::Delta), run(EvalMode::Rebuild));
 }
 
+/// [OPUS-4.8] PersistentDict dictionary compaction (sq-lhg): a long synthetic
+/// stream with HIGH VOCABULARY CHURN — every tick contributes a brand-new
+/// subject and object IRI — must NOT grow the lifetime dictionary without
+/// bound. The dictionary is reclaimed as terms age out of every live window, so
+/// it stays proportional to the live window content, not to the all-time
+/// vocabulary; and the per-window results stay byte-identical to the
+/// uncompacted `Rebuild` reference (the remap is a bijection on live ids).
+#[test]
+fn persistent_dict_compaction_bounds_growth_on_churning_vocabulary() {
+    use sparq_rsp::EvalMode;
+
+    // (start, end, rows) per closed window — the full observable per-window result.
+    type WindowRows = (u64, u64, Vec<Vec<Option<Term>>>);
+
+    const TICKS: u64 = 30_000; // long enough to cross the 1024-dead trigger many times
+    let q_str = "SELECT ?s ?o WHERE { ?s <http://ex/value> ?o } ORDER BY ?s ?o";
+    // Tumbling RANGE 10 STEP 10: each window holds ~10 ticks' vocabulary, and a
+    // closed window's terms age out immediately — so the all-time vocabulary
+    // (~2·TICKS distinct IRIs) dwarfs any single window's.
+    let spec = WindowSpec::time(10, 10);
+
+    // Distinct subject AND object every tick: unbounded vocabulary growth.
+    let triple = |ts: u64| -> [Term; 3] {
+        [
+            iri(&format!("subj{ts}")),
+            iri("value"),
+            iri(&format!("obj{ts}")),
+        ]
+    };
+
+    // --- Reference: Rebuild mode (fresh dict per window, never persists). ---
+    let mut reference: Vec<WindowRows> = Vec::new();
+    {
+        let mut q = ContinuousQuery::register(q_str, spec).unwrap().with_mode(EvalMode::Rebuild);
+        assert_eq!(q.dict_len(), None, "Rebuild has no lifetime dictionary");
+        let mut sink = |r: sparq_rsp::WindowResult| reference.push((r.start, r.end, r.rows));
+        for ts in 0..TICKS {
+            q.push(triple(ts), ts, &mut sink).unwrap();
+        }
+        q.flush(&mut sink).unwrap();
+    }
+
+    // --- Under test: PersistentDict, sampling the dictionary size over time. ---
+    let mut got: Vec<WindowRows> = Vec::new();
+    let mut max_dict_len = 0usize;
+    let mut samples: Vec<usize> = Vec::new();
+    {
+        let mut q =
+            ContinuousQuery::register(q_str, spec).unwrap().with_mode(EvalMode::PersistentDict);
+        let mut sink = |r: sparq_rsp::WindowResult| got.push((r.start, r.end, r.rows));
+        for ts in 0..TICKS {
+            q.push(triple(ts), ts, &mut sink).unwrap();
+            let len = q.dict_len().expect("PersistentDict exposes its dict size");
+            max_dict_len = max_dict_len.max(len);
+            if ts % 3000 == 0 {
+                samples.push(len);
+            }
+        }
+        q.flush(&mut sink).unwrap();
+    }
+
+    // 1) Results are IDENTICAL to the uncompacted reference — the compaction
+    //    remap preserved every still-referenced term and every window's rows.
+    assert_eq!(got, reference, "PersistentDict (compacting) diverged from the Rebuild reference");
+    assert!(!reference.is_empty());
+
+    // 2) The dictionary is BOUNDED: the all-time vocabulary is ~2·TICKS + 1
+    //    distinct IRIs (a subject and an object per tick, plus <value>), but the
+    //    dictionary never holds more than a tiny multiple of one window's
+    //    vocabulary. A monotonic (un-compacted) dictionary would reach ~60 000
+    //    here; the bound is well under a few thousand.
+    let all_time_vocab = 2 * TICKS as usize + 1;
+    assert!(
+        max_dict_len < all_time_vocab / 10,
+        "dictionary grew toward the all-time vocabulary ({max_dict_len} vs all-time {all_time_vocab}); \
+         compaction is not reclaiming aged-out terms"
+    );
+    // Measured peak here is ~2 063 (≈ the 1024-dead trigger + ~half the live
+    // set + one window), versus 60 001 all-time. 3 000 pins the bound tightly
+    // while leaving headroom (dict_len counts terms, so it is deterministic).
+    assert!(
+        max_dict_len < 3_000,
+        "dictionary not bounded near the live window content: peaked at {max_dict_len} terms"
+    );
+
+    // 3) The dictionary does NOT grow monotonically: it oscillates (grows as
+    //    fresh vocabulary arrives, DROPS at each compaction as aged-out terms
+    //    are reclaimed). The defining evidence of reclamation is that the size
+    //    decreases at least once — a monotonic dictionary never would — while
+    //    every sample stays within the bound established above.
+    assert!(
+        samples.iter().copied().max().unwrap_or(0) <= max_dict_len,
+        "samples exceeded the tracked maximum (bookkeeping bug)"
+    );
+    let shrinks = samples.windows(2).any(|w| w[1] < w[0]);
+    assert!(
+        shrinks,
+        "dictionary never shrank across the stream (samples {samples:?}) — terms are not being reclaimed"
+    );
+}
+
 // ---------------------------------------------------------------- CONSTRUCT / ASK
 
 fn construct_objs(triples: &[oxrdf::Triple]) -> Vec<String> {

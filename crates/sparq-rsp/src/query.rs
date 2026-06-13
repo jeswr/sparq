@@ -193,6 +193,16 @@ impl ContinuousQuery {
         self.eval.spec()
     }
 
+    /// [OPUS-4.8] Observability hook: the number of distinct non-inline terms
+    /// currently held by the persistent dictionary (`None` outside
+    /// [`EvalMode::PersistentDict`]). This is the quantity dictionary
+    /// compaction bounds — for a long-running query over an unbounded
+    /// vocabulary it tracks the live window content, not the all-time history.
+    #[doc(hidden)]
+    pub fn dict_len(&self) -> Option<usize> {
+        self.eval.dict_len()
+    }
+
     /// Pushes one stream element; `on_result` fires once per window this
     /// closes (zero or more times), oldest window first.
     ///

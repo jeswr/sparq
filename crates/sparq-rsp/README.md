@@ -118,8 +118,12 @@ How each closed window becomes the graph the engine evaluates is the
 - **`PersistentDict`** (default) — ONE dictionary for the continuous query's
   lifetime: terms interned once at push time, per-window graphs built from
   already-interned `[Id; 3]`s via `Graph::from_parts`. Removes term
-  hashing/allocation from the window loop; the dictionary grows monotonically
-  with the stream's distinct vocabulary (documented trade).
+  hashing/allocation from the window loop. The dictionary is COMPACTED as terms
+  age out of every live window (refcount-exact liveness: a term is kept iff some
+  live window still references it), so it stays bounded by the live window
+  vocabulary rather than growing with the all-time vocabulary — a 30 000-tick
+  churning-vocabulary stream (all-time vocab 60 001) peaks at ~2 063 dictionary
+  terms. `ContinuousQuery::dict_len()` exposes the live size.
 - **`Delta`** — ONE live graph + `Graph::apply_delta(inserts, deletes)` per
   slide (set-semantic diff between consecutive windows), compacted when the
   pending overlay outgrows the window. Measured slower than `PersistentDict`
@@ -158,7 +162,7 @@ above the saving is within run-to-run noise.
 
 ## Tests
 
-`cargo test -p sparq-rsp` — 32 integration tests + 3 doctests pinning:
+`cargo test -p sparq-rsp` — 33 integration tests + 3 doctests pinning:
 boundary inclusivity (`[start, end)`), tumbling partition / sliding overlap,
 window origin `t0` (shifted bounds, pre-origin arrivals, anchor far from the
 origin), empty-window reporting, `step > range` gaps, out-of-order within
@@ -166,6 +170,8 @@ origin), empty-window reporting, `step > range` gaps, out-of-order within
 scripted ISTREAM and DSTREAM traces (including disappearance via an empty
 window), multiset diff semantics, set-semantic materialisation, three-way
 eval-mode equivalence (incl. delta compaction + multi-timestamp eviction),
+PersistentDict dictionary compaction (bounded growth under high vocabulary
+churn, results identical to the uncompacted reference),
 CONSTRUCT (RSTREAM/ISTREAM/DSTREAM set diffs) and ASK per window,
 register-time validation of all three query forms, and end-to-end
 AVG-per-window.
