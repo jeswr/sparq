@@ -35,8 +35,8 @@ Source: `research/parallelism-scaling.md`. Touches the hot path: `exec.rs`, `lib
   serialization target**, not core asymmetry. NUMA + >8-thread questions still blocked.
 
 ### T2 — Wikidata ingestion under 24 min
-Source: `research/wikidata-ingestion-benchmark.md`, `fast-ingestion.md`. Currently **1.28–1.30 M/s**
-on the M1 (≈ QLever's server rate on a laptop). 24 min for ~9.4 B truthy ⇒ need ~6.5 M/s.
+Source: `research/wikidata-ingestion-benchmark.md`, `fast-ingestion.md` (the measured
+M1 build rate is single-sourced there). 24 min for ~9.4 B truthy ⇒ need ~6.5 M/s.
 - **The one bottleneck is `Dict::merge_remap`** (profiled) — the mandatory global-id serialization
   point; 8 cores net only ~1.3 M/s vs 0.96 single-core. **This is the SAME fix as T1.0's
   thread-local-vocab/sharded-dict** → T2's core *is* a T1 deliverable.
@@ -50,9 +50,10 @@ on the M1 (≈ QLever's server rate on a laptop). 24 min for ~9.4 B truthy ⇒ n
   `research/wikidata-ingestion-benchmark.md`). The timed ≥1 B-triple ingest is scripted and
   ready in `hwrun/remote.sh`; <24-min target neither met nor refuted.
 - **Status 2026-06-11 (pm): partial-scale MEASURED @1 B, full target quota-blocked.**
-  Sanctioned rung-5 run (on-demand r7i.2xlarge, 8 vCPU/64 GB, ~$1.50 total): **1 B real
-  truthy triples gz→queryable store in 737.8 s = 1.355 M/s, 51.5 GB peak RSS, 84 GB index,
-  COUNTs correct over mmap.** Measured ceiling: dict consolidation+remap is ~200 s/1 B
+  Sanctioned rung-5 run (on-demand r7i.2xlarge, 8 vCPU/64 GB, ~$1.50 total): 1 B real
+  truthy triples gz→queryable store, COUNTs correct over mmap — the rung5 wall/throughput/
+  peak-RSS/index figures are single-sourced in `research/wikidata-ingestion-benchmark.md`.
+  Measured ceiling: dict consolidation+remap is ~200 s/1 B
   *serial* even with the sharded dict ⇒ Amdahl-capped ≥31 min full-truthy on ANY core
   count until that bucket shrinks below ~153 s/1 B; load scaling plateaus at 1.8× on 4
   homogeneous x86 cores (merge_remap ceiling confirmed real, not M1 E-core artifact).

@@ -18,27 +18,13 @@ Graph shapes: `iri` = all-ground triples (RDFC10 cheap path); `bnode` =
 bnode chain with literal attributes (exercises canonical labeling,
 non-pathological).
 
-## Baseline (2026-06-13, fanless M1, zk-core branch @ post-verify-hook)
+## Baseline
 
-| bench | mean | throughput |
-|---|--:|--:|
-| canon/iri/64 | 513 µs | 124.8k triples/s |
-| canon/iri/256 | 2.43 ms | 105.3k triples/s |
-| canon/iri/1024 | 6.69 ms | 153.1k triples/s |
-| canon/bnode/64 | 880 µs | 72.8k triples/s |
-| canon/bnode/256 | 3.36 ms | 76.2k triples/s |
-| canon/bnode/1024 | 9.32 ms | 109.9k triples/s |
-| commit/iri/64 (end-to-end) | 8.90 ms | 7.2k triples/s |
-| commit/iri/256 | 43.2 ms | 5.9k triples/s |
-| commit/iri/1024 | 167.9 ms | 6.1k triples/s |
-| commit/bnode/64 | 8.58 ms | 7.5k triples/s |
-| commit/bnode/256 | 62.4 ms | 4.1k triples/s |
-| commit/bnode/1024 | 186.6 ms | 5.5k triples/s |
-| commit/leaves+fold/64 (canon precomputed) | 9.08 ms | 7.1k triples/s |
-| commit/leaves+fold/256 | 26.5 ms | 9.7k triples/s |
-| commit/leaves+fold/1024 | 128.6 ms | 8.0k triples/s |
-| poseidon2/permutation | 92.5 µs | — |
-| poseidon2/hash40 (commitment-scale fold) | 583 µs | — |
+The criterion benches above report mean time + triples/s throughput for RDFC10
+canonicalization (`canon/{iri,bnode}/{64,256,1024}`), end-to-end commitment
+(`commit/…`), the canon-precomputed leaves+fold path, and the raw Poseidon2
+primitives. Run `cargo bench` (above) for the numbers — criterion writes its own
+reports under `target/criterion`. The load-bearing qualitative reading:
 
 Reading of the baseline (empirical honesty, not spin):
 

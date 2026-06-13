@@ -149,9 +149,10 @@ physical cores; the @8 point adds only hyperthreads, so ideal @8 is ~4.8–5×, 
 ## Status of the two threads
 
 - **T2 (Wikidata <24 min):** **partial-scale MEASURED at 1 B real truthy triples on the
-  rung-5 box — 737.8 s, 1.355 M/s, 51.5 GB peak RSS, COUNTs correct** (full numbers +
-  labeled extrapolations: `research/wikidata-ingestion-benchmark.md`). Full-truthy
-  validation remains quota-blocked (needs big box + spill dict or ≥300 GB RAM).
+  rung-5 box, COUNTs correct** — the rung5 figures (wall, throughput, peak RSS) are
+  single-sourced in `research/wikidata-ingestion-benchmark.md` (with full numbers +
+  labeled extrapolations). Full-truthy validation remains quota-blocked (needs big box
+  + spill dict or ≥300 GB RAM).
 - **T1 / "T12" (many-core + NUMA):** 1–8-thread scaling now measured on homogeneous x86
   (table above): merge_remap ceiling confirmed real. NUMA + >8-thread behaviour remain
   hardware-blocked.

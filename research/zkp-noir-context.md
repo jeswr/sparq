@@ -227,7 +227,7 @@ soundness-assumption} curve.
 | Lampe pin | `@1cd3f4de` in `proofs/Ieee754/lakefile.toml` | research/05 |
 | zkVM baseline | 23 triples, `SELECT *`: **~7.5 min** (RISC Zero, M1 16GB) | research/02 §1.2 |
 | Early Noir pipeline | **6.88 s** proof generation (2025-07-15) | noir_sparql_proof README |
-| Modular demo bench | filter_eq 4 ACIR / **132 gates**; filter_lt 9 / **2 925 gates** (u64 range-check dominates); bgp_match depth-8 87 / **1 410 gates**; binding_consistency 9 / **281 gates**; 5 proofs parallel ≈ **5.2 s** prove, **3.2 s** verify, manifest ~164 kB | HANDOFF-WAVE17.md bench table |
+| Modular demo bench | per-member gate counts + prove/verify timing are committed as JSON — `bench/zk-compose/gate_counts_latest.json` / `family_cost_curve.json` (and regression-gated by `crates/sparq-zk-compose/tests/gate_count_snapshot.json`); read those rather than the historical HANDOFF-WAVE17 figures | `bench/zk-compose/*.json` |
 | Monolith scale | "one large circuit, often 10^6+ gates dominated by the join machinery" | modular decision doc |
 | Conformance | SPARQL 1.1 suite **167/236** (monolith, stable across #72) | state-current.md |
 | Braun & Käfer (closest prior art) | sub-second proving, but **no SPARQL algebra** — term-level proofs only | research/02 §1.1 |

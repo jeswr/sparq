@@ -22,30 +22,17 @@ Headline numbers (Apple M1, 4P+4E, 16 GB, macOS 26.4.1, 2026-06-12) are
 tabulated in `research/concurrent-serving.md` §1; re-run on the target
 hardware before trusting any absolute value.
 
-## writer_spike — recorded run (Apple M1, release, 2026-06-13, WRITER_UPDATES=30000)
+## writer_spike
 
-**Writer throughput (closed-loop drain; in-flight capped at min(max_batch, 64) sync feeders):**
+`./target/release/writer_spike` (build here first; `WRITER_UPDATES=30000`) measures the
+Wave A2 group-commit writer's throughput (updates/s, generations, updates/gen at
+`max_batch` 1/16/256) and reader latency (open-loop, coordinated-omission-safe: p50/p99/max
+under a concurrent writer vs idle). Run it for the numbers — this is a research spike, so
+re-run on the target hardware. The load-bearing findings:
 
-| max_batch | updates/s | generations | updates/gen |
-|---|---:|---:|---:|
-| 1 | 7,064 | 30,000 | 1.0 |
-| 16 | 54,865 | 1,875 | 16.0 |
-| 256 | 12,014 | 468 | 64.1 |
-
-**Reader latency (open-loop, coordinated-omission-safe, 200µs schedule, 2s window):**
-
-| scenario | p50 µs | p99 µs | max µs |
-|---|---:|---:|---:|
-| idle (no writer) | 69.4 | 84.5 | 150.7 |
-| A2 writer max_batch=1 | 71.2 | 114.2 | 307.3 |
-| A2 writer max_batch=16 | 70.9 | 113.8 | 2125.0 |
-| A2 writer max_batch=256 | 69.8 | 93.3 | 331.0 |
-| A1 publish-per-update | 70.1 | 96.3 | 384.4 |
-
-Honest reading:
-- **Group-commit wins on throughput**: batch-16 is ~7.8× batch-1 (54.9k vs 7.1k updates/s)
-  — each generation amortises one fork/seal/publish over 16 updates instead of 1.
-- **Batch-256 LOSES to batch-16** (12.0k vs 54.9k updates/s). This harness caps in-flight
+- **Group-commit wins on throughput**: batch-16 is several × batch-1 — each generation
+  amortises one fork/seal/publish over many updates instead of one.
+- **Batch-256 LOSES to batch-16.** This harness caps in-flight
   work at 64 sync feeders, so a window never actually collects 256 (updates/gen plateaus at
   ~64); the larger per-window seal then folds the pending delta (O(graph) compaction) more
   often, so a too-large `max_batch` is pure overhead here. The §6.5 default (256) only pays

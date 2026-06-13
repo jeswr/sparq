@@ -23,19 +23,19 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
 - **Storage (`sparq-core`)** — dictionary-encoded triple store with six sorted permutation
   indexes (Hexastore/RDF-3X lineage); a 3-permutation compact-index mode (~half the index
   memory) for memory-constrained targets; parallel index construction.
-- **Out-of-core mode** — build the indexes on disk and query them memory-mapped: 100M-triple
-  external build in 74 s at 4.2 GB peak RAM on a 2020 M1 Air, then 0.67 s open with ~0
-  committed heap (OS page cache only), at query speeds matching the in-memory engine.
+- **Out-of-core mode** — build the indexes on disk and query them memory-mapped: a 100M-triple
+  external build at a few GB peak RAM, then fast open with ~0 committed heap (OS page cache
+  only), at query speeds matching the in-memory engine (figures: `research/BENCHMARKS.md`).
 - **Parsing** — N-Triples, Turtle, N-Quads, TriG (via `oxttl`); parallel and streaming, with
-  transparent `.gz` / `.bz2` / `.zst` decompression. Real-Wikidata ingestion ~1.3 M triples/s
-  building all six permutations out-of-core on a fanless laptop.
+  transparent `.gz` / `.bz2` / `.zst` decompression. Real-Wikidata ingestion builds all six
+  permutations out-of-core on a fanless laptop (rate: `research/wikidata-ingestion-benchmark.md`).
 - **SPARQL query (`sparq-engine`)** — SELECT/ASK; Basic Graph Patterns, FILTER, OPTIONAL,
   UNION, MINUS, VALUES, BIND, aggregation + GROUP BY, ORDER BY, DISTINCT, LIMIT/OFFSET;
   sort-merge, hash, and worst-case-optimal joins with greedy cardinality-based planning;
   parallel scan / filter / sort / aggregation / serialization.
 - **Inference (`sparq-reason`, opt-in)** — RDFS, OWL-RL, and a Notation3 subset with
-  saturate-then-sweep single-pass materialization (~17× over a naive fixpoint for RDFS,
-  ~30× OWL-RL fast path) and union-find `owl:sameAs`.
+  saturate-then-sweep single-pass materialization (a large speedup over a naive fixpoint;
+  figures in `research/BENCHMARKS.md` / the crate README) and union-find `owl:sameAs`.
 - **CLI (`sparq-cli`)** — load/query/bench subcommands, on-disk index build + `query-mmap`,
   `reason`, a per-subsystem parallel-scaling harness, and hardware-tiered release binaries
   (per-ISA prefetch tuning selected per silicon family).
@@ -184,12 +184,11 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
   with proof recording per call. Id-level batch N3 proofs bridge via
   `explain::n3_proof_tree`. The feature is cfg'd out entirely by default: zero hot-path
   cost, zero wasm impact (sparq-reason is not in the wasm graph; bundle byte-identical).
-  Measured cost when ON (olympics 1.78M triples, paired best-of-2, M1 Air): batch
-  `materialize_*` unchanged (untouched code); incremental handles pay for the base
-  reverse indexes — initial build ≈1.9–2.2× (RDFS 0.27→0.61 s, OWL-mono 0.30→0.64 s,
-  OWL-fixpoint 0.34→0.66 s), 10k-triple deltas ≈1.5–2.1× (all still ms-scale,
-  ≥89× faster than re-materialization); N3 unchanged (no extra maintenance state).
-  Design lever if that ever matters: build the indexes lazily on first `why()`.
+  When ON: batch `materialize_*` is unchanged (untouched code); incremental handles pay a
+  bounded constant for the base reverse indexes on initial build, and small deltas stay
+  ms-scale and far faster than re-materialization (measured cost in the crate README); N3
+  unchanged (no extra maintenance state). Design lever if that ever matters: build the
+  indexes lazily on first `why()`.
 
 
 - **Opt-in full-text search over literals (`sparq-text`, new crate)** — a small,
@@ -206,9 +205,8 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
   into inline `VALUES` over the hits and executed through the engine's existing
   `PreparedQuery: From<spargebra::Query>` seam — zero engine changes, zero wasm
   impact (bundle byte-checked; the crate sits outside every default dependency
-  graph, like `sparq-geo`/`sparq-vectors`). 1M synthetic 8-word literals: build
-  ~0.75 s, ~101 MiB heap, 2-term AND ~170 µs/query (contended-machine rough
-  figures; `crates/sparq-text/README.md`).
+  graph, like `sparq-geo`/`sparq-vectors`). Build / index-size / query-latency figures
+  on 1M synthetic literals: `crates/sparq-text/README.md` (run its `bench_text` example).
 - **Opt-in time-travel queries (`sparq-serve`, `sparq-server`)** — a retained
   generation IS a queryable snapshot. Library: `RingConfig::time_travel`
   (`TimeTravelConfig { max_generations, max_age }`, default `None`) extends ring
@@ -366,10 +364,10 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
 - **Pipelined streaming N-Triples ingest (`sparq-core`)** — `Graph::load_reader_parallel`
   now fills its 32 MiB block from repeated short `read()`s and overlaps decompression
   with parallel parse (producer thread → bounded channel → rayon parse → dict merge),
-  matching the `build_external_ntriples_parallel` pipeline. Streaming ingest of a 173 MB
-  gzip/zstd N-Triples file: 5.59 s → 0.66 s (gzip, 8.5×) and 3.95 s → 0.58 s (zstd, 6.9×);
-  streaming now matches or beats decompress-then-parse. `load_reader_parallel` requires
-  `R: Read + Send`. See `research/custom-parsers-baseline.md`.
+  matching the `build_external_ntriples_parallel` pipeline. Streaming ingest of a gzip/zstd
+  N-Triples file is now far faster than the pre-fix per-`read()` flush and matches or beats
+  decompress-then-parse (figures: `research/custom-parsers-baseline.md`).
+  `load_reader_parallel` requires `R: Read + Send`.
 
 - **Inference fixpoint linearization + delta-driven evaluation (`sparq-reason`,
   fixpoint-opt thread)** — the chain-transitivity derivation storms are gone, and
@@ -461,13 +459,14 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
 
 ### Performance
 
-Measured against native QLever 0.5.47 on the same machine (2020 MacBook Air M1, 16 GB),
-compute-only, cold, min-of-N — methodology and full tables in `bench/qlever-baselines.md`:
+Measured against native QLever on the same machine, compute-only, cold, min-of-N. The
+methodology, the full per-query tables, and the speedup ranges are single-sourced in
+`bench/qlever-baselines.md` (run `bench/qlever-olympics/` / `bench/qlever-synthetic/` to
+reproduce):
 
-- Synthetic 10M and 100M join/OPTIONAL queries: **2.2–20× faster** than QLever, in-memory and
+- Synthetic 10M and 100M join/OPTIONAL queries: faster than QLever, in-memory and
   out-of-core (mmap) alike; the advantage holds from 10M to 100M.
-- Real skewed data (DBpedia/Wallscope olympics, 1.78M triples): faster on **every** query,
-  **1.7–12×**.
+- Real skewed data (DBpedia/Wallscope olympics, 1.78M triples): faster on **every** query.
 - Honest caveats: QLever's on-disk index is *compressed* (smaller disk footprint at
   billion-scale); billion-scale real data (Wikidata/WDBench) is untested on this hardware;
   single-pattern/FILTER comparisons short-circuit via index range-counting and are excluded

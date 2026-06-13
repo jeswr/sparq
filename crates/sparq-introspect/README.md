@@ -94,20 +94,21 @@ type lookups once per *distinct* object), two range scans for declared domain/ra
 one dictionary pass (vocabularies). `O(|G| + |dict|)` time, output-sized memory plus
 the subject→types map.
 
-## Measured results — Apple M1, 16 GB, rustc 1.89, `--release`
+## Measured results
 
-Reproduce: `cargo run -p sparq-introspect --example olympics_introspect --release`
-(fixture paths via `SPARQ_OLYMPICS_NT` / `SPARQ_SYNTHETIC_NT`).
+The `olympics_introspect` example reports load / `Introspection::build` / `to_json` /
+`to_text_summary` time over the olympics (1.78M triples) and qlever-synthetic (10M)
+fixtures. Run it for the numbers (fixture paths via `SPARQ_OLYMPICS_NT` /
+`SPARQ_SYNTHETIC_NT`):
 
-| Dataset | Load | `Introspection::build` | `to_json` | `to_text_summary(2500)` |
-|---|---|---|---|---|
-| olympics, 1.78M triples (407k subjects, 8 classes, 16 predicates, 15 char. sets, 6243 namespaces) | 0.98 s | **0.10 s** | <1 ms (65 KB) | 0.1 ms |
-| qlever-synthetic, 10.0M triples (1.25M subjects, 1 class, 5 predicates, 1 char. set) | 5.8 s | **0.99 s** | <1 ms (5 KB) | 0.1 ms |
+```sh
+cargo run -p sparq-introspect --example olympics_introspect --release
+```
 
-Gates (design doc §4): full introspection scan ≤ dataset load time — **6–10× under** on
-both datasets; summary generation < 100 ms at olympics scale — **0.1 ms**; the olympics
-text summary names the dataset's actual classes (foaf:Person, dbo:SportsEvent,
-dbo:SportsTeam, dbo:Olympics, …) — asserted by `tests/olympics.rs`.
+The design-doc §4 gates it enforces: full introspection scan ≤ dataset load time;
+summary generation < 100 ms at olympics scale; and the olympics text summary names
+the dataset's actual classes (foaf:Person, dbo:SportsEvent, dbo:SportsTeam,
+dbo:Olympics, …) — asserted by `tests/olympics.rs`.
 
 Olympics summary excerpt (budget 2500):
 

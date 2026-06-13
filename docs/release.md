@@ -3,15 +3,18 @@
 How to cut a sparq release. Everything below is **maintainer-triggered**: nothing publishes
 until you push a `v*` tag (CI) or run `cargo publish` (crates.io) yourself.
 
-## 0. One-time pre-release checklist (before the first 0.1.0 tag)
+## 0. One-time pre-release steps (before the first 0.1.0 tag)
 
-- [ ] **Add a `LICENSE` file** (MIT text) at the repo root. `license = "MIT"` in Cargo.toml
-      satisfies crates.io, but the release archives and the Docker/ghcr page should carry the
-      actual text; `release.yml` copies `LICENSE` into every archive *if present*.
-- [ ] **Check crate-name availability** on crates.io for `sparq-core`, `sparq-engine`,
-      `sparq-reason`, `sparq-cli`, `sparq-server` (https://crates.io/crates/<name>). Squatted
-      names mean renaming before anything else.
-- [ ] `cargo owner` / crates.io API token configured locally (`cargo login`).
+These are tracked as beads (`bd list -l area:release`); the procedure is documented
+here for the runbook:
+
+- **Add a `LICENSE` file** (MIT text) at the repo root. `license = "MIT"` in Cargo.toml
+  satisfies crates.io, but the release archives and the Docker/ghcr page should carry the
+  actual text; `release.yml` copies `LICENSE` into every archive *if present*.
+- **Check crate-name availability** on crates.io for `sparq-core`, `sparq-engine`,
+  `sparq-reason`, `sparq-cli`, `sparq-server` (https://crates.io/crates/<name>). Squatted
+  names mean renaming before anything else.
+- `cargo owner` / crates.io API token configured locally (`cargo login`).
 
 ## 1. Version bump
 

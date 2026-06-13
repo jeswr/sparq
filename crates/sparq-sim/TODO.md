@@ -1,9 +1,16 @@
-# sparq-sim — gaps and follow-ups
+# sparq-sim — outstanding work
 
-Constraint honoured in v1 and v2: **no existing crate was modified**. Items below are
-either resolved here or deferred with rationale.
+Tracked in beads (not here). Run `bd ready -l area:sparq-sim` or
+`bd list -l area:sparq-sim`. See AGENTS.md for the no-markdown-TODOs policy.
 
-## v1 gaps — status
+## Notes
+
+Design rationale and DONE-status records retained from the previous gaps list
+(not task tracking). Forward-looking items are tracked in beads.
+
+Constraint honoured in v1 and v2: **no existing crate was modified**.
+
+### v1 gaps — status
 
 1. ~~**Neighbor-sparse entities get no `most_similar` candidates**~~ **DONE** —
    `SimConfig::profile_fallback` (default on): when `(predicate, neighbor)` candidate
@@ -45,7 +52,7 @@ either resolved here or deferred with rationale.
    alloc per row. Swapping the `rdf:type`-block workaround for these is this
    crate's owner's call.
 
-## Deferred (per research/genai-design.md phasing)
+### Deferred (per research/genai-design.md phasing) — tracked in beads
 
 - v1.1: FST lexical tier over the sorted dictionary; T-box-aware signatures (closure
   via `sparq-reason`, opt-in).

@@ -25,19 +25,17 @@ once per unique triple) and forces result-preserving plan changes (disabled
 COUNT/LIMIT/sargable pushdowns). The `untraced` arm confirms the disarmed cost
 is the one-thread-local-read floor.
 
-## Baseline (2026-06-13, M-series, zk-trace-engine, short-sample run)
+## Baseline
 
-100 entities (~900 triples). `traced` = recorder armed + drained each iter.
+This criterion bench compares untraced vs traced (recorder armed + drained each iter)
+execution of bgp-star / chain / triangle / filter / optional over 100 entities
+(~900 triples), reporting the per-query trace-capture overhead. Run it for the numbers:
 
-| query | untraced | traced | overhead |
-|---|--:|--:|--:|
-| bgp-star | 167 µs | 437 µs | 2.6x |
-| bgp-chain | 384 µs | 1.29 ms | 3.4x |
-| bgp-triangle (WCOJ) | 765 µs | 2.57 ms | 3.4x |
-| filter | 101 µs | 380 µs | 3.8x |
-| optional | 281 µs | 861 µs | 3.1x |
+```sh
+cd bench/zk-trace && cargo bench
+```
 
-Honest read: capture is a constant-factor cost (~2.5-4x) at this scale — it
+Honest read: capture is a constant-factor cost (a few × at this scale) — it
 materializes the full consumed input set (dictionary ids deduped, terms once
 per unique triple) and forces the result-preserving plan changes (disabled
 COUNT/LIMIT/sargable pushdowns). This is the proving path, run once per proof,
