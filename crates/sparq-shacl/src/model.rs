@@ -73,6 +73,31 @@ pub enum Component {
     },
     HasValue(Term),
     In(Vec<Term>),
+    /// sh:sparql — a SPARQL-based constraint (SHACL §5.2). The index is into
+    /// [`ShapesModel::sparql`].
+    Sparql(usize),
+}
+
+/// A `sh:sparql` constraint's components (SHACL §5.2): the `sh:select` query,
+/// its `sh:prefixes` declarations and an optional constraint-level `sh:message`.
+/// The parsed/validated query is held in [`crate::sparql::PreparedSparql`]; a
+/// `None` prepared form means the query was ill-formed (and the constraint is
+/// skipped, matching this crate's lenient handling of ill-formed shapes).
+#[derive(Debug, Clone)]
+pub(crate) struct SparqlConstraint {
+    /// The raw `sh:select` text.
+    pub select: String,
+    /// PREFIX declarations assembled from `sh:prefixes` (`sh:declare` →
+    /// `sh:prefix` / `sh:namespace`), prepended to `select` before parsing.
+    pub prefixes: String,
+    /// The constraint's own `sh:message` template, if any (takes precedence over
+    /// a `?message` binding and over the shape's `sh:message`).
+    pub message: Option<String>,
+    /// `sh:deactivated true` on the constraint node.
+    pub deactivated: bool,
+    /// The parsed query; `None` if `select` did not parse as a SELECT — the
+    /// constraint is then skipped.
+    pub prepared: Option<crate::sparql::PreparedSparql>,
 }
 
 #[derive(Debug)]
@@ -98,6 +123,8 @@ pub struct ShapesModel {
     by_node: FxHashMap<Term, usize>,
     /// Shapes that have at least one target — the validation entry points.
     pub targeted: Vec<usize>,
+    /// SPARQL-based constraints (`sh:sparql`), referenced by [`Component::Sparql`].
+    pub(crate) sparql: Vec<SparqlConstraint>,
 }
 
 impl ShapesModel {
@@ -107,6 +134,7 @@ impl ShapesModel {
             shapes: Vec::new(),
             by_node: FxHashMap::default(),
             targeted: Vec::new(),
+            sparql: Vec::new(),
         };
 
         // Top-level shape discovery: explicitly typed shapes plus anything with a target.
@@ -400,10 +428,135 @@ impl ShapesModel {
             });
         }
 
+        // sh:sparql — SPARQL-based constraints (SHACL §5.2). The object is a node
+        // carrying sh:select (required), sh:prefixes, sh:message, sh:deactivated.
+        // On a property shape, $PATH in the query is pre-bound to the path.
+        let shape_path = shape.path.clone();
+        for sp in g.objects(node, &sh("sparql")) {
+            if let Some(idx) = self.parse_sparql_constraint(g, &sp, shape_path.as_ref()) {
+                shape.components.push(Component::Sparql(idx));
+            }
+        }
+
         shape
+    }
+
+    /// Parses one `sh:sparql` constraint node into a [`SparqlConstraint`],
+    /// interning it into [`Self::sparql`] and returning its index. `None` when the
+    /// node has no `sh:select` literal (an ill-formed constraint — skipped).
+    /// `shape_path` is the enclosing (property) shape's path, used to pre-bind the
+    /// `$PATH` query variable (SHACL §5.2.1) when present.
+    fn parse_sparql_constraint(
+        &mut self,
+        g: &GraphView,
+        node: &Term,
+        shape_path: Option<&Path>,
+    ) -> Option<usize> {
+        let raw_select = match g.object(node, &sh("select")) {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            _ => return None,
+        };
+        // $PATH pre-binding: substitute the property path's SPARQL property-path
+        // form for $PATH / ?PATH in the query text (a property-shape feature).
+        let select = match shape_path.and_then(Path::to_sparql_property_path) {
+            Some(pp) => substitute_path_var(&raw_select, &pp),
+            None => raw_select,
+        };
+        let prefixes = self.collect_prefixes(g, node);
+        let message = match g.object(node, &sh("message")) {
+            Some(Term::Literal(l)) => Some(l.value().to_string()),
+            _ => None,
+        };
+        let deactivated = matches!(
+            g.object(node, &sh("deactivated")),
+            Some(Term::Literal(l)) if l.value() == "true"
+        );
+        let mut constraint = SparqlConstraint {
+            select,
+            prefixes,
+            message,
+            deactivated,
+            prepared: None,
+        };
+        constraint.prepared = crate::sparql::PreparedSparql::build(&constraint);
+        let idx = self.sparql.len();
+        self.sparql.push(constraint);
+        Some(idx)
+    }
+
+    /// Assembles SPARQL `PREFIX` declarations from a constraint node's
+    /// `sh:prefixes` (SHACL §5.2.1): each `sh:prefixes` object is a prefix
+    /// declarations resource that, directly or via `owl:imports`, declares
+    /// `sh:declare` nodes carrying `sh:prefix` (the short name) and `sh:namespace`
+    /// (the IRI). owl:imports chasing is followed one level (cycle-guarded).
+    fn collect_prefixes(&self, g: &GraphView, node: &Term) -> String {
+        const OWL_IMPORTS: &str = "http://www.w3.org/2002/07/owl#imports";
+        let mut out = String::new();
+        let mut seen_decls: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+        let mut roots: Vec<Term> = g.objects(node, &sh("prefixes"));
+        let mut visited_roots: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+        let mut i = 0;
+        while i < roots.len() {
+            let root = roots[i].clone();
+            i += 1;
+            if !visited_roots.insert(root.clone()) {
+                continue;
+            }
+            // Follow owl:imports transitively (cycle-guarded by visited_roots).
+            for imp in g.objects(&root, OWL_IMPORTS) {
+                roots.push(imp);
+            }
+            for decl in g.objects(&root, &sh("declare")) {
+                if !seen_decls.insert(decl.clone()) {
+                    continue;
+                }
+                let prefix = match g.object(&decl, &sh("prefix")) {
+                    Some(Term::Literal(l)) => l.value().to_string(),
+                    _ => continue,
+                };
+                let ns = match g.object(&decl, &sh("namespace")) {
+                    Some(Term::Literal(l)) => l.value().to_string(),
+                    Some(Term::NamedNode(n)) => n.as_str().to_string(),
+                    _ => continue,
+                };
+                out.push_str(&format!("PREFIX {prefix}: <{ns}>\n"));
+            }
+        }
+        out
     }
 }
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+}
+
+/// Substitutes the `$PATH` / `?PATH` query variable (a SHACL property-shape
+/// SPARQL pre-binding) with the SPARQL property-path expression `pp`, replacing
+/// only WHOLE variable tokens (so `$PATHWAY` is left alone). SHACL §5.2.1.
+fn substitute_path_var(select: &str, pp: &str) -> String {
+    let mut out = String::with_capacity(select.len());
+    let mut rest = select;
+    while let Some(pos) = rest.find(['$', '?']) {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..]; // starts with $ or ?
+        let body = &tail[1..];
+        // Whole-token match of "PATH" delimited by a non-identifier char.
+        let is_path_var = body.strip_prefix("PATH").is_some_and(|after| {
+            after
+                .chars()
+                .next()
+                .map(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .unwrap_or(true)
+        });
+        if is_path_var {
+            out.push_str(pp);
+            rest = &body[4..]; // past "PATH"
+        } else {
+            // Not the PATH var: keep the sigil and continue past it.
+            out.push_str(&tail[..1]);
+            rest = body;
+        }
+    }
+    out.push_str(rest);
+    out
 }

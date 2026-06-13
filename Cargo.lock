@@ -3237,7 +3237,9 @@ dependencies = [
  "oxttl 0.2.3",
  "regex",
  "rustc-hash 2.1.2",
+ "spargebra",
  "sparq-core",
+ "sparq-engine",
 ]
 
 [[package]]

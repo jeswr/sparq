@@ -154,6 +154,41 @@ impl Path {
             Path::ZeroOrOne(p) => format!("[ <{SH}zeroOrOnePath> {} ]", p.to_turtle()),
         }
     }
+
+    /// [OPUS-4.8] Serialises the path as a **SPARQL property-path expression**
+    /// (for `$PATH` pre-binding in SHACL-SPARQL property constraints, §5.2.1):
+    /// `<iri>`, `^p`, `p1/p2`, `p1|p2`, `p*`, `p+`, `p?`, fully parenthesised so
+    /// it composes safely when textually spliced into a query's BGP. Returns
+    /// `None` for an empty/degenerate sequence or alternative (no SPARQL form).
+    pub fn to_sparql_property_path(&self) -> Option<String> {
+        Some(match self {
+            Path::Predicate(p) => format!("<{p}>"),
+            Path::Inverse(p) => format!("^({})", p.to_sparql_property_path()?),
+            Path::Sequence(ps) => {
+                if ps.is_empty() {
+                    return None;
+                }
+                let inner: Vec<String> = ps
+                    .iter()
+                    .map(|p| p.to_sparql_property_path())
+                    .collect::<Option<_>>()?;
+                format!("({})", inner.join("/"))
+            }
+            Path::Alternative(ps) => {
+                if ps.is_empty() {
+                    return None;
+                }
+                let inner: Vec<String> = ps
+                    .iter()
+                    .map(|p| p.to_sparql_property_path())
+                    .collect::<Option<_>>()?;
+                format!("({})", inner.join("|"))
+            }
+            Path::ZeroOrMore(p) => format!("({})*", p.to_sparql_property_path()?),
+            Path::OneOrMore(p) => format!("({})+", p.to_sparql_property_path()?),
+            Path::ZeroOrOne(p) => format!("({})?", p.to_sparql_property_path()?),
+        })
+    }
 }
 
 /// Breadth-first reachability closure of `inner` from `start`; `reflexive`

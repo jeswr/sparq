@@ -1,10 +1,12 @@
 # sparq-shacl
 
-Opt-in **SHACL Core** validation over [`sparq_core::Graph`]s.
+Opt-in **SHACL Core + SHACL-SPARQL (`sh:sparql`)** validation over
+[`sparq_core::Graph`]s.
 
 Parses a shapes graph into a shapes model, evaluates every SHACL Core
 constraint component against a data graph by direct, index-backed permutation
-scans (no SPARQL round-trip), and produces a `ValidationReport` with:
+scans (no SPARQL round-trip), evaluates `sh:sparql` constraints by routing their
+`sh:select` through `sparq-engine`, and produces a `ValidationReport` with:
 
 - the parsed results (`conforms` + `Vec<ValidationResult>` carrying
   focus node / result path / value / source shape / source constraint
@@ -46,6 +48,16 @@ timezone-presence comparability rule), `sh:minLength`/`sh:maxLength`,
 (+`sh:qualifiedMinCount`/`sh:qualifiedMaxCount`/
 `sh:qualifiedValueShapesDisjoint`), `sh:closed` (+`sh:ignoredProperties`),
 `sh:hasValue`, `sh:in`.
+
+**SHACL-SPARQL:** `sh:sparql` (the SPARQL-based constraint component, §5.2) —
+the `sh:select` runs per focus node with `$this` pre-bound (and `$PATH` on
+property shapes), each solution a violation; honours `sh:prefixes`
+(`sh:declare`/`sh:prefix`/`sh:namespace`, with `owl:imports` chasing) and
+`sh:message` (`{?var}` templating). Maps `?value`→`sh:value` (defaulting to the
+focus node when unprojected), `?path`→`sh:resultPath`, `?message`→
+`sh:resultMessage`. Pinned by the W3C `sparql/node` + `sparql/property`
+sub-suites. SPARQL-based constraint *components* (custom `sh:ConstraintComponent`
+with `sh:parameter`/`sh:validator`) are deferred — see `TODO.md`.
 
 Targets: `sh:targetNode`, `sh:targetClass` (with `rdfs:subClassOf*` closure),
 implicit class targets (a shape that is itself an `rdfs:Class`),
@@ -116,8 +128,10 @@ for data in data_graphs {
 
 ## Scope and non-goals
 
-- **SHACL Core only.** SHACL-SPARQL (`sh:sparql` constraints, SPARQL-based
-  constraint components) is out of scope; see `TODO.md`.
+- **SHACL Core + `sh:sparql`.** The SPARQL-based constraint *component*
+  declaration machinery (custom `sh:ConstraintComponent` with `sh:parameter` /
+  `sh:validator`) and the full `sparql/pre-binding` semantics (rejecting
+  variable re-binding, `$shapesGraph`) are out of scope; see `TODO.md`.
 - Validation results are **not deduplicated** across traversal routes /
   component occurrences — matching the test suite's expectations (a nested
   shape reached through two parents reports twice).
