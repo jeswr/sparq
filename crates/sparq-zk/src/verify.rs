@@ -183,6 +183,225 @@ fn expression_has_exists(e: &Expression) -> bool {
     }
 }
 
+// [OPUS-4.8] FILTER query-binding (audit #5/#6/#10) — extract the query's
+// FILTER comparisons and the variable→(pattern,slot) map so the compose
+// verifier can require a matching, slot-bound, verdict-gated filter sub-proof.
+
+/// A numeric comparison operator extracted from a query FILTER. Mirrors the
+/// `filter_int` circuit's `OP_*` codes; `sparq-zk-compose`'s `FilterOp` maps
+/// 1:1 to this (the manifest enum lives downstream, so this neutral enum is
+/// what the query parser yields). `code()` is the in-circuit `op` value the
+/// reconstructed public-input vector carries — the compose verifier compares
+/// it against the bound sub-proof's `op`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterCmp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+}
+
+impl FilterCmp {
+    /// The `op` public-input value the `filter_int` circuit expects (identical
+    /// to `sparq_zk_compose::manifest::FilterOp::code`).
+    pub fn code(self) -> u32 {
+        match self {
+            FilterCmp::Lt => 0,
+            FilterCmp::Le => 1,
+            FilterCmp::Gt => 2,
+            FilterCmp::Ge => 3,
+            FilterCmp::Eq => 4,
+            FilterCmp::Ne => 5,
+        }
+    }
+}
+
+/// One query FILTER comparison the verifier must find a bound `filter_int`
+/// sub-proof for: `?variable op bound`, where `bound` is the xsd:integer
+/// constant operand parsed from the literal. Only the integer-FILTER fragment
+/// the `filter_int` circuit supports is extracted; any other FILTER shape
+/// (float, string, arithmetic, `?a op ?b`, `IN`, …) makes the query fall
+/// outside the bindable fragment and is rejected by [`collect_filters`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryFilter {
+    /// The variable the FILTER constrains (its operand column).
+    pub variable: String,
+    /// The comparison operator (already normalized to `?var op const` form;
+    /// a `const op ?var` FILTER is flipped so the variable is on the left).
+    pub op: FilterCmp,
+    /// The xsd:integer constant operand, as a non-negative decimal.
+    pub bound: u64,
+}
+
+/// xsd:integer datatype IRI (the only literal datatype the `filter_int`
+/// circuit can bind — see `encode.rs` / `filter_int.nr`).
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+/// Flip a comparison so `const op ?var` becomes the equivalent `?var op' const`.
+fn flip_cmp(op: FilterCmp) -> FilterCmp {
+    match op {
+        FilterCmp::Lt => FilterCmp::Gt,
+        FilterCmp::Le => FilterCmp::Ge,
+        FilterCmp::Gt => FilterCmp::Lt,
+        FilterCmp::Ge => FilterCmp::Le,
+        FilterCmp::Eq => FilterCmp::Eq,
+        FilterCmp::Ne => FilterCmp::Ne,
+    }
+}
+
+/// Parse one comparison operand pair `(a, b)` under `op` into a normalized
+/// `QueryFilter` (`?var op const`). `None` if it is not a bindable
+/// integer-FILTER (e.g. `?a op ?b`, a non-integer / non-canonical literal, or
+/// `const op const`). A non-canonical xsd:integer lexical form (leading zero,
+/// sign, whitespace) is rejected: `filter_int.nr` can only bind a canonical
+/// non-negative decimal token, so a non-canonical bound could never be matched
+/// by any honest proof and must fail closed (audit hardening, lexical-form
+/// note).
+fn comparison_filter(op: FilterCmp, a: &Expression, b: &Expression) -> Option<QueryFilter> {
+    let var_of = |e: &Expression| match e {
+        Expression::Variable(v) => Some(v.as_str().to_string()),
+        _ => None,
+    };
+    let int_of = |e: &Expression| match e {
+        Expression::Literal(l) if l.datatype().as_str() == XSD_INTEGER => {
+            canonical_u64(l.value())
+        }
+        _ => None,
+    };
+    match (var_of(a), int_of(b)) {
+        (Some(variable), Some(bound)) => return Some(QueryFilter { variable, op, bound }),
+        _ => {}
+    }
+    // `const op ?var` — flip so the variable is on the left.
+    match (int_of(a), var_of(b)) {
+        (Some(bound), Some(variable)) => {
+            Some(QueryFilter { variable, op: flip_cmp(op), bound })
+        }
+        _ => None,
+    }
+}
+
+/// Parse a canonical non-negative xsd:integer lexical form to `u64`. Rejects
+/// leading zeros, signs, and any non-digit byte — only the exact token the
+/// circuit's `enc_int_literal` replica can bind round-trips (mirrors
+/// `filter_int.nr`'s digit-token constraints).
+fn canonical_u64(lex: &str) -> Option<u64> {
+    if lex.is_empty() || !lex.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if lex.len() > 1 && lex.starts_with('0') {
+        return None; // non-canonical leading zero
+    }
+    lex.parse::<u64>().ok()
+}
+
+/// Walk a FILTER expression and collect every top-level integer comparison it
+/// imposes. `AND` chains are flattened (each conjunct is its own obligation).
+/// Any FILTER node that is NOT a flat conjunction of bindable integer
+/// comparisons (negation, disjunction, arithmetic, `?a op ?b`, function calls,
+/// non-integer literals, …) makes the query fall outside the bindable fragment:
+/// the function returns `Err(UnsupportedFragment)` so a FILTER the binding layer
+/// cannot vouch for fails CLOSED rather than being silently disclosed unproven
+/// (audit #10: a FILTER must have a bound sub-proof, so an unbindable FILTER
+/// must be rejected, never ignored).
+fn collect_filter_expr(e: &Expression, out: &mut Vec<QueryFilter>) -> Result<(), VerifyError> {
+    use Expression as E;
+    match e {
+        E::And(a, b) => {
+            collect_filter_expr(a, out)?;
+            collect_filter_expr(b, out)
+        }
+        E::Less(a, b) => push_cmp(FilterCmp::Lt, a, b, out),
+        E::LessOrEqual(a, b) => push_cmp(FilterCmp::Le, a, b, out),
+        E::Greater(a, b) => push_cmp(FilterCmp::Gt, a, b, out),
+        E::GreaterOrEqual(a, b) => push_cmp(FilterCmp::Ge, a, b, out),
+        E::Equal(a, b) => push_cmp(FilterCmp::Eq, a, b, out),
+        other => Err(VerifyError::UnsupportedFragment(format!(
+            "FILTER expression not a bindable integer comparison: {other:?}"
+        ))),
+    }
+}
+
+fn push_cmp(
+    op: FilterCmp,
+    a: &Expression,
+    b: &Expression,
+    out: &mut Vec<QueryFilter>,
+) -> Result<(), VerifyError> {
+    match comparison_filter(op, a, b) {
+        Some(qf) => {
+            out.push(qf);
+            Ok(())
+        }
+        None => Err(VerifyError::UnsupportedFragment(
+            "FILTER comparison is not `?var <op> <xsd:integer>` (the bindable fragment)".into(),
+        )),
+    }
+}
+
+/// Re-derive the query's FILTER obligations from the query text alone, in the
+/// same independent `spargebra` parse `fragment_patterns` uses. Returns one
+/// [`QueryFilter`] per integer comparison. Rejects any FILTER outside the
+/// bindable integer fragment (so it cannot be silently disclosed unproven).
+pub fn fragment_filters(sparql: &str) -> Result<Vec<QueryFilter>, VerifyError> {
+    let query = spargebra::SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| VerifyError::Parse(e.to_string()))?;
+    let pattern = match &query {
+        Query::Select { pattern, .. } | Query::Ask { pattern, .. } => pattern,
+        Query::Construct { .. } => return Err(VerifyError::UnsupportedFragment("CONSTRUCT".into())),
+        Query::Describe { .. } => return Err(VerifyError::UnsupportedFragment("DESCRIBE".into())),
+    };
+    let mut out = Vec::new();
+    collect_filters_gp(pattern, &mut out)?;
+    Ok(out)
+}
+
+fn collect_filters_gp(gp: &GraphPattern, out: &mut Vec<QueryFilter>) -> Result<(), VerifyError> {
+    match gp {
+        GraphPattern::Bgp { .. } => Ok(()),
+        GraphPattern::Filter { expr, inner } => {
+            if expression_has_exists(expr) {
+                return Err(VerifyError::UnsupportedFragment("EXISTS / NOT EXISTS".into()));
+            }
+            collect_filter_expr(expr, out)?;
+            collect_filters_gp(inner, out)
+        }
+        GraphPattern::Join { left, right } => {
+            collect_filters_gp(left, out)?;
+            collect_filters_gp(right, out)
+        }
+        GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. } => collect_filters_gp(inner, out),
+        // Every other node is already rejected by `collect_patterns`; the
+        // verifier always calls `recheck` (which runs `fragment_patterns`)
+        // before/with the filter extraction, so a structurally-unsupported
+        // query never reaches a point where its FILTERs matter. Fail closed
+        // anyway for totality.
+        other => Err(VerifyError::UnsupportedFragment(format!("{other:?}"))),
+    }
+}
+
+/// For each variable, the set of `(pattern_index, slot_index)` positions it
+/// occupies across the query-order BGP patterns. The compose verifier uses
+/// this to require a FILTER's bound sub-proof to reference exactly the scanned
+/// slot the FILTER variable binds to (audit #6).
+pub fn variable_slots(patterns: &[PatternKey]) -> Vec<(String, usize, usize)> {
+    let mut out = Vec::new();
+    for (pi, key) in patterns.iter().enumerate() {
+        for (si, slot) in key.slots.iter().enumerate() {
+            if let SlotPattern::Var(v) = slot {
+                out.push((v.clone(), pi, si));
+            }
+        }
+    }
+    out
+}
+
 fn triple_pattern_key(tp: &TriplePattern) -> Result<PatternKey, VerifyError> {
     let term_slot = |t: &TermPattern| -> Result<SlotPattern, VerifyError> {
         match t {
@@ -386,5 +605,100 @@ mod tests {
             cross_graph_join_obligations(&keys, &attrs(&[&[0], &[]])),
             Err(VerifyError::EmptyAttribution { pattern: 1 })
         );
+    }
+
+    // [OPUS-4.8] FILTER query-binding extraction tests (audit #5/#6/#10).
+
+    fn xint(v: u64) -> String {
+        format!(
+            "\"{v}\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        )
+    }
+
+    #[test]
+    fn extracts_integer_filter_in_both_operand_orders() {
+        let q = format!(
+            "SELECT ?s ?age WHERE {{ ?s <http://ex/age> ?age FILTER(?age >= {}) }}",
+            xint(18)
+        );
+        let fs = fragment_filters(&q).unwrap();
+        assert_eq!(
+            fs,
+            vec![QueryFilter { variable: "age".into(), op: FilterCmp::Ge, bound: 18 }]
+        );
+        // `const op ?var` flips to `?var op' const`.
+        let q2 = format!(
+            "SELECT ?s ?age WHERE {{ ?s <http://ex/age> ?age FILTER({} <= ?age) }}",
+            xint(18)
+        );
+        let fs2 = fragment_filters(&q2).unwrap();
+        assert_eq!(
+            fs2,
+            vec![QueryFilter { variable: "age".into(), op: FilterCmp::Ge, bound: 18 }],
+            "18 <= ?age must normalize to ?age >= 18"
+        );
+    }
+
+    #[test]
+    fn flattens_conjoined_filters() {
+        let q = format!(
+            "SELECT ?s ?age WHERE {{ ?s <http://ex/age> ?age FILTER(?age >= {} && ?age < {}) }}",
+            xint(18),
+            xint(65)
+        );
+        let fs = fragment_filters(&q).unwrap();
+        assert_eq!(
+            fs,
+            vec![
+                QueryFilter { variable: "age".into(), op: FilterCmp::Ge, bound: 18 },
+                QueryFilter { variable: "age".into(), op: FilterCmp::Lt, bound: 65 },
+            ]
+        );
+    }
+
+    #[test]
+    fn no_filter_yields_empty() {
+        let fs = fragment_filters("SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }").unwrap();
+        assert!(fs.is_empty());
+    }
+
+    #[test]
+    fn unbindable_filters_fail_closed() {
+        // Non-integer / arithmetic / var-var / disjunction / non-canonical:
+        // each is OUTSIDE the bindable fragment and must REJECT (never be
+        // silently disclosed unproven — audit #10).
+        for q in [
+            // float literal
+            "SELECT ?s WHERE { ?s <http://ex/h> ?h FILTER(?h >= \"1.5\"^^<http://www.w3.org/2001/XMLSchema#double>) }",
+            // plain string (no xsd:integer datatype)
+            "SELECT ?s WHERE { ?s <http://ex/h> ?h FILTER(?h >= \"18\") }",
+            // var vs var
+            "SELECT ?s WHERE { ?s <http://ex/a> ?a . ?s <http://ex/b> ?b FILTER(?a >= ?b) }",
+            // disjunction (not a flat AND of comparisons)
+            "SELECT ?s WHERE { ?s <http://ex/age> ?a FILTER(?a >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer> || ?a < \"0\"^^<http://www.w3.org/2001/XMLSchema#integer>) }",
+            // arithmetic operand
+            "SELECT ?s WHERE { ?s <http://ex/age> ?a FILTER(?a + \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }",
+            // non-canonical leading-zero integer
+            "SELECT ?s WHERE { ?s <http://ex/age> ?a FILTER(?a >= \"018\"^^<http://www.w3.org/2001/XMLSchema#integer>) }",
+        ] {
+            assert!(
+                matches!(fragment_filters(q), Err(VerifyError::UnsupportedFragment(_))),
+                "must fail closed: {q}"
+            );
+        }
+    }
+
+    #[test]
+    fn variable_slots_maps_var_positions() {
+        let keys = fragment_patterns(
+            "SELECT ?s ?age WHERE { ?s <http://ex/age> ?age . ?s <http://ex/sal> ?sal }",
+        )
+        .unwrap();
+        let vs = variable_slots(&keys);
+        // ?s at (0,0) and (1,0); ?age at (0,2); ?sal at (1,2).
+        assert!(vs.contains(&("s".into(), 0, 0)));
+        assert!(vs.contains(&("s".into(), 1, 0)));
+        assert!(vs.contains(&("age".into(), 0, 2)));
+        assert!(vs.contains(&("sal".into(), 1, 2)));
     }
 }
