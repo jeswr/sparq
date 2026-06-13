@@ -47,7 +47,7 @@ use crate::field::Fr;
 use crate::poseidon2;
 use ark_ec::{twisted_edwards::Affine, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ed_on_bn254::{EdwardsConfig, EdwardsProjective, Fr as JjScalar};
-use ark_ff::{BigInteger, PrimeField, UniformRand};
+use ark_ff::{BigInteger, PrimeField, UniformRand, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 /// Domain separator folded into the signed message (so an issuer signature
@@ -125,16 +125,71 @@ impl SecretKey {
 
     /// Sign a per-graph commitment under this key, returning the signature hex
     /// (`compressed(R) ‖ s`). The signed message is the domain-separated
-    /// commitment message, matching [`verify`] on the verifier side. The nonce
-    /// is drawn from `seed` (deterministic for tests/tooling; production uses
-    /// OS entropy via [`sign`]).
-    // [OPUS-4.8] audit #3.
-    pub fn sign_commitment_seeded(&self, commitment: &Fr, seed: u64) -> String {
-        use ark_std::rand::SeedableRng;
-        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
-        let sig = sign(self, &commitment_message(commitment), &mut rng);
+    /// commitment message, matching [`verify`] on the verifier side.
+    ///
+    /// # Nonce derivation (audit #3 codex finding #4 fix)
+    /// The Schnorr nonce `k` is derived DETERMINISTICALLY from (secret key,
+    /// message) via the Poseidon2 sponge (an RFC6979-style derivation in the
+    /// signature's native field), NOT from any caller-supplied seed. The old
+    /// `sign_commitment_seeded(.., seed: u64)` was an unsafe public API: a caller
+    /// reusing a `seed` across two distinct messages produced two signatures with
+    /// the SAME `R = k·G` but different `s`, from which `sk = (s1 - s2)/(e1 - e2)`
+    /// is trivially recovered. Deriving `k` from `(sk, m)` removes the seed
+    /// entirely — the same message always yields the same (safe) signature, and
+    /// distinct messages get distinct nonces, with no way for a caller to force a
+    /// nonce collision. Production keys must still be generated from OS entropy
+    /// (see [`SecretKey::from_seed`]'s warning); deterministic nonces only remove
+    /// the *signing-time* entropy requirement, exactly as RFC6979 does for ECDSA.
+    // [OPUS-4.8] audit #3 codex #4: deterministic (sk, m) nonce, no caller seed.
+    pub fn sign_commitment(&self, commitment: &Fr) -> String {
+        let sig = sign_deterministic(self, &commitment_message(commitment));
         signature_to_hex(&sig)
     }
+}
+
+/// Derive a deterministic Schnorr nonce `k` from the secret key and the message
+/// (RFC6979-style, in the curve's native field). The secret key's scalar is
+/// mapped into the base field [`Fr`] (its big-endian bytes, reduced) and folded
+/// with the message and a nonce-specific domain tag through the Poseidon2 sponge;
+/// the resulting base-field digest is reduced into the scalar field. This is a
+/// PRF over `(sk, m)`: it never repeats a nonce for distinct messages and never
+/// leaks `sk`, so no signing-time entropy is needed and seed-reuse is impossible
+/// by construction (there is no seed). Both this and the in-circuit-recomputable
+/// challenge live in the same base field, keeping the scheme circuit-friendly.
+// [OPUS-4.8] audit #3 codex #4.
+fn derive_nonce(sk: &SecretKey, m: &Fr) -> JjScalar {
+    // A distinct domain tag from the challenge so the nonce-PRF output can never
+    // collide with / be mistaken for a challenge value.
+    const SIG_DOMAIN_NONCE: u64 = 0x5a4b_5349_475f_4e31; // "ZKSIG_N1"
+    // Map the secret scalar into the base field via its big-endian bytes. The
+    // base field (BN254 scalar field) is larger than the Baby-JubJub scalar
+    // field, so this reduction is injective on canonical sk encodings.
+    let sk_base = Fr::from_be_bytes_mod_order(&sk.0.into_bigint().to_bytes_be());
+    let k_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), sk_base, *m]);
+    let k = JjScalar::from_be_bytes_mod_order(&k_base.into_bigint().to_bytes_be());
+    // Guard the degenerate k == 0 (would make R the identity); fold once more.
+    if k.is_zero() {
+        let k2_base: Fr = poseidon2::hash(&[Fr::from(SIG_DOMAIN_NONCE), k_base, *m]);
+        JjScalar::from_be_bytes_mod_order(&k2_base.into_bigint().to_bytes_be())
+    } else {
+        k
+    }
+}
+
+/// Sign `m` with `sk` using a DETERMINISTIC nonce derived from `(sk, m)` (no
+/// entropy source, no caller seed — see [`derive_nonce`]). This is the
+/// issuance-side path used by [`SecretKey::sign_commitment`]; a relying party
+/// only ever calls [`verify`]. Equivalent in shape to [`sign`] but with the
+/// nonce pinned, so it is replay-stable and seed-reuse-proof.
+// [OPUS-4.8] audit #3 codex #4.
+pub fn sign_deterministic(sk: &SecretKey, m: &Fr) -> Signature {
+    let g = EdwardsProjective::generator();
+    let k = derive_nonce(sk, m);
+    let r_pt = (g * k).into_affine();
+    let pk = sk.public_key().0;
+    let e = challenge(&r_pt, &pk, m);
+    let s = k + e * sk.0;
+    Signature { r: r_pt, s }
 }
 
 /// The challenge `e = Poseidon2([DOMAIN, R.x, R.y, pk.x, pk.y, m])`, reduced
@@ -145,6 +200,13 @@ impl SecretKey {
 /// verify (single source of truth, mirroring the `verify_*_relation` discipline
 /// in the noir-optimisation skill).
 fn challenge(r: &Affine<EdwardsConfig>, pk: &Affine<EdwardsConfig>, m: &Fr) -> JjScalar {
+    // [OPUS-4.8] codex #2 (false positive, confirmed): in ark-ec 0.5
+    // `AffineRepr::xy()` returns `Option<(Self::BaseField, Self::BaseField)>` —
+    // OWNED `BaseField` values, not references (see ark-ec-0.5.0
+    // models/twisted_edwards/affine.rs:164). `BaseField == Fr` here, so the
+    // `unwrap_or` with owned `Fr` zeros is type-correct and compiles. (The
+    // identity is the only point with `xy() == None`; it is rejected in `verify`
+    // and `public_key_from_hex` before reaching here — codex #3.)
     let (rx, ry) = r.xy().unwrap_or((Fr::from(0u64), Fr::from(0u64)));
     let (px, py) = pk.xy().unwrap_or((Fr::from(0u64), Fr::from(0u64)));
     let e_base: Fr = poseidon2::hash(&[
@@ -190,9 +252,18 @@ pub fn sign<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
 /// requires — the relying party resolves `pk` from the disclosed key-set `K`,
 /// recomputes `e`, and checks this equation over the commitment message.
 pub fn verify(pk: &PublicKey, m: &Fr, sig: &Signature) -> bool {
-    // Reject the identity / off-curve / non-prime-order points defensively:
-    // `R` and `pk` must be on the curve and in the prime-order subgroup, else a
-    // small-subgroup point could let a forger pass the equation.
+    // [OPUS-4.8] codex #3: reject the IDENTITY public key. The identity point is
+    // on-curve and in-subgroup, but `e·pk = 0` for it, so the verification
+    // equation collapses to `s·G == R`; a forger picks any `s`, sets `R = s·G`,
+    // and a signature verifies for the identity key under ANY message. Rejecting
+    // `pk.0.is_zero()` here (and in `public_key_from_hex`, fail-closed at parse
+    // time) closes that universal forgery.
+    if pk.0.is_zero() {
+        return false;
+    }
+    // Reject the off-curve / non-prime-order points defensively: `R` and `pk`
+    // must be on the curve and in the prime-order subgroup, else a small-subgroup
+    // point could let a forger pass the equation.
     if !sig.r.is_on_curve()
         || !pk.0.is_on_curve()
         || !sig.r.is_in_correct_subgroup_assuming_on_curve()
@@ -224,9 +295,15 @@ pub fn public_key_to_hex(pk: &PublicKey) -> String {
 /// not a valid compressed Baby-JubJub point (fail-closed).
 pub fn public_key_from_hex(s: &str) -> Option<PublicKey> {
     let bytes = from_hex(s)?;
-    Affine::<EdwardsConfig>::deserialize_compressed(&bytes[..])
-        .ok()
-        .map(PublicKey)
+    let pt = Affine::<EdwardsConfig>::deserialize_compressed(&bytes[..]).ok()?;
+    // [OPUS-4.8] codex #3: reject the identity point at parse time (fail-closed).
+    // A signature is universally forgeable for the identity key (e·pk = 0), so an
+    // identity key must never enter a key-set K or an attestation. `verify` also
+    // rejects it defensively, but rejecting here keeps it out of K entirely.
+    if pt.is_zero() {
+        return None;
+    }
+    Some(PublicKey(pt))
 }
 
 /// Serialize a signature to hex: `compressed(R) ‖ scalar(s)` (each
@@ -367,5 +444,71 @@ mod tests {
             Some(s)
         );
         assert_eq!(SignatureScheme::from_cryptosuite_iri("urn:other"), None);
+    }
+
+    // --- audit #3 codex #3: identity-key forgery rejection ----------------
+
+    /// [OPUS-4.8] codex #3: a signature is universally forgeable for the IDENTITY
+    /// public key (`e·pk = 0` ⇒ the equation is `s·G == R`, satisfied by any `s`
+    /// with `R = s·G`). Such a forgery — valid for ANY message — MUST be rejected
+    /// by `verify`. Before the fix this returned `true`.
+    #[test]
+    fn identity_key_forgery_rejected() {
+        // The identity / neutral point of Baby-JubJub.
+        let id_pk = PublicKey(Affine::<EdwardsConfig>::zero());
+        assert!(id_pk.0.is_zero(), "constructed the identity point");
+        // Forge: pick any s, set R = s·G. Then s·G == R + e·0 holds for all m.
+        let s = JjScalar::from(123456u64);
+        let r = (EdwardsProjective::generator() * s).into_affine();
+        let forged = Signature { r, s };
+        let m = commitment_message(&Fr::from(42u64));
+        assert!(
+            !verify(&id_pk, &m, &forged),
+            "identity-key signature must be rejected (universal forgery)"
+        );
+        // And it must never be admissible from hex either (fail-closed at parse).
+        let id_hex = {
+            let mut b = Vec::new();
+            Affine::<EdwardsConfig>::zero()
+                .serialize_compressed(&mut b)
+                .unwrap();
+            to_hex(&b)
+        };
+        assert!(
+            public_key_from_hex(&id_hex).is_none(),
+            "identity key must not parse into a usable PublicKey"
+        );
+    }
+
+    // --- audit #3 codex #4: deterministic nonce (no caller seed) ----------
+
+    /// [OPUS-4.8] codex #4: `sign_commitment` derives the nonce from `(sk, m)`,
+    /// so it is deterministic (replay-stable) and seed-reuse is impossible by
+    /// construction. The signature verifies, and re-signing the same commitment
+    /// yields byte-identical output.
+    #[test]
+    fn deterministic_sign_commitment_round_trip_and_stable() {
+        let sk = SecretKey::from_seed(11);
+        let pk = sk.public_key();
+        let c = Fr::from(0xc0ffeeu64);
+        let h1 = sk.sign_commitment(&c);
+        let h2 = sk.sign_commitment(&c);
+        assert_eq!(h1, h2, "deterministic signing must be replay-stable");
+        let sig = signature_from_hex(&h1).expect("round-trips");
+        assert!(
+            verify(&pk, &commitment_message(&c), &sig),
+            "deterministic signature must verify"
+        );
+    }
+
+    /// [OPUS-4.8] codex #4: distinct messages get DISTINCT nonces `R` — the
+    /// property that makes seed-reuse key-extraction impossible (the old seeded
+    /// API let a caller force `R1 == R2` across messages, leaking `sk`).
+    #[test]
+    fn deterministic_nonce_differs_per_message() {
+        let sk = SecretKey::from_seed(12);
+        let r1 = sign_deterministic(&sk, &commitment_message(&Fr::from(1u64))).r;
+        let r2 = sign_deterministic(&sk, &commitment_message(&Fr::from(2u64))).r;
+        assert_ne!(r1, r2, "distinct messages must use distinct nonces R");
     }
 }
