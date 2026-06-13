@@ -39,6 +39,24 @@ pub fn field_from_hex_str(s: &str) -> Option<Fr> {
     Some(field_from_hex(&padded))
 }
 
+/// 32-byte big-endian (left-zero-padded) representation of a field element —
+/// exactly one word of bb's `public_inputs` blob layout (each public input is a
+/// 32-byte BE field element, no length prefix; determined empirically against
+/// bb 5.0.0-nightly, see the `sparq-zk-compose` verifier reconstruction). The
+/// hex of this word is `field_to_hex` minus the `0x`.
+// [OPUS-4.8] added for the verifier's public-input reconstruction (audit #1).
+pub fn field_to_be_bytes_32(f: &Fr) -> [u8; 32] {
+    let be = f.into_bigint().to_bytes_be();
+    // ark `to_bytes_be` for a 254-bit field returns up to 32 bytes; left-pad to
+    // a fixed 32-byte word so a small value (e.g. `op = 0`) still emits a full
+    // word, matching bb's fixed-width public-input serialization.
+    let mut out = [0u8; 32];
+    debug_assert!(be.len() <= 32, "bn254 field is <= 32 bytes");
+    let start = 32 - be.len();
+    out[start..].copy_from_slice(&be);
+    out
+}
+
 /// Maps 32 hash bytes (e.g. a Blake3 digest) into the field by truncating to
 /// the low 31 bytes (248 bits < 254-bit modulus) interpreted big-endian.
 /// Truncation rather than modular reduction keeps the encoding bias-free and
@@ -67,6 +85,21 @@ mod tests {
         let h = field_to_hex(&f);
         assert_eq!(h, format!("0x{:0>64}", "1a2b"));
         assert_eq!(field_from_hex_str(&h).unwrap(), f);
+    }
+
+    #[test]
+    fn be_bytes_32_is_left_padded_and_matches_hex() {
+        // A small value emits a full 32-byte word (left-padded), and its hex
+        // equals field_to_hex minus the 0x — the bb public-input word layout.
+        let f = Fr::from(0x2au64);
+        let w = field_to_be_bytes_32(&f);
+        assert_eq!(w.len(), 32);
+        assert_eq!(w[31], 0x2a);
+        assert!(w[..31].iter().all(|&b| b == 0));
+        let hex: String = w.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(format!("0x{hex}"), field_to_hex(&f));
+        // Zero is the all-zero word (variable slots / padding rows).
+        assert_eq!(field_to_be_bytes_32(&Fr::from(0u64)), [0u8; 32]);
     }
 
     #[test]

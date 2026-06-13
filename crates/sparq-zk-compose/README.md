@@ -142,11 +142,17 @@ are byte-identical with or without it.
 
 ### Concurrency note
 
-Subprocess proving shares one `Prover.toml` (and witness file) per circuit
-package, so concurrent provers targeting the **same** family member race on
-those files. The e2e tests therefore assign each toolchain-gated test a
-distinct member. A future driver could write per-invocation scratch packages
-to lift this.
+Subprocess proving shares one `target/<pkg>.gz` witness and (by default) one
+`Prover.toml` per circuit package, so concurrent provers targeting the **same**
+family member would race on those files. To make this safe under default
+parallel `cargo test`, the driver exposes tag-isolated entry points —
+`gen_witness_tagged` / `prove_in` — which write `Prover_<tag>.toml` (selected via
+`nargo execute --prover-name`) and `target/<pkg>_w_<tag>.gz`; bb artifacts land in
+the caller's own `out_dir`. Concurrent toolchain-gated tests pass a per-test
+`tag`, so they no longer need to target distinct members or run with
+`--test-threads=1`. <!-- [OPUS-4.8] roborev job 2180 -->. The untagged `prove`
+/`gen_witness` wrappers keep the legacy shared names and are only safe
+single-threaded against a given member.
 
 ## Reproduction (benchmarks)
 

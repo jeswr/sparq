@@ -7,3 +7,9 @@ target/
 proof
 public_inputs
 vk
+
+# prover inputs (generated per-run; tagged copies are per-test-isolated to make
+# the toolchain tests safe under parallel `cargo test` — see driver.rs)
+# [OPUS-4.8]
+Prover.toml
+Prover_*.toml
