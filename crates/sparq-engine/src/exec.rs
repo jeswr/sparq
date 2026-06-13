@@ -7246,8 +7246,11 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
         TermPattern::Variable(_) => Err("variable where a term was expected".into()),
         // RDF-star GROUND triple term `<<( s p o )>>` (RDF 1.2): build the structural
         // `Term::Triple`, which the dictionary interns/looks up by its component ids.
-        // Variables INSIDE a quoted-triple pattern remain unsupported (they need pattern
-        // decomposition over stored triple terms, not a single id — a clean error, no crash).
+        // A variable INSIDE a quoted-triple pattern (sq-kbs / T6) is handled UPSTREAM by
+        // BGP decomposition (`extract_quoted_constraints` -> `quoted_relation`), which
+        // rewrites any variable-carrying quoted slot into a synthetic variable before this
+        // resolver runs. So in a parsed query this function only ever sees a GROUND triple
+        // term — the variable-predicate arm below is a defensive backstop, not a feature gap.
         TermPattern::Triple(t) => {
             let subject: oxrdf::NamedOrBlankNode = match term_pattern_to_term(&t.subject)? {
                 Term::NamedNode(n) => n.into(),
@@ -7256,8 +7259,9 @@ fn term_pattern_to_term(tp: &TermPattern) -> Result<Term, String> {
             };
             let predicate = match &t.predicate {
                 NamedNodePattern::NamedNode(n) => n.clone(),
+                // Unreachable for parsed queries (see above); kept as a non-panicking backstop.
                 NamedNodePattern::Variable(_) => {
-                    return Err("variable inside a triple-term pattern is not yet supported (T6)".into())
+                    return Err("variable inside a quoted-triple term must be decomposed by the BGP planner (T6)".into())
                 }
             };
             let object = term_pattern_to_term(&t.object)?;
@@ -7738,7 +7742,7 @@ mod path_tests {
     fn rdf_star_concrete_triple_terms() {
         // RDF 1.2 triple terms load and CONCRETE `<< … >>` patterns match via the
         // STRUCTURAL dictionary encoding (component ids). Variable-inside patterns are
-        // still unsupported (clean error, tested below).
+        // handled by BGP decomposition (sq-kbs / T6) — see the dedicated tests below.
         let g = Graph::load_str(
             "PREFIX : <http://ex/>\n<< :alice :age 30 >> :certainty 0.9 .\n<< :bob :age 25 >> :certainty 0.5 .",
             "turtle",
@@ -7842,6 +7846,105 @@ mod path_tests {
         assert_eq!(q("PREFIX : <http://ex/> SELECT ?c WHERE { << :bob :age ?a >> :certainty ?c }").rows.len(), 1);
         // No match: nothing reifies :alice :age 31.
         assert_eq!(q("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice :age 31 >> :certainty ?c }").rows.len(), 0);
+    }
+
+    #[test]
+    fn rdf_star_quoted_pattern_var_positions_bind() {
+        // sq-kbs (T6): a variable in EACH position of a quoted-triple pattern binds to
+        // the matching component of the stored triple term, and the bound VALUES are
+        // exactly the subject/predicate/object of the reified statement.
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n\
+             << :alice :age 30 >> :certainty 0.9 .\n\
+             << :bob :likes :tea >> :certainty 0.4 .",
+            "turtle",
+        )
+        .unwrap();
+        let sols = |s: &str| {
+            let r = crate::query(&g, s).unwrap();
+            let mut out: Vec<String> = r
+                .rows
+                .iter()
+                .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default()).collect::<Vec<_>>().join("|"))
+                .collect();
+            out.sort();
+            out
+        };
+        // Variable in SUBJECT slot — binds to the reified subject.
+        assert_eq!(sols("PREFIX : <http://ex/> SELECT ?s WHERE { << ?s :age 30 >> :certainty ?c }"), vec!["<http://ex/alice>"]);
+        // Variable in PREDICATE slot — binds to the reified predicate.
+        assert_eq!(sols("PREFIX : <http://ex/> SELECT ?p WHERE { << :alice ?p 30 >> :certainty ?c }"), vec!["<http://ex/age>"]);
+        // Variable in OBJECT slot — binds to the reified object (literal preserved).
+        assert_eq!(
+            sols("PREFIX : <http://ex/> SELECT ?o WHERE { << :alice :age ?o >> :certainty ?c }"),
+            vec!["\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+        );
+    }
+
+    #[test]
+    fn rdf_star_quoted_pattern_ground_var_mix_filters() {
+        // sq-kbs (T6): ground positions FILTER, variable positions BIND, within one
+        // quoted pattern. Only the statement whose ground slots match contributes a row,
+        // and the variable slot is bound to that statement's value.
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n\
+             << :alice :age 30 >> :certainty 0.9 .\n\
+             << :alice :age 40 >> :certainty 0.1 .\n\
+             << :bob :age 30 >> :certainty 0.5 .",
+            "turtle",
+        )
+        .unwrap();
+        let q = |s: &str| crate::query(&g, s).unwrap();
+        // Ground subject + ground predicate, variable object: two alice-age statements.
+        let r = q("PREFIX : <http://ex/> SELECT ?o ?c WHERE { << :alice :age ?o >> :certainty ?c }");
+        assert_eq!(r.rows.len(), 2);
+        // Ground subject + ground object, variable predicate: exactly the :alice :age 30 row.
+        let r = q("PREFIX : <http://ex/> SELECT ?c WHERE { << :alice ?p 30 >> :certainty ?c }");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "\"0.9\"^^<http://www.w3.org/2001/XMLSchema#decimal>");
+        // No ground match: nothing reifies :carol :age 30.
+        assert_eq!(q("PREFIX : <http://ex/> SELECT ?c WHERE { << :carol :age 30 >> :certainty ?c }").rows.len(), 0);
+    }
+
+    #[test]
+    fn rdf_star_quoted_pattern_all_vars_enumerate() {
+        // sq-kbs (T6): `<< ?s ?p ?o >>` enumerates EVERY stored quoted triple, binding all
+        // three slots, and the count equals the number of distinct reified statements.
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n\
+             << :alice :age 30 >> :certainty 0.9 .\n\
+             << :bob :likes :tea >> :certainty 0.4 .\n\
+             << :carol :age 22 >> :certainty 0.7 .\n\
+             :alice :name \"Alice\" .",
+            "turtle",
+        )
+        .unwrap();
+        let r = crate::query(&g, "PREFIX : <http://ex/> SELECT ?s ?p ?o ?c WHERE { << ?s ?p ?o >> :certainty ?c }").unwrap();
+        assert_eq!(r.rows.len(), 3);
+        // Every row binds all four variables (no NULLs), and the subjects cover all three.
+        let mut subjects: Vec<String> = r.rows.iter().map(|row| row[0].as_ref().unwrap().to_string()).collect();
+        subjects.sort();
+        assert_eq!(subjects, vec!["<http://ex/alice>", "<http://ex/bob>", "<http://ex/carol>"]);
+        assert!(r.rows.iter().all(|row| row.iter().take(4).all(|c| c.is_some())));
+    }
+
+    #[test]
+    fn rdf_star_quoted_pattern_nested_one_level() {
+        // sq-kbs (T6): a quoted triple NESTED (one level) inside a quoted-triple pattern
+        // unifies recursively — the inner variables bind to the inner statement's parts.
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n<< << :alice :age 30 >> :statedBy :bob >> :certainty 0.8 .",
+            "turtle",
+        )
+        .unwrap();
+        let r = crate::query(
+            &g,
+            "PREFIX : <http://ex/> SELECT ?who ?src WHERE { << << ?who :age 30 >> :statedBy ?src >> :certainty ?c }",
+        )
+        .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "<http://ex/alice>");
+        assert_eq!(r.rows[0][1].as_ref().unwrap().to_string(), "<http://ex/bob>");
     }
 
     #[test]
