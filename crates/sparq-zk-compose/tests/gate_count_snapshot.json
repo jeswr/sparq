@@ -1,0 +1,16 @@
+{
+  "_comment": "[OPUS-4.8] sq-c5f gate-count regression baseline. Checked-in ultra_honk `circuit_size` (bb gates, the noir-optimisation ground truth) per compiled zk/compose member. The `gate_count_regression` test (tests/gate_count.rs) recompiles each member, reads its real circuit_size, and FAILS if it exceeds baseline*(1+tolerance) — preventing silent circuit bloat. Tolerance is 3% (see the test): bb gate counts for the scan members vary ~0.5-0.75% across platform/build (measured: darwin arm64 baseline vs linux x86_64 +0.75% on scan_k2_n64_r8; filter members are byte-identical), so 3% absorbs platform noise while still catching real relation growth (typically tens of %). To re-baseline after an INTENTIONAL circuit change, run `bench/zk-compose/scripts/gate_counts.sh` and copy the new circuit_size values here (and into bench/zk-compose/gate_counts_latest.json).",
+  "tool": "bb gates -s ultra_honk",
+  "bb_version_baselined": "5.0.0-nightly.20260324",
+  "nargo_version_baselined": "1.0.0-beta.21",
+  "tolerance_pct": 3.0,
+  "members": {
+    "scan_k1_n16_r4": 5958,
+    "scan_k2_n16_r8": 11011,
+    "scan_k2_n64_r8": 34379,
+    "filter_int_d1": 17416,
+    "filter_int_d2": 17416,
+    "filter_int_d4": 17416,
+    "filter_f64": 3113
+  }
+}
