@@ -46,6 +46,9 @@ mod time;
 mod sequence;
 mod comparison;
 mod string;
+// [OPUS-4.8] sq-y73: bounded circuit-friendly regex subset + circuit-native hash.
+mod regex;
+mod hash;
 mod binary;
 mod gregorian;
 mod qname;
@@ -204,6 +207,15 @@ pub use string::{
     string_length, string_less_than, string_to_codepoints, substring, substring_after,
     substring_before, tokenize_whitespace, translate, upper_case,
 };
+
+// [OPUS-4.8] sq-y73: regex (bounded circuit-friendly subset) -- see regex.nr scope note.
+pub use regex::{
+    CharClass, matches_anchored, matches_char_class_any, matches_char_class_plus,
+    matches_char_class_star, matches_literal, matches_prefix, replace_literal,
+};
+
+// [OPUS-4.8] sq-y73: hash (circuit-native content hash + hex formatter) -- see hash.nr scope note.
+pub use hash::{bytes_to_lower_hex, string_pedersen_hash};
 
 // Re-export binary comparison functions
 pub use binary::{

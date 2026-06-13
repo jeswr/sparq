@@ -347,6 +347,83 @@ re-run — not trusted from the earlier run.)
 - `xpath` lib: **67/67**. `xpath_unit_tests`: **244/244**.
 - Toolchain: `nargo 1.0.0-beta.21` (noirc 89a0f0fa), `bb 5.0.0-nightly.20260324`.
 
+## String / regex / hash functions — sq-y73 (DONE 2026-06-13)
+
+`Model: Opus 4.8` — completed on Opus 4.8 while Fable 5 was unavailable.
+Flag for re-review when Fable returns. (beads task sq-y73.)
+
+**String functions** were already implemented upstream (`string.nr`:
+substring, substring-before/after, upper/lower-case, concat, string-join,
+translate, normalize-space, encode-for-uri, compare/string-relops, ...) but
+VENDOR.md flagged most as **untested**. This task:
+
+- Added 15 inline `#[test]`s in `string.nr` + 0 regressions — closing the
+  untested gap for `substring`, `substring_before/after`, `upper/lower_case`,
+  `concat_bytes`, `string_join_two`, `encode_for_uri`, `compare` +
+  `string_equal/less_than/greater_than/le/ge`, `translate`, `normalize_space`,
+  `codepoint_equal`.
+- **Fixed a real bug in `translate`** surfaced by the new tests: when
+  `transString` is shorter than `mapString` (the XPath "delete" case),
+  `trans_bytes[trans_idx]` was indexed with `trans_idx >= K`, panicking
+  "Index out of bounds" — because Noir's `&` does NOT short-circuit, so the
+  `(trans_idx < K)` guard did not prevent the read. Now clamps the read index
+  and gates on a comptime `K > 0`.
+
+**Regex** (`regex.nr`, new) — a **bounded, circuit-friendly subset**, NOT full
+`fn:matches`/`fn:replace`. Full XML-Schema PCRE stays stubbed (`stub_fnmatches`
+/ `stub_fnreplace`): the qt3 `fnmatches` corpus is dominated by backreferences
+(`\1`), Unicode category escapes (`\p{Lu}`, `\i`, `\c`), char-class subtraction
+(`[A-Z-[OI]]`), supplementary-plane codepoints, and unbounded quantifiers over
+witness-length input — all intractable in fixed-size data-oblivious circuits, so
+>95% qt3 pass is impossible by construction. Implemented instead, under names
+that signal the bounded semantics:
+
+| Function | Semantics |
+|---|---|
+| `matches_literal` | unanchored literal substring match (+ `i` flag) |
+| `matches_anchored` | `^lit$` whole-string exact match |
+| `matches_prefix` | `^lit` prefix match |
+| `CharClass` + `matches_char_class_{star,plus,any}` | single ASCII char-class (`[a-z]`, `[^Q]`, ranges + singles + negation) with implicit `*`/`+`/one-occurrence |
+| `replace_literal` | non-overlapping literal pattern → literal replacement (no `$N` captures) |
+
+All O(N·M) straight-line byte compares; ASCII-only; case-insensitivity is ASCII
+A–Z↔a–z. 14 inline tests + 6 unit tests.
+
+**Hash** (`hash.nr`, new) — SPARQL `MD5/SHA1/SHA256/SHA384/SHA512` are **NOT**
+provided. Verified by probe that the pinned toolchain's stdlib
+(`nargo 1.0.0-beta.21`) exposes only the algebraic Pedersen hashes
+(`std::hash::pedersen_hash` etc.); `std::hash::sha256`, `std::keccak256`,
+`std::hash::poseidon2` all fail to resolve — the byte-oriented crypto hashes
+moved to external crates. MD5/SHA-1 are also cryptographically broken and must
+not be hand-rolled. Implemented instead:
+
+- `string_pedersen_hash<N, LIMBS>` — domain-separated, length-prefixed Pedersen
+  content hash of a string's bytes → `Field`. The circuit-native primitive for
+  in-proof string identity/commitment (the real ZK use case the SPARQL hash
+  builtins usually proxy). Packs 31 bytes/limb under the BN254 modulus.
+- `bytes_to_lower_hex<N, OUT>` — the SPARQL hash return-value formatter
+  (lowercase hex), ready to wrap a future vendored SHA-256 `[u8; 32]` digest.
+
+6 inline tests + 4 unit tests.
+
+### Verification (measured 2026-06-13, beta.21 / bb 5.0.0-nightly.20260324)
+
+| Target | Command | Result |
+|---|---|---|
+| `xpath` lib | `nargo test` | **102/102 pass** (was 67; +35) |
+| `xpath_unit_tests` | `nargo test` | **254/254 pass** (was 244; +10) |
+| new circuits | `nargo compile` + `bb gates` | compiles; ~28.7k gates for matches_literal+pedersen+char-class probe (Pedersen-dominated) |
+
+Note: `bb prove`'s end-to-end flow on this bb nightly has a CLI quirk (it reads
+a default `./target/vk` and errors before writing the proof) reproducible on a
+trivial unrelated circuit — not a circuit-soundness issue. Validation follows
+the project convention (`nargo test` + `bb gates`), as the float-migration
+section above also does.
+
+The new public API is re-exported from `lib.nr` and mapped in `xpath_fn.nr`
+(bounded regex under explicit `matches_*`/`replace_literal` names; `fn:matches`
+/ `fn:replace` proper deliberately left pointing at the stubs).
+
 ## Planned follow-up (out of scope here)
 
 - **Float API migration (stage 2):** ✅ DONE — see "Float API migration —
@@ -354,6 +431,15 @@ re-run — not trusted from the earlier run.)
   `jeswr/zkp-sparql-workspace:circuits/noir_XPath` branch
   `refactor/new-ieee754-api` was used as a reference only, not copied
   wholesale.)
+- **SPARQL crypto hashes (MD5/SHA*):** out of scope here — needs a
+  dependency-policy decision to vendor an external Noir SHA-256/keccak crate
+  (no stdlib digest at beta.21). Once vendored, the `SHA256(?s)` facade is
+  `bytes_to_lower_hex::<32, 64>(sha256(...))`. MD5/SHA-1 should stay unimplemented
+  (broken hashes).
+- **Regex beyond the bounded subset:** a Thompson-NFA-product gadget with an
+  a-priori state+step bound could cover more `fn:matches` patterns; full PCRE
+  (backreferences, `\p{...}`) remains infeasible. Track as a composition-layer
+  ZK-regex strategy (cf. zkRegEx).
 - **Upstreaming:** the beta.21 dep-pinning story, the date-timezone semantic
   fixes, and restoring the 21 green float/double packages to the workspace
   should eventually be upstreamed to jeswr/noir_XPath.

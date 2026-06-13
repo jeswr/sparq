@@ -10,6 +10,9 @@ mod datetime_tests;
 mod date_tests;
 mod boolean_tests;
 mod string_tests;
+// [OPUS-4.8] sq-y73: bounded regex subset + circuit-native hash coverage.
+mod regex_tests;
+mod hash_tests;
 mod qname_tests;
 mod sequence_tests;
 mod time_tests;
