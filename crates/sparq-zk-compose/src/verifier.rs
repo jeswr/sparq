@@ -1497,15 +1497,30 @@ fn bind_issuer_attestations(
 /// in question.) A relying party that has resolved NO authoritative snapshot for
 /// the referenced list/version rejects (it cannot authenticate the liveness view).
 ///
-/// # Privacy (interim) — the documented remaining step
-/// `index` is matched against the authoritative bitstring in the clear, so this
-/// reveals WHICH list slot the credential occupies (a linkability handle). The
-/// full-privacy upgrade is an IN-CIRCUIT hidden-index inclusion + bit-unset proof
-/// bound to the (authoritative) list version, revealing only "the hidden index is
-/// in-range and unset at version V". The verifier-side interim closes the
-/// "revoked credential still verifies" hole NOW (the minimum soundness bar — and,
-/// post re-audit, anchors the bit on authenticated bytes) and leaves the
-/// index-hiding as the privacy upgrade.
+/// # Privacy — the hidden-index upgrade (sq-3e5 / sq-h2v) and its residual gap
+/// `index` is matched against the authoritative bitstring in the clear HERE, so
+/// this clear-index path reveals WHICH list slot the credential occupies (a
+/// linkability handle). The IN-CIRCUIT hidden-index inclusion + bit-unset proof is
+/// now IMPLEMENTED ([`bind_hidden_revocation`] + the `revoke_unset_d{depth}`
+/// circuit): it proves "the bit at my HIDDEN index in the tree rooted at the
+/// relying party's authoritative root is unset" in zero knowledge, disclosing
+/// neither the index nor the other bits, and is bound to the verifier's OWN
+/// authoritative Merkle root (so the trust anchor is preserved). When a manifest
+/// carries `hidden_revocation` and the policy enables it, that proof is the
+/// index-hiding liveness evidence.
+///
+/// HONEST RESIDUAL GAP: this clear-index check ALSO runs (it is the always-on
+/// soundness floor), AND `bind_issuer_attestations` still requires the manifest's
+/// clear `RevocationStatus` (issuer-bound via `status_ref_digest(H(list), index,
+/// version)`, which embeds the index in the clear). So at this layer a privacy-
+/// seeking holder still discloses its index through the mandatory issuer-bound
+/// reference, even when it ALSO presents the hidden-index proof. Fully removing
+/// the leak requires the ISSUER-ATTESTATION path to bind a COMMITMENT to the index
+/// (not the clear index) — a signature-scheme change in `sparq_zk::sig` — so the
+/// hidden-index circuit can be the sole liveness evidence with no clear reference.
+/// The circuit + verifier binding (the ZK-hard part) are done; the
+/// attestation-side index-hiding is the documented follow-up. See
+/// [`bind_hidden_revocation`].
 // [OPUS-4.8] audit #12: verifier-side revocation / freshness check.
 // [OPUS-4.8] audit #12 re-audit (Option B): the bit decision reads the
 // AUTHORITATIVE (relying-party-resolved) snapshot, never the prover's bytes.
