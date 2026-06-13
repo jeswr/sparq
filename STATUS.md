@@ -83,24 +83,50 @@ member has a different vk and fails `bb verify`.
   the now-bound values (no new crypto seam needed).
 - **#3 issuer sig, #8/#9 attribution/salt:** orthogonal to #1/#2; untouched.
 
-## DONE
+## DONE (all committed; do NOT push — orchestrator merges)
 - Read audit + test-bench design + circuits + verifier/driver/build/toml/manifest.
 - Determined bb public_inputs byte format empirically (above).
 - Measured vk recompute determinism + timing; chose recompute-at-verify.
-- #1 IMPLEMENTED: `reconstruct_public_inputs()` + byte-compare in
-  `verify_manifest`; 2 unit tests pin it to REAL bb blobs (byte-match), +3
-  hardening/sensitivity unit tests. Commit 6c236dd.
-- #2 IMPLEMENTED: `CircuitProver::canonical_vk()` + `verify_with()`;
-  `verify_manifest` uses the recomputed canonical vk, never `art.vk`. Commit
-  6c236dd.
-- Hardening: `hex_decode`/`take_lp`/`decode_artifacts` -> `Option`, routed
-  through `CheckError::MalformedProof`/`MalformedField`/`PublicInputMismatch`.
-- Existing 10 e2e + new 5 unit tests green.
+- #1 IMPLEMENTED (commit 6c236dd): `reconstruct_public_inputs()` + byte-compare
+  in `verify_manifest`. 2 unit tests pin it to REAL bb blobs (byte-match for
+  filter_int_d1 + scan_k1_n16_r4), +3 sensitivity/hardening unit tests.
+- #2 IMPLEMENTED (commit 6c236dd): `CircuitProver::canonical_vk()` +
+  `verify_with()`; `verify_manifest` recomputes the canonical member vk and uses
+  it, never `art.vk`. Removed the false vk-recompute comment (was verifier.rs
+  204-209). vk pinned to FULL CircuitId => subsumes #11; operand_enc now in the
+  byte-compared vector => subsumes #7.
+- Hardening (commit 6c236dd): `hex_decode`/`take_lp`/`decode_artifacts` ->
+  `Option`, routed through `CheckError::MalformedProof`/`MalformedField`/
+  `PublicInputMismatch` (no panic on prover-controlled bytes).
+- Forge-and-verify NEGATIVE e2e tests (commit 5c40f14, toolchain-gated):
+  statement-substitution + verdict-substitution + challenge-rebind => REJECT
+  (#1); a trivial attacker-circuit proof under its own vk => REJECT via
+  canonical vk (#2); art.vk-is-ignored corollary; + positive control. The exact
+  audit #2 attack was reproduced and confirmed defeated.
+- wasm dep tree confirmed FREE of sparq-zk* (no regression).
 
-## IN-FLIGHT
-- Forge-and-verify NEGATIVE e2e tests (toolchain-gated): honest proof of
-  statement A under manifest B => REJECT (#1); prover non-canonical vk =>
-  REJECT (#2); + positive control through verify_manifest.
+## TEST RESULTS (cargo test -p sparq-zk -p sparq-zk-compose --release, threads=1)
+- sparq-zk lib: 25 passed (incl. new field be_bytes_32 test)
+- sparq-zk integration suites: 4 + 2 + 7 + 3 passed
+- sparq-zk-compose lib: 5 passed (reconstruction byte-match + hardening)
+- sparq-zk-compose e2e: 16 passed, 1 ignored (slow scan); the ignored
+  full_manifest_prove_verify_scan also passes when run with --ignored
+- 0 failed across the gate.
 
-## NEXT COMMAND
-- cargo test -p sparq-zk -p sparq-zk-compose --release -- --include-ignored
+## DEFERRED (designed to fold in — see DESIGN "Seams")
+- #4 replay/freshness (fresh-nonce param + single-use store): challenge is now
+  byte-bound into field 0; only the freshness SOURCE + seen-nonce store remain.
+- #5/#6 FILTER semantics + #10 query digest: op/bound/expected/operand_enc are
+  now byte-bound; a later agent maps the query FILTER var->slot and cross-checks.
+- #3 issuer signature, #8/#9 attribution/salt, #12 revocation: orthogonal to
+  #1/#2; untouched. The scan.nr replay note + verify.rs:20-23 join-safety
+  comment are left for the #4/#8 agents (the guarantee they describe is still
+  not delivered, so removing them now would be its own false-assurance edit).
+
+## RESIDUAL NOTE on #11 (n/d)
+`n` cannot be re-derived from public data (graph size is private) and `d`
+round-trips its bucket; the member is selected by the declared (stage-1b-checked)
+CircuitId. This is sound because the canonical vk is recomputed for THAT full id
+— a proof from a different compiled member fails bb verify against it (demonstrated
+by forge_reject_noncanonical_vk). Per the audit this relabel is otherwise
+bucket-invariant (same statement). No further action needed for #1/#2 scope.
