@@ -955,9 +955,13 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
         std::fs::remove_file(&flags_path).ok();
     }
 
-    // dict-meta.bin (prefixes + datatypes + term count) — identical bytes to `save_mmap`.
+    // dict-meta.bin (version header + prefixes + datatypes + term count) — identical bytes to
+    // `save_mmap`. [OPUS-4.8] (review 1409) The version header records the id-space partition.
     {
         let mut meta = BufWriter::new(std::fs::File::create(dir.join("dict-meta.bin")).map_err(io_err)?);
+        meta.write_all(&dict::DICT_META_MAGIC.to_le_bytes()).map_err(io_err)?;
+        meta.write_all(&dict::DICT_META_VERSION.to_le_bytes()).map_err(io_err)?;
+        meta.write_all(&dict::INLINE_BASE.to_le_bytes()).map_err(io_err)?;
         meta.write_all(&(prefixes.names.len() as u32).to_le_bytes()).map_err(io_err)?;
         for p in &prefixes.names {
             dict::write_str(&mut meta, p).map_err(io_err)?;

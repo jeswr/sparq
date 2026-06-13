@@ -36,6 +36,21 @@ pub const INLINE_BASE: Id = 1 << 31;
 /// fall back to the dictionary).
 const INLINE_MAX: u32 = (1 << 30) - 1;
 
+/// [OPUS-4.8] (review 1409) On-disk format marker for the mmap dictionary (`dict-meta.bin`).
+/// `INLINE_BASE` partitions the `u32` id space, so persisted RAW ids only mean what they say
+/// under the SAME partition the file was written with. A file written before `INLINE_BASE`
+/// moved (from `1 << 30` to `1 << 31`) encodes inline integers in `[1<<30, 1<<31)`, which the
+/// current code would misread as dictionary ids — silent numeric corruption / panics. The
+/// header records the partition so `open_mmap` can REJECT a mismatched/legacy store with a
+/// clear rebuild-required error instead of silently misinterpreting its ids.
+///
+/// `dict-meta.bin` previously began with `prefixes.len() as u32` (a small count). This magic
+/// is chosen to be distinguishable from any plausible legacy prefix count, so the reader can
+/// detect header-less legacy files. ("DMV1" — Dict Meta, V1; little-endian.)
+pub(crate) const DICT_META_MAGIC: u32 = 0x31_56_4D_44; // b"DMV1" little-endian
+/// Bump when the on-disk meta layout changes incompatibly.
+pub(crate) const DICT_META_VERSION: u32 = 1;
+
 /// If a literal `value`/`datatype` is a canonical non-negative `xsd:integer` in
 /// range, its inline id. Only the canonical lexical form (no leading zeros / sign)
 /// inlines, so `"030"^^integer` stays a distinct dictionary term.
@@ -1198,8 +1213,12 @@ impl Dict {
         // grown dictionary persists totally (the compaction path relies on this).
         let n = self.len();
 
-        // meta: prefixes, datatypes, term count.
+        // meta: [OPUS-4.8] (review 1409) version header (magic + version + id partition), then
+        // prefixes, datatypes, term count.
         let mut meta = std::io::BufWriter::new(std::fs::File::create(dir.join("dict-meta.bin"))?);
+        meta.write_all(&DICT_META_MAGIC.to_le_bytes())?;
+        meta.write_all(&DICT_META_VERSION.to_le_bytes())?;
+        meta.write_all(&INLINE_BASE.to_le_bytes())?; // the id-space partition this file encodes
         meta.write_all(&(self.prefixes.len() as u32).to_le_bytes())?;
         for p in &self.prefixes {
             write_str(&mut meta, p)?;
@@ -1245,6 +1264,37 @@ impl Dict {
     pub fn open_mmap(dir: &std::path::Path) -> std::io::Result<Dict> {
         use std::io::Read;
         let mut r = std::io::BufReader::new(std::fs::File::open(dir.join("dict-meta.bin"))?);
+        // [OPUS-4.8] (review 1409) Validate the on-disk id-space partition before trusting any
+        // persisted RAW id. A header-less file (legacy, written before this marker) or one
+        // whose INLINE_BASE differs from the running build must be REJECTED — its inline vs
+        // dictionary id ranges would be misinterpreted, silently corrupting numeric values.
+        let magic = read_u32(&mut r)?;
+        if magic != DICT_META_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "dict-meta.bin is in a legacy (pre-versioning) format whose id-space partition \
+                 is unknown; rebuild the store with the current version",
+            ));
+        }
+        let version = read_u32(&mut r)?;
+        if version != DICT_META_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "dict-meta.bin format version {version} is not supported (this build expects {DICT_META_VERSION}); rebuild the store"
+                ),
+            ));
+        }
+        let file_inline_base = read_u32(&mut r)?;
+        if file_inline_base != INLINE_BASE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "store id-space partition mismatch: file INLINE_BASE={file_inline_base}, this build={INLINE_BASE}; \
+                     persisted ids would be misinterpreted — rebuild the store"
+                ),
+            ));
+        }
         let np = read_u32(&mut r)? as usize;
         let mut prefixes = Vec::with_capacity(np);
         for _ in 0..np {
@@ -1589,7 +1639,10 @@ impl ShardedDict {
                 .into_iter()
                 .map(|(tag, idx, t)| {
                     let lid = shard.intern(&t);
-                    debug_assert!(lid < stride, "shard {s} exceeded STRIDE — raise shard count / widen Id");
+                    // [OPUS-4.8] Always-on (not debug_assert): a shard overflowing its STRIDE
+                    // makes temp-id ranges of adjacent shards overlap, which silently corrupts
+                    // the order-preserving remap (`remap_sharded`) in release builds. Fail hard.
+                    assert!(lid < stride, "shard {s} exceeded STRIDE ({stride}) — raise shard count / widen Id");
                     (tag, idx, (s as u32) * stride + lid)
                 })
                 .collect()
@@ -1675,7 +1728,10 @@ impl ShardedDict {
                 let SlotPtr(ptr, len) = scatter[pidx];
                 for (i, tp) in &per_partial[s] {
                     let lid = shard.intern_parts(tp);
-                    debug_assert!(lid < stride, "shard {s} exceeded STRIDE — raise shard count / widen Id");
+                    // [OPUS-4.8] Always-on (not debug_assert): STRIDE overflow makes adjacent
+                    // shards' temp-id ranges overlap and silently corrupts `remap_sharded`
+                    // (the scatter below would also write a wrong final id). Fail hard.
+                    assert!(lid < stride, "shard {s} exceeded STRIDE ({stride}) — raise shard count / widen Id");
                     debug_assert!((*i as usize) < len);
                     // SAFETY: i < len (local ids are 1..=pd.len() < pd.len()+1) and this
                     // (pidx, i) slot is written by exactly this shard — see RemapScatter.
@@ -1712,6 +1768,24 @@ impl ShardedDict {
     pub fn into_merged(self) -> (Dict, Vec<u64>, u32) {
         let base = self.bases();
         let stride = self.stride;
+        // [OPUS-4.8] Validate capacity before producing the merged dict. (1) No shard may
+        // have overflowed its STRIDE — otherwise its temp ids overlapped the next shard's
+        // range and `remap_sharded` produced corrupt final ids. (2) The total distinct-term
+        // count must fit in the dictionary id partition `[1, INLINE_BASE)`; otherwise final
+        // dense ids would collide with the inline-integer space. Both are silent-corruption
+        // bugs in release, so assert hard rather than debug_assert.
+        for (s, sh) in self.shards.iter().enumerate() {
+            assert!(
+                (sh.terms.len() as u64) <= stride as u64,
+                "shard {s} has {} terms, exceeding STRIDE ({stride}) — raise shard count / widen Id",
+                sh.terms.len()
+            );
+        }
+        let total_terms = base[base.len() - 1];
+        assert!(
+            total_terms < INLINE_BASE as u64,
+            "merged dictionary has {total_terms} terms, exceeding the dictionary id partition (< {INLINE_BASE}) — widen Id to u64"
+        );
         // Unify prefix + datatype tables; build per-shard local-id -> unified-id remaps.
         let (mut uni_prefixes, mut pidx): (Vec<Box<str>>, FxHashMap<Box<str>, u32>) = Default::default();
         let (mut uni_dts, mut didx): (Vec<NamedNode>, FxHashMap<Box<str>, u32>) = Default::default();
@@ -1911,6 +1985,37 @@ mod tests {
     }
 
     #[test]
+    fn merged_dict_lookup_and_intern_after_build_table() {
+        // [OPUS-4.8] Regression for review 1373 (Medium): `into_merged` returns a dict with an
+        // empty lookup table; `build_table` must rebuild it so the merged dict honours the
+        // normal lookup/intern invariant — lookup hits every term, and re-interning an existing
+        // term returns its id (no duplicate), while a fresh term appends above the merged ids.
+        let mut sd = ShardedDict::new(4);
+        let mk = |i: usize| -> Term { Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/n{i}"))) };
+        let terms: Vec<Term> = (0..50).map(mk).collect();
+        let items: Vec<(u32, Id, Term)> =
+            terms.iter().enumerate().map(|(j, t)| (0, (j + 1) as Id, t.clone())).collect();
+        let resolved = sd.intern_terms(items);
+        let temp_of: std::collections::HashMap<Id, Id> = resolved.iter().map(|(_, j, temp)| (*j, *temp)).collect();
+        let (mut merged, base, stride) = sd.into_merged();
+        merged.build_table();
+        assert_eq!(merged.len(), 50, "distinct term count");
+        for (j, t) in terms.iter().enumerate() {
+            let fin = remap_sharded(temp_of[&((j + 1) as Id)], &base, stride);
+            // lookup must HIT (was an empty table before build_table) and agree with the final id.
+            assert_eq!(merged.lookup(t), fin, "lookup hits term {j}");
+            // re-interning an existing term must NOT add a duplicate.
+            assert_eq!(merged.intern(t), fin, "re-intern of existing term {j} is idempotent");
+        }
+        assert_eq!(merged.len(), 50, "no duplicates created by re-interning");
+        // A fresh term appends above the merged ids.
+        let fresh = Term::NamedNode(NamedNode::new_unchecked("http://ex/fresh"));
+        let fid = merged.intern(&fresh);
+        assert_eq!(merged.len(), 51);
+        assert_eq!(merged.lookup(&fresh), fid);
+    }
+
+    #[test]
     fn non_canonical_and_out_of_range_do_not_inline() {
         let mut d = Dict::new();
         for s in ["05", "+5", "-3", "007"] {
@@ -2047,6 +2152,43 @@ mod tests {
         assert_eq!(d2.term(iid), inner);
         assert_eq!(d2.lookup(&outer), oid);
         assert_eq!(d2.lookup(&triple("http://ex/x", "http://ex/p", int("8"))), NO_ID);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] Regression for review 1409: the mmap dictionary must carry an on-disk
+    /// id-space partition marker so a store written under a DIFFERENT `INLINE_BASE` (or a
+    /// legacy header-less file) is REJECTED rather than silently misinterpreting its ids.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn mmap_dict_rejects_legacy_and_mismatched_partition() {
+        use std::io::Write;
+        let mut d = Dict::new();
+        d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a")));
+        d.intern(&int("42")); // an inline integer — its meaning depends on INLINE_BASE
+        let dir = std::env::temp_dir().join(format!("sparq-dict-ver-mmap-{}", std::process::id()));
+
+        // (a) A current-format store opens fine, and the header records the current partition.
+        d.save_mmap(&dir).unwrap();
+        let meta = std::fs::read(dir.join("dict-meta.bin")).unwrap();
+        assert_eq!(&meta[0..4], &DICT_META_MAGIC.to_le_bytes(), "meta starts with the magic");
+        assert_eq!(&meta[4..8], &DICT_META_VERSION.to_le_bytes(), "then the version");
+        assert_eq!(&meta[8..12], &INLINE_BASE.to_le_bytes(), "then the id partition");
+        assert!(Dict::open_mmap(&dir).is_ok(), "current-format store must open");
+
+        // (b) A store with a MISMATCHED partition (simulating the old INLINE_BASE = 1<<30) must
+        //     be rejected — its inline ids would be misread as dictionary ids.
+        let mut tampered = meta.clone();
+        tampered[8..12].copy_from_slice(&(1u32 << 30).to_le_bytes());
+        std::fs::File::create(dir.join("dict-meta.bin")).unwrap().write_all(&tampered).unwrap();
+        let err = Dict::open_mmap(&dir).err().expect("mismatched partition must be rejected");
+        assert!(err.to_string().contains("partition mismatch"), "clear rebuild error: {err}");
+
+        // (c) A LEGACY header-less file (begins directly with the prefix count) must be rejected.
+        let legacy_body = &meta[12..]; // drop magic+version+partition → pre-versioning layout
+        std::fs::File::create(dir.join("dict-meta.bin")).unwrap().write_all(legacy_body).unwrap();
+        let err = Dict::open_mmap(&dir).err().expect("legacy header-less file must be rejected");
+        assert!(err.to_string().contains("legacy"), "clear rebuild error: {err}");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
