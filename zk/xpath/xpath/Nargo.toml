@@ -4,7 +4,9 @@ type = "lib"
 authors = ["jeswr"]
 
 [dependencies]
-# Vendored copies of upstream git deps (see ../vendor/*/VENDOR-PROVENANCE.md).
-# Upstream pins were: ieee754 = jeswr/noir_IEEE754@v0.3.1, json_parser = noir-lang/noir_json_parser@main (floating).
-ieee754 = { path = "../vendor/ieee754" }
+# Float dep migrated from vendored noir_IEEE754 v0.3.1 to the optimized
+# sparq_ieee754 library in this repo (see ../VENDOR.md "Migration" section).
+sparq_ieee754 = { path = "../../ieee754" }
+# Vendored copy of upstream git dep (see ../vendor/json_parser/VENDOR-PROVENANCE.md).
+# Upstream pin was: json_parser = noir-lang/noir_json_parser@main (floating).
 json_parser = { path = "../vendor/json_parser" }
