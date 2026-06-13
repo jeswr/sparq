@@ -183,14 +183,15 @@ export class SparqStore {
   }
 
   /**
-   * Runs an ASK query natively in the engine (evaluation early-exits at the
-   * first solution; a single-pattern ASK is answered straight from the index).
-   * Returns the `boolean` of the engine's SPARQL 1.1 JSON results form.
+   * Runs an ASK query through the engine's NATIVE ask path: evaluation
+   * early-exits at the first solution (the pattern runs under an implicit
+   * `LIMIT 1`), a single-pattern ASK is answered straight from the index, and
+   * the result crosses the wasm boundary as a plain `boolean` — no SELECT is
+   * materialised, no SPARQL-JSON string is built or parsed. A non-ASK query is
+   * rejected with a clear error.
    */
   queryBoolean(sparql: string): boolean {
-    const json = JSON.parse(this.#inner.query(sparql)) as SparqlJsonResults;
-    if (typeof json.boolean !== 'boolean') throw new Error('queryBoolean() requires an ASK query');
-    return json.boolean;
+    return this.#inner.ask(sparql);
   }
 
   /**
