@@ -12,6 +12,11 @@
 //!   (`instant-distance`, pure Rust), both returning `(Id, cosine)` pairs;
 //!   [`VectorIndex::nearest_term`] / [`nearest_term_exact`] query by [`oxrdf::Term`],
 //!   resolving through a [`Graph`](sparq_core::Graph)'s dictionary.
+//! - [`DiskAnnIndex`]: a **persistent on-disk Vamana / DiskANN-style ANN graph** (`.spqg`) —
+//!   build once, then [`open`](DiskAnnIndex::open) on later runs with **no rebuild** (mmap +
+//!   header check). Cosine-identical to [`VectorIndex`]; the out-of-core counterpart for
+//!   stores that should survive process restart (see [`diskann`] for the format and the
+//!   honest scope vs. full PQ-backed DiskANN).
 //! - [`Embedder`]: provider-agnostic embedding trait. Embeddings are produced
 //!   **outside** the engine (design decision: out-of-process); [`HashEmbedder`] is the
 //!   deterministic, offline, **test-only** implementation, and the non-default
@@ -34,6 +39,7 @@
 //! compile it.
 
 pub mod ann;
+pub mod diskann;
 pub mod embed;
 pub mod fuse;
 pub mod labels;
@@ -41,6 +47,7 @@ pub mod store;
 pub mod verbalize;
 
 pub use ann::{cosine, nearest_exact, nearest_term_exact, HnswConfig, VectorIndex};
+pub use diskann::{sibling_graph_path, DiskAnnIndex, VamanaConfig, SPQG_MAGIC, SPQG_VERSION};
 pub use embed::{Embedder, HashEmbedder};
 pub use fuse::{fuse_rrf, fuse_rrf_weighted, fuse_scores, RRF_K};
 pub use labels::{embed_labels, embed_labels_with, LabelConfig};
