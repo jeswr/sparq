@@ -135,6 +135,67 @@ fn gzipped_hdt_loads_transparently() {
     assert_eq!(sparq_hdt::load(&path).unwrap().store.len(), 328);
 }
 
+// [OPUS-4.8] H5: zstd / bzip2 compressed-HDT container compressors, mirroring
+// `gzipped_snikmeta`. Both decode in the STREAMING path (`with_hdt_stream`),
+// selected by magic bytes (zstd `28 b5 2f fd`, bzip2 "BZh"), never file name.
+
+/// zstd-compresses the snikmeta fixture in memory.
+fn zstd_snikmeta() -> Option<Vec<u8>> {
+    let hdt_path = fixture("snikmeta.hdt");
+    if !hdt_path.exists() {
+        eprintln!("skipping: fixture {} absent", hdt_path.display());
+        return None;
+    }
+    let bytes = std::fs::read(&hdt_path).unwrap();
+    Some(zstd::stream::encode_all(std::io::Cursor::new(bytes), 3).unwrap())
+}
+
+/// bzip2-compresses the snikmeta fixture in memory.
+fn bzip2_snikmeta() -> Option<Vec<u8>> {
+    use std::io::Write;
+    let hdt_path = fixture("snikmeta.hdt");
+    if !hdt_path.exists() {
+        eprintln!("skipping: fixture {} absent", hdt_path.display());
+        return None;
+    }
+    let bytes = std::fs::read(&hdt_path).unwrap();
+    let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+    enc.write_all(&bytes).unwrap();
+    Some(enc.finish().unwrap())
+}
+
+/// `.hdt.zst` containers are sniffed by magic bytes and streamed-decoded, from a
+/// reader and a path with no `.zst` extension. Triple set == plain `.hdt`.
+#[test]
+fn zstd_hdt_loads_transparently() {
+    let Some(zst) = zstd_snikmeta() else { return };
+    let plain = sparq_hdt::load(fixture("snikmeta.hdt")).unwrap();
+    let g = sparq_hdt::load_reader(std::io::Cursor::new(zst.clone())).unwrap();
+    assert_eq!(g.store.len(), 328);
+    assert_eq!(triple_set(&g), triple_set(&plain));
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-zst");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("disguised.hdt"); // sniffed by content, not name
+    std::fs::write(&path, &zst).unwrap();
+    assert_eq!(sparq_hdt::load(&path).unwrap().store.len(), 328);
+}
+
+/// `.hdt.bz2` containers are sniffed by magic bytes and streamed-decoded, from a
+/// reader and a path with no `.bz2` extension. Triple set == plain `.hdt`.
+#[test]
+fn bzip2_hdt_loads_transparently() {
+    let Some(bz) = bzip2_snikmeta() else { return };
+    let plain = sparq_hdt::load(fixture("snikmeta.hdt")).unwrap();
+    let g = sparq_hdt::load_reader(std::io::Cursor::new(bz.clone())).unwrap();
+    assert_eq!(g.store.len(), 328);
+    assert_eq!(triple_set(&g), triple_set(&plain));
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-bz2");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("disguised.hdt"); // sniffed by content, not name
+    std::fs::write(&path, &bz).unwrap();
+    assert_eq!(sparq_hdt::load(&path).unwrap().store.len(), 328);
+}
+
 /// The HDT header (dataset metadata triples) is exposed as a queryable graph,
 /// for plain and gzipped archives alike.
 #[test]
@@ -261,6 +322,55 @@ fn direct_decoder_gzip_matches_plain() {
     let from_plain = sparq_hdt::load(fixture("snikmeta.hdt")).unwrap();
     assert_eq!(triple_set(&from_gz), triple_set(&from_plain));
     assert_eq!(from_gz.store.len(), from_plain.store.len());
+}
+
+/// [OPUS-4.8] H5 differential gate: the SAME bytes compressed as gzip, zstd and
+/// bzip2 must all decode (streaming) to the IDENTICAL triple set as the plain
+/// `.hdt`. Run on the multi-block generated archive so the codec path is fed a
+/// realistic-shaped, multi-section dictionary (not just the 10 KB snikmeta).
+#[test]
+fn all_codecs_decode_to_identical_triple_set() {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+
+    // A multi-block, shared-section-heavy graph (same shape as the multiblock
+    // oracle test) so the compressed `.hdt` is non-trivial.
+    let mut nt = String::new();
+    const N: usize = 150;
+    let knows = "<http://xmlns.com/foaf/0.1/knows>";
+    let label = "<http://www.w3.org/2000/01/rdf-schema#label>";
+    for i in 0..N {
+        writeln!(nt, "<http://example.org/e{i}> {knows} <http://example.org/e{}> .", i + 1).unwrap();
+        writeln!(nt, "<http://example.org/e{i}> {label} \"name {i}\"@en .").unwrap();
+    }
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-codecs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let nt_path = dir.join("codecs.nt");
+    std::fs::write(&nt_path, &nt).unwrap();
+    let written = hdt::Hdt::read_nt(&nt_path).expect("building HDT");
+    let mut plain: Vec<u8> = Vec::new();
+    written.write(&mut plain).expect("serializing HDT");
+
+    let reference = triple_set(&sparq_hdt::load_reader(std::io::Cursor::new(plain.clone())).unwrap());
+    assert!(reference.len() >= 2 * N);
+
+    // gzip
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(&plain).unwrap();
+    let gz = gz.finish().unwrap();
+    // zstd
+    let zst = zstd::stream::encode_all(std::io::Cursor::new(plain.clone()), 3).unwrap();
+    // bzip2
+    let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+    bz.write_all(&plain).unwrap();
+    let bz = bz.finish().unwrap();
+
+    for (codec, bytes) in [("gzip", gz), ("zstd", zst), ("bzip2", bz)] {
+        let g = sparq_hdt::load_reader(std::io::Cursor::new(bytes))
+            .unwrap_or_else(|e| panic!("{codec} decode failed: {e}"));
+        assert_eq!(triple_set(&g), reference, "{codec} must decode to the identical triple set as plain .hdt");
+    }
 }
 
 /// Empty + single-triple HDT archives decode identically on both paths (exercises
