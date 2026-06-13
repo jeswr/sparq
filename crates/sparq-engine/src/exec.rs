@@ -634,6 +634,14 @@ fn join_chunks(mut chunks: Vec<String>) -> String {
 /// common (single-pattern) browser query. Output is a chunk sequence (see
 /// [`eval_select_json_chunks`]); concatenated it is the exact JSON document.
 fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Option<Vec<String>> {
+    // zk-trace: this streaming path serialises straight from the scan without
+    // materialising Bindings, so it never hits the scan-recording hook. Fall
+    // through to the Bindings path (which records) while a recorder is armed —
+    // result-equivalent, only the plan changes.
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return None;
+    }
     if view::default_is_empty() {
         return None; // empty-default view: the general path short-circuits at the BGP
     }
@@ -1498,9 +1506,9 @@ fn eval_graph_named(
                     continue; // not visible under the installed dataset view (L1)
                 }
                 // zk-trace: each iteration of `GRAPH ?g` tags the enclosed
-                // scans/filters with the iteration's named graph.
-                #[cfg(feature = "zk")]
-                let _zk = crate::zk::graph_scope(gname);
+                // scans/filters with the iteration's named graph — the scope
+                // is installed INSIDE eval_translated (one place), so the
+                // operator boundary stream is not double-nested.
                 let mut b = eval_translated(
                     graph,
                     local,
@@ -2796,12 +2804,16 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     if prepared.iter().any(|p| p.unsatisfiable) {
         // zk-trace: an unsatisfiable constant (a term absent from the
         // dictionary) is a PROVABLY-EMPTY input set — the per-property proof
-        // must witness "no such triple exists". Record each pattern's key
-        // with an empty triple set so the trace is sufficient.
+        // must witness "no such triple exists". Record ONLY the patterns that
+        // are provably empty; a satisfiable SIBLING was never consumed (the
+        // join short-circuits), so claiming it empty would over-state the
+        // trace.
         #[cfg(feature = "zk")]
         if crate::zk::enabled() {
-            for tp in patterns {
-                crate::zk::record_empty_pattern(crate::zk::key_of_algebra_pattern(tp));
+            for (tp, prep) in patterns.iter().zip(&prepared) {
+                if prep.unsatisfiable {
+                    crate::zk::record_empty_pattern(crate::zk::key_of_algebra_pattern(tp));
+                }
             }
         }
         return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
@@ -3379,12 +3391,11 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
     for tp in patterns {
         let (id_pat, pos_vars, unsat) = prepare_pattern(graph, tp)?;
         if unsat {
-            // zk-trace: provably-empty input set (see eval_bgp_binary).
+            // zk-trace: record ONLY this provably-empty pattern (see the
+            // binary path) — siblings are not proven empty here.
             #[cfg(feature = "zk")]
             if crate::zk::enabled() {
-                for tp in patterns {
-                    crate::zk::record_empty_pattern(crate::zk::key_of_algebra_pattern(tp));
-                }
+                crate::zk::record_empty_pattern(crate::zk::key_of_algebra_pattern(tp));
             }
             return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
         }

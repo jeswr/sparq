@@ -190,6 +190,53 @@ fn limit_disables_early_termination() {
     assert_eq!(total, 3, "completeness witness needs the whole scan range");
 }
 
+/// GRAPH <const> records exactly ONE Enter/Exit(Graph) boundary (not
+/// double-nested) and tags the enclosed scan with the named graph.
+#[test]
+fn graph_const_single_boundary_and_tag() {
+    let ds = Graph::load_dataset(
+        "<http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .\n\
+         <http://ex/c> <http://ex/p> <http://ex/d> <http://ex/g2> .\n",
+        "n-quads",
+    )
+    .unwrap();
+    let q = "SELECT ?o WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p> ?o } }";
+    let (r, t) = traced(&ds, q);
+    assert_eq!(r.rows.len(), 1);
+    let enters = t.steps.iter().filter(|s| matches!(s, Step::Enter(Op::Graph))).count();
+    let exits = t.steps.iter().filter(|s| matches!(s, Step::Exit(Op::Graph))).count();
+    assert_eq!(enters, 1, "exactly one GRAPH boundary (not double-nested): {:?}", t.steps);
+    assert_eq!(exits, 1);
+    // The scan is tagged with g1.
+    let p = t.patterns.iter().find(|p| p.graph.is_some()).expect("a graph-tagged pattern");
+    assert_eq!(p.graph.as_ref().unwrap().to_string(), "<http://ex/g1>");
+}
+
+/// GRAPH ?g iterates the named graphs: each iteration records exactly one
+/// boundary (regression guard for the double-scope bug roborev caught).
+#[test]
+fn graph_var_one_boundary_per_iteration() {
+    let ds = Graph::load_dataset(
+        "<http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .\n\
+         <http://ex/c> <http://ex/p> <http://ex/d> <http://ex/g2> .\n",
+        "n-quads",
+    )
+    .unwrap();
+    let q = "SELECT ?g ?o WHERE { GRAPH ?g { ?s <http://ex/p> ?o } }";
+    let (r, t) = traced(&ds, q);
+    assert_eq!(r.rows.len(), 2, "one row per named graph");
+    let enters = t.steps.iter().filter(|s| matches!(s, Step::Enter(Op::Graph))).count();
+    // Two visible named graphs => exactly two GRAPH boundaries, no nesting.
+    assert_eq!(enters, 2, "one boundary per graph iteration, not nested: {:?}", t.steps);
+    // Both graph tags appear.
+    let tags: std::collections::BTreeSet<String> =
+        t.patterns.iter().filter_map(|p| p.graph.as_ref().map(|t| t.to_string())).collect();
+    assert_eq!(
+        tags,
+        std::collections::BTreeSet::from(["<http://ex/g1>".to_string(), "<http://ex/g2>".to_string()])
+    );
+}
+
 /// Property paths are NOT captured per-pattern: an Op::Path marker is recorded
 /// so a consumer can fail closed.
 #[test]

@@ -127,21 +127,22 @@ fn gen_query(rng: &mut Rng) -> String {
     format!("{pfx}SELECT * WHERE {{ {body} }}")
 }
 
-/// Canonical representation of a result for comparison (row multiset; ORDER BY
-/// queries are compared as a sequence by keeping row order, which is already
-/// preserved in `rows`).
-fn canon(r: &QueryResult) -> Vec<String> {
+/// Canonical representation of a result for comparison. For ORDER BY queries
+/// the row SEQUENCE is significant, so it is preserved; otherwise rows are
+/// compared as a sorted multiset (robust to incidental reordering).
+fn canon(r: &QueryResult, ordered: bool) -> Vec<String> {
     let mut rows: Vec<String> = r.rows.iter().map(|row| format!("{row:?}")).collect();
-    // SELECT result row ORDER is only significant under ORDER BY; for the
-    // differential we compare as a sorted multiset (both runs use the same
-    // planner, so an unordered query's row order is identical anyway, but a
-    // sort makes the assertion robust to any incidental reordering).
-    rows.sort();
+    if !ordered {
+        rows.sort();
+    }
     rows
 }
 
 /// The differential: results must be identical with the recorder armed vs not.
 fn assert_same(g: &Graph, q: &str) {
+    // ORDER BY makes the row sequence load-bearing — do NOT sort it away, or a
+    // zk-on/zk-off ordering regression would be masked.
+    let ordered = q.contains("ORDER BY");
     let off = query(g, q);
     let on = {
         let _guard = zk::install();
@@ -151,8 +152,8 @@ fn assert_same(g: &Graph, q: &str) {
     };
     match (off, on) {
         (Ok(a), Ok(b)) => assert_eq!(
-            canon(&a),
-            canon(&b),
+            canon(&a, ordered),
+            canon(&b, ordered),
             "zk on/off result mismatch for query:\n{q}"
         ),
         (Err(_), Err(_)) => {}
