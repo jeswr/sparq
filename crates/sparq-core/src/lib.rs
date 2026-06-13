@@ -2446,6 +2446,57 @@ fn is_sparql_directive_start(bytes: &[u8], k: usize) -> bool {
     m(b"prefix") || m(b"base")
 }
 
+/// [OPUS-4.8] (T3) Delimit a SPARQL-style `PREFIX`/`BASE` directive starting at `start` (which
+/// [`is_sparql_directive_start`] has already confirmed). Unlike a statement or an `@`-directive,
+/// the SPARQL form has **no `.` terminator** — it ends right after the closing `>` of its single
+/// `IRIREF` (the last token of both `BASE <iri>` and `PREFIX pname: <iri>`). Returns the offset
+/// just past that `>`, or `None` (→ caller falls back to serial) if the directive is malformed or
+/// truncated, in which case the serial oxttl parser produces the rejection.
+///
+/// Correctness of treating this as a snapshot span: the byte run `[start, end)` is exactly the
+/// directive text oxttl would consume, so replaying it verbatim into a later chunk's preamble
+/// reproduces the prefix/base binding identically (confirmed: oxttl accepts mixed `@`/SPARQL
+/// forms, SPARQL redefinitions, and relative SPARQL `BASE`). A trailing `.` after the `>` (which
+/// is INVALID Turtle for the SPARQL form) is deliberately NOT consumed: it remains in the stream
+/// as the start of the next unit, where the per-chunk oxttl parse rejects it — preserving the
+/// rejection the W3C `turtle-syntax-bad-base-03` case requires.
+///
+/// The scan skips inter-token whitespace and `#`-comments but otherwise only has to locate the
+/// IRIREF: anything between the keyword and the `<` that is NOT whitespace/comment/`PNAME_NS`
+/// makes the directive malformed, so we bail to serial rather than guess.
+#[cfg(feature = "parallel")]
+fn next_sparql_directive_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let n = bytes.len();
+    // Past the keyword: `PREFIX` is 6 bytes, `BASE` is 4. `is_sparql_directive_start` guarantees
+    // one of them matches at `start` followed by whitespace.
+    let kw_len = if bytes[start..].len() >= 6 && bytes[start..start + 6].eq_ignore_ascii_case(b"prefix") {
+        6
+    } else {
+        4 // base
+    };
+    // Skip whitespace/comments up to the IRIREF (for PREFIX the PNAME_NS sits in between; we
+    // don't need to validate it — the only `<` before the directive's own IRIREF is that IRIREF,
+    // and oxttl validates the PNAME_NS when it re-parses the snapshot).
+    let mut i = skip_ws_comments(bytes, start + kw_len);
+    // Find the IRIREF's opening `<`, allowing only a PNAME_NS token (PREFIX form) before it. If
+    // we hit a statement-relevant byte (`.`, a quote, EOF) before `<`, the directive is malformed.
+    while i < n && bytes[i] != b'<' {
+        match bytes[i] {
+            b'.' | b'"' | b'\'' | b';' | b',' | b'[' | b']' | b'(' | b')' | b'@' => return None,
+            b'#' => i = skip_ws_comments(bytes, i),
+            _ => i += 1,
+        }
+    }
+    if i >= n {
+        return None; // no IRIREF before EOF
+    }
+    // Consume the IRIREF `<...>`; `>` cannot appear unescaped inside (it is `>`), so the
+    // first `>` closes it. A newline inside an IRIREF is also illegal, but oxttl re-validates the
+    // snapshot, so we only need a cheap span here.
+    i += 1;
+    memchr::memchr(b'>', &bytes[i..]).map(|off| i + off + 1)
+}
+
 /// Scan from `start` (in the top-level/normal Turtle state) to the next statement-terminating
 /// `.` (one followed by whitespace/EOF/comment, i.e. not a decimal point or PN_LOCAL dot),
 /// skipping over IRIs `<...>`, string literals (all four quote forms, with `\` escapes), and
@@ -2551,20 +2602,24 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
 /// fall back to serial. Each chunk is `directive-snapshot + a run of statements`, so every
 /// prefix/base in scope at that chunk's start is re-declared in the chunk.
 ///
-/// # `@prefix`/`@base` directives anywhere (T3 — no longer a serial cliff)
-/// [OPUS-4.8] `@`-form directives are tracked as ordered byte-spans as the body is scanned, and
-/// each chunk is prefixed with the **verbatim, in-order concatenation of every `@`-directive
-/// that precedes the chunk's first statement**. This replays the document's directive prelude
-/// exactly, so it is correct even for redefinitions and relative `@base <rel>` (which resolves
-/// against the running base): oxttl re-processes the snapshot in the same order the serial parse
-/// does, so each chunk sees the identical prefix table and base. A leading run of directives
-/// (the common serializer shape) is just the degenerate case where the snapshot is the same for
-/// every chunk. Previously ANY directive interspersed among the triples dropped the WHOLE file
-/// to serial; that 0× cliff is gone for the `@`-form.
+/// # Directives anywhere (T3 — no longer a serial cliff), BOTH the `@`- and the SPARQL-style form
+/// [OPUS-4.8] Directives are tracked as ordered byte-spans as the body is scanned, and each chunk
+/// is prefixed with the **verbatim, in-order concatenation of every directive that precedes the
+/// chunk's first statement** (joined by `\n`). This replays the document's directive prelude
+/// exactly, so it is correct even for redefinitions and relative `@base <rel>` / `BASE <rel>`
+/// (which resolve against the running base): oxttl re-processes the snapshot in the same order the
+/// serial parse does, so each chunk sees the identical prefix table and base. A leading run of
+/// directives (the common serializer shape) is just the degenerate case where the snapshot is the
+/// same for every chunk. Previously ANY directive interspersed among the triples — and ANY
+/// SPARQL-style `PREFIX`/`BASE` anywhere — dropped the WHOLE file to serial; that 0× cliff is gone
+/// for both forms:
+/// - Turtle `@prefix`/`@base`: `.`-terminated, delimited by [`next_terminator`].
+/// - SPARQL-style `PREFIX`/`BASE`: NO `.` terminator, delimited at its IRIREF by
+///   [`next_sparql_directive_end`]. (An invalid trailing `.` is left in the stream so the per-chunk
+///   oxttl parse still rejects it — see that fn.)
 ///
-/// Still bails (→ serial): SPARQL-style `PREFIX`/`BASE` (keyword form, no `.` terminator — its
-/// extent cannot be delimited by the statement-terminator scan without re-deriving the directive
-/// grammar, so it stays the rarer serial case), and anything the scanner cannot cleanly scan.
+/// Still bails (→ serial): anything the scanner cannot cleanly delimit (a truncated/malformed
+/// directive or statement, which the serial oxttl parser then rejects).
 ///
 /// BLANK NODES do not force a serial fallback. (They used to bail this function out — and 42
 /// `_:` labels among the 1.5 M statements of the real Wikidata slice silently forfeited the
@@ -2600,16 +2655,22 @@ fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
         dirs_before: usize,
     }
 
-    // [OPUS-4.8] (T3) Single pass over the top level: classify each unit as an `@`-directive
-    // (recorded as an ordered span) or a statement (recorded with the directive count in scope).
-    // `@`-directives and statements may interleave freely; only SPARQL-style `PREFIX`/`BASE`
-    // forces the serial fallback (no `.` terminator to delimit it cheaply).
+    // [OPUS-4.8] (T3) Single pass over the top level: classify each unit as a directive (recorded
+    // as an ordered byte-span) or a statement (recorded with the directive count in scope).
+    // Directives — BOTH the Turtle `@prefix`/`@base` form (`.`-terminated) AND the SPARQL-style
+    // `PREFIX`/`BASE` form (no `.`, delimited at its IRIREF by `next_sparql_directive_end`) — and
+    // statements may interleave freely. Each chunk's synthetic preamble replays every directive in
+    // scope verbatim, so a mid-body redefinition (either form) is correct.
     let mut dirs: Vec<(usize, usize)> = Vec::new();
     let mut stmts: Vec<Stmt> = Vec::new();
     let mut j = skip_ws_comments(bytes, 0);
     while j < n {
         if is_sparql_directive_start(bytes, j) {
-            return None; // SPARQL-style PREFIX/BASE — not fast-pathed
+            // SPARQL-style `PREFIX`/`BASE`: a directive span with no `.` terminator.
+            let end = next_sparql_directive_end(bytes, j)?;
+            dirs.push((j, end));
+            j = skip_ws_comments(bytes, end);
+            continue;
         }
         let is_directive = bytes[j] == b'@';
         let end = next_terminator(bytes, j)?;
@@ -3337,7 +3398,8 @@ mod tests {
     /// [OPUS-4.8] (T3) Interspersed `@prefix`/`@base` directives among the body statements must
     /// no longer drop the whole document to serial — instead each chunk carries a verbatim
     /// in-order snapshot of the directives in scope at its start, so the chunked parse equals
-    /// serial even for prefix REDEFINITIONS. SPARQL-style `PREFIX`/`BASE` still bails to serial.
+    /// serial even for prefix REDEFINITIONS. SPARQL-style `PREFIX`/`BASE` (the no-`.` keyword
+    /// form) is handled the same way (delimited at its IRIREF) — see case 4.
     #[cfg(feature = "parallel")]
     #[test]
     fn parallel_turtle_interspersed_directives_match_serial() {
@@ -3392,19 +3454,46 @@ mod tests {
         adjacent.push_str("@prefix y: <http://y/> .\nx:last y:p x:o .\n@prefix z: <http://z/> .\n");
         differential(&adjacent, 8, false);
 
-        // 4. SPARQL-style PREFIX interspersed → must STILL bail to serial (cannot delimit the
-        //    no-dot keyword form cheaply). Serial fallback is correct, just not parallel.
-        let mut sparql = String::from("PREFIX s: <http://s/>\n");
-        for i in 0..100 {
-            sparql.push_str(&format!("s:s{i} s:p s:o{i} .\n"));
+        // 4. SPARQL-style `PREFIX`/`BASE` (no-`.` keyword form) interspersed and REDEFINED
+        //    mid-body — must now FAN OUT (no longer the serial cliff) and match serial. The
+        //    snapshot replays each SPARQL directive verbatim, so the binding in scope at each
+        //    chunk's start is the right one. Includes a relative SPARQL `BASE <rel>` redefinition
+        //    resolved against the running base, and prefixes introduced partway through.
+        let mut sparql = String::from("PREFIX s: <http://s0/>\nBASE <http://base0/>\n");
+        for round in 0..8 {
+            sparql.push_str(&format!("PREFIX s: <http://s{round}/>\nBASE <http://base{round}/>\n"));
+            for i in 0..120 {
+                sparql.push_str(&format!("s:longkey{round}_{i} s:longpred <relative-iri-{i}> .\n"));
+            }
         }
-        assert!(
-            turtle_chunks(sparql.as_bytes(), 16).is_none(),
-            "SPARQL-style PREFIX must still force the serial fallback"
-        );
-        // …and the serial fallback still yields the right triples.
-        let (_pd, pt) = parse_turtle_chunked(sparql.as_bytes(), 16).unwrap();
-        assert_eq!(pt.len(), 100);
+        assert!(sparql.len() > 8192);
+        differential(&sparql, 32, true);
+
+        // 5. MIXED `@`-form and SPARQL-style directives in the SAME document, interleaved with
+        //    statements — both forms must be tracked in the same ordered snapshot.
+        let mut mixedforms = String::from("@prefix a: <http://a/> .\nPREFIX b: <http://b/>\n");
+        for i in 0..80 {
+            mixedforms.push_str(&format!("a:s{i} b:p a:o{i} .\n"));
+        }
+        mixedforms.push_str("@base <http://base/> .\nPREFIX c: <http://c/>\n");
+        for i in 80..160 {
+            mixedforms.push_str(&format!("<s{i}> b:p c:o{i} .\n"));
+        }
+        differential(&mixedforms, 16, true);
+
+        // 6. A `#`-comment containing `<` and `.` sitting BETWEEN the SPARQL keyword and its
+        //    IRIREF — the directive delimiter must skip the whole comment line (so the in-comment
+        //    `<`/`.` is never mistaken for the IRIREF / a terminator) and find the real IRIREF.
+        let mut commented = String::from("PREFIX p: # a comment with < and . inside\n  <http://c0/>\n");
+        for round in 0..6 {
+            commented.push_str(&format!(
+                "PREFIX p: #redef <bogus> .\n <http://c{round}/>\nBASE # base <x> .\n <http://b{round}/>\n"
+            ));
+            for i in 0..50 {
+                commented.push_str(&format!("p:s{round}_{i} p:p <rel{i}> .\n"));
+            }
+        }
+        differential(&commented, 16, true);
     }
 
     /// [OPUS-4.8] (T2/T3 rejection parity) Malformed Turtle must still be REJECTED — the
@@ -3430,6 +3519,17 @@ mod tests {
             "@prefix a: <http://a/> .\na:s a:p later:o .\n@prefix later: <http://l/> .\na:s2 a:p a:o .\n",
             // Bare unescaped control / illegal token sequence.
             "@prefix ex: <http://ex/> .\nex:s ex:p \"unterminated .\nex:s2 ex:p ex:o2 .\n",
+            // [OPUS-4.8] (T3 SPARQL-form rejection parity) SPARQL-style `BASE` with an illegal
+            // trailing `.` (W3C turtle-syntax-bad-base-03). The SPARQL-directive splitter ends the
+            // span at the `>` and leaves the `.` in the stream; the chunk that then begins with `.`
+            // must fail oxttl → serial redo → reject. A splitter that swallowed the `.` would
+            // silently ACCEPT this invalid document — the over-eager-split corruption class.
+            "BASE <http://b/> .\n<s> <http://b/p> <http://b/o> .\n<s2> <http://b/p> <http://b/o2> .\n",
+            // SPARQL-style `PREFIX` with an illegal trailing `.`.
+            "PREFIX p: <http://b/> .\np:s p:p p:o .\np:s2 p:p p:o2 .\n",
+            // SPARQL-style `PREFIX` whose prefixed name is used in the body but the directive's
+            // IRIREF is missing (truncated) — must reject, not be silently snapshotted.
+            "PREFIX p: badnoiriref\np:s p:p p:o .\np:s2 p:p p:o2 .\n",
         ];
         for (k, src) in bad.iter().enumerate() {
             // Reference: the serial oxttl parser rejects it.
