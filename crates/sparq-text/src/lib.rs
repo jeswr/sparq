@@ -16,8 +16,10 @@
 //!    `GeoIndex::apply_delta` shape).
 //! 3. [`rewrite`] (default-on `engine` feature) — the `text:` magic
 //!    predicates ([`vocab`]): `?lit text:matches "query"` (AND of tokens,
-//!    `*`-suffix prefix tokens), `?lit text:matchesAny "query"` (OR), and
-//!    `?lit text:score ?s` (the BM25 score). [`query_text`] rewrites them into
+//!    `*`-suffix prefix tokens), `?lit text:matchesAny "query"` (OR),
+//!    `?lit text:phrase "foo bar"` (adjacent, in-order tokens — needs a
+//!    positions-enabled index), and `?lit text:score ?s` (the BM25 score).
+//!    [`query_text`] rewrites them into
 //!    inline `VALUES` over the index's hits at the spargebra-algebra level and
 //!    executes through sparq-engine's prepared-query seam
 //!    (`PreparedQuery: From<spargebra::Query>`) — the engine itself is
@@ -47,6 +49,13 @@ pub mod vocab {
     pub const MATCHES: &str = "http://sparq.dev/text#matches";
     /// `?lit text:matchesAny "query"` — literals containing AT LEAST ONE token.
     pub const MATCHES_ANY: &str = "http://sparq.dev/text#matchesAny";
+    /// `?lit text:phrase "foo bar"` — literals where the query's tokens appear
+    /// ADJACENT and IN ORDER (a positional phrase match, not a BM25 ranking).
+    /// Requires a positions-enabled index ([`TextIndex::build_with_positions`]);
+    /// the cheap default index stores no positions and is rejected at rewrite
+    /// time. No `text:score` companion (a phrase match is boolean adjacency).
+    /// [OPUS-4.8]
+    pub const PHRASE: &str = "http://sparq.dev/text#phrase";
     /// `?lit text:score ?s` — binds the BM25 score of `?lit`'s match (must
     /// accompany exactly one `text:matches`/`text:matchesAny` on the same
     /// subject variable in the same basic graph pattern).
