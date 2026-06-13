@@ -15,14 +15,22 @@ SSHO="-i $STATE/key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null 
 X "scp driver + sampler" \
   scp $SSHO "$SCRIPTS_DIR/remote-8b.sh" "$SCRIPTS_DIR/mem-sampler.sh" "ubuntu@$IP:"
 
+# [OPUS-4.8] roborev 2013: the idempotency check must NOT use `pgrep -f
+# remote-8b.sh`. This whole inline command runs in a remote shell whose own
+# command text contains `remote-8b.sh` (the nohup line below), so pgrep -f would
+# match the wrapper shell itself and always report already-running, so the
+# driver would never start. Bracketing the pattern doesn't help here either —
+# the wrapper's command line still contains a literal `bash remote-8b.sh`
+# substring. Use a PID file written from the backgrounded job's own `$!` and a
+# `kill -0` liveness check, which is unambiguous and cannot match the wrapper.
 XS "start driver under nohup (idempotent: skips if already running/done)" "
   ssh $SSHO ubuntu@$IP '
     if [ -f DONE ]; then echo already-done; exit 0; fi
-    if pgrep -f remote-8b.sh >/dev/null; then echo already-running; exit 0; fi
+    if [ -f driver.pid ] && kill -0 \"\$(cat driver.pid)\" 2>/dev/null; then echo already-running; exit 0; fi
     nohup bash remote-8b.sh \"$SPARQ_SHA\" \"$CHUNK_MILLIONS\" \"$DEADMAN_MIN\" \
       \"$BUILD_TIMEOUT_S\" \"$SWAP_ABORT_MIB\" \"$DISK_ABORT_FREE_GB\" \"$PARSE_CHECKPOINT_S\" \
       \"$DUMP_URL\" \"$DL_WORKERS\" \"$DICT_SPILL_ENV\" \"$CARGO_FEATURES\" \
-      >/dev/null 2>&1 & echo started'"
+      >/dev/null 2>&1 & echo \$! > driver.pid; echo started'"
 
 # Poll loop: every 60 s print elapsed, last step marker, last sampler line, abort flag.
 # Supervisor-side budget stop at 30 h (RUNBOOK §9) — warns loudly, never auto-extends.
