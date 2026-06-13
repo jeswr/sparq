@@ -20,15 +20,22 @@
 //!   same split the dictionary itself stores) with distinct-term counts, recognised
 //!   against a bundled table of well-known vocabularies.
 //!
+//! - **Cross-class join hints**: the `(subject_class) --predicate--> (object_class)`
+//!   edge table with per-edge triple counts ([`JoinHints`]), mined in the same SPO
+//!   scan — the join-cardinality signal beyond the per-predicate observed range.
+//!
 //! Outputs: the [`Introspection`] struct tree, [`Introspection::to_json`] (the machine
-//! surface for LLM grounding), and [`Introspection::to_text_summary`] (a compact,
+//! surface for LLM grounding), [`Introspection::to_text_summary`] (a compact,
 //! most-important-first digest under a character budget — the prompt-ready "schema
-//! card" deck the design doc prescribes).
+//! card" deck the design doc prescribes), [`Introspection::to_void`] (a W3C VoID
+//! dataset description, as N-Triples), and [`Introspection::schema_summary_for`] (a
+//! retrieval-mode digest scoped to a set of seed IRIs, for large-schema KGs).
 //!
 //! The crate is opt-in and read-only over the public `sparq-core` API; the default
 //! engine build does not include it and carries no introspection code.
 
-use oxrdf::{NamedNode, Term};
+use oxrdf::vocab::xsd;
+use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use sparq_core::dict::{self, Id, TermParts, INLINE_BASE};
@@ -38,6 +45,7 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
 const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const VOID_NS: &str = "http://rdfs.org/ns/void#";
 
 /// Well-known vocabularies, recognised by namespace: `(prefix, namespace, title)`.
 /// Bundled (offline, WASM-safe) — no network lookup.
@@ -124,6 +132,9 @@ pub struct BuildOptions {
     /// olympics mint thousands of per-instance namespaces — is aggregated into
     /// [`Vocabularies::elided_namespaces`]/`elided_terms`.
     pub max_namespaces: usize,
+    /// Cross-class `(C, p, D)` join hints retained (by descending triple count); the
+    /// tail is aggregated into [`JoinHints::elided_hints`]/`elided_triples`.
+    pub max_join_hints: usize,
     /// Sample values are truncated to this many characters.
     pub max_sample_chars: usize,
 }
@@ -135,6 +146,7 @@ impl Default for BuildOptions {
             max_classes_per_histogram: 8,
             max_char_sets: 1000,
             max_namespaces: 200,
+            max_join_hints: 1000,
             max_sample_chars: 60,
         }
     }
@@ -261,6 +273,37 @@ pub struct Vocabularies {
     pub elided_terms: u64,
 }
 
+/// A cross-class join hint: `(subject_class) --predicate--> (object_class)` with the
+/// triple count behind that edge — the C–p→D table the introspect TODO records as a
+/// follow-up. Mined from the same SPO scan that builds the characteristic sets: for
+/// each triple whose subject is typed `C` and whose (IRI) object is typed `D`, the
+/// `(C, p, D)` cell is incremented. It quantifies which classes actually join through
+/// which predicate, the join-cardinality signal a planner or NL→SPARQL prompt wants
+/// beyond the per-predicate global observed range.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct JoinHint {
+    pub subject_class: String,
+    pub predicate: String,
+    pub object_class: String,
+    /// Triples whose subject is an instance of `subject_class`, whose predicate is
+    /// `predicate`, and whose (IRI) object is an instance of `object_class`. A triple
+    /// contributes to every `(C, p, D)` cell its subject's and object's types span
+    /// (multi-typed subjects/objects count under each declared type).
+    pub triples: u64,
+}
+
+/// The cross-class join-hint table: the retained top edges plus exact tail aggregates.
+#[derive(Clone, Debug, Serialize)]
+pub struct JoinHints {
+    /// Total number of *distinct* `(C, p, D)` edges observed.
+    pub distinct: u64,
+    /// The top edges by triple count (bounded by [`BuildOptions::max_join_hints`]).
+    pub hints: Vec<JoinHint>,
+    /// Edges beyond the cap, and the triples they cover.
+    pub elided_hints: u64,
+    pub elided_triples: u64,
+}
+
 /// The full introspection result. Build with [`Introspection::build`]; export with
 /// [`to_json`](Introspection::to_json) / [`to_text_summary`](Introspection::to_text_summary).
 #[derive(Clone, Debug, Serialize)]
@@ -268,11 +311,16 @@ pub struct Introspection {
     pub triples: u64,
     /// Distinct subjects.
     pub subjects: u64,
+    /// Distinct subjects that carry at least one `rdf:type` (the typed entities — the
+    /// `void:entities` count). `<= subjects`.
+    pub entities: u64,
     /// Classes by descending instance count.
     pub classes: Vec<ClassProfile>,
     /// Predicates by descending triple count.
     pub predicates: Vec<PredicateProfile>,
     pub characteristic_sets: CharacteristicSets,
+    /// Cross-class `(C, p, D)` join hints, by descending triple count.
+    pub join_hints: JoinHints,
     /// Namespaces in use, by descending term count.
     pub vocabularies: Vocabularies,
 }
@@ -395,10 +443,10 @@ pub fn characteristic_set_ids(graph: &Graph) -> Vec<CsIdSet> {
 
 impl Introspection {
     /// Builds the full introspection with default [`BuildOptions`]. Cost: one full SPO
-    /// scan (characteristic sets + per-class usage + observed domains), one pass over
-    /// the POS blocks of every predicate (object kinds, datatypes, samples, observed
-    /// ranges), one pass over the dictionary (vocabularies) — all sorted scans over
-    /// indexes the store already keeps.
+    /// scan (characteristic sets + per-class usage + observed domains + cross-class
+    /// join hints), one pass over the POS blocks of every predicate (object kinds,
+    /// datatypes, samples, observed ranges), one pass over the dictionary
+    /// (vocabularies) — all sorted scans over indexes the store already keeps.
     pub fn build(graph: &Graph) -> Introspection {
         Self::build_with(graph, &BuildOptions::default())
     }
@@ -430,7 +478,12 @@ impl Introspection {
         let mut cs: FxHashMap<Box<[Id]>, CsAcc> = FxHashMap::default();
         let mut preds: FxHashMap<Id, PredAcc> = FxHashMap::default();
         let mut class_preds: FxHashMap<Id, FxHashMap<Id, (u64, u64)>> = FxHashMap::default();
+        // Cross-class join hints: (subject_class, predicate, object_class) -> triples.
+        // Filled in the same scan — when the subject is typed AND the object is a typed
+        // IRI, the cell for every (C, p, D) the subject's/object's types span is bumped.
+        let mut join: FxHashMap<(Id, Id, Id), u64> = FxHashMap::default();
         let mut subjects: u64 = 0;
+        let mut entities: u64 = 0;
 
         let scan = graph.store.scan(&[None, None, None]);
         let rows = scan.rows.as_ref();
@@ -440,6 +493,7 @@ impl Introspection {
         let mut i = 0;
         while i < rows.len() {
             let [s, ..] = scan.to_spo(&rows[i]);
+            let types = subj_types.get(&s);
             ps.clear();
             ms.clear();
             let mut j = i;
@@ -450,9 +504,21 @@ impl Introspection {
                 }
                 let mut k = j;
                 while k < rows.len() {
-                    let [s3, p3, _] = scan.to_spo(&rows[k]);
+                    let [s3, p3, o3] = scan.to_spo(&rows[k]);
                     if s3 != s || p3 != p {
                         break;
+                    }
+                    // Cross-class join hint: this triple's (typed subject) --p--> (typed
+                    // IRI object). One object-type lookup per triple; only typed
+                    // subjects with typed object reach the inner product.
+                    if let Some(ts) = types {
+                        if let Some(os) = subj_types.get(&o3) {
+                            for &c in ts {
+                                for &d in os {
+                                    *join.entry((c, p, d)).or_default() += 1;
+                                }
+                            }
+                        }
                     }
                     k += 1;
                 }
@@ -461,7 +527,9 @@ impl Introspection {
                 j = k;
             }
             subjects += 1;
-            let types = subj_types.get(&s);
+            if types.is_some() {
+                entities += 1;
+            }
             for (idx, &p) in ps.iter().enumerate() {
                 let pa = preds.entry(p).or_default();
                 pa.triples += ms[idx];
@@ -786,9 +854,42 @@ impl Introspection {
             })
             .collect();
 
+        // Cross-class join hints: resolve ids, sort by descending triple count
+        // (tie-break on the resolved triple key for determinism across store builds),
+        // cap, and aggregate the tail.
+        let distinct_join = join.len() as u64;
+        let mut join_vec: Vec<JoinHint> = join
+            .into_iter()
+            .map(|((c, p, d), triples)| JoinHint {
+                subject_class: iri_str(c),
+                predicate: iri_str(p),
+                object_class: iri_str(d),
+                triples,
+            })
+            .collect();
+        join_vec.sort_by(|a, b| {
+            b.triples.cmp(&a.triples).then_with(|| {
+                (&a.subject_class, &a.predicate, &a.object_class).cmp(&(
+                    &b.subject_class,
+                    &b.predicate,
+                    &b.object_class,
+                ))
+            })
+        });
+        let mut elided_hints = 0u64;
+        let mut elided_join_triples = 0u64;
+        if join_vec.len() > opts.max_join_hints {
+            for h in &join_vec[opts.max_join_hints..] {
+                elided_hints += 1;
+                elided_join_triples += h.triples;
+            }
+            join_vec.truncate(opts.max_join_hints);
+        }
+
         Introspection {
             triples: graph.len() as u64,
             subjects,
+            entities,
             classes,
             predicates,
             characteristic_sets: CharacteristicSets {
@@ -796,6 +897,12 @@ impl Introspection {
                 sets,
                 elided_sets,
                 elided_subjects,
+            },
+            join_hints: JoinHints {
+                distinct: distinct_join,
+                hints: join_vec,
+                elided_hints,
+                elided_triples: elided_join_triples,
             },
             vocabularies,
         }
@@ -805,6 +912,91 @@ impl Introspection {
     /// for LLM grounding (and for any other tool).
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("introspection serialises to JSON")
+    }
+
+    /// Emits a [W3C VoID](https://www.w3.org/TR/void/) description of the dataset as
+    /// **N-Triples** (a syntactic subset of Turtle, so the output parses as either —
+    /// no serializer dependency, oxrdf renders every term RFC-correctly).
+    ///
+    /// `dataset_iri` names the `void:Dataset` resource (e.g. the dataset's URL).
+    /// The top-level dataset carries:
+    /// - `void:triples` — total triples (exact);
+    /// - `void:entities` — distinct subjects carrying an `rdf:type` (exact);
+    /// - `void:distinctSubjects` — distinct subjects (exact);
+    /// - `void:classes` — distinct classes (`rdf:type` objects) (exact);
+    /// - `void:properties` — distinct predicates (exact).
+    ///
+    /// It also emits one `void:classPartition` per class (with `void:class` and
+    /// `void:entities` = instance count) and one `void:propertyPartition` per predicate
+    /// (with `void:property`, `void:triples`, and `void:distinctSubjects` for that
+    /// predicate). Partitions are blank nodes.
+    ///
+    /// NOT emitted (honest scope): `void:distinctObjects` — the crate tracks distinct
+    /// objects only *per predicate*, never a global de-duplicated count, so a faithful
+    /// global figure is unavailable without an extra union pass; the per-predicate
+    /// partitions carry `void:distinctSubjects` but not a per-predicate
+    /// `void:distinctObjects` either (the per-predicate `distinct_objects` mixes IRIs
+    /// and literals, which VoID's `void:distinctObjects` does not distinguish — left
+    /// out rather than emitted misleadingly). `void:vocabulary`/`void:uriSpace`
+    /// linkset partitions are also out of scope here.
+    pub fn to_void(&self, dataset_iri: &str) -> String {
+        use std::fmt::Write as _;
+        let v = |local: &str| format!("{VOID_NS}{local}");
+        let ds = NamedNode::new_unchecked(dataset_iri);
+        let mut out = String::new();
+        // Helpers: each writes one N-Triples line (subject is either the dataset IRI or
+        // a blank node label `_:bN`). oxrdf NamedNode/Literal Display is N-Triples-safe.
+        let iri = |s: &str| NamedNode::new_unchecked(s).to_string();
+        let int = |n: u64| Literal::new_typed_literal(n.to_string(), xsd::INTEGER).to_string();
+
+        // ---- Top-level dataset.
+        let _ = writeln!(out, "{ds} <{RDF_TYPE}> <{}> .", v("Dataset"));
+        let _ = writeln!(out, "{ds} <{}> {} .", v("triples"), int(self.triples));
+        let _ = writeln!(out, "{ds} <{}> {} .", v("entities"), int(self.entities));
+        let _ = writeln!(
+            out,
+            "{ds} <{}> {} .",
+            v("distinctSubjects"),
+            int(self.subjects)
+        );
+        let _ = writeln!(
+            out,
+            "{ds} <{}> {} .",
+            v("classes"),
+            int(self.classes.len() as u64)
+        );
+        let _ = writeln!(
+            out,
+            "{ds} <{}> {} .",
+            v("properties"),
+            int(self.predicates.len() as u64)
+        );
+
+        // ---- Class partitions (one blank node each).
+        let mut bnode = 0u64;
+        for c in &self.classes {
+            let b = format!("_:c{bnode}");
+            bnode += 1;
+            let _ = writeln!(out, "{ds} <{}> {b} .", v("classPartition"));
+            let _ = writeln!(out, "{b} <{}> {} .", v("class"), iri(&c.class));
+            let _ = writeln!(out, "{b} <{}> {} .", v("entities"), int(c.instances));
+        }
+
+        // ---- Property partitions (one blank node each).
+        for p in &self.predicates {
+            let b = format!("_:p{bnode}");
+            bnode += 1;
+            let _ = writeln!(out, "{ds} <{}> {b} .", v("propertyPartition"));
+            let _ = writeln!(out, "{b} <{}> {} .", v("property"), iri(&p.predicate));
+            let _ = writeln!(out, "{b} <{}> {} .", v("triples"), int(p.triples));
+            let _ = writeln!(
+                out,
+                "{b} <{}> {} .",
+                v("distinctSubjects"),
+                int(p.distinct_subjects)
+            );
+        }
+        out
     }
 
     /// Renders a compact, prompt-ready text digest under `budget_chars` characters,
@@ -973,6 +1165,144 @@ impl Introspection {
             hint.push_str(&format!(", e.g. {}", prefixes.compact(s)));
         }
         hint
+    }
+
+    /// **Retrieval-mode summary**: a prompt-ready digest scoped to a set of seed IRIs,
+    /// for KGs whose full schema is too large to fit a prompt (the 10k-property-KG
+    /// path). Each seed is matched against the mined schema — a seed naming a **class**
+    /// pulls that class's profile (per-predicate usage) and the cross-class join edges
+    /// it participates in (as subject or object); a seed naming a **predicate** pulls
+    /// that predicate's global profile. Only the matched slice is rendered, under
+    /// `budget_chars`, most-relevant-first, with the same prefix glossary discipline as
+    /// [`to_text_summary`].
+    ///
+    /// This is struct-level scoping (it filters the already-mined profiles by IRI);
+    /// it does not re-scan the graph, so it cannot expand to neighbours the build did
+    /// not already profile (e.g. it will not chase the *instances* of a seed entity —
+    /// the crate retains class/predicate profiles, not per-subject adjacency). Seeds
+    /// that match nothing are reported in a trailing note.
+    pub fn schema_summary_for(&self, seeds: &[&str], budget_chars: usize) -> String {
+        let mut prefixes = PrefixAssigner::new();
+        let mut body: Vec<String> = Vec::new();
+        let mut matched = 0usize;
+
+        // ---- Seed classes: profile + join edges touching the class.
+        for &seed in seeds {
+            if let Some(c) = self.classes.iter().find(|c| c.class == seed) {
+                matched += 1;
+                body.push(format!(
+                    "### {} — {} instances",
+                    prefixes.compact(&c.class),
+                    c.instances
+                ));
+                for cp in c
+                    .predicates
+                    .iter()
+                    .filter(|cp| cp.predicate != RDF_TYPE)
+                    .take(12)
+                {
+                    let pct = (cp.coverage * 100.0).round() as u64;
+                    let hint = self.predicate_hint(&cp.predicate, &mut prefixes);
+                    body.push(format!(
+                        "- {} — {}/{} subjects ({pct}%){hint}",
+                        prefixes.compact(&cp.predicate),
+                        cp.subjects,
+                        c.instances
+                    ));
+                }
+                // Cross-class join edges where this class is the subject or object.
+                let edges: Vec<&JoinHint> = self
+                    .join_hints
+                    .hints
+                    .iter()
+                    .filter(|h| h.subject_class == seed || h.object_class == seed)
+                    .take(8)
+                    .collect();
+                for h in edges {
+                    body.push(format!(
+                        "  join: {} --{}--> {} ({} triples)",
+                        prefixes.compact(&h.subject_class),
+                        prefixes.compact(&h.predicate),
+                        prefixes.compact(&h.object_class),
+                        h.triples
+                    ));
+                }
+            }
+        }
+
+        // ---- Seed predicates: global profile.
+        for &seed in seeds {
+            if let Some(p) = self.predicates.iter().find(|p| p.predicate == seed) {
+                matched += 1;
+                let lit_pct = (p.literal_fraction * 100.0).round() as u64;
+                let kinds = if lit_pct == 0 {
+                    "IRIs".to_string()
+                } else if lit_pct == 100 {
+                    "literals".to_string()
+                } else {
+                    format!("{lit_pct}% literals")
+                };
+                let sample = p
+                    .samples
+                    .first()
+                    .map(|s| format!(", e.g. {}", prefixes.compact(s)))
+                    .unwrap_or_default();
+                body.push(format!(
+                    "### {} — {} triples, {} subj, {} obj ({kinds}{sample})",
+                    prefixes.compact(&p.predicate),
+                    p.triples,
+                    p.distinct_subjects,
+                    p.distinct_objects
+                ));
+                if let Some(d) = p.inferred_domains.first() {
+                    body.push(format!("  domain: {}", prefixes.compact(&d.iri)));
+                }
+                if let Some(r) = p.inferred_ranges.first() {
+                    body.push(format!("  range: {}", prefixes.compact(&r.iri)));
+                }
+            }
+        }
+
+        let unmatched: Vec<&&str> = seeds
+            .iter()
+            .filter(|&&s| {
+                !self.classes.iter().any(|c| c.class == s)
+                    && !self.predicates.iter().any(|p| p.predicate == s)
+            })
+            .collect();
+
+        // ---- Assemble: header, glossary, body, unmatched note.
+        let mut w = BudgetWriter::new(budget_chars);
+        w.line(&format!(
+            "# Schema for {matched}/{} seeds",
+            seeds.len()
+        ));
+        if !prefixes.assigned.is_empty() && !w.full() {
+            w.line("## Prefixes");
+            for (ns, pfx) in &prefixes.assigned {
+                let title = self
+                    .vocabularies
+                    .namespaces
+                    .iter()
+                    .find(|v| v.namespace == *ns)
+                    .and_then(|v| v.title.as_deref())
+                    .map(|t| format!(" — {t}"))
+                    .unwrap_or_default();
+                if !w.line(&format!("{pfx}: {ns}{title}")) {
+                    break;
+                }
+            }
+        }
+        for l in &body {
+            if !w.line(l) {
+                break;
+            }
+        }
+        if !unmatched.is_empty() {
+            let note = format!("(no schema for {} seed(s))", unmatched.len());
+            w.line(&note);
+        }
+        w.finish()
     }
 }
 
@@ -1414,5 +1744,147 @@ mod tests {
         // The two-subject set {rdf:type, :p, :q} leads.
         assert_eq!(ids[0].subjects, 2);
         assert_eq!(ids[0].predicate_triples.iter().sum::<u64>(), 2 + 3 + 2, "type x2, p x3, q x2");
+    }
+
+    /// Cross-class join hints: `(C, p, D)` edge triple counts, exact on a fixture, and
+    /// reflected in the JSON surface.
+    #[test]
+    fn join_hints_cross_class_edges() {
+        // 2 Persons each work at the one Company; one Person knows the other Person.
+        let g = graph(
+            ":alice rdf:type foaf:Person ; :worksAt :acme ; foaf:knows :bob .
+             :bob   rdf:type foaf:Person ; :worksAt :acme .
+             :acme  rdf:type :Company .",
+        );
+        let ix = Introspection::build(&g);
+        let person = "http://xmlns.com/foaf/0.1/Person";
+        let knows = "http://xmlns.com/foaf/0.1/knows";
+        let find = |c: &str, p: &str, d: &str| {
+            ix.join_hints
+                .hints
+                .iter()
+                .find(|h| h.subject_class == c && h.predicate == p && h.object_class == d)
+        };
+        // Person --worksAt--> Company: 2 triples (alice, bob).
+        let wa = find(person, &ex("worksAt"), &ex("Company")).expect("Person worksAt Company");
+        assert_eq!(wa.triples, 2);
+        // Person --knows--> Person: 1 triple (alice knows bob; both typed Person).
+        let kn = find(person, knows, person).expect("Person knows Person");
+        assert_eq!(kn.triples, 1);
+        // Exactly these two distinct edges (untyped objects/subjects contribute none).
+        assert_eq!(ix.join_hints.distinct, 2);
+        assert_eq!(ix.join_hints.elided_hints, 0);
+        // Sorted by descending triple count: worksAt (2) before knows (1).
+        assert_eq!(ix.join_hints.hints[0].triples, 2);
+        assert_eq!(ix.join_hints.hints[1].triples, 1);
+        // JSON surface carries the edges.
+        let v: serde_json::Value = serde_json::from_str(&ix.to_json()).unwrap();
+        assert_eq!(v["join_hints"]["distinct"], 2);
+        assert_eq!(v["join_hints"]["hints"][0]["triples"], 2);
+        assert_eq!(v["entities"], 3); // alice, bob, acme are all typed.
+    }
+
+    #[test]
+    fn join_hints_cap_aggregates_tail() {
+        // Three distinct (C,p,D) edges; cap at 1.
+        let g = graph(
+            ":a rdf:type :A ; :p1 :x ; :p2 :y ; :p3 :z .
+             :x rdf:type :X . :y rdf:type :Y . :z rdf:type :Z .",
+        );
+        let opts = BuildOptions {
+            max_join_hints: 1,
+            ..BuildOptions::default()
+        };
+        let ix = Introspection::build_with(&g, &opts);
+        assert_eq!(ix.join_hints.distinct, 3);
+        assert_eq!(ix.join_hints.hints.len(), 1);
+        assert_eq!(ix.join_hints.elided_hints, 2);
+        assert_eq!(ix.join_hints.elided_triples, 2);
+    }
+
+    /// VoID export: exact counts on the top-level dataset and partitions; the output
+    /// parses back as N-Triples.
+    #[test]
+    fn void_export_counts_and_parses() {
+        let g = graph(
+            ":alice rdf:type foaf:Person ; foaf:name \"Alice\" ; :worksAt :acme .
+             :bob   rdf:type foaf:Person ; foaf:name \"Bob\" .
+             :acme  rdf:type :Company .",
+        );
+        let ix = Introspection::build(&g);
+        let nt = ix.to_void("http://ex.org/dataset");
+
+        // Re-parse: the VoID document is valid N-Triples (hence valid Turtle).
+        let re: std::collections::HashMap<(String, String), String> =
+            oxttl::NTriplesParser::new()
+                .for_slice(nt.as_bytes())
+                .map(|t| {
+                    let t = t.expect("valid N-Triples");
+                    (
+                        (t.subject.to_string(), t.predicate.to_string()),
+                        t.object.to_string(),
+                    )
+                })
+                .collect();
+
+        let ds = "<http://ex.org/dataset>".to_string();
+        let v = |l: &str| format!("<{VOID_NS}{l}>");
+        let lit = |n: u64| {
+            oxrdf::Literal::new_typed_literal(n.to_string(), oxrdf::vocab::xsd::INTEGER).to_string()
+        };
+        // Top-level dataset counts (exact). 6 triples: alice(type,name,worksAt),
+        // bob(type,name), acme(type).
+        assert_eq!(re.get(&(ds.clone(), v("triples"))), Some(&lit(6)));
+        assert_eq!(re.get(&(ds.clone(), v("entities"))), Some(&lit(3))); // alice, bob, acme
+        assert_eq!(re.get(&(ds.clone(), v("distinctSubjects"))), Some(&lit(3)));
+        assert_eq!(re.get(&(ds.clone(), v("classes"))), Some(&lit(2))); // Person, Company
+        // 4 predicates: rdf:type, foaf:name, :worksAt (+ the partition properties are
+        // distinct predicates of the *original* graph, not the VoID doc).
+        assert_eq!(re.get(&(ds.clone(), v("properties"))), Some(&lit(3)));
+        // A class partition for Person carries void:class + void:entities=2.
+        let nt2 = ix.to_void("http://ex.org/dataset");
+        assert!(
+            nt2.contains(&v("classPartition")),
+            "must emit class partitions"
+        );
+        assert!(
+            nt2.contains(&v("propertyPartition")),
+            "must emit property partitions"
+        );
+        // The Person class partition's entity count (2) appears.
+        assert!(nt2.contains("http://xmlns.com/foaf/0.1/Person"));
+    }
+
+    /// Retrieval-mode (seed-scoped) summary: only the seeds' slice is rendered, under
+    /// budget, and unmatched seeds are noted.
+    #[test]
+    fn schema_summary_for_seeds() {
+        let g = graph(
+            ":alice rdf:type foaf:Person ; foaf:name \"Alice\" ; :worksAt :acme .
+             :bob   rdf:type foaf:Person ; foaf:name \"Bob\" .
+             :acme  rdf:type :Company .",
+        );
+        let ix = Introspection::build(&g);
+        let person = "http://xmlns.com/foaf/0.1/Person";
+        let s = ix.schema_summary_for(&[person, "http://ex.org/nonexistent"], 4000);
+        assert!(s.chars().count() <= 4000);
+        // The seed class is profiled.
+        assert!(s.contains("foaf:Person"), "seed class profile:\n{s}");
+        assert!(s.contains("2 instances"), "instance count:\n{s}");
+        assert!(s.contains("foaf:name"), "per-class predicate:\n{s}");
+        // The join edge from Person is surfaced.
+        assert!(s.contains("join:"), "join edge:\n{s}");
+        // 1 matched seed, 1 unmatched note.
+        assert!(s.contains("1/2 seeds"), "header:\n{s}");
+        assert!(s.contains("no schema for 1"), "unmatched note:\n{s}");
+        // A predicate seed pulls the predicate's global profile.
+        let sp = ix.schema_summary_for(&[&ex("worksAt")], 4000);
+        assert!(sp.contains("worksAt"), "predicate seed profile:\n{sp}");
+        assert!(sp.contains("range:"), "predicate range hint:\n{sp}");
+        // Budget is respected even when tight.
+        for budget in [30, 120, 500] {
+            let t = ix.schema_summary_for(&[person], budget);
+            assert!(t.chars().count() <= budget, "budget {budget} overflow");
+        }
     }
 }

@@ -44,10 +44,14 @@ let ix = Introspection::build(&graph);              // or build_with(&graph, &Bu
 ix.classes        // Vec<ClassProfile>      — by instance count, with per-class usage
 ix.predicates     // Vec<PredicateProfile>  — global stats + observed/declared domain/range
 ix.characteristic_sets  // CharacteristicSets — top sets + exact tail aggregates
+ix.join_hints     // JoinHints              — cross-class (C, p, D) edges + triple counts
+ix.entities       // u64                    — distinct typed subjects (the void:entities count)
 ix.vocabularies   // Vocabularies           — namespaces + well-known recognition
 
-ix.to_json()                  // pretty JSON — the machine surface for LLM grounding
-ix.to_text_summary(2500)      // prompt-ready digest, most-important-first, ≤ 2500 chars
+ix.to_json()                          // pretty JSON — the machine surface for LLM grounding
+ix.to_text_summary(2500)              // prompt-ready digest, most-important-first, ≤ 2500 chars
+ix.to_void("http://ex.org/dataset")   // W3C VoID description, as N-Triples (valid Turtle)
+ix.schema_summary_for(&seeds, 2500)   // retrieval-mode: schema scoped to seed class/predicate IRIs
 ```
 
 `to_text_summary(budget_chars)` renders: header totals → prefix glossary (exactly the
@@ -56,6 +60,31 @@ order) → classes with per-class coverage + range hints + samples → character
 patterns → global predicate stats. Lines are dropped greedily at the budget; a final
 `…` marks elision. Range/sample hints in the class section come from the predicate's
 *global* profile (the per-class numbers are exact; hints are hints).
+
+**VoID export** (`to_void(dataset_iri)`): a [W3C VoID](https://www.w3.org/TR/void/)
+description as N-Triples (a subset of Turtle, so it parses as either — no serializer
+dependency). The `void:Dataset` carries `void:triples`, `void:entities` (distinct typed
+subjects), `void:distinctSubjects`, `void:classes`, `void:properties` (all exact), plus
+a `void:classPartition` per class (`void:class` + `void:entities`) and a
+`void:propertyPartition` per predicate (`void:property` + `void:triples` +
+`void:distinctSubjects`). `void:distinctObjects` is **not** emitted — the crate tracks
+distinct objects only per-predicate (mixed IRI/literal), never a global de-duplicated
+count, so a faithful figure would need an extra pass; omitted rather than misleading.
+
+**Cross-class join hints** (`ix.join_hints`): the `(subject_class) --predicate-->
+(object_class)` edge table with per-edge triple counts, mined in the *same* SPO scan as
+the characteristic sets (one object-type lookup per triple; only typed-subject→typed-
+object triples contribute). Top edges by triple count, capped at
+`BuildOptions::max_join_hints` with exact tail aggregates — the join-cardinality signal
+beyond the per-predicate global observed range.
+
+**Retrieval-mode summary** (`schema_summary_for(seeds, budget)`): a seed-scoped digest
+for KGs whose full schema overflows a prompt (the 10k-property-KG path). Each seed IRI
+is matched against the mined schema — a **class** seed pulls its per-predicate profile
+plus the cross-class join edges it touches; a **predicate** seed pulls its global
+profile — and only that slice is rendered under the budget. Struct-level scoping (it
+filters the already-mined profiles by IRI, no re-scan), so it does not chase the
+*instances* of a seed entity.
 
 ## Cost model
 
@@ -102,11 +131,14 @@ ns1: http://wallscope.co.uk/resource/olympics/team/ (1184 terms)
 
 ## Tests
 
-- 9 unit tests (`src/lib.rs`): characteristic-set exactness (counts, multiplicities,
+- 14 unit tests (`src/lib.rs`): characteristic-set exactness (counts, multiplicities,
   partition of subjects, cap aggregation), class instance counts + coverage, object
   kinds/datatypes/samples (incl. inline integers and language tags), observed-vs-
   declared domain/range, vocabulary counts + well-known recognition, JSON validity,
-  text-summary budget/truncation/content, empty + typeless graphs.
+  text-summary budget/truncation/content, empty + typeless graphs, cross-class join
+  hints (exact edge counts + cap aggregation), VoID export (exact counts + re-parses as
+  N-Triples), and the retrieval-mode seed-scoped summary (matched/unmatched seeds,
+  budget).
 - 1 integration test (`tests/olympics.rs`): the design-doc gate at 1.78M-triple scale —
   skips (passes with a note) when the fixture is absent; override the path with
   `SPARQ_OLYMPICS_NT`.

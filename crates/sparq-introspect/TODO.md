@@ -89,17 +89,39 @@ engine's star-join cardinality estimator. The precise hook, read from
 
 ## Feature follow-ups (from research/genai-ontology-introspection.md, not in v1 scope)
 
-- VoID + VoID-ext export (`to_void()`), SHACL shape export with support/confidence
-  (a CS ≈ a node shape).
-- Retrieval-mode summary `schema_summary_for(seeds, budget)` — only the schema around
-  given entities (the 10k-property-KG path).
-- Cross-class join hints `(C, p, D)` with counts (predicate co-occurrence is captured;
-  the C—p→D edge table is not yet).
+- **VoID export (`to_void(dataset_iri)`) — DONE [OPUS-4.8] (sq-cc7).** Emits a W3C
+  VoID description as N-Triples (a subset of Turtle, so it parses as either; no
+  serializer dependency — oxrdf renders every term RFC-correctly). Top-level
+  `void:Dataset` with `void:triples` / `void:entities` / `void:distinctSubjects` /
+  `void:classes` / `void:properties` (all EXACT), plus one `void:classPartition` per
+  class (`void:class` + `void:entities`) and one `void:propertyPartition` per
+  predicate (`void:property` + `void:triples` + `void:distinctSubjects`). DEFERRED:
+  `void:distinctObjects` (the crate tracks distinct objects only per-predicate, never
+  a global de-duplicated count — a faithful figure needs an extra union pass, and the
+  per-predicate `distinct_objects` mixes IRIs+literals so it is left out rather than
+  emitted misleadingly); VoID-ext, `void:vocabulary`/`uriSpace`, and linkset
+  partitions. SHACL shape export (a CS ≈ a node shape) still TODO.
+- **Retrieval-mode summary `schema_summary_for(seeds, budget)` — DONE [OPUS-4.8]
+  (sq-cc7).** Seed-scoped digest for the 10k-property-KG path: each seed IRI is
+  matched against the mined schema (a class seed pulls its profile + the cross-class
+  join edges it touches; a predicate seed pulls its global profile), only that slice
+  is rendered under the char budget, unmatched seeds noted. LIMITATION (honest):
+  struct-level scoping — it filters the already-mined class/predicate profiles by IRI
+  and does NOT re-scan, so it cannot chase the *instances* of a seed entity (the crate
+  retains class/predicate profiles, not per-subject adjacency). The general
+  dataset-shape summary remains `to_text_summary(budget)`.
+- **Cross-class join hints `(C, p, D)` with counts — DONE [OPUS-4.8] (sq-cc7).**
+  `Introspection::join_hints: JoinHints` — for each triple whose subject is typed `C`
+  and whose IRI object is typed `D`, the `(C, p, D)` cell is incremented, mined in the
+  SAME SPO scan as the characteristic sets (one object-type lookup per triple; only
+  typed-subject→typed-object triples reach the inner product). Top edges by triple
+  count, capped at `BuildOptions::max_join_hints` with exact tail aggregates. Multi-
+  typed subjects/objects count under each declared type (documented).
 - ABSTAT-style pattern minimalization via the class hierarchy (`rdfs:subClassOf`),
-  e.g. olympics' `dbo:SportsEvent rdfs:subClassOf dbo:Sport` chains.
+  e.g. olympics' `dbo:SportsEvent rdfs:subClassOf dbo:Sport` chains. STILL TODO.
 - Persisted sidecar (`*.introspect`) for O(output) summaries without rescanning;
   per-class sample *labels* (current samples are global per predicate, which can look
   odd on minority classes — e.g. a Person label sample shown under dbo:SportsTeam's
-  rdfs:label row).
+  rdfs:label row). STILL TODO.
 - WASM smoke test + bundle-size measurement (all operations are scans, no syscalls —
-  expected trivial, unverified).
+  expected trivial, unverified). STILL TODO.
