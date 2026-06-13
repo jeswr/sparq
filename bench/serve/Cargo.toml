@@ -21,6 +21,8 @@ spargebra = { path = "../../vendor/spargebra" }
 sparq-core = { path = "../../crates/sparq-core" }
 sparq-engine = { path = "../../crates/sparq-engine" }
 sparq-server = { path = "../../crates/sparq-server" }
+# Wave A2 group-commit writer + generation ring (the subject of writer_spike).
+sparq-serve = { path = "../../crates/sparq-serve" }
 spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
 mimalloc = "0.1"
 
@@ -51,3 +53,7 @@ path = "src/bin/point_spike.rs"
 [[bin]]
 name = "update_stream_spike"
 path = "src/bin/update_stream_spike.rs"
+
+[[bin]]
+name = "writer_spike"
+path = "src/bin/writer_spike.rs"

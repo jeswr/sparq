@@ -16,11 +16,35 @@
 //!
 //! Updates inside a batch are applied in **submission order** (strict FIFO — the
 //! deterministic, replayable single-order log that replication will lean on;
-//! per-pod conflict reordering is explicitly a later deliverable). Cross-batch
+//! commutativity is used as a *grouping license*, never to reorder). Cross-batch
 //! reordering: none — batches are committed in sequence by the one thread.
 //! A = per-update atomicity via the failed-update policy below; C = single-order
 //! application; I = snapshot isolation for readers + the serial writer;
 //! D = out of scope for the in-memory server v1 (as §6.5 records).
+//!
+//! ## Commutativity batching ([`CommitGranularity`])
+//!
+//! With the default [`CommitGranularity::Window`], one window = one generation =
+//! one epoch tick — litreview A's epoch group-commit pattern ("one new
+//! generation per epoch, not per statement"), and the §3.3/§6.5 prescription
+//! that generation granularity come from batching windows. Correctness never
+//! needs more: FIFO application of the whole window onto one working copy *is*
+//! the serial order.
+//!
+//! Opt-in [`CommitGranularity::CommuteGroup`] splits each window's batch into
+//! maximal runs of provably-commuting pure-data updates
+//! ([`Footprint::commutes_with`] — conservative graph-level detection; an
+//! unanalyzable update or a same-graph opposite-polarity data update is a
+//! barrier) and publishes ONE generation per run, in arrival order. Every
+//! published generation is then internally conflict-free — a log record whose
+//! updates can be replayed or applied in any order (the parallel-delta /
+//! replication seam of §6.8) — and each epoch tick covers exactly one commuting
+//! group. The price is one fork/seal/publish per run instead of per window
+//! (barrier-heavy streams degrade to per-update generations) plus one
+//! footprint parse per update on the writer thread; `bench/serve/writer_spike`
+//! measures both. Application order is FIFO in both modes, so the committed
+//! result is byte-identical to serial execution either way (differential-tested
+//! in `tests/commute.rs`).
 //!
 //! ## Failed-update policy (documented contract)
 //!
@@ -66,7 +90,10 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use rustc_hash::FxHashSet;
+
 use crate::epoch::PodId;
+use crate::footprint::{Footprint, TargetGraph};
 use crate::ring::GenerationRing;
 
 /// Default group-commit window. §6.5 prescribes 2–5 ms; the middle of the band
@@ -78,6 +105,24 @@ pub const DEFAULT_WINDOW: Duration = Duration::from_millis(3);
 /// been collected (§6.5's `min(T_window, N_max)`, e.g. "2–5 ms or 256 updates").
 pub const DEFAULT_MAX_BATCH: usize = 256;
 
+/// How many generations one group-commit window publishes (module docs:
+/// "Commutativity batching").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommitGranularity {
+    /// One window = one generation (the default; litreview A's epoch
+    /// group-commit pattern and the §6.5 prescription). Footprints are never
+    /// computed — zero analysis overhead.
+    #[default]
+    Window,
+    /// One generation per maximal run of provably-commuting data updates
+    /// within the window ([`Footprint::commutes_with`]); a barrier (general /
+    /// unanalyzable update, or a same-graph opposite-polarity data update)
+    /// starts a new generation. Buys internally conflict-free log records and
+    /// per-group epoch ticks at the cost of more publishes on barrier-heavy
+    /// streams + one [`ApplyUpdates::footprint`] call per update.
+    CommuteGroup,
+}
+
 /// Configuration for the sequenced [`Writer`].
 #[derive(Clone, Debug)]
 pub struct WriterConfig {
@@ -87,11 +132,18 @@ pub struct WriterConfig {
     /// The window also closes as soon as this many updates are batched
     /// (back-pressure bound; values below 1 are treated as 1).
     pub max_batch: usize,
+    /// Whether a window commits as one generation or as one generation per
+    /// commuting run (module docs).
+    pub granularity: CommitGranularity,
 }
 
 impl Default for WriterConfig {
     fn default() -> Self {
-        WriterConfig { window: DEFAULT_WINDOW, max_batch: DEFAULT_MAX_BATCH }
+        WriterConfig {
+            window: DEFAULT_WINDOW,
+            max_batch: DEFAULT_MAX_BATCH,
+            granularity: CommitGranularity::Window,
+        }
     }
 }
 
@@ -127,6 +179,16 @@ pub trait ApplyUpdates: Send + 'static {
 
     /// Finalizes the working copy into a publishable snapshot.
     fn seal(&mut self, working: Self::Working) -> Self::Snapshot;
+
+    /// The update's conservative write footprint, used only under
+    /// [`CommitGranularity::CommuteGroup`] to form commuting runs. The default
+    /// is the safe one — every update a [`Footprint::Barrier`] (commutes with
+    /// nothing), which degrades CommuteGroup mode to one generation per update
+    /// but can never mis-group. [`GraphApplier`](crate::GraphApplier) overrides
+    /// this with [`Footprint::of_sparql`].
+    fn footprint(&self, _update: &Self::Update) -> Footprint {
+        Footprint::Barrier
+    }
 }
 
 /// Why a submitted update did not land in a published generation.
@@ -193,8 +255,15 @@ impl<U: Send + 'static> Writer<U> {
     /// Submits an update and **blocks until the generation containing it is
     /// published**, returning that generation's number (the group-commit ack:
     /// at most one window + one batch application of latency). `touched` is the
-    /// update's conflict tag — the pods (named graphs) it writes, whose epochs
-    /// the publish bumps.
+    /// update's epoch tag — the pods (named graphs) it writes, whose epochs
+    /// the publish bumps (commutativity grouping never trusts it; that comes
+    /// from [`ApplyUpdates::footprint`]).
+    ///
+    /// The returned number doubles as the **read-your-writes token** (Wave A3,
+    /// the single-node `shard_seq`): the publish happens-before this ack, so
+    /// [`GenerationRing::read_your_writes`]`(n)` succeeds on this ring from the
+    /// moment `submit` returns, and a client that round-trips `n` as a session
+    /// token can be routed to any replica that has applied through `n`.
     ///
     /// `Err(Rejected)` means *this* update failed and was skipped while its
     /// batch proceeded; `Err(Shutdown)` means it was never applied.
@@ -275,11 +344,64 @@ fn run<A: ApplyUpdates>(
                 }
             }
         }
-        commit(&ring, &mut applier, batch);
+        match config.granularity {
+            CommitGranularity::Window => commit(&ring, &mut applier, batch),
+            CommitGranularity::CommuteGroup => {
+                for group in split_commute_groups(&applier, batch) {
+                    commit(&ring, &mut applier, group);
+                }
+            }
+        }
         if disconnected {
             return;
         }
     }
+}
+
+/// Splits one window's batch into maximal runs of pairwise-commuting data
+/// updates, preserving arrival order (no reordering — commutativity licenses
+/// *grouping*, the FIFO application inside each group stays the serial order).
+/// A barrier always forms a singleton group; a data update conflicting with the
+/// current group (it inserts into a graph the group deletes from, or deletes
+/// from a graph the group inserts into) starts a new group. Concatenating the
+/// groups reproduces the batch exactly.
+fn split_commute_groups<A: ApplyUpdates>(
+    applier: &A,
+    batch: Vec<Msg<A::Update>>,
+) -> Vec<Vec<Msg<A::Update>>> {
+    let mut groups: Vec<Vec<Msg<A::Update>>> = Vec::new();
+    let mut cur: Vec<Msg<A::Update>> = Vec::new();
+    // The current group's accumulated graph-level write sets (data groups only).
+    let mut cur_inserts: FxHashSet<TargetGraph> = FxHashSet::default();
+    let mut cur_deletes: FxHashSet<TargetGraph> = FxHashSet::default();
+    for msg in batch {
+        match applier.footprint(&msg.update) {
+            Footprint::Data { inserts, deletes } => {
+                let commutes_with_group =
+                    inserts.is_disjoint(&cur_deletes) && deletes.is_disjoint(&cur_inserts);
+                if !cur.is_empty() && !commutes_with_group {
+                    groups.push(std::mem::take(&mut cur));
+                    cur_inserts.clear();
+                    cur_deletes.clear();
+                }
+                cur_inserts.extend(inserts);
+                cur_deletes.extend(deletes);
+                cur.push(msg);
+            }
+            Footprint::Barrier => {
+                if !cur.is_empty() {
+                    groups.push(std::mem::take(&mut cur));
+                    cur_inserts.clear();
+                    cur_deletes.clear();
+                }
+                groups.push(vec![msg]);
+            }
+        }
+    }
+    if !cur.is_empty() {
+        groups.push(cur);
+    }
+    groups
 }
 
 /// Applies one batch to a fresh working copy and publishes ONE generation

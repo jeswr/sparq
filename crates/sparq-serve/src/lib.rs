@@ -55,10 +55,15 @@
 
 mod applier;
 mod epoch;
+mod footprint;
 mod ring;
 mod writer;
 
 pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
+pub use footprint::{Footprint, TargetGraph};
 pub use ring::{Generation, GenerationRing, RingConfig, TimeTravelConfig, DEFAULT_RETAIN};
-pub use writer::{ApplyUpdates, WriteError, Writer, WriterConfig, DEFAULT_MAX_BATCH, DEFAULT_WINDOW};
+pub use writer::{
+    ApplyUpdates, CommitGranularity, WriteError, Writer, WriterConfig, DEFAULT_MAX_BATCH,
+    DEFAULT_WINDOW,
+};

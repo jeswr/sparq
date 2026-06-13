@@ -76,7 +76,7 @@ fn one_window_one_generation_epochs_union() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(250), max_batch: 64 },
+        WriterConfig { window: Duration::from_millis(250), max_batch: 64, ..WriterConfig::default() },
     );
 
     // 7 fire-and-forget + 1 sync, all queued well inside the 250 ms window the
@@ -111,7 +111,7 @@ fn sync_submit_returns_its_generation_number() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 256 },
+        WriterConfig { window: Duration::from_millis(1), max_batch: 256, ..WriterConfig::default() },
     );
 
     // Each submit blocks until publish, so the next opens a fresh window.
@@ -137,7 +137,7 @@ fn failed_update_is_isolated_and_recovered() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(300), max_batch: 64 },
+        WriterConfig { window: Duration::from_millis(300), max_batch: 64, ..WriterConfig::default() },
     ));
 
     // Deterministic in-window order via staggered sync submitters: a (t≈0),
@@ -181,7 +181,7 @@ fn all_failed_batch_publishes_no_generation() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 8 },
+        WriterConfig { window: Duration::from_millis(1), max_batch: 8, ..WriterConfig::default() },
     );
 
     let err = writer.submit("fail:nope".into(), pods(&["pod:x"])).unwrap_err();
@@ -202,7 +202,7 @@ fn window_closes_early_on_max_batch() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_secs(10), max_batch: 2 },
+        WriterConfig { window: Duration::from_secs(10), max_batch: 2, ..WriterConfig::default() },
     ));
 
     let started = Instant::now();
@@ -231,7 +231,7 @@ fn window_timing_approximately_honored() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(80), max_batch: 256 },
+        WriterConfig { window: Duration::from_millis(80), max_batch: 256, ..WriterConfig::default() },
     );
 
     let started = Instant::now();
@@ -257,7 +257,7 @@ fn drop_drains_pending_batch() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_secs(10), max_batch: 256 },
+        WriterConfig { window: Duration::from_secs(10), max_batch: 256, ..WriterConfig::default() },
     );
 
     writer.submit_detached("a".into(), pods(&["p"])).unwrap();
@@ -281,7 +281,7 @@ fn applier_panic_reports_shutdown() {
     let writer = Writer::spawn(
         ring.clone(),
         MockApplier::new(&forks),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 8 },
+        WriterConfig { window: Duration::from_millis(1), max_batch: 8, ..WriterConfig::default() },
     );
 
     assert_eq!(writer.submit("panic".into(), pods(&["p"])).unwrap_err(), WriteError::Shutdown);
@@ -302,7 +302,7 @@ fn readers_never_stall_while_writer_commits() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         MockApplier { forks: forks.clone(), fork_delay: Duration::from_millis(2) },
-        WriterConfig { window: Duration::from_millis(1), max_batch: 64 },
+        WriterConfig { window: Duration::from_millis(1), max_batch: 64, ..WriterConfig::default() },
     ));
 
     let stop = Arc::new(AtomicBool::new(false));

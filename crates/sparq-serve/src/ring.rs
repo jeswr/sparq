@@ -133,6 +133,17 @@ impl<S> Generation<S> {
     pub fn published_at(&self) -> SystemTime {
         self.published_at
     }
+
+    /// Read-your-writes check (Wave A3; the `shard_seq` pattern of
+    /// `research/adr-horizontal-scaling.md` §4.3 collapsed to one node): `seq`
+    /// is the generation number a [`Writer::submit`](crate::Writer::submit) ack
+    /// returned — the session token a client round-trips. A generation
+    /// satisfies the token iff it already reflects that commit. Generations are
+    /// published in sequence by the single writer, so `number >= seq` is exact,
+    /// not heuristic.
+    pub fn satisfies(&self, seq: u64) -> bool {
+        self.number >= seq
+    }
 }
 
 /// The generation ring: lock-free `current()`, wait-free-for-readers `publish()`,
@@ -201,6 +212,22 @@ impl<S> GenerationRing<S> {
     /// stays readable no matter how far the writer publishes past it. Lock-free.
     pub fn current(&self) -> Arc<Generation<S>> {
         self.current.load_full()
+    }
+
+    /// Pins the current generation iff it satisfies the read-your-writes token
+    /// `seq` ([`Generation::satisfies`]) — `None` means this ring has not yet
+    /// applied the commit the token names, and the caller must wait or redirect
+    /// (the replica case in `research/adr-horizontal-scaling.md` §4.3:
+    /// "route to … any replica with `applied_seq ≥ token`").
+    ///
+    /// On the node that acked the write this never returns `None`: the writer
+    /// publishes a generation *before* acking the submissions it contains, so a
+    /// token obtained from [`Writer::submit`](crate::Writer::submit)
+    /// happens-after its own generation's publish (invariant tested in
+    /// `tests/tokens.rs`). Lock-free, same cost as [`current`](Self::current).
+    pub fn read_your_writes(&self, seq: u64) -> Option<Arc<Generation<S>>> {
+        let g = self.current.load_full();
+        g.satisfies(seq).then_some(g)
     }
 
     /// Publishes the next generation wrapping `snapshot`, bumping the epoch of
