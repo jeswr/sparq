@@ -11,34 +11,39 @@
 //!
 //! Pipeline (all IO is sequential — no random disk access anywhere):
 //!   1. ingest    — route each parsed partial's terms to `hash % n` shards (the same
-//!     routing as `ShardedDict::intern_partials`); per shard, a BOUNDED
-//!     dedup cache maps serialized term -> seq (the per-shard occurrence
-//!     counter). Cache misses append the term to the shard's record file
-//!     (seq = record index, implicit). Triples are staged to disk as
-//!     `[u64;3]` (`(shard+1)<<32 | seq`; inline ids pass through).
-//!     Over-budget caches are CLEARED at batch boundaries (an "epoch") —
-//!     re-spilled duplicates collapse at dedup time, so correctness never
-//!     depends on the cache policy, only IO volume does.
+//!      routing as `ShardedDict::intern_partials`); per shard, a BOUNDED
+//!      dedup cache maps serialized term -> seq (the per-shard occurrence
+//!      counter). Cache misses append the term to the shard's record file
+//!      (seq = record index, implicit). Triples are staged to disk as
+//!      `[u64;3]` (`(shard+1)<<32 | seq`; inline ids pass through).
+//!      Over-budget caches are CLEARED at batch boundaries (an "epoch") —
+//!      re-spilled duplicates collapse at dedup time, so correctness never
+//!      depends on the cache policy, only IO volume does.
 //!   2. dedup     — per shard: external sort of the records by (term bytes, seq);
-//!     groups of equal terms yield the distinct term with its MIN seq
-//!     (= first occurrence) plus a (min_seq, seq) pair per occurrence.
+//!      groups of equal terms yield the distinct term with its MIN seq
+//!      (= first occurrence) plus a (min_seq, seq) pair per occurrence.
 //!   3. assign    — per shard in order: external sort of the distinct terms by
-//!     min_seq; final id = base[shard] + rank (the sharded path's
-//!     assignment). The dictionary files (`dict-terms/offs/hash/hid/
-//!     meta.bin`) plus `numerics.bin`/`temporals.bin` are STREAM-written
-//!     in final-id order — never resident.
+//!      min_seq; final id = base[shard] + rank (the sharded path's
+//!      assignment). The dictionary files (`dict-terms/offs/hash/hid/
+//!      meta.bin`) plus `numerics.bin`/`temporals.bin` are STREAM-written
+//!      in final-id order — never resident.
 //!   4. join      — (seq -> min_seq) ⋈ (min_seq -> final id) -> dense per-shard
-//!     `seq -> final id` remap files (two more small external sorts).
+//!      `seq -> final id` remap files (two more small external sorts).
 //!   5. remap     — stream the staged triples through per-shard sliding windows over
-//!     the remap files (advanced at the recorded epoch boundaries), and
-//!     feed final-id `[u32;3]` triples into the existing
-//!     `extsort::spill_run` / `kway_merge` machinery. Ids are already
-//!     final and dense, so no `remap_perm_file` pass is needed.
+//!      the remap files (advanced at the recorded epoch boundaries), and
+//!      feed final-id `[u32;3]` triples into the existing
+//!      `extsort::spill_run` / `kway_merge` machinery. Ids are already
+//!      final and dense, so no `remap_perm_file` pass is needed.
 
 use crate::dict::{self, Dict, Id, TermParts};
 use rustc_hash::FxHashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+
+/// One shard's routed `(seq, serialized-term)` entries for a single ingest batch.
+type ShardEntries = Vec<(Id, Box<[u8]>)>;
+/// A finalized per-shard record: `(record-file path, final seq count, epoch boundaries)`.
+type ShardFile = (PathBuf, u32, Vec<(u64, u32)>);
 
 // ---- Configuration + resource detection -------------------------------------------
 
@@ -673,10 +678,10 @@ impl SpillInterner {
         let n = self.shards.len();
 
         // Route + serialize (parallel over partials; same hash routing as the sharded path).
-        let routed: Vec<Vec<Vec<(Id, Box<[u8]>)>>> = partials
+        let routed: Vec<Vec<ShardEntries>> = partials
             .par_iter()
             .map(|(pd, _)| {
-                let mut b: Vec<Vec<(Id, Box<[u8]>)>> = (0..n).map(|_| Vec::with_capacity(pd.len() / n + 1)).collect();
+                let mut b: Vec<ShardEntries> = (0..n).map(|_| Vec::with_capacity(pd.len() / n + 1)).collect();
                 let mut scratch: Vec<u8> = Vec::new();
                 for i in 1..=pd.len() as Id {
                     let tp = pd.term_parts(i);
@@ -798,7 +803,7 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
     st.staged.flush().map_err(io_err)?;
     let staged_path = st.staged_path.clone();
     let staged_count = st.staged_count;
-    let mut shard_files: Vec<(PathBuf, u32, Vec<(u64, u32)>)> = Vec::with_capacity(n);
+    let mut shard_files: Vec<ShardFile> = Vec::with_capacity(n);
     for mut s in std::mem::take(&mut st.shards) {
         s.rec.flush().map_err(io_err)?;
         s.cache = FxHashMap::default();

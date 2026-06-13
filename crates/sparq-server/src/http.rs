@@ -520,6 +520,9 @@ fn resolve_pin(
 /// is just an ignored unknown parameter (like any other).
 #[cfg(not(feature = "time-travel"))]
 #[inline(always)]
+// clippy: Err is axum's `Response` (the idiomatic handler error); boxing it would
+// only desync this signature from the `time-travel` variant and every call-site match.
+#[allow(clippy::result_large_err)]
 fn resolve_pin(
     state: &AppState,
     _url_params: &HashMap<String, String>,

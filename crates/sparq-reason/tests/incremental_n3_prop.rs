@@ -281,7 +281,7 @@ fn decimal_data_reaching_concatenation_falls_back_sticky_and_stays_correct() {
     assert_equal(&g, CONCAT_RULES, &base, "after decimal");
 
     let t2 = [ex("c"), ex("val"), s_lit("world")];
-    g.insert(&[t2.clone()]);
+    g.insert(std::slice::from_ref(&t2));
     base.insert(t2);
     assert_equal(&g, CONCAT_RULES, &base, "sticky fallback insert");
 }

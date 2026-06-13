@@ -346,8 +346,11 @@ pub struct SingleMemberGzipSink {
     header_sent: bool,
 }
 
+/// One decompressed-and-CRCed gzip member, keyed by member index in `GzShared::ready`.
+type GzMember = io::Result<(Vec<u8>, flate2::Crc)>;
+
 struct GzShared {
-    ready: Mutex<BTreeMap<usize, io::Result<(Vec<u8>, flate2::Crc)>>>,
+    ready: Mutex<BTreeMap<usize, GzMember>>,
     cv: Condvar,
 }
 

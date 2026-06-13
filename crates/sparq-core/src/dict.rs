@@ -47,8 +47,12 @@ const INLINE_MAX: u32 = (1 << 30) - 1;
 /// `dict-meta.bin` previously began with `prefixes.len() as u32` (a small count). This magic
 /// is chosen to be distinguishable from any plausible legacy prefix count, so the reader can
 /// detect header-less legacy files. ("DMV1" — Dict Meta, V1; little-endian.)
+// clippy/dead_code: the on-disk meta header is read/written only by the `mmap`/`dict-spill`
+// persistence paths, which are cfg'd out of the default feature set.
+#[allow(dead_code)]
 pub(crate) const DICT_META_MAGIC: u32 = 0x31_56_4D_44; // b"DMV1" little-endian
 /// Bump when the on-disk meta layout changes incompatibly.
+#[allow(dead_code)]
 pub(crate) const DICT_META_VERSION: u32 = 1;
 
 /// If a literal `value`/`datatype` is a canonical non-negative `xsd:integer` in

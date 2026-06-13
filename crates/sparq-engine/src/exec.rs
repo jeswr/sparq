@@ -3736,12 +3736,12 @@ fn merge_join(left: Bindings, right: Bindings, jv: &Variable) -> Bindings {
                 while j2 < r.len() && r[j2][rk] == rv {
                     j2 += 1;
                 }
-                for li in i..i2 {
-                    for rj in j..j2 {
-                        if extra_shared.iter().all(|&(lc, rc)| l[li][lc] == r[rj][rc]) {
-                            let mut row = l[li].clone();
+                for lrow in l.iter().take(i2).skip(i) {
+                    for rrow in r.iter().take(j2).skip(j) {
+                        if extra_shared.iter().all(|&(lc, rc)| lrow[lc] == rrow[rc]) {
+                            let mut row = lrow.clone();
                             for &rc in &right_only {
-                                row.push(r[rj][rc]);
+                                row.push(rrow[rc]);
                             }
                             rows.push(row);
                         }
@@ -4168,10 +4168,10 @@ fn left_outer_merge(
         while j2 < r.len() && r[j2][rk] == key {
             j2 += 1;
         }
-        for li in i..i2 {
+        for lrow in l.iter().take(i2).skip(i) {
             let mut matched = false;
-            for rj in j..j2 {
-                let combined = merge_rows(&l[li], &r[rj], shared, right_only);
+            for rrow in r.iter().take(j2).skip(j) {
+                let combined = merge_rows(lrow, rrow, shared, right_only);
                 let keep = match expr {
                     None => true,
                     Some(e) => {
@@ -4185,7 +4185,7 @@ fn left_outer_merge(
                 }
             }
             if !matched {
-                let mut combined = l[li].clone();
+                let mut combined = lrow.clone();
                 combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
                 rows.push(combined);
             }

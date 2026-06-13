@@ -174,6 +174,8 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
     format!("{pfx}SELECT * WHERE {{ {body} }}")
 }
 
+// clippy: differential oracle pins oxigraph's legacy Store::query semantics
+#[allow(deprecated)]
 fn oxi_count(store: &Store, q: &str) -> Result<usize, String> {
     match store.query(q).map_err(|e| e.to_string())? {
         oxigraph::sparql::QueryResults::Solutions(s) => Ok(s.count()),
@@ -183,6 +185,8 @@ fn oxi_count(store: &Store, q: &str) -> Result<usize, String> {
 }
 
 /// Oxigraph's ordered sequence of a single projected variable, as term strings.
+// clippy: differential oracle pins oxigraph's legacy Store::query semantics
+#[allow(deprecated)]
 fn oxi_seq(store: &Store, q: &str, var: &str) -> Option<Vec<String>> {
     match store.query(q).ok()? {
         oxigraph::sparql::QueryResults::Solutions(s) => Some(

@@ -194,6 +194,9 @@ impl RegistryEntry {
     /// verify path. Same deterministic `(sk, m)` nonce discipline as
     /// [`Self::issued`].
     // [OPUS-4.8] audit #12: status-bound issuance.
+    // clippy: each arg is a distinct cryptographic input to a signing constructor;
+    // bundling into a params struct would only obscure the call sites.
+    #[allow(clippy::too_many_arguments)]
     pub fn issued_with_status(
         document: NamedNode,
         commitment: Fr,

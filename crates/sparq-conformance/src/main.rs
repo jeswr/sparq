@@ -165,6 +165,11 @@ struct SuiteStats {
     divergences: Vec<(String, String, String)>, // (test name, rationale, observed mismatch)
 }
 
+/// The grouped conformance report shape: group -> section -> suite -> stats.
+type SuiteMap = BTreeMap<String, SuiteStats>;
+type SectionGroups = Vec<(String, SuiteMap)>;
+type ReportGroups = Vec<(String, SectionGroups)>;
+
 fn main() {
     // Quiet expected engine panics (they are reported as FAILs by the watchdog).
     std::panic::set_hook(Box::new(|_| {}));
@@ -203,12 +208,12 @@ fn main() {
         .expect("canonicalize suites root");
 
     // Group -> section -> suite -> stats, preserving GROUPS order.
-    let mut groups: Vec<(String, Vec<(String, BTreeMap<String, SuiteStats>)>)> = Vec::new();
+    let mut groups: ReportGroups = Vec::new();
     let mut other_entries = 0usize;
     let mut total_run = 0usize;
 
     for (group_label, section_specs) in GROUPS {
-        let mut sections: Vec<(String, BTreeMap<String, SuiteStats>)> = Vec::new();
+        let mut sections: SectionGroups = Vec::new();
         for (label, tops, scope) in *section_specs {
             let mut entries: Vec<TestEntry> = Vec::new();
             for top in *tops {
@@ -217,7 +222,7 @@ fn main() {
                     eprintln!("failed to load {}: {e}", manifest_path.display());
                 }
             }
-            let mut suites: BTreeMap<String, SuiteStats> = BTreeMap::new();
+            let mut suites: SuiteMap = BTreeMap::new();
             for entry in &entries {
                 if let Some(f) = &filter {
                     if !entry.id.contains(f.as_str())
@@ -336,7 +341,7 @@ fn git_head(dir: &Path) -> String {
 }
 
 fn render_report(
-    groups: &[(String, Vec<(String, BTreeMap<String, SuiteStats>)>)],
+    groups: &[(String, SectionGroups)],
     root: &Path,
     other_entries: usize,
     total_run: usize,

@@ -31,6 +31,9 @@ pub struct QueryChunks {
 #[wasm_bindgen]
 impl QueryChunks {
     /// The next chunk, or `undefined` when the sequence is exhausted.
+    // clippy: a #[wasm_bindgen]-exported inherent method (JS calls `.next()`); it cannot
+    // be `Iterator::next`, and renaming would break the published JS binding contract.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<String> {
         self.chunks.next()
     }
