@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781390411729,
+  "lastUpdate": 1781390526074,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -7270,6 +7270,153 @@ window.BENCHMARK_DATA = {
           {
             "name": "q10_optional_age_json_us",
             "value": 37674.9,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.14,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1579288,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "committer": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "distinct": true,
+          "id": "82cbe6cb56f2007527f191ec6eaaaff800c9b3ff",
+          "message": "merge: ZK-compose features — filter_int_d3 + HolderPoP + FilterF64-composable + entailmentRegime [OPUS-4.8]\n\nsq-wto: derive_filter_int_id requires EXACT compiled-D match (out-of-family -> clean error,\nnever wrong-D); added filter_int_d3 so the family is contiguous 1..=4 (fixes the fuzzer's\nsilently-unprovable 3/5-19-digit operands).\nsq-cwq: real challenge-bound Schnorr HolderPoP (holder_pop_message/sign_holder_pop) + external\nHolderRegistry trust anchor; bind_holder_pop FAIL-CLOSED (was a silent-accept placeholder).\nIssuer->holder credential binding deferred (documented).\nsq-q7e+sq-tat: CircuitId::FilterF64 manifest-composable for the integer-valued xsd:double\nfragment — binds operand to the committed literal + derives IEEE bits from the bound value\n(NO prover-free a_bits; the soundness fix). 4 members filter_f64_d{1..4}. Fractional/scientific\n+ query-text float-FILTER mapping deferred.\nsq-314: derivation module (RDFS rdfs9/rdfs7 subset) + EntailmentPolicy + bind_entailment\nfail-closed (entailment_regime was unchecked free metadata). In-circuit closure proof deferred.\nAll real nargo+bb; clippy+workspace green; gate_count_snapshot updated (all 17416).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T22:38:41Z",
+          "tree_id": "ca90969fa62cd5a09f716e65f97678415161fb46",
+          "url": "https://github.com/jeswr/sparq/commit/82cbe6cb56f2007527f191ec6eaaaff800c9b3ff"
+        },
+        "date": 1781390525547,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.548,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "parse_ns_per_byte",
+            "value": 4.9721,
+            "unit": "ns/byte"
+          },
+          {
+            "name": "store_bytes_per_triple_small",
+            "value": 88,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 3.5,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3270.6,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4865.9,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 5.8,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 4.3,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 819.2,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 13113,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 62952,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 162515.7,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 4806.4,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 4.6,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 43784.2,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 8347.1,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 62091.1,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 166975.9,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 3241.4,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 6.8,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 41212.4,
             "unit": "us"
           },
           {
