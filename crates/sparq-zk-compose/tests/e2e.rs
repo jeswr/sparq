@@ -198,10 +198,11 @@ fn witness_gen_filter_int_satisfiable() {
         eprintln!("nargo/bb absent; skipping witness-gen test");
         return;
     }
-    // 4-digit value -> filter_int_d4: a member no other concurrent test
-    // touches (subprocess proving shares one Prover.toml per package, so
-    // parallel tests MUST target distinct members — see README concurrency
-    // note). 1234 >= 18 is true.
+    // [OPUS-4.8] tag-isolated witness gen: previously this relied on targeting a
+    // member (filter_int_d4) no other concurrent test touches, because the
+    // witness path was shared per package. The driver now isolates the
+    // prover-input toml + witness by tag, so concurrency is safe regardless of
+    // member overlap (roborev job 2180). 1234 >= 18 is true.
     let operand_enc = encode_int_literal(1234);
     let (filter, digits) =
         build_filter_int(operand_enc, 1234, FilterOp::Ge, 18, true).unwrap();
@@ -214,7 +215,9 @@ fn witness_gen_filter_int_satisfiable() {
     );
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
-    prover.gen_witness(&id, &toml).expect("witness satisfiable");
+    prover
+        .gen_witness_tagged(&id, &toml, "wg_filter_d4")
+        .expect("witness satisfiable");
 }
 
 #[test]
@@ -224,6 +227,8 @@ fn witness_gen_filter_int_rejects_false_verdict() {
         return;
     }
     // 17 >= 18 is false; claim true -> witness generation must fail.
+    // [OPUS-4.8] tag-isolated: this targets filter_int_d1, shared with the
+    // forge/full-prove tests, so it MUST NOT use the shared witness path.
     let operand_enc = encode_int_literal(17);
     let (filter, digits) =
         build_filter_int(operand_enc, 17, FilterOp::Ge, 18, true).unwrap();
@@ -232,7 +237,7 @@ fn witness_gen_filter_int_rejects_false_verdict() {
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).unwrap();
     assert!(
-        prover.gen_witness(&id, &toml).is_err(),
+        prover.gen_witness_tagged(&id, &toml, "wg_filter_d1_false").is_err(),
         "a lying verdict must be unsatisfiable"
     );
 }
@@ -260,7 +265,10 @@ fn witness_gen_scan_satisfiable() {
     );
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
-    prover.gen_witness(&id, &toml).expect("scan witness satisfiable");
+    // [OPUS-4.8] tag-isolated witness gen.
+    prover
+        .gen_witness_tagged(&id, &toml, "wg_scan")
+        .expect("scan witness satisfiable");
 }
 
 // --- full bb prove -> verify ---------------------------------------------
@@ -281,7 +289,8 @@ fn full_prove_verify_filter_int_d1() {
 
     let prover = CircuitProver::from_crate_root();
     let out = scratch("full_d1");
-    let art = prover.prove(&id, &toml, &out).expect("prove succeeds");
+    // [OPUS-4.8] tag-isolated prove (shares filter_int_d1 with the forge tests).
+    let art = prover.prove_in(&id, &toml, &out, "full_d1").expect("prove succeeds");
     assert!(!art.proof.is_empty());
     let ok = prover.verify(&art, &out.join("verify")).expect("verify runs");
     assert!(ok, "valid proof must verify");
@@ -322,7 +331,8 @@ fn full_manifest_prove_verify_scan() {
     );
     let prover = CircuitProver::from_crate_root();
     let out = scratch("manifest_scan");
-    let art = prover.prove(&id, &toml, &out).unwrap();
+    // [OPUS-4.8] tag-isolated prove.
+    let art = prover.prove_in(&id, &toml, &out, "manifest_scan").unwrap();
 
     let manifest = ProofManifest {
         r#type: "urn:sparq:zk:ProofManifest".into(),
@@ -372,7 +382,10 @@ fn honest_filter_d1(
     let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits);
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
     let out = scratch(tag);
-    let art = prover.prove(&id, &toml, &out).expect("prove succeeds");
+    // [OPUS-4.8] tag-isolated prove: every forge test targets filter_int_d1, so
+    // under default parallel `cargo test` they'd otherwise race on the shared
+    // Prover.toml / witness and prove the WRONG statement (roborev job 2180).
+    let art = prover.prove_in(&id, &toml, &out, tag).expect("prove succeeds");
     (filter, art)
 }
 

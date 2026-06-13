@@ -109,11 +109,44 @@ impl CircuitProver {
     /// Write `Prover.toml` and run `nargo execute`, returning the witness
     /// path. This is the FAST path (no proving) the ignored tests use to
     /// exercise the relation cheaply.
+    ///
+    /// Concurrency: the per-package `Prover.toml` and the workspace
+    /// `target/<pkg>_w.gz` witness are SHARED state. Two prove/witness calls
+    /// against the SAME member (e.g. two `filter_int_d1` tests) running
+    /// concurrently would overwrite each other's `Prover.toml` between write
+    /// and `nargo execute`, and clobber each other's witness — proving (or
+    /// failing) the WRONG statement. Callers that may run concurrently against
+    /// the same member MUST pass a unique `tag` via [`Self::gen_witness_tagged`]
+    /// (and [`Self::prove_in`]) so the prover-input toml and witness get unique,
+    /// non-colliding names. This default wrapper uses the empty tag (the shared
+    /// `Prover.toml` / `<pkg>_w.gz`) and is only safe single-threaded.
     pub fn gen_witness(&self, id: &CircuitId, prover_toml: &str) -> Result<PathBuf, DriverError> {
+        self.gen_witness_tagged(id, prover_toml, "")
+    }
+
+    /// As [`Self::gen_witness`], but isolates the prover-input toml and the
+    /// emitted witness under a unique `tag` so concurrent calls against the same
+    /// member don't race on shared file paths. With a non-empty `tag` the input
+    /// is written to `<pkg>/Prover_<tag>.toml` (selected via `nargo
+    /// execute --prover-name`) and the witness to `target/<pkg>_w_<tag>.gz`.
+    // [OPUS-4.8] tag-isolated witness path so the toolchain tests are safe under
+    // default (parallel) `cargo test` — no shared Prover.toml/witness race
+    // (roborev codex job 2180).
+    pub fn gen_witness_tagged(
+        &self,
+        id: &CircuitId,
+        prover_toml: &str,
+        tag: &str,
+    ) -> Result<PathBuf, DriverError> {
         let pkg = id.package();
-        let toml_path = self.package_dir(id).join("Prover.toml");
+        // Empty tag => legacy shared names; non-empty => per-call-unique names.
+        let (prover_name, witness_name) = if tag.is_empty() {
+            ("Prover".to_string(), format!("{pkg}_w"))
+        } else {
+            (format!("Prover_{tag}"), format!("{pkg}_w_{tag}"))
+        };
+        let toml_path = self.package_dir(id).join(format!("{prover_name}.toml"));
         std::fs::write(&toml_path, prover_toml)?;
-        let witness_name = format!("{pkg}_w");
         let witness_path = self.target_dir().join(format!("{witness_name}.gz"));
         // nargo execute exits 0 even on a failed assertion / bad input — it
         // signals failure by NOT writing the witness file (and printing to
@@ -125,6 +158,8 @@ impl CircuitProver {
             .arg(&witness_name)
             .arg("--package")
             .arg(&pkg)
+            .arg("--prover-name")
+            .arg(&prover_name)
             .current_dir(&self.compose_dir)
             .output()
             .map_err(|source| DriverError::Spawn { tool: "nargo".into(), source })?;
@@ -143,14 +178,33 @@ impl CircuitProver {
 
     /// Full prove: compile -> witness -> bb prove + write_vk. `out_dir` is a
     /// scratch directory the artifacts are written into.
+    ///
+    /// NOTE: this uses the SHARED (untagged) witness path and so is only safe
+    /// single-threaded against a given member; concurrent callers must use
+    /// [`Self::prove_in`] with a unique tag.
     pub fn prove(
         &self,
         id: &CircuitId,
         prover_toml: &str,
         out_dir: &Path,
     ) -> Result<ProofArtifacts, DriverError> {
+        self.prove_in(id, prover_toml, out_dir, "")
+    }
+
+    /// As [`Self::prove`], but threads a unique `tag` through the witness step
+    /// so concurrent proves against the same member don't race on the shared
+    /// `Prover.toml` / `target/<pkg>_w.gz` (the bb artifacts already land in the
+    /// caller's isolated `out_dir`). Use a per-test-unique `tag`.
+    // [OPUS-4.8] tag-isolated prove path (roborev codex job 2180).
+    pub fn prove_in(
+        &self,
+        id: &CircuitId,
+        prover_toml: &str,
+        out_dir: &Path,
+        tag: &str,
+    ) -> Result<ProofArtifacts, DriverError> {
         let acir = self.compile(id)?;
-        let witness = self.gen_witness(id, prover_toml)?;
+        let witness = self.gen_witness_tagged(id, prover_toml, tag)?;
         std::fs::create_dir_all(out_dir)?;
 
         // `--write_vk` emits proof, public_inputs, AND vk in one pass (bb

@@ -130,3 +130,16 @@ CircuitId. This is sound because the canonical vk is recomputed for THAT full id
 — a proof from a different compiled member fails bb verify against it (demonstrated
 by forge_reject_noncanonical_vk). Per the audit this relabel is otherwise
 bucket-invariant (same statement). No further action needed for #1/#2 scope.
+
+## TEST-ISOLATION FIX (roborev codex job 2180, Medium) — [OPUS-4.8]
+The toolchain-backed prove/witness e2e tests shared one `Prover.toml` + one
+`target/<pkg>_w.gz` witness per Noir member, so default parallel `cargo test`
+could interleave them and prove/verify the WRONG statement (only `--test-threads=1`
+was reliable). Fixed by threading a unique per-test `tag` through the prove path:
+new `CircuitProver::gen_witness_tagged` / `prove_in` write `Prover_<tag>.toml`
+(selected via `nargo execute --prover-name`) and `target/<pkg>_w_<tag>.gz`; bb
+artifacts already landed in the caller's isolated `out_dir`. All d1-sharing tests
+(forge_*, full_prove_verify_filter_int_d1, witness_gen_*) now pass a distinct tag.
+`zk/compose/.gitignore` ignores the generated `Prover*.toml`. e2e now passes under
+DEFAULT parallelism (no --test-threads=1), confirmed over 3 consecutive runs:
+`test result: ok. 16 passed; 0 failed; 1 ignored` (~4.5-7.3s).
