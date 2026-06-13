@@ -1728,6 +1728,44 @@ mod tests {
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
     }
 
+    /// [OPUS-4.8] roborev 1538 (High): a budget must bound CPU/memory on a LARGE
+    /// single-pattern SELECT, not just the final response. Above PAR_THRESHOLD the
+    /// streaming-JSON path used to fan out to rayon and build EVERY matching fragment
+    /// before checking the budget. With a budget active it must instead take the
+    /// cooperative serial loop that stops within ~1024 scanned rows. We build >50k
+    /// matching rows and assert (a) the budget error fires, and (b) an already-expired
+    /// deadline returns near-instantly (a full parallel materialisation of 60k rows
+    /// would be far slower) — guarding against re-introducing the eager fan-out.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn budget_bounds_large_single_pattern_json_scan() {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..60_000u32 {
+            ttl.push_str(&format!("ex:s{i} ex:p \"value-{i}-some-padding-text\" .\n"));
+        }
+        let big = Graph::load_str(&ttl, "turtle").unwrap();
+        let q = "SELECT * WHERE { ?s ?p ?o }";
+        // Tiny row cap on a 60k scan: must refuse with the budget error.
+        let b = QueryBudget { max_rows: Some(5), ..QueryBudget::unlimited() };
+        let e = query_json_with_budget(&big, q, &b).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
+        // Already-expired deadline: the serial loop trips on its first 1024-row check,
+        // so the call returns quickly without materialising the whole result.
+        let b = QueryBudget {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+            ..QueryBudget::unlimited()
+        };
+        let start = std::time::Instant::now();
+        let e = query_json_with_budget(&big, q, &b).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(e.contains("query budget exceeded (timeout)"), "got: {e}");
+        assert!(elapsed < std::time::Duration::from_secs(2), "expired-deadline scan took {elapsed:?} — budget not bounding work");
+        // Without a budget the same large scan still works (parallel path) and is complete:
+        // one `"s":` binding key per result row.
+        let full = query_json(&big, q).unwrap();
+        assert_eq!(full.matches("\"s\":").count(), 60_000, "unbudgeted scan must return all rows");
+    }
+
     #[test]
     fn budget_unlimited_matches_query() {
         let q = "PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:knows ?b . ?b ex:age ?age }";

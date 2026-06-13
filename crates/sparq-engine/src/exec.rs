@@ -113,6 +113,17 @@ pub(crate) mod budget {
         ACTIVE.with(|a| a.get())
     }
 
+    /// `true` while a deadline / row-cap budget is installed. [OPUS-4.8] roborev 1538:
+    /// the streaming-JSON fast path uses this to take the cooperative SERIAL loop (which
+    /// breaks every 1024 rows) instead of the parallel fan-out that materialises every
+    /// matching fragment before any budget check — so `--max-results` / timeouts bound
+    /// CPU and memory, not just the final response.
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    #[inline]
+    pub(crate) fn active() -> bool {
+        ACTIVE.with(|a| a.get().on)
+    }
+
     /// `true` once the budget is exhausted (sticky) — row-producing loops break
     /// on it; `rows` is the loop's current output size.
     #[inline]
@@ -739,8 +750,13 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
     };
 
     let mut s = head;
+    // [OPUS-4.8] roborev 1538: only take the parallel fan-out when NO budget is active. The
+    // parallel path builds every matching JSON fragment before it can check the budget, so a
+    // row cap / deadline would not bound CPU or memory — it would serialise the full result and
+    // only then fail. With a budget installed we fall through to the cooperative serial loop
+    // below, which checks `budget::exhausted` every 1024 rows and stops early.
     #[cfg(feature = "parallel")]
-    if scan_rows.len() >= PAR_THRESHOLD {
+    if scan_rows.len() >= PAR_THRESHOLD && !budget::active() {
         use rayon::prelude::*;
         // One string per chunk (≈ per worker), not per row — avoids one heap allocation per
         // result cell. Chunks stay in order, so the bytes are identical to the serial path.
