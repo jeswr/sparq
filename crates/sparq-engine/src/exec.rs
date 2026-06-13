@@ -4436,79 +4436,73 @@ fn group_aggregate(
     }
 
     // Evaluate each group's aggregates (the expensive part — `eval_expr` over every member of
-    // every group) in parallel: it is read-only (`&LocalVocab`) and independent across groups.
-    // Interning the results (`value_to_id`, needs `&mut LocalVocab`) stays serial and in `order`,
-    // so the output is byte-identical to the serial path.
+    // every group), then intern the result and build the output row, in first-seen `order`.
+    // Interning needs `&mut LocalVocab` and so stays SERIAL and in order, making the ids
+    // byte-identical regardless of how evaluation is scheduled.
+    let mut rows: Vec<Row> = Vec::with_capacity(order.len());
+
+    // [OPUS-4.8] roborev 1429 (Med): bound peak memory. The previous implementation
+    // materialised the aggregate `Value`s (and then their resolved ids) for EVERY group at
+    // once before building any row — for many-group / large GROUP_CONCAT queries that holds
+    // all aggregate output in memory simultaneously. We now process in bounded BATCHES (and,
+    // in the sequential path, one group at a time), interning and pushing each batch's rows
+    // before evaluating the next, so only a bounded slice of `Value`s is live.
     #[cfg(feature = "parallel")]
-    let agg_values: Vec<Vec<Value>> = if b.rows.len() >= PAR_THRESHOLD {
+    let parallel_eval = b.rows.len() >= PAR_THRESHOLD;
+    #[cfg(not(feature = "parallel"))]
+    let parallel_eval = false;
+
+    #[cfg(feature = "parallel")]
+    if parallel_eval {
         use rayon::prelude::*;
-        let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
-        let bref = &b;
         // Thread-local extension-function registry and dataset view: snapshot +
         // per-item re-install (free when neither is installed) — see the FILTER branch.
         let fns = functions::snapshot();
         let vw = view::snapshot();
-        members
-            .par_iter()
-            .map(|members| {
-                let _fns = functions::worker_install(&fns);
-                let _vw = view::worker_install(&vw);
-                aggregates
-                    .iter()
-                    .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg))
-                    .collect::<Result<Vec<_>, String>>()
-            })
-            .collect::<Result<Vec<_>, String>>()?
-    } else {
-        members
-            .iter()
-            .map(|members| {
-                aggregates
-                    .iter()
-                    .map(|(_, agg)| eval_aggregate(graph, local, &b, members, agg))
-                    .collect::<Result<Vec<_>, String>>()
-            })
-            .collect::<Result<Vec<_>, String>>()?
-    };
-    #[cfg(not(feature = "parallel"))]
-    let agg_values: Vec<Vec<Value>> = members
-        .iter()
-        .map(|members| {
-            aggregates
-                .iter()
-                .map(|(_, agg)| eval_aggregate(graph, local, &b, members, agg))
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    // Resolve the aggregate values to ids: a PARALLEL read-only pass (inline integers, graph-dict
-    // and already-local terms — the vast majority) and then a serial intern of only the genuinely
-    // new terms, in order, so ids are byte-identical to the fully-serial path (T1.0b).
-    #[cfg(feature = "parallel")]
-    let resolved: Vec<Vec<Result<Id, Term>>> = if b.rows.len() >= PAR_THRESHOLD {
-        use rayon::prelude::*;
-        let lv: &LocalVocab = local;
-        agg_values
-            .par_iter()
-            .map(|vals| vals.iter().map(|v| value_to_id_readonly(graph, lv, v)).collect())
-            .collect()
-    } else {
-        agg_values.iter().map(|vals| vals.iter().map(|v| value_to_id_readonly(graph, local, v)).collect()).collect()
-    };
-    #[cfg(not(feature = "parallel"))]
-    let resolved: Vec<Vec<Result<Id, Term>>> =
-        agg_values.iter().map(|vals| vals.iter().map(|v| value_to_id_readonly(graph, local, v)).collect()).collect();
-
-    let mut rows: Vec<Row> = Vec::with_capacity(order.len());
-    for (key, res) in order.iter().zip(resolved) {
-        let mut row = Row::from_slice(key);
-        for r in res {
-            row.push(match r {
-                Ok(id) => id,
-                Err(term) => local.intern(term),
-            });
+        // Process `members`/`order` in PAR_THRESHOLD-sized batches: evaluate + read-only
+        // resolve each batch in parallel, then serially intern only that batch's genuinely
+        // new terms and emit its rows. Peak `Value` footprint is one batch, not all groups.
+        for (key_chunk, member_chunk) in order.chunks(PAR_THRESHOLD).zip(members.chunks(PAR_THRESHOLD)) {
+            let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
+            let bref = &b;
+            let resolved: Vec<Vec<Result<Id, Term>>> = member_chunk
+                .par_iter()
+                .map(|members| {
+                    let _fns = functions::worker_install(&fns);
+                    let _vw = view::worker_install(&vw);
+                    aggregates
+                        .iter()
+                        .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg).map(|v| value_to_id_readonly(graph, lv, &v)))
+                        .collect::<Result<Vec<_>, String>>()
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            for (key, res) in key_chunk.iter().zip(resolved) {
+                let mut row = Row::from_slice(key);
+                for r in res {
+                    row.push(match r {
+                        Ok(id) => id,
+                        Err(term) => local.intern(term),
+                    });
+                }
+                rows.push(row);
+            }
         }
-        rows.push(row);
     }
+
+    if !parallel_eval {
+        // Sequential STREAMING path: eval + intern + push per group, dropping each group's
+        // `Value`s before moving to the next, so peak memory is a single group's aggregates.
+        for (key, members) in order.iter().zip(&members) {
+            let mut row = Row::from_slice(key);
+            for (_, agg) in aggregates {
+                let v = eval_aggregate(graph, local, &b, members, agg)?;
+                let id = value_to_id(graph, local, &v);
+                row.push(id);
+            }
+            rows.push(row);
+        }
+    }
+
     Ok(Bindings::unsorted(out_vars, rows))
 }
 

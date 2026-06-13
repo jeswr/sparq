@@ -1006,6 +1006,40 @@ mod tests {
         assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"), 1);
     }
 
+    /// [OPUS-4.8] roborev 1429 (Med): GROUP BY aggregate over a >PAR_THRESHOLD (50k) input
+    /// must produce complete, correct per-group results. This crosses the chunked parallel
+    /// eval+intern boundary (default `parallel` feature) and the streaming sequential path
+    /// (no-default), which must agree group-for-group. 1,000 groups x 60 rows = 60,000 rows;
+    /// group `k` has values k..k+60 so SUM = 60*k + (0+..+59) = 60*k + 1770.
+    #[test]
+    fn group_aggregate_above_par_threshold_complete() {
+        let mut data = String::from("@prefix ex: <http://ex/> .\n");
+        for k in 0..1000u32 {
+            for i in 0..60u32 {
+                data.push_str(&format!("ex:s{k} ex:v {} .\n", k + i));
+            }
+        }
+        let gg = Graph::load_str(&data, "turtle").unwrap();
+        let r = query(
+            &gg,
+            "PREFIX ex: <http://ex/> SELECT ?s (SUM(?v) AS ?sum) WHERE { ?s ex:v ?v } GROUP BY ?s",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1000, "every group must be emitted exactly once");
+        // Index group -> sum string and spot-check a few groups across the chunk boundary.
+        use std::collections::HashMap;
+        let sums: HashMap<String, String> = r
+            .rows
+            .iter()
+            .map(|row| (row[0].as_ref().unwrap().to_string(), row[1].as_ref().unwrap().to_string()))
+            .collect();
+        for k in [0u32, 1, 499, 500, 833, 999] {
+            let want = 60 * k + 1770;
+            let got = sums.get(&format!("<http://ex/s{k}>")).expect("group present");
+            assert!(got.contains(&want.to_string()), "group {k}: SUM want {want}, got {got}");
+        }
+    }
+
     #[test]
     fn order_by() {
         let r = query(
