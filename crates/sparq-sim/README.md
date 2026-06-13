@@ -112,7 +112,7 @@ Sport and City are served by the **neighbor-sparse profile fallback**
 every event names exactly one sport, so no two sports share a concrete neighbor) and
 City 2/4; the fallback fills starved slots with role-profile matches, taking those
 classes to 400/400 and 398/400 at a latency cost of ~0.3 ms on the mean (v1: mean
-1.48 ms, p95 8.9 ms). See `TODO.md` for the before/after table.
+1.48 ms, p95 8.9 ms).
 
 ## Tests
 

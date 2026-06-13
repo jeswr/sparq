@@ -17,6 +17,9 @@ __pycache__/
 /.roborev/
 STATUS.md
 
+# Claude Code agent worktrees (transient scratch; the tracked skills under .claude/skills/ stay)
+/.claude/worktrees/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

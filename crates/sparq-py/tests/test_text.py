@@ -1,5 +1,5 @@
 """Full-text search tests for the `sparq` Python package (the TextIndex lifecycle
-recorded as a follow-up in crates/sparq-py/TODO.md): `Graph.text_search`,
+tracked as a follow-up in beads — `bd list -l area:sparq-py`): `Graph.text_search`,
 `Graph.query_text` (the `text:` magic predicates), the lazy build + cache, and
 its invalidation on every mutating swap (update / reason_n3_with).
 

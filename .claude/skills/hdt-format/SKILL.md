@@ -6,8 +6,8 @@ description: The HDT (Header-Dictionary-Triples) binary RDF archive format — l
 # HDT — Header Dictionary Triples
 
 [OPUS-4.8] Authored for the active HDT work. Ground truth: the `sparq-hdt` crate
-(`crates/sparq-hdt/src/lib.rs`, `Cargo.toml`, `TODO.md`) and the upstream
-`hdt` crate (KonradHoeffner/hdt, MIT). Verify crate API against the pinned
+(`crates/sparq-hdt/src/lib.rs`, `Cargo.toml`; open work in beads — `bd list -l area:sparq-hdt`)
+and the upstream `hdt` crate (KonradHoeffner/hdt, MIT). Verify crate API against the pinned
 version before writing code.
 
 ## What HDT is
@@ -69,9 +69,9 @@ a rebuild hint. Two deliberate reasons (documented in `sparq-cli/Cargo.toml`):
 2. The HDT decode stack is dead weight on non-HDT paths.
 
 **Version pin: `hdt = "0.4"`.** Do NOT bump to 0.6 casually — 0.6 pulls `qwt`,
-whose default `prefetch` feature needs **nightly** rustc on aarch64 (see
-`TODO.md`). Native-only by design (the reader spawns threads; the use case is
-bulk ingest).
+whose default `prefetch` feature needs **nightly** rustc on aarch64 (tracked in
+beads — `bd list -l area:sparq-hdt`). Native-only by design (the reader spawns
+threads; the use case is bulk ingest).
 
 ## Known gaps
 

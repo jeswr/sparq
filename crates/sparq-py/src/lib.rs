@@ -18,8 +18,8 @@
 //!   already-loaded graph.
 //! * Full-text search (`sparq_text`): `Graph.text_search` returns BM25-ranked
 //!   literal hits and `Graph.query_text` runs SELECTs with the `text:` magic
-//!   predicates. The [`TextIndex`] lifecycle lives HERE (the follow-up recorded
-//!   in `TODO.md`): built lazily on first use and cached on the graph, and
+//!   predicates. The [`TextIndex`] lifecycle lives HERE (the follow-up tracked
+//!   in beads — `bd list -l area:sparq-py`): built lazily on first use and cached on the graph, and
 //!   invalidated by every mutating swap (`update` / `reason` /
 //!   `reason_n3_with`) — those paths rebuild the graph (dictionary ids may
 //!   change), so the native incremental `TextIndex::apply_delta` mirror has no

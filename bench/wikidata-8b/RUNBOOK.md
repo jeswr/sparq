@@ -18,9 +18,9 @@ FLIGHT. Before launching:
 
 1. dict-spill must be **merged to public main**; set `SPARQ_SHA` in
    `scripts/config.sh` to a post-merge commit.
-2. Resolve every `TODO(dict-spill)` marker in `scripts/config.sh` and
-   `scripts/remote-8b.sh`. Candidate names from the in-flight branch (VERIFY at
-   merge — they may change):
+2. Resolve the dict-spill flag/feature placeholders in `scripts/config.sh` and
+   `scripts/remote-8b.sh` (tracked in bead sq-1q3). Candidate names from the
+   in-flight branch (VERIFY against the merged impl — they may change):
    - env: `SPARQ_DICT_SPILL=1|on|auto`, `SPARQ_DICT_SPILL_BUDGET_MB`,
      `SPARQ_DICT_SPILL_DISK_FLOOR_MB`
    - cargo: feature `dict-spill` exists on **sparq-core only**; sparq-cli does
@@ -62,7 +62,7 @@ flagged estimate):
 | dump .gz (deleted after recompress) | 71 GB | 71 GB | verified Content-Length |
 | recompressed .zst | 56 GB | 66 GB | ~7.0 GB/B-triples (measured @1B: 6.99 GB) |
 | extsort temp runs (peak, upper bound) | 675 GB | 790 GB | ≤0.94× index (1B write-amplification) |
-| dict spill working set | ~150 GB | ~250 GB | ESTIMATE: ~69 B/term (measured @100M) at extrapolated term counts; TODO(dict-spill): refine from merged implementation |
+| dict spill working set | ~150 GB | ~250 GB | ESTIMATE: ~69 B/term (measured @100M) at extrapolated term counts; refine from merged impl (sq-1q3) |
 | swapfile | 64 GB | 64 GB | fixed |
 | OS + rust + sparq build | 15 GB | 15 GB | stage-1 observed |
 | **peak total** | **~1,750 GB** | **~2,100 GB** | gz deleted before build (mandatory step) |
@@ -142,7 +142,7 @@ All scripts live in `bench/wikidata-8b/scripts/`, share `config.sh`, and
 ```sh
 cd bench/wikidata-8b/scripts
 
-# 0. edit config.sh: SPARQ_SHA (post-merge), confirm TODO(dict-spill) resolved
+# 0. edit config.sh: SPARQ_SHA (post-merge), confirm dict-spill flags reconciled (sq-1q3)
 ./launch.sh                  # dry-run: review every command it would run
 EXECUTE=1 ./launch.sh        # keypair + SG + run-instances + wait + record ip
 EXECUTE=1 ./run.sh           # scp remote-8b.sh + mem-sampler.sh, nohup start, poll
@@ -161,7 +161,7 @@ instances — never double-launch.
 Executed by `remote-8b.sh`:
 
 ```sh
-# TODO(dict-spill): verify flag names + cli feature plumbing at merge time.
+# NOTE: verify these flag names + cli feature plumbing against the merged impl (sq-1q3).
 SPARQ_SHARDED_DICT=1 SPARQ_BUILD_TIMING=1 \
 SPARQ_DICT_SPILL=1 SPARQ_DICT_SPILL_BUDGET_MB=8192 \
 timeout 86400 /usr/bin/time -v \
@@ -170,8 +170,8 @@ timeout 86400 /usr/bin/time -v \
 
 - `32` = 32 M-triple chunks, same as stage 1 (~0.5 GB triple-sort cap).
 - Budget 8,192 MB ≈ half of RAM for the dict, leaving room for chunk buffers +
-  page cache on a 15 GiB-usable box. TODO(dict-spill): tune against the merged
-  implementation's accounting (if the budget excludes overheads, go lower).
+  page cache on a 15 GiB-usable box. Tune against the merged implementation's
+  accounting (sq-1q3) — if the budget excludes overheads, go lower.
 - `timeout 86400` (24 h) is the build-phase hard stop.
 
 ## 5. Monitoring

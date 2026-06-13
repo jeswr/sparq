@@ -33,8 +33,8 @@ Geometry parsing and algorithms wrap the standard pure-Rust geo stack
 | 8.7 | `geof:intersection/union/difference/symDifference` | ✅ point-set ops: polygon overlay (geo `BooleanOps`) **plus** the well-defined line/point cases — see the table below; genuinely-intractable combos (1-D set subtraction) are a per-row expression error |
 | 8.7 | `geof:getSRID` | ✅ the CRS IRI as `xsd:anyURI` |
 | 8.3/8.4 | Core RDF shape: `geo:hasGeometry`, `geo:hasDefaultGeometry`, `geo:asWKT` | ✅ extracted by `GeoIndex::build` (default + named graphs) |
-| 8.5.2 | `geo:gmlLiteral` | ❌ WKT only (no maintained pure-Rust GML parser — TODO.md) |
-| 7 / 9 | RIF/SPARQL rewrite rules, `geor:` query rewriting | ❌ needs engine-level query rewriting (TODO.md) |
+| 8.5.2 | `geo:gmlLiteral` | ❌ WKT only (no maintained pure-Rust GML parser — tracked in beads, `bd list -l area:sparq-geo`) |
+| 7 / 9 | RIF/SPARQL rewrite rules, `geor:` query rewriting | ❌ needs engine-level query rewriting (tracked in beads, `bd list -l area:sparq-geo`) |
 
 Formal OGC conformance testing is **skipped** (the official suite needs a full
 SPARQL endpoint harness); the table above is the implemented subset.
@@ -145,7 +145,7 @@ installs the registry on the `/sparql` query, update, and subscription paths.
 The registry evaluates `geof:` *post-hoc* (after pattern matching, per row).
 For large spatial selections, pre-filter with the R-tree `GeoIndex` below and
 feed the candidates to the query (e.g. via `VALUES`); pushing `geof:` filters
-down into index windows automatically needs a planner hook (TODO.md).
+down into index windows automatically needs a planner hook (tracked in beads, `bd list -l area:sparq-geo`).
 
 ## Index design
 

@@ -264,7 +264,7 @@ let store2 = VectorStore::open_from_bytes(bytes)?;           // identical valida
 - **DiskANN honest scope:** `DiskAnnIndex` searches full-precision vectors straight from the
   mmap. The PQ-compressed in-RAM candidate cache that *full* DiskANN ranks on
   (`quant.rs`) exists and is tested but is **not yet wired into** `search_slots` (recorded
-  follow-up in `crates/sparq-vectors/TODO.md`); run the PQ-filter + re-rank loop yourself
+  follow-up in the crate's open beads, `bd list -l area:sparq-vectors`); run the PQ-filter + re-rank loop yourself
   (recipe 4).
 - **Little-endian only.** `.spqv`/`.spqg` reject big-endian targets at create/open.
 - **Determinism:** ties break on ascending id (searchers) or first appearance (fusion);

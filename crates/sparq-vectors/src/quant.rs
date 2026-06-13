@@ -33,7 +33,7 @@
 //! This module is the **PQ-compressed in-RAM candidate cache** that closes `diskann.rs`'s honest
 //! gap to *full* DiskANN (see that module's "Honest scope" note). The wiring, kept here as the
 //! contract rather than baked into the `.spqg` format prematurely (no driving recall budget yet —
-//! see `TODO.md`):
+//! see this crate's open beads — `bd list -l area:sparq-vectors`):
 //!
 //! 1. After building the `.spqg` graph, [`fit`](ProductQuantizer::fit) a [`ProductQuantizer`] on
 //!    the store's vectors and [`encode_store`](ProductQuantizer::encode_store) every vector into a

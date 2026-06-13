@@ -132,7 +132,7 @@ verified warm-up from `GET /dictionary/{dict-id}` for the *next* request.
   loaded with `options.dataset`; `size`/`heapBytes` always report the default
   graph (use `countQuads()` for dataset totals). `dataset` is not combinable
   with `compressed` yet.
-- CONSTRUCT / DESCRIBE / federated queries are not supported (see `TODO.md`).
+- CONSTRUCT / DESCRIBE / federated queries are not supported (tracked in beads — `bd list -l area:js`).
 - `REGEX`/`REPLACE` are compiled out of the wasm build (the engine's
   non-default `regex` cargo feature) to keep the bundle small — use
   `CONTAINS`/`STRSTARTS`/… or a custom build.

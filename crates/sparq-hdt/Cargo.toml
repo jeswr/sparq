@@ -24,7 +24,7 @@ readme = "README.md"
 # hdt-cpp / hdt-java: FourSectionDictionary (Plain Front Coding) + BitmapTriples in
 # SPO order. `default-features = false` drops its sophia adapter — we translate at
 # the id level, not through sophia terms. Pinned to 0.4: 0.6 pulls `qwt`, whose
-# default `prefetch` feature needs NIGHTLY rustc on aarch64 (see TODO.md).
+# default `prefetch` feature needs NIGHTLY rustc on aarch64 (see bead sq-2l1).
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

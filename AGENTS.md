@@ -33,9 +33,11 @@ If your agent runtime supports the Agent Skills standard, these load via progres
 
 ## Working on this repo (contributor agents)
 
-- Build: `cargo build --workspace`. Test: `cargo test --workspace`. Lint is enforcing: `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` must pass.
+- Build: `cargo build --workspace`. Test: `cargo test --workspace`.
+- Lint is enforcing (CI gates on it): `cargo clippy --workspace --exclude sparq-py --all-targets -- -D warnings` and `cargo fmt --check` must pass. Run clippy over the **full workspace**, not a single crate — feature unification surfaces lints that an isolated-crate check misses. (`sparq-py` is excluded because it needs the Python/maturin toolchain.)
 - The core crates (`sparq-core`, `sparq-engine`) must stay dependency-free of the opt-in capability crates, and the wasm build must not regress — both are enforced in CI.
-- Conformance: the W3C SPARQL suites must stay green (see `conformance-report.md`).
+- Conformance: the W3C SPARQL + inference suites must stay green and are **ratcheted** (the committed floor only goes up) — see `conformance-report.md` / `inference-conformance-report.md` and the CI ratchet. Performance is gated the same way against a best-ever floor (`bench/perf-baseline.json`).
+- **Merge discipline:** the gate for landing any change is *full-workspace clippy + `cargo test` + the conformance/perf ratchets*, all green. When work is done in parallel git worktrees, gate and merge **one branch at a time** with a full re-gate between merges; never edit `.beads/` files inside a worktree (it conflicts at merge — `bd export` regenerates the JSONL).
 
 ## MAINTENANCE RULE (REQUIRED — read before changing any public surface)
 
@@ -56,17 +58,28 @@ If you add a brand-new public surface, add a new `skills/<surface>/` (dir name =
 This repo tracks work in **beads** (`bd`, a git-native dependency-graph issue tracker; the committed source-of-record is `.beads/issues.jsonl`). Rules for any agent working here:
 
 - **Do NOT write TODO/FIXME into markdown or leave them in `TODO.md` files.** Capture future work as a bead instead.
-- **When you identify follow-up/future work, create a bead for it:**
+- **When you identify follow-up/future work, create a bead for it** (from the repo root, with `bd` on your PATH):
   ```sh
-  cd /home/ubuntu/sparq && /home/ubuntu/.local/bin/bd create "<imperative title>" -t <task|bug|feature|chore|spike> -p <0-4> -l <area:crate,kind:...> -d "<what + why + where>"
+  bd create "<imperative title>" -t <task|bug|feature|chore|spike> -p <0-4> -l <area:crate,kind:...> -d "<what + why + where>"
   ```
-  This writes the shared Dolt DB (exclusive-lock-serialized — safe across parallel agents). **Never edit `.beads/issues.jsonl` (or any `.beads/` file) by hand** — it causes merge conflicts; `bd export` regenerates it.
+  This writes the shared Dolt DB (exclusive-lock-serialized — safe across parallel agents). For the rationale behind a *deferred* task, put it in the bead's `-d` description or `--design` field so the bead is self-contained. **Never edit `.beads/issues.jsonl` (or any `.beads/` file) by hand** — it causes merge conflicts; `bd export` regenerates it.
 - Run `bd ready` to see unblocked work; close with `bd close <id>`.
 
 ## No hard-coded performance numbers
 
 Do not bake benchmark numbers (MB/s, ×-faster, recall, gate counts, latencies) into markdown. Reference the **generated structured data** instead (the benchmark harnesses emit JSON; CI publishes results). If you cite a number, cite where it was generated.
 
+## Repository hygiene — where things live (READ THIS; it keeps the repo clean by default)
+
+Everything you produce has exactly **one** correct home. Putting it anywhere else creates the cruft that forces periodic "clean-up runs" — so don't create it in the first place.
+
+- **Tasks / TODOs / follow-ups / "future work" → a bead.** Never a `TODO`/`FIXME`/`XXX` marker in a markdown file, never a `TODO.md`, never a `- [ ]` checklist of pending work in a tracked doc. If you catch yourself writing "we should later…", run `bd create` (see the beads section above) and move on. Code-comment `TODO`s are discouraged too — prefer a bead and reference its id.
+- **Durable knowledge → `AGENTS.md` / `CLAUDE.md`, a `skills/<surface>/SKILL.md`, a crate `README.md`, or a `research/` design record — whichever fits.** Workspace-wide conventions and contributor rules go here in `AGENTS.md` (Claude Code also auto-reads `CLAUDE.md`, which just points here). Usage knowledge goes in the matching skill. Per-crate caveats go in that crate's `README.md`. Design rationale and measured verdicts go in `research/` — or, for the rationale behind a specific deferred task, in that bead's description / `--design` field.
+- **Do NOT commit narrative scratch docs.** No `HANDOVER*.md`, no `SESSION*.md`, no "current state" / "what I'm doing now" / progress-log markdown in the repo. Session and orchestration state belongs in beads (for work) or in your own un-tracked notes — never in a tracked file. The only living operational markdown allowed is **genuine reference** (a runbook, the benchmark catalog) and **generated reports** (the CI-published perf/conformance data) — not a story about a session.
+- **No hard-coded performance numbers in markdown** (restated; see the section above): cite the generated structured data, not a baked-in figure.
+
+Honour these homes and the repo never accumulates stale TODO lists or handover docs — no clean-up pass is ever needed.
+
 ## Public-API → SKILL.md maintenance rule
 
-When you change a public API — any `pub` item in a crate's public surface, a CLI flag, an HTTP route, or the Python/JS bindings — **update the corresponding `skills/<surface>/SKILL.md` in the SAME change** so the usage docs never drift. The map is in [`skills/SKILL.md`](./skills/SKILL.md).
+Important enough to state twice: see **MAINTENANCE RULE (REQUIRED)** near the top. In short — when you change any public API (`pub` item, CLI flag, HTTP route, Python/JS binding), update the corresponding `skills/<surface>/SKILL.md` in the SAME change. The surface→skill map is in [`skills/SKILL.md`](./skills/SKILL.md).

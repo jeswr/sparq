@@ -1,7 +1,8 @@
 //! [OPUS-4.8] A **persistent, on-disk Vamana ANN index** (`.spqg`) over a [`VectorStore`]:
 //! a fixed-degree proximity graph laid out for memory-mapped, locality-friendly reads, so a
 //! built index is **saved once and reopened without a rebuild** (the gap [`ann`](crate::ann)'s
-//! in-RAM HNSW left — see that module's persistence note and `TODO.md#persistent-ann`).
+//! in-RAM HNSW left — see that module's persistence note and this crate's open beads
+//! (`bd list -l area:sparq-vectors`)).
 //!
 //! # Why a second index
 //!
@@ -57,7 +58,8 @@
 //! as a standalone, tested encoder/decoder/distance-estimator, but `search_slots` below is
 //! **unchanged** — it still searches full-precision from the mmap. Wiring the PQ candidate cache
 //! into the greedy search (rank on codes in RAM, re-rank the beam off the mmap) is the recorded
-//! follow-up; see `quant.rs`'s "intended use" note and `TODO.md`. At the scales where the graph
+//! follow-up; see `quant.rs`'s "intended use" note and this crate's open beads
+//! (`bd list -l area:sparq-vectors`). At the scales where the graph
 //! fits in page cache (the regime this unblocks: skip the per-process rebuild) the two are
 //! equivalent; PQ matters only when the vectors themselves exceed RAM. The `.spqg` header
 //! reserves 4 bytes for an encoding tag so a PQ variant lands as a backwards-compatible bump.

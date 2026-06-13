@@ -15,7 +15,7 @@ instances first.
 - [x] 2026-06-13 dict-spill in-flight branch inspected (`../sparq-dictspill` @ 5069b33):
   candidate flags `SPARQ_DICT_SPILL`, `SPARQ_DICT_SPILL_BUDGET_MB`,
   `SPARQ_DICT_SPILL_DISK_FLOOR_MB`; cargo feature `dict-spill` (sparq-core only,
-  NOT yet plumbed into sparq-cli's features) — runbook carries TODO markers.
+  NOT yet plumbed into sparq-cli's features) — reconcile against merged impl (sq-1q3).
 - [x] RUNBOOK.md written (spec, cost model, duration estimates, abort criteria)
 - [x] scripts/ written (config/launch/run/collect/terminate/remote-8b/mem-sampler),
   all default to DRY-RUN; `EXECUTE=1` required for any AWS mutation
@@ -25,8 +25,8 @@ instances first.
 
 Launch gate (ALL must hold before `EXECUTE=1`):
 - [ ] dict-spill merged to public main; `SPARQ_SHA` set to a post-merge commit
-- [ ] TODO(dict-spill) markers in `scripts/config.sh` + `scripts/remote-8b.sh`
-      resolved against the merged flag names / cli feature plumbing
+- [ ] dict-spill flag/feature placeholders in `scripts/config.sh` + `scripts/remote-8b.sh`
+      reconciled against the merged flag names / cli feature plumbing (sq-1q3)
 - [ ] budget re-checked: ledger shows ≤ $0.78 spent of $30 cap
 - [ ] no live `purpose=sparq-hw-validation` instances; i-090531b4ede8f2d3f untouched
 

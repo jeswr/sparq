@@ -9,7 +9,7 @@ store's sorted permutation indexes. No models, no network, no extra state — an
 
 The output grounds NL→SPARQL prompts (compact, budgeted text summaries; full JSON for
 machine consumption) and doubles as planner-grade statistics (the characteristic-set
-table is the SOTA star-join cardinality estimator — see `TODO.md` for the wiring).
+table is the SOTA star-join cardinality estimator — see the open beads for this crate, `bd list -l area:sparq-introspect`, for the wiring).
 
 ## What it computes
 

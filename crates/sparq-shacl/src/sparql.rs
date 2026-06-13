@@ -13,7 +13,7 @@
 //! whose result variables include neither a reserved nor an undeclared-prefix
 //! token — anything that fails to parse is treated as an ill-formed constraint
 //! and skipped (consistent with this crate's lenient handling of ill-formed
-//! shapes; see TODO.md).
+//! shapes; see this crate's open beads — `bd list -l area:sparq-shacl`).
 //!
 //! Solution → validation-result mapping (SHACL §5.2.2):
 //!   * `sh:focusNode`   ← the focus node ($this);

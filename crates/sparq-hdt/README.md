@@ -68,6 +68,6 @@ which is the format's main draw alongside no-text-parse loading.
 
 ## Not (yet) supported
 
-See `TODO.md`: writing HDT archives (blocked upstream — the wrapped crate has no
+See the open beads for this crate (`bd list -l area:sparq-hdt`): writing HDT archives (blocked upstream — the wrapped crate has no
 in-memory builder API, re-verified against hdt 0.6) and a decode-only fast path
 (upstream builds pattern-query indexes ingest never uses).

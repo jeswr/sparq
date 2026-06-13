@@ -57,7 +57,7 @@ property shapes), each solution a violation; honours `sh:prefixes`
 focus node when unprojected), `?path`→`sh:resultPath`, `?message`→
 `sh:resultMessage`. Pinned by the W3C `sparql/node` + `sparql/property`
 sub-suites. SPARQL-based constraint *components* (custom `sh:ConstraintComponent`
-with `sh:parameter`/`sh:validator`) are deferred — see `TODO.md`.
+with `sh:parameter`/`sh:validator`) are deferred — see the open beads for this crate (`bd list -l area:sparq-shacl`).
 
 Targets: `sh:targetNode`, `sh:targetClass` (with `rdfs:subClassOf*` closure),
 implicit class targets (a shape that is itself an `rdfs:Class`),
@@ -131,7 +131,7 @@ for data in data_graphs {
 - **SHACL Core + `sh:sparql`.** The SPARQL-based constraint *component*
   declaration machinery (custom `sh:ConstraintComponent` with `sh:parameter` /
   `sh:validator`) and the full `sparql/pre-binding` semantics (rejecting
-  variable re-binding, `$shapesGraph`) are out of scope; see `TODO.md`.
+  variable re-binding, `$shapesGraph`) are out of scope; see the open beads for this crate (`bd list -l area:sparq-shacl`).
 - Validation results are **not deduplicated** across traversal routes /
   component occurrences — matching the test suite's expectations (a nested
   shape reached through two parents reports twice).

@@ -1636,7 +1636,7 @@ impl Graph {
 
     /// [OPUS-4.8] (sq-5lf) A cheap, logically-INDEPENDENT, IMMUTABLE point-in-time copy
     /// of this graph — O(pending delta), never O(triples). This is the public snapshot
-    /// surface the workspace `TODO.md` ("sparq-core: cheap graph snapshot API") and beads
+    /// surface beads `sq-3p1` ("Core: cheap O(overlay) Graph::snapshot API") and
     /// `sq-5lf` specify, and what the blocked downstream consumers (sparq-rsp's
     /// true-overlay window eval, sparq-py's `Graph.copy()`, the RDF/JS incremental-update
     /// story) want: hand out an O(1)-ish snapshot that reads exactly the triples present

@@ -223,7 +223,7 @@ let g = sparq_shacl::load_turtle_with_base(&text, &format!("file://{path}")).unw
 - **§6 limits:** the W3C `sparql/component/*` suite is NOT directly runnable offline (it
   `owl:imports` the external `http://datashapes.org/dash` vocabulary); declare custom
   components inline in your shapes graph. Full `sparql/pre-binding` semantics (rejecting
-  variable re-binding, `$shapesGraph`) are out of scope — see `TODO.md`.
+  variable re-binding, `$shapesGraph`) are out of scope — see the crate's open beads (`bd list -l area:sparq-shacl`).
 - **W3C conformance:** 98/98 of the core `sht:Validate` suite passes. Reproduce with
   `crates/sparq-shacl/fetch-shacl-tests.sh` then
   `cargo test -p sparq-shacl --test w3c_core` (self-skips if the gitignored suite is absent).

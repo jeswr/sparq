@@ -12,7 +12,8 @@
 //! `sh:parameter` / `sh:validator` declaration machinery) and most of
 //! `pre-binding/` (which probes the FULL pre-binding algebra-rewrite semantics,
 //! including rejection of queries that re-bind a pre-bound variable) are out of
-//! scope for this milestone and are not walked (see crates/sparq-shacl/TODO.md).
+//! scope for this milestone and are not walked (see this crate's open beads —
+//! `bd list -l area:sparq-shacl`).
 //! The `component/` tests additionally need an `owl:imports` of the external
 //! `http://datashapes.org/dash` vocabulary the offline harness cannot resolve.
 

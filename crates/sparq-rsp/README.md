@@ -88,7 +88,7 @@ q.push(&meta_stream, triple, ts, |r| { /* full join result per tick */ })?;
   content as a **named graph** keyed by the window IRI; the engine's
   cross-named-graph join then binds variables shared between `WINDOW <w1>` and
   `WINDOW <w2>`. RSTREAM (full per-tick result) for now; ISTREAM/DSTREAM over a
-  multi-window join is a documented follow-up (see `TODO.md`).
+  multi-window join is a documented follow-up (tracked in beads, `bd list -l area:sparq-rsp`).
 
 ## Window semantics (exact, pinned by tests)
 

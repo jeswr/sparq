@@ -433,7 +433,7 @@ fn boundary_geometry(g: &Geometry<f64>) -> Result<Geometry<f64>, GeoError> {
 // primitives (`line_intersection`, `CoordinatePosition`) and return an honest
 // [`GeoError::Unsupported`] for the genuinely-intractable combinations (notably
 // line−line / line∆line, which need linear-referencing subtraction `geo` does
-// not provide) rather than a wrong answer. See README / TODO.md for the table.
+// not provide) rather than a wrong answer. See README for the table.
 
 use geo::coordinate_position::CoordPos;
 use geo::line_intersection::line_intersection;
@@ -938,7 +938,8 @@ pub fn buffer(g: &GeoGeometry, radius: f64, unit: Unit) -> Result<GeoGeometry, G
 /// `geo:wktLiteral` lexical forms (plus plain `f64` / `bool`), exactly what a
 /// SPARQL engine builtin sees after evaluating its argument expressions to
 /// literals. sparq-engine can register these one-to-one once it has an
-/// extension-function registry (the required API is recorded in TODO.md).
+/// extension-function registry (the required API is tracked in beads —
+/// `bd list -l area:sparq-geo`).
 pub mod lex {
     use super::Unit;
     use crate::literal::parse_wkt_literal;
