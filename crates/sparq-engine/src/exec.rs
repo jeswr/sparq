@@ -1424,7 +1424,7 @@ fn eval_graph_named(
         graph: &Graph,
         local: &mut LocalVocab,
         sub: &Graph,
-        gname: &Term,
+        #[cfg(feature = "zk")] gname: &Term,
         inner: &GraphPattern,
     ) -> Result<Bindings, String> {
         // Inside GRAPH the evaluation graph IS the named sub-graph: suspend a
@@ -1432,11 +1432,11 @@ fn eval_graph_named(
         let _scope = view::enter_graph();
         // zk-trace: tag the enclosed scans/filters with the named graph (the
         // sub-graph has its own dictionary; terms are materialized at record
-        // time against it, so the tag is what attributes them).
+        // time against it, so the tag is what attributes them). The `gname`
+        // parameter is cfg'd out entirely when the feature is off, so the
+        // default (wasm) build is byte-identical.
         #[cfg(feature = "zk")]
         let _zk = crate::zk::graph_scope(gname);
-        #[cfg(not(feature = "zk"))]
-        let _ = gname;
         let mut sub_local = LocalVocab::default();
         let b = eval_graph_pattern(sub, &mut sub_local, inner)?;
         let rows: Vec<Row> = b
@@ -1465,7 +1465,14 @@ fn eval_graph_named(
                 None
             };
             match sub {
-                Some(sub) => eval_translated(graph, local, sub, &target, inner),
+                Some(sub) => eval_translated(
+                    graph,
+                    local,
+                    sub,
+                    #[cfg(feature = "zk")]
+                    &target,
+                    inner,
+                ),
                 // The named graph is absent → ZERO solutions (even for `GRAPH <g> {}`,
                 // which must NOT yield the unit row), but with `inner`'s variable
                 // schema — evaluate against an empty graph for the columns, then drop
@@ -1494,7 +1501,14 @@ fn eval_graph_named(
                 // scans/filters with the iteration's named graph.
                 #[cfg(feature = "zk")]
                 let _zk = crate::zk::graph_scope(gname);
-                let mut b = eval_translated(graph, local, sub, gname, inner)?;
+                let mut b = eval_translated(
+                    graph,
+                    local,
+                    sub,
+                    #[cfg(feature = "zk")]
+                    gname,
+                    inner,
+                )?;
                 let gid = value_to_id(graph, local, &Value::Term(gname.clone()));
                 match b.col(v) {
                     // The inner pattern itself binds the graph variable (e.g.
@@ -1964,6 +1978,17 @@ fn pattern_var_pos(tp: &TriplePattern, var: &Variable) -> Option<usize> {
 /// scan of the first pattern that binds the variable) and the residual filters
 /// (applied normally afterwards).
 pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, ScanCmp)>>, Vec<Expression>) {
+    // zk-trace: a sargable FILTER pushed into the scan would make the scan
+    // record only the POST-filter rows (the rows that PASSED), losing the
+    // FILTER obligation and under-capturing the input set — the proof must
+    // witness the operand of every filtered row and the rows it excluded.
+    // Keep every filter residual while recording, so it flows through
+    // apply_filter (one FilterObligation) over the FULL unfiltered scan set.
+    // Result-equivalent; only the plan changes (zk module docs).
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return (vec![None; patterns.len()], filters.to_vec());
+    }
     let mut pat_filters: Vec<Option<(usize, ScanCmp)>> = vec![None; patterns.len()];
     let mut residual = Vec::new();
     for f in filters {
