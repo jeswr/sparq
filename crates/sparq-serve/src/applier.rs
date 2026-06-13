@@ -42,6 +42,7 @@
 
 use sparq_core::Graph;
 
+use crate::footprint::Footprint;
 use crate::writer::ApplyUpdates;
 
 /// Default [`GraphApplier`] compaction threshold (pending-delta entries: overlay
@@ -110,5 +111,16 @@ impl ApplyUpdates for GraphApplier {
             let _ = working.compact();
         }
         working
+    }
+
+    /// Conservative graph-level write footprint parsed from the update text
+    /// ([`Footprint::of_sparql`]). Costs one spargebra parse (~2 µs at
+    /// prod-solid-server update sizes) on the writer thread, paid only under
+    /// [`CommitGranularity::CommuteGroup`](crate::CommitGranularity) — the
+    /// engine's own parse inside [`apply`](ApplyUpdates::apply) still happens
+    /// (there is no pre-parsed update entry point in the engine today; an
+    /// engine-seams ask if CommuteGroup mode ever carries hot traffic).
+    fn footprint(&self, update: &String) -> Footprint {
+        Footprint::of_sparql(update)
     }
 }

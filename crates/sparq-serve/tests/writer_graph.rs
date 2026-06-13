@@ -30,7 +30,7 @@ fn sparql_batch_publishes_one_generation() {
     let writer = Writer::spawn(
         ring.clone(),
         GraphApplier::new(),
-        WriterConfig { window: Duration::from_millis(200), max_batch: 64 },
+        WriterConfig { window: Duration::from_millis(200), max_batch: 64, ..WriterConfig::default() },
     );
 
     let before = ring.current(); // pinned across the commit
@@ -61,7 +61,7 @@ fn bad_sparql_is_isolated_from_its_batch() {
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
         GraphApplier::new(),
-        WriterConfig { window: Duration::from_millis(300), max_batch: 64 },
+        WriterConfig { window: Duration::from_millis(300), max_batch: 64, ..WriterConfig::default() },
     ));
 
     writer.submit_detached(insert(0), [PodId::from("pod:a")]).unwrap();
@@ -101,7 +101,7 @@ fn consecutive_windows_consecutive_generations() {
     let writer = Writer::spawn(
         ring.clone(),
         GraphApplier::new(),
-        WriterConfig { window: Duration::from_millis(1), max_batch: 256 },
+        WriterConfig { window: Duration::from_millis(1), max_batch: 256, ..WriterConfig::default() },
     );
 
     for expect in 1..=4u64 {
