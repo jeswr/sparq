@@ -177,6 +177,34 @@ pub use crate::string::codepoint_equal;
 pub use crate::string::string_to_codepoints;
 
 // ============================================================================
+// [OPUS-4.8] sq-y73: regex (bounded subset) + hash (circuit-native).
+//
+// NOTE: `fn:matches` / `fn:replace` proper (full XML-Schema regex) remain
+// STUBS (see stubs.nr) because full PCRE is not circuit-feasible. The bounded
+// circuit-friendly primitives are exposed under explicit `matches_*` /
+// `replace_literal` names so a code generator picks the bounded semantics
+// deliberately, never mistaking them for full regex. Similarly the SPARQL
+// MD5/SHA* hash builtins are NOT provided (no stdlib digest at this toolchain
+// pin); `string_pedersen_hash` is the circuit-native content hash. See the
+// regex.nr / hash.nr module headers for the full scope rationale.
+// ============================================================================
+
+// fn:matches (bounded: literal / char-class / anchored subset)
+pub use crate::regex::matches_anchored;
+pub use crate::regex::matches_char_class_any;
+pub use crate::regex::matches_char_class_plus;
+pub use crate::regex::matches_char_class_star;
+pub use crate::regex::matches_literal;
+pub use crate::regex::matches_prefix;
+
+// fn:replace (bounded: literal pattern + literal replacement)
+pub use crate::regex::replace_literal;
+
+// hash: circuit-native content hash (NOT SPARQL MD5/SHA*)
+pub use crate::hash::bytes_to_lower_hex;
+pub use crate::hash::string_pedersen_hash;
+
+// ============================================================================
 // Float/Double variants
 // ============================================================================
 

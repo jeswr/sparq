@@ -389,11 +389,22 @@ pub fn translate<let N: u32, let M: u32, let K: u32>(
                     result_len += 1;
                 }
             } else {
-                // Check if there's a corresponding character in trans_string
+                // Check if there's a corresponding character in trans_string.
+                // [OPUS-4.8] sq-y73 fix: Noir's `&` does NOT short-circuit, so
+                // `trans_bytes[trans_idx]` was indexed even when trans_idx >= K,
+                // panicking with "Index out of bounds" whenever transString is
+                // shorter than mapString (the delete case). Clamp the index used
+                // for the read and gate the write on the real bound.
                 let trans_idx = found_idx as u32;
-                if (trans_idx < K) & (trans_bytes[trans_idx] != 0) {
-                    if result_len < N {
-                        result[result_len] = trans_bytes[trans_idx];
+                let in_bounds = trans_idx < K;
+                // Clamp the index to a statically-valid slot for the (always
+                // executed, post-flatten) read; `K > 0` is comptime so the
+                // whole read folds away for an empty transString.
+                if K > 0 {
+                    let safe_idx = if in_bounds { trans_idx } else { 0 };
+                    let trans_byte = trans_bytes[safe_idx];
+                    if in_bounds & (trans_byte != 0) & (result_len < N) {
+                        result[result_len] = trans_byte;
                         result_len += 1;
                     }
                 }
@@ -901,4 +912,195 @@ pub fn fn_string_from_boolean<let N: u32>(value: bool) -> ([u8; N], u32) {
     }
 
     (result, result_len)
+}
+
+// ============================================================================
+// [OPUS-4.8] sq-y73: coverage for previously-untested string transforms.
+// VENDOR.md flagged substring/substring_before/after, upper/lower_case,
+// concat_bytes, string_join_two, encode_for_uri, compare/string_equal/
+// less/greater, translate, normalize_space as implemented-but-untested.
+// These inline tests close that gap. Flag for re-review when Fable returns.
+// ============================================================================
+
+#[test]
+fn test_substring_with_length() {
+    // fn:substring("hello", 2, 3) -> "ell"
+    let s: str<5> = "hello";
+    let (out, len) = substring::<5, 5>(s, 2, 3);
+    assert(len == 3);
+    let expected = "ell".as_bytes();
+    for i in 0..3 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_substring_start_clamped() {
+    // fn:substring("hello", -2, 4) clamps start to 1 (idx 0).
+    let s: str<5> = "hello";
+    let (out, len) = substring::<5, 5>(s, -2, 4);
+    assert(len == 4);
+    let expected = "hell".as_bytes();
+    for i in 0..4 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_substring_before() {
+    // fn:substring-before("1999/04/01", "/") -> "1999"
+    let s: str<10> = "1999/04/01";
+    let sep: str<1> = "/";
+    let (out, len) = substring_before::<10, 1>(s, sep);
+    assert(len == 4);
+    let expected = "1999".as_bytes();
+    for i in 0..4 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_substring_after() {
+    // fn:substring-after("1999/04/01", "/") -> "04/01"
+    let s: str<10> = "1999/04/01";
+    let sep: str<1> = "/";
+    let (out, len) = substring_after::<10, 1>(s, sep);
+    assert(len == 5);
+    let expected = "04/01".as_bytes();
+    for i in 0..5 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_upper_case() {
+    let s: str<5> = "aBc12";
+    let (out, len) = upper_case::<5>(s);
+    assert(len == 5);
+    let expected = "ABC12".as_bytes();
+    for i in 0..5 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_lower_case() {
+    let s: str<5> = "AbC12";
+    let (out, len) = lower_case::<5>(s);
+    assert(len == 5);
+    let expected = "abc12".as_bytes();
+    for i in 0..5 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_concat_bytes() {
+    // concat("foo", "bar") -> "foobar"
+    let a = "foo".as_bytes();
+    let b = "bar".as_bytes();
+    let (out, len) = concat_bytes::<3, 3, 6>(a, 3, b, 3);
+    assert(len == 6);
+    let expected = "foobar".as_bytes();
+    for i in 0..6 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_string_join_two() {
+    // string-join(("a","b"), "-") -> "a-b"
+    let a = "a".as_bytes();
+    let b = "b".as_bytes();
+    let sep = "-".as_bytes();
+    let (out, len) = string_join_two::<1, 1, 1, 3>(a, 1, b, 1, sep, 1);
+    assert(len == 3);
+    let expected = "a-b".as_bytes();
+    for i in 0..3 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_encode_for_uri() {
+    // encode-for-uri("a b") -> "a%20b"
+    let s: str<3> = "a b";
+    let (out, len) = encode_for_uri::<3, 9>(s);
+    assert(len == 5);
+    let expected = "a%20b".as_bytes();
+    for i in 0..5 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_compare_and_relops() {
+    let a: str<3> = "abc";
+    let b: str<3> = "abd";
+    let c: str<3> = "abc";
+    assert(compare::<3, 3>(a, b) == -1);
+    assert(compare::<3, 3>(b, a) == 1);
+    assert(compare::<3, 3>(a, c) == 0);
+    assert(string_equal::<3, 3>(a, c));
+    assert(string_less_than::<3, 3>(a, b));
+    assert(string_greater_than::<3, 3>(b, a));
+    assert(string_le::<3, 3>(a, c));
+    assert(string_ge::<3, 3>(a, c));
+}
+
+#[test]
+fn test_compare_prefix_shorter_first() {
+    // "ab" < "abc" (shorter string with equal prefix sorts first)
+    let a: str<2> = "ab";
+    let b: str<3> = "abc";
+    assert(compare::<2, 3>(a, b) == -1);
+}
+
+#[test]
+fn test_translate() {
+    // translate("bar","abc","ABC") -> "BAr"
+    let s: str<3> = "bar";
+    let from: str<3> = "abc";
+    let to: str<3> = "ABC";
+    let (out, len) = translate::<3, 3, 3>(s, from, to);
+    assert(len == 3);
+    let expected = "BAr".as_bytes();
+    for i in 0..3 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_translate_delete() {
+    // translate("abcabc","abc","AB") -> "ABAB" (c has no mapping -> deleted)
+    let s: str<6> = "abcabc";
+    let from: str<3> = "abc";
+    let to: str<2> = "AB";
+    let (out, len) = translate::<6, 3, 2>(s, from, to);
+    assert(len == 4);
+    let expected = "ABAB".as_bytes();
+    for i in 0..4 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_normalize_space() {
+    // normalize-space("  a  b  ") -> "a b"
+    let s: str<8> = "  a  b  ";
+    let (out, len) = normalize_space::<8>(s);
+    assert(len == 3);
+    let expected = "a b".as_bytes();
+    for i in 0..3 {
+        assert(out[i] == expected[i]);
+    }
+}
+
+#[test]
+fn test_codepoint_equal() {
+    let a: str<3> = "abc";
+    let b: str<3> = "abc";
+    let c: str<3> = "abd";
+    assert(codepoint_equal::<3, 3>(a, b));
+    assert(!codepoint_equal::<3, 3>(a, c));
 }
