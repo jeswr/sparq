@@ -153,15 +153,125 @@ member has a different vk and fails `bb verify`.
   full_manifest_prove_verify_scan also passes when run with --ignored
 - 0 failed across the gate.
 
+## PHASE 2 — QUERY-CORRECTNESS FILTER BINDING (#5/#6/#7 + achievable #10) [OPUS-4.8]
+DONE (committed; do NOT push). Verifier-side only — NO circuit recompile (the
+values are ALREADY bound by #1's reconstruct_public_inputs; this is the missing
+verifier-side check that the bound values MATCH the query the RP reads).
+
+### What landed
+- `sparq-zk::verify` (commit 1): `FilterCmp` (neutral cmp op, `code()` ==
+  filter_int OP_*), `QueryFilter { variable, op, bound }`, `fragment_filters()`
+  (independent spargebra parse, normalizes `?var op const`, flattens AND,
+  FAILS CLOSED on any unbindable FILTER — float/string/var-var/disjunction/
+  arithmetic/non-canonical-integer), `variable_slots()` (var -> (pat,slot)),
+  `fragment_pattern_consts()` (per-pattern constant Terms; returns oxrdf::Term so
+  compose needs no sparq-engine dep), `canonical_u64()` (rejects leading-zero/
+  signed ints, mirrors filter_int.nr digit-token constraints). +5 unit tests.
+- `sparq-zk-compose::verifier` (commit 2): `verify_manifest_structure` gains
+  stage 2b + 2c (run BEFORE bb, in the fast gate so a crypto failure can't mask
+  them). New CheckError: `UnboundPattern` / `UnboundFilter` / `UnmappableFilterVar`.
+  - 2b (#10 constant-swap): every query BGP pattern's constant slots must be
+    bound by some scan sub-proof. `scan_matches_pattern` re-encodes the query
+    constants (salt-independent for IRI/literal, `encode_term(.., Fr::from(0))`)
+    and equates to the bb-bound `pattern_is_const`/`pattern_const_enc`.
+  - 2c (#5/#6/#7 FILTER): each query FILTER `?v op c` is gated PER ROW — for
+    EVERY scan answering the pattern `?v` binds in, EVERY active disclosed row
+    (0..row_count) must have a binding edge to a filter_int sub-proof s.t. (1)
+    the edge's scan answers the pattern (scan_matches_pattern), (2) `from_slot`
+    == `?v`'s slot in that pattern (#6), (3) the filter's bound `(op,bound)`
+    EQUAL the query's `(op,c)` (#5), (4) `expected==true` (verdict gating). Any
+    ungated/false row, or no scan answering the pattern, => REJECT (#10
+    FILTER-add). Per-row gating is the load-bearing part: the disclosed result IS
+    the scans' rows, so a multi-row scan cannot disclose a FAILING row while only
+    proving the passing one (a true #6 gap closed — see test
+    `filter_reject_unproven_failing_row`).
+
+### FILTER var->slot mapping APPROACH (the requested detail)
+A FILTER variable is mapped to a *concrete scanned slot* WITHOUT a trusted
+pattern->sub-proof index in the manifest:
+  1. `variable_slots(query_patterns)` gives every `(variable, pattern_idx,
+     slot_idx)` from an independent query parse.
+  2. For FILTER `?v op c`, take `?v`'s `(pattern_idx, slot_idx)` positions.
+  3. A binding edge satisfies it iff its `from_proof` scan's bound constants
+     MATCH query pattern `pattern_idx` (so the scan is *identified as that
+     pattern's scan by its constants*, not by a trusted index — this is exactly
+     the #10 cross-check) AND `edge.from_slot == slot_idx` AND the `to_proof`
+     filter's `(op,bound,expected)` match `(op, c, true)`.
+The scan that answers a pattern is thus pinned by its (bb-bound) constants, and
+the operand column is pinned to the FILTER variable's actual slot in that
+pattern — closing the "point the operand at the salary slot for an age filter"
+forge (#6) and the operand-substitution seam (#7, via stage-2's now-bb-bound
+operand_enc equality + this slot check).
+
+### FORGES NOW REJECTED (test names + `test result:` line)
+All in `crates/sparq-zk-compose/tests/e2e.rs`; the 6 FILTER negatives are
+STRUCTURAL (no toolchain) so they run in minimal CI and can't be masked by a
+later bb failure:
+- `filter_reject_comparison_substitution_17_vs_18` — the headline age-17-vs-`>=18`
+  forge: a filter_int over (Ge, bound=17, expected=true) does NOT satisfy a query
+  FILTER(?o>=18) => UnboundFilter(o). (#5)
+- `filter_reject_filter_add_on_scan_only` — scan-only manifest under a
+  FILTER-carrying query => UnboundFilter(o). (#10 FILTER-add)
+- `filter_reject_constant_swap_age_as_salary` — age scan under a <salary> query
+  => UnboundPattern(0). (#10 constant-swap)
+- `filter_reject_operand_slot_substitution` — FILTER(?age>=65) with the edge
+  pointing at the SALARY object slot => UnboundFilter(age). (#6)
+- `filter_reject_false_verdict_row` — expected=false row presented as passing =>
+  UnboundFilter(o). (#5/#6 verdict gating)
+- `filter_reject_unbindable_filter_fragment` — string-literal FILTER fails closed
+  => Sparqzk(UnsupportedFragment). (#10 fail-closed)
+- `filter_reject_unproven_failing_row` — 2-row scan (age 25 passes, 15 fails)
+  with a true-verdict proof only for row 0 => UnboundFilter(o). (#5/#6 per-row)
+- `filter_binding_happy_path_structure` + `filter_two_rows_both_gated_verifies`
+  — correct composed FILTER manifests (1- and 2-row, every row gated) pass.
+- #1/#2 forge tests preserved (now carry an honest scan at idx 0; forged FILTER
+  at idx 1): forge_reject_statement_substitution / _verdict_substitution
+  (PublicInputMismatch{proof:1}), _challenge_rebind (proof:0, scan fails first),
+  _noncanonical_vk (ProofRejected{proof:1}), _artvk_is_ignored, _positive.
+Gate (default threads): `cargo test -p sparq-zk -p sparq-zk-compose --release`:
+  sparq-zk lib `test result: ok. 30 passed; 0 failed`
+  sparq-zk integration: 4 / 2 / 7 / 3 passed
+  sparq-zk-compose lib `5 passed`
+  sparq-zk-compose e2e `test result: ok. 25 passed; 0 failed; 1 ignored`
+  0 failed across the gate (confirmed stable over multiple runs; e2e ~6.4s).
+  Ignored slow `full_manifest_prove_verify_scan` also passes with --ignored.
+
+### DEFERRED-TO-CIRCUIT (empirical-honesty deferral, NOT faked)
+A FULL canonical-query-digest-as-public-input is NOT done — it needs a CIRCUIT
+change (a new `query_digest: pub Field` per member => nargo recompile + new vk),
+which is out of scope for this verifier-only phase. RESIDUAL forge it would
+additionally close: the verifier-side cross-checks above are sound against the
+*current* manifest shape (constants + FILTERs are matched by value), BUT they do
+NOT bind the query's **projection/variable-naming** or **pattern ORDER/multiplicity**
+into the proof. Concretely the residual is narrow: a query whose BGP constants
+and integer FILTERs are byte-identical to an honest one but differs only in (a)
+the SELECT projection list, or (b) duplicate/reordered patterns that re-use the
+same constants, is not distinguished by 2b/2c (each pattern still finds *a*
+matching scan; projection is not part of any bound value). Projection-NARROWING
+and FILTER-DROP remain true-statement directions (not forgeries, per the audit).
+The dangerous directions (FILTER-add, comparison-/constant-/operand-swap,
+verdict mis-gating) ARE closed by this phase. A query digest would make the
+binding total (exact-query, not value-wise); recommend it as the next circuit-
+touching deliverable. NO circuit files were changed in this phase.
+
 ## DEFERRED (designed to fold in — see DESIGN "Seams")
 - #4 replay/freshness (fresh-nonce param + single-use store): challenge is now
   byte-bound into field 0; only the freshness SOURCE + seen-nonce store remain.
-- #5/#6 FILTER semantics + #10 query digest: op/bound/expected/operand_enc are
-  now byte-bound; a later agent maps the query FILTER var->slot and cross-checks.
-- #3 issuer signature, #8/#9 attribution/salt, #12 revocation: orthogonal to
-  #1/#2; untouched. The scan.nr replay note + verify.rs:20-23 join-safety
-  comment are left for the #4/#8 agents (the guarantee they describe is still
-  not delivered, so removing them now would be its own false-assurance edit).
+- #5/#6/#7 + achievable #10: DONE this phase (above). The query-DIGEST part of
+  #10 is deferred-to-circuit (residual noted above).
+- #3 issuer signature, #8/#9 attribution/salt, #12 revocation: orthogonal;
+  untouched. The scan.nr replay note + verify.rs:20-23 join-safety comment are
+  left for the #4/#8 agents (the guarantee they describe is still not delivered,
+  so removing them now would be its own false-assurance edit).
+
+## STILL NOT FULLY SOUND AFTER THIS PHASE
+This phase closes the FILTER/query-result *correctness* binding (#5/#6/#7 +
+achievable #10). The verifier is STILL NOT fully sound: #3 (issuer-signature /
+key-set membership — commitments are unsigned prover-chosen values; the prover is
+still effectively the issuer of every fact), #4 (replay/freshness — no fresh
+nonce / single-use), #8/#9 (cross-graph bnode attribution/salt are proof-unbound),
+and #12 (revocation unimplemented) all remain. Do NOT present the verifier as
+proving credential provenance, freshness, or non-revocation to a relying party.
 
 ## RESIDUAL NOTE on #11 (n/d)
 `n` cannot be re-derived from public data (graph size is private) and `d`
@@ -183,3 +293,26 @@ artifacts already landed in the caller's isolated `out_dir`. All d1-sharing test
 `zk/compose/.gitignore` ignores the generated `Prover*.toml`. e2e now passes under
 DEFAULT parallelism (no --test-threads=1), confirmed over 3 consecutive runs:
 `test result: ok. 16 passed; 0 failed; 1 ignored` (~4.5-7.3s).
+
+## FILTER `!=` BINDING (roborev codex job 2207, Medium) — [OPUS-4.8]
+`FilterCmp::Ne` had an op code (5) and was mapped through the compose layer, but
+the verifier-side FILTER parser (`collect_filter_expr` in `crates/sparq-zk/src/
+verify.rs`) never recognised SPARQL `!=`. spargebra has NO dedicated `NotEqual`
+node — `?v != c` parses to `Expression::Not(Box::new(Expression::Equal(a, b)))`
+(confirmed by probing the vendored spargebra: `Not(Equal(Variable, Literal))` for
+`?v != c`, `Not(Equal(Literal, Variable))` for `c != ?v`, `Not(Equal(Var, Var))`
+for var-var). So every valid integer `!=` FILTER fell through to the fail-closed
+reject path and was UNSUPPORTED. Fixed by matching `E::Not(inner)` and, only when
+`inner` is `E::Equal(a, b)`, routing through the existing `push_cmp(FilterCmp::Ne,
+a, b)` (which reuses `comparison_filter`'s var/const + canonical-integer vetting,
+both operand orders; `Ne` is symmetric so the flip is a no-op). Any other `Not`
+payload (`Not(Greater)`, `Not(And)`, `Not(Equal(?a,?b))`, non-integer/non-canonical
+operands) STILL fails closed — `!=` widens coverage without loosening the fragment.
+Tests: 3 unit (`extracts_not_equal_filter_in_both_operand_orders`,
+`not_equal_flattens_with_conjoined_comparisons`, `unbindable_not_equal_filters_
+fail_closed`) + 3 e2e (`witness_gen_filter_int_ne_satisfiable`, `witness_gen_
+filter_int_ne_rejects_false_verdict`, `full_prove_verify_filter_int_ne_d1` — full
+bb prove+verify of an honest `!=` plus a tampered-byte rejection, tag-isolated).
+Gate `cargo test -p sparq-zk -p sparq-zk-compose --release` (DEFAULT threads) green
+over 2 consecutive runs: sparq-zk lib `33 passed; 0 failed`; compose e2e `28 passed;
+0 failed; 1 ignored` (~6.8s).

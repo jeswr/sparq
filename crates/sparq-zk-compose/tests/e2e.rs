@@ -242,6 +242,52 @@ fn witness_gen_filter_int_rejects_false_verdict() {
     );
 }
 
+// [OPUS-4.8] roborev codex 2207: end-to-end `!=` (FilterCmp/FilterOp::Ne).
+// The verifier-side parser now binds SPARQL `?v != c` (spargebra
+// `Not(Equal(..))`) to `Ne`; these confirm the `Ne` op code drives the real
+// `filter_int` circuit's `!eq` verdict branch through the engine seam.
+#[test]
+fn witness_gen_filter_int_ne_satisfiable() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping witness-gen Ne test");
+        return;
+    }
+    // 30 != 18 is true. Tag-isolated witness gen (filter_int_d2, value "30").
+    let operand_enc = encode_int_literal(30);
+    let (filter, digits) =
+        build_filter_int(operand_enc, 30, FilterOp::Ne, 18, true).unwrap();
+    let (id, toml) =
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).expect("compiles");
+    prover
+        .gen_witness_tagged(&id, &toml, "wg_filter_ne_d2")
+        .expect("30 != 18 witness satisfiable");
+}
+
+#[test]
+fn witness_gen_filter_int_ne_rejects_false_verdict() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping");
+        return;
+    }
+    // Forge: 18 != 18 is FALSE; claim the `!=` verdict is true -> witness
+    // generation must fail (the circuit's `!eq` branch cannot be satisfied).
+    // Tag-isolated (filter_int_d2, value "18"), distinct from the satisfiable
+    // case's tag so concurrent runs are independent.
+    let operand_enc = encode_int_literal(18);
+    let (filter, digits) =
+        build_filter_int(operand_enc, 18, FilterOp::Ne, 18, true).unwrap();
+    let (id, toml) =
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).unwrap();
+    assert!(
+        prover.gen_witness_tagged(&id, &toml, "wg_filter_ne_d2_false").is_err(),
+        "a lying `!=` verdict (18 != 18 claimed true) must be unsatisfiable"
+    );
+}
+
 #[test]
 fn witness_gen_scan_satisfiable() {
     if !toolchain_available() {
@@ -303,6 +349,42 @@ fn full_prove_verify_filter_int_d1() {
         .verify(&bad, &out.join("verify_bad"))
         .expect("verify runs");
     assert!(!rejected, "tampered proof must be rejected");
+}
+
+/// [OPUS-4.8] roborev codex 2207: NON-ignored full prove+verify of a `Ne`
+/// FILTER on the smallest member. Confirms `FilterOp::Ne` drives an honest
+/// proof that bb actually verifies (the "binds + verifies" positive for the
+/// newly-bound `!=` fragment), and that a flipped proof byte is rejected.
+/// Tag-isolated (shares filter_int_d1 with the other full-prove/forge tests).
+#[test]
+fn full_prove_verify_filter_int_ne_d1() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping full prove+verify (Ne)");
+        return;
+    }
+    // 5 != 9 is true.
+    let operand_enc = encode_int_literal(5);
+    let (filter, digits) =
+        build_filter_int(operand_enc, 5, FilterOp::Ne, 9, true).unwrap();
+    let (id, toml) =
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+    assert_eq!(id, CircuitId::FilterInt { d: 1 });
+
+    let prover = CircuitProver::from_crate_root();
+    let out = scratch("full_ne_d1");
+    let art = prover.prove_in(&id, &toml, &out, "full_ne_d1").expect("prove succeeds");
+    assert!(!art.proof.is_empty());
+    let ok = prover.verify(&art, &out.join("verify")).expect("verify runs");
+    assert!(ok, "valid `!=` proof must verify");
+
+    // Tamper: flip a proof byte -> bb must reject.
+    let mut bad = art.clone();
+    let mid = bad.proof.len() / 2;
+    bad.proof[mid] ^= 0xff;
+    let rejected = prover
+        .verify(&bad, &out.join("verify_bad"))
+        .expect("verify runs");
+    assert!(!rejected, "tampered `!=` proof must be rejected");
 }
 
 /// Full manifest prove -> verify with the artifact-bundling path.
@@ -389,11 +471,52 @@ fn honest_filter_d1(
     (filter, art)
 }
 
-fn filter_manifest(inputs: ProofInputs, proof_hex: String, challenge: FieldHex) -> ProofManifest {
+/// Prove a REAL scan over `{ ?s <http://ex/age> ?o }` on the credential graph
+/// (one active age row). The query-correctness binding (#10) now requires every
+/// query BGP pattern to have a backing scan sub-proof, so the #1/#2 FILTER
+/// crypto-forge tests below carry this honest scan at index 0 and forge only the
+/// (unreferenced) FILTER sub-proof at index 1 — stage 2b passes on the scan,
+/// stage 2c is a no-op (the query has no FILTER), and stage 3 still byte-compares
+/// the forged FILTER => the original #1/#2 assertions are preserved. Returns
+/// (scan inputs, scan proof_hex).
+fn honest_age_scan(
+    challenge: &FieldHex,
+    prover: &CircuitProver,
+    tag: &str,
+) -> (ProofInputs, String) {
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).expect("scan builds");
+    let (id, toml) = prover_toml_for(
+        &scan.inputs,
+        challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+    );
+    let out = scratch(tag);
+    let art = prover.prove_in(&id, &toml, &out, tag).expect("scan prove succeeds");
+    (scan.inputs, encode_artifacts(&art))
+}
+
+/// A composed manifest carrying an honest age scan (index 0) + a FILTER sub-proof
+/// (index 1). The query is a plain 1-pattern scan query with NO FILTER, so the
+/// FILTER sub-proof is unreferenced by the query (no binding edge): the #1/#2
+/// tests forge the FILTER's public inputs and stage 3 byte-compares it.
+fn filter_manifest(
+    scan_inputs: ProofInputs,
+    scan_hex: String,
+    inputs: ProofInputs,
+    proof_hex: String,
+    challenge: FieldHex,
+) -> ProofManifest {
     ProofManifest {
         r#type: "urn:sparq:zk:ProofManifest".into(),
-        // A 1-pattern query so recheck/arity pass; the FILTER-semantics binding
-        // (#5/#6) is a later agent's, so the query need only be in-fragment.
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec!["did:key:zSampleIssuer".into()],
         attributions: vec![vec![0]],
@@ -401,7 +524,10 @@ fn filter_manifest(inputs: ProofInputs, proof_hex: String, challenge: FieldHex) 
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge },
         revocation: None,
-        sub_proofs: vec![SubProof { inputs, proof_hex }],
+        sub_proofs: vec![
+            SubProof { inputs: scan_inputs, proof_hex: scan_hex },
+            SubProof { inputs, proof_hex },
+        ],
         binding_edges: vec![],
     }
 }
@@ -416,10 +542,11 @@ fn forge_positive_honest_filter_verifies() {
     }
     let challenge = FieldHex("0x2a".into());
     let prover = CircuitProver::from_crate_root();
+    let (scan_inputs, scan_hex) = honest_age_scan(&challenge, &prover, "forge_pos_scan");
     // 5 < 10 is true.
     let (inputs, art) =
         honest_filter_d1(5, FilterOp::Lt, 10, true, &challenge, &prover, "forge_pos");
-    let m = filter_manifest(inputs, encode_artifacts(&art), challenge);
+    let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
     verify_manifest(&m, &prover, &scratch("forge_pos_verify")).expect("honest manifest verifies");
 }
 
@@ -436,15 +563,16 @@ fn forge_reject_statement_substitution() {
     }
     let challenge = FieldHex("0x2a".into());
     let prover = CircuitProver::from_crate_root();
+    let (scan_inputs, scan_hex) = honest_age_scan(&challenge, &prover, "forge_sub_scan");
     let (mut inputs, art) =
         honest_filter_d1(5, FilterOp::Lt, 10, true, &challenge, &prover, "forge_sub");
     // Lie: declare bound=99 while proof_hex still proves 5 < 10.
     if let ProofInputs::FilterInt { bound, .. } = &mut inputs {
         *bound = 99;
     }
-    let m = filter_manifest(inputs, encode_artifacts(&art), challenge);
+    let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
     match verify_manifest(&m, &prover, &scratch("forge_sub_verify")) {
-        Err(CheckError::PublicInputMismatch { proof: 0 }) => {}
+        Err(CheckError::PublicInputMismatch { proof: 1 }) => {}
         other => panic!("expected PublicInputMismatch, got {other:?}"),
     }
 }
@@ -459,6 +587,7 @@ fn forge_reject_verdict_substitution() {
     }
     let challenge = FieldHex("0x2a".into());
     let prover = CircuitProver::from_crate_root();
+    let (scan_inputs, scan_hex) = honest_age_scan(&challenge, &prover, "forge_verdict_scan");
     // Honest: 5 >= 10 is FALSE.
     let (mut inputs, art) =
         honest_filter_d1(5, FilterOp::Ge, 10, false, &challenge, &prover, "forge_verdict");
@@ -466,9 +595,9 @@ fn forge_reject_verdict_substitution() {
     if let ProofInputs::FilterInt { expected, .. } = &mut inputs {
         *expected = true;
     }
-    let m = filter_manifest(inputs, encode_artifacts(&art), challenge);
+    let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
     match verify_manifest(&m, &prover, &scratch("forge_verdict_verify")) {
-        Err(CheckError::PublicInputMismatch { proof: 0 }) => {}
+        Err(CheckError::PublicInputMismatch { proof: 1 }) => {}
         other => panic!("expected PublicInputMismatch, got {other:?}"),
     }
 }
@@ -485,10 +614,13 @@ fn forge_reject_challenge_rebind() {
     }
     let prover = CircuitProver::from_crate_root();
     let proof_challenge = FieldHex("0x2a".into());
+    let (scan_inputs, scan_hex) = honest_age_scan(&proof_challenge, &prover, "forge_chal_scan");
     let (inputs, art) =
         honest_filter_d1(5, FilterOp::Lt, 10, true, &proof_challenge, &prover, "forge_chal");
-    // Present under a DIFFERENT binding challenge than the proof carries.
-    let m = filter_manifest(inputs, encode_artifacts(&art), FieldHex("0xdead".into()));
+    // Present under a DIFFERENT binding challenge than the proofs carry. Both
+    // sub-proofs byte-bind the challenge into field 0, so the first-checked
+    // (scan, proof 0) already mismatches.
+    let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), FieldHex("0xdead".into()));
     match verify_manifest(&m, &prover, &scratch("forge_chal_verify")) {
         Err(CheckError::PublicInputMismatch { proof: 0 }) => {}
         other => panic!("expected PublicInputMismatch, got {other:?}"),
@@ -521,10 +653,11 @@ fn forge_reject_noncanonical_vk() {
         expected: true,
     };
     let art = attacker_filter_d1_artifacts(&challenge, &operand_enc, 3 /*Ge*/, 18, true);
-    let m = filter_manifest(inputs, encode_artifacts(&art), challenge);
     let prover = CircuitProver::from_crate_root();
+    let (scan_inputs, scan_hex) = honest_age_scan(&challenge, &prover, "forge_vk_scan");
+    let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
     match verify_manifest(&m, &prover, &scratch("forge_vk_verify")) {
-        Err(CheckError::ProofRejected { proof: 0 }) => {}
+        Err(CheckError::ProofRejected { proof: 1 }) => {}
         other => panic!("expected ProofRejected (canonical vk defeats attacker vk), got {other:?}"),
     }
 }
@@ -541,13 +674,14 @@ fn forge_artvk_is_ignored() {
     }
     let challenge = FieldHex("0x2a".into());
     let prover = CircuitProver::from_crate_root();
+    let (scan_inputs, scan_hex) = honest_age_scan(&challenge, &prover, "forge_ignorevk_scan");
     let (inputs, mut art) =
         honest_filter_d1(5, FilterOp::Lt, 10, true, &challenge, &prover, "forge_ignorevk");
     // Corrupt the bundled vk — the verifier must not use it.
     for b in art.vk.iter_mut() {
         *b ^= 0xff;
     }
-    let m = filter_manifest(inputs, encode_artifacts(&art), challenge);
+    let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
     verify_manifest(&m, &prover, &scratch("forge_ignorevk_verify"))
         .expect("honest proof verifies despite a garbage bundled vk (canonical vk is used)");
 }
@@ -615,4 +749,376 @@ fn attacker_filter_d1_artifacts(
         public_inputs: std::fs::read(out.join("public_inputs")).unwrap(),
         vk: std::fs::read(out.join("vk")).unwrap(),
     }
+}
+
+// --- query-correctness FILTER-binding NEGATIVE tests (audit #5/#6/#7/#10) -----
+//
+// [OPUS-4.8] These exercise the VERIFIER-SIDE query-correctness binding added in
+// this phase. The bb public-input vector already cryptographically binds the
+// scan pattern constants and the FILTER op/bound/expected/operand_enc (audit #1,
+// landed on main); this stage checks those bound values MATCH the query the
+// relying party reads. They are STRUCTURAL (`verify_manifest_structure`, no bb)
+// because every value the gate inspects is in the declared ProofInputs — so they
+// run in default CI without the toolchain, and they cannot be masked by a later
+// crypto failure (the structural gate runs first). The happy-path composed
+// manifest (a query WITH a FILTER + a correct edge) verifies — see
+// `filter_binding_happy_path_structure`.
+
+/// A credential graph with both an age and a salary numeric literal, for the
+/// operand-slot / constant-swap forges.
+fn pensioner_graph() -> Vec<Triple> {
+    let p = NamedOrBlankNode::NamedNode(iri("http://ex/p"));
+    // Salary fits the d=4 filter_int member (FILTER_INT_D_VALUES = [1,2,4]).
+    vec![
+        Triple::new(p.clone(), iri("http://ex/hasSalary"), int_lit(7000)),
+        Triple::new(p, iri("http://ex/hasAge"), int_lit(40)),
+    ]
+}
+
+/// Build a scan `ProofInputs` (no proving) for a single-constant-predicate
+/// pattern `{ ?s <pred> ?o }` over `graph`.
+fn scan_inputs_for(graph: &[Triple], pred: &str) -> ProofInputs {
+    let salt = salt_from_bytes(&[9u8; 32]);
+    let commit = commit_triples(graph, salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri(pred))),
+        o: Slot::Var,
+    };
+    build_scan(&[commit], &pattern).expect("scan builds").inputs
+}
+
+/// A filter `ProofInputs` over an xsd:integer `value` (no proving).
+fn filter_inputs(value: u64, op: FilterOp, bound: u64, expected: bool) -> ProofInputs {
+    let operand_enc = encode_int_literal(value);
+    build_filter_int(operand_enc, value, op, bound, expected)
+        .expect("filter builds")
+        .0
+}
+
+/// Audit #5 (comparison-substitution): a `filter_int` over (op=Ge, bound=17,
+/// expected=true) — a genuinely-true `17 >= 17` instance — must NOT satisfy a
+/// query `FILTER(?o >= 18)`. The bound (17) differs from the query constant
+/// (18), so no edge matches => UnboundFilter. This is the headline age-17-vs-`>=18`
+/// forge.
+#[test]
+fn filter_reject_comparison_substitution_17_vs_18() {
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
+    let scan_operand = match &scan {
+        ProofInputs::Scan { rows, .. } => rows[0][2].clone(),
+        _ => unreachable!(),
+    };
+    // The honest filter proves 17 >= 17 (bound=17), but the query asks >= 18.
+    let mut filt = filter_inputs(17, FilterOp::Ge, 17, true);
+    // Point the operand at the scanned slot so stage-2 binding-edge equality holds.
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt {
+        *operand_enc = scan_operand;
+    }
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() },
+            SubProof { inputs: filt, proof_hex: String::new() },
+        ],
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+    };
+    match verify_manifest_structure(&m) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
+        other => panic!("expected UnboundFilter(o), got {other:?}"),
+    }
+}
+
+/// Audit #10 (FILTER-add): a scan-ONLY manifest presented under a query that
+/// carries a FILTER must be REJECTED — the disclosed (unfiltered) rows would be
+/// read as satisfying the FILTER. No filter sub-proof => UnboundFilter.
+#[test]
+fn filter_reject_filter_add_on_scan_only() {
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
+        binding_edges: vec![],
+    };
+    match verify_manifest_structure(&m) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
+        other => panic!("expected UnboundFilter(o), got {other:?}"),
+    }
+}
+
+/// Audit #10 (constant-swap): an age scan (pattern_const_enc = Enc(<hasAge>))
+/// presented under a query whose pattern uses <hasSalary> must be REJECTED — the
+/// query pattern's constant has no scan binding it => UnboundPattern.
+#[test]
+fn filter_reject_constant_swap_age_as_salary() {
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/salary> ?o }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
+        binding_edges: vec![],
+    };
+    match verify_manifest_structure(&m) {
+        Err(CheckError::UnboundPattern { pattern: 0 }) => {}
+        other => panic!("expected UnboundPattern(0), got {other:?}"),
+    }
+}
+
+/// Audit #6 (operand-slot substitution): for `FILTER(?age >= 65)` over a
+/// two-pattern query { ?p <hasSalary> ?sal . ?p <hasAge> ?age }, the prover
+/// points the binding edge at the SALARY scan's object slot (a value that
+/// satisfies >= 65) instead of the AGE scan's object slot. The edge's
+/// (from_proof, from_slot) does not correspond to ?age's scanned column =>
+/// UnboundFilter. (The salary scan answers pattern 0; ?age binds only in
+/// pattern 1.)
+#[test]
+fn filter_reject_operand_slot_substitution() {
+    let g = pensioner_graph();
+    let salary_scan = scan_inputs_for(&g, "http://ex/hasSalary"); // pattern 0
+    let age_scan = scan_inputs_for(&g, "http://ex/hasAge"); // pattern 1
+    // Operand points at the SALARY object (7000 >= 65 is true).
+    let salary_operand = match &salary_scan {
+        ProofInputs::Scan { rows, .. } => rows[0][2].clone(),
+        _ => unreachable!(),
+    };
+    let mut filt = filter_inputs(7000, FilterOp::Ge, 65, true);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt {
+        *operand_enc = salary_operand;
+    }
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?p WHERE { ?p <http://ex/hasSalary> ?sal . ?p <http://ex/hasAge> ?age FILTER(?age >= \"65\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0], vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![
+            SubProof { inputs: salary_scan, proof_hex: String::new() }, // proof 0
+            SubProof { inputs: age_scan, proof_hex: String::new() },    // proof 1
+            SubProof { inputs: filt, proof_hex: String::new() },        // proof 2
+        ],
+        // Edge points at proof 0 (salary scan) slot 2 — the WRONG column for ?age.
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 2 }],
+    };
+    match verify_manifest_structure(&m) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "age" => {}
+        other => panic!("expected UnboundFilter(age), got {other:?}"),
+    }
+}
+
+/// Audit #5/#6 (verdict gating): a FILTER row whose honest verdict is FALSE
+/// (expected=false) may not be presented as passing. The filter declares
+/// expected=false; stage 2c requires expected==true => UnboundFilter.
+#[test]
+fn filter_reject_false_verdict_row() {
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
+    let scan_operand = match &scan {
+        ProofInputs::Scan { rows, .. } => rows[0][2].clone(),
+        _ => unreachable!(),
+    };
+    // age=25, query FILTER(?o >= 18): the honest verdict is TRUE, but the prover
+    // declares expected=false (e.g. to mis-gate). A false-verdict row must not
+    // satisfy the FILTER's row-inclusion obligation.
+    let mut filt = filter_inputs(25, FilterOp::Ge, 18, false);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt {
+        *operand_enc = scan_operand;
+    }
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() },
+            SubProof { inputs: filt, proof_hex: String::new() },
+        ],
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+    };
+    match verify_manifest_structure(&m) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
+        other => panic!("expected UnboundFilter(o), got {other:?}"),
+    }
+}
+
+/// Audit #10 (unbindable FILTER fails closed): a FILTER outside the bindable
+/// integer fragment (here a string-literal comparison) must be REJECTED, never
+/// silently disclosed unproven. The recheck/fragment_filters parse rejects it.
+#[test]
+fn filter_reject_unbindable_filter_fragment() {
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\") }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
+        binding_edges: vec![],
+    };
+    match verify_manifest_structure(&m) {
+        Err(CheckError::Sparqzk(_)) => {}
+        other => panic!("expected Sparqzk(UnsupportedFragment), got {other:?}"),
+    }
+}
+
+/// Happy path (structural): a query WITH a correct FILTER, a matching scan, a
+/// matching filter (op/bound/verdict), and a correct binding edge (operand slot =
+/// the FILTER variable's scanned slot) — all the query-correctness gates pass.
+#[test]
+fn filter_binding_happy_path_structure() {
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age"); // age=25
+    let scan_operand = match &scan {
+        ProofInputs::Scan { rows, .. } => rows[0][2].clone(),
+        _ => unreachable!(),
+    };
+    // 25 >= 18 is true.
+    let mut filt = filter_inputs(25, FilterOp::Ge, 18, true);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt {
+        *operand_enc = scan_operand;
+    }
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() },
+            SubProof { inputs: filt, proof_hex: String::new() },
+        ],
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+    };
+    verify_manifest_structure(&m).expect("correct composed FILTER manifest verifies structurally");
+}
+
+/// Two-subject graph: one age passes the FILTER, one fails. Used to exercise
+/// per-row verdict gating (a multi-row disclosed result).
+fn two_age_graph() -> Vec<Triple> {
+    vec![
+        Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/alice")),
+            iri("http://ex/age"),
+            int_lit(25), // passes >= 18
+        ),
+        Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/bob")),
+            iri("http://ex/age"),
+            int_lit(15), // FAILS >= 18 — must not be disclosed as passing
+        ),
+    ]
+}
+
+/// Audit #5/#6 (per-row verdict gating): a scan disclosing TWO age rows (25 and
+/// 15) under FILTER(?o >= 18), where the prover supplies a true-verdict filter
+/// proof ONLY for the passing row (25). The failing row (15) is still disclosed
+/// but has no true-verdict edge => UnboundFilter. Without per-row gating a prover
+/// could disclose the failing row as if it passed.
+#[test]
+fn filter_reject_unproven_failing_row() {
+    let scan = scan_inputs_for(&two_age_graph(), "http://ex/age");
+    let (rows, row_count) = match &scan {
+        ProofInputs::Scan { rows, row_count, .. } => (rows.clone(), *row_count),
+        _ => unreachable!(),
+    };
+    assert_eq!(row_count, 2, "two disclosed age rows");
+    // A true-verdict filter for the FIRST disclosed row only (whichever it is).
+    let mut filt = filter_inputs(25, FilterOp::Ge, 18, true);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt {
+        *operand_enc = rows[0][2].clone();
+    }
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() },
+            SubProof { inputs: filt, proof_hex: String::new() },
+        ],
+        // Edge only for row 0 — row 1 has no true-verdict filter proof.
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+    };
+    match verify_manifest_structure(&m) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
+        other => panic!("expected UnboundFilter(o) for the unproven failing row, got {other:?}"),
+    }
+}
+
+/// Per-row gating positive: BOTH disclosed rows carry a true-verdict filter
+/// proof over their own operand slot => the composed FILTER manifest verifies.
+#[test]
+fn filter_two_rows_both_gated_verifies() {
+    let scan = scan_inputs_for(&two_age_graph(), "http://ex/age");
+    let rows = match &scan {
+        ProofInputs::Scan { rows, row_count, .. } => {
+            assert_eq!(*row_count, 2);
+            rows.clone()
+        }
+        _ => unreachable!(),
+    };
+    // Each disclosed row's age (25 and 15) is >= 15, so use bound=15 so BOTH
+    // verdicts are honestly true; one filter proof per row, one edge per row.
+    let mut filt0 = filter_inputs(25, FilterOp::Ge, 15, true);
+    let mut filt1 = filter_inputs(15, FilterOp::Ge, 15, true);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt0 {
+        *operand_enc = rows[0][2].clone();
+    }
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt1 {
+        *operand_enc = rows[1][2].clone();
+    }
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"15\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() },  // proof 0
+            SubProof { inputs: filt0, proof_hex: String::new() }, // proof 1
+            SubProof { inputs: filt1, proof_hex: String::new() }, // proof 2
+        ],
+        binding_edges: vec![
+            BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 },
+            BindingEdge { from_proof: 0, from_row: 1, from_slot: 2, to_proof: 2 },
+        ],
+    };
+    verify_manifest_structure(&m).expect("both rows gated true => verifies");
 }

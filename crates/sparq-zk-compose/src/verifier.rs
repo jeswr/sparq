@@ -32,9 +32,15 @@
 
 use crate::build::{derive_filter_int_id, derive_scan_id};
 use crate::driver::{CircuitProver, DriverError};
-use crate::manifest::{BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest};
-use sparq_zk::field::field_to_be_bytes_32;
-use sparq_zk::verify::{recheck, JoinEdge, VerifyError};
+use crate::manifest::{
+    BindingEdge, BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest,
+};
+use sparq_zk::encode::encode_term;
+use sparq_zk::field::{field_to_be_bytes_32, field_to_hex, Fr};
+use sparq_zk::verify::{
+    fragment_filters, fragment_pattern_consts, fragment_patterns, recheck, variable_slots,
+    FilterCmp, JoinEdge, QueryFilter, VerifyError,
+};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -71,6 +77,20 @@ pub enum CheckError {
     /// (audit #1) does not byte-match the prover's `public_inputs` blob: the
     /// JSON statement and the cryptographic proof describe different statements.
     PublicInputMismatch { proof: usize },
+    /// A query BGP pattern's constant slots have no scan sub-proof whose bound
+    /// `pattern_is_const`/`pattern_const_enc` match them (audit #10): the
+    /// disclosed scan does not actually answer the query's pattern (e.g. an age
+    /// scan presented under a salary query — constant-swap).
+    UnboundPattern { pattern: usize },
+    /// A query FILTER has no bound `filter_int` sub-proof matching its operator
+    /// and constant, reachable via a binding edge from the scan slot the FILTER
+    /// variable binds to, with a true verdict (audit #5/#6/#10): the FILTER is
+    /// unproven (FILTER-add, comparison-substitution, wrong-operand-slot, or an
+    /// `expected==false` row presented as passing).
+    UnboundFilter { variable: String },
+    /// A query FILTER constrains a variable that does not bind to any scanned
+    /// column of a BGP pattern (cannot be mapped to a `filter_int` operand).
+    UnmappableFilterVar { variable: String },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -106,6 +126,18 @@ impl std::fmt::Display for CheckError {
             CheckError::PublicInputMismatch { proof } => write!(
                 f,
                 "sub-proof {proof}: reconstructed public inputs do not match the proof's public inputs (declared statement is not the proved statement)"
+            ),
+            CheckError::UnboundPattern { pattern } => write!(
+                f,
+                "query BGP pattern {pattern} has no scan sub-proof binding its constant slots (constant-swap / unproven pattern)"
+            ),
+            CheckError::UnboundFilter { variable } => write!(
+                f,
+                "query FILTER on ?{variable} has no matching slot-bound, true-verdict filter_int sub-proof (FILTER-add / comparison- or operand-substitution / false-verdict row)"
+            ),
+            CheckError::UnmappableFilterVar { variable } => write!(
+                f,
+                "query FILTER on ?{variable} does not bind to any scanned column"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -220,7 +252,172 @@ pub fn verify_manifest_structure(
         }
     }
 
+    // --- Stage 2b + 2c: query-correctness binding (audit #5/#6/#7/#10). ---
+    // The bb public-input vector already cryptographically binds the scan
+    // pattern constants and the FILTER op/bound/expected/operand_enc (audit
+    // #1). This stage is the VERIFIER-SIDE check that those bound values match
+    // the query the relying party reads in `manifest.query` — without it a
+    // proof of one statement is presented under a different query.
+    bind_query_correctness(manifest)?;
+
     Ok(required)
+}
+
+/// Encode a query pattern's constant term to its `pattern_const_enc` field-hex
+/// (salt-independent for IRIs/literals — only bnodes use the salt, and query
+/// constants are never bnodes; matches `build::encode_slot` / the in-circuit
+/// `pattern_const_enc`). Variable slots encode as `0x0`.
+fn encode_pattern_slot(c: &Option<oxrdf::Term>) -> Option<FieldHex> {
+    match c {
+        Some(t) => encode_term(t, &Fr::from(0u64)).map(|f| FieldHex(field_to_hex(&f))),
+        None => Some(FieldHex("0x0".to_string())),
+    }
+}
+
+/// Whether a scan sub-proof's bound pattern constancy/encoding matches a query
+/// pattern's constant slots. This is the verifier-side equality over the
+/// bb-bound `pattern_is_const`/`pattern_const_enc` (audit #10): a scan over
+/// `<hasAge>` cannot answer a query pattern over `<hasSalary>` (constant-swap),
+/// and a variable slot must be a variable on both sides.
+fn scan_matches_pattern(inputs: &ProofInputs, consts: &[Option<oxrdf::Term>; 3]) -> bool {
+    let (is_const, const_enc) = match inputs {
+        ProofInputs::Scan { pattern_is_const, pattern_const_enc, .. } => {
+            (pattern_is_const, pattern_const_enc)
+        }
+        _ => return false,
+    };
+    for slot in 0..3 {
+        let q_is_const = consts[slot].is_some();
+        if q_is_const != is_const[slot] {
+            return false;
+        }
+        // For a constant slot, the bound encoding must equal the query
+        // constant's encoding; for a variable slot both carry the `0x0` filler
+        // (still checked, so a non-`0x0` variable slot mismatches).
+        match encode_pattern_slot(&consts[slot]) {
+            Some(enc) if enc == const_enc[slot] => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Stage 2b/2c: bind every query BGP pattern's constants to a scan sub-proof
+/// (audit #10) and every query FILTER to a slot-bound, true-verdict
+/// `filter_int` sub-proof reached via a binding edge (audit #5/#6/#7).
+///
+/// FILTER var→slot mapping: a query FILTER `?v op c` is satisfied iff there is
+/// a binding edge `(from_proof=scan, from_row, from_slot, to_proof=filter)`
+/// such that (1) the scan answers the query pattern in which `?v` binds (its
+/// constants match, `scan_matches_pattern`); (2) `from_slot` is exactly the
+/// slot `?v` occupies in that pattern (audit #6 — closes "point the operand at
+/// the salary slot for an age filter"); (3) the filter's bound `(op, bound)`
+/// EQUAL the query's `(op, c)` (audit #5 — closes the 17-vs-`>=18`
+/// comparison-substitution); and (4) the filter's `expected == true` (audit
+/// #5/#6 — the verdict gates row inclusion; an `expected==false` row may not be
+/// presented as passing).
+///
+/// A FILTER with no such edge ⇒ REJECT (audit #10 FILTER-add / a `filter_int`
+/// over the wrong operand). Stage 2 already enforced the edge's scanned-slot
+/// encoding equals the filter `operand_enc` (so #7 operand substitution is
+/// closed by that equality over the now-bb-bound values + this slot check).
+fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
+    let patterns = fragment_patterns(&manifest.query)?;
+    let consts = fragment_pattern_consts(&patterns);
+    let filters = fragment_filters(&manifest.query)?;
+    let var_slots = variable_slots(&patterns);
+
+    // (2b) every query BGP pattern's constants are bound by SOME scan sub-proof.
+    for (pi, c) in consts.iter().enumerate() {
+        let bound = manifest
+            .sub_proofs
+            .iter()
+            .any(|sp| scan_matches_pattern(&sp.inputs, c));
+        if !bound {
+            return Err(CheckError::UnboundPattern { pattern: pi });
+        }
+    }
+
+    // (2c) every query FILTER has a matching, slot-bound, true-verdict proof for
+    // EVERY active disclosed row of EVERY scan that answers the FILTER's pattern.
+    // Per-row gating is the load-bearing part of #5/#6: the disclosed result is
+    // the scans' rows, so a FILTER row whose verdict is false must be EXCLUDED —
+    // i.e. every active row of a filtered pattern must carry a true-verdict
+    // filter_int sub-proof over that row's operand slot. A single missing/false
+    // row makes the FILTER unproven for the disclosed set => REJECT.
+    for QueryFilter { variable, op, bound } in &filters {
+        // The (pattern, slot) positions ?variable binds to. A FILTER over a
+        // variable that never binds to a scanned column is unmappable.
+        let positions: Vec<(usize, usize)> = var_slots
+            .iter()
+            .filter(|(v, _, _)| v == variable)
+            .map(|(_, p, s)| (*p, *s))
+            .collect();
+        if positions.is_empty() {
+            return Err(CheckError::UnmappableFilterVar { variable: variable.clone() });
+        }
+        // The FILTER must constrain at least one disclosed row (else it is
+        // vacuously "satisfied" by an empty result while the query carries a
+        // FILTER the prover never proved). Track that some scan answered the
+        // pattern AND every one of its active rows is gated true.
+        let mut any_scan_answered = false;
+        for (spi, sp) in manifest.sub_proofs.iter().enumerate() {
+            let (rows, row_count) = match &sp.inputs {
+                ProofInputs::Scan { rows, row_count, .. } => (rows, *row_count as usize),
+                _ => continue,
+            };
+            // Is this scan the one that answers a pattern ?v binds in, and at
+            // which slot does ?v sit there?
+            let slot = positions.iter().find_map(|(pi, si)| {
+                consts
+                    .get(*pi)
+                    .filter(|c| scan_matches_pattern(&sp.inputs, c))
+                    .map(|_| *si)
+            });
+            let Some(slot) = slot else { continue };
+            any_scan_answered = true;
+            // Every ACTIVE disclosed row must have a true-verdict filter_int
+            // edge at this slot with matching (op, bound).
+            for row in 0..row_count.min(rows.len()) {
+                let gated = manifest.binding_edges.iter().any(|edge| {
+                    edge.from_proof == spi
+                        && edge.from_row == row
+                        && edge.from_slot == slot
+                        && filter_edge_true(manifest, edge.to_proof, *op, *bound)
+                });
+                if !gated {
+                    return Err(CheckError::UnboundFilter { variable: variable.clone() });
+                }
+            }
+        }
+        if !any_scan_answered {
+            // A FILTER whose variable binds in a pattern, but no scan answers
+            // that pattern: the FILTER cannot be discharged (FILTER-add on a
+            // manifest missing the filtered pattern's scan).
+            return Err(CheckError::UnboundFilter { variable: variable.clone() });
+        }
+    }
+    Ok(())
+}
+
+/// Whether sub-proof `to_proof` is a `filter_int` whose bound `(op, bound)`
+/// match the query FILTER and whose disclosed verdict is TRUE (audit #5/#6:
+/// op/bound substitution + verdict gating). The operand-slot equality (the edge
+/// references the FILTER variable's scanned column) is enforced by the caller;
+/// the edge's scanned-slot encoding == the filter `operand_enc` is enforced by
+/// stage 2 over the now-bb-bound values (audit #7).
+fn filter_edge_true(
+    manifest: &ProofManifest,
+    to_proof: usize,
+    op: FilterCmp,
+    bound: u64,
+) -> bool {
+    match manifest.sub_proofs.get(to_proof).map(|sp| &sp.inputs) {
+        Some(ProofInputs::FilterInt { op: f_op, bound: f_bound, expected, .. }) => {
+            f_op.code() == op.code() && *f_bound == bound && *expected
+        }
+        _ => false,
+    }
 }
 
 /// Full verification: structure (stage 1+2) then the cryptographic gate
