@@ -38,6 +38,10 @@ ark-ff = { version = "0.5", default-features = false }
 
 # Off-circuit string hash h_s (plan §2.2: Enc_t(term) = h_2(type_code, h_s(value))).
 blake3 = "1"
+ark-ed-on-bn254 = { version = "0.5", default-features = false }
+ark-ec = { version = "0.5", default-features = false }
+ark-serialize = { version = "0.5", default-features = false }
+ark-std = { version = "0.5", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 serde_json = "1"

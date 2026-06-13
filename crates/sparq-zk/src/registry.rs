@@ -41,6 +41,19 @@ pub const ZK_COMMITMENT: &str = "https://sparq.dev/ns/zk#commitment";
 pub const ZK_SCHEME: &str = "https://sparq.dev/ns/zk#scheme";
 pub const ZK_CRYPTOSUITE: &str = "https://sparq.dev/ns/zk#cryptosuite";
 pub const ZK_ISSUER_KEY: &str = "https://sparq.dev/ns/zk#issuerKey";
+/// The issuer's actual verification-key material (compressed Baby-JubJub point,
+/// hex) — the bytes the verifier resolves to check the commitment signature
+/// (audit #3). Distinct from `zk:issuerKey`, which is a `did:`/verification-
+/// method REFERENCE; this is the resolvable key the signature is verified
+/// under. (`zk:issuerKey` carries provenance; `zk:issuerPublicKey` carries the
+/// cryptographic key. A production resolver would dereference the former to the
+/// latter; v1 records the latter directly so the proof is self-contained.)
+// [OPUS-4.8] audit #3: real signing key, not just a did: IRI.
+pub const ZK_ISSUER_PUBLIC_KEY: &str = "https://sparq.dev/ns/zk#issuerPublicKey";
+/// The issuer's signature over `C(G)` (hex), under `zk:cryptosuite`. This is
+/// what makes the commitment attested rather than prover-chosen (audit #3).
+// [OPUS-4.8] audit #3.
+pub const ZK_COMMITMENT_SIGNATURE: &str = "https://sparq.dev/ns/zk#commitmentSignature";
 pub const ZK_SIGNATURE_GRAPH: &str = "https://sparq.dev/ns/zk#signatureGraph";
 pub const ZK_STATUS_LIST: &str = "https://sparq.dev/ns/zk#statusList";
 pub const ZK_RDFC10_SALT: &str = "https://sparq.dev/ns/zk#rdfc10Salt";
@@ -79,6 +92,15 @@ pub struct RegistryEntry {
     pub cryptosuite: Option<NamedNode>,
     /// Issuer verification-method reference (a `did:` URL).
     pub issuer_key: Option<NamedNode>,
+    /// The issuer's actual verification key (compressed Baby-JubJub point, hex)
+    /// — the key the verifier checks the commitment signature under (audit #3).
+    // [OPUS-4.8]
+    pub issuer_public_key: Option<String>,
+    /// The issuer's signature over `C(G)` (hex), under `cryptosuite`. Absent =>
+    /// the commitment is UNATTESTED and a verifier requiring attestation must
+    /// reject it (audit #3).
+    // [OPUS-4.8]
+    pub commitment_signature: Option<String>,
     /// The credential's proof graph (`<D>?proof` by convention).
     pub signature_graph: Option<NamedNode>,
     /// Status-list reference (plan §2.6).
@@ -99,12 +121,77 @@ impl RegistryEntry {
             scheme: NamedNode::new_unchecked(ZK_SCHEME_POSEIDON2_RDFC10_V1),
             cryptosuite: None,
             issuer_key: None,
+            issuer_public_key: None,
+            commitment_signature: None,
             signature_graph: None,
             status_list: None,
             salt,
             status: Status::Active,
             ingested: None,
         }
+    }
+
+    /// An attested entry: a freshly committed graph signed by an issuer
+    /// (audit #3). Records the issuer's public key + a Schnorr signature over
+    /// the domain-separated commitment message, plus the `zk:cryptosuite` id.
+    /// This is the issuance-side path (an issuer tool / tests); a relying party
+    /// only ever VERIFIES via [`Self::verify_commitment_signature`].
+    ///
+    /// # Nonce safety (codex job 2216 MEDIUM)
+    /// Signing routes through [`crate::sig::SecretKey::sign_commitment`], whose
+    /// Schnorr nonce is derived DETERMINISTICALLY from `(sk, commitment_message)`
+    /// (RFC6979-style; see `sig::derive_nonce`). No caller-supplied RNG/seed is
+    /// taken, so a cloned/reused RNG state can never reuse a Schnorr nonce across
+    /// commitments and leak the issuer secret key. (The earlier deterministic-
+    /// signing fix added `sign_commitment` but issuance still took a caller RNG;
+    /// this routes issuance through it.) The random-nonce `sig::sign` is now
+    /// test-only — no public API takes a caller RNG.
+    // [OPUS-4.8] audit #3; codex 2216 MEDIUM: deterministic-nonce issuance, no caller RNG.
+    pub fn issued(
+        document: NamedNode,
+        commitment: Fr,
+        salt: Fr,
+        sk: &crate::sig::SecretKey,
+    ) -> Self {
+        let pk = sk.public_key();
+        // Deterministic (sk, m) nonce — see `SecretKey::sign_commitment` /
+        // `sign_deterministic`. No RNG state crosses the API boundary.
+        let sig_hex = sk.sign_commitment(&commitment);
+        let mut e = RegistryEntry::new(document, commitment, salt);
+        e.cryptosuite = Some(NamedNode::new_unchecked(
+            crate::sig::SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+        ));
+        e.issuer_public_key = Some(crate::sig::public_key_to_hex(&pk));
+        e.commitment_signature = Some(sig_hex);
+        e
+    }
+
+    /// Verify that this entry's recorded signature is a valid issuer signature
+    /// over its commitment under its recorded public key + cryptosuite — the
+    /// verifier-side attestation gate (audit #3). Fail-closed: a missing key,
+    /// missing signature, unknown cryptosuite, or malformed hex all return
+    /// `false`. NB this checks the signature is INTERNALLY valid; the caller
+    /// must ALSO check the key is a member of the disclosed key-set `K`.
+    // [OPUS-4.8] audit #3.
+    pub fn verify_commitment_signature(&self) -> bool {
+        let (Some(pk_hex), Some(sig_hex), Some(cs)) =
+            (&self.issuer_public_key, &self.commitment_signature, &self.cryptosuite)
+        else {
+            return false;
+        };
+        // Only the v1 scheme is verifiable in-tree; an unknown cryptosuite is
+        // unverifiable => fail closed.
+        if crate::sig::SignatureScheme::from_cryptosuite_iri(cs.as_str()).is_none() {
+            return false;
+        }
+        let (Some(pk), Some(sig)) = (
+            crate::sig::public_key_from_hex(pk_hex),
+            crate::sig::signature_from_hex(sig_hex),
+        ) else {
+            return false;
+        };
+        let msg = crate::sig::commitment_message(&self.commitment);
+        crate::sig::verify(&pk, &msg, &sig)
     }
 
     /// Serializes the entry as triples of the registry graph.
@@ -144,6 +231,21 @@ impl RegistryEntry {
         }
         if let Some(k) = &self.issuer_key {
             out.push([s.clone(), pred(ZK_ISSUER_KEY), Term::NamedNode(k.clone())]);
+        }
+        // [OPUS-4.8] audit #3: the cryptographic key + the commitment signature.
+        if let Some(pk) = &self.issuer_public_key {
+            out.push([
+                s.clone(),
+                pred(ZK_ISSUER_PUBLIC_KEY),
+                Term::Literal(oxrdf::Literal::new_simple_literal(pk.clone())),
+            ]);
+        }
+        if let Some(sig) = &self.commitment_signature {
+            out.push([
+                s.clone(),
+                pred(ZK_COMMITMENT_SIGNATURE),
+                Term::Literal(oxrdf::Literal::new_simple_literal(sig.clone())),
+            ]);
         }
         if let Some(g) = &self.signature_graph {
             out.push([s.clone(), pred(ZK_SIGNATURE_GRAPH), Term::NamedNode(g.clone())]);
@@ -281,12 +383,21 @@ pub fn read_registry(graph: &Graph) -> Vec<RegistryEntry> {
             Term::Literal(l) if p == ZK_INGESTED => Some(l.value().to_string()),
             _ => None,
         });
+        // [OPUS-4.8] audit #3: plain-literal key + signature hex.
+        let str_of = |pred: &str| -> Option<String> {
+            props.iter().find_map(|(p, o)| match o {
+                Term::Literal(l) if p == pred => Some(l.value().to_string()),
+                _ => None,
+            })
+        };
         out.push(RegistryEntry {
             document: doc,
             commitment,
             scheme,
             cryptosuite: iri_of(ZK_CRYPTOSUITE),
             issuer_key: iri_of(ZK_ISSUER_KEY),
+            issuer_public_key: str_of(ZK_ISSUER_PUBLIC_KEY),
+            commitment_signature: str_of(ZK_COMMITMENT_SIGNATURE),
             signature_graph: iri_of(ZK_SIGNATURE_GRAPH),
             status_list: iri_of(ZK_STATUS_LIST),
             salt,
@@ -314,6 +425,86 @@ mod tests {
         e.status_list = Some(NamedNode::new_unchecked("https://dmv.example/status/3#94"));
         e.ingested = Some("2026-06-12T00:00:00Z".to_string());
         e
+    }
+
+    // [OPUS-4.8] audit #3: an attested entry, its signature, and tamper cases.
+    #[test]
+    fn issued_entry_signature_round_trips_through_store_and_verifies() {
+        use crate::sig::SecretKey;
+        let sk = SecretKey::from_seed(11);
+        let commitment = Fr::from(0xc0ffeeu64);
+        let salt = salt_from_bytes(&[3u8; 32]);
+        let e = RegistryEntry::issued(
+            NamedNode::new("https://dmv.example/vc/lic-7").unwrap(),
+            commitment,
+            salt,
+            &sk,
+        );
+        assert!(e.verify_commitment_signature(), "fresh issued entry verifies");
+        // Round-trips through the store unchanged (key + sig survive).
+        let mut g = Graph::load_str("", "turtle").unwrap();
+        install_registry(&mut g, &[e.clone()]).unwrap();
+        let back = read_registry(&g);
+        assert_eq!(back, vec![e]);
+        assert!(back[0].verify_commitment_signature(), "read-back entry verifies");
+    }
+
+    #[test]
+    fn issued_entry_rejects_commitment_tamper() {
+        // The drop-a-triple-and-recommit shape: change the commitment after
+        // signing => the signature no longer verifies.
+        use crate::sig::SecretKey;
+        let sk = SecretKey::from_seed(12);
+        let mut e = RegistryEntry::issued(
+            NamedNode::new("https://dmv.example/vc/lic-8").unwrap(),
+            Fr::from(1000u64),
+            salt_from_bytes(&[4u8; 32]),
+            &sk,
+        );
+        e.commitment = Fr::from(1001u64); // recommit over a different (truncated) graph
+        assert!(!e.verify_commitment_signature(), "tampered commitment must not verify");
+    }
+
+    // [OPUS-4.8] codex 2216 MEDIUM: issuance is deterministic + nonce-safe. The
+    // signature comes from the `(sk, m)`-derived-nonce path, so (a) re-issuing
+    // the SAME (sk, commitment) yields byte-identical signatures (no caller RNG),
+    // and (b) two DISTINCT commitments under the same key get DISTINCT nonces `R`
+    // — the property that makes the seed/nonce-reuse `sk`-extraction attack
+    // impossible by construction (there is no caller RNG to clone/reuse).
+    #[test]
+    fn issued_is_deterministic_and_nonce_safe() {
+        use crate::sig::{signature_from_hex, SecretKey};
+        let sk = SecretKey::from_seed(99);
+        let salt = salt_from_bytes(&[7u8; 32]);
+        let doc = NamedNode::new("https://dmv.example/vc/lic-det").unwrap();
+
+        // (a) Determinism: two issuances of the same (sk, commitment) match.
+        let c = Fr::from(0xabc123u64);
+        let e1 = RegistryEntry::issued(doc.clone(), c, salt, &sk);
+        let e2 = RegistryEntry::issued(doc.clone(), c, salt, &sk);
+        assert_eq!(
+            e1.commitment_signature, e2.commitment_signature,
+            "issuance must be deterministic (no caller RNG => byte-stable signature)"
+        );
+        assert!(e1.verify_commitment_signature());
+
+        // (b) Nonce safety: distinct commitments => distinct nonces R. If R were
+        // reused, sk would be recoverable; deterministic (sk, m) nonces forbid it.
+        let other = RegistryEntry::issued(doc, c + Fr::from(1u64), salt, &sk);
+        let sig1 = signature_from_hex(e1.commitment_signature.as_ref().unwrap()).unwrap();
+        let sig_other = signature_from_hex(other.commitment_signature.as_ref().unwrap()).unwrap();
+        assert_ne!(
+            sig1.r, sig_other.r,
+            "distinct commitments must use distinct Schnorr nonces R (no nonce reuse)"
+        );
+    }
+
+    #[test]
+    fn unsigned_entry_does_not_verify() {
+        // A plain (unsigned) entry has no commitment signature => unattested.
+        let e = entry("https://dmv.example/vc/unsigned");
+        // `entry` sets a cryptosuite IRI but no public key / signature.
+        assert!(!e.verify_commitment_signature(), "unsigned entry is unattested");
     }
 
     #[test]
