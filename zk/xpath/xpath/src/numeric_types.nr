@@ -1082,9 +1082,74 @@ pub fn round_double(a: XsdDouble) -> XsdDouble {
 }
 
 /// fn:ceiling for xs:float
-/// Round toward positive infinity (sparq_ieee754 roundToIntegralTowardPositive kernel)
+/// Round toward positive infinity
+/// Bit-twiddling implementation: measured cheaper than the sparq_ieee754
+/// f32 ceil kernel at this call shape (185.0 lib-kernel-regressed ~325 ->
+/// 130.4 gates/call; see VENDOR.md migration bench table).
+// [OPUS-4.8] written while Fable 5 unavailable - re-review when Fable returns
 pub fn ceil_float(a: XsdFloat) -> XsdFloat {
-    XsdFloat { value: a.value.ceil() }
+    let bits = a.to_bits();
+    let is_special = f32_bits_is_special(bits);
+
+    let sign = bits & FLOAT32_SIGN_MASK;
+    let is_negative = sign != 0;
+    let exp_bits = (bits & FLOAT32_EXP_MASK) >> FLOAT32_MANTISSA_BITS;
+    let mantissa = bits & FLOAT32_MANTISSA_MASK;
+    let exp = exp_bits as i32 - FLOAT32_EXP_BIAS as i32;
+
+    // Case: already integer (exp >= 23)
+    let is_integer = exp >= FLOAT32_MANTISSA_BITS as i32;
+
+    // Case: |value| < 1 (exp < 0)
+    let is_less_than_one = exp < 0;
+
+    // Normal case: exp in [0, 22]
+    let is_normal_case = (exp >= 0) & (exp < FLOAT32_MANTISSA_BITS as i32);
+
+    // Compute for normal case
+    let frac_bits = if is_normal_case {
+        (FLOAT32_MANTISSA_BITS as i32 - exp) as u32
+    } else {
+        1
+    };
+    let frac_mask = (1u32 << frac_bits) - 1;
+    let int_mask = !frac_mask;
+    let frac = mantissa & frac_mask;
+    let int_mantissa = mantissa & int_mask;
+    let round_up = !is_negative & (frac != 0);
+
+    // Compute rounded result for normal case
+    let increment = 1u32 << frac_bits;
+    let new_mantissa = int_mantissa + increment;
+    let overflow = new_mantissa >= (1u32 << FLOAT32_MANTISSA_BITS);
+
+    let normal_result = if round_up {
+        if overflow {
+            sign | ((exp_bits + 1) << FLOAT32_MANTISSA_BITS)
+        } else {
+            sign | (exp_bits << FLOAT32_MANTISSA_BITS) | new_mantissa
+        }
+    } else {
+        sign | (exp_bits << FLOAT32_MANTISSA_BITS) | int_mantissa
+    };
+
+    // Result for |value| < 1 case
+    let less_than_one_result = if is_negative {
+        FLOAT32_SIGN_MASK // -0
+    } else {
+        0x3F800000 // 1.0
+    };
+
+    // Select result based on case
+    let result_bits = if is_special | is_integer {
+        bits
+    } else if is_less_than_one {
+        less_than_one_result
+    } else {
+        normal_result
+    };
+
+    XsdFloat::from_bits(result_bits)
 }
 
 /// fn:ceiling for xs:double
@@ -1094,9 +1159,74 @@ pub fn ceil_double(a: XsdDouble) -> XsdDouble {
 }
 
 /// fn:floor for xs:float
-/// Round toward negative infinity (sparq_ieee754 roundToIntegralTowardNegative kernel)
+/// Round toward negative infinity
+/// Bit-twiddling implementation: measured cheaper than the sparq_ieee754
+/// f32 floor kernel at this call shape (185.0 lib-kernel-regressed ~325 ->
+/// 130.4 gates/call; see VENDOR.md migration bench table).
+// [OPUS-4.8] written while Fable 5 unavailable - re-review when Fable returns
 pub fn floor_float(a: XsdFloat) -> XsdFloat {
-    XsdFloat { value: a.value.floor() }
+    let bits = a.to_bits();
+    let is_special = f32_bits_is_special(bits);
+
+    let sign = bits & FLOAT32_SIGN_MASK;
+    let is_negative = sign != 0;
+    let exp_bits = (bits & FLOAT32_EXP_MASK) >> FLOAT32_MANTISSA_BITS;
+    let mantissa = bits & FLOAT32_MANTISSA_MASK;
+    let exp = exp_bits as i32 - FLOAT32_EXP_BIAS as i32;
+
+    // Case: already integer (exp >= 23)
+    let is_integer = exp >= FLOAT32_MANTISSA_BITS as i32;
+
+    // Case: |value| < 1 (exp < 0)
+    let is_less_than_one = exp < 0;
+
+    // Normal case: exp in [0, 22]
+    let is_normal_case = (exp >= 0) & (exp < FLOAT32_MANTISSA_BITS as i32);
+
+    // Compute for normal case
+    let frac_bits = if is_normal_case {
+        (FLOAT32_MANTISSA_BITS as i32 - exp) as u32
+    } else {
+        1
+    };
+    let frac_mask = (1u32 << frac_bits) - 1;
+    let int_mask = !frac_mask;
+    let frac = mantissa & frac_mask;
+    let int_mantissa = mantissa & int_mask;
+    let round_down = is_negative & (frac != 0);
+
+    // Compute rounded result for normal case
+    let increment = 1u32 << frac_bits;
+    let new_mantissa = int_mantissa + increment;
+    let overflow = new_mantissa >= (1u32 << FLOAT32_MANTISSA_BITS);
+
+    let normal_result = if round_down {
+        if overflow {
+            sign | ((exp_bits + 1) << FLOAT32_MANTISSA_BITS)
+        } else {
+            sign | (exp_bits << FLOAT32_MANTISSA_BITS) | new_mantissa
+        }
+    } else {
+        sign | (exp_bits << FLOAT32_MANTISSA_BITS) | int_mantissa
+    };
+
+    // Result for |value| < 1 case
+    let less_than_one_result = if is_negative {
+        0xBF800000 // -1.0
+    } else {
+        0 // 0.0
+    };
+
+    // Select result based on case
+    let result_bits = if is_special | is_integer {
+        bits
+    } else if is_less_than_one {
+        less_than_one_result
+    } else {
+        normal_result
+    };
+
+    XsdFloat::from_bits(result_bits)
 }
 
 /// fn:floor for xs:double
