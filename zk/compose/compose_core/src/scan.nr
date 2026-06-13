@@ -21,12 +21,15 @@
 //! the verifier checking the public-input bytes carry its fresh nonce.
 //!
 //! What this circuit does NOT prove (v1 deferrals, see
-//! crates/sparq-zk-compose/README.md): issuer signatures over the
-//! commitments (off-circuit in v1 -- commitments are disclosed manifest
-//! fields), per-row graph attributions (the verifier conservatively assumes
-//! every pattern may draw from every graph), join consistency across
-//! patterns (verifier-side over disclosed rows, per the proof-vs-clear
-//! dispatch rule).
+//! crates/sparq-zk-compose/README.md): issuer signatures over the commitments
+//! are checked VERIFIER-SIDE (audit #3 -- `commitments[g]` is byte-bound into
+//! these public inputs, and the verifier checks an issuer Schnorr signature
+//! over each with the key in a disclosed key-set K; the in-circuit
+//! undisclosed-key set-membership upgrade is the next step, see
+//! `sparq_zk::sig`); per-row graph attributions are NOT bound in-circuit (the
+//! verifier conservatively assumes every pattern may draw from every graph,
+//! audit #8); join consistency across patterns is verifier-side over disclosed
+//! rows, per the proof-vs-clear dispatch rule.
 
 use crate::hashes::{commit_fold, h3};
 

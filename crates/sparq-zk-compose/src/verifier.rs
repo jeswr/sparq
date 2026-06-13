@@ -10,6 +10,17 @@
 //! 2. **Binding-consistency edges**: each declared edge's scan-proof row/slot
 //!    encoding must equal the consuming filter proof's `operand_enc` (a plain
 //!    field equality over public inputs — the modular composition seam).
+//! 2d. **Issuer-signature / key-set binding (audit #3).** Every scan
+//!    sub-proof's `commitments[g]` must carry an issuer attestation
+//!    ([`crate::manifest::CommitmentAttestation`]) whose Schnorr signature
+//!    verifies under its declared issuer key and whose key is a member of the
+//!    DISCLOSED key-set `K` (`manifest.key_set`). `commitments[g]` is byte-bound
+//!    into the bb public inputs by stage 3a, so this ties the attested
+//!    commitment to the proved statement: an unsigned/prover-invented
+//!    commitment, a drop-a-triple-and-recommit suppression (the truncated
+//!    `C(G')` has no valid attestation), and a key-not-in-`K` signature all
+//!    REJECT. Interim privacy note: this reveals WHICH issuer signed; the
+//!    in-circuit undisclosed-key upgrade (see `sparq_zk::sig`) removes that.
 //! 3. **bb verification (the cryptographic gate)**, for each sub-proof, all of:
 //!    a. **Public-input reconstruction (audit #1).** Independently rebuild the
 //!       public-input field vector from the DECLARED [`ProofInputs`] (in `main`
@@ -33,10 +44,14 @@
 use crate::build::{derive_filter_int_id, derive_scan_id};
 use crate::driver::{CircuitProver, DriverError};
 use crate::manifest::{
-    BindingEdge, BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest,
+    BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest,
 };
 use sparq_zk::encode::encode_term;
 use sparq_zk::field::{field_to_be_bytes_32, field_to_hex, Fr};
+use sparq_zk::sig::{
+    commitment_message, public_key_from_hex, signature_from_hex, verify as sig_verify,
+    SignatureScheme,
+};
 use sparq_zk::verify::{
     fragment_filters, fragment_pattern_consts, fragment_patterns, recheck, variable_slots,
     FilterCmp, JoinEdge, QueryFilter, VerifyError,
@@ -91,6 +106,23 @@ pub enum CheckError {
     /// A query FILTER constrains a variable that does not bind to any scanned
     /// column of a BGP pattern (cannot be mapped to a `filter_int` operand).
     UnmappableFilterVar { variable: String },
+    /// A scan sub-proof's commitment has no issuer attestation in the manifest
+    /// (audit #3): `commitments[g]` is unsigned / prover-invented, so the
+    /// "credential issued by X" claim has no cryptographic backing. Closes the
+    /// unsigned-commitment forgery and the drop-a-triple-and-recommit
+    /// suppression (a truncated-leaf recommit yields a different `C(G)` with no
+    /// valid attestation).
+    // [OPUS-4.8] audit #3.
+    UnattestedCommitment { proof: usize, commitment: String },
+    /// An attestation's signature did not verify under its declared issuer key
+    /// (audit #3): forged/tampered signature, or the signature is over a
+    /// different commitment than declared.
+    // [OPUS-4.8] audit #3.
+    InvalidIssuerSignature { commitment: String },
+    /// An attestation's issuer key is not a member of the disclosed key-set `K`
+    /// (audit #3): a signature by a key outside the trusted set is rejected.
+    // [OPUS-4.8] audit #3.
+    IssuerKeyNotInKeySet { commitment: String },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -138,6 +170,18 @@ impl std::fmt::Display for CheckError {
             CheckError::UnmappableFilterVar { variable } => write!(
                 f,
                 "query FILTER on ?{variable} does not bind to any scanned column"
+            ),
+            CheckError::UnattestedCommitment { proof, commitment } => write!(
+                f,
+                "scan sub-proof {proof}: commitment {commitment} has no issuer attestation (unsigned / prover-invented commitment — no credential provenance)"
+            ),
+            CheckError::InvalidIssuerSignature { commitment } => write!(
+                f,
+                "commitment {commitment}: issuer signature does not verify under its declared key (forged/tampered signature or wrong commitment)"
+            ),
+            CheckError::IssuerKeyNotInKeySet { commitment } => write!(
+                f,
+                "commitment {commitment}: attestation key is not a member of the disclosed key-set K (untrusted issuer)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -260,7 +304,96 @@ pub fn verify_manifest_structure(
     // proof of one statement is presented under a different query.
     bind_query_correctness(manifest)?;
 
+    // --- Stage 2d: issuer-signature / key-set binding (audit #3). ---
+    // Every scan sub-proof's commitments[g] must carry a valid issuer signature
+    // (key ∈ disclosed K). commitments[g] is byte-bound into the bb public
+    // inputs by the audit #1 reconstruction, so this verifier-side check ties
+    // the attested commitment to the proved statement.
+    bind_issuer_attestations(manifest)?;
+
     Ok(required)
+}
+
+/// Stage 2d: bind every scan commitment to an issuer signature whose key is in
+/// the disclosed key-set K (audit #3). For each `commitments[g]` of each scan
+/// sub-proof:
+/// - there MUST be a `commitment_attestations` entry over that commitment value,
+/// - its signature MUST verify under its declared `issuer_public_key`,
+/// - and that key MUST be a member of `manifest.key_set`.
+///
+/// Closes: (a) an unsigned/prover-invented commitment (no matching attestation),
+/// (b) drop-a-triple-and-recommit suppression (the truncated graph's `C(G')`
+/// differs from the signed `C(G)`, so no valid attestation exists),
+/// (c) a signature by a key not in K. The commitment is no longer an unsigned
+/// prover-chosen public input.
+fn bind_issuer_attestations(manifest: &ProofManifest) -> Result<(), CheckError> {
+    // The disclosed trust anchor: parse K's keys once. A key in K that fails to
+    // parse is dropped (it can never match a parsed attestation key).
+    let key_set: BTreeSet<String> = manifest
+        .key_set
+        .iter()
+        .filter_map(|h| public_key_from_hex(h).map(|_| normalize_hex(h)))
+        .collect();
+
+    for (pi, sp) in manifest.sub_proofs.iter().enumerate() {
+        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
+            continue;
+        };
+        for c in commitments {
+            // Find an attestation declared over this exact commitment value
+            // (compare as field elements, so 0x-padding differences don't slip
+            // an unattested commitment past).
+            let c_field = c.to_field();
+            let att = manifest.commitment_attestations.iter().find(|a| {
+                a.commitment.to_field().is_some() && a.commitment.to_field() == c_field
+            });
+            let Some(att) = att else {
+                return Err(CheckError::UnattestedCommitment {
+                    proof: pi,
+                    commitment: c.0.clone(),
+                });
+            };
+            // (1) The attestation key must be in the disclosed set K. (Check
+            // membership BEFORE the signature so an untrusted issuer is the
+            // reported reason even if its signature is internally valid.)
+            if !key_set.contains(&normalize_hex(&att.issuer_public_key)) {
+                return Err(CheckError::IssuerKeyNotInKeySet {
+                    commitment: c.0.clone(),
+                });
+            }
+            // (2) The cryptosuite must be a known/verifiable scheme, the key +
+            // signature must parse, and the signature must verify over the
+            // domain-separated commitment message. Any failure => reject (fail
+            // closed; prover-controlled bytes never panic).
+            let Some(commitment_fr) = c_field else {
+                return Err(CheckError::InvalidIssuerSignature {
+                    commitment: c.0.clone(),
+                });
+            };
+            let ok = SignatureScheme::from_cryptosuite_iri(&att.cryptosuite).is_some()
+                && match (
+                    public_key_from_hex(&att.issuer_public_key),
+                    signature_from_hex(&att.signature),
+                ) {
+                    (Some(pk), Some(sig)) => {
+                        sig_verify(&pk, &commitment_message(&commitment_fr), &sig)
+                    }
+                    _ => false,
+                };
+            if !ok {
+                return Err(CheckError::InvalidIssuerSignature {
+                    commitment: c.0.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Normalize a hex key for set membership: strip an optional `0x` prefix and
+/// lowercase, so K-membership is representation-insensitive.
+fn normalize_hex(h: &str) -> String {
+    h.strip_prefix("0x").unwrap_or(h).to_ascii_lowercase()
 }
 
 /// Encode a query pattern's constant term to its `pattern_const_enc` field-hex

@@ -99,6 +99,37 @@ impl BindingMode {
     }
 }
 
+/// An issuer attestation over one per-graph commitment `C(G)` (audit #3): the
+/// commitment value, the issuer's public key, and the issuer's signature over
+/// the domain-separated commitment message. The verifier checks (a) the
+/// signature is valid under `issuer_public_key`, and (b) `issuer_public_key` is
+/// a member of the manifest's disclosed `key_set` K — so `commitments[]` is no
+/// longer an unsigned prover-chosen public input. Every scan sub-proof's
+/// commitment must have a matching, in-`K` attestation, else the manifest is
+/// rejected.
+///
+/// Privacy note (interim): this discloses WHICH issuer signed each graph (the
+/// key is checked in the clear). The full-privacy upgrade verifies the same
+/// signature IN-CIRCUIT with an undisclosed signing key + a set-membership
+/// gadget over K, revealing only "signed by SOME key in K". See
+/// `sparq_zk::sig` module docs.
+// [OPUS-4.8] audit #3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitmentAttestation {
+    /// `C(G)` — must match a scan sub-proof's `commitments[g]` (and is itself
+    /// byte-bound into the bb public inputs by the audit #1 reconstruction).
+    pub commitment: FieldHex,
+    /// The issuer verification key (compressed Baby-JubJub point, hex). Must be
+    /// a member of `ProofManifest::key_set` (audit #3 key-set membership).
+    pub issuer_public_key: String,
+    /// The issuer's signature over `commitment_message(C(G))`, hex.
+    pub signature: String,
+    /// The signature scheme's `zk:cryptosuite` IRI (`poseidon2-schnorr-v1` in
+    /// v1). An unknown cryptosuite is unverifiable => the attestation is
+    /// rejected (fail closed).
+    pub cryptosuite: String,
+}
+
 /// Revocation status (plan §S2.5 revocation = hidden-index status-list). v1
 /// ships the placeholder shape only: a reference to a status list and the
 /// (hidden, in the full design) index. The verifier records it but does not
@@ -227,9 +258,26 @@ pub struct ProofManifest {
     /// re-parses this (sparq-zk `verify::recheck`) — it is NOT trusted.
     pub query: String,
     /// did:key issuer references for the committed graphs (length = number of
-    /// distinct issuers; informational in v1 — signature check deferred).
+    /// distinct issuers; informational provenance — the cryptographic check is
+    /// `key_set` + `commitment_attestations` below).
     #[serde(default)]
     pub issuers: Vec<String>,
+    /// The DISCLOSED key-set K (audit #3): the issuer public keys the relying
+    /// party trusts, as hex (compressed Baby-JubJub points). Every committed
+    /// graph's attestation key MUST be a member of this set. An empty K means
+    /// "no issuer is trusted" — any scan sub-proof carrying commitments is then
+    /// rejected (fail closed). The relying party fixes K out of band (it is the
+    /// public statement of WHOSE credentials this proof is allowed to draw on).
+    // [OPUS-4.8] audit #3.
+    #[serde(default)]
+    pub key_set: Vec<String>,
+    /// Issuer attestations over the per-graph commitments (audit #3): one per
+    /// distinct `commitments[g]` value that any scan sub-proof carries. The
+    /// verifier requires every scan commitment to have a matching attestation
+    /// whose signature is valid and whose key is in `key_set`.
+    // [OPUS-4.8] audit #3.
+    #[serde(default)]
+    pub commitment_attestations: Vec<CommitmentAttestation>,
     /// Per-pattern graph attribution sets (which committed graph indices each
     /// BGP pattern may draw from) — fed to `verify::recheck` for the Q6
     /// cross-graph bnode-join guard.

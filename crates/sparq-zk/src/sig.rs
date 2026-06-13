@@ -111,6 +111,30 @@ impl SecretKey {
         let g = EdwardsProjective::generator();
         PublicKey((g * self.0).into_affine())
     }
+
+    /// A deterministic secret key from a `u64` seed — issuance-tooling / test
+    /// convenience so callers in crates without an `ark` dependency can mint a
+    /// key without touching the curve types. NOT for production key generation
+    /// (use OS entropy). Distinct seeds give distinct keys.
+    // [OPUS-4.8] audit #3 test/tooling helper.
+    pub fn from_seed(seed: u64) -> Self {
+        use ark_std::rand::SeedableRng;
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+        SecretKey(JjScalar::rand(&mut rng))
+    }
+
+    /// Sign a per-graph commitment under this key, returning the signature hex
+    /// (`compressed(R) ‖ s`). The signed message is the domain-separated
+    /// commitment message, matching [`verify`] on the verifier side. The nonce
+    /// is drawn from `seed` (deterministic for tests/tooling; production uses
+    /// OS entropy via [`sign`]).
+    // [OPUS-4.8] audit #3.
+    pub fn sign_commitment_seeded(&self, commitment: &Fr, seed: u64) -> String {
+        use ark_std::rand::SeedableRng;
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+        let sig = sign(self, &commitment_message(commitment), &mut rng);
+        signature_to_hex(&sig)
+    }
 }
 
 /// The challenge `e = Poseidon2([DOMAIN, R.x, R.y, pk.x, pk.y, m])`, reduced
