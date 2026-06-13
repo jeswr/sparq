@@ -255,8 +255,15 @@ impl<U: Send + 'static> Writer<U> {
     /// Submits an update and **blocks until the generation containing it is
     /// published**, returning that generation's number (the group-commit ack:
     /// at most one window + one batch application of latency). `touched` is the
-    /// update's conflict tag — the pods (named graphs) it writes, whose epochs
-    /// the publish bumps.
+    /// update's epoch tag — the pods (named graphs) it writes, whose epochs
+    /// the publish bumps (commutativity grouping never trusts it; that comes
+    /// from [`ApplyUpdates::footprint`]).
+    ///
+    /// The returned number doubles as the **read-your-writes token** (Wave A3,
+    /// the single-node `shard_seq`): the publish happens-before this ack, so
+    /// [`GenerationRing::read_your_writes`]`(n)` succeeds on this ring from the
+    /// moment `submit` returns, and a client that round-trips `n` as a session
+    /// token can be routed to any replica that has applied through `n`.
     ///
     /// `Err(Rejected)` means *this* update failed and was skipped while its
     /// batch proceeded; `Err(Shutdown)` means it was never applied.

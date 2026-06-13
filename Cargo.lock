@@ -3162,6 +3162,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "rustc-hash 2.1.2",
+ "spargebra",
  "sparq-core",
  "sparq-engine",
 ]
