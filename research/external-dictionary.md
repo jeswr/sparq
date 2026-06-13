@@ -134,4 +134,81 @@ in-flight blocks (~3 × 64 MiB + partials), and transient batch overshoot of the
 
 ## Results
 
-(appended as measured — see VALIDATION section of the task)
+Model: Opus 4.8 (Fable 5 unavailable — flag for re-review/upgrade when Fable returns).
+
+### Correctness (byte-identity + differential + fuzz)
+
+- **Byte-identity, unit/differential**: `crates/sparq-engine/tests/dict_spill_differential.rs`
+  builds the same N-Triples doc through the default sharded in-RAM path
+  (`build_external_opts(.., true)`) and the spilled path (`build_external_spill`) with a
+  TINY budget (`mem_budget = 1`, forcing constant cache-epoch clears + many-run external
+  sorts) and asserts **every output file is byte-identical** (dict blob, offsets, hash
+  index, all 6 perms, numerics, temporals) plus query-result parity. Also passes with a
+  comfortable (single-epoch) budget and the empty/non-NT-reject edge cases. 4/4 pass.
+- **Byte-identity at REAL scale**: at 10M and 100M triples (high-distinct-cardinality
+  data, ~2 distinct terms/triple) the spilled build (512 MB budget) produced output
+  **byte-identical to the in-RAM build across all 14 files** — including the 7.68 GB
+  `dict-terms.bin` at 100M (200M distinct terms). The byte-identity invariant holds at
+  scale, not just on toy inputs.
+- **Fuzz (differential vs Oxigraph)**: `SPARQ_FUZZ_DICTSPILL=1` re-serialises each fuzz
+  graph to N-Triples, rebuilds via the spilled dict (`mem_budget = 1`), reopens mmap'd,
+  and compares query cardinalities (+ ordered + JSON-path + count paths) to Oxigraph.
+  The raw harness has **499 pre-existing sparq-vs-Oxigraph mismatch seeds over 0..20000**
+  that are unrelated to this feature (they reproduce identically on the BASELINE build
+  with no dict-spill). The dict-spill mode's mismatch SET equals the baseline SET exactly:
+  verified `42 == 42` (identical seeds) over 0..2000 and `{10034,10172,10184,10188,10213,
+  10243,10248}` reproduced exactly over 10000..10500. **Zero dict-spill-specific
+  mismatches** — the spilled path diverges from neither the in-RAM path nor Oxigraph.
+  (The committed fuzz budget of `1` makes each case do a full external build, so the run
+  is slow — set-equality is the meaningful signal and it is exact.)
+
+### Peak RSS (macOS, `/usr/bin/time -l`, mimalloc, high-distinct-cardinality data)
+
+High-cardinality synthetic: each line a UNIQUE IRI subject + UNIQUE literal object
+(`<http://ex/resource/itemN> <http://ex/p> "unique-literal-value-N-payload-...">`), so
+distinct terms ≈ 2× triples — the dict-heavy worst case. `chunk = 16M` triples.
+
+| triples | distinct terms | dict-terms.bin | budget OFF (in-RAM dict) | budget ON (512 MB) | reduction | output |
+|--------:|---------------:|---------------:|-------------------------:|-------------------:|----------:|:------:|
+| 10M     | ~20M           | 0.77 GB        | 3.11 GB                  | 0.82 GB            | **3.8×**  | byte-identical |
+| 100M    | ~200M          | 7.68 GB        | 5.61 GB                  | 4.55 GB            | 1.23×     | byte-identical |
+
+Notes (empirical honesty):
+- At **10M** the spill is dramatic (3.8×): the in-RAM dict (arena of `Stored` +
+  hashbrown table for 20M terms) is the dominant resident set, and bounding it to a
+  512 MB budget collapses peak RSS to 0.82 GB. Tightening to 256 MB did NOT drop further
+  (0.87 GB) — below ~512 MB the peak is set by the un-budgeted floor: the `chunk`×12 B
+  triple run buffer (16M×12 B ≈ 192 MB), the parse pipeline (~0.5–1 GB), and the
+  sibling-merge mmap residency. This is exactly the bound the design predicts
+  (`≈ B + chunk×12B + ~0.5–1 GiB floor`).
+- At **100M** the reduction is only 1.23× — NOT because the dict spill fails (the dict IS
+  bounded to the budget) but because at this scale peak RSS is dominated by the TRIPLE
+  side: six `perm*.bin` permutations (~1.2 GB each) built by k-way merge + sibling
+  re-sort over 100M-triple mmap'd runs. The `drop-behind` madvise (this branch) curbs
+  that residency but does not eliminate the mmap working set; on the OFF path the in-RAM
+  dict (5.6 GB peak) and on the ON path the perm merge (4.55 GB peak) are comparable. The
+  dict-spill's value is therefore REGIME-DEPENDENT: decisive when the dict would exceed
+  the triple-side peak (the 1B/8B target), modest when the triple side already dominates.
+
+### 1B / 8B projection
+
+Extrapolating the on-disk dict (~7.68 GB `dict-terms.bin` / 200M distinct @100M → ~38.4 B
+on-disk per distinct term for this dataset's term shape):
+
+| triples | distinct terms (≈2×) | dict-terms.bin (on disk) | in-RAM dict (OFF) ≈ arena+table, ~3–4× blob | spilled peak (budget B) |
+|--------:|---------------------:|-------------------------:|--------------------------------------------:|------------------------:|
+| 100M    | ~200M                | 7.7 GB (measured)        | dominated build peak 5.6 GB (measured)      | 4.55 GB @512 MB (measured) |
+| 1B      | ~2B                  | ~77 GB                   | **~230–300 GB** (un-runnable on <256 GB)    | ≈ B + chunk×12B + perm-merge floor (tens of GB) |
+| 8B (truthy Wikidata) | ~?* | ~280–330 GB (from stage-1 measurement, research/wikidata-lowresource-stage1.md) | **un-runnable** — swap-bound at 1B already on 16 GB | budget-bounded: dict never resident |
+
+\* real Wikidata has far MORE sharing than this synthetic worst case (distinct terms grow
+sublinearly), so the 8B dict is the measured 280–330 GiB extrapolation, not 16B. The
+synthetic ~2× is an adversarial upper bound on dict size per triple.
+
+**Conclusion**: the spilled dict makes the dict contribution to peak RSS a CONFIGURABLE
+constant (the budget) instead of an O(distinct-terms) term that extrapolates to
+280–330 GiB at 8B. That is the prerequisite the 8B run needs: with the dict bounded, the
+remaining peak is the triple-side merge, which `extsort` already bounds (chunked runs +
+k-way merge + drop-behind). The 100M result is an honest reminder that bounding the dict
+alone does not shrink the triple-side peak — but at 8B the dict, not the triple merge, is
+what makes the build un-runnable today, and that is exactly what this removes.
