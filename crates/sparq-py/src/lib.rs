@@ -440,10 +440,11 @@ impl Graph {
     /// Named graphs are carried across the rebuild untouched; on error (e.g. a
     /// rules parse failure) the graph is left unchanged.
     ///
-    /// The graph's triples join the document as ground facts (blank nodes keep
-    /// their labels, so a label shared with the rules document denotes the same
-    /// node — N3 merge semantics). RDF-star triple terms have no N3 form and are
-    /// rejected.
+    /// The graph's triples join the document as ground facts. This graph's blank
+    /// nodes are renamed under a reserved `sparqg` prefix before composition, so
+    /// a blank-node label in `rules` can NOT alias an existing data node (rule-
+    /// local blanks stay rule-local; review 1961). RDF-star triple terms have no
+    /// N3 form and are rejected.
     fn reason_n3_with(&mut self, py: Python<'_>, rules: &str) -> PyResult<usize> {
         use std::fmt::Write as _;
         let inner = &self.inner;
@@ -460,10 +461,27 @@ impl Graph {
                 for [s, p, o] in rows {
                     for id in [s, p, o] {
                         let term = inner.dict.term(id);
-                        if matches!(term, oxrdf::Term::Triple(_)) {
-                            return Err("RDF-star triple terms cannot participate in N3 reasoning".into());
+                        match term {
+                            oxrdf::Term::Triple(_) => {
+                                return Err("RDF-star triple terms cannot participate in N3 reasoning".into());
+                            }
+                            // [OPUS-4.8] roborev 1961: rename this graph's blank
+                            // nodes under the reserved `sparqg` prefix before
+                            // composing the N3 document, so a blank-node label
+                            // that also appears in the caller's `rules` cannot
+                            // alias (and thereby silently merge with / rewrite)
+                            // an existing data node. `sparqg` is reserved for
+                            // this internal composition: an ordinary `_:x` label
+                            // in the rules can no longer collide with data, and
+                            // a data node's renamed form `_:sparqg<orig>` is
+                            // unique to the data side.
+                            oxrdf::Term::BlankNode(b) => {
+                                let _ = write!(src, "_:sparqg{} ", b.as_str());
+                            }
+                            other => {
+                                let _ = write!(src, "{other} ");
+                            }
                         }
-                        let _ = write!(src, "{term} ");
                     }
                     src.push_str(".\n");
                 }

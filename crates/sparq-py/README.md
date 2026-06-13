@@ -116,9 +116,11 @@ g4 = sparq.Graph.open("./mydb")
 - `update()` / `reason()` / `reason_n3_with()` rebuild the immutable store (O(n)
   per call). Reasoning materializes over the **default graph** (named graphs are
   carried across the rebuild untouched). `len(g)` counts default-graph triples.
-- `reason_n3_with(rules)` merges the graph's triples with the rules document
-  (N3 merge semantics: a blank-node label shared between the two denotes the
-  same node); RDF-star triple terms have no N3 form and are rejected there.
+- `reason_n3_with(rules)` runs the rules document over the graph's triples. The
+  graph's blank nodes are renamed under a reserved `sparqg` prefix first, so a
+  blank-node label in the rules can NOT alias an existing data node (rule-local
+  blanks stay rule-local); RDF-star triple terms have no N3 form and are
+  rejected there.
 - Full-text (`text_search` / `query_text`) indexes the **default graph**'s plain
   and language-tagged string literals only (named graphs keep their own
   dictionaries and are not indexed); `text:matches` is an AND of tokens,
