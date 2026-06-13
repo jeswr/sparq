@@ -194,10 +194,10 @@ pub struct AttestedStatusRef {
 /// # Privacy (interim, documented deferral)
 /// `index` is disclosed in the CLEAR here — a linkability channel (a relying
 /// party can correlate two presentations of the same credential by its index).
-/// The full-privacy upgrade is an IN-CIRCUIT hidden-index status-list inclusion
-/// + bit-unset proof bound to a disclosed list version, revealing only "the
-/// (hidden) index is in-range and unset in version V". See the verifier module
-/// docs (audit #12 remaining-step note).
+/// The full-privacy upgrade is an IN-CIRCUIT hidden-index status-list inclusion +
+/// bit-unset proof bound to a disclosed list version, revealing only "the (hidden)
+/// index is in-range and unset in version V". See the verifier module docs
+/// (audit #12 remaining-step note).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationStatus {
     /// IRI of the status-list credential (bound under the issuer signature via

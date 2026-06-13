@@ -2105,7 +2105,7 @@ fn eval_path(
     // DefaultGraphMode::Empty (L1 dataset view): no data pairs at top-level graph
     // scope — exactly the empty-graph evaluation. The zero-length constant
     // solutions below still apply (`<s> p* <s>` holds even on an empty graph).
-    if !view::default_is_empty() && !(matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
+    if !(view::default_is_empty() || matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
         let ends = PathEnds { s: s_bound, o: o_bound };
         // `?x p ?x` (same variable at both ends — necessarily both unbound): only
         // diagonal pairs survive the filter, and for the recursive operators the
@@ -3115,7 +3115,7 @@ pub(crate) fn goo_pick(
             Some(star) => star * sel,
             None => cur_card * prepared[i].est as f64 * sel,
         };
-        if best.map_or(true, |(_, bc)| out < bc) {
+        if best.is_none_or(|(_, bc)| out < bc) {
             best = Some((i, out));
         }
     }
@@ -3736,12 +3736,12 @@ fn merge_join(left: Bindings, right: Bindings, jv: &Variable) -> Bindings {
                 while j2 < r.len() && r[j2][rk] == rv {
                     j2 += 1;
                 }
-                for li in i..i2 {
-                    for rj in j..j2 {
-                        if extra_shared.iter().all(|&(lc, rc)| l[li][lc] == r[rj][rc]) {
-                            let mut row = l[li].clone();
+                for lrow in l.iter().take(i2).skip(i) {
+                    for rrow in r.iter().take(j2).skip(j) {
+                        if extra_shared.iter().all(|&(lc, rc)| lrow[lc] == rrow[rc]) {
+                            let mut row = lrow.clone();
                             for &rc in &right_only {
-                                row.push(r[rj][rc]);
+                                row.push(rrow[rc]);
                             }
                             rows.push(row);
                         }
@@ -4121,7 +4121,7 @@ fn left_outer_join(graph: &Graph, local: &mut LocalVocab, left: Bindings, right:
         }
         if !matched {
             let mut combined = lrow.clone();
-            combined.extend(std::iter::repeat(NO_ID).take(n_right_only));
+            combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
             rows.push(combined);
         }
     }
@@ -4168,10 +4168,10 @@ fn left_outer_merge(
         while j2 < r.len() && r[j2][rk] == key {
             j2 += 1;
         }
-        for li in i..i2 {
+        for lrow in l.iter().take(i2).skip(i) {
             let mut matched = false;
-            for rj in j..j2 {
-                let combined = merge_rows(&l[li], &r[rj], shared, right_only);
+            for rrow in r.iter().take(j2).skip(j) {
+                let combined = merge_rows(lrow, rrow, shared, right_only);
                 let keep = match expr {
                     None => true,
                     Some(e) => {
@@ -4185,8 +4185,8 @@ fn left_outer_merge(
                 }
             }
             if !matched {
-                let mut combined = l[li].clone();
-                combined.extend(std::iter::repeat(NO_ID).take(n_right_only));
+                let mut combined = lrow.clone();
+                combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
                 rows.push(combined);
             }
         }
@@ -5580,7 +5580,7 @@ fn eval_exact_lexical(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id
             if id == NO_ID {
                 None
             } else if is_local(id) {
-                exact_lexical_of_term(&local.term(id))
+                exact_lexical_of_term(local.term(id))
             } else {
                 graph.exact_numeric_lexical(id)
             }
@@ -5800,7 +5800,7 @@ impl Dec {
             }
             None => match mode {
                 // |value| < 1: floor of a tiny positive is 0, of a tiny negative is -1.
-                RoundMode::Floor => i128::from(self.mant < 0) * -1,
+                RoundMode::Floor => -i128::from(self.mant < 0),
                 // ceil of a tiny positive is 1, of a tiny negative is 0.
                 RoundMode::Ceil => i128::from(self.mant > 0),
                 // |value| < 0.5 always at this scale, so half-up rounds to 0.
@@ -5869,7 +5869,7 @@ fn eval_dec(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Exp
             if id == NO_ID {
                 None
             } else if is_local(id) {
-                exact_lexical_of_term(&local.term(id)).and_then(|s| Dec::parse(&s))
+                exact_lexical_of_term(local.term(id)).and_then(|s| Dec::parse(&s))
             } else {
                 Dec::parse(&graph.exact_numeric_lexical(id)?)
             }
@@ -6092,14 +6092,14 @@ fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
     use LitKind::*;
     match (lit_kind(x), lit_kind(y)) {
         (Num(Some(a)), Num(Some(b))) => num_compare(a, b),
-        (Str(a), Str(b)) => Some(a.cmp(&b)),
+        (Str(a), Str(b)) => Some(a.cmp(b)),
         (Bool(Some(a)), Bool(Some(b))) => Some(a.cmp(&b)),
         (DateTime(Some(a)), DateTime(Some(b))) => Timeline::cmp_tl(a, b),
         (Date(Some(a)), Date(Some(b))) => Timeline::cmp_tl(a, b),
         // Same language tag: compare values (the suites' lenient extension).
-        (Lang(t1, v1), Lang(t2, v2)) if t1 == t2 => Some(v1.cmp(&v2)),
+        (Lang(t1, v1), Lang(t2, v2)) if t1 == t2 => Some(v1.cmp(v2)),
         // Same other-XSD datatype: lexical order (correct for time, gYear, …).
-        (OtherXsd(d1, l1), OtherXsd(d2, l2)) if d1 == d2 => Some(l1.cmp(&l2)),
+        (OtherXsd(d1, l1), OtherXsd(d2, l2)) if d1 == d2 => Some(l1.cmp(l2)),
         _ => None,
     }
 }

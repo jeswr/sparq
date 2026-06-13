@@ -287,7 +287,7 @@ impl AuthIndex {
 
     /// Does a conditional grant's (agent, client) head apply to this session?
     fn cond_applies(&self, g: &ConditionalGrant, s: &Session) -> bool {
-        let agent_ok = Self::agent_principals(s).iter().any(|p| *p == g.agent);
+        let agent_ok = Self::agent_principals(s).contains(&g.agent);
         let client_ok = g.client == ANY_CLIENT || s.client == Some(g.client.as_str());
         agent_ok && client_ok && !g.except.iter().any(|m| self.matcher_accepts(m, s))
     }

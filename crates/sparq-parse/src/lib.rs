@@ -346,8 +346,11 @@ pub struct SingleMemberGzipSink {
     header_sent: bool,
 }
 
+/// One decompressed-and-CRCed gzip member, keyed by member index in `GzShared::ready`.
+type GzMember = io::Result<(Vec<u8>, flate2::Crc)>;
+
 struct GzShared {
-    ready: Mutex<BTreeMap<usize, io::Result<(Vec<u8>, flate2::Crc)>>>,
+    ready: Mutex<BTreeMap<usize, GzMember>>,
     cv: Condvar,
 }
 
@@ -818,7 +821,7 @@ mod tests {
             .ready
             .lock()
             .unwrap()
-            .insert(next_out_before, Err(io::Error::new(io::ErrorKind::Other, "boom")));
+            .insert(next_out_before, Err(io::Error::other("boom")));
         let err = sink.try_drain().unwrap_err();
         assert_eq!(err.to_string(), "boom");
         // Cursor advanced past the failed (and already-removed) index; the entry

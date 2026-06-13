@@ -302,7 +302,7 @@ fn group_value(graph: &Graph, id: Id, group: &PropertyGroup, cfg: &EntityTextCon
         if cands.is_empty() {
             continue;
         }
-        cands.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        cands.sort_by_key(|a| (a.0, a.1));
         let mut values: Vec<String> = Vec::new();
         for (_, _, text) in cands {
             if values.len() >= group.max_values.max(1) {

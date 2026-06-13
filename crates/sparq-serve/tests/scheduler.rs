@@ -78,7 +78,7 @@ fn heavy_cap_always_reserves_a_cheap_worker() {
     // Even if a deployment misconfigures heavy_concurrency == workers, the cap is
     // clamped so at least one worker stays free for cheap jobs.
     let sched: Arc<Scheduler<()>> = Scheduler::new(cfg(4, 4, 1_000));
-    assert!(sched.heavy_cap() <= sched.workers() - 1, "a cheap worker must always be reserved");
+    assert!(sched.heavy_cap() < sched.workers(), "a cheap worker must always be reserved");
     assert!(sched.heavy_cap() >= 1);
 }
 
@@ -488,7 +488,7 @@ fn run_plain_pool(width: usize, n: usize, work: impl Fn() + Send + Sync + 'stati
     let t0 = Instant::now();
     for _ in 0..n {
         let w = work.clone();
-        tx.send(Box::new(move || w())).unwrap();
+        tx.send(Box::new(w)).unwrap();
     }
     drop(tx);
     for h in handles {

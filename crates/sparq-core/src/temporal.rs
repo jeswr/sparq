@@ -82,9 +82,9 @@ impl Timeline {
 /// outside the ±14h window (inside it: indeterminate -> `None`).
 #[inline]
 fn cmp_instants(ai: f64, a_tz: bool, bi: f64, b_tz: bool) -> Option<Ordering> {
-    if a_tz == b_tz {
-        ai.partial_cmp(&bi)
-    } else if (ai - bi).abs() > 14.0 * 3600.0 {
+    // Same (or no) timezone: a direct compare. With MIXED presence the order is
+    // only decidable outside the ±14h window; inside it the result is indeterminate.
+    if a_tz == b_tz || (ai - bi).abs() > 14.0 * 3600.0 {
         ai.partial_cmp(&bi)
     } else {
         None
