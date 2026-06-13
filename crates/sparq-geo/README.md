@@ -30,7 +30,7 @@ Geometry parsing and algorithms wrap the standard pure-Rust geo stack
 | 9 | `geof:relate(g1, g2, pattern)` — generic DE-9IM test | ✅ `IntersectionMatrix::matches` |
 | 8.7 | `geof:envelope`, `geof:boundary`, `geof:convexHull` | ✅ (`boundary` of a GEOMETRYCOLLECTION unsupported) |
 | 8.7 | `geof:buffer(g, radius, units)` | ✅ geo 0.33 `Buffer`; metric radii via a local equirectangular metre frame (accuracy notes below); result MULTIPOLYGON |
-| 8.7 | `geof:intersection/union/difference/symDifference` | ✅ POLYGONAL operands (geo `BooleanOps`); other operand types are a per-row expression error |
+| 8.7 | `geof:intersection/union/difference/symDifference` | ✅ point-set ops: polygon overlay (geo `BooleanOps`) **plus** the well-defined line/point cases — see the table below; genuinely-intractable combos (1-D set subtraction) are a per-row expression error |
 | 8.7 | `geof:getSRID` | ✅ the CRS IRI as `xsd:anyURI` |
 | 8.3/8.4 | Core RDF shape: `geo:hasGeometry`, `geo:hasDefaultGeometry`, `geo:asWKT` | ✅ extracted by `GeoIndex::build` (default + named graphs) |
 | 8.5.2 | `geo:gmlLiteral` | ❌ WKT only (no maintained pure-Rust GML parser — TODO.md) |
@@ -108,10 +108,34 @@ plus the generic `relate(g1, g2, de9imPattern)` (all `xsd:boolean`);
 `intersection` / `union` / `difference` / `symDifference` (`geo:wktLiteral`);
 `getSRID` (`xsd:anyURI`). Geometry arguments must be `geo:wktLiteral`
 literals. Any geo error (malformed WKT, wrong datatype, CRS mismatch, unknown
-unit, non-polygonal set-operation operands, wrong arity) is a per-row SPARQL
-*expression* error — the row is dropped by a `FILTER`, left unbound by a
+unit, an unsupported set-operation operand pair, wrong arity) is a per-row
+SPARQL *expression* error — the row is dropped by a `FILTER`, left unbound by a
 `BIND` — exactly like the builtin functions; an IRI not in the registry stays
 a hard query error.
+
+### Set-operation operand matrix
+
+The four set operations are GeoSPARQL point-set operations. `geo`'s
+`BooleanOps` realises polygon overlay; the lower-dimension cases are
+implemented directly over `geo`'s `line_intersection` / `CoordinatePosition`.
+"point" covers `POINT`/`MULTIPOINT`, "line" `LINESTRING`/`MULTILINESTRING`,
+"polygon" `POLYGON`/`MULTIPOLYGON` (and the rect/triangle shorthands).
+
+| operands | `intersection` | `union` | `difference` (a − b) | `symDifference` |
+|---|---|---|---|---|
+| polygon × polygon | ✅ overlay | ✅ overlay | ✅ overlay | ✅ overlay |
+| point × point | ✅ shared points | ✅ MULTIPOINT | ✅ set subtraction | ✅ set sym-diff |
+| point × line/polygon | ✅ points on the other | ✅ GEOMETRYCOLLECTION | ✅ points not on the other | ✅ (point−other) ∪ other |
+| line × line | ✅ crossings + collinear overlaps | ✅ MULTILINESTRING | ❌ no linear-referencing in `geo` | ❌ ditto |
+| line × polygon | ✅ line clipped to the polygon | ✅ GEOMETRYCOLLECTION | ❌ ditto | ❌ ditto |
+
+A ❌ cell is a clean `GeoError::Unsupported` (a per-row expression error through
+the registry), never a wrong answer or panic. Results are the lowest-dimension
+geometry that captures the answer (a line merely *touching* a polygon at a
+point yields a `MULTIPOINT`; a line∩line that is purely a crossing yields a
+`MULTIPOINT`/`POINT`), and serialise back to `geo:wktLiteral`. Line/line and
+line/polygon unions are NOT noded/dissolved (`geo` has no 1-D overlay), so an
+overlapping line∪line keeps both curves.
 
 Build the registry **once** and reuse it: it is cheaply cloneable and
 `Send + Sync`. sparq-server exposes exactly this wiring behind its opt-in

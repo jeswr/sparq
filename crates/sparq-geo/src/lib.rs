@@ -11,8 +11,9 @@
 //!    `geof:sfOverlaps`, Egenhofer `geof:eh*`, RCC8 `geof:rcc8*` (all DE-9IM
 //!    via `geo`'s `Relate`) plus the generic `geof:relate`; the
 //!    geometry-producing `geof:envelope` / `boundary` / `convexHull` /
-//!    `buffer` and the polygonal set operations `geof:intersection` /
-//!    `union` / `difference` / `symDifference`; and `geof:getSRID`. The
+//!    `buffer` and the point-set operations `geof:intersection` /
+//!    `union` / `difference` / `symDifference` (polygon overlay plus the
+//!    well-defined line/point cases); and `geof:getSRID`. The
 //!    [`geof::lex`] sub-module mirrors every function at the LEXICAL level
 //!    (wkt-literal strings in, plain values / wkt-literal strings out) — the
 //!    exact shape a SPARQL engine builtin receives; the [`registry`] module

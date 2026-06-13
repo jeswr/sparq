@@ -352,12 +352,31 @@ fn set_operations_through_sparql() {
     assert_eq!(names(&q("geof:union(?a, ?b)"), 0)[0], "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
     assert_eq!(names(&q("geof:intersection(?a, ?b)"), 0)[0], "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
     assert_eq!(names(&q("geof:symDifference(?a, ?b)"), 0)[0], "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
-    // Non-polygonal operands are per-row expression errors, not hard errors.
+
+    // Mixed-dimension union (point ∪ polygon) now yields a GEOMETRYCOLLECTION
+    // that CONTAINS the point — so every city's loc is contained in its union
+    // with the UK box.
     let r = query_with_functions(
         &cities(),
         &format!(
             "{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?pt . ex:uk ex:area ?a . \
-               FILTER(geof:sfContains(geof:union(?pt, ?a), ?pt)) }}"
+               FILTER(geof:sfIntersects(geof:union(?pt, ?a), ?pt)) }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 3);
+
+    // …but a GENUINELY-unsupported combo (1-D set subtraction) is still a
+    // per-row expression error, not a hard query failure: the FILTER errors on
+    // every row, so the result is empty (zero rows), query still Ok.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?pt . \
+               BIND(\"LINESTRING(0 0, 2 0)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral> AS ?l1) \
+               BIND(\"LINESTRING(1 0, 3 0)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral> AS ?l2) \
+               FILTER(geof:sfIntersects(geof:difference(?l1, ?l2), ?pt)) }}"
         ),
         &geof_registry(),
     )

@@ -109,7 +109,8 @@ type LexSetOp = fn(&str, &str) -> Result<String, GeoError>;
 /// * `envelope` / `boundary` / `convexHull` `(g)` -> `geo:wktLiteral`;
 /// * `buffer(g, radius, unitIri)` -> `geo:wktLiteral` (a MULTIPOLYGON);
 /// * `intersection` / `union` / `difference` / `symDifference` `(g1, g2)` ->
-///   `geo:wktLiteral` (POLYGONAL operands only);
+///   `geo:wktLiteral` (point-set ops: polygon overlay plus the well-defined
+///   line/point cases — see `geof` for the supported matrix);
 /// * `getSRID(g)` -> `xsd:anyURI` (the geometry's CRS IRI).
 ///
 /// Build it once and reuse it: the registry is cheaply cloneable and `Send + Sync`,
@@ -195,7 +196,8 @@ pub fn geof_registry() -> FunctionRegistry {
         });
     }
 
-    // The set operations: geof:*(?g1, ?g2) -> geo:wktLiteral (polygonal operands only).
+    // The set operations: geof:*(?g1, ?g2) -> geo:wktLiteral (point-set ops over
+    // polygon/line/point operands; see geof for the supported matrix).
     let set_ops: [(&'static str, LexSetOp); 4] = [
         ("intersection", lex::intersection),
         ("union", lex::union),
@@ -304,8 +306,23 @@ mod tests {
         let Term::Literal(l) = inter(&[a.clone(), b.clone()]).unwrap() else { panic!("literal") };
         assert_eq!(l.datatype().as_str(), WKT_LITERAL);
         assert!(l.value().contains("MULTIPOLYGON"), "got {}", l.value());
-        // Non-polygonal operands are expression errors.
-        assert!(inter(&[wkt("POINT(0 0)"), b.clone()]).is_err());
+        // Line/point operands are now supported (sq-gn3): a point inside the
+        // polygon survives; a point outside clips to an empty MULTIPOINT.
+        let Term::Literal(inside) = inter(&[wkt("POINT(2 2)"), b.clone()]).unwrap() else {
+            panic!("literal")
+        };
+        assert!(inside.value().contains('2'), "got {}", inside.value());
+        let Term::Literal(outside) = inter(&[wkt("POINT(0 0)"), b.clone()]).unwrap() else {
+            panic!("literal")
+        };
+        assert!(
+            outside.value().contains("EMPTY") || outside.value().contains("()"),
+            "got {}",
+            outside.value()
+        );
+        // 1-D set subtraction stays a clean expression error (no wrong answer).
+        let diff = reg.get(&format!("{GEOF_NS}difference")).unwrap();
+        assert!(diff(&[wkt("LINESTRING(0 0, 2 0)"), wkt("LINESTRING(1 0, 3 0)")]).is_err());
         // buffer: polygon out, radius must be numeric, unit must be known.
         let buffer = reg.get(&format!("{GEOF_NS}buffer")).unwrap();
         let metre = Term::NamedNode(NamedNode::new_unchecked(format!("{}metre", crate::vocab::UOM_NS)));
