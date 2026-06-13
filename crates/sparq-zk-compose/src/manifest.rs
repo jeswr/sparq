@@ -262,13 +262,22 @@ pub struct ProofManifest {
     /// `key_set` + `commitment_attestations` below).
     #[serde(default)]
     pub issuers: Vec<String>,
-    /// The DISCLOSED key-set K (audit #3): the issuer public keys the relying
-    /// party trusts, as hex (compressed Baby-JubJub points). Every committed
-    /// graph's attestation key MUST be a member of this set. An empty K means
-    /// "no issuer is trusted" — any scan sub-proof carrying commitments is then
-    /// rejected (fail closed). The relying party fixes K out of band (it is the
-    /// public statement of WHOSE credentials this proof is allowed to draw on).
-    // [OPUS-4.8] audit #3.
+    /// The prover's DECLARED key-set (audit #3): the issuer public keys the
+    /// prover claims its commitments draw on, as hex (compressed Baby-JubJub
+    /// points). This is informational / a narrowing claim ONLY — it is NOT the
+    /// trust anchor.
+    ///
+    /// # Codex #1 soundness fix
+    /// The verifier's trust anchor `K` is an EXTERNAL relying-party input
+    /// ([`crate::verifier::KeySet`]), passed into
+    /// [`crate::verifier::verify_manifest`], NOT this field. Trusting this
+    /// prover-supplied field as the anchor was a soundness hole: a prover signs a
+    /// forged commitment with its own key and self-lists it here. The verifier
+    /// now (a) checks every attestation key against the EXTERNAL `K`, and (b)
+    /// requires this declared `key_set` to be a SUBSET of the external `K` (a
+    /// prover may narrow but never widen the trust set). An empty external `K`
+    /// trusts no issuer — any scan carrying commitments is then rejected.
+    // [OPUS-4.8] audit #3 / codex #1: prover-declared, NOT the trust anchor.
     #[serde(default)]
     pub key_set: Vec<String>,
     /// Issuer attestations over the per-graph commitments (audit #3): one per

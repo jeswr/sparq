@@ -10,17 +10,22 @@
 //! 2. **Binding-consistency edges**: each declared edge's scan-proof row/slot
 //!    encoding must equal the consuming filter proof's `operand_enc` (a plain
 //!    field equality over public inputs — the modular composition seam).
-//! 2d. **Issuer-signature / key-set binding (audit #3).** Every scan
+//! 2d. **Issuer-signature / key-set binding (audit #3, codex #1).** Every scan
 //!    sub-proof's `commitments[g]` must carry an issuer attestation
 //!    ([`crate::manifest::CommitmentAttestation`]) whose Schnorr signature
 //!    verifies under its declared issuer key and whose key is a member of the
-//!    DISCLOSED key-set `K` (`manifest.key_set`). `commitments[g]` is byte-bound
-//!    into the bb public inputs by stage 3a, so this ties the attested
-//!    commitment to the proved statement: an unsigned/prover-invented
-//!    commitment, a drop-a-triple-and-recommit suppression (the truncated
-//!    `C(G')` has no valid attestation), and a key-not-in-`K` signature all
-//!    REJECT. Interim privacy note: this reveals WHICH issuer signed; the
-//!    in-circuit undisclosed-key upgrade (see `sparq_zk::sig`) removes that.
+//!    EXTERNAL trusted key-set `K` — the relying party's [`KeySet`] argument,
+//!    NOT the prover-supplied `manifest.key_set` (trusting the latter as the
+//!    anchor was the codex #1 soundness hole: a prover signs a forgery with its
+//!    own key and self-lists it). `manifest.key_set` is only accepted as a
+//!    SUBSET of the external `K`. `commitments[g]` is byte-bound into the bb
+//!    public inputs by stage 3a, so this ties the attested commitment to the
+//!    proved statement: an unsigned/prover-invented commitment, a
+//!    drop-a-triple-and-recommit suppression (the truncated `C(G')` has no valid
+//!    attestation), a key-not-in-external-`K` signature, and a prover key-set
+//!    that widens `K` all REJECT. Interim privacy note: this reveals WHICH
+//!    issuer signed; the in-circuit undisclosed-key upgrade (see
+//!    `sparq_zk::sig`) removes that.
 //! 3. **bb verification (the cryptographic gate)**, for each sub-proof, all of:
 //!    a. **Public-input reconstruction (audit #1).** Independently rebuild the
 //!       public-input field vector from the DECLARED [`ProofInputs`] (in `main`
@@ -58,6 +63,68 @@ use sparq_zk::verify::{
 };
 use std::collections::BTreeSet;
 use std::path::Path;
+
+/// The relying party's EXTERNALLY-anchored trusted issuer key-set `K` — the
+/// soundness fix for audit #3 codex finding #1.
+///
+/// # Why this is a verifier input, not a manifest field
+/// The manifest carries a `key_set` field, but it is PROVER-SUPPLIED: a
+/// malicious prover signs a forged commitment with its OWN key and lists that
+/// key in `manifest.key_set`, so a verifier that trusts `manifest.key_set` as
+/// the anchor gives NO "authoritative source" guarantee — `#3` would be
+/// vacuous. The trust anchor MUST come from outside the proof. A relying party
+/// constructs a [`KeySet`] from the issuer keys IT decides to trust (its policy
+/// / an issuer-key registry it resolves out of band) and passes it into
+/// [`verify_manifest`] / [`verify_manifest_structure`]. The accept decision then
+/// depends only on this external set; `manifest.key_set`, if present at all, is
+/// only accepted when it is a SUBSET of this external set (checked, never
+/// trusted as the anchor) — see [`bind_issuer_attestations`].
+///
+/// Keys are stored in normalized hex form (no `0x`, lowercase) and validated as
+/// parseable, non-identity Baby-JubJub points at construction (an unparseable or
+/// identity key can never be a real issuer key, so it is dropped fail-closed).
+// [OPUS-4.8] audit #3 codex #1: external trust anchor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeySet {
+    keys: BTreeSet<String>,
+}
+
+impl KeySet {
+    /// An empty trust anchor: trusts NO issuer. Any scan carrying commitments is
+    /// then rejected (fail closed). Useful as the explicit "no source is
+    /// authoritative" policy and as a test default.
+    pub fn empty() -> Self {
+        KeySet { keys: BTreeSet::new() }
+    }
+
+    /// Build a trust anchor from the relying party's trusted issuer public keys
+    /// (hex). Each key is validated as a parseable, non-identity Baby-JubJub
+    /// point (`public_key_from_hex` already rejects the identity — codex #3) and
+    /// stored in normalized hex; unparseable/identity entries are dropped (they
+    /// can never match a real attestation key, so dropping them is fail-closed,
+    /// not a silent widening of trust).
+    pub fn from_hex_keys<I, S>(keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let keys = keys
+            .into_iter()
+            .filter_map(|h| public_key_from_hex(h.as_ref()).map(|_| normalize_hex(h.as_ref())))
+            .collect();
+        KeySet { keys }
+    }
+
+    /// Whether `pk_hex` (any case, optional `0x`) is a member of the trusted set.
+    fn contains_hex(&self, pk_hex: &str) -> bool {
+        self.keys.contains(&normalize_hex(pk_hex))
+    }
+
+    /// The trusted set is empty (trusts no issuer).
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+}
 
 /// Why a manifest was rejected.
 #[derive(Debug)]
@@ -119,10 +186,19 @@ pub enum CheckError {
     /// different commitment than declared.
     // [OPUS-4.8] audit #3.
     InvalidIssuerSignature { commitment: String },
-    /// An attestation's issuer key is not a member of the disclosed key-set `K`
-    /// (audit #3): a signature by a key outside the trusted set is rejected.
-    // [OPUS-4.8] audit #3.
+    /// An attestation's issuer key is not a member of the EXTERNAL trusted
+    /// key-set `K` (audit #3, codex #1): a signature by a key outside the
+    /// relying-party-supplied trusted set is rejected. The trust anchor is the
+    /// verifier's [`KeySet`] argument, NOT the prover's `manifest.key_set`.
+    // [OPUS-4.8] audit #3 / codex #1.
     IssuerKeyNotInKeySet { commitment: String },
+    /// The prover's `manifest.key_set` lists a key that is NOT in the external
+    /// trusted key-set `K` (audit #3 codex #1): the prover tried to widen the
+    /// trust anchor with a key the relying party never trusted. The manifest's
+    /// declared key-set must be a SUBSET of the external `K`; a superset is
+    /// rejected so the accept decision can never depend on a prover-chosen key.
+    // [OPUS-4.8] audit #3 / codex #1.
+    UntrustedDeclaredKey { key: String },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -181,7 +257,11 @@ impl std::fmt::Display for CheckError {
             ),
             CheckError::IssuerKeyNotInKeySet { commitment } => write!(
                 f,
-                "commitment {commitment}: attestation key is not a member of the disclosed key-set K (untrusted issuer)"
+                "commitment {commitment}: attestation key is not a member of the external trusted key-set K (untrusted issuer)"
+            ),
+            CheckError::UntrustedDeclaredKey { key } => write!(
+                f,
+                "manifest key_set declares key {key} which is not in the external trusted key-set K (prover may not widen the trust anchor)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -238,8 +318,14 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
 
 /// Stage 1+2: structural verification (no bb). Returns the required obligation
 /// edges on success.
+///
+/// `trusted_key_set` is the relying party's EXTERNALLY-anchored issuer trust set
+/// `K` (audit #3 codex #1) — NOT read from the manifest. Every committed graph's
+/// attestation key must be a member of THIS set, and the prover's
+/// `manifest.key_set` (if any) must be a subset of it. See [`KeySet`].
 pub fn verify_manifest_structure(
     manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
 ) -> Result<Vec<JoinEdge>, CheckError> {
     // --- Stage 1a: sparq-zk layer-3 bnode / arity re-check. ---
     let attributions: Vec<BTreeSet<usize>> = manifest
@@ -304,36 +390,55 @@ pub fn verify_manifest_structure(
     // proof of one statement is presented under a different query.
     bind_query_correctness(manifest)?;
 
-    // --- Stage 2d: issuer-signature / key-set binding (audit #3). ---
+    // --- Stage 2d: issuer-signature / key-set binding (audit #3 / codex #1). ---
     // Every scan sub-proof's commitments[g] must carry a valid issuer signature
-    // (key ∈ disclosed K). commitments[g] is byte-bound into the bb public
-    // inputs by the audit #1 reconstruction, so this verifier-side check ties
-    // the attested commitment to the proved statement.
-    bind_issuer_attestations(manifest)?;
+    // whose key ∈ the EXTERNAL trusted K (the verifier's argument, NOT
+    // manifest.key_set). commitments[g] is byte-bound into the bb public inputs
+    // by the audit #1 reconstruction, so this verifier-side check ties the
+    // attested commitment to the proved statement.
+    bind_issuer_attestations(manifest, trusted_key_set)?;
 
     Ok(required)
 }
 
 /// Stage 2d: bind every scan commitment to an issuer signature whose key is in
-/// the disclosed key-set K (audit #3). For each `commitments[g]` of each scan
-/// sub-proof:
+/// the EXTERNAL trusted key-set `K` (audit #3, soundness fix for codex #1). For
+/// each `commitments[g]` of each scan sub-proof:
 /// - there MUST be a `commitment_attestations` entry over that commitment value,
 /// - its signature MUST verify under its declared `issuer_public_key`,
-/// - and that key MUST be a member of `manifest.key_set`.
+/// - and that key MUST be a member of the EXTERNAL `trusted_key_set` (the
+///   relying party's argument — NEVER `manifest.key_set`).
+///
+/// # The codex #1 soundness fix
+/// Previously the trust anchor was `manifest.key_set` — PROVER-supplied. A
+/// malicious prover could sign a forged commitment with its own key, list that
+/// key in `manifest.key_set`, and pass. That made `#3` vacuous. Now the anchor
+/// is `trusted_key_set`, an external relying-party input. `manifest.key_set` is
+/// only allowed as a SUBSET of the external `K` (a prover may narrow but never
+/// widen the trust set); a `manifest.key_set` key NOT in the external `K` is
+/// rejected ([`CheckError::UntrustedDeclaredKey`]) so the accept decision can
+/// never depend on a prover-chosen key.
 ///
 /// Closes: (a) an unsigned/prover-invented commitment (no matching attestation),
 /// (b) drop-a-triple-and-recommit suppression (the truncated graph's `C(G')`
 /// differs from the signed `C(G)`, so no valid attestation exists),
-/// (c) a signature by a key not in K. The commitment is no longer an unsigned
-/// prover-chosen public input.
-fn bind_issuer_attestations(manifest: &ProofManifest) -> Result<(), CheckError> {
-    // The disclosed trust anchor: parse K's keys once. A key in K that fails to
-    // parse is dropped (it can never match a parsed attestation key).
-    let key_set: BTreeSet<String> = manifest
-        .key_set
-        .iter()
-        .filter_map(|h| public_key_from_hex(h).map(|_| normalize_hex(h)))
-        .collect();
+/// (c) a signature by a key not in the external K (incl. the prover's own key —
+/// the forge the codex #1 test exercises). The commitment is no longer an
+/// unsigned prover-chosen public input under a prover-chosen trust anchor.
+fn bind_issuer_attestations(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+) -> Result<(), CheckError> {
+    // The prover's declared key_set may NARROW but never WIDEN the external trust
+    // anchor: every key it lists must already be in the external K. (A
+    // declared-but-untrusted key is the codex #1 forge: prover lists its own key.)
+    for declared in &manifest.key_set {
+        if !trusted_key_set.contains_hex(declared) {
+            return Err(CheckError::UntrustedDeclaredKey {
+                key: declared.clone(),
+            });
+        }
+    }
 
     for (pi, sp) in manifest.sub_proofs.iter().enumerate() {
         let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
@@ -353,10 +458,12 @@ fn bind_issuer_attestations(manifest: &ProofManifest) -> Result<(), CheckError> 
                     commitment: c.0.clone(),
                 });
             };
-            // (1) The attestation key must be in the disclosed set K. (Check
-            // membership BEFORE the signature so an untrusted issuer is the
-            // reported reason even if its signature is internally valid.)
-            if !key_set.contains(&normalize_hex(&att.issuer_public_key)) {
+            // (1) The attestation key must be in the EXTERNAL trusted set K.
+            // (Check membership BEFORE the signature so an untrusted issuer is
+            // the reported reason even if its signature is internally valid.)
+            // This is the codex #1 fix: K is the verifier's argument, never the
+            // prover-supplied manifest.key_set.
+            if !trusted_key_set.contains_hex(&att.issuer_public_key) {
                 return Err(CheckError::IssuerKeyNotInKeySet {
                     commitment: c.0.clone(),
                 });
@@ -555,7 +662,9 @@ fn filter_edge_true(
 
 /// Full verification: structure (stage 1+2) then the cryptographic gate
 /// (stage 3). `prover` points at the `zk/compose/` workspace; `work_dir` is
-/// scratch for bb artifacts.
+/// scratch for bb artifacts; `trusted_key_set` is the relying party's EXTERNAL
+/// issuer trust anchor `K` (audit #3 codex #1 — never the prover's
+/// `manifest.key_set`).
 ///
 /// Stage 3, per sub-proof, binds the declared statement to the proof (audit
 /// #1/#2): (a) reconstruct the public-input byte vector from the DECLARED
@@ -568,8 +677,9 @@ pub fn verify_manifest(
     manifest: &ProofManifest,
     prover: &CircuitProver,
     work_dir: &Path,
+    trusted_key_set: &KeySet,
 ) -> Result<(), CheckError> {
-    verify_manifest_structure(manifest)?;
+    verify_manifest_structure(manifest, trusted_key_set)?;
 
     // The challenge that MUST appear as public-input field 0 of every member.
     // It comes from the manifest's binding (a later agent binds this to a
