@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-13
+
+First release: an experimental, from-scratch RDF triplestore and SPARQL engine in Rust
+(dictionary-encoded, six sorted permutation indexes, parallel execution), published as the
+`sparq-*` crate family — `sparq-core` / `sparq-engine` / `sparq-reason` / `sparq-cli` /
+`sparq-server` plus the opt-in capability crates (see `docs/release.md` §4 for the full
+publish set). The API is unstable; SERVICE federation remains unimplemented — see
+`research/roadmap.md`.
+
+**Crates.io build caveat:** crates.io builds resolve upstream `spargebra` 0.4.6 — the vendored SPARQL-parser conformance fixes (`vendor/spargebra/SPARQ-PATCHES.md`) apply only to git builds until the upstream PRs land.
+
 ### Added
+
+- **Storage (`sparq-core`)** — dictionary-encoded triple store with six sorted permutation
+  indexes (Hexastore/RDF-3X lineage); a 3-permutation compact-index mode (~half the index
+  memory) for memory-constrained targets; parallel index construction.
+- **Out-of-core mode** — build the indexes on disk and query them memory-mapped: 100M-triple
+  external build in 74 s at 4.2 GB peak RAM on a 2020 M1 Air, then 0.67 s open with ~0
+  committed heap (OS page cache only), at query speeds matching the in-memory engine.
+- **Parsing** — N-Triples, Turtle, N-Quads, TriG (via `oxttl`); parallel and streaming, with
+  transparent `.gz` / `.bz2` / `.zst` decompression. Real-Wikidata ingestion ~1.3 M triples/s
+  building all six permutations out-of-core on a fanless laptop.
+- **SPARQL query (`sparq-engine`)** — SELECT/ASK; Basic Graph Patterns, FILTER, OPTIONAL,
+  UNION, MINUS, VALUES, BIND, aggregation + GROUP BY, ORDER BY, DISTINCT, LIMIT/OFFSET;
+  sort-merge, hash, and worst-case-optimal joins with greedy cardinality-based planning;
+  parallel scan / filter / sort / aggregation / serialization.
+- **Inference (`sparq-reason`, opt-in)** — RDFS, OWL-RL, and a Notation3 subset with
+  saturate-then-sweep single-pass materialization (~17× over a naive fixpoint for RDFS,
+  ~30× OWL-RL fast path) and union-find `owl:sameAs`.
+- **CLI (`sparq-cli`)** — load/query/bench subcommands, on-disk index build + `query-mmap`,
+  `reason`, a per-subsystem parallel-scaling harness, and hardware-tiered release binaries
+  (per-ISA prefetch tuning selected per silicon family).
+- **HTTP server (`sparq-server`)** — W3C SPARQL 1.1 Protocol query endpoint (GET/POST) and
+  Graph Store HTTP Protocol read side; JSON / XML / CSV / TSV results with content
+  negotiation; Docker image (distroless, `ghcr.io/jeswr/sparq-server`).
+- **WebAssembly (`sparq-wasm`, unpublished)** — the core engine compiled for the browser with
+  a minimal bundle (no threads, compact index); ships via npm later, not crates.io.
 
 - **Python bindings parity wave (`sparq-py`)** — the Python `Graph` catches up with
   the engine/reasoner surface: native `ask()` (engine early-exit instead of the
@@ -86,65 +122,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ≥89× faster than re-materialization); N3 unchanged (no extra maintenance state).
   Design lever if that ever matters: build the indexes lazily on first `why()`.
 
-### Fixed
-
-- **Persisted per-predicate stats never loaded on `open` (`sparq-core`)** —
-  `load_pred_stats` read the predicate id as 8 bytes while `save_pred_stats` writes a
-  4-byte `Id`, mis-framing every record: the load always failed and `open()` silently
-  fell back to recomputing the stats, which paged the ENTIRE POS+PSO permutations into
-  RAM (the dominant out-of-core open cost the persisted file exists to avoid). Measured
-  on the 10M-triple synthetic dir: open 0.52 s → 0.019 s, RSS after open 236 MB →
-  2.3 MB (research/memory-tiering.md). Regression-tested
-  (`pred_stats_load_is_some_and_exact`).
-- **N3 incremental maintenance: base↔layer ownership transfer (`sparq-reason`)** —
-  deleting a fact that is both asserted and derivable by a recursive-SCC layer made the
-  fact re-enter the layer's derived set during a delete round (it stops seeding the local
-  fixpoint), tripping the sign-homogeneity `debug_assert` (panic in debug builds, a
-  needless *sticky* engine fallback in release). Now recovered with a non-sticky full
-  re-materialization; the graph stays on the counting fast path. Found by the `explain`
-  retraction tests; regression-tested against the from-scratch oracle.
-
-- **Domain/range typing for TBox-orphan properties on the monotone OWL route
-  (`sparq-reason`)** — on the batch single-pass path (`rdfs_closure` with the
-  property-orientation closure active, i.e. any `owl:inverseOf`/`owl:SymmetricProperty`
-  axiom present), a property with an `rdfs:domain`/`rdfs:range` declaration but no
-  subPropertyOf/inverseOf/symmetric/equivalentProperty edge emitted NO rdfs2/rdfs3
-  typing for its assertions (absent from the orientation map, the emission
-  short-circuited) — diverging from the full fixpoint path. Such properties now fall
-  through to the plain-RDFS emission (their expansion is the trivial identity).
-  Regression-tested; conformance unchanged (1637/0/17 — no suite test hits the
-  combination, which is how it survived).
-
-### Changed
-
-- **Pipelined streaming N-Triples ingest (`sparq-core`)** — `Graph::load_reader_parallel`
-  now fills its 32 MiB block from repeated short `read()`s and overlaps decompression
-  with parallel parse (producer thread → bounded channel → rayon parse → dict merge),
-  matching the `build_external_ntriples_parallel` pipeline. Streaming ingest of a 173 MB
-  gzip/zstd N-Triples file: 5.59 s → 0.66 s (gzip, 8.5×) and 3.95 s → 0.58 s (zstd, 6.9×);
-  streaming now matches or beats decompress-then-parse. `load_reader_parallel` requires
-  `R: Read + Send`. See `research/custom-parsers-baseline.md`.
-
-- **Inference fixpoint linearization + delta-driven evaluation (`sparq-reason`,
-  fixpoint-opt thread)** — the chain-transitivity derivation storms are gone, and
-  closure-only callers stop paying for proof bookkeeping:
-  * OWL-RL `prp-trp` is evaluated as the LINEAR rule `R(x,y), GEN(y,z) ⊢ R(x,z)` over
-    generator edges (edges not derived by prp-trp itself; `TC(GEN) = TC(R)`), with the
-    per-round schema rebuild and `prp-fp`/`prp-ifp` moved into the delta sweep —
-    owl-bench `owl-transitive` (2k-edge chain, ~2M-pair closure): **54 s → 0.25 s**.
-  * The N3 forward chainer detects transitivity-shaped rules
-    (`{?x P ?y. ?y P ?z} => {?x P ?z}`) and runs the same linearization, bypassing the
-    generic binding machinery — anc500 (500-link `:ancestor` chain): **52 s → 0.18 s**
-    engine-internal (closure byte-identical, 125,250).
-  * `run_closure` takes a `StepMode`: premise materialization and proof-step interning
-    are skipped when the caller discards them (`reason_n3`, the CLI closure path;
-    conformance keeps conclusions only) — grid30 closure 1.94 s → 1.02 s (−47%),
-    dt100k −18% (engine-internal min-of-5, identical closures).
-  Inference conformance unchanged (1637 pass / 0 fail / 17 documented divergences);
-  wasm artifact size unchanged; refreshed EYE head-to-head in
-  `bench/inference/eye-comparison.md`.
-
-### Added
 
 - **Opt-in full-text search over literals (`sparq-text`, new crate)** — a small,
   owned BM25 inverted index over a graph's string literals (UAX #29 tokenizer +
@@ -311,6 +288,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Pipelined streaming N-Triples ingest (`sparq-core`)** — `Graph::load_reader_parallel`
+  now fills its 32 MiB block from repeated short `read()`s and overlaps decompression
+  with parallel parse (producer thread → bounded channel → rayon parse → dict merge),
+  matching the `build_external_ntriples_parallel` pipeline. Streaming ingest of a 173 MB
+  gzip/zstd N-Triples file: 5.59 s → 0.66 s (gzip, 8.5×) and 3.95 s → 0.58 s (zstd, 6.9×);
+  streaming now matches or beats decompress-then-parse. `load_reader_parallel` requires
+  `R: Read + Send`. See `research/custom-parsers-baseline.md`.
+
+- **Inference fixpoint linearization + delta-driven evaluation (`sparq-reason`,
+  fixpoint-opt thread)** — the chain-transitivity derivation storms are gone, and
+  closure-only callers stop paying for proof bookkeeping:
+  * OWL-RL `prp-trp` is evaluated as the LINEAR rule `R(x,y), GEN(y,z) ⊢ R(x,z)` over
+    generator edges (edges not derived by prp-trp itself; `TC(GEN) = TC(R)`), with the
+    per-round schema rebuild and `prp-fp`/`prp-ifp` moved into the delta sweep —
+    owl-bench `owl-transitive` (2k-edge chain, ~2M-pair closure): **54 s → 0.25 s**.
+  * The N3 forward chainer detects transitivity-shaped rules
+    (`{?x P ?y. ?y P ?z} => {?x P ?z}`) and runs the same linearization, bypassing the
+    generic binding machinery — anc500 (500-link `:ancestor` chain): **52 s → 0.18 s**
+    engine-internal (closure byte-identical, 125,250).
+  * `run_closure` takes a `StepMode`: premise materialization and proof-step interning
+    are skipped when the caller discards them (`reason_n3`, the CLI closure path;
+    conformance keeps conclusions only) — grid30 closure 1.94 s → 1.02 s (−47%),
+    dt100k −18% (engine-internal min-of-5, identical closures).
+  Inference conformance unchanged (1637 pass / 0 fail / 17 documented divergences);
+  wasm artifact size unchanged; refreshed EYE head-to-head in
+  `bench/inference/eye-comparison.md`.
+
+
 - **`sparq-geo` depends on geo 0.33** (was 0.30; clean API compatibility): brings
   the `Buffer` trait that makes `geof:buffer` implementable.
 - **`GeoIndex::entries()` returns an iterator** (was a slice): entry slots are
@@ -350,40 +355,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte-identical, same `Content-Length`) instead of one giant string: peak server RSS
   for a 1M-row SELECT (202 MB body) drops from ~750 MB to ~405–570 MB.
 
-## [0.1.0] - 2026-06-10
+### Fixed
 
-First release: an experimental, from-scratch RDF triplestore and SPARQL engine in Rust
-(dictionary-encoded, six sorted permutation indexes, parallel execution), published as the
-`sparq-core` / `sparq-engine` / `sparq-reason` / `sparq-cli` / `sparq-server` crates.
-The API is unstable and several SPARQL features are still in progress (named graphs,
-property paths, SERVICE, UPDATE) — see `research/roadmap.md`.
+- **Persisted per-predicate stats never loaded on `open` (`sparq-core`)** —
+  `load_pred_stats` read the predicate id as 8 bytes while `save_pred_stats` writes a
+  4-byte `Id`, mis-framing every record: the load always failed and `open()` silently
+  fell back to recomputing the stats, which paged the ENTIRE POS+PSO permutations into
+  RAM (the dominant out-of-core open cost the persisted file exists to avoid). Measured
+  on the 10M-triple synthetic dir: open 0.52 s → 0.019 s, RSS after open 236 MB →
+  2.3 MB (research/memory-tiering.md). Regression-tested
+  (`pred_stats_load_is_some_and_exact`).
+- **N3 incremental maintenance: base↔layer ownership transfer (`sparq-reason`)** —
+  deleting a fact that is both asserted and derivable by a recursive-SCC layer made the
+  fact re-enter the layer's derived set during a delete round (it stops seeding the local
+  fixpoint), tripping the sign-homogeneity `debug_assert` (panic in debug builds, a
+  needless *sticky* engine fallback in release). Now recovered with a non-sticky full
+  re-materialization; the graph stays on the counting fast path. Found by the `explain`
+  retraction tests; regression-tested against the from-scratch oracle.
 
-### Added
-
-- **Storage (`sparq-core`)** — dictionary-encoded triple store with six sorted permutation
-  indexes (Hexastore/RDF-3X lineage); a 3-permutation compact-index mode (~half the index
-  memory) for memory-constrained targets; parallel index construction.
-- **Out-of-core mode** — build the indexes on disk and query them memory-mapped: 100M-triple
-  external build in 74 s at 4.2 GB peak RAM on a 2020 M1 Air, then 0.67 s open with ~0
-  committed heap (OS page cache only), at query speeds matching the in-memory engine.
-- **Parsing** — N-Triples, Turtle, N-Quads, TriG (via `oxttl`); parallel and streaming, with
-  transparent `.gz` / `.bz2` / `.zst` decompression. Real-Wikidata ingestion ~1.3 M triples/s
-  building all six permutations out-of-core on a fanless laptop.
-- **SPARQL query (`sparq-engine`)** — SELECT/ASK; Basic Graph Patterns, FILTER, OPTIONAL,
-  UNION, MINUS, VALUES, BIND, aggregation + GROUP BY, ORDER BY, DISTINCT, LIMIT/OFFSET;
-  sort-merge, hash, and worst-case-optimal joins with greedy cardinality-based planning;
-  parallel scan / filter / sort / aggregation / serialization.
-- **Inference (`sparq-reason`, opt-in)** — RDFS, OWL-RL, and a Notation3 subset with
-  saturate-then-sweep single-pass materialization (~17× over a naive fixpoint for RDFS,
-  ~30× OWL-RL fast path) and union-find `owl:sameAs`.
-- **CLI (`sparq-cli`)** — load/query/bench subcommands, on-disk index build + `query-mmap`,
-  `reason`, a per-subsystem parallel-scaling harness, and hardware-tiered release binaries
-  (per-ISA prefetch tuning selected per silicon family).
-- **HTTP server (`sparq-server`)** — W3C SPARQL 1.1 Protocol query endpoint (GET/POST) and
-  Graph Store HTTP Protocol read side; JSON / XML / CSV / TSV results with content
-  negotiation; Docker image (distroless, `ghcr.io/jeswr/sparq-server`).
-- **WebAssembly (`sparq-wasm`, unpublished)** — the core engine compiled for the browser with
-  a minimal bundle (no threads, compact index); ships via npm later, not crates.io.
+- **Domain/range typing for TBox-orphan properties on the monotone OWL route
+  (`sparq-reason`)** — on the batch single-pass path (`rdfs_closure` with the
+  property-orientation closure active, i.e. any `owl:inverseOf`/`owl:SymmetricProperty`
+  axiom present), a property with an `rdfs:domain`/`rdfs:range` declaration but no
+  subPropertyOf/inverseOf/symmetric/equivalentProperty edge emitted NO rdfs2/rdfs3
+  typing for its assertions (absent from the orientation map, the emission
+  short-circuited) — diverging from the full fixpoint path. Such properties now fall
+  through to the plain-RDFS emission (their expansion is the trivial identity).
+  Regression-tested; conformance unchanged (1637/0/17 — no suite test hits the
+  combination, which is how it survived).
 
 ### Performance
 
@@ -399,4 +398,5 @@ compute-only, cold, min-of-N — methodology and full tables in `bench/qlever-ba
   single-pattern/FILTER comparisons short-circuit via index range-counting and are excluded
   from the claims above.
 
+[Unreleased]: https://github.com/jeswr/sparq/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jeswr/sparq/releases/tag/v0.1.0

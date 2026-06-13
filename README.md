@@ -58,6 +58,11 @@ Opt-in capability crates (none is a dependency of the core; zero wasm impact, en
 
 ## Usage
 
+> **Note (crates.io installs):** builds installed from crates.io (e.g. `cargo install
+> sparq-cli`) resolve the upstream `spargebra` 0.4.6 parser — the vendored SPARQL-parser
+> conformance fixes ([`vendor/spargebra/SPARQ-PATCHES.md`](vendor/spargebra/SPARQ-PATCHES.md))
+> apply only to git builds (building this repository directly) until the upstream PRs land.
+
 ```sh
 # build
 cargo build --release

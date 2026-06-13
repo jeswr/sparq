@@ -1,8 +1,5 @@
 # @jeswr/sparq
 
-> **Package name is a placeholder** — the final npm name is the maintainer's call
-> (e.g. `sparq`, `@rdfjs/sparq`, `sparq-wasm`). Update `package.json#name` before
-> the first publish.
 
 [RDF/JS](https://rdf.js.org/)-style bindings for **sparq**, a Rust RDF
 triplestore + SPARQL engine compiled to WebAssembly. One ~1.6 MB wasm artifact,

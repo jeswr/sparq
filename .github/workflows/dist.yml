@@ -26,7 +26,7 @@ jobs:
           # every Apple-silicon feature; native unlocks zero new instructions — measured).
           - { tier: arm64-darwin,     os: macos-14,         target: aarch64-apple-darwin,      cpu: "",          ext: "" }
           # Intel Macs: x86-64-v3 (every Intel Mac since ~2015 / Haswell has AVX2).
-          - { tier: x64-darwin,       os: macos-13,         target: x86_64-apple-darwin,       cpu: x86-64-v3,   ext: "" }
+          - { tier: x64-darwin,       os: macos-15-intel,   target: x86_64-apple-darwin,       cpu: x86-64-v3,   ext: "" }
           # ---- x86-64 Linux (servers + the launcher's fat package) ----
           # baseline (SSE2, runs anywhere) + v2 (SSE4.2, ~2009+) + v3 (AVX2/BMI2/FMA, common
           # modern) + v4 (AVX-512, newest). The launcher picks by /proc/cpuinfo.
