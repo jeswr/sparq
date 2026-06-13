@@ -38,12 +38,46 @@ Verdict: scaffold is GOOD; committed as baseline unchanged. Added `.gitignore`
 | filter_int_d4     | — | —  | — | filter_int (D=4)|
 | filter_f64        | — | —  | — | filter_f64 (building block, not manifest-composable v1) |
 
-## In flight / next
+### M1 — Rust orchestration crate `crates/sparq-zk-compose` (DONE)
 
-- Rust crate `crates/sparq-zk-compose` (ProofManifest + prover + verifier).
-- Gate-count benches under `bench/zk-compose/`.
-- e2e prove→verify + tamper tests.
+- `manifest`: ProofManifest serde (query, commitments, did:key issuers,
+  attributions, EntailmentRegime, BindingMode challenge/holder-PoP,
+  CircuitId, RevocationStatus placeholder, SubProof, BindingEdge). Round-trips.
+- `build`: commitments + BGP pattern -> scan ProofInputs + witness; circuit-id
+  derivation (k,n,r / d) shared by prover + verifier.
+- `toml`: Prover.toml emission for every member.
+- `driver`: nargo + bb subprocess prover/verifier. KEY FIX: nargo execute
+  exits 0 even on failed assertion — detect unsatisfiability by witness-file
+  absence. bb prove uses --write_vk (one pass -> proof+public_inputs+vk).
+- `verifier`: structural gate (sparq_zk::verify::recheck Q6 bnode guard +
+  circuit-id re-derivation + binding-edge field equalities) then bb verify.
+- Non-default workspace member (nothing depends on it).
 
-### Exact next command
+### M2 — tests + benches (DONE)
 
-    cd /Users/jesght/Documents/GitHub/rdfjs/sparq-zkcompose && nargo check --program-dir zk/compose
+- `tests/e2e.rs`: 11 tests (10 run + 1 ignored slow). serde round-trip,
+  4 structural-tamper cases, 3 witness-gen (incl. false-verdict rejection),
+  1 NON-ignored full bb prove->verify->byte-tamper (filter_int_d1), 1 ignored
+  full scan manifest prove->verify. All pass.
+- `bench/zk-compose/`: gate counts (bb gates ultra_honk) + prove/verify
+  wall-clock + README + regen scripts.
+
+## Gate counts (ultra_honk circuit_size)
+
+scan_k1_n16_r4=5958  scan_k2_n16_r8=11011  scan_k2_n64_r8=34379
+filter_int_d{1,2,4}=17416 (blake3-block-bound, d-invariant)  filter_f64=3113
+
+## Prove/verify (small e2e, darwin arm64)
+
+filter_int_d1: prove 1.13s, verify 0.16s, proof 14656 B
+scan_k1_n16_r4: prove 1.62s, verify 0.95s, proof 14656 B
+
+## DONE / verified
+
+- compose_core: 22/22 nargo tests. compose crate: 10/10 + 1 ignored.
+- Poseidon2 + filter_int encoding bit-compatible with sparq-zk (verified).
+- wasm byte gate: see commit (must stay 1,643,095).
+
+### Exact next command (if resuming)
+
+    cd /Users/jesght/Documents/GitHub/rdfjs/sparq-zkcompose && cargo test -p sparq-zk-compose

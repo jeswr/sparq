@@ -1,0 +1,26 @@
+[package]
+name = "sparq-zk-compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "ZK proof composition for sparq: ProofManifest + nargo/bb prover driver + verifier over the per-property Noir circuit family (stage 2)"
+publish = false
+
+# Like sparq-zk: NOTHING in the workspace depends on this crate, so default
+# builds and the wasm artifact are byte-identical with or without it. The
+# circuit family it drives lives at zk/compose/ (proved via nargo/bb
+# subprocesses, not linked).
+
+[dependencies]
+sparq-zk = { path = "../sparq-zk" }
+oxrdf = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Deterministic temp dirs for prove/verify e2e.

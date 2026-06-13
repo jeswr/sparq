@@ -1,0 +1,208 @@
+// [OPUS-4.8] written while Fable 5 unavailable — re-review when Fable returns.
+//! Builds circuit inputs + witnesses from sparq-zk commitments.
+//!
+//! The (k, n, r) circuit-family id is DERIVED from the data: `k` = number of
+//! committed graphs, `n` = smallest compiled slot-bucket >= the largest
+//! graph, `r` = smallest compiled row-bucket >= the disclosed match count.
+//! Prover and verifier both call [`derive_scan_id`] so a proof can only fit
+//! its member (brief: "derive the circuit-family id from the proof manifest").
+
+use crate::manifest::{CircuitId, FieldHex, FilterOp, ProofInputs};
+use sparq_zk::commit::GraphCommitment;
+use sparq_zk::encode::encode_term;
+use sparq_zk::field::{field_to_hex, Fr};
+use oxrdf::{NamedNode, Term};
+
+/// Compiled slot buckets (`n`) of the scan family, ascending.
+pub const SCAN_N_BUCKETS: &[u32] = &[16, 64];
+/// Compiled row buckets (`r`) of the scan family, ascending.
+pub const SCAN_R_BUCKETS: &[u32] = &[4, 8];
+/// Compiled `k` values of the scan family.
+pub const SCAN_K_VALUES: &[u32] = &[1, 2];
+/// Compiled digit counts (`d`) of the filter_int family.
+pub const FILTER_INT_D_VALUES: &[u32] = &[1, 2, 4];
+
+fn smallest_bucket(buckets: &[u32], need: u32) -> Option<u32> {
+    buckets.iter().copied().find(|&b| b >= need)
+}
+
+/// Derive the scan circuit id for `k` graphs whose largest holds `max_graph`
+/// triples, disclosing `match_rows` rows. `None` if no compiled member fits.
+pub fn derive_scan_id(k: u32, max_graph: u32, match_rows: u32) -> Option<CircuitId> {
+    if !SCAN_K_VALUES.contains(&k) {
+        return None;
+    }
+    let n = smallest_bucket(SCAN_N_BUCKETS, max_graph.max(1))?;
+    let r = smallest_bucket(SCAN_R_BUCKETS, match_rows.max(1))?;
+    Some(CircuitId::Scan { k, n, r })
+}
+
+/// Derive the filter_int circuit id for a `digits`-digit value.
+pub fn derive_filter_int_id(digits: u32) -> Option<CircuitId> {
+    let d = smallest_bucket(FILTER_INT_D_VALUES, digits.max(1))?;
+    Some(CircuitId::FilterInt { d })
+}
+
+/// A constant or variable slot of a BGP triple pattern.
+#[derive(Debug, Clone)]
+pub enum Slot {
+    Const(Term),
+    Var,
+}
+
+/// A single BGP triple pattern (subject, predicate, object slots).
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    pub s: Slot,
+    pub p: Slot,
+    pub o: Slot,
+}
+
+/// The witnesses a scan proof needs but the manifest never carries.
+#[derive(Debug, Clone)]
+pub struct ScanWitness {
+    /// Per-graph active triple counts.
+    pub counts: Vec<u32>,
+    /// Per-graph per-slot term encodings (active leaves; build pads to N).
+    pub enc: Vec<Vec<[FieldHex; 3]>>,
+}
+
+/// Built scan proof: the public inputs + the private witness.
+#[derive(Debug, Clone)]
+pub struct BuiltScan {
+    pub inputs: ProofInputs,
+    pub witness: ScanWitness,
+}
+
+fn hexf(f: &Fr) -> FieldHex {
+    FieldHex(field_to_hex(f))
+}
+
+/// Encode a BGP slot to the (is_const, const_enc) pair the circuit takes, and
+/// also return the encoded constant (for row matching).
+fn encode_slot(slot: &Slot, salt: &Fr) -> (bool, FieldHex, Option<Fr>) {
+    match slot {
+        Slot::Const(t) => {
+            let enc = encode_term(t, salt).expect("committable constant term");
+            (true, hexf(&enc), Some(enc))
+        }
+        Slot::Var => (false, FieldHex("0x0".to_string()), None),
+    }
+}
+
+/// Build a scan proof's inputs + witnesses from per-graph commitments.
+///
+/// All graphs must share the salt convention used to commit them; the encoded
+/// leaves come straight from each [`GraphCommitment`]'s recorded leaves' source
+/// terms. We re-encode each canonical triple's terms (the circuit checks
+/// `h3(enc) == leaf`), so this re-derivation is sound by construction: a wrong
+/// encoding would fail the in-circuit commitment recompute.
+pub fn build_scan(
+    commitments: &[GraphCommitment],
+    pattern: &Pattern,
+) -> Option<BuiltScan> {
+    let k = commitments.len() as u32;
+    // Per-graph term encodings of every canonical triple.
+    let mut enc: Vec<Vec<[FieldHex; 3]>> = Vec::with_capacity(commitments.len());
+    let mut enc_fr: Vec<Vec<[Fr; 3]>> = Vec::with_capacity(commitments.len());
+    let mut counts = Vec::with_capacity(commitments.len());
+    for c in commitments {
+        let salt = c.salt;
+        let mut graph_hex = Vec::new();
+        let mut graph_fr = Vec::new();
+        for t in &c.canonical.triples {
+            let s = encode_term(&subj_term(t), &salt)?;
+            let p = encode_term(&Term::NamedNode(t.predicate.clone()), &salt)?;
+            let o = encode_term(&t.object, &salt)?;
+            graph_hex.push([hexf(&s), hexf(&p), hexf(&o)]);
+            graph_fr.push([s, p, o]);
+        }
+        counts.push(graph_hex.len() as u32);
+        enc.push(graph_hex);
+        enc_fr.push(graph_fr);
+    }
+
+    // Pattern encoding.
+    // Each graph shares no single salt for IRIs/literals (those are
+    // salt-independent), so constant encodings are stable across graphs; use
+    // graph 0's salt as the reference (bnodes are never query constants).
+    let ref_salt = commitments.first().map(|c| c.salt).unwrap_or(Fr::from(0u64));
+    let (sc, se, sf) = encode_slot(&pattern.s, &ref_salt);
+    let (pc, pe, pf) = encode_slot(&pattern.p, &ref_salt);
+    let (oc, oe, of) = encode_slot(&pattern.o, &ref_salt);
+    let pattern_is_const = [sc, pc, oc];
+    let pattern_const_enc = [se, pe, oe];
+    let const_fr = [sf, pf, of];
+
+    // Disclosed rows: every active slot matching the pattern's constants.
+    let mut rows: Vec<[FieldHex; 3]> = Vec::new();
+    for graph in &enc_fr {
+        for triple in graph {
+            let matches = const_fr.iter().enumerate().all(|(i, c)| match c {
+                Some(cf) => triple[i] == *cf,
+                None => true,
+            });
+            if matches {
+                rows.push([hexf(&triple[0]), hexf(&triple[1]), hexf(&triple[2])]);
+            }
+        }
+    }
+    let row_count = rows.len() as u32;
+    let max_graph = counts.iter().copied().max().unwrap_or(0);
+    let id = derive_scan_id(k, max_graph, row_count)?;
+
+    let commitments_hex: Vec<FieldHex> =
+        commitments.iter().map(|c| hexf(&c.commitment)).collect();
+
+    Some(BuiltScan {
+        inputs: ProofInputs::Scan {
+            id,
+            commitments: commitments_hex,
+            pattern_is_const,
+            pattern_const_enc,
+            rows,
+            row_count,
+        },
+        witness: ScanWitness { counts, enc },
+    })
+}
+
+/// Build a filter_int proof for a hidden xsd:integer operand `value` under
+/// operator `op` against `bound`, with the disclosed `expected` verdict.
+/// `operand_enc` must be the same term encoding the scan proof disclosed for
+/// the operand column (binding consistency).
+pub fn build_filter_int(
+    operand_enc: FieldHex,
+    value: u64,
+    op: FilterOp,
+    bound: u64,
+    expected: bool,
+) -> Option<(ProofInputs, Vec<u8>)> {
+    let digits = value.to_string();
+    let id = derive_filter_int_id(digits.len() as u32)?;
+    let digit_bytes: Vec<u8> = digits.bytes().collect();
+    Some((
+        ProofInputs::FilterInt { id, operand_enc, op, bound, expected },
+        digit_bytes,
+    ))
+}
+
+/// Encode an xsd:integer literal `value` to its term encoding under `salt`
+/// (salt-independent for literals; convenience for callers wiring a filter to
+/// a known constant).
+pub fn encode_int_literal(value: u64) -> FieldHex {
+    let lit = oxrdf::Literal::new_typed_literal(
+        value.to_string(),
+        NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+    );
+    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
+        .expect("integer literal is committable");
+    hexf(&enc)
+}
+
+fn subj_term(t: &oxrdf::Triple) -> Term {
+    match &t.subject {
+        oxrdf::NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
+        oxrdf::NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.clone()),
+    }
+}

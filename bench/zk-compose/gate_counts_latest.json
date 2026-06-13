@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-06-13T08:58:37Z",
+  "tool": "bb gates -s ultra_honk",
+  "bb_version": "5.0.0-nightly.20260324",
+  "nargo_version": "nargo version = 1.0.0-beta.21",
+  "benchmarks": {
+    "scan_k1_n16_r4": { "circuit_size": 5958 },
+    "scan_k2_n16_r8": { "circuit_size": 11011 },
+    "scan_k2_n64_r8": { "circuit_size": 34379 },
+    "filter_int_d1": { "circuit_size": 17416 },
+    "filter_int_d2": { "circuit_size": 17416 },
+    "filter_int_d4": { "circuit_size": 17416 },
+    "filter_f64": { "circuit_size": 3113 }
+  }
+}

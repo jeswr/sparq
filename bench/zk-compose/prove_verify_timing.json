@@ -1,0 +1,21 @@
+{
+  "_comment": "Wall-clock bb prove/verify on the small credential-scale e2e cases. [OPUS-4.8] measured while Fable 5 unavailable. Hardware: darwin arm64, bb 5.0.0-nightly.20260324 ultra_honk, num threads 8. Prove includes --write_vk. Re-measure with bench/zk-compose/scripts/prove_verify.sh.",
+  "timestamp": "2026-06-13T08:57:00Z",
+  "bb_version": "5.0.0-nightly.20260324",
+  "nargo_version": "1.0.0-beta.21",
+  "verifier_target": "noir-recursive",
+  "benchmarks": {
+    "filter_int_d1": {
+      "prove_secs": 1.13,
+      "verify_secs": 0.16,
+      "proof_bytes": 14656,
+      "vk_bytes": 3680
+    },
+    "scan_k1_n16_r4": {
+      "prove_secs": 1.62,
+      "verify_secs": 0.95,
+      "proof_bytes": 14656,
+      "vk_bytes": 3680
+    }
+  }
+}

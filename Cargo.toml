@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-server", "crates/sparq-serve", "crates/sparq-conformance", "crates/sparq-py", "crates/sparq-shacl", "crates/sparq-hdt", "crates/sparq-sim", "crates/sparq-geo", "crates/sparq-introspect", "crates/sparq-nlq", "crates/sparq-vectors", "crates/sparq-rsp", "crates/sparq-gpu", "crates/sparq-solid", "crates/sparq-parse", "crates/sparq-text", "crates/sparq-zk"]
+members = ["crates/sparq-core", "crates/sparq-engine", "crates/sparq-cli", "crates/sparq-bench", "crates/sparq-wasm", "crates/sparq-reason", "crates/sparq-server", "crates/sparq-serve", "crates/sparq-conformance", "crates/sparq-py", "crates/sparq-shacl", "crates/sparq-hdt", "crates/sparq-sim", "crates/sparq-geo", "crates/sparq-introspect", "crates/sparq-nlq", "crates/sparq-vectors", "crates/sparq-rsp", "crates/sparq-gpu", "crates/sparq-solid", "crates/sparq-parse", "crates/sparq-text", "crates/sparq-zk", "crates/sparq-zk-compose"]
 exclude = ["vendor/spargebra"]
 
 # Vendored spargebra 0.4.6 with surgical W3C-conformance parser fixes (see
