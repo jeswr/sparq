@@ -270,17 +270,14 @@ fn comparison_filter(op: FilterCmp, a: &Expression, b: &Expression) -> Option<Qu
         }
         _ => None,
     };
-    match (var_of(a), int_of(b)) {
-        (Some(variable), Some(bound)) => return Some(QueryFilter { variable, op, bound }),
-        _ => {}
+    if let (Some(variable), Some(bound)) = (var_of(a), int_of(b)) {
+        return Some(QueryFilter { variable, op, bound });
     }
     // `const op ?var` — flip so the variable is on the left.
-    match (int_of(a), var_of(b)) {
-        (Some(bound), Some(variable)) => {
-            Some(QueryFilter { variable, op: flip_cmp(op), bound })
-        }
-        _ => None,
+    if let (Some(bound), Some(variable)) = (int_of(a), var_of(b)) {
+        return Some(QueryFilter { variable, op: flip_cmp(op), bound });
     }
+    None
 }
 
 /// Parse a canonical non-negative xsd:integer lexical form to `u64`. Rejects
@@ -400,6 +397,28 @@ pub fn variable_slots(patterns: &[PatternKey]) -> Vec<(String, usize, usize)> {
         }
     }
     out
+}
+
+/// Per query-order BGP pattern, the constant term at each `(s, p, o)` slot
+/// (`None` = a variable slot). The compose verifier encodes these and
+/// byte-matches them against a scan sub-proof's bound `pattern_const_enc` to
+/// confirm the disclosed scan actually answers the query's pattern (audit #10,
+/// constant-swap). Returned in the same query order as [`fragment_patterns`]
+/// (and `attributions`), as `oxrdf::Term`s so a downstream crate need not
+/// depend on `sparq-engine`/`PatternKey`.
+pub fn fragment_pattern_consts(
+    patterns: &[PatternKey],
+) -> Vec<[Option<oxrdf::Term>; 3]> {
+    patterns
+        .iter()
+        .map(|key| {
+            let slot = |i: usize| match &key.slots[i] {
+                SlotPattern::Term(t) => Some(t.clone()),
+                _ => None,
+            };
+            [slot(0), slot(1), slot(2)]
+        })
+        .collect()
 }
 
 fn triple_pattern_key(tp: &TriplePattern) -> Result<PatternKey, VerifyError> {
