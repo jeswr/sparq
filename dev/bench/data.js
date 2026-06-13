@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781390526074,
+  "lastUpdate": 1781390636745,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -7422,6 +7422,153 @@ window.BENCHMARK_DATA = {
           {
             "name": "rdfs_infer_s",
             "value": 0.14,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1579288,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "committer": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "distinct": true,
+          "id": "3d1af71173b2567852f0fe85e5aa6cc61f8d62f8",
+          "message": "merge: docs hygiene — markdown TODOs->bead pointers + perf numbers->references (sq-5vm) [OPUS-4.8]\n\n10 TODO.md -> thin 'bd ready -l area:<crate>' pointers (design rationale preserved under\nNotes); beaded TODO markers stripped from research/docs. Perf: README ~25 hard-coded figures\n-> a Performance section linking the dashboard (jeswr.github.io/sparq/dev/bench) + benchmarks.toml\n+ CATALOG; single-sourced the rung5 1B + QLever-comparison dups; per-crate README perf tables +\nresearch/BENCHMARKS.md + CHANGELOG + bench/*/README -> reference form (ZK READMEs cite their\ncommitted JSONs); skills cite the measured source once + drop drift figures. Kept external/cited\nthird-party numbers + conformance ratchets. Long-tail + harness-JSON-emission gap beaded\n(sq-my8, sq-d7d). Enforces AGENTS.md's existing no-markdown-TODOs + no-hard-coded-perf rules.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T22:40:24Z",
+          "tree_id": "9415be91384b01fba8ff981638b3bce24635181d",
+          "url": "https://github.com/jeswr/sparq/commit/3d1af71173b2567852f0fe85e5aa6cc61f8d62f8"
+        },
+        "date": 1781390635095,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.53,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "parse_ns_per_byte",
+            "value": 4.8179,
+            "unit": "ns/byte"
+          },
+          {
+            "name": "store_bytes_per_triple_small",
+            "value": 88,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 3.4,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3018.9,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4395.2,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 5.9,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 9.1,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 759.2,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 12305.6,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 55447.3,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 144468.5,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 4582.3,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 5,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 40265.2,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 8805,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 58436.8,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 155280.3,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 3777.7,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 7.8,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 40414.9,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.134,
             "unit": "s"
           },
           {
