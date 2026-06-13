@@ -336,4 +336,51 @@ impl<T: Clone> WindowedStream<T> {
     pub fn late_dropped(&self) -> u64 {
         self.late_dropped
     }
+
+    /// Visits every LIVE payload still held by this stream — the buffered open
+    /// windows (time) or the ring (count), PLUS any windows already closed but
+    /// not yet taken. The complete set of payloads this stream can still surface
+    /// to the caller; nothing outside it is reachable any more (the slide's
+    /// `split_off` has dropped it). Used by [OPUS-4.8] persistent-dictionary
+    /// compaction to compute which interned terms are still referenced by a live
+    /// window — every id NOT visited here has aged out of every window and its
+    /// dictionary entry is reclaimable.
+    pub(crate) fn for_each_live_payload(&self, mut f: impl FnMut(&T)) {
+        for ts_triples in self.buffer.values() {
+            for t in ts_triples {
+                f(t);
+            }
+        }
+        for item in &self.ring {
+            f(&item.triple);
+        }
+        for w in &self.closed {
+            for t in &w.triples {
+                f(&t.triple);
+            }
+        }
+    }
+
+    /// Rewrites every LIVE payload in place (same set visited by
+    /// [`for_each_live_payload`](Self::for_each_live_payload)). The remap MUST be
+    /// a bijection on the live payloads (it is: a dictionary rebuild assigns each
+    /// surviving id a fresh dense id), so window membership, ordering and counts
+    /// are untouched — only the encoding of each payload changes. Used to swing
+    /// the live window indexes onto a freshly-compacted dictionary ATOMICALLY:
+    /// after this call no live payload references an old (reclaimed) id.
+    pub(crate) fn remap_live_payloads(&mut self, mut f: impl FnMut(&T) -> T) {
+        for ts_triples in self.buffer.values_mut() {
+            for t in ts_triples {
+                *t = f(t);
+            }
+        }
+        for item in &mut self.ring {
+            item.triple = f(&item.triple);
+        }
+        for w in &mut self.closed {
+            for t in &mut w.triples {
+                t.triple = f(&t.triple);
+            }
+        }
+    }
 }
