@@ -25,12 +25,19 @@ sparq-core = { path = "../../crates/sparq-core", features = ["parallel"] }
 sparq-engine = { path = "../../crates/sparq-engine" }
 # The D4 deliverable under test (CompressedSink, dictionaries).
 sparq-parse = { path = "../../crates/sparq-parse" }
+# [OPUS-4.8] HDT load path under test (bench-hdt / bench-hdt-zip): the direct
+# sparq-side SPO decoder (`graph_from_reader`) vs the upstream wavelet-building
+# path (`load_reader_via_upstream`). The `hdt`(sophia) dep lets the bench build a
+# realistic `.hdt` fixture from N-Triples in-process (no external rdf2hdt needed).
+sparq-hdt = { path = "../../crates/sparq-hdt" }
+hdt = { version = "0.4", features = ["sophia"] }
 # Reference parsers (same versions the workspace pins).
 oxttl = { version = "0.2", features = ["rdf-12"] }
 oxrdf = { version = "0.3", features = ["rdf-12"] }
 # Codecs under test (same crates/versions sparq-cli ingest uses).
 flate2 = "1"
 zstd = "0.13"
+bzip2 = "0.4"
 # Thread-count control for the serial-vs-parallel comparisons.
 rayon = "1"
 # Match the production CLI environment: sparq-cli ingest runs under mimalloc.

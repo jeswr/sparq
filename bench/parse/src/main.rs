@@ -12,6 +12,15 @@
 //!   bench-ttl <file.ttl>                parser/ingest measurements on Turtle
 //!   bench-zip <file.nt>                 decode-only + two-stage vs streaming ingest
 //!                                       (expects <file.nt>.gz and <file.nt>.zst)
+//!   gen-hdt <in.nt> <out.hdt>           build a real .hdt from N-Triples in-process
+//!                                       (hdt crate writer; no external rdf2hdt)
+//!   bench-hdt <file.hdt>                A/B HDT load: the sparq DIRECT decoder
+//!                                       (graph_from_reader, skips the wavelet/OP
+//!                                       index) vs the UPSTREAM wavelet-building
+//!                                       path (Hdt::read + graph_from_hdt). Reports
+//!                                       the speedup RATIO + per-stage split + peak RSS.
+//!   bench-hdt-zip <file.hdt>            decompress+parse MB/s of <file.hdt>.{gz,zst,bz2}
+//!                                       via the direct decoder (expects those files)
 
 // Match the production CLI: sparq-cli ingest runs under mimalloc.
 #[global_allocator]
@@ -34,8 +43,13 @@ fn main() {
         Some("bench-ttl") => bench_ttl(&args[2]),
         Some("bench-zip") => bench_zip(&args[2]),
         Some("probe-read") => probe_read(&args[2]),
+        Some("gen-hdt") => gen_hdt(&args[2], &args[3]),
+        Some("bench-hdt") => bench_hdt(&args[2]),
+        Some("bench-hdt-zip") => bench_hdt_zip(&args[2]),
+        // Internal: load ONE path once in a fresh process, print its peak RSS.
+        Some("hdt-rss") => hdt_rss(&args[2], &args[3]),
         _ => {
-            eprintln!("usage: parse-baseline gen|to-ttl|compress|bench-nt|bench-ttl|bench-zip ...");
+            eprintln!("usage: parse-baseline gen|to-ttl|compress|bench-nt|bench-ttl|bench-zip|gen-hdt|bench-hdt|bench-hdt-zip ...");
             std::process::exit(2);
         }
     }
@@ -462,4 +476,183 @@ fn compress(path: &str) {
         zst,
         raw.len() as f64 / zst as f64
     );
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] HDT: gen-hdt / bench-hdt / bench-hdt-zip
+//
+// The HEADLINE measurement for plan lever H1 (research/parsing-optimization-plan.md
+// §1, §4, §5 Wave A): the sparq DIRECT decoder (`sparq_hdt::graph_from_reader`,
+// which reads bitmaps/sequences directly and SKIPS the upstream `TriplesBitmap::new`
+// wavelet-matrix + OP-index + rank/select build) vs the UPSTREAM wavelet-building
+// path (`hdt::Hdt::read` + `sparq_hdt::graph_from_hdt`). The durable, load-robust
+// claim is the speedup RATIO; absolute MB/s is noisy on a shared box (§4 NOTE).
+// ---------------------------------------------------------------------------
+
+/// Peak resident set size (VmHWM, the high-water mark) in bytes, from
+/// /proc/self/status. Returns 0 if unavailable (non-Linux / no procfs).
+fn peak_rss_bytes() -> u64 {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return 0 };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            // "VmHWM:    123456 kB"
+            if let Some(kb) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok()) {
+                return kb * 1024;
+            }
+        }
+    }
+    0
+}
+
+/// Builds a real `.hdt` archive from an N-Triples file, in-process, via the `hdt`
+/// crate's writer (FourSectDict PFC + BitmapTriples, SPO order) — the same archive
+/// shape hdt-cpp/hdt-java emit. No external `rdf2hdt` binary needed.
+fn gen_hdt(nt_path: &str, hdt_path: &str) {
+    let t = Instant::now();
+    let hdt = hdt::Hdt::read_nt(std::path::Path::new(nt_path))
+        .unwrap_or_else(|e| panic!("building HDT from {nt_path}: {e}"));
+    let mut out = std::io::BufWriter::new(std::fs::File::create(hdt_path).unwrap());
+    hdt.write(&mut out).unwrap_or_else(|e| panic!("writing {hdt_path}: {e}"));
+    out.flush().unwrap();
+    drop(out);
+    let nt_bytes = std::fs::metadata(nt_path).unwrap().len();
+    let hdt_bytes = std::fs::metadata(hdt_path).unwrap().len();
+    eprintln!(
+        "gen-hdt: {nt_path} ({nt_bytes} B) -> {hdt_path} ({hdt_bytes} B, {:.2}x smaller) in {:.1}s",
+        nt_bytes as f64 / hdt_bytes as f64,
+        t.elapsed().as_secs_f64()
+    );
+}
+
+/// A/B HDT load benchmark: direct decoder vs upstream wavelet path, with a
+/// per-stage split for the upstream path and the speedup ratio.
+fn bench_hdt(path: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let name = dataset_name(path);
+
+    // Triple/term counts + correctness gate: the two paths MUST agree before any
+    // perf number is meaningful (empirical-honesty rule).
+    let direct = sparq_hdt::graph_from_reader(std::io::Cursor::new(&bytes[..])).expect("direct decode");
+    let upstream_hdt = hdt::Hdt::read(std::io::BufReader::new(std::io::Cursor::new(&bytes[..]))).expect("Hdt::read");
+    let upstream = sparq_hdt::graph_from_hdt(&upstream_hdt).expect("graph_from_hdt");
+    let triples = direct.store.len();
+    assert_eq!(triples, upstream.store.len(), "A/B triple count mismatch — refusing to report perf");
+    assert_eq!(direct.dict.len(), upstream.dict.len(), "A/B distinct-term mismatch — refusing to report perf");
+    drop((direct, upstream, upstream_hdt));
+
+    eprintln!("{name}: {} HDT bytes, {triples} triples", bytes.len());
+    println!("| dataset | task | s | MB/s (.hdt bytes) | Mtriples/s |");
+    println!("|---|---|---|---|---|");
+
+    // --- DIRECT decoder (the new default path): one end-to-end stage. ---
+    let secs_direct = median(|| {
+        let g = sparq_hdt::graph_from_reader(std::io::Cursor::new(&bytes[..])).unwrap();
+        black_box(g.store.len());
+    });
+    row(name, "DIRECT decoder (graph_from_reader)", 1, secs_direct, bytes.len(), triples);
+
+    // --- UPSTREAM wavelet path, split into its two public stages. ---
+    // Stage 1: Hdt::read = decode dict + BUILD the wavelet matrix / OP-index /
+    // rank-select that the direct decoder never builds (the eliminated work).
+    let secs_up_read = median(|| {
+        let h = hdt::Hdt::read(std::io::BufReader::new(std::io::Cursor::new(&bytes[..]))).unwrap();
+        black_box(h.triples.adjlist_z.sequence.entries);
+    });
+    row(name, "  upstream stage Hdt::read (decode+index build)", 1, secs_up_read, bytes.len(), triples);
+
+    // Stage 2: graph_from_hdt = id-translation + Graph build (shared with direct).
+    let read_once = hdt::Hdt::read(std::io::BufReader::new(std::io::Cursor::new(&bytes[..]))).unwrap();
+    let secs_up_translate = median(|| {
+        let g = sparq_hdt::graph_from_hdt(&read_once).unwrap();
+        black_box(g.store.len());
+    });
+    drop(read_once);
+    row(name, "  upstream stage graph_from_hdt (translate+build)", 1, secs_up_translate, bytes.len(), triples);
+
+    // End-to-end upstream = read + translate (matches load_reader_via_upstream).
+    let secs_upstream = median(|| {
+        let h = hdt::Hdt::read(std::io::BufReader::new(std::io::Cursor::new(&bytes[..]))).unwrap();
+        let g = sparq_hdt::graph_from_hdt(&h).unwrap();
+        black_box(g.store.len());
+    });
+    row(name, "UPSTREAM total (Hdt::read + graph_from_hdt)", 1, secs_upstream, bytes.len(), triples);
+
+    eprintln!("------------------------------------------------------------");
+    eprintln!(
+        "A/B SPEEDUP (load-robust): upstream {:.3}s / direct {:.3}s = {:.2}x faster",
+        secs_upstream, secs_direct, secs_upstream / secs_direct
+    );
+    eprintln!(
+        "  upstream split: Hdt::read(decode+index)={:.3}s + graph_from_hdt(translate)={:.3}s",
+        secs_up_read, secs_up_translate
+    );
+    eprintln!(
+        "  the direct decoder ELIMINATES the index-build portion of Hdt::read and shares the translate stage."
+    );
+    // VmHWM is a process-lifetime high-water mark, so an in-process pair would be
+    // identical (both paths ran). For an HONEST per-path peak, re-load each path
+    // ALONE in a fresh subprocess and read its VmHWM.
+    match (rss_one_path(path, "direct"), rss_one_path(path, "upstream")) {
+        (Some(d), Some(u)) => eprintln!(
+            "  peak RSS (per-path, fresh process each): direct {:.0} MB, upstream {:.0} MB ({:.2}x)",
+            d as f64 / 1e6, u as f64 / 1e6, u as f64 / d as f64
+        ),
+        _ => eprintln!("  peak RSS (per-path): unavailable (subprocess failed)"),
+    }
+}
+
+/// Re-runs THIS binary's `hdt-rss <path> <which>` in a fresh process so VmHWM
+/// reflects only that single load path; parses the printed byte count.
+fn rss_one_path(path: &str, which: &str) -> Option<u64> {
+    let exe = std::env::current_exe().ok()?;
+    let out = std::process::Command::new(exe).args(["hdt-rss", path, which]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok()
+}
+
+/// Loads exactly one path once, prints its peak-RSS byte count to stdout.
+fn hdt_rss(path: &str, which: &str) {
+    let bytes = std::fs::read(path).unwrap();
+    match which {
+        "direct" => {
+            let g = sparq_hdt::graph_from_reader(std::io::Cursor::new(&bytes[..])).unwrap();
+            black_box(g.store.len());
+        }
+        _ => {
+            let h = hdt::Hdt::read(std::io::BufReader::new(std::io::Cursor::new(&bytes[..]))).unwrap();
+            let g = sparq_hdt::graph_from_hdt(&h).unwrap();
+            black_box(g.store.len());
+        }
+    }
+    println!("{}", peak_rss_bytes());
+}
+
+/// Decompress+parse MB/s of the compressed HDT containers via the direct decoder
+/// (the H5 streaming path). Expects `<file.hdt>.{gz,zst,bz2}` alongside the plain
+/// `.hdt`; MB/s is over the DECOMPRESSED `.hdt` byte count.
+fn bench_hdt_zip(path: &str) {
+    let plain = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let name = dataset_name(path);
+    let triples = sparq_hdt::graph_from_reader(std::io::Cursor::new(&plain[..]))
+        .expect("plain decode")
+        .store
+        .len();
+
+    println!("| dataset | task | s | MB/s (decompressed .hdt) | Mtriples/s |");
+    println!("|---|---|---|---|---|");
+
+    for ext in ["gz", "zst", "bz2"] {
+        let cpath = format!("{path}.{ext}");
+        let Ok(comp) = std::fs::read(&cpath) else {
+            eprintln!("skipping {ext}: {cpath} absent (run `compress-hdt` or gzip/zstd/bzip2 the .hdt)");
+            continue;
+        };
+        let ratio = plain.len() as f64 / comp.len() as f64;
+        let secs = median(|| {
+            // load_reader sniffs the container by magic bytes and streams the
+            // decode through the direct decoder — exactly the production path.
+            let g = sparq_hdt::load_reader(std::io::Cursor::new(&comp[..])).unwrap();
+            black_box(g.store.len());
+        });
+        row(name, &format!("{ext} decode+parse (direct, {ratio:.2}x compressed)"), 1, secs, plain.len(), triples);
+    }
 }

@@ -17,9 +17,11 @@
 //! mapping memoized in a flat per-section table — so the term set is never
 //! materialized twice and the per-triple work is three array lookups.
 //!
-//! GZipped containers (`.hdt.gz`) are detected by MAGIC BYTES (not file name)
-//! and decompressed on the fly by every entry point; [`header`] exposes the
-//! archive's metadata triples (the H in HDT) as a queryable sparq [`Graph`].
+//! Compressed containers — `.hdt.gz` (gzip), `.hdt.zst` (zstd) and `.hdt.bz2`
+//! (bzip2), as publishers ship them — are detected by MAGIC BYTES (not file name)
+//! and decompressed on the fly, STREAMING (the decompressed `.hdt` is never fully
+//! materialized) by every entry point; [`header`] exposes the archive's metadata
+//! triples (the H in HDT) as a queryable sparq [`Graph`].
 
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph;
@@ -82,26 +84,67 @@ impl From<hdt::hdt::Error> for Error {
     }
 }
 
-/// Whether the stream starts with the gzip magic bytes (0x1f 0x8b). Peeks via
-/// the reader's buffer without consuming.
-fn is_gzip<R: BufRead>(reader: &mut R) -> std::io::Result<bool> {
-    let buf = reader.fill_buf()?;
-    Ok(buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b)
+/// The compression container an HDT byte stream is wrapped in, recognised by its
+/// leading MAGIC BYTES (never the file name). `None` is a bare `$HDT` archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Container {
+    /// gzip (`.hdt.gz`), magic `1f 8b`.
+    Gzip,
+    /// zstd (`.hdt.zst`), magic `28 b5 2f fd`.
+    Zstd,
+    /// bzip2 (`.hdt.bz2`), magic `42 5a 68` ("BZh").
+    Bzip2,
+    /// Uncompressed HDT (or any other content — let the decoder reject it).
+    None,
 }
 
-/// Runs `f` over the (transparently decompressed) HDT byte stream: a stream
-/// starting with the gzip magic is wrapped in a streaming `MultiGzDecoder`
-/// (`.hdt.gz` containers as some publishers ship); anything else is passed
-/// through. Detection is by CONTENT, not file name.
+/// Sniffs the container from the head of the stream WITHOUT consuming it (peeks
+/// the [`BufRead`] buffer). `.hdt` magic itself is `$HDT` (`24 48 44 54`); any
+/// non-compression head is returned as [`Container::None`] and passed through.
+fn sniff_container<R: BufRead>(reader: &mut R) -> std::io::Result<Container> {
+    let buf = reader.fill_buf()?;
+    Ok(if buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b {
+        Container::Gzip
+    } else if buf.len() >= 4 && buf[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+        Container::Zstd
+    } else if buf.len() >= 3 && buf[..3] == [0x42, 0x5a, 0x68] {
+        Container::Bzip2
+    } else {
+        Container::None
+    })
+}
+
+/// Runs `f` over the (transparently decompressed) HDT byte stream. A stream
+/// whose magic bytes identify a `.hdt.gz` / `.hdt.zst` / `.hdt.bz2` container is
+/// wrapped in the matching STREAMING decoder — the decompressed `.hdt` is never
+/// fully materialized, it is decoded on demand as `f` reads it; anything else is
+/// passed through unchanged. Detection is by CONTENT, not file name.
 fn with_hdt_stream<T>(
     mut reader: impl BufRead,
     f: impl FnOnce(&mut dyn BufRead) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    if is_gzip(&mut reader)? {
-        let mut decoder = std::io::BufReader::new(flate2::bufread::MultiGzDecoder::new(reader));
-        f(&mut decoder)
-    } else {
-        f(&mut reader)
+    match sniff_container(&mut reader)? {
+        // `MultiGzDecoder` / `MultiBzDecoder` already buffer per the `bufread`
+        // input, but their `Read` output needs a `BufRead` for the HDT reader;
+        // zstd's `Decoder` likewise. One wrapping `BufReader` each — no double
+        // buffering on the bare-HDT path (it is already a `BufRead`).
+        Container::Gzip => {
+            let mut d = std::io::BufReader::new(flate2::bufread::MultiGzDecoder::new(reader));
+            f(&mut d)
+        }
+        Container::Zstd => {
+            // `zstd::stream::read::Decoder::with_buffer` takes a `BufRead` source
+            // directly (no inner re-buffer); its output is wrapped once.
+            let dec = zstd::stream::read::Decoder::with_buffer(reader)
+                .map_err(Error::Io)?;
+            let mut d = std::io::BufReader::new(dec);
+            f(&mut d)
+        }
+        Container::Bzip2 => {
+            let mut d = std::io::BufReader::new(bzip2::bufread::MultiBzDecoder::new(reader));
+            f(&mut d)
+        }
+        Container::None => f(&mut reader),
     }
 }
 
