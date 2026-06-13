@@ -4,7 +4,7 @@
 
 ## POST-CRASH STATE (2026-06-13): the prior session's 10 agents all died at the 4:20am session limit. Main = remote = 8ab4754 then py-textindex merged (dac9870, gate pending). Recovery done so far:
 - zk-core, wikidata-8b-prep, release-prep-v010: ALL MERGED+PUSHED before the crash (main reached 8ab4754).
-- py-textindex: MERGED locally (dac9870), gate running. Fable-authored branch, Opus merge.
+- py-textindex: MERGED+PUSHED (dac9870, gate 713/0 wasm 1,643,095). Task #44 bindings parity COMPLETE. Fable-authored branch, Opus merge. Worktree removed, branch deleted.
 - dict-spill / serve-wave-a2 / zk-xpath-ieee754-migration: had committed+dirty work → OPUS FINISHER AGENTS RELAUNCHED (running now).
 - zk-compose / zk-trace-engine / neon-intersect: 0 commits (died before committing) → NEED FULL RELAUNCH (not yet done — held to avoid over-parallelizing on Opus).
 - EC2: could NOT verify (AWS SSO token expired — `aws sso login --profile pss` to re-check). Prior handover says nothing was ever launched; the 8B run is gated on dict-spill so it never started. LOW risk but UNVERIFIED.
