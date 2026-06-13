@@ -1036,52 +1036,101 @@ fn nonce_single_use_second_presentation_rejected() {
     }
 }
 
-/// Audit #4 (consistency, fast/structural-adjacent): a manifest whose declared
-/// binding challenge does NOT equal the verifier's nonce is rejected with
-/// NonceBindingMismatch — fail-closed JSON consistency. Toolchain-gated only
-/// because it constructs a real proof to reach the binding check (the check runs
-/// before bb, but the manifest must carry valid proof bytes to pass the earlier
-/// MissingProof guard... actually the binding check is BEFORE the per-sub-proof
-/// loop, so it fires even with a witness-only manifest). Uses a witness-only
-/// manifest to stay FAST (no bb).
+/// Audit #4 (consistency + replay policy): a manifest whose declared binding
+/// challenge does NOT equal the verifier's nonce is rejected with
+/// NonceBindingMismatch — fail-closed JSON consistency. No toolchain needed: the
+/// nonce/binding consistency check runs before the per-sub-proof crypto loop, so a
+/// witness-only (empty proof_hex) manifest reaches it.
+///
+/// # sq-3v2: the freshness/replay policy on a binding-mismatch — BURN-ON-MISMATCH
+/// `verify_manifest` calls `seen.record_fresh(nonce)` BEFORE the nonce/binding
+/// consistency check (and before the crypto gate). So the verifier nonce is
+/// CONSUMED even when the manifest is rejected for NonceBindingMismatch. This is
+/// INTENTIONAL and the test asserts it:
+///   - The verifier nonce is single-use and verifier-issued (out of band, fresh per
+///     session). Once it has been PRESENTED in any verify attempt — successful or
+///     not — it is spent; the honest flow always uses a brand-new nonce.
+///   - Recording first means a rejection (binding mismatch, malformed proof, a bb
+///     failure, …) is NOT a free retry: an attacker who captured a nonce cannot use
+///     a binding-mismatch (or any other) rejection as an oracle to probe-and-retry
+///     the SAME nonce. A second presentation under that nonce is a flat
+///     NonceReplay, regardless of what it carries.
+///   - Burning a nonce on a mismatched binding cannot harm an honest prover: an
+///     honest prover's binding == nonce, so it never hits this path; and a fresh
+///     session always mints a new nonce, so there is nothing to "retry" with the
+///     burnt one anyway.
+///
+/// The cost is that a transient/buggy submission (wrong binding) consumes the
+/// nonce — the relying party simply issues a new one. We accept that in exchange
+/// for the strict no-retry-after-rejection replay property.
 #[test]
 fn nonce_binding_mismatch_rejected() {
-    // No toolchain needed: the nonce/binding consistency check runs before the
-    // per-sub-proof crypto loop, so a witness-only manifest reaches it.
     let prover = CircuitProver::from_crate_root();
     let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
-    let mut m = ProofManifest {
-        r#type: "urn:sparq:zk:ProofManifest".into(),
-        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
-        issuers: vec![],
-        key_set: vec![],
-        commitment_attestations: vec![],
-        attributions: vec![vec![0]],
-        join_obligations: vec![],
-        entailment_regime: EntailmentRegime::Simple,
-        // Binding declares 0x2a...
-        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
-        // [OPUS-4.8] audit #12: non-revoked, fresh, so the prefilter (incl. the
-        // revocation gate) passes and the nonce/binding check is reached.
-        revocation: Some(fixture_revocation()),
-        status_snapshots: vec![fixture_snapshot(false)],
-        sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
-        binding_edges: vec![],
+    let make = || {
+        let mut m = ProofManifest {
+            r#type: "urn:sparq:zk:ProofManifest".into(),
+            query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+            issuers: vec![],
+            key_set: vec![],
+            commitment_attestations: vec![],
+            attributions: vec![vec![0]],
+            join_obligations: vec![],
+            entailment_regime: EntailmentRegime::Simple,
+            // Binding declares 0x2a...
+            binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+            // [OPUS-4.8] audit #12: non-revoked, fresh, so the prefilter (incl. the
+            // revocation gate) passes and the nonce/binding check is reached.
+            revocation: Some(fixture_revocation()),
+            status_snapshots: vec![fixture_snapshot(false)],
+            sub_proofs: vec![SubProof { inputs: scan.clone(), proof_hex: String::new() }],
+            binding_edges: vec![],
+        };
+        attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
+        m
     };
-    attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
-    // ...but the verifier issues nonce 0x99 (!= 0x2a). The consistency check
-    // fires before any bb call.
+
+    // ...but the verifier issues nonce 0x99 (!= 0x2a). The consistency check fires
+    // before any bb call. CRUCIALLY: share ONE single-use store across both
+    // presentations so we can observe whether the FIRST (mismatched) presentation
+    // already burned the nonce.
+    let seen = InMemorySeenNonces::new();
+    let nonce = nonce_for("0x99");
+
+    // First presentation: binding 0x2a != nonce 0x99 => NonceBindingMismatch. But
+    // record_fresh ran FIRST, so the nonce 0x99 is now BURNED.
     match verify_manifest(
-        &m,
+        &make(),
         &prover,
-        &scratch("nonce_binding_mismatch"),
+        &scratch("nonce_binding_mismatch_1"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
-        &nonce_for("0x99"),
-        &InMemorySeenNonces::new(),
+        &nonce,
+        &seen,
     ) {
         Err(CheckError::NonceBindingMismatch) => {}
-        other => panic!("expected NonceBindingMismatch, got {other:?}"),
+        other => panic!("expected NonceBindingMismatch on first presentation, got {other:?}"),
+    }
+
+    // sq-3v2 policy assertion: the nonce was CONSUMED on the mismatch rejection.
+    // A second presentation under the SAME nonce + SAME store is therefore a flat
+    // NonceReplay — NOT NonceBindingMismatch again. This proves the burn-on-
+    // mismatch policy: a binding-mismatch rejection is not a free retry of the
+    // nonce.
+    match verify_manifest(
+        &make(),
+        &prover,
+        &scratch("nonce_binding_mismatch_2"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &nonce,
+        &seen,
+    ) {
+        Err(CheckError::NonceReplay) => {}
+        other => panic!(
+            "expected NonceReplay on re-presentation (nonce burned on the prior \
+             binding-mismatch rejection), got {other:?}"
+        ),
     }
 }
 

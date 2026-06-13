@@ -1766,6 +1766,20 @@ pub fn verify_manifest(
     // this first means a replayed (nonce, manifest) pair is rejected without
     // even running bb. The store is consulted unconditionally — there is no
     // opt-out path that could bypass single-use (the parameter is mandatory).
+    //
+    // [OPUS-4.8] sq-3v2 — BURN-ON-MISMATCH is intentional. Because this records
+    // FIRST, the verifier nonce is CONSUMED even when the manifest is subsequently
+    // rejected (NonceBindingMismatch, MalformedProof, a bb failure, …). That is the
+    // chosen freshness/replay policy: a verifier-issued nonce is spent the moment it
+    // is PRESENTED, so a rejection is never a free retry — an attacker who captured
+    // a nonce cannot use ANY rejection as an oracle to probe-and-retry the SAME
+    // nonce (a re-presentation is a flat NonceReplay). It cannot harm an honest
+    // prover (whose binding == nonce, so it never takes the mismatch path; and a
+    // fresh session always mints a new nonce). The cost — a transient/buggy
+    // submission spends the nonce — is accepted in exchange for the strict
+    // no-retry-after-rejection property; the relying party simply issues a new
+    // nonce. The `nonce_binding_mismatch_rejected` e2e test asserts this exact
+    // policy (a re-presentation under the burnt nonce returns NonceReplay).
     if !seen.record_fresh(nonce) {
         return Err(CheckError::NonceReplay);
     }
