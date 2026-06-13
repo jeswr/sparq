@@ -251,9 +251,11 @@ struct VarSorter {
     tag: String,
 }
 
-/// Approximate per-record bookkeeping overhead (Box header + sort slot) added to the
-/// payload bytes for budget accounting.
-const VAR_REC_OVERHEAD: usize = 40;
+/// Approximate per-record bookkeeping overhead added to the payload bytes for budget
+/// accounting: the allocator's per-`Box<[u8]>` overhead (~48 B for small allocations)
+/// plus the 24 B `(u32, Box<[u8]>)` sort slot — measured against real RSS at 100M
+/// (the original 40 B figure understated runs by ~40%).
+const VAR_REC_OVERHEAD: usize = 72;
 
 impl VarSorter {
     fn new(mode: VarKey, budget: usize, tmp: &Path, tag: &str) -> VarSorter {
@@ -491,7 +493,9 @@ struct PodSorter<T: PodRec> {
 impl<T: PodRec + Send> PodSorter<T> {
     fn new(budget_bytes: usize, tmp: &Path, tag: &str) -> PodSorter<T> {
         PodSorter {
-            budget_elems: (budget_bytes / T::SIZE.max(1)).max(1 << 12),
+            // Budget by the IN-RAM element size (with alignment padding — e.g. `HashPair`
+            // is 12 B on disk but 16 B in the run buffer), not the serialized size.
+            budget_elems: (budget_bytes / std::mem::size_of::<T>().max(1)).max(1 << 12),
             buf: Vec::new(),
             runs: Vec::new(),
             tmp: tmp.to_path_buf(),
@@ -875,11 +879,14 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
     let mut tempi_w = BufWriter::new(std::fs::File::create(dir.join("temporals.bin")).map_err(io_err)?);
     let flags_path = tmp.join("dsp-tflags.bin");
     let mut flags_w = BufWriter::new(std::fs::File::create(&flags_path).map_err(io_err)?);
-    let mut hash_sorter: PodSorter<HashPair> = PodSorter::new(sort_budget, tmp, "dsp-hash");
+    // The hash-pair sorter is alive across the WHOLE shard loop, concurrently with each
+    // shard's distinct-stream sorter — partition the budget between them so their summed
+    // run buffers stay within `sort_budget`.
+    let mut hash_sorter: PodSorter<HashPair> = PodSorter::new(sort_budget / 4, tmp, "dsp-hash");
     let mut pos: u64 = 0;
     for s in 0..n {
         let distinct_path = tmp.join(format!("dsp-distinct{s}.bin"));
-        let mut sorter = VarSorter::new(VarKey::SeqOnly, sort_budget, tmp, &format!("dsp-s{s}-byseq"));
+        let mut sorter = VarSorter::new(VarKey::SeqOnly, sort_budget / 2, tmp, &format!("dsp-s{s}-byseq"));
         {
             let mut r = BufReader::new(std::fs::File::open(&distinct_path).map_err(io_err)?);
             let mut head = [0u8; 8];
@@ -983,7 +990,9 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
     for (s, (_, seq_count, mut epochs)) in shard_files.into_iter().enumerate() {
         ensure_disk(tmp, cfg.disk_floor)?;
         let pairs_path = tmp.join(format!("dsp-pairs{s}.bin"));
-        let mut by_min: PodSorter<MinSeqPair> = PodSorter::new(sort_budget, tmp, &format!("dsp-s{s}-bymin"));
+        // `by_min`'s merge readers feed `by_seq`'s run buffer concurrently — split the
+        // budget between the two sorters.
+        let mut by_min: PodSorter<MinSeqPair> = PodSorter::new(sort_budget / 2, tmp, &format!("dsp-s{s}-bymin"));
         {
             let mut r = BufReader::new(std::fs::File::open(&pairs_path).map_err(io_err)?);
             let mut b = [0u8; 8];
@@ -994,7 +1003,7 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
         std::fs::remove_file(&pairs_path).ok();
 
         let m2f_path = tmp.join(format!("dsp-m2f{s}.bin"));
-        let mut by_seq: PodSorter<SeqFinal> = PodSorter::new(sort_budget, tmp, &format!("dsp-s{s}-final"));
+        let mut by_seq: PodSorter<SeqFinal> = PodSorter::new(sort_budget / 2, tmp, &format!("dsp-s{s}-final"));
         {
             let mut m2f = BufReader::new(std::fs::File::open(&m2f_path).map_err(io_err)?);
             let mut merge = by_min.into_merge().map_err(io_err)?;
