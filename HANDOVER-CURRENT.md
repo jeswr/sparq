@@ -34,5 +34,8 @@ The global plan meter is not accessible from inside a session and local token co
 ## IEEE754 upstreaming directive (Jesse, 2026-06-13)
 test-lib content REPLACES the published noir IEEE754 repo (old main preserved, e.g. moved to a `deprecated` branch) ONCE test-lib has the same level of testing/benchmarking/CI as the old repo. Sequence: (1) audit agent — old repo's CI/test/bench inventory, test-lib state (76 unpushed commits + dirty kernels.nr), delta sparq zk/ieee754 vs test-lib (new kernels/benches to flow back); (2) gap-closure work in test-lib; (3) orchestrator executes swap: push `deprecated` branch first, verify, then replace main with test-lib history (+ sparq-side kernel additions). test-lib repo is now WRITABLE for this work (directive supersedes read-only-reference rule for test-lib only).
 
+## Paused (user direction 2026-06-13)
+- Horizontal scaling: PAUSED — to be worked in the prod-solid-server context, not sparq. research/adr-horizontal-scaling.md stays as reference; no implementation here.
+
 ## Awaiting Jesse
-horizontal-scaling ADR answers, RDFox license decision. (test-lib push subsumed by the upstreaming directive above.)
+RDFox license decision; `cargo login` + `npm login` for registry publishes; PyPI rename decision (sparq taken → sparq-rdf free).
