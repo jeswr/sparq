@@ -1,6 +1,15 @@
-# Orchestrator handover — live state (updated 2026-06-13, USAGE FREEZE active)
+# Orchestrator handover — live state (updated 2026-06-13, POST-CRASH RECOVERY, model=Opus 4.8)
 
-## ⚠ USAGE FREEZE (user, 2026-06-13): ~80% of session budget consumed. NO new agent launches. If this session dies, resume protocol: (1) NO cloud resources are running (verify with the tag query below anyway); (2) check each worktree's STATUS.md + `git log main..HEAD` for agent state; (3) work the merge queue below one branch at a time with the gate.
+## ⚠ MODEL = OPUS 4.8 (Fable 5 temporarily unavailable). Per Jesse: tag every commit with `Model: Opus 4.8 (...)` + `Co-Authored-By: Claude Opus 4.8` trailer, inline `// [OPUS-4.8]` markers on new code, same in every subagent brief — so Opus work can be re-reviewed when Fable returns. See memory feedback-opus-commit-tagging. When /model shows Fable again, revert to the Fable trailer.
+
+## POST-CRASH STATE (2026-06-13): the prior session's 10 agents all died at the 4:20am session limit. Main = remote = 8ab4754 then py-textindex merged (dac9870, gate pending). Recovery done so far:
+- zk-core, wikidata-8b-prep, release-prep-v010: ALL MERGED+PUSHED before the crash (main reached 8ab4754).
+- py-textindex: MERGED locally (dac9870), gate running. Fable-authored branch, Opus merge.
+- dict-spill / serve-wave-a2 / zk-xpath-ieee754-migration: had committed+dirty work → OPUS FINISHER AGENTS RELAUNCHED (running now).
+- zk-compose / zk-trace-engine / neon-intersect: 0 commits (died before committing) → NEED FULL RELAUNCH (not yet done — held to avoid over-parallelizing on Opus).
+- EC2: could NOT verify (AWS SSO token expired — `aws sso login --profile pss` to re-check). Prior handover says nothing was ever launched; the 8B run is gated on dict-spill so it never started. LOW risk but UNVERIFIED.
+
+## RESUME PROTOCOL if THIS session dies: (1) re-auth AWS + verify no sparq-hw-validation instance running; (2) check each worktree STATUS.md + `git log main..HEAD`; (3) gate+push merge-ready branches one at a time; (4) relaunch any 0-commit branches.
 
 ## MERGE QUEUE (exact, in order; gate each, push on green)
 1. zk-core: ALREADY MERGED on local main (unpushed); gate running at freeze time (`bash task bv9f3atvv`, expect ~712+/0 + wasm 1,643,095) → push jeswr main, remove ../sparq-zk-core, delete branch zk-core.
