@@ -322,6 +322,7 @@ fn sample_manifest() -> ProofManifest {
             from_slot: 2,
             to_proof: 1,
         }],
+        hidden_revocation: None,
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the scan commitment (salt- AND
     // status-bound) so the sample manifest passes the issuer-signature +
@@ -643,6 +644,7 @@ fn full_manifest_prove_verify_scan() {
             proof_hex: encode_artifacts(&art),
         }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     attest_all(&mut manifest, &test_issuer_sk(1), salt); // [OPUS-4.8] audit #3/#9/#12 (salt+status-bound)
     // [OPUS-4.8] audit #4: the verifier issues the nonce that the proof committed
@@ -758,6 +760,7 @@ fn filter_manifest(
             SubProof { inputs, proof_hex },
         ],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the honest scan (salt- AND status-bound)
     // so the #1/#2 forge tests reach the crypto gate (the FILTER forge they
@@ -1085,6 +1088,7 @@ fn nonce_binding_mismatch_rejected() {
             status_snapshots: vec![fixture_snapshot(false)],
             sub_proofs: vec![SubProof { inputs: scan.clone(), proof_hex: String::new() }],
             binding_edges: vec![],
+            hidden_revocation: None,
         };
         attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
         m
@@ -1168,6 +1172,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             status_snapshots: vec![fixture_snapshot(false)],
             sub_proofs: vec![SubProof { inputs: scan.clone(), proof_hex: proof_hex.into() }],
             binding_edges: vec![],
+            hidden_revocation: None,
         };
         attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
         m
@@ -1422,6 +1427,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -1449,6 +1455,7 @@ fn filter_reject_filter_add_on_scan_only() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -1476,6 +1483,7 @@ fn filter_reject_constant_swap_age_as_salary() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundPattern { pattern: 0 }) => {}
@@ -1523,6 +1531,7 @@ fn filter_reject_operand_slot_substitution() {
         ],
         // Edge points at proof 0 (salary scan) slot 2 — the WRONG column for ?age.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 2 }],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "age" => {}
@@ -1564,6 +1573,7 @@ fn filter_reject_false_verdict_row() {
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -1591,6 +1601,7 @@ fn filter_reject_unbindable_filter_fragment() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::Sparqzk(_)) => {}
@@ -1631,6 +1642,7 @@ fn filter_binding_happy_path_structure() {
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the scan (salt- AND status-bound).
     // `scan_inputs_for` commits under salt byte 9, so the attestation salt must
@@ -1693,6 +1705,7 @@ fn filter_reject_unproven_failing_row() {
         ],
         // Edge only for row 0 — row 1 has no true-verdict filter proof.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -1744,6 +1757,7 @@ fn filter_two_rows_both_gated_verifies() {
             BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 },
             BindingEdge { from_proof: 0, from_row: 1, from_slot: 2, to_proof: 2 },
         ],
+        hidden_revocation: None,
     };
     // [OPUS-4.8] audit #3/#9: attest the scan (salt-bound). `scan_inputs_for`
     // commits under salt byte 9.
@@ -1799,6 +1813,7 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     (m, commitment_fr, salt)
 }
@@ -1883,6 +1898,7 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::UnattestedCommitment { proof: 0, .. }) => {}
@@ -2199,6 +2215,7 @@ fn cross_graph_manifest(
             SubProof { inputs: scan_role.inputs, proof_hex: String::new() },
         ],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     // Salt- AND status-bound attestations for BOTH commitments (audit #3+#9+#12),
     // distinct salts, shared fixture status reference.
@@ -2722,6 +2739,7 @@ fn revocation_stale_status_list_rejected() {
         }],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     // The relying party only trusts version 5 (window 0): the old-version
     // snapshot is STALE.
@@ -2911,6 +2929,7 @@ fn revocation_within_window_verifies() {
         }],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     // now=5, window=3 => accepts [2, 5]; version 3 is fresh. The AUTHORITATIVE
     // snapshot for (list, version=3) is non-revoked (re-audit Option B: the bit is

@@ -21,13 +21,17 @@
 pub mod build;
 pub mod driver;
 pub mod manifest;
+pub mod revocation;
 pub mod toml;
 pub mod verifier;
 
 pub use manifest::{
     AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
-    ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
+    HiddenIndexRevocation, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot,
+    SubProof,
 };
+// [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
+pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
 // [OPUS-4.8] sq-aih: FileSeenNonces is the DURABLE (restart-surviving) store;
 // InMemorySeenNonces is NON-DURABLE / test-only.
