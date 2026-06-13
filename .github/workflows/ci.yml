@@ -114,16 +114,18 @@ jobs:
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
     # (W3C OWL WG test cases), the w3c/N3 community-group suite, and
-    # sparql11/entailment — run against sparq-reason by the
-    # sparq-inference-conformance binary. Current snapshot (2026-06): rdf-mt
-    # 48/48; OWL 2 RL 78 pass + 13 documented divergences / 0 fail; N3 1464
-    # pass + 4 divergences / 0 fail; sparql11/entailment 47 pass / 0 fail —
-    # overall 1637 pass + 17 documented divergences = 1654, 0 fail (100.0% of
+    # sparql11/entailment — run against sparq-reason — PLUS the W3C rdf-turtle
+    # suite run through the sparq Turtle parser (parse_to_triples, the B4
+    # rejection oracle) — all by the sparq-inference-conformance binary. Current
+    # snapshot (2026-06): rdf-mt 48/48; OWL 2 RL 78 pass + 13 documented
+    # divergences / 0 fail; N3 1464 pass + 4 divergences / 0 fail;
+    # sparql11/entailment 47 pass / 0 fail; W3C rdf-turtle 313 pass / 0 fail —
+    # overall 1950 pass + 17 documented divergences = 1967, 0 fail (100.0% of
     # run). Every divergence carries its rationale in the report;
     # research/inference-completeness-audit.md is the per-gap map. This job
     # GATES exactly like the SPARQL ratchet above: a drop below the count is a
     # conformance regression and fails CI. Never lower the ratchet.
-    name: Inference conformance (ratchet >= 1654 pass+divergence)
+    name: Inference conformance (ratchet >= 1967 pass+divergence)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -137,7 +139,7 @@ jobs:
         run: cat inference-conformance-report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Enforce ratchet (pass+divergence count must not regress)
         run: |
-          RATCHET=1654
+          RATCHET=1967
           # The Overall section emits:
           # **<N> pass / <M> fail / <D> documented divergence / <K> out-of-scope — ...**
           # (suite subtotals use the same shape, so parse the line after the
