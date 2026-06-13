@@ -53,21 +53,34 @@
 //!   hardening behind the SAME [`MpcBackend`] trait — see [`crate::backend`] doc
 //!   and PLAN M3/M4. We do NOT claim malicious security here.
 //!
-//! ## Randomness honesty note
+//! ## Randomness (sq-1vt: CSPRNG, resolved) [OPUS-4.8]
 //!
-//! The masking polynomial coefficients need randomness. This module's
-//! [`SeededRng`] is a deterministic SplitMix64 PRNG, used so the in-process
-//! multi-party SIMULATION (and its differential tests) are reproducible. **In a
-//! real deployment the dealer's coefficients MUST come from a cryptographically
-//! secure RNG** — a deterministic PRNG would make shares predictable and break
-//! confidentiality. This is flagged, not hidden: see [`SeededRng`]. No security
-//! is claimed for the PRNG itself; it stands in for the network/RNG layer that a
-//! production backend supplies.
+//! The masking polynomial coefficients and the equality-test mask need
+//! randomness, and that randomness is **security-critical**: if it is
+//! predictable, shares and masks become predictable and confidentiality
+//! collapses (sq-1vt). The randomness therefore comes through the [`crate::rng`]
+//! seam:
+//!
+//! - The **production / default** path ([`ShamirBackend::new`] →
+//!   [`ShamirBackend::dealer`]) mints a fresh [`crate::rng::SecureRng`] — a
+//!   ChaCha20 CSPRNG seeded from OS entropy — for each dealing session. Field
+//!   elements are drawn uniformly via rejection sampling (no modulo bias).
+//! - A **deterministic, seedable** path ([`ShamirBackend::new_seeded`], gated
+//!   behind `#[cfg(any(test, feature = "insecure-test-rng"))]`) drives the
+//!   in-process multi-party SIMULATION and its differential/stress tests
+//!   reproducibly. It is feature-gated out of normal builds: the real masking
+//!   path cannot reach the deterministic RNG. No security is claimed for it.
+//!
+//! Crucially the live RNG state lives on a short-lived [`ShamirDealer`], not on
+//! the `Clone`-able [`ShamirBackend`] config — so cloning a backend never
+//! duplicates (and thus reuses) a CSPRNG keystream. Each `dealer()` call gets
+//! independent randomness.
 
 use crate::backend::{BackendInfo, MpcBackend, TrustModel};
 use crate::field::Fp;
 use crate::holder::Holder;
 use crate::partial::{HolderId, MpcError, PartialResult};
+use crate::rng::{MpcRng, SecureRng};
 
 /// A single Shamir share: the polynomial evaluated at a party's nonzero point.
 /// `x` is the party index (1-based; the secret sits at `x = 0`), `y = f(x)`.
@@ -80,61 +93,74 @@ pub struct Share {
     pub y: Fp,
 }
 
-/// Deterministic SplitMix64 PRNG. **Simulation/testing only** — see the module
-/// "Randomness honesty note". A production backend MUST substitute a CSPRNG for
-/// the dealer's masking coefficients.
-#[derive(Debug, Clone)]
-pub struct SeededRng {
-    state: u64,
+/// How a [`ShamirBackend`] seeds the masking RNG for each dealing session.
+///
+/// This is a *descriptor*, not live RNG state — it is cheaply `Clone`/`Copy` and
+/// carries no keystream, so cloning a backend can never duplicate (and reuse) a
+/// CSPRNG. The live randomness is minted per session by [`ShamirBackend::dealer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RngSource {
+    /// **Production / default.** Each dealing session gets a fresh
+    /// [`SecureRng`] (ChaCha20 CSPRNG) seeded from OS entropy. This is the only
+    /// variant a default-feature build can construct (sq-1vt).
+    Os,
+    /// **Test/benchmark only.** Deterministic, seedable masking RNG for
+    /// reproducible simulation. Gated out of normal builds.
+    #[cfg(any(test, feature = "insecure-test-rng"))]
+    InsecureSeed(u64),
 }
 
-impl SeededRng {
-    /// New PRNG from a fixed seed (reproducible simulation).
-    pub fn new(seed: u64) -> Self {
-        SeededRng { state: seed }
-    }
-
-    /// Next field element (uniform-ish over `F_p` for simulation; NOT a security
-    /// guarantee — see module note).
-    fn next_fp(&mut self) -> Fp {
-        // SplitMix64.
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        Fp::new(z)
-    }
-}
-
-/// Honest-majority Shamir `t`-of-`n` secret-sharing backend.
+/// Honest-majority Shamir `t`-of-`n` secret-sharing backend (the immutable
+/// *configuration*).
 ///
 /// `n` = number of compute parties (= holders in the flatmate model); the
-/// privacy threshold is `t = ⌊(n-1)/2⌋` (honest majority). The backend is the
-/// *coordinator-free* description of the scheme; the in-process multi-party
-/// simulation that runs the parties is driven by [`MpcBackend::run_secure`] +
-/// the helpers below, which is what the differential tests exercise.
+/// privacy threshold is `t = ⌊(n-1)/2⌋` (honest majority). The backend holds NO
+/// live RNG state — only `n`, `t`, and the [`RngSource`] descriptor — so it is
+/// freely `Clone`-able without ever cloning a CSPRNG keystream. The masking
+/// randomness lives on the short-lived [`ShamirDealer`] minted by [`Self::dealer`].
+///
+/// The backend is the *coordinator-free* description of the scheme; the
+/// in-process multi-party simulation that runs the parties is driven by
+/// [`MpcBackend::run_secure`] + the helpers below, which is what the differential
+/// tests exercise.
 #[derive(Debug, Clone)]
 pub struct ShamirBackend {
     n: usize,
     t: usize,
-    rng: SeededRng,
+    rng_source: RngSource,
 }
 
 impl ShamirBackend {
-    /// Build an honest-majority backend for `n` parties (`n >= 2`). The privacy
-    /// threshold is set to the honest-majority maximum `t = ⌊(n-1)/2⌋`: any
+    /// Build a **production** honest-majority backend for `n` parties (`n >= 2`).
+    /// The privacy threshold is the honest-majority maximum `t = ⌊(n-1)/2⌋`: any
     /// `<= t` colluding parties learn nothing; reconstruction needs `>= t+1`.
     ///
-    /// `seed` fixes the simulation PRNG (see the module randomness note).
-    pub fn new(n: usize, seed: u64) -> Result<Self, MpcError> {
+    /// Masking randomness comes from a fresh OS-seeded ChaCha20 CSPRNG per
+    /// dealing session — the only RNG this constructor wires in (sq-1vt). There
+    /// is no seed parameter: a real masking RNG must not be predictable. For a
+    /// reproducible test simulation use [`Self::new_seeded`] (test-gated).
+    pub fn new(n: usize) -> Result<Self, MpcError> {
+        Self::with_source(n, RngSource::Os)
+    }
+
+    /// Build a backend whose masking RNG is a **deterministic, seedable**
+    /// SplitMix64 — **for reproducible tests / benchmarks ONLY**. Gated behind
+    /// `#[cfg(any(test, feature = "insecure-test-rng"))]` so the real protocol
+    /// cannot construct it. The masks it produces are predictable; never use it
+    /// for a real deployment (that is the sq-1vt weakness).
+    #[cfg(any(test, feature = "insecure-test-rng"))]
+    pub fn new_seeded(n: usize, seed: u64) -> Result<Self, MpcError> {
+        Self::with_source(n, RngSource::InsecureSeed(seed))
+    }
+
+    fn with_source(n: usize, rng_source: RngSource) -> Result<Self, MpcError> {
         if n < 2 {
             return Err(MpcError::Protocol(
                 "Shamir honest-majority backend needs n >= 2 parties".into(),
             ));
         }
         let t = (n - 1) / 2;
-        Ok(ShamirBackend { n, t, rng: SeededRng::new(seed) })
+        Ok(ShamirBackend { n, t, rng_source })
     }
 
     /// Number of compute parties.
@@ -148,16 +174,74 @@ impl ShamirBackend {
         self.t
     }
 
-    /// Draw one field element from the simulation PRNG (advances state). Used by
-    /// the equality-test mask. **Simulation only** — see the module randomness
-    /// note: production masks MUST come from a CSPRNG.
+    /// Mint a fresh [`ShamirDealer`] with **independent** masking randomness for
+    /// one dealing session. In production this seeds a brand-new OS-seeded
+    /// ChaCha20 CSPRNG — so two dealers from the same (or a cloned) backend draw
+    /// independent, unpredictable masks, never a reused keystream.
+    pub fn dealer(&self) -> ShamirDealer {
+        let rng: Box<dyn MpcRng> = match self.rng_source {
+            RngSource::Os => Box::new(SecureRng::from_os()),
+            #[cfg(any(test, feature = "insecure-test-rng"))]
+            RngSource::InsecureSeed(seed) => Box::new(crate::rng::InsecureTestRng::new(seed)),
+        };
+        ShamirDealer { n: self.n, t: self.t, rng }
+    }
+
+    /// Reconstruct the secret `f(0)` from `>= t+1` shares via Lagrange
+    /// interpolation. Fewer than `t+1` shares is a protocol error (the whole
+    /// point of the threshold). Shares must have distinct `x`. RNG-free.
+    pub fn reconstruct(&self, shares: &[Share]) -> Result<Fp, MpcError> {
+        reconstruct_at_zero(shares, self.t)
+    }
+}
+
+/// A short-lived dealer holding **live masking randomness** for one sharing
+/// session. It owns the CSPRNG (production) / deterministic PRNG (test) and is
+/// the only thing that draws masking field elements. Created by
+/// [`ShamirBackend::dealer`]; not `Clone` (its RNG state must not be duplicated).
+pub struct ShamirDealer {
+    n: usize,
+    t: usize,
+    rng: Box<dyn MpcRng>,
+}
+
+impl std::fmt::Debug for ShamirDealer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShamirDealer")
+            .field("n", &self.n)
+            .field("t", &self.t)
+            .field("rng", &"<live masking RNG>")
+            .finish()
+    }
+}
+
+impl ShamirDealer {
+    /// Number of compute parties (mirrors the backend's).
+    pub fn parties(&self) -> usize {
+        self.n
+    }
+
+    /// The privacy threshold `t` (mirrors the backend's).
+    pub fn threshold(&self) -> usize {
+        self.t
+    }
+
+    /// Draw one uniform field element from the masking RNG (advances state).
+    /// Used by the equality-test mask. Rejection-sampled for exact uniformity
+    /// (see [`crate::rng`]).
     pub fn draw_fp(&mut self) -> Fp {
         self.rng.next_fp()
     }
 
+    /// Draw a uniform **nonzero** field element. The equality mask must be
+    /// nonzero (a zero mask would open `m = 0` even for unequal keys).
+    pub fn draw_nonzero_fp(&mut self) -> Fp {
+        self.rng.next_nonzero_fp()
+    }
+
     /// Secret-share one field element into `n` shares on a fresh degree-`t`
-    /// polynomial `f` with `f(0) = secret`. Free coefficients are random (PRNG
-    /// in simulation; CSPRNG in production — see module note).
+    /// polynomial `f` with `f(0) = secret`. Free coefficients are uniform random
+    /// from the masking RNG (a CSPRNG in production — sq-1vt).
     pub fn share(&mut self, secret: Fp) -> Vec<Share> {
         // f(z) = secret + c_1 z + ... + c_t z^t.
         let mut coeffs = Vec::with_capacity(self.t + 1);
@@ -170,9 +254,7 @@ impl ShamirBackend {
             .collect()
     }
 
-    /// Reconstruct the secret `f(0)` from `>= t+1` shares via Lagrange
-    /// interpolation. Fewer than `t+1` shares is a protocol error (the whole
-    /// point of the threshold). Shares must have distinct `x`.
+    /// Reconstruct (RNG-free; delegates to the backend's Lagrange interpolation).
     pub fn reconstruct(&self, shares: &[Share]) -> Result<Fp, MpcError> {
         reconstruct_at_zero(shares, self.t)
     }
@@ -345,10 +427,11 @@ impl MpcBackend for ShamirBackend {
         // dedicated private-salary fragment.
         let private = holder.evaluate_local(PRIVATE_SALARY_FRAGMENT)?;
         let v = extract_single_integer(&private)?;
-        // A fresh sharing requires fresh randomness; clone the RNG state so the
-        // backend stays `&self` (the trait is immutable-self by design — the
-        // dealer's randomness is conceptually per-input).
-        let mut dealer = self.clone();
+        // A fresh sharing requires fresh, INDEPENDENT randomness. Mint a fresh
+        // dealer (production: a fresh OS-seeded CSPRNG — sq-1vt) rather than
+        // cloning RNG state, so per-input sharings never reuse a keystream. The
+        // trait stays `&self`; the dealer's randomness is per-input by design.
+        let mut dealer = self.dealer();
         Ok(vec![dealer.share(Fp::new(v))])
     }
 
@@ -435,9 +518,12 @@ mod tests {
 
     #[test]
     fn share_then_reconstruct_roundtrips() {
-        let mut b = ShamirBackend::new(4, 0xC0FFEE).unwrap();
+        // Use the seedable test RNG so the simulation is reproducible; the
+        // PRODUCTION path uses the OS-seeded CSPRNG (see `production_csprng_*`).
+        let b = ShamirBackend::new_seeded(4, 0xC0FFEE).unwrap();
+        let mut dealer = b.dealer();
         for secret in [0u64, 1, 42, 100_000, crate::field::P - 1] {
-            let shares = b.share(Fp::new(secret));
+            let shares = dealer.share(Fp::new(secret));
             assert_eq!(shares.len(), 4);
             // Full set reconstructs.
             assert_eq!(b.reconstruct(&shares).unwrap(), Fp::new(secret));
@@ -451,10 +537,37 @@ mod tests {
     fn fewer_than_threshold_plus_one_shares_cannot_reconstruct() {
         // t = 1, so a SINGLE share is below threshold: reconstruction must error,
         // not silently return a wrong/honest-looking value.
-        let mut b = ShamirBackend::new(4, 1).unwrap();
-        let shares = b.share(Fp::new(73));
+        let b = ShamirBackend::new_seeded(4, 1).unwrap();
+        let shares = b.dealer().share(Fp::new(73));
         let err = b.reconstruct(&shares[..1]).unwrap_err();
         assert!(matches!(err, MpcError::Protocol(_)));
+    }
+
+    #[test]
+    fn production_csprng_share_reconstruct_roundtrips() {
+        // The PRODUCTION path (OS-seeded ChaCha20 CSPRNG, sq-1vt) must still
+        // produce correct sharings: round-trip the secret through fresh dealers.
+        let b = ShamirBackend::new(4).unwrap();
+        for secret in [0u64, 1, 42, 100_000, crate::field::P - 1] {
+            let shares = b.dealer().share(Fp::new(secret));
+            assert_eq!(b.reconstruct(&shares).unwrap(), Fp::new(secret));
+        }
+    }
+
+    #[test]
+    fn production_csprng_two_dealers_use_independent_randomness() {
+        // sq-1vt unpredictability witness: two dealers minted from the SAME
+        // (production) backend must NOT produce identical shares for the same
+        // secret — each `dealer()` mints a fresh OS-seeded CSPRNG, so the masking
+        // polynomials differ. (Collision is cryptographically negligible.)
+        let b = ShamirBackend::new(5).unwrap(); // t = 2 → random coeffs present
+        let s1 = b.dealer().share(Fp::new(42));
+        let s2 = b.dealer().share(Fp::new(42));
+        // Both reconstruct to 42 ...
+        assert_eq!(b.reconstruct(&s1).unwrap(), Fp::new(42));
+        assert_eq!(b.reconstruct(&s2).unwrap(), Fp::new(42));
+        // ... but the share vectors differ (different random masking polynomials).
+        assert_ne!(s1, s2, "two production dealers reused the same masking randomness");
     }
 
     #[test]
@@ -464,9 +577,9 @@ mod tests {
         // valid polynomial through the 2 shares for any chosen f(0). We show the
         // 2 shares do not determine the secret by exhibiting two different
         // secrets whose sharings agree on the same 2 points.
-        let mut b = ShamirBackend::new(5, 7).unwrap();
+        let b = ShamirBackend::new_seeded(5, 7).unwrap();
         assert_eq!(b.threshold(), 2);
-        let shares_a = b.share(Fp::new(1000));
+        let shares_a = b.dealer().share(Fp::new(1000));
         // For ANY two of A's shares, a degree-2 poly through them + a third
         // chosen point reconstructs a DIFFERENT secret — i.e. 2 points underdet.
         let two = &shares_a[..2];
@@ -520,10 +633,10 @@ mod tests {
         let salaries = [30_000u64, 45_000, 28_000, 51_000];
         let plaintext_sum: u64 = salaries.iter().sum();
 
-        let mut dealer = ShamirBackend::new(4, 0xABCD).unwrap();
+        let mut dealer = ShamirBackend::new_seeded(4, 0xABCD).unwrap().dealer();
         let shared: Vec<ShareVec> = salaries.iter().map(|&s| dealer.share(Fp::new(s))).collect();
 
-        let backend = ShamirBackend::new(4, 0).unwrap(); // reconstruction is RNG-free
+        let backend = ShamirBackend::new(4).unwrap(); // reconstruction is RNG-free
         let summed = backend.run_secure(&shared).unwrap();
         let out = backend.reconstruct_disclosed(&summed).unwrap();
 
@@ -539,9 +652,9 @@ mod tests {
     #[test]
     fn secure_sum_zero_and_single() {
         // Edge: a single holder's "sum" is its own value; reconstructs to it.
-        let mut dealer = ShamirBackend::new(3, 5).unwrap();
+        let mut dealer = ShamirBackend::new_seeded(3, 5).unwrap().dealer();
         let one = vec![dealer.share(Fp::new(12345))];
-        let backend = ShamirBackend::new(3, 0).unwrap();
+        let backend = ShamirBackend::new(3).unwrap();
         let summed = backend.run_secure(&one).unwrap();
         let got = backend.reconstruct(&summed[0]).unwrap();
         assert_eq!(got, Fp::new(12345));
@@ -549,7 +662,7 @@ mod tests {
 
     #[test]
     fn n_too_small_is_a_protocol_error() {
-        assert!(matches!(ShamirBackend::new(1, 0), Err(MpcError::Protocol(_))));
+        assert!(matches!(ShamirBackend::new(1), Err(MpcError::Protocol(_))));
     }
 
     #[test]
@@ -560,7 +673,8 @@ mod tests {
         let alice = Holder::from_rdf("alice", &format!("{PFX} ex:alice ex:salary \"30000\"^^xsd:integer ."), "turtle").unwrap();
         let bob = Holder::from_rdf("bob", &format!("{PFX} ex:bob ex:salary \"45000\"^^xsd:integer ."), "turtle").unwrap();
 
-        let backend = ShamirBackend::new(2, 99).unwrap();
+        // Production backend (OS-seeded CSPRNG) — the round-trip is seed-agnostic.
+        let backend = ShamirBackend::new(2).unwrap();
         let mut sa = backend.share_private_input(&alice).unwrap();
         let sb = backend.share_private_input(&bob).unwrap();
         sa.extend(sb);

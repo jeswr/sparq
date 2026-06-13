@@ -49,7 +49,10 @@
 //!   It secret-shares a holder's private input, runs the secure cumulative-sum
 //!   aggregate (zero-round local addition), reconstructs only the disclosed
 //!   output, and supplies the secret-shared equality primitive the hidden-value
-//!   join uses. Semi-honest, simulation RNG — see [`shamir`] honesty notes.
+//!   join uses. Semi-honest. **Masking randomness is a CSPRNG** ([`rng`],
+//!   sq-1vt): the dealer's coefficients and the equality mask come from
+//!   OS-seeded ChaCha20; a deterministic PRNG is available only behind a
+//!   test-only feature gate.
 //! - [`join`] — **(§2 convention #6; §4.3 step 4; §5.2 Q3)** The [`GlobalJoin`]
 //!   trait + [`DisclosedKeyJoin`] (M2, crypto-free disclosed-key equi-join over
 //!   GLOBAL IRIs) AND [`HiddenValueJoin`] (M3): joining on a PRIVATE key via the
@@ -77,6 +80,9 @@ pub mod holder;
 pub mod join;
 pub mod partial;
 pub mod proof;
+// [OPUS-4.8] sq-1vt: the CSPRNG masking seam (production SecureRng + test-only
+// InsecureTestRng). The real protocol's secret-sharing randomness lives here.
+pub mod rng;
 pub mod shamir;
 
 pub use backend::{BackendInfo, MpcBackend, TrustModel};
@@ -85,4 +91,5 @@ pub use holder::{Holder, HolderResult};
 pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, JoinPlan};
 pub use partial::{HolderId, MpcError, PartialResult};
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
+pub use rng::{MpcRng, SecureRng};
 pub use shamir::{Share, ShamirBackend};
