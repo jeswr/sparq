@@ -64,10 +64,13 @@
 //!    snapshot for the same `(list, version)` byte-equals the authoritative one
 //!    (a tamper tripwire). A REVOKED bit, a STALE reference, a missing
 //!    AUTHORITATIVE snapshot, a disagreeing prover snapshot, or an
-//!    omitted/forged/mismatched reference all REJECT. Interim privacy note:
-//!    `index` is disclosed in the CLEAR (a linkability channel); the in-circuit
-//!    HIDDEN-index inclusion + bit-unset proof bound to the authoritative list
-//!    version is the documented privacy upgrade. See [`bind_revocation`].
+//!    omitted/forged/mismatched reference all REJECT. [OPUS-4.8] sq-ayv: a
+//!    credential may instead use the COMMITTED-index path — the issuer signs
+//!    `status_ref_commit_digest(H(list), index_commitment, version)` (a hiding
+//!    commitment to the index), the clear index is WITHHELD, and liveness is
+//!    checked by the hidden-index proof cross-bound to that commitment (so neither
+//!    the index nor the bit is disclosed). The clear-index path above is unchanged
+//!    for clear references. See [`bind_revocation`] / [`bind_hidden_revocation`].
 //!
 //! 4. **Freshness / single-use (audit #4).** [`verify_manifest`] takes a
 //!    VERIFIER-ISSUED fresh [`VerifierNonce`] (minted out of band, handed to the
@@ -112,7 +115,8 @@ use sparq_zk::field::{field_from_hex_str, field_to_be_bytes_32, field_to_hex, Fr
 // status reference (status_ref_digest over the disclosed list/index/version).
 use sparq_zk::sig::{
     commitment_message_with_status, holder_pop_message, public_key_from_hex, signature_from_hex,
-    status_list_id_to_field, status_ref_digest, verify as sig_verify, SignatureScheme,
+    status_list_id_to_field, status_ref_commit_digest, status_ref_digest, verify as sig_verify,
+    SignatureScheme,
 };
 use sparq_zk::verify::{
     fragment_filters, fragment_pattern_consts, fragment_patterns, recheck, variable_slots,
@@ -994,6 +998,28 @@ pub enum CheckError {
     /// `AttestedStatusRef`.
     // [OPUS-4.8] audit #12.
     RevocationReferenceMismatch { commitment: String },
+    /// [OPUS-4.8] sq-ayv: the status reference's index-disclosure MODE is malformed
+    /// — neither a clear `index` nor an `index_commitment` is present, or BOTH are
+    /// (the attestation's signed reference and the disclosed reference must each be
+    /// EXACTLY one of clear-index or committed-index, and the two must agree on the
+    /// mode). Rejected fail-closed: an ambiguous reference mode could let a prover
+    /// recompute the signed digest one way while the liveness check reads the other.
+    RevocationReferenceModeInvalid { commitment: String },
+    /// [OPUS-4.8] sq-ayv: a COMMITTED-index revocation reference (clear index
+    /// withheld) was disclosed but NO `manifest.hidden_revocation` proof is present
+    /// to check liveness against the authoritative root. The committed-index path
+    /// MOVES the liveness decision to the hidden-index proof; without it the
+    /// credential's liveness is unchecked, so this is rejected fail-closed
+    /// (revocation is NEVER skipped — either the clear-index bit check or the
+    /// hidden-index proof must run).
+    HiddenRevocationRequired { proof: usize },
+    /// [OPUS-4.8] sq-ayv: a `manifest.hidden_revocation` proof's PUBLIC index
+    /// commitment does NOT equal the ISSUER-SIGNED index commitment in
+    /// `manifest.revocation.index_commitment` (the cross-binding): the index proven
+    /// unset is not provably the index the issuer committed to. Rejected — a holder
+    /// could otherwise sign over a commitment to its REVOKED index and prove
+    /// bit-unset for a different (active) index.
+    HiddenRevocationIndexCommitmentMismatch,
     /// The relying party has NO AUTHORITATIVE status-list snapshot for the
     /// credential's (issuer-bound) revocation reference `(status_list, version)`
     /// (audit #12 / re-audit Option B): the verifier cannot AUTHENTICATE the
@@ -1268,6 +1294,18 @@ impl std::fmt::Display for CheckError {
             CheckError::RevocationReferenceMismatch { commitment } => write!(
                 f,
                 "commitment {commitment}: the disclosed manifest.revocation does not match the issuer-signed status reference (audit #12: index/version/list mismatch — the prover disclosed a different reference than the issuer signed)"
+            ),
+            CheckError::RevocationReferenceModeInvalid { commitment } => write!(
+                f,
+                "commitment {commitment}: the status reference's index-disclosure mode is malformed (sq-ayv: must be EXACTLY one of clear index or index_commitment, and the disclosed reference must agree with the issuer-signed one — both-set, neither-set, or a clear/committed mode mismatch is rejected fail-closed)"
+            ),
+            CheckError::HiddenRevocationRequired { proof } => write!(
+                f,
+                "scan sub-proof {proof}: a committed-index revocation reference (clear index withheld) requires a manifest.hidden_revocation proof to check liveness against the authoritative root (sq-ayv: the committed-index path moves the liveness decision to the hidden-index proof; revocation is never skipped)"
+            ),
+            CheckError::HiddenRevocationIndexCommitmentMismatch => write!(
+                f,
+                "the hidden-revocation proof's public index commitment does not equal the issuer-signed index commitment (sq-ayv cross-binding: the index proven unset must be the index the issuer committed to)"
             ),
             CheckError::StatusSnapshotMissing { status_list, version } => write!(
                 f,
@@ -1592,7 +1630,20 @@ pub fn prefilter_manifest_structure(
     // attested commitment to the proved statement. The issuer signature ALSO
     // binds the credential's status-list reference (audit #12), so a scan-covering
     // attestation that omits/forges the reference is rejected here.
-    bind_issuer_attestations(manifest, trusted_key_set)?;
+    //
+    // [OPUS-4.8] sq-xxg: a scan commitment may be covered EITHER by a clear
+    // attestation OR by a hidden-issuer proof (when the relying party enabled the
+    // hidden path). Compute the STRUCTURALLY hidden-covered commitments so the
+    // clear attestation is treated as NOT-REQUIRED for them; the fail-closed
+    // either-clear-or-hidden / never-neither rule is enforced inside
+    // `bind_issuer_attestations`. The hidden proof itself is cryptographically
+    // verified by `bind_hidden_issuer_attestations` in the bb stage of
+    // `verify_manifest` (which binds its public `key_set_root` to the relying
+    // party's authoritative KeySet and its `m` to the issuer-signed message), so a
+    // hidden-only commitment is no less attested than a clear one — only WHICH
+    // issuer signed is hidden.
+    let hidden_covered = hidden_issuer_covered_commitments(manifest, trusted_key_set);
+    bind_issuer_attestations(manifest, trusted_key_set, &hidden_covered)?;
 
     // --- Stage 2f: revocation / freshness (audit #12). ---
     // The status reference is now issuer-bound (stage 2d); check the credential's
@@ -1607,7 +1658,8 @@ pub fn prefilter_manifest_structure(
 /// Stage 2d: bind every scan commitment to an issuer signature whose key is in
 /// the EXTERNAL trusted key-set `K` (audit #3, soundness fix for codex #1). For
 /// each `commitments[g]` of each scan sub-proof:
-/// - there MUST be a `commitment_attestations` entry over that commitment value,
+/// - there MUST be a `commitment_attestations` entry over that commitment value
+///   OR a hidden-issuer proof covering it (sq-xxg, see below),
 /// - its signature MUST verify under its declared `issuer_public_key`,
 /// - that key MUST be a member of the EXTERNAL `trusted_key_set` (the relying
 ///   party's argument — NEVER `manifest.key_set`),
@@ -1616,6 +1668,27 @@ pub fn prefilter_manifest_structure(
 ///   must be internally consistent with the attestations actually proven. The
 ///   accept decision stays anchored on the external K (this consistency rule is
 ///   ADDED to, never substituted for, the external-K check).
+///
+/// # sq-xxg: clear attestation is OPTIONAL when a hidden-issuer proof covers it
+/// `hidden_covered` is the set of commitment-hex keys for which the manifest
+/// carries a `hidden_issuer_attestations` entry AND the relying party enabled the
+/// hidden-issuer path. For a commitment in this set, the clear-key
+/// `commitment_attestations` entry is NOT required: the hidden-issuer proof (whose
+/// public `key_set_root` is bound to the relying party's authoritative KeySet, and
+/// whose `m` is the issuer-signed message, both checked cryptographically by
+/// [`bind_hidden_issuer_attestations`] in the bb stage) is the attestation. The
+/// privacy gain is that WHICH trusted issuer signed is hidden; the soundness
+/// guarantee ("signed by SOME key in the relying party's K over this committed
+/// graph's status-bound message") is unchanged.
+///
+/// FAIL-CLOSED (either-clear-or-hidden, NEVER neither): a commitment with NEITHER
+/// a clear attestation NOR a hidden-issuer entry is rejected
+/// ([`CheckError::UnattestedCommitment`]). A commitment WITH a clear attestation
+/// is still fully checked here (key ∈ K, signature, salt, status) regardless of
+/// any hidden entry — the hidden path only RELAXES the *requirement* for a clear
+/// entry, it never relaxes the checks applied to a clear entry that IS present.
+/// So no commitment can go unattested, and a hidden-only commitment is gated by
+/// the (mandatory, fail-closed) bb hidden-issuer verification.
 ///
 /// # The codex #1 soundness fix
 /// Previously the trust anchor was `manifest.key_set` — PROVER-supplied. A
@@ -1636,6 +1709,7 @@ pub fn prefilter_manifest_structure(
 fn bind_issuer_attestations(
     manifest: &ProofManifest,
     trusted_key_set: &KeySet,
+    hidden_covered: &BTreeSet<String>,
 ) -> Result<(), CheckError> {
     // The prover's declared key_set may NARROW but never WIDEN the external trust
     // anchor: every key it lists must already be in the external K. (A
@@ -1674,6 +1748,33 @@ fn bind_issuer_attestations(
                 a.commitment.to_field().is_some() && a.commitment.to_field() == c_field
             });
             let Some(att) = att else {
+                // [OPUS-4.8] sq-xxg: no CLEAR attestation. This is acceptable ONLY
+                // if a hidden-issuer proof covers this commitment (and the relying
+                // party enabled the hidden path) — the fail-closed
+                // either-clear-or-hidden / never-neither rule. The hidden proof is
+                // cryptographically verified by `bind_hidden_issuer_attestations`
+                // (bb stage), so a hidden-covered commitment is fully attested
+                // there; here we only RELAX the clear-entry requirement. A
+                // commitment covered by NEITHER is rejected as unattested.
+                if let Some(c_fr) = c_field {
+                    if hidden_covered.contains(&field_to_hex(&c_fr)) {
+                        // The hidden-only commitment still participates in the
+                        // audit-#9 salt-uniqueness check (the Q6 cross-graph
+                        // bnode-correlation channel applies to ANY committed graph
+                        // a verified scan drew from, hidden-attested or clear). Its
+                        // salt is the one the verifier uses to recompute the
+                        // issuer-signed `m` (resolve_commitment_salt). If no salt is
+                        // disclosed for a hidden-only commitment, the message cannot
+                        // be recomputed and the bb hidden-issuer gate rejects it as
+                        // unreferenced (fail-closed) — so we record only a present,
+                        // parseable salt here.
+                        if let Some(salt_fr) = resolve_commitment_salt(manifest, &c_fr) {
+                            referenced_salt
+                                .insert(field_to_hex(&c_fr), field_to_hex(&salt_fr));
+                        }
+                        continue;
+                    }
+                }
                 return Err(CheckError::UnattestedCommitment {
                     proof: pi,
                     commitment: c.0.clone(),
@@ -1767,19 +1868,17 @@ fn bind_issuer_attestations(
             let Some(rev) = &manifest.revocation else {
                 return Err(CheckError::RevocationReferenceMissing { proof: pi });
             };
-            // The disclosed reference index/version MUST equal what the issuer
-            // signed (the attestation's `AttestedStatusRef`). A mismatch means the
-            // prover disclosed a different reference than was signed (e.g. an
-            // index whose bit is unset); reject explicitly. (Even without this
-            // explicit check the digest below would diverge and fail the
-            // signature, but reporting the precise reason aids the relying party.)
-            if rev.index != att_status.index || rev.version != att_status.version {
-                return Err(CheckError::RevocationReferenceMismatch {
-                    commitment: c.0.clone(),
-                });
-            }
+            // The disclosed reference MUST equal what the issuer signed (the
+            // attestation's `AttestedStatusRef`), in the SAME disclosure mode. A
+            // mismatch means the prover disclosed a different reference than was
+            // signed (e.g. an index/commitment whose bit is unset); reject
+            // explicitly. [OPUS-4.8] sq-ayv: `resolve_status_ref` handles BOTH the
+            // clear-index (audit #12) and committed-index paths and recomputes the
+            // issuer-signed `status_ref` over the disclosed value the issuer signed
+            // (clear index OR index commitment).
             let list_id_fr = status_list_id_to_field(&rev.status_list);
-            let status_ref = status_ref_digest(&list_id_fr, rev.index, rev.version);
+            let (status_ref, _mode) =
+                resolve_status_ref(rev, att_status, &list_id_fr, &c.0)?;
             let message =
                 commitment_message_with_status(&commitment_fr, &salt_fr, &status_ref);
             let ok = SignatureScheme::from_cryptosuite_iri(&att.cryptosuite).is_some()
@@ -1832,6 +1931,146 @@ fn bind_issuer_attestations(
         }
     }
     Ok(())
+}
+
+/// The set of commitment-hex keys (canonical `field_to_hex`) for which a CLEAR
+/// issuer attestation may be withheld because a HIDDEN-ISSUER proof covers them
+/// (sq-xxg). A commitment is hidden-covered iff (a) the relying party ENABLED the
+/// hidden-issuer path (`KeySet::with_hidden_issuer_depth`) AND (b) the manifest
+/// carries a `hidden_issuer_attestations` entry for it.
+///
+/// This is a STRUCTURAL coverage set only — it does NOT verify the hidden proof
+/// (that is the bb-stage [`bind_hidden_issuer_attestations`], which binds the
+/// proof's public `key_set_root` to the authoritative KeySet and its `m` to the
+/// issuer-signed message, and rejects a dangling/forged/unreferenced entry). So a
+/// commitment in this set is treated as "clear attestation not required" by the
+/// structural [`bind_issuer_attestations`], but is still gated by the mandatory,
+/// fail-closed bb hidden-issuer verification before `verify_manifest` accepts.
+///
+/// When the relying party did NOT enable the hidden path, this returns the empty
+/// set, so every commitment then requires a clear attestation exactly as before
+/// (a manifest carrying hidden entries against a non-enabled policy is separately
+/// rejected by `bind_hidden_issuer_attestations` with `HiddenIssuerNotEnabled`).
+// [OPUS-4.8] sq-xxg: structural hidden-issuer coverage set (clear-attestation
+// optionality). Soundness rests on the bb gate; this only relaxes the structural
+// clear-entry requirement and never lets a commitment go uncovered (either-clear-
+// or-hidden, never-neither — enforced in `bind_issuer_attestations`).
+fn hidden_issuer_covered_commitments(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+) -> BTreeSet<String> {
+    if trusted_key_set.hidden_issuer_depth().is_none() {
+        // The hidden path is disabled; no commitment may withhold its clear
+        // attestation. (Any hidden entry present is rejected fail-closed by the
+        // bb-stage gate with HiddenIssuerNotEnabled.)
+        return BTreeSet::new();
+    }
+    manifest
+        .hidden_issuer_attestations
+        .iter()
+        .filter_map(|hi| hi.commitment.to_field().map(|f| field_to_hex(&f)))
+        .collect()
+}
+
+/// Whether a status reference uses the sq-ayv COMMITTED-index path (the clear
+/// index is withheld and a hiding `index_commitment` is bound) vs the audit-#12
+/// CLEAR-index path. Determined by the ATTESTATION's signed reference
+/// (`AttestedStatusRef`), which the issuer controls — never a prover claim alone.
+// [OPUS-4.8] sq-ayv.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusRefMode {
+    /// Clear-index (audit #12): the issuer signed `status_ref_digest(list, index,
+    /// version)`; liveness is the clear-index bit check.
+    Clear,
+    /// Committed-index (sq-ayv): the issuer signed
+    /// `status_ref_commit_digest(list, index_commitment, version)`; liveness is the
+    /// hidden-index proof cross-bound to that commitment.
+    Committed,
+}
+
+/// Resolve the issuer-signed `status_ref` field element AND the disclosure mode
+/// from the attestation's signed reference (`att_status`) cross-checked against
+/// the disclosed `rev` reference (sq-ayv). Fail-closed:
+/// - the ATTESTED reference must be EXACTLY one of clear `index` / committed
+///   `index_commitment` (both-set or neither-set => `RevocationReferenceModeInvalid`);
+/// - the DISCLOSED `rev` must agree on the same mode and value (a mismatch or a
+///   mode disagreement => the named error). The clear-index path stays byte-for-byte
+///   what audit #12 did; the committed path recomputes the digest over the disclosed
+///   `index_commitment` (which the issuer signed, never the clear index).
+///
+/// Returns `(status_ref_fr, mode)`. `list_id_fr` is the caller-hashed list IRI.
+// [OPUS-4.8] sq-ayv: mode-aware status-reference resolution.
+fn resolve_status_ref(
+    rev: &crate::manifest::RevocationStatus,
+    att_status: &crate::manifest::AttestedStatusRef,
+    list_id_fr: &Fr,
+    commitment_hex: &str,
+) -> Result<(Fr, StatusRefMode), CheckError> {
+    let att_committed = att_status.index_commitment.is_some();
+    let att_clear = att_status.index.is_some();
+    // The ATTESTED reference must be EXACTLY one mode.
+    if att_committed == att_clear {
+        return Err(CheckError::RevocationReferenceModeInvalid {
+            commitment: commitment_hex.to_string(),
+        });
+    }
+    if att_committed {
+        // Committed-index (sq-ayv). The disclosed reference must withhold the clear
+        // index AND disclose a matching commitment + version.
+        let att_ic_hex = att_status
+            .index_commitment
+            .as_ref()
+            .expect("att_committed");
+        let Some(rev_ic) = &rev.index_commitment else {
+            return Err(CheckError::RevocationReferenceModeInvalid {
+                commitment: commitment_hex.to_string(),
+            });
+        };
+        // A disclosed clear index alongside a committed reference is a mode
+        // disagreement (the index must be withheld on the committed path).
+        if rev.index.is_some() {
+            return Err(CheckError::RevocationReferenceModeInvalid {
+                commitment: commitment_hex.to_string(),
+            });
+        }
+        // The disclosed commitment must equal the issuer-signed one (compare as
+        // field elements so 0x-padding cannot slip a different value past), and
+        // the version must match.
+        let (Some(att_ic_fr), Some(rev_ic_fr)) = (att_ic_hex.to_field(), rev_ic.to_field())
+        else {
+            return Err(CheckError::RevocationReferenceModeInvalid {
+                commitment: commitment_hex.to_string(),
+            });
+        };
+        if att_ic_fr != rev_ic_fr || rev.version != att_status.version {
+            return Err(CheckError::RevocationReferenceMismatch {
+                commitment: commitment_hex.to_string(),
+            });
+        }
+        let status_ref = status_ref_commit_digest(list_id_fr, &att_ic_fr, att_status.version);
+        Ok((status_ref, StatusRefMode::Committed))
+    } else {
+        // Clear-index (audit #12), unchanged. The disclosed reference must carry the
+        // same clear index + version and NOT carry a commitment.
+        let att_index = att_status.index.expect("att_clear");
+        let Some(rev_index) = rev.index else {
+            return Err(CheckError::RevocationReferenceMismatch {
+                commitment: commitment_hex.to_string(),
+            });
+        };
+        if rev.index_commitment.is_some() {
+            return Err(CheckError::RevocationReferenceModeInvalid {
+                commitment: commitment_hex.to_string(),
+            });
+        }
+        if rev_index != att_index || rev.version != att_status.version {
+            return Err(CheckError::RevocationReferenceMismatch {
+                commitment: commitment_hex.to_string(),
+            });
+        }
+        let status_ref = status_ref_digest(list_id_fr, rev_index, att_status.version);
+        Ok((status_ref, StatusRefMode::Clear))
+    }
 }
 
 /// Stage 2f: revocation / freshness check (audit #12). PRECONDITION:
@@ -1893,18 +2132,26 @@ fn bind_issuer_attestations(
 /// carries `hidden_revocation` and the policy enables it, that proof is the
 /// index-hiding liveness evidence.
 ///
-/// HONEST RESIDUAL GAP: this clear-index check ALSO runs (it is the always-on
-/// soundness floor), AND `bind_issuer_attestations` still requires the manifest's
-/// clear `RevocationStatus` (issuer-bound via `status_ref_digest(H(list), index,
-/// version)`, which embeds the index in the clear). So at this layer a privacy-
-/// seeking holder still discloses its index through the mandatory issuer-bound
-/// reference, even when it ALSO presents the hidden-index proof. Fully removing
-/// the leak requires the ISSUER-ATTESTATION path to bind a COMMITMENT to the index
-/// (not the clear index) — a signature-scheme change in `sparq_zk::sig` — so the
-/// hidden-index circuit can be the sole liveness evidence with no clear reference.
-/// The circuit + verifier binding (the ZK-hard part) are done; the
-/// attestation-side index-hiding is the documented follow-up. See
-/// [`bind_hidden_revocation`].
+/// # sq-ayv: the residual index leak is now CLOSED (committed-index path)
+/// The index-leak gap is resolved. A credential may use the COMMITTED-index path:
+/// the issuer signs `status_ref_commit_digest(H(list), index_commitment, version)`
+/// — a HIDING commitment to the index, not the clear index — so the clear index is
+/// withheld from every signed object AND disclosed field (`RevocationStatus.index`
+/// is `None`). In that mode this function does NOT run the clear bit check (there
+/// is no clear index); instead it REQUIRES a hidden-index proof
+/// ([`CheckError::HiddenRevocationRequired`]) whose in-circuit cross-binding ties
+/// the proven-unset index to the issuer-signed commitment ([`bind_hidden_revocation`]).
+/// So a hidden-revocation presentation discloses neither the index nor the liveness
+/// bit, while revocation is still checked against the authoritative root (never
+/// skipped). The CLEAR-index path below remains unchanged for clear references (the
+/// always-on soundness floor); a relying party that does not need index-hiding can
+/// keep using it.
+///
+/// HONEST REMAINING DISCLOSURE: the status-list IRI and the `version` are still
+/// disclosed in the clear (both issuer-bound); only the index + liveness bit are
+/// hidden on the committed path. The dense depth-10 host Merkle builder still
+/// bounds the representative list size (the sparse-commitment scope note is
+/// unchanged — see [`crate::revocation`]).
 // [OPUS-4.8] audit #12: verifier-side revocation / freshness check.
 // [OPUS-4.8] audit #12 re-audit (Option B): the bit decision reads the
 // AUTHORITATIVE (relying-party-resolved) snapshot, never the prover's bytes.
@@ -1938,18 +2185,47 @@ fn bind_revocation(
             version: rev.version,
         });
     };
-    // Liveness (THE security decision): the credential's status bit must be UNSET
-    // IN THE AUTHORITATIVE snapshot (out-of-range reads as SET — fail closed).
-    // This reads the relying party's OWN authenticated bytes, so the verdict is
-    // identical regardless of what snapshot (forged all-zero or otherwise) the
-    // prover attached — the re-audit break is closed here. Checked BEFORE the
-    // tamper tripwire so a genuinely-revoked credential is reported as REVOKED no
-    // matter what the prover disclosed.
-    if authoritative.bit(rev.index) {
-        return Err(CheckError::CredentialRevoked {
-            status_list: rev.status_list.clone(),
-            index: rev.index,
-        });
+    // [OPUS-4.8] sq-ayv: the index-disclosure mode. A COMMITTED-index reference
+    // (clear index withheld, `index_commitment` present) MOVES the liveness
+    // decision to the hidden-index proof (`bind_hidden_revocation`, bb stage),
+    // which proves bit-unset against THIS authoritative root and cross-binds the
+    // index commitment. The clear bit-read below cannot run (there is no clear
+    // index), so we REQUIRE a hidden-revocation proof here (fail-closed —
+    // revocation is never skipped) and defer the bit decision to it.
+    match (rev.index, &rev.index_commitment) {
+        (None, Some(_)) => {
+            // Committed-index path: a hidden-revocation proof MUST be present (its
+            // cryptographic bit-unset + cross-binding verification is the liveness
+            // gate, run in the bb stage). Without it, liveness is unchecked.
+            if manifest.hidden_revocation.is_none() {
+                return Err(CheckError::HiddenRevocationRequired { proof: 0 });
+            }
+            // The authoritative snapshot's existence + freshness are already
+            // checked above; the bit-unset decision happens in bind_hidden_revocation
+            // against the root derived from this same authoritative snapshot.
+        }
+        (Some(index), None) => {
+            // Clear-index path (audit #12), unchanged. Liveness (THE security
+            // decision): the credential's status bit must be UNSET IN THE
+            // AUTHORITATIVE snapshot (out-of-range reads as SET — fail closed). This
+            // reads the relying party's OWN authenticated bytes, so the verdict is
+            // identical regardless of what snapshot the prover attached.
+            if authoritative.bit(index) {
+                return Err(CheckError::CredentialRevoked {
+                    status_list: rev.status_list.clone(),
+                    index,
+                });
+            }
+        }
+        _ => {
+            // Neither or both disclosed: a malformed reference mode. (The
+            // attestation-side check `resolve_status_ref` already enforces the mode
+            // for status-bound scans; this guards a `revocation` with no scan
+            // covering it, fail-closed.)
+            return Err(CheckError::RevocationReferenceModeInvalid {
+                commitment: rev.status_list.clone(),
+            });
+        }
     }
     // Tamper tripwire: the authoritative bit is UNSET, but if the prover ALSO
     // disclosed a snapshot for this exact (list, version) it MUST byte-equal the
@@ -2079,26 +2355,61 @@ fn bind_hidden_revocation(
         return Err(CheckError::HiddenRevocationRootMismatch);
     }
 
-    // Cryptographic gate: reconstruct the public inputs (challenge, root) from the
-    // AUTHORITATIVE root (NOT the prover's declared bytes — byte-equal above, but
-    // we feed our own to be end-to-end authentic), recompute the canonical vk, and
-    // bb verify. The prover's bundled vk / public_inputs are never trusted (audit
-    // #2 discipline, mirrored here).
+    // [OPUS-4.8] sq-ayv: the index commitment the proof cross-binds. The TRUST
+    // ANCHOR is the ISSUER-SIGNED commitment in `manifest.revocation.index_commitment`
+    // (validated under the issuer signature in `bind_issuer_attestations` /
+    // `resolve_status_ref`), NOT the prover's declared `hidden.index_commitment`.
+    // The `revoke_unset_d{depth}` member ALWAYS exposes an index_commitment public
+    // input now (sq-ayv), so a hidden-revocation proof REQUIRES an issuer-signed
+    // index commitment to bind it to — a hidden proof without one is rejected
+    // fail-closed (it would be a free-floating bit-unset over an unbound index).
+    let Some(rev_ic_hex) = &rev.index_commitment else {
+        return Err(CheckError::HiddenRevocationIndexCommitmentMismatch);
+    };
+    let Some(auth_index_commitment) = rev_ic_hex.to_field() else {
+        return Err(CheckError::HiddenRevocationIndexCommitmentMismatch);
+    };
+    // The proof's DECLARED public index commitment must byte-equal the issuer-signed
+    // one (the prover cannot prove against a commitment the issuer did not sign).
+    let Some(declared_ic) = hidden
+        .index_commitment
+        .as_ref()
+        .and_then(|h| h.to_field())
+    else {
+        return Err(CheckError::HiddenRevocationIndexCommitmentMismatch);
+    };
+    if declared_ic != auth_index_commitment {
+        return Err(CheckError::HiddenRevocationIndexCommitmentMismatch);
+    }
+
+    // Cryptographic gate: reconstruct the public inputs (challenge, root,
+    // index_commitment) from the AUTHORITATIVE root + the ISSUER-SIGNED index
+    // commitment (NOT the prover's declared bytes — byte-equal above, but we feed
+    // our own to be end-to-end authentic), recompute the canonical vk, and bb
+    // verify. The prover's bundled vk / public_inputs are never trusted (audit #2
+    // discipline, mirrored here). The in-circuit cross-binding asserts the proof's
+    // index_commitment is a commitment to the SAME index proven bit-unset, so the
+    // index the issuer committed to is the one shown active.
     let blob = hex_decode(&hidden.proof_hex).ok_or(CheckError::HiddenRevocationMalformedProof)?;
     let art = decode_artifacts(&blob).ok_or(CheckError::HiddenRevocationMalformedProof)?;
 
-    // Public-input layout for revoke_unset_d{depth} main: challenge, root (two
-    // 32-byte BE field words, declaration order).
-    let mut reconstructed: Vec<u8> = Vec::with_capacity(64);
+    // Public-input layout for revoke_unset_d{depth} main: challenge, root,
+    // index_commitment (three 32-byte BE field words, declaration order).
+    let mut reconstructed: Vec<u8> = Vec::with_capacity(96);
     let challenge_fr = challenge
         .to_field()
         .ok_or(CheckError::HiddenRevocationMalformedProof)?;
     reconstructed.extend_from_slice(&field_to_be_bytes_32(&challenge_fr));
     reconstructed.extend_from_slice(&field_to_be_bytes_32(&auth_root));
+    reconstructed.extend_from_slice(&field_to_be_bytes_32(&auth_index_commitment));
     if reconstructed != art.public_inputs {
-        // The proof's committed public inputs (challenge + root) do not match the
-        // verifier's nonce + authoritative root: a different challenge or a
-        // different root than the authoritative one.
+        // The proof's committed public inputs (challenge + root + index_commitment)
+        // do not match the verifier's nonce + authoritative root + issuer-signed
+        // commitment. Diagnose the index-commitment word distinctly.
+        let pi = &art.public_inputs;
+        if pi.len() == 96 && pi[64..96] != field_to_be_bytes_32(&auth_index_commitment) {
+            return Err(CheckError::HiddenRevocationIndexCommitmentMismatch);
+        }
         return Err(CheckError::HiddenRevocationRootMismatch);
     }
 
@@ -2255,15 +2566,44 @@ fn bind_hidden_issuer_attestations(
     Ok(())
 }
 
+/// The per-graph salt the verifier uses to recompute a scan commitment's
+/// issuer-signed message, resolved from EITHER a clear [`CommitmentAttestation`]
+/// over `c_fr` OR — for a HIDDEN-ONLY commitment (sq-xxg) — the
+/// [`HiddenIssuerAttestation`]'s own `salt`. The clear attestation's salt is
+/// preferred when present (the additive mode); the hidden entry's salt is the
+/// fallback so a commitment with no clear attestation can still have its `m`
+/// recomputed. `None` if neither source supplies a parseable salt.
+// [OPUS-4.8] sq-xxg: salt source for hidden-only message reconstruction.
+fn resolve_commitment_salt(manifest: &ProofManifest, c_fr: &Fr) -> Option<Fr> {
+    // Prefer the clear attestation's salt (the original sq-z9l additive path).
+    if let Some(att) = manifest.commitment_attestations.iter().find(|a| {
+        a.commitment.to_field().is_some() && a.commitment.to_field() == Some(*c_fr)
+    }) {
+        if let Some(salt_hex) = &att.salt {
+            if let Some(salt_fr) = salt_hex.to_field() {
+                return Some(salt_fr);
+            }
+        }
+    }
+    // Fall back to a hidden-issuer entry's salt (the hidden-only case).
+    manifest
+        .hidden_issuer_attestations
+        .iter()
+        .find(|hi| hi.commitment.to_field() == Some(*c_fr))
+        .and_then(|hi| hi.salt.as_ref())
+        .and_then(|salt_hex| salt_hex.to_field())
+}
+
 /// The issuer-signed message for every commitment a VERIFIED scan sub-proof
 /// references, keyed by canonical commitment hex (sq-z9l). The message is
 /// `commitment_message_with_status(C(G), salt, status_ref_digest(H(list), index,
 /// version))` — the SAME message [`bind_issuer_attestations`] verifies the clear
 /// signature over, recomputed from the disclosed (prefilter-validated, so
-/// issuer-bound) attestation salt + revocation reference. Used by the
+/// issuer-bound) salt + revocation reference. The salt is resolved via
+/// [`resolve_commitment_salt`], so a HIDDEN-ONLY commitment (no clear attestation,
+/// salt carried on the hidden entry — sq-xxg) is also covered. Used by the
 /// hidden-issuer gate to bind each proof's PUBLIC `m` to a specific committed
-/// graph. Errors if a referenced commitment lacks the salt/reference the prefilter
-/// guarantees (defensive — should not happen post-prefilter).
+/// graph.
 fn scan_referenced_messages(
     manifest: &ProofManifest,
 ) -> Result<std::collections::BTreeMap<String, Fr>, CheckError> {
@@ -2274,24 +2614,45 @@ fn scan_referenced_messages(
         return Ok(out);
     };
     let list_id_fr = status_list_id_to_field(&rev.status_list);
-    let status_ref = status_ref_digest(&list_id_fr, rev.index, rev.version);
+    // [OPUS-4.8] sq-ayv: derive the status reference in the mode the credential
+    // uses (clear index OR committed index), matching the message
+    // `bind_issuer_attestations` verified the issuer signature over.
+    let Some(status_ref) = status_ref_from_revocation(rev, &list_id_fr) else {
+        return Ok(out);
+    };
     for sp in &manifest.sub_proofs {
         let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
             continue;
         };
         for c in commitments {
             let Some(c_fr) = c.to_field() else { continue };
-            let att = manifest.commitment_attestations.iter().find(|a| {
-                a.commitment.to_field().is_some() && a.commitment.to_field() == Some(c_fr)
-            });
-            let Some(att) = att else { continue };
-            let Some(salt_hex) = &att.salt else { continue };
-            let Some(salt_fr) = salt_hex.to_field() else { continue };
+            let Some(salt_fr) = resolve_commitment_salt(manifest, &c_fr) else { continue };
             let m = commitment_message_with_status(&c_fr, &salt_fr, &status_ref);
             out.insert(field_to_hex(&c_fr), m);
         }
     }
     Ok(out)
+}
+
+/// Derive the issuer-signed `status_ref` field element from the DISCLOSED
+/// revocation reference's index-disclosure mode (sq-ayv): clear index =>
+/// [`status_ref_digest`]; committed index => [`status_ref_commit_digest`]. `None`
+/// if the reference's mode is malformed (neither/both set, or an unparseable
+/// commitment). The disclosed reference has ALREADY been cross-checked against the
+/// issuer signature by `bind_issuer_attestations`, so deriving from it here yields
+/// the genuine issuer-signed message.
+// [OPUS-4.8] sq-ayv.
+fn status_ref_from_revocation(
+    rev: &crate::manifest::RevocationStatus,
+    list_id_fr: &Fr,
+) -> Option<Fr> {
+    match (rev.index, &rev.index_commitment) {
+        (Some(index), None) => Some(status_ref_digest(list_id_fr, index, rev.version)),
+        (None, Some(ic_hex)) => ic_hex
+            .to_field()
+            .map(|ic| status_ref_commit_digest(list_id_fr, &ic, rev.version)),
+        _ => None,
+    }
 }
 
 /// Normalize a hex key for set membership: strip an optional `0x` prefix and

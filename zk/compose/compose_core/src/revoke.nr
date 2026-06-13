@@ -52,7 +52,13 @@
 //! One `h2` (~74 gates) per tree level, `D` levels -- `revoke_unset_d10` is ~10
 //! permutations plus the `D`-bit decomposition. Tiny next to the scan family.
 
-use crate::hashes::h2;
+use crate::hashes::{h2, h3};
+
+// [OPUS-4.8] sq-ayv: domain tag for the hiding index commitment, IDENTICAL to the
+// Rust `sparq_zk::sig::status_index_commitment` tag ("ZKSIG_IC" = 0x5a4b_5349_475f_4943).
+// Both compute `Poseidon2::hash([DOMAIN, index, blinding], 3)` so the in-circuit
+// commitment byte-equals the issuer-signed one (single source of truth).
+pub global SIG_DOMAIN_STATUS_IDX_COMMIT: Field = 0x5a4b5349475f4943;
 
 /// Hidden-index bit-unset inclusion relation over a depth-`D` Merkle status
 /// list. See module docs for the statement and the public/private split.
@@ -95,4 +101,50 @@ pub fn revoke_unset_check<let D: u32>(
         node = h2(left, right);
     }
     assert(node == root, "merkle inclusion does not recompute the committed root");
+}
+
+/// Hidden-index bit-unset inclusion relation that ALSO cross-binds a hiding
+/// COMMITMENT to the index (sq-ayv). The privacy upgrade over
+/// [`revoke_unset_check`]: it proves the SAME "bit at my hidden index is unset"
+/// statement AND that the PUBLIC `index_commitment` is a Poseidon2 commitment to
+/// the SAME private `index` (with a private `blinding`).
+///
+/// # Why the cross-binding is load-bearing
+/// The issuer signs `status_ref_commit_digest(list, index_commitment, version)`
+/// (sq-ayv) -- a commitment to the index, NOT the clear index -- so a
+/// hidden-revocation presentation can withhold the index entirely. But for
+/// SOUNDNESS the verifier must know the index the issuer committed to is the SAME
+/// index proven UNSET here; otherwise a holder could obtain a signature over a
+/// commitment to its REVOKED index and prove bit-unset for some OTHER (active)
+/// index. By recomputing `index_commitment` from THIS circuit's private `index`
+/// and exposing it as a public input the verifier byte-matches against the
+/// issuer-signed commitment, the two indices are provably identical. The clear
+/// index is disclosed in NEITHER the signed object NOR any public input.
+///
+/// PUBLIC: `root`, `index_commitment`. PRIVATE: `index`, `bit`, `blinding`,
+/// `siblings`. (The `challenge` public tag is handled by `main`.)
+// [OPUS-4.8] sq-ayv: hidden-index bit-unset + cross-bound index commitment.
+pub fn revoke_unset_check_committed<let D: u32>(
+    root: Field,
+    index_commitment: Field,
+    index: Field,
+    bit: Field,
+    blinding: Field,
+    siblings: [Field; D],
+) {
+    // 1-3. The hidden-index bit-unset inclusion (identical to revoke_unset_check):
+    //      bit==0, range-bound index-derived directions, Merkle fold to `root`.
+    revoke_unset_check::<D>(root, index, bit, siblings);
+
+    // 4. CROSS-BIND the index commitment to the SAME private index proven unset
+    //    above. `index_commitment` is a PUBLIC input the verifier byte-matches
+    //    against the ISSUER-SIGNED commitment; recomputing it here from `index`
+    //    (the same value the Merkle fold used) + the private `blinding` proves the
+    //    issuer committed to the index this proof shows is active. A holder cannot
+    //    sign over a commitment to a revoked index and prove a different one.
+    let recomputed = h3(SIG_DOMAIN_STATUS_IDX_COMMIT, index, blinding);
+    assert(
+        recomputed == index_commitment,
+        "index commitment does not bind the proven-unset index",
+    );
 }

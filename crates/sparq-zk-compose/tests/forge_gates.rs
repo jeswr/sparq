@@ -90,7 +90,12 @@ fn fixture_snapshot(revoked: bool) -> StatusListSnapshot {
     StatusListSnapshot { status_list: STATUS_LIST.to_string(), version: STATUS_VERSION, bits }
 }
 fn fixture_revocation() -> RevocationStatus {
-    RevocationStatus { status_list: STATUS_LIST.to_string(), index: STATUS_INDEX, version: STATUS_VERSION }
+    RevocationStatus {
+        status_list: STATUS_LIST.to_string(),
+        index: Some(STATUS_INDEX),
+        version: STATUS_VERSION,
+        index_commitment: None,
+    }
 }
 /// Policy: accept the fixture version with a fresh, NON-revoked authoritative snapshot.
 fn fresh_policy() -> RevocationPolicy {
@@ -112,7 +117,11 @@ fn attest_full(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestatio
         signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
         salt: Some(FieldHex::from_field(&salt)),
-        status: Some(AttestedStatusRef { index: STATUS_INDEX, version: STATUS_VERSION }),
+        status: Some(AttestedStatusRef {
+            index: Some(STATUS_INDEX),
+            version: STATUS_VERSION,
+            index_commitment: None,
+        }),
     }
 }
 

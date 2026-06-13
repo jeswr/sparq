@@ -308,6 +308,64 @@ pub fn status_ref_digest(list_id: &Fr, index: u64, version: u64) -> Fr {
     ])
 }
 
+/// A hiding COMMITMENT to a credential's status-list index (sq-ayv): the
+/// index-hiding analogue of the clear `index` in [`status_ref_digest`]. The
+/// issuer signs a commitment to the index (via [`status_ref_commit_digest`]),
+/// NOT the clear index, so a hidden-revocation presentation can withhold the
+/// index entirely. `blinding` is a per-credential random field element (the
+/// holder's secret) that makes the commitment hiding: two credentials at the
+/// same index commit to different values, closing the linkability channel the
+/// clear index opened.
+///
+/// # Cross-binding (load-bearing for soundness)
+/// This commitment is recomputed IN-CIRCUIT by the `revoke_unset_d{depth}` member
+/// from the SAME private `index` the Merkle bit-unset fold uses (sq-ayv) and a
+/// private `blinding`, and exposed as a PUBLIC input. The verifier then requires
+/// the proof's public commitment to byte-equal the ISSUER-SIGNED commitment (this
+/// value, folded into the signed message). So the index proven UNSET is provably
+/// the index the issuer committed to — a holder cannot obtain a signature over a
+/// commitment to its REVOKED index and prove bit-unset for some OTHER index.
+///
+/// Domain-separated and binding under the Poseidon2 collision/hiding assumption
+/// (the same hash the commitment + Merkle layers use). Issuer and verifier (and
+/// the circuit) all compute it identically, so a drift cannot make a wrong
+/// commitment verify (single source of truth).
+// [OPUS-4.8] sq-ayv: hiding index commitment (issuer-signed in place of the clear index).
+pub fn status_index_commitment(index: u64, blinding: &Fr) -> Fr {
+    const SIG_DOMAIN_STATUS_IDX_COMMIT: u64 = 0x5a4b_5349_475f_4943; // "ZKSIG_IC"
+    poseidon2::hash(&[
+        Fr::from(SIG_DOMAIN_STATUS_IDX_COMMIT),
+        Fr::from(index),
+        *blinding,
+    ])
+}
+
+/// A domain-separated digest of a credential's status-list reference that binds a
+/// COMMITMENT to the index (sq-ayv) instead of the clear index — the
+/// index-hiding analogue of [`status_ref_digest`]. The issuer folds
+/// `(list_id, index_commitment, version)` so the credential's revocation
+/// reference is issuer-attested WITHOUT the clear index ever entering the signed
+/// object. A DISTINCT domain tag from [`status_ref_digest`] so a clear-index
+/// digest can never be substituted for a committed-index one (and vice versa).
+///
+/// `index_commitment` is [`status_index_commitment`]`(index, blinding)`. The
+/// verifier recomputes this digest from the disclosed `index_commitment` +
+/// version + hashed list IRI and checks the issuer signature over it; the
+/// hidden-revocation proof then cross-binds `index_commitment` to the proven-unset
+/// index in-circuit (see [`status_index_commitment`]). So the index is disclosed
+/// in NEITHER the signed object NOR any clear field, yet revocation is still
+/// checked against the authoritative root.
+// [OPUS-4.8] sq-ayv: committed-index status-reference digest.
+pub fn status_ref_commit_digest(list_id: &Fr, index_commitment: &Fr, version: u64) -> Fr {
+    const SIG_DOMAIN_STATUS_REF_COMMIT: u64 = 0x5a4b_5349_475f_5343; // "ZKSIG_SC"
+    poseidon2::hash(&[
+        Fr::from(SIG_DOMAIN_STATUS_REF_COMMIT),
+        *list_id,
+        *index_commitment,
+        Fr::from(version),
+    ])
+}
+
 /// Hash a status-list IRI string to a field element (domain-separated), so the
 /// in-the-clear `manifest.revocation.status_list` IRI can be bound under the
 /// issuer signature. Issuer and verifier both call this, so a drift cannot make
@@ -840,6 +898,61 @@ mod tests {
             !verify(&pk, &salt_only, &sig),
             "salt-only (status-omitted) message must not verify against a status-bound sig"
         );
+    }
+
+    /// [OPUS-4.8] sq-ayv: `status_index_commitment` is bit-identical to the
+    /// in-circuit `h3(SIG_DOMAIN_STATUS_IDX_COMMIT, index, blinding)` the
+    /// `revoke_unset_d{depth}` member recomputes. The cross-binding (the index
+    /// proven unset == the index the issuer committed to) rests on both computing
+    /// the SAME value, so this pins the cross-vector against the nargo output
+    /// (compose_core/tests.nr `revoke_idx_commit_cross_vector`).
+    #[test]
+    fn status_index_commitment_matches_circuit_cross_vector() {
+        let got = status_index_commitment(0, &Fr::from(0xb1u64));
+        assert_eq!(
+            crate::field::field_to_hex(&got),
+            "0x204fe7eb53d68b4f2c7b981619ed4fbd5f3b99879e0f387761bf489a21456118",
+            "host index commitment must equal the in-circuit h3(DOMAIN, 0, 0xb1)"
+        );
+    }
+
+    /// [OPUS-4.8] sq-ayv: a COMMITTED-index status-bound signature binds the index
+    /// COMMITMENT (not the clear index), is hiding (a different blinding => a
+    /// different commitment for the same index), and the committed-digest domain
+    /// is distinct from the clear-index digest (no substitution).
+    #[test]
+    fn committed_index_status_signature_binds_the_commitment() {
+        let sk = SecretKey::from_seed(31);
+        let pk = sk.public_key();
+        let c = Fr::from(0xc0ffeeu64);
+        let salt = Fr::from(0x5a17u64);
+        let list_id = status_list_id_to_field("https://dmv.example/status/3");
+        let blinding = Fr::from(0xbeefu64);
+        let idx_commit = status_index_commitment(94, &blinding);
+        let sref = status_ref_commit_digest(&list_id, &idx_commit, 7);
+        let hex = sk.sign_commitment_with_status(&c, &salt, &sref);
+        let sig = signature_from_hex(&hex).expect("round-trips");
+        let msg = commitment_message_with_status(&c, &salt, &sref);
+        assert!(verify(&pk, &msg, &sig), "honest committed-index signature verifies");
+
+        // Hiding: the SAME index under a DIFFERENT blinding commits differently,
+        // so two presentations of the same credential are not linkable by the
+        // commitment (the clear-index linkability channel is closed).
+        let idx_commit2 = status_index_commitment(94, &Fr::from(0x1234u64));
+        assert_ne!(idx_commit, idx_commit2, "different blinding => different commitment");
+
+        // A DIFFERENT committed index => different digest => signature fails.
+        let other_commit = status_index_commitment(95, &blinding);
+        let sref_other = status_ref_commit_digest(&list_id, &other_commit, 7);
+        let msg_other = commitment_message_with_status(&c, &salt, &sref_other);
+        assert!(!verify(&pk, &msg_other, &sig), "a different index commitment must not verify");
+
+        // The CLEAR-index digest (audit #12) is domain-separated from the
+        // committed-index one: even with a numerically-equal field input it
+        // cannot be substituted (distinct domain tags).
+        let clear = status_ref_digest(&list_id, 94, 7);
+        let committed = status_ref_commit_digest(&list_id, &idx_commit, 7);
+        assert_ne!(clear, committed, "clear-index and committed-index digests are domain-separated");
     }
 
     /// [OPUS-4.8] audit #12: the list-id hash is collision-resistant on distinct
