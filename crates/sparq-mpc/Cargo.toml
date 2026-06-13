@@ -1,14 +1,18 @@
-# [OPUS-4.8] sparq-mpc — MPC-over-federated-SPARQL scaffold (Milestone 0).
+# [OPUS-4.8] sparq-mpc — MPC over federated SPARQL (RQ2). Through M3.
 # Native-only research crate. DELIBERATELY NOT a dependency of sparq-wasm:
 # the WASM bundle must stay free of any MPC/crypto surface (verify with
 # `cargo tree -p sparq-wasm` — sparq-mpc must NOT appear).
 #
-# This is a CONSERVATIVE scaffold. It builds ONLY what is invariant to the two
-# open design forks documented in research/mpc-zkp-research-and-architecture.md
-# §5.2: (Q1) the unsolved distributed-signature-over-secret-shared-witness
-# inside the collaborative proof, and (Q2) the honest- vs dishonest-majority
-# trust model. No MPC primitive and no collaborative proof are committed to
-# here; those live behind traits whose crypto methods are explicit stubs.
+# Through M3 this builds: the invariant per-holder local sub-evaluation (M0); the
+# disclosed-key global-IRI join (M2); and — M3 — a REAL honest-majority Shamir
+# t-of-n MpcBackend (field.rs + shamir.rs) plus the hidden-value join over
+# private keys via secret-shared equality (the circuit-PSI core). Q2 (trust
+# model) is resolved for v1 = honest-majority semi-honest, configurable behind
+# the MpcBackend trait. STILL deferred behind honest NotYetImplemented stubs:
+# (Q1) the unsolved distributed-signature-over-secret-shared-witness inside the
+# collaborative proof (M4), gated on the ZK-foundation remediation. No fake
+# crypto: every deferred path names its gate. Shamir's masking RNG is a
+# SIMULATION PRNG — production needs a CSPRNG (flagged in shamir.rs).
 [package]
 name = "sparq-mpc"
 version.workspace = true

@@ -41,14 +41,21 @@
 //!   minimise-data-sharing core.
 //! - [`backend`] — **(§3.1; §4.2 trust model; §5.2 Q2)** The [`MpcBackend`]
 //!   trait abstracts the secret-sharing / MPC primitive so honest- vs
-//!   dishonest-majority become swappable impls. Interface only; the trust-model
-//!   decision point is documented, no primitive is chosen.
+//!   dishonest-majority become swappable impls. Q2 is RESOLVED FOR v1:
+//!   honest-majority. The configurability seam is documented here.
+//! - [`field`] / [`shamir`] — **(§3.1; §4.2; §4.3 step 4) — M3, REAL crypto.**
+//!   [`shamir::ShamirBackend`] is the first concrete [`MpcBackend`]: honest-
+//!   majority Shamir `t`-of-`n` secret sharing over the prime field [`field`].
+//!   It secret-shares a holder's private input, runs the secure cumulative-sum
+//!   aggregate (zero-round local addition), reconstructs only the disclosed
+//!   output, and supplies the secret-shared equality primitive the hidden-value
+//!   join uses. Semi-honest, simulation RNG — see [`shamir`] honesty notes.
 //! - [`join`] — **(§2 convention #6; §4.3 step 4; §5.2 Q3)** The [`GlobalJoin`]
-//!   trait + [`DisclosedKeyJoin`] (M2): joining holders' partials on GLOBAL IRIs
-//!   (the distinguishing feature vs node-local-id graph-MPC). The disclosed-key
-//!   equi-join is REAL and crypto-free (the key is a public global IRI, joined
-//!   in the clear OUTSIDE the cryptographic core, convention #4). The hidden-
-//!   value (private-key) join stays a gated `NotYetImplemented` (M3 + Q2/Q3).
+//!   trait + [`DisclosedKeyJoin`] (M2, crypto-free disclosed-key equi-join over
+//!   GLOBAL IRIs) AND [`HiddenValueJoin`] (M3): joining on a PRIVATE key via the
+//!   Shamir-backed secret-shared equality test, disclosing only the result
+//!   payload — the capability M2 could not provide. (The crypto-free path
+//!   remains the default where the key is a public global IRI, convention #4.)
 //! - [`proof`] — **(§4.3 step 5; §4.4; §5.1 hard dependency; §5.2 Q1)** The
 //!   [`CollaborativeProof`] / [`Attestation`] boundary that will emit the ZKP
 //!   that the result is correct AND issuer-attested. Interface + doc; impl
@@ -65,13 +72,17 @@
 //! bundle carries zero MPC surface (mirrors how `sparq-zk` is isolated).
 
 pub mod backend;
+pub mod field;
 pub mod holder;
 pub mod join;
 pub mod partial;
 pub mod proof;
+pub mod shamir;
 
 pub use backend::{BackendInfo, MpcBackend, TrustModel};
+pub use field::Fp;
 pub use holder::{Holder, HolderResult};
-pub use join::{DisclosedKeyJoin, GlobalJoin, JoinPlan};
+pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, JoinPlan};
 pub use partial::{HolderId, MpcError, PartialResult};
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
+pub use shamir::{Share, ShamirBackend};
