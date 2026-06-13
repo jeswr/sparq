@@ -4,8 +4,8 @@
 //! for the measured throughput of each.
 
 use oxrdf::Term;
-use rustc_hash::FxHashSet;
-use sparq_core::dict::{Dict, Id};
+use rustc_hash::{FxHashMap, FxHashSet};
+use sparq_core::dict::{is_inline, Dict, Id};
 use sparq_core::Graph;
 
 use crate::window::{Window, WindowSpec, WindowedStream};
@@ -25,10 +25,21 @@ pub enum EvalMode {
     /// ONE dictionary for the continuous query's lifetime: every term is
     /// interned once at push time and each closed window builds its indexes
     /// from already-interned `[Id; 3]`s (`Graph::from_parts`), removing term
-    /// hashing/allocation from the window loop. The dictionary grows
-    /// monotonically with the stream's distinct vocabulary (an accepted,
-    /// documented trade — see the crate TODO for the compaction follow-up).
-    /// The benchmark winner across every scenario; the default.
+    /// hashing/allocation from the window loop. The benchmark winner across
+    /// every scenario; the default.
+    ///
+    /// [OPUS-4.8] The dictionary no longer grows monotonically with the
+    /// stream's vocabulary. Liveness is exact: a term is reachable iff some
+    /// live window (a buffered/open window, the count ring, or a closed window
+    /// not yet taken) still references it; terms that have aged out of every
+    /// window are unreachable, so their dictionary entries are reclaimable. A
+    /// bounded amount of post-eviction churn triggers a COMPACTION pass that
+    /// rebuilds the dictionary from only the still-live terms and atomically
+    /// remaps the live window indexes onto the fresh dense ids (see
+    /// [`WindowEval::compact_dict`]). Bound: the dictionary stays O(distinct
+    /// terms across the live windows), not O(distinct terms over all time. So a
+    /// long-running query over an unbounded vocabulary holds memory proportional
+    /// to its window content, not its history.
     #[default]
     PersistentDict,
     /// ONE live graph maintained by `Graph::apply_delta(inserts, deletes)` per
@@ -48,6 +59,25 @@ pub enum EvalMode {
 /// compact on every slide).
 const MIN_COMPACT_CHURN: usize = 256;
 
+/// [OPUS-4.8] Persistent-dictionary compaction trigger. After each batch of
+/// closed windows, the dictionary holds `live + dead` distinct terms, where
+/// `live` are still referenced by some window and `dead` have aged out. A
+/// compaction rebuild is O(live + dead) (it walks the live payloads and
+/// reconstructs the survivors), so triggering it on EVERY slide would add a
+/// full-dictionary pass per window — defeating the point of the persistent
+/// dictionary. Instead we let the dead set grow and compact only when it is
+/// both ABSOLUTELY large enough to matter and a SUBSTANTIAL fraction of the
+/// dictionary, so the amortised compaction cost per interned term is O(1) and
+/// the steady-state dictionary size is bounded by `live · (1 + DEAD_RATIO)`.
+///
+/// `MIN_DEAD` keeps small/low-churn streams from ever compacting (the rebuild
+/// would cost more than the few bytes it reclaims); `DEAD_RATIO` makes the
+/// reclaimed-fraction worthwhile when we do pay it.
+const MIN_DEAD_TERMS: usize = 1024;
+/// Compact once the estimated dead terms reach this fraction of the live set.
+const DEAD_RATIO_NUM: usize = 1;
+const DEAD_RATIO_DEN: usize = 2;
+
 enum Materializer {
     Rebuild {
         window: WindowedStream<[Term; 3]>,
@@ -58,6 +88,14 @@ enum Materializer {
         /// moved back out of `graph.dict` after evaluation).
         dict: Option<Dict>,
         window: WindowedStream<[Id; 3]>,
+        /// [OPUS-4.8] `dict.len()` (distinct non-inline terms) at the last
+        /// compaction. The cheap compaction trigger: once `dict.len()` has
+        /// grown by at least [`MIN_DEAD_TERMS`] beyond this, enough terms have
+        /// been interned since the last rebuild that a liveness scan is worth
+        /// running (and `compact_dict` then resets this to the post-rebuild
+        /// length). Scanning only every `MIN_DEAD_TERMS` interns keeps the
+        /// amortised compaction cost per interned term O(1).
+        dict_len_at_compact: usize,
     },
     Delta {
         window: WindowedStream<[Term; 3]>,
@@ -86,6 +124,7 @@ impl WindowEval {
             EvalMode::PersistentDict => Materializer::PersistentDict {
                 dict: Some(Dict::new()),
                 window: WindowedStream::empty(spec),
+                dict_len_at_compact: 0,
             },
             EvalMode::Delta => Materializer::Delta {
                 window: WindowedStream::empty(spec),
@@ -122,7 +161,7 @@ impl WindowEval {
             Materializer::Rebuild { window } | Materializer::Delta { window, .. } => {
                 window.push(triple, ts)
             }
-            Materializer::PersistentDict { dict, window } => {
+            Materializer::PersistentDict { dict, window, .. } => {
                 let d = dict.as_mut().expect("dict is always restored after evaluation");
                 let ids = [d.intern(&triple[0]), d.intern(&triple[1]), d.intern(&triple[2])];
                 window.push(ids, ts);
@@ -145,7 +184,7 @@ impl WindowEval {
                     f(w.start, w.end, &graph)?;
                 }
             }
-            Materializer::PersistentDict { dict, window } => {
+            Materializer::PersistentDict { dict, window, dict_len_at_compact } => {
                 for w in take(window, flush) {
                     let ids: Vec<[Id; 3]> = w.triples.iter().map(|t| t.triple).collect();
                     // Lend the persistent dictionary to the per-window graph;
@@ -157,6 +196,16 @@ impl WindowEval {
                     let r = f(w.start, w.end, &graph);
                     *dict = Some(graph.dict);
                     r?;
+                }
+                // [OPUS-4.8] Reclaim the dictionary entries of terms that have
+                // aged out of every live window. Safe HERE: every closed window
+                // for this call has been evaluated and dropped (the `take`
+                // vector is gone), no `Graph` borrows the dictionary, and the
+                // only remaining references are the live window payloads —
+                // which `compact_dict` remaps atomically.
+                let len = dict.as_ref().expect("dict restored above").len();
+                if len >= dict_len_at_compact.saturating_add(MIN_DEAD_TERMS) {
+                    Self::compact_dict(dict, window, dict_len_at_compact);
                 }
             }
             Materializer::Delta { window, graph, prev, churn } => {
@@ -187,6 +236,101 @@ impl WindowEval {
             }
         }
         Ok(())
+    }
+
+    /// [OPUS-4.8] Persistent-dictionary compaction: rebuild the lifetime
+    /// dictionary from ONLY the terms still referenced by a live window, and
+    /// remap the live window payloads onto the fresh dense ids — bounding the
+    /// dictionary at the live vocabulary instead of the all-time vocabulary.
+    ///
+    /// Correctness contract:
+    /// * **No dangling ids.** Every live payload is remapped through `old → new`
+    ///   in [`WindowedStream::remap_live_payloads`]; the remap covers exactly
+    ///   the ids gathered by [`WindowedStream::for_each_live_payload`], so after
+    ///   the swap no live id points into the freed dictionary.
+    /// * **A still-referenced term stays resolvable.** Every live id is
+    ///   re-interned (its term reconstructed from the old dict, interned into
+    ///   the new one), so its value survives; only ids referenced by NO live
+    ///   window are dropped.
+    /// * **Results are unchanged.** The remap is a bijection on live ids, so
+    ///   per-window triple sets, membership, ordering and counts are identical;
+    ///   only the integer encoding changes. (Inline-integer ids carry their
+    ///   value in the id itself and are never dictionary entries, so they map to
+    ///   themselves and need no rebuild.)
+    /// * **Atomic.** The new dict + remap are built fully before any live
+    ///   payload is rewritten; the rebuild cannot fail (it only reconstructs and
+    ///   re-interns terms already present), so there is no partial state.
+    ///
+    /// Skips the rebuild when nothing would be reclaimed (dead set below
+    /// [`MIN_DEAD_TERMS`] or below the [`DEAD_RATIO_NUM`]/[`DEAD_RATIO_DEN`]
+    /// fraction of the live set), but always advances `dict_len_at_compact` so
+    /// the next liveness scan is again `MIN_DEAD_TERMS` interns away.
+    fn compact_dict(
+        dict: &mut Option<Dict>,
+        window: &mut WindowedStream<[Id; 3]>,
+        dict_len_at_compact: &mut usize,
+    ) {
+        let old = dict.as_ref().expect("dict present when compacting");
+
+        // Gather the DISTINCT live (non-inline) ids referenced by any window.
+        let mut live: FxHashSet<Id> = FxHashSet::default();
+        window.for_each_live_payload(|ids| {
+            for &id in ids {
+                if !is_inline(id) {
+                    live.insert(id);
+                }
+            }
+        });
+
+        // Decide whether reclaiming is worth a full rebuild. `dead` is the
+        // number of dictionary entries no live window references any more.
+        let total = old.len();
+        let dead = total.saturating_sub(live.len());
+        let worth_it = dead >= MIN_DEAD_TERMS
+            && dead * DEAD_RATIO_DEN >= live.len().max(1) * DEAD_RATIO_NUM;
+        if !worth_it {
+            // Defer: record the current size so the next scan is MIN_DEAD_TERMS
+            // interns away (otherwise a once-large-but-now-mostly-live dict
+            // would re-scan on every batch).
+            *dict_len_at_compact = total;
+            return;
+        }
+
+        // Rebuild: a fresh dictionary holding only the survivors, plus the
+        // old→new id remap. Re-intern via the reconstructed term so the new
+        // dict's prefix/datatype tables and value caches are rebuilt correctly.
+        let mut fresh = Dict::with_capacity(live.len());
+        let mut remap: FxHashMap<Id, Id> = FxHashMap::with_capacity_and_hasher(live.len(), Default::default());
+        for &id in &live {
+            let new_id = fresh.intern(&old.term(id));
+            remap.insert(id, new_id);
+        }
+
+        // Atomically swing every live payload onto the fresh ids. Inline ids
+        // pass through unchanged (they are not in `remap`); every non-inline
+        // live id is present in `remap` by construction.
+        window.remap_live_payloads(|ids| {
+            [
+                remap_id(ids[0], &remap),
+                remap_id(ids[1], &remap),
+                remap_id(ids[2], &remap),
+            ]
+        });
+
+        *dict = Some(fresh);
+        *dict_len_at_compact = live.len();
+    }
+}
+
+/// Maps one id through the compaction remap: inline-integer ids (and only
+/// those) are absent from the remap and carry their value in the id, so they
+/// map to themselves; every live dictionary id is present by construction.
+#[inline]
+fn remap_id(id: Id, remap: &FxHashMap<Id, Id>) -> Id {
+    if is_inline(id) {
+        id
+    } else {
+        *remap.get(&id).expect("every live non-inline id is in the compaction remap")
     }
 }
 
