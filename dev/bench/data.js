@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781385473655,
+  "lastUpdate": 1781385652921,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -5474,6 +5474,143 @@ window.BENCHMARK_DATA = {
           {
             "name": "rdfs_infer_s",
             "value": 0.149,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1567668,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "committer": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "distinct": true,
+          "id": "0fbc939fad9c6a02712e4e84f30a2e362ae83ac9",
+          "message": "merge: vectors scalar + product quantization (sq-nq5) [OPUS-4.8]\n\nsparq-vectors/quant.rs: ScalarQuantizer (per-dim f32->u8, 4x) + ProductQuantizer (M\nsubspaces, k-means++ codebooks, M-byte codes, ADC via DistanceTable) + EncodedStore\nRAM cache, all over the crate's L2-normalized cosine convention. HONEST recall/compression:\nPQ-alone ~0.60 @8x (coarse filter), PQ-filter + full-precision re-rank ~0.98 @8x. SQ\nworst-component error within half-step bound. Standalone (NOT baked into .spqg — deliberate,\nno driving workload yet; the DiskANN rank-on-codes+re-rank wiring is the documented follow-up).\nclippy + workspace clippy + 73 tests green.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T21:16:21Z",
+          "tree_id": "26f38f9c110b054e9b92330f48664247ed97db5a",
+          "url": "https://github.com/jeswr/sparq/commit/0fbc939fad9c6a02712e4e84f30a2e362ae83ac9"
+        },
+        "date": 1781385652460,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.529,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 3.6,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3140.6,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4370.7,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 5.8,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 4.4,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 760.3,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 12428.5,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 54820.1,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 145400.4,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 4488.2,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 4.8,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 39876.3,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 7360.2,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 53822.3,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 146612.4,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 2248.9,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 7.6,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 36275.8,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.142,
             "unit": "s"
           },
           {
