@@ -408,3 +408,76 @@ fn delete_of_asserted_layer_derivable_fact_is_an_ownership_transfer() {
     assert!(g.contains(&[ex("a"), ex("ancestor"), ex("c")]));
     assert_eq!(g.mode(), N3Mode::Counting);
 }
+
+// [OPUS-4.8] Regression for reviews 1868 / 1884: a rule with NO plain join atom — an empty `{}`
+// premise — must NOT enter the counting profile (which seeds emissions only from plain premise
+// atoms, so its conclusion would be silently dropped). It must run in Fallback so the maintained
+// closure equals the batch oracle, which DOES derive the constant fact.
+#[test]
+fn empty_premise_rule_falls_back_and_stays_correct() {
+    let rules = r#"@prefix : <http://ex/> .
+{ } => { :a :p :b } .
+"#;
+    let base: Vec<[Term; 3]> = vec![[ex("x"), ex("q"), ex("y")]];
+    let g = MaterializedN3Graph::new(rules, &base).unwrap();
+    assert_eq!(g.mode(), N3Mode::Fallback, "{{}} rule must disqualify the counting path");
+    assert!(g.fallback_reason().is_some(), "must report a disqualification reason");
+    assert!(
+        g.contains(&[ex("a"), ex("p"), ex("b")]),
+        "the constant conclusion of the {{}} rule must be in the closure (1868)"
+    );
+    let baseset: FxHashSet<[Term; 3]> = base.iter().cloned().collect();
+    assert_equal(&g, rules, &baseset, "after empty-premise build");
+}
+
+// [OPUS-4.8] Regression for reviews 1868 / 1884: a rule whose premise is ONLY a whitelisted
+// builtin (no plain join atom) must also fall back to the batch engine — the counting path would
+// never seed it. The builtin-derived constant must still appear in the closure.
+#[test]
+fn builtin_only_premise_rule_falls_back_and_stays_correct() {
+    let rules = r#"@prefix : <http://ex/> .
+@prefix string: <http://www.w3.org/2000/10/swap/string#> .
+{ ("foo" "bar") string:concatenation ?z } => { :out :is ?z } .
+"#;
+    let base: Vec<[Term; 3]> = vec![[ex("x"), ex("q"), ex("y")]];
+    let g = MaterializedN3Graph::new(rules, &base).unwrap();
+    assert_eq!(g.mode(), N3Mode::Fallback, "builtin-only premise must disqualify counting");
+    assert!(g.fallback_reason().is_some(), "must report a disqualification reason");
+    assert!(
+        g.contains(&[ex("out"), ex("is"), s_lit("foobar")]),
+        "the builtin-derived conclusion must be in the closure (1868)"
+    );
+    let baseset: FxHashSet<[Term; 3]> = base.iter().cloned().collect();
+    assert_equal(&g, rules, &baseset, "after builtin-only build");
+}
+
+// [OPUS-4.8] Regression for review 1868 (Low): when fallback is forced by log:implies-family
+// rules-as-data in the base (not by rule analysis), fallback_reason() must report the cause so
+// the documented `None ⇔ counting active` contract holds; and it must clear when the data is gone.
+#[test]
+fn data_rule_fallback_reports_reason_and_clears() {
+    // A qualifying counting rule, so any fallback is purely from the implies-as-data trigger.
+    let rules = r#"@prefix : <http://ex/> .
+{ ?x :p ?y } => { ?x :q ?y } .
+"#;
+    let base: Vec<[Term; 3]> = vec![[ex("a"), ex("p"), ex("b")]];
+    let mut g = MaterializedN3Graph::new(rules, &base).unwrap();
+    assert_eq!(g.mode(), N3Mode::Counting);
+    assert!(g.fallback_reason().is_none(), "counting active ⇒ no reason");
+
+    // Insert a log:implies triple AS DATA — forces fallback.
+    let implies = iri("http://www.w3.org/2000/10/swap/log#implies");
+    g.insert(&[[ex("r1"), implies.clone(), ex("r2")]]);
+    assert_eq!(g.mode(), N3Mode::Fallback, "implies-as-data forces fallback");
+    let reason = g.fallback_reason();
+    assert!(reason.is_some(), "data-rule fallback must report a reason (1868 Low)");
+    assert!(
+        reason.unwrap().contains("implies"),
+        "reason should name the implies-as-data cause, got {reason:?}"
+    );
+
+    // Remove it — counting resumes and the reason clears.
+    g.delete(&[[ex("r1"), implies, ex("r2")]]);
+    assert_eq!(g.mode(), N3Mode::Counting, "removing the data rule resumes counting");
+    assert!(g.fallback_reason().is_none(), "reason must clear when counting resumes");
+}
