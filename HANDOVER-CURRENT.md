@@ -11,9 +11,9 @@ RESUMPTION OPTIONS: continue on this M1 in a fresh session, OR finish porting to
 - zk-test-bench-design @ 3c91055 — research/zk-test-bench-design.md (the user's ZK test/bench deliverable + 6 open questions). DOC-only merge.
 - upstreaming-prep @ cd5de8d in ~/Documents/GitHub/jeswr/test-lib — IEEE754 upstreaming PARITY COMPLETE (CI+test-summary, lint, README+LICENSE, clean secret scan, PARITY.md). NOT pushed. Awaits Jesse's go-ahead for the swap onto public noir_IEEE754 (deprecated-branch-first, merge -s ours, re-pin noir_XPath to v0.9.0 first — see research IEEE754 audit). v1.0.0 needs a feat!/BREAKING-CHANGE swap commit.
 
-### RUNNING when session ended (may die at limit — recover via each worktree's STATUS.md + `git log main..HEAD`)
-- serve-wave-b (../sparq-serveb): serving wave B scheduler (SRPT+aging, no-HoL). Building/testing.
-- dict-spill (../sparq-dictspill): spillable dictionary finisher (gates 8B run). Benchmarking; ITS /private/tmp/dsp_bench (~53GB) is ACTIVE — reclaim only after it finishes.
+### COMPLETED + PUSHED (branches on remote, NOT yet merge-gated — gate+merge on the EC2 box)
+- serve-wave-b @ ef0a6bc (PUSHED): read-side scheduler (SRPT+aging, reserved-cheap-worker no-HoL). Agent-gated 746/0/10, wasm 1,643,103 (0 added). HoL containment ~80-750x; HONEST non-zero ~2.2x all-cheap overhead (~0.5us/job). Wall-clock numbers were CONTENDED — re-measure on the quiet EC2 box before final claims. Scope note: research doc calls this "Wave C"; brief called it "Wave B" (goal #4 reqs 3+4) — same §6.2 design.
+- dict-spill @ (pushed, head = benchmark-doc preservation commit): spillable build-time dictionary (gates 8B run). 4 impl commits + the agent's measured RSS/throughput results (external-dictionary.md). Re-gate on EC2 + verify byte-identity claim before merge. Its /private/tmp/dsp_bench scratch (~53GB) is on the M1, NOT the EC2 box — reclaimable on the M1 now (agent done).
 - MPC research WORKFLOW run wf_f4fd3613-877 (mpc-zkp-research): deep research → research/mpc-zkp-research-and-architecture.md. ⚠ Workflow result is returned to the orchestrator; if the session dies before it completes, the synthesis is LOST — re-run the workflow (script saved at .../workflows/scripts/mpc-zkp-research-wf_f4fd3613-877.js). See memory [[mpc-zkp-project]].
 - neon-intersect (../sparq-neon): PARKED (0 commits) — needs a quiet machine.
 
