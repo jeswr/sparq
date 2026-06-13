@@ -1,0 +1,19 @@
+{
+  "_comment": "[OPUS-4.8] sq-pn2 full-family prove/verify cost curve. Regenerate with `cd bench/zk-compose/family_curve && cargo run --release`. NOT gated in CI (each row is a real bb prove). proof_bytes/vk_bytes/verify are constant across the family (ultra_honk property); prove time tracks the member's gate count.",
+  "tool": "bench/zk-compose/family_curve (sq-pn2 standalone harness)",
+  "timestamp": "2026-06-13T20:34:38Z",
+  "host": "Linux aarch64, 8 cores",
+  "bb_version": "5.0.0-nightly.20260324",
+  "nargo_version": "1.0.0-beta.21",
+  "verifier_target": "noir-recursive",
+  "repeats": 1,
+  "rows": [
+    {"member":"scan_k1_n16_r4","k":1,"n":16,"r":4,"d":0,"prove_secs":0.902,"verify_secs":0.012,"proof_bytes":14656,"vk_bytes":3680},
+    {"member":"scan_k2_n16_r8","k":2,"n":16,"r":8,"d":0,"prove_secs":1.061,"verify_secs":0.013,"proof_bytes":14656,"vk_bytes":3680},
+    {"member":"scan_k2_n64_r8","k":2,"n":64,"r":8,"d":0,"prove_secs":1.828,"verify_secs":0.013,"proof_bytes":14656,"vk_bytes":3680},
+    {"member":"filter_int_d1","k":0,"n":0,"r":0,"d":1,"prove_secs":1.062,"verify_secs":0.012,"proof_bytes":14656,"vk_bytes":3680},
+    {"member":"filter_int_d2","k":0,"n":0,"r":0,"d":2,"prove_secs":1.051,"verify_secs":0.013,"proof_bytes":14656,"vk_bytes":3680},
+    {"member":"filter_int_d4","k":0,"n":0,"r":0,"d":4,"prove_secs":1.071,"verify_secs":0.012,"proof_bytes":14656,"vk_bytes":3680},
+    {"member":"filter_f64","k":0,"n":0,"r":0,"d":0,"prove_secs":0.777,"verify_secs":0.013,"proof_bytes":14656,"vk_bytes":3680}
+  ]
+}
