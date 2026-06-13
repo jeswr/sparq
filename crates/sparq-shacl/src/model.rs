@@ -76,6 +76,72 @@ pub enum Component {
     /// sh:sparql — a SPARQL-based constraint (SHACL §5.2). The index is into
     /// [`ShapesModel::sparql`].
     Sparql(usize),
+    /// [OPUS-4.8] A SPARQL-based constraint COMPONENT (SHACL §6) that activated on
+    /// this shape because the shape uses the component's parameter predicates.
+    /// `component` indexes [`ShapesModel::components`]; `args` are the bound
+    /// parameter values, parallel to the component's `parameters` (one term each
+    /// — the first object found for a mandatory parameter; `None` for an absent
+    /// optional one). The validator pre-binds each as `$paramName`.
+    CustomSparql {
+        component: usize,
+        args: Vec<Option<Term>>,
+    },
+}
+
+/// [OPUS-4.8] A declared `sh:parameter` of a SPARQL-based constraint component
+/// (SHACL §6.2): its predicate (`sh:path`), the pre-bound variable name and
+/// whether it is `sh:optional`.
+#[derive(Debug, Clone)]
+pub(crate) struct ComponentParameter {
+    /// The parameter's predicate IRI (`sh:path` of the parameter) — a shape
+    /// "uses" the parameter by carrying a triple with this predicate.
+    pub predicate: String,
+    /// The pre-bound variable name (`$name`): the parameter's `sh:name`, else the
+    /// local name of its predicate IRI (SHACL §6.2.1).
+    pub var: String,
+    /// `sh:optional true` — the parameter need not be present for the component
+    /// to activate (a mandatory parameter must be present).
+    pub optional: bool,
+}
+
+/// [OPUS-4.8] A SPARQL-based constraint component declaration (SHACL §6.2): its
+/// parameters and a validator. The validator is chosen by shape kind at
+/// evaluation time: `sh:nodeValidator` for node shapes, `sh:propertyValidator`
+/// for property shapes, falling back to the generic `sh:validator`. Each carries
+/// a `sh:ask` or `sh:select` query (compiled into [`PreparedValidator`]).
+#[derive(Debug, Clone)]
+pub(crate) struct ComponentDef {
+    /// The component's node (for diagnostics / `sh:sourceConstraintComponent`).
+    pub node: Term,
+    pub parameters: Vec<ComponentParameter>,
+    /// Generic validator (`sh:validator`) — used when no kind-specific one fits.
+    pub validator: Option<PreparedComponentValidator>,
+    /// `sh:nodeValidator` — preferred for node shapes.
+    pub node_validator: Option<PreparedComponentValidator>,
+    /// `sh:propertyValidator` — preferred for property shapes.
+    pub property_validator: Option<PreparedComponentValidator>,
+}
+
+impl ComponentDef {
+    /// The validator to run for a shape of the given kind: the kind-specific one
+    /// if present, else the generic `sh:validator` (SHACL §6.2.2).
+    pub fn validator_for(&self, is_property_shape: bool) -> Option<&PreparedComponentValidator> {
+        let specific = if is_property_shape {
+            self.property_validator.as_ref()
+        } else {
+            self.node_validator.as_ref()
+        };
+        specific.or(self.validator.as_ref())
+    }
+}
+
+/// [OPUS-4.8] A compiled component validator: the parsed ASK/SELECT query plus
+/// its own `sh:message` template (SHACL §6.3 uses the validator's `sh:message`
+/// for the produced results).
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedComponentValidator {
+    pub prepared: crate::sparql::PreparedValidator,
+    pub message: Option<String>,
 }
 
 /// A `sh:sparql` constraint's components (SHACL §5.2): the `sh:select` query,
@@ -125,6 +191,11 @@ pub struct ShapesModel {
     pub targeted: Vec<usize>,
     /// SPARQL-based constraints (`sh:sparql`), referenced by [`Component::Sparql`].
     pub(crate) sparql: Vec<SparqlConstraint>,
+    /// [OPUS-4.8] SPARQL-based constraint COMPONENTS (`sh:ConstraintComponent`,
+    /// SHACL §6) declared in the shapes graph, referenced by
+    /// [`Component::CustomSparql`]. The registry is keyed (for activation) on the
+    /// mandatory parameter predicates each component declares.
+    pub(crate) components: Vec<ComponentDef>,
 }
 
 impl ShapesModel {
@@ -135,7 +206,12 @@ impl ShapesModel {
             by_node: FxHashMap::default(),
             targeted: Vec::new(),
             sparql: Vec::new(),
+            components: Vec::new(),
         };
+
+        // [OPUS-4.8] SHACL §6: discover SPARQL-based constraint components FIRST, so
+        // shape parsing can activate them against the parameter predicates a shape uses.
+        m.components = discover_components(&g);
 
         // Top-level shape discovery: explicitly typed shapes plus anything with a target.
         let mut roots: Vec<Term> = Vec::new();
@@ -438,6 +514,29 @@ impl ShapesModel {
             }
         }
 
+        // [OPUS-4.8] SHACL §6: activate each declared constraint component whose
+        // MANDATORY parameter predicates the shape all uses. The bound parameter
+        // values (one object per parameter; `None` for an absent optional one)
+        // are captured now and pre-bound as `$paramName` at evaluation time.
+        for (cidx, comp) in self.components.iter().enumerate() {
+            let mut args: Vec<Option<Term>> = Vec::with_capacity(comp.parameters.len());
+            let mut activates = true;
+            for p in &comp.parameters {
+                let value = g.object(node, &p.predicate);
+                if value.is_none() && !p.optional {
+                    activates = false;
+                    break;
+                }
+                args.push(value);
+            }
+            if activates && !comp.parameters.is_empty() {
+                shape.components.push(Component::CustomSparql {
+                    component: cidx,
+                    args,
+                });
+            }
+        }
+
         shape
     }
 
@@ -490,44 +589,151 @@ impl ShapesModel {
     /// `sh:declare` nodes carrying `sh:prefix` (the short name) and `sh:namespace`
     /// (the IRI). owl:imports chasing is followed one level (cycle-guarded).
     fn collect_prefixes(&self, g: &GraphView, node: &Term) -> String {
-        const OWL_IMPORTS: &str = "http://www.w3.org/2002/07/owl#imports";
-        let mut out = String::new();
-        let mut seen_decls: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
-        let mut roots: Vec<Term> = g.objects(node, &sh("prefixes"));
-        let mut visited_roots: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
-        let mut i = 0;
-        while i < roots.len() {
-            let root = roots[i].clone();
-            i += 1;
-            if !visited_roots.insert(root.clone()) {
+        collect_prefixes_from(g, &g.objects(node, &sh("prefixes")))
+    }
+}
+
+/// [OPUS-4.8] Assembles SPARQL `PREFIX` declarations from a set of `sh:prefixes`
+/// declaration resources (SHACL §5.2.1 / §6.3): each root, directly or via
+/// `owl:imports`, declares `sh:declare` nodes carrying `sh:prefix` (short name)
+/// and `sh:namespace` (IRI). owl:imports chasing is followed transitively
+/// (cycle-guarded). Shared by the `sh:sparql` and constraint-component paths.
+fn collect_prefixes_from(g: &GraphView, prefix_roots: &[Term]) -> String {
+    const OWL_IMPORTS: &str = "http://www.w3.org/2002/07/owl#imports";
+    let mut out = String::new();
+    let mut seen_decls: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+    let mut roots: Vec<Term> = prefix_roots.to_vec();
+    let mut visited_roots: rustc_hash::FxHashSet<Term> = rustc_hash::FxHashSet::default();
+    let mut i = 0;
+    while i < roots.len() {
+        let root = roots[i].clone();
+        i += 1;
+        if !visited_roots.insert(root.clone()) {
+            continue;
+        }
+        // Follow owl:imports transitively (cycle-guarded by visited_roots).
+        for imp in g.objects(&root, OWL_IMPORTS) {
+            roots.push(imp);
+        }
+        for decl in g.objects(&root, &sh("declare")) {
+            if !seen_decls.insert(decl.clone()) {
                 continue;
             }
-            // Follow owl:imports transitively (cycle-guarded by visited_roots).
-            for imp in g.objects(&root, OWL_IMPORTS) {
-                roots.push(imp);
-            }
-            for decl in g.objects(&root, &sh("declare")) {
-                if !seen_decls.insert(decl.clone()) {
-                    continue;
-                }
-                let prefix = match g.object(&decl, &sh("prefix")) {
-                    Some(Term::Literal(l)) => l.value().to_string(),
-                    _ => continue,
-                };
-                let ns = match g.object(&decl, &sh("namespace")) {
-                    Some(Term::Literal(l)) => l.value().to_string(),
-                    Some(Term::NamedNode(n)) => n.as_str().to_string(),
-                    _ => continue,
-                };
-                out.push_str(&format!("PREFIX {prefix}: <{ns}>\n"));
-            }
+            let prefix = match g.object(&decl, &sh("prefix")) {
+                Some(Term::Literal(l)) => l.value().to_string(),
+                _ => continue,
+            };
+            let ns = match g.object(&decl, &sh("namespace")) {
+                Some(Term::Literal(l)) => l.value().to_string(),
+                Some(Term::NamedNode(n)) => n.as_str().to_string(),
+                _ => continue,
+            };
+            out.push_str(&format!("PREFIX {prefix}: <{ns}>\n"));
         }
-        out
     }
+    out
 }
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+}
+
+/// [OPUS-4.8] SHACL §6.2: discover the `sh:ConstraintComponent` declarations in
+/// the shapes graph and compile their parameters + validators. A component is
+/// kept only if it has at least one parameter and at least one usable validator
+/// (a generic / node / property validator with a parsable `sh:ask`/`sh:select`).
+fn discover_components(g: &GraphView) -> Vec<ComponentDef> {
+    let mut out = Vec::new();
+    // SHACL §6.2: a component node is a SHACL instance of sh:ConstraintComponent —
+    // i.e. typed sh:ConstraintComponent OR any rdfs:subClassOf-descendant of it
+    // (the W3C suite declares `ex:ConstraintComponent rdfs:subClassOf
+    // sh:ConstraintComponent` and types components with that subclass).
+    for node in g.instances_of(&iri(&sh("ConstraintComponent"))) {
+        let parameters = parse_component_parameters(g, &node);
+        if parameters.is_empty() {
+            continue; // a parameter-less component cannot activate by predicate use
+        }
+        // Validators parse under the component's own `sh:prefixes` (SHACL §6.3),
+        // reusing the `sh:declare`/`owl:imports` chasing of the `sh:sparql` path.
+        let prefixes = collect_prefixes_from(g, &g.objects(&node, &sh("prefixes")));
+        let validator = parse_validator(g, &node, &sh("validator"), &prefixes);
+        let node_validator = parse_validator(g, &node, &sh("nodeValidator"), &prefixes);
+        let property_validator = parse_validator(g, &node, &sh("propertyValidator"), &prefixes);
+        if validator.is_none() && node_validator.is_none() && property_validator.is_none() {
+            continue; // no usable validator — skip (lenient)
+        }
+        out.push(ComponentDef {
+            node,
+            parameters,
+            validator,
+            node_validator,
+            property_validator,
+        });
+    }
+    out
+}
+
+/// Parses a component's `sh:parameter` list (SHACL §6.2.1). Each parameter node
+/// carries `sh:path` (its predicate) and optionally `sh:optional`/`sh:name`. A
+/// parameter with no IRI `sh:path` is skipped (a component cannot key on it).
+fn parse_component_parameters(g: &GraphView, node: &Term) -> Vec<ComponentParameter> {
+    let mut params = Vec::new();
+    for p in g.objects(node, &sh("parameter")) {
+        let predicate = match g.object(&p, &sh("path")) {
+            Some(Term::NamedNode(n)) => n.as_str().to_string(),
+            _ => continue,
+        };
+        // The pre-bound variable name: sh:name if a literal, else the predicate's
+        // local name (after the last '#' or '/').
+        let var = match g.object(&p, &sh("name")) {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            _ => local_name(&predicate),
+        };
+        let optional = matches!(
+            g.object(&p, &sh("optional")),
+            Some(Term::Literal(l)) if l.value() == "true"
+        );
+        params.push(ComponentParameter {
+            predicate,
+            var,
+            optional,
+        });
+    }
+    params
+}
+
+/// The local name of an IRI: the substring after the last `#` or `/`.
+fn local_name(iri: &str) -> String {
+    iri.rsplit(['#', '/']).next().unwrap_or(iri).to_string()
+}
+
+/// Parses one validator (`pred` = `sh:validator` / `sh:nodeValidator` /
+/// `sh:propertyValidator`) of a component: its `sh:ask` (ASK validator) or
+/// `sh:select` (SELECT validator), with `prefixes` prepended and an optional
+/// `sh:message`. Returns `None` if the validator carries neither query or the
+/// query is unparsable / of the wrong form (ill-formed → skipped).
+fn parse_validator(
+    g: &GraphView,
+    node: &Term,
+    pred: &str,
+    prefixes: &str,
+) -> Option<PreparedComponentValidator> {
+    let v = g.object(node, pred)?;
+    // sh:ask takes precedence; fall back to sh:select.
+    let (text, is_ask) = match g.object(&v, &sh("ask")) {
+        Some(Term::Literal(l)) => (l.value().to_string(), true),
+        _ => match g.object(&v, &sh("select")) {
+            Some(Term::Literal(l)) => (l.value().to_string(), false),
+            _ => return None,
+        },
+    };
+    let full = format!("{prefixes}\n{text}");
+    let prepared = crate::sparql::PreparedValidator::build(&full, is_ask)?;
+    let message = match g.object(&v, &sh("message")) {
+        Some(Term::Literal(l)) => Some(l.value().to_string()),
+        _ => None,
+    };
+    Some(PreparedComponentValidator { prepared, message })
 }
 
 /// Substitutes the `$PATH` / `?PATH` query variable (a SHACL property-shape

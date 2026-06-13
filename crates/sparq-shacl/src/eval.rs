@@ -1,7 +1,8 @@
 //! Constraint-component evaluation: walks each targeted shape's focus nodes and
 //! emits [`ValidationResult`]s via direct graph scans (no SPARQL round-trip).
 
-use crate::model::{sh, Component, Shape, ShapesModel, Target};
+use crate::model::{sh, Component, ComponentDef, Shape, ShapesModel, Target};
+use crate::sparql::{ComponentResultFields, PreparedValidator};
 use crate::path::Path;
 use crate::report::ValidationResult;
 use crate::view::GraphView;
@@ -626,6 +627,13 @@ impl<'a> Validator<'a> {
             // re-traversing sh:path inside the SELECT), which matches the spec —
             // the constraint is responsible for its own value selection.
             Component::Sparql(idx) => self.eval_sparql(sid, focus, *idx, out),
+            // [OPUS-4.8] SHACL §6: a SPARQL-based constraint COMPONENT that
+            // activated on this shape. ASK validators run per value node
+            // (ASK=false → violation); SELECT validators run per focus node
+            // (each solution → violation). Parameters are pre-bound as $paramName.
+            Component::CustomSparql { component, args } => {
+                self.eval_custom_component(sid, focus, values, *component, args, out)
+            }
         }
     }
 
@@ -665,6 +673,115 @@ impl<'a> Validator<'a> {
             },
             out,
         );
+    }
+
+    /// [OPUS-4.8] SHACL §6 evaluation for one activated SPARQL-based constraint
+    /// component occurrence. The validator (kind-specific or generic) runs with
+    /// `$this`, the bound parameter VALUES (`$paramName`) and (on a property
+    /// shape) `$PATH` pre-bound; ASK validators additionally run per VALUE NODE
+    /// with `$value` pre-bound (ASK=false → one violation for that value),
+    /// SELECT validators run once per focus node (§5.2 solution→result mapping).
+    fn eval_custom_component(
+        &mut self,
+        sid: usize,
+        focus: &Term,
+        values: &[Term],
+        cidx: usize,
+        args: &[Option<Term>],
+        out: &mut Vec<ValidationResult>,
+    ) {
+        let comp: &ComponentDef = &self.shapes.components[cidx];
+        let shape = &self.shapes.shapes[sid];
+        let is_property_shape = shape.path.is_some();
+        let Some(validator) = comp.validator_for(is_property_shape) else {
+            return; // no usable validator for this shape kind (lenient)
+        };
+        let message = validator.message.clone();
+        let component_iri = match &comp.node {
+            Term::NamedNode(n) => n.as_str().to_string(),
+            // A blank-node component has no IRI for sh:sourceConstraintComponent;
+            // fall back to the generic SPARQL component IRI.
+            _ => sh("SPARQLConstraintComponent"),
+        };
+
+        // Parameter pre-bindings, common to every value node / the SELECT run.
+        // `$paramName` ← bound arg; absent optionals contribute no binding.
+        let mut param_bindings: Vec<(String, Term)> = Vec::with_capacity(args.len());
+        for (p, arg) in comp.parameters.iter().zip(args.iter()) {
+            if let Some(term) = arg {
+                param_bindings.push((p.var.clone(), term.clone()));
+            }
+        }
+        // NOTE (scope): `$PATH` pre-binding for `sh:propertyValidator` is NOT done.
+        // `$PATH` is a SPARQL property PATH (not a term) so it cannot be supplied
+        // via the VALUES table the parameter/`$this`/`$value` bindings use, and the
+        // component's validator query is pre-parsed (shared across shapes), so the
+        // textual `$PATH` substitution the §5.2 `sh:sparql` path performs cannot be
+        // applied per-shape here. ASK validators get `$value` (the value node) and
+        // the parameters, which covers the common property-validator pattern. See
+        // the module/TODO scope note.
+        let shape_path = shape.path.clone();
+        let severity = shape.severity.clone();
+        let shape_messages = shape.messages.clone();
+        let shape_node = shape.node.clone();
+        let data = self.data.graph();
+
+        match &validator.prepared {
+            PreparedValidator::Ask(query) => {
+                // One ASK per value node; ASK=false (constraint not satisfied) is a
+                // violation reported on that value (SHACL §6.3).
+                for v in values {
+                    let mut bindings: Vec<(&str, &Term)> = vec![("this", focus), ("value", v)];
+                    for (name, term) in &param_bindings {
+                        bindings.push((name.as_str(), term));
+                    }
+                    if crate::sparql::ask_violates(query, data, &bindings) {
+                        let default_message = match &message {
+                            // {$param}/{$value}/{$this} substitution from the pre-bound terms.
+                            Some(tpl) => crate::sparql::substitute_bindings(tpl, &bindings),
+                            None => format!(
+                                "Value does not satisfy constraint component <{component_iri}>"
+                            ),
+                        };
+                        out.push(ValidationResult {
+                            focus_node: focus.clone(),
+                            path: shape_path.clone(),
+                            value: Some(v.clone()),
+                            source_shape: shape_node.clone(),
+                            source_component: component_iri.clone(),
+                            severity: severity.clone(),
+                            messages: shape_messages.clone(),
+                            default_message,
+                        });
+                    }
+                }
+            }
+            PreparedValidator::Select(query) => {
+                // One SELECT per focus node; each solution is a violation.
+                let mut bindings: Vec<(&str, &Term)> = vec![("this", focus)];
+                for (name, term) in &param_bindings {
+                    bindings.push((name.as_str(), term));
+                }
+                crate::sparql::select_validate(
+                    query,
+                    data,
+                    focus,
+                    &bindings,
+                    message.as_deref(),
+                    |fields: ComponentResultFields| ValidationResult {
+                        focus_node: fields.focus,
+                        path: fields.path.or_else(|| shape_path.clone()),
+                        value: fields.value,
+                        source_shape: shape_node.clone(),
+                        source_component: component_iri.clone(),
+                        severity: severity.clone(),
+                        messages: shape_messages.clone(),
+                        default_message: fields.default_message,
+                    },
+                    out,
+                );
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)] // one call site per range component; a struct would obscure it
