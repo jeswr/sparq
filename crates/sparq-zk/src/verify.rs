@@ -30,7 +30,7 @@
 //! the verifiable fragment, failing closed.
 
 use sparq_engine::zk::{PatternKey, SlotPattern};
-use spargebra::algebra::GraphPattern;
+use spargebra::algebra::{Expression, GraphPattern};
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::Query;
 use std::collections::BTreeSet;
@@ -118,7 +118,15 @@ fn collect_patterns(gp: &GraphPattern, out: &mut Vec<PatternKey>) -> Result<(), 
             }
             Ok(())
         }
-        GraphPattern::Filter { inner, .. } => collect_patterns(inner, out),
+        GraphPattern::Filter { expr, inner } => {
+            // EXISTS/NOT EXISTS embed a graph pattern inside the FILTER
+            // expression — non-monotone (NOT EXISTS) and traced unlabelled
+            // by the engine seam; outside the stage-1 fragment.
+            if expression_has_exists(expr) {
+                return Err(VerifyError::UnsupportedFragment("EXISTS / NOT EXISTS".into()));
+            }
+            collect_patterns(inner, out)
+        }
         GraphPattern::Join { left, right } => {
             collect_patterns(left, out)?;
             collect_patterns(right, out)
@@ -144,6 +152,34 @@ fn collect_patterns(gp: &GraphPattern, out: &mut Vec<PatternKey>) -> Result<(), 
         // Covers feature-gated variants the workspace enables on spargebra
         // (e.g. sep-0006 LATERAL): everything unknown is outside the fragment.
         other => Err(VerifyError::UnsupportedFragment(format!("{other:?}"))),
+    }
+}
+
+/// Whether a FILTER expression contains an (NOT) EXISTS subpattern anywhere.
+fn expression_has_exists(e: &Expression) -> bool {
+    use Expression as E;
+    match e {
+        E::Exists(_) => true,
+        E::NamedNode(_) | E::Literal(_) | E::Variable(_) | E::Bound(_) => false,
+        E::Or(a, b)
+        | E::And(a, b)
+        | E::Equal(a, b)
+        | E::SameTerm(a, b)
+        | E::Greater(a, b)
+        | E::GreaterOrEqual(a, b)
+        | E::Less(a, b)
+        | E::LessOrEqual(a, b)
+        | E::Add(a, b)
+        | E::Subtract(a, b)
+        | E::Multiply(a, b)
+        | E::Divide(a, b) => expression_has_exists(a) || expression_has_exists(b),
+        E::UnaryPlus(a) | E::UnaryMinus(a) | E::Not(a) => expression_has_exists(a),
+        E::In(a, list) => expression_has_exists(a) || list.iter().any(expression_has_exists),
+        E::If(a, b, c) => {
+            expression_has_exists(a) || expression_has_exists(b) || expression_has_exists(c)
+        }
+        E::Coalesce(list) => list.iter().any(expression_has_exists),
+        E::FunctionCall(_, args) => args.iter().any(expression_has_exists),
     }
 }
 
@@ -278,6 +314,10 @@ mod tests {
             // bnode-in-pattern rejection (still fail-closed).
             ("SELECT * WHERE { ?s <http://ex/a>/<http://ex/b> ?o }", "blank node"),
             ("SELECT * WHERE { ?s ?p ?o BIND(1 AS ?x) }", "BIND"),
+            (
+                "SELECT * WHERE { ?s ?p ?o FILTER NOT EXISTS { ?o ?q ?r } }",
+                "EXISTS",
+            ),
             ("SELECT * WHERE { _:b ?p ?o }", "blank node"),
         ] {
             let err = fragment_patterns(q).unwrap_err();
