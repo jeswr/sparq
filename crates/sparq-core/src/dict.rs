@@ -240,7 +240,11 @@ fn hash_triple_ids(ids: [Id; 3]) -> u64 {
 /// a valid language tag, so the encoding is unambiguous). One string field keeps the
 /// storage layout, hashing and equality unchanged; [`reconstruct_ref`] splits it back out.
 #[inline]
-fn lang_with_dir(l: &Literal) -> Option<std::borrow::Cow<'_, str>> {
+// [OPUS-4.8] (T1) `pub(crate)` so the Turtle chunk worker's borrowed-slice interner
+// (`intern_object_ref` in lib.rs) builds the EXACT same lang(+base-direction) string this
+// module's `Dict::intern` uses — required for intern/hash parity (a directional literal must
+// land on the identical id whether interned via the owned-Term path or the borrowed path).
+pub(crate) fn lang_with_dir(l: &Literal) -> Option<std::borrow::Cow<'_, str>> {
     match l.direction() {
         Some(d) => Some(std::borrow::Cow::Owned(format!("{}--{d}", l.language().unwrap_or("")))),
         None => l.language().map(std::borrow::Cow::Borrowed),

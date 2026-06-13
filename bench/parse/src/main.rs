@@ -41,6 +41,7 @@ fn main() {
         Some("compress") => compress(&args[2]),
         Some("bench-nt") => bench_nt(&args[2]),
         Some("bench-ttl") => bench_ttl(&args[2]),
+        Some("ab-ttl-intern") => ab_ttl_intern(&args[2]),
         Some("bench-zip") => bench_zip(&args[2]),
         Some("probe-read") => probe_read(&args[2]),
         Some("gen-hdt") => gen_hdt(&args[2], &args[3]),
@@ -49,7 +50,7 @@ fn main() {
         // Internal: load ONE path once in a fresh process, print its peak RSS.
         Some("hdt-rss") => hdt_rss(&args[2], &args[3]),
         _ => {
-            eprintln!("usage: parse-baseline gen|to-ttl|compress|bench-nt|bench-ttl|bench-zip|gen-hdt|bench-hdt|bench-hdt-zip ...");
+            eprintln!("usage: parse-baseline gen|to-ttl|compress|bench-nt|bench-ttl|ab-ttl-intern|bench-zip|gen-hdt|bench-hdt|bench-hdt-zip ...");
             std::process::exit(2);
         }
     }
@@ -178,6 +179,108 @@ fn subject_to_term(s: &oxrdf::NamedOrBlankNode) -> oxrdf::Term {
         oxrdf::NamedOrBlankNode::NamedNode(n) => oxrdf::Term::NamedNode(n.clone()),
         oxrdf::NamedOrBlankNode::BlankNode(b) => oxrdf::Term::BlankNode(b.clone()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] ab-ttl-intern — ISOLATED A/B of the Turtle T1 lever
+// ---------------------------------------------------------------------------
+//
+// Both `bench-ttl` rows mix parsing + interning; oxttl parse dominates (~63% of
+// parse+intern), so the intern delta T1 targets is swamped by parse noise. This
+// subcommand removes the parse: it pre-parses the document ONCE into a Vec of
+// oxttl `Triple`s, then times ONLY the intern loop, two strategies back-to-back
+// over the SAME term stream, many iterations — the cleanest read of the
+// `oxrdf::Term`-materialization tax (T1). Median-of-N; report the RATIO (old/new),
+// which is load-robust.
+//
+//   OLD (pre-T1): per S/P/O build an owned `oxrdf::Term` then `dict.intern(&Term)`.
+//   NEW (T1):     dispatch on the borrowed oxttl components into
+//                 `intern_iri`/`intern_blank`/`intern_lit` directly.
+fn ab_ttl_intern(path: &str) {
+    use oxrdf::Term;
+    use sparq_core::dict::{Dict, Id};
+
+    let text = read_to_string(path);
+    let bytes = text.as_bytes();
+    let name = dataset_name(path);
+
+    // Parse once; hold the owned triples so the timed loops never touch the parser.
+    let parsed: Vec<oxrdf::Triple> = oxttl::TurtleParser::new()
+        .for_slice(bytes)
+        .map(|r| r.expect("dataset must parse"))
+        .collect();
+    let n = parsed.len();
+    eprintln!("{name}: {} bytes, {n} triples (parse excluded from timing)", bytes.len());
+
+    // OLD: owned-Term materialization per component, then dict.intern(&Term).
+    let old = |triples: &[oxrdf::Triple]| -> usize {
+        let mut dict = Dict::new();
+        let mut out: Vec<[Id; 3]> = Vec::with_capacity(triples.len());
+        for t in triples {
+            let s = dict.intern(&subject_to_term(&t.subject));
+            let p = dict.intern(&Term::NamedNode(t.predicate.clone()));
+            let o = dict.intern(&t.object);
+            out.push([s, p, o]);
+        }
+        black_box(dict.len());
+        out.len()
+    };
+
+    // NEW (T1): borrowed-slice dispatch into the component interners.
+    let new = |triples: &[oxrdf::Triple]| -> usize {
+        let mut dict = Dict::new();
+        let mut out: Vec<[Id; 3]> = Vec::with_capacity(triples.len());
+        for t in triples {
+            let s = match &t.subject {
+                oxrdf::NamedOrBlankNode::NamedNode(nn) => dict.intern_iri(nn.as_str()),
+                oxrdf::NamedOrBlankNode::BlankNode(b) => dict.intern_blank(b.as_str()),
+            };
+            let p = dict.intern_iri(t.predicate.as_str());
+            let o = match &t.object {
+                Term::NamedNode(nn) => dict.intern_iri(nn.as_str()),
+                Term::BlankNode(b) => dict.intern_blank(b.as_str()),
+                // The bench datasets carry no base-direction literals; language() suffices here.
+                Term::Literal(l) => dict.intern_lit(l.value(), l.datatype().as_str(), l.language()),
+                Term::Triple(_) => dict.intern(&t.object),
+            };
+            out.push([s, p, o]);
+        }
+        black_box(dict.len());
+        out.len()
+    };
+
+    // Sanity: both strategies must intern to the same dict size + triple count.
+    assert_eq!(old(&parsed), new(&parsed));
+
+    // Many iterations, interleaved old/new each round, median over rounds.
+    const ROUNDS: usize = 15;
+    let mut t_old = Vec::with_capacity(ROUNDS);
+    let mut t_new = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let s = Instant::now();
+        black_box(old(&parsed));
+        t_old.push(s.elapsed().as_secs_f64());
+        let s = Instant::now();
+        black_box(new(&parsed));
+        t_new.push(s.elapsed().as_secs_f64());
+    }
+    t_old.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    t_new.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mo = t_old[t_old.len() / 2];
+    let mn = t_new[t_new.len() / 2];
+    println!("| dataset | strategy | median s ({ROUNDS} rounds) | Mtriples/s | ns/triple |");
+    println!("|---|---|---|---|---|");
+    println!("| {name} | OLD owned-Term intern | {mo:.4} | {:.2} | {:.1} |", n as f64 / 1e6 / mo, mo * 1e9 / n as f64);
+    println!("| {name} | NEW (T1) borrowed intern | {mn:.4} | {:.2} | {:.1} |", n as f64 / 1e6 / mn, mn * 1e9 / n as f64);
+    println!(
+        "| {name} | **ratio old/new** | **{:.3}×** | | |",
+        mo / mn
+    );
+    eprintln!(
+        "intern-only A/B: OLD {mo:.4}s, NEW {mn:.4}s, speedup {:.3}× ({:.1}% of intern step removed)",
+        mo / mn,
+        100.0 * (mo - mn) / mo
+    );
 }
 
 // ---------------------------------------------------------------------------

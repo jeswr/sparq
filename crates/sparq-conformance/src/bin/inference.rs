@@ -9,6 +9,7 @@
 
 use sparq_conformance::inference::{n3_suite, owl_suite, rdfmt, report, sparql_entail};
 use sparq_conformance::inference::report::{Outcome, Section, TestResult};
+use sparq_conformance::turtle_suite;
 use std::path::PathBuf;
 
 fn main() {
@@ -41,6 +42,8 @@ fn main() {
     let rdf_tests = root.join("rdf-tests");
     let n3_root = root.join("n3");
     let owl_export = root.join("owl2/all.rdf");
+    // [OPUS-4.8] (B4) W3C rdf-turtle suite directory inside the same rdf-tests clone.
+    let turtle_root = rdf_tests.join("rdf/rdf11/rdf-turtle");
     if !rdf_tests.is_dir() {
         eprintln!(
             "test data not found under {} — run scripts/fetch-inference-suites.sh first",
@@ -104,6 +107,13 @@ fn main() {
         "SPARQL 1.1 entailment regimes (sparql11/entailment)",
         sparql_entail::notes(),
         &|results| sparql_entail::run_suite(&rdf_tests, results),
+    );
+    // [OPUS-4.8] (B4) W3C rdf-turtle suite through the SPARQ Turtle parser — the
+    // rejection/acceptance oracle that gates the Turtle T1 spike. Reuses the rdf-tests clone.
+    run_section(
+        "W3C rdf-turtle through the sparq Turtle parser (parse_to_triples)",
+        turtle_suite::notes(),
+        &|results| turtle_suite::run_suite(&turtle_root, results),
     );
 
     let md = report::render(

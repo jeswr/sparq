@@ -2286,15 +2286,57 @@ fn finish_sharded(sd: dict::ShardedDict, mut all: Vec<[Id; 3]>) -> (Dict, Vec<[I
     (dict, all)
 }
 
+/// [OPUS-4.8] (T1) Intern an oxttl-parsed subject (`NamedNode`/`BlankNode`) from its BORROWED
+/// `&str`, without materializing an owned `oxrdf::Term`. `subject_term` + `dict.intern(&Term)`
+/// built a heap `Term` per S — bumping the `NamedNode`/`BlankNode` ref-count (an `Arc`/`Rc` clone
+/// in oxrdf's interned-IRI representation) and constructing the `Term` enum — only for `intern`
+/// to immediately re-borrow `.as_str()` and dispatch right back to `intern_iri`/`intern_blank`.
+/// Here we dispatch on the borrowed component directly: the only allocation left is the one
+/// `intern_*` makes on a genuinely new term (copy into `Box<str>`), which is unavoidable.
+#[cfg(feature = "parallel")]
+#[inline]
+fn intern_subject_ref(dict: &mut Dict, s: &oxrdf::NamedOrBlankNode) -> Id {
+    match s {
+        oxrdf::NamedOrBlankNode::NamedNode(n) => dict.intern_iri(n.as_str()),
+        oxrdf::NamedOrBlankNode::BlankNode(b) => dict.intern_blank(b.as_str()),
+    }
+}
+
+/// [OPUS-4.8] (T1) Intern an oxttl-parsed object `Term` from its BORROWED components — the object
+/// slot is the one that can be a literal or (RDF-star) a quoted triple. IRIs/blank nodes/literals
+/// dispatch straight to the component interners with `&str` views; a nested triple term recurses
+/// (its s/p/o are interned first, then the triple is stored by component ids, matching
+/// `Dict::intern(&Term::Triple(_))`). No owned `Term` is built for the common non-star case.
+#[cfg(feature = "parallel")]
+#[inline]
+fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
+    match o {
+        Term::NamedNode(n) => dict.intern_iri(n.as_str()),
+        Term::BlankNode(b) => dict.intern_blank(b.as_str()),
+        Term::Literal(l) => {
+            dict.intern_lit(l.value(), l.datatype().as_str(), crate::dict::lang_with_dir(l).as_deref())
+        }
+        // RDF-star quoted triple: rare; fall back to the owned-Term path (handles nesting +
+        // content-addressed triple ids identically to the serial parser).
+        Term::Triple(_) => dict.intern(o),
+    }
+}
+
 /// Serial Turtle parse of `bytes` into `dict` — the fallback and the per-chunk worker.
+///
+/// [OPUS-4.8] (T1) Interns each S/P/O directly from oxttl's already-parsed BORROWED term views
+/// (`intern_subject_ref` / `intern_iri` / `intern_object_ref`) instead of first materializing an
+/// owned `oxrdf::Term` per component and re-borrowing it in `dict.intern`. oxttl still does all
+/// tokenization, grammar and prefixed-name expansion — this only removes the per-triple `Term`
+/// heap churn between oxttl's output and the dict.
 #[cfg(feature = "parallel")]
 fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
     let mut triples = Vec::new();
     for t in TurtleParser::new().for_slice(bytes) {
         let t = t.map_err(|e| e.to_string())?;
-        let s = dict.intern(&subject_term(&t.subject));
-        let p = dict.intern(&Term::NamedNode(t.predicate.clone()));
-        let o = dict.intern(&t.object);
+        let s = intern_subject_ref(dict, &t.subject);
+        let p = dict.intern_iri(t.predicate.as_str());
+        let o = intern_object_ref(dict, &t.object);
         triples.push([s, p, o]);
     }
     Ok(triples)
@@ -3329,6 +3371,107 @@ mod tests {
                     "case {k} target {target}: parallel path must reject malformed Turtle"
                 );
             }
+        }
+    }
+
+    /// [OPUS-4.8] (B4 — sparq-turtle-path REJECTION ORACLE) The public `Graph::parse_to_triples`
+    /// `"turtle"` path MUST reject malformed Turtle, and reject EXACTLY what the oxttl serial
+    /// parser rejects (oxttl is the differential reference). This is the load-bearing gate for the
+    /// T1 borrowed-slice interner spike: T1 changes how `parse_turtle_chunk` interns oxttl's
+    /// already-parsed terms, so it cannot itself accept invalid syntax — but the chunked-vs-serial
+    /// byte-identity oracle (`parallel_turtle_bnodes_match_serial`) only proves chunked ≡ serial,
+    /// NOT that either rejects what the spec/oxttl rejects. An over-eager accept would be a silent
+    /// corruption invisible to that oracle. So we pin REJECTION here directly, on the PUBLIC entry
+    /// point (`parse_to_triples`, which dispatches to `parse_turtle_parallel` under `parallel`),
+    /// for a dozen-plus malformed inputs spanning the categories the brief calls out: bad IRIs,
+    /// bad escapes, unterminated strings, bad prefixes, plus structural errors.
+    ///
+    /// The assertion is DIFFERENTIAL, not just "sparq errors": for each input we first confirm the
+    /// oxttl serial reference rejects it (so the corpus stays honest as oxttl evolves), then assert
+    /// the public sparq turtle path rejects it too. Positive controls confirm the harness is not
+    /// vacuously rejecting everything.
+    #[test]
+    fn turtle_path_rejection_oracle() {
+        // Differential reference: serial oxttl (the same parser the chunk worker drives).
+        let oxttl_serial_rejects = |src: &str| -> bool {
+            oxttl::TurtleParser::new()
+                .for_slice(src.as_bytes())
+                .any(|r| r.is_err())
+        };
+
+        // Malformed Turtle, one invalid reason each. A leading valid statement is included where
+        // it helps the parallel splitter actually engage (so the chunk path, not only the 1T
+        // direct parse, is exercised by the same corpus when run under --features parallel).
+        let bad: &[(&str, &str)] = &[
+            // ---- bad prefixes / prefixed names ----
+            ("undeclared prefix in body",
+             "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\nbad:s bad:p bad:o .\n"),
+            ("@prefix without an IRI",
+             "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\n@prefix bad .\nex:s2 ex:p ex:o2 .\n"),
+            ("prefix used before its declaration",
+             "@prefix a: <http://a/> .\na:s a:p later:o .\n@prefix later: <http://l/> .\na:s2 a:p a:o .\n"),
+            ("@prefix missing the colon",
+             "@prefix ex <http://ex/> .\nex:s ex:p ex:o .\n"),
+            // ---- bad IRIs ----
+            ("unterminated IRI ref (no closing >)",
+             "@prefix ex: <http://ex/> .\nex:s ex:p <http://no-close .\nex:s2 ex:p ex:o2 .\n"),
+            ("space inside an IRI ref",
+             "<http://ex/ s> <http://ex/p> <http://ex/o> .\n"),
+            // ---- bad string escapes ----
+            ("invalid string escape \\q",
+             "@prefix ex: <http://ex/> .\nex:s ex:p \"bad \\q escape\" .\nex:s2 ex:p ex:o2 .\n"),
+            ("truncated \\u escape (too few hex digits)",
+             "@prefix ex: <http://ex/> .\nex:s ex:p \"bad \\u12\" .\nex:s2 ex:p ex:o2 .\n"),
+            // ---- unterminated strings ----
+            ("unterminated single-quoted string",
+             "@prefix ex: <http://ex/> .\nex:s ex:p \"unterminated .\nex:s2 ex:p ex:o2 .\n"),
+            ("unterminated triple-quoted string",
+             "@prefix ex: <http://ex/> .\nex:s ex:p \"\"\"open\nstill open .\n"),
+            // ---- structural ----
+            ("missing statement terminator",
+             "@prefix ex: <http://ex/> .\nex:s ex:p ex:o\nex:s2 ex:p ex:o2 .\n"),
+            ("predicate with no object",
+             "@prefix ex: <http://ex/> .\nex:s ex:p .\nex:s2 ex:p ex:o2 .\n"),
+            ("literal in subject position",
+             "@prefix ex: <http://ex/> .\n\"lit\" ex:p ex:o .\n"),
+            ("bad numeric literal (double dot)",
+             "@prefix ex: <http://ex/> .\nex:s ex:p 1.2.3 .\nex:s2 ex:p ex:o2 .\n"),
+            ("unmatched [ property-list",
+             "@prefix ex: <http://ex/> .\nex:s ex:p [ ex:q ex:r .\nex:s2 ex:p ex:o2 .\n"),
+            ("unmatched ( collection",
+             "@prefix ex: <http://ex/> .\nex:s ex:p ( ex:a ex:b .\nex:s2 ex:p ex:o2 .\n"),
+        ];
+
+        for (why, src) in bad {
+            assert!(
+                oxttl_serial_rejects(src),
+                "corpus invariant: oxttl reference must reject `{why}` (update the corpus if oxttl changed)"
+            );
+            assert!(
+                Graph::parse_to_triples(src, "turtle").is_err(),
+                "sparq turtle path must REJECT malformed Turtle: {why}"
+            );
+        }
+
+        // Positive controls: well-formed Turtle MUST parse (so the oracle is not vacuous), covering
+        // the constructs the T1 interner has to keep handling — prefixed names, full IRIs, blank
+        // nodes, collections, language tags, datatyped + plain literals, RDF-star quoted triples.
+        let good: &[&str] = &[
+            "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\n",
+            "<http://ex/s> <http://ex/p> \"plain\" .\n",
+            "@prefix ex: <http://ex/> .\nex:s ex:p [ ex:q ( 1 2 3 ) ] ; ex:r _:b .\n",
+            "@prefix ex: <http://ex/> .\nex:s ex:p \"hi\"@en , \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "@prefix ex: <http://ex/> .\n<< ex:s ex:p ex:o >> ex:said ex:alice .\n",
+        ];
+        for src in good {
+            assert!(
+                !oxttl_serial_rejects(src),
+                "corpus invariant: oxttl reference must ACCEPT this well-formed Turtle"
+            );
+            assert!(
+                Graph::parse_to_triples(src, "turtle").is_ok(),
+                "sparq turtle path must ACCEPT well-formed Turtle: {src:?}"
+            );
         }
     }
 
