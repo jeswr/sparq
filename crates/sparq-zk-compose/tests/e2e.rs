@@ -37,8 +37,8 @@ use sparq_zk_compose::issuer::{
 };
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
-    encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, HolderRegistry,
-    InMemorySeenNonces, KeySet, RevocationPolicy, VerifierNonce,
+    encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, EntailmentPolicy,
+    HolderRegistry, InMemorySeenNonces, KeySet, RevocationPolicy, VerifierNonce,
 };
 use sparq_zk::field::Fr;
 use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
@@ -312,6 +312,7 @@ fn sample_manifest() -> ProofManifest {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge {
             challenge: FieldHex("0x2a".into()),
         },
@@ -644,6 +645,7 @@ fn full_manifest_prove_verify_scan() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge },
         // [OPUS-4.8] audit #12: issuer-bound, non-revoked, fresh.
         revocation: Some(fixture_revocation()),
@@ -666,6 +668,7 @@ fn full_manifest_prove_verify_scan() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -761,6 +764,7 @@ fn filter_manifest(
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge },
         // [OPUS-4.8] audit #12: non-revoked, fresh, issuer-bound — so the #1/#2/#4
         // forge tests reach the gate they probe (not the revocation gate).
@@ -805,6 +809,7 @@ fn forge_positive_honest_filter_verifies() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -839,6 +844,7 @@ fn forge_reject_statement_substitution() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -873,6 +879,7 @@ fn forge_reject_verdict_substitution() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -909,6 +916,7 @@ fn forge_reject_challenge_rebind() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0xdead"),
         &InMemorySeenNonces::new(),
     ) {
@@ -967,6 +975,7 @@ fn nonce_happy_path_fresh_nonce_verifies() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for(nonce_hex),
         &InMemorySeenNonces::new(),
     )
@@ -1003,6 +1012,7 @@ fn nonce_replay_under_new_nonce_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0xbeef"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1039,6 +1049,7 @@ fn nonce_single_use_second_presentation_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
     )
@@ -1051,6 +1062,7 @@ fn nonce_single_use_second_presentation_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
     ) {
@@ -1100,6 +1112,7 @@ fn nonce_binding_mismatch_rejected() {
             attributions: vec![vec![0]],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
             // Binding declares 0x2a...
             binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
             // [OPUS-4.8] audit #12: non-revoked, fresh, so the prefilter (incl. the
@@ -1131,6 +1144,7 @@ fn nonce_binding_mismatch_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
     ) {
@@ -1150,6 +1164,7 @@ fn nonce_binding_mismatch_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
     ) {
@@ -1190,6 +1205,7 @@ fn holder_pop_manifest(holder_hex: &str, pop_hex: &str, cryptosuite: &str) -> Pr
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::HolderPop {
             challenge: FieldHex("0x2a".into()),
             holder: holder_hex.to_string(),
@@ -1234,6 +1250,7 @@ fn holder_pop_empty_registry_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(), // no authorised holders
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1268,6 +1285,7 @@ fn holder_pop_untrusted_holder_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &registry,
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1302,6 +1320,7 @@ fn holder_pop_invalid_signature_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &registry,
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1333,6 +1352,7 @@ fn holder_pop_unknown_cryptosuite_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &registry,
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1386,6 +1406,7 @@ fn holder_pop_valid_verifies_end_to_end() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::HolderPop {
             challenge: challenge.clone(),
             holder: holder_hex,
@@ -1407,6 +1428,7 @@ fn holder_pop_valid_verifies_end_to_end() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &registry,
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -1442,6 +1464,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             attributions: vec![vec![0]],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
             binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
             revocation: Some(fixture_revocation()),
             status_snapshots: vec![fixture_snapshot(false)],
@@ -1473,6 +1496,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             &trusted_k(&test_issuer_sk(1)),
             &fresh_policy(),
             &HolderRegistry::empty(),
+            &EntailmentPolicy::simple_only(),
             &nonce_for("0x2a"),
             &InMemorySeenNonces::new(),
         ) {
@@ -1520,6 +1544,7 @@ fn forge_reject_noncanonical_vk() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1555,6 +1580,7 @@ fn forge_artvk_is_ignored() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -1698,6 +1724,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1730,6 +1757,7 @@ fn filter_reject_filter_add_on_scan_only() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1759,6 +1787,7 @@ fn filter_reject_constant_swap_age_as_salary() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1803,6 +1832,7 @@ fn filter_reject_operand_slot_substitution() {
         attributions: vec![vec![0], vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1848,6 +1878,7 @@ fn filter_reject_false_verdict_row() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1880,6 +1911,7 @@ fn filter_reject_unbindable_filter_fragment() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1918,6 +1950,7 @@ fn filter_binding_happy_path_structure() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // [OPUS-4.8] audit #12: non-revoked, fresh, issuer-bound.
         revocation: Some(fixture_revocation()),
@@ -1982,6 +2015,7 @@ fn filter_reject_unproven_failing_row() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -2031,6 +2065,7 @@ fn filter_two_rows_both_gated_verifies() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // [OPUS-4.8] audit #12: non-revoked, fresh, issuer-bound.
         revocation: Some(fixture_revocation()),
@@ -2091,6 +2126,7 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // [OPUS-4.8] audit #12: a non-revoked, fresh, issuer-bound reference so a
         // status-bound attestation (`attest_with_salt`) reaches the signature
@@ -2182,6 +2218,7 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -2494,6 +2531,7 @@ fn cross_graph_manifest(
         attributions: declared,
         join_obligations: obligations,
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // [OPUS-4.8] audit #12: a non-revoked, fresh, issuer-bound reference for
         // BOTH graphs (both attestations bind the same fixture index/version), so
@@ -3015,6 +3053,7 @@ fn revocation_stale_status_list_rejected() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // Disclose the (issuer-signed) old-version reference + a non-revoked
         // snapshot at that old version.
@@ -3208,6 +3247,7 @@ fn revocation_within_window_verifies() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: Some(RevocationStatus {
             status_list: FIXTURE_STATUS_LIST.to_string(),
@@ -3262,6 +3302,7 @@ fn revocation_full_prove_verify_non_revoked_verifies() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -3303,6 +3344,7 @@ fn revocation_full_prove_verify_revoked_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &revoked_policy(), // AUTHORITATIVE snapshot has bit 3 SET => REVOKED.
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -3384,6 +3426,7 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![hidden_snapshot(false)],
@@ -3471,6 +3514,7 @@ fn hidden_revocation_unrevoked_verifies_and_index_is_private() {
         &trusted_k(&test_issuer_sk(1)),
         &hidden_policy(false),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -3545,6 +3589,7 @@ fn hidden_revocation_forged_root_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &hidden_policy(false), // authoritative root derived from the real snapshot
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -3610,6 +3655,7 @@ fn hi_scan_manifest(prover: &CircuitProver, signer_sk: &SecretKey, tag: &str) ->
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot(false)],
@@ -3745,7 +3791,7 @@ fn hidden_issuer_in_set_verifies_and_key_is_private() {
     manifest.hidden_issuer_attestations = vec![hidden];
     verify_manifest(
         &manifest, &prover, &scratch("hi_verify_ok"),
-        &keyset, &fresh_policy(), &HolderRegistry::empty(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &keyset, &fresh_policy(), &HolderRegistry::empty(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     )
     .expect("in-set hidden-issuer attestation verifies end-to-end");
 }
@@ -3878,7 +3924,7 @@ fn hidden_issuer_forged_root_rejected() {
     }];
     match verify_manifest(
         &manifest, &prover, &scratch("hi_verify_forge"),
-        &keyset, &fresh_policy(), &HolderRegistry::empty(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &keyset, &fresh_policy(), &HolderRegistry::empty(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     ) {
         Err(CheckError::HiddenIssuerRootMismatch) => {}
         other => panic!("a forged-root hidden-issuer proof must be HiddenIssuerRootMismatch, got {other:?}"),
@@ -3914,7 +3960,7 @@ fn hidden_issuer_not_enabled_rejected() {
     // the unit test in verifier.rs. We assert SOME rejection here (fail-closed).
     let res = verify_manifest(
         &m, &prover, &scratch("hi_notenabled"),
-        &k, &fresh_policy(), &HolderRegistry::empty(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &k, &fresh_policy(), &HolderRegistry::empty(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     );
     assert!(res.is_err(), "a manifest with hidden-issuer attestation under a non-opted-in KeySet must be rejected");
 }
@@ -4072,6 +4118,7 @@ fn filter_f64_composes_end_to_end() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot(false)],
@@ -4092,6 +4139,7 @@ fn filter_f64_composes_end_to_end() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -4110,4 +4158,175 @@ fn filter_f64_out_of_family_errors_cleanly() {
         "an out-of-family (5-digit) double operand must yield None — clean error, \
          never a silently-unprovable wrong-D member"
     );
+}
+
+// --- sq-314: entailment regime + derivation steps, end-to-end -----------------
+//
+// [OPUS-4.8] sq-314. `entailment_regime` used to be FREE METADATA (the verifier
+// never checked it). It is now ENFORCED: a regime the relying party's
+// EntailmentPolicy rejects, a Simple manifest carrying inference steps, a
+// non-Simple regime with no/ungrounded steps, all REJECT (fail-closed). These
+// tests exercise the structural enforcement (no toolchain — they reject/progress
+// at bind_entailment, before the bb gate).
+
+use sparq_zk_compose::derivation::{DerivationStep, EntailmentRule};
+
+/// An IRI's term encoding, the way scans disclose IRIs (salt-independent).
+fn enc_iri(s: &str) -> FieldHex {
+    let enc = sparq_zk::encode::encode_term(
+        &Term::NamedNode(NamedNode::new(s).unwrap()),
+        &Fr::from(0u64),
+    )
+    .unwrap();
+    FieldHex(sparq_zk::field::field_to_hex(&enc))
+}
+
+/// A scan-only manifest whose disclosed rows are the `rdf:type` triples of a tiny
+/// graph (so `(alice type Student)` is in the asserted base), under a chosen
+/// regime + derivation steps. Witness-only (empty proof_hex) so the entailment
+/// gate — which runs BEFORE the bb sub-proof loop — is what the test observes.
+fn entailment_manifest(regime: EntailmentRegime, steps: Vec<DerivationStep>) -> ProofManifest {
+    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let subclassof = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    let salt = salt_from_bytes(&[3u8; 32]);
+    let alice = NamedOrBlankNode::NamedNode(iri("http://ex/alice"));
+    let triples = vec![
+        Triple::new(
+            alice,
+            NamedNode::new(rdf_type).unwrap(),
+            Term::NamedNode(iri("http://ex/Student")),
+        ),
+        Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/Student")),
+            NamedNode::new(subclassof).unwrap(),
+            Term::NamedNode(iri("http://ex/Person")),
+        ),
+    ];
+    let commit = commit_triples(&triples, salt).unwrap();
+    // Scan `{ ?s <rdf:type> ?o }` discloses the (alice type Student) row only.
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(NamedNode::new(rdf_type).unwrap())),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).expect("scan builds");
+
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?o }"
+            .into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: regime,
+        derivation_steps: steps,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all(&mut m, &test_issuer_sk(1), salt);
+    m
+}
+
+fn run_entailment(m: &ProofManifest, policy: &EntailmentPolicy) -> Result<(), CheckError> {
+    let prover = CircuitProver::from_crate_root();
+    verify_manifest(
+        m,
+        &prover,
+        &scratch("entail"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &HolderRegistry::empty(),
+        policy,
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+}
+
+/// sq-314: an `Rdfs` manifest under a `Simple`-only policy REJECTS
+/// (EntailmentRegimeNotAccepted) — the regime is enforced, not free metadata.
+#[test]
+fn entailment_rdfs_rejected_under_simple_only_policy() {
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only()) {
+        Err(CheckError::EntailmentRegimeNotAccepted { .. }) => {}
+        other => panic!("Rdfs under simple-only must be EntailmentRegimeNotAccepted, got {other:?}"),
+    }
+}
+
+/// sq-314: a `Simple` manifest that nonetheless carries derivation steps REJECTS
+/// (UnexpectedDerivationSteps).
+#[test]
+fn entailment_simple_with_steps_rejected() {
+    let t = enc_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let sc = enc_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+    let step = DerivationStep {
+        rule: EntailmentRule::Rdfs9SubClassType,
+        antecedents: vec![
+            [enc_iri("http://ex/alice"), t.clone(), enc_iri("http://ex/Student")],
+            [enc_iri("http://ex/Student"), sc, enc_iri("http://ex/Person")],
+        ],
+        derived: [enc_iri("http://ex/alice"), t, enc_iri("http://ex/Person")],
+    };
+    let m = entailment_manifest(EntailmentRegime::Simple, vec![step]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only()) {
+        Err(CheckError::UnexpectedDerivationSteps) => {}
+        other => panic!("Simple with steps must be UnexpectedDerivationSteps, got {other:?}"),
+    }
+}
+
+/// sq-314: an `Rdfs` manifest with NO derivation steps REJECTS
+/// (MissingDerivationSteps) even when the policy accepts Rdfs.
+#[test]
+fn entailment_rdfs_without_steps_rejected() {
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only().with_rdfs()) {
+        Err(CheckError::MissingDerivationSteps { .. }) => {}
+        other => panic!("Rdfs with no steps must be MissingDerivationSteps, got {other:?}"),
+    }
+}
+
+/// sq-314: an `Rdfs` step whose `(Student subClassOf Person)` antecedent is NOT in
+/// the disclosed base (the scan discloses only the `rdf:type` row) is UNGROUNDED
+/// => UngroundedDerivationAntecedent.
+#[test]
+fn entailment_rdfs_ungrounded_antecedent_rejected() {
+    let t = enc_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let sc = enc_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+    let step = DerivationStep {
+        rule: EntailmentRule::Rdfs9SubClassType,
+        antecedents: vec![
+            [enc_iri("http://ex/alice"), t.clone(), enc_iri("http://ex/Student")],
+            // NOT disclosed by the rdf:type scan -> ungrounded.
+            [enc_iri("http://ex/Student"), sc, enc_iri("http://ex/Person")],
+        ],
+        derived: [enc_iri("http://ex/alice"), t, enc_iri("http://ex/Person")],
+    };
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![step]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only().with_rdfs()) {
+        Err(CheckError::UngroundedDerivationAntecedent { .. }) => {}
+        other => panic!(
+            "an ungrounded antecedent must be UngroundedDerivationAntecedent, got {other:?}"
+        ),
+    }
+}
+
+/// sq-314: a `Simple` manifest with no steps PASSES the entailment gate (it then
+/// progresses to the bb loop and stops at MissingProof — proving the entailment
+/// gate ACCEPTED it rather than rejecting it).
+#[test]
+fn entailment_simple_accepted_progresses_past_gate() {
+    let m = entailment_manifest(EntailmentRegime::Simple, vec![]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only()) {
+        Err(CheckError::MissingProof { .. }) => {}
+        other => panic!(
+            "a Simple manifest must pass the entailment gate (then hit MissingProof), got {other:?}"
+        ),
+    }
 }

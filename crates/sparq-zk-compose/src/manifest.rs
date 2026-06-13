@@ -530,6 +530,18 @@ pub struct ProofManifest {
     #[serde(default)]
     pub join_obligations: Vec<(String, usize, usize)>,
     pub entailment_regime: EntailmentRegime,
+    /// The recorded inference steps that justify any DERIVED triples under a
+    /// non-`Simple` `entailment_regime` (sq-314). EMPTY for `Simple` (no
+    /// inference). For `Rdfs`/`Owl` the verifier ([`crate::verifier::bind_entailment`])
+    /// re-checks every step is a well-formed, regime-admitted rule instance whose
+    /// antecedents are GROUNDED (chain to an earlier step or to a disclosed scan
+    /// row) — so the regime claim is enforced, not free metadata. A non-`Simple`
+    /// regime with NO grounded steps is rejected (fail-closed). See the
+    /// `derivation` module for the honest scope (disclosed-base re-check; the
+    /// in-circuit closure proof is deferred).
+    // [OPUS-4.8] sq-314: derivation steps for entailment-regime enforcement.
+    #[serde(default)]
+    pub derivation_steps: Vec<crate::derivation::DerivationStep>,
     pub binding: BindingMode,
     /// The credential's revocation reference (audit #12): which status list,
     /// index, and version. Issuer-bound (see [`RevocationStatus`]). When ANY

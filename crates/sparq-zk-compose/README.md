@@ -125,7 +125,19 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
 - **Trust framework** (issuer allow-lists, schema governance) — deferred.
 - **Revocation** — `RevocationStatus` is a hidden-index status-list
   placeholder; v1 carries the index in the clear and does not check liveness.
-- **Inference / entailment** — only `EntailmentRegime::Simple` is proved.
+- **Inference / entailment** — ENFORCED end-to-end ([OPUS-4.8] sq-314), not free
+  metadata. The verifier checks `entailment_regime` against an external
+  `EntailmentPolicy` (default `Simple`-only, fail-closed): a regime the policy
+  rejects, a `Simple` manifest carrying inference steps, or a non-`Simple` regime
+  whose `derivation_steps` do not STRUCTURALLY ground every derived triple to the
+  disclosed base (or to an earlier step) all REJECT. The `derivation` module
+  ships a `DerivationStep` capability + an RDFS rule subset (rdfs9 subClassOf-type,
+  rdfs7 subPropertyOf) the verifier re-checks (`bind_entailment`). DEFERRED: the
+  in-circuit ZK proof that an UNDISCLOSED antecedent is in the committed graph's
+  closure (the inference-circuit deliverable) — until then a derivation is sound
+  only over the DISCLOSED base (an ungrounded antecedent is rejected, never
+  assumed). So `Rdfs`/`Owl` is accepted only for disclosed-base derivations under
+  an explicit opt-in policy.
 - **HolderPoP binding** — IMPLEMENTED ([OPUS-4.8] sq-cwq): the `HolderPop`
   binding now carries a holder key + a challenge-bound Schnorr proof-of-possession
   (`pop`), and the verifier checks it FAIL-CLOSED against an external

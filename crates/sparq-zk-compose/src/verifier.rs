@@ -95,8 +95,11 @@
 use crate::build::{derive_filter_f64_id, derive_filter_int_id, derive_scan_id};
 use crate::driver::{CircuitProver, DriverError};
 use crate::manifest::{
-    BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest, StatusListSnapshot,
+    BindingMode, CircuitId, EntailmentRegime, FieldHex, ProofInputs, ProofManifest,
+    StatusListSnapshot,
 };
+// [OPUS-4.8] sq-314: derivation-step re-check for entailment-regime enforcement.
+use crate::derivation::regime_admits;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation root derivation.
 use crate::revocation::merkle_root;
 use sparq_zk::encode::encode_term;
@@ -311,6 +314,69 @@ impl HolderRegistry {
     /// Whether `holder_hex` (any case, optional `0x`) is an authorised holder.
     fn contains_hex(&self, holder_hex: &str) -> bool {
         self.holders.contains(&normalize_hex(holder_hex))
+    }
+}
+
+/// The relying party's ENTAILMENT-REGIME policy (sq-314): which entailment regimes
+/// it will accept a manifest under. The verifier enforces this fail-closed
+/// ([`bind_entailment`]) so `manifest.entailment_regime` is no longer free
+/// metadata.
+///
+/// # Default = `Simple`-only (fail-closed)
+/// [`EntailmentPolicy::default`] / [`EntailmentPolicy::simple_only`] accepts ONLY
+/// `Simple` (no inference) — the conservative anchor, matching what v1 actually
+/// proves cryptographically. A relying party that wants to accept inference opts
+/// in explicitly with [`EntailmentPolicy::with_rdfs`] / [`EntailmentPolicy::with_owl`];
+/// when it does, the verifier additionally requires the manifest's
+/// `derivation_steps` to STRUCTURALLY ground every derived triple (see
+/// [`bind_entailment`] + the `derivation` module). A regime the policy does not
+/// accept REJECTS.
+///
+/// # Honest scope
+/// Accepting `Rdfs`/`Owl` here means "I accept a derivation re-checked against the
+/// disclosed base"; it does NOT (yet) mean an in-circuit closure proof (deferred —
+/// see the `derivation` module docs). A relying party that requires
+/// cryptographic-strength inference keeps the `Simple`-only default.
+// [OPUS-4.8] sq-314: entailment-regime policy (external, fail-closed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntailmentPolicy {
+    accept_rdfs: bool,
+    accept_owl: bool,
+}
+
+impl Default for EntailmentPolicy {
+    fn default() -> Self {
+        EntailmentPolicy::simple_only()
+    }
+}
+
+impl EntailmentPolicy {
+    /// Accept ONLY `Simple` (no inference) — the fail-closed default.
+    pub fn simple_only() -> Self {
+        EntailmentPolicy { accept_rdfs: false, accept_owl: false }
+    }
+
+    /// Additionally accept `Rdfs` manifests (with grounded derivation steps).
+    pub fn with_rdfs(mut self) -> Self {
+        self.accept_rdfs = true;
+        self
+    }
+
+    /// Additionally accept `Owl` (RDFS-RL/OWL-RL) manifests. `Owl` subsumes RDFS,
+    /// so this also accepts `Rdfs`.
+    pub fn with_owl(mut self) -> Self {
+        self.accept_owl = true;
+        self.accept_rdfs = true;
+        self
+    }
+
+    /// Whether this policy accepts `regime`.
+    fn accepts(&self, regime: EntailmentRegime) -> bool {
+        match regime {
+            EntailmentRegime::Simple => true,
+            EntailmentRegime::Rdfs => self.accept_rdfs,
+            EntailmentRegime::Owl => self.accept_owl,
+        }
     }
 }
 
@@ -1065,6 +1131,36 @@ pub enum CheckError {
     /// Rejected.
     // [OPUS-4.8] sq-cwq.
     HolderPopInvalid { holder: String },
+    /// The manifest's `entailment_regime` is NOT accepted by the relying party's
+    /// [`EntailmentPolicy`] (sq-314): e.g. an `Rdfs`/`Owl` manifest under a
+    /// `Simple`-only policy. Rejected fail-closed — the regime is enforced, not
+    /// free metadata (a relying party opts into inference explicitly).
+    // [OPUS-4.8] sq-314.
+    EntailmentRegimeNotAccepted { regime: &'static str },
+    /// A `Simple` manifest carried derivation steps (sq-314): `Simple` means NO
+    /// inference, so any `derivation_steps` are inconsistent with the declared
+    /// regime. Rejected.
+    // [OPUS-4.8] sq-314.
+    UnexpectedDerivationSteps,
+    /// A non-`Simple` manifest carried NO derivation steps (sq-314): an inference
+    /// regime with nothing to justify the inference is a vacuous claim. Rejected
+    /// fail-closed (a relying party that accepts `Rdfs`/`Owl` requires the
+    /// derivation to be recorded + re-checkable).
+    // [OPUS-4.8] sq-314.
+    MissingDerivationSteps { regime: &'static str },
+    /// A derivation step is not a well-formed instance of its rule, or its rule is
+    /// not admitted by the declared regime (sq-314): the recorded inference does
+    /// not match the rule shape / regime. Rejected.
+    // [OPUS-4.8] sq-314.
+    MalformedDerivationStep { step: usize },
+    /// A derivation step's antecedent is UNGROUNDED (sq-314): it is neither an
+    /// earlier step's derived triple nor a triple disclosed by a scan sub-proof
+    /// (the asserted base). A derived triple cannot rest on an antecedent the proof
+    /// does not establish, so this is rejected fail-closed. (The in-circuit closure
+    /// proof that would ground antecedents not disclosed is deferred — see the
+    /// `derivation` module; until then only the disclosed base grounds a step.)
+    // [OPUS-4.8] sq-314.
+    UngroundedDerivationAntecedent { step: usize, antecedent: usize },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -1260,6 +1356,26 @@ impl std::fmt::Display for CheckError {
             CheckError::HolderPopInvalid { holder } => write!(
                 f,
                 "HolderPop binding pop signature does not verify under holder key {holder} over the challenge-bound message (sq-cwq: the presenter did not prove possession of the holder secret)"
+            ),
+            CheckError::EntailmentRegimeNotAccepted { regime } => write!(
+                f,
+                "manifest entailment regime `{regime}` is not accepted by the relying party's EntailmentPolicy (sq-314: the regime is enforced, not free metadata — a relying party must opt into inference)"
+            ),
+            CheckError::UnexpectedDerivationSteps => write!(
+                f,
+                "a Simple-regime manifest carried derivation steps (sq-314: Simple means no inference — steps are inconsistent with the regime)"
+            ),
+            CheckError::MissingDerivationSteps { regime } => write!(
+                f,
+                "a non-Simple regime `{regime}` carried no derivation steps (sq-314: an inference regime must record the derivation it claims — fail-closed)"
+            ),
+            CheckError::MalformedDerivationStep { step } => write!(
+                f,
+                "derivation step {step} is not a well-formed instance of its rule, or its rule is not admitted by the declared regime (sq-314)"
+            ),
+            CheckError::UngroundedDerivationAntecedent { step, antecedent } => write!(
+                f,
+                "derivation step {step} antecedent {antecedent} is ungrounded (sq-314: it is neither an earlier step's derived triple nor a disclosed scan row — a derived triple cannot rest on an antecedent the proof does not establish)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -2481,6 +2597,132 @@ fn bind_holder_pop(
     Ok(())
 }
 
+/// Encode an IRI to its salt-independent term encoding `FieldHex` (the same
+/// encoding scans disclose), `None` if it does not encode. Used by
+/// [`bind_entailment`] to compute the RDFS schema-vocabulary encodings.
+// [OPUS-4.8] sq-314.
+fn encode_iri_hex(iri: &str) -> Option<FieldHex> {
+    let nn = oxrdf::NamedNode::new(iri).ok()?;
+    let enc = encode_term(&oxrdf::Term::NamedNode(nn), &Fr::from(0u64))?;
+    Some(FieldHex(field_to_hex(&enc)))
+}
+
+/// sq-314: enforce the manifest's entailment regime end-to-end. This makes
+/// `entailment_regime` a CHECKED claim rather than free metadata.
+///
+/// Fail-closed contract:
+/// 1. the regime MUST be accepted by the relying party's [`EntailmentPolicy`]
+///    (`Simple` always; `Rdfs`/`Owl` only on explicit opt-in) — else
+///    `EntailmentRegimeNotAccepted`;
+/// 2. a `Simple` manifest MUST carry NO derivation steps (no inference) — else
+///    `UnexpectedDerivationSteps`;
+/// 3. a non-`Simple` manifest MUST carry derivation steps — else
+///    `MissingDerivationSteps`;
+/// 4. every derivation step MUST be a well-formed, regime-admitted rule instance
+///    (`MalformedDerivationStep`), and every antecedent MUST be GROUNDED: equal to
+///    an EARLIER step's derived triple or to a triple disclosed by a scan
+///    sub-proof (the asserted base) — else `UngroundedDerivationAntecedent`.
+///
+/// Grounding is by TERM-ENCODING equality (the disclosed scan rows and the step
+/// triples are both `FieldHex` encodings), so an antecedent that equals a
+/// disclosed asserted triple is soundly grounded. Step ordering is significant:
+/// each step may only ground on STRICTLY EARLIER steps (a forward-chained
+/// derivation), so there are no cyclic self-justifications.
+///
+/// # Honest scope (what is NOT proved here — deferred)
+/// Grounding ties antecedents to the DISCLOSED base; it does NOT (yet) prove in
+/// zero-knowledge that an undisclosed antecedent is in the committed graph's
+/// closure. An antecedent that is neither disclosed nor chained to a disclosed
+/// triple is REJECTED (not assumed). The full in-circuit RDFS/OWL-RL closure proof
+/// is the inference-circuit deliverable; this stage makes the regime claim
+/// non-vacuous and auditable over the disclosed-base fragment, fail-closed.
+// [OPUS-4.8] sq-314: entailment regime + derivation steps, end-to-end.
+fn bind_entailment(
+    manifest: &ProofManifest,
+    policy: &EntailmentPolicy,
+) -> Result<(), CheckError> {
+    let regime = manifest.entailment_regime;
+    let regime_name = match regime {
+        EntailmentRegime::Simple => "simple",
+        EntailmentRegime::Rdfs => "rdfs",
+        EntailmentRegime::Owl => "owl",
+    };
+    // (1) The regime must be accepted by the relying party.
+    if !policy.accepts(regime) {
+        return Err(CheckError::EntailmentRegimeNotAccepted { regime: regime_name });
+    }
+    let steps = &manifest.derivation_steps;
+    // (2) Simple => no inference steps.
+    if regime == EntailmentRegime::Simple {
+        if !steps.is_empty() {
+            return Err(CheckError::UnexpectedDerivationSteps);
+        }
+        return Ok(());
+    }
+    // (3) Non-Simple => steps required.
+    if steps.is_empty() {
+        return Err(CheckError::MissingDerivationSteps { regime: regime_name });
+    }
+
+    // The asserted base: every triple disclosed by a scan sub-proof (active rows),
+    // as [s, p, o] encodings — the ground set a step may chain from.
+    let mut disclosed: BTreeSet<[String; 3]> = BTreeSet::new();
+    for sp in &manifest.sub_proofs {
+        if let ProofInputs::Scan { rows, row_count, .. } = &sp.inputs {
+            for row in rows.iter().take(*row_count as usize) {
+                disclosed.insert([
+                    normalize_hex(&row[0].0),
+                    normalize_hex(&row[1].0),
+                    normalize_hex(&row[2].0),
+                ]);
+            }
+        }
+    }
+
+    // RDFS schema-vocabulary encodings (salt-independent IRIs). If any fails to
+    // encode the whole check fails closed (it cannot happen for these constants).
+    let (Some(rdf_type), Some(rdfs_subclassof), Some(rdfs_subpropertyof)) = (
+        encode_iri_hex("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+        encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subClassOf"),
+        encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subPropertyOf"),
+    ) else {
+        return Err(CheckError::MalformedDerivationStep { step: 0 });
+    };
+
+    // (4) Re-check each step. `derived_so_far` accumulates the derived triples of
+    // EARLIER steps (forward chaining only — no cyclic self-grounding).
+    let mut derived_so_far: BTreeSet<[String; 3]> = BTreeSet::new();
+    for (si, step) in steps.iter().enumerate() {
+        // 4a. Well-formed rule instance AND the regime admits the rule.
+        if !regime_admits(regime, step.rule)
+            || !step.is_well_formed(&rdf_type, &rdfs_subclassof, &rdfs_subpropertyof)
+        {
+            return Err(CheckError::MalformedDerivationStep { step: si });
+        }
+        // 4b. Every antecedent grounded (disclosed base OR an earlier derived).
+        for (ai, ant) in step.antecedents.iter().enumerate() {
+            let key = [
+                normalize_hex(&ant[0].0),
+                normalize_hex(&ant[1].0),
+                normalize_hex(&ant[2].0),
+            ];
+            if !disclosed.contains(&key) && !derived_so_far.contains(&key) {
+                return Err(CheckError::UngroundedDerivationAntecedent {
+                    step: si,
+                    antecedent: ai,
+                });
+            }
+        }
+        // This step's derived triple is now available to ground later steps.
+        derived_so_far.insert([
+            normalize_hex(&step.derived[0].0),
+            normalize_hex(&step.derived[1].0),
+            normalize_hex(&step.derived[2].0),
+        ]);
+    }
+    Ok(())
+}
+
 /// Full verification: structure (stage 1+2) then the cryptographic gate
 /// (stage 3). `prover` points at the `zk/compose/` workspace; `work_dir` is
 /// scratch for bb artifacts; `trusted_key_set` is the relying party's EXTERNAL
@@ -2494,7 +2736,12 @@ fn bind_holder_pop(
 /// possession of a registry-member key by signing the verifier nonce (an empty
 /// registry, an untrusted holder, or a malformed/invalid PoP all REJECT; a
 /// `Challenge` binding ignores the registry). Pass `&HolderRegistry::empty()`
-/// when holder binding is not in use.
+/// when holder binding is not in use. `entailment_policy` is the relying party's
+/// EXTERNAL entailment-regime policy (sq-314): which regimes it accepts. The
+/// regime is enforced fail-closed — a regime the policy rejects, or a non-`Simple`
+/// regime whose `derivation_steps` do not structurally ground every derived triple
+/// to the disclosed base, REJECTS. Pass `&EntailmentPolicy::simple_only()` (the
+/// default) to accept only non-inference proofs.
 ///
 /// # Freshness / single-use (audit #4) — the challenge-response flow
 /// `nonce` is the relying party's OWN fresh value (a [`VerifierNonce`]), minted
@@ -2540,10 +2787,20 @@ pub fn verify_manifest(
     trusted_key_set: &KeySet,
     revocation_policy: &RevocationPolicy,
     holder_registry: &HolderRegistry,
+    entailment_policy: &EntailmentPolicy,
     nonce: &VerifierNonce,
     seen: &dyn SeenNonces,
 ) -> Result<(), CheckError> {
     prefilter_manifest_structure(manifest, trusted_key_set, revocation_policy)?;
+
+    // --- sq-314: entailment regime + derivation steps (fail-closed). ---
+    // Enforce `manifest.entailment_regime` against the relying party's policy so
+    // it is a CHECKED claim, not free metadata: a regime the policy rejects, a
+    // Simple manifest carrying inference steps, a non-Simple manifest with no
+    // steps, or a derivation step that is malformed / ungrounded all REJECT. This
+    // is a pure-JSON structural check (no bb); placed before the nonce burn since
+    // it is independent of the crypto gate.
+    bind_entailment(manifest, entailment_policy)?;
 
     // --- Audit #4: single-use (fail-closed, BEFORE the crypto gate). ---
     // Record the verifier's nonce as used; reject if it was already seen. Doing
