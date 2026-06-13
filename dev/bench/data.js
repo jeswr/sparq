@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781389003085,
+  "lastUpdate": 1781389617678,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -6981,6 +6981,153 @@ window.BENCHMARK_DATA = {
           {
             "name": "rdfs_infer_s",
             "value": 0.116,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1571665,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "committer": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "distinct": true,
+          "id": "7585bc394c072c11883a99d00d321b473dde8137",
+          "message": "merge: extend per-commit perf CI — PRs + Pages dashboard + 2 deterministic metrics [OPUS-4.8]\n\nExtends the existing bench.yml/ci-bench.sh/benchmark-data infra (sq-5vm part 3):\n- bench.yml runs on pull_request too; auto-push gated to main (PRs compute+comment via\n  comment-always/summary-always, never write the published series); history bootstrap +\n  pages skipped on fork PRs; alert-threshold 200->150%.\n- Pages: gh-pages-branch=benchmark-data, dir dev/bench -> dashboard at\n  jeswr.github.io/sparq/dev/bench once the owner enables Pages (toggle documented; bead sq-9aj).\n- ci-bench.sh: +store_bytes_per_triple_small (2nd scale) + parse_ns_per_byte (fixed corpus,\n  smaller-is-better) — deterministic, runner-noise-immune regression gates. 25 metrics, exit 0.\nA true hard-gate on the deterministic metrics is tracked as sq-i1d (the action's fail-on-alert\nis global). Agent created sq-i1d + sq-9aj via the beads protocol.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T22:25:05Z",
+          "tree_id": "dfdc46eb94b579cdc5134713f32042dbf92dd651",
+          "url": "https://github.com/jeswr/sparq/commit/7585bc394c072c11883a99d00d321b473dde8137"
+        },
+        "date": 1781389617221,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.537,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "parse_ns_per_byte",
+            "value": 4.9721,
+            "unit": "ns/byte"
+          },
+          {
+            "name": "store_bytes_per_triple_small",
+            "value": 88,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 3.5,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3263.5,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4781.5,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 5.6,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 4.3,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 858.9,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 13007.2,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 59022.1,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 158395.5,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 4240.3,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 4.9,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 41312.2,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 7031,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 56980,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 148753.5,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 2347.5,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 7,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 37288,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.144,
             "unit": "s"
           },
           {
