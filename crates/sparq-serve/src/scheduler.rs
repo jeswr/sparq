@@ -412,7 +412,11 @@ impl<T: Send + 'static> Scheduler<T> {
 
     /// Total jobs completed (ran to a result or were shed) since construction.
     pub fn completed(&self) -> u64 {
-        self.completed.load(Ordering::Relaxed)
+        // [OPUS-4.8] Acquire (paired with the worker's Release increment in
+        // `worker_loop`) so a caller observing all its tickets' `wait()` returned
+        // is guaranteed to see every corresponding increment — the invariant the
+        // `heavy_concurrency_is_bounded` quiet-box race violated under Relaxed.
+        self.completed.load(Ordering::Acquire)
     }
 
     /// Snapshot of `(cheap_queued, heavy_queued, heavy_running)` — for metrics and
@@ -484,8 +488,21 @@ fn worker_loop<T: Send + 'static>(
         // A panic-safe guard: if `work` panics, deliver `Panicked` and release
         // the heavy slot, so the pool never deadlocks on a leaked cap count.
         let outcome = run_job_catching(job.work);
+        // [OPUS-4.8] Signal-before-count race fix. The completion counter MUST be
+        // incremented BEFORE `deliver()` signals the ticket waiter, and with
+        // Release ordering, so the increment is published *before* the wake. Order
+        // matters: `deliver()` takes the slot mutex, stores `Done`, and notifies
+        // the condvar; the waiter in `Ticket::wait` re-acquires that same slot
+        // mutex when it wakes. The slot mutex's release (here in `deliver`) →
+        // acquire (in `wait`) pair is the inter-thread happens-before edge, and it
+        // carries this Release increment with it. Combined with the Acquire load in
+        // `completed()`, every increment of a completed job is therefore visible to
+        // a waiter the moment its `wait()` returns. The previous order (deliver
+        // then Relaxed fetch_add) let a woken waiter read `completed()` *before* the
+        // increment landed — the 11-vs-12 race that only surfaced on a quiet box
+        // where `wait()` could return before the worker reached the fetch_add.
+        completed.fetch_add(1, Ordering::Release);
         job.slot.deliver(outcome);
-        completed.fetch_add(1, Ordering::Relaxed);
 
         if is_heavy {
             let mut q = lock.lock().expect("scheduler queues poisoned");
