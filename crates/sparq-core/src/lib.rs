@@ -8,6 +8,7 @@ pub mod compress;
 pub mod dict;
 #[cfg(feature = "mmap")]
 pub mod extsort;
+pub mod intersect;
 mod nt;
 pub mod store;
 pub mod temporal;

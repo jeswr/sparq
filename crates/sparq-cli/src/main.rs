@@ -41,10 +41,31 @@ fn main() {
         Some("probe-compress") => cmd_probe_compress(&args),
         Some("compare-compress") => cmd_compare_compress(&args),
         Some("bench-remap") => cmd_bench_remap(&args),
+        Some("bench-intersect") => cmd_bench_intersect(&args),
         Some("scaling") => cmd_scaling(&args),
         _ => {
             eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
+        }
+    }
+}
+
+/// Measure-first micro-benchmark for the NEON sorted-set intersection kernel
+/// (research/hardware/m1-apple-silicon.md §1). Synthetic grid by default; pass a
+/// data file for the real-distribution shapes the join paths produce.
+///   sparq-cli bench-intersect [iters]                  # synthetic grid
+///   sparq-cli bench-intersect <data-file> <format> [iters]   # real distributions
+fn cmd_bench_intersect(args: &[String]) {
+    match args.get(2).map(String::as_str) {
+        None => sparq_core::intersect::bench_grid(7),
+        Some(n) if n.parse::<usize>().is_ok() => {
+            sparq_core::intersect::bench_grid(n.parse().unwrap())
+        }
+        Some(path) => {
+            let format = args.get(3).map(String::as_str).unwrap_or("ntriples");
+            let iters: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(7);
+            let g = load(path, format);
+            sparq_core::intersect::bench_real(&g, iters);
         }
     }
 }
