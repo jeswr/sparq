@@ -15,6 +15,8 @@
 
 ## MODE: ultracode (this session, user /effort ultracode) — default to workflow orchestration + adversarial verification for substantive tasks; token cost not a constraint. Reverts when session ends.
 
+## DISK (user mandate 2026-06-13, see memory feedback-disk-space): machine hit ~2 GiB free. Deleted bench/wikidata/truthy.nt.bz2 (40 GB) + qlever-{100m,synthetic,olympics} datasets/indexes (all git-ignored, regenerable) → 43 GB free. Persistent df watchdog running (Monitor task bs18m4j5v, alerts <12 GB). STILL RECLAIMABLE after dict-spill finishes: /private/tmp/dsp_bench + /private/tmp/dspbench (~30 GB, the agent's active 100M scratch — do NOT delete while it runs). EVERY future benchmark/dataset agent brief MUST: check free space first, scratch in /private/tmp, DELETE its datasets/indexes on completion, cap dataset size. Never delete tracked bench scripts/.gitignore/Qleverfile.
+
 ## IN FLIGHT NOW (Opus): dict-spill finisher (8B gate; RSS numbers reliable, wall-time may be CPU-contended → re-verify on quiet machine if borderline), zk-trace-engine (module B), readme-perf (README perf update + add parsing/serialisation, worktree ../sparq-readme), zk-soundness-audit WORKFLOW (run wf_8117e4d6-69a, read-only adversarial audit of zk-compose+sparq-zk prover/verifier → returns report to commit at research/zk-soundness-audit.md). neon-intersect still parked.
 
 ## RESUME PROTOCOL if THIS session dies: (1) re-auth AWS + verify no sparq-hw-validation instance running; (2) check each worktree STATUS.md + `git log main..HEAD`; (3) gate+push merge-ready branches one at a time; (4) relaunch any 0-commit branches.
