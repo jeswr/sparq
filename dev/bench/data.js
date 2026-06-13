@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781377206046,
+  "lastUpdate": 1781377727956,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -1501,6 +1501,143 @@ window.BENCHMARK_DATA = {
           {
             "name": "rdfs_infer_s",
             "value": 0.145,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1518547,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "committer": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "distinct": true,
+          "id": "810f783778e52483cd6294a40a56692df4157f9a",
+          "message": "feat(tracking): adopt beads (bd) dependency-aware task tracking + populate backlog [OPUS-4.8]\n\nStands up beads (`bd`, git-native dependency-graph issue tracker) as the durable\ncross-agent backlog, per research/task-tracking-best-practices.md (empirically\nverified install + scheme). Populated 75 issues from three sources:\n- design docs (roadmap, PLAN.md, ~58 research/*.md, per-crate TODO.md): 40 tasks\n- code TODO/FIXME/deferred markers: 11 tasks\n- roborev backlog: 1 still-present fixable finding + 10 quota-failed re-runs + a\n  batch-verify task for 13 findings already addressed by the ZK soundness work\nPlus 5 epics (MPC, ZK build-out, HDT+Turtle parse perf, roborev, CI), 3 closed\nmilestones (serve-wave-b, M3, lint-gate), and known follow-ups (fmt reformat,\nflaky tokens test, neon-intersect).\n\nDependency edges model the merge queue + prerequisites: M4 spike ← in-circuit sig\ngadget; HDT PFC decode ← direct SPO decoder; rustfmt hard-gate ← one-time\nreformat; Turtle interspersed-directive ← W3C TurtleTests rejection oracle. So\n`bd ready` (66 unblocked) computes the parallelisable work-set offline.\nembeddeddolt/ is gitignored; .beads/issues.jsonl is the committed source-of-record.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T19:07:00Z",
+          "tree_id": "6b4fc437b2768a9a8d553c8730f2390523f2ddd5",
+          "url": "https://github.com/jeswr/sparq/commit/810f783778e52483cd6294a40a56692df4157f9a"
+        },
+        "date": 1781377727495,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.54,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 3.7,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3348.7,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4893.9,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 6,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 4.2,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 811,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 13578.8,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 63431.3,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 164014.8,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 2761.9,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 4.5,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 42629.1,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 7172.8,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 57914.9,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 157891.3,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 2421.6,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 6.5,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 37119.9,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.147,
             "unit": "s"
           },
           {
