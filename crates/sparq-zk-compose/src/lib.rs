@@ -25,8 +25,10 @@ pub mod toml;
 pub mod verifier;
 
 pub use manifest::{
-    BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp, ProofInputs,
-    ProofManifest, RevocationStatus, SubProof,
+    AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
+    ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
 };
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
 pub use verifier::{InMemorySeenNonces, SeenNonces, VerifierNonce};
+// [OPUS-4.8] audit #12: revocation / freshness policy.
+pub use verifier::RevocationPolicy;
