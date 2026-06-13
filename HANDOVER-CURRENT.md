@@ -10,6 +10,11 @@ If this file describes running agents/instances and you are a fresh session, ver
 - Gate command: `cargo test --workspace --exclude sparq-py --release --no-fail-fast 2>&1 | grep -aE "^test result" | awk '{s+=$4; f+=$6} END {print "passed:", s, "failed:", f}'` (-a REQUIRED) + wasm build + stat -f%z.
 
 ## Running agents (worktrees; agents NEVER push/merge; each keeps STATUS.md current)
+- zk-compose (../sparq-zkcompose): ZK stage 2 — prover+verifier composition package (Noir circuit family w/ dynamic (k,n) sizing + crates/sparq-zk-compose orchestration, ProofManifest w/ entailmentRegime, tamper tests, gate/proving benches).
+- zk-trace-engine (../sparq-zktrace): module B — per-operator exact input-set capture w/ graph attribution behind `zk` feature; owns sparq-engine zk paths + sparq-zk trace modules.
+- serve-wave-a2 (../sparq-wavea2): sequenced writer + group-commit (+A3 epochs if clean); owns crates/sparq-serve only.
+- neon-intersect (../sparq-neon): measure-first NEON/portable-SIMD intersection kernel; CAUTION at merge review — heavy concurrent builds on this M1 skew timings, re-verify headline numbers on a quiet machine before accepting.
+- py-textindex (../sparq-pytext): TextIndex lifecycle on the py wrapper; owns sparq-py + minimal sparq-text additions.
 - zk-core (../sparq-zk-core): resuming from 1c57a2d — rdf-canon suite, bnode guard, criterion benches, wasm-off check.
 - DONE zk-ieee754-kernels: MERGED+PUSHED (2b66ba7, gate 674/0, wasm 1,643,095). Comparisons/rounding/sqrt/casts kernels + 52 gate-bench rows + 121/121 oracle vectors. Follow-up noted: sqrt_f16 circuit byte-identical to sqrt_f64 (correct per oracle; possibly missing narrow remainder bound).
 - DONE zk-xpath: MERGED+PUSHED (504014a, gate 674/0, wasm 1,643,095). Vendor verified, zero beta.21 drift, all 241 packages run (63/71 REAL green, 8 pre-existing upstream gaps; 21/21 float pkgs = the migration oracle), VENDOR.md inventory written.
