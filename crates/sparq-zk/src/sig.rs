@@ -230,10 +230,20 @@ pub fn commitment_message(commitment: &Fr) -> Fr {
     poseidon2::hash(&[Fr::from(SIG_DOMAIN_COMMITMENT), *commitment])
 }
 
-/// Sign a message field element `m` with `sk`. The nonce `k` is drawn from
-/// `rng`; this is the issuance-side path (tests + an issuer tool). A relying
-/// party only ever calls [`verify`].
-pub fn sign<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
+/// Sign a message field element `m` with `sk`, drawing the nonce `k` from `rng`.
+///
+/// # Test-only (codex job 2216 MEDIUM)
+/// This random-nonce path is `#[cfg(test)]` and `pub(crate)`: no public API takes
+/// a caller-supplied RNG/seed. A reused/cloned RNG state would reuse a Schnorr
+/// nonce across two distinct messages, yielding two signatures with the same
+/// `R = k·G`, from which `sk = (s1 - s2)/(e1 - e2)` is trivially recovered. All
+/// issuance now goes through the deterministic `(sk, m)`-nonce path
+/// ([`sign_deterministic`] / [`SecretKey::sign_commitment`]); this remains only
+/// to exercise [`verify`] against an independently-nonce'd honest signature in
+/// this crate's own tests.
+// [OPUS-4.8] codex 2216 MEDIUM: random-nonce signer is test-only; no public caller-RNG API.
+#[cfg(test)]
+pub(crate) fn sign<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
     sk: &SecretKey,
     m: &Fr,
     rng: &mut R,

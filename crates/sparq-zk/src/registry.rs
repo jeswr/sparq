@@ -136,23 +136,33 @@ impl RegistryEntry {
     /// the domain-separated commitment message, plus the `zk:cryptosuite` id.
     /// This is the issuance-side path (an issuer tool / tests); a relying party
     /// only ever VERIFIES via [`Self::verify_commitment_signature`].
-    // [OPUS-4.8] audit #3.
-    pub fn issued<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
+    ///
+    /// # Nonce safety (codex job 2216 MEDIUM)
+    /// Signing routes through [`crate::sig::SecretKey::sign_commitment`], whose
+    /// Schnorr nonce is derived DETERMINISTICALLY from `(sk, commitment_message)`
+    /// (RFC6979-style; see `sig::derive_nonce`). No caller-supplied RNG/seed is
+    /// taken, so a cloned/reused RNG state can never reuse a Schnorr nonce across
+    /// commitments and leak the issuer secret key. (The earlier deterministic-
+    /// signing fix added `sign_commitment` but issuance still took a caller RNG;
+    /// this routes issuance through it.) The random-nonce `sig::sign` is now
+    /// test-only — no public API takes a caller RNG.
+    // [OPUS-4.8] audit #3; codex 2216 MEDIUM: deterministic-nonce issuance, no caller RNG.
+    pub fn issued(
         document: NamedNode,
         commitment: Fr,
         salt: Fr,
         sk: &crate::sig::SecretKey,
-        rng: &mut R,
     ) -> Self {
         let pk = sk.public_key();
-        let msg = crate::sig::commitment_message(&commitment);
-        let sig = crate::sig::sign(sk, &msg, rng);
+        // Deterministic (sk, m) nonce — see `SecretKey::sign_commitment` /
+        // `sign_deterministic`. No RNG state crosses the API boundary.
+        let sig_hex = sk.sign_commitment(&commitment);
         let mut e = RegistryEntry::new(document, commitment, salt);
         e.cryptosuite = Some(NamedNode::new_unchecked(
             crate::sig::SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
         ));
         e.issuer_public_key = Some(crate::sig::public_key_to_hex(&pk));
-        e.commitment_signature = Some(crate::sig::signature_to_hex(&sig));
+        e.commitment_signature = Some(sig_hex);
         e
     }
 
@@ -421,10 +431,7 @@ mod tests {
     #[test]
     fn issued_entry_signature_round_trips_through_store_and_verifies() {
         use crate::sig::SecretKey;
-        use ark_ff::UniformRand;
-        use ark_std::rand::SeedableRng;
-        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(11);
-        let sk = SecretKey(ark_ed_on_bn254::Fr::rand(&mut rng));
+        let sk = SecretKey::from_seed(11);
         let commitment = Fr::from(0xc0ffeeu64);
         let salt = salt_from_bytes(&[3u8; 32]);
         let e = RegistryEntry::issued(
@@ -432,7 +439,6 @@ mod tests {
             commitment,
             salt,
             &sk,
-            &mut rng,
         );
         assert!(e.verify_commitment_signature(), "fresh issued entry verifies");
         // Round-trips through the store unchanged (key + sig survive).
@@ -448,19 +454,49 @@ mod tests {
         // The drop-a-triple-and-recommit shape: change the commitment after
         // signing => the signature no longer verifies.
         use crate::sig::SecretKey;
-        use ark_ff::UniformRand;
-        use ark_std::rand::SeedableRng;
-        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(12);
-        let sk = SecretKey(ark_ed_on_bn254::Fr::rand(&mut rng));
+        let sk = SecretKey::from_seed(12);
         let mut e = RegistryEntry::issued(
             NamedNode::new("https://dmv.example/vc/lic-8").unwrap(),
             Fr::from(1000u64),
             salt_from_bytes(&[4u8; 32]),
             &sk,
-            &mut rng,
         );
         e.commitment = Fr::from(1001u64); // recommit over a different (truncated) graph
         assert!(!e.verify_commitment_signature(), "tampered commitment must not verify");
+    }
+
+    // [OPUS-4.8] codex 2216 MEDIUM: issuance is deterministic + nonce-safe. The
+    // signature comes from the `(sk, m)`-derived-nonce path, so (a) re-issuing
+    // the SAME (sk, commitment) yields byte-identical signatures (no caller RNG),
+    // and (b) two DISTINCT commitments under the same key get DISTINCT nonces `R`
+    // — the property that makes the seed/nonce-reuse `sk`-extraction attack
+    // impossible by construction (there is no caller RNG to clone/reuse).
+    #[test]
+    fn issued_is_deterministic_and_nonce_safe() {
+        use crate::sig::{signature_from_hex, SecretKey};
+        let sk = SecretKey::from_seed(99);
+        let salt = salt_from_bytes(&[7u8; 32]);
+        let doc = NamedNode::new("https://dmv.example/vc/lic-det").unwrap();
+
+        // (a) Determinism: two issuances of the same (sk, commitment) match.
+        let c = Fr::from(0xabc123u64);
+        let e1 = RegistryEntry::issued(doc.clone(), c, salt, &sk);
+        let e2 = RegistryEntry::issued(doc.clone(), c, salt, &sk);
+        assert_eq!(
+            e1.commitment_signature, e2.commitment_signature,
+            "issuance must be deterministic (no caller RNG => byte-stable signature)"
+        );
+        assert!(e1.verify_commitment_signature());
+
+        // (b) Nonce safety: distinct commitments => distinct nonces R. If R were
+        // reused, sk would be recoverable; deterministic (sk, m) nonces forbid it.
+        let other = RegistryEntry::issued(doc, c + Fr::from(1u64), salt, &sk);
+        let sig1 = signature_from_hex(e1.commitment_signature.as_ref().unwrap()).unwrap();
+        let sig_other = signature_from_hex(other.commitment_signature.as_ref().unwrap()).unwrap();
+        assert_ne!(
+            sig1.r, sig_other.r,
+            "distinct commitments must use distinct Schnorr nonces R (no nonce reuse)"
+        );
     }
 
     #[test]
