@@ -41,6 +41,30 @@ jobs:
           aws-region: eu-west-2
       - name: Launch spot, benchmark, always-terminate
         run: bash scripts/ec2-bench.sh
+      # [OPUS-4.8] First-run bootstrap (same rationale as bench.yml): create the
+      # shared benchmark-data history branch on origin if it does not exist yet,
+      # so github-action-benchmark's `git fetch ... benchmark-data:benchmark-data`
+      # does not hard-fail with "couldn't find remote ref". Idempotent.
+      - name: Ensure benchmark-data history branch exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin benchmark-data >/dev/null 2>&1; then
+            echo "benchmark-data branch already exists on origin — nothing to do."
+          else
+            echo "benchmark-data branch missing on origin — creating an orphan branch."
+            tmp="$(mktemp -d)"
+            git -C "$tmp" init -q
+            git -C "$tmp" checkout -q --orphan benchmark-data
+            git -C "$tmp" -c user.name=github-actions[bot] \
+                          -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                          commit -q --allow-empty -m "chore(bench): initialise benchmark-data history branch"
+            git -C "$tmp" push -q \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              benchmark-data:benchmark-data
+            echo "Created and pushed orphan benchmark-data branch."
+          fi
       - name: Track EC2 benchmark series
         uses: benchmark-action/github-action-benchmark@v1
         with:
