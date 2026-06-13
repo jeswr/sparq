@@ -1,0 +1,9 @@
+# Noir / nargo build artifacts
+target/
+**/target/
+
+# bb proving artifacts
+*.gz
+proof
+public_inputs
+vk

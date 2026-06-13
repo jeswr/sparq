@@ -1,0 +1,11 @@
+[package]
+name = "sparq_zk_compose_core"
+type = "lib"
+authors = ["sparq"]
+
+[dependencies]
+# Same tag as crates/sparq-zk/tests/fixtures/noir_poseidon2 — the commitment
+# scheme's cross-vector chain depends on this exact library version.
+poseidon = { git = "https://github.com/noir-lang/poseidon", tag = "v0.3.0" }
+# SPARQL float comparisons (FILTER over xsd:double operands).
+sparq_ieee754 = { path = "../../ieee754" }
