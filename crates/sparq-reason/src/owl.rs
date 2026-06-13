@@ -548,6 +548,78 @@ impl ClassFeatureIdx {
     }
 }
 
+/// [OPUS-4.8] Conservative detection of OWL feature predicates/classes that are reachable through
+/// RDFS *before* any feature is asserted directly. The fast paths bypass the OWL fixpoint when no
+/// OWL feature is present, but an OWL feature can be *entailed* by RDFS first:
+///   - rdfs7:  `(:p rdfs:subPropertyOf owl:sameAs), (:a :p :b)` ⊢ `(:a owl:sameAs :b)` — a feature
+///     predicate appears only after RDFS subproperty propagation.
+///   - rdfs9:  `(:C rdfs:subClassOf owl:SymmetricProperty), (:p a :C)` ⊢ `(:p a owl:SymmetricProperty)`
+///     — a feature class appears only after RDFS subclass propagation.
+/// In both cases the single-pass fast path would emit the derived `owl:sameAs`/feature-type triple
+/// as an *ordinary* triple WITHOUT running the equality/property reasoning it implies.
+///
+/// To stay sound we treat a feature as "used" if any feature predicate is a (transitive)
+/// rdfs:subPropertyOf-superproperty of *some* predicate that actually occurs in the data, or any
+/// feature class is a (transitive) rdfs:subClassOf-superclass of *some* type that actually occurs
+/// on a node. This is conservative (it may force the fixpoint when the derivation is vacuous),
+/// which is the safe direction.
+///
+/// Returns `(feature_pred_reachable, feature_type_reachable)`.
+fn rdfs_reachable_features(
+    triples: &[[Id; 3]],
+    v: &Vocab,
+    feature_preds: &FxHashSet<Id>,
+    feature_types: &FxHashSet<Id>,
+) -> (bool, bool) {
+    // Build the subPropertyOf / subClassOf adjacency and collect predicates/types in use.
+    let mut sub_prop: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    let mut sub_class: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    let mut preds_in_use: FxHashSet<Id> = FxHashSet::default();
+    let mut types_in_use: FxHashSet<Id> = FxHashSet::default();
+    for &[s, p, ob] in triples {
+        if p == v.sub_prop {
+            sub_prop.entry(s).or_default().push(ob);
+        } else if p == v.sub_class {
+            sub_class.entry(s).or_default().push(ob);
+        }
+        // Every predicate is a candidate rdfs7 source; every type-object a candidate rdfs9 source.
+        preds_in_use.insert(p);
+        if p == v.ty {
+            types_in_use.insert(ob);
+        }
+    }
+    // Does any in-use predicate reach a feature predicate via subPropertyOf+ (at least one hop)?
+    // The non-reflexive `reaches` means a directly-asserted feature predicate (which the direct
+    // scan in the callers already handles) does NOT count here — only a feature predicate that is
+    // a *proper* RDFS superproperty of an in-use predicate triggers the fixpoint fallback.
+    let pred_hit = preds_in_use.iter().any(|&start| reaches(start, &sub_prop, feature_preds));
+    // Same for feature classes reached through subClassOf+.
+    let type_hit = types_in_use.iter().any(|&start| reaches(start, &sub_class, feature_types));
+    (pred_hit, type_hit)
+}
+
+/// [OPUS-4.8] Strictly-transitive (≥1 hop) reachability of any node in `targets` from `start` over
+/// `adj`. The start node itself is NOT a hit even if it is a target — a feature reached only by
+/// being directly used is not "RDFS-derived". This is deliberately non-reflexive.
+fn reaches(start: Id, adj: &FxHashMap<Id, Vec<Id>>, targets: &FxHashSet<Id>) -> bool {
+    let mut seen: FxHashSet<Id> = FxHashSet::default();
+    let mut stack = vec![start];
+    seen.insert(start);
+    while let Some(cur) = stack.pop() {
+        if let Some(sups) = adj.get(&cur) {
+            for &nxt in sups {
+                if targets.contains(&nxt) {
+                    return true;
+                }
+                if seen.insert(nxt) {
+                    stack.push(nxt);
+                }
+            }
+        }
+    }
+    false
+}
+
 /// True if the ontology uses any OWL-specific feature (so it needs the OWL fixpoint). When false,
 /// the OWL-RL closure is exactly RDFS + scm-dom/rng, computed by the fast single-pass path.
 fn owl_uses_features(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> bool {
@@ -572,7 +644,14 @@ fn owl_uses_features(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> bool {
     .into_iter()
     .collect();
     let types: FxHashSet<Id> = [o.symmetric, o.transitive, o.functional, o.inv_functional].into_iter().collect();
-    triples.iter().any(|&[_, p, ob]| preds.contains(&p) || (p == v.ty && types.contains(&ob)))
+    if triples.iter().any(|&[_, p, ob]| preds.contains(&p) || (p == v.ty && types.contains(&ob))) {
+        return true;
+    }
+    // [OPUS-4.8] Also fall back to the fixpoint when an OWL feature predicate/class is reachable
+    // through RDFS subPropertyOf/subClassOf (rdfs7/rdfs9) — the single-pass path would otherwise
+    // emit the RDFS-derived feature triple without doing the equality/property reasoning. See 1402.
+    let (pred_hit, type_hit) = rdfs_reachable_features(triples, v, &preds, &types);
+    pred_hit || type_hit
 }
 
 /// If the ontology uses ONLY the monotone / non-recursive OWL-RL subset (equivalentClass,
@@ -602,6 +681,24 @@ fn monotone_only(triples: &[[Id; 3]], v: &Vocab, o: &Owl) -> Option<crate::rdfs:
     .collect();
     let recursive_types: FxHashSet<Id> =
         [o.transitive, o.functional, o.inv_functional].into_iter().collect();
+
+    // [OPUS-4.8] An OWL feature can also be introduced by RDFS entailment (rdfs7/rdfs9), e.g.
+    // `(:p rdfs:subPropertyOf owl:sameAs)` (recursive) or `(:C rdfs:subClassOf owl:SymmetricProperty)`
+    // (monotone). The mono descriptor below is built from DIRECTLY-asserted feature axioms only, so
+    // an RDFS-reachable feature — recursive OR monotone — would be silently dropped. Force the full
+    // fixpoint whenever any OWL feature predicate/class is RDFS-reachable. See 1402.
+    let monotone_preds: FxHashSet<Id> =
+        [o.inverse_of, o.equiv_class, o.equiv_prop].into_iter().collect();
+    let monotone_types: FxHashSet<Id> = [o.symmetric].into_iter().collect();
+    let all_feature_preds: FxHashSet<Id> =
+        recursive_preds.union(&monotone_preds).copied().collect();
+    let all_feature_types: FxHashSet<Id> =
+        recursive_types.union(&monotone_types).copied().collect();
+    let (pred_hit, type_hit) =
+        rdfs_reachable_features(triples, v, &all_feature_preds, &all_feature_types);
+    if pred_hit || type_hit {
+        return None;
+    }
 
     let mut mono = crate::rdfs::MonoOwl::default();
     for &[s, p, ob] in triples {
@@ -1408,7 +1505,43 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
         } else if new_delta.is_empty() {
             break;
         } else {
-            delta = new_delta;
+            // [OPUS-4.8] A property/class axiom can be DERIVED during the fixpoint (e.g. rdfs7
+            // makes `:p rdfs:subPropertyOf owl:sameAs` emit nothing but rdfs9 derives
+            // `:p rdf:type owl:SymmetricProperty`, or an axiom predicate arrives via subPropertyOf).
+            // The per-fact emitter joins assertions against the property axiom maps (ax.*), which
+            // were built once from the seed and are otherwise treated as immutable. When the delta
+            // introduces a NEW axiom we must rebuild `ax`/adjacency/generators and re-fire ALL
+            // assertions so the new axiom applies to pre-existing facts. Mirrors the merge rebuild.
+            // See review 1402.
+            let axiom_added = new_delta.iter().any(|&[_, p, ob]| {
+                p == o.inverse_of
+                    || p == o.equiv_prop
+                    || p == o.equiv_class
+                    || (p == v.ty
+                        && (ob == o.symmetric
+                            || ob == o.transitive
+                            || ob == o.functional
+                            || ob == o.inv_functional))
+            });
+            if axiom_added {
+                // Roll the new delta into `all` first (commit already inserted it into `all`),
+                // then rebuild the axiom-derived structures and run a full naive round next.
+                ax = Axioms::build(&all, &v, &o);
+                need = ax
+                    .transitive
+                    .iter()
+                    .chain(ax.functional.iter())
+                    .chain(ax.inv_functional.iter())
+                    .copied()
+                    .collect();
+                build_adjacency(&all, &need, &mut out, &mut inc);
+                gen.rebuild(&all, &ax.transitive);
+                cf = ClassFeatureIdx::default();
+                schema_stale = true;
+                delta = all.iter().copied().collect();
+            } else {
+                delta = new_delta;
+            }
         }
     }
     if prof {
@@ -2676,6 +2809,86 @@ mod tests {
                 "http://ex/y"
             ),
             "prp-eqp"
+        );
+    }
+
+    // [OPUS-4.8] Regression for review 1402: an OWL feature predicate introduced via RDFS
+    // subPropertyOf entailment (rdfs7) must NOT take the no-feature fast path — the derived
+    // owl:sameAs must drive eq-rep substitution, not be emitted as an ordinary triple.
+    #[test]
+    fn subproperty_derived_sameas_runs_equality() {
+        let mut dict = Dict::new();
+        // :p rdfs:subPropertyOf owl:sameAs ; :a :p :b ; :b :likes :c
+        // rdfs7 ⊢ (:a owl:sameAs :b); eq-rep then ⊢ (:a :likes :c).
+        let (p, a, b, c, likes) = (
+            ex(&mut dict, "p"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+            ex(&mut dict, "c"),
+            ex(&mut dict, "likes"),
+        );
+        let sp = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subPropertyOf");
+        let same_as = owl(&mut dict, "sameAs");
+        let mut triples = vec![[p, sp, same_as], [a, p, b], [b, likes, c]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        // rdfs7 fires regardless of path:
+        assert!(set.contains(&[a, same_as, b]), "rdfs7 should derive :a owl:sameAs :b");
+        // The equality MUST be acted on: :a inherits :b's outgoing :likes :c (eq-rep-s).
+        assert!(
+            has(&dict, &set, "http://ex/a", "http://ex/likes", "http://ex/c"),
+            "subproperty-derived owl:sameAs must drive eq-rep (1402)"
+        );
+    }
+
+    // [OPUS-4.8] Regression for review 1402: an OWL feature CLASS introduced via RDFS subClassOf
+    // entailment (rdfs9) must NOT take a fast path that drops the feature — a subclass of
+    // owl:SymmetricProperty must yield symmetric reasoning on its instances.
+    #[test]
+    fn subclass_derived_symmetric_runs_symmetry() {
+        let mut dict = Dict::new();
+        // :MyProp rdfs:subClassOf owl:SymmetricProperty ; :knows a :MyProp ; :a :knows :b
+        // rdfs9 ⊢ (:knows a owl:SymmetricProperty); prp-symp ⊢ (:b :knows :a).
+        let (myprop, knows, a, b) = (
+            ex(&mut dict, "MyProp"),
+            ex(&mut dict, "knows"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+        );
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let sc = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+        let symmetric = owl(&mut dict, "SymmetricProperty");
+        let mut triples = vec![[myprop, sc, symmetric], [knows, ty, myprop], [a, knows, b]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(set.contains(&[knows, ty, symmetric]), "rdfs9 should type :knows symmetric");
+        assert!(
+            set.contains(&[b, knows, a]),
+            "subclass-derived owl:SymmetricProperty must drive prp-symp (1402)"
+        );
+    }
+
+    // [OPUS-4.8] Guard: directly-asserted monotone features (inverseOf, equivalentClass) must STILL
+    // take the monotone fast path — the non-reflexive RDFS-reachability check must not misfire on a
+    // feature predicate that is merely *used* (only proper RDFS superproperties count).
+    #[test]
+    fn direct_monotone_features_unaffected() {
+        let mut dict = Dict::new();
+        let (parent, child, a, b) = (
+            ex(&mut dict, "parentOf"),
+            ex(&mut dict, "childOf"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+        );
+        let inv = owl(&mut dict, "inverseOf");
+        let v = Vocab::intern(&mut dict);
+        let o = Owl::intern(&mut dict);
+        let triples = vec![[parent, inv, child], [a, parent, b]];
+        // inverseOf is a feature, so the fixpoint IS needed, but the monotone path must accept it.
+        assert!(owl_uses_features(&triples, &v, &o), "inverseOf is a feature");
+        assert!(
+            monotone_only(&triples, &v, &o).is_some(),
+            "direct inverseOf must remain on the monotone fast path"
         );
     }
 }
