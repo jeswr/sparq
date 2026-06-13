@@ -3643,6 +3643,7 @@ fn committed_index_without_hidden_revocation_rejected() {
         binding_edges: vec![],
         hidden_revocation: None, // <- MISSING; committed-index requires it
         hidden_issuer_attestations: vec![],
+        derivation_steps: vec![],
     };
     attest_all_committed(&mut m, &sk, salt, &ic);
     let _ = commitment_fr;
@@ -3688,6 +3689,7 @@ fn committed_index_disclosed_commitment_mismatch_rejected() {
         binding_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+        derivation_steps: vec![],
     };
     // The issuer signs over `signed_ic`, but the disclosed reference carries
     // `disclosed_ic` — the digests differ, so cross-check / signature fails.
@@ -4090,6 +4092,7 @@ fn hi_scan_manifest_no_clear_attestation(
         binding_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
+        derivation_steps: vec![],
     };
     (manifest, c, salt)
 }
@@ -4134,7 +4137,9 @@ fn hidden_issuer_only_verifies_with_clear_key_absent() {
 
     verify_manifest(
         &manifest, &prover, &scratch("hi_only_verify"),
-        &keyset, &fresh_policy(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &keyset, &fresh_policy(),
+        &HolderRegistry::empty(), &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     )
     .expect("hidden-only presentation (clear key absent) verifies end-to-end");
 
