@@ -611,6 +611,7 @@ fn explain_mode(
 /// server); published but no longer retained → **410 Gone** (it aged out of the
 /// retention window — gone permanently, retrying cannot help).
 #[cfg(feature = "time-travel")]
+#[allow(clippy::result_large_err)] // Err is axum's Response; boxing would desync the cfg variants
 fn resolve_pin(
     state: &AppState,
     url_params: &HashMap<String, String>,
