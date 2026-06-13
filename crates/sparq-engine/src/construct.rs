@@ -242,11 +242,10 @@ fn cbd(graph: &Graph, solutions: &QueryResult) -> Result<Vec<Triple>, String> {
     for row in &solutions.rows {
         for cell in row.iter().flatten() {
             match cell {
-                Term::NamedNode(_) | Term::BlankNode(_) => {
-                    if visited.insert(cell.clone()) {
+                Term::NamedNode(_) | Term::BlankNode(_)
+                    if visited.insert(cell.clone()) => {
                         queue.push(cell.clone());
                     }
-                }
                 _ => {} // a literal has no description
             }
         }

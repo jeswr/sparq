@@ -80,11 +80,7 @@ fn freshen_term(t: &Term, fresh: &mut FreshBnodes) -> Term {
 }
 
 fn quad_to_triple_fresh(q: &Quad, fresh: &mut FreshBnodes) -> (GraphSlot, TripleTerms) {
-    let subject = match freshen_term(&nob_to_term(&q.subject), fresh) {
-        Term::NamedNode(n) => Term::NamedNode(n),
-        Term::BlankNode(b) => Term::BlankNode(b),
-        s => s,
-    };
+    let subject = freshen_term(&nob_to_term(&q.subject), fresh);
     (
         graph_name_slot(&q.graph_name),
         [subject, Term::NamedNode(q.predicate.clone()), freshen_term(&q.object, fresh)],

@@ -69,7 +69,7 @@ fn gen_graph(rng: &mut Rng) -> String {
                 3 => format!("\"-{}\"^^xsd:integer", rng.below(60)),   // negative integer (not inline)
                 4 => format!("\"0{}\"^^xsd:integer", 1 + rng.below(9)), // non-canonical (leading zero)
                 5 => format!("\"{}.0\"^^xsd:double", rng.below(120)),   // double
-                6 => format!("\"{}\"^^xsd:integer", 9007199254740990u64 + rng.below(6) as u64), // near 2^53 — f64-inexact
+                6 => format!("\"{}\"^^xsd:integer", 9007199254740990u64 + rng.below(6)), // near 2^53 — f64-inexact
                 7 => format!("\"{}\"^^xsd:decimal", hp_dec[rng.below(4) as usize]), // high-precision decimal
                 _ => format!("\"s{}\"", rng.below(5)),                  // plain string (non-numeric)
             };
@@ -101,7 +101,7 @@ fn gen_filter(rng: &mut Rng, var: &str) -> String {
     // non-numeric operand must turn into a type error, not a string comparison.
     // 1-in-6: a threshold near 2^53, where an f64 numeric model loses integer precision.
     if rng.chance(1, 6) {
-        let t = 9007199254740990u64 + rng.below(6) as u64;
+        let t = 9007199254740990u64 + rng.below(6);
         return format!("FILTER({var} {op} {t})");
     }
     let t = rng.below(160) as i64 - 40; // -40..119
@@ -145,7 +145,7 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
                 2 => "ex:n0".to_string(),                          // IRI
                 3 => "\"true\"^^xsd:boolean".to_string(),          // boolean
                 4 => format!("\"{}\"^^xsd:int", rng.below(120)),   // xsd:int
-                5 => format!("\"{}\"^^xsd:integer", 9007199254740990u64 + rng.below(6) as u64), // near 2^53
+                5 => format!("\"{}\"^^xsd:integer", 9007199254740990u64 + rng.below(6)), // near 2^53
                 6 => format!("\"{}\"^^xsd:decimal", ["0.123456789012345678", "0.123456789012345679", "0.299999999999999999"][rng.below(3) as usize]), // high-precision decimal
                 _ => format!("\"{}.5\"^^xsd:decimal", rng.below(120)), // decimal
             };

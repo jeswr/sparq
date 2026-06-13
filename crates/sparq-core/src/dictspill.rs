@@ -610,7 +610,7 @@ impl ShardState {
         }
         let seq = self.seq;
         self.seq = self.seq.checked_add(1).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "dict-spill: shard exceeded 2^32 spilled occurrences")
+            io::Error::other("dict-spill: shard exceeded 2^32 spilled occurrences")
         })?;
         self.rec.write_all(&(bytes.len() as u32).to_le_bytes())?;
         self.rec.write_all(bytes)?;
@@ -711,7 +711,7 @@ impl SpillInterner {
                         // SAFETY: i < len and this (pidx, i) slot is hash-routed to
                         // exactly this shard — disjoint writes, no reads until the
                         // parallel scope ends.
-                        unsafe { ptr.add(*i as usize).write(STAGED_DICT_BASE * (s as u64 + 1) | seq as u64) };
+                        unsafe { ptr.add(*i as usize).write((STAGED_DICT_BASE * (s as u64 + 1)) | seq as u64) };
                     }
                 }
                 Ok(())
@@ -1022,7 +1022,7 @@ pub(crate) fn consolidate(mut st: SpillInterner, dir: &Path, tmp: &Path, cfg: &S
                 }))
             };
             while let Some(p) = merge.next().map_err(io_err)? {
-                while cur.map_or(true, |(m, _)| m < p.min_seq) {
+                while cur.is_none_or(|(m, _)| m < p.min_seq) {
                     cur = next_m2f(&mut m2f).map_err(io_err)?;
                     if cur.is_none() {
                         return Err("dict-spill: remap join exhausted the assignment stream".into());

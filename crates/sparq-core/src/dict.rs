@@ -1719,7 +1719,7 @@ impl ShardedDict {
         struct SlotPtr(*mut Id, usize);
         unsafe impl Send for SlotPtr {}
         unsafe impl Sync for SlotPtr {}
-        let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| (SlotPtr(v.as_mut_ptr(), v.len()))).collect();
+        let scatter: Vec<SlotPtr> = remaps.iter_mut().map(|v| SlotPtr(v.as_mut_ptr(), v.len())).collect();
 
         // Intern each shard's terms in parallel (single-writer per shard → no contention),
         // walking partials in order so per-shard id assignment matches the serial routing.
@@ -2065,7 +2065,7 @@ mod tests {
         let mut d = Dict::new();
         let tt = triple("http://ex/alice", "http://ex/age", int("30"));
         let id = d.intern(&tt);
-        assert!(id >= 1 && id < INLINE_BASE);
+        assert!((1..INLINE_BASE).contains(&id));
         // Children were interned (subject + predicate; the object is inline).
         assert_eq!(d.len(), 3, "subject + predicate + the triple itself (inline object not stored)");
         // term() rebuilds a structural Term::Triple, not a literal.
@@ -2217,7 +2217,7 @@ mod tests {
         let mut d = Dict::new();
         let iri = Term::NamedNode(oxrdf::NamedNode::new("http://ex/x").unwrap());
         let id = d.intern(&iri);
-        assert!(id >= 1 && id < INLINE_BASE);
+        assert!((1..INLINE_BASE).contains(&id));
         assert!(!is_inline(id));
         assert_eq!(d.term(id), iri);
     }

@@ -839,7 +839,7 @@ fn post_equivalences(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
         }
     }
     let mut added = 0;
-    let mut emit = |pairs: &FxHashSet<(Id, Id)>,
+    let emit = |pairs: &FxHashSet<(Id, Id)>,
                     eq: Id,
                     set: &mut FxHashSet<[Id; 3]>,
                     triples: &mut Vec<[Id; 3]>,
