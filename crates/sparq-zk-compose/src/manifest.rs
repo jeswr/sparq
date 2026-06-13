@@ -301,6 +301,17 @@ pub enum CircuitId {
     /// [`RevocationStatus`] check leaked). Supports lists up to `2^depth` indices.
     // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation circuit member.
     RevokeUnset { depth: u32 },
+    /// `hidden_issuer_d{depth}` — in-circuit Schnorr-over-Baby-JubJub signature
+    /// verification + hidden-key set membership over a depth-`depth` Poseidon2
+    /// Merkle tree of the issuer key set K (sq-z9l). The proof's PUBLIC inputs are
+    /// `challenge` + the commitment message `m` + the key-set Merkle `key_set_root`;
+    /// the issuer public key, the signature `(R, s)`, the challenge-reduction
+    /// witness, and the membership index/path are PRIVATE, so the proof proves
+    /// "this commitment was signed by SOME key in K" without disclosing WHICH
+    /// issuer. The privacy upgrade over the clear-key
+    /// [`crate::verifier::bind_issuer_attestations`] check.
+    // [OPUS-4.8] sq-z9l: hidden-issuer-attestation circuit member.
+    HiddenIssuer { depth: u32 },
 }
 
 impl CircuitId {
@@ -311,6 +322,7 @@ impl CircuitId {
             CircuitId::FilterInt { d } => format!("filter_int_d{d}"),
             CircuitId::FilterF64 => "filter_f64".to_string(),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
+            CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
         }
     }
 }
@@ -486,6 +498,20 @@ pub struct ProofManifest {
     // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation proof (privacy upgrade).
     #[serde(default)]
     pub hidden_revocation: Option<HiddenIndexRevocation>,
+    /// OPTIONAL hidden-issuer attestation proofs (sq-z9l): zero-knowledge proofs
+    /// that scan-covering commitments were each signed by SOME issuer whose key is
+    /// in the committed key set K, WITHOUT disclosing which issuer. The privacy
+    /// upgrade over the clear-key [`crate::verifier::bind_issuer_attestations`]
+    /// check. When the policy enables the path (`KeySet::with_hidden_issuer_depth`)
+    /// and an entry is present for a commitment, the verifier checks the proof's
+    /// PUBLIC `key_set_root` equals the root it derives from its OWN authoritative
+    /// KeySet and `message` equals the recomputed issuer-signed message, then runs
+    /// `bb verify` — so WHICH authority vouched for the holder is never disclosed.
+    /// The clear-key path remains the interim/always-on check; this is the additive
+    /// privacy layer. See [`crate::verifier::bind_hidden_issuer_attestations`].
+    // [OPUS-4.8] sq-z9l: hidden-issuer attestation proofs (privacy upgrade).
+    #[serde(default)]
+    pub hidden_issuer_attestations: Vec<HiddenIssuerAttestation>,
 }
 
 /// A hidden-index revocation (bit-unset) proof (sq-3e5 / sq-h2v): the bb proof
@@ -515,6 +541,50 @@ pub struct HiddenIndexRevocation {
     pub root: FieldHex,
     /// The bb proof blob (hex), in the same `len|proof|len|pi|vk` layout as a
     /// [`SubProof::proof_hex`] (see [`crate::verifier::encode_artifacts`]).
+    pub proof_hex: String,
+}
+
+/// A hidden-issuer attestation (sq-z9l): a bb proof produced by the
+/// `hidden_issuer_d{depth}` circuit that the commitment message `m` was signed by
+/// SOME issuer whose public key is a member of the key set K committed as the
+/// PUBLIC Poseidon2 Merkle `key_set_root` — WITHOUT disclosing which issuer.
+///
+/// # Trust anchor (preserves the audit #3 external-K anchor — load-bearing)
+/// `key_set_root` is a PUBLIC input the prover commits, but it is NOT trusted as a
+/// prover claim: the verifier recomputes the authoritative root from its OWN
+/// [`crate::verifier::KeySet`] (canonical order) at `depth` and rejects unless the
+/// proof's public `key_set_root` byte-equals it. So the "in K" fact is bound to
+/// the relying party's own trust anchor, exactly as the clear-key path is — the
+/// only thing hidden is WHICH key (the deanonymising channel), never the trust
+/// source. The privacy upgrade over the clear-key
+/// [`crate::verifier::bind_issuer_attestations`] check.
+///
+/// `m` is the issuer-signed commitment message the proof binds. In v1 this is the
+/// status-bound `commitment_message_with_status(C(G), salt, status_ref)` (the
+/// SAME message the clear path binds), so the verifier recomputes `m` from the
+/// disclosed commitment/salt/reference and requires the proof's PUBLIC `m` to
+/// match — tying the hidden-issuer proof to a specific committed graph.
+///
+/// `depth` selects the circuit member (`hidden_issuer_d{depth}`) and MUST equal
+/// the depth the relying party derives its root with.
+// [OPUS-4.8] sq-z9l: hidden-issuer attestation (privacy upgrade).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenIssuerAttestation {
+    /// The commitment this attestation covers — must match a scan sub-proof's
+    /// `commitments[g]` (so the verifier can recompute the signed message `m`).
+    pub commitment: FieldHex,
+    /// The Merkle-tree depth (`hidden_issuer_d{depth}` member; supports `2^depth`
+    /// issuers). MUST match the depth the relying party derives its root with.
+    pub depth: u32,
+    /// The key-set Merkle root the proof was produced against (the proof's PUBLIC
+    /// input). Checked byte-equal to the relying party's authoritative root.
+    pub key_set_root: FieldHex,
+    /// The issuer-signed commitment message `m` the proof binds (the proof's
+    /// PUBLIC input). Checked equal to the message the verifier recomputes from the
+    /// disclosed commitment + salt + status reference.
+    pub message: FieldHex,
+    /// The bb proof blob (hex), same `len|proof|len|pi|vk` layout as a
+    /// [`SubProof::proof_hex`].
     pub proof_hex: String,
 }
 

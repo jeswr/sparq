@@ -20,6 +20,7 @@
 
 pub mod build;
 pub mod driver;
+pub mod issuer;
 pub mod manifest;
 pub mod revocation;
 pub mod toml;
@@ -32,6 +33,11 @@ pub use manifest::{
 };
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
+// [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers (in-circuit
+// Schnorr-over-BabyJubJub + hidden-key set membership).
+pub use issuer::{
+    hidden_issuer_prover_toml, key_membership_witness, key_set_root, HiddenIssuerWitness,
+};
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
 // [OPUS-4.8] sq-aih: FileSeenNonces is the DURABLE (restart-surviving) store;
 // InMemorySeenNonces is NON-DURABLE / test-only.

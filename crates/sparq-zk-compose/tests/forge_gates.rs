@@ -166,6 +166,7 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
         hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
     };
     (m, commitment, salt)
 }
@@ -326,6 +327,7 @@ fn forge_attribution_under_declared_rejected() {
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
         hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
     };
     match verify_full(&m, "forge_attr_collapse") {
         Err(CheckError::AttributionUnderDeclared { pattern: 0, .. }) => {}
@@ -520,6 +522,7 @@ fn composed_manifest(
         ],
         binding_edges: vec![],
         hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
     }
 }
 
