@@ -13,15 +13,22 @@ Successor agent resuming 2026-06-12. Predecessor left 3 commits, no STATUS.md.
 | 5 | bnode correlation guard | DONE (successor): verifier re-check hook in src/verify.rs (plan §2.4 layer 3 — independent spargebra re-parse, cross-graph join obligations, recheck()); prover guard now covered by tests/trace_guard.rs (7 integration tests incl. colliding-label rejection and the label-identified-union leak) — commit 7321168 |
 | 6 | Criterion benches + baselines | DONE (successor): standalone bench/zk (bench/parse isolation pattern), baselines in bench/zk/README.md — commit 4941c40 |
 | 7 | wasm size gate (feature off) | DONE (successor): baseline (4901be8, same path) 1,593,075 B == HEAD 1,593,075 B. NOT bit-identical: 197 bytes differ — all panic-location LINE NUMBERS in sparq-engine (cfg'd-out zk hook lines shift line numbers of following code); zero code/size change |
-| 8 | workspace tests green | IN FLIGHT: cargo test --workspace --exclude sparq-py --release --no-fail-fast running |
+| 8 | workspace tests green | DONE: cargo test --workspace --exclude sparq-py --release --no-fail-fast → 712 passed, 0 failed (exit 0; a few ignored, all pre-existing) |
 
 sparq-zk test totals now: 24 lib (incl. 6 verify) + 4 noir-cross + 2 rdf-canon + 7 trace_guard = 37, all pass (release).
+Post-workspace-run fix ec767fb (verify.rs only: reject (NOT) EXISTS — fragment walk missed the GraphPattern inside FILTER expressions); sparq-zk re-run green 37/37, no other crate touched since the workspace run.
 
 ## Bench baselines (fanless M1, 2026-06-13; full table in bench/zk/README.md)
 - canon: ~73k-153k triples/s (iri/bnode, 64-1024)
 - commit end-to-end: ~4.1k-7.5k triples/s; leaves+fold: ~7k-9.7k triples/s
 - poseidon2: permutation 92.5 us, hash40 583 us (correctness-first port; headroom documented)
 
-## Next steps if killed
-1. Await/inspect workspace test run output: grep -aE "^test result"; any failures -> check pre-existing vs mine (only sparq-zk + feature-gated engine zk code touched).
-2. Update item 8 to DONE, commit STATUS.md, final report (per-scope status, counts, wasm bytes, bench numbers, final SHA).
+## COMPLETE
+All 8 scope items done. Branch zk-core ready for orchestrator merge gate (do not merge here).
+Known stage-1 caveats, deliberate and documented in code:
+- The union store identifies equal bnode LABELS across graphs (RDF merge forbids this);
+  the Q6 guard rejects exactly the executed plans whose results could depend on it
+  (tested: label_identified_union_leak_is_caught).
+- Verifier re-check is coarser than the prover guard by design (cannot see private bnode values).
+- Poseidon2 is a correctness-first port (~92 us/permutation); optimization headroom documented
+  in bench/zk/README.md — do not optimize before a stage needs it.
