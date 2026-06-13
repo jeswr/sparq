@@ -1,6 +1,15 @@
-# sparq-shacl — known gaps / follow-ups
+# sparq-shacl — outstanding work
 
-## SHACL-SPARQL (`sh:sparql`, W3C SHACL §5.2) — DONE (sq-1rr) [OPUS-4.8]
+Tracked in beads (not here). Run `bd ready -l area:sparq-shacl` or
+`bd list -l area:sparq-shacl`. See AGENTS.md for the no-markdown-TODOs policy.
+
+## Notes
+
+Design rationale and DONE-status records retained from the previous gaps list
+(not task tracking). The "still scoped out" items below are tracked in beads;
+the rationale is kept for context.
+
+### SHACL-SPARQL (`sh:sparql`, W3C SHACL §5.2) — DONE (sq-1rr) [OPUS-4.8]
 The `sh:sparql` constraint component is implemented (`src/sparql.rs` + the
 `Component::Sparql` arm in `eval.rs`), routing the `sh:select` query through
 `sparq-engine`. Per focus node the query runs with `$this` pre-bound (by an
@@ -19,7 +28,7 @@ textual prepend); each solution is one validation result. Covered:
 Pinned by `tests/sparql_constraints.rs` (10 cases) and the W3C `sparql/node` +
 `sparql/property` sub-suites via `tests/w3c_sparql.rs` (5/5).
 
-## SPARQL-based constraint COMPONENTS (`sh:ConstraintComponent`, §6) — DONE (sq-sm2) [OPUS-4.8]
+### SPARQL-based constraint COMPONENTS (`sh:ConstraintComponent`, §6) — DONE (sq-sm2) [OPUS-4.8]
 The §6 machinery is implemented (`discover_components` + `ComponentDef` in
 `model.rs`, the `Component::CustomSparql` arm in `eval.rs`, the validator
 pre-binding + ASK/SELECT runners in `sparql.rs`). Covered:
@@ -52,7 +61,7 @@ activation, multi-parameter, SELECT validator, `sh:optional`, node-validator
 preference, report-Turtle). Multi-parameter pre-binding is exercised by the
 two-parameter "concat" component (the W3C `validator-001` pattern).
 
-### §6 — still scoped out (honest)
+#### §6 — scoped out for now (tracked in beads)
 - **The W3C `sparql/component/*` suite is NOT run**: every entry
   `owl:imports <http://datashapes.org/dash>` (the external DASH vocabulary that
   supplies the `dash:*` constraint components the data uses), which the offline
@@ -94,7 +103,7 @@ two-parameter "concat" component (the W3C `validator-001` pattern).
 - Focus-node/value-node sets containing RDF 1.2 triple terms are untested
   (the dictionary supports them; the SHACL spec predates them).
 
-## Upstream (sparq-core / sparq-engine) gaps noticed — NOT changed here
+### Upstream (sparq-core / sparq-engine) gaps noticed — NOT changed here
 - ~~`Graph::load_str` has no base-IRI parameter~~ **DONE (engine-seams wave)**:
   `Graph::load_str_with_base` / `parse_to_triples_with_base` landed in sparq-core
   (Turtle/TriG; a document's own `@base` still wins). This crate's
@@ -106,7 +115,7 @@ two-parameter "concat" component (the W3C `validator-001` pattern).
   `GraphView` can iterate ids and materialise only the terms it actually
   compares — this crate's owner's call.
 
-## Implementation niceties — status
+### Implementation niceties — status
 - ~~Severity-aware conformance~~ **DONE**:
   `ValidationReport::conforms_violations_only()` (true iff no result carries
   `sh:Violation` — the "warnings don't fail the build" toggle) and

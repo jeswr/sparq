@@ -1,10 +1,16 @@
-# JS/RDF-JS layer — engine/wasm API gaps and follow-ups
+# js — outstanding work
 
-Gaps observed while building the RDF/JS wrapper. Items marked **engine** need
-work in `sparq-engine`/`sparq-core` (owned by another thread — do not implement
-from here); **wasm** items are additive exports in `crates/sparq-wasm`.
+Tracked in beads (not here). Run `bd ready -l area:js` (or `area:sparq-wasm` /
+`area:sparq-engine` for the engine-side gaps) or `bd list -l area:js`.
+See AGENTS.md for the no-markdown-TODOs policy.
 
-## Engine API gaps
+## Notes
+
+Design rationale retained from the previous gap list (not task tracking).
+Items marked **engine** need work in `sparq-engine`/`sparq-core` (owned by another
+thread); **wasm** items are additive exports in `crates/sparq-wasm`.
+
+### Engine API gaps (context)
 
 - **ASK (engine)** — `sparq_engine::query*` rejects everything but SELECT. The
   JS layer rewrites `ASK` → `SELECT *` and tests `count > 0`, which computes the
@@ -35,13 +41,3 @@ from here); **wasm** items are additive exports in `crates/sparq-wasm`.
 - **Term round-trip fidelity** — SPARQL JSON has no RDF 1.2 directional
   language-literal channel; if/when the engine supports `"x"@en--ltr`, the JSON
   serialiser and `termFromSparqlJson` need an agreed extension field.
-
-## JS-side follow-ups
-
-- Decide the final npm package name (currently the `@jeswr/sparq` placeholder).
-- Expose the RDF/JS `StringSparqlQueryable` stream interfaces (`queryBindings`
-  returning a `ResultStream<Bindings>`); blocked on the cursor API above to be
-  worth more than an array-backed shim.
-- Browser smoke test (the wasm loader's non-Node path is exercised only by
-  inspection today).
-- Consider shipping a `--target nodejs` build alongside for CJS consumers.

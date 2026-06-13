@@ -1,9 +1,16 @@
-# sparq-geo — gaps / follow-ups
+# sparq-geo — outstanding work
 
-Status audit 2026-06-12: every item from the previous revision of this file is
-either IMPLEMENTED (with tests) or explicitly DEFERRED below with its reason.
+Tracked in beads (not here). Run `bd ready -l area:sparq-geo` or
+`bd list -l area:sparq-geo`. See AGENTS.md for the no-markdown-TODOs policy.
 
-## Engine extension-function registry — DONE
+## Notes
+
+Design rationale and DONE-status records retained from the previous gap list
+(not task tracking). Status audit 2026-06-12: every item from the previous
+revision was either IMPLEMENTED (with tests) or deferred with its reason; the
+deferred items are now tracked in beads, with the rationale kept below.
+
+### Engine extension-function registry — DONE
 
 sparq-engine grew the extension-function registry this section originally
 specified (`FunctionRegistry` / `ExtFn` / `query_with_functions` /
@@ -13,7 +20,7 @@ registers all 35 implemented `geof:` functions through it (the default-on
 through real SPARQL). sparq-server installs the registry behind its opt-in
 `geo` cargo feature.
 
-## geof: functions — DONE (was "not in v1")
+### geof: functions — DONE (was "not in v1")
 
 All previously-deferred functions landed (2026-06-12):
 
@@ -49,7 +56,7 @@ All previously-deferred functions landed (2026-06-12):
   approximation class as extended–extended `geof:distance`); degree/radian
   radii buffer in coordinate space.
 
-## CRS support
+### CRS support
 
 - DONE (opt-in): the `reproject` cargo feature (`src/reproject.rs`) adds
   pure-Rust reprojection into CRS84 via `proj4rs` for a CURATED EPSG table —
@@ -67,7 +74,7 @@ All previously-deferred functions landed (2026-06-12):
   other than 4326 (4269, …): needs an axis-order registry (same database
   problem as above); they remain opaque `Crs::Other`.
 
-## Index gaps
+### Index gaps
 
 - Antimeridian — DONE: query balls crossing ±180° split into two windows
   (two tree walks, deduped + merged); `nearest` inherits the fix. Regression
@@ -89,7 +96,7 @@ All previously-deferred functions landed (2026-06-12):
   negligible at the segment lengths typical of RDF data. (Documented
   accuracy note, not a planned change.)
 
-## Deferred: planner pushdown (needs-engine-seam)
+### Planner pushdown (needs-engine-seam; tracked in beads)
 
 The registry evaluates `geof:` post-hoc (per row, after pattern matching).
 Pushing `geof:` filters down into a `GeoIndex` window query (the performant
@@ -102,9 +109,9 @@ substitution (FILTER → index window scan), not a statistics injection, so the
 new `cs-planner` estimator seam does not cover it; it needs its own design —
 a rewrite hook where a registered predicate+filter shape claims a scan.)
 
-## Conformance
+### Conformance
 
-Formal OGC GeoSPARQL conformance (the official test suite) is skipped — it
+Formal OGC GeoSPARQL conformance (the official test suite) is not yet run — it
 requires a SPARQL-protocol endpoint harness and the full `geor:` query-rewrite
-machinery (also an engine-level feature). The implemented subset is tabulated
-against spec sections in README.md.
+machinery (also an engine-level feature); tracked in beads. The implemented
+subset is tabulated against spec sections in README.md.

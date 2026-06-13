@@ -1,7 +1,14 @@
-# sparq-vectors — recorded follow-ups
+# sparq-vectors — outstanding work
 
-v1 scope and rationale live in `research/genai-design.md` (phase 4) and the
-crate README. Status of the deliberate cuts:
+Tracked in beads (not here). Run `bd ready -l area:sparq-vectors` or
+`bd list -l area:sparq-vectors`. See AGENTS.md for the no-markdown-TODOs policy.
+
+## Notes
+
+Design rationale and DONE-status records retained from the previous follow-ups
+list (not task tracking). Forward-looking items are tracked in beads. v1 scope
+and rationale live in `research/genai-design.md` (phase 4) and the crate README.
+Status of the deliberate cuts:
 
 - ~~**Streaming store builds.**~~ **DONE** — [`StreamingWriter`]: every `put`
   appends the vector straight to the file's data section and spills the id to
@@ -34,7 +41,7 @@ crate README. Status of the deliberate cuts:
   graph fits page cache the two are equivalent; PQ matters only once the
   vectors themselves exceed RAM. Build is single-threaded O(n·L·R) and slower
   than HNSW's rayon build (~50 s vs ~33 s for 50k×32 at opt-level 2); a
-  rayon-parallel Vamana build is the recorded follow-up.
+  rayon-parallel Vamana build is tracked in beads.
 - ~~**Quantization.**~~ **DONE** (sq-nq5) [OPUS-4.8] — [`ScalarQuantizer`] +
   [`ProductQuantizer`] in `src/quant.rs`, both over the L2-normalized /
   squared-Euclidean cosine convention (`cos = 1 − d²/2`) so estimates are
@@ -58,9 +65,9 @@ crate README. Status of the deliberate cuts:
     The `.spqg` format is **unchanged** — baking PQ codes into the on-disk record
     now would still be speculation against a recall budget we don't have, and the
     `.spqv`/`.spqg` reserved bytes keep that a backwards-compatible bump when a
-    driving workload arrives. **Follow-up: the `search_slots` integration in
-    `diskann.rs`** (the localized change to rank on PQ codes + a re-rank pass) and
-    persisting the codebook beside the graph.
+    driving workload arrives. (The `search_slots` integration in `diskann.rs` —
+    the localized change to rank on PQ codes + a re-rank pass — and persisting the
+    codebook beside the graph are tracked in beads.)
 - ~~**Hybrid RRF fusion** (lexical + structural + vector)~~ **DONE** —
   `fuse_rrf` / `fuse_scores` in `src/fuse.rs` (rank-based RRF `k = 60` +
   min-max alpha-blend over plain ranked lists, so `sparq-vectors` never
@@ -73,7 +80,7 @@ crate README. Status of the deliberate cuts:
   wave note: sparq-engine's opt-in `cs-planner` feature now demonstrates the
   injection shape — an external estimator installed via `with_cs_table` and
   consulted by the greedy planner for star joins; a learned/GNCE estimator could
-  follow the same pattern. Still deferred here.)
+  follow the same pattern. Deferred here; tracked in beads.)
 - ~~**WASM** (bytes-backed open)~~ **DONE** (the cheap half) —
   `VectorStore::open_from_bytes(Vec<u8>)` opens a `.spqv` document held in
   memory with validation identical to `open`; all read paths are shared
@@ -81,8 +88,8 @@ crate README. Status of the deliberate cuts:
   design): the crate stays outside the wasm dependency graph, and memmap2 is
   still an unconditional dep — a `wasm` cargo feature gating memmap2 out is
   the remaining (deliberate) cut, to be added only with an actual wasm
-  consumer so the wasm bundle never grows by default.
-- **Big-endian targets.** DEFERRED (out-of-scope-by-design): `.spqv` is
+  consumer so the wasm bundle never grows by default (tracked in beads).
+- **Big-endian targets.** Out-of-scope-by-design (tracked in beads): `.spqv` is
   little-endian; `create`/`open`/`open_from_bytes`/`StreamingWriter::create`
   reject big-endian hosts rather than byte-swap. Swap-on-read is easy if
   anyone ever needs it; no big-endian deployment target exists today.

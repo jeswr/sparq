@@ -1,12 +1,21 @@
-# TODO
+# workspace — outstanding work
 
-## sparq-engine: `#[derive(Debug)]` on `QueryResult` — DONE
+Tracked in beads (not here). Run `bd ready` / `bd list`, or scope to an area
+with `bd ready -l area:<crate>`. See AGENTS.md for the no-markdown-TODOs policy.
+
+## Notes
+
+Design rationale retained from the previous TODO list (not task tracking).
+
+### sparq-engine: `#[derive(Debug)]` on `QueryResult` — DONE
 
 Implemented in the engine-seams wave: `QueryResult` now derives `Debug`.
 (`sparq-nlq`'s hand-written summarising impl can be dropped at its owner's leisure
 — it still compiles either way.)
 
-## sparq-core: cheap graph snapshot API (would simplify the server's update path)
+### sparq-core: cheap graph snapshot API (design rationale)
+
+The actionable item is beaded; the design context is kept here.
 
 The server's SPARQL Update path (T17 wiring, `crates/sparq-server/src/http.rs::Writer`)
 achieves microsecond steady-state updates **without core changes** by double-buffering:
@@ -37,8 +46,7 @@ calls on the master (compaction must not invalidate live snapshots — e.g. the 
 base goes into fresh `Arc`s). The server-side wiring keeps its shape: publish slot
 `RwLock<Arc<Graph>>` + single-writer mutex; only `Writer`'s buffer juggling collapses.
 
-STATUS (engine-seams wave audit): still open, deliberately deferred. Meeting the
-three requirements means moving `TripleStore`'s permutation storage and the
+Meeting the three requirements means moving `TripleStore`'s permutation storage and the
 dictionary's compacted arena behind `Arc`s (a structural change to every storage
 mode, incl. mmap + compressed) — far beyond an additive seam; sparq-rsp's overlay
-item 3 and sparq-py's `Graph.copy()` both remain blocked on it.
+item and sparq-py's `Graph.copy()` both remain blocked on it (all tracked in beads).

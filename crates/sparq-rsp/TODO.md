@@ -1,9 +1,17 @@
-# sparq-rsp — follow-ups
+# sparq-rsp — outstanding work
+
+Tracked in beads (not here). Run `bd ready -l area:sparq-rsp` or
+`bd list -l area:sparq-rsp`. See AGENTS.md for the no-markdown-TODOs policy.
+
+## Notes
+
+Design rationale and DONE-status records retained from the previous follow-ups
+list (not task tracking). Forward-looking items are tracked in beads.
 
 Constraint honoured in v1 and v2: **no existing crate was modified**; nothing
 in the workspace depends on this crate, and the wasm build is untouched.
 
-## The big one: overlay evaluation instead of rebuild-per-window — DONE (v2)
+### Overlay evaluation instead of rebuild-per-window — DONE (v2)
 
 v1 rebuilt a fresh dictionary-encoded `Graph` per closed window (the measured
 ~1.6 M triples/s plateau). v2 implements the first two rungs of the overlay
@@ -38,11 +46,9 @@ ladder as selectable [`EvalMode`]s, benchmarked head-to-head (README table,
      - Implementation is at the rsp layer only — `sparq_core::Dict` is
        append-only with dense ids and was NOT modified, so a stable-id free-list
        inside the dict is out of scope; the bijective rebuild+remap is the
-       in-scope equivalent. DEFERRED follow-up: the rebuild is O(live + dead)
-       and re-interns each survivor by reconstructing its `Term`; a future
-       `Dict` API that retains the compact `Stored` form across a filtered
-       rebuild (or true id reuse) would cut the rebuild constant — needs a
-       sparq-core seam, like the cheap-snapshot one in §3.
+       in-scope equivalent. (A `Dict` filtered-rebuild API retaining the compact
+       `Stored` form would cut the rebuild constant — needs a sparq-core seam,
+       like the cheap-snapshot one below; tracked in beads.)
 2. **Delta application** (`EvalMode::Delta`) — DONE, kept opt-in,
    **measured-and-not-defaulted**: one live `Graph` + per-slide
    `apply_delta(inserts, deletes)` (exact set-semantic diff between
@@ -52,8 +58,8 @@ ladder as selectable [`EvalMode`]s, benchmarked head-to-head (README table,
    `apply_delta` is term-level (intern + `id_of` per change) and overlay rows
    are re-sorted per scan, so it loses to PersistentDict everywhere
    (0.29–2.01 M; see README). Kept because its per-slide work is O(changes).
-3. **True overlay snapshot** — DEFERRED, **blocked-on-engine-seam**: needs the
-   cheap-snapshot API recorded in the workspace `TODO.md` ("sparq-core: cheap
+3. **True overlay snapshot** — blocked-on-engine-seam (tracked in beads): needs
+   the cheap-snapshot API recorded in the workspace `TODO.md` ("sparq-core: cheap
    graph snapshot API") so the window loop can keep one mutable graph and hand
    the engine an O(1) immutable snapshot per closed window. That seam would
    also remove PersistentDict's remaining per-window cost (index build +
@@ -72,7 +78,7 @@ ladder as selectable [`EvalMode`]s, benchmarked head-to-head (README table,
    that it vanishes. Adopted anyway: strictly less work per window, no API
    change, and registration was already paying the parse.
 
-## Smaller gaps
+### Smaller gaps — status
 
 - **Window origin `t0`** — DONE: `WindowSpec::with_t0(t0)` (RSP-QL's
   parameterised origin); windows are `[t0 + k·step, t0 + k·step + range)`,
@@ -118,19 +124,19 @@ ladder as selectable [`EvalMode`]s, benchmarked head-to-head (README table,
      cross-named-graph id translation (`eval_graph_named`) makes a variable
      shared between `WINDOW <w1>` and `WINDOW <w2>` JOIN correctly. RSTREAM
      (full per-tick result) only for now.
-     - FOLLOW-UPS (deferred): ISTREAM/DSTREAM over a multi-window join (the diff
-       base would be the previous tick's full result; `diff_rows` applies
-       mechanically but is not wired); a SLOW window that closes MULTIPLE windows
-       between a fast window's ticks contributes only its LATEST-closed content
-       at each tick (documented snapshot rule — a per-tick exact-overlap policy
-       would be a different, heavier semantics); window VARIABLES; `ROWS` in the
-       multi form. The persistent-dictionary `EvalMode` is NOT applied per
-       sub-graph here (each tick builds fresh per-window sub-graphs via
-       `from_parts`) — wiring `EvalMode` through the multi path is a follow-up.
+     - Scope notes (further work tracked in beads): ISTREAM/DSTREAM over a
+       multi-window join is not wired (the diff base would be the previous tick's
+       full result; `diff_rows` applies mechanically); a SLOW window that closes
+       MULTIPLE windows between a fast window's ticks contributes only its
+       LATEST-closed content at each tick (documented snapshot rule — a per-tick
+       exact-overlap policy would be a different, heavier semantics); window
+       VARIABLES and `ROWS` in the multi form are not supported. The
+       persistent-dictionary `EvalMode` is NOT applied per sub-graph here (each
+       tick builds fresh per-window sub-graphs via `from_parts`).
 - **R2S hash collisions**: ISTREAM/DSTREAM SELECT diffs use 64-bit row hashes
   (documented, vanishingly unlikely to collide). Exact term-level multiset
-  diffing would remove the caveat at the cost of hashing full term values.
-  (CONSTRUCT diffs are exact set differences — no caveat.)
+  diffing would remove the caveat at the cost of hashing full term values
+  (tracked in beads). (CONSTRUCT diffs are exact set differences — no caveat.)
 - **Per-window budget**: `sparq_engine::query_with_budget` exists; exposing a
   `QueryBudget` per registered query would bound worst-case window evaluation
-  in embedded deployments.
+  in embedded deployments (tracked in beads).

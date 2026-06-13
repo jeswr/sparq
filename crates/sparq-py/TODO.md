@@ -1,10 +1,16 @@
-# sparq-py — API gaps & follow-ups (T21)
+# sparq-py — outstanding work
 
-Gaps in the wrapped crates' public APIs found while building the Python bindings.
-Per the T21 scope, no existing crate source was touched; these are recorded for
-their owning crates.
+Tracked in beads (not here). Run `bd ready -l area:sparq-py` or
+`bd list -l area:sparq-py`. See AGENTS.md for the no-markdown-TODOs policy.
 
-## Engine (sparq-engine)
+## Notes
+
+Design rationale and DONE-status records retained from the previous gap list
+(not task tracking). Gaps in the wrapped crates' public APIs found while building
+the Python bindings; recorded for their owning crates. Per the T21 scope, no
+existing crate source was touched.
+
+### Engine (sparq-engine)
 
 - ~~**No native ASK / CONSTRUCT / DESCRIBE.**~~ **DONE (py-parity wave).**
   `Graph.ask` runs `sparq_engine::ask_prepared` (early-exiting; SELECT still
@@ -25,7 +31,7 @@ their owning crates.
   path; lazy rebuild is the matching policy). `build_text_index()` builds eagerly,
   `drop_text_index()` releases the cache. Covered by `tests/test_text.py`.
 
-## Reasoning (sparq-reason)
+### Reasoning (sparq-reason)
 
 - ~~**`reason_n3` has no graph-input entry point.**~~ **DONE (py-parity wave).**
   `Graph.reason_n3_with(rules)` applies a caller-supplied N3 rules document to an
@@ -44,13 +50,13 @@ their owning crates.
   inside `reason("owl")` — detection is over asserted triples, and callers may
   want the closure even when inconsistent.
 
-## Core (sparq-core)
+### Core (sparq-core)
 
-- **`Dict`/`Graph` are not `Clone`** — STILL OPEN (audited, deferred with reason):
-  a naive `Clone` would deep-copy the dictionary arena + six permutations (O(n))
-  and is wrong for the mmap-backed mode; the designed fix is the cheap-snapshot
-  API in the workspace `TODO.md` (Arc-shared immutable base), deferred as a
-  structural storage change. `Graph.copy()` stays blocked on it.
+- **`Dict`/`Graph` are not `Clone`** (context for the beaded `Graph.copy()`
+  follow-up): a naive `Clone` would deep-copy the dictionary arena + six
+  permutations (O(n)) and is wrong for the mmap-backed mode; the designed fix is
+  the cheap-snapshot API in the workspace `TODO.md` (Arc-shared immutable base),
+  a structural storage change. `Graph.copy()` stays blocked on it.
 - ~~**`Graph::save` panics on a sparse numeric cache**~~ **STALE — already fixed.**
   `save`/`save_compressed` recompute a dense cache from the dictionary when the
   in-memory cache is sparse (`dense_numerics`' fallback arm); the engine-seams
@@ -58,7 +64,7 @@ their owning crates.
   (`sparq-core::tests::save_after_into_compressed_sparse_numerics`). A compressed
   mode in Python is unblocked.
 
-## Packaging
+### Packaging
 
 - The workspace `release` profile is `panic = "abort"`, which would abort the whole
   Python interpreter on any Rust panic inside the extension. Added a
@@ -66,6 +72,4 @@ their owning crates.
   be built with `maturin build --profile python-release`. CI's quick check uses
   `maturin develop` (dev profile, unwinding) so it is unaffected.
 - Wheels-matrix release wiring (manylinux/macos/windows × abi3, `maturin-action`)
-  is a follow-up — see the note in `docs/release.md`.
-- The PyPI name `sparq` must be checked for availability before first publish
-  (same caveat as the crates.io names in `docs/release.md` §0).
+  and the PyPI-name availability check are tracked in beads (see also `docs/release.md`).
