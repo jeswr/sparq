@@ -1,0 +1,449 @@
+// [OPUS-4.8] written while Fable 5 unavailable — re-review when Fable returns.
+//! sq-61g: differential prove → verify → compare-to-cleartext fuzzer.
+//!
+//! For each random iteration the fuzzer:
+//!  1. generates a small random RDF "credential" graph (a single subject with a
+//!     random set of `<ex/predN> <xsd:integer>` triples) and a random query from
+//!     the supported circuit family — either a bare BGP scan
+//!     `{ ?s <pred> ?o }` or that scan plus a numeric `FILTER(?o <op> <bound>)`;
+//!  2. evaluates the query in CLEARTEXT over the same triples (the oracle): the
+//!     set of matched (s,p,o) rows, and — when a FILTER is present — the boolean
+//!     verdict per matched row;
+//!  3. drives the SAME data through the ZK pipeline: `build_scan` /
+//!     `build_filter_int` → `prover_toml_for` → real `nargo execute` witness
+//!     generation (and, for the heavy variant, a full `bb prove` +
+//!     `verify_manifest`), then reads the ZK PUBLIC result (the disclosed `rows`
+//!     and the proved `expected` verdict);
+//!  4. asserts the ZK public result EQUALS the cleartext result.
+//!
+//! A divergence here is exactly a soundness (ZK accepts a result cleartext
+//! rejects) or completeness (ZK drops a result cleartext keeps) bug. The default
+//! test runs a modest, CI-sane number of iterations against the cheap witness
+//! path (which already exercises the full in-circuit relation — `nargo execute`
+//! fails to produce a witness iff the relation is unsatisfiable). The heavy
+//! `#[ignore]`d variant runs fewer iterations but adds a real `bb prove` +
+//! `verify_manifest`, exercising the cryptographic proof end to end.
+//!
+//! Seedable: the per-iteration seed is derived from a base seed (env
+//! `SPARQ_FUZZ_SEED`, else a fixed default) so failures are reproducible. On any
+//! mismatch the failing seed is printed for one-line repro.
+
+use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
+use sparq_zk::commit::{commit_triples, GraphCommitment};
+use sparq_zk::encode::{encode_term, salt_from_bytes};
+use sparq_zk::field::{field_to_hex, Fr};
+use sparq_zk_compose::build::{build_filter_int, build_scan, Pattern, Slot};
+use sparq_zk_compose::driver::CircuitProver;
+use sparq_zk_compose::manifest::{FieldHex, FilterOp, ProofInputs};
+use sparq_zk_compose::toml::prover_toml_for;
+
+// --- tiny deterministic PRNG (splitmix64) — no new dependency ---------------
+// We only need a reproducible stream of small integers; splitmix64 is a one-liner
+// with good-enough statistical quality for fuzzing input selection.
+struct Rng(u64);
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Rng(seed)
+    }
+    fn next_u64(&mut self) -> u64 {
+        // splitmix64
+        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+    /// Uniform-ish in `[0, n)` (n > 0).
+    fn below(&mut self, n: u64) -> u64 {
+        self.next_u64() % n
+    }
+    fn boolean(&mut self) -> bool {
+        self.next_u64() & 1 == 1
+    }
+}
+
+// The base seed: override with SPARQ_FUZZ_SEED to reproduce a reported failure
+// (the per-iteration seed printed on failure already pins the exact case, but a
+// base override lets you sweep a different stream).
+fn base_seed() -> u64 {
+    std::env::var("SPARQ_FUZZ_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0x5EED_C0FFEE_u64)
+}
+
+fn toolchain_available() -> bool {
+    fn on_path(tool: &str) -> bool {
+        std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    on_path("nargo") && on_path("bb")
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "sparq_zk_compose_fuzz_{name}_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn iri(s: &str) -> NamedNode {
+    NamedNode::new(s).unwrap()
+}
+
+const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+fn int_lit(v: u64) -> Term {
+    Term::Literal(Literal::new_typed_literal(v.to_string(), iri(XSD_INT)))
+}
+
+// --- the generated test case -----------------------------------------------
+
+/// One random predicate→value pair in the generated subject's graph.
+#[derive(Clone)]
+struct Fact {
+    pred: String,
+    value: u64,
+}
+
+/// A generated fuzz case: a single-subject credential graph + a chosen query.
+struct FuzzCase {
+    triples: Vec<Triple>,
+    facts: Vec<Fact>,
+    /// The predicate the query's BGP pattern fixes (`{ ?s <query_pred> ?o }`).
+    query_pred: String,
+    /// An optional numeric FILTER on the matched object: `?o <op> <bound>`.
+    filter: Option<(FilterOp, u64)>,
+}
+
+/// The compiled `filter_int` digit buckets (`build::FILTER_INT_D_VALUES`). The
+/// circuit's `digits: [u8; D]` witness requires the operand's decimal digit
+/// count to EXACTLY equal a compiled `D` (and forbids a leading zero for D>1),
+/// so an operand whose digit count is NOT one of these (e.g. 3, or 5-19 digits)
+/// has NO provable member — `build_filter_int` would derive `d=4` for a 3-digit
+/// value, which is unsatisfiable. The fuzzer therefore draws FILTER-eligible
+/// values only from these exact digit counts; the gap itself is documented as a
+/// sq-61g finding (a completeness gap in the compiled family, not a soundness
+/// hole). See the test-file doc + the sq-61g report.
+const FILTER_DIGIT_BUCKETS: &[u32] = &[1, 2, 4];
+
+/// Draw an `xsd:integer` value whose canonical decimal has exactly `d` digits
+/// (no leading zero for d>1).
+fn value_with_digits(rng: &mut Rng, d: u32) -> u64 {
+    match d {
+        1 => rng.below(10),                       // 0..=9
+        2 => 10 + rng.below(90),                  // 10..=99
+        4 => 1000 + rng.below(9000),              // 1000..=9999
+        _ => unreachable!("only compiled buckets"),
+    }
+}
+
+/// Generate a random small credential graph + query.
+///
+/// Object values are drawn only from compiled `filter_int` digit buckets (1, 2,
+/// or 4 digits — see [`FILTER_DIGIT_BUCKETS`]) so a matched object is always a
+/// provable FILTER operand; graph size is kept ≤ the `n=16` slot-bucket and
+/// matched rows ≤ the `r=4` row-bucket of the `scan_k1` member, so a single
+/// committed graph always derives a compiled scan id.
+fn generate(rng: &mut Rng) -> FuzzCase {
+    let subject = NamedOrBlankNode::NamedNode(iri("http://ex/subj"));
+    // 1..=4 distinct predicates so matched rows for a single predicate is 1 (one
+    // value per predicate), keeping us inside r=4 even when the query predicate
+    // is absent (0 matched rows is also valid — empty result).
+    let n_preds = 1 + rng.below(4) as usize; // 1..=4
+    let mut facts: Vec<Fact> = Vec::with_capacity(n_preds);
+    let mut triples = Vec::with_capacity(n_preds);
+    for i in 0..n_preds {
+        let pred = format!("http://ex/pred{i}");
+        // Pick a compiled digit bucket then a value of exactly that many digits,
+        // so the matched object is a provable FILTER operand.
+        let d = FILTER_DIGIT_BUCKETS[rng.below(FILTER_DIGIT_BUCKETS.len() as u64) as usize];
+        let value = value_with_digits(rng, d);
+        facts.push(Fact { pred: pred.clone(), value });
+        triples.push(Triple::new(subject.clone(), iri(&pred), int_lit(value)));
+    }
+
+    // The query predicate: usually one that EXISTS (so we exercise matches), but
+    // with some probability a predicate that is ABSENT (exercise the empty
+    // result / completeness corner).
+    let query_pred = if rng.below(5) == 0 {
+        "http://ex/absent".to_string()
+    } else {
+        facts[rng.below(facts.len() as u64) as usize].pred.clone()
+    };
+
+    // Optionally attach a numeric FILTER on the matched object.
+    let filter = if rng.boolean() {
+        let op = match rng.below(6) {
+            0 => FilterOp::Lt,
+            1 => FilterOp::Le,
+            2 => FilterOp::Gt,
+            3 => FilterOp::Ge,
+            4 => FilterOp::Eq,
+            _ => FilterOp::Ne,
+        };
+        // Bound near the actual values so both verdicts occur; allow 0..=10000.
+        let bound = rng.below(10_001);
+        Some((op, bound))
+    } else {
+        None
+    };
+
+    FuzzCase { triples, facts, query_pred, filter }
+}
+
+// --- the CLEARTEXT oracle ---------------------------------------------------
+
+/// Cleartext evaluation of the case's scan `{ ?s <query_pred> ?o }`: the matched
+/// integer object value(s). With a single subject + distinct predicates this is
+/// 0 or 1 values, but we model it as a set for generality.
+fn cleartext_scan_values(case: &FuzzCase) -> Vec<u64> {
+    case.facts
+        .iter()
+        .filter(|f| f.pred == case.query_pred)
+        .map(|f| f.value)
+        .collect()
+}
+
+/// Cleartext numeric comparison verdict (`value <op> bound`).
+fn cleartext_verdict(op: FilterOp, value: u64, bound: u64) -> bool {
+    match op {
+        FilterOp::Lt => value < bound,
+        FilterOp::Le => value <= bound,
+        FilterOp::Gt => value > bound,
+        FilterOp::Ge => value >= bound,
+        FilterOp::Eq => value == bound,
+        FilterOp::Ne => value != bound,
+    }
+}
+
+// --- the ZK path ------------------------------------------------------------
+
+/// Build the scan over one committed graph. Returns the commitment + built scan,
+/// or `None` if the case does not fit a compiled member (caller skips it — not a
+/// soundness signal, just an out-of-family input).
+fn zk_build_scan(case: &FuzzCase, salt: Fr) -> Option<(GraphCommitment, sparq_zk_compose::build::BuiltScan)> {
+    let commit = commit_triples(&case.triples, salt).ok()?;
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri(&case.query_pred))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(std::slice::from_ref(&commit), &pattern)?;
+    Some((commit, scan))
+}
+
+/// The ZK PUBLIC scan result: the disclosed object values, read from the scan's
+/// `rows` public input (slot 2), decoded by matching each disclosed encoding back
+/// to a fact's encoded value. We compare ENCODINGS (the on-field public values),
+/// not cleartext ints, by encoding the cleartext oracle values the same way — so
+/// this is a true comparison of "what the public proof discloses" vs "what
+/// cleartext says should be disclosed".
+fn zk_scan_disclosed_encodings(scan: &ProofInputs) -> Vec<String> {
+    match scan {
+        ProofInputs::Scan { rows, row_count, .. } => rows
+            .iter()
+            .take(*row_count as usize)
+            .map(|r| r[2].0.clone())
+            .collect(),
+        _ => unreachable!("scan inputs"),
+    }
+}
+
+/// Encode a cleartext integer object value to its term encoding hex, the way the
+/// scan discloses it (literals are salt-independent in this encoding, but we pass
+/// the graph salt for fidelity).
+fn encode_value_hex(value: u64, salt: Fr) -> String {
+    let enc = encode_term(&int_lit(value), &salt).expect("int literal encodes");
+    field_to_hex(&enc)
+}
+
+/// The DEFAULT, CI-sane iteration count for the cheap witness-path fuzzer.
+const DEFAULT_ITERS: u64 = 24;
+/// The heavy (`#[ignore]`) full-prove iteration count (each is ~1-2s of bb).
+const HEAVY_ITERS: u64 = 6;
+
+/// Core differential body shared by the cheap + heavy variants. `full_prove`
+/// selects whether each case runs a real `bb prove` + `verify_manifest` (heavy)
+/// or only `nargo execute` witness-gen (cheap, but still the full in-circuit
+/// relation). Returns the number of cases actually exercised (some are skipped
+/// as out-of-family, which is not a failure).
+fn run_differential(iters: u64, full_prove: bool) -> u64 {
+    let prover = CircuitProver::from_crate_root();
+    let base = base_seed();
+    let mut exercised = 0u64;
+
+    for i in 0..iters {
+        // Per-iteration seed derived from the base — printed on failure.
+        let seed = base ^ (i.wrapping_mul(0x100_0000_01b3));
+        let mut rng = Rng::new(seed);
+        let case = generate(&mut rng);
+        // A per-case salt so distinct iterations don't share commitment state.
+        let salt = salt_from_bytes(&{
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&seed.to_le_bytes());
+            b[8] = 0xA5; // make it non-zero / distinctive
+            b
+        });
+
+        let Some((_commit, scan)) = zk_build_scan(&case, salt) else {
+            // Out-of-family input (no compiled member fits) — skip, not a bug.
+            continue;
+        };
+        exercised += 1;
+
+        // ---- SCAN differential: disclosed rows vs cleartext matches. ----
+        let zk_rows = zk_scan_disclosed_encodings(&scan.inputs);
+        let mut clear_rows: Vec<String> = cleartext_scan_values(&case)
+            .into_iter()
+            .map(|v| encode_value_hex(v, salt))
+            .collect();
+        let mut zk_sorted = zk_rows.clone();
+        zk_sorted.sort();
+        clear_rows.sort();
+        assert_eq!(
+            zk_sorted, clear_rows,
+            "SCAN result divergence (seed {seed:#x}): ZK disclosed {zk_rows:?} vs cleartext {clear_rows:?}; \
+             query_pred={}, facts={:?}",
+            case.query_pred,
+            case.facts.iter().map(|f| (&f.pred, f.value)).collect::<Vec<_>>()
+        );
+
+        // The cheap path verifies the relation is SATISFIABLE for the honest
+        // statement: nargo execute must produce a witness. (A wrong disclosed row
+        // set would already have failed the assertion above; here we confirm the
+        // honest statement the cleartext oracle agrees with is also provable.)
+        let challenge = FieldHex("0x2a".into());
+        let (scan_id, scan_toml) = prover_toml_for(
+            &scan.inputs,
+            &challenge,
+            &scan.witness.counts,
+            &scan.witness.enc,
+            &[],
+        );
+        let tag = format!("fuzz_scan_{i}");
+        prover.compile(&scan_id).expect("scan compiles");
+        prover
+            .gen_witness_tagged(&scan_id, &scan_toml, &tag)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "SCAN witness UNSAT for an honest cleartext-agreeing statement \
+                     (seed {seed:#x}): {e}"
+                )
+            });
+
+        // ---- FILTER differential (when the case carries a FILTER). ----
+        if let Some((op, bound)) = case.filter {
+            // The filter is applied to the matched object value(s). With one
+            // matched row (single subject) we filter that value; with zero
+            // matched rows there is nothing to filter (skip the filter leg).
+            let matched = cleartext_scan_values(&case);
+            for value in matched {
+                let expected = cleartext_verdict(op, value, bound);
+                let operand_enc = FieldHex(encode_value_hex(value, salt));
+                // Build the HONEST filter (expected = the cleartext verdict).
+                let Some((filter_inputs, digits)) =
+                    build_filter_int(operand_enc.clone(), value, op, bound, expected)
+                else {
+                    // Value out of the d≤4 family (shouldn't happen: value≤9999).
+                    continue;
+                };
+                let (fid, ftoml) =
+                    prover_toml_for(&filter_inputs, &challenge, &[], &[], &digits);
+                let ftag = format!("fuzz_filter_{i}");
+                prover.compile(&fid).expect("filter compiles");
+
+                // Honest verdict must be PROVABLE (witness exists)...
+                prover
+                    .gen_witness_tagged(&fid, &ftoml, &ftag)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "FILTER witness UNSAT for the HONEST cleartext verdict \
+                             (seed {seed:#x}): {value} {op:?} {bound} = {expected}: {e}"
+                        )
+                    });
+
+                // ...and the FLIPPED verdict must be UNPROVABLE (soundness: the
+                // circuit must not let a lie pass). nargo execute signals
+                // unsatisfiability by NOT writing a witness => gen_witness errs.
+                let Some((lie_inputs, lie_digits)) =
+                    build_filter_int(operand_enc, value, op, bound, !expected)
+                else {
+                    continue;
+                };
+                let (lid, ltoml) =
+                    prover_toml_for(&lie_inputs, &challenge, &[], &[], &lie_digits);
+                let ltag = format!("fuzz_filter_lie_{i}");
+                let lie_witness = prover.gen_witness_tagged(&lid, &ltoml, &ltag);
+                assert!(
+                    lie_witness.is_err(),
+                    "SOUNDNESS VIOLATION (seed {seed:#x}): the circuit produced a \
+                     witness for the FALSE verdict {value} {op:?} {bound} = {} \
+                     (cleartext says {expected})",
+                    !expected
+                );
+
+                // Heavy variant: a real bb prove of the honest filter, then bb
+                // verify, asserting the proved PUBLIC verdict equals cleartext.
+                if full_prove {
+                    let out = scratch(&format!("fuzz_prove_{i}"));
+                    let art = prover
+                        .prove_in(&fid, &ftoml, &out, &format!("fuzz_prove_{i}"))
+                        .expect("honest filter proves");
+                    let ok = prover
+                        .verify(&art, &out.join("verify"))
+                        .expect("bb verify runs");
+                    assert!(
+                        ok,
+                        "PROOF of the honest cleartext verdict failed to verify \
+                         (seed {seed:#x}): {value} {op:?} {bound} = {expected}"
+                    );
+                    let _ = std::fs::remove_dir_all(&out);
+                }
+            }
+        }
+    }
+    exercised
+}
+
+/// sq-61g — the default CI-sane differential fuzzer (cheap witness path). Runs a
+/// modest number of random cases; each asserts the ZK disclosed scan rows equal
+/// cleartext matches, the honest FILTER verdict is provable, and the FLIPPED
+/// verdict is UNprovable (soundness). Skips cleanly if nargo/bb absent.
+#[test]
+fn differential_fuzz_witness_path() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping differential fuzzer");
+        return;
+    }
+    let n = run_differential(DEFAULT_ITERS, false);
+    eprintln!("differential_fuzz_witness_path: {n} in-family cases exercised");
+    assert!(n > 0, "no in-family fuzz cases were exercised — generator is broken");
+}
+
+/// sq-61g (heavy) — the full prove→verify→compare-to-cleartext fuzzer. Each case
+/// runs a real `bb prove` + `bb verify` of the honest FILTER and asserts the
+/// proved public verdict verifies (and matches cleartext). Slower (~seconds per
+/// case), so gated behind `#[ignore]`.
+///
+/// Run with:
+///   cargo test -p sparq-zk-compose --test differential_fuzz -- --ignored
+/// Reproduce a specific stream with:
+///   SPARQ_FUZZ_SEED=0x... cargo test -p sparq-zk-compose --test differential_fuzz -- --ignored
+#[test]
+#[ignore = "slow: full bb prove per fuzz case (sq-61g heavy variant)"]
+fn differential_fuzz_full_prove() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping heavy differential fuzzer");
+        return;
+    }
+    let n = run_differential(HEAVY_ITERS, true);
+    eprintln!("differential_fuzz_full_prove: {n} in-family cases exercised (full bb prove)");
+    assert!(n > 0, "no in-family fuzz cases were exercised — generator is broken");
+}
