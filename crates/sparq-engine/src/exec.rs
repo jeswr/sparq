@@ -2203,11 +2203,15 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
         Some(SpatialPushdown { geo_var, kind: SpatialKind::DistanceWithin { point_wkt, radius: r, unit_iri, inclusive } })
     };
     match e {
-        // distance(...) < r  |  r > distance(...)
-        Expression::Less(l, r) => distance_cmp(l, r, false).or_else(|| distance_cmp(r, l, false)),
-        Expression::LessOrEqual(l, r) => distance_cmp(l, r, true).or_else(|| distance_cmp(r, l, true)),
-        Expression::Greater(l, r) => distance_cmp(r, l, false),
-        Expression::GreaterOrEqual(l, r) => distance_cmp(r, l, true),
+        // A finite within-window needs distance on the SMALLER side: `distance(...) < r`
+        // or the mirror `r > distance(...)`. The opposite orientation (`r < distance` /
+        // `distance > r`) is an unbounded EXTERIOR — NOT pushable — so each arm matches
+        // exactly ONE operand orientation (asymmetric on purpose; the earlier symmetric
+        // `.or_else` wrongly recognised the exterior as a within-window). [OPUS-4.8]
+        Expression::Less(l, r) => distance_cmp(l, r, false), // distance(...) < r
+        Expression::LessOrEqual(l, r) => distance_cmp(l, r, true), // distance(...) <= r
+        Expression::Greater(l, r) => distance_cmp(r, l, false), // r > distance(...)
+        Expression::GreaterOrEqual(l, r) => distance_cmp(r, l, true), // r >= distance(...)
         // geof:sfWithin(?g, box) / geof:sfIntersects(?g, box) as the whole FILTER.
         Expression::FunctionCall(Function::Custom(nn), cargs) => {
             let iri = nn.as_str();
@@ -2245,8 +2249,35 @@ fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown)
     // scanned column. A candidate term absent from the dict can never bind here, so
     // dropping it from the id-set is safe (and keeps the set a superset of the matches).
     let cand_ids: FxHashSet<Id> = cands.iter().filter_map(|t| graph.id_of(t)).collect();
-    b.rows.retain(|row| cand_ids.contains(&row[col]));
+    // Drop a row ONLY when the index is AUTHORITATIVE over its binding AND excludes it:
+    // keep when the binding is a candidate (an indexed match) OR the index has no opinion
+    // on it (NOT indexed — e.g. bound via a non-`geo:asWKT` predicate, a non-geographic
+    // CRS, or a different graph). The residual `geof:` FILTER then judges every kept row,
+    // so a geometry the index never saw is NEVER silently dropped. This makes the result
+    // identical to the post-hoc path no matter which subset the index covers. To avoid
+    // re-materialising a term per row, the not-indexed check is memoised per distinct id.
+    let mut verdict: FxHashMap<Id, bool> = FxHashMap::default();
+    b.rows.retain(|row| {
+        let id = row[col];
+        if cand_ids.contains(&id) {
+            return true; // an indexed candidate (kept; exact FILTER refines)
+        }
+        *verdict.entry(id).or_insert_with(|| {
+            // Keep iff the index is NOT authoritative over this binding.
+            match term_of_id(graph, id) {
+                Some(t) => !idx.is_indexed(&t),
+                None => true, // no term (synthetic / unbound) — index can't rule it out
+            }
+        })
+    });
     true
+}
+
+/// The graph-dictionary term for `id`, if any. (A standalone helper so the spatial
+/// pushdown can resolve a binding without a `LocalVocab`; bindings reaching a pushable
+/// scan-bound geometry FILTER are graph-dict ids.) [OPUS-4.8]
+fn term_of_id(graph: &Graph, id: Id) -> Option<Term> {
+    (id != NO_ID && !dict::is_inline(id)).then(|| graph.dict.term(id))
 }
 
 // ---- BGP evaluation ----------------------------------------------------------

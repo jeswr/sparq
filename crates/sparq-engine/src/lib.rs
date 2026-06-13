@@ -174,18 +174,38 @@ pub enum SpatialQuery<'a> {
 /// A spatial index the engine can push a recognised `geof:` FILTER into.
 ///
 /// Implemented by sparq-geo over its `GeoIndex`; installed per-query via
-/// [`with_spatial_index`]. The contract is a one-way FILTER (candidate
-/// SUPERSET): `candidates` must return EVERY geometry-variable binding that
-/// could satisfy the predicate (false positives allowed, false negatives NOT) —
-/// the exact `geof:` check still runs afterwards and removes the false
-/// positives, so the pushed-down plan returns identically to the post-hoc path.
-/// Returning `None` declines the pushdown (e.g. unparsable constant, unsupported
-/// CRS) and the engine falls back to the full per-row scan.
+/// [`with_spatial_index`].
+///
+/// CORRECTNESS CONTRACT (a one-way FILTER that must never drop a true match):
+///
+/// * [`candidates`](Self::candidates) returns EVERY *indexed* geometry-variable
+///   binding that could satisfy the predicate — a SUPERSET of the matches AMONG
+///   the geometries the index actually holds (false positives allowed; false
+///   negatives among indexed geometries are NOT). The exact `geof:` check still
+///   runs afterwards and removes the false positives.
+/// * [`is_indexed`](Self::is_indexed) reports whether a `Term` is one the index
+///   has an opinion on. The engine keeps a row when its binding is a candidate
+///   OR is NOT indexed — so a geometry the index never saw (bound via a
+///   non-`geo:asWKT` predicate, a non-geographic CRS, a different graph, …) is
+///   left for the exact `geof:` FILTER to judge, NEVER silently dropped.
+///
+/// Together these make the pushed-down plan return IDENTICALLY to the post-hoc
+/// path regardless of which subset of the queried bindings the index covers.
+/// Returning `None` from `candidates` declines the pushdown entirely (e.g.
+/// unparsable constant, a metric the index cannot bound) and the engine falls
+/// back to the full per-row scan.
 pub trait SpatialProvider: Send + Sync {
-    /// The candidate superset of geometry-variable bindings (the WKT-literal
-    /// `Term`s the FILTER's geometry variable is bound to) for `query`, or
+    /// The candidate superset (among indexed geometries) of geometry-variable
+    /// bindings — the WKT-literal `Term`s — that could satisfy `query`, or
     /// `None` to decline the pushdown.
     fn candidates(&self, query: &SpatialQuery) -> Option<Vec<Term>>;
+
+    /// Whether `term` is a geometry this index holds an opinion on (i.e. it was
+    /// indexed). A binding for which this is `false` is NEVER dropped by the
+    /// pushdown — the index cannot rule it out, so the exact `geof:` FILTER
+    /// decides. (For a `GeoIndex`: the geographic-CRS `geo:asWKT` literals it
+    /// extracted.)
+    fn is_indexed(&self, term: &Term) -> bool;
 }
 
 /// Runs `f` with `idx` installed as the active spatial index — the planner

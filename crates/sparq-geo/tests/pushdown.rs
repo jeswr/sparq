@@ -194,6 +194,85 @@ fn distance_greater_than_stays_posthoc() {
 }
 
 #[test]
+fn reversed_operand_exterior_stays_posthoc() {
+    // REGRESSION: `r < geof:distance(?g, pt)` is the EXTERIOR (distance > r), NOT a
+    // within-window — it must NOT be recognised as DistanceWithin (that would drop
+    // exactly the far points that match). Same for `r <= distance`. Result must equal
+    // the post-hoc path, and (since these don't push down) the exact-check count is
+    // unchanged.
+    let g = grid(8);
+    for op in ["<", "<="] {
+        let q = format!(
+            "{PREFIXES} SELECT ?f WHERE {{ \
+               ?f geo:hasGeometry ?n . ?n geo:asWKT ?wkt . \
+               FILTER(100 {op} geof:distance(?wkt, \"POINT(0 0)\"^^geo:wktLiteral, uom:kilometre)) \
+             }}"
+        );
+        let (rows, posthoc, pushed) = compare(&g, &q);
+        assert!(!rows.is_empty(), "far points (> 100 km) should match `{op}` exterior");
+        assert_eq!(pushed, posthoc, "exterior `{op}` must NOT push down to a within-window");
+    }
+}
+
+#[test]
+fn geometry_bound_via_non_aswkt_predicate_is_correct() {
+    // REGRESSION (silent false negatives): the GeoIndex only indexes geo:asWKT
+    // literals, but a FILTER's geometry variable can be bound by ANY predicate (here
+    // ex:loc — exactly the shape the geof: registry's own examples use). Those literals
+    // are NOT in the index; the pushdown must NOT drop them — is_indexed returns false,
+    // so the row is kept and the exact geof: FILTER judges it. Result must be identical
+    // to the post-hoc path.
+    let g = Graph::load_str(
+        r#"
+        @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:  <http://ex/> .
+        ex:a ex:loc "POINT(0 0)"^^geo:wktLiteral .
+        ex:b ex:loc "POINT(0.1 0.1)"^^geo:wktLiteral .
+        ex:c ex:loc "POINT(40 40)"^^geo:wktLiteral .
+        "#,
+        "turtle",
+    )
+    .unwrap();
+    let q = format!(
+        "{PREFIXES} SELECT ?s WHERE {{ \
+           ?s ex:loc ?wkt . \
+           FILTER(geof:distance(?wkt, \"POINT(0 0)\"^^geo:wktLiteral, uom:kilometre) < 50) \
+         }} ORDER BY ?s"
+    );
+    // The index is EMPTY (no geo:asWKT triples), so every binding is not-indexed and kept.
+    let (rows, _posthoc, _pushed) = compare(&g, &q);
+    assert_eq!(rows, vec![vec!["<http://ex/a>".to_string()], vec!["<http://ex/b>".to_string()]]);
+}
+
+#[test]
+fn mixed_indexed_and_unindexed_bindings_correct() {
+    // A geometry variable that UNIONs an indexed (geo:asWKT) literal with a non-indexed
+    // (ex:loc) one: the pushdown may restrict the indexed binding but must keep the
+    // non-indexed one for the exact FILTER. Result must match post-hoc.
+    let g = Graph::load_str(
+        r#"
+        @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:  <http://ex/> .
+        ex:idx geo:hasGeometry ex:g . ex:g geo:asWKT "POINT(0 0)"^^geo:wktLiteral .
+        ex:far geo:hasGeometry ex:gf . ex:gf geo:asWKT "POINT(40 40)"^^geo:wktLiteral .
+        ex:other ex:loc "POINT(0.1 0.1)"^^geo:wktLiteral .
+        "#,
+        "turtle",
+    )
+    .unwrap();
+    let q = format!(
+        "{PREFIXES} SELECT ?wkt WHERE {{ \
+           {{ ?s geo:asWKT ?wkt }} UNION {{ ?s ex:loc ?wkt }} \
+           FILTER(geof:distance(?wkt, \"POINT(0 0)\"^^geo:wktLiteral, uom:kilometre) < 50) \
+         }} ORDER BY ?wkt"
+    );
+    let (rows, _posthoc, _pushed) = compare(&g, &q);
+    // POINT(0 0) (indexed, in window) and POINT(0.1 0.1) (not indexed, kept then matches);
+    // POINT(40 40) is excluded by the exact filter. Both within-50km points present.
+    assert_eq!(rows.len(), 2, "both near points kept; got {rows:?}");
+}
+
+#[test]
 fn no_index_installed_is_unchanged() {
     // The seam is inert without a provider: a pushable FILTER just runs post-hoc.
     let g = grid(5);

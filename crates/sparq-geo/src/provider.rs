@@ -38,6 +38,7 @@ use crate::geof::Unit;
 use crate::GeoIndex;
 use geo_types::{Geometry, Point};
 use oxrdf::Term;
+use rustc_hash::FxHashSet;
 use sparq_engine::{SpatialProvider, SpatialQuery};
 
 /// A [`GeoIndex`] wrapped as a [`SpatialProvider`] for the engine's spatial
@@ -46,11 +47,18 @@ use sparq_engine::{SpatialProvider, SpatialQuery};
 /// afresh. [OPUS-4.8]
 pub struct GeoIndexProvider {
     index: GeoIndex,
+    /// The set of geometry LITERALS the index holds — the universe it is
+    /// authoritative over. The engine consults this (via
+    /// [`SpatialProvider::is_indexed`]) so a binding the index never saw (bound
+    /// via a non-`geo:asWKT` predicate, a non-geographic CRS, …) is left for the
+    /// exact `geof:` FILTER instead of being silently dropped. Built once.
+    indexed: FxHashSet<Term>,
 }
 
 impl GeoIndexProvider {
     pub fn new(index: GeoIndex) -> Self {
-        Self { index }
+        let indexed = index.entries().map(|e| e.literal.clone()).collect();
+        Self { index, indexed }
     }
 
     /// Borrow the wrapped index (e.g. for the non-pushdown query methods).
@@ -90,8 +98,20 @@ impl SpatialProvider for GeoIndexProvider {
             }
             SpatialQuery::BboxIntersects { arg_wkt } => {
                 let g = crate::parse_wkt_literal(arg_wkt).ok()?;
+                // A non-geographic CONSTANT shares no metric with the index's geographic
+                // entries: DECLINE (None) so the post-hoc path runs, rather than return an
+                // empty candidate set that would wrongly drop same-CRS matches the exact
+                // `geof:` check would keep. (is_indexed already protects non-geographic
+                // VARIABLE bindings; this guards the constant side.)
+                if !g.crs.is_geographic() {
+                    return None;
+                }
                 Some(self.index.bbox_candidate_literals(&g))
             }
         }
+    }
+
+    fn is_indexed(&self, term: &Term) -> bool {
+        self.indexed.contains(term)
     }
 }
