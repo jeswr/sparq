@@ -3096,6 +3096,7 @@ dependencies = [
 name = "sparq-hdt"
 version = "0.1.0"
 dependencies = [
+ "crc",
  "flate2",
  "hdt",
  "sparq-core",

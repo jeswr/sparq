@@ -35,6 +35,10 @@ hdt = { version = "0.4", default-features = false }
 # The default backend (miniz_oxide) is pure Rust; flate2 is already used
 # elsewhere in the workspace (sparq-cli, and previously this crate's dev-deps).
 flate2 = "1"
+# [OPUS-4.8] CRC8/CRC32-C verification in the direct decoder (decode.rs). Same
+# crate (and the same CRC params) the wrapped `hdt` reader uses for the bitmap /
+# sequence sections, so the direct path validates byte-for-byte identically.
+crc = "3"
 
 [dev-dependencies]
 # The `sophia` feature provides hdt's (experimental) N-Triples -> HDT writer
