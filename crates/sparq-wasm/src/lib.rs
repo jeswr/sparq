@@ -247,6 +247,34 @@ impl Store {
         sparq_engine::count(&self.graph, sparql).map_err(|e| JsError::new(&e))
     }
 
+    /// Answers an **ASK** query as a plain `boolean`, evaluated through the engine's
+    /// NATIVE ask path ([`sparq_engine::ask`]): the pattern is evaluated under an
+    /// implicit `LIMIT 1`, so the scan/join **early-exits at the first solution** and
+    /// nothing is materialised — no SELECT result is built, no SPARQL-JSON string is
+    /// serialised, and no boolean is parsed back out on the JS side. This is the
+    /// right entry point for an existence check on a memory-constrained device: prefer
+    /// it over routing an ASK through [`query`](Self::query) (which would build and
+    /// serialise the boolean results document) or, worse, rewriting it to a counted
+    /// `SELECT *`. A non-ASK query (SELECT / CONSTRUCT / DESCRIBE / UPDATE) is rejected
+    /// with a clear error — use [`query`](Self::query) / [`queryQuads`](Self::query_quads).
+    pub fn ask(&self, sparql: &str) -> Result<bool, JsError> {
+        sparq_engine::ask(&self.graph, sparql).map_err(|e| JsError::new(&e))
+    }
+
+    /// Like [`ask`](Self::ask) but under a cooperative working-set budget: any
+    /// intermediate or final materialised result exceeding `maxRows` rows aborts the
+    /// query with a `"query budget exceeded (max-rows)"` error rather than running to
+    /// completion. Use it to bound the worst-case memory an adversarial / accidentally
+    /// huge ASK pattern can take in the browser tab. The early-exit still applies, so a
+    /// pattern that finds a solution quickly never approaches the cap. (The engine's
+    /// other budget dimension, a wall-clock deadline, is native-only — `std::time::Instant`
+    /// is unusable on `wasm32` — so only the portable row cap is exposed here.)
+    #[wasm_bindgen(js_name = askWithMaxRows)]
+    pub fn ask_with_max_rows(&self, sparql: &str, max_rows: usize) -> Result<bool, JsError> {
+        let budget = sparq_engine::QueryBudget { max_rows: Some(max_rows), ..Default::default() };
+        sparq_engine::ask_with_budget(&self.graph, sparql, &budget).map_err(|e| JsError::new(&e))
+    }
+
     /// Applies a SPARQL 1.1 Update (`INSERT DATA`, `DELETE DATA`, `CLEAR`,
     /// `DELETE/INSERT … WHERE` on the default graph) and returns the **new** store —
     /// the receiver is immutable and remains valid. Mirrors `sparq_engine::update`'s
@@ -439,6 +467,55 @@ mod tests {
     fn query_quads_rejects_select() {
         let g = Graph::load_str(DATA, "turtle").unwrap();
         assert!(sparq_engine::construct_ntriples(&g, "SELECT ?s WHERE { ?s ?p ?o }").is_err());
+    }
+
+    // ---- sq-16a: native ASK early-exit through the wasm layer ----
+    //
+    // `Store::ask` / `Store::askWithMaxRows` are thin `JsError`-mapping wrappers over
+    // `sparq_engine::ask` / `ask_with_budget`. The mapping closure cannot run on a native
+    // target (`JsError::new` is a wasm-bindgen import that panics off-wasm), so — exactly as
+    // `query_quads_rejects_select` does — these tests assert against the engine functions the
+    // exports delegate to: the dispatch (which engine fn, which budget) is what this task wires
+    // up, and the engine's own tests already cover `eval_ask`'s LIMIT-1 early-exit semantics.
+
+    /// The ASK dispatch returns the engine's native boolean — true when the pattern has a
+    /// solution, false when it does not — without going through the SELECT/JSON path.
+    #[test]
+    fn ask_dispatches_to_native_bool() {
+        let g = Graph::load_str(DATA, "turtle").unwrap();
+        assert!(sparq_engine::ask(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o }").unwrap());
+        assert!(!sparq_engine::ask(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:nope ?o }").unwrap());
+        // FILTER is evaluated (not just an existence count): true above the threshold, false below.
+        assert!(sparq_engine::ask(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 28) }").unwrap());
+        assert!(!sparq_engine::ask(&g, "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a FILTER(?a > 99) }").unwrap());
+    }
+
+    /// A non-ASK query routed to the ask path is rejected with a clear error (the message the
+    /// `JsError` carries), so `Store::ask` can never silently answer a SELECT/CONSTRUCT.
+    #[test]
+    fn ask_rejects_non_ask() {
+        let g = Graph::load_str(DATA, "turtle").unwrap();
+        let err = sparq_engine::ask(&g, "SELECT ?s WHERE { ?s ?p ?o }").unwrap_err();
+        assert!(err.contains("ASK"), "rejection must mention ASK, got: {err}");
+        assert!(sparq_engine::ask(&g, "PREFIX ex: <http://ex/> CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }").is_err());
+    }
+
+    /// The budgeted dispatch builds a `max_rows` working-set cap on the portable (wasm-safe)
+    /// `QueryBudget` field: a generous cap still answers, a zero cap trips the budget. This is
+    /// exactly what `Store::askWithMaxRows` passes to `ask_with_budget`.
+    #[test]
+    fn ask_with_max_rows_budget() {
+        let g = Graph::load_str(DATA, "turtle").unwrap();
+        // A two-pattern join materialises an intermediate working set, so the row cap is the
+        // thing being enforced (a single-pattern / filter-pushdown ASK answers from the scan
+        // without ever building a counted result, so it never approaches the cap — exactly the
+        // early-exit win). A generous cap answers; a zero cap trips with a budget error.
+        let q = "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o . ?s ex:age ?a FILTER(?a > 28) }";
+        let generous = sparq_engine::QueryBudget { max_rows: Some(1024), ..Default::default() };
+        assert!(sparq_engine::ask_with_budget(&g, q, &generous).unwrap());
+        let starved = sparq_engine::QueryBudget { max_rows: Some(0), ..Default::default() };
+        let err = sparq_engine::ask_with_budget(&g, q, &starved).unwrap_err();
+        assert!(err.contains("budget"), "starved budget must report a budget error, got: {err}");
     }
 
     #[test]
