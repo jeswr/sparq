@@ -44,26 +44,21 @@ use spargebra::{Query, SparqlParser};
 pub(crate) struct PreparedSparql {
     /// The parsed `sh:select` algebra (prefixes already resolved at parse time).
     query: Query,
-    /// All projected variable names, for `{?var}` message substitution and for
-    /// validating up front that the query has an explicit projection.
-    vars: Vec<String>,
 }
 
 impl PreparedSparql {
     /// Parses `constraint.select` (with its prefixes prepended) into algebra,
     /// returning `None` for a non-SELECT or unparsable query (ill-formed → skip).
+    /// `SELECT *` is accepted (every in-scope variable, including `$this`, is a
+    /// result variable); only a non-SELECT query form is rejected.
     pub(crate) fn build(constraint: &SparqlConstraint) -> Option<PreparedSparql> {
         let text = format!("{}\n{}", constraint.prefixes, constraint.select);
         let query = SparqlParser::new().parse_query(&text).ok()?;
-        // Only SELECT is meaningful for sh:sparql; the projection drives the result count.
-        let Query::Select { pattern, .. } = &query else {
+        // Only SELECT is meaningful for sh:sparql; the solutions drive the result count.
+        if !matches!(query, Query::Select { .. }) {
             return None;
-        };
-        let vars: Vec<String> = projected_vars(pattern)?
-            .iter()
-            .map(|v| v.as_str().to_string())
-            .collect();
-        Some(PreparedSparql { query, vars })
+        }
+        Some(PreparedSparql { query })
     }
 
     /// Runs the constraint for one `focus` node against `data`, pushing one
@@ -89,6 +84,10 @@ impl PreparedSparql {
         // projection if it was absent), so look variables up by name to be safe.
         let pos = |name: &str| result.vars.iter().position(|v| v.as_str() == name);
         let (vpos, ppos, mpos) = (pos("value"), pos("path"), pos("message"));
+        // Message {?var} substitution indexes the EXECUTED result's variables (the
+        // injected query appends ?this to the projection, so positions can differ
+        // from the source query's projected `self.vars`).
+        let result_vars: Vec<String> = result.vars.iter().map(|v| v.as_str().to_string()).collect();
 
         for row in &result.rows {
             // sh:value (SHACL §5.2.2): the solution's ?value binding when the query
@@ -115,7 +114,7 @@ impl PreparedSparql {
                 .and_then(|c| c.clone())
                 .map(term_lexical);
             let default_message = match (&constraint.message, &row_message) {
-                (Some(tpl), _) => substitute(tpl, &self.vars, row),
+                (Some(tpl), _) => substitute(tpl, &result_vars, row),
                 (None, Some(m)) => m.clone(),
                 (None, None) => "Violates SPARQL-based constraint".to_string(),
             };
@@ -134,21 +133,6 @@ pub(crate) struct ResultFields {
     pub value: Option<Term>,
     pub path: Option<crate::path::Path>,
     pub default_message: String,
-}
-
-/// The projected variables of a SELECT pattern: the `Project` node reached by
-/// descending through the solution-modifier wrappers (`Distinct` / `Reduced` /
-/// `Slice` / `OrderBy`) that a `SELECT DISTINCT … ORDER BY … LIMIT …` builds
-/// above the projection. `None` when there is no explicit `Project` (`SELECT *`).
-fn projected_vars(pattern: &GraphPattern) -> Option<&Vec<Variable>> {
-    match pattern {
-        GraphPattern::Project { variables, .. } => Some(variables),
-        GraphPattern::Distinct { inner }
-        | GraphPattern::Reduced { inner }
-        | GraphPattern::Slice { inner, .. }
-        | GraphPattern::OrderBy { inner, .. } => projected_vars(inner),
-        _ => None,
-    }
 }
 
 /// Pre-binds `$this` to `focus` by injecting a single-row `VALUES (?this) { (focus) }`

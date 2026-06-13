@@ -341,6 +341,30 @@ fn sparql_pre_binding_below_solution_modifiers() {
     assert!(v.contains("-2"), "value {v}");
 }
 
+/// `SELECT *` is accepted: $this is pre-bound and surfaces among the result
+/// variables; ?value (in scope) maps to sh:value.
+#[test]
+fn sparql_select_star() {
+    let shapes = format!(
+        r#"{PREFIXES}
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:bob ;
+          sh:sparql [
+            sh:select "SELECT * WHERE {{ $this <http://example.org/age> ?value . FILTER(?value < 0) }}" ;
+          ] .
+    "#
+    );
+    let data = r#"
+        @prefix ex: <http://example.org/> .
+        ex:bob ex:age -3 .
+    "#;
+    let r = run(data, &shapes);
+    assert_eq!(r.results.len(), 1, "{}", r.to_text());
+    assert!(r.results[0].focus_node.to_string().contains("bob"));
+    let v = r.results[0].value.as_ref().unwrap().to_string();
+    assert!(v.contains("-3"), "value {v}");
+}
+
 /// The report Turtle for a SPARQL-based result must itself be valid Turtle and
 /// carry the SPARQLConstraintComponent.
 #[test]
