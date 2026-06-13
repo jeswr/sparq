@@ -19,18 +19,57 @@ textual prepend); each solution is one validation result. Covered:
 Pinned by `tests/sparql_constraints.rs` (10 cases) and the W3C `sparql/node` +
 `sparql/property` sub-suites via `tests/w3c_sparql.rs` (5/5).
 
-### SHACL-SPARQL — still deferred (honest scope)
-- **SPARQL-based constraint COMPONENTS** (`sh:ConstraintComponent` declarations
-  with `sh:parameter` + `sh:validator`/`sh:nodeValidator`/`sh:propertyValidator`,
-  `sh:SPARQLAskValidator`/`sh:SPARQLSelectValidator`): NOT implemented. This is
-  the larger §6 machinery — a component registry keyed on the parameter
-  predicates a shape uses, multi-parameter pre-binding (`$paramName`), the
-  ASK-validator-per-value-node firing rule, and `?value`/`$value` binding for
-  ASK validators. The suite's `sparql/component/*` entries also `owl:imports` the
-  external `http://datashapes.org/dash` vocabulary, which the offline test
-  harness cannot resolve. A follow-up would add a `Component::CustomSparql`
-  carrying the resolved validator + bound parameters and a component-discovery
-  pass over the shapes graph.
+## SPARQL-based constraint COMPONENTS (`sh:ConstraintComponent`, §6) — DONE (sq-sm2) [OPUS-4.8]
+The §6 machinery is implemented (`discover_components` + `ComponentDef` in
+`model.rs`, the `Component::CustomSparql` arm in `eval.rs`, the validator
+pre-binding + ASK/SELECT runners in `sparql.rs`). Covered:
+  - **Discovery**: every SHACL instance of `sh:ConstraintComponent` (following
+    the `rdfs:subClassOf` closure — the W3C suite types components via a
+    subclass) is compiled into a registry of `(parameters, validators)`.
+  - **Parameters** (`sh:parameter` → `sh:path` predicate, `sh:optional`,
+    `sh:name`): the pre-bound variable name is the parameter's `sh:name` else
+    the predicate's local name.
+  - **Activation**: a component activates on a shape that carries triples for
+    all its MANDATORY parameter predicates; the bound parameter values are
+    captured as `Component::CustomSparql { component, args }`.
+  - **Validators**: `sh:nodeValidator` preferred for node shapes,
+    `sh:propertyValidator` for property shapes, falling back to the generic
+    `sh:validator` (§6.2.2). Each carries `sh:ask` (ASK validator) or
+    `sh:select` (SELECT validator) — the form is detected by which property is
+    present, robust to the validator's rdf:type.
+  - **ASK validators** run per VALUE NODE with `$this`, `$value` and each
+    `$paramName` pre-bound; `ASK = false` → one violation on that value
+    (`sh:value` = the value node). FILTER-only ASK patterns work via a
+    pre-binding **push-down** (VALUES joined BELOW the FILTER so the pre-bound
+    terms are in scope inside it — joining above leaves them unbound).
+  - **SELECT validators** run per FOCUS NODE; each solution → one violation,
+    reusing the §5.2 solution→result mapping (`?value`/`?path`/`?message`).
+  - **Messages**: the validator's `sh:message` with `{?var}`/`{$param}`
+    substitution (the SELECT path from the solution row; the ASK path from the
+    pre-bound terms). `sh:sourceConstraintComponent` is the component's IRI.
+Pinned by `tests/sparql_components.rs` (7 cases: ASK violate+conform, non-
+activation, multi-parameter, SELECT validator, `sh:optional`, node-validator
+preference, report-Turtle). Multi-parameter pre-binding is exercised by the
+two-parameter "concat" component (the W3C `validator-001` pattern).
+
+### §6 — still scoped out (honest)
+- **The W3C `sparql/component/*` suite is NOT run**: every entry
+  `owl:imports <http://datashapes.org/dash>` (the external DASH vocabulary that
+  supplies the `dash:*` constraint components the data uses), which the offline
+  test harness cannot resolve — so there is no local copy of the imported graph
+  and the shapes graph is incomplete. The machinery is instead pinned by local
+  fixtures modelled on those entries (`tests/shacl/.../sparql/component/
+  validator-001.ttl` was the template). A follow-up could vendor a pinned copy
+  of the dash graph and resolve `owl:imports` to run the suite directly.
+- **`$PATH` pre-binding for `sh:propertyValidator` is NOT done**: `$PATH` is a
+  SPARQL property PATH (not a term), so it cannot be supplied via the VALUES
+  table the `$this`/`$value`/`$paramName` bindings use, and the component's
+  validator query is pre-parsed and shared across shapes (so the textual `$PATH`
+  substitution the §5.2 `sh:sparql` path does cannot be applied per shape here).
+  ASK property-validators still get `$value` (the value node) + the parameters,
+  which covers the common pattern; a `$PATH`-using property validator would need
+  per-shape re-parsing of the validator query with the path substituted in.
+- **Recursive/derived parameters and `sh:labelTemplate`** are not handled.
 - **Full pre-binding semantics** (`sparql/pre-binding/*`): only `$this`/`$PATH`
   pre-binding is done. The suite's pre-binding section additionally requires
   *rejecting* queries that would re-bind a pre-bound variable (e.g. a `BIND` or

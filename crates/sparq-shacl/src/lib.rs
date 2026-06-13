@@ -3,10 +3,11 @@
 //!
 //! Parse a shapes graph into a shapes model, evaluate every SHACL Core
 //! constraint component against a data graph by direct index-backed scans,
-//! evaluate `sh:sparql` constraints (SHACL §5.2) by routing their `sh:select`
-//! through `sparq-engine` (with `$this`/`$PATH` pre-binding), and produce a
-//! [`ValidationReport`] (with Turtle and plain-text renderings of the SHACL
-//! report vocabulary).
+//! evaluate `sh:sparql` constraints (SHACL §5.2) and SPARQL-based constraint
+//! COMPONENTS (`sh:ConstraintComponent`, SHACL §6) by routing their
+//! `sh:select`/`sh:ask` through `sparq-engine` (with `$this`/`$value`/`$PATH`
+//! and `$paramName` pre-binding), and produce a [`ValidationReport`] (with
+//! Turtle and plain-text renderings of the SHACL report vocabulary).
 //!
 //! This crate follows the `sparq-reason` isolation pattern: it is NOT a
 //! dependency of any other sparq crate — the core engine and the wasm bundle
