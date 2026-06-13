@@ -61,29 +61,56 @@ Note: `dist.yml` *also* fires on `v*` tags (bare per-tier binaries as workflow a
 `dist.yml` has no `workflow_call` trigger and is owned by another work-thread; see the
 header comment in `release.yml`. Once both are merged, drop the `tags:` trigger from
 `dist.yml` (keep `workflow_dispatch`) to stop double-building, and keep the two matrices
-in sync until they're unified. One known dist.yml fix to fold in: its `macos-13` runner
-label is retired (GitHub removed it); `release.yml` already uses `macos-15-intel` for the
-x64-darwin tier.
+in sync until they're unified. (The retired `macos-13` runner label has been replaced with
+`macos-15-intel` in both workflows' x64-darwin tier.)
 
 ## 4. crates.io publication
 
-**Publish order** follows the dependency DAG (a crate's deps must exist on crates.io before
-it can be verified):
+**16 crates publish.** The publish order follows the dependency DAG, leaf-first (a crate's
+deps must exist on crates.io before it can be verified):
 
 ```
 sparq-core                      # no internal deps — first
-  ├── sparq-engine              # depends on core         ┐ order between these
-  └── sparq-reason              # depends on core         ┘ two doesn't matter
-        ├── sparq-cli           # depends on core + engine + reason — after all three
-        └── sparq-server        # depends on core + engine — after engine
+  ├── sparq-introspect          # core only                ┐
+  ├── sparq-reason              # core only                │ order among these
+  ├── sparq-hdt                 # core only                │ six doesn't matter
+  ├── sparq-shacl               # core only                │
+  ├── sparq-sim                 # core only                │
+  └── sparq-vectors             # core only                ┘
+sparq-engine                    # core + introspect — after both
+  ├── sparq-geo                 # core + engine            ┐
+  ├── sparq-serve               # core + engine            │ order among these
+  ├── sparq-text                # core + engine            │ six doesn't matter
+  ├── sparq-rsp                 # core + engine            │
+  ├── sparq-solid               # core + engine + reason   │
+  └── sparq-nlq                 # core + engine + introspect ┘
+sparq-cli                       # core + engine + reason + hdt
+sparq-server                    # core + engine + geo + serve — last
 ```
 
 Exact commands, from the repo root, on the tagged commit:
 
 ```sh
 cargo publish -p sparq-core
-cargo publish -p sparq-engine
+cargo publish -p sparq-introspect
 cargo publish -p sparq-reason
+cargo publish -p sparq-hdt
+cargo publish -p sparq-shacl
+cargo publish -p sparq-sim
+cargo publish -p sparq-vectors
+
+# CHECKPOINT before sparq-engine: the crates.io package resolves UPSTREAM spargebra 0.4.6,
+# not the vendored copy (the [patch]/path override is stripped on publish). Dry-run it
+# against upstream first — it must package + compile cleanly:
+#   cargo publish --dry-run -p sparq-engine
+cargo publish -p sparq-engine
+
+cargo publish -p sparq-geo
+cargo publish -p sparq-serve
+cargo publish -p sparq-text
+cargo publish -p sparq-rsp
+cargo publish -p sparq-solid
+cargo publish -p sparq-nlq
 cargo publish -p sparq-cli
 cargo publish -p sparq-server
 ```
@@ -93,8 +120,9 @@ cargo publish -p sparq-server
   and retry.
 - Dry-run any crate first with `cargo publish --dry-run -p <crate>`
   (`--dry-run -p sparq-core` was verified for 0.1.0: packages + compiles cleanly).
-- **Not published**: `sparq-bench` (internal benchmark harness) and `sparq-wasm` (ships via
-  npm later) are `publish = false` in their manifests — `cargo publish` refuses them.
+- **Not published** (`publish = false` in their manifests — `cargo publish` refuses them):
+  `sparq-bench`, `sparq-conformance`, `sparq-gpu`, `sparq-parse`, `sparq-py` (ships as
+  PyPI wheels later, see below), and `sparq-wasm` (ships via npm).
 - Publishing is **permanent** (versions can only be yanked, not deleted/reused).
 
 ## 5. Docker (manual / local)
