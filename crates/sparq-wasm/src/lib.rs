@@ -96,6 +96,28 @@ impl SolutionCursor {
     }
 }
 
+/// A forward-only cursor over the N-Triples lines of a CONSTRUCT/DESCRIBE result graph
+/// (see [`Store::query_quads_chunks`]): each [`next`](Self::next) yields the next batch of
+/// up to `batch_size` triples as an N-Triples fragment (which is also valid Turtle —
+/// N-Triples ⊂ Turtle). Concatenating every batch reproduces [`Store::query_quads`]'s full
+/// document. The graph is materialised once inside wasm, but each batch string is built on
+/// demand and not retained, so the JS-side copy is bounded to one batch at a time.
+#[wasm_bindgen]
+pub struct QuadChunks {
+    chunks: std::vec::IntoIter<String>,
+}
+
+#[wasm_bindgen]
+impl QuadChunks {
+    /// The next N-Triples fragment, or `undefined` when the graph is exhausted.
+    // clippy: a #[wasm_bindgen]-exported inherent method (JS calls `.next()`); it cannot
+    // be `Iterator::next`, and renaming would break the JS binding contract.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<String> {
+        self.chunks.next()
+    }
+}
+
 #[wasm_bindgen]
 impl Store {
     /// Parses an RDF document into a store. `format`: `"turtle"` | `"ntriples"` |
@@ -184,6 +206,37 @@ impl Store {
     pub fn query_cursor(&self, sparql: &str, batch_size: usize) -> Result<SolutionCursor, JsError> {
         let result = sparq_engine::query(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
         Ok(SolutionCursor { result, pos: 0, batch_size: batch_size.max(1) })
+    }
+
+    /// Runs a **CONSTRUCT or DESCRIBE** query and returns the resulting RDF graph
+    /// serialised as **N-Triples** (one `s p o .` line per triple). N-Triples is a
+    /// syntactic subset of Turtle, so the returned string is also a valid `text/turtle`
+    /// document. This is the quad-returning entry point: where [`query`](Self::query)
+    /// answers SELECT/ASK with a solution table, `queryQuads` answers the graph-valued
+    /// query forms with their constructed graph. CONSTRUCT instantiates its template once
+    /// per WHERE solution (template blank nodes are freshened per solution, and triples
+    /// with unbound or RDF-illegal terms are dropped per SPARQL §16.2); DESCRIBE returns
+    /// the concise bounded description of each described resource. A SELECT/ASK query is
+    /// rejected here — use [`query`](Self::query) / [`queryChunks`](Self::query_chunks).
+    #[wasm_bindgen(js_name = queryQuads)]
+    pub fn query_quads(&self, sparql: &str) -> Result<String, JsError> {
+        sparq_engine::construct_ntriples(&self.graph, sparql).map_err(|e| JsError::new(&e))
+    }
+
+    /// Like [`queryQuads`](Self::query_quads) but returns a [`QuadChunks`] cursor that
+    /// yields the constructed graph in batches of at most `batchSize` triples (each an
+    /// N-Triples fragment), so a large constructed/described graph crosses the wasm
+    /// boundary piecewise and the caller holds at most one batch at a time. Concatenating
+    /// every batch reproduces `queryQuads`'s document exactly. `batchSize` is clamped to at
+    /// least 1. Caveat: as with [`queryQuads`](Self::query_quads) the full graph is
+    /// materialised inside wasm before the first batch; the bound is on the JS-side copy.
+    #[wasm_bindgen(js_name = queryQuadsChunks)]
+    pub fn query_quads_chunks(&self, sparql: &str, batch_size: usize) -> Result<QuadChunks, JsError> {
+        let triples = sparq_engine::construct_or_describe(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
+        let batch = batch_size.max(1);
+        let chunks: Vec<String> =
+            triples.chunks(batch).map(sparq_engine::triples_to_ntriples).collect();
+        Ok(QuadChunks { chunks: chunks.into_iter() })
     }
 
     /// Counts the solutions of a SELECT query *without* materialising them — for a
@@ -327,6 +380,65 @@ mod tests {
         let only = cur.next().expect("one empty batch even with zero rows");
         assert!(only.contains("\"bindings\":[]"), "empty result batch must have empty bindings: {only}");
         assert!(cur.next().is_none(), "exhausted after the single empty batch");
+    }
+
+    // ---- sq-hlq: CONSTRUCT / DESCRIBE -> quads ----
+
+    /// CONSTRUCT through `queryQuads` returns the constructed graph as N-Triples
+    /// (a valid Turtle subset): absolute IRIs, `.`-terminated lines.
+    #[test]
+    fn construct_to_quads_ntriples() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let nt = store
+            .query_quads(
+                "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }",
+            )
+            .unwrap();
+        // Two name triples -> two constructed triples, each a full N-Triples line.
+        assert_eq!(nt.lines().filter(|l| !l.trim().is_empty()).count(), 2, "got: {nt}");
+        assert!(nt.contains("<http://ex/label>"), "predicate IRI expanded: {nt}");
+        assert!(nt.contains("<http://ex/alice> <http://ex/label> \"Alice\" ."), "got: {nt}");
+        // Language tag preserved on the constructed literal.
+        assert!(nt.contains("\"Bob\"@en"), "lang tag preserved: {nt}");
+    }
+
+    /// DESCRIBE also flows through `queryQuads` (concise bounded description).
+    #[test]
+    fn describe_to_quads() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let nt = store.query_quads("DESCRIBE <http://ex/bob>").unwrap();
+        // CBD of ex:bob = its outgoing triples (name + age), nothing inbound.
+        assert!(nt.contains("<http://ex/bob> <http://ex/name> \"Bob\"@en ."), "got: {nt}");
+        assert!(nt.contains("<http://ex/bob> <http://ex/age>"), "got: {nt}");
+        assert!(!nt.contains("<http://ex/alice>"), "CBD must not pull in inbound subjects: {nt}");
+    }
+
+    /// `queryQuadsChunks` batches the constructed graph; concatenation == `queryQuads`.
+    #[test]
+    fn construct_quads_chunks_reassemble() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let q = "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }";
+        let whole = store.query_quads(q).unwrap();
+
+        let mut chunks = store.query_quads_chunks(q, 1).unwrap();
+        let mut reassembled = String::new();
+        let mut n_batches = 0;
+        while let Some(c) = chunks.next() {
+            n_batches += 1;
+            reassembled.push_str(&c);
+        }
+        assert_eq!(n_batches, 2, "batch_size 1 over 2 triples => 2 batches");
+        assert_eq!(reassembled, whole, "chunked N-Triples must reassemble to the whole document");
+    }
+
+    /// A SELECT routed to the quad path is rejected (it is not a graph-valued query).
+    /// Asserted against the engine function `queryQuads` delegates to, because the
+    /// `JsError`-returning wasm wrapper cannot construct its error on a native target
+    /// (`JsError::new` is a wasm-bindgen import that panics off-wasm).
+    #[test]
+    fn query_quads_rejects_select() {
+        let g = Graph::load_str(DATA, "turtle").unwrap();
+        assert!(sparq_engine::construct_ntriples(&g, "SELECT ?s WHERE { ?s ?p ?o }").is_err());
     }
 
     #[test]

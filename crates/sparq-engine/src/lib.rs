@@ -29,9 +29,10 @@ mod update;
 #[cfg(feature = "zk")]
 pub mod zk;
 pub use construct::{
-    construct, construct_ntriples, construct_ntriples_with_budget, construct_prepared,
-    construct_prepared_with_budget, construct_with_budget, describe, describe_prepared,
-    describe_prepared_with_budget, describe_with_budget, triples_to_ntriples,
+    construct, construct_ntriples, construct_ntriples_with_budget, construct_or_describe,
+    construct_or_describe_with_budget, construct_prepared, construct_prepared_with_budget,
+    construct_with_budget, describe, describe_prepared, describe_prepared_with_budget,
+    describe_with_budget, triples_to_ntriples,
 };
 #[cfg(feature = "cs-planner")]
 pub use cs::{with_cs_table, CsSet, CsTable};
