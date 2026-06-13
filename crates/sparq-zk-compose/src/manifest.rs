@@ -292,6 +292,15 @@ pub enum CircuitId {
     /// `filter_f64` — xsd:double FILTER (v1 building block, not yet
     /// manifest-composable).
     FilterF64,
+    /// `revoke_unset_d{depth}` — hidden-index status-list inclusion + bit-unset
+    /// proof over a depth-`depth` Poseidon2 Merkle tree (sq-3e5 / sq-h2v). The
+    /// proof's PUBLIC inputs are `challenge` + the status-list Merkle `root`; the
+    /// holder's index, the leaf bit, and the authentication path are PRIVATE, so
+    /// the proof proves "the bit at my hidden index is unset" without disclosing
+    /// the index (the clear-index linkability channel the verifier-side
+    /// [`RevocationStatus`] check leaked). Supports lists up to `2^depth` indices.
+    // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation circuit member.
+    RevokeUnset { depth: u32 },
 }
 
 impl CircuitId {
@@ -301,6 +310,7 @@ impl CircuitId {
             CircuitId::Scan { k, n, r } => format!("scan_k{k}_n{n}_r{r}"),
             CircuitId::FilterInt { d } => format!("filter_int_d{d}"),
             CircuitId::FilterF64 => "filter_f64".to_string(),
+            CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
         }
     }
 }
@@ -462,6 +472,50 @@ pub struct ProofManifest {
     /// Binding-consistency edges between sub-proofs.
     #[serde(default)]
     pub binding_edges: Vec<BindingEdge>,
+    /// OPTIONAL hidden-index revocation proof (sq-3e5 / sq-h2v): a zero-knowledge
+    /// proof that the credential's status bit at its (HIDDEN) index in the
+    /// committed status list is UNSET, disclosing neither the index nor the other
+    /// bits. The privacy upgrade over the clear-index [`RevocationStatus`] check.
+    ///
+    /// When present, the verifier checks the proof's PUBLIC Merkle root equals the
+    /// root it derives from its OWN AUTHORITATIVE snapshot (the audit-#12 re-audit
+    /// trust anchor is preserved) and runs `bb verify` — so the holder's list slot
+    /// is never disclosed. The clear `RevocationStatus.index`/snapshot path remains
+    /// the interim check; this field is the additive privacy layer. See
+    /// [`crate::verifier::bind_hidden_revocation`].
+    // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation proof (privacy upgrade).
+    #[serde(default)]
+    pub hidden_revocation: Option<HiddenIndexRevocation>,
+}
+
+/// A hidden-index revocation (bit-unset) proof (sq-3e5 / sq-h2v): the bb proof
+/// produced by the `revoke_unset_d{depth}` circuit, together with the PUBLIC
+/// status-list Merkle `root` it was proved against.
+///
+/// # Trust anchor (preserves audit #12 re-audit)
+/// `root` is a PUBLIC input the prover commits, but it is NOT trusted as a prover
+/// claim: the verifier recomputes the authoritative root from its OWN
+/// [`StatusListSnapshot`] (carried in [`crate::verifier::RevocationPolicy`], the
+/// external relying-party trust anchor) and rejects unless the proof's public
+/// `root` byte-equals it. So the liveness fact is bound to the relying party's own
+/// authenticated status data, exactly as the clear-index path is — the only thing
+/// hidden is WHICH index (the linkability channel), never the trust source.
+///
+/// `depth` selects the circuit member (`revoke_unset_d{depth}`) and MUST equal the
+/// depth the relying party uses to derive its authoritative root, so the trees (and
+/// roots) are over the same leaf layout.
+// [OPUS-4.8] sq-3e5 + sq-h2v.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenIndexRevocation {
+    /// The Merkle-tree depth (`revoke_unset_d{depth}` member; supports `2^depth`
+    /// indices). MUST match the depth the relying party derives its root with.
+    pub depth: u32,
+    /// The status-list Merkle root the proof was produced against (the proof's
+    /// PUBLIC input). Checked byte-equal to the relying party's authoritative root.
+    pub root: FieldHex,
+    /// The bb proof blob (hex), in the same `len|proof|len|pi|vk` layout as a
+    /// [`SubProof::proof_hex`] (see [`crate::verifier::encode_artifacts`]).
+    pub proof_hex: String,
 }
 
 fn default_type() -> String {

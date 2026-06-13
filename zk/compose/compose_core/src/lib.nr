@@ -16,5 +16,6 @@ pub mod hashes;
 pub mod scan;
 pub mod filter_int;
 pub mod filter_float;
+pub mod revoke;
 
 mod tests;

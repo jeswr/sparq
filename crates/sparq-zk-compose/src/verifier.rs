@@ -97,6 +97,8 @@ use crate::driver::{CircuitProver, DriverError};
 use crate::manifest::{
     BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest, StatusListSnapshot,
 };
+// [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation root derivation.
+use crate::revocation::merkle_root;
 use sparq_zk::encode::encode_term;
 use sparq_zk::field::{field_from_hex_str, field_to_be_bytes_32, field_to_hex, Fr};
 // [OPUS-4.8] codex 2221 HIGH: only the SALT-BOUND `commitment_message_with_salt`
@@ -253,6 +255,15 @@ pub struct RevocationPolicy {
     /// band (the external trust anchor for the bitstring, mirroring `K`).
     // [OPUS-4.8] audit #12 re-audit: external authoritative bitstrings.
     authoritative: std::collections::BTreeMap<(String, u64), StatusListSnapshot>,
+    /// OPTIONAL Merkle-tree depth for the HIDDEN-INDEX revocation proof (sq-3e5 /
+    /// sq-h2v). When set, the verifier derives the authoritative status-list
+    /// Merkle root from its own [`StatusListSnapshot`] at this depth and checks a
+    /// `manifest.hidden_revocation` proof's PUBLIC root byte-equals it (so the
+    /// holder's index is never disclosed). `None` => no hidden-index proof is
+    /// accepted (the relying party only runs the clear-index path). MUST equal the
+    /// depth the prover used (the `revoke_unset_d{depth}` member).
+    // [OPUS-4.8] sq-3e5 + sq-h2v: authoritative-root derivation depth.
+    hidden_index_depth: Option<u32>,
 }
 
 impl RevocationPolicy {
@@ -266,6 +277,7 @@ impl RevocationPolicy {
             now,
             freshness_window,
             authoritative: std::collections::BTreeMap::new(),
+            hidden_index_depth: None,
         }
     }
 
@@ -277,7 +289,20 @@ impl RevocationPolicy {
             now: v,
             freshness_window: 0,
             authoritative: std::collections::BTreeMap::new(),
+            hidden_index_depth: None,
         }
+    }
+
+    /// Enable the HIDDEN-INDEX revocation path (sq-3e5 / sq-h2v) at Merkle depth
+    /// `depth` (builder style). The verifier will then derive the authoritative
+    /// status-list Merkle root from its own snapshot at this depth and accept a
+    /// `manifest.hidden_revocation` proof whose PUBLIC root matches — without the
+    /// holder disclosing its index. `depth` MUST equal the `revoke_unset_d{depth}`
+    /// member the prover used. The clear-index path is unaffected.
+    // [OPUS-4.8] sq-3e5 + sq-h2v: opt-in hidden-index verification depth.
+    pub fn with_hidden_index_depth(mut self, depth: u32) -> Self {
+        self.hidden_index_depth = Some(depth);
+        self
     }
 
     /// Attach one AUTHORITATIVE status-list snapshot (builder style). The relying
@@ -310,6 +335,14 @@ impl RevocationPolicy {
     // [OPUS-4.8] audit #12 re-audit: authoritative lookup (never the prover's).
     fn authoritative_snapshot(&self, list: &str, version: u64) -> Option<&StatusListSnapshot> {
         self.authoritative.get(&(list.to_string(), version))
+    }
+
+    /// The hidden-index Merkle depth, if the relying party enabled the
+    /// hidden-index revocation path. `None` => the path is disabled (a
+    /// `manifest.hidden_revocation` is then not accepted as the liveness check).
+    // [OPUS-4.8] sq-3e5 + sq-h2v.
+    fn hidden_index_depth(&self) -> Option<u32> {
+        self.hidden_index_depth
     }
 
     /// The oldest version still considered fresh.
@@ -793,6 +826,43 @@ pub enum CheckError {
     /// credential must not slip through on an old "active" view).
     // [OPUS-4.8] audit #12.
     StatusListStale { status_list: String, version: u64 },
+    /// A `manifest.hidden_revocation` proof was presented but the relying party
+    /// has NOT enabled the hidden-index path (no `hidden_index_depth` in the
+    /// policy) (sq-3e5 / sq-h2v): the verifier cannot derive an authoritative
+    /// Merkle root to bind the proof to, so it rejects fail-closed rather than
+    /// accepting a root it did not itself compute.
+    // [OPUS-4.8] sq-3e5 + sq-h2v.
+    HiddenRevocationNotEnabled,
+    /// The `manifest.hidden_revocation` declared a Merkle depth that does NOT
+    /// match the relying party's policy depth (sq-3e5 / sq-h2v): the trees (and
+    /// roots) would be over different leaf layouts, so the proof cannot be bound
+    /// to the verifier's authoritative root. Rejected.
+    // [OPUS-4.8] sq-3e5 + sq-h2v.
+    HiddenRevocationDepthMismatch { declared: u32, policy: u32 },
+    /// The relying party could not derive an authoritative Merkle root for the
+    /// hidden-index revocation proof (sq-3e5 / sq-h2v): there is no authoritative
+    /// snapshot for the referenced `(list, version)`, or the depth is implausible.
+    /// Fail-closed — the verifier will not vouch for a liveness view it cannot
+    /// itself anchor.
+    // [OPUS-4.8] sq-3e5 + sq-h2v.
+    HiddenRevocationRootUnavailable { status_list: String, version: u64 },
+    /// The `manifest.hidden_revocation` proof's PUBLIC Merkle root does NOT equal
+    /// the root the relying party derived from its OWN authoritative snapshot
+    /// (sq-3e5 / sq-h2v): the proof was produced against a different (e.g.
+    /// prover-forged all-zero) status list. Rejected — the liveness fact is not
+    /// bound to the relying party's authenticated status data.
+    // [OPUS-4.8] sq-3e5 + sq-h2v.
+    HiddenRevocationRootMismatch,
+    /// bb rejected the hidden-index revocation proof (sq-3e5 / sq-h2v): the
+    /// zero-knowledge bit-unset/inclusion statement did not verify against the
+    /// canonical `revoke_unset_d{depth}` vk and the reconstructed public inputs.
+    // [OPUS-4.8] sq-3e5 + sq-h2v.
+    HiddenRevocationProofRejected,
+    /// The `manifest.hidden_revocation` proof blob is malformed (non-hex /
+    /// truncated length prefix) (sq-3e5 / sq-h2v) — rejected before any bb call
+    /// (audit hardening; prover-controlled bytes never panic).
+    // [OPUS-4.8] sq-3e5 + sq-h2v.
+    HiddenRevocationMalformedProof,
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -916,6 +986,30 @@ impl std::fmt::Display for CheckError {
             CheckError::StatusListStale { status_list, version } => write!(
                 f,
                 "status-list snapshot for {status_list} at version {version} is outside the verifier freshness window (audit #12: stale revocation view)"
+            ),
+            CheckError::HiddenRevocationNotEnabled => write!(
+                f,
+                "manifest carries a hidden-index revocation proof but the relying party's policy has not enabled the hidden-index path (no Merkle depth set) (sq-3e5/sq-h2v: the verifier cannot derive an authoritative root to bind the proof to)"
+            ),
+            CheckError::HiddenRevocationDepthMismatch { declared, policy } => write!(
+                f,
+                "hidden-index revocation proof declares Merkle depth {declared} but the relying party's policy depth is {policy} (sq-3e5/sq-h2v: trees over different leaf layouts cannot share a root)"
+            ),
+            CheckError::HiddenRevocationRootUnavailable { status_list, version } => write!(
+                f,
+                "the relying party could not derive an authoritative Merkle root for the hidden-index revocation proof (list {status_list}, version {version}) (sq-3e5/sq-h2v: no authoritative snapshot, or implausible depth -- fail-closed)"
+            ),
+            CheckError::HiddenRevocationRootMismatch => write!(
+                f,
+                "hidden-index revocation proof's public Merkle root does not equal the relying party's authoritative root (sq-3e5/sq-h2v: the proof was produced against a different/forged status list)"
+            ),
+            CheckError::HiddenRevocationProofRejected => write!(
+                f,
+                "bb rejected the hidden-index revocation proof (sq-3e5/sq-h2v: the zero-knowledge bit-unset/inclusion statement did not verify)"
+            ),
+            CheckError::HiddenRevocationMalformedProof => write!(
+                f,
+                "hidden-index revocation proof blob is malformed (sq-3e5/sq-h2v)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -1403,15 +1497,30 @@ fn bind_issuer_attestations(
 /// in question.) A relying party that has resolved NO authoritative snapshot for
 /// the referenced list/version rejects (it cannot authenticate the liveness view).
 ///
-/// # Privacy (interim) — the documented remaining step
-/// `index` is matched against the authoritative bitstring in the clear, so this
-/// reveals WHICH list slot the credential occupies (a linkability handle). The
-/// full-privacy upgrade is an IN-CIRCUIT hidden-index inclusion + bit-unset proof
-/// bound to the (authoritative) list version, revealing only "the hidden index is
-/// in-range and unset at version V". The verifier-side interim closes the
-/// "revoked credential still verifies" hole NOW (the minimum soundness bar — and,
-/// post re-audit, anchors the bit on authenticated bytes) and leaves the
-/// index-hiding as the privacy upgrade.
+/// # Privacy — the hidden-index upgrade (sq-3e5 / sq-h2v) and its residual gap
+/// `index` is matched against the authoritative bitstring in the clear HERE, so
+/// this clear-index path reveals WHICH list slot the credential occupies (a
+/// linkability handle). The IN-CIRCUIT hidden-index inclusion + bit-unset proof is
+/// now IMPLEMENTED ([`bind_hidden_revocation`] + the `revoke_unset_d{depth}`
+/// circuit): it proves "the bit at my HIDDEN index in the tree rooted at the
+/// relying party's authoritative root is unset" in zero knowledge, disclosing
+/// neither the index nor the other bits, and is bound to the verifier's OWN
+/// authoritative Merkle root (so the trust anchor is preserved). When a manifest
+/// carries `hidden_revocation` and the policy enables it, that proof is the
+/// index-hiding liveness evidence.
+///
+/// HONEST RESIDUAL GAP: this clear-index check ALSO runs (it is the always-on
+/// soundness floor), AND `bind_issuer_attestations` still requires the manifest's
+/// clear `RevocationStatus` (issuer-bound via `status_ref_digest(H(list), index,
+/// version)`, which embeds the index in the clear). So at this layer a privacy-
+/// seeking holder still discloses its index through the mandatory issuer-bound
+/// reference, even when it ALSO presents the hidden-index proof. Fully removing
+/// the leak requires the ISSUER-ATTESTATION path to bind a COMMITMENT to the index
+/// (not the clear index) — a signature-scheme change in `sparq_zk::sig` — so the
+/// hidden-index circuit can be the sole liveness evidence with no clear reference.
+/// The circuit + verifier binding (the ZK-hard part) are done; the
+/// attestation-side index-hiding is the documented follow-up. See
+/// [`bind_hidden_revocation`].
 // [OPUS-4.8] audit #12: verifier-side revocation / freshness check.
 // [OPUS-4.8] audit #12 re-audit (Option B): the bit decision reads the
 // AUTHORITATIVE (relying-party-resolved) snapshot, never the prover's bytes.
@@ -1479,6 +1588,146 @@ fn bind_revocation(
             status_list: rev.status_list.clone(),
             version: rev.version,
         });
+    }
+    Ok(())
+}
+
+/// The HIDDEN-INDEX revocation check (sq-3e5 / sq-h2v) — the privacy upgrade
+/// over [`bind_revocation`]'s clear-index path. Runs only the cryptographic gate
+/// for `manifest.hidden_revocation`; the structural pre-conditions (the
+/// issuer-bound reference, freshness) are still enforced by
+/// [`bind_issuer_attestations`] + [`bind_revocation`] in the structural prefilter.
+///
+/// # What it proves and what stays hidden
+/// The prover supplies a `revoke_unset_d{depth}` bb proof whose PUBLIC inputs are
+/// the verifier's `challenge` and a status-list Merkle `root`; the holder's
+/// INDEX, the leaf bit, and the authentication path are PRIVATE. The circuit
+/// proves "the bit at my hidden index in the tree rooted at `root` is UNSET" — so
+/// a relying party learns the credential is live WITHOUT learning which list slot
+/// it occupies (closing the clear-index linkability channel).
+///
+/// # Trust anchor (preserves the audit-#12 re-audit fix — load-bearing)
+/// `root` is a prover-committed public input, NOT trusted as a prover claim. The
+/// verifier derives the AUTHORITATIVE root from its OWN [`StatusListSnapshot`] for
+/// the credential's (issuer-bound, freshness-checked) `(list, version)` — exactly
+/// the snapshot [`bind_revocation`] uses, resolved out of band like the trusted
+/// key-set `K` — at the policy's `hidden_index_depth`, and REQUIRES the proof's
+/// public root to byte-equal it. A prover that proves bit-unset against a FORGED
+/// all-zero tree (its own root) fails this equality: the liveness fact is bound to
+/// the relying party's authenticated status bytes, never the prover's. (A
+/// genuinely REVOKED credential cannot even produce the proof — the in-circuit
+/// `bit == 0` assertion is unsatisfiable for a set bit — and additionally the
+/// authoritative root over the relying party's snapshot, whose bit IS set, would
+/// differ from any all-zero forgery.)
+///
+/// # Fail-closed
+/// - No `manifest.hidden_revocation` => nothing to check here (the clear-index
+///   [`bind_revocation`] remains the liveness gate); returns `Ok`.
+/// - A proof present but the policy has NOT enabled the hidden-index path
+///   (`hidden_index_depth == None`) => REJECT ([`CheckError::HiddenRevocationNotEnabled`]):
+///   the verifier will not accept a root it cannot itself derive.
+/// - A `depth` mismatch, an unresolvable authoritative root, a root mismatch, a
+///   malformed blob, or a bb rejection all REJECT.
+///
+/// PRECONDITION: `bind_revocation` has already validated the issuer-bound
+/// reference + freshness for `manifest.revocation`, so the `(list, version)` used
+/// to resolve the authoritative snapshot here is the issuer's, not a prover claim.
+///
+/// # Scope (honest, see [`crate::revocation`])
+/// The authoritative root is derived with the DENSE [`merkle_root`] builder (it
+/// hashes all `2^depth` leaves), and only the `revoke_unset_d10` member (depth 10,
+/// up to 1024 indices) is compiled. A production status list (2^17+ slots) needs a
+/// sparse / compressed-inclusion commitment — the circuit relation is
+/// depth-generic, but the dense host builder + single member bound the
+/// representative size. This is a representative implementation; the soundness of
+/// the binding (root equality + bb verify + in-circuit bit-unset) holds at any
+/// supported depth.
+// [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation cryptographic gate.
+fn bind_hidden_revocation(
+    manifest: &ProofManifest,
+    policy: &RevocationPolicy,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    challenge: &FieldHex,
+) -> Result<(), CheckError> {
+    let Some(hidden) = &manifest.hidden_revocation else {
+        // No hidden-index proof; the clear-index path (bind_revocation) is the
+        // liveness gate. Nothing to verify here.
+        return Ok(());
+    };
+    // The relying party must have OPTED IN to the hidden-index path; otherwise it
+    // has no authoritative root to bind the proof to and rejects fail-closed.
+    let Some(depth) = policy.hidden_index_depth() else {
+        return Err(CheckError::HiddenRevocationNotEnabled);
+    };
+    if hidden.depth != depth {
+        return Err(CheckError::HiddenRevocationDepthMismatch {
+            declared: hidden.depth,
+            policy: depth,
+        });
+    }
+    // The issuer-bound reference (validated by bind_revocation upstream) names the
+    // (list, version) whose AUTHORITATIVE snapshot we derive the root from. Without
+    // a reference there is no credential whose liveness is in question.
+    let Some(rev) = &manifest.revocation else {
+        return Ok(());
+    };
+    let Some(authoritative) = policy.authoritative_snapshot(&rev.status_list, rev.version) else {
+        return Err(CheckError::HiddenRevocationRootUnavailable {
+            status_list: rev.status_list.clone(),
+            version: rev.version,
+        });
+    };
+    // Derive the AUTHORITATIVE root from the relying party's OWN snapshot (the
+    // trust anchor). This is what the proof's public root must equal.
+    let Some(auth_root) = merkle_root(authoritative, depth) else {
+        return Err(CheckError::HiddenRevocationRootUnavailable {
+            status_list: rev.status_list.clone(),
+            version: rev.version,
+        });
+    };
+    // The proof's declared public root must byte-equal the authoritative root. A
+    // malformed declared root fails closed.
+    let Some(declared_root) = hidden.root.to_field() else {
+        return Err(CheckError::HiddenRevocationRootMismatch);
+    };
+    if declared_root != auth_root {
+        return Err(CheckError::HiddenRevocationRootMismatch);
+    }
+
+    // Cryptographic gate: reconstruct the public inputs (challenge, root) from the
+    // AUTHORITATIVE root (NOT the prover's declared bytes — byte-equal above, but
+    // we feed our own to be end-to-end authentic), recompute the canonical vk, and
+    // bb verify. The prover's bundled vk / public_inputs are never trusted (audit
+    // #2 discipline, mirrored here).
+    let blob = hex_decode(&hidden.proof_hex).ok_or(CheckError::HiddenRevocationMalformedProof)?;
+    let art = decode_artifacts(&blob).ok_or(CheckError::HiddenRevocationMalformedProof)?;
+
+    // Public-input layout for revoke_unset_d{depth} main: challenge, root (two
+    // 32-byte BE field words, declaration order).
+    let mut reconstructed: Vec<u8> = Vec::with_capacity(64);
+    let challenge_fr = challenge
+        .to_field()
+        .ok_or(CheckError::HiddenRevocationMalformedProof)?;
+    reconstructed.extend_from_slice(&field_to_be_bytes_32(&challenge_fr));
+    reconstructed.extend_from_slice(&field_to_be_bytes_32(&auth_root));
+    if reconstructed != art.public_inputs {
+        // The proof's committed public inputs (challenge + root) do not match the
+        // verifier's nonce + authoritative root: a different challenge or a
+        // different root than the authoritative one.
+        return Err(CheckError::HiddenRevocationRootMismatch);
+    }
+
+    let id = CircuitId::RevokeUnset { depth };
+    let sub_work = work_dir.join("hidden_revocation");
+    let canonical_vk = prover
+        .canonical_vk(&id, &sub_work.join("vk"))
+        .map_err(CheckError::Driver)?;
+    let ok = prover
+        .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+        .map_err(CheckError::Driver)?;
+    if !ok {
+        return Err(CheckError::HiddenRevocationProofRejected);
     }
     Ok(())
 }
@@ -1849,6 +2098,17 @@ pub fn verify_manifest(
             return Err(CheckError::ProofRejected { proof: i });
         }
     }
+
+    // --- sq-3e5 / sq-h2v: hidden-index revocation cryptographic gate. ---
+    // If the manifest carries a hidden-index revocation proof, verify it against
+    // the relying party's OWN authoritative Merkle root (derived from its
+    // authoritative snapshot) and the verifier's nonce. The clear-index liveness
+    // gate (bind_revocation, in the prefilter above) is UNCHANGED and still runs;
+    // this is the additive privacy upgrade that lets the holder NOT disclose its
+    // index. The challenge fed here is the verifier's nonce (audit #4), identical
+    // to the sub-proof loop's binding.
+    bind_hidden_revocation(manifest, revocation_policy, prover, work_dir, &challenge)?;
+
     Ok(())
 }
 

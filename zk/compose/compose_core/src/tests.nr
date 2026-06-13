@@ -13,6 +13,7 @@
 use crate::filter_int::{filter_int_check, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_NE};
 use crate::filter_float::filter_f64_check;
 use crate::hashes::{commit_fold, h2, h3, TYPE_CODE_LITERAL};
+use crate::revoke::revoke_unset_check;
 use crate::scan::{scan_check, PatternSpec};
 
 // ---------------------------------------------------------------------------
@@ -337,4 +338,91 @@ fn filter_f64_ieee_edge_cases() {
 #[test(should_fail_with = "float filter verdict mismatch")]
 fn filter_f64_rejects_lying_verdict() {
     filter_f64_check(F64_TWO_POINT_FIVE, F64_ONE_POINT_FIVE, OP_LT, true);
+}
+
+// ---------------------------------------------------------------------------
+// revoke -- hidden-index status-list inclusion + bit-unset (sq-3e5 / sq-h2v).
+// ---------------------------------------------------------------------------
+//
+// A depth-2 tree over 4 leaves built BY HAND with the same `h2` the Rust root
+// builder uses. Leaves are the status bits (0 = active, 1 = revoked):
+//   leaf0=0  leaf1=1  leaf2=0  leaf3=0
+//   n01 = h2(leaf0, leaf1)   n23 = h2(leaf2, leaf3)
+//   root = h2(n01, n23)
+// The proof for an active index reveals neither the index nor the bits; the
+// witness here just exercises the relation in-circuit.
+
+// Authentication path for index 0 (an UNSET leaf): bottom-up siblings are
+// [leaf1, n23]; directions are LSB-first bits of 0 = [0,0] (left, left).
+#[test]
+fn revoke_unset_index0_active_accepts() {
+    let leaf0: Field = 0;
+    let leaf1: Field = 1;
+    let n23 = h2(0, 0); // h2(leaf2=0, leaf3=0)
+    let root = h2(h2(leaf0, leaf1), n23);
+    revoke_unset_check::<2>(root, 0, leaf0, [leaf1, n23]);
+}
+
+// Index 2 (also UNSET): directions = bits of 2 = [0,1]; siblings = [leaf3, n01].
+#[test]
+fn revoke_unset_index2_active_accepts() {
+    let n01 = h2(0, 1); // h2(leaf0=0, leaf1=1)
+    let leaf2: Field = 0;
+    let leaf3: Field = 0;
+    let root = h2(n01, h2(leaf2, leaf3));
+    revoke_unset_check::<2>(root, 2, leaf2, [leaf3, n01]);
+}
+
+// A REVOKED leaf (bit==1, index 1) must be REJECTED: the bit-unset assertion
+// fails. The holder of a revoked credential cannot produce a proof.
+#[test(should_fail_with = "credential is revoked: status bit is set")]
+fn revoke_set_bit_rejected() {
+    let leaf0: Field = 0;
+    let leaf1: Field = 1;
+    let n23 = h2(0, 0);
+    let root = h2(h2(leaf0, leaf1), n23);
+    // index 1, bit 1 (revoked): path siblings bottom-up = [leaf0, n23],
+    // directions = bits of 1 = [1,0].
+    revoke_unset_check::<2>(root, 1, leaf1, [leaf0, n23]);
+}
+
+// A leaf whose authentication path does NOT recompute the committed root is
+// rejected (a forged inclusion / wrong sibling).
+#[test(should_fail_with = "merkle inclusion does not recompute the committed root")]
+fn revoke_wrong_path_rejected() {
+    let leaf0: Field = 0;
+    let leaf1: Field = 1;
+    let n23 = h2(0, 0);
+    let root = h2(h2(leaf0, leaf1), n23);
+    // Correct directions for index 0, but a WRONG sibling at level 0 (99 not
+    // leaf1) so the fold misses the root.
+    revoke_unset_check::<2>(root, 0, leaf0, [99, n23]);
+}
+
+// The index IS the path direction (directions are decomposed FROM `index`
+// in-circuit, not a separate witness). So claiming index 2 (directions [0,1])
+// while supplying index-0's authentication path ([leaf1, n23]) folds along the
+// WRONG side at level 1 and cannot recompute the root -- rejected. A prover
+// therefore cannot reuse another (unset) leaf's path under a different claimed
+// index: changing the index changes the fold directions, breaking inclusion.
+#[test(should_fail_with = "merkle inclusion does not recompute the committed root")]
+fn revoke_index_path_mismatch_rejected() {
+    let leaf0: Field = 0;
+    let leaf1: Field = 1;
+    let n23 = h2(0, 0);
+    let root = h2(h2(leaf0, leaf1), n23);
+    revoke_unset_check::<2>(root, 2, leaf0, [leaf1, n23]);
+}
+
+// `index` is range-bound to `2^D` by the in-circuit bit-decomposition: an index
+// >= 2^D has a nonzero bit beyond position D, which `to_le_bits::<D>` constrains
+// to zero, so the witness is unsatisfiable. (D=2 here => valid indices 0..=3;
+// index 4 = 0b100 overflows.) This pins the in-range guarantee the tree needs.
+#[test(should_fail)]
+fn revoke_out_of_range_index_rejected() {
+    let leaf0: Field = 0;
+    let leaf1: Field = 1;
+    let n23 = h2(0, 0);
+    let root = h2(h2(leaf0, leaf1), n23);
+    revoke_unset_check::<2>(root, 4, leaf0, [leaf1, n23]);
 }

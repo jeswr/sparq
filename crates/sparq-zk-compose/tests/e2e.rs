@@ -25,8 +25,11 @@ use sparq_zk_compose::build::{
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::manifest::{
     AttestedStatusRef, BindingEdge, BindingMode, CircuitId, CommitmentAttestation, EntailmentRegime,
-    FieldHex, FilterOp, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
+    FieldHex, FilterOp, HiddenIndexRevocation, ProofInputs, ProofManifest, RevocationStatus,
+    StatusListSnapshot, SubProof,
 };
+// [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
+use sparq_zk_compose::revocation::{merkle_root, merkle_witness, revoke_prover_toml};
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
     encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, InMemorySeenNonces,
@@ -322,6 +325,7 @@ fn sample_manifest() -> ProofManifest {
             from_slot: 2,
             to_proof: 1,
         }],
+        hidden_revocation: None,
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the scan commitment (salt- AND
     // status-bound) so the sample manifest passes the issuer-signature +
@@ -643,6 +647,7 @@ fn full_manifest_prove_verify_scan() {
             proof_hex: encode_artifacts(&art),
         }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     attest_all(&mut manifest, &test_issuer_sk(1), salt); // [OPUS-4.8] audit #3/#9/#12 (salt+status-bound)
     // [OPUS-4.8] audit #4: the verifier issues the nonce that the proof committed
@@ -758,6 +763,7 @@ fn filter_manifest(
             SubProof { inputs, proof_hex },
         ],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the honest scan (salt- AND status-bound)
     // so the #1/#2 forge tests reach the crypto gate (the FILTER forge they
@@ -1085,6 +1091,7 @@ fn nonce_binding_mismatch_rejected() {
             status_snapshots: vec![fixture_snapshot(false)],
             sub_proofs: vec![SubProof { inputs: scan.clone(), proof_hex: String::new() }],
             binding_edges: vec![],
+            hidden_revocation: None,
         };
         attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
         m
@@ -1168,6 +1175,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             status_snapshots: vec![fixture_snapshot(false)],
             sub_proofs: vec![SubProof { inputs: scan.clone(), proof_hex: proof_hex.into() }],
             binding_edges: vec![],
+            hidden_revocation: None,
         };
         attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
         m
@@ -1422,6 +1430,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -1449,6 +1458,7 @@ fn filter_reject_filter_add_on_scan_only() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -1476,6 +1486,7 @@ fn filter_reject_constant_swap_age_as_salary() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundPattern { pattern: 0 }) => {}
@@ -1523,6 +1534,7 @@ fn filter_reject_operand_slot_substitution() {
         ],
         // Edge points at proof 0 (salary scan) slot 2 — the WRONG column for ?age.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 2 }],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "age" => {}
@@ -1564,6 +1576,7 @@ fn filter_reject_false_verdict_row() {
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -1591,6 +1604,7 @@ fn filter_reject_unbindable_filter_fragment() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::Sparqzk(_)) => {}
@@ -1631,6 +1645,7 @@ fn filter_binding_happy_path_structure() {
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
     };
     // [OPUS-4.8] audit #3/#9/#12: attest the scan (salt- AND status-bound).
     // `scan_inputs_for` commits under salt byte 9, so the attestation salt must
@@ -1693,6 +1708,7 @@ fn filter_reject_unproven_failing_row() {
         ],
         // Edge only for row 0 — row 1 has no true-verdict filter proof.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
@@ -1744,6 +1760,7 @@ fn filter_two_rows_both_gated_verifies() {
             BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 },
             BindingEdge { from_proof: 0, from_row: 1, from_slot: 2, to_proof: 2 },
         ],
+        hidden_revocation: None,
     };
     // [OPUS-4.8] audit #3/#9: attest the scan (salt-bound). `scan_inputs_for`
     // commits under salt byte 9.
@@ -1799,6 +1816,7 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     (m, commitment_fr, salt)
 }
@@ -1883,6 +1901,7 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::UnattestedCommitment { proof: 0, .. }) => {}
@@ -2199,6 +2218,7 @@ fn cross_graph_manifest(
             SubProof { inputs: scan_role.inputs, proof_hex: String::new() },
         ],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     // Salt- AND status-bound attestations for BOTH commitments (audit #3+#9+#12),
     // distinct salts, shared fixture status reference.
@@ -2722,6 +2742,7 @@ fn revocation_stale_status_list_rejected() {
         }],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     // The relying party only trusts version 5 (window 0): the old-version
     // snapshot is STALE.
@@ -2911,6 +2932,7 @@ fn revocation_within_window_verifies() {
         }],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        hidden_revocation: None,
     };
     // now=5, window=3 => accepts [2, 5]; version 3 is fresh. The AUTHORITATIVE
     // snapshot for (list, version=3) is non-revoked (re-audit Option B: the bit is
@@ -2994,5 +3016,244 @@ fn revocation_full_prove_verify_revoked_rejected() {
     ) {
         Err(CheckError::CredentialRevoked { .. }) => {}
         other => panic!("expected CredentialRevoked end-to-end (authoritative bit set), got {other:?}"),
+    }
+}
+
+// ===========================================================================
+// sq-3e5 + sq-h2v: HIDDEN-INDEX revocation (bit-unset) proof.
+// ===========================================================================
+//
+// [OPUS-4.8] These exercise the privacy upgrade: prove the credential's status
+// bit at its HIDDEN index is unset, disclosing neither the index nor the other
+// bits. The proof binds to the relying party's OWN authoritative Merkle root
+// (the audit-#12 re-audit trust anchor is preserved); the clear-index path is
+// unchanged. The depth-10 `revoke_unset_d10` member covers 1024 indices.
+
+/// The hidden-index Merkle depth the fixtures use (matches `revoke_unset_d10`).
+const HIDDEN_DEPTH: u32 = 10;
+
+/// Build the AUTHORITATIVE depth-10 snapshot for the fixture list: index 3
+/// (FIXTURE_STATUS_INDEX) is UNSET (active); pass `revoked=true` to set it.
+/// The snapshot covers 1024 leaves; only the first byte is populated, so all
+/// other indices read 0 (active) and the padding past the bytes reads SET (the
+/// fail-closed convention) -- index 3 is what the proof targets.
+fn hidden_snapshot(revoked: bool) -> StatusListSnapshot {
+    let bits = if revoked {
+        vec![1u8 << FIXTURE_STATUS_INDEX]
+    } else {
+        vec![0u8]
+    };
+    StatusListSnapshot {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        version: FIXTURE_STATUS_VERSION,
+        bits,
+    }
+}
+
+/// A relying-party policy that accepts the fixture version, carries a fresh
+/// NON-revoked authoritative snapshot, AND enables the hidden-index path at
+/// depth 10 (so the verifier derives its authoritative Merkle root from that
+/// snapshot and binds the hidden-index proof to it).
+fn hidden_policy(revoked: bool) -> RevocationPolicy {
+    RevocationPolicy::accept_version(FIXTURE_STATUS_VERSION)
+        .with_snapshot(hidden_snapshot(revoked))
+        .with_hidden_index_depth(HIDDEN_DEPTH)
+}
+
+/// Build a complete, attested age-scan manifest (no FILTER) carrying an
+/// issuer-bound, fresh, non-revoked clear reference -- the same shape as
+/// `full_manifest_prove_verify_scan`. Returns (manifest, prover, salt) so a
+/// hidden-index proof can be attached and verified.
+fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr) {
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).unwrap();
+    let challenge = FieldHex("0x2a".into());
+    let (id, toml) = prover_toml_for(
+        &scan.inputs,
+        &challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+    );
+    let out = scratch(tag);
+    let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
+    let mut manifest = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec!["did:key:zSampleIssuer".into()],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![hidden_snapshot(false)],
+        sub_proofs: vec![SubProof {
+            inputs: scan.inputs,
+            proof_hex: encode_artifacts(&art),
+        }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+    };
+    attest_all(&mut manifest, &test_issuer_sk(1), salt);
+    (manifest, salt)
+}
+
+/// Prove the `revoke_unset_d10` circuit for `index` against the depth-10 tree of
+/// `snapshot`, returning the assembled [`HiddenIndexRevocation`] manifest field.
+/// `challenge` is the verifier nonce the proof commits as public field 0.
+fn prove_hidden_revocation(
+    prover: &CircuitProver,
+    snapshot: &StatusListSnapshot,
+    index: u64,
+    challenge: &Fr,
+    tag: &str,
+) -> HiddenIndexRevocation {
+    let root = merkle_root(snapshot, HIDDEN_DEPTH).expect("root");
+    let witness = merkle_witness(snapshot, HIDDEN_DEPTH, index).expect("witness");
+    let toml = revoke_prover_toml(challenge, &root, index, &witness);
+    let id = CircuitId::RevokeUnset { depth: HIDDEN_DEPTH };
+    let out = scratch(tag);
+    let art = prover.prove_in(&id, &toml, &out, tag).expect("hidden-revocation prove succeeds");
+    HiddenIndexRevocation {
+        depth: HIDDEN_DEPTH,
+        root: FieldHex::from_field(&root),
+        proof_hex: encode_artifacts(&art),
+    }
+}
+
+/// HAPPY PATH: an UNREVOKED hidden index verifies end-to-end, and the proof's
+/// public inputs are exactly (challenge, root) -- the INDEX is NOT disclosed.
+#[test]
+#[ignore = "slow: full bb prove of a scan + the hidden-revocation member"]
+fn hidden_revocation_unrevoked_verifies_and_index_is_private() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping hidden-revocation full prove+verify");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let (mut manifest, _salt) = hidden_scan_manifest(&prover, "hidden_scan_ok");
+    let challenge = Fr::from(0x2au64); // the proof commits 0x2a as field 0
+    let snapshot = hidden_snapshot(false); // index 3 UNSET (active)
+    let hidden = prove_hidden_revocation(&prover, &snapshot, FIXTURE_STATUS_INDEX, &challenge, "hidden_ok");
+
+    // --- INDEX-NOT-DISCLOSED assertion (the privacy goal). ---
+    // The bb public_inputs blob is exactly two 32-byte words: challenge, root.
+    // The index (3) appears in NEITHER. We decode the blob and assert (a) it is
+    // 64 bytes (2 fields, NOT 3+) and (b) neither word encodes the index value.
+    use sparq_zk::field::{field_to_be_bytes_32, field_from_hex_str};
+    let blob = {
+        // proof_hex layout is len|proof|len|pi|vk; pull out the pi segment.
+        let bytes = (0..hidden.proof_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hidden.proof_hex[i..i + 2], 16).unwrap())
+            .collect::<Vec<u8>>();
+        let plen = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let pi_off = 4 + plen;
+        let pilen = u32::from_be_bytes([
+            bytes[pi_off], bytes[pi_off + 1], bytes[pi_off + 2], bytes[pi_off + 3],
+        ]) as usize;
+        bytes[pi_off + 4..pi_off + 4 + pilen].to_vec()
+    };
+    assert_eq!(blob.len(), 64, "revoke public inputs must be exactly (challenge, root) = 2 words; index is NOT a public input");
+    let index_word = field_to_be_bytes_32(&Fr::from(FIXTURE_STATUS_INDEX));
+    let root_fr = field_from_hex_str(&hidden.root.0).unwrap();
+    assert_eq!(&blob[0..32], &field_to_be_bytes_32(&challenge), "word 0 is the challenge");
+    assert_eq!(&blob[32..64], &field_to_be_bytes_32(&root_fr), "word 1 is the root");
+    assert_ne!(&blob[0..32], &index_word[..], "the index must NOT be a public input");
+    assert_ne!(&blob[32..64], &index_word[..], "the index must NOT be a public input");
+
+    manifest.hidden_revocation = Some(hidden);
+    verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("hidden_verify_ok"),
+        &trusted_k(&test_issuer_sk(1)),
+        &hidden_policy(false),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("unrevoked hidden-index credential verifies end-to-end");
+}
+
+/// REVOKED index: the holder of a REVOKED credential CANNOT produce the proof.
+/// `revoke_unset_d10` asserts the leaf bit is 0; for a set bit the witness is
+/// unsatisfiable, so `prove_in` (nargo execute) fails to produce a witness.
+#[test]
+#[ignore = "slow: attempts a bb prove that must be unsatisfiable"]
+fn hidden_revocation_revoked_index_is_unprovable() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping hidden-revocation unprovable case");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let challenge = Fr::from(0x2au64);
+    // Authoritative snapshot with index 3 SET (revoked).
+    let snapshot = hidden_snapshot(true);
+    let root = merkle_root(&snapshot, HIDDEN_DEPTH).unwrap();
+    // The witness for the revoked index carries bit==1; the circuit's bit-unset
+    // assertion is unsatisfiable, so nargo produces NO witness.
+    let witness = merkle_witness(&snapshot, HIDDEN_DEPTH, FIXTURE_STATUS_INDEX).unwrap();
+    assert_eq!(witness.bit, Fr::from(1u64), "revoked index has bit set");
+    let toml = revoke_prover_toml(&challenge, &root, FIXTURE_STATUS_INDEX, &witness);
+    let id = CircuitId::RevokeUnset { depth: HIDDEN_DEPTH };
+    let out = scratch("hidden_revoked");
+    let res = prover.prove_in(&id, &toml, &out, "hidden_revoked");
+    assert!(
+        res.is_err(),
+        "a REVOKED credential's hidden-index bit-unset proof must be unprovable (the in-circuit bit==0 assertion fails)"
+    );
+}
+
+/// FORGED ROOT: a prover proves bit-unset against its OWN all-zero tree (a forged
+/// status list where everything is active), whose root differs from the relying
+/// party's AUTHORITATIVE root. The verifier rejects (root mismatch) -- the
+/// liveness fact must bind to the relying party's authenticated bytes.
+#[test]
+#[ignore = "slow: full bb prove of a scan + a forged-root hidden-revocation proof"]
+fn hidden_revocation_forged_root_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping hidden-revocation forged-root case");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let (mut manifest, _salt) = hidden_scan_manifest(&prover, "hidden_scan_forge");
+    let challenge = Fr::from(0x2au64);
+    // The prover builds an ALL-ZERO tree (every index active) -- a forged status
+    // list. Index 3's bit is 0 there too, so the proof is internally valid, but
+    // the forged root differs from the relying party's authoritative root.
+    let forged = StatusListSnapshot {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        version: FIXTURE_STATUS_VERSION,
+        bits: vec![0u8; 128], // 1024 explicit zero bits -> a DIFFERENT (all-active) tree
+    };
+    // The relying party's authoritative snapshot has padding past byte 0 read as
+    // SET, so its root differs from the all-explicit-zero forged root.
+    let auth = hidden_snapshot(false);
+    assert_ne!(
+        merkle_root(&forged, HIDDEN_DEPTH).unwrap(),
+        merkle_root(&auth, HIDDEN_DEPTH).unwrap(),
+        "the forged all-zero tree must have a different root than the authoritative snapshot"
+    );
+    let hidden = prove_hidden_revocation(&prover, &forged, FIXTURE_STATUS_INDEX, &challenge, "hidden_forge");
+    manifest.hidden_revocation = Some(hidden);
+    match verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("hidden_verify_forge"),
+        &trusted_k(&test_issuer_sk(1)),
+        &hidden_policy(false), // authoritative root derived from the real snapshot
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HiddenRevocationRootMismatch) => {}
+        other => panic!("a forged-root hidden-revocation proof must be HiddenRevocationRootMismatch, got {other:?}"),
     }
 }
