@@ -122,12 +122,25 @@ pub struct CommitmentAttestation {
     /// The issuer verification key (compressed Baby-JubJub point, hex). Must be
     /// a member of `ProofManifest::key_set` (audit #3 key-set membership).
     pub issuer_public_key: String,
-    /// The issuer's signature over `commitment_message(C(G))`, hex.
+    /// The issuer's signature, hex. When `salt` is present (audit #9) the signed
+    /// message is `commitment_message_with_salt(C(G), salt_G)`; otherwise it is
+    /// the bare `commitment_message(C(G))` (audit #3, salt-unbound legacy).
     pub signature: String,
     /// The signature scheme's `zk:cryptosuite` IRI (`poseidon2-schnorr-v1` in
     /// v1). An unknown cryptosuite is unverifiable => the attestation is
     /// rejected (fail closed).
     pub cryptosuite: String,
+    /// The per-graph RDFC10 bnode salt this commitment was committed under
+    /// (audit #9), hex. When present, the issuer signature is verified over the
+    /// SALT-BOUND message so the salt is issuer-attested (a salt-reusing
+    /// ingester cannot present a graph under a salt the issuer did not sign), and
+    /// the verifier additionally rejects two DISTINCT commitments sharing a salt
+    /// (the Q6 cross-graph bnode-correlation channel). Absent => salt-unbound
+    /// legacy attestation (audit #3 only); the salt-separation guarantee then
+    /// rests on the honest-ingest convention, which the verifier cannot enforce.
+    // [OPUS-4.8] audit #9: issuer-attested per-graph salt.
+    #[serde(default)]
+    pub salt: Option<FieldHex>,
 }
 
 /// Revocation status (plan §S2.5 revocation = hidden-index status-list). v1
@@ -194,6 +207,16 @@ pub enum ProofInputs {
         rows: Vec<[FieldHex; 3]>,
         /// Active row count (<= r).
         row_count: u32,
+        /// Per-graph source attribution (length k): `attribution[g]` is true
+        /// iff this pattern's match set draws a triple from committed graph `g`.
+        /// Constrained in-circuit (`scan.nr` step 4, audit #8) and byte-bound
+        /// into the bb public inputs by [`crate::verifier::reconstruct_public_inputs`],
+        /// so it is PROOF-BOUND, not a prover-controlled claim. The verifier
+        /// cross-checks it against `manifest.attributions` for the pattern this
+        /// scan answers (closes the `[[0],[0]]` collapse-two-graphs forge).
+        // [OPUS-4.8] audit #8: in-circuit per-graph source attribution.
+        #[serde(default)]
+        attribution: Vec<bool>,
     },
     /// filter_int_d{d}: hidden-operand numeric FILTER over an xsd:integer.
     #[serde(rename = "filter_int")]

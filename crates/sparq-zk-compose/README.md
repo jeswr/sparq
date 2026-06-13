@@ -60,7 +60,15 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
 1. **Structural (no bb, fast):** `sparq_zk::verify::recheck` re-runs the
    stage-1 layer-3 gate (cross-graph bnode-join guard Q6 + attribution arity)
    from the query text; circuit ids are re-derived from public inputs; binding
-   edges are checked as field equalities.
+   edges are checked as field equalities; the query-correctness, issuer-signature
+   / key-set, and **per-graph source-attribution** binding gates run here.
+   The attribution gate (audit #8) cross-checks `manifest.attributions` against
+   the PROOF-BOUND per-graph `attribution[k]` each scan carries (`scan.nr` step 4,
+   byte-bound by the audit #1 reconstruction): `manifest.attributions[pattern]`
+   must be a superset of the proved matched-graph set, so a collapse-two-graphs
+   `[[0],[0]]` lie that would drop a cross-graph bnode obligation is rejected.
+   The issuer signature now binds the per-graph salt (audit #9) and the verifier
+   rejects two distinct commitments sharing a salt.
 2. **Cryptographic:** every sub-proof is verified via `bb verify`.
 
 `verify_manifest_structure` is the fast gate; `verify_manifest` adds bb.

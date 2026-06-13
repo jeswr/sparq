@@ -13,7 +13,7 @@ use crate::manifest::{CircuitId, FieldHex, ProofInputs};
 ///
 /// Order MUST match `scan_k{k}_n{n}_r{r}/src/main.nr`:
 /// challenge, commitments, pattern_is_const, pattern_const_enc, rows,
-/// row_count, counts, enc.
+/// row_count, attribution, counts, enc.
 #[allow(clippy::too_many_arguments)]
 pub fn scan_prover_toml(
     challenge: &FieldHex,
@@ -22,6 +22,7 @@ pub fn scan_prover_toml(
     pattern_const_enc: &[FieldHex; 3],
     rows: &[[FieldHex; 3]],
     row_count: u32,
+    attribution: &[bool],
     counts: &[u32],
     enc: &[Vec<[FieldHex; 3]>],
 ) -> String {
@@ -42,6 +43,15 @@ pub fn scan_prover_toml(
     ));
     s.push_str(&format!("rows = {}\n", rows_array(rows)));
     s.push_str(&format!("row_count = \"{row_count}\"\n"));
+    // attribution: [bool; K] (audit #8) -- declared right after row_count.
+    s.push_str(&format!(
+        "attribution = [{}]\n",
+        attribution
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
     s.push_str(&format!(
         "counts = [{}]\n",
         counts
@@ -158,6 +168,7 @@ pub fn prover_toml_for(
             pattern_const_enc,
             rows,
             row_count,
+            attribution,
         } => {
             let CircuitId::Scan { n, r, .. } = id else {
                 unreachable!("scan inputs carry a scan id")
@@ -175,6 +186,7 @@ pub fn prover_toml_for(
                 pattern_const_enc,
                 &rows,
                 *row_count,
+                attribution,
                 scan_counts,
                 &enc,
             );

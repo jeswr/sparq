@@ -156,7 +156,9 @@ impl RegistryEntry {
         let pk = sk.public_key();
         // Deterministic (sk, m) nonce — see `SecretKey::sign_commitment` /
         // `sign_deterministic`. No RNG state crosses the API boundary.
-        let sig_hex = sk.sign_commitment(&commitment);
+        // [OPUS-4.8] audit #9: bind the per-graph salt into the signed object so
+        // the salt is issuer-attested and salt reuse is detectable verifier-side.
+        let sig_hex = sk.sign_commitment_with_salt(&commitment, &salt);
         let mut e = RegistryEntry::new(document, commitment, salt);
         e.cryptosuite = Some(NamedNode::new_unchecked(
             crate::sig::SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
@@ -190,7 +192,9 @@ impl RegistryEntry {
         ) else {
             return false;
         };
-        let msg = crate::sig::commitment_message(&self.commitment);
+        // [OPUS-4.8] audit #9: issuance via `issued` signs the SALT-BOUND
+        // message, so verification recomputes it over `(commitment, salt)`.
+        let msg = crate::sig::commitment_message_with_salt(&self.commitment, &self.salt);
         crate::sig::verify(&pk, &msg, &sig)
     }
 

@@ -104,22 +104,49 @@ fn p_pattern() -> PatternSpec {
     PatternSpec { is_const: [false, true, false], const_enc: [0, P, 0] }
 }
 
+// Pattern ?s P ?o matches in BOTH graph 0 and graph 1 (test_graphs): the true
+// attribution for the accept paths is therefore [true, true].
+global ATTR_BOTH: [bool; 2] = [true, true];
+
 #[test]
 fn scan_accepts_complete_match_set() {
     let (enc, counts, commitments) = test_graphs();
     // Pattern ?s P ?o matches (S1,P,O1) in graph 0 and (S2,P,O2) in graph 1.
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, counts, enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, ATTR_BOTH, counts, enc);
 }
 
 #[test]
 fn scan_accepts_constant_only_pattern_with_padding_rows() {
     let (enc, counts, commitments) = test_graphs();
     // Fully-constant pattern (an ASK-shaped membership): one matching row,
-    // second row slot padded.
+    // second row slot padded. (S2,P,O2) lives only in graph 1, so the bound
+    // attribution is [false, true].
     let pattern = PatternSpec { is_const: [true, true, true], const_enc: [S2, P, O2] };
     let rows: [[Field; 3]; 2] = [[S2, P, O2], [0, 0, 0]];
-    scan_check::<2, 4, 2>(commitments, pattern, rows, 1, counts, enc);
+    scan_check::<2, 4, 2>(commitments, pattern, rows, 1, [false, true], counts, enc);
+}
+
+// [OPUS-4.8] audit #8: the per-graph attribution is constrained to the true
+// matched-graph set. Lying in EITHER direction is rejected.
+#[test(should_fail_with = "attribution does not match the proved source graphs")]
+fn scan_rejects_attribution_understated() {
+    // The [[0],[0]] collapse-two-graphs lie at the circuit level: the pattern
+    // matches in graph 1 too, but the prover claims attribution[1] = false to
+    // hide the cross-graph source.
+    let (enc, counts, commitments) = test_graphs();
+    let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, [true, false], counts, enc);
+}
+
+#[test(should_fail_with = "attribution does not match the proved source graphs")]
+fn scan_rejects_attribution_overstated() {
+    // Claiming a graph contributes when it does not is also rejected (exact
+    // matched set, not a superset).
+    let (enc, counts, commitments) = test_graphs();
+    let pattern = PatternSpec { is_const: [true, true, true], const_enc: [S2, P, O2] };
+    let rows: [[Field; 3]; 2] = [[S2, P, O2], [0, 0, 0]];
+    scan_check::<2, 4, 2>(commitments, pattern, rows, 1, [true, true], counts, enc);
 }
 
 #[test(should_fail_with = "graph commitment mismatch")]
@@ -127,7 +154,7 @@ fn scan_rejects_tampered_commitment() {
     let (enc, counts, mut commitments) = test_graphs();
     commitments[0] += 1;
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, counts, enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, ATTR_BOTH, counts, enc);
 }
 
 #[test(should_fail_with = "graph commitment mismatch")]
@@ -137,7 +164,7 @@ fn scan_rejects_tampered_graph_content() {
     // suspended" hiding, plan S1.1) -- the fold no longer reproduces C.
     enc[0][0] = [S1, P_OTHER, O1];
     let rows: [[Field; 3]; 2] = [[S2, P, O2], [0, 0, 0]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, counts, enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, [false, true], counts, enc);
 }
 
 #[test(should_fail_with = "matching triple missing from disclosed rows")]
@@ -145,7 +172,7 @@ fn scan_rejects_suppressed_row() {
     let (enc, counts, commitments) = test_graphs();
     // Graph 1's match is suppressed: completeness sweep must catch it.
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [0, 0, 0]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, counts, enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, ATTR_BOTH, counts, enc);
 }
 
 #[test(should_fail_with = "disclosed row not in any committed graph")]
@@ -153,7 +180,7 @@ fn scan_rejects_fabricated_row() {
     let (enc, counts, commitments) = test_graphs();
     // A row that matches the pattern but is in NO committed graph.
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [999, P, 998]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, counts, enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, ATTR_BOTH, counts, enc);
 }
 
 #[test(should_fail_with = "disclosed row does not match the pattern")]
@@ -161,7 +188,7 @@ fn scan_rejects_off_pattern_row() {
     let (enc, counts, commitments) = test_graphs();
     // A committed triple that does NOT match the pattern's constant slot.
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [S1, P_OTHER, O2]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, counts, enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, ATTR_BOTH, counts, enc);
 }
 
 #[test(should_fail_with = "matching triple missing from disclosed rows")]
@@ -170,21 +197,21 @@ fn scan_rejects_inactive_row_padding_as_disclosure() {
     // The matching triples are in the row array but row_count hides one:
     // padding rows must NOT satisfy completeness.
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, counts, enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, ATTR_BOTH, counts, enc);
 }
 
 #[test(should_fail_with = "graph size exceeds circuit bucket")]
 fn scan_rejects_oversized_count() {
     let (enc, _, commitments) = test_graphs();
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, [5, 1], enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, ATTR_BOTH, [5, 1], enc);
 }
 
 #[test(should_fail_with = "row_count exceeds circuit bucket")]
 fn scan_rejects_oversized_row_count() {
     let (enc, counts, commitments) = test_graphs();
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 3, counts, enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 3, ATTR_BOTH, counts, enc);
 }
 
 // ---------------------------------------------------------------------------
