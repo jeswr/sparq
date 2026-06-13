@@ -38,4 +38,13 @@ suppressed (outside stage-1 fragment).
 - wasm byte delta: +8B vs main's committed artifact, within documented
   ±8B path noise; only non-cfg'd change is a codegen-neutral match-arm block.
 
-## Overhead numbers, gate, final SHA: see RETURN report.
+## Results
+- Workspace gate (cargo test --workspace --exclude sparq-py --release
+  --no-fail-fast): EXIT=0, 734 passed / 0 failed across 113 suites.
+- engine zk: 16 operator tests + 10k differential (zk-on == zk-off) green.
+- Trace overhead (credential scale, proving path): ~2.5-4x untraced — a
+  constant factor (materialises the full consumed input set + disables
+  result-only pushdowns). Disarmed: one thread-local read per scan.
+- wasm: default/wasm build byte count vs main within documented ±8B path
+  noise (all zk code cfg'd out; the one non-default param is cfg-gated).
+- roborev: latest commit reviewed "No issues found"; all prior findings fixed.
