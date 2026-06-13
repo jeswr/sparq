@@ -65,14 +65,16 @@ extract_invoke() {
       line=$0; sub(/^id[[:space:]]*=[[:space:]]*"/,"",line); sub(/".*/,"",line); cur=line
     }
     inblk && /^invoke[[:space:]]*=/ {
-      line=$0; sub(/^invoke[[:space:]]*=[[:space:]]*"/,"",line); sub(/"[[:space:]]*$/,"",line); inv=line
+      # Strip the opening `invoke = "` then everything from the CLOSING quote onward
+      # (incl. any trailing TOML inline comment). roborev #2264: the old anchored
+      # `"[[:space:]]*$` left the closing quote in place when a `# comment` followed it.
+      line=$0; sub(/^invoke[[:space:]]*=[[:space:]]*"/,"",line); sub(/".*$/,"",line); inv=line
     }
     inblk && cur==want && inv!="" && /^invoke[[:space:]]*=/ {
       print inv; found=1; exit
     }
     END { if(!found) exit 3 }
   ' "$TOML" \
-    | sed -E 's/[[:space:]]+#[^"]*$//' \
     | sed -E 's/\\n/\n/g'
 }
 
@@ -182,7 +184,9 @@ cmd_wait_result() {
     local st; st="$($AWS ec2 describe-instances --instance-ids "$iid" \
       --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown)"
     echo "[ec2-bench] $iid state=$st, no result marker yet; sleeping 30s..." >&2
-    [ "$st" = "terminated" ] && { echo "$out" | sed -n '/=== SPARQ_BENCH_RESULT/,/=== END SPARQ_BENCH_RESULT ===/p'; echo "[ec2-bench] instance terminated; above is whatever console captured" >&2; return 0; }
+    # roborev #2264: if the box terminated before emitting the END marker, the benchmark
+    # did NOT complete — surface whatever console captured but return FAILURE, not success.
+    [ "$st" = "terminated" ] && { echo "$out" | sed -n '/=== SPARQ_BENCH_RESULT/,/=== END SPARQ_BENCH_RESULT ===/p'; echo "[ec2-bench] $iid terminated WITHOUT a result marker — benchmark did not complete" >&2; return 1; }
     sleep 30
   done
   echo "[ec2-bench] TIMEOUT after ${maxmin}m waiting for result on $iid" >&2; return 1
@@ -190,6 +194,12 @@ cmd_wait_result() {
 
 cmd_terminate() {
   local iid="${1:-}"; [ -n "$iid" ] || die "usage: terminate <instance-id>"
+  # SAFETY GUARD (roborev #2264, HIGH): refuse to terminate anything that is not one of
+  # OUR bench boxes. This is the last line of defence against fat-fingering prod
+  # (i-090531b4ede8f2d3f) or the dev box — terminate must NEVER touch an untagged instance.
+  local purpose; purpose="$($AWS ec2 describe-instances --instance-ids "$iid" \
+    --query 'Reservations[0].Instances[0].Tags[?Key==`purpose`]|[0].Value' --output text 2>/dev/null || echo '')"
+  [ "$purpose" = "sparq-bench" ] || die "refusing to terminate $iid: tag purpose='$purpose' (expected 'sparq-bench'). Guard against touching prod / the dev box."
   $AWS ec2 terminate-instances --instance-ids "$iid" --query 'TerminatingInstances[0].[InstanceId,CurrentState.Name]' --output text
   $AWS ec2 wait instance-terminated --instance-ids "$iid" && echo "[ec2-bench] $iid terminated"
 }

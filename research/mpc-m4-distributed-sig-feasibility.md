@@ -21,7 +21,7 @@ specific join sparq M4 wants — verify a digital signature whose *signed messag
 (the graph commitment) is itself secret-shared across N mutually-distrusting
 provers*, under a *hidden* issuer key in a set `K`, emitting one ordinary
 proof — is, to the best of this survey, unbuilt and unbenchmarked in any venue
-through 2026. The three ingredients each exist *separately* but the composition
+as of this survey (2026-06-13). The three ingredients each exist *separately* but the composition
 does not:
 
 - **Collaborative proving over a shared witness exists** — Ozdemir-Boneh (USENIX'22,
