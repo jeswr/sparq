@@ -65,13 +65,17 @@
 //! bundle carries zero MPC surface (mirrors how `sparq-zk` is isolated).
 
 pub mod backend;
+pub mod field;
 pub mod holder;
 pub mod join;
 pub mod partial;
 pub mod proof;
+pub mod shamir;
 
 pub use backend::{BackendInfo, MpcBackend, TrustModel};
+pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{DisclosedKeyJoin, GlobalJoin, JoinPlan};
 pub use partial::{HolderId, MpcError, PartialResult};
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
+pub use shamir::{Share, ShamirBackend};
