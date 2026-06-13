@@ -18,6 +18,9 @@
 //! - [`commit`] — per-named-graph flat Poseidon2 commitments (plan §2.2).
 //! - [`registry`] — `<urn:sparq:zk>` registry-graph plumbing (plan Q13),
 //!   mirroring `sparq-solid`'s `<urn:sparq:auth>` conventions.
+//! - [`sig`] — issuer signatures over per-graph commitments (audit #3):
+//!   Schnorr over Baby-JubJub with a Poseidon2 challenge, the verifier-side
+//!   sound interim that binds `C(G)` to an issuer key in a disclosed key-set.
 //! - [`trace`] — the zk-trace seam (plan §4.E): per-obligation input sets
 //!   from an executed query, leaf-index resolution against per-graph
 //!   commitment orderings, and the Q6 cross-graph bnode-join guard
@@ -36,6 +39,7 @@ pub mod field;
 pub mod poseidon2;
 mod poseidon2_constants;
 pub mod registry;
+pub mod sig;
 pub mod trace;
 pub mod verify;
 
