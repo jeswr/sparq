@@ -96,11 +96,25 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
   result, wrong commitment, swapped operand, cross-graph bnode join, flipped
   proof byte) all fail.
 
+**Composable now ([OPUS-4.8] sq-q7e / sq-tat):**
+- **`xsd:double` FILTER composition** — IMPLEMENTED for the INTEGER-VALUED double
+  fragment. The composable `filter_f64_d{d}` members (`CircuitId::FilterF64 { d }`
+  / `ProofInputs::FilterF64`) bind the hidden operand to the committed literal via
+  the canonical `"<digits>"^^xsd:double` token (blake3, the same mechanism as
+  `filter_int`) and DERIVE the IEEE bits in-circuit from the bound value
+  (`f64::from(value)`, exact for `value < 2^53`), so there is NO prover-free
+  `a_bits`. A float FILTER now participates in a composed proof via a binding edge
+  to a scan (e2e: `filter_f64_composes_end_to_end`). The raw `filter_f64` building
+  block (free bits) remains for non-composed use. DEFERRED: the GENERAL fragment
+  (fractional/scientific lexical forms, rounded values) needs a full in-circuit
+  decimal→IEEE-754 parser with round-to-nearest-even over an arbitrary lexical
+  form — unbudgeted; the integer-valued fragment is enforced by the digit-only
+  token (an out-of-fragment operand is unprovable, never mis-bound). Query-text
+  FILTER→float mapping also deferred (sparq-zk `fragment_filters` parses only the
+  xsd:integer FILTER fragment); a float FILTER composes via the binding edge +
+  its own verified sub-proof.
+
 **Deferred (documented, schema-stable placeholders where relevant):**
-- **`xsd:double` FILTER composition** — `filter_f64` is a gate-counted, tested
-  comparison building block, but binding an `f64` to a committed literal needs
-  in-circuit float→canonical-decimal printing (unbudgeted). The comparison
-  itself (`sparq_ieee754`, IEEE/NaN-correct) is done.
 - **Issuer signatures** over commitments — v1 carries `did:key` refs in the
   manifest but does not verify a signature in-circuit (commitments are
   disclosed manifest fields). The named-graph credential seam is in place.

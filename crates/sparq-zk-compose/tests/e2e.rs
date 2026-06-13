@@ -20,7 +20,8 @@ use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use sparq_zk::commit::commit_triples;
 use sparq_zk::encode::salt_from_bytes;
 use sparq_zk_compose::build::{
-    build_filter_int, build_scan, encode_int_literal, Pattern, Slot,
+    build_filter_f64, build_filter_int, build_scan, encode_double_literal, encode_int_literal,
+    Pattern, Slot,
 };
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::manifest::{
@@ -3916,4 +3917,197 @@ fn hidden_issuer_not_enabled_rejected() {
         &k, &fresh_policy(), &HolderRegistry::empty(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     );
     assert!(res.is_err(), "a manifest with hidden-issuer attestation under a non-opted-in KeySet must be rejected");
+}
+
+// --- sq-q7e + sq-tat: MANIFEST-COMPOSABLE xsd:double FILTER ---------------------
+//
+// [OPUS-4.8] sq-q7e / sq-tat (duplicates). filter_f64 was a v1 BUILDING BLOCK
+// that could not be assembled into a proof manifest (its `a_bits` was prover-free
+// and there was no `ProofInputs::FilterF64` variant). It is now manifest-composable
+// over the INTEGER-VALUED double fragment: the operand is bound to the committed
+// literal via the canonical token (blake3, like filter_int) and the IEEE bits are
+// DERIVED in-circuit from the bound value (`f64::from(value)`), so no free a_bits.
+// These tests cover the soundness (honest proves, lies rejected) and the end-to-end
+// composition (a float-FILTER sub-proof participates in a real prove/verify with a
+// binding edge to a scan).
+
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+/// A double-typed integer-valued literal term (plain lexical form, e.g. "42").
+fn double_lit(v: u64) -> Term {
+    Term::Literal(Literal::new_typed_literal(v.to_string(), iri(XSD_DOUBLE)))
+}
+
+/// A credential graph whose `<http://ex/score>` object is an integer-valued
+/// xsd:double (so the composable filter_f64 fragment applies).
+fn double_credential_graph(score: u64) -> Vec<Triple> {
+    let alice = NamedOrBlankNode::NamedNode(iri("http://ex/alice"));
+    vec![Triple::new(alice, iri("http://ex/score"), double_lit(score))]
+}
+
+/// sq-q7e/sq-tat (soundness): the honest xsd:double FILTER witness PROVES and the
+/// FLIPPED verdict is UNprovable. This also exercises the in-circuit
+/// `f64::from(value)` bits derivation — a witness that lies about the verdict
+/// cannot satisfy the circuit (the bits are a constrained function of the bound
+/// operand, not a free input). Toolchain-gated (real nargo execute).
+#[test]
+fn filter_f64_witness_honest_proves_lie_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping filter_f64 witness soundness test");
+        return;
+    }
+    // operand = 25.0 (xsd:double), FILTER(?o >= 18.0) — true.
+    let value: u64 = 25;
+    let operand_enc = encode_double_literal(value);
+    let bound = 18.0_f64;
+    let (inputs, digits) =
+        build_filter_f64(operand_enc.clone(), value, FilterOp::Ge, bound, true)
+            .expect("25.0 >= 18.0 builds (d=2 member)");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterF64 { d: 2 });
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits);
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).expect("filter_f64_d2 compiles");
+    prover
+        .gen_witness_tagged(&id, &toml, "f64_honest")
+        .expect("the honest xsd:double FILTER verdict must PROVE");
+
+    // The FLIPPED verdict (false) must be UNprovable — soundness.
+    let (lie_inputs, lie_digits) =
+        build_filter_f64(operand_enc, value, FilterOp::Ge, bound, false).expect("builds");
+    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits);
+    let lie = prover.gen_witness_tagged(&lid, &ltoml, "f64_lie");
+    assert!(
+        lie.is_err(),
+        "SOUNDNESS: a FALSE xsd:double FILTER verdict (25.0 >= 18.0 = false) must be UNprovable"
+    );
+}
+
+/// sq-q7e/sq-tat (soundness): a prover cannot substitute a DIFFERENT operand than
+/// the one the scan committed — the canonical-token binding ties `operand_enc` to
+/// the exact committed literal. Witnessing digits for a different value than
+/// `operand_enc` encodes fails the in-circuit `operand encoding mismatch` assert.
+#[test]
+fn filter_f64_operand_binding_rejects_substituted_value() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping filter_f64 operand-binding test");
+        return;
+    }
+    // operand_enc is for 25.0, but the prover witnesses digits for 99 (two digits,
+    // same member d=2) and claims 99 >= 18 = true. The token rebuilt from "99"
+    // hashes to a DIFFERENT operand_enc than the committed "25", so the binding
+    // assert fails => no witness.
+    let operand_enc_25 = encode_double_literal(25);
+    let (inputs, _digits) =
+        build_filter_f64(operand_enc_25.clone(), 99, FilterOp::Ge, 18.0, true).expect("builds");
+    // Force the operand_enc to the committed 25's encoding while the digits witness
+    // says 99 (build_filter_f64 already set operand_enc to the passed value; here we
+    // pass operand_enc_25 but value=99 so the digit witness is "99").
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], b"99");
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).expect("compiles");
+    let res = prover.gen_witness_tagged(&id, &toml, "f64_subst");
+    assert!(
+        res.is_err(),
+        "SOUNDNESS: witnessing a value (99) different from the operand_enc the scan \
+         committed (25) must fail the canonical-token binding (operand encoding mismatch)"
+    );
+}
+
+/// sq-q7e/sq-tat (END-TO-END composition): a float-FILTER sub-proof participates in
+/// a composed, cryptographically-verified manifest. A scan over a double-valued
+/// credential discloses the object; a filter_f64 sub-proof proves `?o >= 18.0`
+/// over that disclosed encoding, tied by a binding edge; the whole manifest
+/// verifies (real bb prove + verify_manifest). This is the deliverable both sq-q7e
+/// and sq-tat ask for: a float FILTER assembled into a proof manifest.
+#[test]
+#[ignore = "slow: full bb prove of a scan + composable filter_f64 member (sq-q7e/sq-tat)"]
+fn filter_f64_composes_end_to_end() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping filter_f64 e2e composition");
+        return;
+    }
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let score: u64 = 25;
+    let commit = commit_triples(&double_credential_graph(score), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/score"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).unwrap();
+    let challenge = FieldHex("0x2a".into());
+    let prover = CircuitProver::from_crate_root();
+
+    // Prove the scan sub-proof.
+    let (scan_id, scan_toml) = prover_toml_for(
+        &scan.inputs,
+        &challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+    );
+    let scan_out = scratch("f64_compose_scan");
+    let scan_art = prover.prove_in(&scan_id, &scan_toml, &scan_out, "f64_compose_scan").unwrap();
+
+    // The disclosed object encoding the scan revealed (row 0, slot 2) — the float
+    // filter's operand anchor (the binding edge ties them).
+    let operand_enc = match &scan.inputs {
+        ProofInputs::Scan { rows, .. } => rows[0][2].clone(),
+        _ => unreachable!(),
+    };
+
+    // Prove the composable float-FILTER sub-proof: ?score >= 18.0 (true).
+    let (filter_inputs, fdigits) =
+        build_filter_f64(operand_enc, score, FilterOp::Ge, 18.0, true).expect("filter builds");
+    let (fid, ftoml) = prover_toml_for(&filter_inputs, &challenge, &[], &[], &fdigits);
+    let f_out = scratch("f64_compose_filter");
+    let filter_art = prover.prove_in(&fid, &ftoml, &f_out, "f64_compose_filter").unwrap();
+
+    let mut manifest = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/score> ?o }".into(),
+        issuers: vec!["did:key:zSampleIssuer".into()],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![
+            SubProof { inputs: scan.inputs, proof_hex: encode_artifacts(&scan_art) },
+            SubProof { inputs: filter_inputs, proof_hex: encode_artifacts(&filter_art) },
+        ],
+        // Binding edge: scan proof 0, row 0, object slot (2) -> float filter proof 1.
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all(&mut manifest, &test_issuer_sk(1), salt);
+    verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("f64_compose_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &HolderRegistry::empty(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("a composed manifest with a float-FILTER sub-proof must verify end-to-end");
+}
+
+/// sq-q7e/sq-tat: a 5-digit (out-of-family) integer-valued double operand errors
+/// cleanly (None) from build_filter_f64 — clean error, never a wrong-D member
+/// (the sq-wto exact-match discipline applied to the f64 family). No toolchain.
+#[test]
+fn filter_f64_out_of_family_errors_cleanly() {
+    let operand_enc = encode_double_literal(54321); // 5 digits, no compiled member
+    let built = build_filter_f64(operand_enc, 54321, FilterOp::Lt, 99999.0, true);
+    assert!(
+        built.is_none(),
+        "an out-of-family (5-digit) double operand must yield None — clean error, \
+         never a silently-unprovable wrong-D member"
+    );
 }

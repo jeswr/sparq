@@ -37,7 +37,11 @@ Verdict: scaffold is GOOD; committed as baseline unchanged. Added `.gitignore`
 | filter_int_d2     | — | —  | — | filter_int (D=2)|
 | filter_int_d3     | — | —  | — | filter_int (D=3; [OPUS-4.8] sq-wto, closes the 3-digit gap) |
 | filter_int_d4     | — | —  | — | filter_int (D=4)|
-| filter_f64        | — | —  | — | filter_f64 (building block, not manifest-composable v1) |
+| filter_f64        | — | —  | — | filter_f64 (raw-bits building block; non-composed use) |
+| filter_f64_d1     | — | —  | — | filter_f64 composable (D=1; [OPUS-4.8] sq-q7e/sq-tat, integer-valued double, operand-bound) |
+| filter_f64_d2     | — | —  | — | filter_f64 composable (D=2; sq-q7e/sq-tat) |
+| filter_f64_d3     | — | —  | — | filter_f64 composable (D=3; sq-q7e/sq-tat) |
+| filter_f64_d4     | — | —  | — | filter_f64 composable (D=4; sq-q7e/sq-tat) |
 | revoke_unset_d10  | — | —  | — | revoke_unset (D=10, hidden-index revocation; sq-3e5/sq-h2v) |
 | hidden_issuer_d4  | — | —  | — | hidden_issuer (D=4, in-circuit Schnorr-over-BabyJubJub + hidden-key set membership; sq-z9l) |
 

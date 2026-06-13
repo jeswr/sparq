@@ -100,6 +100,34 @@ pub fn filter_int_prover_toml(
     s
 }
 
+/// Render the `Prover.toml` body for a MANIFEST-COMPOSABLE filter_f64 proof
+/// ([OPUS-4.8] sq-q7e / sq-tat). Order MUST match `filter_f64_d{d}/src/main.nr`:
+/// challenge, operand_enc, op, b_bits, expected, digits.
+pub fn filter_f64_prover_toml(
+    challenge: &FieldHex,
+    operand_enc: &FieldHex,
+    op: u32,
+    b_bits: u64,
+    expected: bool,
+    digits: &[u8],
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", challenge.0));
+    s.push_str(&format!("operand_enc = \"{}\"\n", operand_enc.0));
+    s.push_str(&format!("op = \"{op}\"\n"));
+    s.push_str(&format!("b_bits = \"{b_bits}\"\n"));
+    s.push_str(&format!("expected = {expected}\n"));
+    s.push_str(&format!(
+        "digits = [{}]\n",
+        digits
+            .iter()
+            .map(|d| format!("\"{d}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    s
+}
+
 fn hex_array(items: &[FieldHex]) -> String {
     format!(
         "[{}]",
@@ -204,6 +232,27 @@ pub fn prover_toml_for(
                 operand_enc,
                 op.code(),
                 *bound,
+                *expected,
+                filter_digits,
+            );
+            (id.clone(), toml)
+        }
+        // [OPUS-4.8] sq-q7e + sq-tat: composable xsd:double FILTER. `filter_digits`
+        // carries the integer-valued double's canonical decimal digits (same role
+        // as the filter_int digit witness); `b_bits` is the constant double's IEEE
+        // bit pattern.
+        ProofInputs::FilterF64 {
+            id,
+            operand_enc,
+            op,
+            b_bits,
+            expected,
+        } => {
+            let toml = filter_f64_prover_toml(
+                challenge,
+                operand_enc,
+                op.code(),
+                *b_bits,
                 *expected,
                 filter_digits,
             );

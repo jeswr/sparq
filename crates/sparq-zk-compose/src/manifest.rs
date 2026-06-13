@@ -329,9 +329,19 @@ pub enum CircuitId {
     Scan { k: u32, n: u32, r: u32 },
     /// `filter_int_d{d}` — hidden xsd:integer FILTER with `d` decimal digits.
     FilterInt { d: u32 },
-    /// `filter_f64` — xsd:double FILTER (v1 building block, not yet
-    /// manifest-composable).
-    FilterF64,
+    /// `filter_f64_d{d}` — MANIFEST-COMPOSABLE hidden xsd:double FILTER with `d`
+    /// decimal digits, over the INTEGER-VALUED double fragment ([OPUS-4.8] sq-q7e
+    /// / sq-tat). The hidden operand is bound to the committed literal via the
+    /// canonical `"<digits>"^^<…#double>` token (blake3, the same mechanism as
+    /// `filter_int`), and the IEEE bits are DERIVED in-circuit from the bound
+    /// value (`f64::from(value)`), so there is no prover-free `a_bits`. The raw
+    /// `filter_f64` building block (free bits) remains for non-composed use; this
+    /// `{d}`-carrying id is the composable member. Fragment scope: plain
+    /// integer-valued doubles (`"42"^^xsd:double`); fractional/scientific forms
+    /// are deferred (the in-circuit decimal→IEEE parser is unbudgeted). See
+    /// `sparq_zk_compose_core::filter_float::filter_f64_composable_check`.
+    // [OPUS-4.8] sq-q7e + sq-tat: FilterF64 is now manifest-composable (carries d).
+    FilterF64 { d: u32 },
     /// `revoke_unset_d{depth}` — hidden-index status-list inclusion + bit-unset
     /// proof over a depth-`depth` Poseidon2 Merkle tree (sq-3e5 / sq-h2v). The
     /// proof's PUBLIC inputs are `challenge` + the status-list Merkle `root`; the
@@ -360,7 +370,7 @@ impl CircuitId {
         match self {
             CircuitId::Scan { k, n, r } => format!("scan_k{k}_n{n}_r{r}"),
             CircuitId::FilterInt { d } => format!("filter_int_d{d}"),
-            CircuitId::FilterF64 => "filter_f64".to_string(),
+            CircuitId::FilterF64 { d } => format!("filter_f64_d{d}"),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
             CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
         }
@@ -412,6 +422,24 @@ pub enum ProofInputs {
         /// The disclosed verdict.
         expected: bool,
     },
+    /// filter_f64_d{d}: MANIFEST-COMPOSABLE hidden-operand numeric FILTER over an
+    /// xsd:double (integer-valued fragment) ([OPUS-4.8] sq-q7e / sq-tat). Public
+    /// inputs mirror the member `main`: challenge (prepended), operand_enc, op,
+    /// b_bits, expected. The hidden operand is bound to the committed literal by
+    /// `operand_enc` (the scan-proof anchor, same as `filter_int`), and `b_bits`
+    /// is the FILTER's constant double as an IEEE-754 bit pattern.
+    #[serde(rename = "filter_f64")]
+    FilterF64 {
+        id: CircuitId,
+        /// The hidden column's term encoding (the scan-proof anchor) — bound
+        /// in-circuit to the committed xsd:double literal via its canonical token.
+        operand_enc: FieldHex,
+        op: FilterOp,
+        /// The FILTER's constant operand as an IEEE-754 double bit pattern.
+        b_bits: u64,
+        /// The disclosed verdict.
+        expected: bool,
+    },
 }
 
 impl ProofInputs {
@@ -419,6 +447,7 @@ impl ProofInputs {
         match self {
             ProofInputs::Scan { id, .. } => id,
             ProofInputs::FilterInt { id, .. } => id,
+            ProofInputs::FilterF64 { id, .. } => id,
         }
     }
 }

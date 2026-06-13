@@ -92,7 +92,7 @@
 //! public-input reconstruction that binds the JSON statement (incl. attribution
 //! bits) and the verifier's nonce to the proofs.
 
-use crate::build::{derive_filter_int_id, derive_scan_id};
+use crate::build::{derive_filter_f64_id, derive_filter_int_id, derive_scan_id};
 use crate::driver::{CircuitProver, DriverError};
 use crate::manifest::{
     BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest, StatusListSnapshot,
@@ -1311,6 +1311,19 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
             };
             derive_filter_int_id(d)
         }
+        // [OPUS-4.8] sq-q7e + sq-tat: composable xsd:double FILTER. As with
+        // filter_int, the operand's digit count is PRIVATE; the declared `d` is
+        // re-checked against the compiled f64 family only (it must be a compiled
+        // d). The full CircuitId (incl. `d`) is what the audit-#1 public-input
+        // reconstruction + canonical-vk recompute pin, so a wrong `d` cannot
+        // byte-match a real member's proof.
+        ProofInputs::FilterF64 { .. } => {
+            let d = match inputs.circuit_id() {
+                CircuitId::FilterF64 { d } => *d,
+                _ => return None,
+            };
+            derive_filter_f64_id(d)
+        }
     }
 }
 
@@ -1423,8 +1436,13 @@ pub fn prefilter_manifest_structure(
                 .ok_or(CheckError::DanglingEdge { edge: e })?,
             _ => return Err(CheckError::EdgeKindMismatch { edge: e }),
         };
+        // [OPUS-4.8] sq-q7e + sq-tat: a binding edge may consume the scanned
+        // column into EITHER an xsd:integer FILTER (filter_int) or a composable
+        // xsd:double FILTER (filter_f64) — both carry `operand_enc` as the
+        // scan-proof anchor, bound to the committed literal in-circuit.
         let operand = match &to.inputs {
             ProofInputs::FilterInt { operand_enc, .. } => operand_enc,
+            ProofInputs::FilterF64 { operand_enc, .. } => operand_enc,
             _ => return Err(CheckError::EdgeKindMismatch { edge: e }),
         };
         if scanned != operand {
@@ -2768,6 +2786,16 @@ fn reconstruct_public_inputs(
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, *bound);
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-q7e + sq-tat: filter_f64_d{d} public inputs, in
+        // `main` declaration order: challenge (pushed above), operand_enc, op,
+        // b_bits (the constant double's IEEE-754 bit pattern as a u64 word),
+        // expected.
+        ProofInputs::FilterF64 { operand_enc, op, b_bits, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, *b_bits);
             push_uint(&mut out, u64::from(*expected));
         }
     }
