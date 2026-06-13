@@ -218,22 +218,37 @@ pub struct RevocationStatus {
     pub version: u64,
 }
 
-/// A disclosed snapshot of a Bitstring/StatusList2021-style status list (audit
-/// #12): the list IRI, its version, and its status bitstring. The credential's
-/// liveness is `bit[index] == 0` (unset = active; set = revoked/suspended).
+/// A snapshot of a Bitstring/StatusList2021-style status list (audit #12): the
+/// list IRI, its version, and its status bitstring. The credential's liveness is
+/// `bit[index] == 0` (unset = active; set = revoked/suspended).
 ///
-/// The verifier checks, against the (issuer-bound) [`RevocationStatus`]: (i) the
-/// snapshot's `status_list` + `version` match the credential's reference (and so
-/// the issuer-signed digest), (ii) `bit[index]` is UNSET, and (iii) the
-/// `version` is within the verifier's freshness window. A revoked bit, a stale
-/// version, or a mismatched/absent snapshot all REJECT (fail-closed).
+/// # Two roles — and which one is authoritative (re-audit Option B)
+/// This type is used in TWO places:
+/// 1. The relying party's AUTHORITATIVE snapshot, carried externally in
+///    `verifier::RevocationPolicy` (resolved + authenticated by the relying party
+///    out of band, like the trusted key-set `K`). The liveness BIT decision reads
+///    from HERE.
+/// 2. The prover's `ProofManifest::status_snapshots` — UNAUTHENTICATED
+///    prover-supplied bytes. The issuer signature binds the status-list REFERENCE
+///    (`status_ref_digest(H(list IRI), index, version)`) but NOT the bit VALUES,
+///    so the prover's bitstring is NOT trusted for the bit decision. If a prover
+///    snapshot is present for the referenced `(list, version)` the verifier only
+///    requires it to byte-equal the authoritative one (a tamper tripwire —
+///    `CheckError::StatusSnapshotTampered`); otherwise it is ignored. Reading the
+///    bit from the prover's snapshot was the re-audit hole: a genuine reference +
+///    a forged all-zero snapshot reverified a REVOKED credential.
+///
+/// The verifier checks, against the (issuer-bound) [`RevocationStatus`] and its
+/// AUTHORITATIVE snapshot: (i) the reference `version` is within the verifier's
+/// freshness window, (ii) the AUTHORITATIVE `bit[index]` is UNSET, and (iii) any
+/// prover snapshot for `(list, version)` agrees byte-for-byte. A revoked
+/// authoritative bit, a stale version, a missing authoritative snapshot, or a
+/// disagreeing prover snapshot all REJECT (fail-closed).
 ///
 /// `bits` is the raw status bitstring, LSB-first within each byte (bit `i` is
-/// `bits[i / 8] >> (i % 8) & 1`) — the StatusList2021 convention. It is the
-/// disclosed snapshot the relying party validates directly (it need not be
-/// re-proven in-circuit; the interim binds it via the version under the issuer
-/// signature).
-// [OPUS-4.8] audit #12: disclosed status-list snapshot.
+/// `bits[i / 8] >> (i % 8) & 1`) — the StatusList2021 convention.
+// [OPUS-4.8] audit #12: status-list snapshot (authoritative copy lives in the policy).
+// [OPUS-4.8] audit #12 re-audit: prover's manifest copy is NOT the bit-decision source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusListSnapshot {
     /// IRI of the status list this snapshot is for (must equal the credential's

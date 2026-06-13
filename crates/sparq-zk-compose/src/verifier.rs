@@ -42,23 +42,31 @@
 //!    c. `bb verify` over (prover proof, reconstructed public inputs, canonical
 //!       vk).
 //!
-//! 2f. **Revocation / freshness (audit #12).** Leverages #3: the issuer
-//!    signature ALSO binds the credential's STATUS-LIST REFERENCE
+//! 2f. **Revocation / freshness (audit #12, + re-audit Option B).** Leverages #3:
+//!    the issuer signature ALSO binds the credential's STATUS-LIST REFERENCE
 //!    (`status_ref_digest(H(list IRI), index, version)`), so a scan-covering
 //!    attestation MUST carry an issuer-bound status reference (mandatory /
 //!    fail-closed — a `status: None` attestation is rejected, and an omitted
 //!    `manifest.revocation` leaves the status-bound signature uncheckable and is
 //!    rejected). The verifier then recomputes the digest from the disclosed
 //!    `manifest.revocation`, requires it to match the issuer-signed
-//!    `AttestedStatusRef`, finds the disclosed [`crate::manifest::StatusListSnapshot`]
-//!    for `(list, version)`, and asserts (i) the snapshot version is within the
-//!    relying party's [`RevocationPolicy`] freshness window and (ii) the
-//!    credential's status bit at `index` is UNSET. A REVOKED bit, a STALE
-//!    snapshot, a missing snapshot, or an omitted/forged/mismatched reference all
-//!    REJECT. Interim privacy note: `index` is disclosed in the CLEAR (a
-//!    linkability channel); the in-circuit HIDDEN-index inclusion + bit-unset
-//!    proof bound to the disclosed list version is the documented privacy
-//!    upgrade. See [`bind_revocation`].
+//!    `AttestedStatusRef`, and — THE RE-AUDIT FIX — reads the credential's status
+//!    BIT from the relying party's OWN AUTHORITATIVE [`crate::manifest::StatusListSnapshot`]
+//!    for `(list, version)`, carried EXTERNALLY in [`RevocationPolicy`] (exactly
+//!    as the trusted key-set `K` is external), NOT from the prover's
+//!    `manifest.status_snapshots`. The issuer signature binds the REFERENCE but
+//!    NOT the bit VALUES, so trusting the prover's bitstring let a genuine
+//!    reference + a forged all-zero snapshot reverify a REVOKED credential; the
+//!    bit is now sourced off prover-controlled bytes. It asserts (i) the
+//!    reference version is within the relying party's freshness window, (ii) the
+//!    AUTHORITATIVE snapshot's bit at `index` is UNSET, and (iii) any prover
+//!    snapshot for the same `(list, version)` byte-equals the authoritative one
+//!    (a tamper tripwire). A REVOKED bit, a STALE reference, a missing
+//!    AUTHORITATIVE snapshot, a disagreeing prover snapshot, or an
+//!    omitted/forged/mismatched reference all REJECT. Interim privacy note:
+//!    `index` is disclosed in the CLEAR (a linkability channel); the in-circuit
+//!    HIDDEN-index inclusion + bit-unset proof bound to the authoritative list
+//!    version is the documented privacy upgrade. See [`bind_revocation`].
 //!
 //! 4. **Freshness / single-use (audit #4).** [`verify_manifest`] takes a
 //!    VERIFIER-ISSUED fresh [`VerifierNonce`] (minted out of band, handed to the
@@ -86,7 +94,7 @@
 use crate::build::{derive_filter_int_id, derive_scan_id};
 use crate::driver::{CircuitProver, DriverError};
 use crate::manifest::{
-    BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest,
+    BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest, StatusListSnapshot,
 };
 use sparq_zk::encode::encode_term;
 use sparq_zk::field::{field_from_hex_str, field_to_be_bytes_32, field_to_hex, Fr};
@@ -172,11 +180,43 @@ impl KeySet {
 
 /// The relying party's revocation/freshness policy (audit #12). The verifier
 /// requires every scan-covering credential to carry an issuer-bound status-list
-/// reference, that the disclosed status snapshot show the credential's status
+/// reference, that the AUTHORITATIVE status snapshot (resolved by the relying
+/// party, NOT taken from the prover — see below) show the credential's status
 /// bit UNSET, and that the snapshot's version be within `[min_version, now]`
 /// where `now` is the current/latest version the relying party accepts and
 /// `now - min_version <= freshness_window` (a snapshot older than the window is
 /// STALE and rejected).
+///
+/// # The authenticated-bits fix (audit #12 re-audit — the load-bearing change)
+/// The issuer signature binds only the status-list REFERENCE
+/// (`status_ref_digest(H(list IRI), index, version)`), NOT the bit VALUES. So the
+/// status BITSTRING is unauthenticated: a prover that presents a genuine
+/// issuer-signed reference can attach a FORGED all-zero
+/// `manifest.status_snapshots` entry, and reading `snapshot.bit(index)` from THAT
+/// would let a REVOKED credential verify — the liveness decision would rest on
+/// prover-controlled bytes (the recurring "decision on an unauthenticated
+/// prover-supplied input" pattern that bit #3/#8/#9/#4/#12-ref).
+///
+/// The fix (Option B — mirrors the audit-#3 external-trust-anchor `K` precedent):
+/// the AUTHORITATIVE status-list snapshot is an EXTERNAL relying-party input
+/// carried HERE, in the policy, exactly as the trusted key-set is external. The
+/// verifier reads ITS OWN authoritative snapshot's `bit[index]` for the liveness
+/// decision; the prover's `manifest.status_snapshots` is NEVER trusted for the
+/// bit. The credential's issuer-signed `(list IRI, index, version)` ties it to a
+/// specific list/slot/version; the verifier resolves the snapshot for THAT
+/// `(list, version)` from its own store and reads the bit. A relying party
+/// populates this store from the status-list credential(s) it fetches + verifies
+/// out of band (the real W3C status-list object IS a separately-signed,
+/// periodically-updated artifact; resolving it is the relying party's job, just
+/// like resolving issuer keys for `K`).
+///
+/// If the prover ALSO discloses a snapshot for the referenced `(list, version)`,
+/// it MUST byte-equal the authoritative one (else REJECT — a disagreeing
+/// prover snapshot is a tamper signal); but the bit decision always uses the
+/// authoritative bytes regardless. A reference whose `(list, version)` the
+/// relying party has NO authoritative snapshot for is REJECTED fail-closed
+/// (`StatusSnapshotMissing`): the verifier will not vouch for a liveness view it
+/// cannot itself authenticate.
 ///
 /// # Freshness model (version-as-counter)
 /// `version` is a monotone counter the issuer increments each time it republishes
@@ -193,27 +233,82 @@ impl KeySet {
 /// mandatorily, and the status check runs unconditionally. A relying party that
 /// does not (yet) track versions can use [`RevocationPolicy::accept_version`] to
 /// pin the exact version it trusts (window 0), or [`RevocationPolicy::up_to`] for
-/// a window. There is no constructor that disables the bit-unset check.
+/// a window. A policy with NO authoritative snapshot for a referenced
+/// `(list, version)` rejects (fail-closed). There is no constructor that disables
+/// the bit-unset check.
 // [OPUS-4.8] audit #12: revocation / freshness policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// [OPUS-4.8] audit #12 re-audit (Option B): authoritative snapshot is EXTERNAL —
+// the bit decision rests on relying-party-resolved bytes, never the prover's.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevocationPolicy {
     /// The latest status-list version the relying party accepts as current.
     now: u64,
     /// How many versions back a snapshot may be and still be fresh.
     freshness_window: u64,
+    /// The relying party's AUTHORITATIVE status-list snapshots, keyed by
+    /// `(status_list IRI, version)`. The liveness bit decision reads from HERE,
+    /// never from the prover's `manifest.status_snapshots`. Populated from the
+    /// status-list credential(s) the relying party fetched + authenticated out of
+    /// band (the external trust anchor for the bitstring, mirroring `K`).
+    // [OPUS-4.8] audit #12 re-audit: external authoritative bitstrings.
+    authoritative: std::collections::BTreeMap<(String, u64), StatusListSnapshot>,
 }
 
 impl RevocationPolicy {
     /// Accept snapshots in `[now - window, now]` (a freshness window of `window`
-    /// versions ending at `now`).
+    /// versions ending at `now`). Carries NO authoritative snapshots yet — attach
+    /// them with [`Self::with_snapshot`] / [`Self::with_snapshots`]; a referenced
+    /// `(list, version)` with no attached authoritative snapshot is rejected
+    /// fail-closed.
     pub fn up_to(now: u64, freshness_window: u64) -> Self {
-        RevocationPolicy { now, freshness_window }
+        RevocationPolicy {
+            now,
+            freshness_window,
+            authoritative: std::collections::BTreeMap::new(),
+        }
     }
 
     /// Accept EXACTLY version `v` (window 0) — the relying party pins the single
-    /// status-list version it has resolved and trusts.
+    /// status-list version it has resolved and trusts. Attach the authoritative
+    /// snapshot(s) with [`Self::with_snapshot`] / [`Self::with_snapshots`].
     pub fn accept_version(v: u64) -> Self {
-        RevocationPolicy { now: v, freshness_window: 0 }
+        RevocationPolicy {
+            now: v,
+            freshness_window: 0,
+            authoritative: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Attach one AUTHORITATIVE status-list snapshot (builder style). The relying
+    /// party resolves + authenticates this out of band (a verified W3C status-list
+    /// credential); the verifier reads its `bit[index]` for the liveness decision,
+    /// NEVER the prover's snapshot. Keyed by `(status_list, version)`; a later
+    /// snapshot for the same key replaces an earlier one.
+    // [OPUS-4.8] audit #12 re-audit: relying-party authoritative bitstring.
+    pub fn with_snapshot(mut self, snapshot: StatusListSnapshot) -> Self {
+        self.authoritative
+            .insert((snapshot.status_list.clone(), snapshot.version), snapshot);
+        self
+    }
+
+    /// Attach several authoritative snapshots at once (builder style).
+    // [OPUS-4.8] audit #12 re-audit.
+    pub fn with_snapshots<I>(mut self, snapshots: I) -> Self
+    where
+        I: IntoIterator<Item = StatusListSnapshot>,
+    {
+        for s in snapshots {
+            self.authoritative.insert((s.status_list.clone(), s.version), s);
+        }
+        self
+    }
+
+    /// The relying party's authoritative snapshot for `(list, version)`, if it has
+    /// resolved one. `None` => the verifier has no authenticated liveness view for
+    /// this reference and rejects fail-closed.
+    // [OPUS-4.8] audit #12 re-audit: authoritative lookup (never the prover's).
+    fn authoritative_snapshot(&self, list: &str, version: u64) -> Option<&StatusListSnapshot> {
+        self.authoritative.get(&(list.to_string(), version))
     }
 
     /// The oldest version still considered fresh.
@@ -494,12 +589,26 @@ pub enum CheckError {
     /// `AttestedStatusRef`.
     // [OPUS-4.8] audit #12.
     RevocationReferenceMismatch { commitment: String },
-    /// No disclosed status-list snapshot matches the credential's (issuer-bound)
-    /// revocation reference `(status_list, version)` (audit #12): the verifier
-    /// cannot check the credential's status bit, so it rejects (fail-closed — a
-    /// prover cannot skip the bit-unset check by omitting the snapshot).
-    // [OPUS-4.8] audit #12.
+    /// The relying party has NO AUTHORITATIVE status-list snapshot for the
+    /// credential's (issuer-bound) revocation reference `(status_list, version)`
+    /// (audit #12 / re-audit Option B): the verifier cannot AUTHENTICATE the
+    /// credential's liveness view, so it rejects (fail-closed). The bit decision
+    /// is sourced from the relying party's [`RevocationPolicy`] authoritative
+    /// store — NOT the prover's `manifest.status_snapshots` — so an absent
+    /// authoritative snapshot is the verifier's own missing trust input, never a
+    /// prover-skippable field.
+    // [OPUS-4.8] audit #12 / re-audit: missing AUTHORITATIVE (relying-party) snapshot.
     StatusSnapshotMissing { status_list: String, version: u64 },
+    /// The prover disclosed a status-list snapshot for the referenced
+    /// `(status_list, version)` whose bits DISAGREE with the relying party's
+    /// AUTHORITATIVE snapshot (audit #12 re-audit, Option B): a tamper signal. The
+    /// liveness bit decision does NOT depend on the prover's snapshot (it always
+    /// reads the authoritative bytes), but a disagreeing prover snapshot — e.g. a
+    /// FORGED all-zero bitstring presented alongside a genuine reference for a
+    /// REVOKED credential — is surfaced explicitly as a forgery attempt rather
+    /// than silently ignored.
+    // [OPUS-4.8] audit #12 re-audit: prover snapshot ≠ authoritative snapshot.
+    StatusSnapshotTampered { status_list: String, version: u64 },
     /// The credential's status bit is SET in the disclosed snapshot (audit #12):
     /// the credential is REVOKED / SUSPENDED. Rejected.
     // [OPUS-4.8] audit #12.
@@ -621,7 +730,11 @@ impl std::fmt::Display for CheckError {
             ),
             CheckError::StatusSnapshotMissing { status_list, version } => write!(
                 f,
-                "no disclosed status-list snapshot matches the credential's reference (list {status_list}, version {version}) (audit #12: cannot check the status bit — fail closed)"
+                "the relying party has no AUTHORITATIVE status-list snapshot for the credential's reference (list {status_list}, version {version}) (audit #12 re-audit: the liveness bit is read from the relying party's own resolved snapshot, not the prover's — an unresolved reference fails closed)"
+            ),
+            CheckError::StatusSnapshotTampered { status_list, version } => write!(
+                f,
+                "the prover-disclosed status-list snapshot for (list {status_list}, version {version}) disagrees with the relying party's AUTHORITATIVE snapshot (audit #12 re-audit: forged/tampered bitstring — the bit decision uses the authoritative bytes, and a disagreeing prover snapshot is rejected)"
             ),
             CheckError::CredentialRevoked { status_list, index } => write!(
                 f,
@@ -1079,15 +1192,33 @@ fn bind_issuer_attestations(
 /// issuer signed). So here `manifest.revocation` is the ISSUER'S reference, not
 /// a prover claim.
 ///
-/// This stage then validates the credential's LIVENESS against the disclosed
-/// status-list snapshot and the relying party's freshness policy:
-/// - find the disclosed [`StatusListSnapshot`] matching the reference's
-///   `(status_list, version)` — a missing snapshot REJECTS
+/// This stage then validates the credential's LIVENESS against the AUTHORITATIVE
+/// status-list snapshot (resolved by the relying party into [`RevocationPolicy`],
+/// NOT taken from the prover) and the relying party's freshness policy:
+/// - resolve the AUTHORITATIVE [`StatusListSnapshot`] matching the reference's
+///   `(status_list, version)` from the policy — NO authoritative snapshot REJECTS
 ///   ([`CheckError::StatusSnapshotMissing`]);
-/// - the snapshot version MUST be within the policy's freshness window — a stale
-///   (or future-dated) snapshot REJECTS ([`CheckError::StatusListStale`]);
-/// - the credential's status bit at `index` MUST be UNSET — a set bit means the
-///   credential is REVOKED/SUSPENDED and REJECTS ([`CheckError::CredentialRevoked`]).
+/// - the version MUST be within the policy's freshness window — a stale
+///   (or future-dated) reference REJECTS ([`CheckError::StatusListStale`]);
+/// - if the prover ALSO disclosed a snapshot for the SAME `(list, version)` it
+///   MUST byte-equal the authoritative one — a disagreeing prover snapshot is a
+///   tamper signal and REJECTS ([`CheckError::StatusSnapshotTampered`]);
+/// - the credential's status bit at `index` IN THE AUTHORITATIVE SNAPSHOT MUST be
+///   UNSET — a set bit means the credential is REVOKED/SUSPENDED and REJECTS
+///   ([`CheckError::CredentialRevoked`]).
+///
+/// # The authenticated-bits fix (Option B) — load-bearing
+/// The bit decision reads `authoritative.bit(index)`, where `authoritative` is
+/// the relying party's OWN snapshot for the reference's `(list, version)` — NEVER
+/// `manifest.status_snapshots`. The issuer signature binds the reference (which
+/// list / slot / version) but NOT the bit values; if the verifier read the
+/// prover's snapshot bytes for the bit, a prover holding a genuine reference
+/// could attach a forged all-zero snapshot and a REVOKED credential would verify
+/// (the re-audit break). Sourcing the bitstring externally — exactly as the
+/// trusted key-set `K` is external (audit #3) — moves the liveness decision off
+/// prover-controlled bytes. The prover's snapshot, if present for the referenced
+/// key, is only checked for byte-equality with the authoritative one (a tamper
+/// tripwire); it is otherwise ignored.
 ///
 /// # Mandatory / fail-closed
 /// This runs whenever the manifest carries a `revocation` reference, which —
@@ -1096,17 +1227,21 @@ fn bind_issuer_attestations(
 /// status-bound credential cannot reach acceptance without passing this. (A
 /// manifest with no scans and no revocation has nothing to revoke; the check is
 /// vacuous, not skipped — there is no scan-covering commitment whose liveness is
-/// in question.)
+/// in question.) A relying party that has resolved NO authoritative snapshot for
+/// the referenced list/version rejects (it cannot authenticate the liveness view).
 ///
 /// # Privacy (interim) — the documented remaining step
-/// `index` is matched against a disclosed bitstring in the clear, so this reveals
-/// WHICH list slot the credential occupies (a linkability handle). The
+/// `index` is matched against the authoritative bitstring in the clear, so this
+/// reveals WHICH list slot the credential occupies (a linkability handle). The
 /// full-privacy upgrade is an IN-CIRCUIT hidden-index inclusion + bit-unset proof
-/// bound to the disclosed list version, revealing only "the hidden index is
+/// bound to the (authoritative) list version, revealing only "the hidden index is
 /// in-range and unset at version V". The verifier-side interim closes the
-/// "revoked credential still verifies" hole NOW (the minimum soundness bar) and
-/// leaves the index-hiding as the privacy upgrade.
+/// "revoked credential still verifies" hole NOW (the minimum soundness bar — and,
+/// post re-audit, anchors the bit on authenticated bytes) and leaves the
+/// index-hiding as the privacy upgrade.
 // [OPUS-4.8] audit #12: verifier-side revocation / freshness check.
+// [OPUS-4.8] audit #12 re-audit (Option B): the bit decision reads the
+// AUTHORITATIVE (relying-party-resolved) snapshot, never the prover's bytes.
 fn bind_revocation(
     manifest: &ProofManifest,
     policy: &RevocationPolicy,
@@ -1118,33 +1253,56 @@ fn bind_revocation(
         // is in question — the check is vacuously satisfied.
         return Ok(());
     };
-    // Find the disclosed snapshot for this reference's list + version.
-    let snapshot = manifest
-        .status_snapshots
-        .iter()
-        .find(|s| s.status_list == rev.status_list && s.version == rev.version);
-    let Some(snapshot) = snapshot else {
+    // Freshness FIRST, on the (issuer-bound) reference's version: a stale (or
+    // future-dated) reference is rejected so a revoked-since-snapshot credential
+    // cannot slip through on an old "active" view, regardless of whether the
+    // relying party still holds that old version's snapshot.
+    if !policy.is_fresh(rev.version) {
+        return Err(CheckError::StatusListStale {
+            status_list: rev.status_list.clone(),
+            version: rev.version,
+        });
+    }
+    // Resolve the AUTHORITATIVE snapshot from the relying party's policy (NOT the
+    // prover). No authoritative snapshot for the referenced (list, version) =>
+    // the verifier cannot authenticate the liveness view => REJECT fail-closed.
+    let Some(authoritative) = policy.authoritative_snapshot(&rev.status_list, rev.version) else {
         return Err(CheckError::StatusSnapshotMissing {
             status_list: rev.status_list.clone(),
             version: rev.version,
         });
     };
-    // Freshness: the snapshot version must be within the policy window. A stale
-    // snapshot is rejected so a revoked-since-snapshot credential cannot slip
-    // through on an old "active" view.
-    if !policy.is_fresh(snapshot.version) {
-        return Err(CheckError::StatusListStale {
-            status_list: rev.status_list.clone(),
-            version: snapshot.version,
-        });
-    }
-    // Liveness: the credential's status bit must be UNSET (out-of-range reads as
-    // SET — fail closed).
-    if snapshot.bit(rev.index) {
+    // Liveness (THE security decision): the credential's status bit must be UNSET
+    // IN THE AUTHORITATIVE snapshot (out-of-range reads as SET — fail closed).
+    // This reads the relying party's OWN authenticated bytes, so the verdict is
+    // identical regardless of what snapshot (forged all-zero or otherwise) the
+    // prover attached — the re-audit break is closed here. Checked BEFORE the
+    // tamper tripwire so a genuinely-revoked credential is reported as REVOKED no
+    // matter what the prover disclosed.
+    if authoritative.bit(rev.index) {
         return Err(CheckError::CredentialRevoked {
             status_list: rev.status_list.clone(),
             index: rev.index,
         });
+    }
+    // Tamper tripwire: the authoritative bit is UNSET, but if the prover ALSO
+    // disclosed a snapshot for this exact (list, version) it MUST byte-equal the
+    // authoritative one. The liveness verdict above did not depend on it; this
+    // only surfaces a disagreeing prover snapshot as an explicit forgery signal
+    // (e.g. the prover lied the OTHER way — claimed REVOKED — or doctored
+    // unrelated bits) rather than silently accepting it.
+    // [OPUS-4.8] audit #12 re-audit: prover snapshot is a tamper tripwire only.
+    if let Some(prover_snapshot) = manifest
+        .status_snapshots
+        .iter()
+        .find(|s| s.status_list == rev.status_list && s.version == rev.version)
+    {
+        if prover_snapshot.bits != authoritative.bits {
+            return Err(CheckError::StatusSnapshotTampered {
+                status_list: rev.status_list.clone(),
+                version: rev.version,
+            });
+        }
     }
     Ok(())
 }

@@ -37,10 +37,17 @@ use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
 
 // [OPUS-4.8] audit #12: revocation/freshness plumbing. The fixtures bind a
 // status-list reference (list `http://ex/status/1`, index 3, version 1) under the
-// issuer signature and disclose a snapshot whose bit 3 is UNSET, version 1. The
-// relying party's policy accepts version 1 (`fresh_policy`). Tests that probe a
-// DIFFERENT gate get a fresh, non-revoked status so they reach the gate under
-// test; the #12-specific forges set the bit / drop the field / stale the version.
+// issuer signature. The relying party's policy accepts version 1 (`fresh_policy`)
+// AND carries the AUTHORITATIVE snapshot (re-audit Option B): the liveness bit is
+// read from the relying party's own snapshot, NOT the prover's. Tests that probe a
+// DIFFERENT gate get a fresh, non-revoked AUTHORITATIVE snapshot so they reach the
+// gate under test; the #12-specific forges set the AUTHORITATIVE bit / drop the
+// field / stale the version / disagree the prover snapshot.
+//
+// [OPUS-4.8] audit #12 re-audit: the bitstring is now an EXTERNAL relying-party
+// input (in the policy), authenticated out of band like the trusted key-set K —
+// it is NEVER read from `manifest.status_snapshots` for the bit decision. The
+// `revoked` flag in these fixtures therefore lives in the POLICY snapshot.
 
 /// The status-list IRI the fixtures bind/disclose.
 const FIXTURE_STATUS_LIST: &str = "http://ex/status/1";
@@ -49,9 +56,23 @@ const FIXTURE_STATUS_INDEX: u64 = 3;
 /// The status-list version the fixtures bind + the relying party accepts.
 const FIXTURE_STATUS_VERSION: u64 = 1;
 
-/// The relying party's revocation policy accepting the fixture version (window 0).
+/// The relying party's revocation policy accepting the fixture version (window 0)
+/// AND carrying a fresh, NON-revoked AUTHORITATIVE snapshot. This is the external
+/// authoritative bitstring the verifier reads the liveness bit from (re-audit
+/// Option B) — tests probing a different gate use this so the revocation gate
+/// passes. The #12 forges build a policy with a REVOKED authoritative snapshot
+/// (`revoked_policy`) or no snapshot at all.
 fn fresh_policy() -> RevocationPolicy {
-    RevocationPolicy::accept_version(FIXTURE_STATUS_VERSION)
+    RevocationPolicy::accept_version(FIXTURE_STATUS_VERSION).with_snapshot(fixture_snapshot(false))
+}
+
+/// The relying party's policy whose AUTHORITATIVE snapshot has the credential's
+/// status bit SET (revoked). The verifier reads ITS OWN (this) snapshot's bit, so
+/// a credential is rejected as revoked here NO MATTER what snapshot the prover
+/// attaches. This is the re-audit forge anchor.
+// [OPUS-4.8] audit #12 re-audit: authoritative REVOKED snapshot in the policy.
+fn revoked_policy() -> RevocationPolicy {
+    RevocationPolicy::accept_version(FIXTURE_STATUS_VERSION).with_snapshot(fixture_snapshot(true))
 }
 
 /// The disclosed status-list snapshot the fixtures attach: a single byte with
@@ -2418,34 +2439,44 @@ fn probe_scan_public_inputs_hex() {
 // (H(list IRI), index, version) via `commitment_message_with_status`. So a
 // scan-covering attestation MUST carry an issuer-bound status reference
 // (mandatory / fail-closed), the disclosed `manifest.revocation` must match it,
-// the disclosed status-list snapshot must show the credential's status bit UNSET,
-// and the snapshot version must be within the relying party's freshness window.
+// the credential's status bit must be UNSET, and the version must be within the
+// relying party's freshness window.
+//
+// [OPUS-4.8] RE-AUDIT FIX (Option B): the issuer signature binds the REFERENCE
+// but NOT the bit VALUES, so the status bitstring is read from the relying party's
+// OWN AUTHORITATIVE snapshot (external, in `RevocationPolicy`) — never the
+// prover's `manifest.status_snapshots`. See the dedicated re-audit section below.
 //
 // Minimum bar (all asserted below):
-//   - a REVOKED credential                         => REJECT (CredentialRevoked)
+//   - a REVOKED credential (authoritative bit set) => REJECT (CredentialRevoked)
 //   - a revoked credential whose prover OMITS the
 //     revocation field                             => REJECT (status-bound sig
 //                                                     can't be checked => fail)
-//   - a STALE status list (outside the window)     => REJECT (StatusListStale)
-//   - a non-revoked credential with a fresh list   => VERIFIES
+//   - a STALE reference (outside the window)        => REJECT (StatusListStale)
+//   - no AUTHORITATIVE snapshot for the reference   => REJECT (StatusSnapshotMissing)
+//   - a non-revoked credential, fresh, authoritative=> VERIFIES
 //
 // The status check is MANDATORY: there is no path that accepts a scan-covering
-// commitment without an issuer-bound status reference + a fresh, bit-unset
-// snapshot. The privacy upgrade (in-circuit HIDDEN-index inclusion + bit-unset,
-// removing the clear-index linkability channel) is the documented remaining step.
+// commitment without an issuer-bound status reference + a fresh AUTHORITATIVE,
+// bit-unset snapshot. The privacy upgrade (in-circuit HIDDEN-index inclusion +
+// bit-unset, removing the clear-index linkability channel) is the documented
+// remaining step.
 
-/// (1) A REVOKED credential ⇒ REJECT. The disclosed snapshot has the
-/// credential's status bit SET; everything else (issuer signature, salt,
-/// reference, freshness) is honest, so the ONLY fault is revocation.
+/// (1) A REVOKED credential ⇒ REJECT. The relying party's AUTHORITATIVE snapshot
+/// (in the policy) has the credential's status bit SET; everything else (issuer
+/// signature, salt, reference, freshness) is honest, so the ONLY fault is
+/// revocation. The prover's `manifest.status_snapshots` is left as the (active)
+/// fixture default — IRRELEVANT to the bit decision (re-audit Option B): the
+/// verifier reads the AUTHORITATIVE bit, not the prover's.
 #[test]
 fn revocation_revoked_credential_rejected() {
     let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
     let sk = test_issuer_sk(1);
     m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    // Flip the snapshot bit at the credential's index => REVOKED.
-    m.status_snapshots = vec![fixture_snapshot(true)];
-    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+    // The AUTHORITATIVE snapshot (in the policy) has bit 3 SET => REVOKED. The
+    // prover's snapshot is the active fixture default (and is ignored for the bit).
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &revoked_policy()) {
         Err(CheckError::CredentialRevoked { index, .. }) if index == FIXTURE_STATUS_INDEX => {}
         other => panic!("expected CredentialRevoked, got {other:?}"),
     }
@@ -2528,12 +2559,14 @@ fn revocation_reference_mismatch_rejected() {
     }
 }
 
-/// (3) A STALE status list (snapshot version outside the verifier freshness
-/// window) ⇒ REJECT. The credential is genuinely non-revoked in the disclosed
-/// snapshot, but the snapshot is too old to trust (a revoked-since-snapshot
-/// credential must not slip through on a stale "active" view). The issuer signed
-/// the OLD version, so to reach the freshness gate the disclosed reference +
-/// snapshot are both the old version; the policy only accepts a newer one.
+/// (3) A STALE status reference (issuer-signed version outside the verifier
+/// freshness window) ⇒ REJECT. The credential would be non-revoked at that old
+/// version, but the relying party will not trust a revocation view that old (a
+/// revoked-since-version credential must not slip through on a stale "active"
+/// view). The freshness gate is checked on the ISSUER-SIGNED reference version
+/// (re-audit Option B), so it fires regardless of whether the relying party still
+/// holds that old version's authoritative snapshot; the policy only accepts a
+/// newer version.
 #[test]
 fn revocation_stale_status_list_rejected() {
     let sk = test_issuer_sk(1);
@@ -2582,18 +2615,24 @@ fn revocation_stale_status_list_rejected() {
     }
 }
 
-/// (3b) No disclosed snapshot for the credential's (issuer-bound) reference ⇒
-/// REJECT: the verifier cannot check the status bit, so it fails closed (a prover
-/// cannot skip the bit-unset check by omitting the snapshot).
+/// (3b) The relying party has NO AUTHORITATIVE snapshot for the credential's
+/// (issuer-bound) reference ⇒ REJECT: the verifier cannot AUTHENTICATE the
+/// liveness view, so it fails closed (re-audit Option B — the bit is read from the
+/// relying party's own resolved snapshot, so an unresolved reference is the
+/// verifier's missing trust input). The prover attaching its own snapshot does
+/// NOT help — it is not the bit source.
 #[test]
 fn revocation_missing_snapshot_rejected() {
     let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
     let sk = test_issuer_sk(1);
     m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    // Reference present + issuer-bound, but NO matching snapshot disclosed.
-    m.status_snapshots = vec![];
-    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+    // The prover attaches its OWN (active) snapshot — irrelevant: the policy has
+    // NO authoritative snapshot for the referenced (list, version).
+    m.status_snapshots = vec![fixture_snapshot(false)];
+    // Policy accepts the version but holds NO authoritative snapshot for it.
+    let policy = RevocationPolicy::accept_version(FIXTURE_STATUS_VERSION);
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &policy) {
         Err(CheckError::StatusSnapshotMissing { version, .. }) if version == FIXTURE_STATUS_VERSION => {}
         other => panic!("expected StatusSnapshotMissing, got {other:?}"),
     }
@@ -2611,6 +2650,111 @@ fn revocation_non_revoked_fresh_verifies_structurally() {
     m.key_set.push(public_key_to_hex(&sk.public_key()));
     prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy())
         .expect("non-revoked, fresh, issuer-bound credential verifies");
+}
+
+// ===========================================================================
+// [OPUS-4.8] audit #12 RE-AUDIT (Option B): authenticated status bits.
+// ===========================================================================
+//
+// The re-audit hole (confirmed BROKEN before this fix): `StatusListSnapshot.bits`
+// were UNAUTHENTICATED. The issuer signature binds only the status-list REFERENCE
+// (`status_ref_digest(H(list IRI), index, version)`) — NOT the bit values. So a
+// prover could present a GENUINE issuer-signed reference for a REVOKED credential
+// together with a FORGED all-zero `manifest.status_snapshots` entry, and the old
+// `bind_revocation` — which read `snapshot.bit(index)` from the PROVER's bytes —
+// would see bit==0 and let the revoked credential VERIFY. The liveness decision
+// rested on prover-controlled bytes.
+//
+// The fix (Option B, mirrors the audit-#3 external-K precedent): the authoritative
+// status bitstring is an EXTERNAL relying-party input (in `RevocationPolicy`,
+// attached via `.with_snapshot(..)`), resolved + authenticated out of band. The
+// verifier reads ITS OWN snapshot's `bit[index]`; the prover's snapshot is NEVER
+// the bit source (it is only a tamper tripwire: if present for the referenced
+// (list, version) it must byte-equal the authoritative one).
+//
+// The MANDATORY re-audit forge (this test): a REVOKED credential (authoritative
+// bit SET) + a genuine issuer-signed reference + a FORGED all-zero prover snapshot
+// ⇒ MUST be REJECTED (the authoritative bit is read, not the prover's).
+
+/// THE re-audit forge (structural): a REVOKED credential — the relying party's
+/// AUTHORITATIVE snapshot has bit[index] SET — is presented with a genuine
+/// issuer-signed reference AND a FORGED all-zero (active) prover snapshot. Before
+/// the fix this VERIFIED (the verifier read the prover's all-zero bit). Now the
+/// verifier reads the AUTHORITATIVE bit and REJECTS (`CredentialRevoked`). The
+/// forged prover snapshot is irrelevant to the verdict.
+#[test]
+fn revocation_reaudit_forged_active_snapshot_cannot_unrevoke() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    // Genuine, in-K, status-bound attestation over the real (revoked) reference.
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    // The prover FORGES an all-zero (active) snapshot — claiming the credential is
+    // live. This is exactly the re-audit break.
+    m.status_snapshots = vec![fixture_snapshot(false)];
+    // But the relying party's AUTHORITATIVE snapshot (in the policy) has bit 3 SET.
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &revoked_policy()) {
+        Err(CheckError::CredentialRevoked { index, .. }) if index == FIXTURE_STATUS_INDEX => {}
+        other => panic!(
+            "RE-AUDIT FORGE: a revoked credential with a forged all-zero prover snapshot \
+             MUST be rejected on the authoritative bit, got {other:?}"
+        ),
+    }
+}
+
+/// THE re-audit forge, variant: the prover OMITS the snapshot entirely (empty
+/// `status_snapshots`) for a REVOKED credential. The bit decision does not depend
+/// on the prover's snapshot at all, so this still REJECTS on the authoritative
+/// bit (`CredentialRevoked`) — there is no "no prover snapshot => skip the check"
+/// path.
+#[test]
+fn revocation_reaudit_omitted_prover_snapshot_still_revoked() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    // No prover snapshot at all — irrelevant; the authoritative bit governs.
+    m.status_snapshots = vec![];
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &revoked_policy()) {
+        Err(CheckError::CredentialRevoked { index, .. }) if index == FIXTURE_STATUS_INDEX => {}
+        other => panic!("expected CredentialRevoked (authoritative bit set, no prover snapshot), got {other:?}"),
+    }
+}
+
+/// Tamper tripwire: a NON-revoked credential (authoritative bit UNSET) whose
+/// prover discloses a snapshot for the referenced (list, version) that DISAGREES
+/// with the authoritative one (here the prover claims REVOKED — the opposite lie)
+/// ⇒ REJECT with `StatusSnapshotTampered`. The liveness verdict did not depend on
+/// the prover snapshot, but a disagreeing one is surfaced as a forgery signal
+/// rather than silently ignored.
+#[test]
+fn revocation_reaudit_disagreeing_prover_snapshot_rejected() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    // Authoritative snapshot is ACTIVE (`fresh_policy`); the prover discloses a
+    // REVOKED snapshot for the same (list, version) — a disagreement.
+    m.status_snapshots = vec![fixture_snapshot(true)];
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+        Err(CheckError::StatusSnapshotTampered { version, .. }) if version == FIXTURE_STATUS_VERSION => {}
+        other => panic!("expected StatusSnapshotTampered (prover snapshot ≠ authoritative), got {other:?}"),
+    }
+}
+
+/// Positive control for Option B: a NON-revoked credential whose prover snapshot
+/// AGREES with the authoritative one (both active) VERIFIES. (Distinguishes the
+/// tamper tripwire from a blanket "any prover snapshot rejects".)
+#[test]
+fn revocation_reaudit_agreeing_prover_snapshot_verifies() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    // Prover snapshot matches the authoritative active snapshot.
+    m.status_snapshots = vec![fixture_snapshot(false)];
+    prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy())
+        .expect("an agreeing (active) prover snapshot + active authoritative snapshot verifies");
 }
 
 /// (4b) A snapshot WITHIN a freshness window (not just the exact version)
@@ -2651,8 +2795,14 @@ fn revocation_within_window_verifies() {
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
     };
-    // now=5, window=3 => accepts [2, 5]; version 3 is fresh.
-    let policy = RevocationPolicy::up_to(5, 3);
+    // now=5, window=3 => accepts [2, 5]; version 3 is fresh. The AUTHORITATIVE
+    // snapshot for (list, version=3) is non-revoked (re-audit Option B: the bit is
+    // read from this policy snapshot, not the prover's).
+    let policy = RevocationPolicy::up_to(5, 3).with_snapshot(StatusListSnapshot {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        version: ver,
+        bits: vec![0u8],
+    });
     prefilter_manifest_structure(&m, &trusted_k(&sk), &policy)
         .expect("a snapshot within the freshness window verifies");
 }
@@ -2691,7 +2841,15 @@ fn revocation_full_prove_verify_non_revoked_verifies() {
 /// (6) FORGE (slow, real bb prove+verify): a REVOKED credential presented with a
 /// genuine bb proof of the scan still REJECTS through the FULL pipeline — the
 /// crypto gate passes (the scan IS a real proof) but the #12 revocation gate
-/// fires. Confirms revocation is enforced END-TO-END, not just structurally.
+/// fires on the AUTHORITATIVE (relying-party) snapshot. Confirms revocation is
+/// enforced END-TO-END, not just structurally.
+///
+/// [OPUS-4.8] audit #12 re-audit: this is the EXACT re-audit break end-to-end —
+/// the prover attaches a FORGED all-zero (active) `manifest.status_snapshots`
+/// alongside a genuine issuer-signed reference, but the relying party's
+/// AUTHORITATIVE snapshot (in `revoked_policy`) has the bit SET, so the verifier
+/// reads ITS OWN bytes and rejects (`CredentialRevoked`). The forged prover
+/// snapshot is irrelevant to the verdict.
 #[test]
 #[ignore = "slow: full bb prove (audit #12 revoked-end-to-end forge)"]
 fn revocation_full_prove_verify_revoked_rejected() {
@@ -2705,19 +2863,19 @@ fn revocation_full_prove_verify_revoked_rejected() {
     let (inputs, art) =
         honest_filter_d1(5, FilterOp::Lt, 10, true, &challenge, &prover, "rev_forge");
     let mut m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
-    // Flip the disclosed snapshot bit => the credential is REVOKED, even though
-    // the bb proof of the scan is genuine.
-    m.status_snapshots = vec![fixture_snapshot(true)];
+    // The prover attaches a FORGED all-zero (active) snapshot — the re-audit break.
+    // It is IGNORED for the bit; the verdict comes from the AUTHORITATIVE policy.
+    m.status_snapshots = vec![fixture_snapshot(false)];
     match verify_manifest(
         &m,
         &prover,
         &scratch("rev_forge_verify"),
         &trusted_k(&test_issuer_sk(1)),
-        &fresh_policy(),
+        &revoked_policy(), // AUTHORITATIVE snapshot has bit 3 SET => REVOKED.
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
         Err(CheckError::CredentialRevoked { .. }) => {}
-        other => panic!("expected CredentialRevoked end-to-end, got {other:?}"),
+        other => panic!("expected CredentialRevoked end-to-end (authoritative bit set), got {other:?}"),
     }
 }
