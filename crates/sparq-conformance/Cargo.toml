@@ -3,6 +3,9 @@ name = "sparq-conformance"
 # Dev-only harness (roadmap T13): runs the official W3C SPARQL test suites
 # against sparq and reports a pass-rate scoreboard. Never published.
 publish = false
+# [OPUS-4.8] Two [[bin]] targets below — pick the SPARQL harness as the default
+# so a bare `cargo run -p sparq-conformance` (CI + scripts + local) is unambiguous.
+default-run = "sparq-conformance"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

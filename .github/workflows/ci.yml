@@ -82,7 +82,10 @@ jobs:
       - name: Fetch W3C test suites (pinned)
         run: ./scripts/fetch-conformance.sh
       - name: Run conformance suites
-        run: cargo run --release -p sparq-conformance
+        # [OPUS-4.8] --bin is REQUIRED: the crate now ships two binaries
+        # (sparq-conformance + sparq-inference-conformance, added in 058bdbf5),
+        # so a bare `cargo run -p sparq-conformance` is ambiguous and exits 101.
+        run: cargo run --release -p sparq-conformance --bin sparq-conformance
       - name: Summarize
         run: cat conformance-report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Enforce ratchet (pass+divergence count must not regress)

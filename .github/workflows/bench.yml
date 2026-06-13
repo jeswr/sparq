@@ -33,6 +33,32 @@ jobs:
         run: cargo build --release -p sparq-cli -p sparq-bench
       - name: Run benchmarks
         run: bash scripts/ci-bench.sh 200000 bench-results.json
+      # [OPUS-4.8] First-run bootstrap: github-action-benchmark does
+      # `git fetch origin benchmark-data:benchmark-data` and hard-fails with
+      # "couldn't find remote ref benchmark-data" when the history branch does
+      # not yet exist (it does NOT auto-create it — see its docs/write.ts). Create
+      # the orphan branch on origin if missing so the very first run (and any run
+      # after the branch is deleted) self-heals instead of failing. Idempotent.
+      - name: Ensure benchmark-data history branch exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin benchmark-data >/dev/null 2>&1; then
+            echo "benchmark-data branch already exists on origin — nothing to do."
+          else
+            echo "benchmark-data branch missing on origin — creating an orphan branch."
+            tmp="$(mktemp -d)"
+            git -C "$tmp" init -q
+            git -C "$tmp" checkout -q --orphan benchmark-data
+            git -C "$tmp" -c user.name=github-actions[bot] \
+                          -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                          commit -q --allow-empty -m "chore(bench): initialise benchmark-data history branch"
+            git -C "$tmp" push -q \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              benchmark-data:benchmark-data
+            echo "Created and pushed orphan benchmark-data branch."
+          fi
       - name: Store + compare against history
         uses: benchmark-action/github-action-benchmark@v1
         with:
