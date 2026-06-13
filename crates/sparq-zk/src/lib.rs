@@ -16,6 +16,9 @@
 //! - [`encode`] — per-term / per-triple field encoding with graph-scoped
 //!   bnode salting (plan §2.2, Q6).
 //! - [`commit`] — per-named-graph flat Poseidon2 commitments (plan §2.2).
+//! - [`ingest`] — the trusted-ingest Stage-2 path (sq-610 + sq-cn8): a salt
+//!   mint that draws globally-unique per-graph RDFC10 salts from the OS CSPRNG
+//!   and per-named-graph commitment wired through to the zk-trace consumer.
 //! - [`registry`] — `<urn:sparq:zk>` registry-graph plumbing (plan Q13),
 //!   mirroring `sparq-solid`'s `<urn:sparq:auth>` conventions.
 //! - [`sig`] — issuer signatures over per-graph commitments (audit #3):
@@ -36,6 +39,7 @@ pub mod canon;
 pub mod commit;
 pub mod encode;
 pub mod field;
+pub mod ingest;
 pub mod poseidon2;
 mod poseidon2_constants;
 pub mod registry;

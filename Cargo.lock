@@ -3311,6 +3311,7 @@ dependencies = [
  "ark-serialize",
  "ark-std",
  "blake3",
+ "getrandom 0.2.17",
  "oxrdf 0.2.4",
  "oxrdf 0.3.3",
  "oxttl 0.1.8",

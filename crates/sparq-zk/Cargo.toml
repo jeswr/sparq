@@ -38,6 +38,12 @@ ark-ff = { version = "0.5", default-features = false }
 
 # Off-circuit string hash h_s (plan §2.2: Enc_t(term) = h_2(type_code, h_s(value))).
 blake3 = "1"
+
+# OS CSPRNG for the trusted-ingest per-graph salt mint (audit #9 / sq-610): each
+# named graph draws fresh OS-random entropy so its bnode salt is globally unique
+# by construction. Already in the workspace lockfile (via ark-std's rand).
+# [OPUS-4.8] sq-610.
+getrandom = "0.2"
 ark-ed-on-bn254 = { version = "0.5", default-features = false }
 ark-ec = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
