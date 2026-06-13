@@ -59,10 +59,12 @@ pub fn fuse_rrf<T: Clone + Eq + Hash>(
 /// [`fuse_rrf`] but each list carries a non-negative weight —
 /// `score(item) = Σ_lists weight_l / (k + rank_l)`, ranks 1-based. Use it to
 /// down-weight a noisier signal without dropping it (e.g. text 1.0,
-/// structural 0.5); weight 0 mutes a list entirely (its items still appear,
-/// scored only by the other lists), and all-1.0 weights reduce to plain
-/// [`fuse_rrf`]. Ties break by first appearance across `(list, rank)` order,
-/// deterministically.
+/// structural 0.5); weight 0 mutes a list ENTIRELY — [OPUS-4.8] its items do
+/// not appear unless another weighted list also ranks them (review 1874: a
+/// muted list previously injected its items at score 0.0, so they could surface
+/// as standalone results when `top_k` was large or every list was zero-weighted).
+/// All-1.0 weights reduce to plain [`fuse_rrf`]. Ties break by first appearance
+/// across `(list, rank)` order, deterministically.
 ///
 /// # Panics
 /// If `k ≤ 0`, or any weight is negative or non-finite.
@@ -80,6 +82,12 @@ pub fn fuse_rrf_weighted<T: Clone + Eq + Hash>(
     let mut acc: FxHashMap<T, (f64, usize)> = FxHashMap::default();
     let mut order = 0usize;
     for (list, weight) in lists {
+        // [OPUS-4.8] Skip muted (weight 0) lists entirely so they inject no standalone items —
+        // a 0.0 contribution would still register the item in `acc` and let it surface in the
+        // top-k. A muted list contributes nothing. See review 1874.
+        if *weight == 0.0 {
+            continue;
+        }
         for (rank0, (item, _)) in list.iter().enumerate() {
             let contribution = weight / (k + (rank0 + 1) as f64);
             let entry = acc.entry(item.clone()).or_insert_with(|| {
@@ -251,6 +259,30 @@ mod tests {
         // x still appears (rank 2 in b) but a contributes nothing.
         assert_eq!(fused[0].0, "y");
         assert!((fused[1].1 - 1.0 / 62.0).abs() < 1e-12);
+    }
+
+    // [OPUS-4.8] Regression for review 1874: an item that exists ONLY in a zero-weight (muted)
+    // list must NOT surface as a standalone result. Previously a 0.0 contribution still inserted
+    // it into the accumulator, so it could appear when top_k was large enough.
+    #[test]
+    fn weighted_rrf_zero_weight_injects_no_standalone_items() {
+        let muted: Vec<(&str, f64)> = vec![("only_in_muted", 1.0), ("z", 1.0)];
+        let live: Vec<(&str, f64)> = vec![("y", 1.0)];
+        // Large top_k so nothing is dropped by truncation.
+        let fused = fuse_rrf_weighted(&[(&muted, 0.0), (&live, 1.0)], 60.0, 100);
+        assert_eq!(fused.len(), 1, "only the live list's item should appear");
+        assert_eq!(fused[0].0, "y");
+        assert!(fused.iter().all(|(t, _)| *t != "only_in_muted" && *t != "z"));
+    }
+
+    // [OPUS-4.8] When EVERY list is muted, the fused result is empty (not a pile of 0.0-scored
+    // items). Review 1874.
+    #[test]
+    fn weighted_rrf_all_zero_weights_yields_empty() {
+        let a: Vec<(&str, f64)> = vec![("x", 1.0), ("y", 1.0)];
+        let b: Vec<(&str, f64)> = vec![("z", 1.0)];
+        let fused = fuse_rrf_weighted(&[(&a, 0.0), (&b, 0.0)], 60.0, 100);
+        assert!(fused.is_empty(), "all-muted fusion must be empty, got {fused:?}");
     }
 
     #[test]

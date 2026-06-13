@@ -376,6 +376,34 @@ def test_reason_n3_with_error_leaves_graph_unchanged():
     assert graph.ask("PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }")
 
 
+def test_reason_n3_with_rules_bnode_cannot_alias_data_bnode():
+    # roborev 1961: a blank-node label in the rules document must NOT alias an
+    # existing data blank node. The data has a blank node labelled `_:x` with a
+    # distinguishing property; the rules also mention `_:x`. If the labels
+    # collided (old merge behaviour) the rule would fire against the data node
+    # and add ex:Tainted to it. With graph bnodes renamed under the reserved
+    # `sparqg` prefix, the rule's `_:x` is a separate node and the data node is
+    # untouched.
+    graph = sparq.Graph.load(
+        "@prefix ex: <http://ex/> . _:x ex:realProp ex:realVal ."
+    )
+    added = graph.reason_n3_with(
+        """
+        @prefix ex: <http://ex/> .
+        _:x ex:p ex:q .
+        { _:x ex:p ex:q } => { _:x a ex:Tainted } .
+        """
+    )
+    # The rule fires only on the rules-local _:x; the data node keeps only its
+    # original property and gains nothing tying it to ex:Tainted.
+    assert not graph.ask(
+        "PREFIX ex: <http://ex/> ASK { ?b ex:realProp ex:realVal . ?b a ex:Tainted }"
+    )
+    # The original data triple survives the rename round-trip.
+    assert graph.ask("PREFIX ex: <http://ex/> ASK { ?b ex:realProp ex:realVal }")
+    assert added >= 0  # exact count depends on rules-side materialization, not asserted
+
+
 # --- inconsistencies ----------------------------------------------------------
 
 

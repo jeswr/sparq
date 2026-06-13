@@ -113,6 +113,17 @@ pub(crate) mod budget {
         ACTIVE.with(|a| a.get())
     }
 
+    /// `true` while a deadline / row-cap budget is installed. [OPUS-4.8] roborev 1538:
+    /// the streaming-JSON fast path uses this to take the cooperative SERIAL loop (which
+    /// breaks every 1024 rows) instead of the parallel fan-out that materialises every
+    /// matching fragment before any budget check — so `--max-results` / timeouts bound
+    /// CPU and memory, not just the final response.
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    #[inline]
+    pub(crate) fn active() -> bool {
+        ACTIVE.with(|a| a.get().on)
+    }
+
     /// `true` once the budget is exhausted (sticky) — row-producing loops break
     /// on it; `rows` is the loop's current output size.
     #[inline]
@@ -739,8 +750,13 @@ fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option
     };
 
     let mut s = head;
+    // [OPUS-4.8] roborev 1538: only take the parallel fan-out when NO budget is active. The
+    // parallel path builds every matching JSON fragment before it can check the budget, so a
+    // row cap / deadline would not bound CPU or memory — it would serialise the full result and
+    // only then fail. With a budget installed we fall through to the cooperative serial loop
+    // below, which checks `budget::exhausted` every 1024 rows and stops early.
     #[cfg(feature = "parallel")]
-    if scan_rows.len() >= PAR_THRESHOLD {
+    if scan_rows.len() >= PAR_THRESHOLD && !budget::active() {
         use rayon::prelude::*;
         // One string per chunk (≈ per worker), not per row — avoids one heap allocation per
         // result cell. Chunks stay in order, so the bytes are identical to the serial path.
@@ -4436,79 +4452,73 @@ fn group_aggregate(
     }
 
     // Evaluate each group's aggregates (the expensive part — `eval_expr` over every member of
-    // every group) in parallel: it is read-only (`&LocalVocab`) and independent across groups.
-    // Interning the results (`value_to_id`, needs `&mut LocalVocab`) stays serial and in `order`,
-    // so the output is byte-identical to the serial path.
+    // every group), then intern the result and build the output row, in first-seen `order`.
+    // Interning needs `&mut LocalVocab` and so stays SERIAL and in order, making the ids
+    // byte-identical regardless of how evaluation is scheduled.
+    let mut rows: Vec<Row> = Vec::with_capacity(order.len());
+
+    // [OPUS-4.8] roborev 1429 (Med): bound peak memory. The previous implementation
+    // materialised the aggregate `Value`s (and then their resolved ids) for EVERY group at
+    // once before building any row — for many-group / large GROUP_CONCAT queries that holds
+    // all aggregate output in memory simultaneously. We now process in bounded BATCHES (and,
+    // in the sequential path, one group at a time), interning and pushing each batch's rows
+    // before evaluating the next, so only a bounded slice of `Value`s is live.
     #[cfg(feature = "parallel")]
-    let agg_values: Vec<Vec<Value>> = if b.rows.len() >= PAR_THRESHOLD {
+    let parallel_eval = b.rows.len() >= PAR_THRESHOLD;
+    #[cfg(not(feature = "parallel"))]
+    let parallel_eval = false;
+
+    #[cfg(feature = "parallel")]
+    if parallel_eval {
         use rayon::prelude::*;
-        let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
-        let bref = &b;
         // Thread-local extension-function registry and dataset view: snapshot +
         // per-item re-install (free when neither is installed) — see the FILTER branch.
         let fns = functions::snapshot();
         let vw = view::snapshot();
-        members
-            .par_iter()
-            .map(|members| {
-                let _fns = functions::worker_install(&fns);
-                let _vw = view::worker_install(&vw);
-                aggregates
-                    .iter()
-                    .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg))
-                    .collect::<Result<Vec<_>, String>>()
-            })
-            .collect::<Result<Vec<_>, String>>()?
-    } else {
-        members
-            .iter()
-            .map(|members| {
-                aggregates
-                    .iter()
-                    .map(|(_, agg)| eval_aggregate(graph, local, &b, members, agg))
-                    .collect::<Result<Vec<_>, String>>()
-            })
-            .collect::<Result<Vec<_>, String>>()?
-    };
-    #[cfg(not(feature = "parallel"))]
-    let agg_values: Vec<Vec<Value>> = members
-        .iter()
-        .map(|members| {
-            aggregates
-                .iter()
-                .map(|(_, agg)| eval_aggregate(graph, local, &b, members, agg))
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    // Resolve the aggregate values to ids: a PARALLEL read-only pass (inline integers, graph-dict
-    // and already-local terms — the vast majority) and then a serial intern of only the genuinely
-    // new terms, in order, so ids are byte-identical to the fully-serial path (T1.0b).
-    #[cfg(feature = "parallel")]
-    let resolved: Vec<Vec<Result<Id, Term>>> = if b.rows.len() >= PAR_THRESHOLD {
-        use rayon::prelude::*;
-        let lv: &LocalVocab = local;
-        agg_values
-            .par_iter()
-            .map(|vals| vals.iter().map(|v| value_to_id_readonly(graph, lv, v)).collect())
-            .collect()
-    } else {
-        agg_values.iter().map(|vals| vals.iter().map(|v| value_to_id_readonly(graph, local, v)).collect()).collect()
-    };
-    #[cfg(not(feature = "parallel"))]
-    let resolved: Vec<Vec<Result<Id, Term>>> =
-        agg_values.iter().map(|vals| vals.iter().map(|v| value_to_id_readonly(graph, local, v)).collect()).collect();
-
-    let mut rows: Vec<Row> = Vec::with_capacity(order.len());
-    for (key, res) in order.iter().zip(resolved) {
-        let mut row = Row::from_slice(key);
-        for r in res {
-            row.push(match r {
-                Ok(id) => id,
-                Err(term) => local.intern(term),
-            });
+        // Process `members`/`order` in PAR_THRESHOLD-sized batches: evaluate + read-only
+        // resolve each batch in parallel, then serially intern only that batch's genuinely
+        // new terms and emit its rows. Peak `Value` footprint is one batch, not all groups.
+        for (key_chunk, member_chunk) in order.chunks(PAR_THRESHOLD).zip(members.chunks(PAR_THRESHOLD)) {
+            let lv: &LocalVocab = local; // immutable reborrow for the read-only parallel phase
+            let bref = &b;
+            let resolved: Vec<Vec<Result<Id, Term>>> = member_chunk
+                .par_iter()
+                .map(|members| {
+                    let _fns = functions::worker_install(&fns);
+                    let _vw = view::worker_install(&vw);
+                    aggregates
+                        .iter()
+                        .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg).map(|v| value_to_id_readonly(graph, lv, &v)))
+                        .collect::<Result<Vec<_>, String>>()
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            for (key, res) in key_chunk.iter().zip(resolved) {
+                let mut row = Row::from_slice(key);
+                for r in res {
+                    row.push(match r {
+                        Ok(id) => id,
+                        Err(term) => local.intern(term),
+                    });
+                }
+                rows.push(row);
+            }
         }
-        rows.push(row);
     }
+
+    if !parallel_eval {
+        // Sequential STREAMING path: eval + intern + push per group, dropping each group's
+        // `Value`s before moving to the next, so peak memory is a single group's aggregates.
+        for (key, members) in order.iter().zip(&members) {
+            let mut row = Row::from_slice(key);
+            for (_, agg) in aggregates {
+                let v = eval_aggregate(graph, local, &b, members, agg)?;
+                let id = value_to_id(graph, local, &v);
+                row.push(id);
+            }
+            rows.push(row);
+        }
+    }
+
     Ok(Bindings::unsorted(out_vars, rows))
 }
 
@@ -4533,17 +4543,21 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                     return Ok(v);
                 }
             }
-            // Collect the per-member values of `expr`. An unbound / errored member is
-            // recorded: SUM and AVG must ERROR on it (yielding an unbound aggregate),
-            // while COUNT/MIN/MAX/SAMPLE/GROUP_CONCAT skip it.
+            // Collect the per-member values of `expr`. [OPUS-4.8] An UNBOUND member (a variable
+            // with no binding in that row, e.g. an OPTIONAL one) is SKIPPED for every aggregate,
+            // matching SPARQL "aggregate over the bound values": SUM/AVG over an OPTIONAL column
+            // must still sum the rows that do have a value, not collapse to unbound. Only a
+            // genuine expression ERROR (`Value::Error`, e.g. a type error inside `expr`) is fatal
+            // for SUM/AVG. A BOUND but non-numeric member is pushed into `vals` and turns SUM/AVG
+            // into a type error downstream (`as_numeric` -> None), per agg-err-01.
             let mut vals: Vec<Value> = Vec::with_capacity(members.len());
             let mut errored = false;
             for &ri in members {
                 let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
-                if matches!(v, Value::Unbound | Value::Error) {
-                    errored = true;
-                } else {
-                    vals.push(v);
+                match v {
+                    Value::Unbound => {}             // skip: aggregate ignores unbound rows
+                    Value::Error => errored = true,  // fatal for SUM/AVG (-> unbound aggregate)
+                    _ => vals.push(v),
                 }
             }
             if *distinct {
@@ -5766,16 +5780,32 @@ impl Dec {
     /// Rounds to an integer-valued decimal (scale 0), preserving the decimal TYPE
     /// (`CEIL("2.5"^^xsd:decimal)` is `"3"^^xsd:decimal`).
     fn round_to_int(self, mode: RoundMode) -> Dec {
-        if self.scale == 0 {
-            return self;
+        if self.scale == 0 || self.mant == 0 {
+            return Dec { mant: self.mant, scale: 0 };
         }
-        let p = 10i128.pow(self.scale);
-        let q = self.mant.div_euclid(p);
-        let r = self.mant.rem_euclid(p); // 0..p
-        let mant = match mode {
-            RoundMode::Floor => q,
-            RoundMode::Ceil => q + i128::from(r > 0),
-            RoundMode::HalfUp => q + i128::from(r * 2 >= p),
+        // [OPUS-4.8] `10i128.pow(self.scale)` overflows (debug panic / release wrap) for any
+        // valid decimal whose scale is >= 39 (10^39 > i128::MAX). When the power exceeds i128
+        // the integer part is necessarily 0 (|mant| < i128::MAX < 10^scale), so |value| < 1 and
+        // also < 0.5 (2*i128::MAX < 10^39 <= 10^scale), making the rounded result obvious from
+        // the sign alone — derive it directly instead of constructing the overflowing power.
+        let mant = match 10i128.checked_pow(self.scale) {
+            Some(p) => {
+                let q = self.mant.div_euclid(p);
+                let r = self.mant.rem_euclid(p); // 0..p
+                match mode {
+                    RoundMode::Floor => q,
+                    RoundMode::Ceil => q + i128::from(r > 0),
+                    RoundMode::HalfUp => q + i128::from(r * 2 >= p),
+                }
+            }
+            None => match mode {
+                // |value| < 1: floor of a tiny positive is 0, of a tiny negative is -1.
+                RoundMode::Floor => i128::from(self.mant < 0) * -1,
+                // ceil of a tiny positive is 1, of a tiny negative is 0.
+                RoundMode::Ceil => i128::from(self.mant > 0),
+                // |value| < 0.5 always at this scale, so half-up rounds to 0.
+                RoundMode::HalfUp => 0,
+            },
         };
         Dec { mant, scale: 0 }
     }

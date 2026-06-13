@@ -42,12 +42,46 @@ pub const SPQV_MAGIC: [u8; 4] = *b"SPQV";
 pub const SPQV_VERSION: u32 = 1;
 const HEADER_LEN: usize = 32;
 
+/// [OPUS-4.8] A 4-byte-aligned owned byte buffer. A plain `Vec<u8>` has alignment 1, so its base
+/// pointer may land on an odd address; `slot_vector` casts `&[u8]` slices of the buffer to
+/// `&[f32]` via `from_raw_parts`, which is UNDEFINED BEHAVIOR on an unaligned pointer. Backing the
+/// owned bytes with a `Vec<u32>` (alignment 4) guarantees the base — and therefore every
+/// `HEADER_LEN + slot·dim·4` offset (all multiples of 4) — is f32-aligned. See review 1874.
+struct AlignedBytes {
+    /// Backing storage; only `len` bytes are logically valid (the last word may be padding).
+    words: Vec<u32>,
+    len: usize,
+}
+
+impl AlignedBytes {
+    fn from_vec(bytes: Vec<u8>) -> AlignedBytes {
+        let len = bytes.len();
+        // ceil(len / 4) words; the final word is zero-padded.
+        let words = vec![0u32; len.div_ceil(4)];
+        let mut ab = AlignedBytes { words, len };
+        // SAFETY: `words` holds at least `len` bytes (rounded up to a word) and is u32-aligned
+        // (≥ align(u8)); the destination region is exclusively owned here.
+        let dst =
+            unsafe { std::slice::from_raw_parts_mut(ab.words.as_mut_ptr() as *mut u8, len) };
+        dst.copy_from_slice(&bytes);
+        ab
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `words` is u32-aligned and holds ≥ `len` initialized bytes (the copy above);
+        // f32/u8 reads of this region are in bounds. The base is 4-byte aligned by construction.
+        unsafe { std::slice::from_raw_parts(self.words.as_ptr() as *const u8, self.len) }
+    }
+}
+
 /// Read-phase backing bytes: a memory map ([`VectorStore::open`]) or an owned
 /// buffer ([`VectorStore::open_from_bytes`] — environments without a
 /// filesystem). Both deref to `[u8]`; every read path is shared.
 enum Bytes {
     Map(Mmap),
-    Owned(Vec<u8>),
+    /// [OPUS-4.8] f32-aligned owned bytes (see `AlignedBytes`) so the `slot_vector` f32 cast is
+    /// always aligned — a plain `Vec<u8>` is alignment 1 and would risk UB. Review 1874.
+    Owned(AlignedBytes),
 }
 
 impl std::ops::Deref for Bytes {
@@ -55,7 +89,7 @@ impl std::ops::Deref for Bytes {
     fn deref(&self) -> &[u8] {
         match self {
             Bytes::Map(m) => m,
-            Bytes::Owned(v) => v,
+            Bytes::Owned(v) => v.as_bytes(),
         }
     }
 }
@@ -116,7 +150,9 @@ impl VectorStore {
     /// borrow the owned buffer instead of a memory map. The handle is
     /// read-only (`put`/`finalize` behave as on any opened store).
     pub fn open_from_bytes(bytes: Vec<u8>) -> Result<VectorStore, String> {
-        Self::open_validated(Bytes::Owned(bytes), PathBuf::new(), "<bytes>")
+        // [OPUS-4.8] Copy into a 4-byte-aligned backing so the read-phase f32 casts are aligned
+        // (a plain Vec<u8> is alignment 1 — casting its slices to &[f32] is UB). Review 1874.
+        Self::open_validated(Bytes::Owned(AlignedBytes::from_vec(bytes)), PathBuf::new(), "<bytes>")
     }
 
     /// Shared header/index validation behind [`open`](Self::open) and
@@ -340,10 +376,12 @@ impl VectorStore {
         let start = HEADER_LEN + slot * self.dim * 4;
         let bytes = &map[start..start + self.dim * 4];
         debug_assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<f32>(), 0);
-        // SAFETY: the map is page-aligned (or a Vec allocation, aligned ≥ 8) and
-        // `start` is a multiple of 4, so the pointer is f32-aligned; the range is in
-        // bounds (validated in `open`); f32 accepts any bit pattern; the slice borrows
-        // the map, owned by `self`.
+        // SAFETY: the backing base is 4-byte aligned — a memory map is page-aligned, and the
+        // owned path uses `AlignedBytes` (u32-backed, alignment 4) precisely so this cast is
+        // aligned ([OPUS-4.8] review 1874; a raw Vec<u8> is alignment 1 and would be UB here).
+        // `start` is a multiple of 4 (HEADER_LEN=32 + slot·dim·4), so the pointer stays
+        // f32-aligned; the range is in bounds (validated in `open`); f32 accepts any bit pattern;
+        // the slice borrows the backing, owned by `self`.
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, self.dim) }
     }
 }

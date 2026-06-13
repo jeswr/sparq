@@ -1540,6 +1540,12 @@ pub struct MaterializedN3Graph {
     /// Sticky runtime disqualification: evaluation met data outside the builtin-parity
     /// whitelist; every rebuild stays in fallback (always correct).
     data_fallback: Option<String>,
+    /// [OPUS-4.8] NON-sticky fallback cause: the base currently contains `log:implies`-family
+    /// triples (rules-as-data), which the batch engine would parse as RULES, so counting is
+    /// forced off this rematerialize. Recomputed every `rematerialize`; cleared when the
+    /// implies-data is removed and counting resumes. Keeps `fallback_reason()`'s
+    /// `None ⇔ counting active` contract exact for this cause. See review 1868.
+    data_rule_fallback: Option<String>,
     base: FxHashSet<[N3Term; 3]>,
     mode: N3Mode,
     counts: FxHashMap<[N3Term; 3], u32>,
@@ -2061,6 +2067,18 @@ fn n3_compile(parsed: &n3p::Parsed) -> Result<N3Compiled, String> {
             atoms.push(N3Atom::Plain { pat: pat.clone(), plain_ix: n_plain });
             n_plain += 1;
         }
+        // [OPUS-4.8] Counting propagation seeds emissions ONLY from N3Atom::Plain premise atoms
+        // (see `propagate` / the rematerialize seed). A rule with NO plain join atom — an empty
+        // premise `{}` rule or a builtin/guard-only premise — would therefore never fire in
+        // counting mode, so its conclusions would be missing from the maintained closure even
+        // though the batch engine (reason_n3_terms) derives them. Reject such rules so the graph
+        // runs in Fallback mode (always correct). See reviews 1868 / 1884.
+        if n_plain == 0 {
+            return Err(format!(
+                "rule {rix}: premise has no plain join atom (empty or builtin/guard-only premise) \
+                 — outside the counting profile (seeds only from plain premise atoms)"
+            ));
+        }
         // The guard subject (?UNSCOPED) must stay unbound: at most this one occurrence.
         for sv in &guard_subject_vars {
             let occurrences: usize = ordered
@@ -2350,6 +2368,7 @@ impl MaterializedN3Graph {
             compiled,
             disqualified,
             data_fallback: None,
+            data_rule_fallback: None,
             base,
             mode: N3Mode::Fallback,
             counts: FxHashMap::default(),
@@ -2394,6 +2413,13 @@ impl MaterializedN3Graph {
             .base
             .iter()
             .any(|t| n3_pred_iri(&t[1]).is_some_and(|p| implies.iter().any(|i| i == p)));
+        // [OPUS-4.8] Record (or clear) the non-sticky data-rule fallback cause so fallback_reason()
+        // reports it instead of silently returning None. See review 1868.
+        self.data_rule_fallback = data_rules.then(|| {
+            "base contains log:implies-family triples (rules-as-data); the batch engine reasons \
+             over them — outside the counting profile"
+                .to_string()
+        });
         if self.compiled.is_some() && self.data_fallback.is_none() && !data_rules {
             self.mode = N3Mode::Counting;
             let pending: Vec<[N3Term; 3]> = self.base.iter().cloned().collect();
@@ -2709,10 +2735,16 @@ impl MaterializedN3Graph {
         self.mode
     }
 
-    /// Why the graph is (or would be) in fallback mode: the rule-analysis disqualification,
-    /// or the sticky runtime data disqualification. `None` ⇔ the counting path is active.
+    /// Why the graph is (or would be) in fallback mode: the rule-analysis disqualification, the
+    /// sticky runtime data disqualification, or the (non-sticky) presence of `log:implies`-family
+    /// rules-as-data in the base. `None` ⇔ the counting path is active. See review 1868.
     pub fn fallback_reason(&self) -> Option<&str> {
-        self.data_fallback.as_deref().or(self.disqualified.as_deref())
+        // [OPUS-4.8] Include the data-rule cause so the documented `None ⇔ counting` contract
+        // holds even when fallback is forced by implies-as-data rather than rule analysis.
+        self.data_fallback
+            .as_deref()
+            .or(self.disqualified.as_deref())
+            .or(self.data_rule_fallback.as_deref())
     }
 
     /// How many times a mutation re-materialized from scratch (guard-predicate deltas,

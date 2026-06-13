@@ -270,11 +270,17 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
     a verified-parity builtin whitelist (log:uri, log:equalTo/notEqualTo,
     string:concatenation/scrape/encodeForUri), `?UNSCOPED log:notIncludes` only over
     predicates no rule derives (guard deltas rebuild), recursion via recursive-SCC
-    layers; everything else (and out-of-whitelist data, sticky) falls back to the
-    batch engine per mutation. The sparq-solid WAC rules and ACP strata a/b qualify;
-    acp-c does not (variable conclusion predicate) — asserted by test.
-  Differential property tests hold every maintained profile equal to its from-scratch
-  batch closure after every randomized edit batch (RDFS/OWL/N3). Benchmarks
+    layers; everything else falls back to the batch engine per mutation. Fallback
+    cases include: out-of-whitelist data reached at evaluation (sticky); base
+    `log:implies`-family triples (rules-as-data); and rules whose premise has NO plain
+    join atom (an empty `{}` premise or a builtin/guard-only premise), since counting
+    seeds emissions only from plain premise atoms and would otherwise drop their
+    conclusions ([OPUS-4.8] reviews 1868/1884). The sparq-solid WAC rules and ACP
+    strata a/b qualify; acp-c does not (variable conclusion predicate) — asserted by test.
+  Differential property tests hold every counting-*maintained* profile equal to its
+  from-scratch batch closure after every randomized edit batch (RDFS/OWL/N3);
+  rule shapes outside the maintained profile (above) take the always-correct batch
+  fallback rather than being maintained. Benchmarks
   (`bench/inference/incremental-bench.md`, olympics scale + a 1k-doc WAC pod):
   1-triple deltas maintain in microseconds vs ~1s re-materialization (~10⁵–10⁶x);
   10k-triple deltas 16–500x; live WAC ACL edits 11–162 ms vs the 0.84 s engine re-run,

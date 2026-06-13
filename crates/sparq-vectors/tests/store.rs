@@ -256,3 +256,32 @@ fn open_from_bytes_validates_like_open() {
     bytes.truncate(bytes.len() - 1);
     assert!(VectorStore::open_from_bytes(bytes).is_err());
 }
+
+// [OPUS-4.8] Regression for review 1874: the owned-bytes path must read vectors correctly even
+// when the source `Vec<u8>` is NOT 4-byte aligned — the store now copies into an f32-aligned
+// backing, so `slot_vector`'s &[u8]→&[f32] cast can never see an unaligned pointer (which is UB).
+// Under `cargo +nightly miri test` this also flags any residual misaligned-reference creation.
+#[test]
+fn open_from_bytes_handles_unaligned_source_buffer() {
+    let path = tmp_path("bytes-unaligned.spqv");
+    let mut store = VectorStore::create(&path, 3).unwrap();
+    store.put(42, &[1.0, 2.0, 3.0]).unwrap();
+    store.put(7, &[-4.5, 5.25, 6.0]).unwrap();
+    store.finalize().unwrap();
+    let file = std::fs::read(&path).unwrap();
+
+    // Force a deliberately ODD-address source: allocate with a leading byte, then drop it via
+    // `split_off(1)` so the returned Vec's data pointer is the original base + 1 (alignment 1).
+    let mut padded = Vec::with_capacity(file.len() + 1);
+    padded.push(0u8);
+    padded.extend_from_slice(&file);
+    let unaligned = padded.split_off(1);
+    // (We don't assert oddness — heap alignment is allocator-dependent — but this maximises the
+    // chance the source is unaligned; the copy-into-aligned-backing fix must make reads correct
+    // regardless.)
+    let mem = VectorStore::open_from_bytes(unaligned).unwrap();
+    assert_eq!(mem.get(42), Some(&[1.0f32, 2.0, 3.0][..]));
+    assert_eq!(mem.get(7), Some(&[-4.5f32, 5.25, 6.0][..]));
+    let pairs: Vec<(u32, Vec<f32>)> = mem.iter().map(|(id, v)| (id, v.to_vec())).collect();
+    assert_eq!(pairs, [(42, vec![1.0, 2.0, 3.0]), (7, vec![-4.5, 5.25, 6.0])]);
+}

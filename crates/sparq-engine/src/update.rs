@@ -55,10 +55,39 @@ fn graph_name_slot(g: &GraphName) -> GraphSlot {
     }
 }
 
-fn quad_to_triple(q: &Quad) -> (GraphSlot, TripleTerms) {
+/// [OPUS-4.8] roborev 1646 (Med): per SPARQL 1.1 Update §3.1.1, blank nodes in INSERT DATA are
+/// "assumed to be disjoint from the blank nodes in the Graph Store" — they MUST be inserted as
+/// FRESH nodes. The old `quad_to_triple` preserved the parsed label, so `INSERT DATA { _:b … }`
+/// would conflate with an existing `_:b` in the store. We rewrite every blank-node label
+/// (including inside RDF-1.2 triple terms) through `fresh`, so the same label within one INSERT
+/// DATA operation stays one node while colliding with no existing graph blank node.
+fn freshen_term(t: &Term, fresh: &mut FreshBnodes) -> Term {
+    match t {
+        Term::BlankNode(b) => fresh.get(b.as_str()),
+        Term::Triple(tr) => {
+            let subject = match freshen_term(&Term::from(tr.subject.clone()), fresh) {
+                Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
+                Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
+                // a triple-term subject is always a named/blank node, so this is unreachable;
+                // fall back to the original to stay total.
+                _ => tr.subject.clone(),
+            };
+            let object = freshen_term(&tr.object, fresh);
+            Term::Triple(Box::new(oxrdf::Triple::new(subject, tr.predicate.clone(), object)))
+        }
+        other => other.clone(),
+    }
+}
+
+fn quad_to_triple_fresh(q: &Quad, fresh: &mut FreshBnodes) -> (GraphSlot, TripleTerms) {
+    let subject = match freshen_term(&nob_to_term(&q.subject), fresh) {
+        Term::NamedNode(n) => Term::NamedNode(n),
+        Term::BlankNode(b) => Term::BlankNode(b),
+        s => s,
+    };
     (
         graph_name_slot(&q.graph_name),
-        [nob_to_term(&q.subject), Term::NamedNode(q.predicate.clone()), q.object.clone()],
+        [subject, Term::NamedNode(q.predicate.clone()), freshen_term(&q.object, fresh)],
     )
 }
 
@@ -299,15 +328,79 @@ fn instantiate_templates(
 
 // --- LOAD ----------------------------------------------------------------------------------------
 
-/// Reads and parses a `file://` document for LOAD (the conformance suites resolve their
-/// relative sources against the request file's location, so this covers them). Non-file
-/// schemes are an error — `LOAD SILENT` turns that into a no-op at the call sites.
+/// LOAD `file://` policy (roborev 1646, High). [OPUS-4.8] `LOAD <file://…>` dereferences a
+/// server-LOCAL file, so on the public update path (HTTP `apply_update`) an untrusted client
+/// could otherwise import any RDF-readable file the process can read and query it back. The
+/// DEFAULT policy is therefore REJECT: `file://` LOAD only works when a caller has explicitly
+/// installed an allowlisted base directory via [`with_load_base`] (the conformance runner does
+/// this, pointing at the local test-data tree). The requested path is canonicalised and must
+/// resolve UNDER that base, so `../` traversal and symlinks cannot escape it.
+pub(crate) mod load_policy {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        static BASE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    /// Uninstalls the allowlisted base when the installing scope returns (also on
+    /// error/unwind, so a poisoned thread never leaks a trusted base).
+    pub(crate) struct Guard(Option<PathBuf>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            BASE.with(|b| *b.borrow_mut() = self.0.take());
+        }
+    }
+
+    /// Installs `base` (canonicalised) as the allowlisted LOAD directory for the duration of
+    /// the returned guard. Restores the previous base on drop (supports nesting).
+    pub(crate) fn install(base: PathBuf) -> Guard {
+        let canon = std::fs::canonicalize(&base).unwrap_or(base);
+        BASE.with(|b| {
+            let prev = b.borrow_mut().replace(canon);
+            Guard(prev)
+        })
+    }
+
+    pub(crate) fn base() -> Option<PathBuf> {
+        BASE.with(|b| b.borrow().clone())
+    }
+}
+
+/// Runs `f` with `base` allowlisted as the root for `LOAD <file://…>` (roborev 1646). Without
+/// this, every `file://` LOAD is REJECTED — the secure default for public update paths. Trusted
+/// local callers (the SPARQL conformance runner) wrap their `update` call in this to permit
+/// loading the test-data files that live under `base`.
+pub fn with_load_base<R>(base: impl Into<std::path::PathBuf>, f: impl FnOnce() -> R) -> R {
+    let _guard = load_policy::install(base.into());
+    f()
+}
+
+/// Reads and parses a `file://` document for LOAD. `file://` is REJECTED unless an allowlisted
+/// base directory is installed (see [`with_load_base`]); when one is, the resolved path is
+/// canonicalised and must lie UNDER it. Non-file schemes are an error — `LOAD SILENT` turns any
+/// of these into a no-op at the call sites.
 fn load_document(source: &str) -> Result<TripleSet, String> {
-    let path = source
+    let raw = source
         .strip_prefix("file://")
         .ok_or_else(|| format!("LOAD source not supported (only file:// URIs): {source}"))?;
-    let text = std::fs::read_to_string(path).map_err(|e| format!("LOAD {source}: {e}"))?;
-    let format = match path.rsplit('.').next() {
+    // `file:///abs` -> "/abs"; keep the literal-strip behaviour for the relative-path form the
+    // conformance suites use, but require an installed allowlist either way.
+    let Some(base) = load_policy::base() else {
+        return Err(format!(
+            "LOAD of {source} refused: file:// access is disabled (no allowlisted base directory configured)"
+        ));
+    };
+    let requested = std::path::Path::new(raw);
+    // Resolve relative paths against the allowlisted base, then canonicalise to collapse `..`
+    // and follow symlinks so the containment check cannot be bypassed.
+    let joined = if requested.is_absolute() { requested.to_path_buf() } else { base.join(requested) };
+    let path = std::fs::canonicalize(&joined).map_err(|e| format!("LOAD {source}: {e}"))?;
+    if !path.starts_with(&base) {
+        return Err(format!("LOAD of {source} refused: resolves outside the allowlisted base directory"));
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("LOAD {source}: {e}"))?;
+    let format = match path.extension().and_then(|e| e.to_str()) {
         Some("nt") => "ntriples",
         Some("nq") => "nquads",
         Some("trig") => "trig",
@@ -323,8 +416,11 @@ fn load_document(source: &str) -> Result<TripleSet, String> {
 fn apply_op(ds: &mut Dataset, op: &GraphUpdateOperation) -> Result<(), String> {
     match op {
         GraphUpdateOperation::InsertData { data } => {
+            // Fresh blank nodes for the whole operation (roborev 1646): same label in this
+            // INSERT DATA -> same node; never the existing store's `_:b`.
+            let mut fresh = FreshBnodes { map: FxHashMap::default() };
             for q in data {
-                let (slot, t) = quad_to_triple(q);
+                let (slot, t) = quad_to_triple_fresh(q, &mut fresh);
                 ds.insert(&slot, t);
             }
         }
@@ -461,7 +557,10 @@ pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
     for op in &upd.operations {
         match op {
             GraphUpdateOperation::InsertData { data } => {
-                for (slot, ins) in group_by_slot(data.iter().map(quad_to_triple).collect()) {
+                // Fresh blank nodes for the whole operation (roborev 1646) — see apply_op.
+                let mut fresh = FreshBnodes { map: FxHashMap::default() };
+                let triples: Vec<_> = data.iter().map(|q| quad_to_triple_fresh(q, &mut fresh)).collect();
+                for (slot, ins) in group_by_slot(triples) {
                     apply_slot_delta(graph, &slot, &ins, &[])?;
                 }
             }
@@ -471,7 +570,7 @@ pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
                 }
             }
             GraphUpdateOperation::Clear { graph: target, .. } => match target {
-                GraphTarget::DefaultGraph => replace_default(graph),
+                GraphTarget::DefaultGraph => replace_default(graph)?,
                 GraphTarget::NamedNode(n) => {
                     let name = Term::NamedNode(n.clone());
                     if let Some(i) = graph.named.iter().position(|(g, _)| *g == name) {
@@ -484,21 +583,21 @@ pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
                     }
                 }
                 GraphTarget::AllGraphs => {
-                    replace_default(graph);
+                    replace_default(graph)?;
                     for entry in &mut graph.named {
                         entry.1 = empty_graph();
                     }
                 }
             },
             GraphUpdateOperation::Drop { graph: target, .. } => match target {
-                GraphTarget::DefaultGraph => replace_default(graph),
+                GraphTarget::DefaultGraph => replace_default(graph)?,
                 GraphTarget::NamedNode(n) => {
                     let name = Term::NamedNode(n.clone());
                     graph.named.retain(|(g, _)| *g != name);
                 }
                 GraphTarget::NamedGraphs => graph.named.clear(),
                 GraphTarget::AllGraphs => {
-                    replace_default(graph);
+                    replace_default(graph)?;
                     graph.named.clear();
                 }
             },
@@ -546,11 +645,13 @@ pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Replaces the default graph with an empty one, PRESERVING the named graphs.
-fn replace_default(graph: &mut Graph) {
-    let named = std::mem::take(&mut graph.named);
-    *graph = empty_graph();
-    graph.named = named;
+/// [OPUS-4.8] (review 1593) DURABLY empties the default graph, preserving the named graphs
+/// AND (crucially) a directory-backed graph's WAL/directory association — so a CLEAR/DROP of
+/// the default graph is persistent across a reopen, instead of being silently lost (the old
+/// `*graph = empty_graph()` dropped the WAL, and the on-disk base was untouched, so a reopen
+/// restored the cleared data). Falls back to an in-place store clear for in-memory graphs.
+fn replace_default(graph: &mut Graph) -> Result<(), String> {
+    graph.clear_default_durable()
 }
 
 #[cfg(test)]
@@ -837,5 +938,83 @@ mod tests {
         );
         eprintln!("speedup: {:.0}x (rebuild {:.3}s vs overlay {:.6}s)",
             old.as_secs_f64() / new_avg.as_secs_f64(), old.as_secs_f64(), new_avg.as_secs_f64());
+    }
+
+    /// [OPUS-4.8] roborev 1646 (High): `LOAD <file://…>` must be REFUSED by default — an
+    /// untrusted update on the public path cannot import server-local files. It only works
+    /// inside an allowlisted base, and even then cannot escape it via `..`.
+    #[test]
+    fn load_file_uri_refused_by_default_and_sandboxed() {
+        let dir = std::env::temp_dir().join(format!("sparq_load_1646_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let inside = dir.join("data.ttl");
+        std::fs::write(&inside, "@prefix : <http://ex/> . :a :p :b .").unwrap();
+        // A secret file OUTSIDE the allowlisted base (one level up).
+        let secret = dir.parent().unwrap().join(format!("sparq_secret_1646_{}.ttl", std::process::id()));
+        std::fs::write(&secret, "@prefix : <http://ex/> . :secret :leaked :value .").unwrap();
+
+        let g = empty_graph();
+        let load_inside = format!("LOAD <file://{}>", inside.display());
+        // `Result<Graph, String>::unwrap_err` would need Graph: Debug — extract the error string.
+        let err = |r: Result<Graph, String>| -> String { r.err().expect("expected a LOAD error") };
+
+        // (1) DEFAULT: no allowlist installed -> refused (the file is never read).
+        let e = err(update(&g, &load_inside));
+        assert!(e.contains("file:// access is disabled"), "default LOAD must be refused, got: {e}");
+        // SILENT swallows the refusal into a no-op (still loads nothing).
+        let g_silent = update(&g, &format!("LOAD SILENT <file://{}>", inside.display())).unwrap();
+        assert_eq!(count(&g_silent), 0);
+
+        // (2) Allowlisted base: a file UNDER the base loads.
+        let loaded = with_load_base(dir.clone(), || update(&g, &load_inside)).unwrap();
+        assert_eq!(count(&loaded), 1, "LOAD under the allowlisted base must succeed");
+
+        // (3) A path that escapes the base (absolute, outside) is refused even with a base set.
+        let load_secret = format!("LOAD <file://{}>", secret.display());
+        let e = err(with_load_base(dir.clone(), || update(&g, &load_secret)));
+        assert!(e.contains("outside the allowlisted base"), "escape must be refused, got: {e}");
+        // …and a `..` traversal to the same secret is likewise refused.
+        let rel = format!("LOAD <file://../{}>", secret.file_name().unwrap().to_str().unwrap());
+        let e = err(with_load_base(dir.clone(), || update(&g, &rel)));
+        assert!(e.contains("outside the allowlisted base") || e.contains("LOAD"), "traversal must be refused, got: {e}");
+
+        // (4) The base does not leak past the scope: a subsequent LOAD is refused again.
+        let e = err(update(&g, &load_inside));
+        assert!(e.contains("file:// access is disabled"), "base must not leak, got: {e}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&secret);
+    }
+
+    /// [OPUS-4.8] roborev 1646 (Med): blank nodes in INSERT DATA are FRESH per SPARQL — they
+    /// must not conflate with an existing store blank node of the same label. The rebuild and
+    /// delta-overlay paths must both freshen.
+    #[test]
+    fn insert_data_blank_nodes_are_fresh() {
+        // Graph already holds a blank node labelled `b` (subject of one triple).
+        let src = "@prefix : <http://ex/> . _:b :p :existing .";
+        let ins = "PREFIX : <http://ex/> INSERT DATA { _:b :p :inserted }";
+
+        // Rebuild path: the inserted `_:b` must be a DIFFERENT node, so :p has two distinct
+        // blank-node subjects and the two objects stay on separate subjects.
+        let g = Graph::load_str(src, "turtle").unwrap();
+        let g = update(&g, ins).unwrap();
+        assert_eq!(count(&g), 2, "both triples present");
+        let subjects = crate::count(&g, "SELECT DISTINCT ?s WHERE { ?s <http://ex/p> ?o }").unwrap();
+        assert_eq!(subjects, 2, "INSERT DATA bnode must be fresh (distinct from existing _:b)");
+
+        // Delta-overlay path: same freshness guarantee.
+        let mut g2 = Graph::load_str(src, "turtle").unwrap();
+        update_in_place(&mut g2, ins).unwrap();
+        assert_eq!(count(&g2), 2);
+        let subjects2 = crate::count(&g2, "SELECT DISTINCT ?s WHERE { ?s <http://ex/p> ?o }").unwrap();
+        assert_eq!(subjects2, 2, "in-place INSERT DATA bnode must be fresh too");
+
+        // Within ONE INSERT DATA op, the same label is the SAME fresh node.
+        let g3 = Graph::load_str("@prefix : <http://ex/> . :x :p :y .", "turtle").unwrap();
+        let g3 = update(&g3, "PREFIX : <http://ex/> INSERT DATA { _:s :a :o . _:s :b :o2 }").unwrap();
+        let one_subj = crate::count(&g3, "SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(isBlank(?s)) }").unwrap();
+        assert_eq!(one_subj, 1, "same label in one INSERT DATA op is one node");
     }
 }

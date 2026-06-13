@@ -1047,8 +1047,27 @@ impl Graph {
     /// cache is recomputed, preserving backward compatibility.
     #[cfg(feature = "mmap")]
     pub fn open(dir: &std::path::Path) -> std::io::Result<Graph> {
+        // [OPUS-4.8] (review 1593) Finish or roll back any compaction directory swap that a
+        // crash interrupted, so `dir` is always present (never lost in the rename window).
+        recover_compaction(dir)?;
         let store = TripleStore::open(dir)?;
-        let dict = Dict::open_mmap(dir)?;
+        // [OPUS-4.8] (review 1325, sub-finding 2) Prefer the mmap dictionary format
+        // (`dict-meta.bin`, written by `save_mmap`); fall back to the LEGACY single-file
+        // `dict.bin` (written by the older `Dict::save`) so graph directories saved before
+        // the mmap dictionary format still open. The legacy dict loads fully into RAM (no
+        // mmap), which is the only difference — every term still round-trips.
+        let dict = if dir.join("dict-meta.bin").exists() {
+            Dict::open_mmap(dir)?
+        } else {
+            let legacy = dir.join("dict.bin");
+            if legacy.exists() {
+                Dict::open(&legacy)?
+            } else {
+                // Neither format present — surface the original mmap error (NotFound on
+                // dict-meta.bin), matching the previous behaviour for a corrupt directory.
+                Dict::open_mmap(dir)?
+            }
+        };
         let np = dir.join("numerics.bin");
         let numerics = match std::fs::File::open(&np) {
             Ok(f) if f.metadata()?.len() as usize == dict.len() * std::mem::size_of::<f64>() => {
@@ -1590,6 +1609,38 @@ impl Graph {
         Ok(())
     }
 
+    /// [OPUS-4.8] (review 1593) DURABLY empties this graph's default-graph content while
+    /// PRESERVING its directory / WAL association — the durable replacement for
+    /// `*graph = empty_graph()` on a directory-backed graph (where the latter dropped the WAL
+    /// and a reopen restored the old on-disk base). For a directory-backed graph the current
+    /// triples are retracted through [`apply_delta`](Self::apply_delta), so the deletions are
+    /// WAL-logged + fsync'd and survive a crash/reopen; for an in-memory graph it clears the
+    /// store overlay in place (no WAL to keep). Named graphs are untouched.
+    pub fn clear_default_durable(&mut self) -> Result<(), String> {
+        #[cfg(feature = "mmap")]
+        if self.wal.is_some() {
+            // Retract every current default-graph triple as a WAL-logged delete batch.
+            let triples: Vec<[Term; 3]> = {
+                let scan = self.store.scan(&[None, None, None]);
+                scan.rows
+                    .iter()
+                    .map(|r| {
+                        let spo = scan.to_spo(r);
+                        [self.dict.term(spo[0]), self.dict.term(spo[1]), self.dict.term(spo[2])]
+                    })
+                    .collect()
+            };
+            if !triples.is_empty() {
+                self.apply_delta(&[], &triples)?;
+            }
+            return Ok(());
+        }
+        // In-memory graph: no WAL/dir to preserve — clear the store content in place. The
+        // dictionary is intentionally kept (ids stay stable; the empty store references none).
+        self.store = TripleStore::from_triples(Vec::new());
+        Ok(())
+    }
+
     /// [`apply_delta`](Self::apply_delta) over the whole DATASET, parsing the batch
     /// from two N-Quads documents (N-Triples is the default-graph subset): `deletes`
     /// first, then `inserts`, grouped and applied PER GRAPH — default-graph statements
@@ -1713,16 +1764,27 @@ impl Graph {
         }
         #[cfg(feature = "mmap")]
         if let Some(dir) = dir {
-            // Persist the new base to a sibling dir, then swap via two renames — the
-            // original dir stays intact until the new one is fully written + synced.
+            // [OPUS-4.8] (review 1593) ROLLBACK-SAFE directory swap. The two-rename swap has a
+            // window where the canonical `dir` does not exist (between the two renames); a
+            // crash there must NOT lose the dataset. We:
+            //   1. write the new base to `compact-new` and fsync the DIRECTORY (so its
+            //      existence + contents are durable before it can become canonical);
+            //   2. rename `dir` -> `compact-old`, fsync the parent (the rename is durable);
+            //   3. rename `compact-new` -> `dir`, fsync the parent.
+            // If a crash interrupts the swap, `recover_compaction` (run on every open)
+            // deterministically completes or rolls it back from the surviving sibling.
             let new_dir = dir.with_extension("compact-new");
             let old_dir = dir.with_extension("compact-old");
             std::fs::remove_dir_all(&new_dir).ok();
             std::fs::remove_dir_all(&old_dir).ok();
             self.wal = None; // close the log before the directory swap
             self.save(&new_dir).map_err(|e| e.to_string())?;
+            fsync_dir(&new_dir).map_err(|e| e.to_string())?;
+            let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
             std::fs::rename(&dir, &old_dir).map_err(|e| e.to_string())?;
+            fsync_dir(parent).map_err(|e| e.to_string())?;
             std::fs::rename(&new_dir, &dir).map_err(|e| e.to_string())?;
+            fsync_dir(parent).map_err(|e| e.to_string())?;
             // Re-open memory-mapped from the new base (fresh, empty WAL); only then drop
             // the old files (open mmaps keep unlinked files alive on unix).
             *self = Graph::open(&dir).map_err(|e| e.to_string())?;
@@ -1732,10 +1794,74 @@ impl Graph {
     }
 }
 
+/// [OPUS-4.8] (review 1593) fsync a DIRECTORY so a rename of (or into) it is durable. On
+/// failure (e.g. a platform/filesystem that rejects opening a dir) it is a best-effort no-op,
+/// matching the durability the rest of the persistence path assumes.
+#[cfg(feature = "mmap")]
+fn fsync_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::File::open(dir) {
+        Ok(f) => match f.sync_all() {
+            Ok(()) => Ok(()),
+            // Some filesystems return EINVAL/unsupported for fsync on a directory handle;
+            // that is not a data-loss condition, so treat it as success.
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::InvalidInput) => Ok(()),
+            Err(e) => Err(e),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// [OPUS-4.8] (review 1593) Recover an INTERRUPTED [`compact`](Graph::compact) directory swap
+/// so the canonical `dir` always ends up present after any crash. Deterministic from the
+/// surviving siblings (`<dir>.compact-old` / `<dir>.compact-new`):
+///
+/// - `dir` present: the swap completed (or never started) — just remove any stale siblings.
+/// - `dir` MISSING, `compact-new` present: a crash between the two renames — the new base was
+///   already fully written + dir-fsynced, so COMPLETE the swap by promoting `compact-new`.
+/// - `dir` MISSING, only `compact-old` present: a crash before the new base was ready — ROLL
+///   BACK by restoring `compact-old`.
+#[cfg(feature = "mmap")]
+fn recover_compaction(dir: &std::path::Path) -> std::io::Result<()> {
+    let new_dir = dir.with_extension("compact-new");
+    let old_dir = dir.with_extension("compact-old");
+    let parent = dir.parent().unwrap_or_else(|| std::path::Path::new("."));
+    if dir.exists() {
+        // Canonical dir is intact; drop any leftover siblings from a crash after the swap.
+        std::fs::remove_dir_all(&new_dir).ok();
+        std::fs::remove_dir_all(&old_dir).ok();
+        return Ok(());
+    }
+    if new_dir.exists() {
+        // Complete the swap: the new base was fully written + synced before the swap began.
+        std::fs::rename(&new_dir, dir)?;
+        fsync_dir(parent)?;
+        std::fs::remove_dir_all(&old_dir).ok();
+    } else if old_dir.exists() {
+        // Roll back: restore the previous base (the new one never reached durability).
+        std::fs::rename(&old_dir, dir)?;
+        fsync_dir(parent)?;
+    }
+    Ok(())
+}
+
 /// The append-only write-ahead log of update operations for a directory-backed graph.
-/// One record per triple: `[op: u8 (0 = insert, 1 = delete)][len: u32 LE][N-Triples
-/// statement bytes]`. Batches are fsync'd on append; replay stops at the first torn /
-/// unparsable record (crash mid-write) and truncates there.
+///
+/// [OPUS-4.8] (review 1593) Entries are framed as ATOMIC BATCHES, not independent per-triple
+/// records, so a crash mid-append can never leave a PARTIALLY-applied batch on replay. Each
+/// batch is laid out as:
+///
+/// ```text
+/// [BATCH_MAGIC u32][n_records u32][body_len u32]   <- header
+/// <body_len bytes of records>                       <- each: [op u8][len u32][N-Triples bytes]
+/// [checksum u64][COMMIT_MARKER u32]                 <- commit trailer (written last)
+/// ```
+///
+/// The checksum (FNV-1a over the header + body) plus the trailing commit marker form the
+/// COMMIT POINT: `replay` only applies a batch whose trailer is present AND whose checksum
+/// matches, and TRUNCATES the log at the start of the first batch that fails either check
+/// (the torn tail of an interrupted append). So replay applies exactly the batches that were
+/// fully durable — never a prefix of one. The whole batch is `write_all`'d then fsync'd once.
 #[cfg(feature = "mmap")]
 struct Wal {
     file: std::fs::File,
@@ -1746,6 +1872,10 @@ struct Wal {
 impl Wal {
     const INSERT: u8 = 0;
     const DELETE: u8 = 1;
+    /// Batch frame magic ("WBA1" little-endian) — starts every batch header.
+    const BATCH_MAGIC: u32 = 0x31_41_42_57;
+    /// Commit marker ("DONE" little-endian) — written last, after the checksum.
+    const COMMIT_MARKER: u32 = 0x45_4E_4F_44;
 
     fn path(dir: &std::path::Path) -> std::path::PathBuf {
         dir.join("wal.log")
@@ -1756,17 +1886,42 @@ impl Wal {
         Ok(Wal { file, dir: dir.to_path_buf() })
     }
 
-    /// Appends one batch — delete records first, then inserts (the order `apply_delta`
-    /// applies them) — and fsyncs, so the batch is durable BEFORE it is applied.
+    /// FNV-1a 64-bit checksum (no extra deps; deterministic across runs/platforms).
+    fn checksum(bytes: &[u8]) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        h
+    }
+
+    /// Appends one ATOMIC batch — delete records first, then inserts (the order
+    /// `apply_delta` applies them) — framed with a header + checksum + commit marker, and
+    /// fsyncs, so the WHOLE batch is durable as a unit BEFORE it is applied in memory. A
+    /// crash mid-append leaves an uncommitted tail that `replay` discards entirely.
     fn append_batch(&mut self, inserts: &[[Term; 3]], deletes: &[[Term; 3]]) -> std::io::Result<()> {
         use std::io::Write;
-        let mut buf = Vec::new();
+        let mut body = Vec::new();
+        let mut n_records = 0u32;
         for t in deletes {
-            Self::push_record(&mut buf, Self::DELETE, t);
+            Self::push_record(&mut body, Self::DELETE, t);
+            n_records += 1;
         }
         for t in inserts {
-            Self::push_record(&mut buf, Self::INSERT, t);
+            Self::push_record(&mut body, Self::INSERT, t);
+            n_records += 1;
         }
+        let mut buf = Vec::with_capacity(body.len() + 24);
+        buf.extend_from_slice(&Self::BATCH_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&n_records.to_le_bytes());
+        buf.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&body);
+        // Checksum covers everything written so far (header + body); the commit marker is
+        // appended AFTER the checksum so a torn write can't produce a valid-looking trailer.
+        let crc = Self::checksum(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&Self::COMMIT_MARKER.to_le_bytes());
         self.file.write_all(&buf)?;
         self.file.sync_data()
     }
@@ -1785,9 +1940,11 @@ impl Wal {
         self.file.sync_data()
     }
 
-    /// Reads `dir`'s log into `(is_insert, triple)` ops in append order. Stops cleanly
-    /// at the first incomplete or unparsable record — a crash mid-write — and TRUNCATES
-    /// the file to the last complete record, so subsequent appends are well-formed.
+    /// Reads `dir`'s log into `(is_insert, triple)` ops in append order, batch by batch.
+    /// Only fully-committed batches (intact header + body + matching checksum + commit
+    /// marker) are applied; the file is TRUNCATED at the start of the first incomplete or
+    /// corrupt batch — the torn tail of an interrupted append — so the partial batch is
+    /// NEVER partially applied and subsequent appends start at a clean batch boundary.
     fn replay(dir: &std::path::Path) -> std::io::Result<Vec<(bool, [Term; 3])>> {
         let path = Self::path(dir);
         let bytes = match std::fs::read(&path) {
@@ -1796,26 +1953,57 @@ impl Wal {
             Err(e) => return Err(e),
         };
         let mut ops = Vec::new();
-        let mut good = 0usize; // end of the last fully-replayed record
-        while good < bytes.len() {
-            let pos = good;
-            if pos + 5 > bytes.len() {
+        let mut good = 0usize; // end of the last fully-committed batch
+        'batches: while good < bytes.len() {
+            let bstart = good;
+            // Header: magic + n_records + body_len (12 bytes).
+            if bstart + 12 > bytes.len() {
                 break; // torn header
             }
-            let op = bytes[pos];
-            if op > Self::DELETE {
-                break; // corrupt op byte
+            let rd = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            if rd(bstart) != Self::BATCH_MAGIC {
+                break; // not a batch frame (corruption / torn tail)
             }
-            let len = u32::from_le_bytes([bytes[pos + 1], bytes[pos + 2], bytes[pos + 3], bytes[pos + 4]]) as usize;
-            let start = pos + 5;
-            let Some(end) = start.checked_add(len).filter(|&e| e <= bytes.len()) else {
+            let n_records = rd(bstart + 4) as usize;
+            let body_len = rd(bstart + 8) as usize;
+            let body_start = bstart + 12;
+            let Some(body_end) = body_start.checked_add(body_len).filter(|&e| e <= bytes.len()) else {
                 break; // torn body
             };
-            let Some(t) = parse_nt_record(&bytes[start..end]) else {
-                break; // unparsable body (corruption)
+            // Commit trailer: checksum (8) + marker (4).
+            let Some(trailer_end) = body_end.checked_add(12).filter(|&e| e <= bytes.len()) else {
+                break; // trailer not yet written — uncommitted batch
             };
-            ops.push((op == Self::INSERT, t));
-            good = end;
+            let stored_crc = u64::from_le_bytes(bytes[body_end..body_end + 8].try_into().expect("8 bytes"));
+            let marker = rd(body_end + 8);
+            if marker != Self::COMMIT_MARKER || Self::checksum(&bytes[bstart..body_end]) != stored_crc {
+                break; // uncommitted / corrupt batch — discard the tail
+            }
+            // The batch is committed: parse its records. (A parse failure here would mean a
+            // committed-but-corrupt body — treat it as a torn tail and stop, conservatively.)
+            let mut pos = body_start;
+            let mut batch_ops = Vec::with_capacity(n_records);
+            for _ in 0..n_records {
+                if pos + 5 > body_end {
+                    break 'batches;
+                }
+                let op = bytes[pos];
+                let len = rd(pos + 1) as usize;
+                let start = pos + 5;
+                let Some(end) = start.checked_add(len).filter(|&e| e <= body_end) else {
+                    break 'batches;
+                };
+                let Some(t) = parse_nt_record(&bytes[start..end]) else {
+                    break 'batches;
+                };
+                batch_ops.push((op == Self::INSERT, t));
+                pos = end;
+            }
+            if batch_ops.len() != n_records {
+                break; // body record count disagreed with the header — corrupt
+            }
+            ops.extend(batch_ops);
+            good = trailer_end;
         }
         if good < bytes.len() {
             let f = std::fs::OpenOptions::new().write(true).open(&path)?;
@@ -2204,6 +2392,18 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
                     _ => i += 1,
                 }
             }
+            // [OPUS-4.8] PN_LOCAL_ESC (review 1398): a prefixed-name local can contain an
+            // escaped reserved char, e.g. `ex:foo\#bar` or `ex:a\.b`. Skip the backslash AND
+            // the escaped byte so an escaped `#` is NOT read as a comment start (which would
+            // swallow a real `.` terminator and could scan past an interspersed
+            // `@base`/`@prefix`, leaving a later chunk to parse under a stale preamble). Bail
+            // to serial if the `\` is the last byte (malformed).
+            b'\\' => {
+                if i + 1 >= n {
+                    return None;
+                }
+                i += 2;
+            }
             _ => i += 1,
         }
     }
@@ -2365,6 +2565,9 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
 ) -> Result<(), String> {
     use std::sync::mpsc::sync_channel;
     const BLOCK: usize = 64 << 20; // 64 MiB
+    // [OPUS-4.8] (review 1357) Cache timing-enabled ONCE; the hot per-block merge/remap loop
+    // then takes no `Instant::now()` and no atomic update when SPARQ_BUILD_TIMING is unset.
+    let timing = build_timing::enabled();
     let (tx, rx) = sync_channel::<Vec<u8>>(3);
     // Parsed partials flow parse-thread -> merge (this thread). A small bound keeps memory
     // bounded (a couple of blocks' partials in flight) while letting the rayon PARSE of the
@@ -2430,10 +2633,10 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
         // arrive in order; partials are in chunk order), so the output is byte-identical.
         for partials in prx {
             for (pd, ptriples) in partials {
-                let t_merge = std::time::Instant::now();
+                let t_merge = build_timing::start(timing);
                 let remap = dict.merge_remap(&pd);
-                build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-                let t_remap = std::time::Instant::now();
+                build_timing::record(t_merge, &build_timing::MERGE_NS);
+                let t_remap = build_timing::start(timing);
                 let map = |id: Id| if id >= dict::INLINE_BASE { id } else { remap[(id - 1) as usize] };
                 // Prefetch the remap gather DIST triples ahead — the large-global-dict gather
                 // is the build-path bottleneck (per-ISA hint, correctness-neutral).
@@ -2453,7 +2656,7 @@ fn build_external_ntriples_parallel<R: std::io::Read + Send>(
                         extsort::spill_run(buf, runs, tmp).map_err(|e| e.to_string())?;
                     }
                 }
-                build_timing::REMAP_NS.fetch_add(t_remap.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                build_timing::record(t_remap, &build_timing::REMAP_NS);
             }
         }
         // Join parse first (it feeds stage 3 — surface a parse error), then the producer.
@@ -2478,6 +2681,8 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
 ) -> Result<(), String> {
     use std::sync::mpsc::sync_channel;
     const BLOCK: usize = 64 << 20;
+    // [OPUS-4.8] (review 1357) Cache timing-enabled once; copied into the merge/remap stages.
+    let timing = build_timing::enabled();
     let (tx, rx) = sync_channel::<Vec<u8>>(3);
     type Partials = Vec<(Dict, Vec<[Id; 3]>)>;
     let (ptx, prx) = sync_channel::<Partials>(2);
@@ -2538,7 +2743,7 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
             use rayon::prelude::*;
             let mut scratch: Vec<[Id; 3]> = Vec::new();
             for (partials, remaps) in rrx {
-                let t_remap = std::time::Instant::now();
+                let t_remap = build_timing::start(timing);
                 for (pidx, (_, ptriples)) in partials.iter().enumerate() {
                     let rm = &remaps[pidx];
                     let map = |id: Id| if id >= dict::INLINE_BASE { id } else { rm[id as usize] };
@@ -2553,7 +2758,7 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
                         }
                     }
                 }
-                build_timing::REMAP_NS.fetch_add(t_remap.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                build_timing::record(t_remap, &build_timing::REMAP_NS);
             }
             Ok(())
         });
@@ -2564,9 +2769,9 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
         // assignment is deterministic and identical to the previous serial-stage version.
         let feed = || -> Result<(), String> {
             for partials in prx {
-                let t_merge = std::time::Instant::now();
+                let t_merge = build_timing::start(timing);
                 let remaps = sharded.intern_partials(&partials);
-                build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                build_timing::record(t_merge, &build_timing::MERGE_NS);
                 if rtx.send((partials, remaps)).is_err() {
                     return Ok(()); // the remap stage errored and dropped the receiver
                 }
@@ -2622,6 +2827,8 @@ fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
     // nothing but per-batch overhead. (The differential test builds the reference with
     // the sharded path's 64 MiB blocks, so it verifies this invariance empirically.)
     const BLOCK: usize = 16 << 20;
+    // [OPUS-4.8] (review 1357) Cache timing-enabled once for the merge stage below.
+    let timing = build_timing::enabled();
     let (tx, rx) = sync_channel::<Vec<u8>>(3);
     type Partials = Vec<(Dict, Vec<[Id; 3]>)>;
     let (ptx, prx) = sync_channel::<Partials>(2);
@@ -2672,9 +2879,9 @@ fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
         });
         // Stage 3 (this thread) — bounded-cache resolve + triple staging.
         for partials in prx {
-            let t_merge = std::time::Instant::now();
+            let t_merge = build_timing::start(timing);
             interner.intern_batch(&partials)?;
-            build_timing::MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            build_timing::record(t_merge, &build_timing::MERGE_NS);
         }
         parser.join().map_err(|_| "parse thread panicked".to_string())??;
         producer.join().map_err(|_| "decompression thread panicked".to_string())?
@@ -2688,7 +2895,9 @@ fn parse_block(bytes: &[u8]) -> Result<Vec<(Dict, Vec<[Id; 3]>)>, String> {
     use rayon::prelude::*;
     let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 4096 + 1);
     let bounds = newline_chunk_bounds(bytes, target);
-    let t_parse = std::time::Instant::now();
+    // [OPUS-4.8] (review 1357) Only timestamp this phase when timing is enabled — one env read
+    // per ~16-64 MiB block (not per triple) and no clock/atomic on the common unset path.
+    let t_parse = build_timing::start(build_timing::enabled());
     let partials: Vec<(Dict, Vec<[Id; 3]>)> = bounds
         .par_iter()
         .map(|&(s, e)| {
@@ -2697,7 +2906,7 @@ fn parse_block(bytes: &[u8]) -> Result<Vec<(Dict, Vec<[Id; 3]>)>, String> {
             Ok::<_, String>((d, t))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    build_timing::PARSE_NS.fetch_add(t_parse.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    build_timing::record(t_parse, &build_timing::PARSE_NS);
     Ok(partials)
 }
 
@@ -2717,6 +2926,21 @@ mod build_timing {
     }
     pub fn enabled() -> bool {
         std::env::var("SPARQ_BUILD_TIMING").is_ok()
+    }
+    /// [OPUS-4.8] (review 1357) Take a phase start timestamp only when timing is enabled, so
+    /// the hot ingest path performs NO `Instant::now()` clock read when `SPARQ_BUILD_TIMING`
+    /// is unset (the common case). Callers cache `enabled()` once per build and pass the flag.
+    #[inline]
+    pub fn start(timing: bool) -> Option<std::time::Instant> {
+        timing.then(std::time::Instant::now)
+    }
+    /// Accumulate the elapsed nanos for a phase iff its start was taken (timing enabled),
+    /// skipping the atomic `fetch_add` entirely otherwise.
+    #[inline]
+    pub fn record(start: Option<std::time::Instant>, counter: &AtomicU64) {
+        if let Some(t) = start {
+            counter.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     pub fn report(stage: &str, secs: f64) {
         use std::sync::atomic::Ordering::Relaxed;
@@ -2869,6 +3093,52 @@ mod tests {
         differential(&ground, 16);
     }
 
+    /// [OPUS-4.8] Regression for review 1398: a PN_LOCAL_ESC `\#` in a prefixed-name local
+    /// must not be read as a comment start by `next_terminator`. Before the fix, the escaped
+    /// `#` swallowed the rest of its line (including the real `.` terminator), so the scanner
+    /// could run through an interspersed `@base`/`@prefix` undetected; a later chunk would then
+    /// parse under the stale preamble and resolve relative IRIs wrongly. The fix makes the
+    /// scanner skip the escaped byte, so the interspersed directive is correctly detected and
+    /// the whole document falls back to the serial parser (`turtle_chunks` → None).
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_escaped_hash_in_local() {
+        // (a) Escaped `#` in a local does not eat the terminator: the splitter still scans the
+        //     statements cleanly and the chunked parse equals the serial parse.
+        let mut clean = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..400 {
+            // `ex:foo\#bar{i}` — a valid PN_LOCAL with an escaped `#`. The `\#` must NOT start
+            // a comment; the `.` after it is the real top-level terminator.
+            clean.push_str(&format!("ex:s{i} ex:p ex:foo\\#bar{i} .\n"));
+        }
+        assert!(clean.len() > 8192);
+        // The escaped-`#` doc must still split (no spurious comment-eating of terminators)…
+        assert!(turtle_chunks(clean.as_bytes(), 32).is_some(), "escaped # must not break the split");
+        // …and parse identically to the serial parser.
+        let (pd, pt) = parse_turtle_chunked(clean.as_bytes(), 32).unwrap();
+        let mut sd = Dict::new();
+        let st = parse_turtle_chunk(clean.as_bytes(), &mut sd).unwrap();
+        assert_eq!(canon_bnodes(&pd, &pt), canon_bnodes(&sd, &st), "escaped-# chunked parse must equal serial");
+        assert_eq!(pt.len(), 400);
+
+        // (b) An interspersed `@base` AFTER an escaped `#` (and enough statements to force
+        //     multiple chunks) must be DETECTED → serial fallback. Pre-fix, the escaped `#`
+        //     swallowed the line and the scanner ran through the `@base`, returning chunks that
+        //     would parse later statements under a stale base.
+        let mut interspersed = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..200 {
+            interspersed.push_str(&format!("ex:s{i} ex:p ex:foo\\#bar{i} .\n"));
+        }
+        interspersed.push_str("@base <http://other/> .\n");
+        for i in 200..400 {
+            interspersed.push_str(&format!("ex:s{i} ex:p ex:o{i} .\n"));
+        }
+        assert!(
+            turtle_chunks(interspersed.as_bytes(), 32).is_none(),
+            "an interspersed @base after an escaped # must force the serial fallback"
+        );
+    }
+
     #[cfg(feature = "mmap")]
     #[test]
     fn save_open_mmap_roundtrip() {
@@ -2958,6 +3228,55 @@ mod tests {
             if let Some(pid) = g.id_of(&Term::NamedNode(pred)) {
                 assert_eq!(g.store.pred_stat(pid), g2.store.pred_stat(pid), "pred_stat differs for p{p}");
             }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] Regression for review 1325 (sub-finding 2): a graph directory carrying the
+    /// LEGACY single-file `dict.bin` dictionary (saved before the mmap dict format) must still
+    /// open via `Graph::open` (falling back from the absent `dict-meta.bin`), with every triple
+    /// round-tripping identically.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn open_falls_back_to_legacy_dict_bin() {
+        let mut nt = String::new();
+        for i in 0..400u32 {
+            nt.push_str(&format!("<http://ex/n{}> <http://ex/p{}> <http://ex/o{}> .\n", i % 97, i % 7, i % 53));
+        }
+        nt.push_str("<http://ex/n0> <http://ex/name> \"caf\\u00e9\"@fr .\n");
+        let g = Graph::load_str(&nt, "ntriples").unwrap();
+        // The in-memory build produces an arena dict (base == 0), so `Dict::save` applies.
+        let dir = std::env::temp_dir().join(format!("sparq_legacy_dict_test_{}", std::process::id()));
+        g.save(&dir).unwrap();
+        // Simulate a LEGACY directory: drop every mmap-dict file and write the single-file
+        // `dict.bin` instead. The permutation/numerics/temporals files are left untouched.
+        for f in ["dict-meta.bin", "dict-terms.bin", "dict-offs.bin", "dict-hash.bin", "dict-hid.bin"] {
+            std::fs::remove_file(dir.join(f)).ok();
+        }
+        g.dict.save(&dir.join("dict.bin")).unwrap();
+        assert!(!dir.join("dict-meta.bin").exists());
+        assert!(dir.join("dict.bin").exists());
+        // `Graph::open` must succeed via the legacy fallback and round-trip every triple.
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g.len(), g2.len());
+        assert_eq!(g.dict.len(), g2.dict.len());
+        let dump = |gg: &Graph| {
+            let scan = gg.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(dump(&g), dump(&g2), "legacy-dict-reopened store differs");
+        for s in 0..50u32 {
+            let t = Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/n{}", s % 97)));
+            assert_eq!(g.id_of(&t), g2.id_of(&t), "legacy dict lookup differs for {t}");
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3331,11 +3650,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Kill-during-write simulation: a WAL truncated mid-record must replay cleanly up
-    /// to the last COMPLETE record (and the file must be truncated to that boundary).
+    /// Kill-during-write simulation: a WAL whose trailing BATCH is torn (header, body, or
+    /// commit trailer) must replay only the fully-COMMITTED batches and truncate the torn
+    /// tail. [OPUS-4.8] (review 1593) Each `apply_delta` is one atomic batch frame:
+    /// `[magic][n][body_len] <records> [crc][commit]`.
     #[cfg(feature = "mmap")]
     #[test]
-    fn wal_torn_record_replay() {
+    fn wal_torn_batch_replay() {
         let dir = std::env::temp_dir().join(format!("sparq_wal_torn_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         Graph::load_str("<http://ex/s0> <http://ex/p0> <http://ex/o0> .", "ntriples").unwrap().save(&dir).unwrap();
@@ -3347,29 +3668,129 @@ mod tests {
         }
         let wal_path = dir.join("wal.log");
         let full = std::fs::read(&wal_path).unwrap();
+        // Length of the FIRST batch frame: 12 (header) + body_len + 12 (crc+commit).
+        let body_len = u32::from_le_bytes([full[8], full[9], full[10], full[11]]) as usize;
+        let first_batch_len = 12 + body_len + 12;
+        assert!(full.len() > first_batch_len, "test needs two batches");
 
-        // Sever the SECOND record mid-body (a crash between write and fsync completion).
-        let first_len = 5 + u32::from_le_bytes([full[1], full[2], full[3], full[4]]) as usize;
-        assert!(full.len() > first_len + 8, "test needs two records");
-        let torn = &full[..first_len + 8];
+        // (a) Sever the SECOND batch mid-body (a crash before its commit trailer is synced):
+        //     the uncommitted batch is discarded WHOLE — never partially applied.
+        let torn = &full[..first_batch_len + 14]; // header + a few body bytes, no trailer
         std::fs::write(&wal_path, torn).unwrap();
-
         let g = Graph::open(&dir).unwrap();
         let got = dump_terms(&g);
-        // Only the FIRST update survives; the torn second record is discarded.
-        assert_eq!(got.len(), 2);
+        assert_eq!(got.len(), 2, "only the first committed batch replays");
         assert!(got.iter().any(|(s, _, _)| s.contains("s1")));
         assert!(!got.iter().any(|(s, _, _)| s.contains("s2")));
-        // …and the log was truncated to the last complete record.
-        assert_eq!(std::fs::read(&wal_path).unwrap().len(), first_len, "torn tail must be truncated");
+        assert_eq!(std::fs::read(&wal_path).unwrap().len(), first_batch_len, "torn tail truncated to the batch boundary");
 
-        // A corrupt OP BYTE (bit-rot) must also stop replay cleanly.
-        let mut corrupt = full[..first_len].to_vec();
-        corrupt[0] = 7; // invalid op
+        // (b) Corrupt the FIRST batch's body (flip a byte inside it): the checksum fails, so
+        //     the whole batch is rejected and replay stops at the base — never a partial apply.
+        let mut corrupt = full[..first_batch_len].to_vec();
+        corrupt[14] ^= 0xFF; // a byte inside the first record's body
         std::fs::write(&wal_path, &corrupt).unwrap();
         let g2 = Graph::open(&dir).unwrap();
-        assert_eq!(dump_terms(&g2).len(), 1, "corrupt first record must stop replay at the base");
-        assert_eq!(std::fs::read(&wal_path).unwrap().len(), 0);
+        assert_eq!(dump_terms(&g2).len(), 1, "checksum-failing batch must not apply");
+        assert_eq!(std::fs::read(&wal_path).unwrap().len(), 0, "corrupt leading batch truncates the whole log");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (review 1593) A MULTI-record batch must be atomic: if a crash severs the
+    /// batch after some of its records are on disk but before the commit trailer, NONE of the
+    /// batch's records may be applied (the pre-fix per-record WAL would apply a prefix).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn wal_torn_multi_record_batch_is_all_or_nothing() {
+        let dir = std::env::temp_dir().join(format!("sparq_wal_multi_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_str("<http://ex/s0> <http://ex/p0> <http://ex/o0> .", "ntriples").unwrap().save(&dir).unwrap();
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            // ONE batch of three inserts.
+            let ins: Vec<[Term; 3]> = (1..=3)
+                .map(|i| [term_iri(i, "s"), term_iri(i, "p"), term_iri(i, "o")])
+                .collect();
+            g.apply_delta(&ins, &[]).unwrap();
+        }
+        let wal_path = dir.join("wal.log");
+        let full = std::fs::read(&wal_path).unwrap();
+        let body_len = u32::from_le_bytes([full[8], full[9], full[10], full[11]]) as usize;
+        // Drop the commit trailer (last 12 bytes) AND part of the last record — a torn append
+        // with two of the three records' bytes present but no commit point.
+        let torn = &full[..12 + body_len - 5]; // header + most of the body, no trailer
+        std::fs::write(&wal_path, torn).unwrap();
+        let g = Graph::open(&dir).unwrap();
+        // NONE of the three records may have applied — only the base triple remains.
+        assert_eq!(dump_terms(&g).len(), 1, "uncommitted multi-record batch must apply nothing");
+        assert_eq!(std::fs::read(&wal_path).unwrap().len(), 0, "the torn batch is the whole log → truncated empty");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (review 1593) Compaction directory swap must be crash-recoverable: if `dir`
+    /// is missing but the new base survives in `compact-new`, `Graph::open` completes the
+    /// swap; if only `compact-old` survives, it rolls back — `dir` is never lost.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn compact_swap_crash_recovery() {
+        let base = std::env::temp_dir().join(format!("sparq_compact_recover_{}", std::process::id()));
+        let dir = base.join("g");
+        // Helper: build a graph dir with one triple naming `tag`.
+        let build = |d: &std::path::Path, tag: &str| {
+            std::fs::remove_dir_all(d).ok();
+            Graph::load_str(&format!("<http://ex/{tag}> <http://ex/p> <http://ex/o> ."), "ntriples")
+                .unwrap()
+                .save(d)
+                .unwrap();
+        };
+
+        // (a) Crash BETWEEN the two renames: dir missing, both siblings present. Recovery must
+        //     COMPLETE the swap by promoting compact-new (the fully-synced new base).
+        build(&dir.with_extension("compact-old"), "old");
+        build(&dir.with_extension("compact-new"), "new");
+        assert!(!dir.exists());
+        let g = Graph::open(&dir).unwrap();
+        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/new")), "must promote compact-new");
+        assert!(!dir.with_extension("compact-new").exists());
+        assert!(!dir.with_extension("compact-old").exists());
+
+        // (b) Crash BEFORE the new base was ready: dir missing, only compact-old present.
+        //     Recovery must ROLL BACK by restoring compact-old.
+        std::fs::remove_dir_all(&dir).ok();
+        build(&dir.with_extension("compact-old"), "old");
+        assert!(!dir.exists());
+        let g = Graph::open(&dir).unwrap();
+        assert!(dump_terms(&g).iter().any(|(s, _, _)| s.contains("/old")), "must roll back to compact-old");
+        assert!(!dir.with_extension("compact-old").exists());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (review 1593) A durable CLEAR of a directory-backed graph must SURVIVE a
+    /// reopen. The pre-fix CLEAR replaced the graph with a fresh in-memory empty graph,
+    /// dropping the WAL/dir association, so the on-disk base was untouched and a reopen
+    /// restored the cleared data. `clear_default_durable` retracts the triples through the
+    /// WAL instead, so the emptiness is persistent.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn clear_default_durable_survives_reopen() {
+        let dir = std::env::temp_dir().join(format!("sparq_clear_durable_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let mut nt = String::new();
+        for i in 0..20u32 {
+            nt.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+        }
+        Graph::load_str(&nt, "ntriples").unwrap().save(&dir).unwrap();
+
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            assert_eq!(dump_terms(&g).len(), 20);
+            g.clear_default_durable().unwrap();
+            assert_eq!(dump_terms(&g).len(), 0, "clear empties the graph in memory");
+            assert!(g.wal.is_some(), "the WAL/dir association is preserved");
+        }
+        // Reopen: the WAL-logged retractions replay, so the graph stays empty.
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(dump_terms(&g2).len(), 0, "durable CLEAR must survive the reopen");
         std::fs::remove_dir_all(&dir).ok();
     }
 

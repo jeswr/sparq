@@ -124,6 +124,16 @@ impl ShapesModel {
         ] {
             roots.extend(g.subjects_of(&sh(pred)));
         }
+        // [OPUS-4.8] Implicit class shapes: a node that is an rdfs:Class with SHACL constraints is
+        // itself a node shape (with an implicit class target) per the SHACL spec. Root discovery
+        // previously only collected explicitly-typed shapes and shapes with sh:target* — so an
+        // implicit class shape with neither was never parsed and its constraints silently ignored.
+        // Include rdfs:Class subjects as root candidates; parse_shape only attaches the implicit
+        // target to nodes actually typed rdfs:Class (and a constraint-free class parses to a
+        // no-op shape, which validates nothing). See review 1616.
+        for t in g.triples(None, Some(RDF_TYPE), Some(&iri(RDFS_CLASS))) {
+            roots.push(t[0].clone());
+        }
         for root in crate::view::dedup(roots) {
             m.shape_id(&g, &root);
         }

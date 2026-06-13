@@ -36,7 +36,7 @@ pub use construct::{
 #[cfg(feature = "cs-planner")]
 pub use cs::{with_cs_table, CsSet, CsTable};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
-pub use update::{update, update_in_place};
+pub use update::{update, update_in_place, with_load_base};
 
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;
@@ -958,6 +958,88 @@ mod tests {
         assert!(r.rows[0][3].as_ref().unwrap().to_string().contains("35"));
     }
 
+    /// [OPUS-4.8] roborev 1610 (High): SUM/AVG over a column that is UNBOUND for some
+    /// rows (here via OPTIONAL) must still aggregate the rows that DO have a value — an
+    /// unbound member is skipped, not fatal. Previously any unbound member collapsed the
+    /// whole aggregate to unbound.
+    #[test]
+    fn sum_avg_skip_unbound_members() {
+        // ex:a..ex:d all exist; only a (10) and c (30) carry ex:score.
+        let data = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:a ex:t 1 . ex:b ex:t 1 . ex:c ex:t 1 . ex:d ex:t 1 .
+            ex:a ex:score 10 . ex:c ex:score 30 ."#;
+        let gg = Graph::load_str(data, "turtle").unwrap();
+        let pfx = "PREFIX ex: <http://ex/> ";
+        let one = |q: &str| -> String {
+            let r = query(&gg, &format!("{pfx}{q}")).unwrap();
+            r.rows[0][0].as_ref().unwrap().to_string()
+        };
+        // SUM/AVG over the OPTIONAL ?score: two bound rows (10, 30) out of four solutions.
+        let s = one("SELECT (SUM(?score) AS ?v) WHERE { ?s ex:t ?t OPTIONAL { ?s ex:score ?score } }");
+        assert!(s.contains("40"), "SUM over OPTIONAL must sum bound rows only, got {s}");
+        let a = one("SELECT (AVG(?score) AS ?v) WHERE { ?s ex:t ?t OPTIONAL { ?s ex:score ?score } }");
+        assert!(a.contains("20"), "AVG over OPTIONAL must average bound rows only, got {a}");
+    }
+
+    /// [OPUS-4.8] roborev 1610 (High/Med): CEIL/FLOOR/ROUND on a decimal with a very
+    /// large fractional scale must not overflow `10^scale` (debug panic / release wrap).
+    /// The value here is +/-1e-40, i.e. magnitude < 0.5, so the rounded results follow
+    /// purely from the sign.
+    #[test]
+    fn round_large_scale_decimal_no_overflow() {
+        let tiny = format!("0.{}1", "0".repeat(39)); // scale 40, value 1e-40
+        let data = format!(
+            r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:p ex:v "{tiny}"^^xsd:decimal .
+            ex:n ex:v "-{tiny}"^^xsd:decimal ."#
+        );
+        let gg = Graph::load_str(&data, "turtle").unwrap();
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        let n = |q: &str| query(&gg, &format!("{pfx}{q}")).unwrap().len();
+        // CEIL(+1e-40)=1, FLOOR(+1e-40)=0, ROUND(+1e-40)=0  (decimal-typed).
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(CEIL(?v) = \"1\"^^xsd:decimal) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(FLOOR(?v) = \"0\"^^xsd:decimal) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"), 1);
+        // CEIL(-1e-40)=0, FLOOR(-1e-40)=-1, ROUND(-1e-40)=0.
+        assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(CEIL(?v) = \"0\"^^xsd:decimal) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(FLOOR(?v) = \"-1\"^^xsd:decimal) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"), 1);
+    }
+
+    /// [OPUS-4.8] roborev 1429 (Med): GROUP BY aggregate over a >PAR_THRESHOLD (50k) input
+    /// must produce complete, correct per-group results. This crosses the chunked parallel
+    /// eval+intern boundary (default `parallel` feature) and the streaming sequential path
+    /// (no-default), which must agree group-for-group. 1,000 groups x 60 rows = 60,000 rows;
+    /// group `k` has values k..k+60 so SUM = 60*k + (0+..+59) = 60*k + 1770.
+    #[test]
+    fn group_aggregate_above_par_threshold_complete() {
+        let mut data = String::from("@prefix ex: <http://ex/> .\n");
+        for k in 0..1000u32 {
+            for i in 0..60u32 {
+                data.push_str(&format!("ex:s{k} ex:v {} .\n", k + i));
+            }
+        }
+        let gg = Graph::load_str(&data, "turtle").unwrap();
+        let r = query(
+            &gg,
+            "PREFIX ex: <http://ex/> SELECT ?s (SUM(?v) AS ?sum) WHERE { ?s ex:v ?v } GROUP BY ?s",
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1000, "every group must be emitted exactly once");
+        // Index group -> sum string and spot-check a few groups across the chunk boundary.
+        use std::collections::HashMap;
+        let sums: HashMap<String, String> = r
+            .rows
+            .iter()
+            .map(|row| (row[0].as_ref().unwrap().to_string(), row[1].as_ref().unwrap().to_string()))
+            .collect();
+        for k in [0u32, 1, 499, 500, 833, 999] {
+            let want = 60 * k + 1770;
+            let got = sums.get(&format!("<http://ex/s{k}>")).expect("group present");
+            assert!(got.contains(&want.to_string()), "group {k}: SUM want {want}, got {got}");
+        }
+    }
+
     #[test]
     fn order_by() {
         let r = query(
@@ -1644,6 +1726,44 @@ mod tests {
         let b = QueryBudget { max_rows: Some(3), ..QueryBudget::unlimited() };
         let e = query_json_chunks_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap_err();
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
+    }
+
+    /// [OPUS-4.8] roborev 1538 (High): a budget must bound CPU/memory on a LARGE
+    /// single-pattern SELECT, not just the final response. Above PAR_THRESHOLD the
+    /// streaming-JSON path used to fan out to rayon and build EVERY matching fragment
+    /// before checking the budget. With a budget active it must instead take the
+    /// cooperative serial loop that stops within ~1024 scanned rows. We build >50k
+    /// matching rows and assert (a) the budget error fires, and (b) an already-expired
+    /// deadline returns near-instantly (a full parallel materialisation of 60k rows
+    /// would be far slower) — guarding against re-introducing the eager fan-out.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn budget_bounds_large_single_pattern_json_scan() {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..60_000u32 {
+            ttl.push_str(&format!("ex:s{i} ex:p \"value-{i}-some-padding-text\" .\n"));
+        }
+        let big = Graph::load_str(&ttl, "turtle").unwrap();
+        let q = "SELECT * WHERE { ?s ?p ?o }";
+        // Tiny row cap on a 60k scan: must refuse with the budget error.
+        let b = QueryBudget { max_rows: Some(5), ..QueryBudget::unlimited() };
+        let e = query_json_with_budget(&big, q, &b).unwrap_err();
+        assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
+        // Already-expired deadline: the serial loop trips on its first 1024-row check,
+        // so the call returns quickly without materialising the whole result.
+        let b = QueryBudget {
+            deadline: Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+            ..QueryBudget::unlimited()
+        };
+        let start = std::time::Instant::now();
+        let e = query_json_with_budget(&big, q, &b).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(e.contains("query budget exceeded (timeout)"), "got: {e}");
+        assert!(elapsed < std::time::Duration::from_secs(2), "expired-deadline scan took {elapsed:?} — budget not bounding work");
+        // Without a budget the same large scan still works (parallel path) and is complete:
+        // one `"s":` binding key per result row.
+        let full = query_json(&big, q).unwrap();
+        assert_eq!(full.matches("\"s\":").count(), 60_000, "unbudgeted scan must return all rows");
     }
 
     #[test]
