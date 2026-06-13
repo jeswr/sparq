@@ -78,6 +78,13 @@ const MIN_DEAD_TERMS: usize = 1024;
 const DEAD_RATIO_NUM: usize = 1;
 const DEAD_RATIO_DEN: usize = 2;
 
+// [OPUS-4.8] The PersistentDict variant holds the live `Dict` inline — that IS the
+// persistent-dictionary mode (the dict lives across windows). Boxing it to equalise
+// variant sizes would add a hot-path indirection per tick for no real benefit: there
+// is exactly ONE Materializer per ContinuousQuery (never a large collection), so the
+// "every instance padded to the largest variant" cost the lint guards against does not
+// apply here. (Only trips under workspace feature-unification, not isolated-crate clippy.)
+#[allow(clippy::large_enum_variant)]
 enum Materializer {
     Rebuild {
         window: WindowedStream<[Term; 3]>,
