@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
-use sparq_server::{router, AppState, ServerConfig};
+use sparq_server::{router, AppState, PodId, ServerConfig, GLOBAL_POD};
 use tokio::net::TcpListener;
 
 /// A synthetic graph of `n` distinct triples (10 predicates, n/10 subjects), built
@@ -364,4 +364,103 @@ async fn bench_update_latency_1m() {
         total as f64 / took.as_secs_f64()
     );
     assert_eq!(count_rows(&cl, &base, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").await, reps + total);
+}
+
+// ---------------------------------------------------------------------------
+// Per-named-graph cache invalidation scope (sq-uqh, Wave B)
+// ---------------------------------------------------------------------------
+//
+// [OPUS-4.8] These exercise the END-TO-END epoch behaviour the cache hook depends on:
+// `apply_update` extracts the per-named-graph visibility scope of the parsed update and
+// publishes a generation that bumps ONLY those pods' epochs. A cached read records the
+// epochs of the pods it touched and stays valid while they are unchanged — so the
+// load-bearing properties are:
+//   * a write to graph A does NOT bump graph B's epoch (a B-scoped cache entry survives);
+//   * a cross-graph / default-graph / dynamically-scoped write DOES bump the global pod
+//     (the catch-all every entry records — so it invalidates everything, never under).
+
+/// The epoch of a pod in the current generation (0 = never touched).
+fn epoch_of(state: &AppState, pod: &str) -> u64 {
+    state.current().epochs().epoch(&PodId::new(pod))
+}
+
+/// A write scoped to graph A bumps ONLY graph A's epoch: graph B's epoch (and any cache
+/// entry recording it) is untouched, while a B-scoped write later bumps B but still not A.
+/// This is the whole point of finer-than-global tagging — no cross-graph invalidation churn.
+#[test]
+fn write_to_graph_a_does_not_invalidate_graph_b() {
+    let state = AppState::with_config(synthetic_graph(100), ServerConfig::default());
+    let pod_a = "http://ex/g/A";
+    let pod_b = "http://ex/g/B";
+
+    // Baseline: nothing touched yet.
+    let (a0, b0, g0) = (epoch_of(&state, pod_a), epoch_of(&state, pod_b), epoch_of(&state, GLOBAL_POD));
+
+    // A write that names ONLY graph A.
+    state
+        .apply_update("INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } }")
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let (a1, b1, g1) = (epoch_of(&state, pod_a), epoch_of(&state, pod_b), epoch_of(&state, GLOBAL_POD));
+    assert_eq!(a1, a0 + 1, "the write to A must bump A's epoch");
+    assert_eq!(b1, b0, "a write to A must NOT bump B's epoch — a B-scoped cache entry survives");
+    assert_eq!(g1, g0, "a single-named-graph write must NOT bump the global pod");
+
+    // A subsequent write naming ONLY graph B bumps B, still leaving A where it was.
+    state
+        .apply_update("INSERT DATA { GRAPH <http://ex/g/B> { <http://ex/s> <http://ex/p> <http://ex/o> } }")
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(epoch_of(&state, pod_b), b1 + 1, "the write to B must bump B's epoch");
+    assert_eq!(epoch_of(&state, pod_a), a1, "the write to B must NOT re-bump A");
+}
+
+/// A cross-graph / unscopable write (here CLEAR ALL, and a default-graph INSERT) MUST bump
+/// the global pod — the catch-all every cache entry records — so it invalidates everything.
+/// Under-invalidating here would be a stale read; over-invalidating (the global bump) is the
+/// honest conservative choice.
+#[test]
+fn cross_graph_and_default_writes_bump_global() {
+    let state = AppState::with_config(synthetic_graph(100), ServerConfig::default());
+
+    // (1) A default-graph INSERT DATA cannot be scoped finer than the catch-all → global.
+    let g0 = epoch_of(&state, GLOBAL_POD);
+    state
+        .apply_update("INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }")
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(epoch_of(&state, GLOBAL_POD), g0 + 1, "a default-graph write must bump global");
+
+    // (2) A cross-graph CLEAR ALL is unbounded → global again.
+    let g1 = epoch_of(&state, GLOBAL_POD);
+    state.apply_update("CLEAR ALL").unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(epoch_of(&state, GLOBAL_POD), g1 + 1, "CLEAR ALL must bump global");
+
+    // (3) A DELETE/INSERT WHERE with a VARIABLE graph target is not statically scopable → global.
+    let g2 = epoch_of(&state, GLOBAL_POD);
+    state
+        .apply_update("INSERT { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }")
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(epoch_of(&state, GLOBAL_POD), g2 + 1, "a variable-graph-target write must bump global");
+}
+
+/// A write mixing a named-graph effect with a default-graph effect bumps BOTH the named pod
+/// AND global in ONE publish — finer scoping is additive over the catch-all, so a cache
+/// entry recording either (or both) is correctly invalidated.
+#[test]
+fn mixed_write_bumps_named_and_global_in_one_generation() {
+    let state = AppState::with_config(synthetic_graph(100), ServerConfig::default());
+    let pod_a = "http://ex/g/A";
+    let n0 = state.current().number();
+    let (a0, g0) = (epoch_of(&state, pod_a), epoch_of(&state, GLOBAL_POD));
+
+    state
+        .apply_update(
+            "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } \
+                          <http://ex/d> <http://ex/p> <http://ex/o> }",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    // One update => one published generation, but BOTH pods bumped within it.
+    assert_eq!(state.current().number(), n0 + 1, "one update publishes exactly one generation");
+    assert_eq!(epoch_of(&state, pod_a), a0 + 1, "the named-graph half must bump A");
+    assert_eq!(epoch_of(&state, GLOBAL_POD), g0 + 1, "the default-graph half must bump global");
 }

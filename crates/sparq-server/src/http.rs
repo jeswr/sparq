@@ -177,16 +177,141 @@ pub(crate) const TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 /// see [`chunked_response`]), so every response is snapshot-consistent with its start.
 pub type PinnedGen = Arc<Generation<Graph>>;
 
-/// The conservative touched-pods placeholder for every update (Wave A4 decision).
+/// The catch-all pod: the visibility scope every query implicitly reads, and the
+/// honest conflict unit for any write that cannot be scoped to a finite set of named
+/// graphs (§6.3/§6.5).
 ///
-/// The server has no pod concept yet: the engine materialises one default graph and the
-/// GSP surface maps every direct graph onto it, so per-named-graph conflict tags would
-/// be fictional today. Every update therefore bumps this single global pod's epoch —
-/// honest over-coarse tagging (any write invalidates everything), never a missed bump.
-/// Wave B's cache work owns real visibility-scope extraction (per-named-graph PodIds
-/// from the parsed update, §6.3/§6.5) and MUST replace this before any cache keys on
-/// finer pods than the global one.
-const GLOBAL_POD: &str = "urn:sparq:pod:global";
+/// [OPUS-4.8] (sq-uqh, Wave B) Bumping this pod's epoch means "invalidate everything":
+/// it represents the DEFAULT graph (which the GSP surface maps every direct graph onto)
+/// plus any cross-graph / dynamically-scoped write whose touched named graphs are not
+/// statically knowable from the parsed update. A correct cache MUST therefore record
+/// this pod's epoch on every entry, so a global bump invalidates all cached reads. Writes
+/// that DO name a finite set of graphs additionally bump those graphs' per-named-graph
+/// pods (see [`touched_pods`]), so a cache keyed on finer-than-global pods is invalidated
+/// too — finer scoping is purely additive over this catch-all, never a replacement for it.
+///
+/// Public so a cache layer (and the update tests) can record/compare this catch-all pod's
+/// epoch on every entry — the contract that makes a global bump invalidate everything.
+pub const GLOBAL_POD: &str = "urn:sparq:pod:global";
+
+/// [OPUS-4.8] (sq-uqh, Wave B) The visibility scope (`PodId` set) a SPARQL Update writes,
+/// for per-named-graph cache invalidation (§6.3/§6.5).
+///
+/// Each pod is a named graph (its graph IRI); a write to graph A bumps only graph A's
+/// epoch, so a cached read scoped to graph B is untouched. Correctness is paramount —
+/// a missed bump is a stale read — so this OVER-invalidates whenever it cannot prove a
+/// finer scope:
+///
+///   * INSERT/DELETE DATA, LOAD, CREATE, CLEAR/DROP GRAPH `<g>`: scoped to the concrete
+///     named graph(s) they name. A *default-graph* quad / target / LOAD destination falls
+///     back to [`GLOBAL_POD`] (the default graph is the catch-all pod).
+///   * CLEAR/DROP DEFAULT/NAMED/ALL: cross-graph and unbounded → [`GLOBAL_POD`].
+///   * DELETE/INSERT … WHERE: scoped to the concrete graph slots its delete/insert
+///     TEMPLATES write — but the moment any template targets a *variable* graph name
+///     (`GRAPH ?g { … }`), the written graphs are not statically knowable → [`GLOBAL_POD`].
+///     The WHERE/USING READ scope is irrelevant: invalidation tracks what a write MODIFIES,
+///     not what it reads.
+///
+/// A parse failure also returns [`GLOBAL_POD`] — the writer re-parses and rejects the
+/// update, so nothing is actually published, but tagging conservatively keeps this
+/// function total and never under-invalidates if the two parses ever disagree.
+///
+/// Concrete named pods are ALWAYS accumulated even when the global flag is also set, so
+/// the returned set is correct whether a cache entry records the global pod, the specific
+/// pods, or both. Over-invalidation (a redundant epoch bump) only costs a cache miss;
+/// under-invalidation costs a stale read — so when in doubt, this bumps more.
+fn touched_pods(sparql: &str) -> Vec<PodId> {
+    use spargebra::algebra::GraphTarget;
+    use spargebra::term::{GraphName, GraphNamePattern};
+    use spargebra::GraphUpdateOperation;
+
+    let mut acc = TouchedPods::default();
+    let upd = match spargebra::SparqlParser::new().parse_update(sparql) {
+        Ok(upd) => upd,
+        // Unparsable here = the writer will also reject it (nothing published); tag global
+        // so we are total and never under-invalidate on a parser disagreement.
+        Err(_) => return vec![PodId::new(GLOBAL_POD)],
+    };
+
+    // A graph slot a write targets: a named graph is its own pod; the default graph is
+    // the catch-all (global).
+    let touch_graph = |g: &GraphName, acc: &mut TouchedPods| match g {
+        GraphName::NamedNode(n) => acc.named(n.as_str()),
+        GraphName::DefaultGraph => acc.global(),
+    };
+
+    for op in &upd.operations {
+        match op {
+            GraphUpdateOperation::InsertData { data } => {
+                for q in data {
+                    touch_graph(&q.graph_name, &mut acc);
+                }
+            }
+            GraphUpdateOperation::DeleteData { data } => {
+                for q in data {
+                    touch_graph(&q.graph_name, &mut acc);
+                }
+            }
+            GraphUpdateOperation::Load { destination, .. } => touch_graph(destination, &mut acc),
+            // CLEAR / DROP: a single named graph is scopable; DEFAULT / NAMED / ALL are
+            // cross-graph or unbounded → global.
+            GraphUpdateOperation::Clear { graph: target, .. }
+            | GraphUpdateOperation::Drop { graph: target, .. } => match target {
+                GraphTarget::NamedNode(n) => acc.named(n.as_str()),
+                GraphTarget::DefaultGraph | GraphTarget::NamedGraphs | GraphTarget::AllGraphs => acc.global(),
+            },
+            // CREATE makes one empty named graph — touches only it.
+            GraphUpdateOperation::Create { graph, .. } => acc.named(graph.as_str()),
+            // DELETE/INSERT … WHERE writes the template graph slots. Concrete slots are
+            // scopable; a variable graph name (or a default-graph slot) is not, so it
+            // widens to global. Reads (WHERE / USING) do not affect invalidation scope.
+            GraphUpdateOperation::DeleteInsert { delete, insert, .. } => {
+                for slot in delete.iter().map(|q| &q.graph_name).chain(insert.iter().map(|q| &q.graph_name)) {
+                    match slot {
+                        GraphNamePattern::NamedNode(n) => acc.named(n.as_str()),
+                        // Default graph or a dynamically-bound graph name: unscopable → global.
+                        GraphNamePattern::DefaultGraph | GraphNamePattern::Variable(_) => acc.global(),
+                    }
+                }
+            }
+        }
+    }
+
+    acc.into_pods()
+}
+
+/// [OPUS-4.8] (sq-uqh) Accumulator for [`touched_pods`]: the set of concrete named-graph
+/// pods a write touches, plus a flag for any unscopable (global) effect. The two are kept
+/// independent — concrete pods are recorded even alongside a global effect — so the final
+/// set never under-invalidates regardless of how a cache entry records its scope.
+#[derive(Default)]
+struct TouchedPods {
+    named: std::collections::BTreeSet<String>,
+    global: bool,
+}
+
+impl TouchedPods {
+    /// Records a write to a concrete named graph.
+    fn named(&mut self, iri: &str) {
+        self.named.insert(iri.to_string());
+    }
+
+    /// Records an unscopable / cross-graph / default-graph write (the catch-all pod).
+    fn global(&mut self) {
+        self.global = true;
+    }
+
+    /// Materialises the pod set. Always non-empty so the publish records *some* epoch
+    /// bump: an update that somehow named no graph at all (e.g. an empty operation list)
+    /// still conservatively bumps global.
+    fn into_pods(self) -> Vec<PodId> {
+        let mut pods: Vec<PodId> = self.named.into_iter().map(PodId::new).collect();
+        if self.global || pods.is_empty() {
+            pods.push(PodId::new(GLOBAL_POD));
+        }
+        pods
+    }
+}
 
 /// The sequenced writer's snapshot-production strategy: sparq-serve's [`GraphApplier`]
 /// (per-batch O(graph) fork + O(batch) `update_in_place` — see its module docs for the
@@ -315,7 +440,13 @@ impl AppState {
     /// it was woken for. Blocking (window + batch application): call it on the
     /// blocking pool.
     pub fn apply_update(&self, sparql: &str) -> Result<u64, String> {
-        match self.writer.submit(sparql.to_string(), [PodId::new(GLOBAL_POD)]) {
+        // [OPUS-4.8] (sq-uqh, Wave B) Extract the per-named-graph visibility scope the
+        // update writes (§6.3/§6.5) so the publish bumps only those pods' epochs — a
+        // write to graph A no longer churns a cache scoped to graph B. Cross-graph /
+        // default-graph / dynamically-scoped writes still fall back to the global pod
+        // (conservative, never under-invalidating). See [`touched_pods`].
+        let touched = touched_pods(sparql);
+        match self.writer.submit(sparql.to_string(), touched) {
             Ok(number) => {
                 // Monotonic max: batch-mates share a generation number and may ack in
                 // any order relative to a later batch's submitters.
@@ -1164,4 +1295,133 @@ fn method_not_allowed(allow: &[Method]) -> Response {
         .header(header::ALLOW, allow_value)
         .body(axum::body::Body::from("method not allowed"))
         .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// Visibility-scope extraction (sq-uqh, Wave B) — unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod touched_pods_tests {
+    //! [OPUS-4.8] (sq-uqh) Per-named-graph `PodId` extraction from a parsed SPARQL Update.
+    //! The whole point of Wave B's finer-than-global tagging: a write that names graph A
+    //! must NOT bump graph B's epoch, while any write that cannot be scoped finer than the
+    //! whole dataset MUST still bump the global pod (conservative, never under-invalidating).
+    use super::{touched_pods, GLOBAL_POD};
+
+    /// The set of pod-id strings a given update touches (order-independent).
+    fn pods(update: &str) -> std::collections::BTreeSet<String> {
+        touched_pods(update).into_iter().map(|p| p.as_str().to_string()).collect()
+    }
+
+    fn has(update: &str, iri: &str) -> bool {
+        pods(update).contains(iri)
+    }
+
+    fn is_global(update: &str) -> bool {
+        has(update, GLOBAL_POD)
+    }
+
+    /// A GRAPH-scoped INSERT/DELETE DATA touches exactly that named graph — never global,
+    /// and never any OTHER graph (the A-not-B property at the extraction layer).
+    #[test]
+    fn graph_scoped_data_ops_are_scoped() {
+        let ins = "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } }";
+        assert_eq!(pods(ins), ["http://ex/g/A".to_string()].into_iter().collect());
+        assert!(!is_global(ins), "a single-graph write must not bump the global pod");
+        assert!(!has(ins, "http://ex/g/B"), "a write to A must not touch B");
+
+        let del = "DELETE DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } }";
+        assert_eq!(pods(del), ["http://ex/g/A".to_string()].into_iter().collect());
+    }
+
+    /// Multiple GRAPH blocks in one operation each contribute their own pod; no global.
+    #[test]
+    fn multiple_named_graphs_each_get_a_pod() {
+        let u = "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } \
+                              GRAPH <http://ex/g/B> { <http://ex/s> <http://ex/p> <http://ex/o> } }";
+        assert_eq!(pods(u), ["http://ex/g/A".to_string(), "http://ex/g/B".to_string()].into_iter().collect());
+        assert!(!is_global(u));
+    }
+
+    /// A default-graph data op is the catch-all pod (global) — the GSP surface maps every
+    /// direct graph onto the default graph, so it cannot be scoped finer.
+    #[test]
+    fn default_graph_data_op_is_global() {
+        let u = "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }";
+        assert!(is_global(u), "a default-graph write must bump the global pod");
+        assert_eq!(pods(u), [GLOBAL_POD.to_string()].into_iter().collect());
+    }
+
+    /// CLEAR/DROP of a single named graph is scoped; DEFAULT/NAMED/ALL widen to global.
+    #[test]
+    fn clear_drop_scoping() {
+        assert_eq!(pods("CLEAR GRAPH <http://ex/g/A>"), ["http://ex/g/A".to_string()].into_iter().collect());
+        assert_eq!(pods("DROP GRAPH <http://ex/g/A>"), ["http://ex/g/A".to_string()].into_iter().collect());
+        assert!(is_global("CLEAR DEFAULT"));
+        assert!(is_global("CLEAR NAMED"));
+        assert!(is_global("CLEAR ALL"));
+        assert!(is_global("DROP ALL"));
+    }
+
+    /// CREATE touches only the new graph.
+    #[test]
+    fn create_is_scoped() {
+        assert_eq!(pods("CREATE GRAPH <http://ex/g/new>"), ["http://ex/g/new".to_string()].into_iter().collect());
+    }
+
+    /// DELETE/INSERT … WHERE with CONCRETE template graphs is scoped to exactly the
+    /// graphs the templates WRITE — the WHERE/USING read scope does not widen it.
+    #[test]
+    fn delete_insert_concrete_templates_are_scoped() {
+        let u = "INSERT { GRAPH <http://ex/g/dst> { ?s ?p ?o } } \
+                 WHERE  { GRAPH <http://ex/g/src> { ?s ?p ?o } }";
+        // Only the write target (dst) is invalidation-relevant; the read source (src) is not.
+        assert_eq!(pods(u), ["http://ex/g/dst".to_string()].into_iter().collect());
+        assert!(!has(u, "http://ex/g/src"), "the WHERE read source must not be invalidated");
+        assert!(!is_global(u));
+    }
+
+    /// A VARIABLE graph name in a template (`GRAPH ?g { … }`) makes the written graphs
+    /// unknowable at parse time → must fall back to global (never under-invalidate).
+    #[test]
+    fn delete_insert_variable_graph_target_is_global() {
+        let u = "INSERT { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }";
+        assert!(is_global(u), "a dynamically-scoped write target must bump the global pod");
+    }
+
+    /// A default-graph DELETE/INSERT template is the catch-all pod.
+    #[test]
+    fn delete_insert_default_template_is_global() {
+        let u = "DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }";
+        assert!(is_global(u));
+    }
+
+    /// A write that mixes a scopable named-graph effect with an unscopable one bumps BOTH
+    /// the named pod AND global — finer scoping is additive over the catch-all.
+    #[test]
+    fn mixed_named_and_global_bumps_both() {
+        let u = "INSERT DATA { GRAPH <http://ex/g/A> { <http://ex/s> <http://ex/p> <http://ex/o> } \
+                              <http://ex/d> <http://ex/p> <http://ex/o> }";
+        assert!(has(u, "http://ex/g/A"));
+        assert!(is_global(u), "the default-graph half must still bump global");
+    }
+
+    /// LOAD into a named graph is scoped; LOAD into the default graph is global. (The LOAD
+    /// itself is refused at apply time without an allowlist — extraction is parse-only.)
+    #[test]
+    fn load_scoping() {
+        assert_eq!(
+            pods("LOAD <file:///x.ttl> INTO GRAPH <http://ex/g/A>"),
+            ["http://ex/g/A".to_string()].into_iter().collect()
+        );
+        assert!(is_global("LOAD <file:///x.ttl>"), "LOAD into the default graph is global");
+    }
+
+    /// An unparsable update is tagged global so extraction is total and never
+    /// under-invalidates (the writer re-parses and rejects it anyway).
+    #[test]
+    fn unparsable_update_is_global() {
+        assert!(is_global("THIS IS NOT SPARQL"));
+    }
 }
