@@ -49,6 +49,47 @@ transformation, with R2S as exact set diffs over the constructed graphs), and
   the workspace depends on it; the core engine and the wasm build carry zero
   streaming code.
 
+## RSP-QL surface syntax + multi-window joins
+
+Beyond the programmatic API above, the crate parses the **RSP-QL textual query
+language** and joins across **multiple named windows**:
+
+```rust
+use sparq_rsp::ContinuousMultiQuery;
+
+// Join sensor READINGS (stream :temp, window :w1) with the ROOM each sensor is
+// in (stream :meta, window :w2), per synchronized tumbling window.
+let mut q = ContinuousMultiQuery::register("\
+REGISTER STREAM <http://ex/out> AS
+SELECT ?room ?v WHERE {
+  WINDOW <http://ex/w1> { ?s <http://ex/value> ?v }
+  WINDOW <http://ex/w2> { ?s <http://ex/in> ?room }
+}
+FROM NAMED WINDOW <http://ex/w1> ON <http://ex/temp> RANGE 10 STEP 10
+FROM NAMED WINDOW <http://ex/w2> ON <http://ex/meta> RANGE 10 STEP 10")?;
+
+q.push(&meta_stream, triple, ts, |r| { /* full join result per tick */ })?;
+```
+
+- **Parser** (`RspqlQuery::parse`): `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM]
+  <out> AS`, `FROM NAMED WINDOW <w> ON <s> [RANGE <dur> [STEP <dur>]]` (tumbling
+  when `STEP` is omitted), and `WINDOW <w> { … }` rewritten to standard SPARQL
+  `GRAPH <w> { … }` — spargebra parses the embedded BGP/algebra. Durations are
+  ISO-8601 (`PT10S`, `PT1M30S`, `P1D`; seconds resolution) or bare integers
+  (logical ticks). IRIs may be `<…>` or prefixed names resolved against the
+  body's `PREFIX`/`BASE`. **Scoped out:** window variables (`WINDOW ?w`), `ROWS`
+  count windows, the `t0`/`max_delay` parameters, and relative `NOW-PT…TO…`
+  window bounds (use the programmatic `WindowSpec` for those).
+- **Multi-window join** (`ContinuousMultiQuery`): each declared window keeps its
+  own S2R state over the stream it reads; pushes are tagged with their stream.
+  All windows share one event-time clock (a triple on one stream advances the
+  watermark of windows on the others, via `WindowedStream::advance`), so closure
+  is synchronized. At each tick every window contributes its latest-closed
+  content as a **named graph** keyed by the window IRI; the engine's
+  cross-named-graph join then binds variables shared between `WINDOW <w1>` and
+  `WINDOW <w2>`. RSTREAM (full per-tick result) for now; ISTREAM/DSTREAM over a
+  multi-window join is a documented follow-up (see `TODO.md`).
+
 ## Window semantics (exact, pinned by tests)
 
 **Time windows** (`WindowSpec::time(range, step)`):

@@ -278,6 +278,42 @@ impl<T: Clone> WindowedStream<T> {
         }
     }
 
+    /// [OPUS-4.8] Advances event time to `ts` WITHOUT inserting a triple — a
+    /// watermark heartbeat. Closes (and empty-reports) every window the new
+    /// watermark has reached, exactly as a gap arrival at `ts` would, but buffers
+    /// nothing. A no-op for count windows (no watermark) and when `ts` does not
+    /// advance `max_ts`.
+    ///
+    /// Used by [`ContinuousMultiQuery`](crate::ContinuousMultiQuery) to drive
+    /// every window off a SHARED event-time clock: a triple on one stream
+    /// advances the watermark of windows on the OTHER streams, so closure is
+    /// synchronized across the join. Treated like a gap arrival for anchoring:
+    /// a heartbeat is evidence of event time passing, so a first heartbeat
+    /// anchors the starting window on its watermark (windows it holds open are
+    /// tracked and eventually emitted, possibly empty), matching the documented
+    /// gap-first-arrival rule.
+    pub fn advance(&mut self, ts: u64) {
+        let WindowSpec::Time { range, step, max_delay, t0 } = self.spec else {
+            return; // count windows have no time axis / watermark
+        };
+        if self.next_close.is_none() {
+            let wm = ts.saturating_sub(max_delay).saturating_sub(t0);
+            let k_min = if wm >= range { (wm - range) / step + 1 } else { 0 };
+            self.next_close = Some(k_min);
+        }
+        if ts > self.max_ts {
+            self.max_ts = ts;
+        }
+        let watermark = self.max_ts.saturating_sub(max_delay);
+        while let Some(k) = self.next_close {
+            let start = t0 + k * step;
+            if watermark < start + range {
+                break;
+            }
+            self.close_time_window(k, range, step, t0);
+        }
+    }
+
     /// Freezes window `k`'s content, queues it, slides to `k + 1` and evicts
     /// everything older than the new oldest open window.
     fn close_time_window(&mut self, k: u64, range: u64, step: u64, t0: u64) {
