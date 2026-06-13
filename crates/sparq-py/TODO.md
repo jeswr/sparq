@@ -13,13 +13,17 @@ their owning crates.
 - ~~**Update drops named graphs.**~~ **DONE (py-parity wave, on top of update v2/F19).**
   Named-graph caveats dropped from the Python docs/docstrings; GRAPH-scoped data
   ops, graph templates and DROP covered by pytest.
-- **Full-text (`text:` magic predicates) is NOT reachable through `Graph.query`.**
-  Verified: `sparq-text` is deliberately a standalone opt-in crate — no other crate
-  (including sparq-engine and sparq-py) depends on it, and the `text:` rewrite only
-  runs through `sparq_text::query_text(graph, &TextIndex, sparql)`. Exposing it in
-  Python means adding the dependency plus a `TextIndex` lifecycle on the wrapper
-  (build lazily, invalidate on every update/reason swap) — real new surface, left
-  as a follow-up rather than wired in quietly.
+- ~~**Full-text (`text:` magic predicates) is NOT reachable through `Graph.query`.**~~
+  **DONE (py-textindex follow-up).** `sparq-text` is now a dependency (leaf-crate
+  edge, same rationale as sparq-reason: the engine/CLI/wasm graphs stay text-free)
+  and the recorded `TextIndex` lifecycle lives on the wrapper: built lazily on the
+  first `Graph.text_search` (ranked `(Term, score)` BM25 hits) / `Graph.query_text`
+  (`text:matches` / `text:matchesAny` / `text:score` magic predicates), cached on
+  the `Graph`, and invalidated on every mutating swap (`update` / `reason` /
+  `reason_n3_with` — those rebuild the graph, possibly re-encoding dictionary ids,
+  so the native incremental `TextIndex::apply_delta` has no corresponding wrapper
+  path; lazy rebuild is the matching policy). `build_text_index()` builds eagerly,
+  `drop_text_index()` releases the cache. Covered by `tests/test_text.py`.
 
 ## Reasoning (sparq-reason)
 

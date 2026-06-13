@@ -3,8 +3,9 @@
 Python bindings for the [sparq](https://github.com/jeswr/sparq) RDF + SPARQL engine:
 a dictionary-encoded triplestore with six permutation indexes, a SPARQL 1.1 query
 engine (SELECT / ASK / CONSTRUCT / DESCRIBE), SPARQL Update over the full dataset
-(named graphs included), and opt-in RDFS / OWL-RL / Notation3 reasoning with OWL
-inconsistency reporting — compiled to a native extension module with
+(named graphs included), opt-in RDFS / OWL-RL / Notation3 reasoning with OWL
+inconsistency reporting, and opt-in BM25 full-text search (`sparq-text`'s
+`text:` magic predicates) — compiled to a native extension module with
 [pyo3](https://pyo3.rs) and packaged with [maturin](https://www.maturin.rs)
 (abi3: one wheel per platform covers CPython ≥ 3.9).
 
@@ -85,6 +86,19 @@ g3 = sparq.Graph.load("@prefix ex: <http://ex/> . ex:plato a ex:Man .")
 g3.reason_n3_with("@prefix ex: <http://ex/> . { ?x a ex:Man } => { ?x a ex:Mortal } .")
 g3.ask("PREFIX ex: <http://ex/> ASK { ex:plato a ex:Mortal }")      # True
 
+# Full-text search (BM25 over the default graph's string literals). The index
+# is built lazily on first use, cached, and invalidated by update()/reason()/
+# reason_n3_with(); build_text_index() builds it eagerly, drop_text_index()
+# frees it (the next call lazily rebuilds).
+g.text_search("ali*")                 # ranked [(Term, score), ...]; AND of tokens,
+g.text_search("alice bob", any=True)  # ... any=True for OR, limit=n for top-n
+g.query_text("""
+    PREFIX text: <http://sparq.dev/text#>
+    SELECT ?s ?score WHERE {
+        ?s ?p ?lit . ?lit text:matches "ali*" . ?lit text:score ?score
+    } ORDER BY DESC(?score)
+""")                                  # text: magic predicates inside plain SPARQL
+
 # Persist / reopen with memory-mapped indexes (out-of-core path).
 g.save("./mydb")
 g4 = sparq.Graph.open("./mydb")
@@ -105,4 +119,10 @@ g4 = sparq.Graph.open("./mydb")
 - `reason_n3_with(rules)` merges the graph's triples with the rules document
   (N3 merge semantics: a blank-node label shared between the two denotes the
   same node); RDF-star triple terms have no N3 form and are rejected there.
-- Long-running calls (load, query, update, reason) release the GIL.
+- Full-text (`text_search` / `query_text`) indexes the **default graph**'s plain
+  and language-tagged string literals only (named graphs keep their own
+  dictionaries and are not indexed); `text:matches` is an AND of tokens,
+  `text:matchesAny` an OR, `*`-suffixed tokens match as prefixes, and
+  `text:score` binds the BM25 score. Hits are frozen per call: the cached index
+  is invalidated by every mutating call and lazily rebuilt.
+- Long-running calls (load, query, update, reason, text search) release the GIL.

@@ -16,6 +16,14 @@
 //!   Notation3 forward-chainer over an N3 document (facts + `{…} => {…}` rules)
 //!   and `Graph.reason_n3_with(rules)` runs caller-supplied N3 rules over an
 //!   already-loaded graph.
+//! * Full-text search (`sparq_text`): `Graph.text_search` returns BM25-ranked
+//!   literal hits and `Graph.query_text` runs SELECTs with the `text:` magic
+//!   predicates. The [`TextIndex`] lifecycle lives HERE (the follow-up recorded
+//!   in `TODO.md`): built lazily on first use and cached on the graph, and
+//!   invalidated by every mutating swap (`update` / `reason` /
+//!   `reason_n3_with`) — those paths rebuild the graph (dictionary ids may
+//!   change), so the native incremental `TextIndex::apply_delta` mirror has no
+//!   corresponding wrapper path; lazy rebuild is the policy that matches.
 //!
 //! Long-running engine calls release the GIL (`py.detach`) so other Python
 //! threads keep running during parse / query / reasoning.
@@ -25,6 +33,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph as CoreGraph;
+use sparq_text::TextIndex;
 use spargebra::{Query, SparqlParser};
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -219,12 +228,47 @@ fn triple_terms(t: &oxrdf::Triple) -> (Term, Term, Term) {
     )
 }
 
+/// An engine SELECT result materialised as a Python [`QueryResult`]
+/// (shared by `Graph.query` and `Graph.query_text`).
+fn select_result(py: Python<'_>, res: &sparq_engine::QueryResult) -> PyResult<QueryResult> {
+    let vars: Vec<String> = res.vars.iter().map(|v| v.as_str().to_string()).collect();
+    let rows = PyList::empty(py);
+    for row in &res.rows {
+        let d = PyDict::new(py);
+        for (var, cell) in vars.iter().zip(row) {
+            if let Some(t) = cell {
+                d.set_item(var, Term::from_oxrdf(t))?;
+            }
+        }
+        rows.append(d)?;
+    }
+    Ok(QueryResult { vars, rows: rows.unbind() })
+}
+
 /// An immutable, dictionary-encoded RDF graph with SPARQL query / update and
 /// opt-in reasoning. Build one with `Graph.load(...)`, `Graph.load_n3(...)`,
 /// or `Graph.open(...)`.
 #[pyclass(module = "sparq")]
 struct Graph {
     inner: CoreGraph,
+    /// Lazily built BM25 full-text index over the default graph's string
+    /// literals (`sparq_text::TextIndex`), cached for `text_search` /
+    /// `query_text`. INVARIANT: any method that swaps `inner` for a rebuilt
+    /// graph (`update`, `reason`, `reason_n3_with`) resets this to `None` —
+    /// a rebuild may re-encode the dictionary, and the index's document ids
+    /// are dictionary term ids.
+    text: Option<TextIndex>,
+}
+
+impl Graph {
+    /// Builds (and caches) the full-text index if absent — the lazy half of
+    /// the lifecycle. The dictionary scan releases the GIL.
+    fn ensure_text_index(&mut self, py: Python<'_>) {
+        if self.text.is_none() {
+            let inner = &self.inner;
+            self.text = Some(py.detach(|| TextIndex::build(inner)));
+        }
+    }
 }
 
 #[pymethods]
@@ -242,7 +286,7 @@ impl Graph {
         let inner = py
             .detach(|| CoreGraph::load_dataset(&text, &fmt))
             .map_err(engine_err)?;
-        Ok(Graph { inner })
+        Ok(Graph { inner, text: None })
     }
 
     /// Parse a Notation3 document (facts + `{ premise } => { conclusion }` rules)
@@ -258,7 +302,7 @@ impl Graph {
                 Ok::<_, String>(CoreGraph::from_parts(dict, triples))
             })
             .map_err(engine_err)?;
-        Ok(Graph { inner })
+        Ok(Graph { inner, text: None })
     }
 
     /// Open a graph previously persisted with `save(dir)` — the permutation
@@ -269,7 +313,7 @@ impl Graph {
         let inner = py
             .detach(|| CoreGraph::open(&dir))
             .map_err(|e| PyIOError::new_err(format!("cannot open {}: {e}", dir.display())))?;
-        Ok(Graph { inner })
+        Ok(Graph { inner, text: None })
     }
 
     /// Persist the graph (indexes + dictionary) into `dir` for later `Graph.open`.
@@ -284,18 +328,7 @@ impl Graph {
         let res = py
             .detach(|| sparq_engine::query(&self.inner, sparql))
             .map_err(engine_err)?;
-        let vars: Vec<String> = res.vars.iter().map(|v| v.as_str().to_string()).collect();
-        let rows = PyList::empty(py);
-        for row in &res.rows {
-            let d = PyDict::new(py);
-            for (var, cell) in vars.iter().zip(row) {
-                if let Some(t) = cell {
-                    d.set_item(var, Term::from_oxrdf(t))?;
-                }
-            }
-            rows.append(d)?;
-        }
-        Ok(QueryResult { vars, rows: rows.unbind() })
+        select_result(py, &res)
     }
 
     /// Run a SPARQL SELECT and return the SPARQL 1.1 JSON results document as a
@@ -361,6 +394,7 @@ impl Graph {
         let inner = &self.inner;
         let new = py.detach(|| sparq_engine::update(inner, sparql)).map_err(engine_err)?;
         self.inner = new;
+        self.text = None; // rebuilt graph: the cached text index is stale
         Ok(())
     }
 
@@ -396,6 +430,7 @@ impl Graph {
             (rebuilt, added)
         });
         self.inner = inner;
+        self.text = None; // rebuilt graph: the cached text index is stale
         Ok(added)
     }
 
@@ -440,7 +475,83 @@ impl Graph {
         new.named = std::mem::take(&mut self.inner.named);
         let added = new.len().saturating_sub(before);
         self.inner = new;
+        self.text = None; // rebuilt graph (fresh dictionary): the cached text index is stale
         Ok(added)
+    }
+
+    /// Full-text search over the default graph's string literals, returning a
+    /// BM25-ranked best-first list of `(literal Term, score)` pairs.
+    ///
+    /// `query` is tokenized like the indexed text (UAX #29 words, lowercased);
+    /// a token ending in `*` matches as a prefix (autocomplete). By default a
+    /// literal must contain EVERY token (AND); `any=True` requires at least one
+    /// (OR, scores sum over the tokens present). `limit` keeps only the best n
+    /// hits. Scores are comparable within one query only.
+    ///
+    /// Indexed text: plain/`xsd:string` and language-tagged literals of the
+    /// DEFAULT graph (named graphs keep their own dictionaries and are not
+    /// indexed). The index is built lazily on first use, cached, and
+    /// invalidated by `update` / `reason` / `reason_n3_with` (those rebuild
+    /// the graph, so the next text call rebuilds the index).
+    #[pyo3(signature = (query, any=false, limit=None))]
+    fn text_search(
+        &mut self,
+        py: Python<'_>,
+        query: &str,
+        any: bool,
+        limit: Option<usize>,
+    ) -> Vec<(Term, f64)> {
+        self.ensure_text_index(py);
+        let index = self.text.as_ref().expect("ensure_text_index just built it");
+        let inner = &self.inner;
+        let mut hits =
+            py.detach(|| if any { index.search_any(query) } else { index.search(query) });
+        if let Some(n) = limit {
+            hits.truncate(n);
+        }
+        hits.iter()
+            .map(|h| (Term::from_oxrdf(&inner.dict.term(h.id)), f64::from(h.score)))
+            .collect()
+    }
+
+    /// Run a SPARQL SELECT that may use the `text:` full-text magic predicates
+    /// (`PREFIX text: <http://sparq.dev/text#>`):
+    ///
+    /// * `?lit text:matches "query"` — `?lit` ranges over indexed literals
+    ///   containing EVERY query token (`*`-suffix = prefix match);
+    /// * `?lit text:matchesAny "query"` — at least one token;
+    /// * `?lit text:score ?s` — binds the BM25 score (`xsd:double`; sort with
+    ///   `ORDER BY DESC(?s)` — the hit table carries no order through joins).
+    ///
+    /// The magic patterns are rewritten into inline `VALUES` over the index's
+    /// hits and the query runs on the standard engine, so `?lit` joins to
+    /// triples like any other variable. A query without `text:` patterns
+    /// behaves exactly like `Graph.query`. Uses the same lazily built, cached
+    /// index as `text_search` (see there for lifecycle and what is indexed).
+    fn query_text(&mut self, py: Python<'_>, sparql: &str) -> PyResult<QueryResult> {
+        self.ensure_text_index(py);
+        let index = self.text.as_ref().expect("ensure_text_index just built it");
+        let inner = &self.inner;
+        let res = py
+            .detach(|| sparq_text::query_text(inner, sparql, index))
+            .map_err(engine_err)?;
+        select_result(py, &res)
+    }
+
+    /// Eagerly (re)build the full-text index now (it is otherwise built lazily
+    /// by the first `text_search` / `query_text`), returning the number of
+    /// indexed literals — useful to pay the build cost at load time instead of
+    /// on the first query.
+    fn build_text_index(&mut self, py: Python<'_>) -> usize {
+        self.text = None;
+        self.ensure_text_index(py);
+        self.text.as_ref().expect("ensure_text_index just built it").len()
+    }
+
+    /// Drop the cached full-text index, freeing its memory. Purely a resource
+    /// release: the next `text_search` / `query_text` lazily rebuilds it.
+    fn drop_text_index(&mut self) {
+        self.text = None;
     }
 
     /// Detect OWL 2 RL inconsistencies (clashes) in the default graph, returning

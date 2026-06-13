@@ -3132,6 +3132,7 @@ dependencies = [
  "sparq-core",
  "sparq-engine",
  "sparq-reason",
+ "sparq-text",
 ]
 
 [[package]]

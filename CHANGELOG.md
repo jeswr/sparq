@@ -45,6 +45,21 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
 - **WebAssembly (`sparq-wasm`, unpublished)** — the core engine compiled for the browser with
   a minimal bundle (no threads, compact index); ships via npm later, not crates.io.
 
+- **Python full-text search (`sparq-py` × `sparq-text`)** — the `TextIndex`
+  lifecycle follow-up recorded in `crates/sparq-py/TODO.md` is implemented on the
+  wrapper: `Graph.text_search(query, any=False, limit=None)` returns BM25-ranked
+  `(Term, score)` hits over the default graph's string literals (AND of tokens by
+  default, `any=True` for OR, `*`-suffix prefix tokens), and `Graph.query_text`
+  runs SELECTs with the `text:` magic predicates (`text:matches` /
+  `text:matchesAny` / `text:score`) through `sparq_text::query_text`. The index is
+  built lazily on first use, cached on the `Graph`, and invalidated on every
+  mutating swap (`update` / `reason` / `reason_n3_with` — the wrapper's mutation
+  paths rebuild the graph, so lazy rebuild, not `apply_delta`, is the policy that
+  matches); `build_text_index()` builds eagerly (returns the indexed-literal
+  count) and `drop_text_index()` releases the cache. Opt-in stays consistent with
+  native (full-text is engaged by depending on `sparq-text`; the new edge is on
+  the leaf `sparq-py` crate only, so engine/CLI/wasm stay text-free; `sparq-text`
+  itself is unchanged). 12 new pytest cases (38 → 50).
 - **Python bindings parity wave (`sparq-py`)** — the Python `Graph` catches up with
   the engine/reasoner surface: native `ask()` (engine early-exit instead of the
   SELECT-count rewrite; SELECT still accepted), new `construct()` / `describe()`
