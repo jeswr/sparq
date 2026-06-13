@@ -1,9 +1,11 @@
 name: CI
 
 # Correctness gate (roadmap G1). Build + test the whole workspace on every push to main and every
-# PR — the regression safety net the "no regressions in functionality" constraint requires. fmt +
-# clippy run informationally for now (the codebase predates a rustfmt.toml; tightened in a later
-# pass). Heavy benchmarks live in bench.yml / bench-ec2.yml, NOT here.
+# PR — the regression safety net the "no regressions in functionality" constraint requires.
+# clippy now GATES with -D warnings (the workspace is warning-clean). rustfmt runs informationally
+# until the one-time `cargo fmt --all` reformat lands (deferred behind the in-flight branches —
+# see rustfmt.toml); flip it to a hard gate once that reformat merges. Heavy benchmarks live in
+# bench.yml / bench-ec2.yml, NOT here.
 on:
   push:
     branches: [main]
@@ -48,7 +50,7 @@ jobs:
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
 
   lint:
-    name: fmt + clippy (informational)
+    name: clippy (gate) + fmt (informational)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,11 +58,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: rustfmt
+      # GATES: the whole workspace (sparq-py included) is clippy-clean under -D warnings.
+      # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Informational until the deferred `cargo fmt --all` reformat lands (see rustfmt.toml).
+      - name: rustfmt (informational)
         run: cargo fmt --all --check
-        continue-on-error: true
-      - name: clippy
-        run: cargo clippy --workspace --all-targets
         continue-on-error: true
 
   conformance:
