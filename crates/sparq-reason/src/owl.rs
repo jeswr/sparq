@@ -555,6 +555,7 @@ impl ClassFeatureIdx {
 ///     predicate appears only after RDFS subproperty propagation.
 ///   - rdfs9:  `(:C rdfs:subClassOf owl:SymmetricProperty), (:p a :C)` ⊢ `(:p a owl:SymmetricProperty)`
 ///     — a feature class appears only after RDFS subclass propagation.
+///
 /// In both cases the single-pass fast path would emit the derived `owl:sameAs`/feature-type triple
 /// as an *ordinary* triple WITHOUT running the equality/property reasoning it implies.
 ///

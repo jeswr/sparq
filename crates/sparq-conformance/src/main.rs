@@ -460,7 +460,7 @@ fn render_report(
     if !skip_hist.is_empty() {
         let _ = writeln!(md, "## Skip reasons\n");
         let mut hist: Vec<_> = skip_hist.into_iter().collect();
-        hist.sort_by(|a, b| b.1.cmp(&a.1));
+        hist.sort_by_key(|e| std::cmp::Reverse(e.1));
         let _ = writeln!(md, "| reason | tests |");
         let _ = writeln!(md, "|---|---:|");
         for (reason, n) in hist {
@@ -487,7 +487,7 @@ fn render_report(
     if !fail_hist.is_empty() {
         let _ = writeln!(md, "## Failure categories\n");
         let mut hist: Vec<_> = fail_hist.into_iter().collect();
-        hist.sort_by(|a, b| b.1.cmp(&a.1));
+        hist.sort_by_key(|e| std::cmp::Reverse(e.1));
         let _ = writeln!(md, "| category | tests |");
         let _ = writeln!(md, "|---|---:|");
         for (reason, n) in hist {

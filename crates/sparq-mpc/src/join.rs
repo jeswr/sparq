@@ -575,7 +575,7 @@ mod tests {
             .evaluate_local("PREFIX ex: <http://ex/> SELECT ?p ?x WHERE { ?p ex:knows ?x }")
             .unwrap();
         let plan = JoinPlan { join_var: var("x"), key_disclosed: true };
-        let joined = DisclosedKeyJoin.join(&[pa.clone()], &plan).unwrap();
+        let joined = DisclosedKeyJoin.join(std::slice::from_ref(&pa), &plan).unwrap();
         assert_eq!(joined.rows.len(), pa.rows.len());
         assert_eq!(
             canonical_multiset(&joined.vars, &joined.rows),

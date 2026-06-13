@@ -170,7 +170,7 @@ pub fn render(sections: &[Section], roots: &[(&str, &Path)]) -> String {
         if !oos_hist.is_empty() {
             let _ = writeln!(md, "### Out-of-scope reasons\n");
             let mut hist: Vec<_> = oos_hist.into_iter().collect();
-            hist.sort_by(|a, b| b.1.cmp(&a.1));
+            hist.sort_by_key(|e| std::cmp::Reverse(e.1));
             let _ = writeln!(md, "| reason | tests |");
             let _ = writeln!(md, "|---|---:|");
             for (reason, n) in hist {

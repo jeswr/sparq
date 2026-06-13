@@ -179,10 +179,10 @@ fn counting_with_layer_guard_and_builtins_matches_from_scratch() {
             let t = [x, ex("hidden"), b_true()];
             let before = g.full_rebuilds();
             if base.contains(&t) {
-                g.delete(&[t.clone()]);
+                g.delete(std::slice::from_ref(&t));
                 base.remove(&t);
             } else {
-                g.insert(&[t.clone()]);
+                g.insert(std::slice::from_ref(&t));
                 base.insert(t);
             }
             assert_eq!(
@@ -245,10 +245,10 @@ fn unsupported_builtin_rules_run_in_fallback_and_stay_correct() {
         ];
         let before = g.full_rebuilds();
         if base.contains(&t) {
-            g.delete(&[t.clone()]);
+            g.delete(std::slice::from_ref(&t));
             base.remove(&t);
         } else {
-            g.insert(&[t.clone()]);
+            g.insert(std::slice::from_ref(&t));
             base.insert(t);
         }
         assert!(g.full_rebuilds() > before, "fallback mutations re-materialize");
@@ -274,7 +274,7 @@ fn decimal_data_reaching_concatenation_falls_back_sticky_and_stays_correct() {
     // A decimal literal flowing into string:concatenation is outside the parity whitelist:
     // the graph must drop to (sticky) engine fallback and stay correct.
     let t = [ex("b"), ex("val"), Term::Lit("1.50".into(), dec.into(), None)];
-    g.insert(&[t.clone()]);
+    g.insert(std::slice::from_ref(&t));
     base.insert(t);
     assert_eq!(g.mode(), N3Mode::Fallback);
     assert!(g.fallback_reason().is_some());
@@ -353,14 +353,14 @@ fn wac_small_pod_differential() {
     // ACL edit: grant Write too (incremental, no rebuild).
     let before = g.full_rebuilds();
     let t = [iri("https://pod.ex/.acl#owner"), acl("mode"), acl("Write")];
-    g.insert(&[t.clone()]);
+    g.insert(std::slice::from_ref(&t));
     base.insert(t);
     assert_eq!(g.full_rebuilds(), before, "plain ACL edit must stay incremental");
     assert_equal(&g, &rules, &base, "after mode insert");
 
     // Revoke Read (incremental delete).
     let t = [iri("https://pod.ex/.acl#owner"), acl("mode"), acl("Read")];
-    g.delete(&[t.clone()]);
+    g.delete(std::slice::from_ref(&t));
     base.remove(&t);
     assert_equal(&g, &rules, &base, "after mode delete");
     assert!(!g.contains(&[iri("https://alice.ex/#me"), auth_read, res("docs/a")]));
@@ -368,7 +368,7 @@ fn wac_small_pod_differential() {
     // ownAcl is a guard predicate: adding a closer ACL rebuilds (documented fallback).
     let before = g.full_rebuilds();
     let t = [res("docs/"), solidx("ownAcl"), res("docs/.acl")];
-    g.insert(&[t.clone()]);
+    g.insert(std::slice::from_ref(&t));
     base.insert(t);
     assert_eq!(g.full_rebuilds(), before + 1, "ownAcl delta must rebuild");
     assert_equal(&g, &rules, &base, "after ownAcl insert");

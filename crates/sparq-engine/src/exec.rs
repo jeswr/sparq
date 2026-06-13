@@ -2105,7 +2105,7 @@ fn eval_path(
     // DefaultGraphMode::Empty (L1 dataset view): no data pairs at top-level graph
     // scope — exactly the empty-graph evaluation. The zero-length constant
     // solutions below still apply (`<s> p* <s>` holds even on an empty graph).
-    if !view::default_is_empty() && !(matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
+    if !(view::default_is_empty() || matches!(s_end, End::Missing(_)) || matches!(o_end, End::Missing(_))) {
         let ends = PathEnds { s: s_bound, o: o_bound };
         // `?x p ?x` (same variable at both ends — necessarily both unbound): only
         // diagonal pairs survive the filter, and for the recursive operators the

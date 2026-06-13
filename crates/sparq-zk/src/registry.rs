@@ -559,7 +559,7 @@ mod tests {
         assert!(e.verify_commitment_signature(), "fresh issued entry verifies");
         // Round-trips through the store unchanged (key + sig survive).
         let mut g = Graph::load_str("", "turtle").unwrap();
-        install_registry(&mut g, &[e.clone()]).unwrap();
+        install_registry(&mut g, std::slice::from_ref(&e)).unwrap();
         let back = read_registry(&g);
         assert_eq!(back, vec![e]);
         assert!(back[0].verify_commitment_signature(), "read-back entry verifies");
@@ -589,7 +589,7 @@ mod tests {
         assert!(e.verify_commitment_signature_with_status(), "fresh status-bound entry verifies");
         // Round-trips through the store.
         let mut g = Graph::load_str("", "turtle").unwrap();
-        install_registry(&mut g, &[e.clone()]).unwrap();
+        install_registry(&mut g, std::slice::from_ref(&e)).unwrap();
         let back = read_registry(&g);
         assert_eq!(back, vec![e.clone()]);
         assert!(back[0].verify_commitment_signature_with_status(), "read-back verifies");

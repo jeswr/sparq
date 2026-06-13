@@ -208,6 +208,7 @@ fn direct_decoder_matches_upstream_snikmeta() {
 ///  * MULTI-BLOCK PFC: > 16 distinct strings per section (block_size 16) so the
 ///    block-sequential decode (H3) crosses block boundaries with running prefixes;
 ///  * a term zoo across blocks: langtag/datatyped/plain literals, blank nodes.
+///
 /// Then asserts the direct decoder == upstream oracle on those exact bytes.
 #[test]
 fn direct_decoder_matches_upstream_generated_multiblock() {
