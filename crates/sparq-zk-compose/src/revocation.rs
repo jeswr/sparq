@@ -120,14 +120,30 @@ pub fn merkle_witness(snapshot: &StatusListSnapshot, depth: u32, index: u64) -> 
 }
 
 /// Render the `Prover.toml` body for the `revoke_unset_d{depth}` member. Order
-/// MUST match `revoke_unset_d{depth}/src/main.nr`: challenge, root (public),
-/// index, bit, siblings (private).
-pub fn revoke_prover_toml(challenge: &Fr, root: &Fr, index: u64, witness: &MerkleWitness) -> String {
+/// MUST match `revoke_unset_d{depth}/src/main.nr`: challenge, root,
+/// index_commitment (public); index, bit, blinding, siblings (private).
+///
+/// [OPUS-4.8] sq-ayv: the member now binds a HIDING index commitment. The
+/// `index_commitment` PUBLIC input is recomputed in-circuit from `index` +
+/// `blinding` and byte-matched by the verifier against the ISSUER-SIGNED
+/// commitment, so the index proven unset is provably the one the issuer committed
+/// to. `index_commitment` MUST equal `sparq_zk::sig::status_index_commitment(index,
+/// blinding)` (the issuer-signed value); the host computes it that way.
+pub fn revoke_prover_toml(
+    challenge: &Fr,
+    root: &Fr,
+    index_commitment: &Fr,
+    index: u64,
+    blinding: &Fr,
+    witness: &MerkleWitness,
+) -> String {
     let mut s = String::new();
     s.push_str(&format!("challenge = \"{}\"\n", field_to_hex(challenge)));
     s.push_str(&format!("root = \"{}\"\n", field_to_hex(root)));
+    s.push_str(&format!("index_commitment = \"{}\"\n", field_to_hex(index_commitment)));
     s.push_str(&format!("index = \"{index}\"\n"));
     s.push_str(&format!("bit = \"{}\"\n", field_to_hex(&witness.bit)));
+    s.push_str(&format!("blinding = \"{}\"\n", field_to_hex(blinding)));
     let sibs: Vec<String> = witness
         .siblings
         .iter()

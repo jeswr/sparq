@@ -168,12 +168,29 @@ pub struct CommitmentAttestation {
 /// and the disclosed reference are cross-checked for equality — a prover that
 /// disclosed a different index/version than the issuer signed is rejected.
 // [OPUS-4.8] audit #12.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// [OPUS-4.8] sq-ayv: `index` is now OPTIONAL — a committed-index attestation
+// (the index-hiding path) signs an `index_commitment` instead of the clear index,
+// so the clear index is absent from the signed object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedStatusRef {
-    /// The credential's index into the status list (as issuer-signed).
-    pub index: u64,
+    /// The credential's CLEAR index into the status list (as issuer-signed) — the
+    /// audit-#12 clear-index path. `None` when the attestation uses the sq-ayv
+    /// COMMITTED-index path (`index_commitment` is `Some` instead), which signs a
+    /// hiding commitment to the index rather than the clear index. Exactly one of
+    /// `index` / `index_commitment` is `Some`; both-None or both-Some is rejected
+    /// fail-closed by the verifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u64>,
     /// The status-list version (as issuer-signed).
     pub version: u64,
+    /// [OPUS-4.8] sq-ayv: the hiding COMMITMENT to the index the issuer signed (in
+    /// place of the clear `index`), hex. When `Some`, the issuer signed
+    /// `status_ref_commit_digest(H(list), index_commitment, version)` and the clear
+    /// index is withheld; the hidden-index revocation proof cross-binds this
+    /// commitment to the proven-unset index in-circuit. `None` for the clear-index
+    /// (audit #12) path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_commitment: Option<FieldHex>,
 }
 
 /// A credential's revocation reference (plan §S2.6, Bitstring/StatusList2021
@@ -203,9 +220,22 @@ pub struct RevocationStatus {
     /// IRI of the status-list credential (bound under the issuer signature via
     /// [`sparq_zk::sig::status_list_id_to_field`]).
     pub status_list: String,
-    /// Index into the list. Disclosed in the clear in v1 (a documented
-    /// linkability channel — see the type docs); the full design hides it.
-    pub index: u64,
+    /// The CLEAR index into the list (the audit-#12 clear-index path). `None` when
+    /// the credential uses the sq-ayv COMMITTED-index path — the clear index is
+    /// WITHHELD and `index_commitment` carries a hiding commitment instead, so the
+    /// linkability channel is closed. `#[serde(default)]` so a committed-index
+    /// manifest simply omits this field.
+    ///
+    /// # Privacy
+    /// When `Some`, `index` is disclosed in the clear (a linkability channel — a
+    /// relying party can correlate two presentations by index). The sq-ayv
+    /// committed-index path (`index = None`, `index_commitment = Some`) closes
+    /// this: revocation is checked via the hidden-index proof against the
+    /// authoritative root, and the issuer binds only a hiding commitment to the
+    /// index — so neither the index NOR the liveness bit is disclosed.
+    // [OPUS-4.8] sq-ayv: clear index withholdable (committed-index path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u64>,
     /// The status-list version the credential asserts against (a monotone
     /// freshness counter — the issuer's status-list publication sequence /
     /// `validFrom` epoch). Bound under the issuer signature and freshness-window
@@ -216,6 +246,16 @@ pub struct RevocationStatus {
     // [OPUS-4.8] audit #12: issuer-bound, freshness-checked version.
     #[serde(default)]
     pub version: u64,
+    /// [OPUS-4.8] sq-ayv: the hiding COMMITMENT to the index (in place of the clear
+    /// `index`), hex. When `Some`, the issuer signed
+    /// `status_ref_commit_digest(H(list), index_commitment, version)` and the
+    /// verifier (a) recomputes that digest from THIS field to check the signature,
+    /// and (b) requires the hidden-index revocation proof's PUBLIC index commitment
+    /// to byte-equal it (the cross-binding). `None` for the clear-index path. A
+    /// committed-index reference REQUIRES a hidden-revocation proof (revocation is
+    /// then checked there, never skipped — fail-closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_commitment: Option<FieldHex>,
 }
 
 /// A snapshot of a Bitstring/StatusList2021-style status list (audit #12): the
@@ -539,6 +579,16 @@ pub struct HiddenIndexRevocation {
     /// The status-list Merkle root the proof was produced against (the proof's
     /// PUBLIC input). Checked byte-equal to the relying party's authoritative root.
     pub root: FieldHex,
+    /// [OPUS-4.8] sq-ayv: the hiding index COMMITMENT the proof was produced against
+    /// (the proof's SECOND public input, after `root`), hex. The circuit recomputes
+    /// it in-circuit from the same private `index` it proves bit-unset for; the
+    /// verifier byte-matches it against the ISSUER-SIGNED commitment in
+    /// [`RevocationStatus::index_commitment`], cross-binding the proven-unset index
+    /// to the index the issuer committed to. `None` for a legacy (sq-3e5) proof
+    /// that predates the cross-binding — but a committed-index `RevocationStatus`
+    /// REQUIRES this to be `Some` (fail-closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_commitment: Option<FieldHex>,
     /// The bb proof blob (hex), in the same `len|proof|len|pi|vk` layout as a
     /// [`SubProof::proof_hex`] (see [`crate::verifier::encode_artifacts`]).
     pub proof_hex: String,

@@ -99,8 +99,9 @@ fn fixture_snapshot(revoked: bool) -> StatusListSnapshot {
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
         status_list: FIXTURE_STATUS_LIST.to_string(),
-        index: FIXTURE_STATUS_INDEX,
+        index: Some(FIXTURE_STATUS_INDEX),
         version: FIXTURE_STATUS_VERSION,
+        index_commitment: None,
     }
 }
 
@@ -195,7 +196,7 @@ fn attest_with_status(
         signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
         salt: Some(FieldHex::from_field(&salt)),
-        status: Some(AttestedStatusRef { index, version }),
+        status: Some(AttestedStatusRef { index: Some(index), version, index_commitment: None }),
     }
 }
 
@@ -233,6 +234,69 @@ fn attest_all(m: &mut ProofManifest, sk: &SecretKey, salt: Fr) {
         let key = sparq_zk::field::field_to_hex(&c);
         if seen.insert(key) {
             m.commitment_attestations.push(attest_with_salt(c, salt, sk));
+        }
+    }
+    if !m.key_set.contains(&pk_hex) {
+        m.key_set.push(pk_hex);
+    }
+}
+
+/// [OPUS-4.8] sq-ayv: a salt- AND COMMITTED-STATUS-bound attestation — the issuer
+/// signs `(commitment, salt, status_ref_commit_digest(H(list), index_commitment,
+/// version))`, binding a HIDING commitment to the index instead of the clear
+/// index. The attestation's `AttestedStatusRef` carries `index_commitment` (NOT a
+/// clear `index`), so the verifier recomputes the committed-status message and
+/// the clear index is absent from the signed object.
+fn attest_with_status_commit(
+    commitment: Fr,
+    salt: Fr,
+    index_commitment: &Fr,
+    version: u64,
+    sk: &SecretKey,
+) -> CommitmentAttestation {
+    let list_id = sparq_zk::sig::status_list_id_to_field(FIXTURE_STATUS_LIST);
+    let status_ref = sparq_zk::sig::status_ref_commit_digest(&list_id, index_commitment, version);
+    CommitmentAttestation {
+        commitment: FieldHex::from_field(&commitment),
+        issuer_public_key: public_key_to_hex(&sk.public_key()),
+        signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
+        cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
+        salt: Some(FieldHex::from_field(&salt)),
+        status: Some(AttestedStatusRef {
+            index: None,
+            version,
+            index_commitment: Some(FieldHex::from_field(index_commitment)),
+        }),
+    }
+}
+
+/// A committed-index `RevocationStatus` (sq-ayv): the clear index is WITHHELD and
+/// a hiding `index_commitment` is disclosed instead.
+fn fixture_revocation_committed(index_commitment: &Fr) -> RevocationStatus {
+    RevocationStatus {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        index: None,
+        version: FIXTURE_STATUS_VERSION,
+        index_commitment: Some(FieldHex::from_field(index_commitment)),
+    }
+}
+
+/// Attach COMMITTED-status attestations (sq-ayv) for every scan commitment under
+/// `sk` + `salt` + the fixture `index_commitment`, disclosing `sk` in K. The clear
+/// index never enters any signed object or disclosed field.
+fn attest_all_committed(m: &mut ProofManifest, sk: &SecretKey, salt: Fr, index_commitment: &Fr) {
+    let pk_hex = public_key_to_hex(&sk.public_key());
+    let mut seen = std::collections::BTreeSet::new();
+    for c in scan_commitments(m) {
+        let key = sparq_zk::field::field_to_hex(&c);
+        if seen.insert(key) {
+            m.commitment_attestations.push(attest_with_status_commit(
+                c,
+                salt,
+                index_commitment,
+                FIXTURE_STATUS_VERSION,
+                sk,
+            ));
         }
     }
     if !m.key_set.contains(&pk_hex) {
@@ -2758,8 +2822,9 @@ fn revocation_reference_mismatch_rejected() {
     // reference mismatch.
     m.revocation = Some(RevocationStatus {
         status_list: FIXTURE_STATUS_LIST.to_string(),
-        index: 5,
+        index: Some(5),
         version: FIXTURE_STATUS_VERSION,
+        index_commitment: None,
     });
     m.status_snapshots = vec![StatusListSnapshot {
         status_list: FIXTURE_STATUS_LIST.to_string(),
@@ -2808,8 +2873,9 @@ fn revocation_stale_status_list_rejected() {
         // snapshot at that old version.
         revocation: Some(RevocationStatus {
             status_list: FIXTURE_STATUS_LIST.to_string(),
-            index: FIXTURE_STATUS_INDEX,
+            index: Some(FIXTURE_STATUS_INDEX),
             version: old_version,
+            index_commitment: None,
         }),
         status_snapshots: vec![StatusListSnapshot {
             status_list: FIXTURE_STATUS_LIST.to_string(),
@@ -2999,8 +3065,9 @@ fn revocation_within_window_verifies() {
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: Some(RevocationStatus {
             status_list: FIXTURE_STATUS_LIST.to_string(),
-            index: FIXTURE_STATUS_INDEX,
+            index: Some(FIXTURE_STATUS_INDEX),
             version: ver,
+            index_commitment: None,
         }),
         status_snapshots: vec![StatusListSnapshot {
             status_list: FIXTURE_STATUS_LIST.to_string(),
@@ -3171,7 +3238,10 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge },
-        revocation: Some(fixture_revocation()),
+        // [OPUS-4.8] sq-ayv: COMMITTED-index reference — the clear index is
+        // withheld; revocation is checked via the hidden-index proof cross-bound
+        // to this commitment.
+        revocation: Some(fixture_revocation_committed(&fixture_index_commitment())),
         status_snapshots: vec![hidden_snapshot(false)],
         sub_proofs: vec![SubProof {
             inputs: scan.inputs,
@@ -3181,35 +3251,147 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
-    attest_all(&mut manifest, &test_issuer_sk(1), salt);
+    attest_all_committed(&mut manifest, &test_issuer_sk(1), salt, &fixture_index_commitment());
     (manifest, salt)
+}
+
+/// The per-credential index-commitment blinding the fixtures use (the holder's
+/// hiding randomness; in production it is OS-random per credential).
+fn fixture_blinding() -> Fr {
+    Fr::from(0x00b1_1d1c_0de5_u64)
+}
+
+/// The hiding index commitment for the fixture credential (sq-ayv): the value the
+/// issuer signs (via `status_ref_commit_digest`) and the hidden-revocation proof
+/// cross-binds to the proven-unset index.
+fn fixture_index_commitment() -> Fr {
+    sparq_zk::sig::status_index_commitment(FIXTURE_STATUS_INDEX, &fixture_blinding())
 }
 
 /// Prove the `revoke_unset_d10` circuit for `index` against the depth-10 tree of
 /// `snapshot`, returning the assembled [`HiddenIndexRevocation`] manifest field.
 /// `challenge` is the verifier nonce the proof commits as public field 0.
+/// [OPUS-4.8] sq-ayv: the proof now cross-binds a hiding index commitment
+/// (recomputed in-circuit from `index` + `blinding`); the assembled field carries
+/// it so the verifier can byte-match it against the issuer-signed commitment.
 fn prove_hidden_revocation(
     prover: &CircuitProver,
     snapshot: &StatusListSnapshot,
     index: u64,
+    blinding: &Fr,
     challenge: &Fr,
     tag: &str,
 ) -> HiddenIndexRevocation {
     let root = merkle_root(snapshot, HIDDEN_DEPTH).expect("root");
+    let index_commitment = sparq_zk::sig::status_index_commitment(index, blinding);
     let witness = merkle_witness(snapshot, HIDDEN_DEPTH, index).expect("witness");
-    let toml = revoke_prover_toml(challenge, &root, index, &witness);
+    let toml = revoke_prover_toml(challenge, &root, &index_commitment, index, blinding, &witness);
     let id = CircuitId::RevokeUnset { depth: HIDDEN_DEPTH };
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("hidden-revocation prove succeeds");
     HiddenIndexRevocation {
         depth: HIDDEN_DEPTH,
         root: FieldHex::from_field(&root),
+        index_commitment: Some(FieldHex::from_field(&index_commitment)),
         proof_hex: encode_artifacts(&art),
     }
 }
 
-/// HAPPY PATH: an UNREVOKED hidden index verifies end-to-end, and the proof's
-/// public inputs are exactly (challenge, root) -- the INDEX is NOT disclosed.
+/// [OPUS-4.8] sq-ayv (FAIL-CLOSED, never-skip-revocation): a COMMITTED-index
+/// reference (clear index withheld) with a valid committed attestation but NO
+/// `manifest.hidden_revocation` proof is REJECTED — the committed-index path moves
+/// the liveness decision to the hidden-index proof, so without it revocation would
+/// be unchecked. (Structural, no bb: reaches the gate in the prefilter.)
+#[test]
+fn committed_index_without_hidden_revocation_rejected() {
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let commitment_fr = commit.commitment;
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).expect("scan builds");
+    let ic = fixture_index_commitment();
+    let sk = test_issuer_sk(1);
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(fixture_revocation_committed(&ic)),
+        status_snapshots: vec![],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        binding_edges: vec![],
+        hidden_revocation: None, // <- MISSING; committed-index requires it
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all_committed(&mut m, &sk, salt, &ic);
+    let _ = commitment_fr;
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &hidden_policy(false)) {
+        Err(CheckError::HiddenRevocationRequired { .. }) => {}
+        other => panic!(
+            "a committed-index reference without a hidden-revocation proof must be HiddenRevocationRequired (never skip revocation), got {other:?}"
+        ),
+    }
+}
+
+/// [OPUS-4.8] sq-ayv: a committed attestation whose DISCLOSED `index_commitment`
+/// differs from the ISSUER-SIGNED one is REJECTED — the recomputed status-commit
+/// digest then differs and the issuer signature fails. (Structural, no bb.)
+#[test]
+fn committed_index_disclosed_commitment_mismatch_rejected() {
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).expect("scan builds");
+    let signed_ic = fixture_index_commitment(); // what the issuer signs
+    let disclosed_ic = sparq_zk::sig::status_index_commitment(999, &fixture_blinding()); // a DIFFERENT one
+    assert_ne!(signed_ic, disclosed_ic);
+    let sk = test_issuer_sk(1);
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        // Disclose a DIFFERENT commitment than the issuer signed.
+        revocation: Some(fixture_revocation_committed(&disclosed_ic)),
+        status_snapshots: vec![],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    // The issuer signs over `signed_ic`, but the disclosed reference carries
+    // `disclosed_ic` — the digests differ, so cross-check / signature fails.
+    attest_all_committed(&mut m, &sk, salt, &signed_ic);
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &hidden_policy(false)) {
+        Err(CheckError::RevocationReferenceMismatch { .. }) => {}
+        other => panic!(
+            "a disclosed index commitment that differs from the issuer-signed one must be RevocationReferenceMismatch, got {other:?}"
+        ),
+    }
+}
+
+/// HAPPY PATH: an UNREVOKED hidden index verifies end-to-end. [OPUS-4.8] sq-ayv:
+/// the proof's public inputs are (challenge, root, index_commitment) -- the clear
+/// INDEX is NOT disclosed in any public input NOR in the manifest (committed-index
+/// mode: `RevocationStatus.index` is withheld), closing the residual index leak.
 #[test]
 #[ignore = "slow: full bb prove of a scan + the hidden-revocation member"]
 fn hidden_revocation_unrevoked_verifies_and_index_is_private() {
@@ -3221,12 +3403,15 @@ fn hidden_revocation_unrevoked_verifies_and_index_is_private() {
     let (mut manifest, _salt) = hidden_scan_manifest(&prover, "hidden_scan_ok");
     let challenge = Fr::from(0x2au64); // the proof commits 0x2a as field 0
     let snapshot = hidden_snapshot(false); // index 3 UNSET (active)
-    let hidden = prove_hidden_revocation(&prover, &snapshot, FIXTURE_STATUS_INDEX, &challenge, "hidden_ok");
+    let blinding = fixture_blinding();
+    let hidden = prove_hidden_revocation(
+        &prover, &snapshot, FIXTURE_STATUS_INDEX, &blinding, &challenge, "hidden_ok",
+    );
 
     // --- INDEX-NOT-DISCLOSED assertion (the privacy goal). ---
-    // The bb public_inputs blob is exactly two 32-byte words: challenge, root.
-    // The index (3) appears in NEITHER. We decode the blob and assert (a) it is
-    // 64 bytes (2 fields, NOT 3+) and (b) neither word encodes the index value.
+    // The bb public_inputs blob is exactly three 32-byte words: challenge, root,
+    // index_commitment. The CLEAR index (3) appears in NONE of them (the
+    // index_commitment is a hiding Poseidon2 commitment, not the index).
     use sparq_zk::field::{field_to_be_bytes_32, field_from_hex_str};
     let blob = {
         // proof_hex layout is len|proof|len|pi|vk; pull out the pi segment.
@@ -3241,13 +3426,21 @@ fn hidden_revocation_unrevoked_verifies_and_index_is_private() {
         ]) as usize;
         bytes[pi_off + 4..pi_off + 4 + pilen].to_vec()
     };
-    assert_eq!(blob.len(), 64, "revoke public inputs must be exactly (challenge, root) = 2 words; index is NOT a public input");
+    assert_eq!(blob.len(), 96, "revoke public inputs = (challenge, root, index_commitment) = 3 words; the clear index is NOT a public input");
     let index_word = field_to_be_bytes_32(&Fr::from(FIXTURE_STATUS_INDEX));
     let root_fr = field_from_hex_str(&hidden.root.0).unwrap();
+    let ic_fr = sparq_zk::sig::status_index_commitment(FIXTURE_STATUS_INDEX, &blinding);
     assert_eq!(&blob[0..32], &field_to_be_bytes_32(&challenge), "word 0 is the challenge");
     assert_eq!(&blob[32..64], &field_to_be_bytes_32(&root_fr), "word 1 is the root");
-    assert_ne!(&blob[0..32], &index_word[..], "the index must NOT be a public input");
-    assert_ne!(&blob[32..64], &index_word[..], "the index must NOT be a public input");
+    assert_eq!(&blob[64..96], &field_to_be_bytes_32(&ic_fr), "word 2 is the index commitment");
+    for w in blob.chunks(32) {
+        assert_ne!(w, &index_word[..], "the CLEAR index must NOT be a public input");
+    }
+    // The clear index is withheld from the manifest entirely (committed-index mode):
+    // `RevocationStatus.index` is None and (with skip_serializing_if) absent from JSON.
+    assert!(manifest.revocation.as_ref().unwrap().index.is_none(), "clear index withheld");
+    let json = manifest.to_json();
+    assert!(!json.contains("\"index\""), "no clear `index` field in the committed-index manifest JSON");
 
     manifest.hidden_revocation = Some(hidden);
     verify_manifest(
@@ -3259,7 +3452,7 @@ fn hidden_revocation_unrevoked_verifies_and_index_is_private() {
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
-    .expect("unrevoked hidden-index credential verifies end-to-end");
+    .expect("unrevoked hidden-index credential verifies end-to-end (clear index withheld)");
 }
 
 /// REVOKED index: the holder of a REVOKED credential CANNOT produce the proof.
@@ -3281,7 +3474,11 @@ fn hidden_revocation_revoked_index_is_unprovable() {
     // assertion is unsatisfiable, so nargo produces NO witness.
     let witness = merkle_witness(&snapshot, HIDDEN_DEPTH, FIXTURE_STATUS_INDEX).unwrap();
     assert_eq!(witness.bit, Fr::from(1u64), "revoked index has bit set");
-    let toml = revoke_prover_toml(&challenge, &root, FIXTURE_STATUS_INDEX, &witness);
+    let blinding = fixture_blinding();
+    let index_commitment = sparq_zk::sig::status_index_commitment(FIXTURE_STATUS_INDEX, &blinding);
+    let toml = revoke_prover_toml(
+        &challenge, &root, &index_commitment, FIXTURE_STATUS_INDEX, &blinding, &witness,
+    );
     let id = CircuitId::RevokeUnset { depth: HIDDEN_DEPTH };
     let out = scratch("hidden_revoked");
     let res = prover.prove_in(&id, &toml, &out, "hidden_revoked");
@@ -3321,7 +3518,9 @@ fn hidden_revocation_forged_root_rejected() {
         merkle_root(&auth, HIDDEN_DEPTH).unwrap(),
         "the forged all-zero tree must have a different root than the authoritative snapshot"
     );
-    let hidden = prove_hidden_revocation(&prover, &forged, FIXTURE_STATUS_INDEX, &challenge, "hidden_forge");
+    let hidden = prove_hidden_revocation(
+        &prover, &forged, FIXTURE_STATUS_INDEX, &fixture_blinding(), &challenge, "hidden_forge",
+    );
     manifest.hidden_revocation = Some(hidden);
     match verify_manifest(
         &manifest,
