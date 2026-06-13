@@ -128,7 +128,9 @@ Until these land, the MPC layer would compose onto a verifier that returns `Ok((
 ---
 
 ### Key reference files
-- RQ1 soundness gating: `/home/ubuntu/sparq/research/zk-soundness-audit.md`
-- Existing seam for MPC composition: `/home/ubuntu/refs/zkp-sparql-workspace/decisions/sparql-noir-modular-alternative.md`
-- Commitment/signature design: `/home/ubuntu/refs/zkp-sparql-workspace/paper/sections/04-commitment.tex`
-- RQ framing: `/home/ubuntu/refs/zkp-sparql-workspace/notes/research/03-jesse-prior-work.md`; Transfer report `/tmp/transfer-report.pdf`
+- RQ1 soundness gating (in-repo): [`research/zk-soundness-audit.md`](./zk-soundness-audit.md)
+- The following are **external sources** (Jesse's private `zkp-sparql-workspace`, not in this repo — paths are relative to that workspace root):
+  - Existing seam for MPC composition: `decisions/sparql-noir-modular-alternative.md`
+  - Commitment/signature design: `paper/sections/04-commitment.tex`
+  - RQ framing: `notes/research/03-jesse-prior-work.md`
+  - Transfer report: Jesse's PhD transfer-of-status report (downloadable from blog.jeswr.org)
