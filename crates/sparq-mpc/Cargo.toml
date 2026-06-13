@@ -31,6 +31,15 @@ publish = false
 # sparq-wasm`.) The only real dependency is the SPARQL engine, used for the
 # invariant "each holder evaluates locally over its own graphs" core.
 
+[features]
+# [OPUS-4.8] sq-1vt: gate exposing the DETERMINISTIC, SEEDABLE masking RNG
+# (`ShamirBackend::new_seeded` / `rng::InsecureTestRng`) outside `#[cfg(test)]`,
+# e.g. for an external benchmark harness that needs reproducible masks. It is
+# OFF by default, so a normal `sparq-mpc` build CANNOT construct a predictable
+# masking RNG — the real protocol always uses the OS-seeded ChaCha20 CSPRNG.
+# The feature name is the warning: turning it on opts into insecure randomness.
+insecure-test-rng = []
+
 [dependencies]
 # The single-holder query engine. The MPC layer's whole point is to MINIMISE
 # data sharing: each holder evaluates a query fragment over ITS OWN graphs
@@ -41,3 +50,15 @@ sparq-engine = { path = "../sparq-engine" }
 # row shape sparq-engine's QueryResult uses), so a holder never has to
 # re-encode its own data to hand a partial to the join layer.
 oxrdf = { workspace = true }
+
+# [OPUS-4.8] sq-1vt: CSPRNG for the secret-sharing / masking randomness.
+# The dealer's polynomial coefficients and the equality-test mask MUST be
+# unpredictable — a non-crypto PRNG there is a real confidentiality weakness
+# (sq-1vt). `rand_chacha::ChaCha20Rng` is a vetted CSPRNG; we seed it from OS
+# entropy via `SeedableRng::from_os_rng` (getrandom), and draw u64s via
+# `rand`'s `RngCore`. `rand` is `default-features = false` (we use only the
+# RngCore/SeedableRng traits, NOT thread_rng/distributions) to keep the
+# dependency surface minimal and the native-only / wasm-exclusion invariant
+# intact. Pinned to the workspace's existing 0.9 line (sparq-geo/sparq-text).
+rand = { version = "0.9", default-features = false }
+rand_chacha = "0.9"
