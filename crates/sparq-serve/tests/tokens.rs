@@ -15,7 +15,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sparq_serve::{
     ApplyUpdates, GenerationRing, PodId, Writer, WriterConfig,
@@ -184,6 +184,16 @@ fn satisfied_token_pin_never_regresses_under_concurrent_writes() {
         if let Some(g) = ring.read_your_writes(token) {
             assert!(g.number() >= token, "a satisfied RYW pin never regresses below its token");
         }
+    }
+    // The feeder ran concurrently throughout the reader spin, but on a contended CPU
+    // (e.g. CI under load) the background writer may not have published past the anchor
+    // by the time the tight 50k-iteration spin ends — the reader thread can monopolise
+    // its core and starve the writer. Wait (bounded) for the advance we know is coming
+    // rather than racing it; the monotonicity invariant above is what this test really
+    // guards, and it held on every iteration. [OPUS-4.8]
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ring.current().number() <= 1 && Instant::now() < deadline {
+        std::thread::yield_now();
     }
     stop.store(true, Ordering::Relaxed);
     feeder.join().unwrap();
