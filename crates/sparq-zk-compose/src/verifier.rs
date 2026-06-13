@@ -108,7 +108,7 @@ use sparq_zk::field::{field_from_hex_str, field_to_be_bytes_32, field_to_hex, Fr
 // scan-verify path's signed message — a scan-covering attestation must bind the
 // status reference (status_ref_digest over the disclosed list/index/version).
 use sparq_zk::sig::{
-    commitment_message_with_status, public_key_from_hex, signature_from_hex,
+    commitment_message_with_status, holder_pop_message, public_key_from_hex, signature_from_hex,
     status_list_id_to_field, status_ref_digest, verify as sig_verify, SignatureScheme,
 };
 use sparq_zk::verify::{
@@ -243,6 +243,74 @@ impl KeySet {
     pub fn member_index(&self, pk_hex: &str) -> Option<usize> {
         let target = normalize_hex(pk_hex);
         self.keys.iter().position(|k| *k == target)
+    }
+}
+
+/// The relying party's EXTERNALLY-anchored set of trusted HOLDER keys (sq-cwq) —
+/// the trust anchor for the `HolderPop` binding's proof-of-possession.
+///
+/// # Why this is a verifier input, not a manifest field
+/// Exactly the audit-#3 external-`K` precedent: the holder key the PoP is checked
+/// against MUST come from outside the proof, or any party could mint a key, sign
+/// the challenge with it, list it in the manifest, and pass — a PoP anchored on a
+/// prover-chosen key proves nothing. A relying party constructs a `HolderRegistry`
+/// from the holder keys IT authorises (its policy / a holder-key registry it
+/// resolves out of band) and passes it into [`verify_manifest`]. The accept
+/// decision for a `HolderPop` binding then depends only on this external set.
+///
+/// # Fail-closed
+/// An EMPTY registry trusts no holder: a `HolderPop` binding presented against an
+/// empty registry is REJECTED ([`CheckError::HolderRegistryEmpty`]). There is NO
+/// path on which a `HolderPop` binding is accepted as a bare challenge (the
+/// previous placeholder behaviour, which silently waived the holder check). A
+/// relying party that does not use holder binding simply uses
+/// [`BindingMode::Challenge`]; one that DOES must supply a non-empty registry.
+///
+/// # Scope (honest deferral)
+/// Membership here means "this holder key is authorised to present" — it does NOT
+/// bind the key to a SPECIFIC credential. Issuer-attested credential↔holder
+/// binding (the issuer signing the holder key into the credential) is deferred;
+/// see [`bind_holder_pop`]. Keys are stored normalized (no `0x`, lowercase) and
+/// validated as parseable, non-identity Baby-JubJub points at construction
+/// (unparseable/identity entries dropped fail-closed).
+// [OPUS-4.8] sq-cwq: external holder trust anchor (mirrors KeySet).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HolderRegistry {
+    holders: BTreeSet<String>,
+}
+
+impl HolderRegistry {
+    /// An empty registry: trusts NO holder. A `HolderPop` binding is then rejected
+    /// (`HolderRegistryEmpty`) — the explicit "holder binding not in use" anchor
+    /// and the test default. (A `Challenge` binding is unaffected.)
+    pub fn empty() -> Self {
+        HolderRegistry { holders: BTreeSet::new() }
+    }
+
+    /// Build a registry from the relying party's authorised holder public keys
+    /// (hex). Each is validated as a parseable, non-identity Baby-JubJub point and
+    /// stored normalized; unparseable/identity entries are dropped (fail-closed —
+    /// they can never match a real PoP key).
+    pub fn from_hex_keys<I, S>(keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let holders = keys
+            .into_iter()
+            .filter_map(|h| public_key_from_hex(h.as_ref()).map(|_| normalize_hex(h.as_ref())))
+            .collect();
+        HolderRegistry { holders }
+    }
+
+    /// The registry trusts no holder.
+    pub fn is_empty(&self) -> bool {
+        self.holders.is_empty()
+    }
+
+    /// Whether `holder_hex` (any case, optional `0x`) is an authorised holder.
+    fn contains_hex(&self, holder_hex: &str) -> bool {
+        self.holders.contains(&normalize_hex(holder_hex))
     }
 }
 
@@ -974,6 +1042,29 @@ pub enum CheckError {
     /// truncated length prefix) (sq-z9l) — rejected before any bb call.
     // [OPUS-4.8] sq-z9l.
     HiddenIssuerMalformedProof,
+    /// The manifest's binding is `HolderPop` but the relying party supplied NO
+    /// holder registry (an empty [`HolderRegistry`]) (sq-cwq): the verifier has no
+    /// trust anchor to check the holder key against, so it cannot accept a holder
+    /// PoP. Rejected fail-closed — a HolderPop binding without a registry is NEVER
+    /// silently accepted as a bare challenge (the previous placeholder behaviour).
+    // [OPUS-4.8] sq-cwq.
+    HolderRegistryEmpty,
+    /// The `HolderPop` binding's `holder` key is not a member of the relying
+    /// party's external [`HolderRegistry`] (sq-cwq): the presenter is not an
+    /// authorised holder. Rejected.
+    // [OPUS-4.8] sq-cwq.
+    HolderNotTrusted { holder: String },
+    /// The `HolderPop` binding's `cryptosuite` is unknown/unsupported, or its
+    /// `holder` key / `pop` signature did not parse (sq-cwq): the PoP is
+    /// unverifiable. Rejected fail-closed (prover-controlled bytes never panic).
+    // [OPUS-4.8] sq-cwq.
+    HolderPopMalformed,
+    /// The `HolderPop` binding's `pop` signature did not verify under the `holder`
+    /// key over the challenge-bound PoP message (sq-cwq): the presenter did NOT
+    /// prove possession of the holder secret (a forged/replayed/absent PoP).
+    /// Rejected.
+    // [OPUS-4.8] sq-cwq.
+    HolderPopInvalid { holder: String },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -1153,6 +1244,22 @@ impl std::fmt::Display for CheckError {
             CheckError::HiddenIssuerMalformedProof => write!(
                 f,
                 "hidden-issuer attestation proof blob is malformed (sq-z9l)"
+            ),
+            CheckError::HolderRegistryEmpty => write!(
+                f,
+                "manifest binding is HolderPop but the relying party supplied no holder registry (sq-cwq: no trust anchor to check the holder key against — a holder PoP cannot be accepted, fail-closed)"
+            ),
+            CheckError::HolderNotTrusted { holder } => write!(
+                f,
+                "HolderPop binding holder key {holder} is not a member of the relying party's holder registry (sq-cwq: unauthorised holder)"
+            ),
+            CheckError::HolderPopMalformed => write!(
+                f,
+                "HolderPop binding is unverifiable: unknown cryptosuite, or the holder key / pop signature did not parse (sq-cwq: fail-closed, no silent accept)"
+            ),
+            CheckError::HolderPopInvalid { holder } => write!(
+                f,
+                "HolderPop binding pop signature does not verify under holder key {holder} over the challenge-bound message (sq-cwq: the presenter did not prove possession of the holder secret)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -2280,6 +2387,82 @@ fn filter_edge_true(
     }
 }
 
+/// sq-cwq: verify the holder proof-of-possession when the binding is `HolderPop`.
+/// Runs ONLY for a `HolderPop` binding (a `Challenge` binding returns `Ok(())`
+/// immediately — no PoP is required). `challenge` is the VERIFIER'S nonce (the
+/// same field element bound as public-input field 0 of every sub-proof), so the
+/// PoP is fresh: a captured manifest re-presented under a new nonce cannot reuse
+/// an old PoP, and the holder must sign THIS verifier's challenge.
+///
+/// Fail-closed contract (the sq-cwq fix — no silent accept of an absent PoP):
+/// 1. an EMPTY `holder_registry` => `HolderRegistryEmpty` (no trust anchor — a
+///    holder PoP cannot be accepted; the relying party must supply authorised
+///    holder keys to use holder binding);
+/// 2. `holder` not a member of the registry => `HolderNotTrusted`;
+/// 3. an unknown `cryptosuite`, or a `holder`/`pop` that does not parse =>
+///    `HolderPopMalformed` (prover-controlled bytes never panic);
+/// 4. `pop` not a valid signature under `holder` over
+///    `holder_pop_message(challenge)` => `HolderPopInvalid`.
+///
+/// The previous placeholder accepted a `HolderPop` binding by simply reading its
+/// `challenge` (exactly like a bare `Challenge`), silently waiving (1)-(4) — an
+/// absent/forged PoP passed. That silent-accept path is removed.
+///
+/// # Scope (honest deferral)
+/// This proves the presenter possesses a holder key the relying party trusts AND
+/// signed the verifier's fresh nonce with it. It does NOT bind that key to the
+/// SPECIFIC credential the scan/filter sub-proofs attest — an issuer-attested
+/// holder binding (the issuer signing the holder key into the credential, e.g. a
+/// `holderBinding` field folded into the commitment message) is DEFERRED. Without
+/// it, a trusted holder A could present a trusted holder B's credential. The
+/// holder registry narrows "who may present at all" to authorised holders, which
+/// is the meaningful interim guarantee; the per-credential binding is the
+/// documented next step. This is NOT a silent gap: the registry is fail-closed and
+/// the deferral is recorded here and in the manifest/README docs.
+// [OPUS-4.8] sq-cwq: holder PoP implemented (challenge-bound Schnorr) + fail-closed.
+fn bind_holder_pop(
+    manifest: &ProofManifest,
+    holder_registry: &HolderRegistry,
+    challenge: &FieldHex,
+) -> Result<(), CheckError> {
+    let (holder, pop, cryptosuite) = match &manifest.binding {
+        // A plain challenge binding requires no holder PoP.
+        BindingMode::Challenge { .. } => return Ok(()),
+        BindingMode::HolderPop { holder, pop, cryptosuite, .. } => (holder, pop, cryptosuite),
+    };
+
+    // (1) No trust anchor => cannot accept a holder PoP (fail-closed). This is the
+    // load-bearing replacement for the old silent-accept: a HolderPop binding is
+    // NEVER waived just because no registry was supplied.
+    if holder_registry.is_empty() {
+        return Err(CheckError::HolderRegistryEmpty);
+    }
+    // (2) The holder key must be authorised by the relying party's external set.
+    if !holder_registry.contains_hex(holder) {
+        return Err(CheckError::HolderNotTrusted { holder: holder.clone() });
+    }
+    // (3) Known cryptosuite + parseable key/signature (fail-closed on bad bytes).
+    if SignatureScheme::from_cryptosuite_iri(cryptosuite).is_none() {
+        return Err(CheckError::HolderPopMalformed);
+    }
+    let (Some(pk), Some(sig)) = (public_key_from_hex(holder), signature_from_hex(pop)) else {
+        return Err(CheckError::HolderPopMalformed);
+    };
+    // The challenge must parse to a field element (it equals the verifier nonce,
+    // already validated in verify_manifest, but check here for a standalone caller).
+    let Some(challenge_fr) = challenge.to_field() else {
+        return Err(CheckError::HolderPopMalformed);
+    };
+    // (4) The PoP signature must verify under the holder key over the
+    // challenge-bound, domain-separated PoP message — proving possession of the
+    // holder secret, freshly over the verifier's nonce.
+    let message = holder_pop_message(&challenge_fr);
+    if !sig_verify(&pk, &message, &sig) {
+        return Err(CheckError::HolderPopInvalid { holder: holder.clone() });
+    }
+    Ok(())
+}
+
 /// Full verification: structure (stage 1+2) then the cryptographic gate
 /// (stage 3). `prover` points at the `zk/compose/` workspace; `work_dir` is
 /// scratch for bb artifacts; `trusted_key_set` is the relying party's EXTERNAL
@@ -2287,7 +2470,13 @@ fn filter_edge_true(
 /// `manifest.key_set`); `revocation_policy` is the relying party's EXTERNAL
 /// freshness/revocation policy (audit #12 — the status check is mandatory: a
 /// revoked credential, a stale status snapshot, or an omitted/forged
-/// issuer-bound status reference all REJECT).
+/// issuer-bound status reference all REJECT); `holder_registry` is the relying
+/// party's EXTERNAL set of authorised holder keys (sq-cwq) — consulted ONLY when
+/// `manifest.binding` is `HolderPop`, in which case the holder MUST prove
+/// possession of a registry-member key by signing the verifier nonce (an empty
+/// registry, an untrusted holder, or a malformed/invalid PoP all REJECT; a
+/// `Challenge` binding ignores the registry). Pass `&HolderRegistry::empty()`
+/// when holder binding is not in use.
 ///
 /// # Freshness / single-use (audit #4) — the challenge-response flow
 /// `nonce` is the relying party's OWN fresh value (a [`VerifierNonce`]), minted
@@ -2320,12 +2509,19 @@ fn filter_edge_true(
 /// inputs, canonical vk). The prover-supplied vk and public-input bytes from
 /// the blob are NEVER trusted.
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use.
+// [OPUS-4.8] sq-cwq: + holder_registry (external holder trust anchor). Each
+// argument is a DISTINCT external trust input the relying party supplies (issuer
+// key-set K, revocation policy, holder registry, fresh nonce, single-use store) —
+// deliberately separate, not bundled, to keep each anchor explicit at the call
+// site; the count exceeds clippy's default heuristic but every arg is load-bearing.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_manifest(
     manifest: &ProofManifest,
     prover: &CircuitProver,
     work_dir: &Path,
     trusted_key_set: &KeySet,
     revocation_policy: &RevocationPolicy,
+    holder_registry: &HolderRegistry,
     nonce: &VerifierNonce,
     seen: &dyn SeenNonces,
 ) -> Result<(), CheckError> {
@@ -2375,6 +2571,16 @@ pub fn verify_manifest(
     if declared_fr.is_none() || declared_fr != challenge.to_field() {
         return Err(CheckError::NonceBindingMismatch);
     }
+
+    // --- sq-cwq: holder proof-of-possession (fail-closed for HolderPop). ---
+    // When the binding is `HolderPop`, the holder MUST prove possession of a
+    // relying-party-trusted holder key by signing the VERIFIER'S nonce (above);
+    // an absent registry, an untrusted holder, or a malformed/invalid PoP all
+    // REJECT here — there is no silent-accept of a HolderPop as a bare challenge.
+    // A `Challenge` binding requires no PoP (this returns Ok immediately). The
+    // nonce is recorded single-use BEFORE this, so a rejected PoP still burns the
+    // nonce (consistent with the burn-on-mismatch policy above).
+    bind_holder_pop(manifest, holder_registry, &challenge)?;
 
     for (i, sp) in manifest.sub_proofs.iter().enumerate() {
         if sp.proof_hex.is_empty() {

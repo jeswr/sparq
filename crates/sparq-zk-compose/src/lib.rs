@@ -44,3 +44,5 @@ pub use issuer::{
 pub use verifier::{FileSeenNonces, InMemorySeenNonces, SeenNonces, VerifierNonce};
 // [OPUS-4.8] audit #12: revocation / freshness policy.
 pub use verifier::RevocationPolicy;
+// [OPUS-4.8] sq-cwq: external holder trust anchor for the HolderPop binding's PoP.
+pub use verifier::HolderRegistry;

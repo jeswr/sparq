@@ -85,9 +85,49 @@ pub enum BindingMode {
     /// Verifier-supplied fresh nonce, carried as the circuit's `challenge`
     /// public input (the v1 default).
     Challenge { challenge: FieldHex },
-    /// Holder proof-of-possession (deferred — placeholder; the field is
-    /// reserved so the manifest schema is stable when PoP lands).
-    HolderPop { challenge: FieldHex, holder: String },
+    /// Holder proof-of-possession (sq-cwq): the holder demonstrates possession of
+    /// its holder secret key by signing the verifier's `challenge` (its nonce).
+    ///
+    /// # Verifier contract (fail-closed) — see [`crate::verifier::bind_holder_pop`]
+    /// The verifier requires (a) `holder` to be a member of an EXTERNAL
+    /// relying-party holder registry ([`crate::verifier::HolderRegistry`], the
+    /// trust anchor — mirrors the issuer key-set `K`), and (b) `pop` to be a valid
+    /// signature under `holder`'s key over
+    /// [`sparq_zk::sig::holder_pop_message`]`(challenge)`. An absent registry, an
+    /// untrusted `holder`, a malformed/unverifiable `pop`, or an unknown
+    /// `cryptosuite` all REJECT — there is NO silent-accept path for an
+    /// unimplemented/absent PoP (the previous placeholder was accepted as a bare
+    /// challenge, which silently waived the holder check).
+    ///
+    /// # Scope (honest deferral)
+    /// This proves possession of a TRUSTED holder key, freshly over the verifier's
+    /// nonce (so a captured manifest cannot be replayed by a non-holder). It does
+    /// NOT yet bind that key to a SPECIFIC credential — an issuer-attested holder
+    /// binding (the issuer signing the holder key into the credential) is deferred;
+    /// see the verifier docs. Until then the relying party's holder registry is the
+    /// who-may-present anchor.
+    // [OPUS-4.8] sq-cwq: holder PoP — implemented (challenge-bound Schnorr),
+    // fail-closed; issuer→holder credential binding documented-deferred.
+    HolderPop {
+        challenge: FieldHex,
+        /// The holder's verification key (compressed Baby-JubJub point, hex). Must
+        /// be a member of the relying party's [`crate::verifier::HolderRegistry`].
+        holder: String,
+        /// The holder's signature over
+        /// [`sparq_zk::sig::holder_pop_message`]`(challenge)`, hex
+        /// (`compressed(R) ‖ s`). Proves possession of the holder secret.
+        pop: String,
+        /// The PoP signature scheme's `zk:cryptosuite` IRI (`poseidon2-schnorr-v1`
+        /// in v1). An unknown cryptosuite is unverifiable => REJECT (fail closed).
+        #[serde(default = "default_holder_cryptosuite")]
+        cryptosuite: String,
+    },
+}
+
+fn default_holder_cryptosuite() -> String {
+    // The v1 Schnorr-over-Baby-JubJub suite (mirrors the issuer attestation
+    // default); kept as a fn so the field is stable across schema versions.
+    "https://sparq.dev/ns/zk#poseidon2-schnorr-v1".to_string()
 }
 
 impl BindingMode {

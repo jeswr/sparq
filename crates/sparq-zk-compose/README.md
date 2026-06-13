@@ -112,7 +112,16 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
 - **Revocation** — `RevocationStatus` is a hidden-index status-list
   placeholder; v1 carries the index in the clear and does not check liveness.
 - **Inference / entailment** — only `EntailmentRegime::Simple` is proved.
-- **HolderPoP binding** — schema field reserved; v1 uses `Challenge`.
+- **HolderPoP binding** — IMPLEMENTED ([OPUS-4.8] sq-cwq): the `HolderPop`
+  binding now carries a holder key + a challenge-bound Schnorr proof-of-possession
+  (`pop`), and the verifier checks it FAIL-CLOSED against an external
+  `HolderRegistry` (an empty registry, an untrusted holder, or a
+  malformed/invalid/replayed PoP all REJECT — no silent-accept of an absent PoP,
+  which was the prior placeholder behaviour). DEFERRED: binding the holder key to
+  a SPECIFIC credential (an issuer-attested credential↔holder binding) — until
+  then the registry narrows "who may present" to authorised holders but a trusted
+  holder is not yet tied to a particular credential. See
+  `verifier::bind_holder_pop`.
 
 ## sparq-zk API gaps noted
 

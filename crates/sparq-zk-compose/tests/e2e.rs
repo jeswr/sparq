@@ -36,8 +36,8 @@ use sparq_zk_compose::issuer::{
 };
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
-    encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, InMemorySeenNonces,
-    KeySet, RevocationPolicy, VerifierNonce,
+    encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, HolderRegistry,
+    InMemorySeenNonces, KeySet, RevocationPolicy, VerifierNonce,
 };
 use sparq_zk::field::Fr;
 use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
@@ -664,6 +664,7 @@ fn full_manifest_prove_verify_scan() {
         &scratch("manifest_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -802,6 +803,7 @@ fn forge_positive_honest_filter_verifies() {
         &scratch("forge_pos_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -835,6 +837,7 @@ fn forge_reject_statement_substitution() {
         &scratch("forge_sub_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -868,6 +871,7 @@ fn forge_reject_verdict_substitution() {
         &scratch("forge_verdict_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -903,6 +907,7 @@ fn forge_reject_challenge_rebind() {
         &scratch("forge_chal_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for("0xdead"),
         &InMemorySeenNonces::new(),
     ) {
@@ -960,6 +965,7 @@ fn nonce_happy_path_fresh_nonce_verifies() {
         &scratch("nonce_happy_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for(nonce_hex),
         &InMemorySeenNonces::new(),
     )
@@ -995,6 +1001,7 @@ fn nonce_replay_under_new_nonce_rejected() {
         &scratch("nonce_replay_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for("0xbeef"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1030,6 +1037,7 @@ fn nonce_single_use_second_presentation_rejected() {
         &scratch("nonce_single_use_verify1"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce,
         &seen,
     )
@@ -1041,6 +1049,7 @@ fn nonce_single_use_second_presentation_rejected() {
         &scratch("nonce_single_use_verify2"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce,
         &seen,
     ) {
@@ -1120,6 +1129,7 @@ fn nonce_binding_mismatch_rejected() {
         &scratch("nonce_binding_mismatch_1"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce,
         &seen,
     ) {
@@ -1138,6 +1148,7 @@ fn nonce_binding_mismatch_rejected() {
         &scratch("nonce_binding_mismatch_2"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce,
         &seen,
     ) {
@@ -1147,6 +1158,258 @@ fn nonce_binding_mismatch_rejected() {
              binding-mismatch rejection), got {other:?}"
         ),
     }
+}
+
+// --- sq-cwq: HolderPop proof-of-possession (implemented + fail-closed) ---------
+//
+// [OPUS-4.8] sq-cwq. The HolderPop binding used to be a placeholder: verify_manifest
+// extracted its `challenge` exactly like a bare Challenge and IGNORED the holder
+// field — a HolderPop binding was SILENTLY ACCEPTED with no proof of possession.
+// It is now a real challenge-bound Schnorr PoP, fail-closed: an empty holder
+// registry, an untrusted holder, or a malformed/invalid PoP all REJECT. These
+// tests pin both directions. The NEGATIVE cases fail at `bind_holder_pop` (after
+// the cheap structural prefilter + nonce checks, BEFORE any bb call), so they need
+// no toolchain; the POSITIVE end-to-end case is toolchain-gated.
+
+/// Build a HolderPop-bound manifest over the credential graph whose structural
+/// prefilter passes (valid attestations + revocation), so verify_manifest reaches
+/// the holder-PoP gate. `pop`/`holder`/`cryptosuite` are caller-supplied so a test
+/// can present a valid, forged, or malformed PoP. `proof_hex` is left empty: the
+/// holder-PoP gate runs BEFORE the sub-proof loop, so the negative PoP cases fire
+/// without bb.
+fn holder_pop_manifest(holder_hex: &str, pop_hex: &str, cryptosuite: &str) -> ProofManifest {
+    let salt = salt_from_bytes(&[9u8; 32]);
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::HolderPop {
+            challenge: FieldHex("0x2a".into()),
+            holder: holder_hex.to_string(),
+            pop: pop_hex.to_string(),
+            cryptosuite: cryptosuite.to_string(),
+        },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all(&mut m, &test_issuer_sk(1), salt);
+    m
+}
+
+/// A holder's valid PoP over challenge 0x2a (the nonce these tests issue).
+fn holder_pop_over_2a(holder_sk: &SecretKey) -> String {
+    let challenge_fr = FieldHex("0x2a".into()).to_field().unwrap();
+    holder_sk.sign_holder_pop(&challenge_fr)
+}
+
+/// sq-cwq (fail-closed #1): a HolderPop binding presented against an EMPTY holder
+/// registry is REJECTED (`HolderRegistryEmpty`) — the verifier has no trust anchor
+/// to check the holder against and must NOT silently accept (the old placeholder
+/// did). No toolchain needed.
+#[test]
+fn holder_pop_empty_registry_rejected() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let m = holder_pop_manifest(
+        &holder_hex,
+        &holder_pop_over_2a(&holder_sk),
+        SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+    );
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_pop_empty_reg"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &HolderRegistry::empty(), // no authorised holders
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderRegistryEmpty) => {}
+        other => panic!(
+            "a HolderPop binding under an EMPTY holder registry must be \
+             HolderRegistryEmpty (no silent accept), got {other:?}"
+        ),
+    }
+}
+
+/// sq-cwq (fail-closed #2): a HolderPop whose holder key is NOT in the relying
+/// party's registry is REJECTED (`HolderNotTrusted`), even with a cryptographically
+/// VALID PoP. No toolchain needed.
+#[test]
+fn holder_pop_untrusted_holder_rejected() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    // Registry trusts a DIFFERENT holder.
+    let other = SecretKey::from_seed(888);
+    let registry = HolderRegistry::from_hex_keys([public_key_to_hex(&other.public_key())]);
+    let m = holder_pop_manifest(
+        &holder_hex,
+        &holder_pop_over_2a(&holder_sk), // valid PoP, but holder not trusted
+        SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+    );
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_pop_untrusted"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderNotTrusted { .. }) => {}
+        other => panic!("an untrusted holder must be HolderNotTrusted, got {other:?}"),
+    }
+}
+
+/// sq-cwq (fail-closed #3): a HolderPop with a FORGED/INVALID pop signature (here a
+/// PoP over a DIFFERENT challenge — replay attempt) is REJECTED
+/// (`HolderPopInvalid`) even though the holder IS trusted. The PoP is bound to the
+/// VERIFIER'S nonce, so a PoP minted for another challenge cannot pass. No
+/// toolchain needed.
+#[test]
+fn holder_pop_invalid_signature_rejected() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let registry = HolderRegistry::from_hex_keys([holder_hex.clone()]);
+    // A PoP over a DIFFERENT challenge (0xdead) — does not match the issued nonce 0x2a.
+    let wrong_challenge = FieldHex("0xdead".into()).to_field().unwrap();
+    let stale_pop = holder_sk.sign_holder_pop(&wrong_challenge);
+    let m = holder_pop_manifest(
+        &holder_hex,
+        &stale_pop,
+        SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+    );
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_pop_invalid"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderPopInvalid { .. }) => {}
+        other => panic!(
+            "a PoP over a different challenge (replay) must be HolderPopInvalid, got {other:?}"
+        ),
+    }
+}
+
+/// sq-cwq (fail-closed #4): a HolderPop with an unknown `cryptosuite` (or
+/// unparseable pop) is REJECTED (`HolderPopMalformed`) before any signature check.
+/// No toolchain needed.
+#[test]
+fn holder_pop_unknown_cryptosuite_rejected() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let registry = HolderRegistry::from_hex_keys([holder_hex.clone()]);
+    let m = holder_pop_manifest(
+        &holder_hex,
+        &holder_pop_over_2a(&holder_sk),
+        "https://example.org/ns#unsupported-suite", // unknown cryptosuite
+    );
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_pop_badsuite"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderPopMalformed) => {}
+        other => panic!("an unknown cryptosuite must be HolderPopMalformed, got {other:?}"),
+    }
+}
+
+/// sq-cwq (POSITIVE, end-to-end): a HolderPop with a trusted holder + a VALID PoP
+/// over the verifier nonce, atop a real scan+filter proof, verifies end-to-end.
+/// Toolchain-gated (full bb prove of the sub-proof). This is the "implemented"
+/// half of the brief: a holder PoP that actually participates in a verified
+/// composed proof.
+#[test]
+#[ignore = "slow: full bb prove of a scan member under a HolderPop binding (sq-cwq)"]
+fn holder_pop_valid_verifies_end_to_end() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping sq-cwq HolderPop happy path");
+        return;
+    }
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).unwrap();
+    let challenge = FieldHex("0x2a".into());
+    let (id, toml) = prover_toml_for(
+        &scan.inputs,
+        &challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+    );
+    let prover = CircuitProver::from_crate_root();
+    let out = scratch("holder_pop_scan");
+    let art = prover.prove_in(&id, &toml, &out, "holder_pop_scan").unwrap();
+
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let registry = HolderRegistry::from_hex_keys([holder_hex.clone()]);
+
+    let mut manifest = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec!["did:key:zSampleIssuer".into()],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::HolderPop {
+            challenge: challenge.clone(),
+            holder: holder_hex,
+            pop: holder_pop_over_2a(&holder_sk),
+            cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
+        },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: encode_artifacts(&art) }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all(&mut manifest, &test_issuer_sk(1), salt);
+    verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("holder_pop_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("a valid HolderPop manifest must verify end-to-end");
 }
 
 /// sq-dua (audit hardening): a MALFORMED `proof_hex` blob is prover-controlled and
@@ -1208,6 +1471,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             &scratch("malformed_proof_hex"),
             &trusted_k(&test_issuer_sk(1)),
             &fresh_policy(),
+            &HolderRegistry::empty(),
             &nonce_for("0x2a"),
             &InMemorySeenNonces::new(),
         ) {
@@ -1254,6 +1518,7 @@ fn forge_reject_noncanonical_vk() {
         &scratch("forge_vk_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1288,6 +1553,7 @@ fn forge_artvk_is_ignored() {
         &scratch("forge_ignorevk_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -1376,7 +1642,7 @@ fn attacker_filter_d1_artifacts(
 /// operand-slot / constant-swap forges.
 fn pensioner_graph() -> Vec<Triple> {
     let p = NamedOrBlankNode::NamedNode(iri("http://ex/p"));
-    // Salary fits the d=4 filter_int member (FILTER_INT_D_VALUES = [1,2,4]).
+    // Salary fits the d=4 filter_int member (FILTER_INT_D_VALUES = [1,2,3,4]).
     vec![
         Triple::new(p.clone(), iri("http://ex/hasSalary"), int_lit(7000)),
         Triple::new(p, iri("http://ex/hasAge"), int_lit(40)),
@@ -2994,6 +3260,7 @@ fn revocation_full_prove_verify_non_revoked_verifies() {
         &scratch("rev_happy_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -3034,6 +3301,7 @@ fn revocation_full_prove_verify_revoked_rejected() {
         &scratch("rev_forge_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &revoked_policy(), // AUTHORITATIVE snapshot has bit 3 SET => REVOKED.
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -3201,6 +3469,7 @@ fn hidden_revocation_unrevoked_verifies_and_index_is_private() {
         &scratch("hidden_verify_ok"),
         &trusted_k(&test_issuer_sk(1)),
         &hidden_policy(false),
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -3274,6 +3543,7 @@ fn hidden_revocation_forged_root_rejected() {
         &scratch("hidden_verify_forge"),
         &trusted_k(&test_issuer_sk(1)),
         &hidden_policy(false), // authoritative root derived from the real snapshot
+        &HolderRegistry::empty(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -3474,7 +3744,7 @@ fn hidden_issuer_in_set_verifies_and_key_is_private() {
     manifest.hidden_issuer_attestations = vec![hidden];
     verify_manifest(
         &manifest, &prover, &scratch("hi_verify_ok"),
-        &keyset, &fresh_policy(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &keyset, &fresh_policy(), &HolderRegistry::empty(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     )
     .expect("in-set hidden-issuer attestation verifies end-to-end");
 }
@@ -3607,7 +3877,7 @@ fn hidden_issuer_forged_root_rejected() {
     }];
     match verify_manifest(
         &manifest, &prover, &scratch("hi_verify_forge"),
-        &keyset, &fresh_policy(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &keyset, &fresh_policy(), &HolderRegistry::empty(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     ) {
         Err(CheckError::HiddenIssuerRootMismatch) => {}
         other => panic!("a forged-root hidden-issuer proof must be HiddenIssuerRootMismatch, got {other:?}"),
@@ -3643,7 +3913,7 @@ fn hidden_issuer_not_enabled_rejected() {
     // the unit test in verifier.rs. We assert SOME rejection here (fail-closed).
     let res = verify_manifest(
         &m, &prover, &scratch("hi_notenabled"),
-        &k, &fresh_policy(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &k, &fresh_policy(), &HolderRegistry::empty(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     );
     assert!(res.is_err(), "a manifest with hidden-issuer attestation under a non-opted-in KeySet must be rejected");
 }
