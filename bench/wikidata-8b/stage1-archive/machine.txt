@@ -1,0 +1,45 @@
+Architecture:                            aarch64
+CPU op-mode(s):                          64-bit
+Byte Order:                              Little Endian
+CPU(s):                                  2
+On-line CPU(s) list:                     0,1
+Vendor ID:                               ARM
+Model name:                              Neoverse-V2
+Model:                                   1
+Thread(s) per core:                      1
+Core(s) per socket:                      2
+Socket(s):                               1
+Stepping:                                r0p1
+BogoMIPS:                                2000.00
+Flags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm sb paca pacg dcpodp sve2 sveaes svepmull svebitperm svesha3 flagm2 frint svei8mm svebf16 i8mm bf16 dgh rng bti
+L1d cache:                               128 KiB (2 instances)
+L1i cache:                               128 KiB (2 instances)
+L2 cache:                                4 MiB (2 instances)
+L3 cache:                                36 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0,1
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; CSV2, BHB
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+               total        used        free      shared  buff/cache   available
+Mem:           15668         424       15016           1         436       15243
+Swap:              0           0           0
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root       338G  1.9G  337G   1% /
+Linux ip-172-31-6-43 6.17.0-1017-aws #17~24.04.1-Ubuntu SMP Tue May 26 21:09:53 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
