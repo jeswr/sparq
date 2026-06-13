@@ -8,7 +8,7 @@ An experimental, from-scratch RDF triplestore + SPARQL engine in Rust.
 
 **Benchmarks** — vs native QLever 0.5.47, same machine, compute-only, cold (`bench/qlever-baselines.md`): 2.2–20× on synthetic 10M/100M join/OPTIONAL workloads (in-memory and mmap), and faster on every query of a real skewed dataset (1.7–12×). Honest caveats in the changelog.
 
-**Bindings parity** — Python `sparq` (pyo3/abi3 ≥3.9): query/update, CONSTRUCT/DESCRIBE, named graphs, RDFS/OWL-RL/N3 reasoning + custom N3 rules, inconsistency reports — 38 tests. JS `@jeswr/sparq` (RDF/JS-typed, wasm ~1.2 MB): named graphs, streaming results, in-place/delta updates, compressed ingest (zstd/gzip), dictionary-fetch protocol client — 42 tests.
+**Bindings parity** — Python `sparq` (pyo3/abi3 ≥3.9): query/update, CONSTRUCT/DESCRIBE, named graphs, RDFS/OWL-RL/N3 reasoning + custom N3 rules, inconsistency reports — 38 tests. JS `@jeswr/sparq` (RDF/JS-typed; shipped wasm ~1.2 MB after wasm-opt, ~1.6 MB raw build): named graphs, streaming results, in-place/delta updates, compressed ingest (zstd/gzip), dictionary-fetch protocol client — 42 tests.
 
 **Serving** — W3C SPARQL 1.1 Protocol + Graph Store Protocol (read) server with content negotiation, streamed SELECT bodies (~40% peak-RSS reduction on 1M-row results), Prometheus metrics; Docker: `ghcr.io/jeswr/sparq-server:0.1.0` (distroless). CLI ships hardware-tiered binaries (x86-64 v1–v4, arm64 Linux, Apple silicon + Intel mac, Windows x64/arm64) — verify with `shasum -a 256 -c SHA256SUMS`.
 
