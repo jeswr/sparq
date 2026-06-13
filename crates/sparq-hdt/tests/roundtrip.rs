@@ -261,3 +261,26 @@ fn direct_decoder_gzip_matches_plain() {
     assert_eq!(triple_set(&from_gz), triple_set(&from_plain));
     assert_eq!(from_gz.store.len(), from_plain.store.len());
 }
+
+/// Empty + single-triple HDT archives decode identically on both paths (exercises
+/// the zero-section and single-block-of-one edge of the PFC + SPO walk).
+#[test]
+fn direct_decoder_matches_upstream_tiny() {
+    for nt in [
+        "", // empty graph: zero strings in every section, zero triples
+        "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+    ] {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sparq-hdt-tiny");
+        std::fs::create_dir_all(&dir).unwrap();
+        let nt_path = dir.join("tiny.nt");
+        std::fs::write(&nt_path, nt).unwrap();
+        let written = hdt::Hdt::read_nt(&nt_path).expect("building tiny HDT");
+        let mut buf: Vec<u8> = Vec::new();
+        written.write(&mut buf).expect("serializing tiny HDT");
+
+        let direct = sparq_hdt::load_reader(std::io::Cursor::new(buf.clone())).unwrap();
+        let upstream = sparq_hdt::load_reader_via_upstream(std::io::Cursor::new(buf)).unwrap();
+        assert_eq!(triple_set(&direct), triple_set(&upstream));
+        assert_eq!(direct.store.len(), upstream.store.len());
+    }
+}
