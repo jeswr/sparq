@@ -46,6 +46,12 @@ sparq-engine = { path = "../sparq-engine" }
 # Opt-in reasoning. Pulling it here is fine: sparq-py is a leaf crate, so the reason
 # crate never enters the engine/CLI/wasm dependency graphs through this edge.
 sparq-reason = { path = "../sparq-reason" }
+# Opt-in full-text search (TextIndex + the `text:` magic predicates) — the same
+# leaf-crate rationale as sparq-reason above. Natively, full-text is "opt-in by
+# depending on sparq-text"; this edge opts the Python wheel in while the
+# engine/CLI/wasm dependency graphs stay text-free. Default features = `engine`
+# (the text: rewrite) + `parallel` (rayon-sharded index build).
+sparq-text = { path = "../sparq-text" }
 oxrdf.workspace = true
 # Used only to classify the query form in `Graph.ask` (ASK runs the engine's
 # native early-exiting entry point; SELECT is answered via the lazy count).
