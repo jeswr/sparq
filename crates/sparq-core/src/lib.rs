@@ -3332,6 +3332,107 @@ mod tests {
         }
     }
 
+    /// [OPUS-4.8] (B4 — sparq-turtle-path REJECTION ORACLE) The public `Graph::parse_to_triples`
+    /// `"turtle"` path MUST reject malformed Turtle, and reject EXACTLY what the oxttl serial
+    /// parser rejects (oxttl is the differential reference). This is the load-bearing gate for the
+    /// T1 borrowed-slice interner spike: T1 changes how `parse_turtle_chunk` interns oxttl's
+    /// already-parsed terms, so it cannot itself accept invalid syntax — but the chunked-vs-serial
+    /// byte-identity oracle (`parallel_turtle_bnodes_match_serial`) only proves chunked ≡ serial,
+    /// NOT that either rejects what the spec/oxttl rejects. An over-eager accept would be a silent
+    /// corruption invisible to that oracle. So we pin REJECTION here directly, on the PUBLIC entry
+    /// point (`parse_to_triples`, which dispatches to `parse_turtle_parallel` under `parallel`),
+    /// for a dozen-plus malformed inputs spanning the categories the brief calls out: bad IRIs,
+    /// bad escapes, unterminated strings, bad prefixes, plus structural errors.
+    ///
+    /// The assertion is DIFFERENTIAL, not just "sparq errors": for each input we first confirm the
+    /// oxttl serial reference rejects it (so the corpus stays honest as oxttl evolves), then assert
+    /// the public sparq turtle path rejects it too. Positive controls confirm the harness is not
+    /// vacuously rejecting everything.
+    #[test]
+    fn turtle_path_rejection_oracle() {
+        // Differential reference: serial oxttl (the same parser the chunk worker drives).
+        let oxttl_serial_rejects = |src: &str| -> bool {
+            oxttl::TurtleParser::new()
+                .for_slice(src.as_bytes())
+                .any(|r| r.is_err())
+        };
+
+        // Malformed Turtle, one invalid reason each. A leading valid statement is included where
+        // it helps the parallel splitter actually engage (so the chunk path, not only the 1T
+        // direct parse, is exercised by the same corpus when run under --features parallel).
+        let bad: &[(&str, &str)] = &[
+            // ---- bad prefixes / prefixed names ----
+            ("undeclared prefix in body",
+             "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\nbad:s bad:p bad:o .\n"),
+            ("@prefix without an IRI",
+             "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\n@prefix bad .\nex:s2 ex:p ex:o2 .\n"),
+            ("prefix used before its declaration",
+             "@prefix a: <http://a/> .\na:s a:p later:o .\n@prefix later: <http://l/> .\na:s2 a:p a:o .\n"),
+            ("@prefix missing the colon",
+             "@prefix ex <http://ex/> .\nex:s ex:p ex:o .\n"),
+            // ---- bad IRIs ----
+            ("unterminated IRI ref (no closing >)",
+             "@prefix ex: <http://ex/> .\nex:s ex:p <http://no-close .\nex:s2 ex:p ex:o2 .\n"),
+            ("space inside an IRI ref",
+             "<http://ex/ s> <http://ex/p> <http://ex/o> .\n"),
+            // ---- bad string escapes ----
+            ("invalid string escape \\q",
+             "@prefix ex: <http://ex/> .\nex:s ex:p \"bad \\q escape\" .\nex:s2 ex:p ex:o2 .\n"),
+            ("truncated \\u escape (too few hex digits)",
+             "@prefix ex: <http://ex/> .\nex:s ex:p \"bad \\u12\" .\nex:s2 ex:p ex:o2 .\n"),
+            // ---- unterminated strings ----
+            ("unterminated single-quoted string",
+             "@prefix ex: <http://ex/> .\nex:s ex:p \"unterminated .\nex:s2 ex:p ex:o2 .\n"),
+            ("unterminated triple-quoted string",
+             "@prefix ex: <http://ex/> .\nex:s ex:p \"\"\"open\nstill open .\n"),
+            // ---- structural ----
+            ("missing statement terminator",
+             "@prefix ex: <http://ex/> .\nex:s ex:p ex:o\nex:s2 ex:p ex:o2 .\n"),
+            ("predicate with no object",
+             "@prefix ex: <http://ex/> .\nex:s ex:p .\nex:s2 ex:p ex:o2 .\n"),
+            ("literal in subject position",
+             "@prefix ex: <http://ex/> .\n\"lit\" ex:p ex:o .\n"),
+            ("bad numeric literal (double dot)",
+             "@prefix ex: <http://ex/> .\nex:s ex:p 1.2.3 .\nex:s2 ex:p ex:o2 .\n"),
+            ("unmatched [ property-list",
+             "@prefix ex: <http://ex/> .\nex:s ex:p [ ex:q ex:r .\nex:s2 ex:p ex:o2 .\n"),
+            ("unmatched ( collection",
+             "@prefix ex: <http://ex/> .\nex:s ex:p ( ex:a ex:b .\nex:s2 ex:p ex:o2 .\n"),
+        ];
+
+        for (why, src) in bad {
+            assert!(
+                oxttl_serial_rejects(src),
+                "corpus invariant: oxttl reference must reject `{why}` (update the corpus if oxttl changed)"
+            );
+            assert!(
+                Graph::parse_to_triples(src, "turtle").is_err(),
+                "sparq turtle path must REJECT malformed Turtle: {why}"
+            );
+        }
+
+        // Positive controls: well-formed Turtle MUST parse (so the oracle is not vacuous), covering
+        // the constructs the T1 interner has to keep handling — prefixed names, full IRIs, blank
+        // nodes, collections, language tags, datatyped + plain literals, RDF-star quoted triples.
+        let good: &[&str] = &[
+            "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\n",
+            "<http://ex/s> <http://ex/p> \"plain\" .\n",
+            "@prefix ex: <http://ex/> .\nex:s ex:p [ ex:q ( 1 2 3 ) ] ; ex:r _:b .\n",
+            "@prefix ex: <http://ex/> .\nex:s ex:p \"hi\"@en , \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "@prefix ex: <http://ex/> .\n<< ex:s ex:p ex:o >> ex:said ex:alice .\n",
+        ];
+        for src in good {
+            assert!(
+                !oxttl_serial_rejects(src),
+                "corpus invariant: oxttl reference must ACCEPT this well-formed Turtle"
+            );
+            assert!(
+                Graph::parse_to_triples(src, "turtle").is_ok(),
+                "sparq turtle path must ACCEPT well-formed Turtle: {src:?}"
+            );
+        }
+    }
+
     /// [OPUS-4.8] (T2) Differential test for the `memchr`-based `next_terminator` against the
     /// pre-T2 scalar reference. The SIMD-skip must return the SAME offset (or the same `None`)
     /// for every interesting Turtle shape — comments, all four string-quote forms with escapes,

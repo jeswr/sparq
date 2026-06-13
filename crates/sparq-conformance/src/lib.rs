@@ -14,3 +14,7 @@ pub mod manifest;
 pub mod rdf;
 pub mod results;
 pub mod run;
+// [OPUS-4.8] (B4) W3C rdf-turtle suite run THROUGH the sparq Turtle parser
+// (`Graph::parse_to_triples`) — the rejection/acceptance oracle for the Turtle T1 spike,
+// distinct from the oxttl-differential chunked-vs-serial test and the N3-parser TurtleTests.
+pub mod turtle_suite;
