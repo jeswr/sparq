@@ -626,11 +626,15 @@ pub fn run_update_test(entry: &TestEntry) -> Status {
     dedup_rows(&mut expected);
 
     let graph_names: Vec<String> = entry.update_pre.graph_data.iter().map(|(g, _)| g.clone()).collect();
+    // [OPUS-4.8] roborev 1646: `LOAD <file://…>` is refused by default. The conformance suite
+    // is a TRUSTED local run, so allowlist the request file's directory (where the W3C update
+    // tests keep the data files they LOAD) as the LOAD base.
+    let load_base: PathBuf = request_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| {
             let graph = load_dataset_with_graphs(&nquads, &graph_names)?;
-            let updated = sparq_engine::update(&graph, &request)?;
+            let updated = sparq_engine::with_load_base(load_base, || sparq_engine::update(&graph, &request))?;
             // Dump the resulting dataset: default graph + every named graph.
             let mut rows: Vec<Row> = Vec::new();
             let mut dump = |g: &sparq_core::Graph, name: Option<&Term>| {
