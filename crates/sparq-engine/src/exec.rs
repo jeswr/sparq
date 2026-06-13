@@ -1706,6 +1706,13 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             eval_path(graph, local, subject, path, object)
         }
         GraphPattern::Graph { name, inner } => eval_graph_named(graph, local, name, inner),
+        // SPARQL 1.1 federated query. Behind the NON-DEFAULT `service` feature; when
+        // off this falls through to the generic "unsupported" error below (and never
+        // compiles the HTTP stack). [OPUS-4.8]
+        #[cfg(feature = "service")]
+        GraphPattern::Service { name, inner, silent } => {
+            eval_service(graph, local, name, inner, *silent)
+        }
         GraphPattern::Project { .. }
         | GraphPattern::Distinct { .. }
         | GraphPattern::Reduced { .. }
@@ -1713,6 +1720,139 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         | GraphPattern::OrderBy { .. }
         | GraphPattern::Group { .. } => eval_modified(graph, local, p),
         other => Err(format!("unsupported graph pattern: {other:?}")),
+    }
+}
+
+/// SPARQL 1.1 federated query (`SERVICE`). [OPUS-4.8]
+///
+/// Forwards `SELECT * WHERE { <inner> }` to the remote `endpoint`, parses the
+/// SPARQL-Results-JSON response (see [`crate::service`]) and turns it into a
+/// [`Bindings`] relation interned against this query's dictionaries — exactly as
+/// `VALUES` does — so the caller joins it with the surrounding group via the normal
+/// `join_bindings` path.
+///
+/// * `name` is a `NamedNodePattern`: a concrete IRI endpoint is evaluated; a
+///   `?var` (variable) endpoint is OUT OF SCOPE (it requires a per-solution remote
+///   call) — it errors, or, under SILENT, yields the join identity.
+/// * `silent`: on ANY failure (variable endpoint, DNS/connect error, non-2xx,
+///   malformed body), produce a single empty solution (the identity for join) so the
+///   surrounding query keeps its bindings and does not fail.
+#[cfg(feature = "service")]
+fn eval_service(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    name: &NamedNodePattern,
+    inner: &GraphPattern,
+    silent: bool,
+) -> Result<Bindings, String> {
+    // The join identity: one row with zero columns. Joining it leaves the other
+    // side unchanged (it is `{ {} }`, the single empty mapping). This is the
+    // SILENT-failure fallback AND the result of an empty remote relation under the
+    // standard's evalService when the pattern binds nothing.
+    let identity = || Bindings::unsorted(Vec::new(), vec![Row::new()]);
+
+    // The variables the inner pattern can bind (their textual names drive the row
+    // layout we build from the SRJ `head.vars`).
+    let endpoint = match name {
+        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+        NamedNodePattern::Variable(_) => {
+            // `SERVICE ?endpoint { … }` — not supported (would need a remote call per
+            // binding of ?endpoint). Documented scope-out.
+            if silent {
+                return Ok(identity());
+            }
+            return Err(
+                "SERVICE with a variable endpoint (`SERVICE ?var { … }`) is not supported".into(),
+            );
+        }
+    };
+
+    // Render the inner algebra back to SPARQL syntax and wrap as a SELECT *. spargebra's
+    // Display round-trips algebra → concrete syntax, so OPTIONAL/FILTER/UNION/sub-SELECT
+    // inside the SERVICE block are all forwarded verbatim.
+    let query = format!("SELECT * WHERE {{ {inner} }}");
+
+    let fetched = service_transport::with(|t| crate::service::eval_remote(t, &endpoint, &query));
+    let rel = match fetched {
+        Ok(rel) => rel,
+        Err(e) if silent => {
+            // SILENT: swallow the error, keep the surrounding bindings.
+            let _ = e;
+            return Ok(identity());
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Intern each remote term against the graph dictionary (so it joins with local
+    // BGP results) or the local vocab (terms absent from the data can still match
+    // other remote/VALUES rows) — identical to `values_bindings`.
+    let rows: Vec<Row> = rel
+        .rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|cell| match cell {
+                    None => NO_ID,
+                    Some(t) => graph.id_of(t).unwrap_or_else(|| local.intern(t.clone())),
+                })
+                .collect()
+        })
+        .collect();
+    Ok(Bindings::unsorted(rel.vars, rows))
+}
+
+/// Test/embedder seam for the SERVICE HTTP transport. By default `with` runs the
+/// closure against the production [`crate::service::HttpTransport`]; tests install a
+/// fake (loopback / canned) transport for the duration of a scope so SERVICE can be
+/// exercised without a public-network dependency. [OPUS-4.8]
+#[cfg(feature = "service")]
+pub(crate) mod service_transport {
+    use crate::service::Transport;
+    use std::cell::RefCell;
+
+    thread_local! {
+        // A boxed trait object so a test can install any `Transport`. `None` => use
+        // the real HTTP client.
+        static ACTIVE: RefCell<Option<Box<dyn Transport>>> = const { RefCell::new(None) };
+    }
+
+    /// RAII install of a test transport; restores the previous value on drop.
+    pub(crate) struct Guard(Option<Box<dyn Transport>>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.with(|a| *a.borrow_mut() = self.0.take());
+        }
+    }
+
+    /// Install a transport for the current thread/scope (used by tests).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn install(t: Box<dyn Transport>) -> Guard {
+        Guard(ACTIVE.with(|a| a.borrow_mut().replace(t)))
+    }
+
+    /// Run `f` with the active transport — the installed test transport if any, else
+    /// the production HTTP client (native-only; on wasm there is no client, which is
+    /// moot because the `service` feature never reaches a wasm build).
+    pub(crate) fn with<R>(f: impl FnOnce(&dyn Transport) -> R) -> R {
+        ACTIVE.with(|a| {
+            let borrow = a.borrow();
+            match borrow.as_ref() {
+                Some(t) => f(t.as_ref()),
+                None => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        f(&crate::service::HttpTransport::new())
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        // Unreachable in practice (service is gated off wasm); keep the
+                        // module compilable if someone force-enables the feature.
+                        let _ = &f;
+                        unreachable!("SERVICE has no HTTP transport on wasm")
+                    }
+                }
+            }
+        })
     }
 }
 

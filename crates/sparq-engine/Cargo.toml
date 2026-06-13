@@ -37,6 +37,15 @@ cs-planner = []
 # no recorder is installed, the cost is one thread-local bool read per scan —
 # never anything on a per-row path.
 zk = []
+# SPARQL 1.1 federated query (SERVICE): evaluate `SERVICE <iri> { pattern }` by
+# sending the inner pattern as a SPARQL SELECT to the remote endpoint over HTTP and
+# joining the parsed SPARQL-Results-JSON solutions back into the surrounding query.
+# OPT-IN and OFF by default: SERVICE makes no sense in the browser (no arbitrary
+# cross-origin HTTP, no blocking I/O) so the `service` deps (ureq + serde_json) are
+# additionally `cfg(not(wasm32))`-gated and never enter the wasm bundle even if the
+# feature were turned on for a wasm target. When off, zero federation/HTTP code
+# compiles. [OPUS-4.8]
+service = ["dep:serde_json", "dep:ureq"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -54,11 +63,20 @@ regex = { version = "1", optional = true }
 md-5 = { version = "0.10", optional = true }
 sha1 = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
+# SPARQL-Results-JSON parsing for the `service` (federation) feature. serde_json is
+# already in the workspace tree (sparq-conformance, sparq-server) and is
+# platform-independent, but it is only ever pulled in when `service` is on.
+serde_json = { version = "1", optional = true }
 
 # UUID()/STRUUID() need an OS RNG; depending on uuid from the wasm build would drag
 # getrandom into the browser dependency graph, so the functions are native-only.
+# `ureq` (the SERVICE feature's blocking HTTP client) lives here too: a tiny,
+# synchronous client (no async runtime) gated off wasm so the browser bundle never
+# pulls an HTTP/TLS stack. `tls-native-root` reuses the OS trust store for https
+# endpoints without bundling webpki-roots. [OPUS-4.8]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 uuid = { version = "1", features = ["v4"] }
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs"], optional = true }
 
 [dev-dependencies]
 # The dict-consolidation differential test compares the serial, sharded-parallel and
