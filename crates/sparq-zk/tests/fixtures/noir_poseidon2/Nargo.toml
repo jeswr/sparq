@@ -1,0 +1,7 @@
+[package]
+name = "poseidon2_vectors"
+type = "bin"
+authors = ["sparq-zk cross-test"]
+
+[dependencies]
+poseidon = { git = "https://github.com/noir-lang/poseidon", tag = "v0.3.0" }

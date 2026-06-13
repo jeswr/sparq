@@ -29,6 +29,14 @@ digest = ["dep:md-5", "dep:sha1", "dep:sha2"]
 # OFF by default (the wasm bundle and the default native build carry zero CS code);
 # results are identical either way — only join order is affected.
 cs-planner = []
+# zk-trace seam (research/zkp-query-proofs-plan.md §4.E): records per-obligation
+# witness input sets (matched triples per BGP pattern, executed join order,
+# FILTER operand bindings) for the sparq-zk derived-credential prover. OPT-IN
+# and OFF by default, exactly like sparq-reason's `explain`: when off, zero zk
+# code compiles (default native + wasm builds are byte-identical); when on but
+# no recorder is installed, the cost is one thread-local bool read per scan —
+# never anything on a per-row path.
+zk = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
