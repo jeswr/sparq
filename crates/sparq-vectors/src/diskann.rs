@@ -51,11 +51,16 @@
 //! This is the **Vamana on-disk graph with full-precision vectors searched from the mmap**.
 //! Full DiskANN additionally keeps a **PQ-compressed** copy of every vector resident in RAM to
 //! rank candidates without touching disk, reading full-precision vectors only to re-rank the
-//! beam — that quantization layer is the sibling task **sq-nq5** and is *not* implemented here.
-//! At the scales where the graph fits in page cache (the regime this unblocks: skip the
-//! per-process rebuild) the two are equivalent; PQ matters only when the vectors themselves
-//! exceed RAM. The `.spqg` header reserves 4 bytes for an encoding tag so a PQ variant lands
-//! as a backwards-compatible bump.
+//! beam. That quantization layer now exists ([OPUS-4.8] sq-nq5,
+//! [`quant`](crate::quant) — [`ProductQuantizer`](crate::quant::ProductQuantizer) +
+//! [`EncodedStore`](crate::quant::EncodedStore) + [`DistanceTable`](crate::quant::DistanceTable))
+//! as a standalone, tested encoder/decoder/distance-estimator, but `search_slots` below is
+//! **unchanged** — it still searches full-precision from the mmap. Wiring the PQ candidate cache
+//! into the greedy search (rank on codes in RAM, re-rank the beam off the mmap) is the recorded
+//! follow-up; see `quant.rs`'s "intended use" note and `TODO.md`. At the scales where the graph
+//! fits in page cache (the regime this unblocks: skip the per-process rebuild) the two are
+//! equivalent; PQ matters only when the vectors themselves exceed RAM. The `.spqg` header
+//! reserves 4 bytes for an encoding tag so a PQ variant lands as a backwards-compatible bump.
 
 use crate::store::VectorStore;
 use memmap2::Mmap;

@@ -29,6 +29,11 @@
 //!   `research/genai-text-embedding-practices.md`), and embeds it.
 //!   [`embed_labels`] (configurable via [`LabelConfig`]) is the label-only
 //!   back-compat wrapper.
+//! - [`ScalarQuantizer`] / [`ProductQuantizer`] (`quant`): **vector quantization** for large
+//!   stores ([OPUS-4.8] sq-nq5) — scalar (`f32 → u8`, 4×) and product (`M`-byte codes, 8–32×)
+//!   encoders with reconstruct for re-ranking and asymmetric distance ([`DistanceTable`]) for
+//!   ranking on codes alone. The PQ-compressed in-RAM candidate cache ([`EncodedStore`]) that
+//!   closes [`DiskAnnIndex`]'s gap to *full* DiskANN; cosine-identical to the other searchers.
 //! - [`fuse_rrf`] / [`fuse_rrf_weighted`] / [`fuse_scores`]: rank/score **fusion for
 //!   hybrid retrieval** — combine the text-vector ranking with another ranked signal
 //!   (e.g. `sparq-sim`'s structural similarity) without a dependency between the
@@ -43,6 +48,7 @@ pub mod diskann;
 pub mod embed;
 pub mod fuse;
 pub mod labels;
+pub mod quant;
 pub mod store;
 pub mod verbalize;
 
@@ -50,6 +56,9 @@ pub use ann::{cosine, nearest_exact, nearest_term_exact, HnswConfig, VectorIndex
 pub use diskann::{sibling_graph_path, DiskAnnIndex, VamanaConfig, SPQG_MAGIC, SPQG_VERSION};
 pub use embed::{Embedder, HashEmbedder};
 pub use fuse::{fuse_rrf, fuse_rrf_weighted, fuse_scores, RRF_K};
+pub use quant::{
+    cosine_from_sq_dist, DistanceTable, EncodedStore, PqConfig, ProductQuantizer, ScalarQuantizer,
+};
 pub use labels::{embed_labels, embed_labels_with, LabelConfig};
 pub use store::{StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION};
 pub use verbalize::{
