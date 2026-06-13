@@ -4,6 +4,14 @@ The heavy benchmarks (many-core/NUMA scaling, large-scale ingestion) can't run o
 runners. They run on EC2, but a **public** repo with EC2-triggering CI is dangerous if done wrong,
 and must stay **under $5/month**. This is the security + cost design.
 
+> **G2 — free per-commit perf CI (Pages toggle).** `.github/workflows/bench.yml` runs
+> `scripts/ci-bench.sh` on every push to `main` and on `pull_request` (PRs compute + comment but
+> do **not** auto-push, so the published series isn't polluted), storing points via
+> github-action-benchmark on the `benchmark-data` branch under `dev/bench`. **One-time owner
+> action (cannot be set from a workflow):** Settings → Pages → Source = "Deploy from a branch",
+> Branch = `benchmark-data` / `/ (root)` → Save. The dashboard then renders at
+> <https://jeswr.github.io/sparq/dev/bench>. [OPUS-4.8]
+
 ## Threat model & the three hard rules
 
 1. **No long-lived AWS keys in GitHub secrets.** Use **GitHub OIDC → a scoped IAM role** that CI

@@ -5,14 +5,29 @@ name: Benchmarks
 # the trend is graphed across commits and a large regression raises an alert/comment. Runs on free
 # GitHub-hosted runners (no EC2 → no cost). Heavy/long benches that need real hardware are in the
 # separate cost-capped bench-ec2.yml (G3).
+#
+# [OPUS-4.8] Also runs on pull_request so contributors get perf feedback BEFORE merge — but PRs only
+# COMPUTE + COMMENT (auto-push gated to main below), so they compare against the published series
+# WITHOUT polluting it. The history branch (benchmark-data) is also the source for a public GitHub
+# Pages dashboard:
+#
+#   PUBLIC DASHBOARD — REPO-OWNER TOGGLE REQUIRED (one-time, can't be set from a workflow):
+#   Settings → Pages → "Build and deployment" → Source = "Deploy from a branch",
+#   Branch = `benchmark-data` / `/ (root)` → Save. The chart then renders at
+#   https://jeswr.github.io/sparq/dev/bench (the action writes index.html + data.js under dev/bench
+#   on the benchmark-data branch — see gh-pages-branch + benchmark-data-dir-path below). No new
+#   branch is created; Pages just serves the existing benchmark-data branch.
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write          # github-action-benchmark pushes the results to the benchmark-data branch
   deployments: write
+  pull-requests: write     # [OPUS-4.8] comment-always posts the comparison table on PRs (same-repo PRs;
+                           # fork PRs get a read-only token, so the action skips the comment gracefully)
 
 # Do NOT cancel an in-progress benchmark run (it would corrupt the stored series).
 concurrency:
@@ -40,6 +55,9 @@ jobs:
       # the orphan branch on origin if missing so the very first run (and any run
       # after the branch is deleted) self-heals instead of failing. Idempotent.
       - name: Ensure benchmark-data history branch exists
+        # main only: PRs (esp. from forks) get a read-only GITHUB_TOKEN and must never write the
+        # history branch — they only compare against it. [OPUS-4.8]
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -66,12 +84,27 @@ jobs:
           tool: customSmallerIsBetter
           output-file-path: bench-results.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
+          # [OPUS-4.8] auto-push ONLY on main: pushes the new point to the benchmark-data history
+          # branch (which feeds the public Pages chart). On a PR this is false, so the run COMPUTES
+          # + COMPARES against the published series and COMMENTS, but does NOT write benchmark-data —
+          # contributors get pre-merge feedback with zero pollution of the public trend.
+          auto-push: ${{ github.ref == 'refs/heads/main' }}
+          # The history branch doubles as the Pages source: the action writes index.html + data.js
+          # under dev/bench here, so once the owner points Settings → Pages at branch benchmark-data
+          # /(root) the dashboard renders at https://jeswr.github.io/sparq/dev/bench (see header).
           gh-pages-branch: benchmark-data
           benchmark-data-dir-path: dev/bench
-          # GitHub-hosted runners are noisy, so only flag a *large* regression and don't hard-fail
-          # the build on it — the value is the tracked trend + the alert comment for review.
-          alert-threshold: '200%'
+          # Comment + job-summary on EVERY run (incl. PRs) so the comparison table is always visible
+          # pre-merge, not only when an alert fires. [OPUS-4.8]
+          comment-always: true
+          summary-always: true
+          # GitHub-hosted runners are noisy, so only flag a *large* regression and never hard-fail:
+          # fail-on-alert stays false because this single global gate would otherwise trip on the
+          # noisy wall-clock latencies. The load-bearing regression signal is the set of DETERMINISTIC
+          # metrics ci-bench.sh emits — store/dict bytes-per-{triple,term}, store_bytes_per_triple_small,
+          # parse_ns_per_byte, wasm_bundle_bytes — which barely move run-to-run, so a real regression in
+          # them clears even a generous threshold and surfaces in the alert comment for human review.
+          alert-threshold: '150%'
           comment-on-alert: true
           fail-on-alert: false
           alert-comment-cc-users: '@jeswr'

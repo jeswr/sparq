@@ -9,6 +9,13 @@
 #
 # GitHub-hosted runners are small + noisy, so absolute numbers drift; the value is the cross-commit
 # TREND and large-regression alerting (the workflow sets a generous threshold + fail-on-alert=false).
+#
+# [OPUS-4.8] The load-bearing REGRESSION GATES are the DETERMINISTIC (runner-noise-immune) metrics —
+# store/dict bytes-per-{triple,term} (memory layout), wasm_bundle_bytes, and two added on a FIXED
+# corpus: store_bytes_per_triple_small (a SECOND scale, catches per-triple-overhead regressions the
+# primary scale hides) and parse_ns_per_byte (parse cost on a fixed byte count; emitted as ns/byte =
+# 1000/(MB/s) so it reads smaller-is-better under customSmallerIsBetter). Wall-clock latencies stay
+# trend-only on free runners.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SCALE="${1:-200000}"
@@ -38,6 +45,38 @@ btriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e" | head -1 | grep -oE '[0-9]+' 
 [ -n "${btriple:-}" ] && add store_bytes_per_triple bytes "$btriple"
 bterm=$(grep -oE '[0-9]+ B/term' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
 [ -n "${bterm:-}" ] && add dict_bytes_per_term bytes "$bterm"
+
+# [OPUS-4.8] Two more DETERMINISTIC (runner-noise-immune) regression GATES on a FIXED corpus.
+# The bytes-per-triple figures vary with scale (fixed per-graph overhead amortises differently),
+# so a SECOND, fixed scale catches per-triple-overhead regressions that the primary scale hides;
+# and a parse-cost metric on a FIXED byte count tracks raw ingest throughput. The corpus comes
+# from the DETERMINISTIC synthetic generator (same bytes every run, independent of $SCALE), so
+# its size + memory layout are reproducible — these are the load-bearing gates on noisy runners
+# (the wall-clock query latencies above are trend-only). PARSE_FIX is intentionally small so the
+# min-of-N parse timing is the least-preempted (= most reproducible) wall-clock signal we can get
+# without pulling the heavy standalone bench/parse crate into per-commit CI.
+PARSE_FIX="${PARSE_FIX:-50000}"
+"$GEN" dump "$PARSE_FIX" "$TMP/fix.nt" >/dev/null 2>&1
+FIX_BYTES=$(wc -c < "$TMP/fix.nt" | tr -d ' ')
+
+# parse throughput on the fixed corpus. github-action-benchmark's customSmallerIsBetter treats
+# ALL metrics as smaller-is-better, so we emit parse COST as nanoseconds-per-byte (= 1000 / MB/s):
+# a parse SLOWDOWN raises it and correctly trips the alert, whereas a raw MB/s metric would alert
+# on improvements and miss regressions. min-of-5 over the deterministic byte count.
+: > "$TMP/fixloads"
+for _ in 1 2 3 4 5; do
+  "$CLI" bench "$TMP/fix.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/fe" || true
+  grep -oE 'in [0-9.]+s' "$TMP/fe" | head -1 | grep -oE '[0-9.]+' | head -1 >> "$TMP/fixloads" || true
+done
+fixbest=$(sort -n "$TMP/fixloads" | head -1)
+if [ -n "${fixbest:-}" ] && [ "${FIX_BYTES:-0}" -gt 0 ]; then
+  nspb=$(python3 -c "import sys;print(round(float(sys.argv[1])*1e9/float(sys.argv[2]),4))" "$fixbest" "$FIX_BYTES")
+  add parse_ns_per_byte ns/byte "$nspb"
+fi
+
+# store bytes-per-triple at the SECOND (fixed) scale — fully deterministic memory layout.
+btriple2=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/fe" | head -1 | grep -oE '[0-9]+' | head -1)
+[ -n "${btriple2:-}" ] && add store_bytes_per_triple_small bytes "$btriple2"
 
 # query latencies — bench reports min-of-iters micros per query (TSV: name<TAB>rows<TAB>micros).
 for mode in count materialize json; do
