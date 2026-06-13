@@ -471,7 +471,7 @@ pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
                 }
             }
             GraphUpdateOperation::Clear { graph: target, .. } => match target {
-                GraphTarget::DefaultGraph => replace_default(graph),
+                GraphTarget::DefaultGraph => replace_default(graph)?,
                 GraphTarget::NamedNode(n) => {
                     let name = Term::NamedNode(n.clone());
                     if let Some(i) = graph.named.iter().position(|(g, _)| *g == name) {
@@ -484,21 +484,21 @@ pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
                     }
                 }
                 GraphTarget::AllGraphs => {
-                    replace_default(graph);
+                    replace_default(graph)?;
                     for entry in &mut graph.named {
                         entry.1 = empty_graph();
                     }
                 }
             },
             GraphUpdateOperation::Drop { graph: target, .. } => match target {
-                GraphTarget::DefaultGraph => replace_default(graph),
+                GraphTarget::DefaultGraph => replace_default(graph)?,
                 GraphTarget::NamedNode(n) => {
                     let name = Term::NamedNode(n.clone());
                     graph.named.retain(|(g, _)| *g != name);
                 }
                 GraphTarget::NamedGraphs => graph.named.clear(),
                 GraphTarget::AllGraphs => {
-                    replace_default(graph);
+                    replace_default(graph)?;
                     graph.named.clear();
                 }
             },
@@ -546,11 +546,13 @@ pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Replaces the default graph with an empty one, PRESERVING the named graphs.
-fn replace_default(graph: &mut Graph) {
-    let named = std::mem::take(&mut graph.named);
-    *graph = empty_graph();
-    graph.named = named;
+/// [OPUS-4.8] (review 1593) DURABLY empties the default graph, preserving the named graphs
+/// AND (crucially) a directory-backed graph's WAL/directory association — so a CLEAR/DROP of
+/// the default graph is persistent across a reopen, instead of being silently lost (the old
+/// `*graph = empty_graph()` dropped the WAL, and the on-disk base was untouched, so a reopen
+/// restored the cleared data). Falls back to an in-place store clear for in-memory graphs.
+fn replace_default(graph: &mut Graph) -> Result<(), String> {
+    graph.clear_default_durable()
 }
 
 #[cfg(test)]
