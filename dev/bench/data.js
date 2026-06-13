@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781375980549,
+  "lastUpdate": 1781377001097,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -1222,6 +1222,143 @@ window.BENCHMARK_DATA = {
           {
             "name": "q10_optional_age_json_us",
             "value": 45340.5,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.183,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1519238,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "committer": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "distinct": true,
+          "id": "f708c47b55ff537323313c32e81d729b99d1fb77",
+          "message": "merge: MPC M3 — honest-majority Shamir backend + hidden-value PSI join [OPUS-4.8]\n\nM3 completes the secret-sharing backend the disclosed-key M2 deferred:\n- honest-majority Shamir t-of-n MpcBackend (F_{2^61-1}) + secure cumulative sum\n- hidden-value join via secret-shared equality-to-zero (circuit-PSI core)\n- Q2 resolved: trust model selected by the MpcBackend trait (honest-majority v1,\n  dishonest-majority a future backend), configurability documented in PLAN.md\n- randomized stress test for secret-shared equality\n\nRe-audited HOLD verdict = MERGE: YES (no bypass on all four lenses). Two minor\nnon-blocking follow-ups noted for later: reject n<3 explicitly; document the\nsecure-sum range assumption. Only touches crates/sparq-mpc (no overlap with the\nserve-wave-b scheduler work already on main).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T18:39:32Z",
+          "tree_id": "d9cab7c035bf0b790a79322f9488bce7eac38286",
+          "url": "https://github.com/jeswr/sparq/commit/f708c47b55ff537323313c32e81d729b99d1fb77"
+        },
+        "date": 1781377000485,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.595,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 3.6,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3101.8,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4875.2,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 6.2,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 4.7,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 854,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 16279.8,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 71749.3,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 190308,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 2897.7,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 4.6,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 51817,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 9860.5,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 69173.1,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 169898.2,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 2810.1,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 8.1,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 46030.2,
             "unit": "us"
           },
           {
