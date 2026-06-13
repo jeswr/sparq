@@ -430,8 +430,10 @@ impl ShapesModel {
 
         // sh:sparql — SPARQL-based constraints (SHACL §5.2). The object is a node
         // carrying sh:select (required), sh:prefixes, sh:message, sh:deactivated.
+        // On a property shape, $PATH in the query is pre-bound to the path.
+        let shape_path = shape.path.clone();
         for sp in g.objects(node, &sh("sparql")) {
-            if let Some(idx) = self.parse_sparql_constraint(g, &sp) {
+            if let Some(idx) = self.parse_sparql_constraint(g, &sp, shape_path.as_ref()) {
                 shape.components.push(Component::Sparql(idx));
             }
         }
@@ -442,10 +444,23 @@ impl ShapesModel {
     /// Parses one `sh:sparql` constraint node into a [`SparqlConstraint`],
     /// interning it into [`Self::sparql`] and returning its index. `None` when the
     /// node has no `sh:select` literal (an ill-formed constraint — skipped).
-    fn parse_sparql_constraint(&mut self, g: &GraphView, node: &Term) -> Option<usize> {
-        let select = match g.object(node, &sh("select")) {
+    /// `shape_path` is the enclosing (property) shape's path, used to pre-bind the
+    /// `$PATH` query variable (SHACL §5.2.1) when present.
+    fn parse_sparql_constraint(
+        &mut self,
+        g: &GraphView,
+        node: &Term,
+        shape_path: Option<&Path>,
+    ) -> Option<usize> {
+        let raw_select = match g.object(node, &sh("select")) {
             Some(Term::Literal(l)) => l.value().to_string(),
             _ => return None,
+        };
+        // $PATH pre-binding: substitute the property path's SPARQL property-path
+        // form for $PATH / ?PATH in the query text (a property-shape feature).
+        let select = match shape_path.and_then(Path::to_sparql_property_path) {
+            Some(pp) => substitute_path_var(&raw_select, &pp),
+            None => raw_select,
         };
         let prefixes = self.collect_prefixes(g, node);
         let message = match g.object(node, &sh("message")) {
@@ -513,4 +528,35 @@ impl ShapesModel {
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+}
+
+/// Substitutes the `$PATH` / `?PATH` query variable (a SHACL property-shape
+/// SPARQL pre-binding) with the SPARQL property-path expression `pp`, replacing
+/// only WHOLE variable tokens (so `$PATHWAY` is left alone). SHACL §5.2.1.
+fn substitute_path_var(select: &str, pp: &str) -> String {
+    let mut out = String::with_capacity(select.len());
+    let mut rest = select;
+    while let Some(pos) = rest.find(['$', '?']) {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..]; // starts with $ or ?
+        let body = &tail[1..];
+        // Whole-token match of "PATH" delimited by a non-identifier char.
+        let is_path_var = body.strip_prefix("PATH").is_some_and(|after| {
+            after
+                .chars()
+                .next()
+                .map(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .unwrap_or(true)
+        });
+        if is_path_var {
+            out.push_str(pp);
+            rest = &body[4..]; // past "PATH"
+        } else {
+            // Not the PATH var: keep the sigil and continue past it.
+            out.push_str(&tail[..1]);
+            rest = body;
+        }
+    }
+    out.push_str(rest);
+    out
 }

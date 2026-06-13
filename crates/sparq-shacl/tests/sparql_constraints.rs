@@ -239,6 +239,74 @@ fn sparql_prefixes_follow_owl_imports() {
     assert_eq!(r.results.len(), 1, "{}", r.to_text());
 }
 
+/// On a PROPERTY shape, `$PATH` is pre-bound to the shape's property path: the
+/// SELECT can use `$this $PATH ?value` and it resolves to the shape's predicate.
+/// Also exercises the `?value`-bound mapping and the inherited sh:resultPath.
+#[test]
+fn sparql_property_shape_path_pre_binding() {
+    let shapes = format!(
+        r#"{PREFIXES}
+        ex:LabelShape a sh:PropertyShape ;
+          sh:path ex:germanLabel ;
+          sh:targetClass ex:Country ;
+          sh:sparql [
+            sh:prefixes ex:p ;
+            sh:message "Must be a @de literal" ;
+            sh:select """
+              SELECT $this ?value WHERE {{
+                $this $PATH ?value .
+                FILTER (!isLiteral(?value) || !langMatches(lang(?value), "de"))
+              }}
+            """ ;
+          ] .
+        ex:p sh:declare [ sh:prefix "ex" ; sh:namespace "http://example.org/"^^xsd:anyURI ] .
+    "#
+    );
+    let data = r#"
+        @prefix ex: <http://example.org/> .
+        ex:bad  a ex:Country ; ex:germanLabel "Spain"@en .
+        ex:good a ex:Country ; ex:germanLabel "Spanien"@de .
+    "#;
+    let r = run(data, &shapes);
+    assert_eq!(r.results.len(), 1, "{}", r.to_text());
+    let res = &r.results[0];
+    assert!(res.focus_node.to_string().contains("bad"));
+    assert_eq!(res.value.as_ref().unwrap().to_string(), "\"Spain\"@en");
+    // The property shape's path is inherited as sh:resultPath.
+    assert_eq!(res.path.as_ref().unwrap().to_turtle(), "<http://example.org/germanLabel>");
+}
+
+/// When the SELECT does not project `?value`, `sh:value` defaults to the focus
+/// node (SHACL §5.2.2 / W3C suite node/sparql-003); a bound `?path` becomes
+/// sh:resultPath.
+#[test]
+fn sparql_value_defaults_to_focus_and_path_binding() {
+    let shapes = format!(
+        r#"{PREFIXES}
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:bob ;
+          sh:sparql [
+            sh:select """
+              SELECT $this (<http://example.org/age> AS ?path) WHERE {{
+                $this <http://example.org/age> ?v . FILTER(?v < 0)
+              }}
+            """ ;
+          ] .
+    "#
+    );
+    let data = r#"
+        @prefix ex: <http://example.org/> .
+        ex:bob ex:age -1 .
+    "#;
+    let r = run(data, &shapes);
+    assert_eq!(r.results.len(), 1, "{}", r.to_text());
+    let res = &r.results[0];
+    // ?value not projected -> sh:value is the focus node.
+    assert_eq!(res.value.as_ref().unwrap().to_string(), res.focus_node.to_string());
+    // ?path bound to an IRI -> sh:resultPath.
+    assert_eq!(res.path.as_ref().unwrap().to_turtle(), "<http://example.org/age>");
+}
+
 /// The report Turtle for a SPARQL-based result must itself be valid Turtle and
 /// carry the SPARQLConstraintComponent.
 #[test]

@@ -91,7 +91,16 @@ impl PreparedSparql {
         let (vpos, ppos, mpos) = (pos("value"), pos("path"), pos("message"));
 
         for row in &result.rows {
-            let value = vpos.and_then(|i| row.get(i)).and_then(|c| c.clone());
+            // sh:value (SHACL §5.2.2): the solution's ?value binding when the query
+            // projects ?value; otherwise the focus node itself. The focus-node
+            // default (when ?value is not projected at all) is what the W3C suite
+            // expects — e.g. sparql/node/sparql-003 projects only ?path and its
+            // expected sh:value is the focus node. A query that DOES project ?value
+            // but leaves it unbound on a row reports no sh:value (None).
+            let value = match vpos {
+                Some(i) => row.get(i).and_then(|c| c.clone()),
+                None => Some(focus.clone()),
+            };
             let path = ppos
                 .and_then(|i| row.get(i))
                 .and_then(|c| c.clone())
