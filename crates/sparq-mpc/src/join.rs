@@ -39,7 +39,7 @@
 
 use crate::field::Fp;
 use crate::partial::{HolderId, MpcError, PartialResult};
-use crate::shamir::{self, ShamirBackend};
+use crate::shamir::{self, ShamirBackend, ShamirDealer};
 use oxrdf::{Term, Variable};
 use std::collections::BTreeMap;
 
@@ -396,7 +396,7 @@ impl HiddenValueJoin {
     /// one process; it secret-shares them internally and never uses the
     /// cleartext after sharing except to deal the shares — exactly what a dealer
     /// does. It returns the boolean match WITHOUT reconstructing `a` or `b`.
-    fn secure_equal(&self, dealer: &mut ShamirBackend, a: Fp, b: Fp) -> Result<bool, MpcError> {
+    fn secure_equal(&self, dealer: &mut ShamirDealer, a: Fp, b: Fp) -> Result<bool, MpcError> {
         let t = dealer.threshold();
         // Honest-majority headroom: one multiplication needs 2t+1 <= n parties.
         if dealer.parties() < 2 * t + 1 {
@@ -409,16 +409,10 @@ impl HiddenValueJoin {
         // Secret-share both keys and a fresh nonzero mask.
         let sa = dealer.share(a);
         let sb = dealer.share(b);
-        // Fresh nonzero mask r. Zero is rejected: masking by zero would make m=0
-        // even for unequal keys (a false match). Drawing zero has probability
-        // ~1/p; we loop to be exact rather than rely on it.
-        let mask_value = {
-            let mut v = dealer.draw_fp();
-            while v == Fp::zero() {
-                v = dealer.draw_fp();
-            }
-            v
-        };
+        // Fresh nonzero mask r from the masking RNG (a CSPRNG in production —
+        // sq-1vt). Zero is rejected inside `draw_nonzero_fp`: masking by zero
+        // would make m=0 even for unequal keys (a false match).
+        let mask_value = dealer.draw_nonzero_fp();
         let r = dealer.share(mask_value);
         // d = a - b (local, degree t).
         let d = shamir::sub_shares(&sa, &sb)?;
@@ -439,9 +433,11 @@ impl HiddenValueJoin {
         left: &HiddenKeyedRows,
         right: &HiddenKeyedRows,
     ) -> Result<PartialResult, MpcError> {
-        // A fresh dealer per join keeps the simulation's randomness scoped to
-        // this protocol run (mirrors fresh per-session masks in a real run).
-        let mut dealer = self.backend.clone();
+        // Mint a fresh dealer (production: a fresh OS-seeded CSPRNG — sq-1vt) so
+        // this protocol run's masks are independent and unpredictable. The
+        // backend itself holds no live RNG state, so this never reuses a
+        // keystream across joins.
+        let mut dealer = self.backend.dealer();
 
         let mut out_vars = left.payload_vars.clone();
         out_vars.extend(right.payload_vars.iter().cloned());
@@ -852,7 +848,8 @@ mod hidden_value_tests {
         let right = keyed("R", &["city"], &r_rows);
 
         // n=3, t=1 → supports the single equality multiplication (2t+1 = 3 = n).
-        let backend = ShamirBackend::new(3, 0xBEEF).unwrap();
+        // Seeded test backend for reproducibility; production uses the CSPRNG.
+        let backend = ShamirBackend::new_seeded(3, 0xBEEF).unwrap();
         let join = HiddenValueJoin::new(backend);
         let got = join.join(&left, &right).unwrap();
 
@@ -871,7 +868,7 @@ mod hidden_value_tests {
     fn differential_no_overlap_is_empty() {
         let l_rows = vec![(1u64, vec![lit("a")]), (2, vec![lit("b")])];
         let r_rows = vec![(3u64, vec![lit("x")]), (4, vec![lit("y")])];
-        let join = HiddenValueJoin::new(ShamirBackend::new(3, 7).unwrap());
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(3, 7).unwrap());
         let got = join
             .join(&keyed("L", &["l"], &l_rows), &keyed("R", &["r"], &r_rows))
             .unwrap();
@@ -890,7 +887,7 @@ mod hidden_value_tests {
             (7, vec![lit("Lonely")]),
         ];
         let r_rows = vec![(42u64, vec![lit("R1")]), (42, vec![lit("R2")])];
-        let join = HiddenValueJoin::new(ShamirBackend::new(3, 123).unwrap());
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(3, 123).unwrap());
         let got = join
             .join(&keyed("L", &["l"], &l_rows), &keyed("R", &["r"], &r_rows))
             .unwrap();
@@ -903,7 +900,7 @@ mod hidden_value_tests {
     fn differential_empty_side_is_empty() {
         let l_rows = vec![(1u64, vec![lit("a")])];
         let r_rows: Vec<(u64, Vec<Option<Term>>)> = vec![];
-        let join = HiddenValueJoin::new(ShamirBackend::new(3, 1).unwrap());
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(3, 1).unwrap());
         let got = join
             .join(&keyed("L", &["l"], &l_rows), &keyed("R", &["r"], &r_rows))
             .unwrap();
@@ -915,9 +912,9 @@ mod hidden_value_tests {
     /// circuit-PSI primitive. Larger n (n=5,t=2) exercises 2t+1=5 reconstruction.
     #[test]
     fn secure_equal_primitive_is_correct() {
-        let backend = ShamirBackend::new(5, 0xD00D).unwrap();
+        let backend = ShamirBackend::new_seeded(5, 0xD00D).unwrap();
         let join = HiddenValueJoin::new(backend);
-        let mut dealer = join.backend.clone();
+        let mut dealer = join.backend.dealer();
         assert!(join.secure_equal(&mut dealer, Fp::new(12345), Fp::new(12345)).unwrap());
         assert!(!join.secure_equal(&mut dealer, Fp::new(12345), Fp::new(12346)).unwrap());
         // Zero is a valid key value and equality with zero still works.
@@ -930,8 +927,8 @@ mod hidden_value_tests {
     /// the happy path holds so the guard never fires a false error.
     #[test]
     fn secure_equal_does_not_falsely_guard_party_count() {
-        let join = HiddenValueJoin::new(ShamirBackend::new(3, 0).unwrap());
-        let mut dealer = join.backend.clone();
+        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(3, 0).unwrap());
+        let mut dealer = join.backend.dealer();
         assert!(join.secure_equal(&mut dealer, Fp::new(5), Fp::new(5)).is_ok());
     }
 
@@ -954,9 +951,9 @@ mod hidden_value_tests {
                 let a = next();
                 let b = next();
                 let join = HiddenValueJoin::new(
-                    ShamirBackend::new(n, trial.wrapping_mul(31).wrapping_add(1)).unwrap(),
+                    ShamirBackend::new_seeded(n, trial.wrapping_mul(31).wrapping_add(1)).unwrap(),
                 );
-                let mut dealer = join.backend.clone();
+                let mut dealer = join.backend.dealer();
                 let got = join.secure_equal(&mut dealer, Fp::new(a), Fp::new(b)).unwrap();
                 assert_eq!(got, a == b, "n={n} a={a} b={b}: secure_equal disagreed with plaintext");
             }
