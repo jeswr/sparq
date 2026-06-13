@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781377001097,
+  "lastUpdate": 1781377206046,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -1369,6 +1369,143 @@ window.BENCHMARK_DATA = {
           {
             "name": "wasm_bundle_bytes",
             "value": 1519238,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "committer": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "distinct": true,
+          "id": "0b9e785e2784f9db4c4c75cccba834ace06b8736",
+          "message": "merge: clippy hard-gate + zero-warnings onto main (serve-wave-b + M3) [OPUS-4.8]\n\nBrings the reviewed lint work (3 clippy-fix commits + CI hard-gate + rustfmt.toml,\ncodex jobs 2254/2255 clean) onto main, which now also carries MPC M3. The lint\nbranch was cut before M3 landed, so M3's new code (sparq-mpc shamir.rs/field.rs/\njoin.rs) is linted for the first time by this merge — verified clippy-clean under\n-D warnings as a follow-up before push.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T18:55:58Z",
+          "tree_id": "8eb0baa505d6d014567133096be1e2c49dcd7a6e",
+          "url": "https://github.com/jeswr/sparq/commit/0b9e785e2784f9db4c4c75cccba834ace06b8736"
+        },
+        "date": 1781377204949,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.525,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 4.6,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3139.3,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4390.6,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 6,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 4.7,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 753.4,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 12939.6,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 56011.6,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 152135.2,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 4545.3,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 5.7,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 40186.6,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 7490.9,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 55699.8,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 146404.9,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 3397.3,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 7.7,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 39779.9,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.145,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1518547,
             "unit": "bytes"
           }
         ]
