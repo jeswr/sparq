@@ -13,6 +13,7 @@ fn main(
     pattern_const_enc: pub [Field; 3], // term encodings of constant slots (0 = var)
     rows: pub [[Field; 3]; 8],        // disclosed matched rows (term encodings)
     row_count: pub u32,
+    attribution: pub [bool; 2],       // per-graph source attribution (audit #8)
     // -- private --
     counts: [u32; 2],                 // triples per graph (<= N)
     enc: [[[Field; 3]; 64]; 2],       // per-slot term encodings
@@ -24,6 +25,7 @@ fn main(
         PatternSpec { is_const: pattern_is_const, const_enc: pattern_const_enc },
         rows,
         row_count,
+        attribution,
         counts,
         enc,
     );
