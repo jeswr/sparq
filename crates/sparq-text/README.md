@@ -29,6 +29,13 @@ for hit in &hits {
     let literal = graph.dict.term(hit.id); // hit.id IS the dict id; hit.score is BM25
 }
 
+// Phrase (adjacency) search is OPT-IN: it needs token positions, so build the
+// position-enabled index. The cheap default above stores NO positions.
+let pidx = TextIndex::build_with_positions(&graph);
+let ids  = pidx.phrase("quick brown fox"); // literal ids where the tokens are
+                                           // adjacent & in order (ascending ids)
+
+
 // Incremental upkeep, mirroring Graph::apply_delta (the GeoIndex shape):
 graph.apply_delta(&inserts, &deletes)?;
 index.apply_delta(&graph, &inserts, &deletes);
@@ -90,8 +97,18 @@ with `ORDER BY DESC(?s)` over a `text:score` variable.
   terms until `Graph::compact`, so the incremental index stays *exactly*
   equal to a rebuild — pinned by a differential test — and orphaned literal
   ids simply join to zero triples). After `Graph::compact`, rebuild.
-- **Future work**: token positions (phrase queries) are not stored — postings
-  stay at 8 B per (token, doc) pair; result ordering pushed into the rewrite.
+- **Phrase queries (opt-in positions)**: `TextIndex::build_with_positions`
+  records each token's offsets within its document in a *separate* parallel
+  structure, and `TextIndex::phrase("foo bar")` returns the literal ids where
+  the tokens occur **adjacent and in order** (same analyzer as indexing; order
+  is significant, `"foo bar"` ≠ `"bar foo"`). The cheap default
+  (`TextIndex::build`) stores **no** positions — postings stay at 8 B per
+  (token, doc) pair — so only callers that need phrase search pay for it.
+  `with_positions()` seeds an empty position-enabled index for the delta-fed
+  case; `has_positions()` reports the mode. A phrase match is boolean adjacency
+  (no BM25 ranking) and is **not** yet wired into the `text:` magic predicates.
+- **Future work**: a `text:phrase` magic predicate exposing `phrase()` inside
+  SPARQL; positional postings are also the basis for proximity/slop scoring.
 
 ## Benchmark
 
