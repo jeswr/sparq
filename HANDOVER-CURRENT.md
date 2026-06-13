@@ -1,3 +1,35 @@
+# Orchestrator handover — live state (updated 2026-06-13, SESSION-END at 97% usage, model=Opus 4.8)
+
+## 🔴 SESSION-END HANDOFF (97% usage — this session may die any moment)
+RESUMPTION OPTIONS: continue on this M1 in a fresh session, OR finish porting to the EC2 dev box (below).
+
+### Pushed/clean
+- main pushed up to (this commit) — includes zk-trace-engine merge (module B, agent-gated 734/0 in-worktree; orchestrator re-gate was KILLED due to load-39 thrash, NOT a failure — re-gate cleanly when load is low) + research/zk-soundness-audit.md.
+
+### Unpushed/unmerged branches (committed, safe; merge when capacity allows — each: gate, push, clean worktree)
+- proppaths-design @ 28a6dd4 — research/property-paths-design.md (paths ALREADY implemented, 33/33 W3C; doc is an audit + flags a likely latent bug: GRAPH-scoped zero-length `*`/`?`). DOC-only merge.
+- zk-test-bench-design @ 3c91055 — research/zk-test-bench-design.md (the user's ZK test/bench deliverable + 6 open questions). DOC-only merge.
+- upstreaming-prep @ cd5de8d in ~/Documents/GitHub/jeswr/test-lib — IEEE754 upstreaming PARITY COMPLETE (CI+test-summary, lint, README+LICENSE, clean secret scan, PARITY.md). NOT pushed. Awaits Jesse's go-ahead for the swap onto public noir_IEEE754 (deprecated-branch-first, merge -s ours, re-pin noir_XPath to v0.9.0 first — see research IEEE754 audit). v1.0.0 needs a feat!/BREAKING-CHANGE swap commit.
+
+### RUNNING when session ended (may die at limit — recover via each worktree's STATUS.md + `git log main..HEAD`)
+- serve-wave-b (../sparq-serveb): serving wave B scheduler (SRPT+aging, no-HoL). Building/testing.
+- dict-spill (../sparq-dictspill): spillable dictionary finisher (gates 8B run). Benchmarking; ITS /private/tmp/dsp_bench (~53GB) is ACTIVE — reclaim only after it finishes.
+- MPC research WORKFLOW run wf_f4fd3613-877 (mpc-zkp-research): deep research → research/mpc-zkp-research-and-architecture.md. ⚠ Workflow result is returned to the orchestrator; if the session dies before it completes, the synthesis is LOST — re-run the workflow (script saved at .../workflows/scripts/mpc-zkp-research-wf_f4fd3613-877.js). See memory [[mpc-zkp-project]].
+- neon-intersect (../sparq-neon): PARKED (0 commits) — needs a quiet machine.
+
+### TOP PRIORITY QUEUED WORK
+1. ZK REMEDIATION (critical): research/zk-soundness-audit.md found the v1 verifier is UNSOUND (6 critical binding gaps). Fix order: public-input reconstruction + canonical vk (issues #1/#2) FIRST, then statement binding (#5/#8/#10/#11), then issuer-sig + replay (#3/#4). Use a fix→re-audit workflow. The zk-test-bench-design doc maps forge-and-verify tests to each issue.
+2. EC2 PORT (in progress — see below).
+
+### EC2 DEV-BOX PORT (prereqs DONE, launch is ONE command)
+Goal: port the agent work to a fresh Claude Code session on a SEPARATE account on EC2 (no shared account/compute). Jesse logs in (I can't authenticate); /remote for desktop + SSH for terminal.
+- DONE: keypair ~/.ssh/sparq-dev.pem (chmod 600); SG sg-0414c35a93f1c6557 (SSH from 188.29.24.150/32); AMI ami-03018a249a89a9ec1 (Ubuntu 24.04 arm64, eu-west-2); bootstrap script at /tmp/sparq-dev-userdata.sh (Node+Claude Code+Rust+wasm+gh+deps; noir toolchain = follow-up via noirup, needs nargo 1.0.0-beta.21 + bb 5.0.0-nightly.20260324).
+- DECIDED: m7g.4xlarge, 300GB gp3, tag purpose=sparq-dev, profile pss, region eu-west-2.
+- LAUNCH CMD (run after confirming /tmp/sparq-dev-userdata.sh exists): aws ec2 run-instances --profile pss --region eu-west-2 --image-id ami-03018a249a89a9ec1 --instance-type m7g.4xlarge --key-name sparq-dev --security-group-ids sg-0414c35a93f1c6557 --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":300,"VolumeType":"gp3"}}]' --user-data file:///tmp/sparq-dev-userdata.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=purpose,Value=sparq-dev},{Key=Name,Value=sparq-dev-claude}]' --query 'Instances[0].InstanceId' --output text
+- THEN: get public IP; ssh -i ~/.ssh/sparq-dev.pem ubuntu@<IP>; wait for ~/BOOTSTRAP_DONE; `gh auth login` (Jesse); clone jeswr/sparq + jeswr/* refs; copy HANDOVER-CURRENT.md + memory dir; start `claude` in tmux, relay login URL to Jesse, then /remote.
+- NEVER touch prod EC2 i-090531b4ede8f2d3f. Dev box is a NEW instance.
+
+---
 # Orchestrator handover — live state (updated 2026-06-13, POST-CRASH RECOVERY, model=Opus 4.8)
 
 ## ⚠ MODEL = OPUS 4.8 (Fable 5 temporarily unavailable). Per Jesse: tag every commit with `Model: Opus 4.8 (...)` + `Co-Authored-By: Claude Opus 4.8` trailer, inline `// [OPUS-4.8]` markers on new code, same in every subagent brief — so Opus work can be re-reviewed when Fable returns. See memory feedback-opus-commit-tagging. When /model shows Fable again, revert to the Fable trailer.
