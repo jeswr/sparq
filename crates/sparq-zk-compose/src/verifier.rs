@@ -54,8 +54,8 @@ use crate::manifest::{
 use sparq_zk::encode::encode_term;
 use sparq_zk::field::{field_to_be_bytes_32, field_to_hex, Fr};
 use sparq_zk::sig::{
-    commitment_message, public_key_from_hex, signature_from_hex, verify as sig_verify,
-    SignatureScheme,
+    commitment_message, commitment_message_with_salt, public_key_from_hex, signature_from_hex,
+    verify as sig_verify, SignatureScheme,
 };
 use sparq_zk::verify::{
     fragment_filters, fragment_pattern_consts, fragment_patterns, recheck, variable_slots,
@@ -208,6 +208,28 @@ pub enum CheckError {
     /// so a prover cannot advertise a tighter issuer set than it actually used.
     // [OPUS-4.8] codex 2216 LOW.
     AttestationKeyNotInDeclaredSet { commitment: String, key: String },
+    /// A query BGP pattern's declared `manifest.attributions[pattern]` does not
+    /// cover the PROOF-BOUND set of graphs the answering scan sub-proof's
+    /// in-circuit attribution shows it actually drew matched triples from (audit
+    /// #8): the prover under-declared a contributing graph to collapse a genuine
+    /// cross-graph join and drop its non-bnode obligation (the `[[0],[0]]`
+    /// forge). `proof_graph` is a graph index the scan proved a contribution
+    /// from that `manifest.attributions[pattern]` omits.
+    // [OPUS-4.8] audit #8.
+    AttributionUnderDeclared { pattern: usize, proof_graph: usize },
+    /// A query BGP pattern matched no scan sub-proof carrying a proof-bound
+    /// attribution to cross-check (audit #8): every BGP pattern must be answered
+    /// by a scan (already enforced by stage 2b `UnboundPattern`), so this is the
+    /// belt-and-braces fail-closed if attribution binding cannot find the
+    /// answering scan.
+    // [OPUS-4.8] audit #8.
+    AttributionUnbound { pattern: usize },
+    /// Two DISTINCT committed graphs disclosed the SAME per-graph bnode salt
+    /// (audit #9): a reused salt makes a same-label canonical bnode encode
+    /// identically across both graphs — the Q6 cross-graph correlation handle.
+    /// Each graph must be committed under a globally-unique issuer-attested salt.
+    // [OPUS-4.8] audit #9.
+    SaltReused { salt: String },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -275,6 +297,18 @@ impl std::fmt::Display for CheckError {
             CheckError::AttestationKeyNotInDeclaredSet { commitment, key } => write!(
                 f,
                 "commitment {commitment}: attestation key {key} is not in the prover's declared (non-empty) manifest key_set (declared narrowing is inconsistent with the proven attestations)"
+            ),
+            CheckError::AttributionUnderDeclared { pattern, proof_graph } => write!(
+                f,
+                "query BGP pattern {pattern}: manifest.attributions omits graph {proof_graph}, which the scan proof's in-circuit attribution shows it drew a matched triple from (under-declared attribution — the [[0],[0]] collapse-two-graphs forge that would drop a cross-graph bnode obligation)"
+            ),
+            CheckError::AttributionUnbound { pattern } => write!(
+                f,
+                "query BGP pattern {pattern} has no scan sub-proof carrying a proof-bound attribution to cross-check"
+            ),
+            CheckError::SaltReused { salt } => write!(
+                f,
+                "salt {salt} is reused across two distinct committed graphs (audit #9: cross-graph bnode-correlation channel — each graph needs a globally-unique issuer-attested salt)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -403,6 +437,16 @@ pub fn verify_manifest_structure(
     // proof of one statement is presented under a different query.
     bind_query_correctness(manifest)?;
 
+    // --- Stage 2e: cross-graph attribution binding (audit #8). ---
+    // Bind manifest.attributions (the JSON sets fed to the Q6 obligation gate in
+    // stage 1a) to the PROOF-BOUND per-graph attribution each scan sub-proof
+    // carries (scan.nr step 4, byte-bound by the audit #1 reconstruction). A
+    // prover whose pattern genuinely matches in two graphs can no longer declare
+    // a collapsed `[[0],[0]]` to drop the cross-graph non-bnode obligation: the
+    // declared attribution must be a SUPERSET of the proof-bound matched-graph
+    // set, so under-declaring a contributing graph is rejected here.
+    bind_attributions(manifest)?;
+
     // --- Stage 2d: issuer-signature / key-set binding (audit #3 / codex #1). ---
     // Every scan sub-proof's commitments[g] must carry a valid issuer signature
     // whose key ∈ the EXTERNAL trusted K (the verifier's argument, NOT
@@ -507,27 +551,71 @@ fn bind_issuer_attestations(
             }
             // (2) The cryptosuite must be a known/verifiable scheme, the key +
             // signature must parse, and the signature must verify over the
-            // domain-separated commitment message. Any failure => reject (fail
-            // closed; prover-controlled bytes never panic).
+            // domain-separated commitment message. When the attestation carries a
+            // salt (audit #9) the signed message BINDS the salt, so the salt
+            // under which the graph was committed is issuer-attested. Any failure
+            // => reject (fail closed; prover-controlled bytes never panic).
             let Some(commitment_fr) = c_field else {
                 return Err(CheckError::InvalidIssuerSignature {
                     commitment: c.0.clone(),
                 });
+            };
+            // The message the signature must verify over: salt-bound when the
+            // attestation discloses a (parseable) salt, bare otherwise. A salt
+            // field that is present but unparseable fails closed.
+            let message = match &att.salt {
+                Some(salt_hex) => match salt_hex.to_field() {
+                    Some(salt_fr) => commitment_message_with_salt(&commitment_fr, &salt_fr),
+                    None => {
+                        return Err(CheckError::InvalidIssuerSignature {
+                            commitment: c.0.clone(),
+                        })
+                    }
+                },
+                None => commitment_message(&commitment_fr),
             };
             let ok = SignatureScheme::from_cryptosuite_iri(&att.cryptosuite).is_some()
                 && match (
                     public_key_from_hex(&att.issuer_public_key),
                     signature_from_hex(&att.signature),
                 ) {
-                    (Some(pk), Some(sig)) => {
-                        sig_verify(&pk, &commitment_message(&commitment_fr), &sig)
-                    }
+                    (Some(pk), Some(sig)) => sig_verify(&pk, &message, &sig),
                     _ => false,
                 };
             if !ok {
                 return Err(CheckError::InvalidIssuerSignature {
                     commitment: c.0.clone(),
                 });
+            }
+        }
+    }
+
+    // (3) Salt uniqueness (audit #9): no two DISTINCT commitments may share a
+    // salt. A reused salt is the Q6 cross-graph bnode-correlation channel — a
+    // same-label canonical bnode then encodes identically across both graphs.
+    // Only salt-bound attestations participate (a salt is issuer-attested by
+    // step 2 above), so this rejects an attacker-ingester that committed two
+    // genuinely-distinct graphs under one salt. Two attestations over the SAME
+    // commitment value sharing a salt are fine (the same graph attested twice).
+    let mut salt_to_commitment: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for att in &manifest.commitment_attestations {
+        let Some(salt_hex) = &att.salt else { continue };
+        let Some(salt_fr) = salt_hex.to_field() else { continue };
+        let salt_key = field_to_hex(&salt_fr);
+        let commitment_key = att
+            .commitment
+            .to_field()
+            .map(|f| field_to_hex(&f))
+            .unwrap_or_else(|| att.commitment.0.clone());
+        match salt_to_commitment.get(&salt_key) {
+            Some(prev) if *prev != commitment_key => {
+                return Err(CheckError::SaltReused {
+                    salt: salt_hex.0.clone(),
+                });
+            }
+            _ => {
+                salt_to_commitment.insert(salt_key, commitment_key);
             }
         }
     }
@@ -677,6 +765,70 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
     Ok(())
 }
 
+/// Stage 2e: bind the prover's `manifest.attributions` (which drives the Q6
+/// cross-graph-bnode-join obligation gate in stage 1a) to the PROOF-BOUND
+/// per-graph attribution each scan sub-proof carries (audit #8).
+///
+/// For each query BGP pattern `pi`, find the scan sub-proof that answers it
+/// (constants match, `scan_matches_pattern`) and require
+/// `manifest.attributions[pi]` to be a SUPERSET of that scan's proof-bound
+/// matched-graph set (`attribution[g] == true`). Soundness:
+/// - **Under-declaring** (the `[[0],[0]]` forge): a graph the scan proved a
+///   contribution from but `manifest.attributions[pi]` omits is rejected. This
+///   is the load-bearing #8 fix — the prover can no longer shrink the
+///   attribution set below the truth to drop a cross-graph obligation.
+/// - **Over-declaring** is conservative-safe: extra graphs in
+///   `manifest.attributions[pi]` only widen `|A_i ∪ A_j|`, demanding MORE
+///   non-bnode obligations (the coarser-is-safe direction, per `verify.rs`
+///   module docs). So a superset relation, not equality, is the correct gate —
+///   it preserves the legitimate "this pattern MAY draw from these graphs"
+///   semantics while forbidding the dishonest narrowing.
+///
+/// The proof-bound attribution is byte-checked against the bb public inputs in
+/// stage 3 (audit #1 reconstruction). Here in the structural stage we cross-check
+/// the SAME declared `attribution` field that the reconstruction will bind, so a
+/// structure-only verify already rejects the forge and the full verify rejects it
+/// twice (structurally + cryptographically).
+// [OPUS-4.8] audit #8.
+fn bind_attributions(manifest: &ProofManifest) -> Result<(), CheckError> {
+    let patterns = fragment_patterns(&manifest.query)?;
+    let consts = fragment_pattern_consts(&patterns);
+
+    for (pi, c) in consts.iter().enumerate() {
+        let declared: BTreeSet<usize> = manifest
+            .attributions
+            .get(pi)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default();
+
+        // Find a scan sub-proof that answers this pattern and read its
+        // proof-bound attribution. (Stage 2b already guarantees one exists.)
+        let mut matched_a_scan = false;
+        for sp in &manifest.sub_proofs {
+            let ProofInputs::Scan { attribution, .. } = &sp.inputs else {
+                continue;
+            };
+            if !scan_matches_pattern(&sp.inputs, c) {
+                continue;
+            }
+            matched_a_scan = true;
+            // Every graph the scan PROVED a contribution from must be declared.
+            for (g, &bit) in attribution.iter().enumerate() {
+                if bit && !declared.contains(&g) {
+                    return Err(CheckError::AttributionUnderDeclared {
+                        pattern: pi,
+                        proof_graph: g,
+                    });
+                }
+            }
+        }
+        if !matched_a_scan {
+            return Err(CheckError::AttributionUnbound { pattern: pi });
+        }
+    }
+    Ok(())
+}
+
 /// Whether sub-proof `to_proof` is a `filter_int` whose bound `(op, bound)`
 /// match the query FILTER and whose disclosed verdict is TRUE (audit #5/#6:
 /// op/bound substitution + verdict gating). The operand-slot equality (the edge
@@ -782,7 +934,8 @@ pub fn verify_manifest(
 /// Declaration order — the single source of truth is each
 /// `zk/compose/<member>/src/main.nr` (mirrored 1:1 by `toml.rs`):
 /// - scan_k{k}_n{n}_r{r}: challenge, commitments[k], pattern_is_const[3],
-///   pattern_const_enc[3], rows[r][3] (row-major), row_count.
+///   pattern_const_enc[3], rows[r][3] (row-major), row_count, attribution[k]
+///   (audit #8 — `bool` -> {0,1}, one word per committed graph).
 /// - filter_int_d{d}: challenge, operand_enc, op, bound, expected.
 ///
 /// Crucially the layout is sized by the DECLARED `CircuitId`'s `r`/`k` (rows
@@ -826,6 +979,7 @@ fn reconstruct_public_inputs(
             pattern_const_enc,
             rows,
             row_count,
+            attribution,
             ..
         } => {
             // commitments[k] — exactly k words (k is the declared CircuitId.k,
@@ -860,6 +1014,20 @@ fn reconstruct_public_inputs(
             }
             // row_count: u32.
             push_uint(&mut out, u64::from(*row_count));
+            // attribution[k]: bool -> {0,1}, one word per committed graph (audit
+            // #8). Bound to the proof so the verifier-side cross-check against
+            // manifest.attributions operates over a PROOF-BOUND quantity. The
+            // declared CircuitId.k is the authority for the length (re-derived
+            // from commitments.len() in stage 1b); a wrong-length attribution
+            // therefore yields a wrong-length vector that cannot byte-match.
+            let k = match inputs.circuit_id() {
+                CircuitId::Scan { k, .. } => *k as usize,
+                _ => return Err(CheckError::MalformedField { proof, what: "scan id" }),
+            };
+            for g in 0..k {
+                let bit = attribution.get(g).copied().unwrap_or(false);
+                push_uint(&mut out, u64::from(bit));
+            }
         }
         ProofInputs::FilterInt { operand_enc, op, bound, expected, .. } => {
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
@@ -994,9 +1162,15 @@ mod tests {
         assert_eq!(got, bb, "filter_int reconstruction must byte-match bb");
     }
 
-    /// `scan_k1_n16_r4` over the probe values. 21 fields * 32 = 672 bytes; the
+    /// `scan_k1_n16_r4` over the probe values. 22 fields * 32 = 704 bytes; the
     /// single active row plus 3 zero-padded rows exercise the row-major
-    /// flattening and the pad-to-`r` path.
+    /// flattening and the pad-to-`r` path, and the trailing `attribution[1]`
+    /// word (audit #8) exercises the per-graph source-attribution binding.
+    ///
+    /// [OPUS-4.8] audit #8: the trailing `...01` word is the in-circuit
+    /// attribution for the single committed graph (the pattern matches in it).
+    /// Regenerated by the `probe_scan_public_inputs_hex` test (e2e.rs, ignored)
+    /// against a real `bb prove` of the new scan_k1_n16_r4 — the empirical anchor.
     #[test]
     fn reconstruct_scan_matches_real_bb_public_inputs() {
         let bb = hex_decode(concat!(
@@ -1028,6 +1202,8 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000000",
             // row_count = 1
             "0000000000000000000000000000000000000000000000000000000000000001",
+            // attribution[0] = true (the single graph matches the pattern)
+            "0000000000000000000000000000000000000000000000000000000000000001",
         ))
         .unwrap();
         let z = || fh("0x0");
@@ -1049,9 +1225,11 @@ mod tests {
                 fh("0x2b5caeb2bbd290ab32434a9109030784c7faebadee7a9908d24dccb847910d1d"),
             ]],
             row_count: 1,
+            // The single graph contributes => attribution[0] = true (audit #8).
+            attribution: vec![true],
         };
         let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
-        assert_eq!(got.len(), 672);
+        assert_eq!(got.len(), 704);
         assert_eq!(got, bb, "scan reconstruction must byte-match bb");
     }
 

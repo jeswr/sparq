@@ -145,6 +145,16 @@ impl SecretKey {
         let sig = sign_deterministic(self, &commitment_message(commitment));
         signature_to_hex(&sig)
     }
+
+    /// Sign a per-graph commitment AND its salt (audit #9), returning the
+    /// signature hex. The signed message is [`commitment_message_with_salt`], so
+    /// the salt under which the graph was committed is issuer-attested. Same
+    /// deterministic `(sk, m)` nonce discipline as [`Self::sign_commitment`].
+    // [OPUS-4.8] audit #9: salt-bound issuance.
+    pub fn sign_commitment_with_salt(&self, commitment: &Fr, salt: &Fr) -> String {
+        let sig = sign_deterministic(self, &commitment_message_with_salt(commitment, salt));
+        signature_to_hex(&sig)
+    }
 }
 
 /// Derive a deterministic Schnorr nonce `k` from the secret key and the message
@@ -228,6 +238,31 @@ fn challenge(r: &Affine<EdwardsConfig>, pk: &Affine<EdwardsConfig>, m: &Fr) -> J
 /// any other use of the same field element.
 pub fn commitment_message(commitment: &Fr) -> Fr {
     poseidon2::hash(&[Fr::from(SIG_DOMAIN_COMMITMENT), *commitment])
+}
+
+/// The signed message for a per-graph commitment that ALSO binds the per-graph
+/// RDFC10 bnode salt (audit #9). The issuer signs `(C(G), salt_G)` under a
+/// distinct domain tag, so the salt under which a graph was committed becomes
+/// ISSUER-ATTESTED: a salt-reusing ingester cannot present a graph under a salt
+/// the trusted issuer did not sign, and the verifier — which sees `salt_G` in
+/// the attestation — can detect salt reuse across distinct commitments (the Q6
+/// cross-graph bnode-correlation channel).
+///
+/// # Why bind the salt at all (the audit #9 fix)
+/// The Q6 "bnodes from different graphs are distinct by construction" guarantee
+/// rests on each graph having a globally-unique salt (so a recurring canonical
+/// bnode label `c14n0` encodes to DIFFERENT field elements in different graphs).
+/// The salt never enters any circuit and the bare `commitment_message` does not
+/// bind it, so a salt-reusing ingester could correlate bnodes across graphs. By
+/// folding `salt_G` into the signed object, the property is anchored on the
+/// TRUSTED ISSUER (who draws a fresh OS-random salt per graph at mint, see
+/// `encode::salt_from_bytes`) rather than on an unenforced honest-ingest
+/// convention. A forger who reuses a salt cannot obtain a valid issuer signature
+/// over the reused `(C(G), salt)` pair.
+// [OPUS-4.8] audit #9: salt-bound commitment message.
+const SIG_DOMAIN_COMMITMENT_SALT: u64 = 0x5a4b_5349_475f_4332; // "ZKSIG_C2"
+pub fn commitment_message_with_salt(commitment: &Fr, salt: &Fr) -> Fr {
+    poseidon2::hash(&[Fr::from(SIG_DOMAIN_COMMITMENT_SALT), *commitment, *salt])
 }
 
 /// Sign a message field element `m` with `sk`, drawing the nonce `k` from `rng`.

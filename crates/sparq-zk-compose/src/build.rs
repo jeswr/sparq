@@ -134,18 +134,27 @@ pub fn build_scan(
     let pattern_const_enc = [se, pe, oe];
     let const_fr = [sf, pf, of];
 
-    // Disclosed rows: every active slot matching the pattern's constants.
+    // Disclosed rows: every active slot matching the pattern's constants. While
+    // sweeping, record per-graph source attribution (audit #8): `attribution[g]`
+    // is true iff graph `g` contributes at least one matched triple — the exact
+    // bit `scan.nr` step 4 constrains. This is the proof-bound provenance the
+    // verifier cross-checks against `manifest.attributions`.
+    // [OPUS-4.8] audit #8.
     let mut rows: Vec<[FieldHex; 3]> = Vec::new();
+    let mut attribution: Vec<bool> = Vec::with_capacity(enc_fr.len());
     for graph in &enc_fr {
+        let mut graph_matches = false;
         for triple in graph {
             let matches = const_fr.iter().enumerate().all(|(i, c)| match c {
                 Some(cf) => triple[i] == *cf,
                 None => true,
             });
             if matches {
+                graph_matches = true;
                 rows.push([hexf(&triple[0]), hexf(&triple[1]), hexf(&triple[2])]);
             }
         }
+        attribution.push(graph_matches);
     }
     let row_count = rows.len() as u32;
     let max_graph = counts.iter().copied().max().unwrap_or(0);
@@ -162,6 +171,7 @@ pub fn build_scan(
             pattern_const_enc,
             rows,
             row_count,
+            attribution,
         },
         witness: ScanWitness { counts, enc },
     })

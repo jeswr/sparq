@@ -68,6 +68,20 @@ fn attest(commitment: Fr, sk: &SecretKey) -> CommitmentAttestation {
         issuer_public_key: public_key_to_hex(&sk.public_key()),
         signature: sk.sign_commitment(&commitment), // [OPUS-4.8] codex #4: deterministic nonce
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
+        salt: None, // [OPUS-4.8] audit #9: salt-unbound legacy attestation
+    }
+}
+
+/// [OPUS-4.8] audit #9: a SALT-BOUND attestation — the issuer signs
+/// `(commitment, salt)`, and the manifest discloses `salt`, so the verifier
+/// recomputes the salt-bound message and rejects salt reuse across graphs.
+fn attest_with_salt(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestation {
+    CommitmentAttestation {
+        commitment: FieldHex::from_field(&commitment),
+        issuer_public_key: public_key_to_hex(&sk.public_key()),
+        signature: sk.sign_commitment_with_salt(&commitment, &salt),
+        cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
+        salt: Some(FieldHex::from_field(&salt)),
     }
 }
 
@@ -1578,4 +1592,279 @@ fn issuer_attestation_serde_round_trip() {
     assert!(json.contains("poseidon2-schnorr-v1"));
     let back = ProofManifest::from_json(&json).expect("round-trips");
     assert_eq!(m, back);
+}
+
+// ===========================================================================
+// [OPUS-4.8] audit #8: per-row source-graph attribution binding.
+// ===========================================================================
+//
+// The hole (issue #8): the Q6 cross-graph-bnode-join obligation gate decided
+// obligations purely from `manifest.attributions` — a PROVER-controlled JSON
+// field, unbound to any proof. A prover whose data joins a bnode-valued variable
+// across two genuinely-distinct graphs could declare both joined patterns as
+// drawn from the SAME graph (`[[0],[0]]`), so `|{0}| = 1`, no obligation, and the
+// forbidden cross-graph bnode correlation slipped through.
+//
+// The fix: `scan.nr` step 4 constrains a PUBLIC per-graph `attribution[g]` bit to
+// the true matched-graph set; the verifier byte-binds it (audit #1) and Stage 2e
+// (`bind_attributions`) requires `manifest.attributions[pattern]` to be a SUPERSET
+// of the proof-bound set. Under-declaring (the forge) is rejected.
+
+/// Two single-graph credentials that share an entity (`alice`) but live in
+/// SEPARATE committed graphs — the cross-graph join setup. G0 holds the age
+/// triple, G1 the role triple.
+fn alice_age_graph() -> Vec<Triple> {
+    vec![Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/alice")),
+        iri("http://ex/age"),
+        int_lit(25),
+    )]
+}
+fn alice_role_graph() -> Vec<Triple> {
+    vec![Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/alice")),
+        iri("http://ex/role"),
+        Term::NamedNode(iri("http://ex/admin")),
+    )]
+}
+
+/// Build a two-pattern cross-graph manifest: pattern 0 `?x <age> ?a`, pattern 1
+/// `?x <role> ?r`, each scanning BOTH committed graphs (K=2). Pattern 0 matches
+/// only in G0, pattern 1 only in G1 — so each scan's in-circuit attribution is a
+/// singleton, and the honest declared attributions are `[[0],[1]]`. `declared`
+/// is the (possibly dishonest) `manifest.attributions`; `obligations` the
+/// declared non-bnode join obligations.
+fn cross_graph_manifest(
+    declared: Vec<Vec<usize>>,
+    obligations: Vec<(String, usize, usize)>,
+    sk: &SecretKey,
+) -> ProofManifest {
+    let salt0 = salt_from_bytes(&[10u8; 32]);
+    let salt1 = salt_from_bytes(&[11u8; 32]);
+    let g0 = commit_triples(&alice_age_graph(), salt0).unwrap();
+    let g1 = commit_triples(&alice_role_graph(), salt1).unwrap();
+    let commits = [g0.clone(), g1.clone()];
+
+    let age_pat = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let role_pat = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/role"))),
+        o: Slot::Var,
+    };
+    let scan_age = build_scan(&commits, &age_pat).expect("age scan builds");
+    let scan_role = build_scan(&commits, &role_pat).expect("role scan builds");
+
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?x WHERE { ?x <http://ex/age> ?a . ?x <http://ex/role> ?r }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: declared,
+        join_obligations: obligations,
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![
+            SubProof { inputs: scan_age.inputs, proof_hex: String::new() },
+            SubProof { inputs: scan_role.inputs, proof_hex: String::new() },
+        ],
+        binding_edges: vec![],
+    };
+    // Salt-bound attestations for BOTH commitments (audit #3 + #9), distinct salts.
+    m.commitment_attestations.push(attest_with_salt(g0.commitment, salt0, sk));
+    m.commitment_attestations.push(attest_with_salt(g1.commitment, salt1, sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    m
+}
+
+/// The minimum-bar #8 forge: two genuinely-distinct committed graphs joined on a
+/// bnode-capable variable `?x`, declared `[[0],[0]]` to collapse them so the Q6
+/// gate demands NO non-bnode obligation. The in-circuit attribution of the
+/// role-pattern scan proves it drew from graph 1, which `[[0],[0]]` omits ⇒
+/// REJECT with `AttributionUnderDeclared`. (Before #8 this PASSED — the hole.)
+#[test]
+fn attribution_lie_collapse_two_graphs_rejected() {
+    let sk = test_issuer_sk(1);
+    let m = cross_graph_manifest(vec![vec![0], vec![0]], vec![], &sk);
+    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+        Err(CheckError::AttributionUnderDeclared { proof_graph: 1, .. }) => {}
+        other => panic!(
+            "expected AttributionUnderDeclared (the [[0],[0]] collapse-two-graphs forge), got {other:?}"
+        ),
+    }
+}
+
+/// Companion: even the OTHER collapse direction (`[[1],[1]]`, hiding graph 0) is
+/// rejected — the age-pattern scan proves a graph-0 contribution `[[1]]` omits.
+#[test]
+fn attribution_lie_collapse_onto_graph_one_rejected() {
+    let sk = test_issuer_sk(1);
+    let m = cross_graph_manifest(vec![vec![1], vec![1]], vec![], &sk);
+    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+        Err(CheckError::AttributionUnderDeclared { pattern: 0, proof_graph: 0 }) => {}
+        other => panic!("expected AttributionUnderDeclared on pattern 0, got {other:?}"),
+    }
+}
+
+/// Happy path: HONEST `[[0],[1]]` cross-graph attribution, distinct salts, WITH
+/// the required non-bnode obligation on `?x` ⇒ VERIFIES (structurally). The
+/// positive control: honest attribution that matches the proof-bound sets and
+/// satisfies the Q6 obligation passes.
+#[test]
+fn attribution_honest_cross_graph_with_obligation_verifies() {
+    let sk = test_issuer_sk(1);
+    let m = cross_graph_manifest(
+        vec![vec![0], vec![1]],
+        vec![("x".to_string(), 0, 1)], // the required non-bnode obligation on ?x
+        &sk,
+    );
+    verify_manifest_structure(&m, &trusted_k(&sk))
+        .expect("honest [[0],[1]] cross-graph with a satisfied obligation verifies");
+}
+
+/// Honest `[[0],[1]]` WITHOUT the obligation ⇒ the Q6 gate (stage 1a) rejects the
+/// undeclared cross-graph edge. Confirms the attribution binding does not
+/// short-circuit the obligation gate — the two layers compose.
+#[test]
+fn attribution_honest_cross_graph_without_obligation_rejected() {
+    let sk = test_issuer_sk(1);
+    let m = cross_graph_manifest(vec![vec![0], vec![1]], vec![], &sk);
+    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+        Err(CheckError::Sparqzk(_)) => {} // MissingObligation
+        other => panic!("expected Sparqzk(MissingObligation), got {other:?}"),
+    }
+}
+
+/// Over-declaring is conservative-safe: declaring `[[0,1],[1]]` (pattern 0 may
+/// draw from BOTH graphs though it only matched in 0) is a SUPERSET of the
+/// proof-bound set, so attribution binding accepts it — but the wider set demands
+/// the obligation, which here IS declared ⇒ VERIFIES. (Confirms superset, not
+/// equality, is the gate.)
+#[test]
+fn attribution_over_declared_is_accepted() {
+    let sk = test_issuer_sk(1);
+    let m = cross_graph_manifest(
+        vec![vec![0, 1], vec![1]],
+        vec![("x".to_string(), 0, 1)],
+        &sk,
+    );
+    verify_manifest_structure(&m, &trusted_k(&sk))
+        .expect("over-declared (superset) attribution with obligation verifies");
+}
+
+// ===========================================================================
+// [OPUS-4.8] audit #9: cross-graph bnode salt separation.
+// ===========================================================================
+//
+// The hole (issue #9): the Q6 "bnodes from different graphs are distinct by
+// construction" guarantee rests on each graph having a globally-unique per-graph
+// salt, but the salt never entered any circuit and the verifier never compared
+// salts — a salt-reusing ingester could make a same-label bnode encode
+// identically across two graphs (a cross-graph correlation handle).
+//
+// The fix (leveraging #3): the issuer signs `(commitment, salt)` so the salt is
+// ISSUER-ATTESTED, and the verifier rejects two DISTINCT commitments sharing a
+// salt. A salt-reusing ingester cannot get a valid issuer signature over the
+// reused salt, nor pass the verifier's salt-uniqueness check.
+
+/// Salt-reuse cross-graph correlation: two genuinely-distinct committed graphs
+/// presented under the SAME salt ⇒ REJECT with `SaltReused`. This is the
+/// correlation channel #9 closes.
+#[test]
+fn salt_reuse_across_distinct_graphs_rejected() {
+    let sk = test_issuer_sk(1);
+    let reused = salt_from_bytes(&[42u8; 32]);
+    // Two distinct graphs, BOTH committed under the same salt.
+    let g0 = commit_triples(&alice_age_graph(), reused).unwrap();
+    let g1 = commit_triples(&alice_role_graph(), reused).unwrap();
+    assert_ne!(g0.commitment, g1.commitment, "distinct content => distinct C(G)");
+
+    let mut m = cross_graph_manifest(vec![vec![0], vec![1]], vec![("x".into(), 0, 1)], &sk);
+    // Re-commit the two sub-proofs + attestations under the reused salt so the
+    // manifest's commitments and salts are the salt-reuse case.
+    let age_pat = Pattern { s: Slot::Var, p: Slot::Const(Term::NamedNode(iri("http://ex/age"))), o: Slot::Var };
+    let role_pat = Pattern { s: Slot::Var, p: Slot::Const(Term::NamedNode(iri("http://ex/role"))), o: Slot::Var };
+    let commits = [g0.clone(), g1.clone()];
+    m.sub_proofs[0].inputs = build_scan(&commits, &age_pat).unwrap().inputs;
+    m.sub_proofs[1].inputs = build_scan(&commits, &role_pat).unwrap().inputs;
+    m.commitment_attestations = vec![
+        attest_with_salt(g0.commitment, reused, &sk),
+        attest_with_salt(g1.commitment, reused, &sk),
+    ];
+    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+        Err(CheckError::SaltReused { .. }) => {}
+        other => panic!("expected SaltReused (cross-graph salt collision), got {other:?}"),
+    }
+}
+
+/// A salt-bound attestation whose disclosed salt does NOT match the salt the
+/// issuer signed ⇒ the salt-bound signature does not verify ⇒ REJECT. Confirms
+/// the salt is genuinely issuer-attested (a prover cannot swap in a different
+/// salt to dodge the uniqueness check). Single-scan manifest so the ONLY fault
+/// is the salt swap (attribution/obligation gates are satisfied).
+#[test]
+fn salt_swap_breaks_issuer_signature() {
+    let sk = test_issuer_sk(1);
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let (mut m, c) = scan_only_manifest(&credential_graph(), 7);
+    // Attestation signed over the TRUE salt, but DISCLOSING a different salt —
+    // the salt-bound message the verifier recomputes (over the disclosed salt)
+    // won't match the signature (made over the true salt).
+    let mut att = attest_with_salt(c, salt, &sk);
+    att.salt = Some(FieldHex::from_field(&salt_from_bytes(&[99u8; 32]))); // swapped
+    m.commitment_attestations = vec![att];
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+        Err(CheckError::InvalidIssuerSignature { .. }) => {}
+        other => panic!("expected InvalidIssuerSignature (salt swap), got {other:?}"),
+    }
+}
+
+/// Happy path: distinct issuer-attested salts across the two graphs ⇒ the salt
+/// gate passes (and the manifest verifies structurally). Positive control for #9.
+#[test]
+fn distinct_salts_verify() {
+    let sk = test_issuer_sk(1);
+    // cross_graph_manifest already uses distinct salts (10 vs 11) and salt-bound
+    // attestations; with the obligation declared it verifies end to end.
+    let m = cross_graph_manifest(vec![vec![0], vec![1]], vec![("x".into(), 0, 1)], &sk);
+    verify_manifest_structure(&m, &trusted_k(&sk))
+        .expect("distinct issuer-attested salts verify");
+}
+
+/// [OPUS-4.8] PROBE (ignored): re-dump the real bb `public_inputs` for the new
+/// scan_k1_n16_r4 layout (now carrying `attribution[k]`) so the
+/// `reconstruct_scan_matches_real_bb_public_inputs` unit-test constant stays an
+/// honest empirical anchor. Run with `--ignored` when the toolchain is present;
+/// paste the printed hex into the unit test.
+#[test]
+#[ignore = "probe: prints real bb public_inputs hex for the scan reconstruct unit test"]
+fn probe_scan_public_inputs_hex() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping probe");
+        return;
+    }
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).unwrap();
+    let challenge = FieldHex("0x2a".into());
+    let (id, toml) =
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+    let prover = CircuitProver::from_crate_root();
+    let out = scratch("probe_scan_pi");
+    let art = prover.prove_in(&id, &toml, &out, "probe_scan_pi").unwrap();
+    let hex: String = art.public_inputs.iter().map(|b| format!("{b:02x}")).collect();
+    eprintln!("SCAN_PUBLIC_INPUTS_LEN={}", art.public_inputs.len());
+    eprintln!("SCAN_PUBLIC_INPUTS_HEX={hex}");
+    eprintln!("SCAN_INPUTS_JSON={}", serde_json::to_string(&scan.inputs).unwrap());
 }
