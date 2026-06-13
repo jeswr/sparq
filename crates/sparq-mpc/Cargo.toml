@@ -1,0 +1,39 @@
+# [OPUS-4.8] sparq-mpc — MPC-over-federated-SPARQL scaffold (Milestone 0).
+# Native-only research crate. DELIBERATELY NOT a dependency of sparq-wasm:
+# the WASM bundle must stay free of any MPC/crypto surface (verify with
+# `cargo tree -p sparq-wasm` — sparq-mpc must NOT appear).
+#
+# This is a CONSERVATIVE scaffold. It builds ONLY what is invariant to the two
+# open design forks documented in research/mpc-zkp-research-and-architecture.md
+# §5.2: (Q1) the unsolved distributed-signature-over-secret-shared-witness
+# inside the collaborative proof, and (Q2) the honest- vs dishonest-majority
+# trust model. No MPC primitive and no collaborative proof are committed to
+# here; those live behind traits whose crypto methods are explicit stubs.
+[package]
+name = "sparq-mpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "MPC over federated SPARQL (RQ2): per-holder local sub-evaluation + invariant trait boundaries for the MPC primitive, global-IRI join, and collaborative attested-source proof. Native-only research scaffold; crypto deferred."
+publish = false
+
+# NOTHING in the workspace depends on this crate. In particular sparq-wasm does
+# NOT, so the browser bundle is untouched. (Verified by `cargo tree -p
+# sparq-wasm`.) The only real dependency is the SPARQL engine, used for the
+# invariant "each holder evaluates locally over its own graphs" core.
+
+[dependencies]
+# The single-holder query engine. The MPC layer's whole point is to MINIMISE
+# data sharing: each holder evaluates a query fragment over ITS OWN graphs
+# locally via this engine and ships only partial results, never raw graphs.
+sparq-core = { path = "../sparq-core" }
+sparq-engine = { path = "../sparq-engine" }
+# Term model — local partial results are carried as oxrdf terms (the same
+# row shape sparq-engine's QueryResult uses), so a holder never has to
+# re-encode its own data to hand a partial to the join layer.
+oxrdf = { workspace = true }

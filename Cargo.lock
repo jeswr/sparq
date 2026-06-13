@@ -3101,6 +3101,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-mpc"
+version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "sparq-core",
+ "sparq-engine",
+]
+
+[[package]]
 name = "sparq-nlq"
 version = "0.1.0"
 dependencies = [
