@@ -30,9 +30,21 @@ delta). Completing = writing those + batch-atomicity test + benches.
       under load. HONEST ANTI-RESULT: batch256 LOSES to batch16 (in-flight capped at 64 feeders;
       bigger seal => more O(graph) compaction). Numbers in bench/serve/README.md.
 - [x] CHANGELOG entry (sparq-serve A2+A3)
-- [ ] Gate: cargo test --workspace --exclude sparq-py --release --no-fail-fast | grep -aE "^test result"
-- [ ] wasm byte count: brief says 1,643,095; CHANGELOG records 1,643,103 — verify actual.
-- [ ] Final commit SHA recorded here
+- [x] Gate: cargo test --workspace --exclude sparq-py --release --no-fail-fast — GREEN.
+      exit 0, 113 test-result lines, 723 passed / 0 failed / 9 ignored.
+- [x] wasm byte count = 1,643,103 (matches CHANGELOG baseline; brief said 1,643,095 — 8 bytes
+      lower, a pre-existing branch/brief discrepancy NOT introduced here). sparq-serve absent
+      from wasm graph (cargo tree -p sparq-wasm | grep -c serve == 0). My work added 0 wasm bytes.
+- [x] Final commit: this commit (STATUS finalised).
+
+## DONE — Wave A2 complete, A3 substrate landed
+All checklist items green. Branch serve-wave-a2 is 5 commits ahead of main:
+  ba5a3ca commutativity batching (predecessor)
+  23bd7d6 read-your-writes token primitive + writer doc fixes (recovered delta)
+  e6e0136 A2 commute + batch-atomicity + A3 tokens tests (10 new tests)
+  d56b813 writer_spike bench + CHANGELOG
+  <this>  STATUS finalised
+NEVER pushed/merged (per brief).
 
 ## Existing test inventory (pre-resume, all CommitGranularity::Window)
 - tests/ring.rs, tests/stress.rs, tests/time_travel.rs — ring/retention/epochs
