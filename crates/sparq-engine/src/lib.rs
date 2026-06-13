@@ -23,6 +23,11 @@ mod dataset;
 mod exec;
 mod explain;
 pub mod json;
+// SPARQL 1.1 federated query (SERVICE). NON-DEFAULT `service` feature; pulls a
+// blocking HTTP client (ureq) + serde_json, both gated off wasm. When off, zero
+// federation code compiles. [OPUS-4.8]
+#[cfg(feature = "service")]
+mod service;
 mod update;
 // zk-trace seam (NON-DEFAULT `zk` feature; consumed only by `sparq-zk`).
 // When off, zero zk code is compiled — default builds and wasm are untouched.
