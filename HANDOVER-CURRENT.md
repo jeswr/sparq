@@ -6,7 +6,9 @@
 - zk-core, wikidata-8b-prep, release-prep-v010: ALL MERGED+PUSHED before the crash (main reached 8ab4754).
 - py-textindex: MERGED+PUSHED (dac9870, gate 713/0 wasm 1,643,095). Task #44 bindings parity COMPLETE. Fable-authored branch, Opus merge. Worktree removed, branch deleted.
 - dict-spill / serve-wave-a2 / zk-xpath-ieee754-migration: had committed+dirty work → OPUS FINISHER AGENTS RELAUNCHED (running now).
-- zk-compose / zk-trace-engine / neon-intersect: 0 commits (died before committing) → NEED FULL RELAUNCH (not yet done — held to avoid over-parallelizing on Opus).
+- zk-xpath-ieee754-migration: MERGED+PUSHED (f3bdb4c, gate 713/0). Opus finisher kept floor/ceil_float bit-twiddle on bb-gates evidence.
+- zk-compose / zk-trace-engine: RELAUNCHED on fresh worktrees from current main (the old branches were based on stale b436188, pre-zk-core). Salvaged uncommitted pre-crash work: zk-compose had a Fable-built dynamic-(k,n) circuit scaffold (zk/compose/compose_core + scan_k*/filter_* packages) → restored into the new worktree (29 src files, /tmp/zk-salvage/compose-scaffold backup). zk-trace had a partial exec.rs/zk.rs diff → /tmp/zk-salvage/zktrace-partial.patch (reference only, based on stale main). Both agents running.
+- neon-intersect: 0 commits, STILL PARKED — measure-first spike needs a QUIET machine; relaunch when other agents idle. Old worktree (../sparq-neon @ b436188) still exists, removable.
 - EC2: could NOT verify (AWS SSO token expired — `aws sso login --profile pss` to re-check). Prior handover says nothing was ever launched; the 8B run is gated on dict-spill so it never started. LOW risk but UNVERIFIED.
 
 ## RESUME PROTOCOL if THIS session dies: (1) re-auth AWS + verify no sparq-hw-validation instance running; (2) check each worktree STATUS.md + `git log main..HEAD`; (3) gate+push merge-ready branches one at a time; (4) relaunch any 0-commit branches.
