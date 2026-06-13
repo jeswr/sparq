@@ -1,8 +1,10 @@
 // [OPUS-4.8] MpcBackend trait — abstracts the secret-sharing / MPC primitive.
-//! The MPC primitive abstraction (interface only; no crypto at M0).
+//! The MPC primitive abstraction. The trait is primitive-agnostic; the first
+//! concrete impl is [`crate::shamir::ShamirBackend`] (honest-majority, M3).
 //!
 //! Architecture refs: §3.1 (secret-sharing families & network model), §4.2
-//! (trust & threat model), and the load-bearing OPEN QUESTION **§5.2 Q2**.
+//! (trust & threat model), and decision point **§5.2 Q2** (resolved for v1 =
+//! honest-majority; configurable long-term).
 //!
 //! ## The decision point this trait exists to defer (Q2)
 //!
@@ -30,9 +32,36 @@
 //! Q2 resolves that way) are swappable without touching the join or proof
 //! layers. Convention #7 (modularity is the contribution) demands exactly this.
 //!
-//! Every method that would touch secret-shared data returns
-//! [`MpcError::NotYetImplemented`] naming the gate. No method here fakes a
-//! sharing scheme.
+//! ## Q2 RESOLVED for v1 + how the trust model stays CONFIGURABLE
+//!
+//! Jesse's decision: **honest-majority for v1, configurable long-term.** The
+//! concrete v1 impl is [`crate::shamir::ShamirBackend`] (honest-majority Shamir
+//! `t`-of-`n`, semi-honest). The trait keeps that choice swappable:
+//!
+//! - **Callers select a backend by [`TrustModel`], never by concrete type.** A
+//!   federation inspects [`BackendInfo`] and refuses a backend whose guarantees
+//!   don't match its threat model. The join/proof layers are written against the
+//!   `MpcBackend` trait (e.g. [`crate::join::HiddenValueJoin`] takes *a backend*,
+//!   not "Shamir"), so substituting a dishonest-majority impl touches NO caller.
+//! - **The associated [`MpcBackend::Share`] type absorbs the scheme change.**
+//!   Shamir's share is a per-party polynomial-point vector; a SPDZ-style
+//!   dishonest-majority backend's share is an *authenticated* additive share
+//!   (value + MAC tag) with a preprocessing (triples) phase. Both hide behind
+//!   `type Share`, so the difference never leaks into the join/proof signatures.
+//! - **What a dishonest-majority (SPDZ/MASCOT/Overdrive) backend would add, all
+//!   BEHIND this trait:** (1) an input-independent preprocessing step producing
+//!   Beaver triples + MACs (a private step, not a trait change); (2) `run_secure`
+//!   consuming triples for multiplications and tracking MACs; (3)
+//!   `reconstruct_disclosed` doing a MAC-check before opening (abort on cheat →
+//!   guarantee (D), malicious security). It reports
+//!   `TrustModel::DishonestMajority` + `malicious_secure: true` via
+//!   [`BackendInfo`]. Crucially the `share_private_input` / `run_secure` /
+//!   `reconstruct_disclosed` SIGNATURES are unchanged, so
+//!   [`crate::join::HiddenValueJoin`] and the future collaborative-proof layer
+//!   compose onto it unmodified.
+//!
+//! No trust model is hardcoded into the join/protocol layer: it is a property of
+//! the chosen `MpcBackend` value, surfaced via [`BackendInfo`].
 
 use crate::holder::Holder;
 use crate::partial::{MpcError, PartialResult};
@@ -76,16 +105,20 @@ pub struct BackendInfo {
 /// scheme's share representation so honest- and dishonest-majority impls can
 /// carry entirely different share types behind the same trait.
 ///
-/// ## TODO(Q2) — THE DECISION POINT
-/// Choosing honest- vs dishonest-majority (and, on a WAN, secret-sharing vs
-/// garbled-circuit) reshapes `Share`, the round structure, and the preprocessing
-/// model. Resolve Q2 (architecture §5.2) BEFORE the first concrete impl (M3).
-/// The use-case question — do *cooperating* flatmates vs an external landlord
-/// actually need dishonest-majority among holders? — gates this.
+/// ## Q2 DECISION (resolved for v1)
+/// Honest- vs dishonest-majority (and, on a WAN, secret-sharing vs garbled-
+/// circuit) reshapes `Share`, the round structure, and the preprocessing model.
+/// **v1 resolves Q2 to honest-majority** (Jesse's decision: honest-majority now,
+/// configurable long-term) — the four *cooperating* flatmates prove an aggregate
+/// to an external landlord; among themselves they are honest-but-curious, the
+/// regime Shamir serves. Dishonest-majority remains future research behind this
+/// same trait (see the module-level "how the trust model stays CONFIGURABLE").
 ///
 /// ## Implementation status
-/// No implementor exists at M0. The first will be an honest-majority backend
-/// (M3, see `PLAN.md`), behind this trait so it stays swappable.
+/// First concrete implementor: [`crate::shamir::ShamirBackend`] (M3, honest-
+/// majority Shamir `t`-of-`n`, semi-honest). It implements all three methods
+/// below for real (over an in-process multi-party simulation). A dishonest-
+/// majority impl slots in behind the same trait unchanged.
 pub trait MpcBackend {
     /// The scheme-specific representation of a secret share. Opaque to the rest
     /// of the crate; only this trait's impl manipulates it.
@@ -100,21 +133,25 @@ pub trait MpcBackend {
     /// never leave a source"). Contrast [`Holder::evaluate_local`], which
     /// discloses; this path hides.
     ///
-    /// Gated on Q2 (no scheme chosen) and on the ZK foundation; returns
-    /// [`MpcError::NotYetImplemented`].
+    /// Implemented by [`crate::shamir::ShamirBackend`] (M3): extracts the
+    /// holder's single private integer and Shamir-shares it across the parties.
     fn share_private_input(&self, holder: &Holder) -> Result<Vec<Self::Share>, MpcError>;
 
     /// Run the secure computation over secret-shared inputs from all holders
-    /// (e.g. the cumulative-salary comparison whose per-source addends stay
+    /// (e.g. the cumulative-salary aggregate whose per-source addends stay
     /// private). Returns the shares of the result.
     ///
-    /// Gated on Q2; returns [`MpcError::NotYetImplemented`].
+    /// Implemented by [`crate::shamir::ShamirBackend`] (M3) for the cumulative
+    /// sum — a pure linear function, so it is the zero-round local addition of
+    /// the sharings (the honest-majority Shamir sweet spot).
     fn run_secure(&self, shares: &[Self::Share]) -> Result<Vec<Self::Share>, MpcError>;
 
     /// Reconstruct ONLY the disclosed output from result shares (the minimal
-    /// answer — e.g. a boolean `cumulative > £100k`), under the
+    /// answer — e.g. the cumulative integer, from which the verifier recomputes
+    /// `cumulative > £100k` OUTSIDE the crypto), under the
     /// no-proof-of-revealed-properties discipline (§2 convention #4).
     ///
-    /// Gated on Q2; returns [`MpcError::NotYetImplemented`].
+    /// Implemented by [`crate::shamir::ShamirBackend`] (M3) via Lagrange
+    /// interpolation of the result sharing at `x = 0`.
     fn reconstruct_disclosed(&self, result_shares: &[Self::Share]) -> Result<PartialResult, MpcError>;
 }

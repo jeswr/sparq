@@ -59,7 +59,7 @@ main; the proof layer plugs into that seam.)
 **Gate:** do not start M3/M4 until #3/#4/#5/#6/#8/#9/#12 are closed AND have
 negative e2e tests.
 
-### M2 — `GlobalJoin` protocol  🟡 disclosed-key DONE; hidden-value deferred
+### M2 — `GlobalJoin` protocol  ✅ disclosed-key DONE; hidden-value now in M3
 Join holders' partials on GLOBAL IRIs (architecture §2 #6, §4.3 step 4).
 - **DONE ✅ — the disclosed-key equi-join** (`JoinPlan::key_disclosed == true`):
   [`DisclosedKeyJoin`] in `src/join.rs`. A crypto-free, plaintext equi-join over
@@ -81,31 +81,90 @@ Join holders' partials on GLOBAL IRIs (architecture §2 #6, §4.3 step 4).
     multi-row fan-out); plus empty-result holder, single-holder identity, empty
     federation, and the absent-key soundness error. Native-only invariant
     re-verified: `cargo tree -p sparq-wasm` still excludes `sparq-mpc`.
-- **DEFERRED — the hidden-value path** (`key_disclosed == false`): PRIVATE join
-  values that must enter a circuit-PSI / oblivious join. Honest
-  `NotYetImplemented` naming the gate. Gated on M3's backend AND on **Q2** (trust
-  model) and **Q3** (BGP-join obliviousness cost; how much the out-of-circuit
-  handling collapses, and for which fragment — RQ2b). NOT faked.
+- **DONE in M3 ✅ — the hidden-value path** (`key_disclosed == false`): PRIVATE
+  join values via the secret-shared equality test (circuit-PSI core). See M3
+  ([`HiddenValueJoin`]). The disclosed-key [`DisclosedKeyJoin`] still routes the
+  hidden regime away (it is the crypto-free path), so asking it to handle private
+  keys remains an honest `NotYetImplemented` — the private capability lives in
+  the dedicated type, not faked into the disclosed-key one.
 
-### M3 — `MpcBackend` (honest-majority first)
-First concrete secret-sharing impl behind the trait (architecture §3.1, §4.2).
-- **DECISION POINT Q2** must be resolved first: confirm honest-majority is
-  acceptable for the use case (cooperating flatmates vs external landlord), and
-  pick LAN secret-sharing vs WAN garbled-circuit.
-- Implement honest-majority (replicated 3PC SS) `share_private_input` /
-  `run_secure` / `reconstruct_disclosed` for the cumulative-aggregate sub-case.
-- Dishonest-majority remains future research, swappable behind the same trait.
+### M3 — `MpcBackend` (honest-majority Shamir) + hidden-value join  ✅ DONE [OPUS-4.8]
+First concrete secret-sharing impl behind the trait + the hidden-value join.
+- **Q2 RESOLVED for v1: honest-majority, semi-honest** (Jesse's decision:
+  honest-majority now, configurable long-term). The four flatmates *cooperate*
+  among themselves (honest-but-curious) to prove an aggregate to an external
+  landlord — the regime Shamir serves. LAN secret-sharing chosen (the aggregate
+  is linear → zero-round under Shamir; WAN garbled-circuit unneeded for v1).
+- **Scheme: Shamir `t`-of-`n` over `F_p`** (`p = 2^61-1` Mersenne, dependency-
+  free `u128` reduction). Chosen over **replicated 3PC** because the use case is
+  "any N cooperating flatmates" (replicated is n=3-only) and the secured
+  aggregate is linear → Shamir's free local addition is the right cost profile.
+  `t = ⌊(n-1)/2⌋` (honest majority). `field.rs` + `shamir.rs`. [OPUS-4.8]
+- **Implemented (REAL, in-process multi-party simulation):**
+  - `MpcBackend` for `ShamirBackend`: `share_private_input` (Shamir-share a
+    holder's private salary), `run_secure` (cumulative sum — zero rounds),
+    `reconstruct_disclosed` (Lagrange at 0 → the disclosed integer; the verifier
+    recomputes `> £100k` OUTSIDE the crypto, M5).
+  - Secret-shared **equality test** (`secure_equal`): `d=a-b`, mask by fresh
+    nonzero `r`, one Shamir multiplication (`mul_shares_raw`, degree 2t), open
+    `m=d·r`; `m==0 ⇔ a==b`, leaking ONLY the match bit. Keys never reconstructed.
+  - `HiddenValueJoin`: all-pairs oblivious join on a PRIVATE key driven by the
+    equality test, disclosing only the matching payload columns.
+- **Tested (`cargo test -p sparq-mpc --release`, 32 pass):** DIFFERENTIAL —
+  (a) secure cumulative sum == plaintext sum; (b) hidden-value join == plaintext
+  inner join over the union (overlap, no-overlap, multi-match fan-out, empty
+  side). Plus: field arithmetic vs reference modulo; share/reconstruct round-
+  trip; the threshold actually hides (a <=t-share set is consistent with a
+  DIFFERENT secret — information-theoretic hiding witness); reconstruction below
+  t+1 errors; the equality primitive in isolation (n=5,t=2). Native-only
+  invariant re-verified: `cargo tree -p sparq-wasm` excludes `sparq-mpc`.
+- **Security model (stated, not papered over):** honest-majority **semi-honest**.
+  Privacy holds while `< t+1` parties pool shares; each party learns only its
+  shares + the disclosed output. **NOT malicious-secure** (guarantee D) — a
+  malicious party feeding inconsistent shares is out of scope for v1. Malicious
+  honest-majority (VSS / IT-MACs, ≈2×) is future hardening behind the SAME trait.
+- **Honest scope / what is scaffolded (not faked):** the join is `O(|L|·|R|)`
+  all-pairs (real circuit-PSI uses cuckoo bins — that ~linear optimisation is
+  **Q3 / RQ2b, NOT done**); the key→`Fp` encoding is the holder's responsibility
+  and needs a collision-resistant hash whose correctness is proven in-circuit in
+  production (here controlled so the differential is exact); the simulation RNG
+  is a deterministic SplitMix64 — **production needs a CSPRNG** for the dealer's
+  masking coefficients (flagged in `shamir.rs`, not hidden).
+- **Configurability (Jesse's requirement):** the trust model is a property of
+  the chosen `MpcBackend` value (`BackendInfo::trust_model`), never hardcoded in
+  the join/proof layer. A dishonest-majority (SPDZ/MASCOT) backend slots in
+  behind the SAME trait — adds preprocessing (Beaver triples + MACs) and a
+  MAC-check before opening, changes only `type Share`, leaves
+  `share_private_input`/`run_secure`/`reconstruct_disclosed` SIGNATURES and all
+  callers untouched. Documented in `backend.rs`.
+- **Feasibility envelope (honest — minutes, not seconds):** one multiplication
+  round per candidate pair → `|L|·|R|` secure equality tests for the join; the
+  all-pairs structure IS the cost center the literature flags (ORQ SOSP'25: TPC-H
+  joins under MPC run minutes-to-tens-of-minutes; "joins are the cost center,
+  obliviousness forces worst-case padding"). Viable regime only: honest-majority,
+  LAN, ≤10³–10⁴ rows/holder. Do NOT extrapolate to WAN / dishonest-majority
+  (zero published data points).
 
 ### M4 — Collaborative proof + distributed attestation  ⚠️ THE HARD PROBLEM (SPIKE)
 The contribution AND the principal research risk (architecture §5.2 Q1, §3.4).
+**This is what remains after M3** — M3 gives confidentiality (A) over real
+secret-shared computation, but NOT correctness-proof (B) or attestation (C) to a
+relying party. Those are M4, and M4 is the Q1 dependency:
 - **SPIKE, not routine engineering:** distributed signature/commitment-opening
-  over secret-shared witnesses inside a collaborative proof.
+  over secret-shared witnesses inside a collaborative proof — **Q1, unsolved in
+  the literature** ("the join nobody has built"). M3's secret-sharing layer is
+  the substrate the collaborative witness would be shared over, but verifying a
+  BBS+/EdDSA signature over that shared witness inside one emitted proof is the
+  open research problem; M3 does NOT touch it.
 - Use PATCHED collaborative-SNARK constructions (eprint 2025/1026 soundness
   pitfalls) + a FRESH soundness audit (architecture §5.2 Q4).
 - Bind: correctness (`Disclosed(π) ⊆ Eval_PAG(Q,D)`), attested source
   (issuer-key set-membership over K), query digest, FILTER, per-row attribution,
   fresh challenge.
-- Hard-blocked on M1 (the whole ZK foundation) and on M3 (the chosen backend).
+- **Hard-blocked on M1** (the whole ZK foundation #3/#4/#5/#6/#8/#9/#12 — until
+  these land, a collaborative proof composes onto a verifier that returns `Ok`
+  for forged results: theatre) **AND on M3** (the chosen backend — now DONE).
+  M3 → M4 is gated on Q1 + the ZK estate, NOT on more MPC-primitive work.
 
 ### M5 — Disclosed-aggregate recompute OUTSIDE the crypto
 Implement convention #4 end-to-end: DISTINCT / ORDER BY / LIMIT / OFFSET /
@@ -125,10 +184,14 @@ regime that has zero published data points.
 ---
 
 ## Decision-point / dependency summary
-- **Q1** decided/spiked at **M4** (gates the collaborative proof + attestation).
-- **Q2** decided at **M3** (gates the first MpcBackend; influences M2's hidden
-  path).
-- **Q3** (BGP-join obliviousness cost / RQ2b) analysed at **M2** hidden path.
+- **Q1** decided/spiked at **M4** (gates the collaborative proof + attestation) —
+  **the principal thing that remains.** Unsolved in the literature; SPIKE.
+- **Q2** ✅ DECIDED at **M3**: honest-majority Shamir for v1 (configurable behind
+  the trait long-term). Done.
+- **Q3** (BGP-join obliviousness cost / RQ2b) — surfaced concretely at **M3**:
+  the hidden-value join is `O(|L|·|R|)` all-pairs; the ~linear cuckoo-bin /
+  oblivious-hashing optimisation and the fragment it applies to is **still open**
+  (analysis + impl remain).
 - **Q4** (coZK soundness post-2025/1026) re-audited at **M4**.
 - **Hard dependency:** M1 (ZK foundation #3/#4/#5/#6/#8/#9/#12) gates M4 entirely
   and is a prerequisite for any relying-party meaning.
