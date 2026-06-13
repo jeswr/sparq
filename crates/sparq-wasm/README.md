@@ -44,24 +44,18 @@ OFFSET, sub-SELECT.
 The same engine optimisations apply in WASM, where memory and main-thread time are
 scarcest. The whole `count()` family is **lazy** — counted straight from the sorted
 indexes with no result row built per solution — so "how many?" UI queries stay on the
-main thread without jank. Measured in Node over a 400k-triple graph (`test/perf.cjs`,
-2020 M1 MacBook Air):
+main thread without jank. The `test/perf.cjs` harness measures lazy-count vs materialise
+latency in Node over a 400k-triple graph for LIMIT / type-count / join-count / star-count
+/ filter-count / OPTIONAL-count and their materialising counterparts. Run it for the
+numbers:
 
-| query | time |
-|---|--:|
-| `SELECT * … LIMIT 10` (early-termination, no full scan) | **0.06 ms** |
-| `count(?s a Person)` (lazy, index range size) | **0.02 ms** |
-| `count(follows · name)` (count-only 2-pattern join) | 4.2 ms |
-| `count(name·age·city)` (lazy **N-pattern star** count, Σ_s Π c_i(s)) | **2.5 ms** |
-| `count(FILTER(?a > 90))` (binary-searched range size on inline ints) | **0.07 ms** |
-| `count(name OPTIONAL age)` (lazy left-join, Σ_s c_l·max(1,c_r)) | **2.1 ms** |
-| `FILTER(?a > 90)` **materialise** (same predicate, builds rows) | 7.0 ms |
-| `OPTIONAL` **materialise** (sort-merge left join, builds rows) | 167 ms |
+```sh
+node test/perf.cjs
+```
 
 The lazy-count wins built for the native engine carry over unchanged (same
-`sparq-core`/`sparq-engine`): counting a filtered pattern is **~95× faster** than
-materialising it (0.07 vs 7 ms), and counting an OPTIONAL is **~80× faster** than
-materialising it (2.1 vs 167 ms) — a large saving on a memory-constrained device.
+`sparq-core`/`sparq-engine`): counting a filtered pattern or an OPTIONAL is far cheaper
+than materialising it — a large saving on a memory-constrained device.
 
 ## Browser memory bound (the scale ceiling)
 
@@ -69,23 +63,23 @@ The browser is the memory-constrained target — wasm32 linear memory caps at 4 
 real tab is happier under ~2 GB. The wasm build therefore enables `compact-index`: only
 **three** permutation indexes (SPO, POS, OSP) instead of six — every triple pattern is
 still answered by one of them, but ~half the index memory (some merge joins fall back to
-hashing). Measured in Node over synthetic N-Triples (`test/mem.cjs`, M1), with the same
-compact prefix-factored dictionary + byte-level parser as native:
+hashing). The `test/mem.cjs` harness measures the store footprint (B/triple) for `load`
+(raw) vs `loadCompressed` over synthetic N-Triples and derives the browser triple ceiling;
+the per-commit `store_bytes_per_triple` / `dict_bytes_per_term` metrics are also tracked
+on the perf dashboard (<https://jeswr.github.io/sparq/dev/bench>). Run it for the numbers:
 
-| triples | mode | store | B/triple | browser ceiling |
-|--:|---|--:|--:|---|
-| 2.1 M | `load` (raw) | 140 MB | 67 | ~30 M @2 GB / ~60 M @4 GB |
-| 2.1 M | `loadCompressed` | 56 MB | **27** | **~75 M @2 GB / ~150 M @4 GB** |
+```sh
+node test/mem.cjs
+```
 
-So a browser tab holds roughly **30 M triples** raw, or **~75 M with `loadCompressed`** —
-which (a) BLOCK-COMPRESSES the three permutations (delta + LEB128-varint, decoded per
-touched block), (b) compacts the dictionary's id→term storage into a single blob (no
-per-term `Box<str>`), and (c) makes the numeric-value cache SPARSE (most terms are
+`loadCompressed` (a) BLOCK-COMPRESSES the three permutations (delta + LEB128-varint,
+decoded per touched block), (b) compacts the dictionary's id→term storage into a single
+blob (no per-term `Box<str>`), and (c) makes the numeric-value cache SPARSE (most terms are
 IRIs/strings, and small integers inline — so the dense f64-per-term cache is mostly NaN;
-only real numeric literals are kept). Together they cut the total from 67 → 27 B/triple
-(**−60%**, i.e. ~2.5× more triples in the same tab) for a small per-scan decode (identical
-results). `loadCompressed` is the right default when the tab's RAM, not its CPU, is the
-constraint. The byte-level parser keeps load throughput high (~1.5 M/s, single-threaded —
+only real numeric literals are kept). Together they cut the store substantially (~2.5× more
+triples in the same tab) for a small per-scan decode (identical results). `loadCompressed`
+is the right default when the tab's RAM, not its CPU, is the constraint. The byte-level
+parser keeps load throughput high (single-threaded —
 wasm has no rayon) without allocating an `oxrdf::Term` per term. Correctness of the
 reduced-permutation + compressed engine is held to the same bar as native (differential
 fuzz cases vs Oxigraph with `compact-index` AND the compressed store). The native build

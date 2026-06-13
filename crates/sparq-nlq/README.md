@@ -112,7 +112,7 @@ Measured (Apple M1, 16 GB, `--release`, 2026-06-10):
 | Execution success | 9/9 |
 | Result sanity (non-empty + exact row counts + spot-checked values) | 9/9 |
 | Repair rounds used | exactly 1 (the scripted malformed query) |
-| LLM-excluded `ask()` latency | **p50 10.5 ms, max 41.5 ms** (gate: p50 < 50 ms — green) |
+| LLM-excluded `ask()` latency | gate: p50 < 50 ms (the recorded p50/max print from the example below) |
 
 Re-record the fixture whenever the prompt template, default `NlqConfig`, or dataset
 changes:

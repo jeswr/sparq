@@ -202,26 +202,19 @@ Recipe notes:
 
 `tests/recall.rs` asserts **HNSW recall@10 ≥ 0.95 vs exact brute force** on
 50 000 random 32-d vectors (100 queries), as an ordinary `cargo test` (the
-workspace raises the dev opt-level for this crate so the gate stays fast).
-
-Measured: **recall@10 = 0.998–0.999** with the default `HnswConfig`
-(`ef_search = ef_construction = 100`, fixed seed).
+workspace raises the dev opt-level for this crate so the gate stays fast). The
+measured recall with the default `HnswConfig` (`ef_search = ef_construction = 100`,
+fixed seed) prints from the test — run it for the current figure.
 
 ## Throughput
 
-Measured by `tests/throughput.rs` —
-`cargo test -p sparq-vectors --release --test throughput -- --ignored --nocapture` —
-on an Apple M1, 50 000 × 32-d vectors, k = 10, 200 queries. Ranges span two
-runs (quiet vs heavily loaded machine); rerun the harness on your hardware:
+`tests/throughput.rs` measures `put` / `finalize` / `open` / HNSW build / exact
+vs HNSW top-10 query rates on an Apple M1, 50 000 × 32-d vectors, k = 10, 200
+queries. Run it for the numbers (they are machine- and load-dependent):
 
-| Operation                  | Time            |
-| -------------------------- | --------------- |
-| `put` 50k vectors (RAM)    | 7–10 ms         |
-| `finalize` (write + mmap)  | 7–22 ms         |
-| `open` (mmap + index validation) | 0.6–0.9 ms |
-| HNSW build (rayon)         | 33–83 s         |
-| exact top-10 (full scan)   | 6.5–11.8 ms/query (85–150 q/s) |
-| HNSW top-10                | 1.6–2.5 ms/query (400–630 q/s) |
+```sh
+cargo test -p sparq-vectors --release --test throughput -- --ignored --nocapture
+```
 
 Below ~10⁵ vectors the exact scan is a fine default; the HNSW index pays for
 its build once query volume is high. The HNSW index is rebuilt from the mmap'd
@@ -248,12 +241,13 @@ let hits = index.nearest(&query, 10); // Vec<(Id, cosine)>, best first
 
 Each on-disk node record co-locates the node's id, its (normalized) vector, and
 its ≤ `R` neighbour slots, so one greedy-search hop is one contiguous page read.
-**Recall@10 = 0.966 vs exact brute force** on the 50k×32 synthetic set, and a
-reopened handle returns byte-identical neighbours to the freshly built one.
+Recall@10 vs exact brute force on the 50k×32 synthetic set is asserted by
+`tests/diskann.rs` (run it for the figure), and a reopened handle returns
+byte-identical neighbours to the freshly built one.
 *Scope note:* full-precision vectors are searched straight from the mmap; the
 PQ-compressed in-RAM candidate cache that *full* DiskANN ranks on now exists as
 a standalone, tested layer (`src/quant.rs`, below) but is **not yet wired into
-`search_slots`** — that integration is the recorded follow-up in `TODO.md`. The
+`search_slots`** — that integration is tracked in beads. The
 Vamana build is single-threaded and a little slower than the rayon HNSW build,
 but the **open** is what this buys you: no per-process rebuild.
 
@@ -287,20 +281,13 @@ let candidates = cache.rank_pq(&table, 50);    // RAM-only coarse ranking → Ve
 // …then re-rank `candidates` against full-precision vectors for the final top-k.
 ```
 
-**Measured recall@10** on a 10k clustered synthetic set at **8×** compression
-(`M=16`, vs 32-d × 4 B = 128 B → 16 B):
-
-| ranking                                   | recall@10 |
-| ----------------------------------------- | --------- |
-| PQ-alone (rank on codes, truncate to 10)  | ~0.60     |
-| PQ candidate filter (top-50) + full-precision re-rank | ~0.98 |
-
-PQ codes are a coarse *filter*, not a final ranking — the re-rank pass is what
-recovers near-exact recall, which is exactly why DiskANN re-ranks the beam on
-disk. Compression trades against PQ-alone recall: `M = dim` (4×) lifts PQ-alone
-to ~0.94, while 32× (dim=128, `M=16`) drops it to ~0.23 (~0.61 after re-rank).
-`encode_store` produces the `EncodedStore` in-RAM cache that `DiskAnnIndex`
-would rank on; the wiring into `search_slots` is the recorded follow-up.
+Recall@10 at 8× compression (`M=16`) is measured by the crate's quantization
+tests for two rankings — PQ-alone (a coarse filter) and PQ candidate filter +
+full-precision re-rank (which recovers near-exact recall, the reason DiskANN
+re-ranks the beam on disk); run the tests for the figures. Compression trades
+against PQ-alone recall (higher `M` / lower compression lifts it). `encode_store`
+produces the `EncodedStore` in-RAM cache that `DiskAnnIndex` would rank on; the
+wiring into `search_slots` is tracked in beads.
 
 ## Tests
 

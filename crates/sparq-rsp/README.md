@@ -172,27 +172,22 @@ How each closed window becomes the graph the engine evaluates is the
 
 ## Throughput
 
-`cargo run --release -p sparq-rsp --example throughput` — 1 M synthetic sensor
-readings (100 sensors, 1 triple per tick), time windows, Apple M1, rustc 1.93
-(triples/s; windowing only — no query — runs at 2.33 M triples/s):
+The `throughput` example benchmarks the three [`EvalMode`]s (Rebuild v1,
+PersistentDict, Delta) head-to-head over 1 M synthetic sensor readings (100 sensors,
+1 triple/tick) across tumbling / sliding / GROUP BY window scenarios, reporting
+triples/s per mode. Run it for the numbers:
 
-| scenario | Rebuild (v1) | PersistentDict | Delta |
-|---|---|---|---|
-| `AVG(?v)`, RANGE 100 STEP 100 (tumbling) | 1.13 M | **1.51 M** | 1.07 M |
-| `AVG(?v)`, RANGE 1000 STEP 1000 (tumbling) | 1.55 M | **1.93 M** | 1.87 M |
-| `AVG(?v)`, RANGE 10000 STEP 10000 (tumbling) | 1.61 M | **3.08 M** | 1.70 M |
-| `AVG(?v)`, RANGE 1000 STEP 100 (sliding 10×) | 0.26 M | **0.95 M** | 0.29 M |
-| `AVG(?v)`, RANGE 10000 STEP 1000 (sliding 10×) | 0.27 M | **1.44 M** | 0.36 M |
-| `AVG` per sensor (GROUP BY), RANGE 1000 | 1.68 M | **2.52 M** | 2.01 M |
+```sh
+cargo run --release -p sparq-rsp --example throughput
+```
 
-`PersistentDict` wins every scenario (1.2–5.3× over the v1 rebuild — the
-sliding rows are exactly the "~90 % of each build is redone work" case the v1
-TODO predicted) and is the default. `Delta` never wins: `apply_delta` works at
-the term level (interning inserts, `id_of` per delete) and overlay rows are
-re-sorted per scan, so its savings are eaten before the engine runs. The
-remaining per-window cost in `PersistentDict` is the index build
-(`TripleStore::from_triples`) plus the numeric/temporal caches (O(dictionary)
-per window) — removing those needs the core cheap-snapshot seam (see TODO).
+`PersistentDict` wins every scenario over the v1 rebuild (the sliding rows are
+exactly the "~90 % of each build is redone work" case) and is the default. `Delta`
+never wins: `apply_delta` works at the term level (interning inserts, `id_of` per
+delete) and overlay rows are re-sorted per scan, so its savings are eaten before the
+engine runs. The remaining per-window cost in `PersistentDict` is the index build
+(`TripleStore::from_triples`) plus the numeric/temporal caches (O(dictionary) per
+window) — removing those needs the core cheap-snapshot seam (tracked in beads).
 
 The registered query is parsed ONCE at `register` time into a
 `sparq_engine::PreparedQuery`; each window executes the prepared algebra

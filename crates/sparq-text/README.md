@@ -112,17 +112,13 @@ with `ORDER BY DESC(?s)` over a `text:score` variable.
 
 ## Benchmark
 
-`cargo run --release -p sparq-text --example bench_text` — 1,000,000 distinct
-8-word literals over a ~10k-token Zipf-flavoured vocabulary, Apple M-class
-laptop (2026-06-12, **contended machine — rough figures**):
+The `bench_text` example builds an index over 1,000,000 distinct 8-word literals
+over a ~10k-token Zipf-flavoured vocabulary and reports graph-load / index-build
+time, index size (B/doc), and AND / OR / prefix query latency. Run it for the
+numbers (machine- and load-dependent):
 
-```
-graph load     : 1000000 literal triples in 425.40ms
-index build    : 1000000 docs, 10000 tokens in 745.57ms (1.34 Mdocs/s)
-index size     : ~101.3 MiB heap (106.2 B/doc)
-AND 2 terms    :    169.5 µs/query (3.5 avg hits)
-OR  2 terms    :    252.4 µs/query (3858.3 avg hits)
-prefix (4 ch)  :  40259.7 µs/query (336528.8 avg hits)
+```sh
+cargo run --release -p sparq-text --example bench_text
 ```
 
 Query cost is dominated by the number of hits scored: the synthetic

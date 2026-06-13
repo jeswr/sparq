@@ -85,16 +85,18 @@ reward. `fuse_scores(&text, &structural, alpha, k)` is the tunable alternative
 `bench/qlever-olympics/olympics.nt` (134,730 foaf:Person + SportsTeam/SportsEvent/
 Olympics/Sport/City), ground truth = `rdf:type`, **type triples excluded from
 signatures** (leakage rule, design doc §5.5). Stratified per-class sampling (40 per
-class — the data is 98% Person). Apple M1, 16 GB, rustc 1.89, `--release`.
-Reproduce: `cargo run -p sparq-sim --example olympics_eval --release`.
+class — the data is 98% Person).
 
-| Metric | Result | Gate |
-|---|---|---|
-| precision@10 (`most_similar`, same-class) | **0.999** (2398/2400, FULL coverage) | > 0.7 ✅ |
-| AUC, `Predicates` mode (class separation) | **1.000** | > 0.8 ✅ |
-| AUC, `PredicateNeighbor` mode (pairwise) | 0.605 | (see note) |
-| `most_similar(k=10)` latency, 240 calls | mean **1.75 ms**, p50 **0.77 ms**, p95 **10.4 ms**, max 16.3 ms | ms-level ✅ |
-| Load 1.78M triples + `Sim::new` | 0.9 s | — |
+The `olympics_eval` example reports the quality + latency metrics and checks them
+against their gates (precision@10 same-class > 0.7; `Predicates`-mode class-separation
+AUC > 0.8; ms-level `most_similar(k=10)` latency). Run it for the numbers:
+
+```sh
+cargo run -p sparq-sim --example olympics_eval --release
+```
+
+The gate it enforces, and the two AUC interpretations below, are the load-bearing
+part — the absolute figures print from the example.
 
 **Note on the two AUCs.** Pairwise AUC asks "do two random same-class entities score
 higher than two cross-class ones?". In `PredicateNeighbor` mode most same-class pairs

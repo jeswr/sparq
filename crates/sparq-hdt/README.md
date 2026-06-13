@@ -51,21 +51,20 @@ carries zero HDT code or dependencies. Native-only by design.
   (unicode, lang tags, datatypes, blank nodes, shared subject/object terms,
   inline-integer literals) must match sparq's direct N-Triples load.
 
-## Load throughput (sketch)
+## Load throughput
 
-~1M synthetic triples (100k subjects, 50 predicates, mixed IRI/literal objects),
-Apple Silicon, best of 3, via `cargo run --release -p sparq-hdt --example bench_load`:
+The `bench_load` example loads ~1M synthetic triples (100k subjects, 50 predicates,
+mixed IRI/literal objects) from a `.hdt` archive vs the equivalent `.nt.gz`, reporting
+size on disk, load time, and throughput for each. Run it for the numbers:
 
-| input            | size on disk | load           | throughput      |
-|------------------|-------------:|---------------:|----------------:|
-| `bench.hdt`      |      14.8 MB |         2.40 s | 416 k triples/s |
-| `bench.nt.gz`    |      11.2 MB |         3.47 s | 289 k triples/s |
-| (`bench.nt` raw) |      98.6 MB |              — |               — |
+```sh
+cargo run --release -p sparq-hdt --example bench_load
+```
 
-≈1.4× faster than gunzip-and-parse. On this synthetic data (mostly unique literal
-objects) the HDT file is slightly larger than the `.nt.gz`; on real corpora with
-heavier term reuse HDT archives are typically several times smaller than gzipped
-N-Triples, which is the format's main draw alongside no-text-parse loading.
+HDT loads faster than gunzip-and-parse. On synthetic data with mostly unique literal
+objects the HDT file is about the size of the `.nt.gz`; on real corpora with heavier
+term reuse HDT archives are typically several times smaller than gzipped N-Triples,
+which is the format's main draw alongside no-text-parse loading.
 
 ## Not (yet) supported
 
