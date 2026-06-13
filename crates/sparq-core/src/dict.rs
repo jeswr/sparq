@@ -241,7 +241,7 @@ fn hash_term(t: &Term) -> u64 {
 /// Content hash of a borrowed term — same value as `hash_term` for the same term, computed
 /// from already-split components (no `Term`, no IRI concat). Used to route the sharded
 /// interner without reconstructing a `Term` per occurrence.
-fn hash_termparts(tp: &TermParts) -> u64 {
+pub(crate) fn hash_termparts(tp: &TermParts) -> u64 {
     match tp {
         TermParts::Iri { prefix, suffix } => hash_iri_parts(prefix, suffix),
         TermParts::Lit { value, datatype, lang } => hash_lit(value, datatype, *lang),
@@ -339,7 +339,7 @@ fn reconstruct_triple(d: &Dict, ids: [Id; 3]) -> Term {
 /// A borrowed view of a compact stored term, parsed zero-copy from a term BLOB (the
 /// concatenated record format shared by the in-memory compacted dict and the mmap'd
 /// out-of-core dict). Mirrors [`Stored`] but with `&str` slices into the blob.
-enum StoredRef<'a> {
+pub(crate) enum StoredRef<'a> {
     Iri { prefix: u32, suffix: &'a str },
     Lit { value: &'a str, datatype: u32, lang: Option<&'a str> },
     Blank(&'a str),
@@ -1225,8 +1225,11 @@ impl Dict {
         blob.flush()?;
         write_pod_slice(&dir.join("dict-offs.bin"), &offsets)?;
 
-        // hash-sorted parallel arrays (binary-searchable lookup).
-        pairs.sort_unstable_by_key(|&(h, _)| h);
+        // hash-sorted parallel arrays (binary-searchable lookup). Sorted by (hash, id) —
+        // not just hash — so equal-hash tie order is CANONICAL: the spilled-dict build
+        // (`dictspill`) produces these files by external sort and must match byte-for-byte.
+        // Lookup semantics are unchanged (it walks the whole equal-hash range).
+        pairs.sort_unstable();
         let hashes: Vec<u64> = pairs.iter().map(|&(h, _)| h).collect();
         let ids: Vec<u32> = pairs.iter().map(|&(_, id)| id).collect();
         write_pod_slice(&dir.join("dict-hash.bin"), &hashes)?;
@@ -1443,14 +1446,14 @@ impl Dict {
 
 // ---- (de)serialisation helpers for save/open --------------------------------
 
-fn write_str(w: &mut impl std::io::Write, s: &str) -> std::io::Result<()> {
+pub(crate) fn write_str(w: &mut impl std::io::Write, s: &str) -> std::io::Result<()> {
     w.write_all(&(s.len() as u32).to_le_bytes())?;
     w.write_all(s.as_bytes())
 }
 
 /// Writes one compact term record (the format `parse_stored_ref` reads) and returns the
 /// number of bytes written — for building the mmap term blob + its offset index.
-fn write_record(w: &mut impl std::io::Write, t: &StoredRef) -> std::io::Result<u64> {
+pub(crate) fn write_record(w: &mut impl std::io::Write, t: &StoredRef) -> std::io::Result<u64> {
     Ok(match t {
         StoredRef::Iri { prefix, suffix } => {
             w.write_all(&[0])?;

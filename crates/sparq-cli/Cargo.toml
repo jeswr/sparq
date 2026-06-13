@@ -15,8 +15,11 @@ readme = "../../README.md"
 # Out-of-core querying (memory-mapped on-disk indexes) — on by default for the CLI.
 # mimalloc: the global allocator (T1.0). On by default; `--no-default-features --features mmap`
 # falls back to the system allocator for A/B measurement of allocator contention.
-default = ["mmap", "mimalloc"]
+default = ["mmap", "mimalloc", "dict-spill"]
 mmap = ["sparq-core/mmap"]
+# Spillable build-time term dictionary for `build` (bounded peak RSS; env-gated at
+# runtime via SPARQ_DICT_SPILL — default behavior is unchanged when the vars are unset).
+dict-spill = ["sparq-core/dict-spill"]
 mimalloc = ["dep:mimalloc"]
 # HDT ingestion (`<file>.hdt[.gz]` / format "hdt") via the opt-in sparq-hdt crate.
 # OFF by default for two deliberate reasons: (1) sparq-hdt's MSRV is 1.87 (the

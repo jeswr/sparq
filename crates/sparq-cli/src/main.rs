@@ -356,6 +356,11 @@ fn cmd_recompress(args: &[String]) {
 /// via disk-backed sort/merge, so a dataset whose indexes exceed RAM can be constructed on
 /// a small machine. `chunk_millions` (default 16) sets the in-memory run size (16M triples
 /// ≈ 192 MB of ids); lower it to cap memory further. Query the result with `query-mmap`.
+///
+/// SPARQ_DICT_SPILL=1 additionally SPILLS the term dictionary (N-Triples only): peak RSS
+/// is bounded by SPARQ_DICT_SPILL_BUDGET_MB (default: 1/4 of RAM) instead of growing with
+/// distinct terms; SPARQ_DICT_SPILL_DISK_FLOOR_MB (default 1024) aborts before filling the
+/// disk. Output is byte-identical. See research/external-dictionary.md.
 fn cmd_build(args: &[String]) {
     let (path, format, dir) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(d)) => (p.as_str(), f.as_str(), d.as_str()),
