@@ -16,3 +16,9 @@ __pycache__/
 # roborev snapshots
 /.roborev/
 STATUS.md
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
