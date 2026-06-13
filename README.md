@@ -56,6 +56,16 @@ Opt-in capability crates (none is a dependency of the core; zero wasm impact, en
 | [`sparq-bench`](crates/sparq-bench) | dataset generation, differential correctness vs Oxigraph, scaling harness |
 | [`sparq-gpu`](crates/sparq-gpu) | wgpu compute prototype — measured and parked ([verdict](research/gpu-verdict.md)) |
 
+<!-- [OPUS-4.8] section written/updated by Opus 4.8 (Fable 5 unavailable) — re-review when Fable returns -->
+## Using sparq with AI agents
+
+sparq ships its usage docs as [Agent Skills](https://agentskills.io) (the open `SKILL.md`
+format) so a coding agent can discover how to *use* the engine across every surface. Start with
+[`AGENTS.md`](AGENTS.md) (a README for agents), then [`skills/SKILL.md`](skills/SKILL.md) — the
+router that points at the per-surface skill (Rust, CLI, HTTP, Python, JS/WASM, plus reasoning,
+SHACL, full-text, vector, GeoSPARQL, RSP-QL, ZK query proofs). In Claude Code, install them as a
+plugin: `/plugin marketplace add jeswr/sparq` then `/plugin install sparq@sparq-tools`.
+
 ## Usage
 
 > **Note (crates.io installs):** builds installed from crates.io (e.g. `cargo install
