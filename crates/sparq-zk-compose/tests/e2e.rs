@@ -29,7 +29,7 @@ use sparq_zk_compose::manifest::{
 };
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
-    encode_artifacts, verify_manifest, verify_manifest_structure, CheckError, KeySet,
+    encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, KeySet,
 };
 use sparq_zk::field::Fr;
 use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
@@ -238,7 +238,7 @@ fn manifest_serde_round_trip() {
 #[test]
 fn structure_accepts_well_formed_manifest() {
     let m = sample_manifest();
-    verify_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))).expect("structure verifies");
+    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))).expect("structure verifies");
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn structure_rejects_inconsistent_binding_edge() {
     if let ProofInputs::FilterInt { operand_enc, .. } = &mut m.sub_proofs[1].inputs {
         *operand_enc = FieldHex("0xdeadbeef".into());
     }
-    match verify_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))) {
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))) {
         Err(CheckError::BindingInconsistent { edge: 0 }) => {}
         other => panic!("expected BindingInconsistent, got {other:?}"),
     }
@@ -260,7 +260,7 @@ fn structure_rejects_arity_mismatch() {
     let mut m = sample_manifest();
     // The query has 1 BGP pattern; declare 2 attributions.
     m.attributions = vec![vec![0], vec![0]];
-    assert!(verify_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))).is_err());
+    assert!(prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))).is_err());
 }
 
 #[test]
@@ -270,7 +270,7 @@ fn structure_rejects_circuit_id_mismatch() {
     if let ProofInputs::Scan { id, .. } = &mut m.sub_proofs[0].inputs {
         *id = CircuitId::Scan { k: 2, n: 16, r: 4 };
     }
-    match verify_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))) {
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))) {
         Err(CheckError::CircuitIdMismatch { proof: 0, .. }) => {}
         other => panic!("expected CircuitIdMismatch, got {other:?}"),
     }
@@ -286,7 +286,7 @@ fn structure_rejects_cross_graph_bnode_join() {
     m.attributions = vec![vec![0], vec![1]];
     m.join_obligations = vec![]; // omit the obligation on ?x
     assert!(matches!(
-        verify_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))),
+        prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))),
         Err(CheckError::Sparqzk(_))
     ));
 }
@@ -870,7 +870,7 @@ fn attacker_filter_d1_artifacts(
 // this phase. The bb public-input vector already cryptographically binds the
 // scan pattern constants and the FILTER op/bound/expected/operand_enc (audit #1,
 // landed on main); this stage checks those bound values MATCH the query the
-// relying party reads. They are STRUCTURAL (`verify_manifest_structure`, no bb)
+// relying party reads. They are STRUCTURAL (`prefilter_manifest_structure`, no bb)
 // because every value the gate inspects is in the declared ProofInputs — so they
 // run in default CI without the toolchain, and they cannot be masked by a later
 // crypto failure (the structural gate runs first). The happy-path composed
@@ -944,7 +944,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
     };
-    match verify_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
         other => panic!("expected UnboundFilter(o), got {other:?}"),
     }
@@ -970,7 +970,7 @@ fn filter_reject_filter_add_on_scan_only() {
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
     };
-    match verify_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
         other => panic!("expected UnboundFilter(o), got {other:?}"),
     }
@@ -996,7 +996,7 @@ fn filter_reject_constant_swap_age_as_salary() {
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
     };
-    match verify_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k()) {
         Err(CheckError::UnboundPattern { pattern: 0 }) => {}
         other => panic!("expected UnboundPattern(0), got {other:?}"),
     }
@@ -1042,7 +1042,7 @@ fn filter_reject_operand_slot_substitution() {
         // Edge points at proof 0 (salary scan) slot 2 — the WRONG column for ?age.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 2 }],
     };
-    match verify_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "age" => {}
         other => panic!("expected UnboundFilter(age), got {other:?}"),
     }
@@ -1082,7 +1082,7 @@ fn filter_reject_false_verdict_row() {
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
     };
-    match verify_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
         other => panic!("expected UnboundFilter(o), got {other:?}"),
     }
@@ -1108,7 +1108,7 @@ fn filter_reject_unbindable_filter_fragment() {
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
     };
-    match verify_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k()) {
         Err(CheckError::Sparqzk(_)) => {}
         other => panic!("expected Sparqzk(UnsupportedFragment), got {other:?}"),
     }
@@ -1149,7 +1149,7 @@ fn filter_binding_happy_path_structure() {
     // [OPUS-4.8] audit #3/#9: attest the scan (salt-bound). `scan_inputs_for`
     // commits under salt byte 9, so the attestation salt must match.
     attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
-    verify_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)))
+    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)))
         .expect("correct composed FILTER manifest verifies structurally");
 }
 
@@ -1206,7 +1206,7 @@ fn filter_reject_unproven_failing_row() {
         // Edge only for row 0 — row 1 has no true-verdict filter proof.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
     };
-    match verify_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
         other => panic!("expected UnboundFilter(o) for the unproven failing row, got {other:?}"),
     }
@@ -1258,7 +1258,7 @@ fn filter_two_rows_both_gated_verifies() {
     // [OPUS-4.8] audit #3/#9: attest the scan (salt-bound). `scan_inputs_for`
     // commits under salt byte 9.
     attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
-    verify_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)))
+    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)))
         .expect("both rows gated true => verifies");
 }
 
@@ -1314,7 +1314,7 @@ fn issuer_reject_unsigned_commitment() {
     let (m, _c, _salt) = scan_only_manifest(&credential_graph(), 7);
     // No commitment_attestations, no key_set. The external K trusts a real
     // issuer, so the rejection is "unattested", not "untrusted".
-    match verify_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))) {
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))) {
         Err(CheckError::UnattestedCommitment { proof: 0, .. }) => {}
         other => panic!("expected UnattestedCommitment, got {other:?}"),
     }
@@ -1339,7 +1339,7 @@ fn issuer_reject_invalid_signature() {
     m.key_set.push(public_key_to_hex(&sk.public_key()));
     // External K trusts sk (so the declared key_set is a valid subset); the
     // failure is the invalid signature, not the trust anchor.
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::InvalidIssuerSignature { .. }) => {}
         other => panic!("expected InvalidIssuerSignature, got {other:?}"),
     }
@@ -1387,7 +1387,7 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
     };
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::UnattestedCommitment { proof: 0, .. }) => {}
         other => panic!("expected UnattestedCommitment for the truncated recommit, got {other:?}"),
     }
@@ -1406,7 +1406,7 @@ fn issuer_reject_key_not_in_keyset() {
     // the external K — not a subset violation.
     let trusted = test_issuer_sk(3);
     m.key_set.push(public_key_to_hex(&trusted.public_key()));
-    match verify_manifest_structure(&m, &trusted_k(&trusted)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&trusted)) {
         Err(CheckError::IssuerKeyNotInKeySet { .. }) => {}
         other => panic!("expected IssuerKeyNotInKeySet, got {other:?}"),
     }
@@ -1421,7 +1421,7 @@ fn issuer_reject_empty_keyset() {
     m.commitment_attestations.push(attest_with_salt(c, salt, &signer));
     // The EXTERNAL K is empty (trusts no issuer); the declared key_set is empty
     // too, so the subset check is vacuous and the attestation key falls outside K.
-    match verify_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k()) {
         Err(CheckError::IssuerKeyNotInKeySet { .. }) => {}
         other => panic!("expected IssuerKeyNotInKeySet (empty K), got {other:?}"),
     }
@@ -1436,7 +1436,7 @@ fn issuer_accept_signed_commitment_in_keyset() {
     m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
     // The relying party's EXTERNAL K trusts exactly this issuer.
-    verify_manifest_structure(&m, &trusted_k(&sk))
+    prefilter_manifest_structure(&m, &trusted_k(&sk))
         .expect("issuer-signed, in-K commitment verifies");
 }
 
@@ -1451,7 +1451,7 @@ fn issuer_reject_unknown_cryptosuite() {
     att.cryptosuite = "https://sparq.dev/ns/zk#some-future-scheme".into();
     m.commitment_attestations.push(att);
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::InvalidIssuerSignature { .. }) => {}
         other => panic!("expected InvalidIssuerSignature (unknown cryptosuite), got {other:?}"),
     }
@@ -1488,7 +1488,7 @@ fn issuer_reject_prover_self_signed_key_not_in_external_k() {
     // The relying party's EXTERNAL K trusts a DIFFERENT, real issuer (the DMV,
     // say) — it has never heard of the prover's self-minted key.
     let real_issuer = test_issuer_sk(1);
-    match verify_manifest_structure(&m, &trusted_k(&real_issuer)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&real_issuer)) {
         // The prover tried to WIDEN the external trust anchor with its own key.
         Err(CheckError::UntrustedDeclaredKey { .. }) => {}
         other => panic!(
@@ -1511,7 +1511,7 @@ fn issuer_reject_prover_self_signed_empty_declared_keyset() {
     // manifest.key_set deliberately EMPTY (no subset violation to lean on).
     assert!(m.key_set.is_empty());
     let real_issuer = test_issuer_sk(1);
-    match verify_manifest_structure(&m, &trusted_k(&real_issuer)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&real_issuer)) {
         Err(CheckError::IssuerKeyNotInKeySet { .. }) => {}
         other => panic!(
             "expected IssuerKeyNotInKeySet (forged self-signed key not in external K), got {other:?}"
@@ -1531,7 +1531,7 @@ fn issuer_accept_when_external_k_trusts_the_key() {
     m.commitment_attestations.push(attest_with_salt(c, salt, &key));
     m.key_set.push(public_key_to_hex(&key.public_key()));
     // The relying party DECIDES to trust this issuer, out of band.
-    verify_manifest_structure(&m, &trusted_k(&key))
+    prefilter_manifest_structure(&m, &trusted_k(&key))
         .expect("verifies once the EXTERNAL K trusts the signing key");
 }
 
@@ -1563,7 +1563,7 @@ fn issuer_reject_declared_keyset_omits_attestation_key() {
         public_key_to_hex(&signer.public_key()),
         public_key_to_hex(&declared_only.public_key()),
     ]);
-    match verify_manifest_structure(&m, &trusted) {
+    match prefilter_manifest_structure(&m, &trusted) {
         Err(CheckError::AttestationKeyNotInDeclaredSet { .. }) => {}
         other => panic!(
             "expected AttestationKeyNotInDeclaredSet (declared narrowing omits real signer), got {other:?}"
@@ -1581,7 +1581,7 @@ fn issuer_accept_declared_keyset_includes_attestation_key() {
     let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
     m.commitment_attestations.push(attest_with_salt(c, salt, &signer));
     m.key_set.push(public_key_to_hex(&signer.public_key()));
-    verify_manifest_structure(&m, &trusted_k(&signer))
+    prefilter_manifest_structure(&m, &trusted_k(&signer))
         .expect("verifies once the declared key_set contains the real signer");
 }
 
@@ -1595,7 +1595,7 @@ fn issuer_accept_empty_declared_keyset_skips_consistency_check() {
     m.commitment_attestations.push(attest_with_salt(c, salt, &signer));
     // Deliberately leave the declared key_set empty (no narrowing).
     assert!(m.key_set.is_empty());
-    verify_manifest_structure(&m, &trusted_k(&signer))
+    prefilter_manifest_structure(&m, &trusted_k(&signer))
         .expect("empty declared key_set => external K governs, in-K attestation verifies");
 }
 
@@ -1715,7 +1715,7 @@ fn cross_graph_manifest(
 fn attribution_lie_collapse_two_graphs_rejected() {
     let sk = test_issuer_sk(1);
     let m = cross_graph_manifest(vec![vec![0], vec![0]], vec![], &sk);
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::AttributionUnderDeclared { proof_graph: 1, .. }) => {}
         other => panic!(
             "expected AttributionUnderDeclared (the [[0],[0]] collapse-two-graphs forge), got {other:?}"
@@ -1729,7 +1729,7 @@ fn attribution_lie_collapse_two_graphs_rejected() {
 fn attribution_lie_collapse_onto_graph_one_rejected() {
     let sk = test_issuer_sk(1);
     let m = cross_graph_manifest(vec![vec![1], vec![1]], vec![], &sk);
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::AttributionUnderDeclared { pattern: 0, proof_graph: 0 }) => {}
         other => panic!("expected AttributionUnderDeclared on pattern 0, got {other:?}"),
     }
@@ -1747,7 +1747,7 @@ fn attribution_honest_cross_graph_with_obligation_verifies() {
         vec![("x".to_string(), 0, 1)], // the required non-bnode obligation on ?x
         &sk,
     );
-    verify_manifest_structure(&m, &trusted_k(&sk))
+    prefilter_manifest_structure(&m, &trusted_k(&sk))
         .expect("honest [[0],[1]] cross-graph with a satisfied obligation verifies");
 }
 
@@ -1758,7 +1758,7 @@ fn attribution_honest_cross_graph_with_obligation_verifies() {
 fn attribution_honest_cross_graph_without_obligation_rejected() {
     let sk = test_issuer_sk(1);
     let m = cross_graph_manifest(vec![vec![0], vec![1]], vec![], &sk);
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::Sparqzk(_)) => {} // MissingObligation
         other => panic!("expected Sparqzk(MissingObligation), got {other:?}"),
     }
@@ -1777,7 +1777,7 @@ fn attribution_over_declared_is_accepted() {
         vec![("x".to_string(), 0, 1)],
         &sk,
     );
-    verify_manifest_structure(&m, &trusted_k(&sk))
+    prefilter_manifest_structure(&m, &trusted_k(&sk))
         .expect("over-declared (superset) attribution with obligation verifies");
 }
 
@@ -1820,9 +1820,67 @@ fn salt_reuse_across_distinct_graphs_rejected() {
         attest_with_salt(g0.commitment, reused, &sk),
         attest_with_salt(g1.commitment, reused, &sk),
     ];
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::SaltReused { .. }) => {}
         other => panic!("expected SaltReused (cross-graph salt collision), got {other:?}"),
+    }
+}
+
+/// [OPUS-4.8] codex 2223 LOW: an UNRELATED extra attestation that reuses a salt
+/// must NOT false-reject an otherwise-valid proof. The #9 salt-uniqueness
+/// property only concerns committed graphs a VERIFIED SCAN actually drew from;
+/// an attestation over a commitment NO scan references is out of scope.
+///
+/// Here a single-scan manifest carries a valid salt-bound attestation over its
+/// scan commitment, PLUS a second valid salt-bound attestation over a DIFFERENT
+/// (unreferenced) commitment under the SAME salt. Before the scoping fix the
+/// salt-uniqueness loop iterated every `commitment_attestations` entry and would
+/// reject this with `SaltReused`; after the fix only the scan-referenced
+/// commitment's salt participates, so it verifies.
+#[test]
+fn unrelated_extra_attestation_reusing_salt_does_not_reject() {
+    let sk = test_issuer_sk(1);
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let (mut m, c, _salt) = scan_only_manifest(&credential_graph(), 7);
+    // The genuine, scan-referenced commitment's salt-bound attestation.
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    // An UNRELATED commitment (no scan references it) attested under the SAME
+    // salt by the same trusted issuer. This is not the #9 channel: no verified
+    // scan draws bnodes from it, so reusing the salt cannot correlate anything.
+    let unrelated = c + Fr::from(12345u64);
+    assert_ne!(unrelated, c, "the extra attestation must cover a different commitment");
+    m.commitment_attestations.push(attest_with_salt(unrelated, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    prefilter_manifest_structure(&m, &trusted_k(&sk))
+        .expect("an unrelated extra attestation reusing a salt must not false-reject");
+}
+
+/// [OPUS-4.8] codex 2223 LOW companion: the scoping does NOT weaken the real #9
+/// guard — a salt reused across TWO SCAN-REFERENCED commitments still rejects.
+/// Two distinct committed graphs, each answering a query pattern (so BOTH are
+/// scan-referenced), share one salt ⇒ REJECT with `SaltReused`. (This is the
+/// same security property as `salt_reuse_across_distinct_graphs_rejected`, kept
+/// alongside the negative control so the pair documents the exact scope.)
+#[test]
+fn salt_reuse_across_two_scan_referenced_commitments_still_rejects() {
+    let sk = test_issuer_sk(1);
+    let reused = salt_from_bytes(&[42u8; 32]);
+    let g0 = commit_triples(&alice_age_graph(), reused).unwrap();
+    let g1 = commit_triples(&alice_role_graph(), reused).unwrap();
+    assert_ne!(g0.commitment, g1.commitment, "distinct content => distinct C(G)");
+    let mut m = cross_graph_manifest(vec![vec![0], vec![1]], vec![("x".into(), 0, 1)], &sk);
+    let age_pat = Pattern { s: Slot::Var, p: Slot::Const(Term::NamedNode(iri("http://ex/age"))), o: Slot::Var };
+    let role_pat = Pattern { s: Slot::Var, p: Slot::Const(Term::NamedNode(iri("http://ex/role"))), o: Slot::Var };
+    let commits = [g0.clone(), g1.clone()];
+    m.sub_proofs[0].inputs = build_scan(&commits, &age_pat).unwrap().inputs;
+    m.sub_proofs[1].inputs = build_scan(&commits, &role_pat).unwrap().inputs;
+    m.commitment_attestations = vec![
+        attest_with_salt(g0.commitment, reused, &sk),
+        attest_with_salt(g1.commitment, reused, &sk),
+    ];
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+        Err(CheckError::SaltReused { .. }) => {}
+        other => panic!("expected SaltReused (two scan-referenced graphs sharing a salt), got {other:?}"),
     }
 }
 
@@ -1843,7 +1901,7 @@ fn salt_swap_breaks_issuer_signature() {
     att.salt = Some(FieldHex::from_field(&salt_from_bytes(&[99u8; 32]))); // swapped
     m.commitment_attestations = vec![att];
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::InvalidIssuerSignature { .. }) => {}
         other => panic!("expected InvalidIssuerSignature (salt swap), got {other:?}"),
     }
@@ -1857,7 +1915,7 @@ fn distinct_salts_verify() {
     // cross_graph_manifest already uses distinct salts (10 vs 11) and salt-bound
     // attestations; with the obligation declared it verifies end to end.
     let m = cross_graph_manifest(vec![vec![0], vec![1]], vec![("x".into(), 0, 1)], &sk);
-    verify_manifest_structure(&m, &trusted_k(&sk))
+    prefilter_manifest_structure(&m, &trusted_k(&sk))
         .expect("distinct issuer-attested salts verify");
 }
 
@@ -1891,7 +1949,7 @@ fn forge_scan_covering_attestation_salt_none_rejected() {
     // scan-covering attestation may no longer be salt-less.
     m.commitment_attestations.push(attest(c, &sk)); // salt: None
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::ScanCommitmentSaltMissing { proof: 0, .. }) => {}
         other => panic!(
             "expected ScanCommitmentSaltMissing (salt-less scan-covering attestation must be rejected), got {other:?}"
@@ -1917,7 +1975,7 @@ fn forge_omitted_attribution_rejected() {
     }
     m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::AttributionMalformed { proof: 0, expected: 1, got: 0 }) => {}
         other => panic!(
             "expected AttributionMalformed (omitted attribution must be rejected), got {other:?}"
@@ -1942,7 +2000,7 @@ fn forge_wrong_length_attribution_rejected() {
     }
     m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match verify_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
         Err(CheckError::AttributionMalformed { proof: 0, expected: 1, got: 2 }) => {}
         other => panic!(
             "expected AttributionMalformed (wrong-length attribution must be rejected), got {other:?}"

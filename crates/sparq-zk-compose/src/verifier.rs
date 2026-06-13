@@ -43,8 +43,11 @@
 //!       vk).
 //!
 //! Stage 1+2 run WITHOUT bb (the fast structural gate); stage 3 is the
-//! cryptographic gate. [`verify_manifest_structure`] is the fast path;
-//! [`verify_manifest`] adds bb.
+//! cryptographic gate. [`prefilter_manifest_structure`] runs stages 1+2 ONLY and
+//! is NOT a sound verifier (it binds nothing to a proof — see its docs);
+//! [`verify_manifest`] is the sound public entry point: it runs the pre-filter
+//! then the bb verify + public-input reconstruction that binds the JSON
+//! statement (incl. attribution bits) to the proofs.
 
 use crate::build::{derive_filter_int_id, derive_scan_id};
 use crate::driver::{CircuitProver, DriverError};
@@ -78,7 +81,8 @@ use std::path::Path;
 /// vacuous. The trust anchor MUST come from outside the proof. A relying party
 /// constructs a [`KeySet`] from the issuer keys IT decides to trust (its policy
 /// / an issuer-key registry it resolves out of band) and passes it into
-/// [`verify_manifest`] / [`verify_manifest_structure`]. The accept decision then
+/// [`verify_manifest`] (the sound entry point) / [`prefilter_manifest_structure`]
+/// (the structural pre-filter). The accept decision then
 /// depends only on this external set; `manifest.key_set`, if present at all, is
 /// only accepted when it is a SUBSET of this external set (checked, never
 /// trusted as the anchor) — see [`bind_issuer_attestations`].
@@ -395,14 +399,34 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
     }
 }
 
-/// Stage 1+2: structural verification (no bb). Returns the required obligation
+/// Stage 1+2: the structural PRE-FILTER (no bb). Returns the required obligation
 /// edges on success.
+///
+/// # ⚠️ THIS IS NOT A VERIFIER — it provides NO cryptographic or attribution soundness.
+///
+/// [OPUS-4.8] codex 2223 MEDIUM. This runs only the JSON/structural stages
+/// (circuit-id re-derivation, binding-edge consistency, query-correctness
+/// binding, the cross-graph attribution length+superset gate, and the
+/// issuer-signature/salt checks). It does **NOT** run the bb proof verification
+/// and does **NOT** run the public-input reconstruction byte-compare. The
+/// attribution / pattern / filter / commitment bits it inspects are therefore
+/// **NOT cryptographically bound to any proof here** — a manifest can pass this
+/// pre-filter while its declared `ProofInputs` differ from what the bb proofs
+/// actually attest. The only thing that binds the JSON statement to the proof is
+/// [`verify_manifest`], whose stage 3 reconstructs the public-input vector from
+/// the DECLARED inputs and byte-compares it against each proof's `public_inputs`
+/// (and then runs `bb verify`). **A relying party MUST call [`verify_manifest`];
+/// this function is an internal fast pre-filter / test seam only and accepting a
+/// manifest on its result alone is unsound.**
+///
+/// The name was deliberately chosen so it cannot be mistaken for a verifier (it
+/// was `verify_manifest_structure`, which read as a verification entry point).
 ///
 /// `trusted_key_set` is the relying party's EXTERNALLY-anchored issuer trust set
 /// `K` (audit #3 codex #1) — NOT read from the manifest. Every committed graph's
 /// attestation key must be a member of THIS set, and the prover's
 /// `manifest.key_set` (if any) must be a subset of it. See [`KeySet`].
-pub fn verify_manifest_structure(
+pub fn prefilter_manifest_structure(
     manifest: &ProofManifest,
     trusted_key_set: &KeySet,
 ) -> Result<Vec<JoinEdge>, CheckError> {
@@ -559,6 +583,19 @@ fn bind_issuer_attestations(
         }
     }
 
+    // [OPUS-4.8] codex 2223 LOW: the verified per-graph salt for every commitment
+    // ACTUALLY REFERENCED by a verified scan sub-proof. The salt-uniqueness check
+    // (step 3) runs ONLY over this referenced set, not over every declared
+    // attestation: the #9 security property only concerns committed graphs a
+    // verified scan drew triples from, so an unrelated extra attestation reusing a
+    // salt must NOT false-reject a valid proof. Keyed by canonical commitment hex
+    // (so the same graph referenced by several scans records once); the value is
+    // the verified salt hex. Populated only after the attestation over `c` has
+    // fully verified (key ∈ K, signature valid, salt present + salt-bound), so a
+    // recorded salt is always issuer-attested.
+    let mut referenced_salt: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+
     for (pi, sp) in manifest.sub_proofs.iter().enumerate() {
         let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
             continue;
@@ -627,9 +664,9 @@ fn bind_issuer_attestations(
             // bare `commitment_message` remains a primitive used elsewhere; it is
             // not reachable from the default scan-verify path.) A salt that is
             // present but unparseable also fails closed.
-            let message = match &att.salt {
+            let salt_fr = match &att.salt {
                 Some(salt_hex) => match salt_hex.to_field() {
-                    Some(salt_fr) => commitment_message_with_salt(&commitment_fr, &salt_fr),
+                    Some(salt_fr) => salt_fr,
                     None => {
                         return Err(CheckError::InvalidIssuerSignature {
                             commitment: c.0.clone(),
@@ -643,6 +680,7 @@ fn bind_issuer_attestations(
                     })
                 }
             };
+            let message = commitment_message_with_salt(&commitment_fr, &salt_fr);
             let ok = SignatureScheme::from_cryptosuite_iri(&att.cryptosuite).is_some()
                 && match (
                     public_key_from_hex(&att.issuer_public_key),
@@ -656,35 +694,39 @@ fn bind_issuer_attestations(
                     commitment: c.0.clone(),
                 });
             }
+            // [OPUS-4.8] codex 2223 LOW: record the now-verified salt for this
+            // SCAN-REFERENCED commitment. Keyed by canonical commitment hex so the
+            // same graph referenced by multiple scans records a single entry; the
+            // salt-uniqueness gate (step 3) iterates only this set, so an unrelated
+            // extra attestation never participates.
+            referenced_salt.insert(field_to_hex(&commitment_fr), field_to_hex(&salt_fr));
         }
     }
 
-    // (3) Salt uniqueness (audit #9): no two DISTINCT commitments may share a
-    // salt. A reused salt is the Q6 cross-graph bnode-correlation channel — a
-    // same-label canonical bnode then encodes identically across both graphs.
-    // Only salt-bound attestations participate (a salt is issuer-attested by
-    // step 2 above), so this rejects an attacker-ingester that committed two
-    // genuinely-distinct graphs under one salt. Two attestations over the SAME
-    // commitment value sharing a salt are fine (the same graph attested twice).
+    // (3) Salt uniqueness (audit #9): no two DISTINCT committed graphs USED BY A
+    // VERIFIED SCAN may share a salt. A reused salt is the Q6 cross-graph
+    // bnode-correlation channel — a same-label canonical bnode then encodes
+    // identically across both graphs. [OPUS-4.8] codex 2223 LOW: this check is
+    // scoped to `referenced_salt` (commitments an actually-verified scan drew from)
+    // rather than every `manifest.commitment_attestations` entry. The #9 property
+    // only concerns committed graphs a verified scan used, so an UNRELATED extra
+    // attestation that happens to reuse a salt must NOT false-reject an otherwise
+    // valid proof. Each recorded salt is already issuer-attested (recorded only
+    // after the signature verified above). A salt reused across two distinct
+    // SCAN-referenced commitments still REJECTS. (Two attestations over the SAME
+    // commitment collapse to one entry by the commitment-keyed map and so are
+    // fine: the same graph attested twice.)
     let mut salt_to_commitment: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    for att in &manifest.commitment_attestations {
-        let Some(salt_hex) = &att.salt else { continue };
-        let Some(salt_fr) = salt_hex.to_field() else { continue };
-        let salt_key = field_to_hex(&salt_fr);
-        let commitment_key = att
-            .commitment
-            .to_field()
-            .map(|f| field_to_hex(&f))
-            .unwrap_or_else(|| att.commitment.0.clone());
-        match salt_to_commitment.get(&salt_key) {
-            Some(prev) if *prev != commitment_key => {
+    for (commitment_key, salt_key) in &referenced_salt {
+        match salt_to_commitment.get(salt_key) {
+            Some(prev) if prev != commitment_key => {
                 return Err(CheckError::SaltReused {
-                    salt: salt_hex.0.clone(),
+                    salt: salt_key.clone(),
                 });
             }
             _ => {
-                salt_to_commitment.insert(salt_key, commitment_key);
+                salt_to_commitment.insert(salt_key.clone(), commitment_key.clone());
             }
         }
     }
@@ -937,7 +979,7 @@ pub fn verify_manifest(
     work_dir: &Path,
     trusted_key_set: &KeySet,
 ) -> Result<(), CheckError> {
-    verify_manifest_structure(manifest, trusted_key_set)?;
+    prefilter_manifest_structure(manifest, trusted_key_set)?;
 
     // The challenge that MUST appear as public-input field 0 of every member.
     // It comes from the manifest's binding (a later agent binds this to a
@@ -1091,7 +1133,7 @@ fn reconstruct_public_inputs(
             // therefore yields a wrong-length vector that cannot byte-match.
             //
             // [OPUS-4.8] codex 2221 MEDIUM: `verify_manifest` runs
-            // `verify_manifest_structure` (stage 1b) FIRST, which already rejects
+            // `prefilter_manifest_structure` (stage 1b) FIRST, which already rejects
             // any scan whose `attribution.len() != k` (`AttributionMalformed`), so
             // on this path `attribution` is exactly k bits. The `unwrap_or(false)`
             // below is therefore belt-and-braces only (never the pad-to-false
