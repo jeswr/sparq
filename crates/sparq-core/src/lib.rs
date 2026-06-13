@@ -2286,15 +2286,57 @@ fn finish_sharded(sd: dict::ShardedDict, mut all: Vec<[Id; 3]>) -> (Dict, Vec<[I
     (dict, all)
 }
 
+/// [OPUS-4.8] (T1) Intern an oxttl-parsed subject (`NamedNode`/`BlankNode`) from its BORROWED
+/// `&str`, without materializing an owned `oxrdf::Term`. `subject_term` + `dict.intern(&Term)`
+/// built a heap `Term` per S — bumping the `NamedNode`/`BlankNode` ref-count (an `Arc`/`Rc` clone
+/// in oxrdf's interned-IRI representation) and constructing the `Term` enum — only for `intern`
+/// to immediately re-borrow `.as_str()` and dispatch right back to `intern_iri`/`intern_blank`.
+/// Here we dispatch on the borrowed component directly: the only allocation left is the one
+/// `intern_*` makes on a genuinely new term (copy into `Box<str>`), which is unavoidable.
+#[cfg(feature = "parallel")]
+#[inline]
+fn intern_subject_ref(dict: &mut Dict, s: &oxrdf::NamedOrBlankNode) -> Id {
+    match s {
+        oxrdf::NamedOrBlankNode::NamedNode(n) => dict.intern_iri(n.as_str()),
+        oxrdf::NamedOrBlankNode::BlankNode(b) => dict.intern_blank(b.as_str()),
+    }
+}
+
+/// [OPUS-4.8] (T1) Intern an oxttl-parsed object `Term` from its BORROWED components — the object
+/// slot is the one that can be a literal or (RDF-star) a quoted triple. IRIs/blank nodes/literals
+/// dispatch straight to the component interners with `&str` views; a nested triple term recurses
+/// (its s/p/o are interned first, then the triple is stored by component ids, matching
+/// `Dict::intern(&Term::Triple(_))`). No owned `Term` is built for the common non-star case.
+#[cfg(feature = "parallel")]
+#[inline]
+fn intern_object_ref(dict: &mut Dict, o: &Term) -> Id {
+    match o {
+        Term::NamedNode(n) => dict.intern_iri(n.as_str()),
+        Term::BlankNode(b) => dict.intern_blank(b.as_str()),
+        Term::Literal(l) => {
+            dict.intern_lit(l.value(), l.datatype().as_str(), crate::dict::lang_with_dir(l).as_deref())
+        }
+        // RDF-star quoted triple: rare; fall back to the owned-Term path (handles nesting +
+        // content-addressed triple ids identically to the serial parser).
+        Term::Triple(_) => dict.intern(o),
+    }
+}
+
 /// Serial Turtle parse of `bytes` into `dict` — the fallback and the per-chunk worker.
+///
+/// [OPUS-4.8] (T1) Interns each S/P/O directly from oxttl's already-parsed BORROWED term views
+/// (`intern_subject_ref` / `intern_iri` / `intern_object_ref`) instead of first materializing an
+/// owned `oxrdf::Term` per component and re-borrowing it in `dict.intern`. oxttl still does all
+/// tokenization, grammar and prefixed-name expansion — this only removes the per-triple `Term`
+/// heap churn between oxttl's output and the dict.
 #[cfg(feature = "parallel")]
 fn parse_turtle_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
     let mut triples = Vec::new();
     for t in TurtleParser::new().for_slice(bytes) {
         let t = t.map_err(|e| e.to_string())?;
-        let s = dict.intern(&subject_term(&t.subject));
-        let p = dict.intern(&Term::NamedNode(t.predicate.clone()));
-        let o = dict.intern(&t.object);
+        let s = intern_subject_ref(dict, &t.subject);
+        let p = dict.intern_iri(t.predicate.as_str());
+        let o = intern_object_ref(dict, &t.object);
         triples.push([s, p, o]);
     }
     Ok(triples)
