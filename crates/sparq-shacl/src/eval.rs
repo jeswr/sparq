@@ -507,7 +507,20 @@ impl<'a> Validator<'a> {
             }
             Component::Property(child) => {
                 for v in values {
+                    // [OPUS-4.8] Guard the direct validate_shape recursion against cyclic
+                    // sh:property references (e.g. A sh:property B / B sh:property A): without the
+                    // (focus, shape) re-entry check this overflows the stack. Re-entry into a
+                    // (value, child) pair already on the stack counts as conforming (SHACL leaves
+                    // recursion undefined and the validator treats a cycle as satisfied), so we
+                    // skip it — emitting no further results — and record the cycle reach so any
+                    // enclosing `conforms` frame skips its memo. Mirrors `conforms`'s guard. 1616.
+                    if let Some(i) = self.stack.iter().position(|(n, s)| n == v && *s == *child) {
+                        self.min_reentry = self.min_reentry.min(i);
+                        continue;
+                    }
+                    self.stack.push((v.clone(), *child));
                     self.validate_shape(*child, v, out);
+                    self.stack.pop();
                 }
             }
             Component::Qualified {
@@ -802,19 +815,34 @@ fn timestamp(value: &str, dt: &str) -> Option<(f64, bool)> {
             .unwrap_or(rest.len());
         let time_part = &rest[..tz_at];
         rest = &rest[tz_at..];
-        if !time_part.is_empty() {
-            let mut it = time_part.split(':');
-            let h: f64 = it.next()?.parse().ok()?;
-            let mi: f64 = it.next()?.parse().ok()?;
-            let s: f64 = it.next().unwrap_or("0").parse().ok()?;
-            if it.next().is_some() {
-                return None;
-            }
-            secs = h * 3600.0 + mi * 60.0 + s;
+        // [OPUS-4.8] xsd:dateTime / dateTimeStamp REQUIRE a time after the 'T'; the old code left
+        // secs=0 for an empty time part, accepting "2024-01-01T" / "2024-01-01TZ". Reject it. 1616.
+        if time_part.is_empty() {
+            return None;
         }
+        let mut it = time_part.split(':');
+        let h: f64 = parse_time_field(it.next()?, 2)?;
+        let mi: f64 = parse_time_field(it.next()?, 2)?;
+        // Seconds may carry a fractional part (ss.sss…); validate the integral part shape.
+        let s = parse_seconds_field(it.next().unwrap_or("00"))?;
+        if it.next().is_some() {
+            return None;
+        }
+        // [OPUS-4.8] Range-check the fields: hour 0..=24 (24 only as 24:00:00), minute/second
+        // 0..=59. The old code accepted out-of-range values like 99:99:99. 1616.
+        if h > 24.0 || mi > 59.0 || s >= 60.0 || (h == 24.0 && (mi != 0.0 || s != 0.0)) {
+            return None;
+        }
+        secs = h * 3600.0 + mi * 60.0 + s;
     }
     let tz_offset_secs = parse_tz(rest)?;
-    Some((days_from_civil(y, m, d) as f64 * 86_400.0 + secs - tz_offset_secs, !rest.is_empty()))
+    let has_tz = !rest.is_empty();
+    // [OPUS-4.8] xsd:dateTimeStamp requires an explicit timezone; a timezone-less value is NOT in
+    // its lexical space (this is the sole lexical difference from xsd:dateTime). See review 1616.
+    if local == "dateTimeStamp" && !has_tz {
+        return None;
+    }
+    Some((days_from_civil(y, m, d) as f64 * 86_400.0 + secs - tz_offset_secs, has_tz))
 }
 
 /// The byte index where a date lexical's optional timezone suffix starts.
@@ -842,12 +870,36 @@ fn parse_tz(s: &str) -> Option<f64> {
         _ => return None,
     };
     let mut it = rest.split(':');
-    let h: f64 = it.next()?.parse().ok()?;
-    let m: f64 = it.next()?.parse().ok()?;
-    if it.next().is_some() {
+    // [OPUS-4.8] Enforce the fixed ±hh:mm shape and the XSD timezone range (≤ ±14:00). The old
+    // bare f64 parse accepted "+9:5", "+99:99", etc. 1616.
+    let h = parse_time_field(it.next()?, 2)?;
+    let m = parse_time_field(it.next()?, 2)?;
+    if it.next().is_some() || h > 14.0 || m > 59.0 || (h == 14.0 && m != 0.0) {
         return None;
     }
     Some(sign * (h * 3600.0 + m * 60.0))
+}
+
+/// [OPUS-4.8] Parse a fixed-width all-digit time field (hh / mm) of exactly `width` digits.
+/// Rejects signs, whitespace, and wrong widths the bare f64 parse would otherwise accept. 1616.
+fn parse_time_field(s: &str, width: usize) -> Option<f64> {
+    if s.len() != width || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// [OPUS-4.8] Parse the seconds field `ss` or `ss.sss…`: two leading digits, an optional fraction
+/// of one-or-more digits. Returns the numeric value (range-checked by the caller). 1616.
+fn parse_seconds_field(s: &str) -> Option<f64> {
+    let (int_part, frac_ok) = match s.split_once('.') {
+        Some((i, f)) => (i, !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit())),
+        None => (s, true),
+    };
+    if !frac_ok || int_part.len() != 2 || !int_part.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 fn parse_date(s: &str) -> Option<(i64, u32, u32)> {
@@ -856,13 +908,47 @@ fn parse_date(s: &str) -> Option<(i64, u32, u32)> {
         None => (false, s),
     };
     let mut it = s.split('-');
-    let y: i64 = it.next()?.parse().ok()?;
-    let m: u32 = it.next()?.parse().ok()?;
-    let d: u32 = it.next()?.parse().ok()?;
-    if it.next().is_some() || m == 0 || m > 12 || d == 0 || d > 31 {
+    let ys = it.next()?;
+    let ms = it.next()?;
+    let ds = it.next()?;
+    // [OPUS-4.8] XSD lexical space is fixed-width: yyyy (≥4 digits), mm, dd, all ASCII digits.
+    // The plain f64/u32 parse below accepts e.g. "+04" or whitespace; enforce the shape. 1616.
+    if ys.len() < 4
+        || !ys.bytes().all(|b| b.is_ascii_digit())
+        || ms.len() != 2
+        || !ms.bytes().all(|b| b.is_ascii_digit())
+        || ds.len() != 2
+        || !ds.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let y: i64 = ys.parse().ok()?;
+    let m: u32 = ms.parse().ok()?;
+    let d: u32 = ds.parse().ok()?;
+    // [OPUS-4.8] Reject impossible calendar days (e.g. 2024-02-30, 2023-02-29, 2024-04-31): the
+    // old check only rejected d>31, so February 30th and April 31st passed as well-formed. 1616.
+    if it.next().is_some() || m == 0 || m > 12 || d == 0 || d > days_in_month(y, m) {
         return None;
     }
     Some((if neg { -y } else { y }, m, d))
+}
+
+/// [OPUS-4.8] Days in a (proleptic-Gregorian) month, accounting for leap years. The `y` is the
+/// signed calendar year as written (sign applied by the caller); leap rules are sign-symmetric for
+/// the purpose of day-count here. See review 1616.
+fn days_in_month(y: i64, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
 }
 
 /// Days since 1970-01-01 of a proleptic-Gregorian civil date (Howard Hinnant's
@@ -973,6 +1059,35 @@ mod tests {
         assert!(well_formed(&lit("2024-02-29", "date")));
         assert!(!well_formed(&lit("2024-13-01", "date")));
         assert!(well_formed(&lit("2024-02-29T12:00:00Z", "dateTime")));
+
+        // [OPUS-4.8] Stricter XSD date/time lexical validation (review 1616):
+        // impossible calendar days are rejected.
+        assert!(!well_formed(&lit("2023-02-29", "date")), "Feb 29 in a non-leap year");
+        assert!(!well_formed(&lit("2024-02-30", "date")), "Feb 30 never exists");
+        assert!(!well_formed(&lit("2024-04-31", "date")), "April has 30 days");
+        assert!(well_formed(&lit("2024-04-30", "date")));
+        assert!(well_formed(&lit("2000-02-29", "date")), "2000 is a leap year (÷400)");
+        assert!(!well_formed(&lit("1900-02-29", "date")), "1900 is not (÷100, ¬÷400)");
+        // dateTime requires a time component after 'T'.
+        assert!(!well_formed(&lit("2024-01-01T", "dateTime")), "missing time part");
+        assert!(!well_formed(&lit("2024-01-01TZ", "dateTime")), "empty time part");
+        // Out-of-range hour/minute/second.
+        assert!(!well_formed(&lit("2024-01-01T25:00:00", "dateTime")), "hour 25");
+        assert!(!well_formed(&lit("2024-01-01T12:60:00", "dateTime")), "minute 60");
+        assert!(!well_formed(&lit("2024-01-01T12:00:61", "dateTime")), "second 61");
+        assert!(well_formed(&lit("2024-01-01T24:00:00", "dateTime")), "24:00:00 is legal");
+        assert!(!well_formed(&lit("2024-01-01T24:00:01", "dateTime")), "24:00:01 is not");
+        assert!(well_formed(&lit("2024-01-01T12:30:45.5", "dateTime")), "fractional seconds");
+        // Out-of-range / malformed timezone.
+        assert!(!well_formed(&lit("2024-01-01T12:00:00+15:00", "dateTime")), "tz > ±14:00");
+        assert!(well_formed(&lit("2024-01-01T12:00:00+14:00", "dateTime")));
+        // dateTimeStamp requires an explicit timezone; dateTime does not.
+        assert!(well_formed(&lit("2024-01-01T12:00:00", "dateTime")), "tz-less dateTime ok");
+        assert!(
+            !well_formed(&lit("2024-01-01T12:00:00", "dateTimeStamp")),
+            "tz-less dateTimeStamp is NOT in its lexical space"
+        );
+        assert!(well_formed(&lit("2024-01-01T12:00:00Z", "dateTimeStamp")));
     }
 
     #[test]
