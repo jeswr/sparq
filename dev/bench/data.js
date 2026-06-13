@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781393175154,
+  "lastUpdate": 1781394241057,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -8010,6 +8010,153 @@ window.BENCHMARK_DATA = {
           {
             "name": "rdfs_infer_s",
             "value": 0.141,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1579288,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "committer": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "distinct": true,
+          "id": "b1ea87c727e7dbe3547eadecef365fed0d4ac553",
+          "message": "docs: repository hygiene cleanup — delete TODO.md + handover docs, codify where things live [OPUS-4.8]\n\nPer Jesse's request: turn TODOs into beads, move durable knowledge into\nAGENTS.md/skills, delete deprecated scratch docs, and add a going-forward\npolicy so no future cleanup runs are needed.\n\nDeleted (content fully migrated):\n- root TODO.md — its one substantial item (the cheap-snapshot API design) is\n  now bead sq-3p1 (full design in the bead's --design field; blocks the server\n  double-buffer / Python Graph.copy() / RSP overlay-snapshot consumers).\n- 9 per-crate TODO.md (geo/hdt/introspect/py/rsp/shacl/sim/vectors + js) — were\n  already bead-pointer stubs; deferred items + rationale live in beads (the\n  'from-md-todo' label), DONE-records live in git/CHANGELOG.\n- HANDOVER-CURRENT.md + HANDOVER-2026-06-12.md — session/orchestration scratch;\n  the work they tracked is done/beaded, durable rules live in Claude memory, and\n  the reusable bit (the gate/merge ritual) is now in AGENTS.md.\n\nKnowledge relocated / policy added:\n- AGENTS.md: new 'Repository hygiene — where things live' section (tasks→beads;\n  knowledge→AGENTS.md/CLAUDE.md/skills/README/research; no narrative scratch\n  docs; no hard-coded perf numbers). Enriched the build/lint/merge ritual.\n  Deduped the doubled SKILL.md maintenance rule. Genericised the machine-local\n  bd path.\n- CLAUDE.md: new thin pointer to AGENTS.md (Claude Code auto-reads it).\n\nDangling-reference sweep: repointed every 'see TODO.md' in crate READMEs, source\ncomments, Cargo.toml, and per-surface SKILL.md files at beads (bd list -l area:*).\n\nRemaining TODO markers beaded + stripped: the TODO(dict-spill) markers in\nbench/wikidata-8b/{RUNBOOK,STATUS}.md → bead sq-1q3 (post-merge runbook\nreconciliation).\n\nAlso: .gitignore now ignores .claude/worktrees/ (agent scratch).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T23:42:09Z",
+          "tree_id": "980a575406256e02b5893e4b1c2440f59df9d46f",
+          "url": "https://github.com/jeswr/sparq/commit/b1ea87c727e7dbe3547eadecef365fed0d4ac553"
+        },
+        "date": 1781394240367,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.533,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "parse_ns_per_byte",
+            "value": 4.8565,
+            "unit": "ns/byte"
+          },
+          {
+            "name": "store_bytes_per_triple_small",
+            "value": 88,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 3.9,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3016.5,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4339.4,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 5.8,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 4.7,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 749.3,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 12388.2,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 55349.9,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 148728.6,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 3026.1,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 4.5,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 39939.5,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 9805.1,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 56502.4,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 154012.3,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 3708.8,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 7.3,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 40928.1,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.137,
             "unit": "s"
           },
           {
