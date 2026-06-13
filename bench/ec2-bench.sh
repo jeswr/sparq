@@ -65,11 +65,20 @@ extract_invoke() {
       line=$0; sub(/^id[[:space:]]*=[[:space:]]*"/,"",line); sub(/".*/,"",line); cur=line
     }
     inblk && /^invoke[[:space:]]*=/ {
-      # Strip the opening `invoke = "`, then the CLOSING quote + any trailing inline
-      # comment. The pattern anchors at EOL so it removes only the final closing quote
-      # (preserving escaped \" inside the value, roborev #2277) yet still eats a
-      # `" # comment` tail (roborev #2264). A `#.*` inside the comment is consumed too.
-      line=$0; sub(/^invoke[[:space:]]*=[[:space:]]*"/,"",line); sub(/"[[:space:]]*(#.*)?$/,"",line); inv=line
+      # Parse the TOML basic string EXPLICITLY: walk to the first UNESCAPED closing
+      # quote, preserving escaped chars (\" \\ \n) verbatim, then ignore anything after
+      # (a trailing inline comment). A regex cannot distinguish \" from a real close or
+      # an in-string # from a comment, which kept truncating valid values
+      # (roborev #2264/#2277/#2278), so a regex is not used here.
+      line=$0; sub(/^invoke[[:space:]]*=[[:space:]]*"/,"",line)
+      out=""; n=length(line); i=1
+      while (i<=n) {
+        c=substr(line,i,1)
+        if (c=="\\" && i<n) { out=out c substr(line,i+1,1); i+=2; continue }
+        if (c=="\"") break
+        out=out c; i++
+      }
+      inv=out
     }
     inblk && cur==want && inv!="" && /^invoke[[:space:]]*=/ {
       print inv; found=1; exit
