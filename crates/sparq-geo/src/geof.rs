@@ -73,8 +73,11 @@ impl Unit {
         }
     }
 
-    /// Metres per 1.0 of this unit (metric units only).
-    fn meters_scale(self) -> Option<f64> {
+    /// Metres per 1.0 of this unit (metric units only); `None` for the angular
+    /// units (degree/radian), whose distance is euclidean coordinate-space — a
+    /// different metric the metre-keyed `GeoIndex` cannot bound (so the spatial
+    /// pushdown declines them, see `provider`). [OPUS-4.8]
+    pub(crate) fn meters_scale(self) -> Option<f64> {
         match self {
             Unit::Metre => Some(1.0),
             Unit::Kilometre => Some(1000.0),

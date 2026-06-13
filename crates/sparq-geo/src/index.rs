@@ -72,6 +72,11 @@ pub struct Entry {
     /// The `geo:asWKT` subject this entry was extracted from (the geometry
     /// node; equal to `entity` when the feature carries `geo:asWKT` directly).
     pub node: Term,
+    /// The original `geo:wktLiteral` term (the `geo:asWKT` OBJECT) this entry was
+    /// parsed from — the exact `Term` a SPARQL geometry variable binds to. The
+    /// spatial-pushdown candidate methods return THIS so the engine can map a
+    /// candidate back to a dictionary id by `Term` identity. [OPUS-4.8]
+    pub literal: Term,
     /// The named graph the entry came from; `None` for the default graph.
     pub graph: Option<Term>,
     pub geometry: GeoGeometry,
@@ -169,12 +174,14 @@ fn extract_graph(graph: &Graph, graph_name: Option<&Term>) -> (Vec<Entry>, usize
                 }
             };
             let node = graph.dict.term(s);
+            let literal = Term::Literal(lit.clone());
             match owners.get(&s) {
                 Some(features) => {
                     for &f in features {
                         entries.push(Entry {
                             entity: graph.dict.term(f),
                             node: node.clone(),
+                            literal: literal.clone(),
                             graph: graph_name.cloned(),
                             geometry: geometry.clone(),
                         });
@@ -183,6 +190,7 @@ fn extract_graph(graph: &Graph, graph_name: Option<&Term>) -> (Vec<Entry>, usize
                 None => entries.push(Entry {
                     entity: node.clone(),
                     node,
+                    literal,
                     graph: graph_name.cloned(),
                     geometry,
                 }),
@@ -340,10 +348,12 @@ impl GeoIndex {
                         continue;
                     }
                 };
+                let literal = Term::Literal(lit.clone());
                 if owners.is_empty() {
                     self.insert_entry(Entry {
                         entity: node.clone(),
                         node: node.clone(),
+                        literal,
                         graph: None,
                         geometry,
                     });
@@ -352,6 +362,7 @@ impl GeoIndex {
                         self.insert_entry(Entry {
                             entity: feature.clone(),
                             node: node.clone(),
+                            literal: literal.clone(),
                             graph: None,
                             geometry: geometry.clone(),
                         });
@@ -515,4 +526,68 @@ impl GeoIndex {
     pub fn intersects_wkt(&self, wkt_literal: &str) -> Result<Vec<&Term>, crate::GeoError> {
         Ok(self.intersects(&crate::parse_wkt_literal(wkt_literal)?))
     }
+
+    // ---- Spatial-pushdown candidates (sq-mg9) --------------------------------------
+    //
+    // These return the original `geo:wktLiteral` TERMS (`Entry::literal`), deduped, as a
+    // candidate SUPERSET for a `geof:` FILTER on a geometry variable. The SPARQL engine
+    // maps them back to dictionary ids by term identity and pre-restricts the binding rows
+    // before the exact `geof:` refinement runs — so a candidate set that is a superset of
+    // the true matches is necessary and sufficient for correctness (false positives are
+    // removed by the residual FILTER; false negatives would be a bug). [OPUS-4.8]
+
+    /// The distinct geometry LITERALS whose geometry lies within `meters` great-circle
+    /// metres of `center` — a candidate superset for `geof:distance(?g, center) <(=) r`.
+    /// Reuses the exact metric refinement of [`within_distance`](Self::within_distance),
+    /// so the only false positives are from MULTIPLE literals sharing one entity (the set
+    /// is keyed on the literal, not the entity).
+    pub fn within_distance_literals(&self, center: Point<f64>, meters: f64) -> Vec<Term> {
+        let windows = Self::ball_windows(center, meters);
+        let mut seen: FxHashSet<u32> = FxHashSet::default();
+        let mut out: Vec<Term> = Vec::new();
+        for window in &windows {
+            for item in self.tree.locate_in_envelope_intersecting(window) {
+                if !seen.insert(item.idx) {
+                    continue;
+                }
+                let e = self.slots[item.idx as usize].as_ref().expect("live slot");
+                if let Ok(d) = geof::point_to_geometry_meters(center, &e.geometry.geometry) {
+                    if d <= meters {
+                        out.push(e.literal.clone());
+                    }
+                }
+            }
+        }
+        dedupe(out)
+    }
+
+    /// The distinct geometry LITERALS whose bounding box intersects `geometry`'s bounding
+    /// box — a pure R-tree window scan (NO exact refinement), a candidate superset for
+    /// BOTH `geof:sfIntersects(?g, geometry)` and `geof:sfWithin(?g, geometry)` (A within B
+    /// ⟹ A intersects B ⟹ their AABBs intersect). The engine's residual `geof:` FILTER
+    /// does the exact check. Empty for a non-geographic / empty argument.
+    pub fn bbox_candidate_literals(&self, geometry: &GeoGeometry) -> Vec<Term> {
+        let rect = match geometry.geometry.bounding_rect() {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        if !geometry.crs.is_geographic() {
+            return Vec::new();
+        }
+        let window = AABB::from_corners([rect.min().x, rect.min().y], [rect.max().x, rect.max().y]);
+        let out: Vec<Term> = self
+            .tree
+            .locate_in_envelope_intersecting(&window)
+            .map(|item| self.slots[item.idx as usize].as_ref().expect("live slot").literal.clone())
+            .collect();
+        dedupe(out)
+    }
+}
+
+/// Order-preserving dedupe of candidate terms (the same literal can be indexed under
+/// several entities; the engine only needs each distinct binding once).
+fn dedupe(mut v: Vec<Term>) -> Vec<Term> {
+    let mut seen: FxHashSet<Term> = FxHashSet::default();
+    v.retain(|t| seen.insert(t.clone()));
+    v
 }

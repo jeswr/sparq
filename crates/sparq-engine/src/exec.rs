@@ -319,6 +319,63 @@ pub(crate) mod functions {
     }
 }
 
+// ---- Spatial index (sq-mg9) ----------------------------------------------------
+//
+// The thread-local [`SpatialProvider`] installed by `with_spatial_index`. The
+// planner consults it (`spatial::active`) to push a recognised `geof:` spatial
+// FILTER into a candidate window/range scan. Mirrors `functions` exactly: install
+// guard, plus a rayon-worker snapshot/re-install so the off-thread FILTER/BIND
+// branches see the same index. The overwhelmingly common case is NO index
+// installed, which makes the snapshot path free. [OPUS-4.8]
+pub(crate) mod spatial {
+    use crate::SpatialProvider;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<dyn SpatialProvider>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.with(|a| a.borrow_mut().take());
+        }
+    }
+
+    pub(crate) fn install(idx: Arc<dyn SpatialProvider>) -> Guard {
+        ACTIVE.with(|a| *a.borrow_mut() = Some(idx));
+        Guard
+    }
+
+    /// The installed spatial index, if any.
+    pub(crate) fn active() -> Option<Arc<dyn SpatialProvider>> {
+        ACTIVE.with(|a| a.borrow().clone())
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn snapshot() -> Option<Arc<dyn SpatialProvider>> {
+        ACTIVE.with(|a| a.borrow().clone())
+    }
+
+    pub(crate) struct WorkerGuard(Option<Option<Arc<dyn SpatialProvider>>>);
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.0.take() {
+                ACTIVE.with(|a| *a.borrow_mut() = prev);
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn worker_install(snap: &Option<Arc<dyn SpatialProvider>>) -> WorkerGuard {
+        match snap {
+            None => WorkerGuard(None),
+            Some(idx) => WorkerGuard(Some(ACTIVE.with(|a| a.borrow_mut().replace(idx.clone())))),
+        }
+    }
+}
+
 // ---- Dataset view (L1) ---------------------------------------------------------
 //
 // A thread-local named-graph-subset view installed by the `*_view` entry points /
@@ -1650,6 +1707,14 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             (eval_bgp(graph, &patterns)?, filters)
         };
         for f in &residual {
+            // Spatial pushdown (sq-mg9): if this residual FILTER is a pushable geof:
+            // predicate and a SpatialProvider is installed, pre-restrict the rows to the
+            // index's candidate superset over the geometry variable. The FILTER below
+            // STILL runs and does the exact refinement, so the result is unchanged — the
+            // pushdown only shrinks how many rows the exact `geof:` check examines.
+            if let Some(pd) = recognise_spatial(f) {
+                apply_spatial_pushdown(graph, &mut b, &pd);
+            }
             apply_filter(graph, local, &mut b, f)?;
         }
         return Ok(b);
@@ -2178,6 +2243,181 @@ pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression])
         residual.push(f.clone());
     }
     (pat_filters, residual)
+}
+
+// ---- Spatial FILTER pushdown (sq-mg9) ------------------------------------------
+//
+// Recognise a `geof:` spatial FILTER over an indexed geometry variable and, when a
+// SpatialProvider is installed, pre-restrict the bindings to the index's candidate
+// SUPERSET before the exact `geof:` refinement runs in `apply_filter`. The engine
+// stays geometry-free: it only lifts the geometry variable and the CONSTANT operands
+// out of the algebra and forwards them to the provider; all geometry math is the
+// provider's (sparq-geo's). Correctness is by construction — the candidate set is a
+// superset, the residual `geof:` FILTER is NOT removed, so the result is identical to
+// the post-hoc path. [OPUS-4.8]
+
+/// The geof: IRIs the planner can push down. (The engine cannot depend on
+/// sparq-geo's `vocab`, so the IRIs are mirrored here; they are W3C-fixed.)
+const GEOF_DISTANCE: &str = "http://www.opengis.net/def/function/geosparql/distance";
+const GEOF_SF_WITHIN: &str = "http://www.opengis.net/def/function/geosparql/sfWithin";
+const GEOF_SF_INTERSECTS: &str = "http://www.opengis.net/def/function/geosparql/sfIntersects";
+
+/// A recognised pushable spatial FILTER: the geometry variable to restrict, plus an
+/// OWNED description of the index query (so it outlives the borrowed algebra). The
+/// `SpatialQuery` handed to the provider borrows from the owned strings here.
+struct SpatialPushdown {
+    geo_var: Variable,
+    kind: SpatialKind,
+}
+
+enum SpatialKind {
+    DistanceWithin { point_wkt: String, radius: f64, unit_iri: String, inclusive: bool },
+    BboxIntersects { arg_wkt: String },
+}
+
+/// The `geo:wktLiteral` lexical form of a constant operand, if it is one. (The engine
+/// does not validate the WKT — the provider parses it and declines on failure.)
+fn wkt_const(e: &Expression) -> Option<&str> {
+    const WKT_LITERAL: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
+    match e {
+        Expression::Literal(l) if l.datatype().as_str() == WKT_LITERAL => Some(l.value()),
+        _ => None,
+    }
+}
+
+/// A `geof:distance(?g, point[, unit])` call → `(geo_var, point_wkt, unit_iri)`, with
+/// `?g` the geometry variable and the OTHER geometry operand a constant wktLiteral. The
+/// unit defaults to metre when omitted (GeoSPARQL `geof:distance` is arity-3, but be
+/// lenient). Symmetric in the two geometry args.
+fn match_geof_distance(args: &[Expression]) -> Option<(Variable, String, String)> {
+    const UOM_METRE: &str = "http://www.opengis.net/def/uom/OGC/1.0/metre";
+    if args.len() != 2 && args.len() != 3 {
+        return None;
+    }
+    let unit = if args.len() == 3 {
+        match &args[2] {
+            Expression::NamedNode(nn) => nn.as_str().to_string(),
+            _ => return None,
+        }
+    } else {
+        UOM_METRE.to_string()
+    };
+    let var_of = |e: &Expression| match e {
+        Expression::Variable(v) => Some(v.clone()),
+        _ => None,
+    };
+    // (?g, point) or (point, ?g): the geometry var on either side.
+    for (a, b) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+        if let (Some(v), Some(pt)) = (var_of(a), wkt_const(b)) {
+            return Some((v, pt.to_string(), unit));
+        }
+    }
+    None
+}
+
+/// Recognises a pushable spatial FILTER. Two shapes:
+///
+/// * `geof:distance(?g, point, unit) OP radius` with `OP ∈ {<, <=}` (the bound on the
+///   non-constant side) → a distance-within window;
+/// * `geof:sfWithin(?g, box)` / `geof:sfIntersects(?g, box)` used directly as the FILTER
+///   → a bbox/window scan.
+///
+/// `geof:sfContains/Overlaps/Touches/Crosses/Equals/Disjoint` and distance with `>`/`>=`
+/// (an unbounded EXTERIOR, no finite window) stay post-hoc — see the report.
+fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
+    use spargebra::algebra::Function;
+    // distance(...) OP radius — match the comparison, then the distance call inside.
+    let distance_cmp = |call: &Expression, radius: &Expression, inclusive: bool| -> Option<SpatialPushdown> {
+        let Expression::FunctionCall(Function::Custom(nn), cargs) = call else { return None };
+        if nn.as_str() != GEOF_DISTANCE {
+            return None;
+        }
+        let r = match radius {
+            Expression::Literal(l) => l.value().parse::<f64>().ok()?,
+            _ => return None,
+        };
+        if !r.is_finite() || r < 0.0 {
+            return None;
+        }
+        let (geo_var, point_wkt, unit_iri) = match_geof_distance(cargs)?;
+        Some(SpatialPushdown { geo_var, kind: SpatialKind::DistanceWithin { point_wkt, radius: r, unit_iri, inclusive } })
+    };
+    match e {
+        // A finite within-window needs distance on the SMALLER side: `distance(...) < r`
+        // or the mirror `r > distance(...)`. The opposite orientation (`r < distance` /
+        // `distance > r`) is an unbounded EXTERIOR — NOT pushable — so each arm matches
+        // exactly ONE operand orientation (asymmetric on purpose; the earlier symmetric
+        // `.or_else` wrongly recognised the exterior as a within-window). [OPUS-4.8]
+        Expression::Less(l, r) => distance_cmp(l, r, false), // distance(...) < r
+        Expression::LessOrEqual(l, r) => distance_cmp(l, r, true), // distance(...) <= r
+        Expression::Greater(l, r) => distance_cmp(r, l, false), // r > distance(...)
+        Expression::GreaterOrEqual(l, r) => distance_cmp(r, l, true), // r >= distance(...)
+        // geof:sfWithin(?g, box) / geof:sfIntersects(?g, box) as the whole FILTER.
+        Expression::FunctionCall(Function::Custom(nn), cargs) => {
+            let iri = nn.as_str();
+            if (iri == GEOF_SF_WITHIN || iri == GEOF_SF_INTERSECTS) && cargs.len() == 2 {
+                if let (Expression::Variable(v), Some(arg)) = (&cargs[0], wkt_const(&cargs[1])) {
+                    return Some(SpatialPushdown {
+                        geo_var: v.clone(),
+                        kind: SpatialKind::BboxIntersects { arg_wkt: arg.to_string() },
+                    });
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// If `b` binds the recognised geometry variable, restrict its rows to the provider's
+/// candidate superset over that variable, in place. Returns `true` when the pushdown
+/// fired (an index was installed AND served candidates) so the caller knows the residual
+/// FILTER still refines a SMALLER input set. A miss (no index, declined, or unbound var)
+/// is a no-op returning `false` — the residual FILTER then scans every row, unchanged.
+fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown) -> bool {
+    use crate::SpatialQuery;
+    let Some(col) = b.col(&pd.geo_var) else { return false };
+    let Some(idx) = spatial::active() else { return false };
+    let query = match &pd.kind {
+        SpatialKind::DistanceWithin { point_wkt, radius, unit_iri, inclusive } => {
+            SpatialQuery::DistanceWithin { point_wkt, radius: *radius, unit_iri, inclusive: *inclusive }
+        }
+        SpatialKind::BboxIntersects { arg_wkt } => SpatialQuery::BboxIntersects { arg_wkt },
+    };
+    let Some(cands) = idx.candidates(&query) else { return false };
+    // Map the candidate TERMS to dictionary ids for an O(1) membership test on the
+    // scanned column. A candidate term absent from the dict can never bind here, so
+    // dropping it from the id-set is safe (and keeps the set a superset of the matches).
+    let cand_ids: FxHashSet<Id> = cands.iter().filter_map(|t| graph.id_of(t)).collect();
+    // Drop a row ONLY when the index is AUTHORITATIVE over its binding AND excludes it:
+    // keep when the binding is a candidate (an indexed match) OR the index has no opinion
+    // on it (NOT indexed — e.g. bound via a non-`geo:asWKT` predicate, a non-geographic
+    // CRS, or a different graph). The residual `geof:` FILTER then judges every kept row,
+    // so a geometry the index never saw is NEVER silently dropped. This makes the result
+    // identical to the post-hoc path no matter which subset the index covers. To avoid
+    // re-materialising a term per row, the not-indexed check is memoised per distinct id.
+    let mut verdict: FxHashMap<Id, bool> = FxHashMap::default();
+    b.rows.retain(|row| {
+        let id = row[col];
+        if cand_ids.contains(&id) {
+            return true; // an indexed candidate (kept; exact FILTER refines)
+        }
+        *verdict.entry(id).or_insert_with(|| {
+            // Keep iff the index is NOT authoritative over this binding.
+            match term_of_id(graph, id) {
+                Some(t) => !idx.is_indexed(&t),
+                None => true, // no term (synthetic / unbound) — index can't rule it out
+            }
+        })
+    });
+    true
+}
+
+/// The graph-dictionary term for `id`, if any. (A standalone helper so the spatial
+/// pushdown can resolve a binding without a `LocalVocab`; bindings reaching a pushable
+/// scan-bound geometry FILTER are graph-dict ids.) [OPUS-4.8]
+fn term_of_id(graph: &Graph, id: Id) -> Option<Term> {
+    (id != NO_ID && !dict::is_inline(id)).then(|| graph.dict.term(id))
 }
 
 // ---- BGP evaluation ----------------------------------------------------------
@@ -4461,12 +4701,14 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         // branch (the view matters here via EXISTS in the expression).
         let fns = functions::snapshot();
         let vw = view::snapshot();
+        let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
         b.rows
             .par_iter()
             .enumerate()
             .map(|(i, row)| {
                 let _fns = functions::worker_install(&fns);
                 let _vw = view::worker_install(&vw);
+                let _spx = spatial::worker_install(&spx);
                 ROW_SCOPE.set((scope, i));
                 let v = eval_expr(graph, lv, bref, row, expr)?;
                 Ok(value_to_id_readonly(graph, lv, &v))
@@ -4624,6 +4866,7 @@ fn group_aggregate(
         // per-item re-install (free when neither is installed) — see the FILTER branch.
         let fns = functions::snapshot();
         let vw = view::snapshot();
+        let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
         // Process `members`/`order` in PAR_THRESHOLD-sized batches: evaluate + read-only
         // resolve each batch in parallel, then serially intern only that batch's genuinely
         // new terms and emit its rows. Peak `Value` footprint is one batch, not all groups.
@@ -4635,6 +4878,7 @@ fn group_aggregate(
                 .map(|members| {
                     let _fns = functions::worker_install(&fns);
                     let _vw = view::worker_install(&vw);
+                    let _spx = spatial::worker_install(&spx);
                     aggregates
                         .iter()
                         .map(|(_, agg)| eval_aggregate(graph, lv, bref, members, agg).map(|v| value_to_id_readonly(graph, lv, &v)))
@@ -5048,12 +5292,14 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
         // evaluate UNRESTRICTED on a rayon worker.
         let fns = functions::snapshot();
         let vw = view::snapshot();
+        let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
         b.rows
             .par_iter()
             .enumerate()
             .map(|(i, row)| {
                 let _fns = functions::worker_install(&fns);
                 let _vw = view::worker_install(&vw);
+                let _spx = spatial::worker_install(&spx);
                 ROW_SCOPE.set((scope, i));
                 Ok(effective_boolean(&eval_expr(graph, local, b, row, expr)?))
             })

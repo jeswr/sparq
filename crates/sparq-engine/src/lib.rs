@@ -144,6 +144,87 @@ pub fn with_functions<T>(fns: &FunctionRegistry, f: impl FnOnce() -> T) -> T {
     f()
 }
 
+// ---- Spatial pushdown seam (sq-mg9) -----------------------------------------
+//
+// The engine is GEOMETRY-FREE: the dependency direction is sparq-geo ->
+// sparq-engine, so the engine cannot parse WKT or query an R-tree. The seam that
+// lets a `geof:` spatial FILTER be pushed into a spatial index is therefore a
+// thread-local PROVIDER trait — installed exactly like [`FunctionRegistry`] —
+// that sparq-geo implements over its `GeoIndex`. The engine recognises a pushable
+// spatial FILTER, asks the provider for the CANDIDATE SUPERSET of geometry-variable
+// bindings the index says could match, and pre-restricts rows to those candidates
+// BEFORE the exact `geof:` FILTER refinement still runs. [OPUS-4.8]
+
+/// A request the engine's planner makes of an installed [`SpatialProvider`]: a
+/// recognised pushable `geof:` spatial FILTER, in fully-resolved terms.
+///
+/// The engine does no geometry: it forwards the function IRI and the constant
+/// operand(s) it lifted out of the FILTER, and the provider decides whether it
+/// can serve a candidate set. The geometry *variable*'s bindings are NOT sent —
+/// only the query CONSTANT (the `$point` / `$box` literal and, for distance, the
+/// threshold + unit) — so the provider answers purely from its index.
+#[derive(Debug, Clone)]
+pub enum SpatialQuery<'a> {
+    /// `geof:distance(?g, point) OP radius` with `OP` ∈ `{<, <=}` — a
+    /// distance-WITHIN window. `point_wkt` is the constant geometry's lexical
+    /// form (a `geo:wktLiteral` value), `radius`/`unit_iri` the bound.
+    /// `inclusive` distinguishes `<=` (true) from `<` (false); the provider may
+    /// ignore it and return a (still-correct) superset.
+    DistanceWithin { point_wkt: &'a str, radius: f64, unit_iri: &'a str, inclusive: bool },
+    /// `geof:sfWithin(?g, box)` / `geof:sfIntersects(?g, box)` — a window/range
+    /// scan. `arg_wkt` is the constant geometry's lexical form.
+    BboxIntersects { arg_wkt: &'a str },
+}
+
+/// A spatial index the engine can push a recognised `geof:` FILTER into.
+///
+/// Implemented by sparq-geo over its `GeoIndex`; installed per-query via
+/// [`with_spatial_index`].
+///
+/// CORRECTNESS CONTRACT (a one-way FILTER that must never drop a true match):
+///
+/// * [`candidates`](Self::candidates) returns EVERY *indexed* geometry-variable
+///   binding that could satisfy the predicate — a SUPERSET of the matches AMONG
+///   the geometries the index actually holds (false positives allowed; false
+///   negatives among indexed geometries are NOT). The exact `geof:` check still
+///   runs afterwards and removes the false positives.
+/// * [`is_indexed`](Self::is_indexed) reports whether a `Term` is one the index
+///   has an opinion on. The engine keeps a row when its binding is a candidate
+///   OR is NOT indexed — so a geometry the index never saw (bound via a
+///   non-`geo:asWKT` predicate, a non-geographic CRS, a different graph, …) is
+///   left for the exact `geof:` FILTER to judge, NEVER silently dropped.
+///
+/// Together these make the pushed-down plan return IDENTICALLY to the post-hoc
+/// path regardless of which subset of the queried bindings the index covers.
+/// Returning `None` from `candidates` declines the pushdown entirely (e.g.
+/// unparsable constant, a metric the index cannot bound) and the engine falls
+/// back to the full per-row scan.
+pub trait SpatialProvider: Send + Sync {
+    /// The candidate superset (among indexed geometries) of geometry-variable
+    /// bindings — the WKT-literal `Term`s — that could satisfy `query`, or
+    /// `None` to decline the pushdown.
+    fn candidates(&self, query: &SpatialQuery) -> Option<Vec<Term>>;
+
+    /// Whether `term` is a geometry this index holds an opinion on (i.e. it was
+    /// indexed). A binding for which this is `false` is NEVER dropped by the
+    /// pushdown — the index cannot rule it out, so the exact `geof:` FILTER
+    /// decides. (For a `GeoIndex`: the geographic-CRS `geo:asWKT` literals it
+    /// extracted.)
+    fn is_indexed(&self, term: &Term) -> bool;
+}
+
+/// Runs `f` with `idx` installed as the active spatial index — the planner
+/// consults it to push a recognised `geof:` spatial FILTER into a candidate
+/// window/range scan. Visible to every query the closure runs on this thread
+/// (installed thread-locally, propagated into the engine's rayon workers) and
+/// uninstalled when the closure returns. Composes with [`with_functions`] (you
+/// want BOTH: the registry does the exact refinement, the index the pushdown) in
+/// either nesting order. [OPUS-4.8]
+pub fn with_spatial_index<T>(idx: std::sync::Arc<dyn SpatialProvider>, f: impl FnOnce() -> T) -> T {
+    let _guard = exec::spatial::install(idx);
+    f()
+}
+
 /// [`query`] with an extension-function registry: `Function::Custom` IRIs that are
 /// not XSD constructor casts are dispatched to `fns` (SPARQL 17.6). An IRI absent
 /// from the registry remains the same hard error the registry-free entry points
