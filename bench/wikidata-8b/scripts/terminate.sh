@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Tag-verified terminate + SG/keypair cleanup + cost ledger entry.
 # Refuses the protected instance unconditionally. DRY-RUN by default.
-set -uo pipefail
+# [OPUS-4.8] roborev 2016 (High): errexit added. Without it, the tag-verify XS
+# below could fail (its `exit 1` only leaves the `bash -c` subshell) yet
+# `terminate-instances` would still run on an unverified instance. With errexit,
+# a failing XS aborts the whole script before any destructive AWS call.
+set -euo pipefail
 . "$(dirname "$0")/config.sh"
 banner
 

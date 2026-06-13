@@ -148,6 +148,15 @@ struct Shared {
     cv: Condvar,
 }
 
+// [OPUS-4.8] True when this code is executing inside a rayon worker thread. A
+// `finish` that blocks on a Condvar for `rayon::spawn` jobs can deadlock here
+// (the worker is stuck waiting for work it could be running), and on a
+// single-thread pool there is no other worker to make progress. Both sinks use
+// this to decide when to compress on the calling thread instead of detaching.
+fn parallel_would_starve() -> bool {
+    rayon::current_num_threads() <= 1 || rayon::current_thread_index().is_some()
+}
+
 /// Feed serialized chunks in, drain compressed members/frames out **in order**.
 ///
 /// Each `push` becomes exactly one gzip member / zstd frame; the concatenation
@@ -189,23 +198,26 @@ impl CompressedSink {
     pub fn push(&mut self, chunk: &[u8]) {
         let idx = self.next_in;
         self.next_in += 1;
-        match self.mode {
-            Mode::Serial => {
-                let out = compress_member(&self.codec, chunk);
-                self.shared.ready.lock().unwrap().insert(idx, out);
-            }
-            Mode::Parallel => {
-                // The chunk is copied so the compression task is 'static; a 64 KiB
-                // memcpy is noise next to compressing those bytes.
-                let owned = chunk.to_vec();
-                let codec = self.codec.clone();
-                let shared = Arc::clone(&self.shared);
-                rayon::spawn(move || {
-                    let out = compress_member(&codec, &owned);
-                    shared.ready.lock().unwrap().insert(idx, out);
-                    shared.cv.notify_all();
-                });
-            }
+        // [OPUS-4.8] Parallel mode falls back to compressing on the calling
+        // thread when the rayon pool has a single worker or when we are already
+        // running inside a rayon worker: in either case detaching the job and
+        // blocking on the Condvar in `finish` could deadlock (the only worker —
+        // or this worker — would be parked waiting for the very job it should
+        // run). Serial compression here cannot starve.
+        if self.mode == Mode::Serial || parallel_would_starve() {
+            let out = compress_member(&self.codec, chunk);
+            self.shared.ready.lock().unwrap().insert(idx, out);
+        } else {
+            // The chunk is copied so the compression task is 'static; a 64 KiB
+            // memcpy is noise next to compressing those bytes.
+            let owned = chunk.to_vec();
+            let codec = self.codec.clone();
+            let shared = Arc::clone(&self.shared);
+            rayon::spawn(move || {
+                let out = compress_member(&codec, &owned);
+                shared.ready.lock().unwrap().insert(idx, out);
+                shared.cv.notify_all();
+            });
         }
     }
 
@@ -226,12 +238,25 @@ impl CompressedSink {
     pub fn finish(mut self) -> io::Result<Vec<Vec<u8>>> {
         let total = self.next_in;
         let mut out = Vec::with_capacity(total - self.next_out);
+        // [OPUS-4.8] When `finish` is called from inside a rayon worker we must
+        // not park the worker on the Condvar: that worker may be the only one
+        // that can run the pending compression jobs, so a plain `cv.wait` would
+        // deadlock. Instead, hand control back to rayon (`yield_now`) so this
+        // worker drains the spawned jobs itself, then re-check. Off the pool we
+        // keep the cheaper blocking wait. `push` already guarantees no jobs were
+        // detached on a single-thread pool, so progress is always possible here.
+        let on_pool = rayon::current_thread_index().is_some();
         let mut ready = self.shared.ready.lock().unwrap();
         while self.next_out < total {
             match ready.remove(&self.next_out) {
                 Some(r) => {
                     self.next_out += 1;
                     out.push(r?);
+                }
+                None if on_pool => {
+                    drop(ready);
+                    rayon::yield_now();
+                    ready = self.shared.ready.lock().unwrap();
                 }
                 None => ready = self.shared.cv.wait(ready).unwrap(),
             }
@@ -353,25 +378,40 @@ impl SingleMemberGzipSink {
             crc.update(chunk);
             deflate_segment(level, chunk, false).map(|seg| (seg, crc))
         };
-        match self.mode {
-            Mode::Serial => {
-                let out = work(chunk);
-                self.shared.ready.lock().unwrap().insert(idx, out);
-            }
-            Mode::Parallel => {
-                let owned = chunk.to_vec();
-                let shared = Arc::clone(&self.shared);
-                rayon::spawn(move || {
-                    let out = work(&owned);
-                    shared.ready.lock().unwrap().insert(idx, out);
-                    shared.cv.notify_all();
-                });
-            }
+        // [OPUS-4.8] Same starvation guard as CompressedSink::push: never detach
+        // a job when the rayon pool has one worker or when we are already on a
+        // rayon worker, since `finish` would otherwise block waiting for a job
+        // that cannot run. Serial compression on the calling thread is safe.
+        if self.mode == Mode::Serial || parallel_would_starve() {
+            let out = work(chunk);
+            self.shared.ready.lock().unwrap().insert(idx, out);
+        } else {
+            let owned = chunk.to_vec();
+            let shared = Arc::clone(&self.shared);
+            rayon::spawn(move || {
+                let out = work(&owned);
+                shared.ready.lock().unwrap().insert(idx, out);
+                shared.cv.notify_all();
+            });
         }
     }
 
     fn take(&mut self, piece: io::Result<(Vec<u8>, flate2::Crc)>, out: &mut Vec<Vec<u8>>) -> io::Result<()> {
-        let (mut seg, crc) = piece?;
+        // [OPUS-4.8] Advance the emission cursor BEFORE propagating a compression
+        // error. The caller (`try_drain`/`finish`) has already removed this index
+        // from the ready map; if we returned `Err` without advancing `next_out`,
+        // the cursor would still point at the consumed-and-gone index and a later
+        // `finish` would wait forever for it. A compression error is terminal for
+        // the stream anyway (documented), so surfacing it once at its position
+        // and leaving the cursor past it is the consistent behaviour — matching
+        // CompressedSink::try_drain.
+        let (mut seg, crc) = match piece {
+            Ok(v) => v,
+            Err(e) => {
+                self.next_out += 1;
+                return Err(e);
+            }
+        };
         self.next_out += 1;
         self.crc.combine(&crc);
         if !self.header_sent {
@@ -404,10 +444,20 @@ impl SingleMemberGzipSink {
         let shared = Arc::clone(&self.shared);
         let mut out = Vec::with_capacity(total - self.next_out + 1);
         {
+            // [OPUS-4.8] See CompressedSink::finish: yield to rayon (rather than
+            // parking the worker on the Condvar) when called from inside a rayon
+            // worker, so this worker can drain its own pending segment jobs and
+            // cannot deadlock.
+            let on_pool = rayon::current_thread_index().is_some();
             let mut ready = shared.ready.lock().unwrap();
             while self.next_out < total {
                 match ready.remove(&self.next_out) {
                     Some(p) => self.take(p, &mut out)?,
+                    None if on_pool => {
+                        drop(ready);
+                        rayon::yield_now();
+                        ready = shared.ready.lock().unwrap();
+                    }
                     None => ready = shared.cv.wait(ready).unwrap(),
                 }
             }
@@ -669,5 +719,110 @@ mod tests {
         if !drained_early {
             eprintln!("note: no member drained before the final push (scheduling fluke)");
         }
+    }
+
+    // [OPUS-4.8] Regression for reviews 1913 & 1921: Mode::Parallel must not
+    // deadlock on a single-thread rayon pool. With the old detached-spawn +
+    // Condvar `finish`, the lone worker has no one to run the spawned jobs, so
+    // `finish` would block forever. We run inside a 1-thread pool with a watchdog
+    // thread so a regression fails the test (panic) instead of hanging CI.
+    #[test]
+    fn parallel_sinks_do_not_deadlock_on_single_thread_pool() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let chunks = json_chunks(16);
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+
+        // Watchdog: if `pool.install` has not finished in 30 s it has deadlocked.
+        let wd = Arc::clone(&done);
+        let watchdog = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !wd.load(Ordering::Acquire) {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(30),
+                    "parallel sink deadlocked on a single-thread rayon pool (1913/1921 regression)"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+
+        pool.install(|| {
+            // CompressedSink (gzip + zstd) round-trips inside the constrained pool.
+            let members = run_sink(&chunks, Codec::Gzip { level: 6 }, Mode::Parallel);
+            assert_eq!(members.len(), chunks.len());
+            assert_eq!(decode_gzip_concat(&concat(&members)).unwrap(), concat(&chunks));
+
+            let members = run_sink(&chunks, Codec::Zstd { level: 1 }, Mode::Parallel);
+            assert_eq!(decode_zstd_concat(&concat(&members)).unwrap(), concat(&chunks));
+
+            // SingleMemberGzipSink round-trips inside the constrained pool.
+            let pieces = gzip_single_member(&chunks, 6, Mode::Parallel).unwrap();
+            assert_eq!(decode_single_member(&concat(&pieces)), concat(&chunks));
+        });
+
+        done.store(true, Ordering::Release);
+        watchdog.join().unwrap();
+    }
+
+    // [OPUS-4.8] Regression for reviews 1913 & 1921: a `finish` called from
+    // *inside* a rayon worker (nested execution) must not park that worker on
+    // the Condvar while its own compression jobs are still pending — that is a
+    // self-starvation deadlock. The yield-on-pool path must make progress.
+    #[test]
+    fn parallel_sink_finish_inside_rayon_worker_does_not_deadlock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let chunks = json_chunks(24);
+        let done = Arc::new(AtomicBool::new(false));
+        let wd = Arc::clone(&done);
+        let watchdog = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !wd.load(Ordering::Acquire) {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(30),
+                    "parallel sink finish deadlocked inside a rayon worker (1913/1921 regression)"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+
+        // Default global pool, but the whole push/drain/finish lifecycle runs on
+        // a worker via rayon::scope, exercising the nested-execution guard.
+        rayon::scope(|s| {
+            s.spawn(|_| {
+                let members = run_sink(&chunks, Codec::Zstd { level: 1 }, Mode::Parallel);
+                assert_eq!(decode_zstd_concat(&concat(&members)).unwrap(), concat(&chunks));
+                let pieces = gzip_single_member(&chunks, 6, Mode::Parallel).unwrap();
+                assert_eq!(decode_single_member(&concat(&pieces)), concat(&chunks));
+            });
+        });
+
+        done.store(true, Ordering::Release);
+        watchdog.join().unwrap();
+    }
+
+    // [OPUS-4.8] Regression for review 1921 (Low): when a member fails to
+    // compress, SingleMemberGzipSink::take must advance the emission cursor past
+    // the consumed-and-removed index so a subsequent drain/finish cannot wait
+    // forever for an index that no longer exists in the ready map.
+    #[test]
+    fn single_member_gzip_error_advances_cursor() {
+        let mut sink = SingleMemberGzipSink::new(6, Mode::Serial);
+        sink.push(b"alpha");
+        sink.push(b"beta");
+        let next_out_before = sink.next_out;
+        // Inject a compression failure at the cursor position directly into the
+        // ready map (mirrors a real deflate_segment error), then drain.
+        sink.shared
+            .ready
+            .lock()
+            .unwrap()
+            .insert(next_out_before, Err(io::Error::new(io::ErrorKind::Other, "boom")));
+        let err = sink.try_drain().unwrap_err();
+        assert_eq!(err.to_string(), "boom");
+        // Cursor advanced past the failed (and already-removed) index; the entry
+        // is gone, so a re-check must not block on it.
+        assert_eq!(sink.next_out, next_out_before + 1, "cursor must advance past the error");
     }
 }
