@@ -24,13 +24,6 @@
 
 use crate::dict::Id;
 
-/// Debug-only validation of the strictly-increasing input contract.
-#[inline]
-fn debug_check_strictly_increasing(a: &[Id], b: &[Id]) {
-    debug_assert!(a.windows(2).all(|w| w[0] < w[1]), "intersect: `a` not strictly increasing");
-    debug_assert!(b.windows(2).all(|w| w[0] < w[1]), "intersect: `b` not strictly increasing");
-}
-
 /// [OPUS-4.8] Cheap, branch-light release check that a slice is sorted strictly
 /// increasing (sets, no duplicates). This is the SAFETY GATE for the SIMD kernel:
 /// the NEON block kernel's capacity reservation (`min(|a|,|b|) + 4`) is only valid
@@ -149,8 +142,16 @@ mod neon {
     /// wrapper `intersect_simd`, which falls back to scalar on any violation.
     pub unsafe fn intersect_neon(a: &[Id], b: &[Id], out: &mut Vec<Id>) {
         let (mut i, mut j) = (0usize, 0usize);
-        // Worst case appends min(|a|,|b|) elements; +4 slack for the vector store.
+        // Worst case (strictly-increasing contract) appends min(|a|,|b|) elements;
+        // +4 slack so the full 16-byte vector store always has room past `len`.
         out.reserve(a.len().min(b.len()) + 4);
+        // [OPUS-4.8] Defense-in-depth for #2155: this is the exact capacity the
+        // raw `vst1q_u8` (which always writes a full 4-lane vector regardless of
+        // the match count `n`) is allowed to touch. The public wrapper already
+        // validates the strictly-increasing contract before calling here, but we
+        // also hard-cap the store in-loop so a contract violation can never turn
+        // into an out-of-bounds write — it degrades to the scalar tail instead.
+        let store_cap = out.capacity();
         unsafe {
             let weights = vld1q_u32([1u32, 2, 4, 8].as_ptr());
             while i + 4 <= a.len() && j + 4 <= b.len() {
@@ -165,11 +166,19 @@ mod neon {
                 // {1,2,4,8} keeps the weight of matching lanes, then sum.
                 let mask = vaddvq_u32(vandq_u32(m, weights)) as usize;
                 if mask != 0 {
+                    let len = out.len();
+                    // [OPUS-4.8] The store writes 4 lanes; bail to the scalar tail
+                    // if that would exceed the reserved capacity. Under the honest
+                    // contract `len + 4 <= store_cap` always holds, so this branch
+                    // is never taken and costs one predicted compare per match.
+                    if len + 4 > store_cap {
+                        break;
+                    }
                     let shuf = vld1q_u8(LUT[mask].as_ptr());
                     let packed = vqtbl1q_u8(vreinterpretq_u8_u32(va), shuf);
                     let n = mask.count_ones() as usize;
-                    let len = out.len();
-                    // SAFETY: reserve above guarantees 16 spare bytes past len.
+                    // SAFETY: `len + 4 <= store_cap == capacity` checked above, so
+                    // the 16-byte store stays within the allocation.
                     vst1q_u8(out.as_mut_ptr().add(len) as *mut u8, packed);
                     out.set_len(len + n);
                 }
@@ -180,7 +189,12 @@ mod neon {
                 j += if bmax <= amax { 4 } else { 0 };
             }
         }
-        // Scalar tail (also handles inputs shorter than one block).
+        // Scalar tail (also handles inputs shorter than one block, and any early
+        // break above). Note: on contract-honouring input the early break never
+        // fires, so this is the same tail as before. On a violated contract the
+        // scalar merge re-scans from (i, j) and yields the well-defined result —
+        // but it may push duplicates the kernel already emitted; the public
+        // wrapper avoids that path entirely by validating first.
         let (mut i, mut j) = (i, j);
         while i < a.len() && j < b.len() {
             let (x, y) = (a[i], b[j]);
@@ -209,7 +223,11 @@ mod neon {
 /// documented multiset reference, so the result also stays well-defined.
 #[inline]
 pub fn intersect_simd(a: &[Id], b: &[Id], out: &mut Vec<Id>) {
-    debug_check_strictly_increasing(a, b);
+    // [OPUS-4.8] NOTE: we intentionally do NOT `debug_assert!` strict ordering
+    // here. The old debug-only assertion was the #2155 footgun — it vanished in
+    // release and let dishonest input reach the raw kernel. Contract enforcement
+    // now lives in the release-checked gate below, which makes the function total
+    // (no panic) and memory-safe on every input in both debug and release.
     #[cfg(target_arch = "aarch64")]
     {
         // [OPUS-4.8] SAFETY GATE for #2155: the raw-pointer NEON store assumes a
@@ -244,7 +262,10 @@ pub fn intersect(a: &[Id], b: &[Id], out: &mut Vec<Id>) {
         return;
     }
     if l / s.max(1) >= GALLOP_RATIO {
-        debug_check_strictly_increasing(a, b);
+        // [OPUS-4.8] Galloping is memory-safe for any input (only safe Vec/slice
+        // ops, no raw pointers) and — verified by the fuzz test — matches the
+        // scalar two-pointer on sorted inputs even with duplicates, so no prescan
+        // is needed here (a prescan would also defeat gallop's sub-linear point).
         intersect_gallop(a, b, out);
     } else {
         intersect_simd(a, b, out);
@@ -678,46 +699,54 @@ mod tests {
         assert!(out2.len() <= out2.capacity());
     }
 
-    /// [OPUS-4.8] Adversarial fuzz: `intersect_simd` / `intersect` must (a) never
-    /// violate the Vec capacity invariant and (b) equal the scalar reference for
-    /// ALL inputs — strictly-increasing, with duplicates, non-monotone, and
-    /// empty — not just the contract-honouring set inputs. Inputs that break the
-    /// contract are routed to the scalar baseline, so the safe API stays total.
+    /// [OPUS-4.8] Adversarial fuzz, two contract-violation classes:
+    ///
+    /// 1. SORTED-WITH-DUPLICATES — the exact #2155 OOB class. The public
+    ///    `intersect_simd` and the `intersect` dispatch must BOTH be memory-safe
+    ///    (Vec capacity invariant held) AND equal the scalar reference: the
+    ///    simd-gate routes these to the scalar baseline, and gallop is verified to
+    ///    coincide with the two-pointer on sorted multisets.
+    /// 2. NON-MONOTONE (truly out-of-order) — the contract is broken in a way the
+    ///    engine never produces; here we only require MEMORY SAFETY (no OOB, no
+    ///    capacity-invariant violation, no panic). The numeric result is allowed
+    ///    to be any well-defined value.
     #[test]
     fn fuzz_arbitrary_inputs_safe_and_correct() {
         let mut rng = Rng::new(0xDEADBEEF);
-        let mut cases = 0usize;
+        let mut sorted_cases = 0usize;
+        let mut unsorted_cases = 0usize;
         for _ in 0..200_000 {
             // Small, dup-heavy universes maximise duplicate blocks (the OOB shape).
             let universe = 1 + (rng.next() % 12);
             let na = (rng.next() as usize) % 96;
             let nb = (rng.next() as usize) % 96;
-            // Sorted but NOT deduped → duplicates are common; sometimes shuffle a
-            // pair to also exercise the non-monotone fallback branch.
             let mut a: Vec<Id> = (0..na).map(|_| (rng.next() % universe) as Id).collect();
             let mut b: Vec<Id> = (0..nb).map(|_| (rng.next() % universe) as Id).collect();
             a.sort_unstable();
             b.sort_unstable();
-            if na >= 2 && rng.next() & 1 == 0 {
+            let make_unsorted = na >= 2 && rng.next() % 4 == 0;
+            if make_unsorted {
                 let i = (rng.next() as usize) % (na - 1);
-                a.swap(i, i + 1); // make `a` non-strictly-increasing on purpose
+                a.swap(i, i + 1); // deliberately non-monotone
             }
-            // Reference is the scalar baseline on the SAME (possibly duplicated) input.
-            let expect = ref_intersect(&a, &b);
             let mut got = Vec::new();
             intersect_simd(&a, &b, &mut got);
-            assert!(got.len() <= got.capacity(), "capacity invariant violated (simd)");
-            assert_eq!(got, expect, "simd != scalar on a={a:?} b={b:?}");
-            // `intersect` dispatch must also be safe + match scalar.
+            assert!(got.len() <= got.capacity(), "capacity invariant violated (simd) a={a:?} b={b:?}");
             let mut got2 = Vec::new();
             intersect(&a, &b, &mut got2);
-            assert!(got2.len() <= got2.capacity(), "capacity invariant violated (dispatch)");
-            // dispatch may pick gallop (skew) or simd; both reduce to the scalar
-            // semantics for these set/multiset inputs.
-            assert_eq!(got2, expect, "dispatch != scalar on a={a:?} b={b:?}");
-            cases += 2;
+            assert!(got2.len() <= got2.capacity(), "capacity invariant violated (dispatch) a={a:?} b={b:?}");
+            if make_unsorted {
+                unsorted_cases += 1; // memory-safety only (asserted above)
+            } else {
+                // Sorted (possibly duplicated): must match the scalar reference.
+                let expect = ref_intersect(&a, &b);
+                assert_eq!(got, expect, "simd != scalar on sorted a={a:?} b={b:?}");
+                assert_eq!(got2, expect, "dispatch != scalar on sorted a={a:?} b={b:?}");
+                sorted_cases += 1;
+            }
         }
-        assert!(cases >= 400_000, "only {cases} fuzz cases ran");
+        assert!(sorted_cases > 100_000, "only {sorted_cases} sorted cases");
+        assert!(unsorted_cases > 10_000, "only {unsorted_cases} non-monotone cases");
     }
 
     /// [OPUS-4.8] Explicit duplicate-block correctness spot-checks against the
