@@ -37,7 +37,9 @@
 //! [`crate::backend::MpcBackend`] (M3) and on the Q2 trust-model fork + the Q3
 //! BGP-join obliviousness-cost analysis (RQ2b). No fake crypto here.
 
+use crate::field::Fp;
 use crate::partial::{HolderId, MpcError, PartialResult};
+use crate::shamir::{self, ShamirBackend};
 use oxrdf::{Term, Variable};
 use std::collections::BTreeMap;
 
@@ -305,6 +307,163 @@ fn compatible(lrow: &[Option<Term>], rrow: &[Option<Term>], shared: &[(usize, us
 /// verifier recomputes ORDER BY over the disclosed multiset (convention #4).
 fn canonicalize_rows(rows: &mut [Vec<Option<Term>>]) {
     rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+}
+
+// =====================================================================
+// [OPUS-4.8] M3 — the HIDDEN-VALUE join (the path M2 deferred).
+// =====================================================================
+
+/// A holder's contribution to a hidden-value join: rows whose JOIN KEY is
+/// PRIVATE (already encoded as a field element — see [`HiddenValueJoin`] doc on
+/// the encoding contract) plus the DISCLOSED payload columns that may be opened
+/// on a match.
+///
+/// The key is `Fp` because the secret-shared equality primitive operates over
+/// the field; the holder is responsible for encoding its private key term into
+/// `Fp` (in production via a collision-resistant hash whose pre-image stays
+/// secret-shared and is proven in-circuit — out of scope here; see doc).
+#[derive(Debug, Clone)]
+pub struct HiddenKeyedRows {
+    /// The holder that owns these rows.
+    pub holder: HolderId,
+    /// Disclosed payload column names (NOT including the hidden key).
+    pub payload_vars: Vec<Variable>,
+    /// One entry per row: `(private_key_fp, disclosed_payload_terms)`.
+    pub rows: Vec<(Fp, Vec<Option<Term>>)>,
+}
+
+/// The hidden-value cross-holder join over PRIVATE join keys (M3).
+///
+/// This is the capability the M2 [`DisclosedKeyJoin`] could NOT provide: joining
+/// two holders on a key WITHOUT revealing the key values, disclosing only the
+/// result payload columns of the matching rows. It is built on the honest-
+/// majority [`ShamirBackend`] (M3) via a **secret-shared equality test** — the
+/// core of circuit-PSI (`mpc-protocols` skill: "PSI for private joins").
+///
+/// ## What it computes securely (vs what is scaffolded)
+///
+/// SECURELY (real, in-process multi-party simulation):
+/// - Each holder's private key is **secret-shared** across the `n` Shamir
+///   parties; the cleartext key never leaves the holder.
+/// - For each candidate row pair `(i, j)` the parties compute the secret-shared
+///   difference `d = key_Li - key_Rj` (local), multiply by a fresh jointly-random
+///   nonzero mask `r` (one Shamir multiplication), and **open only** `m = d·r`.
+///   `m == 0 ⇔ keys equal`; for unequal keys `m` is a uniform-random nonzero
+///   field element, so opening it reveals ONLY the match bit — never either key
+///   value, never their difference. This is the standard MPC equality-to-zero
+///   test ([`shamir::mul_shares_raw`] + [`shamir::reconstruct_degree`]).
+/// - On a match, the DISCLOSED payload columns are emitted (they are disclosed
+///   by the disclosure-minimisation rule, convention #4 — only the *key* is
+///   hidden). The keys are NEVER reconstructed.
+///
+/// SCAFFOLDED / out of scope (honestly stated, not faked):
+/// - The `O(|L|·|R|)` all-pairs comparison is the naive oblivious join. A real
+///   circuit-PSI uses oblivious hashing / cuckoo bins to cut this to ~linear;
+///   that optimisation (Q3, RQ2b — BGP-join obliviousness cost) is NOT done. The
+///   all-pairs version is correct but not the SOTA cost profile.
+/// - The field encoding of the key is the holder's responsibility; a production
+///   build needs a collision-resistant hash whose correctness is proven inside
+///   the collaborative proof (M4). Here equality in `Fp` stands in for term
+///   equality and is exact only if the encoding is injective on the inputs (the
+///   differential test guarantees this by construction).
+/// - Malicious security (a party feeding inconsistent shares) is NOT provided —
+///   semi-honest only, exactly as [`ShamirBackend`] states.
+///
+/// ## Feasibility envelope (honest, per the skill — minutes, not seconds)
+///
+/// Communication: ONE multiplication round PER candidate pair → `|L|·|R|` secure
+/// equality tests, each an open of one field element across the parties. On a
+/// real network that all-pairs structure is the cost center the skill flags
+/// ("joins are the cost center; obliviousness forces worst-case padding"). For
+/// the viable regime (≤10³–10⁴ rows/holder, LAN) this is the
+/// minutes-to-tens-of-minutes envelope (ORQ SOSP'25), NOT sub-second. We do not
+/// extrapolate beyond it.
+#[derive(Debug, Clone)]
+pub struct HiddenValueJoin {
+    backend: ShamirBackend,
+}
+
+impl HiddenValueJoin {
+    /// Build a hidden-value join driven by an honest-majority Shamir backend.
+    pub fn new(backend: ShamirBackend) -> Self {
+        HiddenValueJoin { backend }
+    }
+
+    /// Securely test whether two secret-shared field values are equal, opening
+    /// ONLY the match bit. This is the in-process multi-party simulation of the
+    /// MPC equality-to-zero test (one multiplication + one open). The cleartext
+    /// `a`/`b` are passed here ONLY because this function plays ALL parties in
+    /// one process; it secret-shares them internally and never uses the
+    /// cleartext after sharing except to deal the shares — exactly what a dealer
+    /// does. It returns the boolean match WITHOUT reconstructing `a` or `b`.
+    fn secure_equal(&self, dealer: &mut ShamirBackend, a: Fp, b: Fp) -> Result<bool, MpcError> {
+        let t = dealer.threshold();
+        // Honest-majority headroom: one multiplication needs 2t+1 <= n parties.
+        if dealer.parties() < 2 * t + 1 {
+            return Err(MpcError::Protocol(format!(
+                "secure_equal needs n >= 2t+1 (n={}, t={})",
+                dealer.parties(),
+                t
+            )));
+        }
+        // Secret-share both keys and a fresh nonzero mask.
+        let sa = dealer.share(a);
+        let sb = dealer.share(b);
+        // Fresh nonzero mask r. Zero is rejected: masking by zero would make m=0
+        // even for unequal keys (a false match). Drawing zero has probability
+        // ~1/p; we loop to be exact rather than rely on it.
+        let mask_value = {
+            let mut v = dealer.draw_fp();
+            while v == Fp::zero() {
+                v = dealer.draw_fp();
+            }
+            v
+        };
+        let r = dealer.share(mask_value);
+        // d = a - b (local, degree t).
+        let d = shamir::sub_shares(&sa, &sb)?;
+        // m = d * r (one multiplication, degree 2t).
+        let m_shares = shamir::mul_shares_raw(&d, &r)?;
+        // Open m at degree 2t. m == 0  <=>  d == 0  <=>  a == b.
+        let m = shamir::reconstruct_degree(&m_shares, 2 * t)?;
+        Ok(m == Fp::zero())
+    }
+
+    /// Join two holders' hidden-keyed rows on the PRIVATE key, disclosing only
+    /// the payload columns of matching pairs. Output schema is
+    /// `left.payload_vars ++ right.payload_vars` (the key is NOT projected — it
+    /// stays hidden). Result is attributed to the synthetic federation holder and
+    /// canonicalised so the disclosed multiset is order-independent.
+    pub fn join(
+        &self,
+        left: &HiddenKeyedRows,
+        right: &HiddenKeyedRows,
+    ) -> Result<PartialResult, MpcError> {
+        // A fresh dealer per join keeps the simulation's randomness scoped to
+        // this protocol run (mirrors fresh per-session masks in a real run).
+        let mut dealer = self.backend.clone();
+
+        let mut out_vars = left.payload_vars.clone();
+        out_vars.extend(right.payload_vars.iter().cloned());
+
+        let mut out_rows: Vec<Vec<Option<Term>>> = Vec::new();
+        // The all-pairs oblivious comparison (see struct doc on the cost / Q3).
+        for (lkey, lpay) in &left.rows {
+            for (rkey, rpay) in &right.rows {
+                if self.secure_equal(&mut dealer, *lkey, *rkey)? {
+                    let mut merged = lpay.clone();
+                    merged.extend(rpay.iter().cloned());
+                    out_rows.push(merged);
+                }
+            }
+        }
+        canonicalize_rows(&mut out_rows);
+        Ok(PartialResult {
+            holder: HolderId::new("federation"),
+            vars: out_vars,
+            rows: out_rows,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -583,11 +742,13 @@ mod tests {
         );
     }
 
-    /// HONEST DEFERRAL: the hidden-value (private-key) join is NOT faked. It
-    /// returns a gate-naming `NotYetImplemented` citing M3 + Q2/Q3 — never a
-    /// silent or fake result. This is the M2 boundary made explicit.
+    /// The crypto-free [`DisclosedKeyJoin`] still routes the hidden-value regime
+    /// AWAY (it is the M2 disclosed-key path). The hidden-value capability now
+    /// lives in the dedicated [`HiddenValueJoin`] (M3, tested below); asking the
+    /// disclosed-key join to handle private keys must still be an honest,
+    /// gate-naming `NotYetImplemented` — it does NOT fake a private join.
     #[test]
-    fn hidden_value_join_is_honestly_deferred() {
+    fn disclosed_key_join_still_routes_hidden_path_away() {
         let a = Holder::from_rdf("a", &format!("{PFX}ex:p1 ex:knows ex:x1 ."), "turtle").unwrap();
         let pa = a
             .evaluate_local("PREFIX ex: <http://ex/> SELECT ?p ?x WHERE { ?p ex:knows ?x }")
@@ -603,5 +764,179 @@ mod tests {
             }
             other => panic!("expected NotYetImplemented, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod hidden_value_tests {
+    //! M3 tests for the HIDDEN-VALUE join (`HiddenValueJoin`): the path M2 could
+    //! not provide. The load-bearing ones are `differential_*`: the secure join
+    //! over PRIVATE keys must yield the SAME disclosed-payload multiset as the
+    //! plaintext inner join over the union of the two holders' rows. The secure
+    //! computation (secret-shared equality, keys never reconstructed) is run
+    //! in-process across the simulated Shamir parties.
+    use super::*;
+    use crate::shamir::ShamirBackend;
+
+    fn var(n: &str) -> Variable {
+        Variable::new_unchecked(n)
+    }
+
+    /// A plaintext literal payload term, for building expected results / rows.
+    fn lit(s: &str) -> Option<Term> {
+        Some(Term::Literal(oxrdf::Literal::new_simple_literal(s)))
+    }
+
+    /// Build a holder's hidden-keyed rows. The key is encoded as a field element
+    /// via an INJECTIVE small-integer map over the join's key domain (so the
+    /// differential is sound: field equality ⇔ key equality, no collisions). In
+    /// production this encoding is a collision-resistant hash proven in-circuit;
+    /// here we control it to make the test exact (see `HiddenValueJoin` doc).
+    fn keyed(
+        holder: &str,
+        payload_vars: &[&str],
+        rows: &[(u64, Vec<Option<Term>>)],
+    ) -> HiddenKeyedRows {
+        HiddenKeyedRows {
+            holder: HolderId::new(holder),
+            payload_vars: payload_vars.iter().map(|v| var(v)).collect(),
+            rows: rows.iter().map(|(k, p)| (Fp::new(*k), p.clone())).collect(),
+        }
+    }
+
+    /// The reference PLAINTEXT inner join over the union: combine `(lpay ++ rpay)`
+    /// for every pair whose integer keys are equal. This is what the secure join
+    /// must match as a multiset.
+    fn plaintext_join(
+        left: &[(u64, Vec<Option<Term>>)],
+        right: &[(u64, Vec<Option<Term>>)],
+    ) -> Vec<Vec<Option<Term>>> {
+        let mut out = Vec::new();
+        for (lk, lp) in left {
+            for (rk, rp) in right {
+                if lk == rk {
+                    let mut row = lp.clone();
+                    row.extend(rp.iter().cloned());
+                    out.push(row);
+                }
+            }
+        }
+        out
+    }
+
+    fn multiset(rows: &[Vec<Option<Term>>]) -> Vec<String> {
+        let mut m: Vec<String> = rows.iter().map(|r| format!("{r:?}")).collect();
+        m.sort();
+        m
+    }
+
+    /// THE M3 differential: a secure hidden-key join equals the plaintext inner
+    /// join over the union — keys are PRIVATE and never reconstructed. Holder L
+    /// has `(key, name)`, Holder R has `(key, city)`; the join discloses
+    /// `(name, city)` for matching keys WITHOUT revealing the key.
+    #[test]
+    fn differential_hidden_join_equals_plaintext_join() {
+        // Keys 100, 200, 300 are private identifiers (e.g. a hashed national-ID).
+        let l_rows = vec![
+            (100u64, vec![lit("Alice")]),
+            (200u64, vec![lit("Bob")]),
+            (300u64, vec![lit("Carol")]),
+        ];
+        // R shares keys 200 and 300 (Alice's 100 has no match on the right).
+        let r_rows = vec![
+            (200u64, vec![lit("Leeds")]),
+            (300u64, vec![lit("York")]),
+            (999u64, vec![lit("Hull")]), // no left match
+        ];
+        let left = keyed("L", &["name"], &l_rows);
+        let right = keyed("R", &["city"], &r_rows);
+
+        // n=3, t=1 → supports the single equality multiplication (2t+1 = 3 = n).
+        let backend = ShamirBackend::new(3, 0xBEEF).unwrap();
+        let join = HiddenValueJoin::new(backend);
+        let got = join.join(&left, &right).unwrap();
+
+        // Disclosed schema is (name, city) — the key is NOT projected.
+        assert_eq!(got.vars, vec![var("name"), var("city")]);
+        assert_eq!(got.holder, HolderId::new("federation"));
+
+        let expected = plaintext_join(&l_rows, &r_rows);
+        assert_eq!(multiset(&got.rows), multiset(&expected), "hidden join must equal plaintext join");
+        // Concretely: Bob-Leeds, Carol-York. 2 rows.
+        assert_eq!(got.rows.len(), 2);
+    }
+
+    /// No-overlap: disjoint private key sets → empty join, matching plaintext.
+    #[test]
+    fn differential_no_overlap_is_empty() {
+        let l_rows = vec![(1u64, vec![lit("a")]), (2, vec![lit("b")])];
+        let r_rows = vec![(3u64, vec![lit("x")]), (4, vec![lit("y")])];
+        let join = HiddenValueJoin::new(ShamirBackend::new(3, 7).unwrap());
+        let got = join
+            .join(&keyed("L", &["l"], &l_rows), &keyed("R", &["r"], &r_rows))
+            .unwrap();
+        assert!(got.rows.is_empty());
+        assert_eq!(multiset(&got.rows), multiset(&plaintext_join(&l_rows, &r_rows)));
+    }
+
+    /// Multi-match fan-out: a private key shared by several rows on each side
+    /// produces the full cartesian product within that key — must equal plaintext.
+    #[test]
+    fn differential_multi_match_fanout() {
+        // Key 42 appears twice on the left and twice on the right → 4 joined rows.
+        let l_rows = vec![
+            (42u64, vec![lit("L1")]),
+            (42, vec![lit("L2")]),
+            (7, vec![lit("Lonely")]),
+        ];
+        let r_rows = vec![(42u64, vec![lit("R1")]), (42, vec![lit("R2")])];
+        let join = HiddenValueJoin::new(ShamirBackend::new(3, 123).unwrap());
+        let got = join
+            .join(&keyed("L", &["l"], &l_rows), &keyed("R", &["r"], &r_rows))
+            .unwrap();
+        assert_eq!(got.rows.len(), 4, "2x2 cartesian on key 42");
+        assert_eq!(multiset(&got.rows), multiset(&plaintext_join(&l_rows, &r_rows)));
+    }
+
+    /// Empty side → empty join (an empty holder contributes nothing).
+    #[test]
+    fn differential_empty_side_is_empty() {
+        let l_rows = vec![(1u64, vec![lit("a")])];
+        let r_rows: Vec<(u64, Vec<Option<Term>>)> = vec![];
+        let join = HiddenValueJoin::new(ShamirBackend::new(3, 1).unwrap());
+        let got = join
+            .join(&keyed("L", &["l"], &l_rows), &keyed("R", &["r"], &r_rows))
+            .unwrap();
+        assert!(got.rows.is_empty());
+    }
+
+    /// The secure equality primitive in isolation: equal keys → match, unequal
+    /// keys → no match, WITHOUT reconstructing the keys. This is the core
+    /// circuit-PSI primitive. Larger n (n=5,t=2) exercises 2t+1=5 reconstruction.
+    #[test]
+    fn secure_equal_primitive_is_correct() {
+        let backend = ShamirBackend::new(5, 0xD00D).unwrap();
+        let join = HiddenValueJoin::new(backend);
+        let mut dealer = join.backend.clone();
+        assert!(join.secure_equal(&mut dealer, Fp::new(12345), Fp::new(12345)).unwrap());
+        assert!(!join.secure_equal(&mut dealer, Fp::new(12345), Fp::new(12346)).unwrap());
+        // Zero is a valid key value and equality with zero still works.
+        assert!(join.secure_equal(&mut dealer, Fp::zero(), Fp::zero()).unwrap());
+        assert!(!join.secure_equal(&mut dealer, Fp::zero(), Fp::new(1)).unwrap());
+    }
+
+    /// Insufficient parties for the equality multiplication (n < 2t+1) is a
+    /// protocol error, not a wrong answer. (Constructed directly to violate the
+    /// invariant — `ShamirBackend::new` always picks t = (n-1)/2 which satisfies
+    /// 2t+1 <= n, so we cannot hit this via the constructor; this documents the
+    /// guard exists.)
+    #[test]
+    fn secure_equal_guards_party_count() {
+        // n=2,t=0 → 2t+1 = 1 <= 2 OK; n=3,t=1 → 3 <= 3 OK. The honest-majority
+        // constructor never under-provisions, so we assert the happy path holds
+        // and the guard is present (covered by code; this asserts no false error).
+        let join = HiddenValueJoin::new(ShamirBackend::new(3, 0).unwrap());
+        let mut dealer = join.backend.clone();
+        assert!(join.secure_equal(&mut dealer, Fp::new(5), Fp::new(5)).is_ok());
     }
 }

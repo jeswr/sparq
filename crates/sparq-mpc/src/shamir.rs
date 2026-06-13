@@ -148,6 +148,13 @@ impl ShamirBackend {
         self.t
     }
 
+    /// Draw one field element from the simulation PRNG (advances state). Used by
+    /// the equality-test mask. **Simulation only** — see the module randomness
+    /// note: production masks MUST come from a CSPRNG.
+    pub fn draw_fp(&mut self) -> Fp {
+        self.rng.next_fp()
+    }
+
     /// Secret-share one field element into `n` shares on a fresh degree-`t`
     /// polynomial `f` with `f(0) = secret`. Free coefficients are random (PRNG
     /// in simulation; CSPRNG in production — see module note).

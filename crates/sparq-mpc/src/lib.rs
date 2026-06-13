@@ -75,7 +75,7 @@ pub mod shamir;
 pub use backend::{BackendInfo, MpcBackend, TrustModel};
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
-pub use join::{DisclosedKeyJoin, GlobalJoin, JoinPlan};
+pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, JoinPlan};
 pub use partial::{HolderId, MpcError, PartialResult};
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
 pub use shamir::{Share, ShamirBackend};
