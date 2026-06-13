@@ -2,3 +2,7 @@ node_modules/
 dist/
 wasm/
 *.tgz
+# Agent-Skills usage docs copied in at prepack time (single-sourced at repo root:
+# ../skills, ../AGENTS.md) so they ship in the npm tarball. [OPUS-4.8]
+/skills/
+/AGENTS.md
