@@ -53,9 +53,12 @@ use crate::manifest::{
 };
 use sparq_zk::encode::encode_term;
 use sparq_zk::field::{field_to_be_bytes_32, field_to_hex, Fr};
+// [OPUS-4.8] codex 2221 HIGH: only the SALT-BOUND `commitment_message_with_salt`
+// is used on the scan-verify path; the bare salt-less `commitment_message` is no
+// longer reachable here (a scan-covering attestation must be salt-bound).
 use sparq_zk::sig::{
-    commitment_message, commitment_message_with_salt, public_key_from_hex, signature_from_hex,
-    verify as sig_verify, SignatureScheme,
+    commitment_message_with_salt, public_key_from_hex, signature_from_hex, verify as sig_verify,
+    SignatureScheme,
 };
 use sparq_zk::verify::{
     fragment_filters, fragment_pattern_consts, fragment_patterns, recheck, variable_slots,
@@ -230,6 +233,27 @@ pub enum CheckError {
     /// Each graph must be committed under a globally-unique issuer-attested salt.
     // [OPUS-4.8] audit #9.
     SaltReused { salt: String },
+    /// The attestation covering a scan sub-proof's commitment carries NO salt
+    /// (`salt: None`) — fail-closed for audit #9 / codex 2221 HIGH. A salt-less
+    /// (legacy) attestation does NOT bind the per-graph RDFC10 salt into the
+    /// issuer signature and does NOT participate in the salt-uniqueness check, so
+    /// accepting one for a scan-covering commitment would silently bypass the #9
+    /// salt-separation guarantee (a salt-reusing ingester just omits the salt
+    /// field). Every attestation that covers a verified scan commitment MUST carry
+    /// a salt and verify via the salt-bound `commitment_message_with_salt` path.
+    // [OPUS-4.8] codex 2221 HIGH: salt-bound attestation is mandatory for scans.
+    ScanCommitmentSaltMissing { proof: usize, commitment: String },
+    /// A scan sub-proof's `attribution` vector is absent/empty or the wrong
+    /// length (codex 2221 MEDIUM, fail-closed for audit #8). The per-graph source
+    /// attribution is a security-relevant, proof-bound quantity (`scan.nr` step 4)
+    /// that the cross-graph obligation gate (stage 2e) cross-checks against
+    /// `manifest.attributions`. `#[serde(default)]` lets a prover OMIT it (empty
+    /// vec) or under-length it, and `bind_attributions` only checks the bits
+    /// present — so an omitted attribution makes the #8 cross-check vacuous,
+    /// resurrecting the `[[0],[0]]` collapse forge. It MUST be present and EXACTLY
+    /// `CircuitId.k` bits (no default/pad-to-false). `expected` = k.
+    // [OPUS-4.8] codex 2221 MEDIUM: attribution must be present + exactly k bits.
+    AttributionMalformed { proof: usize, expected: usize, got: usize },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -309,6 +333,14 @@ impl std::fmt::Display for CheckError {
             CheckError::SaltReused { salt } => write!(
                 f,
                 "salt {salt} is reused across two distinct committed graphs (audit #9: cross-graph bnode-correlation channel — each graph needs a globally-unique issuer-attested salt)"
+            ),
+            CheckError::ScanCommitmentSaltMissing { proof, commitment } => write!(
+                f,
+                "scan sub-proof {proof}: the attestation covering commitment {commitment} carries no salt (audit #9 / codex 2221 HIGH: a scan-covering attestation MUST be salt-bound — a salt-less legacy attestation bypasses salt-separation)"
+            ),
+            CheckError::AttributionMalformed { proof, expected, got } => write!(
+                f,
+                "scan sub-proof {proof}: attribution must be present and exactly {expected} bits (CircuitId.k), got {got} (audit #8 / codex 2221 MEDIUM: an omitted/short attribution makes the cross-graph under-declaration check vacuous)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -400,6 +432,31 @@ pub fn verify_manifest_structure(
                 declared,
                 derived,
             });
+        }
+        // [OPUS-4.8] codex 2221 MEDIUM (fail-closed for audit #8): a scan's
+        // per-graph source attribution is a security-relevant, proof-bound
+        // quantity (`scan.nr` step 4) the cross-graph obligation gate (stage 2e)
+        // cross-checks against `manifest.attributions`. `#[serde(default)]` lets a
+        // prover OMIT it (empty vec) or under-length it; `bind_attributions` then
+        // only inspects the bits PRESENT, so an omitted attribution makes the
+        // under-declaration cross-check vacuous and resurrects the `[[0],[0]]`
+        // collapse forge. Require it PRESENT and EXACTLY `CircuitId.k` bits — the
+        // same k the (already-verified) circuit id declares and the audit #1
+        // reconstruction byte-binds — with NO default and NO pad-to-false. A
+        // missing/empty/short/long attribution is rejected here, before any gate
+        // can silently skip the omitted graphs.
+        if let ProofInputs::Scan { attribution, .. } = &sp.inputs {
+            let k = match &declared {
+                CircuitId::Scan { k, .. } => *k as usize,
+                _ => unreachable!("Scan inputs always carry a Scan circuit id"),
+            };
+            if attribution.len() != k {
+                return Err(CheckError::AttributionMalformed {
+                    proof: i,
+                    expected: k,
+                    got: attribution.len(),
+                });
+            }
         }
     }
 
@@ -551,18 +608,25 @@ fn bind_issuer_attestations(
             }
             // (2) The cryptosuite must be a known/verifiable scheme, the key +
             // signature must parse, and the signature must verify over the
-            // domain-separated commitment message. When the attestation carries a
-            // salt (audit #9) the signed message BINDS the salt, so the salt
-            // under which the graph was committed is issuer-attested. Any failure
-            // => reject (fail closed; prover-controlled bytes never panic).
+            // SALT-BOUND domain-separated commitment message. Any failure =>
+            // reject (fail closed; prover-controlled bytes never panic).
             let Some(commitment_fr) = c_field else {
                 return Err(CheckError::InvalidIssuerSignature {
                     commitment: c.0.clone(),
                 });
             };
-            // The message the signature must verify over: salt-bound when the
-            // attestation discloses a (parseable) salt, bare otherwise. A salt
-            // field that is present but unparseable fails closed.
+            // [OPUS-4.8] codex 2221 HIGH (fail-closed for audit #9): an
+            // attestation that COVERS a verified scan commitment MUST carry a salt
+            // and be verified via the salt-bound `commitment_message_with_salt`
+            // path. The salt-less (legacy) `commitment_message` path does NOT bind
+            // the per-graph RDFC10 salt and does NOT participate in the
+            // salt-uniqueness check below, so accepting it here would let a
+            // salt-reusing ingester bypass the whole #9 salt-separation guarantee
+            // simply by OMITTING the salt field. There is therefore NO `salt:
+            // None` branch on the scan-covering path — `None` is rejected. (The
+            // bare `commitment_message` remains a primitive used elsewhere; it is
+            // not reachable from the default scan-verify path.) A salt that is
+            // present but unparseable also fails closed.
             let message = match &att.salt {
                 Some(salt_hex) => match salt_hex.to_field() {
                     Some(salt_fr) => commitment_message_with_salt(&commitment_fr, &salt_fr),
@@ -572,7 +636,12 @@ fn bind_issuer_attestations(
                         })
                     }
                 },
-                None => commitment_message(&commitment_fr),
+                None => {
+                    return Err(CheckError::ScanCommitmentSaltMissing {
+                        proof: pi,
+                        commitment: c.0.clone(),
+                    })
+                }
             };
             let ok = SignatureScheme::from_cryptosuite_iri(&att.cryptosuite).is_some()
                 && match (
@@ -1020,6 +1089,14 @@ fn reconstruct_public_inputs(
             // declared CircuitId.k is the authority for the length (re-derived
             // from commitments.len() in stage 1b); a wrong-length attribution
             // therefore yields a wrong-length vector that cannot byte-match.
+            //
+            // [OPUS-4.8] codex 2221 MEDIUM: `verify_manifest` runs
+            // `verify_manifest_structure` (stage 1b) FIRST, which already rejects
+            // any scan whose `attribution.len() != k` (`AttributionMalformed`), so
+            // on this path `attribution` is exactly k bits. The `unwrap_or(false)`
+            // below is therefore belt-and-braces only (never the pad-to-false
+            // bypass — that is rejected upstream); it cannot widen the accepted
+            // shape because the structural gate runs unconditionally before here.
             let k = match inputs.circuit_id() {
                 CircuitId::Scan { k, .. } => *k as usize,
                 _ => return Err(CheckError::MalformedField { proof, what: "scan id" }),
