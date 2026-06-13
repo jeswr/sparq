@@ -13,3 +13,6 @@
 # Local venv for the Python bindings (crates/sparq-py: maturin develop + pytest).
 /.venv-py/
 __pycache__/
+# roborev snapshots
+/.roborev/
+STATUS.md
