@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Concurrent-serving Wave A2 + A3 (`sparq-serve`)** — the single sequenced
+  writer with group-commit over the A1 generation ring (`research/concurrent-serving.md`
+  §6.5). One writer thread owns the sole right to publish generations; updates
+  arriving within a group-commit window (default 3 ms / 256 updates) apply to one
+  working copy and publish as ONE generation (one epoch tick), with per-update
+  atomicity — a failed update is reported to its submitter and skipped, never
+  poisoning its batch (re-fork-and-replay recovery for partial mutation). Opt-in
+  `CommitGranularity::CommuteGroup` splits a window into maximal runs of
+  provably-commuting pure-data updates via conservative graph-level footprint
+  analysis (`Footprint::of_sparql`; same-named-graph opposite-polarity or
+  unanalyzable = barrier) and publishes one conflict-free generation per run —
+  committed result is byte-identical to serial (FIFO application either way).
+  `GraphApplier` is the production `ApplyUpdates` (structural `Graph::fork` +
+  delta-overlay apply + threshold compaction). **A3**: `Writer::submit`'s returned
+  generation number doubles as a single-node read-your-writes `shard_seq` token;
+  `GenerationRing::read_your_writes(token)` pins the current generation iff it
+  already reflects that commit (`number >= token`), `None` otherwise (a lagging
+  replica must wait/redirect). Readers never block — `current()` stays lock-free.
+  Tested: group-commit + FIFO + failed-update isolation, commutativity-batch
+  differential correctness (CommuteGroup == Window == serial, + 200-op fuzz),
+  50k-triple bulk-update atomicity (a concurrent sampler sees 0-or-all, never a
+  partial prefix; never stalls), retention/pinning under sustained writes, and
+  read-your-writes token semantics. Benched in `bench/serve/writer_spike`
+  (group-commit ~7.8× writer throughput at batch 16 vs 1; readers within ~1.3× of
+  idle p99 under load; the too-large-batch regression recorded honestly).
+  `sparq-serve` stays out of the `sparq-wasm` dependency graph (server-side only).
 - **Python bindings parity wave (`sparq-py`)** — the Python `Graph` catches up with
   the engine/reasoner surface: native `ask()` (engine early-exit instead of the
   SELECT-count rewrite; SELECT still accepted), new `construct()` / `describe()`

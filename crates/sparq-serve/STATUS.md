@@ -26,10 +26,12 @@ delta). Completing = writing those + batch-atomicity test + benches.
 - [x] tests/batch_atomicity.rs— 2 tests, 50k bulk = 0-or-all + pinned-under-sustained-writes. PASS
       KEY FINDING: Graph::len() counts the DEFAULT graph only; commute.rs counts
       all graphs via a UNION SPARQL count (named graphs are the §6.5 conflict unit).
-- [ ] bench/serve writer_spike — writer throughput @ batch 1/16/256; reader p50/p99 vs A1
-- [ ] CHANGELOG entry
+- [x] bench/serve writer_spike — DONE. batch16 ~7.8x batch1 throughput; readers ~1.3x idle p99
+      under load. HONEST ANTI-RESULT: batch256 LOSES to batch16 (in-flight capped at 64 feeders;
+      bigger seal => more O(graph) compaction). Numbers in bench/serve/README.md.
+- [x] CHANGELOG entry (sparq-serve A2+A3)
 - [ ] Gate: cargo test --workspace --exclude sparq-py --release --no-fail-fast | grep -aE "^test result"
-- [ ] wasm byte count unchanged @ 1,643,095 (sparq-serve must NOT enter wasm builds)
+- [ ] wasm byte count: brief says 1,643,095; CHANGELOG records 1,643,103 — verify actual.
 - [ ] Final commit SHA recorded here
 
 ## Existing test inventory (pre-resume, all CommitGranularity::Window)
