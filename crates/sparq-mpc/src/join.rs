@@ -925,18 +925,41 @@ mod hidden_value_tests {
         assert!(!join.secure_equal(&mut dealer, Fp::zero(), Fp::new(1)).unwrap());
     }
 
-    /// Insufficient parties for the equality multiplication (n < 2t+1) is a
-    /// protocol error, not a wrong answer. (Constructed directly to violate the
-    /// invariant — `ShamirBackend::new` always picks t = (n-1)/2 which satisfies
-    /// 2t+1 <= n, so we cannot hit this via the constructor; this documents the
-    /// guard exists.)
+    /// The honest-majority constructor never under-provisions for the single
+    /// equality multiplication (it picks `t = (n-1)/2`, so `2t+1 <= n`); assert
+    /// the happy path holds so the guard never fires a false error.
     #[test]
-    fn secure_equal_guards_party_count() {
-        // n=2,t=0 → 2t+1 = 1 <= 2 OK; n=3,t=1 → 3 <= 3 OK. The honest-majority
-        // constructor never under-provisions, so we assert the happy path holds
-        // and the guard is present (covered by code; this asserts no false error).
+    fn secure_equal_does_not_falsely_guard_party_count() {
         let join = HiddenValueJoin::new(ShamirBackend::new(3, 0).unwrap());
         let mut dealer = join.backend.clone();
         assert!(join.secure_equal(&mut dealer, Fp::new(5), Fp::new(5)).is_ok());
+    }
+
+    /// STRESS / adversarial: the secure equality test must have ZERO false
+    /// matches AND zero false non-matches across many random key pairs and
+    /// several honest-majority party counts. This guards against a masking bug
+    /// (e.g. a zero mask slipping through → false match) or a reconstruction-
+    /// degree error. Deterministic LCG so the test is reproducible.
+    #[test]
+    fn secure_equal_no_false_results_across_random_pairs() {
+        let mut state: u64 = 0x1234_5678;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % 50 // small range → keys collide often, exercising both arms
+        };
+        for n in [3usize, 5, 7] {
+            for trial in 0..300u64 {
+                let a = next();
+                let b = next();
+                let join = HiddenValueJoin::new(
+                    ShamirBackend::new(n, trial.wrapping_mul(31).wrapping_add(1)).unwrap(),
+                );
+                let mut dealer = join.backend.clone();
+                let got = join.secure_equal(&mut dealer, Fp::new(a), Fp::new(b)).unwrap();
+                assert_eq!(got, a == b, "n={n} a={a} b={b}: secure_equal disagreed with plaintext");
+            }
+        }
     }
 }

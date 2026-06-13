@@ -37,6 +37,11 @@ pub const P: u64 = (1u64 << 61) - 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Fp(u64);
 
+// Inherent `add`/`sub`/`mul`/`neg` are deliberate: field arithmetic reads
+// clearest as `a.add(b)` in the share/interpolation code, and `Fp` is an
+// internal crate type (not a public numeric tower), so shadowing the std op
+// trait names carries no confusion risk for callers. [OPUS-4.8]
+#[allow(clippy::should_implement_trait)]
 impl Fp {
     /// Embed a `u64` into the field (reducing mod `p`).
     #[inline]
