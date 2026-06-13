@@ -161,7 +161,8 @@ a memory-bounded out-of-core path.
   pins a retained generation, `Sparq-Generation` response tokens, honest 410 when
   history ages out) (see [`crates/sparq-server/README.md`](crates/sparq-server/README.md)).
   Docker image via the release workflow (see [`docs/release.md`](docs/release.md)).
-- **WebAssembly** — the core engine builds for the browser with a minimal, CI-tracked bundle.
+- **WebAssembly** — the core engine builds for the browser with a minimal, CI-tracked bundle
+  (1,643,103 B raw cargo artifact; ~1.2 MB shipped after `wasm-opt`).
 
 ## Documentation
 
@@ -211,6 +212,81 @@ six-permutation out-of-core store in **737.8 s (1.355 M triples/s)** on an 8-vCP
 — [`research/wikidata-ingestion-benchmark.md`](research/wikidata-ingestion-benchmark.md).
 Load thread-scaling reaches 2.99× @ 8 threads after the parallel dictionary-consolidation
 work ([`research/dict-consolidation-verdict.md`](research/dict-consolidation-verdict.md)).
+
+A 16 GB machine can reach the billion-triple regime too, with the dictionary as the wall:
+the same 1B build on a 2-vCPU/16 GB `r8g.large` (Graviton4) completes in 4,691 s
+(0.213 M triples/s) — swap-bound, because the term dictionary stays RAM-resident and grows
+past 16 GB on a billion distinct terms, so a feasibility result, not a throughput one
+([`research/wikidata-lowresource-stage1.md`](research/wikidata-lowresource-stage1.md)).
+
+<!-- [OPUS-4.8] section written/updated by Opus 4.8 (Fable 5 unavailable) — re-review when Fable returns -->
+## Parsing
+
+N-Triples / N-Quads use a **custom byte-level parser** that interns directly into the
+dictionary with parallel newline-split chunking and a sharded dict merge; Turtle / TriG go
+through `oxttl` under a custom statement-terminator chunker (`turtle_chunks`) that parallelises
+even in the presence of blank nodes. Measured on the development machine (M1 Air, 4P+4E, 16 GB)
+over a real 1.5M-triple Wikidata slice (`bench/parse/` harness, median of 3;
+[`research/custom-parsers-baseline.md`](research/custom-parsers-baseline.md)):
+
+| format | task | 1 thread | 8 threads | parallel speedup |
+|---|---|--:|--:|--:|
+| N-Triples | parse + intern | 234 MB/s (2.02 M/s) | 896 MB/s (7.76 M/s) | **3.84×** |
+| N-Triples | full ingest (`load_str`, +6 perms) | 155 MB/s (1.34 M/s) | 585 MB/s (5.06 M/s) | 3.78× |
+| Turtle | parse + intern | 0.998 s | 0.479 s | **2.1×** |
+| Turtle | full ingest (`load_str`) | 1.207 s | 0.613 s | 2.0× |
+
+The custom serial N-Triples parser (234 MB/s) already parses *and* interns faster than
+`oxttl` parses-and-discards (185 MB/s, 1.27×). Turtle parses ~2.5× slower per byte than
+N-Triples but its files are ~3.2× smaller, so per-*triple* the two are comparable at one
+thread; the gap is parallelism (NT 5.06 vs Turtle 1.24 M/s at 8T full ingest). The Turtle
+chunk-parallel path is shown byte-identical to serial `oxttl` on the real slice (1,500,000
+statements, 41 distinct blank-node labels). RDF 1.2 / RDF-star terms parse but have no
+standalone throughput figure yet.
+
+**Streaming & compressed ingest.** Decompression overlaps parsing on a producer thread, so a
+`.gz` / `.zst` stream is parsed without ever materialising the decompressed copy in RAM —
+gzip-streaming ingest of the slice is **0.661 s** (8.5× faster than the pre-fix per-`read()`
+flush) and zstd-streaming **0.576 s** (6.9×), both matching or beating decompress-to-RAM-then-parse
+([`research/custom-parsers-baseline.md`](research/custom-parsers-baseline.md)). For the
+external (out-of-core) build, overlapping bzip2 decode with parse lifts a `.bz2` build from
+~0.39 to ~0.96 M triples/s (~2.4×), and parallelising the sibling-permutation sorts cuts a
+10M external build 6.8 → 4.4 s (−35%)
+([`research/fast-ingestion.md`](research/fast-ingestion.md)).
+
+<!-- [OPUS-4.8] section written/updated by Opus 4.8 (Fable 5 unavailable) — re-review when Fable returns -->
+## Serialisation
+
+The SPARQL-results JSON writer is chunk-parallel and the chunked path avoids the giant
+single-string concat — a 1M-row scan returns its first chunk in 79 ms vs 305 ms for the
+monolithic `query_json` (3.8×, a **memory/peak-RSS win**, not incremental delivery yet)
+([`research/concurrent-serving.md`](research/concurrent-serving.md)). On a 302 MB JSON result
+the writer alone runs at ~3.1 GB/s (8T)
+([`research/custom-parsers-D4-compressed-serialization.md`](research/custom-parsers-D4-compressed-serialization.md)).
+The per-cell JSON escaper was rewritten to bulk-copy already-safe runs, cutting a 701 MB
+(5M-row) result's serialisation 1276 → 1034 ms (−19%)
+([`research/BENCHMARKS.md`](research/BENCHMARKS.md)).
+
+A `CompressedSink` frames the chunked output as multi-member gzip / multi-frame zstd so each
+chunk compresses in parallel as it is produced. Measured on the same 302 MB JSON result
+([`research/custom-parsers-D4-compressed-serialization.md`](research/custom-parsers-D4-compressed-serialization.md)):
+
+| codec | output | ratio | parallel 8T throughput |
+|---|--:|--:|--:|
+| zstd −3 | 16.3 MB | **18.5×** | 6.5 GB/s |
+| gzip −6 | 17.4 MB | 17.4× | 0.75 GB/s |
+| gzip −1 | 22.6 MB | 13.4× | 3.8 GB/s |
+
+zstd −3 strictly dominates gzip −6 (better ratio, ~8.7× faster parallel) and compresses
+2.1× faster than the serializer produces, so overlapping it adds only ~8 ms to a 98 ms
+serialization. On genuinely small (≤1 KiB) point-query responses a trained zstd vocabulary
+dictionary takes the ratio from 2.3× to 11.4× (278 → 56 B per response). **Honesty caveat:**
+the streaming overlap is measured by *replaying* committed chunks, not yet driven by a live
+streaming server; and browsers / Node silently truncate multi-member `Content-Encoding: gzip`
+and multi-frame zstd to the first member, so the shipped sink uses a single-member-gzip
+variant (identical ratio, decodes everywhere) — both documented in
+[`research/custom-parsers-D4-compressed-serialization.md`](research/custom-parsers-D4-compressed-serialization.md)
+and [`research/custom-parsers-ADDENDUM-zstd-js-clients.md`](research/custom-parsers-ADDENDUM-zstd-js-clients.md).
 
 **Honesty notes.** The synthetic dataset (uniform) favours simple joins; the skewed
 real-data (olympics) and W3C-conformance results are the counterweight, and standard suites
