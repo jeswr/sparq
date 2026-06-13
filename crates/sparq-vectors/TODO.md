@@ -14,19 +14,34 @@ crate README. Status of the deliberate cuts:
   format, no format change. One documented contract difference: duplicate ids
   are reported at `finalize` (the sort reveals them), not at `put` (eager
   detection would need the in-RAM id set this writer exists to avoid).
-- **Persistent / out-of-core ANN.** DEFERRED (out-of-scope-by-design for v2 as
-  for v1): the HNSW index is rebuilt from the mmap'd store on open (a one-off
-  per-process cost; see the README throughput table — ~33 s release for
-  50k×32 on an M1). For 10M+ vector stores the index itself should be a
-  versioned on-disk artifact — DiskANN/Vamana-style graph with mmap'd
-  adjacency, or `instant-distance` serde persistence as a stopgap (adds
-  serde+bincode and a SECOND format to version, which is why it stays
-  deferred until a workload actually hits the rebuild wall).
-- **Quantization.** DEFERRED (out-of-scope-by-design): f32-only today. Scalar
-  i8 (4×) or product quantization for 100M-scale stores; the `.spqv` header
-  has 12 reserved bytes for an encoding tag, so this lands as a backwards-
-  compatible header bump when needed — designing the encoding now, without a
-  driving workload or recall budget, would be speculation.
+- ~~**Persistent / out-of-core ANN.**~~ **DONE** (sq-7zc) [OPUS-4.8] —
+  [`DiskAnnIndex`] in `src/diskann.rs`: a self-contained **Vamana on-disk
+  graph** (`.spqg`) we build and encode end to end (the `instant-distance`
+  HNSW is a closed graph — its adjacency can't be laid out on disk, so this is
+  a second, owned index rather than a serde dump of the first). Build once
+  (RobustPrune, α-passes, medoid entry); `open` is mmap + header validation —
+  **no rebuild**, the whole point. Each node record co-locates `[id, degree,
+  dim·f32 vector, R·u32 neighbour slots]` so a greedy-search hop is one
+  contiguous page read (the DiskANN locality property). Cosine throughout,
+  identical to `ann` (unit vectors, `cos = 1 − d²/2`), so scores/rankings match
+  the exact/HNSW searchers. **Recall@10 = 0.966 vs exact brute force on the
+  50k×32 synthetic set** (`tests/diskann.rs`), and a reopened handle returns
+  byte-identical neighbours to the freshly built one (restart-survival gate).
+  HONEST GAP to *full* DiskANN: full-precision vectors are searched directly
+  from the mmap; there is **no PQ-compressed in-RAM candidate cache** to skip
+  disk reads (full DiskANN ranks on PQ codes, re-ranks the beam on disk). That
+  quantization layer is the sibling task below (sq-nq5) — at scales where the
+  graph fits page cache the two are equivalent; PQ matters only once the
+  vectors themselves exceed RAM. Build is single-threaded O(n·L·R) and slower
+  than HNSW's rayon build (~50 s vs ~33 s for 50k×32 at opt-level 2); a
+  rayon-parallel Vamana build is the recorded follow-up.
+- **Quantization.** DEFERRED (out-of-scope-by-design — sibling task **sq-nq5**):
+  f32-only today. Scalar i8 (4×) or product quantization for 100M-scale stores;
+  the `.spqv` header has 12 reserved bytes and the new `.spqg` header 4 reserved
+  bytes for an encoding tag, so this lands as a backwards-compatible header bump
+  when needed (and is what closes the on-disk-ANN gap to *full* DiskANN above) —
+  designing the encoding now, without a driving workload or recall budget, would
+  be speculation.
 - ~~**Hybrid RRF fusion** (lexical + structural + vector)~~ **DONE** —
   `fuse_rrf` / `fuse_scores` in `src/fuse.rs` (rank-based RRF `k = 60` +
   min-max alpha-blend over plain ranked lists, so `sparq-vectors` never

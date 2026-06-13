@@ -224,9 +224,37 @@ runs (quiet vs heavily loaded machine); rerun the harness on your hardware:
 | HNSW top-10                | 1.6–2.5 ms/query (400–630 q/s) |
 
 Below ~10⁵ vectors the exact scan is a fine default; the HNSW index pays for
-its build once query volume is high. The index is rebuilt from the mmap'd
-store per process rather than persisted; out-of-core persistent ANN
-(DiskANN-style) is the recorded follow-up for 10M+ stores.
+its build once query volume is high. The HNSW index is rebuilt from the mmap'd
+store per process; for a **persistent** index that survives restart without a
+rebuild, use `DiskAnnIndex` (below).
+
+## Persistent on-disk ANN (`DiskAnnIndex`)
+
+`DiskAnnIndex` (`src/diskann.rs`) is a **Vamana / DiskANN-style on-disk graph**
+(`.spqg`): build it once, then `open` it on later runs with no rebuild — just an
+mmap and a header check. It is a second, self-contained index (the
+`instant-distance` HNSW is a closed graph whose adjacency can't be persisted),
+with cosine semantics identical to the HNSW/exact searchers.
+
+```rust
+use sparq_vectors::{DiskAnnIndex, VectorStore};
+let store = VectorStore::open("entities.spqv")?;
+// Build + persist once (writes entities.spqg):
+let _ = DiskAnnIndex::build(&store, "entities.spqg")?;
+// On every later run — no rebuild, near-instant:
+let index = DiskAnnIndex::open("entities.spqg")?;
+let hits = index.nearest(&query, 10); // Vec<(Id, cosine)>, best first
+```
+
+Each on-disk node record co-locates the node's id, its (normalized) vector, and
+its ≤ `R` neighbour slots, so one greedy-search hop is one contiguous page read.
+**Recall@10 = 0.966 vs exact brute force** on the 50k×32 synthetic set, and a
+reopened handle returns byte-identical neighbours to the freshly built one.
+*Scope note:* full-precision vectors are searched straight from the mmap; there
+is no PQ-compressed in-RAM candidate cache (the remaining gap to *full* DiskANN
+— that quantization layer is the sibling task, see `TODO.md`). The Vamana build
+is single-threaded and a little slower than the rayon HNSW build, but the
+**open** is what this buys you: no per-process rebuild.
 
 ## Tests
 
@@ -236,6 +264,11 @@ store per process rather than persisted; out-of-core persistent ANN
   duplicate-at-finalize detection), and `open_from_bytes` parity/validation.
 - `tests/recall.rs` — the recall@10 ≥ 0.95 gate plus exact/HNSW agreement on
   separable clusters.
+- `tests/diskann.rs` — the on-disk `DiskAnnIndex`: recall@10 ≥ 0.90 vs exact
+  brute force on 50k×32, **reopen-without-rebuild returns byte-identical
+  neighbours** (the persistence acceptance gate), parity with the in-RAM HNSW
+  on separable clusters, empty/singleton round-trip, and corrupt/wrong-magic
+  rejection.
 - `tests/labels.rs` — `embed_labels` predicate priority, literal filtering,
   and term-keyed lookup end to end on a small graph.
 - `tests/verbalize.rs` — `verbalize`/`embed_entities` on a fixture graph:
