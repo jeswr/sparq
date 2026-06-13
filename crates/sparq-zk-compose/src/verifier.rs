@@ -1351,7 +1351,20 @@ pub fn prefilter_manifest_structure(
     // attested commitment to the proved statement. The issuer signature ALSO
     // binds the credential's status-list reference (audit #12), so a scan-covering
     // attestation that omits/forges the reference is rejected here.
-    bind_issuer_attestations(manifest, trusted_key_set)?;
+    //
+    // [OPUS-4.8] sq-xxg: a scan commitment may be covered EITHER by a clear
+    // attestation OR by a hidden-issuer proof (when the relying party enabled the
+    // hidden path). Compute the STRUCTURALLY hidden-covered commitments so the
+    // clear attestation is treated as NOT-REQUIRED for them; the fail-closed
+    // either-clear-or-hidden / never-neither rule is enforced inside
+    // `bind_issuer_attestations`. The hidden proof itself is cryptographically
+    // verified by `bind_hidden_issuer_attestations` in the bb stage of
+    // `verify_manifest` (which binds its public `key_set_root` to the relying
+    // party's authoritative KeySet and its `m` to the issuer-signed message), so a
+    // hidden-only commitment is no less attested than a clear one — only WHICH
+    // issuer signed is hidden.
+    let hidden_covered = hidden_issuer_covered_commitments(manifest, trusted_key_set);
+    bind_issuer_attestations(manifest, trusted_key_set, &hidden_covered)?;
 
     // --- Stage 2f: revocation / freshness (audit #12). ---
     // The status reference is now issuer-bound (stage 2d); check the credential's
@@ -1366,7 +1379,8 @@ pub fn prefilter_manifest_structure(
 /// Stage 2d: bind every scan commitment to an issuer signature whose key is in
 /// the EXTERNAL trusted key-set `K` (audit #3, soundness fix for codex #1). For
 /// each `commitments[g]` of each scan sub-proof:
-/// - there MUST be a `commitment_attestations` entry over that commitment value,
+/// - there MUST be a `commitment_attestations` entry over that commitment value
+///   OR a hidden-issuer proof covering it (sq-xxg, see below),
 /// - its signature MUST verify under its declared `issuer_public_key`,
 /// - that key MUST be a member of the EXTERNAL `trusted_key_set` (the relying
 ///   party's argument — NEVER `manifest.key_set`),
@@ -1375,6 +1389,27 @@ pub fn prefilter_manifest_structure(
 ///   must be internally consistent with the attestations actually proven. The
 ///   accept decision stays anchored on the external K (this consistency rule is
 ///   ADDED to, never substituted for, the external-K check).
+///
+/// # sq-xxg: clear attestation is OPTIONAL when a hidden-issuer proof covers it
+/// `hidden_covered` is the set of commitment-hex keys for which the manifest
+/// carries a `hidden_issuer_attestations` entry AND the relying party enabled the
+/// hidden-issuer path. For a commitment in this set, the clear-key
+/// `commitment_attestations` entry is NOT required: the hidden-issuer proof (whose
+/// public `key_set_root` is bound to the relying party's authoritative KeySet, and
+/// whose `m` is the issuer-signed message, both checked cryptographically by
+/// [`bind_hidden_issuer_attestations`] in the bb stage) is the attestation. The
+/// privacy gain is that WHICH trusted issuer signed is hidden; the soundness
+/// guarantee ("signed by SOME key in the relying party's K over this committed
+/// graph's status-bound message") is unchanged.
+///
+/// FAIL-CLOSED (either-clear-or-hidden, NEVER neither): a commitment with NEITHER
+/// a clear attestation NOR a hidden-issuer entry is rejected
+/// ([`CheckError::UnattestedCommitment`]). A commitment WITH a clear attestation
+/// is still fully checked here (key ∈ K, signature, salt, status) regardless of
+/// any hidden entry — the hidden path only RELAXES the *requirement* for a clear
+/// entry, it never relaxes the checks applied to a clear entry that IS present.
+/// So no commitment can go unattested, and a hidden-only commitment is gated by
+/// the (mandatory, fail-closed) bb hidden-issuer verification.
 ///
 /// # The codex #1 soundness fix
 /// Previously the trust anchor was `manifest.key_set` — PROVER-supplied. A
@@ -1395,6 +1430,7 @@ pub fn prefilter_manifest_structure(
 fn bind_issuer_attestations(
     manifest: &ProofManifest,
     trusted_key_set: &KeySet,
+    hidden_covered: &BTreeSet<String>,
 ) -> Result<(), CheckError> {
     // The prover's declared key_set may NARROW but never WIDEN the external trust
     // anchor: every key it lists must already be in the external K. (A
@@ -1433,6 +1469,33 @@ fn bind_issuer_attestations(
                 a.commitment.to_field().is_some() && a.commitment.to_field() == c_field
             });
             let Some(att) = att else {
+                // [OPUS-4.8] sq-xxg: no CLEAR attestation. This is acceptable ONLY
+                // if a hidden-issuer proof covers this commitment (and the relying
+                // party enabled the hidden path) — the fail-closed
+                // either-clear-or-hidden / never-neither rule. The hidden proof is
+                // cryptographically verified by `bind_hidden_issuer_attestations`
+                // (bb stage), so a hidden-covered commitment is fully attested
+                // there; here we only RELAX the clear-entry requirement. A
+                // commitment covered by NEITHER is rejected as unattested.
+                if let Some(c_fr) = c_field {
+                    if hidden_covered.contains(&field_to_hex(&c_fr)) {
+                        // The hidden-only commitment still participates in the
+                        // audit-#9 salt-uniqueness check (the Q6 cross-graph
+                        // bnode-correlation channel applies to ANY committed graph
+                        // a verified scan drew from, hidden-attested or clear). Its
+                        // salt is the one the verifier uses to recompute the
+                        // issuer-signed `m` (resolve_commitment_salt). If no salt is
+                        // disclosed for a hidden-only commitment, the message cannot
+                        // be recomputed and the bb hidden-issuer gate rejects it as
+                        // unreferenced (fail-closed) — so we record only a present,
+                        // parseable salt here.
+                        if let Some(salt_fr) = resolve_commitment_salt(manifest, &c_fr) {
+                            referenced_salt
+                                .insert(field_to_hex(&c_fr), field_to_hex(&salt_fr));
+                        }
+                        continue;
+                    }
+                }
                 return Err(CheckError::UnattestedCommitment {
                     proof: pi,
                     commitment: c.0.clone(),
@@ -1591,6 +1654,45 @@ fn bind_issuer_attestations(
         }
     }
     Ok(())
+}
+
+/// The set of commitment-hex keys (canonical `field_to_hex`) for which a CLEAR
+/// issuer attestation may be withheld because a HIDDEN-ISSUER proof covers them
+/// (sq-xxg). A commitment is hidden-covered iff (a) the relying party ENABLED the
+/// hidden-issuer path (`KeySet::with_hidden_issuer_depth`) AND (b) the manifest
+/// carries a `hidden_issuer_attestations` entry for it.
+///
+/// This is a STRUCTURAL coverage set only — it does NOT verify the hidden proof
+/// (that is the bb-stage [`bind_hidden_issuer_attestations`], which binds the
+/// proof's public `key_set_root` to the authoritative KeySet and its `m` to the
+/// issuer-signed message, and rejects a dangling/forged/unreferenced entry). So a
+/// commitment in this set is treated as "clear attestation not required" by the
+/// structural [`bind_issuer_attestations`], but is still gated by the mandatory,
+/// fail-closed bb hidden-issuer verification before `verify_manifest` accepts.
+///
+/// When the relying party did NOT enable the hidden path, this returns the empty
+/// set, so every commitment then requires a clear attestation exactly as before
+/// (a manifest carrying hidden entries against a non-enabled policy is separately
+/// rejected by `bind_hidden_issuer_attestations` with `HiddenIssuerNotEnabled`).
+// [OPUS-4.8] sq-xxg: structural hidden-issuer coverage set (clear-attestation
+// optionality). Soundness rests on the bb gate; this only relaxes the structural
+// clear-entry requirement and never lets a commitment go uncovered (either-clear-
+// or-hidden, never-neither — enforced in `bind_issuer_attestations`).
+fn hidden_issuer_covered_commitments(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+) -> BTreeSet<String> {
+    if trusted_key_set.hidden_issuer_depth().is_none() {
+        // The hidden path is disabled; no commitment may withhold its clear
+        // attestation. (Any hidden entry present is rejected fail-closed by the
+        // bb-stage gate with HiddenIssuerNotEnabled.)
+        return BTreeSet::new();
+    }
+    manifest
+        .hidden_issuer_attestations
+        .iter()
+        .filter_map(|hi| hi.commitment.to_field().map(|f| field_to_hex(&f)))
+        .collect()
 }
 
 /// Stage 2f: revocation / freshness check (audit #12). PRECONDITION:
@@ -2014,15 +2116,44 @@ fn bind_hidden_issuer_attestations(
     Ok(())
 }
 
+/// The per-graph salt the verifier uses to recompute a scan commitment's
+/// issuer-signed message, resolved from EITHER a clear [`CommitmentAttestation`]
+/// over `c_fr` OR — for a HIDDEN-ONLY commitment (sq-xxg) — the
+/// [`HiddenIssuerAttestation`]'s own `salt`. The clear attestation's salt is
+/// preferred when present (the additive mode); the hidden entry's salt is the
+/// fallback so a commitment with no clear attestation can still have its `m`
+/// recomputed. `None` if neither source supplies a parseable salt.
+// [OPUS-4.8] sq-xxg: salt source for hidden-only message reconstruction.
+fn resolve_commitment_salt(manifest: &ProofManifest, c_fr: &Fr) -> Option<Fr> {
+    // Prefer the clear attestation's salt (the original sq-z9l additive path).
+    if let Some(att) = manifest.commitment_attestations.iter().find(|a| {
+        a.commitment.to_field().is_some() && a.commitment.to_field() == Some(*c_fr)
+    }) {
+        if let Some(salt_hex) = &att.salt {
+            if let Some(salt_fr) = salt_hex.to_field() {
+                return Some(salt_fr);
+            }
+        }
+    }
+    // Fall back to a hidden-issuer entry's salt (the hidden-only case).
+    manifest
+        .hidden_issuer_attestations
+        .iter()
+        .find(|hi| hi.commitment.to_field() == Some(*c_fr))
+        .and_then(|hi| hi.salt.as_ref())
+        .and_then(|salt_hex| salt_hex.to_field())
+}
+
 /// The issuer-signed message for every commitment a VERIFIED scan sub-proof
 /// references, keyed by canonical commitment hex (sq-z9l). The message is
 /// `commitment_message_with_status(C(G), salt, status_ref_digest(H(list), index,
 /// version))` — the SAME message [`bind_issuer_attestations`] verifies the clear
 /// signature over, recomputed from the disclosed (prefilter-validated, so
-/// issuer-bound) attestation salt + revocation reference. Used by the
+/// issuer-bound) salt + revocation reference. The salt is resolved via
+/// [`resolve_commitment_salt`], so a HIDDEN-ONLY commitment (no clear attestation,
+/// salt carried on the hidden entry — sq-xxg) is also covered. Used by the
 /// hidden-issuer gate to bind each proof's PUBLIC `m` to a specific committed
-/// graph. Errors if a referenced commitment lacks the salt/reference the prefilter
-/// guarantees (defensive — should not happen post-prefilter).
+/// graph.
 fn scan_referenced_messages(
     manifest: &ProofManifest,
 ) -> Result<std::collections::BTreeMap<String, Fr>, CheckError> {
@@ -2040,12 +2171,7 @@ fn scan_referenced_messages(
         };
         for c in commitments {
             let Some(c_fr) = c.to_field() else { continue };
-            let att = manifest.commitment_attestations.iter().find(|a| {
-                a.commitment.to_field().is_some() && a.commitment.to_field() == Some(c_fr)
-            });
-            let Some(att) = att else { continue };
-            let Some(salt_hex) = &att.salt else { continue };
-            let Some(salt_fr) = salt_hex.to_field() else { continue };
+            let Some(salt_fr) = resolve_commitment_salt(manifest, &c_fr) else { continue };
             let m = commitment_message_with_status(&c_fr, &salt_fr, &status_ref);
             out.insert(field_to_hex(&c_fr), m);
         }

@@ -1853,6 +1853,61 @@ fn issuer_reject_unsigned_commitment() {
     }
 }
 
+/// [OPUS-4.8] sq-xxg (FAIL-CLOSED, never-neither): a scan commitment covered by
+/// NEITHER a clear attestation NOR a hidden-issuer entry is REJECTED as unattested
+/// — even when the relying party ENABLED the hidden-issuer path. The hidden path
+/// only RELAXES the clear-attestation requirement for commitments a hidden entry
+/// actually covers; a commitment with no coverage at all still fails closed.
+/// (Structural, no bb.)
+#[test]
+fn issuer_xxg_neither_clear_nor_hidden_rejected() {
+    let (m, _c, _salt) = scan_only_manifest(&credential_graph(), 7);
+    // KeySet WITH the hidden-issuer path enabled, but the manifest carries NO
+    // hidden_issuer_attestations and NO clear commitment_attestations.
+    let k = KeySet::from_hex_keys([public_key_to_hex(&test_issuer_sk(1).public_key())])
+        .with_hidden_issuer_depth(HI_DEPTH);
+    match prefilter_manifest_structure(&m, &k, &fresh_policy()) {
+        Err(CheckError::UnattestedCommitment { proof: 0, .. }) => {}
+        other => panic!(
+            "a commitment with neither a clear attestation nor a hidden-issuer entry must be UnattestedCommitment (never-neither), got {other:?}"
+        ),
+    }
+}
+
+/// [OPUS-4.8] sq-xxg (clear-attestation OPTIONAL when hidden covers it): a scan
+/// commitment with NO clear attestation but WITH a hidden-issuer entry over it
+/// (and the hidden path enabled) passes the STRUCTURAL clear-attestation gate —
+/// the `UnattestedCommitment` rejection is NOT raised. (The hidden proof's own
+/// cryptographic verification is the bb-stage gate, exercised by the slow
+/// `hidden_issuer_only_*` e2e test; here we assert only that the structural
+/// prefilter no longer demands a clear entry for a hidden-covered commitment.)
+#[test]
+fn issuer_xxg_hidden_covered_relaxes_clear_requirement_structurally() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    // A hidden-issuer entry over `c` (dummy proof — the structural prefilter does
+    // not run bb), carrying the salt so message reconstruction has a source.
+    m.hidden_issuer_attestations = vec![HiddenIssuerAttestation {
+        commitment: FieldHex::from_field(&c),
+        depth: HI_DEPTH,
+        key_set_root: FieldHex("0x0".into()),
+        message: FieldHex("0x0".into()),
+        salt: Some(FieldHex::from_field(&salt)),
+        proof_hex: String::new(),
+    }];
+    let k = KeySet::from_hex_keys([public_key_to_hex(&test_issuer_sk(1).public_key())])
+        .with_hidden_issuer_depth(HI_DEPTH);
+    // The clear-attestation gate must NOT raise UnattestedCommitment for `c`.
+    // (Any other structural result is acceptable here — we are isolating the
+    // clear-attestation optionality, not the bb gate.)
+    if let Err(CheckError::UnattestedCommitment { .. }) =
+        prefilter_manifest_structure(&m, &k, &fresh_policy())
+    {
+        panic!(
+            "a hidden-covered commitment must NOT be rejected as UnattestedCommitment (clear attestation is optional when hidden covers it)"
+        );
+    }
+}
+
 /// (a') A commitment with an attestation whose SIGNATURE is invalid (wrong
 /// commitment signed) must be REJECTED — an attestation present but not
 /// cryptographically valid is no attestation.
@@ -3403,6 +3458,9 @@ fn prove_hidden_issuer(
         depth: HI_DEPTH,
         key_set_root: FieldHex::from_field(&auth_root),
         message: FieldHex::from_field(&m),
+        // [OPUS-4.8] sq-xxg: carry the salt so this attestation is self-contained
+        // and usable on the HIDDEN-ONLY path (no clear attestation to read it from).
+        salt: Some(FieldHex::from_field(salt)),
         proof_hex: encode_artifacts(&art),
     }
 }
@@ -3477,6 +3535,101 @@ fn hidden_issuer_in_set_verifies_and_key_is_private() {
         &keyset, &fresh_policy(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     )
     .expect("in-set hidden-issuer attestation verifies end-to-end");
+}
+
+/// Build a scan manifest with NO clear `commitment_attestations` and NO declared
+/// `key_set` (sq-xxg HIDDEN-ONLY): the commitment is attested SOLELY by a
+/// hidden-issuer proof attached by the caller. Returns (manifest, commitment, salt).
+fn hi_scan_manifest_no_clear_attestation(
+    prover: &CircuitProver,
+    tag: &str,
+) -> (ProofManifest, Fr, Fr) {
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let c = commit.commitment;
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).unwrap();
+    let challenge = FieldHex("0x2a".into());
+    let (id, toml) =
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+    let out = scratch(tag);
+    let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
+    let manifest = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec!["did:key:zSampleIssuer".into()],
+        key_set: vec![],                  // no declared narrowing
+        commitment_attestations: vec![],  // NO clear attestation — hidden-only
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: encode_artifacts(&art) }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    (manifest, c, salt)
+}
+
+/// [OPUS-4.8] sq-xxg HAPPY PATH (HIDDEN-ONLY): a presentation that provides ONLY
+/// the hidden-issuer proof for a commitment — NO clear `commitment_attestations`
+/// entry, NO declared `key_set` — verifies end-to-end. The clear issuer key is
+/// ABSENT from the manifest; the commitment is attested solely by the in-circuit
+/// "signed by SOME key in K" proof (key_set_root bound to the relying party's
+/// authoritative KeySet, m bound to the issuer-signed status message recomputed
+/// from the salt carried on the hidden entry). This is the deanonymisation-leak
+/// suppression: WHICH issuer signed is never disclosed AND the clear key is gone.
+#[test]
+#[ignore = "slow: full bb prove of a scan + the hidden-issuer member (sq-xxg hidden-only)"]
+fn hidden_issuer_only_verifies_with_clear_key_absent() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping hidden-issuer-only full prove+verify");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let signer = test_issuer_sk(1); // a member of K; WHICH is hidden by the proof
+    let (mut manifest, c, salt) =
+        hi_scan_manifest_no_clear_attestation(&prover, "hi_only_scan");
+    let challenge = Fr::from(0x2au64);
+    let keyset = hi_keyset();
+    let signers = hi_canonical_signers();
+    let signer_hex = public_key_to_hex(&signer.public_key());
+    let signer_index = keyset.member_index(&signer_hex).expect("signer in K") as u64;
+
+    // Sanity: the manifest carries NO clear attestation and NO declared key_set,
+    // so the issuer key is NOT disclosed anywhere in the clear.
+    assert!(manifest.commitment_attestations.is_empty(), "no clear attestation");
+    assert!(manifest.key_set.is_empty(), "no declared key_set");
+
+    let hidden = prove_hidden_issuer(
+        &prover, &keyset, &signers, &signer, signer_index, &c, &salt, &challenge, "hi_only",
+    );
+    // The hidden entry MUST carry the salt so the verifier can recompute m for a
+    // hidden-only commitment (no clear attestation to read it from).
+    assert!(hidden.salt.is_some(), "hidden-only entry must carry the salt");
+    manifest.hidden_issuer_attestations = vec![hidden];
+
+    verify_manifest(
+        &manifest, &prover, &scratch("hi_only_verify"),
+        &keyset, &fresh_policy(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+    )
+    .expect("hidden-only presentation (clear key absent) verifies end-to-end");
+
+    // The clear issuer key never appears in any disclosed field — the
+    // deanonymisation leak is suppressed (not merely hidden in-circuit).
+    let signer_hex_norm = signer_hex.strip_prefix("0x").unwrap_or(&signer_hex).to_ascii_lowercase();
+    let json = manifest.to_json();
+    assert!(
+        !json.to_ascii_lowercase().contains(&signer_hex_norm),
+        "the clear issuer key must not appear anywhere in the hidden-only manifest"
+    );
 }
 
 /// OUT-OF-SET KEY: a REAL signature by an issuer NOT in K. Its signature is valid
@@ -3603,6 +3756,7 @@ fn hidden_issuer_forged_root_rejected() {
         depth: HI_DEPTH,
         key_set_root: FieldHex::from_field(&forged_root), // the forged root the prover used
         message: FieldHex::from_field(&m),
+        salt: None, // clear attestation present (hi_scan_manifest); salt read from it
         proof_hex: encode_artifacts(&art),
     }];
     match verify_manifest(
@@ -3634,6 +3788,7 @@ fn hidden_issuer_not_enabled_rejected() {
         depth: HI_DEPTH,
         key_set_root: FieldHex("0x2".into()),
         message: FieldHex("0x3".into()),
+        salt: None,
         proof_hex: "00".into(),
     }];
     // KeySet WITHOUT the hidden-issuer opt-in.

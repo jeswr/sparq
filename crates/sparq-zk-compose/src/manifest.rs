@@ -583,6 +583,22 @@ pub struct HiddenIssuerAttestation {
     /// PUBLIC input). Checked equal to the message the verifier recomputes from the
     /// disclosed commitment + salt + status reference.
     pub message: FieldHex,
+    /// The per-graph RDFC10 bnode salt this commitment was committed under (audit
+    /// #9), hex. Carried HERE so the verifier can recompute the issuer-signed
+    /// message `m = commitment_message_with_status(C(G), salt, status_ref)` for a
+    /// HIDDEN-ONLY commitment — one with NO clear [`CommitmentAttestation`] from
+    /// which to read the salt (sq-xxg). The salt is NOT the privacy target (only
+    /// WHICH issuer signed is hidden); disclosing it is consistent with the clear
+    /// path, and it still participates in the salt-uniqueness guarantee (audit #9).
+    ///
+    /// When `None`, the verifier falls back to the salt from the clear attestation
+    /// over the same commitment (the additive mode, where a clear attestation also
+    /// exists — the original sq-z9l behaviour). A hidden-ONLY commitment (no clear
+    /// attestation) MUST carry the salt here, or the verifier cannot recompute `m`
+    /// and rejects the entry as unreferenced (fail-closed).
+    // [OPUS-4.8] sq-xxg: salt for hidden-only `m` reconstruction.
+    #[serde(default)]
+    pub salt: Option<FieldHex>,
     /// The bb proof blob (hex), same `len|proof|len|pi|vk` layout as a
     /// [`SubProof::proof_hex`].
     pub proof_hex: String,
