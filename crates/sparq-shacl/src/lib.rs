@@ -1,13 +1,18 @@
-//! sparq-shacl: opt-in SHACL Core validation over [`sparq_core::Graph`]s.
+//! sparq-shacl: opt-in SHACL Core + SHACL-SPARQL validation over
+//! [`sparq_core::Graph`]s.
 //!
 //! Parse a shapes graph into a shapes model, evaluate every SHACL Core
-//! constraint component against a data graph by direct index-backed scans, and
-//! produce a [`ValidationReport`] (with Turtle and plain-text renderings of the
-//! SHACL report vocabulary).
+//! constraint component against a data graph by direct index-backed scans,
+//! evaluate `sh:sparql` constraints (SHACL §5.2) by routing their `sh:select`
+//! through `sparq-engine` (with `$this`/`$PATH` pre-binding), and produce a
+//! [`ValidationReport`] (with Turtle and plain-text renderings of the SHACL
+//! report vocabulary).
 //!
 //! This crate follows the `sparq-reason` isolation pattern: it is NOT a
 //! dependency of any other sparq crate — the core engine and the wasm bundle
 //! carry zero SHACL code unless a consumer opts in by depending on it.
+//! (`sparq-engine`, pulled in for `sh:sparql`, is likewise native-only and does
+//! not depend on this crate, so there is no cycle and the wasm bundle is untouched.)
 //!
 //! ```
 //! use sparq_core::Graph;

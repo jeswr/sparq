@@ -1,10 +1,43 @@
 # sparq-shacl — known gaps / follow-ups
 
-## Spec coverage (documented out of scope — unchanged)
-- **SHACL-SPARQL** (`sh:sparql`, SPARQL-based constraint components,
-  pre-binding) is not implemented — the suite's `sparql/` section is out of
-  scope for this crate (Core only). Doing it well would route generated
-  SELECTs through `sparq-engine`.
+## SHACL-SPARQL (`sh:sparql`, W3C SHACL §5.2) — DONE (sq-1rr) [OPUS-4.8]
+The `sh:sparql` constraint component is implemented (`src/sparql.rs` + the
+`Component::Sparql` arm in `eval.rs`), routing the `sh:select` query through
+`sparq-engine`. Per focus node the query runs with `$this` pre-bound (by an
+**algebra-level** `VALUES (?this)` injection — robust to query layout, unlike a
+textual prepend); each solution is one validation result. Covered:
+  - `sh:prefixes` (`sh:declare` → `sh:prefix`/`sh:namespace`), with `owl:imports`
+    chasing of the prefix-declarations resource (cycle-guarded);
+  - `$PATH` pre-binding on property shapes (the path's SPARQL property-path form
+    is substituted for `$PATH`/`?PATH` as a whole token);
+  - solution → result mapping: `sh:focusNode` = `$this`; `sh:value` = `?value`
+    when projected, else the focus node (per the W3C suite); `sh:resultPath` from
+    a bound `?path` (IRI) else the property shape's path; `sh:resultMessage` from
+    the constraint's `sh:message` (with `{?var}`/`{$var}` substitution), else a
+    bound `?message`, else a default;
+  - `sh:deactivated` on the constraint; ill-formed `sh:select` skipped (lenient).
+Pinned by `tests/sparql_constraints.rs` (10 cases) and the W3C `sparql/node` +
+`sparql/property` sub-suites via `tests/w3c_sparql.rs` (5/5).
+
+### SHACL-SPARQL — still deferred (honest scope)
+- **SPARQL-based constraint COMPONENTS** (`sh:ConstraintComponent` declarations
+  with `sh:parameter` + `sh:validator`/`sh:nodeValidator`/`sh:propertyValidator`,
+  `sh:SPARQLAskValidator`/`sh:SPARQLSelectValidator`): NOT implemented. This is
+  the larger §6 machinery — a component registry keyed on the parameter
+  predicates a shape uses, multi-parameter pre-binding (`$paramName`), the
+  ASK-validator-per-value-node firing rule, and `?value`/`$value` binding for
+  ASK validators. The suite's `sparql/component/*` entries also `owl:imports` the
+  external `http://datashapes.org/dash` vocabulary, which the offline test
+  harness cannot resolve. A follow-up would add a `Component::CustomSparql`
+  carrying the resolved validator + bound parameters and a component-discovery
+  pass over the shapes graph.
+- **Full pre-binding semantics** (`sparql/pre-binding/*`): only `$this`/`$PATH`
+  pre-binding is done. The suite's pre-binding section additionally requires
+  *rejecting* queries that would re-bind a pre-bound variable (e.g. a `BIND` or
+  inner `VALUES`/sub-SELECT projecting `?this`) as `sht:Failure`, and binding
+  `$shapesGraph`/`$currentShape`. `$currentShape` could be bound cheaply; the
+  re-binding rejection and `$shapesGraph` (no named-graph handle to the shapes
+  graph at query time) are not done. These entries are not walked by the runner.
 - `sh:pattern` uses Rust `regex` semantics, not XPath/XQuery regex. The
   divergences (e.g. `\i`, `\c` character classes, the `q` flag) don't appear
   in the core suite, but a strict implementation would translate or implement
