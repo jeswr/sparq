@@ -42,6 +42,8 @@ pub mod geof;
 pub mod index;
 pub mod literal;
 #[cfg(feature = "engine")]
+pub mod provider;
+#[cfg(feature = "engine")]
 pub mod registry;
 #[cfg(feature = "reproject")]
 pub mod reproject;
@@ -49,6 +51,8 @@ pub mod reproject;
 pub use geof::Unit;
 pub use index::GeoIndex;
 pub use literal::{parse_wkt_literal, Crs, GeoGeometry};
+#[cfg(feature = "engine")]
+pub use provider::GeoIndexProvider;
 #[cfg(feature = "engine")]
 pub use registry::geof_registry;
 
