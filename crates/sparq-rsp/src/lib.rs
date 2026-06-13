@@ -21,6 +21,15 @@
 //! result is itself a graph, as [`GraphResult`]s) and [`ContinuousAsk`] (one
 //! boolean per window, as [`AskResult`]s) are the CONSTRUCT / ASK forms.
 //!
+//! # RSP-QL surface syntax ([OPUS-4.8], sq-9u1 part 1)
+//!
+//! The above is the *programmatic* API (build a [`WindowSpec`], register plain
+//! SPARQL). [`RspqlQuery::parse`] additionally parses the **RSP-QL textual query
+//! language** — `REGISTER … AS`, `FROM NAMED WINDOW <w> ON <s> [RANGE … STEP …]`,
+//! and `WINDOW <w> { … }` graph patterns — into that representation, reusing
+//! spargebra for the embedded SPARQL. See [`RspqlQuery`] for the supported
+//! subset and the scoped-out constructs.
+//!
 //! # Design constraints (deliberate)
 //!
 //! * **No async runtime, no wall clock.** Timestamps are application-supplied
@@ -59,6 +68,7 @@
 
 mod eval;
 mod query;
+mod rspql;
 mod stream;
 mod window;
 
@@ -66,5 +76,6 @@ pub use eval::EvalMode;
 pub use query::{
     AskResult, ContinuousAsk, ContinuousConstruct, ContinuousQuery, GraphResult, R2S, WindowResult,
 };
+pub use rspql::{RspqlQuery, WindowDecl};
 pub use stream::{Timestamped, TimestampedTriple, TripleStream};
 pub use window::{Window, WindowSpec, WindowedStream};
