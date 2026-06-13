@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781388196730,
+  "lastUpdate": 1781388440457,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -6707,6 +6707,143 @@ window.BENCHMARK_DATA = {
           {
             "name": "rdfs_infer_s",
             "value": 0.142,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1571665,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "committer": {
+            "email": "jesse@jeswr.org",
+            "name": "Jesse Wright"
+          },
+          "distinct": true,
+          "id": "66426dd208d1be8980c769f83730b48fc62a71ce",
+          "message": "docs(skills): usage SKILL.md tree + AGENTS.md + Claude Code plugin (agentic discoverability) [OPUS-4.8]\n\nAdds a root skills/ tree of Agent-Skills SKILL.md docs teaching agents how to USE sparq\n(distinct from .claude/skills/ which are dev-agent skills): a router skills/SKILL.md + 15\nper-surface skills (sparql-query, data-formats, cli, http-server, python, javascript-wasm,\ninference, shacl-validation, full-text-search, vector-search, geosparql, streaming-rsp,\nzk-query-proofs, genai-retrieval, mpc). Each uses the agentskills.io frontmatter (name==dir,\ntrigger-laden description). Plus a root AGENTS.md (the cross-agent entry point) carrying: the\npublic-API->SKILL.md maintenance rule, the beads task-tracking + agents-create-beads protocol,\nand the no-hard-coded-perf-numbers rule. Plus .claude-plugin/{plugin,marketplace}.json so the\nskills install as a Claude Code plugin (/plugin marketplace add jeswr/sparq).\n\nAuthored by the author-usage-skills workflow (16 agents surveying each public surface vs the\nlive API). Perf figures in skills will be normalized by the docs-hygiene pass (sq-5vm).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-13T22:05:30Z",
+          "tree_id": "66e7e890df08160fdbae5d787e25c8a1056168e4",
+          "url": "https://github.com/jeswr/sparq/commit/66426dd208d1be8980c769f83730b48fc62a71ce"
+        },
+        "date": 1781388440007,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.539,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 3.6,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3248.2,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4815.6,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 6.4,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 4.3,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 828.9,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 13242.5,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 60237.8,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 160982.1,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 5954.6,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 5,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 42335.1,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 7048,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 57187.4,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 154541.7,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 2957.2,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 7.5,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 38481.8,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.144,
             "unit": "s"
           },
           {
