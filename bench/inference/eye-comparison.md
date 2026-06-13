@@ -33,16 +33,13 @@ min of 3. EYE: min of 3 on socrates/dt1k, single run on dt10k/anc500/grid30
 (minutes per run), dt100k not run (extrapolated ≈9 h at EYE's observed ≈N^1.95
 DT scaling even on an idle machine).
 
-| workload | sparq | EYE | ratio (EYE/sparq) |
-|---|--:|--:|--:|
-| socrates | 0.403 s | 1.05 s | 2.6× |
-| dt1k | 0.272 s | 10.1 s | 37× |
-| dt10k | 0.353 s | 1,002.7 s ¹ | 2,840× |
-| dt100k | 1.45 s | not run (extrap. ≈9 h+) | ≈22,000× |
-| anc500 | 0.885 s | 267.4 s ¹ | 302× |
-| grid30 | 1.95 s | 149.7 s ¹ | 77× |
-
-¹ single run.
+The same-session head-to-head (sparq vs EYE wall-clock and the EYE/sparq ratio per
+workload) is produced by the runner `bench/inference/eye-comparison.sh`; run it for the
+numbers (the EYE column is a CITED third-party measurement of EYE v11.24.4). The
+load-bearing finding: sparq is orders of magnitude faster than EYE on the DeepTaxonomy
+chains (the gap widens with N — EYE scales ≈N^1.95, so dt100k was extrapolated, not run)
+and faster on the quadratic-closure anc500 / grid30 cases, while computing identical
+closures (cross-checked below).
 
 Closure-size cross-checks (engines agree, and identical to the
 pre-optimization sparq closures): dt1k 2,001; dt10k 20,001; dt100k 200,001;

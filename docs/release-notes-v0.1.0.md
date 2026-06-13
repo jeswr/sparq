@@ -2,11 +2,11 @@
 
 An experimental, from-scratch RDF triplestore + SPARQL engine in Rust.
 
-**Engine** — dictionary-encoded store, six sorted permutation indexes (compact 3-index mode for constrained targets), parallel + streaming loaders with transparent gz/bz2/zst, out-of-core memory-mapped indexes (100M triples: 74 s build, 0.67 s open, ~0 committed heap on a 2020 M1 Air), SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE + Update, named graphs, sort-merge / hash / worst-case-optimal joins with cardinality-based planning.
+**Engine** — dictionary-encoded store, six sorted permutation indexes (compact 3-index mode for constrained targets), parallel + streaming loaders with transparent gz/bz2/zst, out-of-core memory-mapped indexes (fast build + near-instant open with ~0 committed heap; figures in `research/BENCHMARKS.md`), SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE + Update, named graphs, sort-merge / hash / worst-case-optimal joins with cardinality-based planning.
 
 **Inference — 100% across the board** — opt-in RDFS / OWL 2 RL / N3 materialization: every W3C inference suite run passes at 100% (pass + documented divergence) with zero silent skips — RDF Semantics 48/48; OWL 2 RL 78 pass, 0 fail, 13 documented divergences (details: `inference-conformance-report.md`). Opt-in proof trees (`explain` feature) return ZK-witness-friendly derivations.
 
-**Benchmarks** — vs native QLever 0.5.47, same machine, compute-only, cold (`bench/qlever-baselines.md`): 2.2–20× on synthetic 10M/100M join/OPTIONAL workloads (in-memory and mmap), and faster on every query of a real skewed dataset (1.7–12×). Honest caveats in the changelog.
+**Benchmarks** — vs native QLever, same machine, compute-only, cold: faster on synthetic 10M/100M join/OPTIONAL workloads (in-memory and mmap) and on every query of a real skewed dataset. Per-query baselines + speedup ranges are single-sourced in `bench/qlever-baselines.md`; honest caveats in the changelog.
 
 **Bindings parity** — Python `sparq` (pyo3/abi3 ≥3.9): query/update, CONSTRUCT/DESCRIBE, named graphs, RDFS/OWL-RL/N3 reasoning + custom N3 rules, inconsistency reports — 38 tests. JS `@jeswr/sparq` (RDF/JS-typed; shipped wasm ~1.2 MB after wasm-opt, ~1.6 MB raw build): named graphs, streaming results, in-place/delta updates, compressed ingest (zstd/gzip), dictionary-fetch protocol client — 42 tests.
 

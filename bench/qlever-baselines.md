@@ -5,6 +5,14 @@ times are stable enough on this machine to use as a fixed reference; sparq is
 benchmarked in the background and compared against these numbers. Re-measure QLever
 only when the dataset or QLever version changes (note the date + commit if so).
 
+> **What is canonical here.** The **QLever columns are the pinned reference** — a
+> recorded external baseline, kept verbatim. The **sparq columns in the comparison
+> tables below are point-in-time snapshots** of this machine and *will drift*;
+> regenerate them with the `sparq-cli bench … count` / `bench-mmap` commands shown
+> in each section (see also `bench/benchmarks.toml`, `bench/CATALOG.md`, and the
+> per-commit perf dashboard <https://jeswr.github.io/sparq/dev/bench>). This is the
+> single source for the QLever comparison; other docs link here rather than restate it.
+
 All times are **min-of-N cold** query-time-ms reported by QLever (`query-time-ms`),
 COUNT(*)-wrapped queries (the `queries-count/` set) — i.e. compute-only, no JSON
 serialisation. Machine load varies ±30%, so treat these as the reference band.
