@@ -358,6 +358,42 @@ pub fn commitment_message_with_status(commitment: &Fr, salt: &Fr, status_ref: &F
     ])
 }
 
+/// The signed message for a HOLDER proof-of-possession (sq-cwq): a
+/// domain-separated binding of the verifier's freshness `challenge` (its nonce,
+/// the same field element that is public-input field 0 of every circuit member).
+/// The HOLDER signs THIS value with its holder secret key; the verifier checks the
+/// signature under the disclosed holder public key, proving the presenter
+/// POSSESSES the holder secret AND did so freshly over the verifier's nonce (so a
+/// captured manifest cannot be replayed by a party that does not hold the key —
+/// the PoP is bound to the relying party's fresh challenge).
+///
+/// # Scope (honest)
+/// This binds possession of the holder KEY to the verifier's challenge. It does
+/// NOT, on its own, bind that key to a SPECIFIC credential — that requires an
+/// issuer-attested holder binding (the issuer signing the holder key into the
+/// credential), which is a documented deferral (see
+/// `sparq_zk_compose::verifier::bind_holder_pop`). The relying party anchors the
+/// holder key in an EXTERNAL holder registry (mirroring the issuer key-set `K`),
+/// so an absent/untrusted/forged PoP fails closed.
+// [OPUS-4.8] sq-cwq: holder proof-of-possession message (challenge-bound).
+pub fn holder_pop_message(challenge: &Fr) -> Fr {
+    const SIG_DOMAIN_HOLDER_POP: u64 = 0x5a4b_5349_475f_4850; // "ZKSIG_HP"
+    poseidon2::hash(&[Fr::from(SIG_DOMAIN_HOLDER_POP), *challenge])
+}
+
+impl SecretKey {
+    /// Produce a holder proof-of-possession over the verifier's `challenge`
+    /// (sq-cwq), returning the signature hex (`compressed(R) ‖ s`). The signed
+    /// message is [`holder_pop_message`], matching the verifier-side
+    /// `bind_holder_pop` check. Same deterministic `(sk, m)` nonce discipline as
+    /// [`Self::sign_commitment`] (no signing-time entropy, seed-reuse-proof).
+    // [OPUS-4.8] sq-cwq: holder-side PoP signing.
+    pub fn sign_holder_pop(&self, challenge: &Fr) -> String {
+        let sig = sign_deterministic(self, &holder_pop_message(challenge));
+        signature_to_hex(&sig)
+    }
+}
+
 /// Sign a message field element `m` with `sk`, drawing the nonce `k` from `rng`.
 ///
 /// # Test-only (codex job 2216 MEDIUM)

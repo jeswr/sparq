@@ -19,8 +19,22 @@ pub const SCAN_N_BUCKETS: &[u32] = &[16, 64];
 pub const SCAN_R_BUCKETS: &[u32] = &[4, 8];
 /// Compiled `k` values of the scan family.
 pub const SCAN_K_VALUES: &[u32] = &[1, 2];
-/// Compiled digit counts (`d`) of the filter_int family.
-pub const FILTER_INT_D_VALUES: &[u32] = &[1, 2, 4];
+/// Compiled digit counts (`d`) of the filter_int family. The `filter_int_d{D}`
+/// circuit's `digits: [u8; D]` witness requires the operand's decimal digit
+/// count to EXACTLY equal `D` (see `compose_core::filter_int::filter_int_check`),
+/// so a member is provable for an operand iff its digit count == `D`. v1 compiles
+/// the contiguous range 1..=4 plus the historical gap-fill at 3 (sq-wto).
+// [OPUS-4.8] sq-wto: 3 added so the {1,2,4} family is contiguous 1..=4 and no
+// in-range digit count derives an unprovable wrong-D member.
+pub const FILTER_INT_D_VALUES: &[u32] = &[1, 2, 3, 4];
+/// Compiled digit counts (`d`) of the MANIFEST-COMPOSABLE filter_f64 family
+/// ([OPUS-4.8] sq-q7e / sq-tat). Same EXACT-match discipline as `filter_int`:
+/// `filter_f64_d{D}`'s `digits: [u8; D]` witness pins the operand's digit count
+/// to `D`, so a member is provable iff the integer-valued double's decimal digit
+/// count equals `D`. v1 compiles the contiguous 1..=4; `D <= 15` is the soundness
+/// ceiling (value `< 2^53`, exact `f64::from`), so larger counts have no member
+/// and `derive_filter_f64_id` returns `None` (clean error, never a wrong-D).
+pub const FILTER_F64_D_VALUES: &[u32] = &[1, 2, 3, 4];
 
 fn smallest_bucket(buckets: &[u32], need: u32) -> Option<u32> {
     buckets.iter().copied().find(|&b| b >= need)
@@ -38,9 +52,47 @@ pub fn derive_scan_id(k: u32, max_graph: u32, match_rows: u32) -> Option<Circuit
 }
 
 /// Derive the filter_int circuit id for a `digits`-digit value.
+///
+/// # sq-wto correctness (EXACT match, not smallest-bucket-≥)
+/// The `filter_int_d{D}` circuit pins the operand's digit count to `D` exactly:
+/// its witness is `digits: [u8; D]` and `filter_int_check::<D>` rebuilds the
+/// canonical token from exactly `D` digit bytes, so a `d`-digit operand is
+/// provable ONLY by the `D == d` member. The old `smallest_bucket(.., digits)`
+/// (smallest compiled `D >= digits`) was a COMPLETENESS BUG (sq-61g differential
+/// fuzzer / sq-wto): a 3-digit operand derived `d = 4`, but no 3-digit value can
+/// fill a `[u8; 4]` witness, so `nargo execute` produced no witness — an honest
+/// FILTER that SILENTLY yields an unprovable statement. We now require an EXACT
+/// compiled member and return `None` for any digit count with no `D == digits`
+/// member (out-of-family => a CLEAN error at the call site, never a
+/// silently-unprovable d). With the d3 member the provable range is the
+/// contiguous 1..=4; 0 maps to the 1-digit canonical form ("0"); 5..=19 (and
+/// >19, which overflows u64) have no member and return `None`.
+// [OPUS-4.8] sq-wto: exact digit-count match; out-of-bucket => None (clean
+// error), never a wrong-D silently-unprovable member.
 pub fn derive_filter_int_id(digits: u32) -> Option<CircuitId> {
-    let d = smallest_bucket(FILTER_INT_D_VALUES, digits.max(1))?;
-    Some(CircuitId::FilterInt { d })
+    let d = digits.max(1);
+    if FILTER_INT_D_VALUES.contains(&d) {
+        Some(CircuitId::FilterInt { d })
+    } else {
+        None
+    }
+}
+
+/// Derive the MANIFEST-COMPOSABLE filter_f64 circuit id for a `digits`-digit
+/// integer-valued double ([OPUS-4.8] sq-q7e / sq-tat). EXACT-match discipline,
+/// identical to [`derive_filter_int_id`]: the `filter_f64_d{D}` circuit pins the
+/// operand's digit count to `D` (`digits: [u8; D]`), so only the `D == digits`
+/// member is provable. Out-of-family counts (no compiled `D == digits`, incl. the
+/// `>15` soundness ceiling) return `None` — a clean error, never a wrong-D
+/// silently-unprovable member.
+// [OPUS-4.8] sq-q7e + sq-tat: exact digit-count match for the composable f64 family.
+pub fn derive_filter_f64_id(digits: u32) -> Option<CircuitId> {
+    let d = digits.max(1);
+    if FILTER_F64_D_VALUES.contains(&d) {
+        Some(CircuitId::FilterF64 { d })
+    } else {
+        None
+    }
 }
 
 /// A constant or variable slot of a BGP triple pattern.
@@ -207,6 +259,61 @@ pub fn encode_int_literal(value: u64) -> FieldHex {
     );
     let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
         .expect("integer literal is committable");
+    hexf(&enc)
+}
+
+/// XSD double datatype IRI (the composable filter_f64 fragment's literal type).
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+/// Build a MANIFEST-COMPOSABLE filter_f64 proof for a hidden INTEGER-VALUED
+/// xsd:double operand `value` (written in plain canonical decimal-integer lexical
+/// form, e.g. `42` => `"42"^^xsd:double`) under operator `op` against the constant
+/// double `bound`, with the disclosed `expected` verdict ([OPUS-4.8] sq-q7e /
+/// sq-tat). `operand_enc` must be the SAME term encoding the scan proof disclosed
+/// for the operand column (binding consistency, exactly like `build_filter_int`).
+///
+/// Returns `(inputs, digit_bytes)` or `None` if `value`'s digit count has no
+/// compiled `filter_f64_d{D}` member (out-of-family => clean error, never a
+/// silently-unprovable wrong-D — sq-wto discipline). `bound` is the FILTER's
+/// constant double; its IEEE-754 bit pattern is carried as `b_bits` and the
+/// verdict follows IEEE semantics (NaN-correct via `sparq_ieee754`).
+///
+/// # Fragment (honest scope)
+/// The hidden operand must be an integer-valued double in plain decimal form: the
+/// circuit derives the IEEE bits as `f64::from(value)` (exact for the <= 2^53
+/// fragment) and binds `operand_enc` to the `"<digits>"^^xsd:double` token. A
+/// fractional/scientific operand is outside this member (no in-circuit
+/// decimal→IEEE parser — deferred). `value` itself is a `u64` here, so the host
+/// caller wires an integer-valued operand by construction.
+pub fn build_filter_f64(
+    operand_enc: FieldHex,
+    value: u64,
+    op: FilterOp,
+    bound: f64,
+    expected: bool,
+) -> Option<(ProofInputs, Vec<u8>)> {
+    let digits = value.to_string();
+    let id = derive_filter_f64_id(digits.len() as u32)?;
+    let digit_bytes: Vec<u8> = digits.bytes().collect();
+    Some((
+        ProofInputs::FilterF64 { id, operand_enc, op, b_bits: bound.to_bits(), expected },
+        digit_bytes,
+    ))
+}
+
+/// Encode an INTEGER-VALUED xsd:double literal `value` (plain decimal-integer
+/// lexical form `"<value>"^^xsd:double`) to its term encoding — the convenience
+/// wiring a composable float filter to a known constant operand. The lexical form
+/// is `value.to_string()` (no `.0`/exponent), matching the
+/// `filter_f64_composable_check` token rebuild. (Salt-independent for literals.)
+// [OPUS-4.8] sq-q7e + sq-tat.
+pub fn encode_double_literal(value: u64) -> FieldHex {
+    let lit = oxrdf::Literal::new_typed_literal(
+        value.to_string(),
+        NamedNode::new(XSD_DOUBLE).unwrap(),
+    );
+    let enc = encode_term(&Term::Literal(lit), &Fr::from(0u64))
+        .expect("double literal is committable");
     hexf(&enc)
 }
 

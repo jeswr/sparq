@@ -85,9 +85,49 @@ pub enum BindingMode {
     /// Verifier-supplied fresh nonce, carried as the circuit's `challenge`
     /// public input (the v1 default).
     Challenge { challenge: FieldHex },
-    /// Holder proof-of-possession (deferred — placeholder; the field is
-    /// reserved so the manifest schema is stable when PoP lands).
-    HolderPop { challenge: FieldHex, holder: String },
+    /// Holder proof-of-possession (sq-cwq): the holder demonstrates possession of
+    /// its holder secret key by signing the verifier's `challenge` (its nonce).
+    ///
+    /// # Verifier contract (fail-closed) — see [`crate::verifier::bind_holder_pop`]
+    /// The verifier requires (a) `holder` to be a member of an EXTERNAL
+    /// relying-party holder registry ([`crate::verifier::HolderRegistry`], the
+    /// trust anchor — mirrors the issuer key-set `K`), and (b) `pop` to be a valid
+    /// signature under `holder`'s key over
+    /// [`sparq_zk::sig::holder_pop_message`]`(challenge)`. An absent registry, an
+    /// untrusted `holder`, a malformed/unverifiable `pop`, or an unknown
+    /// `cryptosuite` all REJECT — there is NO silent-accept path for an
+    /// unimplemented/absent PoP (the previous placeholder was accepted as a bare
+    /// challenge, which silently waived the holder check).
+    ///
+    /// # Scope (honest deferral)
+    /// This proves possession of a TRUSTED holder key, freshly over the verifier's
+    /// nonce (so a captured manifest cannot be replayed by a non-holder). It does
+    /// NOT yet bind that key to a SPECIFIC credential — an issuer-attested holder
+    /// binding (the issuer signing the holder key into the credential) is deferred;
+    /// see the verifier docs. Until then the relying party's holder registry is the
+    /// who-may-present anchor.
+    // [OPUS-4.8] sq-cwq: holder PoP — implemented (challenge-bound Schnorr),
+    // fail-closed; issuer→holder credential binding documented-deferred.
+    HolderPop {
+        challenge: FieldHex,
+        /// The holder's verification key (compressed Baby-JubJub point, hex). Must
+        /// be a member of the relying party's [`crate::verifier::HolderRegistry`].
+        holder: String,
+        /// The holder's signature over
+        /// [`sparq_zk::sig::holder_pop_message`]`(challenge)`, hex
+        /// (`compressed(R) ‖ s`). Proves possession of the holder secret.
+        pop: String,
+        /// The PoP signature scheme's `zk:cryptosuite` IRI (`poseidon2-schnorr-v1`
+        /// in v1). An unknown cryptosuite is unverifiable => REJECT (fail closed).
+        #[serde(default = "default_holder_cryptosuite")]
+        cryptosuite: String,
+    },
+}
+
+fn default_holder_cryptosuite() -> String {
+    // The v1 Schnorr-over-Baby-JubJub suite (mirrors the issuer attestation
+    // default); kept as a fn so the field is stable across schema versions.
+    "https://sparq.dev/ns/zk#poseidon2-schnorr-v1".to_string()
 }
 
 impl BindingMode {
@@ -289,9 +329,19 @@ pub enum CircuitId {
     Scan { k: u32, n: u32, r: u32 },
     /// `filter_int_d{d}` — hidden xsd:integer FILTER with `d` decimal digits.
     FilterInt { d: u32 },
-    /// `filter_f64` — xsd:double FILTER (v1 building block, not yet
-    /// manifest-composable).
-    FilterF64,
+    /// `filter_f64_d{d}` — MANIFEST-COMPOSABLE hidden xsd:double FILTER with `d`
+    /// decimal digits, over the INTEGER-VALUED double fragment ([OPUS-4.8] sq-q7e
+    /// / sq-tat). The hidden operand is bound to the committed literal via the
+    /// canonical `"<digits>"^^<…#double>` token (blake3, the same mechanism as
+    /// `filter_int`), and the IEEE bits are DERIVED in-circuit from the bound
+    /// value (`f64::from(value)`), so there is no prover-free `a_bits`. The raw
+    /// `filter_f64` building block (free bits) remains for non-composed use; this
+    /// `{d}`-carrying id is the composable member. Fragment scope: plain
+    /// integer-valued doubles (`"42"^^xsd:double`); fractional/scientific forms
+    /// are deferred (the in-circuit decimal→IEEE parser is unbudgeted). See
+    /// `sparq_zk_compose_core::filter_float::filter_f64_composable_check`.
+    // [OPUS-4.8] sq-q7e + sq-tat: FilterF64 is now manifest-composable (carries d).
+    FilterF64 { d: u32 },
     /// `revoke_unset_d{depth}` — hidden-index status-list inclusion + bit-unset
     /// proof over a depth-`depth` Poseidon2 Merkle tree (sq-3e5 / sq-h2v). The
     /// proof's PUBLIC inputs are `challenge` + the status-list Merkle `root`; the
@@ -320,7 +370,7 @@ impl CircuitId {
         match self {
             CircuitId::Scan { k, n, r } => format!("scan_k{k}_n{n}_r{r}"),
             CircuitId::FilterInt { d } => format!("filter_int_d{d}"),
-            CircuitId::FilterF64 => "filter_f64".to_string(),
+            CircuitId::FilterF64 { d } => format!("filter_f64_d{d}"),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
             CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
         }
@@ -372,6 +422,24 @@ pub enum ProofInputs {
         /// The disclosed verdict.
         expected: bool,
     },
+    /// filter_f64_d{d}: MANIFEST-COMPOSABLE hidden-operand numeric FILTER over an
+    /// xsd:double (integer-valued fragment) ([OPUS-4.8] sq-q7e / sq-tat). Public
+    /// inputs mirror the member `main`: challenge (prepended), operand_enc, op,
+    /// b_bits, expected. The hidden operand is bound to the committed literal by
+    /// `operand_enc` (the scan-proof anchor, same as `filter_int`), and `b_bits`
+    /// is the FILTER's constant double as an IEEE-754 bit pattern.
+    #[serde(rename = "filter_f64")]
+    FilterF64 {
+        id: CircuitId,
+        /// The hidden column's term encoding (the scan-proof anchor) — bound
+        /// in-circuit to the committed xsd:double literal via its canonical token.
+        operand_enc: FieldHex,
+        op: FilterOp,
+        /// The FILTER's constant operand as an IEEE-754 double bit pattern.
+        b_bits: u64,
+        /// The disclosed verdict.
+        expected: bool,
+    },
 }
 
 impl ProofInputs {
@@ -379,6 +447,7 @@ impl ProofInputs {
         match self {
             ProofInputs::Scan { id, .. } => id,
             ProofInputs::FilterInt { id, .. } => id,
+            ProofInputs::FilterF64 { id, .. } => id,
         }
     }
 }
@@ -461,6 +530,18 @@ pub struct ProofManifest {
     #[serde(default)]
     pub join_obligations: Vec<(String, usize, usize)>,
     pub entailment_regime: EntailmentRegime,
+    /// The recorded inference steps that justify any DERIVED triples under a
+    /// non-`Simple` `entailment_regime` (sq-314). EMPTY for `Simple` (no
+    /// inference). For `Rdfs`/`Owl` the verifier ([`crate::verifier::bind_entailment`])
+    /// re-checks every step is a well-formed, regime-admitted rule instance whose
+    /// antecedents are GROUNDED (chain to an earlier step or to a disclosed scan
+    /// row) — so the regime claim is enforced, not free metadata. A non-`Simple`
+    /// regime with NO grounded steps is rejected (fail-closed). See the
+    /// `derivation` module for the honest scope (disclosed-base re-check; the
+    /// in-circuit closure proof is deferred).
+    // [OPUS-4.8] sq-314: derivation steps for entailment-regime enforcement.
+    #[serde(default)]
+    pub derivation_steps: Vec<crate::derivation::DerivationStep>,
     pub binding: BindingMode,
     /// The credential's revocation reference (audit #12): which status list,
     /// index, and version. Issuer-bound (see [`RevocationStatus`]). When ANY

@@ -19,6 +19,8 @@
 //! Model: Opus 4.8 (Fable 5 unavailable — flag for re-review/upgrade).
 
 pub mod build;
+// [OPUS-4.8] sq-314: derivation steps + entailment-regime enforcement.
+pub mod derivation;
 pub mod driver;
 pub mod issuer;
 pub mod manifest;
@@ -31,6 +33,9 @@ pub use manifest::{
     HiddenIndexRevocation, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot,
     SubProof,
 };
+// [OPUS-4.8] sq-314: derivation-step capability + entailment regime end-to-end.
+pub use derivation::{regime_admits, DerivationStep, EntailmentRule};
+pub use verifier::EntailmentPolicy;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
 // [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers (in-circuit
@@ -44,3 +49,5 @@ pub use issuer::{
 pub use verifier::{FileSeenNonces, InMemorySeenNonces, SeenNonces, VerifierNonce};
 // [OPUS-4.8] audit #12: revocation / freshness policy.
 pub use verifier::RevocationPolicy;
+// [OPUS-4.8] sq-cwq: external holder trust anchor for the HolderPop binding's PoP.
+pub use verifier::HolderRegistry;

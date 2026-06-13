@@ -20,7 +20,8 @@ use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use sparq_zk::commit::commit_triples;
 use sparq_zk::encode::salt_from_bytes;
 use sparq_zk_compose::build::{
-    build_filter_int, build_scan, encode_int_literal, Pattern, Slot,
+    build_filter_f64, build_filter_int, build_scan, encode_double_literal, encode_int_literal,
+    Pattern, Slot,
 };
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::manifest::{
@@ -36,8 +37,8 @@ use sparq_zk_compose::issuer::{
 };
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
-    encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, InMemorySeenNonces,
-    KeySet, RevocationPolicy, VerifierNonce,
+    encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, EntailmentPolicy,
+    HolderRegistry, InMemorySeenNonces, KeySet, RevocationPolicy, VerifierNonce,
 };
 use sparq_zk::field::Fr;
 use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
@@ -311,6 +312,7 @@ fn sample_manifest() -> ProofManifest {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge {
             challenge: FieldHex("0x2a".into()),
         },
@@ -643,6 +645,7 @@ fn full_manifest_prove_verify_scan() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge },
         // [OPUS-4.8] audit #12: issuer-bound, non-revoked, fresh.
         revocation: Some(fixture_revocation()),
@@ -664,6 +667,8 @@ fn full_manifest_prove_verify_scan() {
         &scratch("manifest_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -759,6 +764,7 @@ fn filter_manifest(
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge },
         // [OPUS-4.8] audit #12: non-revoked, fresh, issuer-bound — so the #1/#2/#4
         // forge tests reach the gate they probe (not the revocation gate).
@@ -802,6 +808,8 @@ fn forge_positive_honest_filter_verifies() {
         &scratch("forge_pos_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -835,6 +843,8 @@ fn forge_reject_statement_substitution() {
         &scratch("forge_sub_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -868,6 +878,8 @@ fn forge_reject_verdict_substitution() {
         &scratch("forge_verdict_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -903,6 +915,8 @@ fn forge_reject_challenge_rebind() {
         &scratch("forge_chal_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0xdead"),
         &InMemorySeenNonces::new(),
     ) {
@@ -960,6 +974,8 @@ fn nonce_happy_path_fresh_nonce_verifies() {
         &scratch("nonce_happy_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for(nonce_hex),
         &InMemorySeenNonces::new(),
     )
@@ -995,6 +1011,8 @@ fn nonce_replay_under_new_nonce_rejected() {
         &scratch("nonce_replay_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0xbeef"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1030,6 +1048,8 @@ fn nonce_single_use_second_presentation_rejected() {
         &scratch("nonce_single_use_verify1"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
     )
@@ -1041,6 +1061,8 @@ fn nonce_single_use_second_presentation_rejected() {
         &scratch("nonce_single_use_verify2"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
     ) {
@@ -1090,6 +1112,7 @@ fn nonce_binding_mismatch_rejected() {
             attributions: vec![vec![0]],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
             // Binding declares 0x2a...
             binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
             // [OPUS-4.8] audit #12: non-revoked, fresh, so the prefilter (incl. the
@@ -1120,6 +1143,8 @@ fn nonce_binding_mismatch_rejected() {
         &scratch("nonce_binding_mismatch_1"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
     ) {
@@ -1138,6 +1163,8 @@ fn nonce_binding_mismatch_rejected() {
         &scratch("nonce_binding_mismatch_2"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
     ) {
@@ -1147,6 +1174,265 @@ fn nonce_binding_mismatch_rejected() {
              binding-mismatch rejection), got {other:?}"
         ),
     }
+}
+
+// --- sq-cwq: HolderPop proof-of-possession (implemented + fail-closed) ---------
+//
+// [OPUS-4.8] sq-cwq. The HolderPop binding used to be a placeholder: verify_manifest
+// extracted its `challenge` exactly like a bare Challenge and IGNORED the holder
+// field — a HolderPop binding was SILENTLY ACCEPTED with no proof of possession.
+// It is now a real challenge-bound Schnorr PoP, fail-closed: an empty holder
+// registry, an untrusted holder, or a malformed/invalid PoP all REJECT. These
+// tests pin both directions. The NEGATIVE cases fail at `bind_holder_pop` (after
+// the cheap structural prefilter + nonce checks, BEFORE any bb call), so they need
+// no toolchain; the POSITIVE end-to-end case is toolchain-gated.
+
+/// Build a HolderPop-bound manifest over the credential graph whose structural
+/// prefilter passes (valid attestations + revocation), so verify_manifest reaches
+/// the holder-PoP gate. `pop`/`holder`/`cryptosuite` are caller-supplied so a test
+/// can present a valid, forged, or malformed PoP. `proof_hex` is left empty: the
+/// holder-PoP gate runs BEFORE the sub-proof loop, so the negative PoP cases fire
+/// without bb.
+fn holder_pop_manifest(holder_hex: &str, pop_hex: &str, cryptosuite: &str) -> ProofManifest {
+    let salt = salt_from_bytes(&[9u8; 32]);
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::HolderPop {
+            challenge: FieldHex("0x2a".into()),
+            holder: holder_hex.to_string(),
+            pop: pop_hex.to_string(),
+            cryptosuite: cryptosuite.to_string(),
+        },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all(&mut m, &test_issuer_sk(1), salt);
+    m
+}
+
+/// A holder's valid PoP over challenge 0x2a (the nonce these tests issue).
+fn holder_pop_over_2a(holder_sk: &SecretKey) -> String {
+    let challenge_fr = FieldHex("0x2a".into()).to_field().unwrap();
+    holder_sk.sign_holder_pop(&challenge_fr)
+}
+
+/// sq-cwq (fail-closed #1): a HolderPop binding presented against an EMPTY holder
+/// registry is REJECTED (`HolderRegistryEmpty`) — the verifier has no trust anchor
+/// to check the holder against and must NOT silently accept (the old placeholder
+/// did). No toolchain needed.
+#[test]
+fn holder_pop_empty_registry_rejected() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let m = holder_pop_manifest(
+        &holder_hex,
+        &holder_pop_over_2a(&holder_sk),
+        SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+    );
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_pop_empty_reg"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &HolderRegistry::empty(), // no authorised holders
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderRegistryEmpty) => {}
+        other => panic!(
+            "a HolderPop binding under an EMPTY holder registry must be \
+             HolderRegistryEmpty (no silent accept), got {other:?}"
+        ),
+    }
+}
+
+/// sq-cwq (fail-closed #2): a HolderPop whose holder key is NOT in the relying
+/// party's registry is REJECTED (`HolderNotTrusted`), even with a cryptographically
+/// VALID PoP. No toolchain needed.
+#[test]
+fn holder_pop_untrusted_holder_rejected() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    // Registry trusts a DIFFERENT holder.
+    let other = SecretKey::from_seed(888);
+    let registry = HolderRegistry::from_hex_keys([public_key_to_hex(&other.public_key())]);
+    let m = holder_pop_manifest(
+        &holder_hex,
+        &holder_pop_over_2a(&holder_sk), // valid PoP, but holder not trusted
+        SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+    );
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_pop_untrusted"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderNotTrusted { .. }) => {}
+        other => panic!("an untrusted holder must be HolderNotTrusted, got {other:?}"),
+    }
+}
+
+/// sq-cwq (fail-closed #3): a HolderPop with a FORGED/INVALID pop signature (here a
+/// PoP over a DIFFERENT challenge — replay attempt) is REJECTED
+/// (`HolderPopInvalid`) even though the holder IS trusted. The PoP is bound to the
+/// VERIFIER'S nonce, so a PoP minted for another challenge cannot pass. No
+/// toolchain needed.
+#[test]
+fn holder_pop_invalid_signature_rejected() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let registry = HolderRegistry::from_hex_keys([holder_hex.clone()]);
+    // A PoP over a DIFFERENT challenge (0xdead) — does not match the issued nonce 0x2a.
+    let wrong_challenge = FieldHex("0xdead".into()).to_field().unwrap();
+    let stale_pop = holder_sk.sign_holder_pop(&wrong_challenge);
+    let m = holder_pop_manifest(
+        &holder_hex,
+        &stale_pop,
+        SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+    );
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_pop_invalid"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderPopInvalid { .. }) => {}
+        other => panic!(
+            "a PoP over a different challenge (replay) must be HolderPopInvalid, got {other:?}"
+        ),
+    }
+}
+
+/// sq-cwq (fail-closed #4): a HolderPop with an unknown `cryptosuite` (or
+/// unparseable pop) is REJECTED (`HolderPopMalformed`) before any signature check.
+/// No toolchain needed.
+#[test]
+fn holder_pop_unknown_cryptosuite_rejected() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let registry = HolderRegistry::from_hex_keys([holder_hex.clone()]);
+    let m = holder_pop_manifest(
+        &holder_hex,
+        &holder_pop_over_2a(&holder_sk),
+        "https://example.org/ns#unsupported-suite", // unknown cryptosuite
+    );
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_pop_badsuite"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderPopMalformed) => {}
+        other => panic!("an unknown cryptosuite must be HolderPopMalformed, got {other:?}"),
+    }
+}
+
+/// sq-cwq (POSITIVE, end-to-end): a HolderPop with a trusted holder + a VALID PoP
+/// over the verifier nonce, atop a real scan+filter proof, verifies end-to-end.
+/// Toolchain-gated (full bb prove of the sub-proof). This is the "implemented"
+/// half of the brief: a holder PoP that actually participates in a verified
+/// composed proof.
+#[test]
+#[ignore = "slow: full bb prove of a scan member under a HolderPop binding (sq-cwq)"]
+fn holder_pop_valid_verifies_end_to_end() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping sq-cwq HolderPop happy path");
+        return;
+    }
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).unwrap();
+    let challenge = FieldHex("0x2a".into());
+    let (id, toml) = prover_toml_for(
+        &scan.inputs,
+        &challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+    );
+    let prover = CircuitProver::from_crate_root();
+    let out = scratch("holder_pop_scan");
+    let art = prover.prove_in(&id, &toml, &out, "holder_pop_scan").unwrap();
+
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let registry = HolderRegistry::from_hex_keys([holder_hex.clone()]);
+
+    let mut manifest = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec!["did:key:zSampleIssuer".into()],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::HolderPop {
+            challenge: challenge.clone(),
+            holder: holder_hex,
+            pop: holder_pop_over_2a(&holder_sk),
+            cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
+        },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: encode_artifacts(&art) }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all(&mut manifest, &test_issuer_sk(1), salt);
+    verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("holder_pop_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("a valid HolderPop manifest must verify end-to-end");
 }
 
 /// sq-dua (audit hardening): a MALFORMED `proof_hex` blob is prover-controlled and
@@ -1178,6 +1464,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             attributions: vec![vec![0]],
             join_obligations: vec![],
             entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
             binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
             revocation: Some(fixture_revocation()),
             status_snapshots: vec![fixture_snapshot(false)],
@@ -1208,6 +1495,8 @@ fn malformed_proof_hex_rejected_not_panicked() {
             &scratch("malformed_proof_hex"),
             &trusted_k(&test_issuer_sk(1)),
             &fresh_policy(),
+            &HolderRegistry::empty(),
+            &EntailmentPolicy::simple_only(),
             &nonce_for("0x2a"),
             &InMemorySeenNonces::new(),
         ) {
@@ -1254,6 +1543,8 @@ fn forge_reject_noncanonical_vk() {
         &scratch("forge_vk_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1288,6 +1579,8 @@ fn forge_artvk_is_ignored() {
         &scratch("forge_ignorevk_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -1376,7 +1669,7 @@ fn attacker_filter_d1_artifacts(
 /// operand-slot / constant-swap forges.
 fn pensioner_graph() -> Vec<Triple> {
     let p = NamedOrBlankNode::NamedNode(iri("http://ex/p"));
-    // Salary fits the d=4 filter_int member (FILTER_INT_D_VALUES = [1,2,4]).
+    // Salary fits the d=4 filter_int member (FILTER_INT_D_VALUES = [1,2,3,4]).
     vec![
         Triple::new(p.clone(), iri("http://ex/hasSalary"), int_lit(7000)),
         Triple::new(p, iri("http://ex/hasAge"), int_lit(40)),
@@ -1431,6 +1724,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1463,6 +1757,7 @@ fn filter_reject_filter_add_on_scan_only() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1492,6 +1787,7 @@ fn filter_reject_constant_swap_age_as_salary() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1536,6 +1832,7 @@ fn filter_reject_operand_slot_substitution() {
         attributions: vec![vec![0], vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1581,6 +1878,7 @@ fn filter_reject_false_verdict_row() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1613,6 +1911,7 @@ fn filter_reject_unbindable_filter_fragment() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1651,6 +1950,7 @@ fn filter_binding_happy_path_structure() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // [OPUS-4.8] audit #12: non-revoked, fresh, issuer-bound.
         revocation: Some(fixture_revocation()),
@@ -1715,6 +2015,7 @@ fn filter_reject_unproven_failing_row() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -1764,6 +2065,7 @@ fn filter_two_rows_both_gated_verifies() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // [OPUS-4.8] audit #12: non-revoked, fresh, issuer-bound.
         revocation: Some(fixture_revocation()),
@@ -1824,6 +2126,7 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // [OPUS-4.8] audit #12: a non-revoked, fresh, issuer-bound reference so a
         // status-bound attestation (`attest_with_salt`) reaches the signature
@@ -1915,6 +2218,7 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
         status_snapshots: vec![],
@@ -2227,6 +2531,7 @@ fn cross_graph_manifest(
         attributions: declared,
         join_obligations: obligations,
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // [OPUS-4.8] audit #12: a non-revoked, fresh, issuer-bound reference for
         // BOTH graphs (both attestations bind the same fixture index/version), so
@@ -2748,6 +3053,7 @@ fn revocation_stale_status_list_rejected() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         // Disclose the (issuer-signed) old-version reference + a non-revoked
         // snapshot at that old version.
@@ -2941,6 +3247,7 @@ fn revocation_within_window_verifies() {
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: Some(RevocationStatus {
             status_list: FIXTURE_STATUS_LIST.to_string(),
@@ -2994,6 +3301,8 @@ fn revocation_full_prove_verify_non_revoked_verifies() {
         &scratch("rev_happy_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -3034,6 +3343,8 @@ fn revocation_full_prove_verify_revoked_rejected() {
         &scratch("rev_forge_verify"),
         &trusted_k(&test_issuer_sk(1)),
         &revoked_policy(), // AUTHORITATIVE snapshot has bit 3 SET => REVOKED.
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -3115,6 +3426,7 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![hidden_snapshot(false)],
@@ -3201,6 +3513,8 @@ fn hidden_revocation_unrevoked_verifies_and_index_is_private() {
         &scratch("hidden_verify_ok"),
         &trusted_k(&test_issuer_sk(1)),
         &hidden_policy(false),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -3274,6 +3588,8 @@ fn hidden_revocation_forged_root_rejected() {
         &scratch("hidden_verify_forge"),
         &trusted_k(&test_issuer_sk(1)),
         &hidden_policy(false), // authoritative root derived from the real snapshot
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -3339,6 +3655,7 @@ fn hi_scan_manifest(prover: &CircuitProver, signer_sk: &SecretKey, tag: &str) ->
         attributions: vec![vec![0]],
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge },
         revocation: Some(fixture_revocation()),
         status_snapshots: vec![fixture_snapshot(false)],
@@ -3474,7 +3791,7 @@ fn hidden_issuer_in_set_verifies_and_key_is_private() {
     manifest.hidden_issuer_attestations = vec![hidden];
     verify_manifest(
         &manifest, &prover, &scratch("hi_verify_ok"),
-        &keyset, &fresh_policy(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &keyset, &fresh_policy(), &HolderRegistry::empty(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     )
     .expect("in-set hidden-issuer attestation verifies end-to-end");
 }
@@ -3607,7 +3924,7 @@ fn hidden_issuer_forged_root_rejected() {
     }];
     match verify_manifest(
         &manifest, &prover, &scratch("hi_verify_forge"),
-        &keyset, &fresh_policy(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &keyset, &fresh_policy(), &HolderRegistry::empty(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     ) {
         Err(CheckError::HiddenIssuerRootMismatch) => {}
         other => panic!("a forged-root hidden-issuer proof must be HiddenIssuerRootMismatch, got {other:?}"),
@@ -3643,7 +3960,373 @@ fn hidden_issuer_not_enabled_rejected() {
     // the unit test in verifier.rs. We assert SOME rejection here (fail-closed).
     let res = verify_manifest(
         &m, &prover, &scratch("hi_notenabled"),
-        &k, &fresh_policy(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &k, &fresh_policy(), &HolderRegistry::empty(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     );
     assert!(res.is_err(), "a manifest with hidden-issuer attestation under a non-opted-in KeySet must be rejected");
+}
+
+// --- sq-q7e + sq-tat: MANIFEST-COMPOSABLE xsd:double FILTER ---------------------
+//
+// [OPUS-4.8] sq-q7e / sq-tat (duplicates). filter_f64 was a v1 BUILDING BLOCK
+// that could not be assembled into a proof manifest (its `a_bits` was prover-free
+// and there was no `ProofInputs::FilterF64` variant). It is now manifest-composable
+// over the INTEGER-VALUED double fragment: the operand is bound to the committed
+// literal via the canonical token (blake3, like filter_int) and the IEEE bits are
+// DERIVED in-circuit from the bound value (`f64::from(value)`), so no free a_bits.
+// These tests cover the soundness (honest proves, lies rejected) and the end-to-end
+// composition (a float-FILTER sub-proof participates in a real prove/verify with a
+// binding edge to a scan).
+
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+/// A double-typed integer-valued literal term (plain lexical form, e.g. "42").
+fn double_lit(v: u64) -> Term {
+    Term::Literal(Literal::new_typed_literal(v.to_string(), iri(XSD_DOUBLE)))
+}
+
+/// A credential graph whose `<http://ex/score>` object is an integer-valued
+/// xsd:double (so the composable filter_f64 fragment applies).
+fn double_credential_graph(score: u64) -> Vec<Triple> {
+    let alice = NamedOrBlankNode::NamedNode(iri("http://ex/alice"));
+    vec![Triple::new(alice, iri("http://ex/score"), double_lit(score))]
+}
+
+/// sq-q7e/sq-tat (soundness): the honest xsd:double FILTER witness PROVES and the
+/// FLIPPED verdict is UNprovable. This also exercises the in-circuit
+/// `f64::from(value)` bits derivation — a witness that lies about the verdict
+/// cannot satisfy the circuit (the bits are a constrained function of the bound
+/// operand, not a free input). Toolchain-gated (real nargo execute).
+#[test]
+fn filter_f64_witness_honest_proves_lie_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping filter_f64 witness soundness test");
+        return;
+    }
+    // operand = 25.0 (xsd:double), FILTER(?o >= 18.0) — true.
+    let value: u64 = 25;
+    let operand_enc = encode_double_literal(value);
+    let bound = 18.0_f64;
+    let (inputs, digits) =
+        build_filter_f64(operand_enc.clone(), value, FilterOp::Ge, bound, true)
+            .expect("25.0 >= 18.0 builds (d=2 member)");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterF64 { d: 2 });
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits);
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).expect("filter_f64_d2 compiles");
+    prover
+        .gen_witness_tagged(&id, &toml, "f64_honest")
+        .expect("the honest xsd:double FILTER verdict must PROVE");
+
+    // The FLIPPED verdict (false) must be UNprovable — soundness.
+    let (lie_inputs, lie_digits) =
+        build_filter_f64(operand_enc, value, FilterOp::Ge, bound, false).expect("builds");
+    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits);
+    let lie = prover.gen_witness_tagged(&lid, &ltoml, "f64_lie");
+    assert!(
+        lie.is_err(),
+        "SOUNDNESS: a FALSE xsd:double FILTER verdict (25.0 >= 18.0 = false) must be UNprovable"
+    );
+}
+
+/// sq-q7e/sq-tat (soundness): a prover cannot substitute a DIFFERENT operand than
+/// the one the scan committed — the canonical-token binding ties `operand_enc` to
+/// the exact committed literal. Witnessing digits for a different value than
+/// `operand_enc` encodes fails the in-circuit `operand encoding mismatch` assert.
+#[test]
+fn filter_f64_operand_binding_rejects_substituted_value() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping filter_f64 operand-binding test");
+        return;
+    }
+    // operand_enc is for 25.0, but the prover witnesses digits for 99 (two digits,
+    // same member d=2) and claims 99 >= 18 = true. The token rebuilt from "99"
+    // hashes to a DIFFERENT operand_enc than the committed "25", so the binding
+    // assert fails => no witness.
+    let operand_enc_25 = encode_double_literal(25);
+    let (inputs, _digits) =
+        build_filter_f64(operand_enc_25.clone(), 99, FilterOp::Ge, 18.0, true).expect("builds");
+    // Force the operand_enc to the committed 25's encoding while the digits witness
+    // says 99 (build_filter_f64 already set operand_enc to the passed value; here we
+    // pass operand_enc_25 but value=99 so the digit witness is "99").
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], b"99");
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).expect("compiles");
+    let res = prover.gen_witness_tagged(&id, &toml, "f64_subst");
+    assert!(
+        res.is_err(),
+        "SOUNDNESS: witnessing a value (99) different from the operand_enc the scan \
+         committed (25) must fail the canonical-token binding (operand encoding mismatch)"
+    );
+}
+
+/// sq-q7e/sq-tat (END-TO-END composition): a float-FILTER sub-proof participates in
+/// a composed, cryptographically-verified manifest. A scan over a double-valued
+/// credential discloses the object; a filter_f64 sub-proof proves `?o >= 18.0`
+/// over that disclosed encoding, tied by a binding edge; the whole manifest
+/// verifies (real bb prove + verify_manifest). This is the deliverable both sq-q7e
+/// and sq-tat ask for: a float FILTER assembled into a proof manifest.
+#[test]
+#[ignore = "slow: full bb prove of a scan + composable filter_f64 member (sq-q7e/sq-tat)"]
+fn filter_f64_composes_end_to_end() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping filter_f64 e2e composition");
+        return;
+    }
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let score: u64 = 25;
+    let commit = commit_triples(&double_credential_graph(score), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/score"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).unwrap();
+    let challenge = FieldHex("0x2a".into());
+    let prover = CircuitProver::from_crate_root();
+
+    // Prove the scan sub-proof.
+    let (scan_id, scan_toml) = prover_toml_for(
+        &scan.inputs,
+        &challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+    );
+    let scan_out = scratch("f64_compose_scan");
+    let scan_art = prover.prove_in(&scan_id, &scan_toml, &scan_out, "f64_compose_scan").unwrap();
+
+    // The disclosed object encoding the scan revealed (row 0, slot 2) — the float
+    // filter's operand anchor (the binding edge ties them).
+    let operand_enc = match &scan.inputs {
+        ProofInputs::Scan { rows, .. } => rows[0][2].clone(),
+        _ => unreachable!(),
+    };
+
+    // Prove the composable float-FILTER sub-proof: ?score >= 18.0 (true).
+    let (filter_inputs, fdigits) =
+        build_filter_f64(operand_enc, score, FilterOp::Ge, 18.0, true).expect("filter builds");
+    let (fid, ftoml) = prover_toml_for(&filter_inputs, &challenge, &[], &[], &fdigits);
+    let f_out = scratch("f64_compose_filter");
+    let filter_art = prover.prove_in(&fid, &ftoml, &f_out, "f64_compose_filter").unwrap();
+
+    let mut manifest = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/score> ?o }".into(),
+        issuers: vec!["did:key:zSampleIssuer".into()],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![
+            SubProof { inputs: scan.inputs, proof_hex: encode_artifacts(&scan_art) },
+            SubProof { inputs: filter_inputs, proof_hex: encode_artifacts(&filter_art) },
+        ],
+        // Binding edge: scan proof 0, row 0, object slot (2) -> float filter proof 1.
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all(&mut manifest, &test_issuer_sk(1), salt);
+    verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("f64_compose_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &HolderRegistry::empty(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("a composed manifest with a float-FILTER sub-proof must verify end-to-end");
+}
+
+/// sq-q7e/sq-tat: a 5-digit (out-of-family) integer-valued double operand errors
+/// cleanly (None) from build_filter_f64 — clean error, never a wrong-D member
+/// (the sq-wto exact-match discipline applied to the f64 family). No toolchain.
+#[test]
+fn filter_f64_out_of_family_errors_cleanly() {
+    let operand_enc = encode_double_literal(54321); // 5 digits, no compiled member
+    let built = build_filter_f64(operand_enc, 54321, FilterOp::Lt, 99999.0, true);
+    assert!(
+        built.is_none(),
+        "an out-of-family (5-digit) double operand must yield None — clean error, \
+         never a silently-unprovable wrong-D member"
+    );
+}
+
+// --- sq-314: entailment regime + derivation steps, end-to-end -----------------
+//
+// [OPUS-4.8] sq-314. `entailment_regime` used to be FREE METADATA (the verifier
+// never checked it). It is now ENFORCED: a regime the relying party's
+// EntailmentPolicy rejects, a Simple manifest carrying inference steps, a
+// non-Simple regime with no/ungrounded steps, all REJECT (fail-closed). These
+// tests exercise the structural enforcement (no toolchain — they reject/progress
+// at bind_entailment, before the bb gate).
+
+use sparq_zk_compose::derivation::{DerivationStep, EntailmentRule};
+
+/// An IRI's term encoding, the way scans disclose IRIs (salt-independent).
+fn enc_iri(s: &str) -> FieldHex {
+    let enc = sparq_zk::encode::encode_term(
+        &Term::NamedNode(NamedNode::new(s).unwrap()),
+        &Fr::from(0u64),
+    )
+    .unwrap();
+    FieldHex(sparq_zk::field::field_to_hex(&enc))
+}
+
+/// A scan-only manifest whose disclosed rows are the `rdf:type` triples of a tiny
+/// graph (so `(alice type Student)` is in the asserted base), under a chosen
+/// regime + derivation steps. Witness-only (empty proof_hex) so the entailment
+/// gate — which runs BEFORE the bb sub-proof loop — is what the test observes.
+fn entailment_manifest(regime: EntailmentRegime, steps: Vec<DerivationStep>) -> ProofManifest {
+    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let subclassof = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    let salt = salt_from_bytes(&[3u8; 32]);
+    let alice = NamedOrBlankNode::NamedNode(iri("http://ex/alice"));
+    let triples = vec![
+        Triple::new(
+            alice,
+            NamedNode::new(rdf_type).unwrap(),
+            Term::NamedNode(iri("http://ex/Student")),
+        ),
+        Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/Student")),
+            NamedNode::new(subclassof).unwrap(),
+            Term::NamedNode(iri("http://ex/Person")),
+        ),
+    ];
+    let commit = commit_triples(&triples, salt).unwrap();
+    // Scan `{ ?s <rdf:type> ?o }` discloses the (alice type Student) row only.
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(NamedNode::new(rdf_type).unwrap())),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).expect("scan builds");
+
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?o }"
+            .into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: regime,
+        derivation_steps: steps,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all(&mut m, &test_issuer_sk(1), salt);
+    m
+}
+
+fn run_entailment(m: &ProofManifest, policy: &EntailmentPolicy) -> Result<(), CheckError> {
+    let prover = CircuitProver::from_crate_root();
+    verify_manifest(
+        m,
+        &prover,
+        &scratch("entail"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &HolderRegistry::empty(),
+        policy,
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+}
+
+/// sq-314: an `Rdfs` manifest under a `Simple`-only policy REJECTS
+/// (EntailmentRegimeNotAccepted) — the regime is enforced, not free metadata.
+#[test]
+fn entailment_rdfs_rejected_under_simple_only_policy() {
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only()) {
+        Err(CheckError::EntailmentRegimeNotAccepted { .. }) => {}
+        other => panic!("Rdfs under simple-only must be EntailmentRegimeNotAccepted, got {other:?}"),
+    }
+}
+
+/// sq-314: a `Simple` manifest that nonetheless carries derivation steps REJECTS
+/// (UnexpectedDerivationSteps).
+#[test]
+fn entailment_simple_with_steps_rejected() {
+    let t = enc_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let sc = enc_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+    let step = DerivationStep {
+        rule: EntailmentRule::Rdfs9SubClassType,
+        antecedents: vec![
+            [enc_iri("http://ex/alice"), t.clone(), enc_iri("http://ex/Student")],
+            [enc_iri("http://ex/Student"), sc, enc_iri("http://ex/Person")],
+        ],
+        derived: [enc_iri("http://ex/alice"), t, enc_iri("http://ex/Person")],
+    };
+    let m = entailment_manifest(EntailmentRegime::Simple, vec![step]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only()) {
+        Err(CheckError::UnexpectedDerivationSteps) => {}
+        other => panic!("Simple with steps must be UnexpectedDerivationSteps, got {other:?}"),
+    }
+}
+
+/// sq-314: an `Rdfs` manifest with NO derivation steps REJECTS
+/// (MissingDerivationSteps) even when the policy accepts Rdfs.
+#[test]
+fn entailment_rdfs_without_steps_rejected() {
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only().with_rdfs()) {
+        Err(CheckError::MissingDerivationSteps { .. }) => {}
+        other => panic!("Rdfs with no steps must be MissingDerivationSteps, got {other:?}"),
+    }
+}
+
+/// sq-314: an `Rdfs` step whose `(Student subClassOf Person)` antecedent is NOT in
+/// the disclosed base (the scan discloses only the `rdf:type` row) is UNGROUNDED
+/// => UngroundedDerivationAntecedent.
+#[test]
+fn entailment_rdfs_ungrounded_antecedent_rejected() {
+    let t = enc_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let sc = enc_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+    let step = DerivationStep {
+        rule: EntailmentRule::Rdfs9SubClassType,
+        antecedents: vec![
+            [enc_iri("http://ex/alice"), t.clone(), enc_iri("http://ex/Student")],
+            // NOT disclosed by the rdf:type scan -> ungrounded.
+            [enc_iri("http://ex/Student"), sc, enc_iri("http://ex/Person")],
+        ],
+        derived: [enc_iri("http://ex/alice"), t, enc_iri("http://ex/Person")],
+    };
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![step]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only().with_rdfs()) {
+        Err(CheckError::UngroundedDerivationAntecedent { .. }) => {}
+        other => panic!(
+            "an ungrounded antecedent must be UngroundedDerivationAntecedent, got {other:?}"
+        ),
+    }
+}
+
+/// sq-314: a `Simple` manifest with no steps PASSES the entailment gate (it then
+/// progresses to the bb loop and stops at MissingProof — proving the entailment
+/// gate ACCEPTED it rather than rejecting it).
+#[test]
+fn entailment_simple_accepted_progresses_past_gate() {
+    let m = entailment_manifest(EntailmentRegime::Simple, vec![]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only()) {
+        Err(CheckError::MissingProof { .. }) => {}
+        other => panic!(
+            "a Simple manifest must pass the entailment gate (then hit MissingProof), got {other:?}"
+        ),
+    }
 }

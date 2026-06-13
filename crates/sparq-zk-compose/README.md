@@ -40,7 +40,13 @@ shape — never trust a declared id:
 - **scan** `scan_k{k}_n{n}_r{r}`: `k` = number of committed graphs, `n` =
   smallest compiled slot-bucket ≥ the largest graph, `r` = smallest compiled
   row-bucket ≥ the disclosed match count. See `build::derive_scan_id`.
-- **filter_int** `filter_int_d{d}`: `d` = digit count of the hidden value.
+- **filter_int** `filter_int_d{d}`: `d` = the hidden value's decimal digit count,
+  which must EXACTLY equal a compiled member (the circuit's `digits: [u8; d]`
+  witness pins the count). Compiled members: `d ∈ {1,2,3,4}` (the contiguous
+  1..=4 range; [OPUS-4.8] sq-wto added `d=3`). `build::derive_filter_int_id`
+  requires an exact match and returns `None` for any other count (e.g. 5..=19),
+  so `build_filter_int` cleanly declines an out-of-family operand rather than
+  deriving a wrong-`d` member that would be silently unprovable (sq-wto).
 
 The verifier re-derives and rejects on mismatch (`CircuitIdMismatch`), so a
 proof can only verify against the member its public inputs fit.
@@ -90,11 +96,25 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
   result, wrong commitment, swapped operand, cross-graph bnode join, flipped
   proof byte) all fail.
 
+**Composable now ([OPUS-4.8] sq-q7e / sq-tat):**
+- **`xsd:double` FILTER composition** — IMPLEMENTED for the INTEGER-VALUED double
+  fragment. The composable `filter_f64_d{d}` members (`CircuitId::FilterF64 { d }`
+  / `ProofInputs::FilterF64`) bind the hidden operand to the committed literal via
+  the canonical `"<digits>"^^xsd:double` token (blake3, the same mechanism as
+  `filter_int`) and DERIVE the IEEE bits in-circuit from the bound value
+  (`f64::from(value)`, exact for `value < 2^53`), so there is NO prover-free
+  `a_bits`. A float FILTER now participates in a composed proof via a binding edge
+  to a scan (e2e: `filter_f64_composes_end_to_end`). The raw `filter_f64` building
+  block (free bits) remains for non-composed use. DEFERRED: the GENERAL fragment
+  (fractional/scientific lexical forms, rounded values) needs a full in-circuit
+  decimal→IEEE-754 parser with round-to-nearest-even over an arbitrary lexical
+  form — unbudgeted; the integer-valued fragment is enforced by the digit-only
+  token (an out-of-fragment operand is unprovable, never mis-bound). Query-text
+  FILTER→float mapping also deferred (sparq-zk `fragment_filters` parses only the
+  xsd:integer FILTER fragment); a float FILTER composes via the binding edge +
+  its own verified sub-proof.
+
 **Deferred (documented, schema-stable placeholders where relevant):**
-- **`xsd:double` FILTER composition** — `filter_f64` is a gate-counted, tested
-  comparison building block, but binding an `f64` to a committed literal needs
-  in-circuit float→canonical-decimal printing (unbudgeted). The comparison
-  itself (`sparq_ieee754`, IEEE/NaN-correct) is done.
 - **Issuer signatures** over commitments — v1 carries `did:key` refs in the
   manifest but does not verify a signature in-circuit (commitments are
   disclosed manifest fields). The named-graph credential seam is in place.
@@ -105,8 +125,29 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
 - **Trust framework** (issuer allow-lists, schema governance) — deferred.
 - **Revocation** — `RevocationStatus` is a hidden-index status-list
   placeholder; v1 carries the index in the clear and does not check liveness.
-- **Inference / entailment** — only `EntailmentRegime::Simple` is proved.
-- **HolderPoP binding** — schema field reserved; v1 uses `Challenge`.
+- **Inference / entailment** — ENFORCED end-to-end ([OPUS-4.8] sq-314), not free
+  metadata. The verifier checks `entailment_regime` against an external
+  `EntailmentPolicy` (default `Simple`-only, fail-closed): a regime the policy
+  rejects, a `Simple` manifest carrying inference steps, or a non-`Simple` regime
+  whose `derivation_steps` do not STRUCTURALLY ground every derived triple to the
+  disclosed base (or to an earlier step) all REJECT. The `derivation` module
+  ships a `DerivationStep` capability + an RDFS rule subset (rdfs9 subClassOf-type,
+  rdfs7 subPropertyOf) the verifier re-checks (`bind_entailment`). DEFERRED: the
+  in-circuit ZK proof that an UNDISCLOSED antecedent is in the committed graph's
+  closure (the inference-circuit deliverable) — until then a derivation is sound
+  only over the DISCLOSED base (an ungrounded antecedent is rejected, never
+  assumed). So `Rdfs`/`Owl` is accepted only for disclosed-base derivations under
+  an explicit opt-in policy.
+- **HolderPoP binding** — IMPLEMENTED ([OPUS-4.8] sq-cwq): the `HolderPop`
+  binding now carries a holder key + a challenge-bound Schnorr proof-of-possession
+  (`pop`), and the verifier checks it FAIL-CLOSED against an external
+  `HolderRegistry` (an empty registry, an untrusted holder, or a
+  malformed/invalid/replayed PoP all REJECT — no silent-accept of an absent PoP,
+  which was the prior placeholder behaviour). DEFERRED: binding the holder key to
+  a SPECIFIC credential (an issuer-attested credential↔holder binding) — until
+  then the registry narrows "who may present" to authorised holders but a trusted
+  holder is not yet tied to a particular credential. See
+  `verifier::bind_holder_pop`.
 
 ## sparq-zk API gaps noted
 

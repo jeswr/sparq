@@ -92,11 +92,14 @@
 //! public-input reconstruction that binds the JSON statement (incl. attribution
 //! bits) and the verifier's nonce to the proofs.
 
-use crate::build::{derive_filter_int_id, derive_scan_id};
+use crate::build::{derive_filter_f64_id, derive_filter_int_id, derive_scan_id};
 use crate::driver::{CircuitProver, DriverError};
 use crate::manifest::{
-    BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest, StatusListSnapshot,
+    BindingMode, CircuitId, EntailmentRegime, FieldHex, ProofInputs, ProofManifest,
+    StatusListSnapshot,
 };
+// [OPUS-4.8] sq-314: derivation-step re-check for entailment-regime enforcement.
+use crate::derivation::regime_admits;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation root derivation.
 use crate::revocation::merkle_root;
 use sparq_zk::encode::encode_term;
@@ -108,7 +111,7 @@ use sparq_zk::field::{field_from_hex_str, field_to_be_bytes_32, field_to_hex, Fr
 // scan-verify path's signed message — a scan-covering attestation must bind the
 // status reference (status_ref_digest over the disclosed list/index/version).
 use sparq_zk::sig::{
-    commitment_message_with_status, public_key_from_hex, signature_from_hex,
+    commitment_message_with_status, holder_pop_message, public_key_from_hex, signature_from_hex,
     status_list_id_to_field, status_ref_digest, verify as sig_verify, SignatureScheme,
 };
 use sparq_zk::verify::{
@@ -243,6 +246,137 @@ impl KeySet {
     pub fn member_index(&self, pk_hex: &str) -> Option<usize> {
         let target = normalize_hex(pk_hex);
         self.keys.iter().position(|k| *k == target)
+    }
+}
+
+/// The relying party's EXTERNALLY-anchored set of trusted HOLDER keys (sq-cwq) —
+/// the trust anchor for the `HolderPop` binding's proof-of-possession.
+///
+/// # Why this is a verifier input, not a manifest field
+/// Exactly the audit-#3 external-`K` precedent: the holder key the PoP is checked
+/// against MUST come from outside the proof, or any party could mint a key, sign
+/// the challenge with it, list it in the manifest, and pass — a PoP anchored on a
+/// prover-chosen key proves nothing. A relying party constructs a `HolderRegistry`
+/// from the holder keys IT authorises (its policy / a holder-key registry it
+/// resolves out of band) and passes it into [`verify_manifest`]. The accept
+/// decision for a `HolderPop` binding then depends only on this external set.
+///
+/// # Fail-closed
+/// An EMPTY registry trusts no holder: a `HolderPop` binding presented against an
+/// empty registry is REJECTED ([`CheckError::HolderRegistryEmpty`]). There is NO
+/// path on which a `HolderPop` binding is accepted as a bare challenge (the
+/// previous placeholder behaviour, which silently waived the holder check). A
+/// relying party that does not use holder binding simply uses
+/// [`BindingMode::Challenge`]; one that DOES must supply a non-empty registry.
+///
+/// # Scope (honest deferral)
+/// Membership here means "this holder key is authorised to present" — it does NOT
+/// bind the key to a SPECIFIC credential. Issuer-attested credential↔holder
+/// binding (the issuer signing the holder key into the credential) is deferred;
+/// see [`bind_holder_pop`]. Keys are stored normalized (no `0x`, lowercase) and
+/// validated as parseable, non-identity Baby-JubJub points at construction
+/// (unparseable/identity entries dropped fail-closed).
+// [OPUS-4.8] sq-cwq: external holder trust anchor (mirrors KeySet).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HolderRegistry {
+    holders: BTreeSet<String>,
+}
+
+impl HolderRegistry {
+    /// An empty registry: trusts NO holder. A `HolderPop` binding is then rejected
+    /// (`HolderRegistryEmpty`) — the explicit "holder binding not in use" anchor
+    /// and the test default. (A `Challenge` binding is unaffected.)
+    pub fn empty() -> Self {
+        HolderRegistry { holders: BTreeSet::new() }
+    }
+
+    /// Build a registry from the relying party's authorised holder public keys
+    /// (hex). Each is validated as a parseable, non-identity Baby-JubJub point and
+    /// stored normalized; unparseable/identity entries are dropped (fail-closed —
+    /// they can never match a real PoP key).
+    pub fn from_hex_keys<I, S>(keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let holders = keys
+            .into_iter()
+            .filter_map(|h| public_key_from_hex(h.as_ref()).map(|_| normalize_hex(h.as_ref())))
+            .collect();
+        HolderRegistry { holders }
+    }
+
+    /// The registry trusts no holder.
+    pub fn is_empty(&self) -> bool {
+        self.holders.is_empty()
+    }
+
+    /// Whether `holder_hex` (any case, optional `0x`) is an authorised holder.
+    fn contains_hex(&self, holder_hex: &str) -> bool {
+        self.holders.contains(&normalize_hex(holder_hex))
+    }
+}
+
+/// The relying party's ENTAILMENT-REGIME policy (sq-314): which entailment regimes
+/// it will accept a manifest under. The verifier enforces this fail-closed
+/// ([`bind_entailment`]) so `manifest.entailment_regime` is no longer free
+/// metadata.
+///
+/// # Default = `Simple`-only (fail-closed)
+/// [`EntailmentPolicy::default`] / [`EntailmentPolicy::simple_only`] accepts ONLY
+/// `Simple` (no inference) — the conservative anchor, matching what v1 actually
+/// proves cryptographically. A relying party that wants to accept inference opts
+/// in explicitly with [`EntailmentPolicy::with_rdfs`] / [`EntailmentPolicy::with_owl`];
+/// when it does, the verifier additionally requires the manifest's
+/// `derivation_steps` to STRUCTURALLY ground every derived triple (see
+/// [`bind_entailment`] + the `derivation` module). A regime the policy does not
+/// accept REJECTS.
+///
+/// # Honest scope
+/// Accepting `Rdfs`/`Owl` here means "I accept a derivation re-checked against the
+/// disclosed base"; it does NOT (yet) mean an in-circuit closure proof (deferred —
+/// see the `derivation` module docs). A relying party that requires
+/// cryptographic-strength inference keeps the `Simple`-only default.
+// [OPUS-4.8] sq-314: entailment-regime policy (external, fail-closed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntailmentPolicy {
+    accept_rdfs: bool,
+    accept_owl: bool,
+}
+
+impl Default for EntailmentPolicy {
+    fn default() -> Self {
+        EntailmentPolicy::simple_only()
+    }
+}
+
+impl EntailmentPolicy {
+    /// Accept ONLY `Simple` (no inference) — the fail-closed default.
+    pub fn simple_only() -> Self {
+        EntailmentPolicy { accept_rdfs: false, accept_owl: false }
+    }
+
+    /// Additionally accept `Rdfs` manifests (with grounded derivation steps).
+    pub fn with_rdfs(mut self) -> Self {
+        self.accept_rdfs = true;
+        self
+    }
+
+    /// Additionally accept `Owl` (RDFS-RL/OWL-RL) manifests. `Owl` subsumes RDFS,
+    /// so this also accepts `Rdfs`.
+    pub fn with_owl(mut self) -> Self {
+        self.accept_owl = true;
+        self.accept_rdfs = true;
+        self
+    }
+
+    /// Whether this policy accepts `regime`.
+    fn accepts(&self, regime: EntailmentRegime) -> bool {
+        match regime {
+            EntailmentRegime::Simple => true,
+            EntailmentRegime::Rdfs => self.accept_rdfs,
+            EntailmentRegime::Owl => self.accept_owl,
+        }
     }
 }
 
@@ -974,6 +1108,59 @@ pub enum CheckError {
     /// truncated length prefix) (sq-z9l) — rejected before any bb call.
     // [OPUS-4.8] sq-z9l.
     HiddenIssuerMalformedProof,
+    /// The manifest's binding is `HolderPop` but the relying party supplied NO
+    /// holder registry (an empty [`HolderRegistry`]) (sq-cwq): the verifier has no
+    /// trust anchor to check the holder key against, so it cannot accept a holder
+    /// PoP. Rejected fail-closed — a HolderPop binding without a registry is NEVER
+    /// silently accepted as a bare challenge (the previous placeholder behaviour).
+    // [OPUS-4.8] sq-cwq.
+    HolderRegistryEmpty,
+    /// The `HolderPop` binding's `holder` key is not a member of the relying
+    /// party's external [`HolderRegistry`] (sq-cwq): the presenter is not an
+    /// authorised holder. Rejected.
+    // [OPUS-4.8] sq-cwq.
+    HolderNotTrusted { holder: String },
+    /// The `HolderPop` binding's `cryptosuite` is unknown/unsupported, or its
+    /// `holder` key / `pop` signature did not parse (sq-cwq): the PoP is
+    /// unverifiable. Rejected fail-closed (prover-controlled bytes never panic).
+    // [OPUS-4.8] sq-cwq.
+    HolderPopMalformed,
+    /// The `HolderPop` binding's `pop` signature did not verify under the `holder`
+    /// key over the challenge-bound PoP message (sq-cwq): the presenter did NOT
+    /// prove possession of the holder secret (a forged/replayed/absent PoP).
+    /// Rejected.
+    // [OPUS-4.8] sq-cwq.
+    HolderPopInvalid { holder: String },
+    /// The manifest's `entailment_regime` is NOT accepted by the relying party's
+    /// [`EntailmentPolicy`] (sq-314): e.g. an `Rdfs`/`Owl` manifest under a
+    /// `Simple`-only policy. Rejected fail-closed — the regime is enforced, not
+    /// free metadata (a relying party opts into inference explicitly).
+    // [OPUS-4.8] sq-314.
+    EntailmentRegimeNotAccepted { regime: &'static str },
+    /// A `Simple` manifest carried derivation steps (sq-314): `Simple` means NO
+    /// inference, so any `derivation_steps` are inconsistent with the declared
+    /// regime. Rejected.
+    // [OPUS-4.8] sq-314.
+    UnexpectedDerivationSteps,
+    /// A non-`Simple` manifest carried NO derivation steps (sq-314): an inference
+    /// regime with nothing to justify the inference is a vacuous claim. Rejected
+    /// fail-closed (a relying party that accepts `Rdfs`/`Owl` requires the
+    /// derivation to be recorded + re-checkable).
+    // [OPUS-4.8] sq-314.
+    MissingDerivationSteps { regime: &'static str },
+    /// A derivation step is not a well-formed instance of its rule, or its rule is
+    /// not admitted by the declared regime (sq-314): the recorded inference does
+    /// not match the rule shape / regime. Rejected.
+    // [OPUS-4.8] sq-314.
+    MalformedDerivationStep { step: usize },
+    /// A derivation step's antecedent is UNGROUNDED (sq-314): it is neither an
+    /// earlier step's derived triple nor a triple disclosed by a scan sub-proof
+    /// (the asserted base). A derived triple cannot rest on an antecedent the proof
+    /// does not establish, so this is rejected fail-closed. (The in-circuit closure
+    /// proof that would ground antecedents not disclosed is deferred — see the
+    /// `derivation` module; until then only the disclosed base grounds a step.)
+    // [OPUS-4.8] sq-314.
+    UngroundedDerivationAntecedent { step: usize, antecedent: usize },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -1154,6 +1341,42 @@ impl std::fmt::Display for CheckError {
                 f,
                 "hidden-issuer attestation proof blob is malformed (sq-z9l)"
             ),
+            CheckError::HolderRegistryEmpty => write!(
+                f,
+                "manifest binding is HolderPop but the relying party supplied no holder registry (sq-cwq: no trust anchor to check the holder key against — a holder PoP cannot be accepted, fail-closed)"
+            ),
+            CheckError::HolderNotTrusted { holder } => write!(
+                f,
+                "HolderPop binding holder key {holder} is not a member of the relying party's holder registry (sq-cwq: unauthorised holder)"
+            ),
+            CheckError::HolderPopMalformed => write!(
+                f,
+                "HolderPop binding is unverifiable: unknown cryptosuite, or the holder key / pop signature did not parse (sq-cwq: fail-closed, no silent accept)"
+            ),
+            CheckError::HolderPopInvalid { holder } => write!(
+                f,
+                "HolderPop binding pop signature does not verify under holder key {holder} over the challenge-bound message (sq-cwq: the presenter did not prove possession of the holder secret)"
+            ),
+            CheckError::EntailmentRegimeNotAccepted { regime } => write!(
+                f,
+                "manifest entailment regime `{regime}` is not accepted by the relying party's EntailmentPolicy (sq-314: the regime is enforced, not free metadata — a relying party must opt into inference)"
+            ),
+            CheckError::UnexpectedDerivationSteps => write!(
+                f,
+                "a Simple-regime manifest carried derivation steps (sq-314: Simple means no inference — steps are inconsistent with the regime)"
+            ),
+            CheckError::MissingDerivationSteps { regime } => write!(
+                f,
+                "a non-Simple regime `{regime}` carried no derivation steps (sq-314: an inference regime must record the derivation it claims — fail-closed)"
+            ),
+            CheckError::MalformedDerivationStep { step } => write!(
+                f,
+                "derivation step {step} is not a well-formed instance of its rule, or its rule is not admitted by the declared regime (sq-314)"
+            ),
+            CheckError::UngroundedDerivationAntecedent { step, antecedent } => write!(
+                f,
+                "derivation step {step} antecedent {antecedent} is ungrounded (sq-314: it is neither an earlier step's derived triple nor a disclosed scan row — a derived triple cannot rest on an antecedent the proof does not establish)"
+            ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
     }
@@ -1203,6 +1426,19 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
                 _ => return None,
             };
             derive_filter_int_id(d)
+        }
+        // [OPUS-4.8] sq-q7e + sq-tat: composable xsd:double FILTER. As with
+        // filter_int, the operand's digit count is PRIVATE; the declared `d` is
+        // re-checked against the compiled f64 family only (it must be a compiled
+        // d). The full CircuitId (incl. `d`) is what the audit-#1 public-input
+        // reconstruction + canonical-vk recompute pin, so a wrong `d` cannot
+        // byte-match a real member's proof.
+        ProofInputs::FilterF64 { .. } => {
+            let d = match inputs.circuit_id() {
+                CircuitId::FilterF64 { d } => *d,
+                _ => return None,
+            };
+            derive_filter_f64_id(d)
         }
     }
 }
@@ -1316,8 +1552,13 @@ pub fn prefilter_manifest_structure(
                 .ok_or(CheckError::DanglingEdge { edge: e })?,
             _ => return Err(CheckError::EdgeKindMismatch { edge: e }),
         };
+        // [OPUS-4.8] sq-q7e + sq-tat: a binding edge may consume the scanned
+        // column into EITHER an xsd:integer FILTER (filter_int) or a composable
+        // xsd:double FILTER (filter_f64) — both carry `operand_enc` as the
+        // scan-proof anchor, bound to the committed literal in-circuit.
         let operand = match &to.inputs {
             ProofInputs::FilterInt { operand_enc, .. } => operand_enc,
+            ProofInputs::FilterF64 { operand_enc, .. } => operand_enc,
             _ => return Err(CheckError::EdgeKindMismatch { edge: e }),
         };
         if scanned != operand {
@@ -2280,6 +2521,208 @@ fn filter_edge_true(
     }
 }
 
+/// sq-cwq: verify the holder proof-of-possession when the binding is `HolderPop`.
+/// Runs ONLY for a `HolderPop` binding (a `Challenge` binding returns `Ok(())`
+/// immediately — no PoP is required). `challenge` is the VERIFIER'S nonce (the
+/// same field element bound as public-input field 0 of every sub-proof), so the
+/// PoP is fresh: a captured manifest re-presented under a new nonce cannot reuse
+/// an old PoP, and the holder must sign THIS verifier's challenge.
+///
+/// Fail-closed contract (the sq-cwq fix — no silent accept of an absent PoP):
+/// 1. an EMPTY `holder_registry` => `HolderRegistryEmpty` (no trust anchor — a
+///    holder PoP cannot be accepted; the relying party must supply authorised
+///    holder keys to use holder binding);
+/// 2. `holder` not a member of the registry => `HolderNotTrusted`;
+/// 3. an unknown `cryptosuite`, or a `holder`/`pop` that does not parse =>
+///    `HolderPopMalformed` (prover-controlled bytes never panic);
+/// 4. `pop` not a valid signature under `holder` over
+///    `holder_pop_message(challenge)` => `HolderPopInvalid`.
+///
+/// The previous placeholder accepted a `HolderPop` binding by simply reading its
+/// `challenge` (exactly like a bare `Challenge`), silently waiving (1)-(4) — an
+/// absent/forged PoP passed. That silent-accept path is removed.
+///
+/// # Scope (honest deferral)
+/// This proves the presenter possesses a holder key the relying party trusts AND
+/// signed the verifier's fresh nonce with it. It does NOT bind that key to the
+/// SPECIFIC credential the scan/filter sub-proofs attest — an issuer-attested
+/// holder binding (the issuer signing the holder key into the credential, e.g. a
+/// `holderBinding` field folded into the commitment message) is DEFERRED. Without
+/// it, a trusted holder A could present a trusted holder B's credential. The
+/// holder registry narrows "who may present at all" to authorised holders, which
+/// is the meaningful interim guarantee; the per-credential binding is the
+/// documented next step. This is NOT a silent gap: the registry is fail-closed and
+/// the deferral is recorded here and in the manifest/README docs.
+// [OPUS-4.8] sq-cwq: holder PoP implemented (challenge-bound Schnorr) + fail-closed.
+fn bind_holder_pop(
+    manifest: &ProofManifest,
+    holder_registry: &HolderRegistry,
+    challenge: &FieldHex,
+) -> Result<(), CheckError> {
+    let (holder, pop, cryptosuite) = match &manifest.binding {
+        // A plain challenge binding requires no holder PoP.
+        BindingMode::Challenge { .. } => return Ok(()),
+        BindingMode::HolderPop { holder, pop, cryptosuite, .. } => (holder, pop, cryptosuite),
+    };
+
+    // (1) No trust anchor => cannot accept a holder PoP (fail-closed). This is the
+    // load-bearing replacement for the old silent-accept: a HolderPop binding is
+    // NEVER waived just because no registry was supplied.
+    if holder_registry.is_empty() {
+        return Err(CheckError::HolderRegistryEmpty);
+    }
+    // (2) The holder key must be authorised by the relying party's external set.
+    if !holder_registry.contains_hex(holder) {
+        return Err(CheckError::HolderNotTrusted { holder: holder.clone() });
+    }
+    // (3) Known cryptosuite + parseable key/signature (fail-closed on bad bytes).
+    if SignatureScheme::from_cryptosuite_iri(cryptosuite).is_none() {
+        return Err(CheckError::HolderPopMalformed);
+    }
+    let (Some(pk), Some(sig)) = (public_key_from_hex(holder), signature_from_hex(pop)) else {
+        return Err(CheckError::HolderPopMalformed);
+    };
+    // The challenge must parse to a field element (it equals the verifier nonce,
+    // already validated in verify_manifest, but check here for a standalone caller).
+    let Some(challenge_fr) = challenge.to_field() else {
+        return Err(CheckError::HolderPopMalformed);
+    };
+    // (4) The PoP signature must verify under the holder key over the
+    // challenge-bound, domain-separated PoP message — proving possession of the
+    // holder secret, freshly over the verifier's nonce.
+    let message = holder_pop_message(&challenge_fr);
+    if !sig_verify(&pk, &message, &sig) {
+        return Err(CheckError::HolderPopInvalid { holder: holder.clone() });
+    }
+    Ok(())
+}
+
+/// Encode an IRI to its salt-independent term encoding `FieldHex` (the same
+/// encoding scans disclose), `None` if it does not encode. Used by
+/// [`bind_entailment`] to compute the RDFS schema-vocabulary encodings.
+// [OPUS-4.8] sq-314.
+fn encode_iri_hex(iri: &str) -> Option<FieldHex> {
+    let nn = oxrdf::NamedNode::new(iri).ok()?;
+    let enc = encode_term(&oxrdf::Term::NamedNode(nn), &Fr::from(0u64))?;
+    Some(FieldHex(field_to_hex(&enc)))
+}
+
+/// sq-314: enforce the manifest's entailment regime end-to-end. This makes
+/// `entailment_regime` a CHECKED claim rather than free metadata.
+///
+/// Fail-closed contract:
+/// 1. the regime MUST be accepted by the relying party's [`EntailmentPolicy`]
+///    (`Simple` always; `Rdfs`/`Owl` only on explicit opt-in) — else
+///    `EntailmentRegimeNotAccepted`;
+/// 2. a `Simple` manifest MUST carry NO derivation steps (no inference) — else
+///    `UnexpectedDerivationSteps`;
+/// 3. a non-`Simple` manifest MUST carry derivation steps — else
+///    `MissingDerivationSteps`;
+/// 4. every derivation step MUST be a well-formed, regime-admitted rule instance
+///    (`MalformedDerivationStep`), and every antecedent MUST be GROUNDED: equal to
+///    an EARLIER step's derived triple or to a triple disclosed by a scan
+///    sub-proof (the asserted base) — else `UngroundedDerivationAntecedent`.
+///
+/// Grounding is by TERM-ENCODING equality (the disclosed scan rows and the step
+/// triples are both `FieldHex` encodings), so an antecedent that equals a
+/// disclosed asserted triple is soundly grounded. Step ordering is significant:
+/// each step may only ground on STRICTLY EARLIER steps (a forward-chained
+/// derivation), so there are no cyclic self-justifications.
+///
+/// # Honest scope (what is NOT proved here — deferred)
+/// Grounding ties antecedents to the DISCLOSED base; it does NOT (yet) prove in
+/// zero-knowledge that an undisclosed antecedent is in the committed graph's
+/// closure. An antecedent that is neither disclosed nor chained to a disclosed
+/// triple is REJECTED (not assumed). The full in-circuit RDFS/OWL-RL closure proof
+/// is the inference-circuit deliverable; this stage makes the regime claim
+/// non-vacuous and auditable over the disclosed-base fragment, fail-closed.
+// [OPUS-4.8] sq-314: entailment regime + derivation steps, end-to-end.
+fn bind_entailment(
+    manifest: &ProofManifest,
+    policy: &EntailmentPolicy,
+) -> Result<(), CheckError> {
+    let regime = manifest.entailment_regime;
+    let regime_name = match regime {
+        EntailmentRegime::Simple => "simple",
+        EntailmentRegime::Rdfs => "rdfs",
+        EntailmentRegime::Owl => "owl",
+    };
+    // (1) The regime must be accepted by the relying party.
+    if !policy.accepts(regime) {
+        return Err(CheckError::EntailmentRegimeNotAccepted { regime: regime_name });
+    }
+    let steps = &manifest.derivation_steps;
+    // (2) Simple => no inference steps.
+    if regime == EntailmentRegime::Simple {
+        if !steps.is_empty() {
+            return Err(CheckError::UnexpectedDerivationSteps);
+        }
+        return Ok(());
+    }
+    // (3) Non-Simple => steps required.
+    if steps.is_empty() {
+        return Err(CheckError::MissingDerivationSteps { regime: regime_name });
+    }
+
+    // The asserted base: every triple disclosed by a scan sub-proof (active rows),
+    // as [s, p, o] encodings — the ground set a step may chain from.
+    let mut disclosed: BTreeSet<[String; 3]> = BTreeSet::new();
+    for sp in &manifest.sub_proofs {
+        if let ProofInputs::Scan { rows, row_count, .. } = &sp.inputs {
+            for row in rows.iter().take(*row_count as usize) {
+                disclosed.insert([
+                    normalize_hex(&row[0].0),
+                    normalize_hex(&row[1].0),
+                    normalize_hex(&row[2].0),
+                ]);
+            }
+        }
+    }
+
+    // RDFS schema-vocabulary encodings (salt-independent IRIs). If any fails to
+    // encode the whole check fails closed (it cannot happen for these constants).
+    let (Some(rdf_type), Some(rdfs_subclassof), Some(rdfs_subpropertyof)) = (
+        encode_iri_hex("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+        encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subClassOf"),
+        encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subPropertyOf"),
+    ) else {
+        return Err(CheckError::MalformedDerivationStep { step: 0 });
+    };
+
+    // (4) Re-check each step. `derived_so_far` accumulates the derived triples of
+    // EARLIER steps (forward chaining only — no cyclic self-grounding).
+    let mut derived_so_far: BTreeSet<[String; 3]> = BTreeSet::new();
+    for (si, step) in steps.iter().enumerate() {
+        // 4a. Well-formed rule instance AND the regime admits the rule.
+        if !regime_admits(regime, step.rule)
+            || !step.is_well_formed(&rdf_type, &rdfs_subclassof, &rdfs_subpropertyof)
+        {
+            return Err(CheckError::MalformedDerivationStep { step: si });
+        }
+        // 4b. Every antecedent grounded (disclosed base OR an earlier derived).
+        for (ai, ant) in step.antecedents.iter().enumerate() {
+            let key = [
+                normalize_hex(&ant[0].0),
+                normalize_hex(&ant[1].0),
+                normalize_hex(&ant[2].0),
+            ];
+            if !disclosed.contains(&key) && !derived_so_far.contains(&key) {
+                return Err(CheckError::UngroundedDerivationAntecedent {
+                    step: si,
+                    antecedent: ai,
+                });
+            }
+        }
+        // This step's derived triple is now available to ground later steps.
+        derived_so_far.insert([
+            normalize_hex(&step.derived[0].0),
+            normalize_hex(&step.derived[1].0),
+            normalize_hex(&step.derived[2].0),
+        ]);
+    }
+    Ok(())
+}
+
 /// Full verification: structure (stage 1+2) then the cryptographic gate
 /// (stage 3). `prover` points at the `zk/compose/` workspace; `work_dir` is
 /// scratch for bb artifacts; `trusted_key_set` is the relying party's EXTERNAL
@@ -2287,7 +2730,18 @@ fn filter_edge_true(
 /// `manifest.key_set`); `revocation_policy` is the relying party's EXTERNAL
 /// freshness/revocation policy (audit #12 — the status check is mandatory: a
 /// revoked credential, a stale status snapshot, or an omitted/forged
-/// issuer-bound status reference all REJECT).
+/// issuer-bound status reference all REJECT); `holder_registry` is the relying
+/// party's EXTERNAL set of authorised holder keys (sq-cwq) — consulted ONLY when
+/// `manifest.binding` is `HolderPop`, in which case the holder MUST prove
+/// possession of a registry-member key by signing the verifier nonce (an empty
+/// registry, an untrusted holder, or a malformed/invalid PoP all REJECT; a
+/// `Challenge` binding ignores the registry). Pass `&HolderRegistry::empty()`
+/// when holder binding is not in use. `entailment_policy` is the relying party's
+/// EXTERNAL entailment-regime policy (sq-314): which regimes it accepts. The
+/// regime is enforced fail-closed — a regime the policy rejects, or a non-`Simple`
+/// regime whose `derivation_steps` do not structurally ground every derived triple
+/// to the disclosed base, REJECTS. Pass `&EntailmentPolicy::simple_only()` (the
+/// default) to accept only non-inference proofs.
 ///
 /// # Freshness / single-use (audit #4) — the challenge-response flow
 /// `nonce` is the relying party's OWN fresh value (a [`VerifierNonce`]), minted
@@ -2320,16 +2774,33 @@ fn filter_edge_true(
 /// inputs, canonical vk). The prover-supplied vk and public-input bytes from
 /// the blob are NEVER trusted.
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use.
+// [OPUS-4.8] sq-cwq: + holder_registry (external holder trust anchor). Each
+// argument is a DISTINCT external trust input the relying party supplies (issuer
+// key-set K, revocation policy, holder registry, fresh nonce, single-use store) —
+// deliberately separate, not bundled, to keep each anchor explicit at the call
+// site; the count exceeds clippy's default heuristic but every arg is load-bearing.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_manifest(
     manifest: &ProofManifest,
     prover: &CircuitProver,
     work_dir: &Path,
     trusted_key_set: &KeySet,
     revocation_policy: &RevocationPolicy,
+    holder_registry: &HolderRegistry,
+    entailment_policy: &EntailmentPolicy,
     nonce: &VerifierNonce,
     seen: &dyn SeenNonces,
 ) -> Result<(), CheckError> {
     prefilter_manifest_structure(manifest, trusted_key_set, revocation_policy)?;
+
+    // --- sq-314: entailment regime + derivation steps (fail-closed). ---
+    // Enforce `manifest.entailment_regime` against the relying party's policy so
+    // it is a CHECKED claim, not free metadata: a regime the policy rejects, a
+    // Simple manifest carrying inference steps, a non-Simple manifest with no
+    // steps, or a derivation step that is malformed / ungrounded all REJECT. This
+    // is a pure-JSON structural check (no bb); placed before the nonce burn since
+    // it is independent of the crypto gate.
+    bind_entailment(manifest, entailment_policy)?;
 
     // --- Audit #4: single-use (fail-closed, BEFORE the crypto gate). ---
     // Record the verifier's nonce as used; reject if it was already seen. Doing
@@ -2375,6 +2846,16 @@ pub fn verify_manifest(
     if declared_fr.is_none() || declared_fr != challenge.to_field() {
         return Err(CheckError::NonceBindingMismatch);
     }
+
+    // --- sq-cwq: holder proof-of-possession (fail-closed for HolderPop). ---
+    // When the binding is `HolderPop`, the holder MUST prove possession of a
+    // relying-party-trusted holder key by signing the VERIFIER'S nonce (above);
+    // an absent registry, an untrusted holder, or a malformed/invalid PoP all
+    // REJECT here — there is no silent-accept of a HolderPop as a bare challenge.
+    // A `Challenge` binding requires no PoP (this returns Ok immediately). The
+    // nonce is recorded single-use BEFORE this, so a rejected PoP still burns the
+    // nonce (consistent with the burn-on-mismatch policy above).
+    bind_holder_pop(manifest, holder_registry, &challenge)?;
 
     for (i, sp) in manifest.sub_proofs.iter().enumerate() {
         if sp.proof_hex.is_empty() {
@@ -2562,6 +3043,16 @@ fn reconstruct_public_inputs(
             push_field(&mut out, operand_enc, proof, "operand_enc")?;
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, *bound);
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-q7e + sq-tat: filter_f64_d{d} public inputs, in
+        // `main` declaration order: challenge (pushed above), operand_enc, op,
+        // b_bits (the constant double's IEEE-754 bit pattern as a u64 word),
+        // expected.
+        ProofInputs::FilterF64 { operand_enc, op, b_bits, expected, .. } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, *b_bits);
             push_uint(&mut out, u64::from(*expected));
         }
     }
