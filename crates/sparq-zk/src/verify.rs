@@ -296,9 +296,11 @@ fn canonical_u64(lex: &str) -> Option<u64> {
 
 /// Walk a FILTER expression and collect every top-level integer comparison it
 /// imposes. `AND` chains are flattened (each conjunct is its own obligation).
-/// Any FILTER node that is NOT a flat conjunction of bindable integer
-/// comparisons (negation, disjunction, arithmetic, `?a op ?b`, function calls,
-/// non-integer literals, …) makes the query fall outside the bindable fragment:
+/// `?v != c` (spargebra `Not(Equal(..))`, [OPUS-4.8]) is recognised as a
+/// `Ne` comparison. Any other FILTER node that is NOT a flat conjunction of
+/// bindable integer comparisons (general negation `!(...)`, disjunction,
+/// arithmetic, `?a op ?b`, function calls, non-integer literals, …) makes the
+/// query fall outside the bindable fragment:
 /// the function returns `Err(UnsupportedFragment)` so a FILTER the binding layer
 /// cannot vouch for fails CLOSED rather than being silently disclosed unproven
 /// (audit #10: a FILTER must have a bound sub-proof, so an unbindable FILTER
@@ -315,6 +317,21 @@ fn collect_filter_expr(e: &Expression, out: &mut Vec<QueryFilter>) -> Result<(),
         E::Greater(a, b) => push_cmp(FilterCmp::Gt, a, b, out),
         E::GreaterOrEqual(a, b) => push_cmp(FilterCmp::Ge, a, b, out),
         E::Equal(a, b) => push_cmp(FilterCmp::Eq, a, b, out),
+        // [OPUS-4.8] SPARQL `?v != c` parses to `Not(Equal(..))` in spargebra
+        // (there is no dedicated `NotEqual` node — confirmed against the
+        // vendored spargebra `Expression` AST). Recognise `Not(Equal(var,const))`
+        // / `Not(Equal(const,var))` and bind it to `FilterCmp::Ne` so valid
+        // integer `!=` FILTERs are inside the bindable fragment. Any other `Not`
+        // payload (e.g. `Not(Greater(..))`, `Not(And(..))`, `Not(Equal(?a,?b))`,
+        // non-integer / non-canonical operands) still falls through `push_cmp`'s
+        // / `comparison_filter`'s fail-closed reject path — `!=` does not loosen
+        // anything beyond the equality shape `comparison_filter` already vets.
+        E::Not(inner) => match inner.as_ref() {
+            E::Equal(a, b) => push_cmp(FilterCmp::Ne, a, b, out),
+            other => Err(VerifyError::UnsupportedFragment(format!(
+                "FILTER `!(...)` is not a bindable integer `!=` (only `?var != <xsd:integer>` binds): {other:?}"
+            ))),
+        },
         other => Err(VerifyError::UnsupportedFragment(format!(
             "FILTER expression not a bindable integer comparison: {other:?}"
         ))),
@@ -673,6 +690,77 @@ mod tests {
                 QueryFilter { variable: "age".into(), op: FilterCmp::Lt, bound: 65 },
             ]
         );
+    }
+
+    // [OPUS-4.8] roborev codex 2207: SPARQL `!=` binds to `FilterCmp::Ne`.
+    // spargebra has no `NotEqual` node — `?v != c` parses to `Not(Equal(..))`.
+    #[test]
+    fn extracts_not_equal_filter_in_both_operand_orders() {
+        // `?var != const` → Ne.
+        let q = format!(
+            "SELECT ?s ?age WHERE {{ ?s <http://ex/age> ?age FILTER(?age != {}) }}",
+            xint(18)
+        );
+        let fs = fragment_filters(&q).unwrap();
+        assert_eq!(
+            fs,
+            vec![QueryFilter { variable: "age".into(), op: FilterCmp::Ne, bound: 18 }],
+            "?age != 18 must bind to Ne"
+        );
+        // `const != ?var` → Ne (Ne is symmetric, so the flip is a no-op).
+        let q2 = format!(
+            "SELECT ?s ?age WHERE {{ ?s <http://ex/age> ?age FILTER({} != ?age) }}",
+            xint(18)
+        );
+        let fs2 = fragment_filters(&q2).unwrap();
+        assert_eq!(
+            fs2,
+            vec![QueryFilter { variable: "age".into(), op: FilterCmp::Ne, bound: 18 }],
+            "18 != ?age must also normalize to ?age != 18 (Ne)"
+        );
+    }
+
+    #[test]
+    fn not_equal_flattens_with_conjoined_comparisons() {
+        // `!=` is a first-class conjunct alongside ordered comparisons.
+        let q = format!(
+            "SELECT ?s ?age WHERE {{ ?s <http://ex/age> ?age FILTER(?age >= {} && ?age != {}) }}",
+            xint(18),
+            xint(21)
+        );
+        let fs = fragment_filters(&q).unwrap();
+        assert_eq!(
+            fs,
+            vec![
+                QueryFilter { variable: "age".into(), op: FilterCmp::Ge, bound: 18 },
+                QueryFilter { variable: "age".into(), op: FilterCmp::Ne, bound: 21 },
+            ]
+        );
+    }
+
+    #[test]
+    fn unbindable_not_equal_filters_fail_closed() {
+        // `!=` must NOT loosen the bindable fragment: a non-integer, var-var,
+        // or non-canonical `!=` operand still fails closed, exactly like the
+        // ordered comparisons. A general `!(...)` over a non-equality is also
+        // rejected.
+        for q in [
+            // var vs var `!=` → Not(Equal(?a,?b)), unbindable
+            "SELECT ?s WHERE { ?s <http://ex/a> ?a . ?s <http://ex/b> ?b FILTER(?a != ?b) }",
+            // plain string (no xsd:integer datatype)
+            "SELECT ?s WHERE { ?s <http://ex/h> ?h FILTER(?h != \"18\") }",
+            // float literal
+            "SELECT ?s WHERE { ?s <http://ex/h> ?h FILTER(?h != \"1.5\"^^<http://www.w3.org/2001/XMLSchema#double>) }",
+            // non-canonical leading-zero integer
+            "SELECT ?s WHERE { ?s <http://ex/age> ?a FILTER(?a != \"018\"^^<http://www.w3.org/2001/XMLSchema#integer>) }",
+            // negation of a non-equality (e.g. `!(?a > c)`) is NOT a bindable Ne
+            "SELECT ?s WHERE { ?s <http://ex/age> ?a FILTER(!(?a > \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>)) }",
+        ] {
+            assert!(
+                matches!(fragment_filters(q), Err(VerifyError::UnsupportedFragment(_))),
+                "must fail closed: {q}"
+            );
+        }
     }
 
     #[test]

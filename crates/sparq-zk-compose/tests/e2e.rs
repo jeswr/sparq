@@ -242,6 +242,52 @@ fn witness_gen_filter_int_rejects_false_verdict() {
     );
 }
 
+// [OPUS-4.8] roborev codex 2207: end-to-end `!=` (FilterCmp/FilterOp::Ne).
+// The verifier-side parser now binds SPARQL `?v != c` (spargebra
+// `Not(Equal(..))`) to `Ne`; these confirm the `Ne` op code drives the real
+// `filter_int` circuit's `!eq` verdict branch through the engine seam.
+#[test]
+fn witness_gen_filter_int_ne_satisfiable() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping witness-gen Ne test");
+        return;
+    }
+    // 30 != 18 is true. Tag-isolated witness gen (filter_int_d2, value "30").
+    let operand_enc = encode_int_literal(30);
+    let (filter, digits) =
+        build_filter_int(operand_enc, 30, FilterOp::Ne, 18, true).unwrap();
+    let (id, toml) =
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).expect("compiles");
+    prover
+        .gen_witness_tagged(&id, &toml, "wg_filter_ne_d2")
+        .expect("30 != 18 witness satisfiable");
+}
+
+#[test]
+fn witness_gen_filter_int_ne_rejects_false_verdict() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping");
+        return;
+    }
+    // Forge: 18 != 18 is FALSE; claim the `!=` verdict is true -> witness
+    // generation must fail (the circuit's `!eq` branch cannot be satisfied).
+    // Tag-isolated (filter_int_d2, value "18"), distinct from the satisfiable
+    // case's tag so concurrent runs are independent.
+    let operand_enc = encode_int_literal(18);
+    let (filter, digits) =
+        build_filter_int(operand_enc, 18, FilterOp::Ne, 18, true).unwrap();
+    let (id, toml) =
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).unwrap();
+    assert!(
+        prover.gen_witness_tagged(&id, &toml, "wg_filter_ne_d2_false").is_err(),
+        "a lying `!=` verdict (18 != 18 claimed true) must be unsatisfiable"
+    );
+}
+
 #[test]
 fn witness_gen_scan_satisfiable() {
     if !toolchain_available() {
@@ -303,6 +349,42 @@ fn full_prove_verify_filter_int_d1() {
         .verify(&bad, &out.join("verify_bad"))
         .expect("verify runs");
     assert!(!rejected, "tampered proof must be rejected");
+}
+
+/// [OPUS-4.8] roborev codex 2207: NON-ignored full prove+verify of a `Ne`
+/// FILTER on the smallest member. Confirms `FilterOp::Ne` drives an honest
+/// proof that bb actually verifies (the "binds + verifies" positive for the
+/// newly-bound `!=` fragment), and that a flipped proof byte is rejected.
+/// Tag-isolated (shares filter_int_d1 with the other full-prove/forge tests).
+#[test]
+fn full_prove_verify_filter_int_ne_d1() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping full prove+verify (Ne)");
+        return;
+    }
+    // 5 != 9 is true.
+    let operand_enc = encode_int_literal(5);
+    let (filter, digits) =
+        build_filter_int(operand_enc, 5, FilterOp::Ne, 9, true).unwrap();
+    let (id, toml) =
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+    assert_eq!(id, CircuitId::FilterInt { d: 1 });
+
+    let prover = CircuitProver::from_crate_root();
+    let out = scratch("full_ne_d1");
+    let art = prover.prove_in(&id, &toml, &out, "full_ne_d1").expect("prove succeeds");
+    assert!(!art.proof.is_empty());
+    let ok = prover.verify(&art, &out.join("verify")).expect("verify runs");
+    assert!(ok, "valid `!=` proof must verify");
+
+    // Tamper: flip a proof byte -> bb must reject.
+    let mut bad = art.clone();
+    let mid = bad.proof.len() / 2;
+    bad.proof[mid] ^= 0xff;
+    let rejected = prover
+        .verify(&bad, &out.join("verify_bad"))
+        .expect("verify runs");
+    assert!(!rejected, "tampered `!=` proof must be rejected");
 }
 
 /// Full manifest prove -> verify with the artifact-bundling path.

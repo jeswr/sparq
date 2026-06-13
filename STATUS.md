@@ -253,3 +253,26 @@ artifacts already landed in the caller's isolated `out_dir`. All d1-sharing test
 `zk/compose/.gitignore` ignores the generated `Prover*.toml`. e2e now passes under
 DEFAULT parallelism (no --test-threads=1), confirmed over 3 consecutive runs:
 `test result: ok. 16 passed; 0 failed; 1 ignored` (~4.5-7.3s).
+
+## FILTER `!=` BINDING (roborev codex job 2207, Medium) — [OPUS-4.8]
+`FilterCmp::Ne` had an op code (5) and was mapped through the compose layer, but
+the verifier-side FILTER parser (`collect_filter_expr` in `crates/sparq-zk/src/
+verify.rs`) never recognised SPARQL `!=`. spargebra has NO dedicated `NotEqual`
+node — `?v != c` parses to `Expression::Not(Box::new(Expression::Equal(a, b)))`
+(confirmed by probing the vendored spargebra: `Not(Equal(Variable, Literal))` for
+`?v != c`, `Not(Equal(Literal, Variable))` for `c != ?v`, `Not(Equal(Var, Var))`
+for var-var). So every valid integer `!=` FILTER fell through to the fail-closed
+reject path and was UNSUPPORTED. Fixed by matching `E::Not(inner)` and, only when
+`inner` is `E::Equal(a, b)`, routing through the existing `push_cmp(FilterCmp::Ne,
+a, b)` (which reuses `comparison_filter`'s var/const + canonical-integer vetting,
+both operand orders; `Ne` is symmetric so the flip is a no-op). Any other `Not`
+payload (`Not(Greater)`, `Not(And)`, `Not(Equal(?a,?b))`, non-integer/non-canonical
+operands) STILL fails closed — `!=` widens coverage without loosening the fragment.
+Tests: 3 unit (`extracts_not_equal_filter_in_both_operand_orders`,
+`not_equal_flattens_with_conjoined_comparisons`, `unbindable_not_equal_filters_
+fail_closed`) + 3 e2e (`witness_gen_filter_int_ne_satisfiable`, `witness_gen_
+filter_int_ne_rejects_false_verdict`, `full_prove_verify_filter_int_ne_d1` — full
+bb prove+verify of an honest `!=` plus a tampered-byte rejection, tag-isolated).
+Gate `cargo test -p sparq-zk -p sparq-zk-compose --release` (DEFAULT threads) green
+over 2 consecutive runs: sparq-zk lib `33 passed; 0 failed`; compose e2e `28 passed;
+0 failed; 1 ignored` (~6.8s).
