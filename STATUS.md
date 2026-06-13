@@ -1,4 +1,44 @@
-# ZK verifier soundness remediation — STATUS
+<!-- [OPUS-4.8] ===================================================================
+     ACTIVE SESSION: sparq-mpc Milestone 0 (scaffold + per-holder local eval).
+     The ZK-remediation STATUS below is a PRESERVED prior-session handoff — left
+     intact for crash-resilience; this MPC section is the current work.
+     Worktree off live main (base 72722b3). DO NOT PUSH.
+========================================================================= -->
+# sparq-mpc — Milestone 0 — STATUS (current session)
+
+## Done
+- New native-only crate `crates/sparq-mpc` added to root `Cargo.toml` workspace
+  members. NOT added to `sparq-wasm` deps — wasm bundle untouched.
+- Module tree (each docstring cites architecture §):
+  - `partial.rs` — `HolderId`, `PartialResult`, `MpcError` (the single honest
+    `NotYetImplemented { what, gated_on }` deferral channel).
+  - `holder.rs` — **REAL** per-holder local SPARQL sub-evaluation via
+    `sparq-engine` (`Holder::evaluate_local`); 3 unit tests.
+  - `backend.rs` — `MpcBackend` trait + `TrustModel`/`BackendInfo` (Q2 decision
+    point; no primitive chosen).
+  - `join.rs` — `GlobalJoin` trait + `JoinPlan` (global-IRI join; impl deferred M2).
+  - `proof.rs` — `CollaborativeProof`/`Attestation` + `ProofStatement` (gated on
+    ZK foundation #3/#4/#5/#6/#8/#9/#12 + Q1; honest stubs; 2 contract tests).
+- `crates/sparq-mpc/PLAN.md` — M0…M6, Q1/Q2/Q3/Q4 decision points, hard dep on
+  the ZK foundation.
+
+## Build / test gate
+- `cargo build -p sparq-mpc` — clean.
+- `cargo test -p sparq-mpc` — clean.
+- `cargo tree -p sparq-wasm` — does NOT contain sparq-mpc (verified).
+
+## Stubbed pending foundation / forks (NO fake crypto)
+- `MpcBackend` crypto methods → `NotYetImplemented` (M3 + Q2).
+- `GlobalJoin::join` → `NotYetImplemented` (M2; disclosed-key path first).
+- `CollaborativeProof` + `Attestation` → `NotYetImplemented` (M1 ZK foundation
+  + Q1 spike at M4).
+
+## Disk
+- `df` at start: 275G free on `/`. No `/tmp` scratch produced.
+
+---
+
+# ZK verifier soundness remediation — STATUS (PRESERVED prior session)
 
 Model: Opus 4.8 (Fable 5 unavailable — re-review when Fable returns).
 Worktree: isolated off `main`. Do NOT push/merge (orchestrator merges).
