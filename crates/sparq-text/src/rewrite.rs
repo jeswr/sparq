@@ -24,8 +24,12 @@
 //!
 //! - `?lit text:matches "query"` — AND of tokens, `*`-suffix = prefix token;
 //! - `?lit text:matchesAny "query"` — OR of tokens;
-//! - `?lit text:score ?s` — companion to exactly one of the above on the same
-//!   `?lit` in the same BGP, binds the BM25 score (`xsd:double`)
+//! - `?lit text:phrase "foo bar"` — tokens ADJACENT and IN ORDER (a positional
+//!   phrase match; needs a positions-enabled index — see below). [OPUS-4.8]
+//! - `?lit text:score ?s` — companion to exactly one `text:matches`/
+//!   `text:matchesAny` on the same `?lit` in the same BGP, binds the BM25 score
+//!   (`xsd:double`). NOT valid for `text:phrase` (a phrase match is boolean
+//!   adjacency, not a ranking).
 //!
 //! is REMOVED and replaced by an inline [`Values`](GraphPattern::Values)
 //! table of the index's hits — the matching literal terms (and scores),
@@ -41,9 +45,11 @@
 //! Constraints (each a hard query error, not a silent mismatch): the
 //! subject must be a variable; the query string must be a constant literal
 //! (bind-time rewriting has no per-row values); `text:score` needs exactly
-//! one match pattern for its variable; any other IRI in the `text:`
-//! namespace is unknown. The index is per-graph (dictionary-local ids), so
-//! hits come from the index you pass — typically the default graph's.
+//! one match pattern for its variable; `text:phrase` requires the index to
+//! carry positions ([`TextIndex::build_with_positions`]) and rejects a
+//! `text:score` companion; any other IRI in the `text:` namespace is unknown.
+//! The index is per-graph (dictionary-local ids), so hits come from the index
+//! you pass — typically the default graph's.
 
 use crate::index::TextIndex;
 use crate::vocab;
@@ -51,6 +57,7 @@ use oxrdf::{Literal, Term};
 use spargebra::algebra::GraphPattern;
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
+use sparq_core::dict::Id;
 use sparq_core::Graph;
 use sparq_engine::{PreparedQuery, QueryBudget, QueryResult};
 
@@ -124,11 +131,21 @@ fn rewrite_pattern(p: &mut GraphPattern, graph: &Graph, index: &TextIndex) -> Re
     Ok(())
 }
 
-/// One `text:matches`/`text:matchesAny` request found in a BGP.
+/// Which index query a `text:` match request runs.
+enum ReqKind {
+    /// `text:matches` — AND of tokens (BM25-scored).
+    All,
+    /// `text:matchesAny` — OR of tokens (BM25-scored).
+    Any,
+    /// `text:phrase` — adjacent, in-order tokens (positional, unscored). [OPUS-4.8]
+    Phrase,
+}
+
+/// One `text:matches`/`text:matchesAny`/`text:phrase` request found in a BGP.
 struct MatchReq {
     var: Variable,
     query: String,
-    any: bool,
+    kind: ReqKind,
     score: Option<Variable>,
 }
 
@@ -160,7 +177,7 @@ fn rewrite_bgp(
             }
         };
         match iri {
-            vocab::MATCHES | vocab::MATCHES_ANY => {
+            vocab::MATCHES | vocab::MATCHES_ANY | vocab::PHRASE => {
                 let var = subject_var(&tp.subject)?;
                 let TermPattern::Literal(q) = &tp.object else {
                     return Err(format!(
@@ -168,12 +185,12 @@ fn rewrite_bgp(
                         tp.object
                     ));
                 };
-                reqs.push(MatchReq {
-                    var,
-                    query: q.value().to_string(),
-                    any: iri == vocab::MATCHES_ANY,
-                    score: None,
-                });
+                let kind = match iri {
+                    vocab::MATCHES_ANY => ReqKind::Any,
+                    vocab::PHRASE => ReqKind::Phrase,
+                    _ => ReqKind::All,
+                };
+                reqs.push(MatchReq { var, query: q.value().to_string(), kind, score: None });
             }
             vocab::SCORE => {
                 let var = subject_var(&tp.subject)?;
@@ -188,7 +205,7 @@ fn rewrite_bgp(
             _ => {
                 return Err(format!(
                     "text: unknown magic predicate <{iri}> (supported: text:matches, \
-                     text:matchesAny, text:score)"
+                     text:matchesAny, text:phrase, text:score)"
                 ))
             }
         }
@@ -199,6 +216,12 @@ fn rewrite_bgp(
         let mut owners = reqs.iter_mut().filter(|r| r.var == var);
         match (owners.next(), owners.next()) {
             (Some(req), None) => {
+                if matches!(req.kind, ReqKind::Phrase) {
+                    return Err(format!(
+                        "text: text:score on {var} is not valid for text:phrase (a phrase \
+                         match is boolean adjacency, not a BM25 ranking)"
+                    ));
+                }
                 if req.score.replace(score_var).is_some() {
                     return Err(format!("text: duplicate text:score for {var}"));
                 }
@@ -221,20 +244,38 @@ fn rewrite_bgp(
     // Join the hit tables onto the remaining ordinary patterns.
     let mut out = GraphPattern::Bgp { patterns: rest };
     for req in reqs {
-        let hits = if req.any { index.search_any(&req.query) } else { index.search(&req.query) };
+        // Each hit is a matching literal id; BM25 modes also carry a score, the
+        // positional phrase mode is unscored (id only). [OPUS-4.8]
+        let hits: Vec<(Id, Option<f32>)> = match req.kind {
+            ReqKind::All => index.search(&req.query).into_iter().map(|h| (h.id, Some(h.score))).collect(),
+            ReqKind::Any => {
+                index.search_any(&req.query).into_iter().map(|h| (h.id, Some(h.score))).collect()
+            }
+            ReqKind::Phrase => {
+                if !index.has_positions() {
+                    return Err(
+                        "text: text:phrase requires a positions-enabled index; build it with \
+                         TextIndex::build_with_positions (the default index stores no positions)"
+                            .to_string(),
+                    );
+                }
+                index.phrase(&req.query).into_iter().map(|id| (id, None)).collect()
+            }
+        };
         let mut variables = vec![req.var];
         if let Some(s) = &req.score {
             variables.push(s.clone());
         }
         let bindings = hits
             .iter()
-            .map(|h| {
-                let Term::Literal(lit) = graph.dict.term(h.id) else {
+            .map(|&(id, score)| {
+                let Term::Literal(lit) = graph.dict.term(id) else {
                     unreachable!("text index documents are literals");
                 };
                 let mut row = vec![Some(GroundTerm::Literal(lit))];
                 if req.score.is_some() {
-                    row.push(Some(GroundTerm::Literal(Literal::from(f64::from(h.score)))));
+                    let score = score.expect("text:score only attaches to BM25 match requests");
+                    row.push(Some(GroundTerm::Literal(Literal::from(f64::from(score)))));
                 }
                 row
             })
