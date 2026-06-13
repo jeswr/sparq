@@ -283,8 +283,9 @@ pub(crate) mod functions {
 
     /// Snapshot of the installed registry for the rayon-parallel branches
     /// (`None` — the overwhelmingly common case — makes [`worker_install`] free).
-    // [OPUS-4.8] Only the parallel expression branches snapshot the registry (see
-    // `worker_install` above, gated the same way); without the feature this is dead.
+    // [OPUS-4.8] Only the `parallel`-gated worker branches snapshot the registry (see
+    // `worker_install`, gated the same way); match the sibling `limits::snapshot` so the
+    // `-D warnings` clippy gate stays clean in no-parallel/wasm builds.
     #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
     pub(crate) fn snapshot() -> Option<Arc<FunctionRegistry>> {
         ACTIVE.with(|a| a.borrow().clone())
@@ -625,7 +626,9 @@ fn write_store_id_json(graph: &Graph, id: Id, s: &mut String) {
 /// single-string mode (`flush = None`) concatenates onto the tail (the pre-existing
 /// behaviour of the parallel join). Concatenation order — and so the byte stream —
 /// is identical either way.
-// [OPUS-4.8] Both call sites are `#[cfg(feature = "parallel")]`; dead without it.
+// [OPUS-4.8] Both call sites are in `parallel`-gated blocks (the sequential/wasm paths
+// `push` directly); gate the helper too so the `-D warnings` clippy gate stays clean in
+// no-parallel/wasm builds.
 #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
 fn emit_chunk(chunks: &mut Vec<String>, frag: String, flush: Option<usize>) {
     match chunks.last_mut() {

@@ -101,6 +101,39 @@ pub fn describe_prepared_with_budget(
     }
 }
 
+/// Executes a CONSTRUCT *or* DESCRIBE query and returns the resulting RDF graph as a
+/// deduplicated triple list — the form-agnostic producer behind the graph-valued query
+/// forms. CONSTRUCT instantiates its template per WHERE solution; DESCRIBE returns each
+/// described resource's concise bounded description (see module docs). A SELECT/ASK query
+/// is rejected. Callers wanting a serialised string use [`construct_ntriples`].
+pub fn construct_or_describe(graph: &Graph, sparql: &str) -> Result<Vec<Triple>, String> {
+    construct_or_describe_with_budget(graph, sparql, &QueryBudget::unlimited())
+}
+
+/// [`construct_or_describe`] under a cooperative [`QueryBudget`].
+pub fn construct_or_describe_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+) -> Result<Vec<Triple>, String> {
+    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    let active = crate::active_dataset(graph, &q);
+    let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = crate::view_scope(&active);
+    let _guard = crate::exec::budget::install(budget);
+    match q {
+        Query::Construct { template, pattern, .. } => {
+            let solutions = crate::exec::eval_select(graph, &pattern)?;
+            Ok(instantiate(&template, &solutions))
+        }
+        Query::Describe { pattern, .. } => {
+            let solutions = crate::exec::eval_select(graph, &pattern)?;
+            cbd(graph, &solutions)
+        }
+        _ => Err("construct_or_describe() requires a CONSTRUCT or DESCRIBE query".to_string()),
+    }
+}
+
 /// Executes a CONSTRUCT *or* DESCRIBE query and serialises the resulting graph as
 /// N-Triples. N-Triples is a syntactic subset of Turtle, so the returned string is
 /// also a valid `text/turtle` document (the server serves it under either type).
@@ -110,22 +143,7 @@ pub fn construct_ntriples(graph: &Graph, sparql: &str) -> Result<String, String>
 
 /// [`construct_ntriples`] under a cooperative [`QueryBudget`].
 pub fn construct_ntriples_with_budget(graph: &Graph, sparql: &str, budget: &QueryBudget) -> Result<String, String> {
-    let q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
-    let active = crate::active_dataset(graph, &q);
-    let graph = active.as_ref().unwrap_or(graph);
-    let _view_scope = crate::view_scope(&active);
-    let _guard = crate::exec::budget::install(budget);
-    let triples = match q {
-        Query::Construct { template, pattern, .. } => {
-            let solutions = crate::exec::eval_select(graph, &pattern)?;
-            instantiate(&template, &solutions)
-        }
-        Query::Describe { pattern, .. } => {
-            let solutions = crate::exec::eval_select(graph, &pattern)?;
-            cbd(graph, &solutions)?
-        }
-        _ => Err("construct_ntriples() requires a CONSTRUCT or DESCRIBE query".to_string())?,
-    };
+    let triples = construct_or_describe_with_budget(graph, sparql, budget)?;
     Ok(triples_to_ntriples(&triples))
 }
 
@@ -302,6 +320,29 @@ mod tests {
 
     fn nts(ts: &[Triple]) -> Vec<String> {
         ts.iter().map(|t| format!("{} {} {} .", t.subject, t.predicate, t.object)).collect()
+    }
+
+    #[test]
+    fn construct_or_describe_handles_both_forms_and_rejects_select() {
+        // CONSTRUCT path: same triples as `construct`.
+        let c = construct_or_describe(
+            &g(),
+            "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        )
+        .unwrap();
+        assert_eq!(c.len(), 3);
+        // DESCRIBE path: same triples as `describe` (CBD).
+        let d = construct_or_describe(&g(), "DESCRIBE <http://ex/carol>").unwrap();
+        assert_eq!(d, describe(&g(), "DESCRIBE <http://ex/carol>").unwrap());
+        assert!(!d.is_empty());
+        // SELECT / ASK are not graph-valued => rejected.
+        assert!(construct_or_describe(&g(), "SELECT ?s WHERE { ?s ?p ?o }").is_err());
+        assert!(construct_or_describe(&g(), "ASK { ?s ?p ?o }").is_err());
+        // And the N-Triples serialiser stays consistent with the form-agnostic producer.
+        assert_eq!(
+            construct_ntriples(&g(), "DESCRIBE <http://ex/carol>").unwrap(),
+            triples_to_ntriples(&d),
+        );
     }
 
     #[test]

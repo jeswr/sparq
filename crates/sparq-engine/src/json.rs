@@ -3,7 +3,7 @@
 //! extra dependencies.
 
 use crate::QueryResult;
-use oxrdf::Term;
+use oxrdf::{Term, Variable};
 use sparq_core::dict::TermParts;
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -68,9 +68,20 @@ pub(crate) fn inline_int_json(s: &mut String, mut v: u32) {
 
 /// Serialises a query result to a SPARQL 1.1 JSON results string.
 pub fn to_sparql_json(r: &QueryResult) -> String {
-    let mut s = String::with_capacity(64 + r.rows.len() * 32);
+    to_sparql_json_rows(&r.vars, &r.rows)
+}
+
+/// Serialises a SELECT solution table — given separately as its `vars` and a slice
+/// of `rows` — to a **standalone, self-contained** SPARQL 1.1 JSON results document
+/// (`{"head":{"vars":…},"results":{"bindings":[…]}}`). Passing a sub-slice of a larger
+/// result's rows yields a valid document carrying just those rows, which lets a caller
+/// page a big result into independently-parseable batches (the wasm `SolutionCursor`)
+/// without ever holding the whole result as one JSON string. `to_sparql_json` is the
+/// `rows == r.rows` special case.
+pub fn to_sparql_json_rows(vars: &[Variable], rows: &[Vec<Option<Term>>]) -> String {
+    let mut s = String::with_capacity(64 + rows.len() * 32);
     s.push_str("{\"head\":{\"vars\":[");
-    for (i, v) in r.vars.iter().enumerate() {
+    for (i, v) in vars.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
@@ -79,7 +90,7 @@ pub fn to_sparql_json(r: &QueryResult) -> String {
         s.push('"');
     }
     s.push_str("]},\"results\":{\"bindings\":[");
-    for (ri, row) in r.rows.iter().enumerate() {
+    for (ri, row) in rows.iter().enumerate() {
         if ri > 0 {
             s.push(',');
         }
@@ -92,7 +103,7 @@ pub fn to_sparql_json(r: &QueryResult) -> String {
                 }
                 first = false;
                 s.push('"');
-                escape_into(&mut s, r.vars[vi].as_str());
+                escape_into(&mut s, vars[vi].as_str());
                 s.push_str("\":");
                 term_to_json(&mut s, term);
             }
@@ -182,6 +193,43 @@ pub(crate) fn escape_into(out: &mut String, s: &str) {
         start = i + 1;
     }
     out.push_str(&s[start..]);
+}
+
+#[cfg(test)]
+mod rows_tests {
+    use super::{to_sparql_json, to_sparql_json_rows};
+    use crate::QueryResult;
+    use oxrdf::{NamedNode, Term, Variable};
+
+    fn row(iri: &str) -> Vec<Option<Term>> {
+        vec![Some(Term::NamedNode(NamedNode::new(iri).unwrap()))]
+    }
+
+    #[test]
+    fn rows_slice_is_self_contained_and_partitions_whole() {
+        let vars = vec![Variable::new("s").unwrap()];
+        let rows = vec![row("http://ex/a"), row("http://ex/b"), row("http://ex/c")];
+        let r = QueryResult { vars: vars.clone(), rows: rows.clone() };
+
+        // The whole-result wrapper is the rows == r.rows special case.
+        assert_eq!(to_sparql_json(&r), to_sparql_json_rows(&vars, &rows));
+
+        // Each slice is an independently valid SPARQL-JSON doc carrying its head vars.
+        let first = to_sparql_json_rows(&vars, &rows[0..2]);
+        let rest = to_sparql_json_rows(&vars, &rows[2..3]);
+        for doc in [&first, &rest] {
+            assert!(doc.contains("\"vars\":[\"s\"]"), "missing head vars: {doc}");
+            assert!(doc.starts_with("{\"head\":") && doc.ends_with("}}"), "not a full doc: {doc}");
+        }
+        assert_eq!(first.matches("\"s\":{").count(), 2);
+        assert_eq!(rest.matches("\"s\":{").count(), 1);
+        assert!(first.contains("http://ex/a") && first.contains("http://ex/b"));
+        assert!(rest.contains("http://ex/c"));
+
+        // An empty slice is still a valid doc with empty bindings.
+        let empty = to_sparql_json_rows(&vars, &[]);
+        assert!(empty.contains("\"bindings\":[]"), "empty slice: {empty}");
+    }
 }
 
 #[cfg(test)]

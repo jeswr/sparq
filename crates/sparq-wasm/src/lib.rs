@@ -39,6 +39,85 @@ impl QueryChunks {
     }
 }
 
+/// A forward-only **cursor over a SELECT result's solution rows** (see
+/// [`Store::query_cursor`]): each [`next`](Self::next) yields the next *batch* of up to
+/// `batch_size` solutions as a **self-contained** SPARQL 1.1 JSON document — vars in
+/// `head`, just that batch's rows in `results.bindings` — so the consumer can `JSON.parse`
+/// each batch on its own and process (then drop) it before pulling the next. Unlike
+/// [`QueryChunks`], whose chunks are arbitrary byte-cuts of one big JSON string that must
+/// be re-joined before parsing, every cursor batch is independently valid. The result is
+/// materialised once inside wasm (the engine has no lazy solution iterator at this layer),
+/// but each batch's JSON string is built lazily on demand and never retained, so the heavy
+/// JS-side string copy is bounded to one batch at a time — never the whole result at once.
+#[wasm_bindgen]
+pub struct SolutionCursor {
+    result: sparq_engine::QueryResult,
+    pos: usize,
+    batch_size: usize,
+}
+
+#[wasm_bindgen]
+impl SolutionCursor {
+    /// The next batch as a standalone SPARQL 1.1 JSON results document, or `undefined`
+    /// once every solution has been yielded. A query with zero solutions yields exactly
+    /// one batch (the empty-`bindings` document) and is then exhausted, so a caller can
+    /// distinguish "no rows" (one empty batch) from "fully drained" (`undefined`).
+    // clippy: a #[wasm_bindgen]-exported inherent method (JS calls `.next()`); it cannot
+    // be `Iterator::next`, and renaming would break the JS binding contract.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<String> {
+        let total = self.result.rows.len();
+        // Exhausted: emit one empty batch for an empty result (pos 0, total 0), then stop.
+        if self.pos > total || (self.pos == total && total != 0) {
+            return None;
+        }
+        let end = (self.pos + self.batch_size).min(total);
+        let json = sparq_engine::json::to_sparql_json_rows(&self.result.vars, &self.result.rows[self.pos..end]);
+        // Advance past `end`; for an empty result step from 0 to 1 so the next call stops.
+        self.pos = if total == 0 { 1 } else { end };
+        Some(json)
+    }
+
+    /// The projected variable names, in order — the `head.vars` shared by every batch.
+    pub fn vars(&self) -> Vec<String> {
+        self.result.vars.iter().map(|v| v.as_str().to_string()).collect()
+    }
+
+    /// The total number of solution rows in the (already materialised) result.
+    #[wasm_bindgen(js_name = rowCount)]
+    pub fn row_count(&self) -> usize {
+        self.result.rows.len()
+    }
+
+    /// The configured batch size (max solutions per [`next`](Self::next)).
+    #[wasm_bindgen(js_name = batchSize)]
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+}
+
+/// A forward-only cursor over the N-Triples lines of a CONSTRUCT/DESCRIBE result graph
+/// (see [`Store::query_quads_chunks`]): each [`next`](Self::next) yields the next batch of
+/// up to `batch_size` triples as an N-Triples fragment (which is also valid Turtle —
+/// N-Triples ⊂ Turtle). Concatenating every batch reproduces [`Store::query_quads`]'s full
+/// document. The graph is materialised once inside wasm, but each batch string is built on
+/// demand and not retained, so the JS-side copy is bounded to one batch at a time.
+#[wasm_bindgen]
+pub struct QuadChunks {
+    chunks: std::vec::IntoIter<String>,
+}
+
+#[wasm_bindgen]
+impl QuadChunks {
+    /// The next N-Triples fragment, or `undefined` when the graph is exhausted.
+    // clippy: a #[wasm_bindgen]-exported inherent method (JS calls `.next()`); it cannot
+    // be `Iterator::next`, and renaming would break the JS binding contract.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<String> {
+        self.chunks.next()
+    }
+}
+
 #[wasm_bindgen]
 impl Store {
     /// Parses an RDF document into a store. `format`: `"turtle"` | `"ntriples"` |
@@ -110,6 +189,54 @@ impl Store {
             sparq_engine::query_json_chunks_with_budget(&self.graph, sparql, &sparq_engine::QueryBudget::unlimited())
                 .map_err(|e| JsError::new(&e))?;
         Ok(QueryChunks { chunks: chunks.into_iter() })
+    }
+
+    /// Runs a SELECT (or ASK) query and returns a [`SolutionCursor`] that yields the
+    /// solutions in batches of at most `batchSize` rows, each batch a self-contained
+    /// SPARQL 1.1 JSON document the caller can `JSON.parse` on its own. This is the
+    /// row-oriented streaming entry point: pull a batch, surface/drop its rows, pull the
+    /// next — the consumer never holds more than one batch, so peak JS memory is bounded
+    /// by `batchSize` rather than by the whole result. (`queryChunks` streams the *bytes*
+    /// of one JSON string at fixed ~64 KiB cuts that must be re-joined before parsing;
+    /// `queryCursor` streams *parseable solution batches*.) `batchSize` is clamped to at
+    /// least 1. Caveat: the engine materialises the full result inside wasm before the
+    /// first batch — there is no lazy engine-level solution iterator at this layer — so the
+    /// bound is on the JS-side string copy, not on wasm working set.
+    #[wasm_bindgen(js_name = queryCursor)]
+    pub fn query_cursor(&self, sparql: &str, batch_size: usize) -> Result<SolutionCursor, JsError> {
+        let result = sparq_engine::query(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
+        Ok(SolutionCursor { result, pos: 0, batch_size: batch_size.max(1) })
+    }
+
+    /// Runs a **CONSTRUCT or DESCRIBE** query and returns the resulting RDF graph
+    /// serialised as **N-Triples** (one `s p o .` line per triple). N-Triples is a
+    /// syntactic subset of Turtle, so the returned string is also a valid `text/turtle`
+    /// document. This is the quad-returning entry point: where [`query`](Self::query)
+    /// answers SELECT/ASK with a solution table, `queryQuads` answers the graph-valued
+    /// query forms with their constructed graph. CONSTRUCT instantiates its template once
+    /// per WHERE solution (template blank nodes are freshened per solution, and triples
+    /// with unbound or RDF-illegal terms are dropped per SPARQL §16.2); DESCRIBE returns
+    /// the concise bounded description of each described resource. A SELECT/ASK query is
+    /// rejected here — use [`query`](Self::query) / [`queryChunks`](Self::query_chunks).
+    #[wasm_bindgen(js_name = queryQuads)]
+    pub fn query_quads(&self, sparql: &str) -> Result<String, JsError> {
+        sparq_engine::construct_ntriples(&self.graph, sparql).map_err(|e| JsError::new(&e))
+    }
+
+    /// Like [`queryQuads`](Self::query_quads) but returns a [`QuadChunks`] cursor that
+    /// yields the constructed graph in batches of at most `batchSize` triples (each an
+    /// N-Triples fragment), so a large constructed/described graph crosses the wasm
+    /// boundary piecewise and the caller holds at most one batch at a time. Concatenating
+    /// every batch reproduces `queryQuads`'s document exactly. `batchSize` is clamped to at
+    /// least 1. Caveat: as with [`queryQuads`](Self::query_quads) the full graph is
+    /// materialised inside wasm before the first batch; the bound is on the JS-side copy.
+    #[wasm_bindgen(js_name = queryQuadsChunks)]
+    pub fn query_quads_chunks(&self, sparql: &str, batch_size: usize) -> Result<QuadChunks, JsError> {
+        let triples = sparq_engine::construct_or_describe(&self.graph, sparql).map_err(|e| JsError::new(&e))?;
+        let batch = batch_size.max(1);
+        let chunks: Vec<String> =
+            triples.chunks(batch).map(sparq_engine::triples_to_ntriples).collect();
+        Ok(QuadChunks { chunks: chunks.into_iter() })
     }
 
     /// Counts the solutions of a SELECT query *without* materialising them — for a
@@ -196,6 +323,122 @@ mod tests {
         let r = sparq_engine::query(&g, "PREFIX ex: <http://ex/> SELECT ?o WHERE { ?s ex:knows ?o }").unwrap();
         let json = sparq_engine::json::to_sparql_json(&r);
         assert!(json.contains("\"type\":\"uri\",\"value\":\"http://ex/bob\""));
+    }
+
+    // ---- sq-0f7: SELECT solution cursor (streaming, batch-level) ----
+
+    /// Concatenating a cursor's batches must surface exactly the rows of the one-shot
+    /// `query`, and the cursor must honour the batch size and terminate cleanly.
+    #[test]
+    fn cursor_batches_cover_all_rows() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?n WHERE { ?s ex:name ?n } ORDER BY ?n";
+        // batch_size 1 over a 2-row result => two non-empty batches, then exhaustion.
+        let mut cur = store.query_cursor(q, 1).unwrap();
+        assert_eq!(cur.row_count(), 2);
+        assert_eq!(cur.batch_size(), 1);
+        assert_eq!(cur.vars(), vec!["s".to_string(), "n".to_string()]);
+
+        let b0 = cur.next().expect("first batch");
+        let b1 = cur.next().expect("second batch");
+        assert!(cur.next().is_none(), "cursor must be exhausted after the last batch");
+
+        // Each batch is a self-contained SPARQL-JSON doc with the full head vars.
+        for b in [&b0, &b1] {
+            assert!(b.contains("\"vars\":[\"s\",\"n\"]"), "batch missing head vars: {b}");
+        }
+        // One binding row per batch (batch_size 1), and together they carry both names.
+        assert_eq!(b0.matches("\"n\":{").count(), 1);
+        assert_eq!(b1.matches("\"n\":{").count(), 1);
+        assert!((b0.contains("\"Alice\"") && b1.contains("Bob")) || (b1.contains("\"Alice\"") && b0.contains("Bob")));
+    }
+
+    /// A batch larger than the result yields everything in one batch; a zero batch size
+    /// is clamped to 1 (never an infinite/empty-step loop).
+    #[test]
+    fn cursor_oversized_and_zero_batch() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let q = "PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }";
+
+        let mut big = store.query_cursor(q, 1000).unwrap();
+        let only = big.next().expect("single batch");
+        assert!(big.next().is_none());
+        assert_eq!(only.matches("\"n\":{").count(), 2, "oversized batch must hold all rows");
+
+        let mut zero = store.query_cursor(q, 0).unwrap();
+        assert_eq!(zero.batch_size(), 1, "batch size clamps to >= 1");
+        assert!(zero.next().is_some());
+    }
+
+    /// A result with no solutions yields exactly one empty batch (so JS can read head
+    /// vars), then terminates — distinguishing "no rows" from "fully drained".
+    #[test]
+    fn cursor_empty_result_yields_one_empty_batch() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let mut cur = store.query_cursor("PREFIX ex: <http://ex/> SELECT ?x WHERE { ?s ex:nope ?x }", 8).unwrap();
+        assert_eq!(cur.row_count(), 0);
+        let only = cur.next().expect("one empty batch even with zero rows");
+        assert!(only.contains("\"bindings\":[]"), "empty result batch must have empty bindings: {only}");
+        assert!(cur.next().is_none(), "exhausted after the single empty batch");
+    }
+
+    // ---- sq-hlq: CONSTRUCT / DESCRIBE -> quads ----
+
+    /// CONSTRUCT through `queryQuads` returns the constructed graph as N-Triples
+    /// (a valid Turtle subset): absolute IRIs, `.`-terminated lines.
+    #[test]
+    fn construct_to_quads_ntriples() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let nt = store
+            .query_quads(
+                "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }",
+            )
+            .unwrap();
+        // Two name triples -> two constructed triples, each a full N-Triples line.
+        assert_eq!(nt.lines().filter(|l| !l.trim().is_empty()).count(), 2, "got: {nt}");
+        assert!(nt.contains("<http://ex/label>"), "predicate IRI expanded: {nt}");
+        assert!(nt.contains("<http://ex/alice> <http://ex/label> \"Alice\" ."), "got: {nt}");
+        // Language tag preserved on the constructed literal.
+        assert!(nt.contains("\"Bob\"@en"), "lang tag preserved: {nt}");
+    }
+
+    /// DESCRIBE also flows through `queryQuads` (concise bounded description).
+    #[test]
+    fn describe_to_quads() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let nt = store.query_quads("DESCRIBE <http://ex/bob>").unwrap();
+        // CBD of ex:bob = its outgoing triples (name + age), nothing inbound.
+        assert!(nt.contains("<http://ex/bob> <http://ex/name> \"Bob\"@en ."), "got: {nt}");
+        assert!(nt.contains("<http://ex/bob> <http://ex/age>"), "got: {nt}");
+        assert!(!nt.contains("<http://ex/alice>"), "CBD must not pull in inbound subjects: {nt}");
+    }
+
+    /// `queryQuadsChunks` batches the constructed graph; concatenation == `queryQuads`.
+    #[test]
+    fn construct_quads_chunks_reassemble() {
+        let store = Store::load(DATA, "turtle").unwrap();
+        let q = "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:label ?n } WHERE { ?s ex:name ?n }";
+        let whole = store.query_quads(q).unwrap();
+
+        let mut chunks = store.query_quads_chunks(q, 1).unwrap();
+        let mut reassembled = String::new();
+        let mut n_batches = 0;
+        while let Some(c) = chunks.next() {
+            n_batches += 1;
+            reassembled.push_str(&c);
+        }
+        assert_eq!(n_batches, 2, "batch_size 1 over 2 triples => 2 batches");
+        assert_eq!(reassembled, whole, "chunked N-Triples must reassemble to the whole document");
+    }
+
+    /// A SELECT routed to the quad path is rejected (it is not a graph-valued query).
+    /// Asserted against the engine function `queryQuads` delegates to, because the
+    /// `JsError`-returning wasm wrapper cannot construct its error on a native target
+    /// (`JsError::new` is a wasm-bindgen import that panics off-wasm).
+    #[test]
+    fn query_quads_rejects_select() {
+        let g = Graph::load_str(DATA, "turtle").unwrap();
+        assert!(sparq_engine::construct_ntriples(&g, "SELECT ?s WHERE { ?s ?p ?o }").is_err());
     }
 
     #[test]

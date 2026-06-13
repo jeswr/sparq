@@ -19,9 +19,9 @@ use temporal::Temporal;
 
 /// Per-chunk parse output: a partial dictionary + that chunk's local-id triples, one
 /// element per parallel chunk (the parallelizable half of ingest, merged downstream).
-// [OPUS-4.8] Used only by `parse_block`, which is `#[cfg(feature = "parallel")]`; match
-// that gating so the default (non-parallel) build does not flag the alias as dead code
-// under `-D warnings` (the `clippy -p sparq-rsp --all-targets` gate compiles this dep).
+// [OPUS-4.8] Used only by `parse_block` (`#[cfg(feature = "parallel")]`); match that gating
+// so neither the default non-parallel build nor the no-default-features (wasm) build flags
+// the alias as dead code under the `-D warnings` clippy gate.
 #[cfg(feature = "parallel")]
 type ChunkPartials = Vec<(Dict, Vec<[Id; 3]>)>;
 use oxrdf::vocab::xsd;
