@@ -109,7 +109,8 @@ type LexSetOp = fn(&str, &str) -> Result<String, GeoError>;
 /// * `envelope` / `boundary` / `convexHull` `(g)` -> `geo:wktLiteral`;
 /// * `buffer(g, radius, unitIri)` -> `geo:wktLiteral` (a MULTIPOLYGON);
 /// * `intersection` / `union` / `difference` / `symDifference` `(g1, g2)` ->
-///   `geo:wktLiteral` (POLYGONAL operands only);
+///   `geo:wktLiteral` (point-set ops: polygon overlay plus the well-defined
+///   line/point cases — see `geof` for the supported matrix);
 /// * `getSRID(g)` -> `xsd:anyURI` (the geometry's CRS IRI).
 ///
 /// Build it once and reuse it: the registry is cheaply cloneable and `Send + Sync`,
@@ -195,7 +196,8 @@ pub fn geof_registry() -> FunctionRegistry {
         });
     }
 
-    // The set operations: geof:*(?g1, ?g2) -> geo:wktLiteral (polygonal operands only).
+    // The set operations: geof:*(?g1, ?g2) -> geo:wktLiteral (point-set ops over
+    // polygon/line/point operands; see geof for the supported matrix).
     let set_ops: [(&'static str, LexSetOp); 4] = [
         ("intersection", lex::intersection),
         ("union", lex::union),
