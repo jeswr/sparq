@@ -87,9 +87,20 @@ member has a different vk and fails `bb verify`.
 - Read audit + test-bench design + circuits + verifier/driver/build/toml/manifest.
 - Determined bb public_inputs byte format empirically (above).
 - Measured vk recompute determinism + timing; chose recompute-at-verify.
+- #1 IMPLEMENTED: `reconstruct_public_inputs()` + byte-compare in
+  `verify_manifest`; 2 unit tests pin it to REAL bb blobs (byte-match), +3
+  hardening/sensitivity unit tests. Commit 6c236dd.
+- #2 IMPLEMENTED: `CircuitProver::canonical_vk()` + `verify_with()`;
+  `verify_manifest` uses the recomputed canonical vk, never `art.vk`. Commit
+  6c236dd.
+- Hardening: `hex_decode`/`take_lp`/`decode_artifacts` -> `Option`, routed
+  through `CheckError::MalformedProof`/`MalformedField`/`PublicInputMismatch`.
+- Existing 10 e2e + new 5 unit tests green.
 
 ## IN-FLIGHT
-- Implementing #1 (public-input reconstruction + byte-compare).
+- Forge-and-verify NEGATIVE e2e tests (toolchain-gated): honest proof of
+  statement A under manifest B => REJECT (#1); prover non-canonical vk =>
+  REJECT (#2); + positive control through verify_manifest.
 
 ## NEXT COMMAND
-- Implement reconstruct_public_inputs() in verifier.rs; commit; then #2.
+- cargo test -p sparq-zk -p sparq-zk-compose --release -- --include-ignored
