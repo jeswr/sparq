@@ -21,8 +21,9 @@
 //!
 //! The [`lex`] sub-module mirrors every function at the lexical level
 //! (wkt-literal strings in, values out) — the shape a SPARQL engine builtin
-//! receives, so sparq-engine can register them directly once it grows an
-//! extension-function registry (TODO.md records the API needed).
+//! receives. [`crate::registry::geof_registry`] packages these directly as a
+//! `sparq_engine::FunctionRegistry`, so they run inside SPARQL FILTER/BIND via
+//! `sparq_engine::query_with_functions` (default-on `engine` cargo feature).
 
 use crate::literal::{Crs, GeoGeometry};
 use crate::GeoError;
