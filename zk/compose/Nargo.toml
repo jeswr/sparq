@@ -9,4 +9,5 @@ members = [
     "filter_int_d4",
     "filter_f64",
     "revoke_unset_d10",
+    "hidden_issuer_d4",
 ]

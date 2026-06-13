@@ -42,7 +42,7 @@
 //! in explicit `Field` constraints, with the Baby-JubJub parameters (a = 1,
 //! d = D below) embedded as constants. (Cost: see the module footer.)
 //!
-//! # Scalar reduction -- the soundness-critical binding (cf. noir-optimisation §3.4)
+//! # Scalar reduction -- the soundness-critical binding (cf. noir-optimisation S3.4)
 //! `sig::challenge` reduces the base-field Poseidon2 digest `e_base` (a `Field`,
 //! so `e_base < q_base`) into the scalar field by `from_be_bytes_mod_order`, i.e.
 //! `e = e_base mod L`. In-circuit we take `e` and a quotient `k` as PRIVATE
@@ -114,7 +114,7 @@ fn point_add(p: Point, q: Point) -> Point {
 fn scalar_mul(scalar: Field, base: Point) -> Point {
     // to_le_bits constrains the decomposition to be canonical AND bounds the
     // scalar to < 2^SCALAR_BITS (bits beyond the width are forced to zero).
-    let bits: [u1; SCALAR_BITS] = scalar.to_le_bits();
+    let bits: [bool; SCALAR_BITS] = scalar.to_le_bits();
     let mut acc = Point { x: 0, y: 1 }; // neutral element
     for i in 0..SCALAR_BITS {
         // MSB first.
@@ -267,7 +267,7 @@ pub fn hidden_issuer_attestation<let D: u32>(
 // Cost note (noir-optimisation): the dominant cost is the two ~251-bit
 // double-and-add scalar muls in schnorr_verify (s*G and e*pk). Each bit does one
 // double + one conditional add = two complete twisted-Edwards adds, each ~3 Field
-// inversions + a handful of mults. ~251 * 2 * 2 ≈ ~1000 point adds. This is the
+// inversions + a handful of mults. ~251 * 2 * 2 ~= ~1000 point adds. This is the
 // heavy gadget the sig.rs docs warned about; the Merkle membership (one h2 per
 // level) is tiny next to it. Measured `bb gates` for revoke_issuer_d10 is in the
 // crate STATUS / the verifier docs.

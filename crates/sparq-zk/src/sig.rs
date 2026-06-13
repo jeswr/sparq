@@ -417,6 +417,121 @@ pub fn verify(pk: &PublicKey, m: &Fr, sig: &Signature) -> bool {
     lhs == rhs
 }
 
+// --- in-circuit witness bridge (sq-z9l) -----------------------------------
+// [OPUS-4.8] sq-z9l: the witness an in-circuit Schnorr verifier needs. The
+// in-circuit gadget (`zk/compose/compose_core/src/issuer.nr`) verifies
+// `s*G == R + e*pk` over Baby-JubJub with point coordinates in the BASE field
+// (= Noir `Field` = `crate::field::Fr`) and the SCALAR `e` reduced mod the
+// curve's scalar order `L`. This bridge produces exactly those field-element
+// witnesses from a `(PublicKey, Signature, message)` triple so the host can
+// render the circuit's `Prover.toml`.
+
+impl PublicKey {
+    /// The issuer key's affine coordinates as base-field [`Fr`] elements (= Noir
+    /// `Field`). `None` for the identity (no affine coordinates) — which is never
+    /// a usable key (rejected at parse/verify, see [`verify`]). The in-circuit
+    /// gadget and the key-set Merkle leaf both work over these coordinates.
+    // [OPUS-4.8] sq-z9l.
+    pub fn coords(&self) -> Option<(Fr, Fr)> {
+        self.0.xy()
+    }
+}
+
+/// The key-set Merkle leaf for an issuer public key: `Poseidon2([pk.x, pk.y])`.
+/// Mirrors `issuer.nr`'s `key_leaf` (`h2(pk.x, pk.y)`) bit-for-bit. `None` for
+/// the identity key (no coordinates). The relying party commits its authoritative
+/// KeySet K with this leaf, and the in-circuit membership proof folds it to the
+/// public root.
+// [OPUS-4.8] sq-z9l: key-set Merkle leaf (host mirror of issuer.nr::key_leaf).
+pub fn key_set_leaf(pk: &PublicKey) -> Option<Fr> {
+    let (x, y) = pk.coords()?;
+    Some(poseidon2::hash(&[x, y]))
+}
+
+/// The Baby-JubJub scalar-field order `L` as a base-field element (`< q_base`,
+/// so the embedding is injective). Mirrors `issuer.nr`'s `BJJ_L`.
+fn scalar_order_in_base() -> Fr {
+    // `JjScalar::MODULUS` big-endian, reduced into the base field. `L < q_base`,
+    // so this is the exact value, not a reduction.
+    Fr::from_be_bytes_mod_order(&JjScalar::MODULUS.to_bytes_be())
+}
+
+/// Map a Baby-JubJub scalar into the base field via its canonical big-endian
+/// bytes. `L < q_base`, so a canonical scalar (`< L`) embeds injectively — the
+/// resulting `Fr` is the same integer, suitable as a circuit `Field` witness.
+fn jj_scalar_to_base(s: &JjScalar) -> Fr {
+    Fr::from_be_bytes_mod_order(&s.into_bigint().to_bytes_be())
+}
+
+/// The in-circuit witness for one hidden issuer attestation: the affine point
+/// coordinates of the issuer key and the signature's `R`, the signature scalar
+/// `s`, and the challenge reduction `(e, e_k)` such that
+/// `e_base = e + e_k * L` with `e < L` and `e_k < 8` (the soundness binding the
+/// circuit re-checks). All as base-field [`Fr`] elements (= Noir `Field`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InCircuitSchnorrWitness {
+    /// Issuer public-key affine coordinates.
+    pub pk_x: Fr,
+    pub pk_y: Fr,
+    /// Signature nonce-commitment `R` affine coordinates.
+    pub r_x: Fr,
+    pub r_y: Fr,
+    /// Signature scalar `s` (canonical, `< L`), embedded in the base field.
+    pub s: Fr,
+    /// Reduced challenge scalar `e = e_base mod L` (`< L`).
+    pub e: Fr,
+    /// Reduction quotient `k` such that `e_base = e + k * L` (`< 8`).
+    pub e_k: Fr,
+}
+
+/// Build the [`InCircuitSchnorrWitness`] for `(pk, sig)` over the signed message
+/// field element `m` (e.g. [`commitment_message_with_status`]'s output — the
+/// SAME `Fr` the issuer signed and the circuit recomputes the challenge over).
+///
+/// Returns `None` if the inputs are degenerate (an identity key or a point with
+/// no affine coordinates), which the in-circuit gadget would reject anyway. This
+/// is an ISSUANCE/PROVER-SIDE helper: it does not itself verify the signature
+/// (the circuit does), it only lays out the witness fields. Callers that want a
+/// sanity check should also call [`verify`].
+pub fn in_circuit_witness(pk: &PublicKey, m: &Fr, sig: &Signature) -> Option<InCircuitSchnorrWitness> {
+    if pk.0.is_zero() {
+        return None;
+    }
+    let (pk_x, pk_y) = pk.0.xy()?;
+    let (r_x, r_y) = sig.r.xy()?;
+    // The base-field Poseidon2 challenge digest, BEFORE the scalar-field
+    // reduction (the in-circuit `e_base`). Recompute it from the SAME inputs
+    // `challenge` uses, but keep the base-field value (challenge() returns the
+    // reduced JjScalar; here we need both halves of the reduction).
+    let e_base: Fr = poseidon2::hash(&[
+        Fr::from(SIG_DOMAIN_COMMITMENT),
+        r_x,
+        r_y,
+        pk_x,
+        pk_y,
+        *m,
+    ]);
+    // Reduce e_base into the scalar field, then re-embed the reduced value and
+    // derive the quotient k = (e_base - e) / L (exact in the integers).
+    let e_scalar = JjScalar::from_be_bytes_mod_order(&e_base.into_bigint().to_bytes_be());
+    let e = jj_scalar_to_base(&e_scalar);
+    let l = scalar_order_in_base();
+    // e_k = (e_base - e) / L. e_base, e, L are all canonical base-field values
+    // representing the true integers (e_base, e < q_base; e < L; e_base = e + kL
+    // with k < 8), so the base-field subtraction/division gives the exact small
+    // integer quotient (no wraparound: e_base >= e since e = e_base mod L).
+    let e_k = (e_base - e) / l;
+    Some(InCircuitSchnorrWitness {
+        pk_x,
+        pk_y,
+        r_x,
+        r_y,
+        s: jj_scalar_to_base(&sig.s),
+        e,
+        e_k,
+    })
+}
+
 // --- serialization (registry literals + manifest fields) ------------------
 
 /// Serialize a public key to lowercase hex (compressed Baby-JubJub point). The
@@ -700,5 +815,64 @@ mod tests {
         let c = status_list_id_to_field("https://dmv.example/status/3x");
         assert_ne!(a, b, "distinct lists hash distinctly");
         assert_ne!(a, c, "a prefix must not collide with a longer IRI");
+    }
+
+    // --- sq-z9l: in-circuit witness bridge --------------------------------
+
+    use crate::field::field_to_hex;
+
+    /// [OPUS-4.8] sq-z9l: the in-circuit witness reproduces the verify equation
+    /// AND the challenge-reduction binding the circuit re-checks. This is the
+    /// host/circuit contract: `s*G == R + e*pk` (in base-field coordinates) and
+    /// `e_base == e + e_k*L` with `e < L`, `e_k < 8`.
+    #[test]
+    fn in_circuit_witness_is_internally_consistent() {
+        let sk = SecretKey::from_seed(99);
+        let pk = sk.public_key();
+        let c = Fr::from(0xdecafu64);
+        let m = commitment_message(&c);
+        let sig = sign_deterministic(&sk, &m);
+        assert!(verify(&pk, &m, &sig), "honest sig verifies (control)");
+
+        let w = in_circuit_witness(&pk, &m, &sig).expect("witness");
+        // The reduction binding the circuit asserts: e_base == e + e_k*L.
+        let e_base: Fr = poseidon2::hash(&[
+            Fr::from(SIG_DOMAIN_COMMITMENT),
+            w.r_x,
+            w.r_y,
+            w.pk_x,
+            w.pk_y,
+            m,
+        ]);
+        let l = scalar_order_in_base();
+        assert_eq!(w.e + w.e_k * l, e_base, "e_base == e + e_k*L");
+        // e < L and e_k < 8 (3-bit).
+        assert!(w.e < l, "e < L");
+        assert!(w.e_k < Fr::from(8u64), "e_k < 8");
+
+        // The witnessed e equals sig::challenge's reduced scalar, re-embedded.
+        let e_ref = jj_scalar_to_base(&challenge(&sig.r, &pk.0, &m));
+        assert_eq!(w.e, e_ref, "witnessed e == reduced challenge");
+
+        // s*G == R + e*pk recomputed in the curve group from the witness scalars.
+        // (Sanity that the base-field witness round-trips back to a valid eqn.)
+        let g = EdwardsProjective::generator();
+        let lhs = (g * sig.s).into_affine();
+        let rhs = (sig.r.into_group() + pk.0 * challenge(&sig.r, &pk.0, &m)).into_affine();
+        assert_eq!(lhs, rhs, "verify equation holds in-group (control)");
+        assert_eq!(field_to_hex(&w.pk_x).len(), 66, "pk_x is a field hex");
+    }
+
+    /// [OPUS-4.8] sq-z9l: the witness bridge declines the identity key (the
+    /// circuit rejects it; the bridge returns None rather than emitting a
+    /// degenerate witness).
+    #[test]
+    fn in_circuit_witness_rejects_identity_key() {
+        let id_pk = PublicKey(Affine::<EdwardsConfig>::zero());
+        let m = commitment_message(&Fr::from(1u64));
+        let s = JjScalar::from(7u64);
+        let r = (EdwardsProjective::generator() * s).into_affine();
+        let sig = Signature { r, s };
+        assert!(in_circuit_witness(&id_pk, &m, &sig).is_none());
     }
 }

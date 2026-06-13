@@ -301,6 +301,17 @@ pub enum CircuitId {
     /// [`RevocationStatus`] check leaked). Supports lists up to `2^depth` indices.
     // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation circuit member.
     RevokeUnset { depth: u32 },
+    /// `hidden_issuer_d{depth}` — in-circuit Schnorr-over-Baby-JubJub signature
+    /// verification + hidden-key set membership over a depth-`depth` Poseidon2
+    /// Merkle tree of the issuer key set K (sq-z9l). The proof's PUBLIC inputs are
+    /// `challenge` + the commitment message `m` + the key-set Merkle `key_set_root`;
+    /// the issuer public key, the signature `(R, s)`, the challenge-reduction
+    /// witness, and the membership index/path are PRIVATE, so the proof proves
+    /// "this commitment was signed by SOME key in K" without disclosing WHICH
+    /// issuer. The privacy upgrade over the clear-key
+    /// [`crate::verifier::bind_issuer_attestations`] check.
+    // [OPUS-4.8] sq-z9l: hidden-issuer-attestation circuit member.
+    HiddenIssuer { depth: u32 },
 }
 
 impl CircuitId {
@@ -311,6 +322,7 @@ impl CircuitId {
             CircuitId::FilterInt { d } => format!("filter_int_d{d}"),
             CircuitId::FilterF64 => "filter_f64".to_string(),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
+            CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
         }
     }
 }
