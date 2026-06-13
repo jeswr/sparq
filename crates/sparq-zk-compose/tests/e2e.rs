@@ -939,3 +939,104 @@ fn filter_binding_happy_path_structure() {
     };
     verify_manifest_structure(&m).expect("correct composed FILTER manifest verifies structurally");
 }
+
+/// Two-subject graph: one age passes the FILTER, one fails. Used to exercise
+/// per-row verdict gating (a multi-row disclosed result).
+fn two_age_graph() -> Vec<Triple> {
+    vec![
+        Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/alice")),
+            iri("http://ex/age"),
+            int_lit(25), // passes >= 18
+        ),
+        Triple::new(
+            NamedOrBlankNode::NamedNode(iri("http://ex/bob")),
+            iri("http://ex/age"),
+            int_lit(15), // FAILS >= 18 — must not be disclosed as passing
+        ),
+    ]
+}
+
+/// Audit #5/#6 (per-row verdict gating): a scan disclosing TWO age rows (25 and
+/// 15) under FILTER(?o >= 18), where the prover supplies a true-verdict filter
+/// proof ONLY for the passing row (25). The failing row (15) is still disclosed
+/// but has no true-verdict edge => UnboundFilter. Without per-row gating a prover
+/// could disclose the failing row as if it passed.
+#[test]
+fn filter_reject_unproven_failing_row() {
+    let scan = scan_inputs_for(&two_age_graph(), "http://ex/age");
+    let (rows, row_count) = match &scan {
+        ProofInputs::Scan { rows, row_count, .. } => (rows.clone(), *row_count),
+        _ => unreachable!(),
+    };
+    assert_eq!(row_count, 2, "two disclosed age rows");
+    // A true-verdict filter for the FIRST disclosed row only (whichever it is).
+    let mut filt = filter_inputs(25, FilterOp::Ge, 18, true);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt {
+        *operand_enc = rows[0][2].clone();
+    }
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() },
+            SubProof { inputs: filt, proof_hex: String::new() },
+        ],
+        // Edge only for row 0 — row 1 has no true-verdict filter proof.
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+    };
+    match verify_manifest_structure(&m) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
+        other => panic!("expected UnboundFilter(o) for the unproven failing row, got {other:?}"),
+    }
+}
+
+/// Per-row gating positive: BOTH disclosed rows carry a true-verdict filter
+/// proof over their own operand slot => the composed FILTER manifest verifies.
+#[test]
+fn filter_two_rows_both_gated_verifies() {
+    let scan = scan_inputs_for(&two_age_graph(), "http://ex/age");
+    let rows = match &scan {
+        ProofInputs::Scan { rows, row_count, .. } => {
+            assert_eq!(*row_count, 2);
+            rows.clone()
+        }
+        _ => unreachable!(),
+    };
+    // Each disclosed row's age (25 and 15) is >= 15, so use bound=15 so BOTH
+    // verdicts are honestly true; one filter proof per row, one edge per row.
+    let mut filt0 = filter_inputs(25, FilterOp::Ge, 15, true);
+    let mut filt1 = filter_inputs(15, FilterOp::Ge, 15, true);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt0 {
+        *operand_enc = rows[0][2].clone();
+    }
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt1 {
+        *operand_enc = rows[1][2].clone();
+    }
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"15\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() },  // proof 0
+            SubProof { inputs: filt0, proof_hex: String::new() }, // proof 1
+            SubProof { inputs: filt1, proof_hex: String::new() }, // proof 2
+        ],
+        binding_edges: vec![
+            BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 },
+            BindingEdge { from_proof: 0, from_row: 1, from_slot: 2, to_proof: 2 },
+        ],
+    };
+    verify_manifest_structure(&m).expect("both rows gated true => verifies");
+}

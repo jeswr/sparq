@@ -338,7 +338,13 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
         }
     }
 
-    // (2c) every query FILTER has a matching, slot-bound, true-verdict proof.
+    // (2c) every query FILTER has a matching, slot-bound, true-verdict proof for
+    // EVERY active disclosed row of EVERY scan that answers the FILTER's pattern.
+    // Per-row gating is the load-bearing part of #5/#6: the disclosed result is
+    // the scans' rows, so a FILTER row whose verdict is false must be EXCLUDED —
+    // i.e. every active row of a filtered pattern must carry a true-verdict
+    // filter_int sub-proof over that row's operand slot. A single missing/false
+    // row makes the FILTER unproven for the disclosed set => REJECT.
     for QueryFilter { variable, op, bound } in &filters {
         // The (pattern, slot) positions ?variable binds to. A FILTER over a
         // variable that never binds to a scanned column is unmappable.
@@ -350,46 +356,68 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
         if positions.is_empty() {
             return Err(CheckError::UnmappableFilterVar { variable: variable.clone() });
         }
-        let satisfied = manifest.binding_edges.iter().any(|edge| {
-            filter_edge_satisfies(manifest, edge, &consts, &positions, *op, *bound)
-        });
-        if !satisfied {
+        // The FILTER must constrain at least one disclosed row (else it is
+        // vacuously "satisfied" by an empty result while the query carries a
+        // FILTER the prover never proved). Track that some scan answered the
+        // pattern AND every one of its active rows is gated true.
+        let mut any_scan_answered = false;
+        for (spi, sp) in manifest.sub_proofs.iter().enumerate() {
+            let (rows, row_count) = match &sp.inputs {
+                ProofInputs::Scan { rows, row_count, .. } => (rows, *row_count as usize),
+                _ => continue,
+            };
+            // Is this scan the one that answers a pattern ?v binds in, and at
+            // which slot does ?v sit there?
+            let slot = positions.iter().find_map(|(pi, si)| {
+                consts
+                    .get(*pi)
+                    .filter(|c| scan_matches_pattern(&sp.inputs, c))
+                    .map(|_| *si)
+            });
+            let Some(slot) = slot else { continue };
+            any_scan_answered = true;
+            // Every ACTIVE disclosed row must have a true-verdict filter_int
+            // edge at this slot with matching (op, bound).
+            for row in 0..row_count.min(rows.len()) {
+                let gated = manifest.binding_edges.iter().any(|edge| {
+                    edge.from_proof == spi
+                        && edge.from_row == row
+                        && edge.from_slot == slot
+                        && filter_edge_true(manifest, edge.to_proof, *op, *bound)
+                });
+                if !gated {
+                    return Err(CheckError::UnboundFilter { variable: variable.clone() });
+                }
+            }
+        }
+        if !any_scan_answered {
+            // A FILTER whose variable binds in a pattern, but no scan answers
+            // that pattern: the FILTER cannot be discharged (FILTER-add on a
+            // manifest missing the filtered pattern's scan).
             return Err(CheckError::UnboundFilter { variable: variable.clone() });
         }
     }
     Ok(())
 }
 
-/// Whether one binding edge witnesses a query FILTER `?v op bound` where `?v`
-/// binds at `positions` (the `(pattern, slot)` pairs from `variable_slots`).
-/// See [`bind_query_correctness`] for the four conditions.
-fn filter_edge_satisfies(
+/// Whether sub-proof `to_proof` is a `filter_int` whose bound `(op, bound)`
+/// match the query FILTER and whose disclosed verdict is TRUE (audit #5/#6:
+/// op/bound substitution + verdict gating). The operand-slot equality (the edge
+/// references the FILTER variable's scanned column) is enforced by the caller;
+/// the edge's scanned-slot encoding == the filter `operand_enc` is enforced by
+/// stage 2 over the now-bb-bound values (audit #7).
+fn filter_edge_true(
     manifest: &ProofManifest,
-    edge: &BindingEdge,
-    consts: &[[Option<oxrdf::Term>; 3]],
-    positions: &[(usize, usize)],
+    to_proof: usize,
     op: FilterCmp,
     bound: u64,
 ) -> bool {
-    let Some(scan) = manifest.sub_proofs.get(edge.from_proof) else { return false };
-    let Some(filt) = manifest.sub_proofs.get(edge.to_proof) else { return false };
-    // (3)+(4): the filter's bound op/bound match the query, verdict is true.
-    match &filt.inputs {
-        ProofInputs::FilterInt { op: f_op, bound: f_bound, expected, .. } => {
-            if f_op.code() != op.code() || *f_bound != bound || !*expected {
-                return false;
-            }
+    match manifest.sub_proofs.get(to_proof).map(|sp| &sp.inputs) {
+        Some(ProofInputs::FilterInt { op: f_op, bound: f_bound, expected, .. }) => {
+            f_op.code() == op.code() && *f_bound == bound && *expected
         }
-        _ => return false,
+        _ => false,
     }
-    // (1)+(2): the edge's scan answers a query pattern where ?v binds, and the
-    // edge's `from_slot` is exactly ?v's slot in that pattern.
-    positions.iter().any(|(pi, si)| {
-        consts
-            .get(*pi)
-            .is_some_and(|c| scan_matches_pattern(&scan.inputs, c))
-            && edge.from_slot == *si
-    })
 }
 
 /// Full verification: structure (stage 1+2) then the cryptographic gate
