@@ -2342,21 +2342,35 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
     let n = bytes.len();
     let mut i = start;
     while i < n {
+        // [OPUS-4.8] (T2) SIMD-skip the uninteresting run to the next byte that can change the
+        // scan state. At top level only `. < # " ' \` matter — every other byte is copied
+        // through. The body-of-the-whole-document terminator pre-scan walks each byte exactly
+        // once, so this inner advance is pure critical-path latency; `memchr` runs it at
+        // ~tens-of-GB/s instead of one byte/iteration. The structured handlers below
+        // (string / IRI / comment skipping, the `.`-terminator and `\`-escape tests) are
+        // UNCHANGED, so behaviour — including the review-1398 PN_LOCAL_ESC `\#` fix — is
+        // identical; this only fast-forwards over the runs the old `_ => i += 1` arm crawled.
+        let a = memchr::memchr3(b'.', b'<', b'#', &bytes[i..]);
+        let b = memchr::memchr3(b'"', b'\'', b'\\', &bytes[i..]);
+        i += match (a, b) {
+            (None, None) => return None, // no interesting byte before EOF → incomplete statement
+            (Some(x), None) => x,
+            (None, Some(y)) => y,
+            (Some(x), Some(y)) => x.min(y),
+        };
         match bytes[i] {
             b'#' => {
-                while i < n && bytes[i] != b'\n' {
-                    i += 1;
+                match memchr::memchr(b'\n', &bytes[i..]) {
+                    Some(off) => i += off + 1,
+                    None => i = n,
                 }
             }
             b'<' => {
                 i += 1;
-                while i < n && bytes[i] != b'>' {
-                    i += 1;
+                match memchr::memchr(b'>', &bytes[i..]) {
+                    Some(off) => i += off + 1,
+                    None => return None,
                 }
-                if i >= n {
-                    return None;
-                }
-                i += 1;
             }
             q @ (b'"' | b'\'') => {
                 let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
@@ -2411,10 +2425,23 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 /// Split Turtle `bytes` into independently-parseable chunks for parallel parsing, or `None` to
-/// fall back to serial. Fast-paths the overwhelmingly common shape: a leading run of `@prefix`/
-/// `@base` directives followed by triple statements. Each chunk is `preamble + a run of
-/// statements`, so the prefixes are in scope in every chunk. Bails (→ serial) on SPARQL-style
-/// `PREFIX`/`BASE`, directives interspersed among the triples, or anything it cannot scan.
+/// fall back to serial. Each chunk is `directive-snapshot + a run of statements`, so every
+/// prefix/base in scope at that chunk's start is re-declared in the chunk.
+///
+/// # `@prefix`/`@base` directives anywhere (T3 — no longer a serial cliff)
+/// [OPUS-4.8] `@`-form directives are tracked as ordered byte-spans as the body is scanned, and
+/// each chunk is prefixed with the **verbatim, in-order concatenation of every `@`-directive
+/// that precedes the chunk's first statement**. This replays the document's directive prelude
+/// exactly, so it is correct even for redefinitions and relative `@base <rel>` (which resolves
+/// against the running base): oxttl re-processes the snapshot in the same order the serial parse
+/// does, so each chunk sees the identical prefix table and base. A leading run of directives
+/// (the common serializer shape) is just the degenerate case where the snapshot is the same for
+/// every chunk. Previously ANY directive interspersed among the triples dropped the WHOLE file
+/// to serial; that 0× cliff is gone for the `@`-form.
+///
+/// Still bails (→ serial): SPARQL-style `PREFIX`/`BASE` (keyword form, no `.` terminator — its
+/// extent cannot be delimited by the statement-terminator scan without re-deriving the directive
+/// grammar, so it stays the rarer serial case), and anything the scanner cannot cleanly scan.
 ///
 /// BLANK NODES do not force a serial fallback. (They used to bail this function out — and 42
 /// `_:` labels among the 1.5 M statements of the real Wikidata slice silently forfeited the
@@ -2441,51 +2468,74 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
 #[cfg(feature = "parallel")]
 fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
     let n = bytes.len();
-    // Phase 1: consume the leading @-directive preamble.
-    let mut i = skip_ws_comments(bytes, 0);
-    while i < n && bytes[i] == b'@' {
-        i = next_terminator(bytes, i)?;
-        i = skip_ws_comments(bytes, i);
-    }
-    if i < n && is_sparql_directive_start(bytes, i) {
-        return None; // SPARQL-style preamble — not fast-pathed
-    }
-    let pre_end = i;
 
-    // Phase 2: collect the body's top-level terminators; bail on any interspersed directive.
-    let mut terms: Vec<usize> = Vec::new();
-    let mut j = pre_end;
-    loop {
-        let k = skip_ws_comments(bytes, j);
-        if k >= n {
-            break;
-        }
-        if bytes[k] == b'@' || is_sparql_directive_start(bytes, k) {
-            return None;
-        }
-        let t = next_terminator(bytes, k)?;
-        terms.push(t);
-        j = t;
+    // A parsed statement: its byte span `[start, end)` and how many `@`-directive spans precede
+    // it (so its chunk's synthetic preamble = the in-order concatenation of `dirs[..dirs_before]`).
+    struct Stmt {
+        start: usize,
+        end: usize,
+        dirs_before: usize,
     }
-    if terms.len() < 2 {
+
+    // [OPUS-4.8] (T3) Single pass over the top level: classify each unit as an `@`-directive
+    // (recorded as an ordered span) or a statement (recorded with the directive count in scope).
+    // `@`-directives and statements may interleave freely; only SPARQL-style `PREFIX`/`BASE`
+    // forces the serial fallback (no `.` terminator to delimit it cheaply).
+    let mut dirs: Vec<(usize, usize)> = Vec::new();
+    let mut stmts: Vec<Stmt> = Vec::new();
+    let mut j = skip_ws_comments(bytes, 0);
+    while j < n {
+        if is_sparql_directive_start(bytes, j) {
+            return None; // SPARQL-style PREFIX/BASE — not fast-pathed
+        }
+        let is_directive = bytes[j] == b'@';
+        let end = next_terminator(bytes, j)?;
+        if is_directive {
+            dirs.push((j, end));
+        } else {
+            stmts.push(Stmt { start: j, end, dirs_before: dirs.len() });
+        }
+        j = skip_ws_comments(bytes, end);
+    }
+    if stmts.len() < 2 {
         return None;
     }
 
-    // Partition the body terminators into ~target contiguous groups.
-    let preamble = &bytes[..pre_end];
-    let per = (terms.len() / target.max(1)).max(1);
+    // Build each chunk's synthetic preamble lazily: it depends only on `dirs_before`, which is
+    // monotonically non-decreasing in document order, so consecutive statements usually share it.
+    // The preamble is the verbatim, in-order bytes of `dirs[..dirs_before]`, joined by `\n` so
+    // adjacent directives never run together — an exact replay of the document's directive
+    // prelude as seen at that point (correct for redefinitions and relative `@base`).
+    let snapshot = |dirs_before: usize| -> Vec<u8> {
+        let mut pre = Vec::new();
+        for &(s, e) in &dirs[..dirs_before] {
+            pre.extend_from_slice(&bytes[s..e]);
+            pre.push(b'\n');
+        }
+        pre
+    };
+
+    // Partition the statements into ~target contiguous groups. A group must not straddle a
+    // change in `dirs_before` (a directive appearing mid-group), or the statements after the
+    // directive would parse under a stale snapshot — so split a group at any such change too.
+    let per = (stmts.len() / target.max(1)).max(1);
     let mut chunks: Vec<Vec<u8>> = Vec::new();
-    let mut body_start = pre_end;
     let mut idx = 0;
-    while idx < terms.len() {
-        let end_i = (idx + per).min(terms.len());
-        let body_end = terms[end_i - 1];
-        let mut chunk = Vec::with_capacity(preamble.len() + (body_end - body_start) + 1);
-        chunk.extend_from_slice(preamble);
-        chunk.push(b'\n');
-        chunk.extend_from_slice(&bytes[body_start..body_end]);
+    while idx < stmts.len() {
+        let dirs_before = stmts[idx].dirs_before;
+        let group_start = stmts[idx].start;
+        let mut end_i = (idx + per).min(stmts.len());
+        // Shrink the group so every statement in it shares the same directive snapshot.
+        for k in idx + 1..end_i {
+            if stmts[k].dirs_before != dirs_before {
+                end_i = k;
+                break;
+            }
+        }
+        let body_end = stmts[end_i - 1].end;
+        let mut chunk = snapshot(dirs_before);
+        chunk.extend_from_slice(&bytes[group_start..body_end]);
         chunks.push(chunk);
-        body_start = body_end;
         idx = end_i;
     }
     Some(chunks)
@@ -3098,8 +3148,9 @@ mod tests {
     /// `#` swallowed the rest of its line (including the real `.` terminator), so the scanner
     /// could run through an interspersed `@base`/`@prefix` undetected; a later chunk would then
     /// parse under the stale preamble and resolve relative IRIs wrongly. The fix makes the
-    /// scanner skip the escaped byte, so the interspersed directive is correctly detected and
-    /// the whole document falls back to the serial parser (`turtle_chunks` → None).
+    /// scanner skip the escaped byte so an interspersed `@base` is seen at its true position —
+    /// pre-T3 that meant a serial fallback; post-T3 (directive-snapshot per chunk) it means the
+    /// `@base` is correctly attributed to the statements that follow it.
     #[cfg(feature = "parallel")]
     #[test]
     fn parallel_turtle_escaped_hash_in_local() {
@@ -3121,22 +3172,264 @@ mod tests {
         assert_eq!(canon_bnodes(&pd, &pt), canon_bnodes(&sd, &st), "escaped-# chunked parse must equal serial");
         assert_eq!(pt.len(), 400);
 
-        // (b) An interspersed `@base` AFTER an escaped `#` (and enough statements to force
-        //     multiple chunks) must be DETECTED → serial fallback. Pre-fix, the escaped `#`
-        //     swallowed the line and the scanner ran through the `@base`, returning chunks that
-        //     would parse later statements under a stale base.
-        let mut interspersed = String::from("@prefix ex: <http://ex/> .\n");
-        for i in 0..200 {
-            interspersed.push_str(&format!("ex:s{i} ex:p ex:foo\\#bar{i} .\n"));
+        // (b) [OPUS-4.8] (T3) An interspersed `@base` AFTER an escaped `#` (with enough
+        //     statements to force multiple chunks) must be attributed to its FOLLOWING
+        //     statements, which use a RELATIVE IRI that resolves against the new base. The
+        //     escaped `#` must not let the scanner run through the `@base` (review 1398) — if it
+        //     did, the relative IRIs would resolve against the stale `@base <http://first/>`.
+        //     The check is the load-bearing one: chunked == serial. The base is also redefined a
+        //     second time so the snapshot must carry BOTH `@base`s in order.
+        let mut interspersed = String::from("@prefix ex: <http://ex/> .\n@base <http://first/> .\n");
+        for i in 0..150 {
+            interspersed.push_str(&format!("ex:s{i} ex:p <rel{i}> ; ex:e ex:foo\\#bar{i} .\n"));
         }
-        interspersed.push_str("@base <http://other/> .\n");
-        for i in 200..400 {
-            interspersed.push_str(&format!("ex:s{i} ex:p ex:o{i} .\n"));
+        interspersed.push_str("@base <http://second/> .\n");
+        for i in 150..300 {
+            interspersed.push_str(&format!("<sub{i}> ex:p <rel{i}> .\n"));
+        }
+        interspersed.push_str("@base <http://third/> .\n");
+        for i in 300..450 {
+            interspersed.push_str(&format!("<sub{i}> ex:p <rel{i}> .\n"));
+        }
+        let chunks = turtle_chunks(interspersed.as_bytes(), 32)
+            .expect("T3: interspersed @base no longer forces serial");
+        assert!(chunks.len() > 1, "must fan out across the interspersed @base");
+        let (pd, pt) = parse_turtle_chunked(interspersed.as_bytes(), 32).unwrap();
+        let mut sd = Dict::new();
+        let st = parse_turtle_chunk(interspersed.as_bytes(), &mut sd).unwrap();
+        assert_eq!(
+            canon_bnodes(&pd, &pt),
+            canon_bnodes(&sd, &st),
+            "interspersed-@base chunked parse must equal serial (relative IRIs resolve against the right base)"
+        );
+    }
+
+    /// [OPUS-4.8] (T3) Interspersed `@prefix`/`@base` directives among the body statements must
+    /// no longer drop the whole document to serial — instead each chunk carries a verbatim
+    /// in-order snapshot of the directives in scope at its start, so the chunked parse equals
+    /// serial even for prefix REDEFINITIONS. SPARQL-style `PREFIX`/`BASE` still bails to serial.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_interspersed_directives_match_serial() {
+        let differential = |ttl: &str, target: usize, expect_fanout: bool| {
+            let chunks = turtle_chunks(ttl.as_bytes(), target);
+            if expect_fanout {
+                let c = chunks.expect("T3: interspersed @-directives must fan out, not bail");
+                assert!(c.len() > 1, "must split into multiple chunks");
+            }
+            let (pd, pt) = parse_turtle_chunked(ttl.as_bytes(), target).unwrap();
+            let mut sd = Dict::new();
+            let st = parse_turtle_chunk(ttl.as_bytes(), &mut sd).unwrap();
+            assert_eq!(
+                canon_bnodes(&pd, &pt),
+                canon_bnodes(&sd, &st),
+                "interspersed-directive chunked parse must equal serial"
+            );
+        };
+
+        // 1. Prefix REDEFINITION mid-body: the SAME prefix `p:` is rebound several times, so each
+        //    block of statements must see the binding in scope at its position. A stale snapshot
+        //    would expand `p:x` to the wrong IRI — caught because chunked must equal serial.
+        let mut redef = String::from("@prefix p: <http://v0/> .\n");
+        for round in 0..6 {
+            redef.push_str(&format!("@prefix p: <http://v{round}/> .\n"));
+            for i in 0..80 {
+                redef.push_str(&format!("p:s{round}_{i} p:p p:o{i} .\n"));
+            }
+        }
+        assert!(redef.len() > 8192);
+        differential(&redef, 32, true);
+
+        // 2. Relative `@base` redefinition mid-body with relative-IRI subjects/objects that
+        //    resolve against the running base; new prefixes appear partway through too.
+        let mut mixed = String::from("@base <http://b0/> .\n@prefix a: <http://a/> .\n");
+        for i in 0..100 {
+            mixed.push_str(&format!("<s{i}> a:p <o{i}> .\n"));
+        }
+        mixed.push_str("@base <http://b1/> .\n@prefix b: <http://bb/> .\n");
+        for i in 100..200 {
+            mixed.push_str(&format!("<s{i}> a:p b:o{i} .\n"));
+        }
+        differential(&mixed, 16, true);
+
+        // 3. A directive immediately adjacent to statements with no blank lines, and a directive
+        //    as the very last top-level unit before EOF (no following statement) — the trailing
+        //    directive simply contributes to no later chunk.
+        let mut adjacent = String::from("@prefix x: <http://x/> .\n");
+        for i in 0..60 {
+            adjacent.push_str(&format!("x:s{i} x:p x:o{i} .\n"));
+        }
+        adjacent.push_str("@prefix y: <http://y/> .\nx:last y:p x:o .\n@prefix z: <http://z/> .\n");
+        differential(&adjacent, 8, false);
+
+        // 4. SPARQL-style PREFIX interspersed → must STILL bail to serial (cannot delimit the
+        //    no-dot keyword form cheaply). Serial fallback is correct, just not parallel.
+        let mut sparql = String::from("PREFIX s: <http://s/>\n");
+        for i in 0..100 {
+            sparql.push_str(&format!("s:s{i} s:p s:o{i} .\n"));
         }
         assert!(
-            turtle_chunks(interspersed.as_bytes(), 32).is_none(),
-            "an interspersed @base after an escaped # must force the serial fallback"
+            turtle_chunks(sparql.as_bytes(), 16).is_none(),
+            "SPARQL-style PREFIX must still force the serial fallback"
         );
+        // …and the serial fallback still yields the right triples.
+        let (_pd, pt) = parse_turtle_chunked(sparql.as_bytes(), 16).unwrap();
+        assert_eq!(pt.len(), 100);
+    }
+
+    /// [OPUS-4.8] (T2/T3 rejection parity) Malformed Turtle must still be REJECTED — the
+    /// parallel split is never allowed to silently accept invalid input. Whether the splitter
+    /// fans out (then a chunk fails oxttl → serial redo) or bails directly, `parse_turtle_chunked`
+    /// must return `Err`, exactly as the serial oxttl parser does. An over-eager split that
+    /// accidentally parsed invalid Turtle as valid is the one failure the chunked-vs-serial
+    /// oracle cannot catch, so it is pinned here directly.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_rejects_malformed() {
+        // Each is invalid Turtle for a distinct reason; size them past the 2-statement minimum so
+        // the splitter actually engages where it can.
+        let bad: &[&str] = &[
+            // Unknown prefix used in the body (the body chunk must fail to parse).
+            "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\nbad:s bad:p bad:o .\n",
+            // Missing terminator on a statement.
+            "@prefix ex: <http://ex/> .\nex:s ex:p ex:o\nex:s2 ex:p ex:o2 .\n",
+            // An interspersed @prefix that is itself malformed (no IRI).
+            "@prefix ex: <http://ex/> .\nex:s ex:p ex:o .\n@prefix bad .\nex:s2 ex:p ex:o2 .\n",
+            // A statement that uses a prefix declared only LATER (Turtle requires prior decl) —
+            // the snapshot must NOT retro-actively make it valid.
+            "@prefix a: <http://a/> .\na:s a:p later:o .\n@prefix later: <http://l/> .\na:s2 a:p a:o .\n",
+            // Bare unescaped control / illegal token sequence.
+            "@prefix ex: <http://ex/> .\nex:s ex:p \"unterminated .\nex:s2 ex:p ex:o2 .\n",
+        ];
+        for (k, src) in bad.iter().enumerate() {
+            // Reference: the serial oxttl parser rejects it.
+            let mut sd = Dict::new();
+            assert!(
+                parse_turtle_chunk(src.as_bytes(), &mut sd).is_err(),
+                "case {k} should be invalid Turtle (serial oxttl)"
+            );
+            // The parallel path must reject it too (fan-out + chunk-fail-serial-redo, or a direct
+            // bail then serial), at several fan-out targets.
+            for target in [1usize, 2, 8, 32] {
+                assert!(
+                    parse_turtle_chunked(src.as_bytes(), target).is_err(),
+                    "case {k} target {target}: parallel path must reject malformed Turtle"
+                );
+            }
+        }
+    }
+
+    /// [OPUS-4.8] (T2) Differential test for the `memchr`-based `next_terminator` against the
+    /// pre-T2 scalar reference. The SIMD-skip must return the SAME offset (or the same `None`)
+    /// for every interesting Turtle shape — comments, all four string-quote forms with escapes,
+    /// IRIs, decimals (`.`-not-a-terminator), PN_LOCAL_ESC `\#`/`\.`, and EOF-truncation — so it
+    /// is a behaviour-preserving speedup, not a re-derivation of the splitter's grammar.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn next_terminator_memchr_matches_scalar() {
+        // The exact pre-T2 scalar scanner, kept here as the oracle.
+        fn scalar(bytes: &[u8], start: usize) -> Option<usize> {
+            let n = bytes.len();
+            let mut i = start;
+            while i < n {
+                match bytes[i] {
+                    b'#' => {
+                        while i < n && bytes[i] != b'\n' {
+                            i += 1;
+                        }
+                    }
+                    b'<' => {
+                        i += 1;
+                        while i < n && bytes[i] != b'>' {
+                            i += 1;
+                        }
+                        if i >= n {
+                            return None;
+                        }
+                        i += 1;
+                    }
+                    q @ (b'"' | b'\'') => {
+                        let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
+                        if triple {
+                            i += 3;
+                            loop {
+                                if i >= n {
+                                    return None;
+                                }
+                                if bytes[i] == b'\\' {
+                                    i += 2;
+                                } else if bytes[i] == q
+                                    && i + 2 < n
+                                    && bytes[i + 1] == q
+                                    && bytes[i + 2] == q
+                                {
+                                    i += 3;
+                                    break;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                        } else {
+                            i += 1;
+                            while i < n && bytes[i] != q {
+                                i += if bytes[i] == b'\\' { 2 } else { 1 };
+                            }
+                            if i >= n {
+                                return None;
+                            }
+                            i += 1;
+                        }
+                    }
+                    b'.' => match bytes.get(i + 1) {
+                        None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'#') => return Some(i + 1),
+                        _ => i += 1,
+                    },
+                    b'\\' => {
+                        if i + 1 >= n {
+                            return None;
+                        }
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            None
+        }
+
+        let cases: &[&str] = &[
+            ":s :p :o .\n",
+            ":s :p :o .",                                  // EOF terminator
+            ":s :p 3.14 ; :q 2.5 .\n",                     // decimals are not terminators
+            ":s :p \"a.b.c\" .\n",                          // dot inside a string
+            ":s :p \"x\\\"y.z\" .\n",                       // escaped quote, then dot in string
+            ":s :p 'single.quoted' .\n",                    // single-quote string
+            ":s :p \"\"\"l1 . still\nl2.\"\"\" .\n",        // triple-quoted, dots + newline inside
+            ":s :p '''a.b''' .\n",                          // triple single-quote
+            ":s :p <http://x.y/a.b.c> .\n",                 // dots inside an IRI
+            "ex:s ex:p ex:foo\\#bar .\n",                   // PN_LOCAL_ESC \# (review 1398)
+            "ex:s ex:p ex:a\\.b .\n",                       // PN_LOCAL_ESC \. — \. is NOT a term
+            ":s :p :o .# trailing comment\n:s2 :p :o2 .\n", // comment right after terminator
+            "# leading comment with . inside\n:s :p :o .\n",
+            ":s :p :o",                                     // no terminator, no EOF dot → None
+            ":s :p \"unterminated",                         // unterminated string → None
+            ":s :p <unterminated",                          // unterminated IRI → None
+            ":s :p \"\"\"unterminated\n.",                  // unterminated triple-quote → None
+            "ex:s ex:p ex:x\\",                             // trailing backslash → None
+            "",
+            ".",                                            // bare dot at EOF is a terminator
+            ".5 .\n",                                       // leading decimal then real terminator
+        ];
+        for (k, c) in cases.iter().enumerate() {
+            let b = c.as_bytes();
+            // From every start offset, not just 0 — turtle_chunks resumes mid-buffer.
+            for start in 0..=b.len() {
+                assert_eq!(
+                    next_terminator(b, start),
+                    scalar(b, start),
+                    "case {k} {c:?} at start {start}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "mmap")]
