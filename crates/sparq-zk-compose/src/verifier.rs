@@ -379,14 +379,28 @@ impl VerifierNonce {
 /// "skip when the store is absent" path (the parameter is mandatory), so the
 /// single-use property cannot be bypassed by omitting a field.
 ///
-/// # Persistence
-/// The in-memory [`InMemorySeenNonces`] is process-local: it enforces single-use
-/// within one verifier process/session. A multi-process / restart-surviving
-/// relying party MUST back this trait with durable storage (a database row with a
-/// UNIQUE constraint on the nonce, a KV store with compare-and-set, etc.); that
-/// is a documented future impl. The trait boundary is exactly so the persistence
-/// choice is pluggable without touching the verifier.
-// [OPUS-4.8] audit #4: single-use nonce store.
+/// # Persistence — pick the right impl, durability is NOT optional in production
+/// This crate ships TWO implementations and the choice is load-bearing for the
+/// audit-#4 single-use guarantee:
+///
+/// - [`FileSeenNonces`] (audit #4 durability fix, sq-aih) — DURABLE. Backed by an
+///   append-only file with an `fsync` + an advisory `flock(LOCK_EX)` around every
+///   check-and-append, so a recorded nonce SURVIVES A RESTART and the
+///   check-and-insert is atomic across concurrent processes sharing the path. THIS
+///   is what a relying party that can be restarted (i.e. every real deployment)
+///   MUST use. See its docs for the exact durability/atomicity contract and the
+///   honest "reference impl vs. a DB UNIQUE constraint" caveats.
+/// - [`InMemorySeenNonces`] — NON-DURABLE, TEST / single-session ONLY. Process-local:
+///   it enforces single-use only WITHIN one verifier process. A replayed proof is
+///   accepted again after a restart because the seen-set is lost. It is deliberately
+///   labelled test-only and MUST NOT be used by a relying party that can restart.
+///
+/// The trait boundary exists so the persistence choice is pluggable; a relying
+/// party with an existing datastore can also back it with a database row carrying a
+/// UNIQUE constraint on the nonce or a KV store with compare-and-set — either gives
+/// the same restart-surviving, atomic semantics as [`FileSeenNonces`].
+// [OPUS-4.8] audit #4: single-use nonce store. sq-aih: durability is mandatory —
+// FileSeenNonces is the durable impl; InMemory is test-only.
 pub trait SeenNonces {
     /// Record `nonce` as used and return `true` iff it was FRESH (not previously
     /// recorded). Returns `false` if the nonce was already seen — the verifier
@@ -396,11 +410,20 @@ pub trait SeenNonces {
     fn record_fresh(&self, nonce: &VerifierNonce) -> bool;
 }
 
-/// Process-local, thread-safe [`SeenNonces`] (audit #4). Enforces single-use
-/// within one verifier process. NOT durable across restarts — see the
-/// [`SeenNonces`] persistence note; a production relying party backs the trait
-/// with a database/KV store with a uniqueness constraint.
-// [OPUS-4.8] audit #4: in-memory single-use store (persistence is a future impl).
+/// Process-local, thread-safe [`SeenNonces`] (audit #4) — **NON-DURABLE, TEST /
+/// single-session ONLY.**
+///
+/// # ⚠️ NOT durable across restarts — DO NOT use in a restartable relying party.
+/// This enforces single-use only WITHIN one verifier process: the seen-set lives
+/// in memory and is LOST on restart, so a captured (nonce, manifest) pair that was
+/// already rejected once is ACCEPTED AGAIN after the process restarts. That defeats
+/// the audit-#4 single-use guarantee for any deployment that can be restarted (i.e.
+/// every real one). It exists for unit tests and ephemeral single-session tooling
+/// only. A relying party MUST use [`FileSeenNonces`] (durable: survives restart, is
+/// the sq-aih fix) or another durable backing (a DB row with a UNIQUE constraint /
+/// a KV store with compare-and-set).
+// [OPUS-4.8] audit #4 / sq-aih: in-memory store is NON-DURABLE, test-only. The
+// durable impl is FileSeenNonces — single-use survives a restart there.
 #[derive(Debug, Default)]
 pub struct InMemorySeenNonces {
     seen: std::sync::Mutex<BTreeSet<String>>,
@@ -423,6 +446,155 @@ impl SeenNonces for InMemorySeenNonces {
             Ok(mut set) => set.insert(nonce.canonical_key()),
             Err(_) => false,
         }
+    }
+}
+
+/// DURABLE, restart-surviving, cross-process single-use [`SeenNonces`] — the
+/// audit-#4 durability fix (sq-aih). Backed by an APPEND-ONLY file of canonical
+/// nonce keys (one per line). Single-use SURVIVES A RESTART: the recorded set is
+/// the file's contents, so reopening the same path re-loads every previously-seen
+/// nonce and a replayed proof is still rejected.
+///
+/// # Atomicity / concurrency contract
+/// Every [`record_fresh`](SeenNonces::record_fresh) does, under an advisory
+/// exclusive `flock(LOCK_EX)` held on the file fd for the whole operation:
+/// 1. seek to start, read the WHOLE file, parse it into the seen-set (the file —
+///    not an in-RAM cache — is the source of truth, so a concurrent process that
+///    appended between calls is observed);
+/// 2. if the nonce is already present, release the lock and return `false`
+///    (replay);
+/// 3. otherwise append `key\n`, `flush` + `fsync` the file (durably on disk before
+///    we report fresh), release the lock, return `true`.
+///
+/// `flock(LOCK_EX)` serialises step 1–3 across ALL processes that opened the SAME
+/// path on the SAME machine, so two concurrent verifiers cannot both observe one
+/// nonce as fresh (the check-and-append is atomic). An in-process [`Mutex`] also
+/// guards the fd so threads in one process can't interleave the seek/read/append.
+///
+/// # Honest scope — reference impl, not a clustered DB
+/// This is a single-file, single-host reference implementation chosen to give a
+/// real restart-surviving guarantee with NO heavy dependency (just `libc::flock`):
+/// - `flock` is ADVISORY and per-host. It does NOT coordinate across machines /
+///   NFS mounts that don't honour `flock` / networked filesystems. A multi-HOST
+///   relying party MUST use a shared transactional store instead (a DB row with a
+///   `UNIQUE` constraint on the nonce, or a KV store with compare-and-set) —
+///   exactly what the [`SeenNonces`] trait boundary is for.
+/// - The file GROWS unbounded (one line per nonce ever seen). For a high-volume
+///   deployment, rotate/compact behind the same path or use a DB. The set is also
+///   re-read from disk on every call (O(file) per verify) — fine for a reference /
+///   moderate-volume relying party, replace with an indexed store at scale.
+/// - A poisoned in-process mutex, an I/O error, a lock failure, or a malformed line
+///   all FAIL CLOSED (return `false` = treat as already-seen / reject), never
+///   accept-on-error and never panic on prover-triggerable input.
+// [OPUS-4.8] sq-aih (audit #4 durability): durable append-only + flock single-use
+// store. Single-use survives a restart. Reference impl — see scope caveats above.
+#[derive(Debug)]
+pub struct FileSeenNonces {
+    /// The append-only nonce log. Held open for the lifetime of the store so the
+    /// advisory `flock` and the appends target a stable fd. Guarded by a process-
+    /// local mutex so threads within one process serialise too.
+    file: std::sync::Mutex<std::fs::File>,
+}
+
+impl FileSeenNonces {
+    /// Open (creating if absent) the durable nonce log at `path`. Any nonces
+    /// already recorded there are immediately in force — reopening the same path
+    /// after a restart re-loads them, so single-use survives the restart.
+    ///
+    /// Returns an `io::Error` if the file cannot be opened/created; a relying party
+    /// MUST treat that as fatal (it has no durable single-use store and must not
+    /// fall back to the non-durable in-memory one silently).
+    pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(path.as_ref())?;
+        Ok(FileSeenNonces { file: std::sync::Mutex::new(file) })
+    }
+
+    /// Whether `key` is already present in the (locked) file. Reads the WHOLE file
+    /// from the start so a concurrent appender is observed. `Err` on an I/O failure
+    /// (the caller fails closed). The fd MUST already hold the advisory lock.
+    fn contains_key_locked(file: &mut std::fs::File, key: &str) -> std::io::Result<bool> {
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::Start(0))?;
+        let mut buf = String::new();
+        file.read_to_string(&mut buf)?;
+        // Each non-empty line is a canonical nonce key. Trailing/embedded blank
+        // lines (e.g. a partial write) are ignored — they can never equal a
+        // canonical key, so ignoring them cannot mask a real replay.
+        Ok(buf.lines().any(|line| line == key))
+    }
+}
+
+impl SeenNonces for FileSeenNonces {
+    fn record_fresh(&self, nonce: &VerifierNonce) -> bool {
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+
+        // Serialise threads in THIS process; cross-process serialisation is the
+        // `flock` below. A poisoned mutex fails closed (another verify panicked
+        // mid-record — do not optimistically accept a possibly-replayed nonce).
+        let mut file = match self.file.lock() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        let fd = file.as_raw_fd();
+        // Advisory EXCLUSIVE lock for the whole check-and-append: this is what
+        // makes the operation atomic ACROSS PROCESSES sharing the path. Blocks
+        // until acquired; an error fails closed.
+        // SAFETY: `fd` is a valid open file descriptor owned by `file` for the
+        // duration of this call (the MutexGuard keeps `file` alive).
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return false;
+        }
+
+        // Unlock helper — runs on every return path below so we never leak the
+        // advisory lock to the next caller (a leaked lock would deadlock).
+        let unlock = |fd: i32| {
+            // SAFETY: same valid, locked fd; LOCK_UN releases our advisory lock.
+            let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
+        };
+
+        let key = nonce.canonical_key();
+
+        // Step 1: is it already recorded (in the durable file)? Fail closed on I/O
+        // error — we must not report a nonce fresh if we couldn't read the log.
+        match Self::contains_key_locked(&mut file, &key) {
+            Ok(true) => {
+                unlock(fd);
+                return false; // replay
+            }
+            Ok(false) => {}
+            Err(_) => {
+                unlock(fd);
+                return false; // fail closed
+            }
+        }
+
+        // Step 2: durably append the new key, then fsync BEFORE reporting fresh —
+        // so a crash after we return `true` cannot lose the record (which would
+        // re-open the replay window). The file was opened in append mode, so the
+        // write lands at EOF regardless of the seek done by the read above.
+        let mut line = key;
+        line.push('\n');
+        if file.write_all(line.as_bytes()).is_err()
+            || file.flush().is_err()
+            || file.sync_all().is_err()
+        {
+            // The append may be partially written; a partial (non-newline-
+            // terminated) line is ignored on the next read, and we report
+            // not-fresh so this presentation is rejected fail-closed. The nonce is
+            // NOT durably recorded, but rejecting here is the safe (non-accepting)
+            // direction.
+            unlock(fd);
+            return false;
+        }
+
+        unlock(fd);
+        true
     }
 }
 
@@ -2031,6 +2203,83 @@ mod tests {
         // A DIFFERENT nonce is independently fresh.
         let n2 = VerifierNonce::from_hex("0x2b").unwrap();
         assert!(store.record_fresh(&n2));
+    }
+
+    /// A unique temp path for a durable-store test (cleaned by the test).
+    fn tmp_nonce_log(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "sparq_zk_compose_seen_nonces_{tag}_{}_{:?}.log",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    /// sq-aih (audit #4 durability): the DURABLE store records a nonce, and a
+    /// FRESH store REOPENED FROM THE SAME PATH (modelling a verifier restart —
+    /// the in-memory state is gone) STILL REJECTS the reused nonce. This is the
+    /// load-bearing property the in-memory store lacks.
+    #[test]
+    fn file_seen_nonces_single_use_survives_restart() {
+        let path = tmp_nonce_log("restart");
+        let _ = std::fs::remove_file(&path);
+        let n = VerifierNonce::from_hex("0x2a").unwrap();
+
+        // Session 1: first sight is fresh, replay rejected. Then DROP the store
+        // (its in-memory fd/state is gone — a restart).
+        {
+            let store = FileSeenNonces::open(&path).expect("open durable store");
+            assert!(store.record_fresh(&n), "first sight must be fresh");
+            assert!(!store.record_fresh(&n), "replay rejected within the session");
+        }
+
+        // Session 2: a COMPLETELY FRESH store reopened from the SAME path. The
+        // nonce must still be seen — single-use survived the restart.
+        {
+            let store = FileSeenNonces::open(&path).expect("reopen durable store");
+            assert!(
+                !store.record_fresh(&n),
+                "a nonce recorded before restart must STILL be rejected after reopening the store"
+            );
+            // A different nonce is independently fresh in the reopened store.
+            let n2 = VerifierNonce::from_hex("0x2b").unwrap();
+            assert!(store.record_fresh(&n2), "an unseen nonce is fresh after restart");
+        }
+
+        // Session 3: confirm the second nonce is now ALSO durable.
+        {
+            let store = FileSeenNonces::open(&path).expect("reopen durable store");
+            let n2 = VerifierNonce::from_hex("0x2b").unwrap();
+            assert!(!store.record_fresh(&n2), "the post-restart nonce is durable too");
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// sq-aih: the durable store keys by CANONICAL field value too — a re-padded
+    /// hex spelling of an already-recorded nonce is still rejected after a restart
+    /// (mirrors the in-memory `seen_nonces_key_is_representation_insensitive`).
+    #[test]
+    fn file_seen_nonces_key_is_representation_insensitive_across_restart() {
+        let path = tmp_nonce_log("repr");
+        let _ = std::fs::remove_file(&path);
+        let padded = VerifierNonce::from_hex(
+            "0x000000000000000000000000000000000000000000000000000000000000002a",
+        )
+        .unwrap();
+        let bare = VerifierNonce::from_hex("0x2a").unwrap();
+        {
+            let store = FileSeenNonces::open(&path).expect("open");
+            assert!(store.record_fresh(&padded), "first sight fresh");
+        }
+        {
+            // Restart, then present the SAME field under a different spelling.
+            let store = FileSeenNonces::open(&path).expect("reopen");
+            assert!(
+                !store.record_fresh(&bare),
+                "same field, different spelling => replay even across a restart"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Audit #4: a nonce is keyed by its CANONICAL field value, so two hex

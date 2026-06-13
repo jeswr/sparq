@@ -29,6 +29,8 @@ pub use manifest::{
     ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
 };
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
-pub use verifier::{InMemorySeenNonces, SeenNonces, VerifierNonce};
+// [OPUS-4.8] sq-aih: FileSeenNonces is the DURABLE (restart-surviving) store;
+// InMemorySeenNonces is NON-DURABLE / test-only.
+pub use verifier::{FileSeenNonces, InMemorySeenNonces, SeenNonces, VerifierNonce};
 // [OPUS-4.8] audit #12: revocation / freshness policy.
 pub use verifier::RevocationPolicy;
