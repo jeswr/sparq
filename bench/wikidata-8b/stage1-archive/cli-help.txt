@@ -1,0 +1,7 @@
+usage:
+  sparq-cli query <data-file> <format> <sparql>
+  sparq-cli bench <data-file> <format> <queries-dir> [iters]
+  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]
+  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk
+  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes
+  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)

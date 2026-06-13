@@ -1,0 +1,113 @@
+build 100M-gz rc=0 swap_delta_MiB=0
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:43.98
+	Maximum resident set size (kbytes): 7208372
+9513512133	/home/ubuntu/idx
+Q[100M-gz]: SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }
+opened 99918830 triples (indexes MEMORY-MAPPED) in 0.011s | store-heap ~0.02 GB (mmap'd perms not counted), dict ~0.02 GB
+1 solutions in 65.635ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.07
+	Maximum resident set size (kbytes): 28564
+Q[100M-gz]: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.wikidata.org/prop/direct/P31> ?o }
+opened 99918830 triples (indexes MEMORY-MAPPED) in 0.011s | store-heap ~0.02 GB (mmap'd perms not counted), dict ~0.02 GB
+1 solutions in 0.139ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.01
+	Maximum resident set size (kbytes): 46840
+Q[100M-gz]: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?o }
+opened 99918830 triples (indexes MEMORY-MAPPED) in 0.011s | store-heap ~0.02 GB (mmap'd perms not counted), dict ~0.02 GB
+1 solutions in 0.133ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.01
+	Maximum resident set size (kbytes): 46956
+build 100M-zst rc=0 swap_delta_MiB=0
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:38.81
+	Maximum resident set size (kbytes): 6915684
+9513512133	/home/ubuntu/idx
+Q[100M-zst]: SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }
+opened 99918830 triples (indexes MEMORY-MAPPED) in 0.011s | store-heap ~0.02 GB (mmap'd perms not counted), dict ~0.02 GB
+1 solutions in 17.376ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.03
+	Maximum resident set size (kbytes): 28576
+Q[100M-zst]: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.wikidata.org/prop/direct/P31> ?o }
+opened 99918830 triples (indexes MEMORY-MAPPED) in 0.011s | store-heap ~0.02 GB (mmap'd perms not counted), dict ~0.02 GB
+1 solutions in 0.128ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.01
+	Maximum resident set size (kbytes): 46840
+Q[100M-zst]: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?o }
+opened 99918830 triples (indexes MEMORY-MAPPED) in 0.011s | store-heap ~0.02 GB (mmap'd perms not counted), dict ~0.02 GB
+1 solutions in 0.138ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.01
+	Maximum resident set size (kbytes): 46960
+inmem-100M rc=1
+--wait may not be combined with --scope.
+build 300M-gz rc=0 swap_delta_MiB=2
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 9:14.51
+	Maximum resident set size (kbytes): 13990828
+27248936340	/home/ubuntu/idx
+Q[300M-gz]: SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }
+opened 299758126 triples (indexes MEMORY-MAPPED) in 0.119s | store-heap ~0.04 GB (mmap'd perms not counted), dict ~0.04 GB
+1 solutions in 31.282ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.15
+	Maximum resident set size (kbytes): 53060
+Q[300M-gz]: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.wikidata.org/prop/direct/P31> ?o }
+opened 299758126 triples (indexes MEMORY-MAPPED) in 0.022s | store-heap ~0.04 GB (mmap'd perms not counted), dict ~0.04 GB
+1 solutions in 17.965ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.04
+	Maximum resident set size (kbytes): 53996
+Q[300M-gz]: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?o }
+opened 299758126 triples (indexes MEMORY-MAPPED) in 0.021s | store-heap ~0.04 GB (mmap'd perms not counted), dict ~0.04 GB
+1 solutions in 17.431ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.04
+	Maximum resident set size (kbytes): 54116
+build 300M-zst rc=0 swap_delta_MiB=28
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 8:36.94
+	Maximum resident set size (kbytes): 14173776
+27248936340	/home/ubuntu/idx
+Q[300M-zst]: SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }
+opened 299758126 triples (indexes MEMORY-MAPPED) in 0.118s | store-heap ~0.04 GB (mmap'd perms not counted), dict ~0.04 GB
+1 solutions in 28.376ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.15
+	Maximum resident set size (kbytes): 53104
+Q[300M-zst]: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.wikidata.org/prop/direct/P31> ?o }
+opened 299758126 triples (indexes MEMORY-MAPPED) in 0.021s | store-heap ~0.04 GB (mmap'd perms not counted), dict ~0.04 GB
+1 solutions in 15.758ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.04
+	Maximum resident set size (kbytes): 54052
+Q[300M-zst]: SELECT (COUNT(*) AS ?c) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?o }
+opened 299758126 triples (indexes MEMORY-MAPPED) in 0.021s | store-heap ~0.04 GB (mmap'd perms not counted), dict ~0.04 GB
+1 solutions in 16.613ms
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.04
+	Maximum resident set size (kbytes): 54104
+300M elapsed: gz=554.51s zst=516.94s
+1B format: zst
+build 1B-zst rc=1 swap_delta_MiB=0
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.01
+	Maximum resident set size (kbytes): 7076
+build 1B-zst rc=0 swap_delta_MiB=33
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:18:11
+	Maximum resident set size (kbytes): 15595420
+89546194884	/home/ubuntu/idx
+inmem-100M rc=0
+loaded 99918830 triples in 61.737s (1.62 M/s) | store ~10.39 GB (104 B/triple), dict ~2.32 GB (33799927 terms, 69 B/term)
+1 solutions in 1.412ms
+	Command being timed: "/home/ubuntu/sparq/target/release/sparq-cli query /home/ubuntu/data/100M.nt.zst ntriples SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }"
+	User time (seconds): 112.67
+	System time (seconds): 1.05
+	Percent of CPU this job got: 179%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:03.38
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 10628440
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 307359
+	Voluntary context switches: 9355
+	Involuntary context switches: 12923
+	Swaps: 0
+	File system inputs: 1583240
+	File system outputs: 8
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
