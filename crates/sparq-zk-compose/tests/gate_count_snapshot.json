@@ -10,6 +10,7 @@
     "scan_k2_n64_r8": 34379,
     "filter_int_d1": 17416,
     "filter_int_d2": 17416,
+    "filter_int_d3": 17416,
     "filter_int_d4": 17416,
     "filter_f64": 3113,
     "revoke_unset_d10": 822,

@@ -19,8 +19,14 @@ pub const SCAN_N_BUCKETS: &[u32] = &[16, 64];
 pub const SCAN_R_BUCKETS: &[u32] = &[4, 8];
 /// Compiled `k` values of the scan family.
 pub const SCAN_K_VALUES: &[u32] = &[1, 2];
-/// Compiled digit counts (`d`) of the filter_int family.
-pub const FILTER_INT_D_VALUES: &[u32] = &[1, 2, 4];
+/// Compiled digit counts (`d`) of the filter_int family. The `filter_int_d{D}`
+/// circuit's `digits: [u8; D]` witness requires the operand's decimal digit
+/// count to EXACTLY equal `D` (see `compose_core::filter_int::filter_int_check`),
+/// so a member is provable for an operand iff its digit count == `D`. v1 compiles
+/// the contiguous range 1..=4 plus the historical gap-fill at 3 (sq-wto).
+// [OPUS-4.8] sq-wto: 3 added so the {1,2,4} family is contiguous 1..=4 and no
+// in-range digit count derives an unprovable wrong-D member.
+pub const FILTER_INT_D_VALUES: &[u32] = &[1, 2, 3, 4];
 
 fn smallest_bucket(buckets: &[u32], need: u32) -> Option<u32> {
     buckets.iter().copied().find(|&b| b >= need)
@@ -38,9 +44,30 @@ pub fn derive_scan_id(k: u32, max_graph: u32, match_rows: u32) -> Option<Circuit
 }
 
 /// Derive the filter_int circuit id for a `digits`-digit value.
+///
+/// # sq-wto correctness (EXACT match, not smallest-bucket-≥)
+/// The `filter_int_d{D}` circuit pins the operand's digit count to `D` exactly:
+/// its witness is `digits: [u8; D]` and `filter_int_check::<D>` rebuilds the
+/// canonical token from exactly `D` digit bytes, so a `d`-digit operand is
+/// provable ONLY by the `D == d` member. The old `smallest_bucket(.., digits)`
+/// (smallest compiled `D >= digits`) was a COMPLETENESS BUG (sq-61g differential
+/// fuzzer / sq-wto): a 3-digit operand derived `d = 4`, but no 3-digit value can
+/// fill a `[u8; 4]` witness, so `nargo execute` produced no witness — an honest
+/// FILTER that SILENTLY yields an unprovable statement. We now require an EXACT
+/// compiled member and return `None` for any digit count with no `D == digits`
+/// member (out-of-family => a CLEAN error at the call site, never a
+/// silently-unprovable d). With the d3 member the provable range is the
+/// contiguous 1..=4; 0 maps to the 1-digit canonical form ("0"); 5..=19 (and
+/// >19, which overflows u64) have no member and return `None`.
+// [OPUS-4.8] sq-wto: exact digit-count match; out-of-bucket => None (clean
+// error), never a wrong-D silently-unprovable member.
 pub fn derive_filter_int_id(digits: u32) -> Option<CircuitId> {
-    let d = smallest_bucket(FILTER_INT_D_VALUES, digits.max(1))?;
-    Some(CircuitId::FilterInt { d })
+    let d = digits.max(1);
+    if FILTER_INT_D_VALUES.contains(&d) {
+        Some(CircuitId::FilterInt { d })
+    } else {
+        None
+    }
 }
 
 /// A constant or variable slot of a BGP triple pattern.

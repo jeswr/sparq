@@ -125,13 +125,14 @@ struct FuzzCase {
 /// The compiled `filter_int` digit buckets (`build::FILTER_INT_D_VALUES`). The
 /// circuit's `digits: [u8; D]` witness requires the operand's decimal digit
 /// count to EXACTLY equal a compiled `D` (and forbids a leading zero for D>1),
-/// so an operand whose digit count is NOT one of these (e.g. 3, or 5-19 digits)
-/// has NO provable member — `build_filter_int` would derive `d=4` for a 3-digit
-/// value, which is unsatisfiable. The fuzzer therefore draws FILTER-eligible
-/// values only from these exact digit counts; the gap itself is documented as a
-/// sq-61g finding (a completeness gap in the compiled family, not a soundness
-/// hole). See the test-file doc + the sq-61g report.
-const FILTER_DIGIT_BUCKETS: &[u32] = &[1, 2, 4];
+/// so an operand is provable iff its digit count == a compiled `D`. The compiled
+/// range is now the contiguous 1..=4 ([OPUS-4.8] sq-wto added the `d=3` member
+/// that closes the old gap — a 3-digit operand used to derive an unprovable
+/// `d=4`); 5..=19 digit operands still have NO member and `build_filter_int`
+/// returns `None` (a CLEAN error, never a silently-unprovable d — that is exactly
+/// what `derive_filter_int_id` now guarantees by requiring an exact match). The
+/// fuzzer draws FILTER-eligible values only from these exact provable counts.
+const FILTER_DIGIT_BUCKETS: &[u32] = &[1, 2, 3, 4];
 
 /// Draw an `xsd:integer` value whose canonical decimal has exactly `d` digits
 /// (no leading zero for d>1).
@@ -139,6 +140,7 @@ fn value_with_digits(rng: &mut Rng, d: u32) -> u64 {
     match d {
         1 => rng.below(10),                       // 0..=9
         2 => 10 + rng.below(90),                  // 10..=99
+        3 => 100 + rng.below(900),                // 100..=999 ([OPUS-4.8] sq-wto)
         4 => 1000 + rng.below(9000),              // 1000..=9999
         _ => unreachable!("only compiled buckets"),
     }
@@ -446,4 +448,96 @@ fn differential_fuzz_full_prove() {
     let n = run_differential(HEAVY_ITERS, true);
     eprintln!("differential_fuzz_full_prove: {n} in-family cases exercised (full bb prove)");
     assert!(n > 0, "no in-family fuzz cases were exercised — generator is broken");
+}
+
+// --- sq-wto: the FILTER digit-bucket completeness fix --------------------------
+//
+// [OPUS-4.8] sq-wto. The bug the differential fuzzer surfaced: `build_filter_int`
+// derived the `filter_int_d{D}` member from the operand's decimal DIGIT COUNT via
+// `smallest_bucket(.., digits)` (smallest compiled `D >= digits`), but the circuit
+// requires the digit count to EXACTLY equal `D`. So a 3-digit operand derived
+// `d=4`, whose `digits: [u8; 4]` witness no 3-digit value can fill — an honest
+// FILTER that SILENTLY produced an UNPROVABLE statement (`nargo execute` writes no
+// witness). NOT a soundness hole, but a completeness/honesty hole: the prover
+// believed it had a statement it could never prove.
+//
+// The fix: a `d=3` member fills the gap (range now contiguous 1..=4), and
+// `derive_filter_int_id` requires an EXACT match — out-of-family counts (5..) now
+// return `None` (a CLEAN error at `build_filter_int`), never a wrong-D member.
+//
+// This test pins the post-fix invariant the brief demands: for a 3-digit and a
+// 5-digit operand the pipeline either PROVES correctly or ERRORS cleanly — it is
+// NEVER silently-unprovable (i.e. `build_filter_int` returns `Some` only when the
+// honest witness is actually producible).
+use sparq_zk_compose::build::derive_filter_int_id;
+use sparq_zk_compose::manifest::CircuitId;
+
+/// A 3-digit operand: `build_filter_int` must return `Some` AND the honest
+/// statement must be PROVABLE (witness produced) — the gap the bug left
+/// silently-unprovable. The flipped verdict must stay UNprovable (soundness
+/// preserved by the new member).
+#[test]
+fn sq_wto_three_digit_operand_proves_not_silently_unprovable() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping sq-wto 3-digit prove test");
+        return;
+    }
+    let value: u64 = 123; // 3 digits — the old smallest-bucket bug's witness.
+    // Derivation picks the EXACT d=3 member (not the old wrong d=4).
+    assert_eq!(
+        derive_filter_int_id(3),
+        Some(CircuitId::FilterInt { d: 3 }),
+        "a 3-digit operand must derive the EXACT d=3 member (sq-wto)"
+    );
+    let salt = Fr::from(0u64);
+    let operand_enc = FieldHex(encode_value_hex(value, salt));
+    let op = FilterOp::Ge;
+    let bound = 100u64;
+    let expected = value >= bound; // honest verdict, true
+
+    // 1) The honest statement must build AND prove (no silently-unprovable d).
+    let (inputs, digits) = build_filter_int(operand_enc.clone(), value, op, bound, expected)
+        .expect("3-digit FILTER must be in-family (sq-wto: d=3 member exists)");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterInt { d: 3 });
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits);
+    let prover = CircuitProver::from_crate_root();
+    prover.compile(&id).expect("filter_int_d3 compiles");
+    prover
+        .gen_witness_tagged(&id, &toml, "wto_d3_honest")
+        .expect(
+            "sq-wto: the HONEST 3-digit FILTER must PROVE — a witness must exist \
+             (the old derivation made this silently-unprovable)",
+        );
+
+    // 2) Soundness preserved: the FLIPPED verdict must be UNprovable.
+    let (lie_inputs, lie_digits) =
+        build_filter_int(operand_enc, value, op, bound, !expected).expect("builds");
+    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits);
+    let lie = prover.gen_witness_tagged(&lid, &ltoml, "wto_d3_lie");
+    assert!(
+        lie.is_err(),
+        "sq-wto: the FALSE verdict over a 3-digit operand must remain UNprovable"
+    );
+}
+
+/// A 5-digit operand: out of the compiled family, so `build_filter_int` must
+/// return `None` — a CLEAN error at the call site, NOT a derived wrong-D member
+/// that would be silently-unprovable. (No toolchain needed — pure derivation.)
+#[test]
+fn sq_wto_five_digit_operand_errors_cleanly_not_silently_unprovable() {
+    // 5-digit value: no compiled `d=5` member.
+    assert_eq!(
+        derive_filter_int_id(5),
+        None,
+        "a 5-digit operand has no compiled member and must derive None (clean error)"
+    );
+    let salt = Fr::from(0u64);
+    let value: u64 = 54321; // 5 digits
+    let operand_enc = FieldHex(encode_value_hex(value, salt));
+    let built = build_filter_int(operand_enc, value, FilterOp::Lt, 99999, true);
+    assert!(
+        built.is_none(),
+        "sq-wto: an out-of-family (5-digit) operand must yield None from \
+         build_filter_int — a clean error, never a silently-unprovable wrong-D member"
+    );
 }

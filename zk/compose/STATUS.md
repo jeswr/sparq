@@ -35,6 +35,7 @@ Verdict: scaffold is GOOD; committed as baseline unchanged. Added `.gitignore`
 | scan_k2_n64_r8    | 2 | 64 | 8 | scan_check      |
 | filter_int_d1     | — | —  | — | filter_int (D=1)|
 | filter_int_d2     | — | —  | — | filter_int (D=2)|
+| filter_int_d3     | — | —  | — | filter_int (D=3; [OPUS-4.8] sq-wto, closes the 3-digit gap) |
 | filter_int_d4     | — | —  | — | filter_int (D=4)|
 | filter_f64        | — | —  | — | filter_f64 (building block, not manifest-composable v1) |
 | revoke_unset_d10  | — | —  | — | revoke_unset (D=10, hidden-index revocation; sq-3e5/sq-h2v) |

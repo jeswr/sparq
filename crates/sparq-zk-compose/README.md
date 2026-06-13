@@ -40,7 +40,13 @@ shape — never trust a declared id:
 - **scan** `scan_k{k}_n{n}_r{r}`: `k` = number of committed graphs, `n` =
   smallest compiled slot-bucket ≥ the largest graph, `r` = smallest compiled
   row-bucket ≥ the disclosed match count. See `build::derive_scan_id`.
-- **filter_int** `filter_int_d{d}`: `d` = digit count of the hidden value.
+- **filter_int** `filter_int_d{d}`: `d` = the hidden value's decimal digit count,
+  which must EXACTLY equal a compiled member (the circuit's `digits: [u8; d]`
+  witness pins the count). Compiled members: `d ∈ {1,2,3,4}` (the contiguous
+  1..=4 range; [OPUS-4.8] sq-wto added `d=3`). `build::derive_filter_int_id`
+  requires an exact match and returns `None` for any other count (e.g. 5..=19),
+  so `build_filter_int` cleanly declines an out-of-family operand rather than
+  deriving a wrong-`d` member that would be silently unprovable (sq-wto).
 
 The verifier re-derives and rejects on mismatch (`CircuitIdMismatch`), so a
 proof can only verify against the member its public inputs fit.
