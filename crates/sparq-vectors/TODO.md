@@ -35,13 +35,32 @@ crate README. Status of the deliberate cuts:
   vectors themselves exceed RAM. Build is single-threaded O(n·L·R) and slower
   than HNSW's rayon build (~50 s vs ~33 s for 50k×32 at opt-level 2); a
   rayon-parallel Vamana build is the recorded follow-up.
-- **Quantization.** DEFERRED (out-of-scope-by-design — sibling task **sq-nq5**):
-  f32-only today. Scalar i8 (4×) or product quantization for 100M-scale stores;
-  the `.spqv` header has 12 reserved bytes and the new `.spqg` header 4 reserved
-  bytes for an encoding tag, so this lands as a backwards-compatible header bump
-  when needed (and is what closes the on-disk-ANN gap to *full* DiskANN above) —
-  designing the encoding now, without a driving workload or recall budget, would
-  be speculation.
+- ~~**Quantization.**~~ **DONE** (sq-nq5) [OPUS-4.8] — [`ScalarQuantizer`] +
+  [`ProductQuantizer`] in `src/quant.rs`, both over the L2-normalized /
+  squared-Euclidean cosine convention (`cos = 1 − d²/2`) so estimates are
+  directly comparable to the exact/HNSW/DiskANN searchers.
+  - **SQ**: per-dimension `[min,max]` linear `f32 → u8` (256 levels), 4×
+    smaller; max per-component error is half a quantization step (measured
+    0.00096 ≤ the 0.0039 bound), reconstruction cosine > 0.99.
+  - **PQ**: `M` subspaces (default 16), k-means codebook of `K` (default 256)
+    per subspace, `M`-byte codes, **asymmetric distance computation** (ADC) via
+    per-subspace [`DistanceTable`]. Measured recall@10 on a 10k clustered
+    synthetic set at 8× (M=16): **PQ-alone ≈ 0.60**, **PQ candidate filter +
+    full-precision re-rank of top-50 ≈ 0.98** — the latter is the DiskANN search
+    loop and the load-bearing number; PQ alone is honestly a coarse filter, not
+    a final ranking. Higher M trades compression for PQ-alone recall (M=32 / 4×
+    → ~0.94 PQ-alone; dim=128 / 32× → ~0.23 PQ-alone, ~0.61 after re-rank).
+  - **Standalone, not yet wired into `.spqg`** (the honest call): the encoders /
+    decoders / distance-estimators + the in-RAM candidate cache
+    ([`EncodedStore`]) are complete and tested, and `quant.rs` documents exactly
+    how `diskann.rs` would consume them (fit PQ on the store → encode every
+    vector → rank candidates on codes in RAM → re-rank the beam off the mmap).
+    The `.spqg` format is **unchanged** — baking PQ codes into the on-disk record
+    now would still be speculation against a recall budget we don't have, and the
+    `.spqv`/`.spqg` reserved bytes keep that a backwards-compatible bump when a
+    driving workload arrives. **Follow-up: the `search_slots` integration in
+    `diskann.rs`** (the localized change to rank on PQ codes + a re-rank pass) and
+    persisting the codebook beside the graph.
 - ~~**Hybrid RRF fusion** (lexical + structural + vector)~~ **DONE** —
   `fuse_rrf` / `fuse_scores` in `src/fuse.rs` (rank-based RRF `k = 60` +
   min-max alpha-blend over plain ranked lists, so `sparq-vectors` never

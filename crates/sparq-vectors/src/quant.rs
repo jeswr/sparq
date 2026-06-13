@@ -259,8 +259,8 @@ pub struct PqConfig {
     /// recall, larger codes. Must divide the work so each subspace has ≥ 1 dimension (`M ≤ dim`).
     pub m: usize,
     /// Centroids per subspace `K`. 256 keeps a code byte-addressable (the standard choice);
-    /// values > 256 are allowed (codes widen to `u16` conceptually) but [`encode`] still returns
-    /// `u8` and so requires `k ≤ 256` — fit rejects `k > 256` for that reason.
+    /// larger `K` would need wider codes, but [`ProductQuantizer::encode`] returns `u8`, so `fit`
+    /// rejects `k > 256` for that reason.
     pub k: usize,
     /// Lloyd's-algorithm iterations for each subspace's k-means. ~10–25 is plenty for the small
     /// subspace dimensions PQ produces.

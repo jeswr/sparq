@@ -250,11 +250,57 @@ Each on-disk node record co-locates the node's id, its (normalized) vector, and
 its ≤ `R` neighbour slots, so one greedy-search hop is one contiguous page read.
 **Recall@10 = 0.966 vs exact brute force** on the 50k×32 synthetic set, and a
 reopened handle returns byte-identical neighbours to the freshly built one.
-*Scope note:* full-precision vectors are searched straight from the mmap; there
-is no PQ-compressed in-RAM candidate cache (the remaining gap to *full* DiskANN
-— that quantization layer is the sibling task, see `TODO.md`). The Vamana build
-is single-threaded and a little slower than the rayon HNSW build, but the
-**open** is what this buys you: no per-process rebuild.
+*Scope note:* full-precision vectors are searched straight from the mmap; the
+PQ-compressed in-RAM candidate cache that *full* DiskANN ranks on now exists as
+a standalone, tested layer (`src/quant.rs`, below) but is **not yet wired into
+`search_slots`** — that integration is the recorded follow-up in `TODO.md`. The
+Vamana build is single-threaded and a little slower than the rayon HNSW build,
+but the **open** is what this buys you: no per-process rebuild.
+
+## Quantization for large stores (`ScalarQuantizer` / `ProductQuantizer`)
+
+`src/quant.rs` shrinks per-vector memory so 100M-scale stores fit a candidate
+cache in RAM, at a measured cost in recall. Both encoders work over the same
+**L2-normalized / squared-Euclidean** cosine convention as the searchers
+(`cos = 1 − d²/2`), so a ranking over quantized codes is directly comparable to
+the exact/HNSW/DiskANN results.
+
+- **Scalar quantization (SQ)** — `ScalarQuantizer`: each dimension is linearly
+  mapped from its learned `[min, max]` onto 256 levels (`f32 → u8`, **4×**
+  smaller); `reconstruct` inverts it for re-ranking. Worst per-component error
+  is half a quantization step (measured 0.00096 on normalized random vectors),
+  reconstruction cosine > 0.99.
+- **Product quantization (PQ)** — `ProductQuantizer`: the vector is split into
+  `M` subspaces, a k-means codebook of `K` centroids is learned per subspace,
+  and a vector becomes its `M` nearest-centroid ids (`M` bytes; default `M=16`,
+  `K=256`). Distance to a full-precision query uses **asymmetric distance
+  computation** (`DistanceTable`): precompute the query↔centroid distances per
+  subspace, then a code's estimated distance is `M` table look-ups, no decode.
+
+```rust
+use sparq_vectors::{DistanceTable, ProductQuantizer, PqConfig, VectorStore};
+let store = VectorStore::open("entities.spqv")?;
+let pq = ProductQuantizer::fit(store.dim(), store.iter().map(|(_, v)| v), PqConfig::default())?;
+let cache = pq.encode_store(&store)?;          // count × M bytes, resident in RAM
+let table = DistanceTable::new(&pq, &query);   // per-subspace query↔centroid table
+let candidates = cache.rank_pq(&table, 50);    // RAM-only coarse ranking → Vec<(Id, cosine)>
+// …then re-rank `candidates` against full-precision vectors for the final top-k.
+```
+
+**Measured recall@10** on a 10k clustered synthetic set at **8×** compression
+(`M=16`, vs 32-d × 4 B = 128 B → 16 B):
+
+| ranking                                   | recall@10 |
+| ----------------------------------------- | --------- |
+| PQ-alone (rank on codes, truncate to 10)  | ~0.60     |
+| PQ candidate filter (top-50) + full-precision re-rank | ~0.98 |
+
+PQ codes are a coarse *filter*, not a final ranking — the re-rank pass is what
+recovers near-exact recall, which is exactly why DiskANN re-ranks the beam on
+disk. Compression trades against PQ-alone recall: `M = dim` (4×) lifts PQ-alone
+to ~0.94, while 32× (dim=128, `M=16`) drops it to ~0.23 (~0.61 after re-rank).
+`encode_store` produces the `EncodedStore` in-RAM cache that `DiskAnnIndex`
+would rank on; the wiring into `search_slots` is the recorded follow-up.
 
 ## Tests
 
@@ -269,6 +315,12 @@ is single-threaded and a little slower than the rayon HNSW build, but the
   neighbours** (the persistence acceptance gate), parity with the in-RAM HNSW
   on separable clusters, empty/singleton round-trip, and corrupt/wrong-magic
   rejection.
+- `tests/quant.rs` — quantization gates: SQ round-trip half-step error bound +
+  reconstruction cosine, PQ encode/decode idempotence, the ADC ==
+  reconstructed-distance identity, uneven-subspace coverage, config/degenerate
+  validation, tie-break determinism, and the headline **PQ recall@10 vs exact**
+  on a 10k clustered set (PQ-alone floor + the PQ-filter-plus-re-rank ≥ 0.95
+  DiskANN-loop gate).
 - `tests/labels.rs` — `embed_labels` predicate priority, literal filtering,
   and term-keyed lookup end to end on a small graph.
 - `tests/verbalize.rs` — `verbalize`/`embed_entities` on a fixture graph:
