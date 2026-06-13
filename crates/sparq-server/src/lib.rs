@@ -34,4 +34,12 @@ pub mod metrics;
 pub mod subscriptions;
 
 #[cfg(feature = "server")]
-pub use http::{harden, router, AppState, ServerConfig};
+pub use http::{harden, router, AppState, PinnedGen, ServerConfig, GLOBAL_POD};
+
+/// [OPUS-4.8] (sq-uqh, Wave B) Re-exported for consumers (and tests) that introspect a
+/// pinned generation's per-pod epoch vector — the cache-invalidation hook the server's
+/// updates feed via [`http::AppState::apply_update`]. A `PinnedGen` exposes
+/// `.epochs().epoch(&PodId)` (sparq-serve's `PodEpochs`); a write to one named graph bumps
+/// only that graph's `PodId` epoch, so a read scoped to another graph is not invalidated.
+#[cfg(feature = "server")]
+pub use sparq_serve::{Epoch, PodEpochs, PodId};
