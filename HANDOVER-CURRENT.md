@@ -1,4 +1,15 @@
-# Orchestrator handover — live state (updated 2026-06-12 ~late evening UTC)
+# Orchestrator handover — live state (updated 2026-06-13, USAGE FREEZE active)
+
+## ⚠ USAGE FREEZE (user, 2026-06-13): ~80% of session budget consumed. NO new agent launches. If this session dies, resume protocol: (1) NO cloud resources are running (verify with the tag query below anyway); (2) check each worktree's STATUS.md + `git log main..HEAD` for agent state; (3) work the merge queue below one branch at a time with the gate.
+
+## MERGE QUEUE (exact, in order; gate each, push on green)
+1. zk-core: ALREADY MERGED on local main (unpushed); gate running at freeze time (`bash task bv9f3atvv`, expect ~712+/0 + wasm 1,643,095) → push jeswr main, remove ../sparq-zk-core, delete branch zk-core.
+2. wikidata-8b-prep (../sparq-wd8b @ 50fe3b8, docs+scripts only) — merge, drop STATUS.md, gate (cheap), push, clean.
+3. release-prep-v010 (../sparq-relprep @ HEAD, CHANGELOG fold + dist.yml runner + caveats + docs/release-notes-v0.1.0.md) — merge, gate, push, then: wait GitHub CI green on that SHA → `git tag v0.1.0 <sha> && git push jeswr v0.1.0` (release.yml creates the GH release + ghcr docker; do NOT gh release create) → `gh release edit v0.1.0 --notes-file docs/release-notes-v0.1.0.md`. crates.io/npm publishes BLOCKED on Jesse's `cargo login`/`npm login` (then docs/release.md §4 order; `--dry-run -p sparq-engine` checkpoint mid-chain).
+4. Then in-flight agent branches as they complete (each: merge, drop STATUS.md, gate, push, clean worktree): dict-spill, zk-xpath-ieee754-migration, zk-compose, zk-trace-engine, serve-wave-a2, neon-intersect (re-verify benchmark numbers on a QUIET machine first), py-textindex.
+5. After dict-spill lands: the 8B Wikidata EC2 run per bench/wikidata-8b/RUNBOOK.md (cap $30, ~$0.78 spent; babysitter pattern; SPARQ_SHA pin required).
+6. After zk-compose + zk-trace land: write research/zk-test-bench-design.md (how ZK test suites/benchmarks are designed, what they derive from) → HAND TO JESSE FOR COMMENT (his explicit deliverable).
+7. test-lib upstreaming (agent in ~/Documents/GitHub/jeswr/test-lib branch upstreaming-prep): when its parity report lands, review, then the swap plan in the IEEE754 audit (deprecated branch first, merge -s ours, re-pin noir_XPath to v0.9.0 BEFORE swap, keep test-summary check name). Swap needs Jesse-visible confirmation before the push.
 
 If this file describes running agents/instances and you are a fresh session, verify each item below FIRST. Cloud resources take priority.
 
