@@ -618,7 +618,53 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            // [OPUS-4.8] sh:sparql — SPARQL-based constraints (SHACL §5.2). The
+            // sh:select runs against the data graph with $this pre-bound to the
+            // focus node; every returned solution is one violation. Note this
+            // evaluates over the FOCUS NODE (not the path value nodes): a sh:sparql
+            // on a property shape sees `values` only through the query (e.g. by
+            // re-traversing sh:path inside the SELECT), which matches the spec —
+            // the constraint is responsible for its own value selection.
+            Component::Sparql(idx) => self.eval_sparql(sid, focus, *idx, out),
         }
+    }
+
+    /// SHACL-SPARQL evaluation for one `sh:sparql` constraint occurrence.
+    fn eval_sparql(&mut self, sid: usize, focus: &Term, idx: usize, out: &mut Vec<ValidationResult>) {
+        let constraint = &self.shapes.sparql[idx];
+        if constraint.deactivated {
+            return;
+        }
+        let Some(prepared) = &constraint.prepared else {
+            return; // ill-formed sh:select — skipped (lenient, per crate policy)
+        };
+        let component = sh("SPARQLConstraintComponent");
+        let shape = &self.shapes.shapes[sid];
+        let (shape_node, shape_path, severity, shape_messages) = (
+            shape.node.clone(),
+            shape.path.clone(),
+            shape.severity.clone(),
+            shape.messages.clone(),
+        );
+        let data = self.data.graph();
+        prepared.evaluate(
+            data,
+            focus,
+            constraint,
+            |fields| ValidationResult {
+                focus_node: focus.clone(),
+                // A bound ?path overrides the shape's path; otherwise inherit the
+                // (property-shape) path, if any.
+                path: fields.path.or_else(|| shape_path.clone()),
+                value: fields.value,
+                source_shape: shape_node.clone(),
+                source_component: component.clone(),
+                severity: severity.clone(),
+                messages: shape_messages.clone(),
+                default_message: fields.default_message,
+            },
+            out,
+        );
     }
 
     #[allow(clippy::too_many_arguments)] // one call site per range component; a struct would obscure it

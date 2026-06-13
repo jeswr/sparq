@@ -34,6 +34,7 @@ mod eval;
 pub mod model;
 pub mod path;
 mod report;
+mod sparql;
 pub mod view;
 
 pub use model::{Component, Shape, ShapesModel, Target};

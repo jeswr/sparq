@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Opt-in SHACL Core validation for the sparq RDF engine: shapes-graph parsing, constraint evaluation and W3C-vocabulary validation reports"
+description = "Opt-in SHACL validation for the sparq RDF engine (Core constraints plus SHACL-SPARQL sh:sparql): shapes-graph parsing, constraint evaluation and W3C-vocabulary validation reports"
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -19,8 +19,16 @@ readme = "README.md"
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+# [OPUS-4.8] SHACL-SPARQL (sh:sparql, W3C SHACL §5.2) routes its sh:select query
+# through the SPARQL engine. sparq-engine does NOT depend on sparq-shacl, so there is
+# no dependency cycle; and like this crate it is native-only and never in the wasm
+# graph, so the isolation guarantee (zero SHACL/engine code in the browser bundle) holds.
+sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 oxrdf.workspace = true
 oxttl.workspace = true
+# Algebra-level pre-binding of $this (a VALUES injection on the parsed sh:select) — more
+# robust than textual substitution. The same vendored spargebra the engine parses with.
+spargebra.workspace = true
 rustc-hash.workspace = true
 # sh:pattern / sh:flags. Native-only crate — never in the wasm graph.
 regex = "1"

@@ -25,6 +25,12 @@ impl<'g> GraphView<'g> {
         GraphView { g }
     }
 
+    /// The underlying graph — the seam SHACL-SPARQL (`sh:sparql`) uses to run its
+    /// `sh:select` query through `sparq-engine`.
+    pub fn graph(&self) -> &'g Graph {
+        self.g
+    }
+
     /// All triples matching the optional-term pattern, as `[s, p, o]` terms.
     /// A bound term absent from the graph's dictionary matches nothing.
     pub fn triples(&self, s: Option<&Term>, p: Option<&str>, o: Option<&Term>) -> Vec<[Term; 3]> {
