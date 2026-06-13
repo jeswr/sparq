@@ -13,6 +13,10 @@
 - neon-intersect: 0 commits, STILL PARKED — measure-first spike needs a QUIET machine; relaunch when dict-spill + zk-trace finish. Old worktree (../sparq-neon @ b436188) still exists, removable.
 - EC2: could NOT verify (AWS SSO token expired — `aws sso login --profile pss` to re-check). Prior handover says nothing was ever launched; the 8B run is gated on dict-spill so it never started. LOW risk but UNVERIFIED.
 
+## MODE: ultracode (this session, user /effort ultracode) — default to workflow orchestration + adversarial verification for substantive tasks; token cost not a constraint. Reverts when session ends.
+
+## IN FLIGHT NOW (Opus): dict-spill finisher (8B gate; RSS numbers reliable, wall-time may be CPU-contended → re-verify on quiet machine if borderline), zk-trace-engine (module B), readme-perf (README perf update + add parsing/serialisation, worktree ../sparq-readme), zk-soundness-audit WORKFLOW (run wf_8117e4d6-69a, read-only adversarial audit of zk-compose+sparq-zk prover/verifier → returns report to commit at research/zk-soundness-audit.md). neon-intersect still parked.
+
 ## RESUME PROTOCOL if THIS session dies: (1) re-auth AWS + verify no sparq-hw-validation instance running; (2) check each worktree STATUS.md + `git log main..HEAD`; (3) gate+push merge-ready branches one at a time; (4) relaunch any 0-commit branches.
 
 ## MERGE QUEUE (exact, in order; gate each, push on green)
