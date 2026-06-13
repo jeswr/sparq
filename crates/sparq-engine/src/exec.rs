@@ -2176,10 +2176,12 @@ fn match_geof_distance(args: &[Expression]) -> Option<(Variable, String, String)
 }
 
 /// Recognises a pushable spatial FILTER. Two shapes:
+///
 /// * `geof:distance(?g, point, unit) OP radius` with `OP ∈ {<, <=}` (the bound on the
 ///   non-constant side) → a distance-within window;
 /// * `geof:sfWithin(?g, box)` / `geof:sfIntersects(?g, box)` used directly as the FILTER
 ///   → a bbox/window scan.
+///
 /// `geof:sfContains/Overlaps/Touches/Crosses/Equals/Disjoint` and distance with `>`/`>=`
 /// (an unbounded EXTERIOR, no finite window) stay post-hoc — see the report.
 fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
