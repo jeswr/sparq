@@ -194,6 +194,9 @@ impl RegistryEntry {
     /// verify path. Same deterministic `(sk, m)` nonce discipline as
     /// [`Self::issued`].
     // [OPUS-4.8] audit #12: status-bound issuance.
+    // clippy: each arg is a distinct cryptographic input to a signing constructor;
+    // bundling into a params struct would only obscure the call sites.
+    #[allow(clippy::too_many_arguments)]
     pub fn issued_with_status(
         document: NamedNode,
         commitment: Fr,
@@ -559,7 +562,7 @@ mod tests {
         assert!(e.verify_commitment_signature(), "fresh issued entry verifies");
         // Round-trips through the store unchanged (key + sig survive).
         let mut g = Graph::load_str("", "turtle").unwrap();
-        install_registry(&mut g, &[e.clone()]).unwrap();
+        install_registry(&mut g, std::slice::from_ref(&e)).unwrap();
         let back = read_registry(&g);
         assert_eq!(back, vec![e]);
         assert!(back[0].verify_commitment_signature(), "read-back entry verifies");
@@ -589,7 +592,7 @@ mod tests {
         assert!(e.verify_commitment_signature_with_status(), "fresh status-bound entry verifies");
         // Round-trips through the store.
         let mut g = Graph::load_str("", "turtle").unwrap();
-        install_registry(&mut g, &[e.clone()]).unwrap();
+        install_registry(&mut g, std::slice::from_ref(&e)).unwrap();
         let back = read_registry(&g);
         assert_eq!(back, vec![e.clone()]);
         assert!(back[0].verify_commitment_signature_with_status(), "read-back verifies");

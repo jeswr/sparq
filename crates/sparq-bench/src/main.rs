@@ -196,6 +196,8 @@ fn time_min(iters: usize, mut f: impl FnMut() -> usize) -> (Duration, usize) {
     (best, rows)
 }
 
+// clippy: differential oracle pins oxigraph's legacy Store::query semantics
+#[allow(deprecated)]
 fn oxi_count(store: &oxigraph::store::Store, q: &str) -> usize {
     match store.query(q).expect("oxi query") {
         oxigraph::sparql::QueryResults::Solutions(s) => s.count(),

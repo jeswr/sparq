@@ -63,8 +63,10 @@ fn language_preference_and_fallback() {
     let g = Graph::load_str(TTL, "turtle").unwrap();
 
     // French-first chain flips both the entity label and the type's label.
-    let mut fr = EntityTextConfig::default();
-    fr.languages = vec!["fr".into(), "en".into(), String::new()];
+    let fr = EntityTextConfig {
+        languages: vec!["fr".into(), "en".into(), String::new()],
+        ..Default::default()
+    };
     assert_eq!(
         verbalize(&g, &ex("bolt"), &fr).unwrap(),
         "Usain Bolt (fr). a athlète. Jamaican sprinter, eight-time Olympic champion.",
@@ -128,10 +130,12 @@ fn extra_prefixed_literal_group_with_value_cap() {
 #[test]
 fn char_budget_truncates_but_keeps_the_label() {
     let g = Graph::load_str(TTL, "turtle").unwrap();
-    let mut cfg = EntityTextConfig::default();
 
     // Whole-piece fit: label + type fit, description does not start.
-    cfg.max_chars = "Usain Bolt. a athlete".chars().count();
+    let mut cfg = EntityTextConfig {
+        max_chars: "Usain Bolt. a athlete".chars().count(),
+        ..Default::default()
+    };
     assert_eq!(verbalize(&g, &ex("bolt"), &cfg).unwrap(), "Usain Bolt. a athlete");
 
     // Mid-piece overflow: the overflowing piece is truncated at a char boundary.
@@ -144,12 +148,14 @@ fn entity_label_groups_only_enrich() {
     // A config whose ONLY group is the type (EntityLabel) must verbalize nothing:
     // Some requires at least one Literal-group contribution.
     let g = Graph::load_str(TTL, "turtle").unwrap();
-    let mut cfg = EntityTextConfig::default();
-    cfg.groups = vec![PropertyGroup::entity_label(vec![NamedNode::new(
-        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-    )
-    .unwrap()])
-    .with_prefix("a ")];
+    let cfg = EntityTextConfig {
+        groups: vec![PropertyGroup::entity_label(vec![NamedNode::new(
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        )
+        .unwrap()])
+        .with_prefix("a ")],
+        ..Default::default()
+    };
     assert_eq!(cfg.groups[0].kind, ObjectKind::EntityLabel);
     assert_eq!(verbalize(&g, &ex("bolt"), &cfg), None);
 }

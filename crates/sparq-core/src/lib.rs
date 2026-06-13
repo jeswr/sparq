@@ -16,6 +16,10 @@ pub mod temporal;
 
 use dict::{Dict, Id};
 use temporal::Temporal;
+
+/// Per-chunk parse output: a partial dictionary + that chunk's local-id triples, one
+/// element per parallel chunk (the parallelizable half of ingest, merged downstream).
+type ChunkPartials = Vec<(Dict, Vec<[Id; 3]>)>;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
@@ -1653,6 +1657,8 @@ impl Graph {
     pub fn apply_delta_nquads(&mut self, inserts: &str, deletes: &str) -> Result<(), String> {
         use oxrdf::GraphName;
         type Slot = Option<Term>;
+        // Per-graph delta: `(slot, inserts, deletes)` — one entry per distinct graph.
+        type SlotDelta = (Slot, Vec<[Term; 3]>, Vec<[Term; 3]>);
         fn parse(text: &str) -> Result<Vec<(Slot, [Term; 3])>, String> {
             let mut out = Vec::new();
             for q in NQuadsParser::new().for_slice(text.as_bytes()) {
@@ -1669,7 +1675,7 @@ impl Graph {
         // Group per slot preserving first-seen order (datasets hold few graphs, so a
         // linear scan beats hashing Terms), keeping each slot's deletes and inserts
         // together so they go through ONE apply_delta call (deletes applied first).
-        let mut slots: Vec<(Slot, Vec<[Term; 3]>, Vec<[Term; 3]>)> = Vec::new();
+        let mut slots: Vec<SlotDelta> = Vec::new();
         for (is_insert, items) in [(false, parse(deletes)?), (true, parse(inserts)?)] {
             for (slot, t) in items {
                 let entry = match slots.iter_mut().find(|(s, _, _)| *s == slot) {
@@ -2526,8 +2532,10 @@ fn turtle_chunks(bytes: &[u8], target: usize) -> Option<Vec<Vec<u8>>> {
         let group_start = stmts[idx].start;
         let mut end_i = (idx + per).min(stmts.len());
         // Shrink the group so every statement in it shares the same directive snapshot.
-        for k in idx + 1..end_i {
-            if stmts[k].dirs_before != dirs_before {
+        // (Range bounds are snapshotted at loop entry, so the in-loop `end_i` write only
+        // takes effect via the immediate `break`.)
+        for (k, stmt) in stmts.iter().enumerate().take(end_i).skip(idx + 1) {
+            if stmt.dirs_before != dirs_before {
                 end_i = k;
                 break;
             }
@@ -2572,7 +2580,8 @@ fn parse_turtle_chunked(bytes: &[u8], target: usize) -> Result<(Dict, Vec<[Id; 3
         Some(c) if c.len() > 1 => c,
         _ => return serial(),
     };
-    let partials: Result<Vec<(Dict, Vec<[Id; 3]>)>, String> = chunks
+    type Partials = Vec<(Dict, Vec<[Id; 3]>)>;
+    let partials: Result<Partials, String> = chunks
         .par_iter()
         .map(|chunk| {
             let mut dict = Dict::new();
@@ -2941,7 +2950,7 @@ fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
 /// Parses one (complete-line) N-Triples byte block in parallel into per-chunk partial
 /// dictionaries + local-id triples (no shared state) — the parallelizable half of ingest.
 #[cfg(feature = "parallel")]
-fn parse_block(bytes: &[u8]) -> Result<Vec<(Dict, Vec<[Id; 3]>)>, String> {
+fn parse_block(bytes: &[u8]) -> Result<ChunkPartials, String> {
     use rayon::prelude::*;
     let target = (rayon::current_num_threads().max(1) * 4).min(bytes.len() / 4096 + 1);
     let bounds = newline_chunk_bounds(bytes, target);
@@ -2964,6 +2973,10 @@ fn parse_block(bytes: &[u8]) -> Result<Vec<(Dict, Vec<[Id; 3]>)>, String> {
 /// to attribute wall-time across parallel-parse vs dict-merge vs triple-remap.
 #[cfg(feature = "parallel")]
 mod build_timing {
+    // clippy/dead_code: this build-phase timing helper is consumed only by the
+    // `mmap`/`dict-spill` external-build paths; in the default feature set those callers
+    // are cfg'd out, leaving some members unused. They are not dead under those features.
+    #![allow(dead_code)]
     use std::sync::atomic::AtomicU64;
     pub static PARSE_NS: AtomicU64 = AtomicU64::new(0);
     pub static MERGE_NS: AtomicU64 = AtomicU64::new(0);

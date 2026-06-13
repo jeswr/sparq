@@ -78,6 +78,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 use std::collections::HashMap;
 
+/// One forward-chaining derivation step: `(derived ground fact, rule index, premise facts
+/// that justified it)`. Collected during closure so a proof can be reconstructed.
+type DerivationStep = ([Term; 3], usize, Vec<[Term; 3]>);
+
 /// Facts + access indexes, so a rule-body join atom is an O(1)/O(matches) lookup instead of a
 /// full scan. Indexed by (predicate, subject)→objects, (predicate, object)→subjects, and
 /// predicate→facts — the patterns that arise when a rule atom's predicate (and often one
@@ -101,9 +105,6 @@ impl FactIndex {
     }
     fn contains(&self, t: &[Term; 3]) -> bool {
         self.all.contains(t)
-    }
-    fn len(&self) -> usize {
-        self.all.len()
     }
     fn insert(&mut self, t: [Term; 3]) -> bool {
         if !self.all.insert(t.clone()) {
@@ -203,7 +204,7 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
 #[allow(clippy::type_complexity)]
 pub(crate) fn reason_n3_terms_proof(
     src: &str,
-) -> Result<(FxHashSet<[Term; 3]>, Vec<([Term; 3], usize, Vec<[Term; 3]>)>), String> {
+) -> Result<(FxHashSet<[Term; 3]>, Vec<DerivationStep>), String> {
     let parsed = parser::parse(src)?;
     let (facts, steps) = run_closure(parsed, None, StepMode::Full);
     Ok((facts.all, steps))
@@ -277,7 +278,7 @@ fn run_closure(
     parsed: parser::Parsed,
     resolver: Option<&Resolver>,
     mode: StepMode,
-) -> (FactIndex, Vec<([Term; 3], usize, Vec<[Term; 3]>)>) {
+) -> (FactIndex, Vec<DerivationStep>) {
     let parser::Parsed { facts: facts0, mut rules, mut backward_rules, base } = parsed;
     // Premises evaluate left-to-right with no coroutining — reorder each
     // premise so a builtin runs only after the atoms that produce its inputs
@@ -291,7 +292,7 @@ fn run_closure(
     bw.base = base;
     bw.resolver = resolver;
     // Derivation steps at the term level (interned to ids once at the end).
-    let mut steps: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
+    let mut steps: Vec<DerivationStep> = Vec::new();
 
     // Which predicates can a backward rule conclude? A forward rule with a premise atom on
     // such a predicate cannot use the semi-naive delta restriction (a backward proof is not
@@ -444,7 +445,7 @@ fn run_closure(
     let mut delta: FxHashSet<[Term; 3]> = facts.all.clone(); // round 0: every fact is "new"
     let mut first_round = true;
     loop {
-        let mut produced: Vec<([Term; 3], usize, Vec<[Term; 3]>)> = Vec::new();
+        let mut produced: Vec<DerivationStep> = Vec::new();
         for (ri, rule) in rules.iter().enumerate() {
             if let Some(&si) = trans_rules.get(&ri) {
                 // Transitivity fast path (linearized; see `TransState` above). Bypasses the
@@ -606,7 +607,7 @@ fn run_closure(
 fn intern_closure(
     dict: &mut Dict,
     facts: &FactIndex,
-    steps: &[([Term; 3], usize, Vec<[Term; 3]>)],
+    steps: &[DerivationStep],
 ) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     // First-class list values have no dictionary representation — expand them
     // into rdf:first/rest blank-node chains (one chain per list VALUE, shared

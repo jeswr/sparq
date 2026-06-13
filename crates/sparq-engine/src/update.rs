@@ -28,6 +28,9 @@ use spargebra::SparqlParser;
 /// A graph slot: `None` = the default graph, `Some(term)` = that named graph.
 type GraphSlot = Option<Term>;
 
+/// An instantiated update triple plus the graph slot it targets.
+type SlotTriple = (GraphSlot, TripleTerms);
+
 fn nob_to_term(s: &NamedOrBlankNode) -> Term {
     match s {
         NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
@@ -79,19 +82,15 @@ fn freshen_term(t: &Term, fresh: &mut FreshBnodes) -> Term {
     }
 }
 
-fn quad_to_triple_fresh(q: &Quad, fresh: &mut FreshBnodes) -> (GraphSlot, TripleTerms) {
-    let subject = match freshen_term(&nob_to_term(&q.subject), fresh) {
-        Term::NamedNode(n) => Term::NamedNode(n),
-        Term::BlankNode(b) => Term::BlankNode(b),
-        s => s,
-    };
+fn quad_to_triple_fresh(q: &Quad, fresh: &mut FreshBnodes) -> SlotTriple {
+    let subject = freshen_term(&nob_to_term(&q.subject), fresh);
     (
         graph_name_slot(&q.graph_name),
         [subject, Term::NamedNode(q.predicate.clone()), freshen_term(&q.object, fresh)],
     )
 }
 
-fn ground_quad_to_triple(q: &GroundQuad) -> (GraphSlot, TripleTerms) {
+fn ground_quad_to_triple(q: &GroundQuad) -> SlotTriple {
     (
         graph_name_slot(&q.graph_name),
         [Term::NamedNode(q.subject.clone()), Term::NamedNode(q.predicate.clone()), ground_to_term(&q.object)],
@@ -291,12 +290,12 @@ fn instantiate_templates(
     delete: &[GroundQuadPattern],
     insert: &[QuadPattern],
     pattern: &spargebra::algebra::GraphPattern,
-) -> Result<(Vec<(GraphSlot, TripleTerms)>, Vec<(GraphSlot, TripleTerms)>), String> {
+) -> Result<(Vec<SlotTriple>, Vec<SlotTriple>), String> {
     let result = crate::exec::eval_select(active, pattern)?;
     let cols: FxHashMap<Variable, usize> =
         result.vars.iter().enumerate().map(|(i, v)| (v.clone(), i)).collect();
-    let mut dels: Vec<(GraphSlot, TripleTerms)> = Vec::new();
-    let mut inss: Vec<(GraphSlot, TripleTerms)> = Vec::new();
+    let mut dels: Vec<SlotTriple> = Vec::new();
+    let mut inss: Vec<SlotTriple> = Vec::new();
     for row in &result.rows {
         let get = |v: &Variable| -> Option<Term> { cols.get(v).and_then(|&i| row[i].clone()) };
         for dp in delete {
@@ -508,7 +507,7 @@ pub fn update(graph: &Graph, sparql: &str) -> Result<Graph, String> {
 // --- the delta-overlay path ------------------------------------------------------------------
 
 /// Groups (graph-slot, triple) pairs per graph slot, preserving first-seen slot order.
-fn group_by_slot(items: Vec<(GraphSlot, TripleTerms)>) -> Vec<(GraphSlot, Vec<TripleTerms>)> {
+fn group_by_slot(items: Vec<SlotTriple>) -> Vec<(GraphSlot, Vec<TripleTerms>)> {
     let mut out: Vec<(GraphSlot, Vec<TripleTerms>)> = Vec::new();
     for (slot, t) in items {
         match out.iter_mut().find(|(s, _)| *s == slot) {

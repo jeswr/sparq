@@ -554,11 +554,10 @@ fn solve(
         }
         let mut bound: Vec<String> = Vec::new();
         let ok = (0..3).all(|k| pat_match(&pat[k], &row[k], map, &mut bound, d));
-        if ok {
-            if solve(i + 1, conclusion, closure, map, d, steps) {
+        if ok
+            && solve(i + 1, conclusion, closure, map, d, steps) {
                 return true;
             }
-        }
         for b in bound {
             map.remove(&b);
         }
@@ -690,15 +689,14 @@ pub fn inconsistency(closure: &[Row], d: &Recognized) -> Option<String> {
                 }
             } else if pn.as_str() == rdfs::SUB_CLASS_OF.as_str() {
                 if let (Term::NamedNode(sub), Term::NamedNode(sup)) = (s, o) {
-                    if d.contains(sub.as_str()) && d.contains(sup.as_str()) {
-                        if dt_subset(sub.as_str(), sup.as_str()) == Some(false) {
+                    if d.contains(sub.as_str()) && d.contains(sup.as_str())
+                        && dt_subset(sub.as_str(), sup.as_str()) == Some(false) {
                             return Some(format!(
                                 "datatype subclass clash: <{}> ⊄ <{}> (value spaces)",
                                 sub.as_str(),
                                 sup.as_str()
                             ));
                         }
-                    }
                 }
             }
         }

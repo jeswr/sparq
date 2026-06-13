@@ -10,6 +10,7 @@
 //! 2. **Binding-consistency edges**: each declared edge's scan-proof row/slot
 //!    encoding must equal the consuming filter proof's `operand_enc` (a plain
 //!    field equality over public inputs — the modular composition seam).
+//!
 //! 2d. **Issuer-signature / key-set binding (audit #3, codex #1).** Every scan
 //!    sub-proof's `commitments[g]` must carry an issuer attestation
 //!    ([`crate::manifest::CommitmentAttestation`]) whose Schnorr signature
@@ -28,19 +29,19 @@
 //!    `sparq_zk::sig`) removes that.
 //! 3. **bb verification (the cryptographic gate)**, for each sub-proof, all of:
 //!    a. **Public-input reconstruction (audit #1).** Independently rebuild the
-//!       public-input field vector from the DECLARED [`ProofInputs`] (in `main`
-//!       declaration order) using the verifier's own challenge, serialize to
-//!       bb's byte layout (32-byte BE field elements, no header — see
-//!       [`reconstruct_public_inputs`]), and assert byte-equality with the
-//!       prover's `public_inputs` blob. This binds the JSON statement to the
-//!       proof; without it stages 1-2 (JSON) and the proof (a detached crypto
-//!       object) describe potentially different statements.
+//!   public-input field vector from the DECLARED [`ProofInputs`] (in `main`
+//!   declaration order) using the verifier's own challenge, serialize to
+//!   bb's byte layout (32-byte BE field elements, no header — see
+//!   [`reconstruct_public_inputs`]), and assert byte-equality with the
+//!   prover's `public_inputs` blob. This binds the JSON statement to the
+//!   proof; without it stages 1-2 (JSON) and the proof (a detached crypto
+//!   object) describe potentially different statements.
 //!    b. **Canonical vk (audit #2).** Recompute the vk verifier-side from the
-//!       compiled member named by the re-derived [`CircuitId`] (never the
-//!       prover's `art.vk`), pinning the vk to the FULL CircuitId (subsumes the
-//!       #11 n/d/r relabel).
+//!   compiled member named by the re-derived [`CircuitId`] (never the
+//!   prover's `art.vk`), pinning the vk to the FULL CircuitId (subsumes the
+//!   #11 n/d/r relabel).
 //!    c. `bb verify` over (prover proof, reconstructed public inputs, canonical
-//!       vk).
+//!   vk).
 //!
 //! 2f. **Revocation / freshness (audit #12, + re-audit Option B).** Leverages #3:
 //!    the issuer signature ALSO binds the credential's STATUS-LIST REFERENCE
