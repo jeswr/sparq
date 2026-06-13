@@ -11,8 +11,10 @@
 # the MpcBackend trait. STILL deferred behind honest NotYetImplemented stubs:
 # (Q1) the unsolved distributed-signature-over-secret-shared-witness inside the
 # collaborative proof (M4), gated on the ZK-foundation remediation. No fake
-# crypto: every deferred path names its gate. Shamir's masking RNG is a
-# SIMULATION PRNG — production needs a CSPRNG (flagged in shamir.rs).
+# crypto: every deferred path names its gate. Shamir's masking RNG is now a
+# CSPRNG (sq-1vt resolved): OS-seeded rand_chacha ChaCha20 by default, with a
+# deterministic seedable PRNG only behind the `insecure-test-rng` feature (off
+# by default; tests use it). See rng.rs + shamir.rs.
 [package]
 name = "sparq-mpc"
 version.workspace = true
