@@ -19,6 +19,10 @@ use temporal::Temporal;
 
 /// Per-chunk parse output: a partial dictionary + that chunk's local-id triples, one
 /// element per parallel chunk (the parallelizable half of ingest, merged downstream).
+// [OPUS-4.8] Only the `parallel`-gated `parse_block` uses this; without the gate the
+// alias is dead code in no-default-features builds (e.g. the wasm target), which trips the
+// `-D warnings` clippy hard-gate. Gate it to its sole user.
+#[cfg(feature = "parallel")]
 type ChunkPartials = Vec<(Dict, Vec<[Id; 3]>)>;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};

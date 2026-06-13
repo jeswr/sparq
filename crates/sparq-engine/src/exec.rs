@@ -283,6 +283,9 @@ pub(crate) mod functions {
 
     /// Snapshot of the installed registry for the rayon-parallel branches
     /// (`None` — the overwhelmingly common case — makes [`worker_install`] free).
+    // [OPUS-4.8] Only the `parallel`-gated worker branches call this; match the sibling
+    // `limits::snapshot` so the `-D warnings` clippy gate is clean in no-parallel/wasm builds.
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
     pub(crate) fn snapshot() -> Option<Arc<FunctionRegistry>> {
         ACTIVE.with(|a| a.borrow().clone())
     }
@@ -622,6 +625,10 @@ fn write_store_id_json(graph: &Graph, id: Id, s: &mut String) {
 /// single-string mode (`flush = None`) concatenates onto the tail (the pre-existing
 /// behaviour of the parallel join). Concatenation order — and so the byte stream —
 /// is identical either way.
+// [OPUS-4.8] Both call sites are in `parallel`-gated blocks; the sequential (wasm) paths
+// `push` directly. Gate the helper too, matching the file's convention, so the
+// `-D warnings` clippy gate is clean in no-parallel/wasm builds.
+#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
 fn emit_chunk(chunks: &mut Vec<String>, frag: String, flush: Option<usize>) {
     match chunks.last_mut() {
         Some(tail) if flush.is_none() => tail.push_str(&frag),
