@@ -246,6 +246,34 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         } else {
             g
         };
+        // With SPARQ_FUZZ_DICTSPILL=1, REBUILD the store through the spilled-dictionary
+        // external build (`dict-spill`) with a TINY budget — constant dedup-cache epoch
+        // clears and many-run external sorts on every case — and reopen it memory-mapped.
+        // Agreement with Oxigraph over thousands of cases validates the spilled id
+        // assignment + streamed dictionary end-to-end. The parsed graph is re-serialized
+        // to N-Triples (the only format the spill path accepts; the generated Turtle is
+        // RDF-star-free, so terms round-trip exactly).
+        let g = if std::env::var("SPARQ_FUZZ_DICTSPILL").is_ok() {
+            let scan = g.store.scan(&[None, None, None]);
+            let mut nt = String::new();
+            for r in scan.rows.iter() {
+                let spo = scan.to_spo(r);
+                nt.push_str(&format!(
+                    "{} {} {} .\n",
+                    g.dict.term(spo[0]),
+                    g.dict.term(spo[1]),
+                    g.dict.term(spo[2])
+                ));
+            }
+            let dir = std::env::temp_dir().join(format!("sparq_fuzz_dsp_{}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            let cfg = sparq_core::dictspill::SpillConfig { mem_budget: 1, disk_floor: 0 };
+            sparq_core::Graph::build_external_spill(nt.as_bytes(), "ntriples", &dir, 64, &cfg)
+                .expect("dict-spill build");
+            sparq_core::Graph::open(&dir).expect("open")
+        } else {
+            g
+        };
         let store = Store::new().unwrap();
         if let Err(e) = store.load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes()) {
             // Both engines parse the same Turtle; a divergence here is itself a bug.
@@ -353,6 +381,10 @@ fn bindings_multiset(json: &str) -> Vec<String> {
 }
 
 fn report_repro(slot: &mut Option<String>, seed: u64, q: &str, ttl: &str, msg: &str) {
+    // One line per failing seed (machine-greppable), so differential runs across harness
+    // MODES (baseline / mmap / compress / dict-spill) can compare failing-seed SETS, not
+    // just counts — a mode is clean iff its set equals the baseline's.
+    eprintln!("MISMATCH seed={seed}");
     if slot.is_none() {
         *slot = Some(format!("seed={seed}\n{msg}\n--- query ---\n{q}\n--- graph ---\n{ttl}"));
     }

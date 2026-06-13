@@ -2614,7 +2614,14 @@ fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
     interner: &mut dictspill::SpillInterner,
 ) -> Result<(), String> {
     use std::sync::mpsc::sync_channel;
-    const BLOCK: usize = 64 << 20;
+    // 16 MiB blocks (vs the sharded path's 64 MiB): the in-flight partial dicts (up to
+    // ~3 batches across the two channels) dominate the spill path's RSS FLOOR in the
+    // unique-literal regime, and the id assignment is CHUNKING-INVARIANT — per-shard
+    // first-occurrence order depends only on the (line, position) order of first
+    // occurrences, not on where block/partial boundaries fall — so smaller blocks trade
+    // nothing but per-batch overhead. (The differential test builds the reference with
+    // the sharded path's 64 MiB blocks, so it verifies this invariance empirically.)
+    const BLOCK: usize = 16 << 20;
     let (tx, rx) = sync_channel::<Vec<u8>>(3);
     type Partials = Vec<(Dict, Vec<[Id; 3]>)>;
     let (ptx, prx) = sync_channel::<Partials>(2);
