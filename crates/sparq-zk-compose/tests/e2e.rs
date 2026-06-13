@@ -29,7 +29,8 @@ use sparq_zk_compose::manifest::{
 };
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
-    encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, KeySet,
+    encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, InMemorySeenNonces,
+    KeySet, VerifierNonce,
 };
 use sparq_zk::field::Fr;
 use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
@@ -48,6 +49,19 @@ fn trusted_k(sk: &SecretKey) -> KeySet {
 /// External trust anchor trusting no issuer (fail-closed).
 fn empty_k() -> KeySet {
     KeySet::empty()
+}
+
+// --- audit #4: verifier-issued nonce + single-use plumbing ----------------
+// [OPUS-4.8] The honest happy-path challenge in these tests is 0x2a, so the
+// verifier nonce is the field 0x2a (it is what the proof committed as field 0
+// AND what manifest.binding declares). `nonce_for("0x2a")` mints it; each
+// verify_manifest call gets a FRESH single-use store unless a test deliberately
+// re-presents the same store to probe single-use.
+
+/// Mint a verifier nonce from a challenge hex (the value the proof committed and
+/// the manifest binding declares).
+fn nonce_for(hex: &str) -> VerifierNonce {
+    VerifierNonce::from_hex(hex).expect("valid nonce hex")
 }
 
 // --- issuer-signature test plumbing (audit #3) ----------------------------
@@ -535,8 +549,17 @@ fn full_manifest_prove_verify_scan() {
         binding_edges: vec![],
     };
     attest_all(&mut manifest, &test_issuer_sk(1), salt); // [OPUS-4.8] audit #3/#9 (salt-bound)
-    verify_manifest(&manifest, &prover, &scratch("manifest_verify"), &trusted_k(&test_issuer_sk(1)))
-        .expect("manifest verifies");
+    // [OPUS-4.8] audit #4: the verifier issues the nonce that the proof committed
+    // (0x2a) and a fresh single-use store; the happy path verifies.
+    verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("manifest_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("manifest verifies");
 }
 
 // --- forge-and-verify NEGATIVE tests (audit #1/#2) ------------------------
@@ -659,8 +682,15 @@ fn forge_positive_honest_filter_verifies() {
     let (inputs, art) =
         honest_filter_d1(5, FilterOp::Lt, 10, true, &challenge, &prover, "forge_pos");
     let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
-    verify_manifest(&m, &prover, &scratch("forge_pos_verify"), &trusted_k(&test_issuer_sk(1)))
-        .expect("honest manifest verifies");
+    verify_manifest(
+        &m,
+        &prover,
+        &scratch("forge_pos_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("honest manifest verifies");
 }
 
 /// Audit #1: a GENUINE proof over statement A (5 < 10 = true) presented under a
@@ -684,7 +714,14 @@ fn forge_reject_statement_substitution() {
         *bound = 99;
     }
     let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
-    match verify_manifest(&m, &prover, &scratch("forge_sub_verify"), &trusted_k(&test_issuer_sk(1))) {
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("forge_sub_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
         Err(CheckError::PublicInputMismatch { proof: 1 }) => {}
         other => panic!("expected PublicInputMismatch, got {other:?}"),
     }
@@ -709,16 +746,25 @@ fn forge_reject_verdict_substitution() {
         *expected = true;
     }
     let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
-    match verify_manifest(&m, &prover, &scratch("forge_verdict_verify"), &trusted_k(&test_issuer_sk(1))) {
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("forge_verdict_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
         Err(CheckError::PublicInputMismatch { proof: 1 }) => {}
         other => panic!("expected PublicInputMismatch, got {other:?}"),
     }
 }
 
-/// Audit #1 (challenge binding seam for #4): a manifest whose binding challenge
-/// differs from the challenge the proof was made under is rejected by the
-/// byte-compare (the JSON challenge is now byte-bound into field 0). This is
-/// the seam a later agent extends to a verifier-issued fresh nonce.
+/// Audit #4 (challenge byte-binding): a proof committed under challenge 0x2a,
+/// re-presented under a DIFFERENT verifier nonce (0xdead) with a consistent
+/// 0xdead manifest binding, is rejected by the byte-compare. The reconstruction
+/// uses the VERIFIER'S nonce (0xdead) as field 0, but the proof committed 0x2a,
+/// so the first-checked sub-proof (scan, proof 0) mismatches. This is the core
+/// #4 replay defence: a captured proof cannot be replayed under a fresh nonce.
 #[test]
 fn forge_reject_challenge_rebind() {
     if !toolchain_available() {
@@ -730,13 +776,199 @@ fn forge_reject_challenge_rebind() {
     let (scan_inputs, scan_hex) = honest_age_scan(&proof_challenge, &prover, "forge_chal_scan");
     let (inputs, art) =
         honest_filter_d1(5, FilterOp::Lt, 10, true, &proof_challenge, &prover, "forge_chal");
-    // Present under a DIFFERENT binding challenge than the proofs carry. Both
-    // sub-proofs byte-bind the challenge into field 0, so the first-checked
-    // (scan, proof 0) already mismatches.
+    // The manifest binding is consistent with the verifier's nonce (both 0xdead),
+    // so NonceBindingMismatch does NOT fire; the proof, however, committed 0x2a,
+    // so the byte-compare against the 0xdead-reconstructed field 0 rejects.
     let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), FieldHex("0xdead".into()));
-    match verify_manifest(&m, &prover, &scratch("forge_chal_verify"), &trusted_k(&test_issuer_sk(1))) {
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("forge_chal_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for("0xdead"),
+        &InMemorySeenNonces::new(),
+    ) {
         Err(CheckError::PublicInputMismatch { proof: 0 }) => {}
         other => panic!("expected PublicInputMismatch, got {other:?}"),
+    }
+}
+
+// --- audit #4: replay / freshness / single-use end-to-end tests -----------
+//
+// [OPUS-4.8] The three forges the test-bench design requires for #4. They run a
+// REAL bb prove (toolchain-gated) so the binding is exercised cryptographically:
+// (a) a captured manifest replayed under a NEW verifier nonce => REJECT (the
+//     proof committed the OLD nonce; the byte-compare against the new nonce
+//     fails);
+// (b) the SAME (nonce, manifest) submitted twice to the SAME single-use store
+//     => the 2nd is REJECTED (NonceReplay);
+// (c) the happy path: the verifier issues a fresh nonce, the prover proves under
+//     it, and verify_manifest accepts.
+
+/// Build an honest composed manifest (honest age scan + an honest, unreferenced
+/// filter sub-proof) whose proofs were generated under `proof_challenge`. The
+/// manifest binding declares `binding_challenge` (normally == proof_challenge).
+/// Toolchain-gated; returns the manifest + the prover.
+fn honest_nonce_manifest(
+    prover: &CircuitProver,
+    proof_challenge: &FieldHex,
+    binding_challenge: FieldHex,
+    tag: &str,
+) -> ProofManifest {
+    let (scan_inputs, scan_hex) = honest_age_scan(proof_challenge, prover, &format!("{tag}_scan"));
+    let (inputs, art) =
+        honest_filter_d1(5, FilterOp::Lt, 10, true, proof_challenge, prover, tag);
+    filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), binding_challenge)
+}
+
+/// Audit #4 (c) HAPPY PATH: verifier issues a fresh nonce, the prover proves
+/// under it, verify_manifest accepts (real bb prove+verify).
+#[test]
+#[ignore = "slow: full bb prove of a scan + filter member (audit #4 happy path)"]
+fn nonce_happy_path_fresh_nonce_verifies() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    // The relying party's fresh nonce for THIS session. The prover proves under
+    // it (challenge == the nonce) and the binding declares it.
+    let nonce_hex = "0x2a";
+    let challenge = FieldHex(nonce_hex.into());
+    let m = honest_nonce_manifest(&prover, &challenge, challenge.clone(), "nonce_happy");
+    verify_manifest(
+        &m,
+        &prover,
+        &scratch("nonce_happy_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for(nonce_hex),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("fresh-nonce honest manifest verifies");
+}
+
+/// Audit #4 (a) REPLAY UNDER A NEW NONCE: a manifest+proof captured from an
+/// earlier session (proof committed 0x2a) is replayed to a verifier that issues
+/// a DIFFERENT fresh nonce (0xbeef). The reconstruction uses 0xbeef as field 0,
+/// which cannot byte-match the proof's committed 0x2a => REJECT. (The binding is
+/// set consistent with the new nonce, so the rejection is the cryptographic
+/// byte-compare, not the JSON consistency check.)
+#[test]
+#[ignore = "slow: full bb prove (audit #4 replay-under-new-nonce)"]
+fn nonce_replay_under_new_nonce_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    // Captured proof: committed challenge 0x2a. The adversary re-presents it to a
+    // fresh verifier whose nonce is 0xbeef, forging a consistent 0xbeef binding.
+    let captured_proof_challenge = FieldHex("0x2a".into());
+    let m = honest_nonce_manifest(
+        &prover,
+        &captured_proof_challenge,
+        FieldHex("0xbeef".into()),
+        "nonce_replay",
+    );
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("nonce_replay_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for("0xbeef"),
+        &InMemorySeenNonces::new(),
+    ) {
+        // First sub-proof (scan, proof 0) committed 0x2a; field 0 reconstructed
+        // with 0xbeef => mismatch.
+        Err(CheckError::PublicInputMismatch { proof: 0 }) => {}
+        other => panic!("expected PublicInputMismatch (replay under fresh nonce), got {other:?}"),
+    }
+}
+
+/// Audit #4 (b) SINGLE-USE: the SAME (nonce, manifest) presented twice to the
+/// SAME single-use store. The first verify accepts; the second is REJECTED with
+/// NonceReplay (the store has already seen the nonce). Models a captured bearer
+/// proof replayed to the same verifier session.
+#[test]
+#[ignore = "slow: full bb prove (audit #4 single-use store)"]
+fn nonce_single_use_second_presentation_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let nonce_hex = "0x2a";
+    let challenge = FieldHex(nonce_hex.into());
+    let m = honest_nonce_manifest(&prover, &challenge, challenge.clone(), "nonce_single_use");
+    // ONE store shared across both presentations (a persistent verifier session).
+    let seen = InMemorySeenNonces::new();
+    let nonce = nonce_for(nonce_hex);
+    // First presentation: fresh nonce => accepts.
+    verify_manifest(
+        &m,
+        &prover,
+        &scratch("nonce_single_use_verify1"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce,
+        &seen,
+    )
+    .expect("first presentation under a fresh nonce verifies");
+    // Second presentation of the SAME (nonce, manifest) => REJECT (single-use).
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("nonce_single_use_verify2"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce,
+        &seen,
+    ) {
+        Err(CheckError::NonceReplay) => {}
+        other => panic!("expected NonceReplay on the second presentation, got {other:?}"),
+    }
+}
+
+/// Audit #4 (consistency, fast/structural-adjacent): a manifest whose declared
+/// binding challenge does NOT equal the verifier's nonce is rejected with
+/// NonceBindingMismatch — fail-closed JSON consistency. Toolchain-gated only
+/// because it constructs a real proof to reach the binding check (the check runs
+/// before bb, but the manifest must carry valid proof bytes to pass the earlier
+/// MissingProof guard... actually the binding check is BEFORE the per-sub-proof
+/// loop, so it fires even with a witness-only manifest). Uses a witness-only
+/// manifest to stay FAST (no bb).
+#[test]
+fn nonce_binding_mismatch_rejected() {
+    // No toolchain needed: the nonce/binding consistency check runs before the
+    // per-sub-proof crypto loop, so a witness-only manifest reaches it.
+    let prover = CircuitProver::from_crate_root();
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        // Binding declares 0x2a...
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: None,
+        sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
+        binding_edges: vec![],
+    };
+    attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
+    // ...but the verifier issues nonce 0x99 (!= 0x2a). The consistency check
+    // fires before any bb call.
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("nonce_binding_mismatch"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for("0x99"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::NonceBindingMismatch) => {}
+        other => panic!("expected NonceBindingMismatch, got {other:?}"),
     }
 }
 
@@ -769,7 +1001,14 @@ fn forge_reject_noncanonical_vk() {
     let prover = CircuitProver::from_crate_root();
     let (scan_inputs, scan_hex) = honest_age_scan(&challenge, &prover, "forge_vk_scan");
     let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
-    match verify_manifest(&m, &prover, &scratch("forge_vk_verify"), &trusted_k(&test_issuer_sk(1))) {
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("forge_vk_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
         Err(CheckError::ProofRejected { proof: 1 }) => {}
         other => panic!("expected ProofRejected (canonical vk defeats attacker vk), got {other:?}"),
     }
@@ -795,8 +1034,15 @@ fn forge_artvk_is_ignored() {
         *b ^= 0xff;
     }
     let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
-    verify_manifest(&m, &prover, &scratch("forge_ignorevk_verify"), &trusted_k(&test_issuer_sk(1)))
-        .expect("honest proof verifies despite a garbage bundled vk (canonical vk is used)");
+    verify_manifest(
+        &m,
+        &prover,
+        &scratch("forge_ignorevk_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("honest proof verifies despite a garbage bundled vk (canonical vk is used)");
 }
 
 /// Compile + prove a trivial ATTACKER circuit that has the same 5 public inputs

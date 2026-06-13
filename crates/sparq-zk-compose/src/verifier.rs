@@ -42,12 +42,28 @@
 //!    c. `bb verify` over (prover proof, reconstructed public inputs, canonical
 //!       vk).
 //!
+//! 4. **Freshness / single-use (audit #4).** [`verify_manifest`] takes a
+//!    VERIFIER-ISSUED fresh [`VerifierNonce`] (minted out of band, handed to the
+//!    prover before proving) and a single-use [`SeenNonces`] store. It (i)
+//!    records the nonce single-use BEFORE the crypto gate (replay of the same
+//!    nonce => [`CheckError::NonceReplay`]); (ii) requires `manifest.binding`'s
+//!    declared challenge to equal the nonce (fail-closed); and (iii) feeds the
+//!    nonce — NOT `manifest.binding` — as field 0 of the stage-3a reconstruction,
+//!    so a proof committed under any OTHER challenge fails the byte-compare. A
+//!    captured manifest re-presented under a fresh nonce is rejected by the
+//!    byte-compare; the same manifest re-presented under its original nonce is
+//!    rejected by the store. (Field 0 stays an unconstrained in-circuit tag — the
+//!    binding is wholly verifier-side via the audit-#1 byte-compare, so no circuit
+//!    change is needed.)
+//!
 //! Stage 1+2 run WITHOUT bb (the fast structural gate); stage 3 is the
-//! cryptographic gate. [`prefilter_manifest_structure`] runs stages 1+2 ONLY and
-//! is NOT a sound verifier (it binds nothing to a proof — see its docs);
-//! [`verify_manifest`] is the sound public entry point: it runs the pre-filter
-//! then the bb verify + public-input reconstruction that binds the JSON
-//! statement (incl. attribution bits) to the proofs.
+//! cryptographic gate; stage 4 (freshness) is enforced by `verify_manifest`
+//! around stage 3. [`prefilter_manifest_structure`] runs stages 1+2 ONLY and
+//! is NOT a sound verifier (it binds nothing to a proof and enforces NO
+//! freshness — see its docs); [`verify_manifest`] is the sound public entry
+//! point: it runs the pre-filter then the freshness + bb verify +
+//! public-input reconstruction that binds the JSON statement (incl. attribution
+//! bits) and the verifier's nonce to the proofs.
 
 use crate::build::{derive_filter_int_id, derive_scan_id};
 use crate::driver::{CircuitProver, DriverError};
@@ -55,7 +71,7 @@ use crate::manifest::{
     BindingMode, CircuitId, FieldHex, ProofInputs, ProofManifest,
 };
 use sparq_zk::encode::encode_term;
-use sparq_zk::field::{field_to_be_bytes_32, field_to_hex, Fr};
+use sparq_zk::field::{field_from_hex_str, field_to_be_bytes_32, field_to_hex, Fr};
 // [OPUS-4.8] codex 2221 HIGH: only the SALT-BOUND `commitment_message_with_salt`
 // is used on the scan-verify path; the bare salt-less `commitment_message` is no
 // longer reachable here (a scan-covering attestation must be salt-bound).
@@ -130,6 +146,109 @@ impl KeySet {
     /// The trusted set is empty (trusts no issuer).
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+}
+
+/// A verifier-issued freshness nonce (audit #4) — a fresh BN254 field element the
+/// relying party mints out of band and hands to the prover BEFORE proving. The
+/// prover MUST incorporate it as the circuit's `challenge` public input (field 0)
+/// at prove time; [`verify_manifest`] then reconstructs the public-input vector
+/// using THIS nonce (never `manifest.binding`), so the existing audit-#1
+/// byte-compare rejects any proof whose committed challenge ≠ the verifier's
+/// nonce. A captured manifest re-presented under a fresh nonce therefore fails
+/// the byte-compare (replay defence), and the [`SeenNonces`] store below rejects
+/// a nonce presented twice (single-use defence).
+///
+/// Stored as a normalized field element so `0x`-padding differences cannot make
+/// two presentations of the same nonce look distinct to the single-use store.
+// [OPUS-4.8] audit #4: verifier-issued freshness nonce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierNonce(Fr);
+
+impl VerifierNonce {
+    /// Adopt a caller-chosen field element as the nonce (e.g. from an external
+    /// CSPRNG mapped into the field, or a fresh per-session value). The relying
+    /// party is responsible for unpredictability/uniqueness; this type only
+    /// guarantees a canonical field representation for the binding + single-use
+    /// machinery. `None` if `hex` is not a parseable field element.
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        field_from_hex_str(hex).map(VerifierNonce)
+    }
+
+    /// Adopt a field element directly (e.g. one drawn by the relying party's RNG
+    /// and reduced into the field).
+    pub fn from_field(f: Fr) -> Self {
+        VerifierNonce(f)
+    }
+
+    /// The nonce as the `FieldHex` the circuit challenge / reconstruction uses.
+    pub fn as_field_hex(&self) -> FieldHex {
+        FieldHex(field_to_hex(&self.0))
+    }
+
+    /// Canonical hex key for the single-use store (representation-insensitive).
+    fn canonical_key(&self) -> String {
+        field_to_hex(&self.0)
+    }
+}
+
+/// Single-use nonce store (audit #4): records every verifier nonce a manifest has
+/// already been accepted (or attempted) under, so a captured (nonce, manifest)
+/// pair cannot be replayed. [`verify_manifest`] calls [`SeenNonces::record_fresh`]
+/// BEFORE the cryptographic gate; a nonce already present REJECTS
+/// ([`CheckError::NonceReplay`]).
+///
+/// # Fail-closed contract
+/// `record_fresh` must (a) return `false` (already-seen) if the nonce was ever
+/// previously recorded, and (b) atomically mark it recorded otherwise. The store
+/// is consulted on EVERY `verify_manifest` call with NO opt-out — there is no
+/// "skip when the store is absent" path (the parameter is mandatory), so the
+/// single-use property cannot be bypassed by omitting a field.
+///
+/// # Persistence
+/// The in-memory [`InMemorySeenNonces`] is process-local: it enforces single-use
+/// within one verifier process/session. A multi-process / restart-surviving
+/// relying party MUST back this trait with durable storage (a database row with a
+/// UNIQUE constraint on the nonce, a KV store with compare-and-set, etc.); that
+/// is a documented future impl. The trait boundary is exactly so the persistence
+/// choice is pluggable without touching the verifier.
+// [OPUS-4.8] audit #4: single-use nonce store.
+pub trait SeenNonces {
+    /// Record `nonce` as used and return `true` iff it was FRESH (not previously
+    /// recorded). Returns `false` if the nonce was already seen — the verifier
+    /// then rejects the manifest as a replay. Implementations MUST be atomic
+    /// (check-and-insert) so concurrent verifiers cannot both observe the same
+    /// nonce as fresh.
+    fn record_fresh(&self, nonce: &VerifierNonce) -> bool;
+}
+
+/// Process-local, thread-safe [`SeenNonces`] (audit #4). Enforces single-use
+/// within one verifier process. NOT durable across restarts — see the
+/// [`SeenNonces`] persistence note; a production relying party backs the trait
+/// with a database/KV store with a uniqueness constraint.
+// [OPUS-4.8] audit #4: in-memory single-use store (persistence is a future impl).
+#[derive(Debug, Default)]
+pub struct InMemorySeenNonces {
+    seen: std::sync::Mutex<BTreeSet<String>>,
+}
+
+impl InMemorySeenNonces {
+    pub fn new() -> Self {
+        InMemorySeenNonces { seen: std::sync::Mutex::new(BTreeSet::new()) }
+    }
+}
+
+impl SeenNonces for InMemorySeenNonces {
+    fn record_fresh(&self, nonce: &VerifierNonce) -> bool {
+        // `.insert` returns true iff the value was NOT already present — exactly
+        // the "was fresh" semantics. A poisoned lock fails closed (treat as
+        // already-seen / reject) rather than panicking on prover-triggerable
+        // input: a poisoned mutex means another verify panicked mid-record, and
+        // we must not optimistically accept a possibly-replayed nonce.
+        match self.seen.lock() {
+            Ok(mut set) => set.insert(nonce.canonical_key()),
+            Err(_) => false,
+        }
     }
 }
 
@@ -258,6 +377,20 @@ pub enum CheckError {
     /// `CircuitId.k` bits (no default/pad-to-false). `expected` = k.
     // [OPUS-4.8] codex 2221 MEDIUM: attribution must be present + exactly k bits.
     AttributionMalformed { proof: usize, expected: usize, got: usize },
+    /// The verifier-issued nonce has already been seen by the single-use store
+    /// (audit #4): a captured (nonce, manifest) pair re-presented to the SAME
+    /// verifier session. Rejected before the cryptographic gate so a bearer proof
+    /// cannot be replayed. The honest flow uses each verifier nonce exactly once.
+    // [OPUS-4.8] audit #4: single-use.
+    NonceReplay,
+    /// The manifest's declared `binding` challenge does not equal the
+    /// verifier-issued nonce (audit #4). The proof's committed challenge (field 0)
+    /// is byte-bound to the nonce by the audit-#1 reconstruction; this additional
+    /// check fails closed when the JSON `binding` advertises a DIFFERENT challenge
+    /// than the verifier issued (a manifest minted for a different session/nonce).
+    /// A consistent honest manifest sets `binding.challenge == nonce`.
+    // [OPUS-4.8] audit #4: nonce/binding consistency, fail-closed.
+    NonceBindingMismatch,
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -345,6 +478,14 @@ impl std::fmt::Display for CheckError {
             CheckError::AttributionMalformed { proof, expected, got } => write!(
                 f,
                 "scan sub-proof {proof}: attribution must be present and exactly {expected} bits (CircuitId.k), got {got} (audit #8 / codex 2221 MEDIUM: an omitted/short attribution makes the cross-graph under-declaration check vacuous)"
+            ),
+            CheckError::NonceReplay => write!(
+                f,
+                "verifier nonce already seen (audit #4: single-use — a captured (nonce, manifest) pair may not be replayed)"
+            ),
+            CheckError::NonceBindingMismatch => write!(
+                f,
+                "manifest binding challenge does not equal the verifier-issued nonce (audit #4: the manifest was minted for a different nonce/session)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -966,29 +1107,77 @@ fn filter_edge_true(
 /// issuer trust anchor `K` (audit #3 codex #1 — never the prover's
 /// `manifest.key_set`).
 ///
+/// # Freshness / single-use (audit #4) — the challenge-response flow
+/// `nonce` is the relying party's OWN fresh value (a [`VerifierNonce`]), minted
+/// out of band and handed to the prover BEFORE proving. The honest flow is a
+/// three-step challenge-response:
+/// 1. **Verifier → prover:** the relying party mints a fresh `nonce` and sends
+///    it. (Unpredictability/uniqueness is the relying party's responsibility; a
+///    CSPRNG value reduced into the field is the expected source.)
+/// 2. **Prover:** proves with `nonce` as the circuit `challenge` public input
+///    (field 0) — the prove path threads it through `toml.rs` / `build.rs`, so
+///    NO circuit change is needed (field 0 is an unconstrained in-circuit tag;
+///    the binding is verifier-side).
+/// 3. **Verifier:** this function (a) records the nonce single-use via `seen`
+///    BEFORE the crypto gate (a second presentation of the same nonce =>
+///    [`CheckError::NonceReplay`]); (b) asserts `manifest.binding`'s declared
+///    challenge equals `nonce` (fail-closed JSON consistency); and (c)
+///    reconstructs the public-input vector using `nonce` (NOT `manifest.binding`)
+///    as field 0, so the audit-#1 byte-compare rejects any proof whose committed
+///    challenge ≠ the verifier's nonce. A CAPTURED manifest re-presented under a
+///    NEW verifier nonce therefore fails the byte-compare (its proof committed
+///    the OLD nonce); the same manifest re-presented under its ORIGINAL nonce
+///    fails the single-use store. Both replay vectors are closed fail-closed —
+///    there is no "skip when a binding field is absent" path.
+///
 /// Stage 3, per sub-proof, binds the declared statement to the proof (audit
 /// #1/#2): (a) reconstruct the public-input byte vector from the DECLARED
-/// `ProofInputs` using the verifier's challenge and assert byte-equality with
-/// the proof's `public_inputs`; (b) recompute the CANONICAL member vk
+/// `ProofInputs` using the VERIFIER'S NONCE as field 0 and assert byte-equality
+/// with the proof's `public_inputs`; (b) recompute the CANONICAL member vk
 /// verifier-side; (c) `bb verify` over (prover proof, reconstructed public
 /// inputs, canonical vk). The prover-supplied vk and public-input bytes from
 /// the blob are NEVER trusted.
+// [OPUS-4.8] audit #4: verifier-issued nonce + single-use.
 pub fn verify_manifest(
     manifest: &ProofManifest,
     prover: &CircuitProver,
     work_dir: &Path,
     trusted_key_set: &KeySet,
+    nonce: &VerifierNonce,
+    seen: &dyn SeenNonces,
 ) -> Result<(), CheckError> {
     prefilter_manifest_structure(manifest, trusted_key_set)?;
 
-    // The challenge that MUST appear as public-input field 0 of every member.
-    // It comes from the manifest's binding (a later agent binds this to a
-    // verifier-issued fresh nonce + single-use store, audit #4 — the byte
-    // binding into the reconstructed vector is done here).
-    let challenge = match &manifest.binding {
+    // --- Audit #4: single-use (fail-closed, BEFORE the crypto gate). ---
+    // Record the verifier's nonce as used; reject if it was already seen. Doing
+    // this first means a replayed (nonce, manifest) pair is rejected without
+    // even running bb. The store is consulted unconditionally — there is no
+    // opt-out path that could bypass single-use (the parameter is mandatory).
+    if !seen.record_fresh(nonce) {
+        return Err(CheckError::NonceReplay);
+    }
+
+    // --- Audit #4: nonce/binding consistency (fail-closed). ---
+    // The challenge that MUST appear as public-input field 0 of every member is
+    // the VERIFIER'S nonce, NOT the prover-written `manifest.binding`. We still
+    // require the declared `binding` challenge to EQUAL the nonce so an honest
+    // manifest is internally consistent and a manifest minted for a different
+    // nonce/session is rejected explicitly (rather than only failing the
+    // byte-compare further down). The load-bearing freshness anchor, though, is
+    // the nonce fed into `reconstruct_public_inputs` below — the JSON `binding`
+    // is no longer trusted as the challenge source (closing the audit-#4
+    // single-JSON-substitution rebind).
+    let challenge = nonce.as_field_hex();
+    let declared_binding_challenge = match &manifest.binding {
         BindingMode::Challenge { challenge } => challenge,
         BindingMode::HolderPop { challenge, .. } => challenge,
     };
+    // Compare as field elements so 0x-padding differences don't spuriously
+    // diverge; a malformed declared binding challenge fails closed.
+    let declared_fr = declared_binding_challenge.to_field();
+    if declared_fr.is_none() || declared_fr != challenge.to_field() {
+        return Err(CheckError::NonceBindingMismatch);
+    }
 
     for (i, sp) in manifest.sub_proofs.iter().enumerate() {
         if sp.proof_hex.is_empty() {
@@ -1000,10 +1189,13 @@ pub fn verify_manifest(
         let art = decode_artifacts(&blob).ok_or(CheckError::MalformedProof { proof: i })?;
 
         // (a) Reconstruct public inputs from the DECLARED statement (audit #1)
-        // and assert byte-equality with the proof's public_inputs. This is the
-        // single load-bearing binding: stages 1-2 check JSON, the proof is a
-        // detached crypto object, and THIS ties them to the same statement.
-        let reconstructed = reconstruct_public_inputs(&sp.inputs, challenge, i)?;
+        // using the VERIFIER'S NONCE as field 0 (audit #4) and assert
+        // byte-equality with the proof's public_inputs. This is the single
+        // load-bearing binding: stages 1-2 check JSON, the proof is a detached
+        // crypto object, and THIS ties them to the same statement AND to the
+        // verifier's fresh nonce (a proof committed under a different challenge
+        // cannot byte-match — closing replay).
+        let reconstructed = reconstruct_public_inputs(&sp.inputs, &challenge, i)?;
         if reconstructed != art.public_inputs {
             return Err(CheckError::PublicInputMismatch { proof: i });
         }
@@ -1383,6 +1575,70 @@ mod tests {
         assert!(take_lp(&[0, 0, 0]).is_none()); // < 4-byte prefix
         assert!(take_lp(&[0, 0, 0, 255, 1, 2]).is_none()); // oversized length
         assert!(decode_artifacts(&[0, 0, 0, 1, 9]).is_none()); // pi prefix missing
+    }
+
+    /// Audit #4: the in-memory single-use store records a nonce on first sight
+    /// (fresh => true) and rejects it on every subsequent sight (=> false).
+    #[test]
+    fn in_memory_seen_nonces_is_single_use() {
+        let store = InMemorySeenNonces::new();
+        let n = VerifierNonce::from_hex("0x2a").unwrap();
+        // First presentation is fresh; second (and third) are not.
+        assert!(store.record_fresh(&n), "first sight must be fresh");
+        assert!(!store.record_fresh(&n), "replay must be rejected");
+        assert!(!store.record_fresh(&n), "replay stays rejected");
+        // A DIFFERENT nonce is independently fresh.
+        let n2 = VerifierNonce::from_hex("0x2b").unwrap();
+        assert!(store.record_fresh(&n2));
+    }
+
+    /// Audit #4: a nonce is keyed by its CANONICAL field value, so two hex
+    /// spellings of the same field element collapse to one single-use entry (a
+    /// prover cannot re-present by re-padding the hex).
+    #[test]
+    fn seen_nonces_key_is_representation_insensitive() {
+        let store = InMemorySeenNonces::new();
+        let padded = VerifierNonce::from_hex(
+            "0x000000000000000000000000000000000000000000000000000000000000002a",
+        )
+        .unwrap();
+        let bare = VerifierNonce::from_hex("0x2a").unwrap();
+        assert!(store.record_fresh(&padded), "first sight fresh");
+        assert!(!store.record_fresh(&bare), "same field, different spelling => replay");
+    }
+
+    /// Audit #4: the nonce round-trips to the FieldHex the reconstruction binds
+    /// as field 0 (canonical 0x-prefixed 64-nibble hex).
+    #[test]
+    fn verifier_nonce_round_trips_to_field_hex() {
+        let n = VerifierNonce::from_hex("0x2a").unwrap();
+        assert_eq!(
+            n.as_field_hex(),
+            FieldHex(
+                "0x000000000000000000000000000000000000000000000000000000000000002a".to_string()
+            )
+        );
+        // A reconstruction with the nonce as challenge equals one with the
+        // equivalent FieldHex challenge (the nonce IS the challenge anchor).
+        let inputs = ProofInputs::FilterInt {
+            id: CircuitId::FilterInt { d: 1 },
+            operand_enc: fh("0x05"),
+            op: FilterOp::Ge,
+            bound: 18,
+            expected: true,
+        };
+        let via_nonce =
+            reconstruct_public_inputs(&inputs, &n.as_field_hex(), 0).unwrap();
+        let via_hex = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
+        assert_eq!(via_nonce, via_hex);
+    }
+
+    /// Audit #4: a non-field nonce hex is rejected at construction (fail-closed —
+    /// a relying party cannot mint an unparseable nonce).
+    #[test]
+    fn verifier_nonce_rejects_malformed_hex() {
+        assert!(VerifierNonce::from_hex("0xzz").is_none());
+        assert!(VerifierNonce::from_hex("").is_none());
     }
 
     /// A non-field hex string in a declared slot is rejected (no panic).

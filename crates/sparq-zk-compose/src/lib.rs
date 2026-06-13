@@ -28,3 +28,5 @@ pub use manifest::{
     BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp, ProofInputs,
     ProofManifest, RevocationStatus, SubProof,
 };
+// [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
+pub use verifier::{InMemorySeenNonces, SeenNonces, VerifierNonce};
