@@ -65,10 +65,11 @@ extract_invoke() {
       line=$0; sub(/^id[[:space:]]*=[[:space:]]*"/,"",line); sub(/".*/,"",line); cur=line
     }
     inblk && /^invoke[[:space:]]*=/ {
-      # Strip the opening `invoke = "` then everything from the CLOSING quote onward
-      # (incl. any trailing TOML inline comment). roborev #2264: the old anchored
-      # `"[[:space:]]*$` left the closing quote in place when a `# comment` followed it.
-      line=$0; sub(/^invoke[[:space:]]*=[[:space:]]*"/,"",line); sub(/".*$/,"",line); inv=line
+      # Strip the opening `invoke = "`, then the CLOSING quote + any trailing inline
+      # comment. The pattern anchors at EOL so it removes only the final closing quote
+      # (preserving escaped \" inside the value, roborev #2277) yet still eats a
+      # `" # comment` tail (roborev #2264). A `#.*` inside the comment is consumed too.
+      line=$0; sub(/^invoke[[:space:]]*=[[:space:]]*"/,"",line); sub(/"[[:space:]]*(#.*)?$/,"",line); inv=line
     }
     inblk && cur==want && inv!="" && /^invoke[[:space:]]*=/ {
       print inv; found=1; exit
