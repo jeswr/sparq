@@ -1039,6 +1039,10 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             Ok(project_bindings(b, variables))
         }
         GraphPattern::Distinct { inner } => {
+            // zk-trace: the enclosed pattern inputs are the PRE-DISTINCT
+            // input sets (the reduction is verifier-side; zk module docs).
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Distinct);
             let mut b = eval_modified(graph, local, inner)?;
             distinct_bindings(&mut b);
             Ok(b)
@@ -1068,6 +1072,11 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             Ok(b)
         }
         GraphPattern::Group { inner, variables, aggregates } => {
+            // zk-trace: the enclosed pattern inputs are the PRE-AGGREGATION
+            // input sets; the count pushdown below is disabled under an armed
+            // recorder (inside `try_count`), so they are always captured.
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Group);
             // COUNT(*) pushdown: a whole-dataset COUNT over a single pattern is the
             // scan range size — no need to materialise the solutions just to count
             // them (QLever counts lazily too; this is the q02-style win).
@@ -1393,10 +1402,23 @@ fn eval_graph_named(
     name: &NamedNodePattern,
     inner: &GraphPattern,
 ) -> Result<Bindings, String> {
-    fn eval_translated(graph: &Graph, local: &mut LocalVocab, sub: &Graph, inner: &GraphPattern) -> Result<Bindings, String> {
+    fn eval_translated(
+        graph: &Graph,
+        local: &mut LocalVocab,
+        sub: &Graph,
+        gname: &Term,
+        inner: &GraphPattern,
+    ) -> Result<Bindings, String> {
         // Inside GRAPH the evaluation graph IS the named sub-graph: suspend a
         // view's empty-default short-circuit for the inner pattern (L1 view).
         let _scope = view::enter_graph();
+        // zk-trace: tag the enclosed scans/filters with the named graph (the
+        // sub-graph has its own dictionary; terms are materialized at record
+        // time against it, so the tag is what attributes them).
+        #[cfg(feature = "zk")]
+        let _zk = crate::zk::graph_scope(gname);
+        #[cfg(not(feature = "zk"))]
+        let _ = gname;
         let mut sub_local = LocalVocab::default();
         let b = eval_graph_pattern(sub, &mut sub_local, inner)?;
         let rows: Vec<Row> = b
@@ -1425,13 +1447,17 @@ fn eval_graph_named(
                 None
             };
             match sub {
-                Some(sub) => eval_translated(graph, local, sub, inner),
+                Some(sub) => eval_translated(graph, local, sub, &target, inner),
                 // The named graph is absent → ZERO solutions (even for `GRAPH <g> {}`,
                 // which must NOT yield the unit row), but with `inner`'s variable
                 // schema — evaluate against an empty graph for the columns, then drop
                 // any rows (an empty group pattern would otherwise produce one).
                 None => {
                     let _scope = view::enter_graph(); // schema eval matches the present-graph path
+                    // zk-trace: an absent graph still records the operator
+                    // boundary + (empty) pattern input sets under its name.
+                    #[cfg(feature = "zk")]
+                    let _zk = crate::zk::graph_scope(&target);
                     let empty = Graph::load_str("", "ntriples").map_err(|e| e.to_string())?;
                     let mut el = LocalVocab::default();
                     let mut b = eval_graph_pattern(&empty, &mut el, inner)?;
@@ -1446,7 +1472,11 @@ fn eval_graph_named(
                 if !view::allows(gname) {
                     continue; // not visible under the installed dataset view (L1)
                 }
-                let mut b = eval_translated(graph, local, sub, inner)?;
+                // zk-trace: each iteration of `GRAPH ?g` tags the enclosed
+                // scans/filters with the iteration's named graph.
+                #[cfg(feature = "zk")]
+                let _zk = crate::zk::graph_scope(gname);
+                let mut b = eval_translated(graph, local, sub, gname, inner)?;
                 let gid = value_to_id(graph, local, &Value::Term(gname.clone()));
                 match b.col(v) {
                     // The inner pattern itself binds the graph variable (e.g.
@@ -1572,11 +1602,19 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             Ok(join_bindings(l, r))
         }
         GraphPattern::LeftJoin { left, right, expression } => {
+            // zk-trace: operator boundary marker (one thread-local read; the
+            // scope is a no-op when the recorder is disarmed). NOTE: the
+            // embedded OPTIONAL condition is evaluated inside the join and is
+            // NOT recorded as a FilterObligation (see zk module docs).
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Optional);
             let l = eval_graph_pattern(graph, local, left)?;
             let r = eval_graph_pattern(graph, local, right)?;
             left_outer_join(graph, local, l, r, expression.as_ref())
         }
         GraphPattern::Union { left, right } => {
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Union);
             let l = eval_graph_pattern(graph, local, left)?;
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(union_bindings(l, r))
@@ -1586,6 +1624,8 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             extend_bindings(graph, local, b, variable, expression)
         }
         GraphPattern::Minus { left, right } => {
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Minus);
             let l = eval_graph_pattern(graph, local, left)?;
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(minus_bindings(l, r))
@@ -4788,18 +4828,26 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
     };
     // zk-trace hook: record the FILTER obligation — expression, in-scope
     // variables, and per-row operand bindings with the verdict (the witness
-    // builder needs the operands of every hidden-filter application).
+    // builder needs the operands of every hidden-filter application). The
+    // per-row path records OPERAND-TABLE INDICES (one memo probe per cell);
+    // terms are materialized once per distinct operand id. Suppressed inside
+    // EXISTS (per-row re-evaluation would flood the obligation list; EXISTS
+    // is outside the stage-1 fragment).
     #[cfg(feature = "zk")]
-    if crate::zk::enabled() {
-        let rows: Vec<(Vec<Option<Term>>, bool)> = b
+    if crate::zk::enabled() && !crate::zk::in_exists() {
+        let mut memo = crate::zk::OperandMemo::new();
+        let rows: Vec<(Vec<u32>, bool)> = b
             .rows
             .iter()
             .zip(keep.iter())
             .map(|(row, &k)| {
-                (b.vars.iter().enumerate().map(|(c, _)| term_of(graph, local, row[c])).collect(), k)
+                let cells = (0..b.vars.len())
+                    .map(|c| memo.index(row[c], |id| term_of(graph, local, id)))
+                    .collect();
+                (cells, k)
             })
             .collect();
-        crate::zk::record_filter(format!("{expr:?}"), &b.vars, rows);
+        crate::zk::record_filter(format!("{expr:?}"), &b.vars, memo.operands, rows);
     }
     let mut i = 0;
     b.rows.retain(|_| {
