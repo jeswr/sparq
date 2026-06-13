@@ -634,6 +634,14 @@ fn join_chunks(mut chunks: Vec<String>) -> String {
 /// common (single-pattern) browser query. Output is a chunk sequence (see
 /// [`eval_select_json_chunks`]); concatenated it is the exact JSON document.
 fn single_pattern_scan_json(graph: &Graph, pattern: &GraphPattern, flush: Option<usize>) -> Option<Vec<String>> {
+    // zk-trace: this streaming path serialises straight from the scan without
+    // materialising Bindings, so it never hits the scan-recording hook. Fall
+    // through to the Bindings path (which records) while a recorder is armed —
+    // result-equivalent, only the plan changes.
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return None;
+    }
     if view::default_is_empty() {
         return None; // empty-default view: the general path short-circuits at the BGP
     }
@@ -935,6 +943,15 @@ pub fn count_select(graph: &Graph, pattern: &GraphPattern) -> Result<usize, Stri
 /// The solution count without materialising, for shapes whose count is exact from
 /// the index: a single-pattern BGP (range size) under projection / OFFSET-LIMIT.
 fn try_count(graph: &Graph, p: &GraphPattern) -> Option<usize> {
+    // zk-trace: a count/ASK answered from the index range consumes NO
+    // attributable input triples, so an armed recorder would capture an
+    // empty (insufficient) witness set. Disable the pushdown while recording
+    // — the result is identical via the materialising path, only the plan
+    // changes (zk module docs: "result-preserving plan changes").
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return None;
+    }
     if view::default_is_empty() {
         return None; // empty-default view: the index ranges are not the active dataset
     }
@@ -1039,6 +1056,10 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             Ok(project_bindings(b, variables))
         }
         GraphPattern::Distinct { inner } => {
+            // zk-trace: the enclosed pattern inputs are the PRE-DISTINCT
+            // input sets (the reduction is verifier-side; zk module docs).
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Distinct);
             let mut b = eval_modified(graph, local, inner)?;
             distinct_bindings(&mut b);
             Ok(b)
@@ -1068,6 +1089,11 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
             Ok(b)
         }
         GraphPattern::Group { inner, variables, aggregates } => {
+            // zk-trace: the enclosed pattern inputs are the PRE-AGGREGATION
+            // input sets; the count pushdown below is disabled under an armed
+            // recorder (inside `try_count`), so they are always captured.
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Group);
             // COUNT(*) pushdown: a whole-dataset COUNT over a single pattern is the
             // scan range size — no need to materialise the solutions just to count
             // them (QLever counts lazily too; this is the q02-style win).
@@ -1097,6 +1123,15 @@ fn eval_modified(graph: &Graph, local: &mut LocalVocab, p: &GraphPattern) -> Res
 /// needs the full result first (joins, ORDER BY, DISTINCT, aggregation, residual
 /// filters), so the caller falls back to full evaluation.
 fn try_capped(graph: &Graph, inner: &GraphPattern, cap: usize) -> Result<Option<Bindings>, String> {
+    // zk-trace: LIMIT early-termination would scan only the first `cap` rows,
+    // recording a TRUNCATED input set — but the completeness witness (the
+    // linear-sweep circuit) must see the whole scan range. Disable the cap
+    // while recording; the full path is result-equivalent (LIMIT is
+    // order-insensitive without ORDER BY).
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return Ok(None);
+    }
     if view::default_is_empty() {
         return Ok(None); // empty-default view: the general path short-circuits at the BGP
     }
@@ -1393,10 +1428,23 @@ fn eval_graph_named(
     name: &NamedNodePattern,
     inner: &GraphPattern,
 ) -> Result<Bindings, String> {
-    fn eval_translated(graph: &Graph, local: &mut LocalVocab, sub: &Graph, inner: &GraphPattern) -> Result<Bindings, String> {
+    fn eval_translated(
+        graph: &Graph,
+        local: &mut LocalVocab,
+        sub: &Graph,
+        #[cfg(feature = "zk")] gname: &Term,
+        inner: &GraphPattern,
+    ) -> Result<Bindings, String> {
         // Inside GRAPH the evaluation graph IS the named sub-graph: suspend a
         // view's empty-default short-circuit for the inner pattern (L1 view).
         let _scope = view::enter_graph();
+        // zk-trace: tag the enclosed scans/filters with the named graph (the
+        // sub-graph has its own dictionary; terms are materialized at record
+        // time against it, so the tag is what attributes them). The `gname`
+        // parameter is cfg'd out entirely when the feature is off, so the
+        // default (wasm) build is byte-identical.
+        #[cfg(feature = "zk")]
+        let _zk = crate::zk::graph_scope(gname);
         let mut sub_local = LocalVocab::default();
         let b = eval_graph_pattern(sub, &mut sub_local, inner)?;
         let rows: Vec<Row> = b
@@ -1425,13 +1473,24 @@ fn eval_graph_named(
                 None
             };
             match sub {
-                Some(sub) => eval_translated(graph, local, sub, inner),
+                Some(sub) => eval_translated(
+                    graph,
+                    local,
+                    sub,
+                    #[cfg(feature = "zk")]
+                    &target,
+                    inner,
+                ),
                 // The named graph is absent → ZERO solutions (even for `GRAPH <g> {}`,
                 // which must NOT yield the unit row), but with `inner`'s variable
                 // schema — evaluate against an empty graph for the columns, then drop
                 // any rows (an empty group pattern would otherwise produce one).
                 None => {
                     let _scope = view::enter_graph(); // schema eval matches the present-graph path
+                    // zk-trace: an absent graph still records the operator
+                    // boundary + (empty) pattern input sets under its name.
+                    #[cfg(feature = "zk")]
+                    let _zk = crate::zk::graph_scope(&target);
                     let empty = Graph::load_str("", "ntriples").map_err(|e| e.to_string())?;
                     let mut el = LocalVocab::default();
                     let mut b = eval_graph_pattern(&empty, &mut el, inner)?;
@@ -1446,7 +1505,18 @@ fn eval_graph_named(
                 if !view::allows(gname) {
                     continue; // not visible under the installed dataset view (L1)
                 }
-                let mut b = eval_translated(graph, local, sub, inner)?;
+                // zk-trace: each iteration of `GRAPH ?g` tags the enclosed
+                // scans/filters with the iteration's named graph — the scope
+                // is installed INSIDE eval_translated (one place), so the
+                // operator boundary stream is not double-nested.
+                let mut b = eval_translated(
+                    graph,
+                    local,
+                    sub,
+                    #[cfg(feature = "zk")]
+                    gname,
+                    inner,
+                )?;
                 let gid = value_to_id(graph, local, &Value::Term(gname.clone()));
                 match b.col(v) {
                     // The inner pattern itself binds the graph variable (e.g.
@@ -1572,11 +1642,19 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             Ok(join_bindings(l, r))
         }
         GraphPattern::LeftJoin { left, right, expression } => {
+            // zk-trace: operator boundary marker (one thread-local read; the
+            // scope is a no-op when the recorder is disarmed). NOTE: the
+            // embedded OPTIONAL condition is evaluated inside the join and is
+            // NOT recorded as a FilterObligation (see zk module docs).
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Optional);
             let l = eval_graph_pattern(graph, local, left)?;
             let r = eval_graph_pattern(graph, local, right)?;
             left_outer_join(graph, local, l, r, expression.as_ref())
         }
         GraphPattern::Union { left, right } => {
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Union);
             let l = eval_graph_pattern(graph, local, left)?;
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(union_bindings(l, r))
@@ -1586,12 +1664,22 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             extend_bindings(graph, local, b, variable, expression)
         }
         GraphPattern::Minus { left, right } => {
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Minus);
             let l = eval_graph_pattern(graph, local, left)?;
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(minus_bindings(l, r))
         }
         GraphPattern::Values { variables, bindings } => Ok(values_bindings(graph, local, variables, bindings)),
-        GraphPattern::Path { subject, path, object } => eval_path(graph, local, subject, path, object),
+        GraphPattern::Path { subject, path, object } => {
+            // zk-trace: property-path expansion scans the store without
+            // per-pattern attribution — record an Op::Path marker so a
+            // consumer fails closed (ZkTrace::first_uncaptured) rather than
+            // building an insufficient witness set.
+            #[cfg(feature = "zk")]
+            let _zk = crate::zk::op_scope(crate::zk::Op::Path);
+            eval_path(graph, local, subject, path, object)
+        }
         GraphPattern::Graph { name, inner } => eval_graph_named(graph, local, name, inner),
         GraphPattern::Project { .. }
         | GraphPattern::Distinct { .. }
@@ -1898,6 +1986,17 @@ fn pattern_var_pos(tp: &TriplePattern, var: &Variable) -> Option<usize> {
 /// scan of the first pattern that binds the variable) and the residual filters
 /// (applied normally afterwards).
 pub(crate) fn split_sargable(patterns: &[TriplePattern], filters: &[Expression]) -> (Vec<Option<(usize, ScanCmp)>>, Vec<Expression>) {
+    // zk-trace: a sargable FILTER pushed into the scan would make the scan
+    // record only the POST-filter rows (the rows that PASSED), losing the
+    // FILTER obligation and under-capturing the input set — the proof must
+    // witness the operand of every filtered row and the rows it excluded.
+    // Keep every filter residual while recording, so it flows through
+    // apply_filter (one FilterObligation) over the FULL unfiltered scan set.
+    // Result-equivalent; only the plan changes (zk module docs).
+    #[cfg(feature = "zk")]
+    if crate::zk::enabled() {
+        return (vec![None; patterns.len()], filters.to_vec());
+    }
     let mut pat_filters: Vec<Option<(usize, ScanCmp)>> = vec![None; patterns.len()];
     let mut residual = Vec::new();
     for f in filters {
@@ -2500,6 +2599,11 @@ fn eval_bgp(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, Strin
     // slots + structural-unification relations, joined by the ordinary machinery (F14).
     let (rewritten, constraints) = extract_quoted_constraints(patterns);
     if !constraints.is_empty() {
+        // zk-trace: structural-unification relations scan the store without
+        // per-pattern attribution — mark Op::QuotedTriples so a consumer
+        // fails closed (ZkTrace::first_uncaptured).
+        #[cfg(feature = "zk")]
+        let _zk = crate::zk::op_scope(crate::zk::Op::QuotedTriples);
         let mut b = eval_bgp(graph, &rewritten)?;
         for c in &constraints {
             b = join_bindings(b, quoted_relation(graph, c));
@@ -2686,6 +2790,8 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
     // The rewrite preserves pattern count/order, so `pat_filters` indexes stay aligned.
     let (rewritten, constraints) = extract_quoted_constraints(patterns);
     if !constraints.is_empty() {
+        #[cfg(feature = "zk")]
+        let _zk = crate::zk::op_scope(crate::zk::Op::QuotedTriples);
         let mut b = eval_bgp_binary(graph, &rewritten, pat_filters)?;
         for c in &constraints {
             b = join_bindings(b, quoted_relation(graph, c));
@@ -2696,6 +2802,20 @@ fn eval_bgp_binary(graph: &Graph, patterns: &[TriplePattern], pat_filters: &[Opt
 
     let prepared = prepare_bgp(graph, patterns)?;
     if prepared.iter().any(|p| p.unsatisfiable) {
+        // zk-trace: an unsatisfiable constant (a term absent from the
+        // dictionary) is a PROVABLY-EMPTY input set — the per-property proof
+        // must witness "no such triple exists". Record ONLY the patterns that
+        // are provably empty; a satisfiable SIBLING was never consumed (the
+        // join short-circuits), so claiming it empty would over-state the
+        // trace.
+        #[cfg(feature = "zk")]
+        if crate::zk::enabled() {
+            for (tp, prep) in patterns.iter().zip(&prepared) {
+                if prep.unsatisfiable {
+                    crate::zk::record_empty_pattern(crate::zk::key_of_algebra_pattern(tp));
+                }
+            }
+        }
         return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
     }
 
@@ -3271,6 +3391,12 @@ fn eval_bgp_wcoj(graph: &Graph, patterns: &[TriplePattern]) -> Result<Bindings, 
     for tp in patterns {
         let (id_pat, pos_vars, unsat) = prepare_pattern(graph, tp)?;
         if unsat {
+            // zk-trace: record ONLY this provably-empty pattern (see the
+            // binary path) — siblings are not proven empty here.
+            #[cfg(feature = "zk")]
+            if crate::zk::enabled() {
+                crate::zk::record_empty_pattern(crate::zk::key_of_algebra_pattern(tp));
+            }
             return Ok(Bindings::unsorted(collect_vars(patterns), vec![]));
         }
         prepared.push((id_pat, pos_vars));
@@ -4788,18 +4914,26 @@ fn apply_filter(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr: &Expr
     };
     // zk-trace hook: record the FILTER obligation — expression, in-scope
     // variables, and per-row operand bindings with the verdict (the witness
-    // builder needs the operands of every hidden-filter application).
+    // builder needs the operands of every hidden-filter application). The
+    // per-row path records OPERAND-TABLE INDICES (one memo probe per cell);
+    // terms are materialized once per distinct operand id. Suppressed inside
+    // EXISTS (per-row re-evaluation would flood the obligation list; EXISTS
+    // is outside the stage-1 fragment).
     #[cfg(feature = "zk")]
-    if crate::zk::enabled() {
-        let rows: Vec<(Vec<Option<Term>>, bool)> = b
+    if crate::zk::enabled() && !crate::zk::in_exists() {
+        let mut memo = crate::zk::OperandMemo::new();
+        let rows: Vec<(Vec<u32>, bool)> = b
             .rows
             .iter()
             .zip(keep.iter())
             .map(|(row, &k)| {
-                (b.vars.iter().enumerate().map(|(c, _)| term_of(graph, local, row[c])).collect(), k)
+                let cells = (0..b.vars.len())
+                    .map(|c| memo.index(row[c], |id| term_of(graph, local, id)))
+                    .collect();
+                (cells, k)
             })
             .collect();
-        crate::zk::record_filter(format!("{expr:?}"), &b.vars, rows);
+        crate::zk::record_filter(format!("{expr:?}"), &b.vars, memo.operands, rows);
     }
     let mut i = 0;
     b.rows.retain(|_| {
@@ -5307,6 +5441,12 @@ fn eval_expr(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], e: &Ex
 /// read-only, so there is no per-FILTER place to memoise the inner bindings). Fine
 /// for correctness and small/mid results; a shared cache is a follow-up optimisation.
 fn eval_exists(graph: &Graph, local: &LocalVocab, b: &Bindings, row: &[Id], inner: &GraphPattern) -> Result<bool, String> {
+    // zk-trace: the inner pattern is re-run per outer row; tag its scans
+    // `in_exists` and suppress their steps / filter obligations (EXISTS is
+    // outside the stage-1 verifiable fragment — sparq-zk::verify rejects it;
+    // the tag is for forensics, not proofs).
+    #[cfg(feature = "zk")]
+    let _zk = crate::zk::exists_scope();
     let mut inner_local = LocalVocab::default();
     let inner_b = eval_graph_pattern(graph, &mut inner_local, inner)?;
     budget::check(inner_b.rows.len())?;

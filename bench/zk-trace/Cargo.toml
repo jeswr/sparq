@@ -1,0 +1,37 @@
+# Criterion benches for the zk-trace seam: per-operator proof-input capture
+# overhead, traced (recorder armed) vs untraced (default execution), at
+# credential-to-mid scale on a deterministic synthetic social graph.
+#
+# Standalone cargo project (own [workspace], same isolation pattern as
+# bench/zk / bench/parse / bench/serve): criterion never touches the root
+# workspace or the wasm build. sparq-engine is pulled WITH the `zk` feature
+# (the whole point), so this project must NOT be a root-workspace member.
+[package]
+name = "zk-trace-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# The root workspace patches spargebra with the vendored W3C-conformance fork;
+# sparq-engine depends on it, so this detached project applies the same patch.
+[patch.crates-io]
+spargebra = { path = "../../vendor/spargebra" }
+
+[dependencies]
+sparq-engine = { path = "../../crates/sparq-engine", features = ["zk"] }
+sparq-core = { path = "../../crates/sparq-core" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "trace_overhead"
+harness = false
+
+# Match the root workspace release profile (what production builds ship).
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
