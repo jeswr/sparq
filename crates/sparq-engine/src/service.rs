@@ -44,6 +44,7 @@ use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple, Varia
 
 /// A materialised remote SELECT result: the projected variables and one row per
 /// solution (`None` = the variable is unbound in that solution).
+#[derive(Debug)]
 pub(crate) struct ServiceRelation {
     pub vars: Vec<Variable>,
     pub rows: Vec<Vec<Option<Term>>>,

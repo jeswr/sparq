@@ -8381,3 +8381,97 @@ mod path_pushdown_tests {
         eprintln!("bound-object reverse traversal: {:.3?}/iter", t.elapsed() / 100);
     }
 }
+
+/// SERVICE algebra-integration tests that drive `eval_service` directly through the
+/// `service_transport` injection seam — no HTTP, no network. They cover what the
+/// out-of-crate `tests/service_federation.rs` cannot reach: the term-interning and
+/// the SILENT/variable-endpoint branches with a mocked transport. [OPUS-4.8]
+#[cfg(all(test, feature = "service"))]
+mod service_exec_tests {
+    use super::*;
+    use crate::service::Transport;
+
+    /// Parse a query to its top-level `GraphPattern` (Select), ready for `eval_select`.
+    fn pattern(sparql: &str) -> spargebra::algebra::GraphPattern {
+        use spargebra::SparqlParser;
+        let q = SparqlParser::new().parse_query(sparql).unwrap();
+        let spargebra::Query::Select { pattern, .. } = q else { panic!("not a SELECT") };
+        pattern
+    }
+
+    struct Canned(&'static str);
+    impl Transport for Canned {
+        fn fetch(&self, _e: &str, _q: &str) -> Result<String, String> {
+            Ok(self.0.to_string())
+        }
+    }
+    struct Boom;
+    impl Transport for Boom {
+        fn fetch(&self, _e: &str, _q: &str) -> Result<String, String> {
+            Err("transport boom".into())
+        }
+    }
+
+    #[test]
+    fn service_joins_remote_into_local_via_mock() {
+        let g = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:alice a ex:Person . ex:bob a ex:Person .",
+            "turtle",
+        )
+        .unwrap();
+        let body = r#"{"head":{"vars":["s","name"]},"results":{"bindings":[
+            {"s":{"type":"uri","value":"http://ex/alice"},"name":{"type":"literal","value":"Alice"}}
+        ]}}"#;
+        let _g = service_transport::install(Box::new(Canned(body)));
+        let p = pattern(
+            "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+             { ?s a ex:Person . SERVICE <http://remote/> { ?s ex:name ?name } }",
+        );
+        let res = eval_select(&g, &p).unwrap();
+        // Only alice has a remote name -> the join keeps one row.
+        assert_eq!(res.rows.len(), 1);
+    }
+
+    #[test]
+    fn service_silent_swallows_mock_error() {
+        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a a ex:T .", "turtle").unwrap();
+        let _g = service_transport::install(Box::new(Boom));
+        let p = pattern(
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE \
+             { ?s a ex:T . SERVICE SILENT <http://remote/> { ?s ex:p ?o } }",
+        );
+        let res = eval_select(&g, &p).unwrap();
+        assert_eq!(res.rows.len(), 1, "SILENT -> identity -> local row survives");
+    }
+
+    #[test]
+    fn service_nonsilent_propagates_mock_error() {
+        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a a ex:T .", "turtle").unwrap();
+        let _g = service_transport::install(Box::new(Boom));
+        let p = pattern(
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE \
+             { ?s a ex:T . SERVICE <http://remote/> { ?s ex:p ?o } }",
+        );
+        assert!(eval_select(&g, &p).is_err());
+    }
+
+    #[test]
+    fn variable_endpoint_is_scoped_out() {
+        let g = Graph::load_str("@prefix ex: <http://ex/> . ex:a a ex:T .", "turtle").unwrap();
+        // No transport installed: a variable endpoint must error BEFORE any fetch.
+        let p = pattern(
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE \
+             { ?s a ex:T . ?s ex:ep ?e . SERVICE ?e { ?s ex:p ?o } }",
+        );
+        let err = eval_select(&g, &p).unwrap_err();
+        assert!(err.contains("variable endpoint"), "got: {err}");
+
+        // SILENT variable endpoint -> identity, no error.
+        let p2 = pattern(
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE \
+             { ?s a ex:T . ?s ex:ep ?e . SERVICE SILENT ?e { ?s ex:p ?o } }",
+        );
+        // The ?e join with no ex:ep data yields 0 rows; the point is it does not error.
+        assert!(eval_select(&g, &p2).is_ok());
+    }
+}

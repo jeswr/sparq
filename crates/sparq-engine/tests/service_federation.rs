@@ -1,0 +1,171 @@
+//! SPARQL 1.1 SERVICE (federated query) — end-to-end tests over a real loopback
+//! HTTP endpoint. [OPUS-4.8]
+//!
+//! These exercise the PRODUCTION path (the ureq `HttpTransport`): a tiny in-process
+//! `TcpListener` thread serves a canned SPARQL-Results-JSON body on `127.0.0.1`, the
+//! engine runs `SERVICE <http://127.0.0.1:PORT/> { … }`, and we assert the remote
+//! solutions are joined into the surrounding query. SILENT + malformed-body handling
+//! are covered too. No public network is touched.
+//!
+//! Built only when the `service` feature is on:
+//!   cargo test -p sparq-engine --features service --test service_federation
+
+#![cfg(feature = "service")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::mpsc;
+use std::thread;
+
+use sparq_engine::query;
+use sparq_core::Graph;
+
+/// Spawn a one-shot HTTP/1.1 server that replies to the first request with
+/// `status` + `body` (Content-Type sparql-results+json). Returns the bound URL.
+/// The thread serves exactly `n` requests then exits, so the OS port is freed.
+fn serve(status: &'static str, body: String, n: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        tx.send(()).ok();
+        for _ in 0..n {
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            // Drain the request (headers + form body) so the client's write completes.
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 {status}\r\n\
+                 Content-Type: application/sparql-results+json\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    rx.recv().unwrap(); // wait until the listener thread is live
+    format!("http://{addr}/")
+}
+
+fn local_graph() -> Graph {
+    // Two people locally; the remote endpoint supplies their names.
+    Graph::load_str(
+        "@prefix ex: <http://ex/> .\n\
+         ex:alice a ex:Person .\n\
+         ex:bob   a ex:Person .\n",
+        "turtle",
+    )
+    .unwrap()
+}
+
+#[test]
+fn service_returns_and_joins_remote_solutions() {
+    // Remote endpoint binds ?s (matching local subjects) and ?name.
+    let body = r#"{
+        "head": { "vars": ["s", "name"] },
+        "results": { "bindings": [
+            { "s": {"type":"uri","value":"http://ex/alice"},
+              "name": {"type":"literal","value":"Alice"} },
+            { "s": {"type":"uri","value":"http://ex/bob"},
+              "name": {"type":"literal","value":"Bob"} }
+        ] }
+    }"#
+    .to_string();
+    let url = serve("200 OK", body, 1);
+    let g = local_graph();
+
+    let q = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s ?name WHERE {{ ?s a ex:Person . SERVICE <{url}> {{ ?s ex:name ?name }} }}"
+    );
+    let res = query(&g, &q).expect("federated query");
+
+    // Two local Persons joined with two remote names => two rows.
+    assert_eq!(res.rows.len(), 2, "expected the remote names joined onto both local persons");
+    let names: Vec<String> = res
+        .rows
+        .iter()
+        .filter_map(|r| {
+            let i = res.vars.iter().position(|v| v.as_str() == "name")?;
+            r[i].as_ref().map(|t| t.to_string())
+        })
+        .collect();
+    assert!(names.iter().any(|n| n.contains("Alice")), "got {names:?}");
+    assert!(names.iter().any(|n| n.contains("Bob")), "got {names:?}");
+}
+
+#[test]
+fn service_join_restricts_to_overlapping_subject() {
+    // Remote binds a name only for alice; the join must drop bob.
+    let body = r#"{
+        "head": { "vars": ["s", "name"] },
+        "results": { "bindings": [
+            { "s": {"type":"uri","value":"http://ex/alice"},
+              "name": {"type":"literal","value":"Alice"} }
+        ] }
+    }"#
+    .to_string();
+    let url = serve("200 OK", body, 1);
+    let g = local_graph();
+    let q = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <{url}> {{ ?s ex:name ?name }} }}"
+    );
+    let res = query(&g, &q).expect("federated query");
+    assert_eq!(res.rows.len(), 1, "only alice has a remote name");
+}
+
+#[test]
+fn service_silent_on_unreachable_endpoint_yields_no_failure() {
+    // Port 1 is reserved/unused on loopback => connection refused immediately.
+    let g = local_graph();
+    let q = "PREFIX ex: <http://ex/>\n\
+             SELECT ?s WHERE { ?s a ex:Person . \
+             SERVICE SILENT <http://127.0.0.1:1/> { ?s ex:name ?name } }";
+    let res = query(&g, q).expect("SILENT must not fail the query");
+    // SILENT failure -> join identity -> the local persons survive unchanged.
+    assert_eq!(res.rows.len(), 2, "SILENT keeps the surrounding bindings");
+}
+
+#[test]
+fn service_non_silent_on_unreachable_endpoint_errors() {
+    let g = local_graph();
+    let q = "PREFIX ex: <http://ex/>\n\
+             SELECT ?s WHERE { ?s a ex:Person . \
+             SERVICE <http://127.0.0.1:1/> { ?s ex:name ?name } }";
+    assert!(query(&g, q).is_err(), "non-SILENT SERVICE against a dead endpoint must error");
+}
+
+#[test]
+fn service_malformed_response_errors_but_silent_swallows() {
+    // A 200 with a non-JSON body.
+    let url = serve("200 OK", "this is not sparql results json".to_string(), 1);
+    let g = local_graph();
+    let q = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <{url}> {{ ?s ex:name ?name }} }}"
+    );
+    assert!(query(&g, &q).is_err(), "malformed remote body must error (non-SILENT)");
+
+    let url2 = serve("200 OK", "still not json".to_string(), 1);
+    let q2 = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <{url2}> {{ ?s ex:name ?name }} }}"
+    );
+    let res = query(&g, &q2).expect("SILENT swallows a malformed body");
+    assert_eq!(res.rows.len(), 2, "SILENT malformed -> identity -> local persons survive");
+}
+
+#[test]
+fn service_http_error_status_handled() {
+    let url = serve("500 Internal Server Error", "boom".to_string(), 1);
+    let g = local_graph();
+    let q = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <{url}> {{ ?s ex:name ?name }} }}"
+    );
+    let res = query(&g, &q).expect("SILENT swallows a 5xx");
+    assert_eq!(res.rows.len(), 2);
+}
