@@ -59,16 +59,33 @@ main; the proof layer plugs into that seam.)
 **Gate:** do not start M3/M4 until #3/#4/#5/#6/#8/#9/#12 are closed AND have
 negative e2e tests.
 
-### M2 — `GlobalJoin` protocol
+### M2 — `GlobalJoin` protocol  🟡 disclosed-key DONE; hidden-value deferred
 Join holders' partials on GLOBAL IRIs (architecture §2 #6, §4.3 step 4).
-- First: the **disclosed-key equi-join** path (`JoinPlan::key_disclosed`) —
-  plaintext join over disclosed IRIs OUTSIDE the cryptographic core (convention
-  #4). Crypto-free, invariant to Q1/Q2 — the natural first implementation.
-- Then: design the **hidden-value** path (circuit-PSI / oblivious join) — gated
-  on M3's backend and on **Q3** (BGP-join obliviousness cost; how much the
-  out-of-circuit handling collapses, and for which fragment — RQ2b).
-- Soundness obligation: the join must NOT trust the untrusted planner for
-  correctness (architecture §4.1).
+- **DONE ✅ — the disclosed-key equi-join** (`JoinPlan::key_disclosed == true`):
+  [`DisclosedKeyJoin`] in `src/join.rs`. A crypto-free, plaintext equi-join over
+  the disclosed global-IRI key, computed OUTSIDE the cryptographic core
+  (convention #4). Invariant to Q1/Q2 — needs NO MPC primitive because a global
+  IRI is a stable public cross-holder identifier. [OPUS-4.8]
+  - **Semantics:** a faithful SPARQL inner join under PAG *compatible-mappings*
+    over ALL shared columns (not just the planner-named key), folded left-to-
+    right; output is the union schema, rows canonicalised so the disclosed
+    multiset is order-independent.
+  - **Soundness (§4.1):** does NOT trust the untrusted planner — independently
+    verifies the named `join_var` is projected by every partial (else a
+    `Protocol` error, never a silent empty join) and enforces compatibility on
+    every shared var so a malicious plan cannot induce a result disagreeing with
+    PAG eval over the union.
+  - **Tested (`cargo test -p sparq-mpc`):** DIFFERENTIAL — the federated join of
+    per-holder partials *equals* evaluating the whole query over the UNION of the
+    holders' graphs in one `sparq-engine` store (2-holder, 3-holder chain,
+    multi-row fan-out); plus empty-result holder, single-holder identity, empty
+    federation, and the absent-key soundness error. Native-only invariant
+    re-verified: `cargo tree -p sparq-wasm` still excludes `sparq-mpc`.
+- **DEFERRED — the hidden-value path** (`key_disclosed == false`): PRIVATE join
+  values that must enter a circuit-PSI / oblivious join. Honest
+  `NotYetImplemented` naming the gate. Gated on M3's backend AND on **Q2** (trust
+  model) and **Q3** (BGP-join obliviousness cost; how much the out-of-circuit
+  handling collapses, and for which fragment — RQ2b). NOT faked.
 
 ### M3 — `MpcBackend` (honest-majority first)
 First concrete secret-sharing impl behind the trait (architecture §3.1, §4.2).
