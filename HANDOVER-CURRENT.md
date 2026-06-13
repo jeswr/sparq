@@ -21,6 +21,11 @@ RESUMPTION OPTIONS: continue on this M1 in a fresh session, OR finish porting to
 1. ZK REMEDIATION (critical): research/zk-soundness-audit.md found the v1 verifier is UNSOUND (6 critical binding gaps). Fix order: public-input reconstruction + canonical vk (issues #1/#2) FIRST, then statement binding (#5/#8/#10/#11), then issuer-sig + replay (#3/#4). Use a fix→re-audit workflow. The zk-test-bench-design doc maps forge-and-verify tests to each issue.
 2. EC2 PORT (in progress — see below).
 
+### STAGED ON THE EC2 BOX (already copied from the M1 — new agent: use these)
+- `~/HANDOVER-CURRENT.md` + sparq memory at `~/.claude/projects/-home-ubuntu-sparq/memory/` (9 files).
+- `~/.roborev/reviews.db` (124MB, md5 beb5ab28…, integrity OK) — the FULL roborev review history from the M1 (sync was disabled, so this is the only copy). sparq last-7d: 550 reviews, 303 FAIL verdicts, 0 marked addressed (many were fixed-in-code-but-never-`roborev close`'d — audit before assuming all 303 are live). Install roborev + `codex login` to use `roborev list/show/refine` against it.
+- `~/handoff-memory/` (32 curated files + README) — cross-project memory that WON'T auto-load (other project paths): noir-ieee754 kernel-optimisation rules (READ before writing ZK circuits), noir-compiler internals, jeswr-zk (the ZKP-over-SPARQL research context + the modular commitment/signature design relevant to audit issue #3), prod-solid-server (the `pss` AWS profile + Opus tagging), product (roborev setup + Jesse's profile). README.md indexes it.
+
 ### EC2 DEV-BOX PORT (prereqs DONE, launch is ONE command)
 Goal: port the agent work to a fresh Claude Code session on a SEPARATE account on EC2 (no shared account/compute). Jesse logs in (I can't authenticate); /remote for desktop + SSH for terminal.
 - DONE: keypair ~/.ssh/sparq-dev.pem (chmod 600); SG sg-0414c35a93f1c6557 (SSH from 188.29.24.150/32); AMI ami-03018a249a89a9ec1 (Ubuntu 24.04 arm64, eu-west-2); bootstrap script at /tmp/sparq-dev-userdata.sh (Node+Claude Code+Rust+wasm+gh+deps; noir toolchain = follow-up via noirup, needs nargo 1.0.0-beta.21 + bb 5.0.0-nightly.20260324).
