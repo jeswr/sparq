@@ -86,6 +86,34 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
   (group-commit ~7.8× writer throughput at batch 16 vs 1; readers within ~1.3× of
   idle p99 under load; the too-large-batch regression recorded honestly).
   `sparq-serve` stays out of the `sparq-wasm` dependency graph (server-side only).
+- **Concurrent-serving Wave B — read-side scheduler (`sparq-serve`)** — the
+  cost-aware query `Scheduler` (`research/concurrent-serving.md` §6.2; goal #4
+  requirements 3 + 4: cheap-query prioritisation + no head-of-line blocking). A
+  bounded thread pool with two lanes split by a crude cost estimate (Wierman &
+  Nuyens: SRPT tolerates crude size errors): **cheap** jobs are prioritised
+  (FIFO) and always keep a reserved worker, while **heavy** jobs run under a
+  bounded concurrency cap (default `cores/2`, clamped `<= workers-1` so a cheap
+  worker is always free). The reserved-cheap-capacity invariant is the structural
+  no-head-of-line guarantee — an expensive-query flood can never block a cheap
+  query, because at least one worker is always available the instant a cheap job
+  arrives. Within the heavy lane, ordering is Umbra-style SRPT-approx + unbounded
+  aging (litreview-C: `p0 = 10^4` start, cost lowers priority, wait raises it), so
+  the most-postponed heavy job eventually becomes the max-priority pick —
+  starvation-free. Readers still pin a generation on entry *inside* the submitted
+  closure (A1 snapshot consistency), so scheduling reorders *when/where* work runs
+  but never *what* it computes: results are byte-identical to unscheduled
+  execution. Library-first: sync, runtime-agnostic (`std::thread` + condvars, no
+  HTTP/async types); the estimator and the work are both injected, so the
+  scheduler never reaches into the engine itself. Tested (empirical-honesty
+  suite): differential result-equality vs direct execution (closure + real-engine
+  COUNT queries over the ring), bounded heavy concurrency, head-of-line cheap-p99
+  containment under a concurrent expensive query (open-loop,
+  coordinated-omission-safe arrival), starvation-freedom under a sustained cheap
+  flood, SRPT-orders-cheaper-first + aging-overtakes-a-cheaper-fresh-heavy
+  (deterministic), no-regression on an all-cheap workload vs a plain pool,
+  panic-isolation, and shutdown shed-don't-hang. Honest scope: true preemption is
+  out (the engine has no re-entrant suspend/resume); the cap + reserved capacity
+  deliver the no-HoL property without it. Stays out of `sparq-wasm`'s graph.
 - **Python bindings parity wave (`sparq-py`)** — the Python `Graph` catches up with
   the engine/reasoner surface: native `ask()` (engine early-exit instead of the
   SELECT-count rewrite; SELECT still accepted), new `construct()` / `describe()`

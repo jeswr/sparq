@@ -38,12 +38,23 @@
 //! structural-fork follow-up lands; the API is shaped so delta-chain retention can
 //! replace full graphs later without an API change.
 //!
+//! Wave B deliverable (§6.2): the read-side **query [`Scheduler`]** — goal #4
+//! requirements 3 + 4 (cheap-query prioritisation + no head-of-line blocking). A
+//! cost-aware bounded thread pool with two lanes: cheap jobs are prioritised and
+//! always keep a reserved worker (so an expensive-query flood can never block a
+//! cheap query — the structural no-HoL guarantee), while heavy jobs run under a
+//! bounded concurrency cap with SRPT-approx + unbounded-aging ordering
+//! (shortest-estimated-first, starvation-free). Readers still pin a generation on
+//! entry (A1) inside the submitted closure, so snapshot consistency is preserved
+//! and scheduling never changes results. See the `scheduler` module docs for the
+//! Umbra-derived design (litreview-C Topic A) and the empirical-honesty test plan.
+//!
 //! Library-first rule (§6.1): sync, runtime-agnostic, no HTTP and no async-runtime
-//! types anywhere in the API (the writer uses `std::thread` + channels internally).
-//! The scheduler, result cache, and stream admission (`Shed(SnapshotPressure)` at
-//! the bound) are LATER waves; this crate ships the foundation they compose over
-//! and exposes the introspection (live-generation count, oldest retained number)
-//! they will need.
+//! types anywhere in the API (the writer and scheduler use `std::thread` +
+//! channels/condvars internally). The result cache and stream admission
+//! (`Shed(SnapshotPressure)` at the bound) are LATER waves; this crate ships the
+//! foundation they compose over and exposes the introspection (live-generation
+//! count, oldest retained number, scheduler queue depths) they will need.
 //!
 //! Snapshot integration decision: §6.4 sketches `Generation { id, graph: Arc<Graph>,
 //! epochs }`. The production snapshot mechanism is exactly an `Arc<sparq_core::Graph>`
@@ -57,12 +68,16 @@ mod applier;
 mod epoch;
 mod footprint;
 mod ring;
+mod scheduler;
 mod writer;
 
 pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use footprint::{Footprint, TargetGraph};
 pub use ring::{Generation, GenerationRing, RingConfig, TimeTravelConfig, DEFAULT_RETAIN};
+pub use scheduler::{
+    Cost, Lane, SchedError, Scheduler, SchedulerConfig, Ticket, DEFAULT_HEAVY_THRESHOLD, P0,
+};
 pub use writer::{
     ApplyUpdates, CommitGranularity, WriteError, Writer, WriterConfig, DEFAULT_MAX_BATCH,
     DEFAULT_WINDOW,
