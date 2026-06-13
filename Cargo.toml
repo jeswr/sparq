@@ -35,6 +35,10 @@ hashbrown = "0.15"
 smallvec = "1"
 # Parallelism.
 rayon = "1"
+# SIMD byte search for the Turtle parallel-split terminator pre-scan (T2). Already in the
+# tree transitively (via oxttl); promoted to a direct dep behind sparq-core's `parallel`
+# feature so the wasm build (no `parallel`) does not pull it. [OPUS-4.8]
+memchr = "2"
 # Memory-mapped on-disk indexes (out-of-core, native only) — query datasets larger
 # than RAM by letting the OS page in only the working set.
 memmap2 = "0.9"

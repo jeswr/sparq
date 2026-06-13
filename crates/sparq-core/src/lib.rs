@@ -2342,21 +2342,35 @@ fn next_terminator(bytes: &[u8], start: usize) -> Option<usize> {
     let n = bytes.len();
     let mut i = start;
     while i < n {
+        // [OPUS-4.8] (T2) SIMD-skip the uninteresting run to the next byte that can change the
+        // scan state. At top level only `. < # " ' \` matter — every other byte is copied
+        // through. The body-of-the-whole-document terminator pre-scan walks each byte exactly
+        // once, so this inner advance is pure critical-path latency; `memchr` runs it at
+        // ~tens-of-GB/s instead of one byte/iteration. The structured handlers below
+        // (string / IRI / comment skipping, the `.`-terminator and `\`-escape tests) are
+        // UNCHANGED, so behaviour — including the review-1398 PN_LOCAL_ESC `\#` fix — is
+        // identical; this only fast-forwards over the runs the old `_ => i += 1` arm crawled.
+        let a = memchr::memchr3(b'.', b'<', b'#', &bytes[i..]);
+        let b = memchr::memchr3(b'"', b'\'', b'\\', &bytes[i..]);
+        i += match (a, b) {
+            (None, None) => return None, // no interesting byte before EOF → incomplete statement
+            (Some(x), None) => x,
+            (None, Some(y)) => y,
+            (Some(x), Some(y)) => x.min(y),
+        };
         match bytes[i] {
             b'#' => {
-                while i < n && bytes[i] != b'\n' {
-                    i += 1;
+                match memchr::memchr(b'\n', &bytes[i..]) {
+                    Some(off) => i += off + 1,
+                    None => i = n,
                 }
             }
             b'<' => {
                 i += 1;
-                while i < n && bytes[i] != b'>' {
-                    i += 1;
+                match memchr::memchr(b'>', &bytes[i..]) {
+                    Some(off) => i += off + 1,
+                    None => return None,
                 }
-                if i >= n {
-                    return None;
-                }
-                i += 1;
             }
             q @ (b'"' | b'\'') => {
                 let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
@@ -3137,6 +3151,119 @@ mod tests {
             turtle_chunks(interspersed.as_bytes(), 32).is_none(),
             "an interspersed @base after an escaped # must force the serial fallback"
         );
+    }
+
+    /// [OPUS-4.8] (T2) Differential test for the `memchr`-based `next_terminator` against the
+    /// pre-T2 scalar reference. The SIMD-skip must return the SAME offset (or the same `None`)
+    /// for every interesting Turtle shape — comments, all four string-quote forms with escapes,
+    /// IRIs, decimals (`.`-not-a-terminator), PN_LOCAL_ESC `\#`/`\.`, and EOF-truncation — so it
+    /// is a behaviour-preserving speedup, not a re-derivation of the splitter's grammar.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn next_terminator_memchr_matches_scalar() {
+        // The exact pre-T2 scalar scanner, kept here as the oracle.
+        fn scalar(bytes: &[u8], start: usize) -> Option<usize> {
+            let n = bytes.len();
+            let mut i = start;
+            while i < n {
+                match bytes[i] {
+                    b'#' => {
+                        while i < n && bytes[i] != b'\n' {
+                            i += 1;
+                        }
+                    }
+                    b'<' => {
+                        i += 1;
+                        while i < n && bytes[i] != b'>' {
+                            i += 1;
+                        }
+                        if i >= n {
+                            return None;
+                        }
+                        i += 1;
+                    }
+                    q @ (b'"' | b'\'') => {
+                        let triple = i + 2 < n && bytes[i + 1] == q && bytes[i + 2] == q;
+                        if triple {
+                            i += 3;
+                            loop {
+                                if i >= n {
+                                    return None;
+                                }
+                                if bytes[i] == b'\\' {
+                                    i += 2;
+                                } else if bytes[i] == q
+                                    && i + 2 < n
+                                    && bytes[i + 1] == q
+                                    && bytes[i + 2] == q
+                                {
+                                    i += 3;
+                                    break;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                        } else {
+                            i += 1;
+                            while i < n && bytes[i] != q {
+                                i += if bytes[i] == b'\\' { 2 } else { 1 };
+                            }
+                            if i >= n {
+                                return None;
+                            }
+                            i += 1;
+                        }
+                    }
+                    b'.' => match bytes.get(i + 1) {
+                        None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'#') => return Some(i + 1),
+                        _ => i += 1,
+                    },
+                    b'\\' => {
+                        if i + 1 >= n {
+                            return None;
+                        }
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            None
+        }
+
+        let cases: &[&str] = &[
+            ":s :p :o .\n",
+            ":s :p :o .",                                  // EOF terminator
+            ":s :p 3.14 ; :q 2.5 .\n",                     // decimals are not terminators
+            ":s :p \"a.b.c\" .\n",                          // dot inside a string
+            ":s :p \"x\\\"y.z\" .\n",                       // escaped quote, then dot in string
+            ":s :p 'single.quoted' .\n",                    // single-quote string
+            ":s :p \"\"\"l1 . still\nl2.\"\"\" .\n",        // triple-quoted, dots + newline inside
+            ":s :p '''a.b''' .\n",                          // triple single-quote
+            ":s :p <http://x.y/a.b.c> .\n",                 // dots inside an IRI
+            "ex:s ex:p ex:foo\\#bar .\n",                   // PN_LOCAL_ESC \# (review 1398)
+            "ex:s ex:p ex:a\\.b .\n",                       // PN_LOCAL_ESC \. — \. is NOT a term
+            ":s :p :o .# trailing comment\n:s2 :p :o2 .\n", // comment right after terminator
+            "# leading comment with . inside\n:s :p :o .\n",
+            ":s :p :o",                                     // no terminator, no EOF dot → None
+            ":s :p \"unterminated",                         // unterminated string → None
+            ":s :p <unterminated",                          // unterminated IRI → None
+            ":s :p \"\"\"unterminated\n.",                  // unterminated triple-quote → None
+            "ex:s ex:p ex:x\\",                             // trailing backslash → None
+            "",
+            ".",                                            // bare dot at EOF is a terminator
+            ".5 .\n",                                       // leading decimal then real terminator
+        ];
+        for (k, c) in cases.iter().enumerate() {
+            let b = c.as_bytes();
+            // From every start offset, not just 0 — turtle_chunks resumes mid-buffer.
+            for start in 0..=b.len() {
+                assert_eq!(
+                    next_terminator(b, start),
+                    scalar(b, start),
+                    "case {k} {c:?} at start {start}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "mmap")]
