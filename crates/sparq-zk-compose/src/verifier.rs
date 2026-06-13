@@ -142,6 +142,16 @@ use std::path::Path;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeySet {
     keys: BTreeSet<String>,
+    /// OPTIONAL Merkle-tree depth for the HIDDEN-ISSUER attestation proof
+    /// (sq-z9l). When set, the verifier derives the authoritative key-set Merkle
+    /// root from THIS set (canonical order) at this depth and accepts a
+    /// `manifest.hidden_issuer_attestations` proof whose PUBLIC root byte-equals
+    /// it — proving "signed by SOME key in K" without disclosing which. `None` =>
+    /// the hidden-issuer path is disabled (the verifier only runs the clear-key
+    /// `bind_issuer_attestations` check). MUST equal the `hidden_issuer_d{depth}`
+    /// member the prover used.
+    // [OPUS-4.8] sq-z9l: opt-in hidden-issuer verification depth.
+    hidden_issuer_depth: Option<u32>,
 }
 
 impl KeySet {
@@ -149,7 +159,7 @@ impl KeySet {
     /// then rejected (fail closed). Useful as the explicit "no source is
     /// authoritative" policy and as a test default.
     pub fn empty() -> Self {
-        KeySet { keys: BTreeSet::new() }
+        KeySet { keys: BTreeSet::new(), hidden_issuer_depth: None }
     }
 
     /// Build a trust anchor from the relying party's trusted issuer public keys
@@ -167,7 +177,27 @@ impl KeySet {
             .into_iter()
             .filter_map(|h| public_key_from_hex(h.as_ref()).map(|_| normalize_hex(h.as_ref())))
             .collect();
-        KeySet { keys }
+        KeySet { keys, hidden_issuer_depth: None }
+    }
+
+    /// Enable the HIDDEN-ISSUER attestation path (sq-z9l) at Merkle depth `depth`
+    /// (builder style). The verifier will then derive the authoritative key-set
+    /// Merkle root from THIS set (canonical order) at `depth` and accept a
+    /// `manifest.hidden_issuer_attestations` proof whose PUBLIC root matches —
+    /// proving "signed by SOME key in K" without disclosing which. `depth` MUST
+    /// equal the `hidden_issuer_d{depth}` member the prover used. The clear-key
+    /// `bind_issuer_attestations` path is unaffected.
+    // [OPUS-4.8] sq-z9l: opt-in hidden-issuer verification depth.
+    pub fn with_hidden_issuer_depth(mut self, depth: u32) -> Self {
+        self.hidden_issuer_depth = Some(depth);
+        self
+    }
+
+    /// The hidden-issuer Merkle depth, if the relying party enabled the path.
+    /// `None` => disabled (a `manifest.hidden_issuer_attestations` is not accepted).
+    // [OPUS-4.8] sq-z9l.
+    fn hidden_issuer_depth(&self) -> Option<u32> {
+        self.hidden_issuer_depth
     }
 
     /// Whether `pk_hex` (any case, optional `0x`) is a member of the trusted set.
@@ -178,6 +208,41 @@ impl KeySet {
     /// The trusted set is empty (trusts no issuer).
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+
+    /// The trusted keys in the canonical CANONICAL leaf order for the hidden-issuer
+    /// key-set Merkle tree (sq-z9l): the normalized-hex set's sorted order
+    /// (`BTreeSet` iteration). Both the relying party (deriving the authoritative
+    /// `key_set_root`) and the prover (building its membership path) commit K in
+    /// THIS order, so the roots agree. Parsed back to [`PublicKey`]s (every stored
+    /// key is already validated parseable at construction, so this never drops a
+    /// member).
+    // [OPUS-4.8] sq-z9l: canonical leaf order for the key-set commitment.
+    fn ordered_keys(&self) -> Vec<sparq_zk::sig::PublicKey> {
+        self.keys
+            .iter()
+            .filter_map(|h| public_key_from_hex(h))
+            .collect()
+    }
+
+    /// The authoritative hidden-issuer key-set Merkle root (sq-z9l) over the
+    /// trusted keys in canonical order, at depth `depth`. This is the TRUST ANCHOR
+    /// the relying party derives from its OWN [`KeySet`] (exactly as
+    /// `RevocationPolicy` derives the status root from its own snapshot), and which
+    /// a `manifest.hidden_issuer_attestations` proof's PUBLIC `key_set_root` must
+    /// byte-equal. `None` if the set overflows the tree or `depth` is implausible.
+    // [OPUS-4.8] sq-z9l.
+    pub fn hidden_issuer_root(&self, depth: u32) -> Option<Fr> {
+        crate::issuer::key_set_root(&self.ordered_keys(), depth)
+    }
+
+    /// The 0-based index of `pk_hex` in the canonical leaf order, if it is a
+    /// member — the slot the prover proves membership at. (Prover-side convenience;
+    /// the verifier never needs the index, which stays private.)
+    // [OPUS-4.8] sq-z9l.
+    pub fn member_index(&self, pk_hex: &str) -> Option<usize> {
+        let target = normalize_hex(pk_hex);
+        self.keys.iter().position(|k| *k == target)
     }
 }
 
@@ -863,6 +928,52 @@ pub enum CheckError {
     /// (audit hardening; prover-controlled bytes never panic).
     // [OPUS-4.8] sq-3e5 + sq-h2v.
     HiddenRevocationMalformedProof,
+    /// A `manifest.hidden_issuer_attestations` entry was presented but the relying
+    /// party has NOT enabled the hidden-issuer path (no `hidden_issuer_depth` in
+    /// the KeySet) (sq-z9l): the verifier cannot derive an authoritative key-set
+    /// Merkle root to bind the proof to, so it rejects fail-closed.
+    // [OPUS-4.8] sq-z9l.
+    HiddenIssuerNotEnabled,
+    /// A `manifest.hidden_issuer_attestations` entry declared a Merkle depth that
+    /// does NOT match the KeySet policy depth (sq-z9l): the trees (and roots) would
+    /// be over different layouts, so the proof cannot be bound to the verifier's
+    /// authoritative root. Rejected.
+    // [OPUS-4.8] sq-z9l.
+    HiddenIssuerDepthMismatch { declared: u32, policy: u32 },
+    /// The relying party could not derive an authoritative key-set Merkle root for
+    /// the hidden-issuer proof (sq-z9l): the trusted set overflows the tree at this
+    /// depth, or the depth is implausible. Fail-closed.
+    // [OPUS-4.8] sq-z9l.
+    HiddenIssuerRootUnavailable,
+    /// The `manifest.hidden_issuer_attestations` proof's PUBLIC key-set Merkle root
+    /// does NOT equal the root the relying party derived from its OWN authoritative
+    /// KeySet (sq-z9l): the proof was produced against a different (e.g.
+    /// prover-chosen) key set. Rejected — the "in K" fact is not anchored on the
+    /// relying party's trust.
+    // [OPUS-4.8] sq-z9l.
+    HiddenIssuerRootMismatch,
+    /// The `manifest.hidden_issuer_attestations` proof's PUBLIC message `m` does
+    /// NOT equal the issuer-signed message the verifier recomputed from the
+    /// disclosed commitment + salt + status reference (sq-z9l): the hidden-issuer
+    /// proof is not bound to this committed graph. Rejected.
+    // [OPUS-4.8] sq-z9l.
+    HiddenIssuerMessageMismatch { commitment: String },
+    /// A `manifest.hidden_issuer_attestations` entry covers a commitment that no
+    /// verified scan sub-proof references (sq-z9l): a dangling hidden attestation.
+    /// Rejected (every hidden attestation must cover a scan-referenced commitment,
+    /// mirroring the clear-key path's UnattestedCommitment discipline in reverse).
+    // [OPUS-4.8] sq-z9l.
+    HiddenIssuerUnreferencedCommitment { commitment: String },
+    /// `bb verify` REJECTED the hidden-issuer proof against the canonical
+    /// `hidden_issuer_d{depth}` vk + reconstructed public inputs (sq-z9l): the
+    /// signature is invalid, the key is not in K, or the public inputs were
+    /// tampered. Rejected.
+    // [OPUS-4.8] sq-z9l.
+    HiddenIssuerProofRejected,
+    /// The `manifest.hidden_issuer_attestations` proof blob is malformed (non-hex /
+    /// truncated length prefix) (sq-z9l) — rejected before any bb call.
+    // [OPUS-4.8] sq-z9l.
+    HiddenIssuerMalformedProof,
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -1010,6 +1121,38 @@ impl std::fmt::Display for CheckError {
             CheckError::HiddenRevocationMalformedProof => write!(
                 f,
                 "hidden-index revocation proof blob is malformed (sq-3e5/sq-h2v)"
+            ),
+            CheckError::HiddenIssuerNotEnabled => write!(
+                f,
+                "hidden-issuer attestation present but the relying party has not enabled the hidden-issuer path (no KeySet::with_hidden_issuer_depth) (sq-z9l)"
+            ),
+            CheckError::HiddenIssuerDepthMismatch { declared, policy } => write!(
+                f,
+                "hidden-issuer attestation depth {declared} does not match the KeySet policy depth {policy} (sq-z9l)"
+            ),
+            CheckError::HiddenIssuerRootUnavailable => write!(
+                f,
+                "relying party could not derive an authoritative key-set Merkle root for the hidden-issuer proof (set overflows the tree or implausible depth) (sq-z9l)"
+            ),
+            CheckError::HiddenIssuerRootMismatch => write!(
+                f,
+                "hidden-issuer proof's public key-set root does not equal the relying party's authoritative key-set root (sq-z9l: proved against a different key set)"
+            ),
+            CheckError::HiddenIssuerMessageMismatch { commitment } => write!(
+                f,
+                "hidden-issuer proof's public message does not equal the issuer-signed message recomputed for commitment {commitment} (sq-z9l: proof not bound to this committed graph)"
+            ),
+            CheckError::HiddenIssuerUnreferencedCommitment { commitment } => write!(
+                f,
+                "hidden-issuer attestation covers commitment {commitment} which no verified scan sub-proof references (sq-z9l: dangling attestation)"
+            ),
+            CheckError::HiddenIssuerProofRejected => write!(
+                f,
+                "bb rejected the hidden-issuer attestation proof (sq-z9l: the zero-knowledge signature-validity + key-set-membership statement did not verify)"
+            ),
+            CheckError::HiddenIssuerMalformedProof => write!(
+                f,
+                "hidden-issuer attestation proof blob is malformed (sq-z9l)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -1732,6 +1875,184 @@ fn bind_hidden_revocation(
     Ok(())
 }
 
+/// Stage 3b (sq-z9l): the HIDDEN-ISSUER attestation cryptographic gate — the
+/// privacy upgrade over [`bind_issuer_attestations`]'s clear-key check. Runs only
+/// the cryptographic gate for `manifest.hidden_issuer_attestations`; the
+/// structural pre-conditions (the issuer-bound reference + salt + clear-key
+/// attestation) are still enforced by the prefilter.
+///
+/// # What it proves and what stays hidden
+/// Each entry supplies a `hidden_issuer_d{depth}` bb proof whose PUBLIC inputs are
+/// the verifier's `challenge`, the commitment message `m`, and the key-set Merkle
+/// `key_set_root`; the issuer key, the signature `(R, s)`, the challenge-reduction
+/// witness, and the membership index/path are PRIVATE. The circuit proves "this
+/// `m` was signed by SOME issuer whose key is in the tree rooted at `key_set_root`"
+/// — so the relying party learns a TRUSTED authority vouched for the commitment
+/// WITHOUT learning WHICH (closing the clear-key deanonymisation channel).
+///
+/// # Trust anchor (preserves the audit #3 external-K anchor — load-bearing)
+/// `key_set_root` is a prover-committed public input, NOT trusted as a claim. The
+/// verifier derives the AUTHORITATIVE root from its OWN [`KeySet`] (canonical
+/// order, the same external anchor `bind_issuer_attestations` checks membership
+/// against) at the policy's `hidden_issuer_depth`, and REQUIRES the proof's public
+/// root to byte-equal it. A prover that proves membership in its OWN (forged) key
+/// set fails this equality. And `m` is recomputed from the disclosed
+/// commitment + salt + status reference (the SAME issuer-signed message the clear
+/// path binds), so the proof is tied to a specific committed graph the relying
+/// party can name — not a free-floating "some signature exists".
+///
+/// # Fail-closed
+/// - No entries => nothing to check (the clear-key [`bind_issuer_attestations`]
+///   remains the attestation gate); returns `Ok`.
+/// - An entry present but the KeySet has NOT enabled the hidden-issuer path
+///   (`hidden_issuer_depth == None`) => REJECT ([`CheckError::HiddenIssuerNotEnabled`]).
+/// - A depth mismatch, an unresolvable root, a root mismatch, a message mismatch,
+///   an unreferenced commitment, a malformed blob, or a bb rejection all REJECT.
+///
+/// PRECONDITION: `bind_issuer_attestations` + `bind_revocation` have already run
+/// in the prefilter, so `manifest.revocation` is the ISSUER's (bound) reference
+/// and the per-commitment salt is the issuer-attested one — the message recomputed
+/// here is therefore the genuine issuer-signed message.
+// [OPUS-4.8] sq-z9l: hidden-issuer attestation cryptographic gate.
+fn bind_hidden_issuer_attestations(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    challenge: &FieldHex,
+) -> Result<(), CheckError> {
+    if manifest.hidden_issuer_attestations.is_empty() {
+        // No hidden-issuer proofs; the clear-key path is the attestation gate.
+        return Ok(());
+    }
+    // The relying party must have OPTED IN; otherwise it has no authoritative
+    // key-set root to bind the proof to and rejects fail-closed.
+    let Some(depth) = trusted_key_set.hidden_issuer_depth() else {
+        return Err(CheckError::HiddenIssuerNotEnabled);
+    };
+    // Derive the AUTHORITATIVE key-set root from the relying party's OWN KeySet
+    // (canonical order) — the trust anchor every entry's public root must equal.
+    let auth_root = trusted_key_set
+        .hidden_issuer_root(depth)
+        .ok_or(CheckError::HiddenIssuerRootUnavailable)?;
+
+    let challenge_fr = challenge
+        .to_field()
+        .ok_or(CheckError::HiddenIssuerMalformedProof)?;
+
+    // The set of commitments a VERIFIED scan sub-proof references, with the
+    // issuer-signed message recomputed for each (commitment hex -> message Fr).
+    // Mirrors bind_issuer_attestations' referenced-commitment discipline: the
+    // message is `commitment_message_with_status(C(G), salt, status_ref)`, exactly
+    // the clear path's signed message, recomputed from the disclosed (and, by the
+    // prefilter, issuer-bound) reference + salt.
+    let referenced = scan_referenced_messages(manifest)?;
+
+    for (i, hi) in manifest.hidden_issuer_attestations.iter().enumerate() {
+        if hi.depth != depth {
+            return Err(CheckError::HiddenIssuerDepthMismatch {
+                declared: hi.depth,
+                policy: depth,
+            });
+        }
+        // The covered commitment must be referenced by a verified scan, and we use
+        // OUR recomputed message (never the prover's declared `hi.message`).
+        let Some(c_fr) = hi.commitment.to_field() else {
+            return Err(CheckError::HiddenIssuerUnreferencedCommitment {
+                commitment: hi.commitment.0.clone(),
+            });
+        };
+        let c_key = field_to_hex(&c_fr);
+        let Some(expected_m) = referenced.get(&c_key) else {
+            return Err(CheckError::HiddenIssuerUnreferencedCommitment {
+                commitment: hi.commitment.0.clone(),
+            });
+        };
+
+        let blob = hex_decode(&hi.proof_hex).ok_or(CheckError::HiddenIssuerMalformedProof)?;
+        let art = decode_artifacts(&blob).ok_or(CheckError::HiddenIssuerMalformedProof)?;
+
+        // Public-input layout for hidden_issuer_d{depth} main: challenge, m,
+        // key_set_root (three 32-byte BE field words, declaration order). We feed
+        // OUR own values (nonce, recomputed message, authoritative root) — never
+        // the prover's declared bytes — so a different challenge, a message not
+        // bound to a referenced commitment, or a non-authoritative key set all fail
+        // the byte-compare.
+        let mut reconstructed: Vec<u8> = Vec::with_capacity(96);
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&challenge_fr));
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(expected_m));
+        reconstructed.extend_from_slice(&field_to_be_bytes_32(&auth_root));
+        if reconstructed != art.public_inputs {
+            // Diagnose WHICH public input diverged for a precise reason. The
+            // proof's first word is the challenge (already bound elsewhere); the
+            // second is the message, the third the key-set root.
+            let pi = &art.public_inputs;
+            if pi.len() == 96 && pi[64..96] != field_to_be_bytes_32(&auth_root) {
+                return Err(CheckError::HiddenIssuerRootMismatch);
+            }
+            if pi.len() == 96 && pi[32..64] != field_to_be_bytes_32(expected_m) {
+                return Err(CheckError::HiddenIssuerMessageMismatch {
+                    commitment: hi.commitment.0.clone(),
+                });
+            }
+            // Otherwise the challenge word (or the blob length) diverged.
+            return Err(CheckError::HiddenIssuerProofRejected);
+        }
+
+        let id = CircuitId::HiddenIssuer { depth };
+        let sub_work = work_dir.join(format!("hidden_issuer_{i}"));
+        let canonical_vk = prover
+            .canonical_vk(&id, &sub_work.join("vk"))
+            .map_err(CheckError::Driver)?;
+        let ok = prover
+            .verify_with(&art.proof, &reconstructed, &canonical_vk, &sub_work.join("verify"))
+            .map_err(CheckError::Driver)?;
+        if !ok {
+            return Err(CheckError::HiddenIssuerProofRejected);
+        }
+    }
+    Ok(())
+}
+
+/// The issuer-signed message for every commitment a VERIFIED scan sub-proof
+/// references, keyed by canonical commitment hex (sq-z9l). The message is
+/// `commitment_message_with_status(C(G), salt, status_ref_digest(H(list), index,
+/// version))` — the SAME message [`bind_issuer_attestations`] verifies the clear
+/// signature over, recomputed from the disclosed (prefilter-validated, so
+/// issuer-bound) attestation salt + revocation reference. Used by the
+/// hidden-issuer gate to bind each proof's PUBLIC `m` to a specific committed
+/// graph. Errors if a referenced commitment lacks the salt/reference the prefilter
+/// guarantees (defensive — should not happen post-prefilter).
+fn scan_referenced_messages(
+    manifest: &ProofManifest,
+) -> Result<std::collections::BTreeMap<String, Fr>, CheckError> {
+    let mut out: std::collections::BTreeMap<String, Fr> = std::collections::BTreeMap::new();
+    let Some(rev) = &manifest.revocation else {
+        // No reference => no status-bound message can be formed. The hidden-issuer
+        // path requires the same issuer-bound reference the clear path does.
+        return Ok(out);
+    };
+    let list_id_fr = status_list_id_to_field(&rev.status_list);
+    let status_ref = status_ref_digest(&list_id_fr, rev.index, rev.version);
+    for sp in &manifest.sub_proofs {
+        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
+            continue;
+        };
+        for c in commitments {
+            let Some(c_fr) = c.to_field() else { continue };
+            let att = manifest.commitment_attestations.iter().find(|a| {
+                a.commitment.to_field().is_some() && a.commitment.to_field() == Some(c_fr)
+            });
+            let Some(att) = att else { continue };
+            let Some(salt_hex) = &att.salt else { continue };
+            let Some(salt_fr) = salt_hex.to_field() else { continue };
+            let m = commitment_message_with_status(&c_fr, &salt_fr, &status_ref);
+            out.insert(field_to_hex(&c_fr), m);
+        }
+    }
+    Ok(out)
+}
+
 /// Normalize a hex key for set membership: strip an optional `0x` prefix and
 /// lowercase, so K-membership is representation-insensitive.
 fn normalize_hex(h: &str) -> String {
@@ -2108,6 +2429,16 @@ pub fn verify_manifest(
     // index. The challenge fed here is the verifier's nonce (audit #4), identical
     // to the sub-proof loop's binding.
     bind_hidden_revocation(manifest, revocation_policy, prover, work_dir, &challenge)?;
+
+    // --- sq-z9l: hidden-issuer attestation cryptographic gate. ---
+    // If the manifest carries hidden-issuer attestation proofs, verify each
+    // against the relying party's OWN authoritative key-set Merkle root (derived
+    // from its trusted KeySet) and the verifier's nonce. The clear-key
+    // attestation gate (bind_issuer_attestations, in the prefilter above) is
+    // UNCHANGED and still runs; this is the additive privacy upgrade that lets the
+    // holder NOT disclose WHICH issuer signed. The challenge fed here is the
+    // verifier's nonce (audit #4), identical to the sub-proof loop's binding.
+    bind_hidden_issuer_attestations(manifest, trusted_key_set, prover, work_dir, &challenge)?;
 
     Ok(())
 }
