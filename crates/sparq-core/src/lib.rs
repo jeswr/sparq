@@ -56,6 +56,54 @@ pub struct Graph {
     wal: Option<Wal>,
 }
 
+/// [OPUS-4.8] (sq-5lf) An IMMUTABLE, logically-independent point-in-time view of a
+/// [`Graph`], produced cheaply by [`Graph::snapshot`] (O(pending delta), never
+/// O(triples)) via the structural fork — the immutable base storage is `Arc`-shared, so
+/// a snapshot duplicates neither the permutation indexes nor the dictionary arena.
+///
+/// A `GraphSnapshot` reads exactly the triples present when it was taken and is
+/// unaffected by any later mutation of the source graph; equally, the source can never
+/// be reached through the snapshot. It [`Deref`](std::ops::Deref)s to `&Graph` (so every
+/// graph READ method — `len`, `id_of`, `pattern`, `iter_ids`, `store`/`dict` access for
+/// the query engine — is available and a `&GraphSnapshot` is usable anywhere a `&Graph`
+/// is) but deliberately exposes NO `DerefMut` and no mutating method: the snapshot cannot
+/// be mutated, so it cannot drift from its point-in-time state. It is [`Send`] + [`Sync`]
+/// (a `Graph` is), so it can be published across threads — the production serving pattern
+/// (one mutable master + a cheap immutable snapshot per commit / per closed RSP window).
+///
+/// If you need a snapshot you can then keep mutating, use [`Graph::fork`] (it returns a
+/// `Graph`); `snapshot` is the read-only surface layered on top of it.
+pub struct GraphSnapshot {
+    graph: Graph,
+}
+
+impl GraphSnapshot {
+    /// Consumes the snapshot, yielding the underlying point-in-time [`Graph`] as an
+    /// independently mutable graph (it already carries its own `Arc`-shared base + delta —
+    /// this is just dropping the read-only wrapper, O(1)). Use when a consumer that took an
+    /// immutable snapshot now wants to apply further updates to that exact state, e.g.
+    /// sparq-py's `Graph.copy()` returning a mutable copy.
+    #[inline]
+    pub fn into_graph(self) -> Graph {
+        self.graph
+    }
+
+    /// Borrows the underlying [`Graph`] (also reachable via the [`Deref`](std::ops::Deref)
+    /// impl; this is the explicit form for call sites that prefer it).
+    #[inline]
+    pub fn as_graph(&self) -> &Graph {
+        &self.graph
+    }
+}
+
+impl std::ops::Deref for GraphSnapshot {
+    type Target = Graph;
+    #[inline]
+    fn deref(&self) -> &Graph {
+        &self.graph
+    }
+}
+
 /// Backing storage for the numeric-value cache (`numerics[id-1]` = f64 value of term
 /// `id`, NaN for non-numeric): owned dense in RAM, mmap'd from disk (out-of-core), or
 /// SPARSE — only the numeric terms in a hash map. Most RDF terms are IRIs/strings (NaN),
@@ -1584,6 +1632,29 @@ impl Graph {
             #[cfg(feature = "mmap")]
             wal: None,
         }
+    }
+
+    /// [OPUS-4.8] (sq-5lf) A cheap, logically-INDEPENDENT, IMMUTABLE point-in-time copy
+    /// of this graph — O(pending delta), never O(triples). This is the public snapshot
+    /// surface the workspace `TODO.md` ("sparq-core: cheap graph snapshot API") and beads
+    /// `sq-5lf` specify, and what the blocked downstream consumers (sparq-rsp's
+    /// true-overlay window eval, sparq-py's `Graph.copy()`, the RDF/JS incremental-update
+    /// story) want: hand out an O(1)-ish snapshot that reads exactly the triples present
+    /// NOW and is unaffected by any later mutation of `self` (or of the snapshot — it is
+    /// immutable). Built on the [structural fork](Self::fork): the six permutation
+    /// indexes, planner stats, frozen dictionary base and numeric/temporal caches are
+    /// `Arc`-shared; only the small per-generation delta is copied by value. (As with
+    /// `fork`, the FIRST snapshot of a flat, never-forked graph pays a one-time O(n)
+    /// dictionary/cache freeze to mint the shareable base; subsequent snapshots of the
+    /// frozen lineage are O(overlay). Call [`compact`](Self::compact) to refreeze.)
+    ///
+    /// The returned [`GraphSnapshot`] is [`Send`] + [`Sync`] and derefs to `&Graph`, so it
+    /// is queryable exactly like a graph (it can be passed anywhere a `&Graph` is — the
+    /// engine reads `store`/`dict` through the deref) but exposes NO mutating method, so a
+    /// snapshot can never diverge from its point-in-time state. To obtain a snapshot you
+    /// can then keep mutating, use [`fork`](Self::fork) instead (which yields a `Graph`).
+    pub fn snapshot(&self) -> GraphSnapshot {
+        GraphSnapshot { graph: self.fork() }
     }
 
     /// Total pending-delta size carried by this graph (and its named graphs): store

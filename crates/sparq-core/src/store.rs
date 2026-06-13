@@ -525,6 +525,17 @@ impl TripleStore {
         self.overlay.is_some()
     }
 
+    /// [OPUS-4.8] (sq-5lf) Strong-reference count of the `Arc`-shared base permutation
+    /// indexes — i.e. how many stores currently SHARE this exact base storage. 1 for a
+    /// freshly built / just-compacted store; bumps by one for each live
+    /// [`fork`](Self::fork) / [`Graph::snapshot`](crate::Graph::snapshot) of it. Used to
+    /// PROVE structural sharing in tests (a cheap snapshot bumps this count rather than
+    /// duplicating the index memory). Two stores share a base iff this is > 1 and they
+    /// were derived from the same lineage.
+    pub fn base_strong_count(&self) -> usize {
+        std::sync::Arc::strong_count(&self.perms)
+    }
+
     /// Whether the store (base merged with any overlay) contains the canonical triple.
     pub fn contains(&self, t: [Id; 3]) -> bool {
         match &self.overlay {
