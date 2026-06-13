@@ -1,0 +1,8 @@
+{
+  "name": "sparq",
+  "version": "0.1.0",
+  "description": "Usage skills for the sparq RDF triplestore + SPARQL 1.1/1.2 engine (Rust/CLI/HTTP/Python/WASM + reasoning, SHACL, full-text, vector, GeoSPARQL, RSP-QL, ZK query proofs).",
+  "skills": [
+    "./skills"
+  ]
+}

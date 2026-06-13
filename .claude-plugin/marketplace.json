@@ -1,0 +1,14 @@
+{
+  "name": "sparq-tools",
+  "owner": {
+    "name": "Jesse Wright",
+    "url": "https://github.com/jeswr"
+  },
+  "plugins": [
+    {
+      "name": "sparq",
+      "source": "./",
+      "description": "sparq usage skills"
+    }
+  ]
+}
