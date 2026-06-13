@@ -307,6 +307,40 @@ fn sparql_value_defaults_to_focus_and_path_binding() {
     assert_eq!(res.path.as_ref().unwrap().to_turtle(), "<http://example.org/age>");
 }
 
+/// Pre-binding must land BELOW solution modifiers: a `SELECT DISTINCT … LIMIT`
+/// keeps $this constrained to the focus (not joined above the LIMIT, which would
+/// truncate the wrong result set). Two violating values, LIMIT 1 → one result;
+/// $this must still be the focus, never a different node.
+#[test]
+fn sparql_pre_binding_below_solution_modifiers() {
+    let shapes = format!(
+        r#"{PREFIXES}
+        ex:S a sh:NodeShape ;
+          sh:targetNode ex:bob ;
+          sh:sparql [
+            sh:select """
+              SELECT DISTINCT $this ?value WHERE {{
+                $this <http://example.org/age> ?value . FILTER(?value < 0)
+              }} ORDER BY ?value LIMIT 1
+            """ ;
+          ] .
+    "#
+    );
+    // bob has two negative ages; alice (not targeted) also has one — pre-binding
+    // must keep the query to bob, and LIMIT 1 must apply to bob's matches.
+    let data = r#"
+        @prefix ex: <http://example.org/> .
+        ex:bob   ex:age -1, -2 .
+        ex:alice ex:age -9 .
+    "#;
+    let r = run(data, &shapes);
+    assert_eq!(r.results.len(), 1, "{}", r.to_text());
+    assert!(r.results[0].focus_node.to_string().contains("bob"));
+    // ORDER BY ?value LIMIT 1 → the smallest age, -2.
+    let v = r.results[0].value.as_ref().unwrap().to_string();
+    assert!(v.contains("-2"), "value {v}");
+}
+
 /// The report Turtle for a SPARQL-based result must itself be valid Turtle and
 /// carry the SPARQLConstraintComponent.
 #[test]

@@ -136,11 +136,17 @@ pub(crate) struct ResultFields {
     pub default_message: String,
 }
 
-/// The projected variables of a SELECT pattern (the outermost `Project`), or the
-/// variables mentioned when there is no explicit projection (`SELECT *`).
+/// The projected variables of a SELECT pattern: the `Project` node reached by
+/// descending through the solution-modifier wrappers (`Distinct` / `Reduced` /
+/// `Slice` / `OrderBy`) that a `SELECT DISTINCT … ORDER BY … LIMIT …` builds
+/// above the projection. `None` when there is no explicit `Project` (`SELECT *`).
 fn projected_vars(pattern: &GraphPattern) -> Option<&Vec<Variable>> {
     match pattern {
         GraphPattern::Project { variables, .. } => Some(variables),
+        GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::OrderBy { inner, .. } => projected_vars(inner),
         _ => None,
     }
 }
@@ -148,7 +154,7 @@ fn projected_vars(pattern: &GraphPattern) -> Option<&Vec<Variable>> {
 /// Pre-binds `$this` to `focus` by injecting a single-row `VALUES (?this) { (focus) }`
 /// table joined under the projection, and ensures `?this` is itself projected (so
 /// a consumer reading `?this` back gets the focus node). Returns `None` if `focus`
-/// is not expressible as a SPARQL ground term (blank nodes are allowed).
+/// is not expressible as a SPARQL ground term.
 fn pre_bind(query: &Query, focus: &Term) -> Option<Query> {
     let Query::Select {
         dataset,
@@ -161,17 +167,28 @@ fn pre_bind(query: &Query, focus: &Term) -> Option<Query> {
     let ground = term_to_ground(focus)?;
     let this = Variable::new_unchecked("this");
     let values = GraphPattern::Values {
-        variables: vec![this.clone()],
+        variables: vec![this],
         bindings: vec![vec![Some(ground)]],
     };
-    // Wrap the *inner* of the projection with a Join against the VALUES table so
-    // the binding is visible to the whole WHERE clause; keep the projection (and
-    // add ?this to it if the author did not already project it).
-    let new_pattern = match pattern {
+    Some(Query::Select {
+        dataset: dataset.clone(),
+        pattern: inject_values(pattern, values),
+        base_iri: base_iri.clone(),
+    })
+}
+
+/// Joins `values` into a SELECT pattern at the right depth: it descends through
+/// the solution-modifier wrappers (`Distinct`/`Reduced`/`Slice`/`OrderBy`) so the
+/// VALUES table lands *below* them (a `LIMIT`/`DISTINCT` must apply to the
+/// pre-bound results, not the other way around), then joins it under the
+/// `Project`'s inner and adds `?this` to the projection if absent. If there is no
+/// `Project` (`SELECT *`), it joins at that point — `?this` is in scope regardless.
+fn inject_values(pattern: &GraphPattern, values: GraphPattern) -> GraphPattern {
+    match pattern {
         GraphPattern::Project { inner, variables } => {
             let mut variables = variables.clone();
             if !variables.iter().any(|v| v.as_str() == "this") {
-                variables.push(this);
+                variables.push(Variable::new_unchecked("this"));
             }
             GraphPattern::Project {
                 inner: Box::new(GraphPattern::Join {
@@ -181,18 +198,31 @@ fn pre_bind(query: &Query, focus: &Term) -> Option<Query> {
                 variables,
             }
         }
-        // No explicit projection (SELECT *): join at the top and project nothing
-        // extra — `?this` is in scope and surfaces in the result vars regardless.
+        GraphPattern::Distinct { inner } => GraphPattern::Distinct {
+            inner: Box::new(inject_values(inner, values)),
+        },
+        GraphPattern::Reduced { inner } => GraphPattern::Reduced {
+            inner: Box::new(inject_values(inner, values)),
+        },
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => GraphPattern::Slice {
+            inner: Box::new(inject_values(inner, values)),
+            start: *start,
+            length: *length,
+        },
+        GraphPattern::OrderBy { inner, expression } => GraphPattern::OrderBy {
+            inner: Box::new(inject_values(inner, values)),
+            expression: expression.clone(),
+        },
+        // No projection wrapper (SELECT *): join here; ?this surfaces regardless.
         other => GraphPattern::Join {
             left: Box::new(values),
             right: Box::new(other.clone()),
         },
-    };
-    Some(Query::Select {
-        dataset: dataset.clone(),
-        pattern: new_pattern,
-        base_iri: base_iri.clone(),
-    })
+    }
 }
 
 /// An RDF term as a SPARQL `GroundTerm` for a VALUES row. Variables/triple-terms
