@@ -176,16 +176,50 @@ impl CircuitProver {
         Ok(ProofArtifacts { proof, public_inputs, vk })
     }
 
-    /// Verify artifacts via `bb verify`. Returns Ok(true) on a valid proof,
-    /// Ok(false) if bb rejects the proof, Err on a spawn/io failure.
-    pub fn verify(&self, art: &ProofArtifacts, work_dir: &Path) -> Result<bool, DriverError> {
+    /// Recompute the CANONICAL verification key for a circuit-family member,
+    /// verifier-side, from the compiled member named by `id` — never trusting a
+    /// prover-supplied vk (audit #2). Compiles the member (idempotent) then runs
+    /// `bb write_vk`. Measured deterministic and fast (~40-60ms once the ACIR is
+    /// cached, ~350ms cold); a freshly-recompiled ACIR yields a byte-identical
+    /// vk to `bb prove --write_vk`, so this is the authentic member vk.
+    // [OPUS-4.8] new verifier-side canonical-vk path (audit #2).
+    pub fn canonical_vk(&self, id: &CircuitId, work_dir: &Path) -> Result<Vec<u8>, DriverError> {
+        let acir = self.compile(id)?;
+        std::fs::create_dir_all(work_dir)?;
+        run(
+            "bb",
+            Command::new("bb")
+                .arg("write_vk")
+                .arg("-b")
+                .arg(&acir)
+                .arg("-o")
+                .arg(work_dir)
+                .arg("-t")
+                .arg(&self.target),
+        )?;
+        Ok(std::fs::read(work_dir.join("vk"))?)
+    }
+
+    /// Verify a proof against an EXPLICIT verification key and public-input
+    /// bytes — the verifier supplies the canonical member vk (from
+    /// [`Self::canonical_vk`]) and the reconstructed-and-byte-checked public
+    /// inputs, NEVER the prover's `art.vk` / `art.public_inputs`. Returns
+    /// Ok(true) on a valid proof, Ok(false) if bb rejects, Err on spawn/io.
+    // [OPUS-4.8] verify against caller-pinned vk + public inputs (audit #1/#2).
+    pub fn verify_with(
+        &self,
+        proof: &[u8],
+        public_inputs: &[u8],
+        vk: &[u8],
+        work_dir: &Path,
+    ) -> Result<bool, DriverError> {
         std::fs::create_dir_all(work_dir)?;
         let proof_p = work_dir.join("proof");
         let pi_p = work_dir.join("public_inputs");
         let vk_p = work_dir.join("vk");
-        std::fs::write(&proof_p, &art.proof)?;
-        std::fs::write(&pi_p, &art.public_inputs)?;
-        std::fs::write(&vk_p, &art.vk)?;
+        std::fs::write(&proof_p, proof)?;
+        std::fs::write(&pi_p, public_inputs)?;
+        std::fs::write(&vk_p, vk)?;
 
         let out = Command::new("bb")
             .arg("verify")
@@ -200,6 +234,17 @@ impl CircuitProver {
             .output()
             .map_err(|source| DriverError::Spawn { tool: "bb".into(), source })?;
         Ok(out.status.success())
+    }
+
+    /// Verify artifacts via `bb verify` using the bundled vk + public inputs.
+    ///
+    /// NOTE: this trusts `art.vk` and `art.public_inputs` and so is NOT a sound
+    /// third-party gate on its own — `verify_manifest` does NOT call this; it
+    /// recomputes the canonical vk and reconstructs the public inputs (see
+    /// [`Self::canonical_vk`] / [`Self::verify_with`] and the verifier). Kept
+    /// for the prover-side round-trip / bb-tamper tests only.
+    pub fn verify(&self, art: &ProofArtifacts, work_dir: &Path) -> Result<bool, DriverError> {
+        self.verify_with(&art.proof, &art.public_inputs, &art.vk, work_dir)
     }
 }
 
