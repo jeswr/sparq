@@ -237,17 +237,123 @@ fn:parse-json facade is stubbed).
 7. Strings are byte/ASCII-level (`str<N>`); no Unicode case mapping or
    normalization.
 
+## Float API migration — sparq_ieee754 (DONE 2026-06-13)
+
+**Status: COMPLETE.** The vendored old free-function IEEE754 API
+(`vendor/ieee754`, v0.3.1 + `u1→u8`) has been removed and the float layer
+in `xpath/src/numeric_types.nr` now sits on `sparq_ieee754` (path dep on
+`zk/ieee754`, the `zk-ieee754` branch vendoring). All old-API usage was
+confined to `numeric_types.nr`; no public consumer (lib, unit tests,
+`test_packages`) was touched — they call only the re-exported wrapper
+functions and `XsdFloat`/`XsdDouble::{from_bits,to_bits}`.
+
+`Model: Opus 4.8` — the bench-table re-validation, the floor/ceil_float
+bit-twiddle finishing edit, and this section were completed on Opus 4.8
+while Fable 5 was unavailable. Flag for re-review when Fable returns.
+
+### What changed
+
+- **Wrappers.** `XsdFloat { value: f32 }` / `XsdDouble { value: f64 }`,
+  where `f32`/`f64` are the `sparq_ieee754`-generated types.
+  `from_bits(b)` → `f32::new(b)`; `to_bits()` → `value.bits()`.
+- **Arithmetic** (`numeric_{add,subtract,multiply,divide}_{float,double}`):
+  `std::ops` operators on the wrapped value (`a.value + b.value`, etc.).
+- **Comparison kernels** (`eq/ne/lt/le/gt/ge`): IEEE comparison via
+  `value.eq(...)` and the `sparq_ieee754` ordering kernels (NaN-aware:
+  any comparison with NaN is false; `±0` compare equal).
+- **floor / ceil — split strategy, empirically chosen:**
+  - `floor_double` / `ceil_double`: `sparq_ieee754` library kernels
+    (`a.value.floor()` / `.ceil()`). Measured CHEAPER than the old lib
+    (438.9 → 341.8 gates/call), so the kernel is kept.
+  - `floor_float` / `ceil_float`: **local bit-twiddling** (exponent
+    decode → fraction mask → directional round-away in the sign-appropriate
+    direction; specials/integers pass through; `|x|<1` short-circuits to
+    `±1`/`±0`). The `sparq_ieee754` f32 floor/ceil kernels REGRESSED
+    (185.0 → ~325 gates/call); the local kernel recovers to 130.4/call —
+    cheaper than BOTH the regressed library kernel and the original
+    vendored lib. This mirrors the already-committed local `round_float`
+    kernel, which was kept local for the same measured reason.
+    `noir-optimisation §1/§2.4` is the governing rule: the saving is
+    backed by the amplified `bb gates` harness, not `nargo info` or
+    intuition (intuition has misfired on this codebase before — §3.3).
+- **round** (`round_{float,double}`): kept local (ties-toward-+∞),
+  bit-twiddling; faster than the old lib (float 256.4 → 201.7).
+- **abs** (`abs_{float,double}`): sign-bit mask (`bits & 0x7FFF…`),
+  NaN payloads preserved.
+- **from_small_int**: `f32::from(n: i8)` / `f64::from` (exact over the
+  full i8 range), replacing the old free-function int conversion.
+- **NaN / special predicates**: bit-level on the canonical encoding
+  (`f32_bits_is_nan`, `f32_bits_is_special`, f64 analogues). `sparq_ieee754`
+  keeps struct fields and classifiers private, so these operate on the
+  bit pattern directly — cheap mask/compare, no decode round-trip.
+
+### API differences from the old vendored lib
+
+| Concern | Old (`vendor/ieee754`) | New (`sparq_ieee754`) |
+|---|---|---|
+| Type | `IEEE754Float32` (free-function API) | `f32` (generated, methods) |
+| Construct from bits | free fn | `f32::new(bits)` |
+| Extract bits | `.value` field (`u1`/`u8` era) | `.bits()` method |
+| Arithmetic | free functions | `std::ops` (`+ - * /`) |
+| int → float | free fn | `f32::from(i8)` |
+| Classifiers | exposed | private — use bit-level predicates |
+| floor/ceil f32 | lib fn | local bit-twiddle (measured cheaper) |
+
+### Before / after gate-count table
+
+`bb gates` UltraHonk `circuit_size`, per-call cost via the amplification
+harness `scripts/bench_float_migration.py` (N_small=8, N_big=32;
+per-call = (gates@32 − gates@8) / 24). BEFORE = old vendored lib
+(`/tmp/xpath_float_before_n8_32.json`); AFTER = `sparq_ieee754` +
+bit-twiddle floor/ceil_float (`/tmp/xpath_float_after_n8_32.json`).
+
+| op | BEFORE | AFTER | Δ | % |
+|---|---:|---:|---:|---:|
+| add_double | 1149.5 | 514.2 | −635.3 | −55.3% |
+| mul_double | 2708.8 | 405.6 | −2303.1 | −85.0% |
+| div_double | 9376.0 | 408.9 | −8967.1 | −95.6% |
+| eq_double | 110.2 | 85.0 | −25.2 | −22.9% |
+| lt_double | 146.8 | 136.3 | −10.4 | −7.1% |
+| round_double | 528.2 | 428.4 | −99.8 | −18.9% |
+| floor_double | 438.9 | 341.8 | −97.1 | −22.1% |
+| ceil_double | 438.9 | 342.8 | −96.1 | −21.9% |
+| abs_double | 0.0 | 77.7 | +77.7 | (see note) |
+| add_float | 952.8 | 525.0 | −427.8 | −44.9% |
+| mul_float | 1571.0 | 436.8 | −1134.2 | −72.2% |
+| lt_float | 140.2 | 119.8 | −20.5 | −14.6% |
+| round_float | 256.4 | 201.7 | −54.7 | −21.3% |
+| floor_float | 185.0 | 130.4 | −54.7 | −29.5% |
+| ceil_float | 185.0 | 130.4 | −54.7 | −29.5% |
+| int_to_double | 236.9 | 111.1 | −125.8 | −53.1% |
+
+Net: a broad win. Heavy arithmetic collapses (`div_double` −95.6%,
+`mul_double` −85.0%) because `sparq_ieee754`'s kernels are the optimised
+ones this workspace's IEEE754 effort produced. **`abs_double` note:** the
+BEFORE measurement was 0.0/call because the old `.abs()` constant-folded
+away entirely inside the amplified harness; the new sign-bit-mask abs does
+real (witness-dependent) work that does not fold, hence 77.7 gates/call.
+This is an honest, tiny regression on one op and an artefact of the old
+form being foldable — not a correctness or net-cost concern.
+
+### Test gates re-run with the floor/ceil_float bit-twiddle in place
+
+(numeric_types.nr changed after the prior pass, so the oracle gate was
+re-run — not trusted from the earlier run.)
+
+- Oracle (21 non-member float/double packages, appended to `members`,
+  manifest reverted after): **21/21 green, 283/283 tests** — incl.
+  `fnceiling_float` 3/3, `fnceiling_double` 3/3, `fnfloor_float` 3/3,
+  `fnfloor_double` 3/3, `fnround_float` 88/88, `fnround_double` 87/87.
+- `xpath` lib: **67/67**. `xpath_unit_tests`: **244/244**.
+- Toolchain: `nargo 1.0.0-beta.21` (noirc 89a0f0fa), `bb 5.0.0-nightly.20260324`.
+
 ## Planned follow-up (out of scope here)
 
-- **Float API migration (stage 2):** a later deliverable will migrate this
-  copy off the old free-function IEEE754 API (`vendor/ieee754`, v0.3.1 +
-  `u1→u8`) onto the optimized vendored `sparq_ieee754` library at
-  `../ieee754` (the `zk-ieee754` branch vendoring). A half-done reference
-  migration exists at
+- **Float API migration (stage 2):** ✅ DONE — see "Float API migration —
+  sparq_ieee754" above. (The half-done reference migration at
   `jeswr/zkp-sparql-workspace:circuits/noir_XPath` branch
-  `refactor/new-ieee754-api` (local checkout:
-  `/Users/jesght/Documents/GitHub/jeswr/zkp-sparql-workspace/circuits/noir_XPath`)
-  — use it as a reference, do not copy it wholesale.
+  `refactor/new-ieee754-api` was used as a reference only, not copied
+  wholesale.)
 - **Upstreaming:** the beta.21 dep-pinning story, the date-timezone semantic
   fixes, and restoring the 21 green float/double packages to the workspace
   should eventually be upstreamed to jeswr/noir_XPath.

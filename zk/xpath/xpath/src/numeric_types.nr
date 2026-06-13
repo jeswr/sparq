@@ -16,18 +16,35 @@
 //!
 //! For operations with mixed types, both operands are promoted to the same type.
 
-use ieee754::float::{
-    abs_float32, abs_float64, add_float32, add_float32_with_rounding, add_float64,
-    add_float64_with_rounding, div_float32, div_float64, float32_eq, float32_from_bits, float32_ge,
-    float32_gt, float32_is_infinity, float32_is_nan, float32_is_zero, float32_le, float32_lt,
-    float32_to_bits, FLOAT32_ZERO, float64_eq, float64_from_bits, float64_ge, float64_gt,
-    float64_is_infinity, float64_is_nan, float64_is_zero, float64_le, float64_lt, float64_to_bits,
-    FLOAT64_ZERO, IEEE754Float32, IEEE754Float64, mul_float32, mul_float64, sub_float32,
-    sub_float64,
-};
-use ieee754::types::{
-    ROUNDING_MODE_NEAREST_AWAY, ROUNDING_MODE_TOWARD_NEGATIVE, ROUNDING_MODE_TOWARD_POSITIVE,
-};
+use sparq_ieee754::{f32, f64};
+
+// ============================================================================
+// Bit-level IEEE 754 predicates
+// ============================================================================
+//
+// sparq_ieee754 intentionally keeps struct fields and classification helpers
+// private; the wrapper-level predicates below operate on the canonical bit
+// encoding instead (cheap mask/compare constraints, no decode round-trip).
+
+/// NaN: exponent all-ones and non-zero mantissa (float32 layout)
+fn f32_bits_is_nan(bits: u32) -> bool {
+    (((bits >> 23) & 0xFF) == 0xFF) & ((bits & 0x7FFFFF) != 0)
+}
+
+/// NaN | Infinity | zero (float32 layout); denormals are NOT special
+fn f32_bits_is_special(bits: u32) -> bool {
+    (((bits >> 23) & 0xFF) == 0xFF) | ((bits & 0x7FFFFFFF) == 0)
+}
+
+/// NaN: exponent all-ones and non-zero mantissa (float64 layout)
+fn f64_bits_is_nan(bits: u64) -> bool {
+    (((bits >> 52) & 0x7FF) == 0x7FF) & ((bits & 0xFFFFFFFFFFFFF) != 0)
+}
+
+/// NaN | Infinity | zero (float64 layout); denormals are NOT special
+fn f64_bits_is_special(bits: u64) -> bool {
+    (((bits >> 52) & 0x7FF) == 0x7FF) | ((bits & 0x7FFFFFFFFFFFFFFF) == 0)
+}
 
 // ============================================================================
 // Numeric Type Enum
@@ -86,24 +103,24 @@ impl Eq for NumericType {
 
 /// IEEE 754 float32 wrapped as XPath xs:float
 pub struct XsdFloat {
-    /// The underlying IEEE 754 float32 value
-    pub value: IEEE754Float32,
+    /// The underlying IEEE 754 float32 value (sparq_ieee754 generated type)
+    pub value: f32,
 }
 
 impl XsdFloat {
     /// Create from IEEE 754 bit representation
     pub fn from_bits(bits: u32) -> Self {
-        XsdFloat { value: float32_from_bits(bits) }
+        XsdFloat { value: f32::new(bits) }
     }
 
     /// Convert to IEEE 754 bit representation
     pub fn to_bits(self) -> u32 {
-        float32_to_bits(self.value)
+        self.value.bits()
     }
 
     /// Check if this value is NaN
     pub fn is_nan(self) -> bool {
-        float32_is_nan(self.value)
+        f32_bits_is_nan(self.value.bits())
     }
 
     /// Create positive zero
@@ -131,47 +148,16 @@ impl XsdFloat {
         XsdFloat::from_bits(0x7FC00000) // Quiet NaN
     }
 
-    /// Create from a small integer (-127 to 127)
-    /// For zero-knowledge compatible conversion
+    /// Create from a small integer (-128 to 127)
+    /// For zero-knowledge compatible conversion (exact for the full i8 range)
     pub fn from_small_int(n: i8) -> Self {
-        // Handle zero case
-        if n == 0 {
-            XsdFloat::zero()
-        } else {
-            let is_negative = n < 0;
-            let abs_n: u8 = if is_negative {
-                ((-n) as i8) as u8
-            } else {
-                n as u8
-            };
-
-            // Find highest set bit position using bounded loop
-            let mut msb_pos: u32 = 0;
-            for i in 0..8 {
-                if (abs_n >> i) != 0 {
-                    msb_pos = i as u32;
-                }
-            }
-
-            // Exponent is biased by 127
-            let exponent: u32 = 127 + msb_pos;
-
-            // Mantissa: shift value left to fill 23 bits, remove implicit leading 1
-            let mantissa: u32 = if msb_pos == 0 {
-                0
-            } else {
-                ((abs_n as u32) << (23 - msb_pos)) & 0x7FFFFF
-            };
-
-            let sign_bit: u32 = if is_negative { 1 << 31 } else { 0 };
-            XsdFloat::from_bits(sign_bit | (exponent << 23) | mantissa)
-        }
+        XsdFloat { value: f32::from(n) }
     }
 }
 
 impl Eq for XsdFloat {
     fn eq(self, other: Self) -> bool {
-        float32_eq(self.value, other.value)
+        self.value.eq(other.value)
     }
 }
 
@@ -181,24 +167,24 @@ impl Eq for XsdFloat {
 
 /// IEEE 754 float64 wrapped as XPath xs:double
 pub struct XsdDouble {
-    /// The underlying IEEE 754 float64 value
-    pub value: IEEE754Float64,
+    /// The underlying IEEE 754 float64 value (sparq_ieee754 generated type)
+    pub value: f64,
 }
 
 impl XsdDouble {
     /// Create from IEEE 754 bit representation
     pub fn from_bits(bits: u64) -> Self {
-        XsdDouble { value: float64_from_bits(bits) }
+        XsdDouble { value: f64::new(bits) }
     }
 
     /// Convert to IEEE 754 bit representation
     pub fn to_bits(self) -> u64 {
-        float64_to_bits(self.value)
+        self.value.bits()
     }
 
     /// Check if this value is NaN
     pub fn is_nan(self) -> bool {
-        float64_is_nan(self.value)
+        f64_bits_is_nan(self.value.bits())
     }
 
     /// Create positive zero
@@ -226,41 +212,10 @@ impl XsdDouble {
         XsdDouble::from_bits(0x7FF8000000000000) // Quiet NaN
     }
 
-    /// Create from a small integer (-127 to 127)
-    /// For zero-knowledge compatible conversion
+    /// Create from a small integer (-128 to 127)
+    /// For zero-knowledge compatible conversion (exact for the full i8 range)
     pub fn from_small_int(n: i8) -> Self {
-        if n == 0 {
-            XsdDouble::zero()
-        } else {
-            let is_negative = n < 0;
-            let abs_n: u8 = if is_negative {
-                ((-n) as i8) as u8
-            } else {
-                n as u8
-            };
-
-            // Find highest set bit position using bounded loop
-            let mut msb_pos: u32 = 0;
-            for i in 0..8 {
-                if (abs_n >> i) != 0 {
-                    msb_pos = i as u32;
-                }
-            }
-
-            // Exponent is biased by 1023 for float64
-            let exponent: u64 = (1023 + msb_pos) as u64;
-
-            // Mantissa: shift value left to fill 52 bits, remove implicit leading 1
-            let shift_amount: u64 = (52 - msb_pos) as u64;
-            let mantissa: u64 = if msb_pos == 0 {
-                0
-            } else {
-                ((abs_n as u64) << shift_amount) & 0xFFFFFFFFFFFFF
-            };
-
-            let sign_bit: u64 = if is_negative { 1 << 63 } else { 0 };
-            XsdDouble::from_bits(sign_bit | (exponent << 52) | mantissa)
-        }
+        XsdDouble { value: f64::from(n) }
     }
 
     /// Promote from float32 to float64
@@ -313,7 +268,7 @@ impl XsdDouble {
 
 impl Eq for XsdDouble {
     fn eq(self, other: Self) -> bool {
-        float64_eq(self.value, other.value)
+        self.value.eq(other.value)
     }
 }
 
@@ -346,29 +301,29 @@ pub fn get_common_type(t1: NumericType, t2: NumericType) -> NumericType {
 /// op:numeric-equal for xs:float
 /// NaN does not equal itself per IEEE 754 / XPath spec
 pub fn numeric_equal_float(a: XsdFloat, b: XsdFloat) -> bool {
-    float32_eq(a.value, b.value)
+    a.value.eq(b.value)
 }
 
 /// op:numeric-less-than for xs:float
 /// Returns false if either operand is NaN
 pub fn numeric_less_than_float(a: XsdFloat, b: XsdFloat) -> bool {
-    float32_lt(a.value, b.value)
+    a.value.lt(b.value)
 }
 
 /// op:numeric-greater-than for xs:float
 /// Returns false if either operand is NaN
 pub fn numeric_greater_than_float(a: XsdFloat, b: XsdFloat) -> bool {
-    float32_gt(a.value, b.value)
+    a.value.gt(b.value)
 }
 
 /// op:numeric-less-than-or-equal for xs:float
 pub fn numeric_le_float(a: XsdFloat, b: XsdFloat) -> bool {
-    float32_le(a.value, b.value)
+    a.value.le(b.value)
 }
 
 /// op:numeric-greater-than-or-equal for xs:float
 pub fn numeric_ge_float(a: XsdFloat, b: XsdFloat) -> bool {
-    float32_ge(a.value, b.value)
+    a.value.ge(b.value)
 }
 
 // ============================================================================
@@ -378,29 +333,29 @@ pub fn numeric_ge_float(a: XsdFloat, b: XsdFloat) -> bool {
 /// op:numeric-equal for xs:double
 /// NaN does not equal itself per IEEE 754 / XPath spec
 pub fn numeric_equal_double(a: XsdDouble, b: XsdDouble) -> bool {
-    float64_eq(a.value, b.value)
+    a.value.eq(b.value)
 }
 
 /// op:numeric-less-than for xs:double
 /// Returns false if either operand is NaN
 pub fn numeric_less_than_double(a: XsdDouble, b: XsdDouble) -> bool {
-    float64_lt(a.value, b.value)
+    a.value.lt(b.value)
 }
 
 /// op:numeric-greater-than for xs:double
 /// Returns false if either operand is NaN
 pub fn numeric_greater_than_double(a: XsdDouble, b: XsdDouble) -> bool {
-    float64_gt(a.value, b.value)
+    a.value.gt(b.value)
 }
 
 /// op:numeric-less-than-or-equal for xs:double
 pub fn numeric_le_double(a: XsdDouble, b: XsdDouble) -> bool {
-    float64_le(a.value, b.value)
+    a.value.le(b.value)
 }
 
 /// op:numeric-greater-than-or-equal for xs:double
 pub fn numeric_ge_double(a: XsdDouble, b: XsdDouble) -> bool {
-    float64_ge(a.value, b.value)
+    a.value.ge(b.value)
 }
 
 // ============================================================================
@@ -409,27 +364,28 @@ pub fn numeric_ge_double(a: XsdDouble, b: XsdDouble) -> bool {
 
 /// op:numeric-add for xs:float
 pub fn numeric_add_float(a: XsdFloat, b: XsdFloat) -> XsdFloat {
-    XsdFloat { value: add_float32(a.value, b.value) }
+    XsdFloat { value: a.value + b.value }
 }
 
 /// op:numeric-subtract for xs:float
 pub fn numeric_subtract_float(a: XsdFloat, b: XsdFloat) -> XsdFloat {
-    XsdFloat { value: sub_float32(a.value, b.value) }
+    XsdFloat { value: a.value - b.value }
 }
 
 /// op:numeric-multiply for xs:float
 pub fn numeric_multiply_float(a: XsdFloat, b: XsdFloat) -> XsdFloat {
-    XsdFloat { value: mul_float32(a.value, b.value) }
+    XsdFloat { value: a.value * b.value }
 }
 
 /// op:numeric-divide for xs:float
 pub fn numeric_divide_float(a: XsdFloat, b: XsdFloat) -> XsdFloat {
-    XsdFloat { value: div_float32(a.value, b.value) }
+    XsdFloat { value: a.value / b.value }
 }
 
 /// fn:abs for xs:float
+/// IEEE 754 abs clears the sign bit (NaN payloads preserved)
 pub fn abs_float(a: XsdFloat) -> XsdFloat {
-    XsdFloat { value: abs_float32(a.value) }
+    XsdFloat::from_bits(a.to_bits() & 0x7FFFFFFF)
 }
 
 // ============================================================================
@@ -438,27 +394,28 @@ pub fn abs_float(a: XsdFloat) -> XsdFloat {
 
 /// op:numeric-add for xs:double
 pub fn numeric_add_double(a: XsdDouble, b: XsdDouble) -> XsdDouble {
-    XsdDouble { value: add_float64(a.value, b.value) }
+    XsdDouble { value: a.value + b.value }
 }
 
 /// op:numeric-subtract for xs:double
 pub fn numeric_subtract_double(a: XsdDouble, b: XsdDouble) -> XsdDouble {
-    XsdDouble { value: sub_float64(a.value, b.value) }
+    XsdDouble { value: a.value - b.value }
 }
 
 /// op:numeric-multiply for xs:double
 pub fn numeric_multiply_double(a: XsdDouble, b: XsdDouble) -> XsdDouble {
-    XsdDouble { value: mul_float64(a.value, b.value) }
+    XsdDouble { value: a.value * b.value }
 }
 
 /// op:numeric-divide for xs:double
 pub fn numeric_divide_double(a: XsdDouble, b: XsdDouble) -> XsdDouble {
-    XsdDouble { value: div_float64(a.value, b.value) }
+    XsdDouble { value: a.value / b.value }
 }
 
 /// fn:abs for xs:double
+/// IEEE 754 abs clears the sign bit (NaN payloads preserved)
 pub fn abs_double(a: XsdDouble) -> XsdDouble {
-    XsdDouble { value: abs_float64(a.value) }
+    XsdDouble::from_bits(a.to_bits() & 0x7FFFFFFFFFFFFFFF)
 }
 
 // ============================================================================
@@ -945,8 +902,7 @@ global FLOAT64_MANTISSA_BITS: u64 = 52;
 /// XPath fn:round: 0.5 -> 1, -0.5 -> -0, 1.5 -> 2, -1.5 -> -1
 pub fn round_float(a: XsdFloat) -> XsdFloat {
     let bits = a.to_bits();
-    let is_special =
-        float32_is_nan(a.value) | float32_is_infinity(a.value) | float32_is_zero(a.value);
+    let is_special = f32_bits_is_special(bits);
 
     let sign = bits & FLOAT32_SIGN_MASK;
     let is_negative = sign != 0;
@@ -1040,8 +996,7 @@ pub fn round_float(a: XsdFloat) -> XsdFloat {
 /// XPath fn:round: 0.5 -> 1, -0.5 -> -0, 1.5 -> 2, -1.5 -> -1
 pub fn round_double(a: XsdDouble) -> XsdDouble {
     let bits = a.to_bits();
-    let is_special =
-        float64_is_nan(a.value) | float64_is_infinity(a.value) | float64_is_zero(a.value);
+    let is_special = f64_bits_is_special(bits);
 
     let sign = bits & FLOAT64_SIGN_MASK;
     let is_negative = sign != 0;
@@ -1128,10 +1083,13 @@ pub fn round_double(a: XsdDouble) -> XsdDouble {
 
 /// fn:ceiling for xs:float
 /// Round toward positive infinity
+/// Bit-twiddling implementation: measured cheaper than the sparq_ieee754
+/// f32 ceil kernel at this call shape (185.0 lib-kernel-regressed ~325 ->
+/// 130.4 gates/call; see VENDOR.md migration bench table).
+// [OPUS-4.8] written while Fable 5 unavailable - re-review when Fable returns
 pub fn ceil_float(a: XsdFloat) -> XsdFloat {
     let bits = a.to_bits();
-    let is_special =
-        float32_is_nan(a.value) | float32_is_infinity(a.value) | float32_is_zero(a.value);
+    let is_special = f32_bits_is_special(bits);
 
     let sign = bits & FLOAT32_SIGN_MASK;
     let is_negative = sign != 0;
@@ -1195,79 +1153,20 @@ pub fn ceil_float(a: XsdFloat) -> XsdFloat {
 }
 
 /// fn:ceiling for xs:double
-/// Round toward positive infinity
+/// Round toward positive infinity (sparq_ieee754 roundToIntegralTowardPositive kernel)
 pub fn ceil_double(a: XsdDouble) -> XsdDouble {
-    let bits = a.to_bits();
-    let is_special =
-        float64_is_nan(a.value) | float64_is_infinity(a.value) | float64_is_zero(a.value);
-
-    let sign = bits & FLOAT64_SIGN_MASK;
-    let is_negative = sign != 0;
-    let exp_bits = (bits & FLOAT64_EXP_MASK) >> FLOAT64_MANTISSA_BITS;
-    let mantissa = bits & FLOAT64_MANTISSA_MASK;
-    let exp = exp_bits as i64 - FLOAT64_EXP_BIAS as i64;
-
-    // Case: already integer (exp >= 52)
-    let is_integer = exp >= FLOAT64_MANTISSA_BITS as i64;
-
-    // Case: |value| < 1 (exp < 0)
-    let is_less_than_one = exp < 0;
-
-    // Normal case: exp in [0, 51]
-    let is_normal_case = (exp >= 0) & (exp < FLOAT64_MANTISSA_BITS as i64);
-
-    // Compute for normal case
-    let frac_bits = if is_normal_case {
-        (FLOAT64_MANTISSA_BITS as i64 - exp) as u64
-    } else {
-        1
-    };
-    let frac_mask = (1u64 << frac_bits) - 1;
-    let int_mask = !frac_mask;
-    let frac = mantissa & frac_mask;
-    let int_mantissa = mantissa & int_mask;
-    let round_up = !is_negative & (frac != 0);
-
-    // Compute rounded result for normal case
-    let increment = 1u64 << frac_bits;
-    let new_mantissa = int_mantissa + increment;
-    let overflow = new_mantissa >= (1u64 << FLOAT64_MANTISSA_BITS);
-
-    let normal_result = if round_up {
-        if overflow {
-            sign | ((exp_bits + 1) << FLOAT64_MANTISSA_BITS)
-        } else {
-            sign | (exp_bits << FLOAT64_MANTISSA_BITS) | new_mantissa
-        }
-    } else {
-        sign | (exp_bits << FLOAT64_MANTISSA_BITS) | int_mantissa
-    };
-
-    // Result for |value| < 1 case
-    let less_than_one_result = if is_negative {
-        FLOAT64_SIGN_MASK // -0
-    } else {
-        0x3FF0000000000000 // 1.0
-    };
-
-    // Select result based on case
-    let result_bits = if is_special | is_integer {
-        bits
-    } else if is_less_than_one {
-        less_than_one_result
-    } else {
-        normal_result
-    };
-
-    XsdDouble::from_bits(result_bits)
+    XsdDouble { value: a.value.ceil() }
 }
 
 /// fn:floor for xs:float
 /// Round toward negative infinity
+/// Bit-twiddling implementation: measured cheaper than the sparq_ieee754
+/// f32 floor kernel at this call shape (185.0 lib-kernel-regressed ~325 ->
+/// 130.4 gates/call; see VENDOR.md migration bench table).
+// [OPUS-4.8] written while Fable 5 unavailable - re-review when Fable returns
 pub fn floor_float(a: XsdFloat) -> XsdFloat {
     let bits = a.to_bits();
-    let is_special =
-        float32_is_nan(a.value) | float32_is_infinity(a.value) | float32_is_zero(a.value);
+    let is_special = f32_bits_is_special(bits);
 
     let sign = bits & FLOAT32_SIGN_MASK;
     let is_negative = sign != 0;
@@ -1331,69 +1230,7 @@ pub fn floor_float(a: XsdFloat) -> XsdFloat {
 }
 
 /// fn:floor for xs:double
-/// Round toward negative infinity
+/// Round toward negative infinity (sparq_ieee754 roundToIntegralTowardNegative kernel)
 pub fn floor_double(a: XsdDouble) -> XsdDouble {
-    let bits = a.to_bits();
-    let is_special =
-        float64_is_nan(a.value) | float64_is_infinity(a.value) | float64_is_zero(a.value);
-
-    let sign = bits & FLOAT64_SIGN_MASK;
-    let is_negative = sign != 0;
-    let exp_bits = (bits & FLOAT64_EXP_MASK) >> FLOAT64_MANTISSA_BITS;
-    let mantissa = bits & FLOAT64_MANTISSA_MASK;
-    let exp = exp_bits as i64 - FLOAT64_EXP_BIAS as i64;
-
-    // Case: already integer (exp >= 52)
-    let is_integer = exp >= FLOAT64_MANTISSA_BITS as i64;
-
-    // Case: |value| < 1 (exp < 0)
-    let is_less_than_one = exp < 0;
-
-    // Normal case: exp in [0, 51]
-    let is_normal_case = (exp >= 0) & (exp < FLOAT64_MANTISSA_BITS as i64);
-
-    // Compute for normal case
-    let frac_bits = if is_normal_case {
-        (FLOAT64_MANTISSA_BITS as i64 - exp) as u64
-    } else {
-        1
-    };
-    let frac_mask = (1u64 << frac_bits) - 1;
-    let int_mask = !frac_mask;
-    let frac = mantissa & frac_mask;
-    let int_mantissa = mantissa & int_mask;
-    let round_down = is_negative & (frac != 0);
-
-    // Compute rounded result for normal case
-    let increment = 1u64 << frac_bits;
-    let new_mantissa = int_mantissa + increment;
-    let overflow = new_mantissa >= (1u64 << FLOAT64_MANTISSA_BITS);
-
-    let normal_result = if round_down {
-        if overflow {
-            sign | ((exp_bits + 1) << FLOAT64_MANTISSA_BITS)
-        } else {
-            sign | (exp_bits << FLOAT64_MANTISSA_BITS) | new_mantissa
-        }
-    } else {
-        sign | (exp_bits << FLOAT64_MANTISSA_BITS) | int_mantissa
-    };
-
-    // Result for |value| < 1 case
-    let less_than_one_result = if is_negative {
-        0xBFF0000000000000 // -1.0
-    } else {
-        0 // 0.0
-    };
-
-    // Select result based on case
-    let result_bits = if is_special | is_integer {
-        bits
-    } else if is_less_than_one {
-        less_than_one_result
-    } else {
-        normal_result
-    };
-
-    XsdDouble::from_bits(result_bits)
+    XsdDouble { value: a.value.floor() }
 }
