@@ -48,6 +48,41 @@ jobs:
         run: cargo build --release -p sparq-cli -p sparq-bench
       - name: Run benchmarks
         run: bash scripts/ci-bench.sh 200000 bench-results.json
+      # [OPUS-4.8] HARD regression GATE on ONLY the DETERMINISTIC metrics (store/dict bytes-per-{triple,term},
+      # store_bytes_per_triple_small, parse_ns_per_byte, wasm_bundle_bytes). github-action-benchmark's
+      # fail-on-alert is a single GLOBAL switch that would also trip on the noisy wall-clock latencies, so it
+      # stays false (alert-comment only, below). This step is the TRUE gate: it compares THIS run's
+      # deterministic metrics against the PREVIOUS committed point on benchmark-data and FAILS CI on a real
+      # regression (tight per-metric thresholds in scripts/perf-gate.py), WITHOUT looking at the latencies.
+      #
+      # Runs on push-to-main AND on PRs (PRs gate against the published series — pre-merge feedback, zero
+      # pollution since auto-push is main-only). It runs BEFORE the github-action-benchmark "Store" step, so
+      # the last entry in data.js is the genuine previous point (not this run). A missing branch / metric =>
+      # no baseline => pass (self-heals on first run; new metrics establish their baseline). DELIBERATE
+      # increases: set the workflow env PERF_GATE_ALLOW (e.g. 'wasm_bundle_bytes') — see perf-gate.py header.
+      - name: Unit-test the hard-gate regression logic
+        # Cheap (no build): asserts perf-gate.py fails on a real regression and passes on
+        # noise-within-threshold / improvement / missing-baseline / deliberate-allow. Catches a future
+        # edit that breaks the gate before it can silently let a regression through. [OPUS-4.8]
+        run: python3 scripts/perf-gate.py --self-test
+      - name: Fetch previous benchmark series (for the hard gate)
+        id: prev_series
+        run: |
+          set -euo pipefail
+          if git fetch --depth=1 origin benchmark-data 2>/dev/null; then
+            git show FETCH_HEAD:dev/bench/data.js > prev-data.js 2>/dev/null \
+              && echo "fetched previous benchmark-data/dev/bench/data.js" \
+              || echo "benchmark-data branch has no dev/bench/data.js yet — no baseline."
+          else
+            echo "benchmark-data branch not present yet — no baseline (first run)."
+          fi
+      - name: Hard gate — deterministic perf regression
+        env:
+          # Deliberate-bump escape hatch: comma-separated metric names allowed to regress THIS run.
+          # Leave empty normally; set to e.g. 'wasm_bundle_bytes' on a commit/run that intentionally
+          # grows the bundle. The new value then becomes the committed baseline for subsequent runs.
+          PERF_GATE_ALLOW: ${{ vars.PERF_GATE_ALLOW }}
+        run: python3 scripts/perf-gate.py bench-results.json prev-data.js
       # [OPUS-4.8] First-run bootstrap: github-action-benchmark does
       # `git fetch origin benchmark-data:benchmark-data` and hard-fails with
       # "couldn't find remote ref benchmark-data" when the history branch does
@@ -98,12 +133,13 @@ jobs:
           # pre-merge, not only when an alert fires. [OPUS-4.8]
           comment-always: true
           summary-always: true
-          # GitHub-hosted runners are noisy, so only flag a *large* regression and never hard-fail:
-          # fail-on-alert stays false because this single global gate would otherwise trip on the
-          # noisy wall-clock latencies. The load-bearing regression signal is the set of DETERMINISTIC
-          # metrics ci-bench.sh emits — store/dict bytes-per-{triple,term}, store_bytes_per_triple_small,
-          # parse_ns_per_byte, wasm_bundle_bytes — which barely move run-to-run, so a real regression in
-          # them clears even a generous threshold and surfaces in the alert comment for human review.
+          # GitHub-hosted runners are noisy, so this action's gate only flags a *large* regression and
+          # never hard-fails: fail-on-alert stays false because this single GLOBAL switch would otherwise
+          # trip on the noisy wall-clock latencies. The TRUE hard gate on the DETERMINISTIC metrics
+          # (store/dict bytes-per-{triple,term}, store_bytes_per_triple_small, parse_ns_per_byte,
+          # wasm_bundle_bytes) is the dedicated "Hard gate" step ABOVE (scripts/perf-gate.py), which fails
+          # CI on a real regression of those alone. This action keeps the trend chart + alert comment for
+          # ALL metrics (including the latency trends) for human review. [OPUS-4.8]
           alert-threshold: '150%'
           comment-on-alert: true
           fail-on-alert: false
