@@ -199,6 +199,15 @@ pub enum CheckError {
     /// rejected so the accept decision can never depend on a prover-chosen key.
     // [OPUS-4.8] audit #3 / codex #1.
     UntrustedDeclaredKey { key: String },
+    /// The prover DECLARED a narrowed `manifest.key_set` (non-empty) but an
+    /// accepted attestation's issuer key is not a member of it (audit #3 codex
+    /// 2216 LOW): the declared narrowed set is inconsistent with the
+    /// attestations actually proven. The accept decision stays anchored on the
+    /// external trusted `K` (an attestation key is ALWAYS required to be in `K`);
+    /// this additionally enforces internal consistency of a declared narrowing,
+    /// so a prover cannot advertise a tighter issuer set than it actually used.
+    // [OPUS-4.8] codex 2216 LOW.
+    AttestationKeyNotInDeclaredSet { commitment: String, key: String },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -262,6 +271,10 @@ impl std::fmt::Display for CheckError {
             CheckError::UntrustedDeclaredKey { key } => write!(
                 f,
                 "manifest key_set declares key {key} which is not in the external trusted key-set K (prover may not widen the trust anchor)"
+            ),
+            CheckError::AttestationKeyNotInDeclaredSet { commitment, key } => write!(
+                f,
+                "commitment {commitment}: attestation key {key} is not in the prover's declared (non-empty) manifest key_set (declared narrowing is inconsistent with the proven attestations)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -406,8 +419,13 @@ pub fn verify_manifest_structure(
 /// each `commitments[g]` of each scan sub-proof:
 /// - there MUST be a `commitment_attestations` entry over that commitment value,
 /// - its signature MUST verify under its declared `issuer_public_key`,
-/// - and that key MUST be a member of the EXTERNAL `trusted_key_set` (the
-///   relying party's argument — NEVER `manifest.key_set`).
+/// - that key MUST be a member of the EXTERNAL `trusted_key_set` (the relying
+///   party's argument — NEVER `manifest.key_set`),
+/// - and, when the prover DECLARED a narrowed `manifest.key_set` (non-empty),
+///   that key MUST ALSO be a member of it (codex 2216 LOW): a declared narrowing
+///   must be internally consistent with the attestations actually proven. The
+///   accept decision stays anchored on the external K (this consistency rule is
+///   ADDED to, never substituted for, the external-K check).
 ///
 /// # The codex #1 soundness fix
 /// Previously the trust anchor was `manifest.key_set` — PROVER-supplied. A
@@ -466,6 +484,25 @@ fn bind_issuer_attestations(
             if !trusted_key_set.contains_hex(&att.issuer_public_key) {
                 return Err(CheckError::IssuerKeyNotInKeySet {
                     commitment: c.0.clone(),
+                });
+            }
+            // (1b) [OPUS-4.8] codex 2216 LOW: declared-key_set consistency. The
+            // accept decision is ALREADY anchored on the external K above (never
+            // weakened here). But if the prover DECLARED a narrowed key_set
+            // (non-empty), every accepted attestation key must also be a member
+            // of it — otherwise the advertised narrowing is inconsistent with the
+            // attestations actually proven (the prover claims a tighter issuer
+            // set than it used). An empty declared key_set means "no narrowing
+            // declared", so this is skipped (external K alone governs).
+            if !manifest.key_set.is_empty()
+                && !manifest
+                    .key_set
+                    .iter()
+                    .any(|k| normalize_hex(k) == normalize_hex(&att.issuer_public_key))
+            {
+                return Err(CheckError::AttestationKeyNotInDeclaredSet {
+                    commitment: c.0.clone(),
+                    key: att.issuer_public_key.clone(),
                 });
             }
             // (2) The cryptosuite must be a known/verifiable scheme, the key +

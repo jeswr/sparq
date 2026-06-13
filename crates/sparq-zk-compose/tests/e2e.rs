@@ -1501,6 +1501,70 @@ fn issuer_accept_when_external_k_trusts_the_key() {
         .expect("verifies once the EXTERNAL K trusts the signing key");
 }
 
+// --- codex 2216 LOW: declared-key_set consistency -------------------------
+//
+// [OPUS-4.8] When the prover DECLARES a narrowed `manifest.key_set` (non-empty),
+// an accepted attestation key must ALSO be a member of it. The accept decision
+// stays anchored on the EXTERNAL K (an attestation key is always required to be
+// in K); this rule additionally forbids advertising a tighter issuer set than
+// was actually used. A declared set that omits the real signing key is an
+// inconsistent narrowing and is rejected.
+
+/// codex 2216 LOW (headline): the external K trusts BOTH issuer A and issuer B,
+/// the commitment is genuinely signed by B (whose key IS in external K, so the
+/// soundness anchor is satisfied), but the prover's DECLARED `manifest.key_set`
+/// lists only A. The declared narrowing is inconsistent with the proven
+/// attestation ⇒ REJECT with `AttestationKeyNotInDeclaredSet`.
+#[test]
+fn issuer_reject_declared_keyset_omits_attestation_key() {
+    let signer = test_issuer_sk(2); // issuer B — actually signs
+    let declared_only = test_issuer_sk(3); // issuer A — declared but unused
+    let (mut m, c) = scan_only_manifest(&credential_graph(), 7);
+    m.commitment_attestations.push(attest(c, &signer));
+    // The prover declares a NARROWED set that omits the real signer B.
+    m.key_set.push(public_key_to_hex(&declared_only.public_key()));
+    // External K trusts BOTH A and B (so the external-K anchor for B passes, and
+    // the declared key A is a valid subset of K — no UntrustedDeclaredKey).
+    let trusted = KeySet::from_hex_keys([
+        public_key_to_hex(&signer.public_key()),
+        public_key_to_hex(&declared_only.public_key()),
+    ]);
+    match verify_manifest_structure(&m, &trusted) {
+        Err(CheckError::AttestationKeyNotInDeclaredSet { .. }) => {}
+        other => panic!(
+            "expected AttestationKeyNotInDeclaredSet (declared narrowing omits real signer), got {other:?}"
+        ),
+    }
+}
+
+/// codex 2216 LOW (positive control): the SAME manifest VERIFIES once the
+/// declared `key_set` is widened to include the real signer's key — proving the
+/// only thing the rejection turned on was the declared-set consistency, and the
+/// external-K anchor is unchanged.
+#[test]
+fn issuer_accept_declared_keyset_includes_attestation_key() {
+    let signer = test_issuer_sk(2);
+    let (mut m, c) = scan_only_manifest(&credential_graph(), 7);
+    m.commitment_attestations.push(attest(c, &signer));
+    m.key_set.push(public_key_to_hex(&signer.public_key()));
+    verify_manifest_structure(&m, &trusted_k(&signer))
+        .expect("verifies once the declared key_set contains the real signer");
+}
+
+/// codex 2216 LOW (no-narrowing control): an EMPTY declared `key_set` means "no
+/// narrowing declared" — the external K alone governs, so a valid in-K
+/// attestation still VERIFIES even though `manifest.key_set` does not list it.
+#[test]
+fn issuer_accept_empty_declared_keyset_skips_consistency_check() {
+    let signer = test_issuer_sk(2);
+    let (mut m, c) = scan_only_manifest(&credential_graph(), 7);
+    m.commitment_attestations.push(attest(c, &signer));
+    // Deliberately leave the declared key_set empty (no narrowing).
+    assert!(m.key_set.is_empty());
+    verify_manifest_structure(&m, &trusted_k(&signer))
+        .expect("empty declared key_set => external K governs, in-K attestation verifies");
+}
+
 /// Serde: the new key-set + attestation fields round-trip through JSON.
 #[test]
 fn issuer_attestation_serde_round_trip() {
