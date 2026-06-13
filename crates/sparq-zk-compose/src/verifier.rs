@@ -1293,17 +1293,20 @@ fn bind_revocation(
     // (e.g. the prover lied the OTHER way — claimed REVOKED — or doctored
     // unrelated bits) rather than silently accepting it.
     // [OPUS-4.8] audit #12 re-audit: prover snapshot is a tamper tripwire only.
-    if let Some(prover_snapshot) = manifest
+    // roborev #2263: check EVERY snapshot matching (list, version), not just the first.
+    // A prover can attach duplicate entries — a benign one that byte-equals the
+    // authoritative snapshot followed by a forged one — and a `.find()` that stops at the
+    // first match would never inspect the forgery. `any()` over all matches trips on ANY
+    // disagreeing snapshot.
+    if manifest
         .status_snapshots
         .iter()
-        .find(|s| s.status_list == rev.status_list && s.version == rev.version)
+        .any(|s| s.status_list == rev.status_list && s.version == rev.version && s.bits != authoritative.bits)
     {
-        if prover_snapshot.bits != authoritative.bits {
-            return Err(CheckError::StatusSnapshotTampered {
-                status_list: rev.status_list.clone(),
-                version: rev.version,
-            });
-        }
+        return Err(CheckError::StatusSnapshotTampered {
+            status_list: rev.status_list.clone(),
+            version: rev.version,
+        });
     }
     Ok(())
 }
