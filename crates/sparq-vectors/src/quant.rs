@@ -368,7 +368,7 @@ impl ProductQuantizer {
     /// Encodes an already-normalized vector into `out` (length `M`). Internal fast path for
     /// [`encode_store`](Self::encode_store).
     fn encode_normalized_into(&self, norm_v: &[f32], out: &mut [u8]) {
-        for s in 0..self.m {
+        for (s, code_s) in out.iter_mut().enumerate() {
             let (lo, hi) = (self.sub_offsets[s], self.sub_offsets[s + 1]);
             let subv = &norm_v[lo..hi];
             let mut best = 0usize;
@@ -380,7 +380,7 @@ impl ProductQuantizer {
                     best = c;
                 }
             }
-            out[s] = best as u8;
+            *code_s = best as u8;
         }
     }
 
@@ -389,9 +389,9 @@ impl ProductQuantizer {
     pub fn reconstruct(&self, code: &[u8]) -> Vec<f32> {
         assert_eq!(code.len(), self.m, "code len {} != M {}", code.len(), self.m);
         let mut out = vec![0f32; self.dim];
-        for s in 0..self.m {
+        for (s, &c) in code.iter().enumerate() {
             let (lo, hi) = (self.sub_offsets[s], self.sub_offsets[s + 1]);
-            out[lo..hi].copy_from_slice(self.centroid(s, code[s] as usize));
+            out[lo..hi].copy_from_slice(self.centroid(s, c as usize));
         }
         out
     }
@@ -452,12 +452,12 @@ fn kmeans(data: &[f32], n: usize, sub_len: usize, k: usize, iters: usize, state:
         // Update nearest-centre squared distance with the newly added centre c-1.
         let added = &centroids[(c - 1) * sub_len..c * sub_len].to_vec();
         let mut total = 0f64;
-        for i in 0..n {
+        for (i, d2_i) in d2.iter_mut().enumerate() {
             let d = sq_dist(point(i), added);
-            if d < d2[i] {
-                d2[i] = d;
+            if d < *d2_i {
+                *d2_i = d;
             }
-            total += d2[i] as f64;
+            total += *d2_i as f64;
         }
         let chosen = if total <= 0.0 {
             // All remaining points coincide with chosen centres: fall back to a uniform pick.
@@ -485,7 +485,7 @@ fn kmeans(data: &[f32], n: usize, sub_len: usize, k: usize, iters: usize, state:
     for _ in 0..iters {
         // Assignment.
         let mut changed = false;
-        for i in 0..n {
+        for (i, assign_i) in assign.iter_mut().enumerate() {
             let p = point(i);
             let mut best = 0usize;
             let mut best_d = f32::INFINITY;
@@ -496,25 +496,24 @@ fn kmeans(data: &[f32], n: usize, sub_len: usize, k: usize, iters: usize, state:
                     best = c;
                 }
             }
-            if assign[i] != best {
-                assign[i] = best;
+            if *assign_i != best {
+                *assign_i = best;
                 changed = true;
             }
         }
         // Update.
         sums.iter_mut().for_each(|x| *x = 0.0);
         counts.iter_mut().for_each(|x| *x = 0);
-        for i in 0..n {
-            let c = assign[i];
+        for (i, &c) in assign.iter().enumerate() {
             counts[c] += 1;
             let p = point(i);
             for (acc, &x) in sums[c * sub_len..(c + 1) * sub_len].iter_mut().zip(p) {
                 *acc += x;
             }
         }
-        for c in 0..k {
-            if counts[c] > 0 {
-                let inv = 1.0 / counts[c] as f32;
+        for (c, &count) in counts.iter().enumerate() {
+            if count > 0 {
+                let inv = 1.0 / count as f32;
                 for (cv, &acc) in centroids[c * sub_len..(c + 1) * sub_len]
                     .iter_mut()
                     .zip(&sums[c * sub_len..(c + 1) * sub_len])
@@ -566,8 +565,8 @@ impl DistanceTable {
     pub fn distance(&self, code: &[u8]) -> f32 {
         assert_eq!(code.len(), self.m, "code len {} != M {}", code.len(), self.m);
         let mut acc = 0f32;
-        for s in 0..self.m {
-            acc += self.tables[s * self.k + code[s] as usize];
+        for (s, &c) in code.iter().enumerate() {
+            acc += self.tables[s * self.k + c as usize];
         }
         acc
     }
