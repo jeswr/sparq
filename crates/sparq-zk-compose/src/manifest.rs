@@ -141,19 +141,124 @@ pub struct CommitmentAttestation {
     // [OPUS-4.8] audit #9: issuer-attested per-graph salt.
     #[serde(default)]
     pub salt: Option<FieldHex>,
+    /// The credential's STATUS-LIST REFERENCE as the issuer signed it (audit
+    /// #12): the index + version that, together with `H(status_list)` from the
+    /// manifest's [`RevocationStatus`], form the issuer-bound
+    /// [`sparq_zk::sig::status_ref_digest`]. When present the issuer signature is
+    /// verified over the STATUS-BOUND message
+    /// ([`sparq_zk::sig::commitment_message_with_status`]), so the reference is
+    /// unforgeable and un-omittable: the verifier recomputes the digest from this
+    /// field + the disclosed `RevocationStatus` and the bare signature check
+    /// fails if they disagree. A scan-covering attestation MUST carry this
+    /// (mandatory / fail-closed — mirrors the codex-2221 salt-mandatory
+    /// precedent; an omitted status ref is rejected, never silently un-checked).
+    /// Absent => status-unbound (audit #3/#9 only) attestation, NOT accepted on
+    /// the scan-verify path.
+    // [OPUS-4.8] audit #12: issuer-attested status-list reference.
+    #[serde(default)]
+    pub status: Option<AttestedStatusRef>,
 }
 
-/// Revocation status (plan §S2.5 revocation = hidden-index status-list). v1
-/// ships the placeholder shape only: a reference to a status list and the
-/// (hidden, in the full design) index. The verifier records it but does not
-/// yet check liveness in-circuit.
+/// The index + version of a credential's status-list reference as bound under
+/// the issuer signature (audit #12). The list IRI is the manifest's
+/// [`RevocationStatus::status_list`]; the verifier hashes it
+/// ([`sparq_zk::sig::status_list_id_to_field`]) and folds it with these into
+/// [`sparq_zk::sig::status_ref_digest`] to recompute the signed message. Carried
+/// in the attestation (not just `RevocationStatus`) so the issuer-signed values
+/// and the disclosed reference are cross-checked for equality — a prover that
+/// disclosed a different index/version than the issuer signed is rejected.
+// [OPUS-4.8] audit #12.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestedStatusRef {
+    /// The credential's index into the status list (as issuer-signed).
+    pub index: u64,
+    /// The status-list version (as issuer-signed).
+    pub version: u64,
+}
+
+/// A credential's revocation reference (plan §S2.6, Bitstring/StatusList2021
+/// shape): which status list tracks the credential's liveness, the credential's
+/// index into that list, and the list VERSION the prover is asserting against.
+///
+/// # Issuer-bound (audit #12, leverages #3)
+/// This reference is NOT trusted as a prover claim. The issuer signature (which
+/// already binds `C(G)` + salt, audit #3/#9) ALSO binds
+/// [`sparq_zk::sig::status_ref_digest`]`(H(status_list), index, version)`
+/// ([`CommitmentAttestation::status`]). The verifier recomputes that digest from
+/// THIS disclosed reference and requires it to match the issuer-signed value —
+/// so a prover cannot omit, forge, or swap the reference (an omitted/forged
+/// reference yields no valid issuer signature, fail-closed). The verifier then
+/// checks the disclosed status-list snapshot's bit at `index` is UNSET and the
+/// `version` is within its freshness window.
+///
+/// # Privacy (interim, documented deferral)
+/// `index` is disclosed in the CLEAR here — a linkability channel (a relying
+/// party can correlate two presentations of the same credential by its index).
+/// The full-privacy upgrade is an IN-CIRCUIT hidden-index status-list inclusion
+/// + bit-unset proof bound to a disclosed list version, revealing only "the
+/// (hidden) index is in-range and unset in version V". See the verifier module
+/// docs (audit #12 remaining-step note).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationStatus {
-    /// IRI of the status-list credential.
+    /// IRI of the status-list credential (bound under the issuer signature via
+    /// [`sparq_zk::sig::status_list_id_to_field`]).
     pub status_list: String,
-    /// Index into the list. In the full design this is hidden and proved
-    /// in-range-and-unset; v1 carries it in the clear (documented deferral).
+    /// Index into the list. Disclosed in the clear in v1 (a documented
+    /// linkability channel — see the type docs); the full design hides it.
     pub index: u64,
+    /// The status-list version the credential asserts against (a monotone
+    /// freshness counter — the issuer's status-list publication sequence /
+    /// `validFrom` epoch). Bound under the issuer signature and freshness-window
+    /// checked by the verifier (audit #12). `#[serde(default)]` keeps old
+    /// version-less manifests parseable, but the verifier's status check is
+    /// mandatory and a version-0 reference still must match the issuer-signed
+    /// digest and a fresh snapshot, so the default does not bypass the gate.
+    // [OPUS-4.8] audit #12: issuer-bound, freshness-checked version.
+    #[serde(default)]
+    pub version: u64,
+}
+
+/// A disclosed snapshot of a Bitstring/StatusList2021-style status list (audit
+/// #12): the list IRI, its version, and its status bitstring. The credential's
+/// liveness is `bit[index] == 0` (unset = active; set = revoked/suspended).
+///
+/// The verifier checks, against the (issuer-bound) [`RevocationStatus`]: (i) the
+/// snapshot's `status_list` + `version` match the credential's reference (and so
+/// the issuer-signed digest), (ii) `bit[index]` is UNSET, and (iii) the
+/// `version` is within the verifier's freshness window. A revoked bit, a stale
+/// version, or a mismatched/absent snapshot all REJECT (fail-closed).
+///
+/// `bits` is the raw status bitstring, LSB-first within each byte (bit `i` is
+/// `bits[i / 8] >> (i % 8) & 1`) — the StatusList2021 convention. It is the
+/// disclosed snapshot the relying party validates directly (it need not be
+/// re-proven in-circuit; the interim binds it via the version under the issuer
+/// signature).
+// [OPUS-4.8] audit #12: disclosed status-list snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusListSnapshot {
+    /// IRI of the status list this snapshot is for (must equal the credential's
+    /// `RevocationStatus::status_list`).
+    pub status_list: String,
+    /// The snapshot's version (must equal the credential's
+    /// `RevocationStatus::version` and be within the verifier freshness window).
+    pub version: u64,
+    /// The raw status bitstring, LSB-first within each byte.
+    pub bits: Vec<u8>,
+}
+
+impl StatusListSnapshot {
+    /// The status bit at `index` (LSB-first within each byte). An out-of-range
+    /// index reads as SET (revoked) — fail-closed: a credential whose index
+    /// falls outside the disclosed snapshot is treated as not-proven-live.
+    // [OPUS-4.8] audit #12: out-of-range reads as revoked (fail closed).
+    pub fn bit(&self, index: u64) -> bool {
+        let byte = (index / 8) as usize;
+        let off = (index % 8) as u32;
+        match self.bits.get(byte) {
+            Some(b) => (b >> off) & 1 == 1,
+            None => true,
+        }
+    }
 }
 
 /// The circuit-family id: which compiled member of the `zk/compose/` family
@@ -320,9 +425,23 @@ pub struct ProofManifest {
     pub join_obligations: Vec<(String, usize, usize)>,
     pub entailment_regime: EntailmentRegime,
     pub binding: BindingMode,
-    /// Optional revocation placeholder.
+    /// The credential's revocation reference (audit #12): which status list,
+    /// index, and version. Issuer-bound (see [`RevocationStatus`]). When ANY
+    /// scan-covering attestation carries an issuer-bound status reference
+    /// ([`CommitmentAttestation::status`]) this MUST be present and match it —
+    /// an omitted `revocation` for a status-bound credential is REJECTED
+    /// (fail-closed; the prover cannot drop the reference to skip the check).
     #[serde(default)]
     pub revocation: Option<RevocationStatus>,
+    /// Disclosed status-list snapshots (audit #12): the bitstrings the verifier
+    /// checks the credential's status bit against. Keyed (by the verifier) on
+    /// `(status_list, version)`. The snapshot matching the credential's
+    /// (issuer-bound) `revocation` reference must show `bit[index] == 0` and a
+    /// version within the verifier's freshness window. A missing matching
+    /// snapshot REJECTS.
+    // [OPUS-4.8] audit #12.
+    #[serde(default)]
+    pub status_snapshots: Vec<StatusListSnapshot>,
     /// The composed sub-proofs (per-property circuit instances).
     pub sub_proofs: Vec<SubProof>,
     /// Binding-consistency edges between sub-proofs.

@@ -24,16 +24,57 @@ use sparq_zk_compose::build::{
 };
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::manifest::{
-    BindingEdge, BindingMode, CircuitId, CommitmentAttestation, EntailmentRegime, FieldHex,
-    FilterOp, ProofInputs, ProofManifest, RevocationStatus, SubProof,
+    AttestedStatusRef, BindingEdge, BindingMode, CircuitId, CommitmentAttestation, EntailmentRegime,
+    FieldHex, FilterOp, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
 };
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
     encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, InMemorySeenNonces,
-    KeySet, VerifierNonce,
+    KeySet, RevocationPolicy, VerifierNonce,
 };
 use sparq_zk::field::Fr;
 use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
+
+// [OPUS-4.8] audit #12: revocation/freshness plumbing. The fixtures bind a
+// status-list reference (list `http://ex/status/1`, index 3, version 1) under the
+// issuer signature and disclose a snapshot whose bit 3 is UNSET, version 1. The
+// relying party's policy accepts version 1 (`fresh_policy`). Tests that probe a
+// DIFFERENT gate get a fresh, non-revoked status so they reach the gate under
+// test; the #12-specific forges set the bit / drop the field / stale the version.
+
+/// The status-list IRI the fixtures bind/disclose.
+const FIXTURE_STATUS_LIST: &str = "http://ex/status/1";
+/// The credential's index in the fixture status list.
+const FIXTURE_STATUS_INDEX: u64 = 3;
+/// The status-list version the fixtures bind + the relying party accepts.
+const FIXTURE_STATUS_VERSION: u64 = 1;
+
+/// The relying party's revocation policy accepting the fixture version (window 0).
+fn fresh_policy() -> RevocationPolicy {
+    RevocationPolicy::accept_version(FIXTURE_STATUS_VERSION)
+}
+
+/// The disclosed status-list snapshot the fixtures attach: a single byte with
+/// bit `FIXTURE_STATUS_INDEX` UNSET (so the credential is ACTIVE). `revoked`
+/// flips that one bit (so the credential reads REVOKED).
+fn fixture_snapshot(revoked: bool) -> StatusListSnapshot {
+    // One byte covers indices 0..=7; index 3 is bit (1<<3)=0x08.
+    let bits = if revoked { vec![1u8 << FIXTURE_STATUS_INDEX] } else { vec![0u8] };
+    StatusListSnapshot {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        version: FIXTURE_STATUS_VERSION,
+        bits,
+    }
+}
+
+/// The issuer-bound revocation reference for the fixtures.
+fn fixture_revocation() -> RevocationStatus {
+    RevocationStatus {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        index: FIXTURE_STATUS_INDEX,
+        version: FIXTURE_STATUS_VERSION,
+    }
+}
 
 // [OPUS-4.8] audit #3 codex #1: the EXTERNAL relying-party trust anchor K. Tests
 // build it from the issuer keys the *relying party* decides to trust — NOT from
@@ -83,19 +124,50 @@ fn attest(commitment: Fr, sk: &SecretKey) -> CommitmentAttestation {
         signature: sk.sign_commitment(&commitment), // [OPUS-4.8] codex #4: deterministic nonce
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
         salt: None, // [OPUS-4.8] audit #9: salt-unbound legacy attestation
+        status: None, // [OPUS-4.8] audit #12: status-unbound legacy attestation
     }
 }
 
-/// [OPUS-4.8] audit #9: a SALT-BOUND attestation — the issuer signs
-/// `(commitment, salt)`, and the manifest discloses `salt`, so the verifier
-/// recomputes the salt-bound message and rejects salt reuse across graphs.
+/// [OPUS-4.8] audit #9/#12: a SALT- AND STATUS-BOUND attestation — the issuer
+/// signs `(commitment, salt, status_ref_digest)` where the status digest folds
+/// `H(FIXTURE_STATUS_LIST)`, the fixture index, and version. The manifest
+/// discloses `salt` AND (separately) the matching `RevocationStatus`, so the
+/// verifier recomputes the status-bound message, rejects salt reuse, and checks
+/// the (issuer-bound) status reference. This is the scan-verify-path attestation:
+/// a scan-covering commitment MUST be status-bound (audit #12).
 fn attest_with_salt(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestation {
+    attest_with_status(
+        commitment,
+        salt,
+        FIXTURE_STATUS_LIST,
+        FIXTURE_STATUS_INDEX,
+        FIXTURE_STATUS_VERSION,
+        sk,
+    )
+}
+
+/// [OPUS-4.8] audit #12: a salt- AND status-bound attestation over an explicit
+/// status-list reference (list IRI + index + version). The issuer signs the
+/// status-bound message and the attestation carries the signed
+/// `AttestedStatusRef` so the verifier cross-checks the disclosed
+/// `manifest.revocation` against it.
+fn attest_with_status(
+    commitment: Fr,
+    salt: Fr,
+    list_iri: &str,
+    index: u64,
+    version: u64,
+    sk: &SecretKey,
+) -> CommitmentAttestation {
+    let list_id = sparq_zk::sig::status_list_id_to_field(list_iri);
+    let status_ref = sparq_zk::sig::status_ref_digest(&list_id, index, version);
     CommitmentAttestation {
         commitment: FieldHex::from_field(&commitment),
         issuer_public_key: public_key_to_hex(&sk.public_key()),
-        signature: sk.sign_commitment_with_salt(&commitment, &salt),
+        signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
         salt: Some(FieldHex::from_field(&salt)),
+        status: Some(AttestedStatusRef { index, version }),
     }
 }
 
@@ -214,10 +286,11 @@ fn sample_manifest() -> ProofManifest {
         binding: BindingMode::Challenge {
             challenge: FieldHex("0x2a".into()),
         },
-        revocation: Some(RevocationStatus {
-            status_list: "http://ex/status/1".into(),
-            index: 3,
-        }),
+        // [OPUS-4.8] audit #12: issuer-bound revocation reference + a fresh,
+        // non-revoked disclosed snapshot, so the sample manifest passes the
+        // revocation gate (tests that probe #12 strip/forge/stale/revoke this).
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![
             SubProof { inputs: scan.inputs, proof_hex: String::new() },
             SubProof { inputs: filter, proof_hex: String::new() },
@@ -229,9 +302,9 @@ fn sample_manifest() -> ProofManifest {
             to_proof: 1,
         }],
     };
-    // [OPUS-4.8] audit #3/#9: attest the scan commitment (salt-bound) so the
-    // sample manifest passes the issuer-signature gate (tests that probe #3
-    // strip/forge this).
+    // [OPUS-4.8] audit #3/#9/#12: attest the scan commitment (salt- AND
+    // status-bound) so the sample manifest passes the issuer-signature +
+    // revocation gates (tests that probe those strip/forge this).
     attest_all(&mut m, &test_issuer_sk(1), salt);
     m
 }
@@ -252,7 +325,7 @@ fn manifest_serde_round_trip() {
 #[test]
 fn structure_accepts_well_formed_manifest() {
     let m = sample_manifest();
-    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))).expect("structure verifies");
+    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()).expect("structure verifies");
 }
 
 #[test]
@@ -263,7 +336,7 @@ fn structure_rejects_inconsistent_binding_edge() {
     if let ProofInputs::FilterInt { operand_enc, .. } = &mut m.sub_proofs[1].inputs {
         *operand_enc = FieldHex("0xdeadbeef".into());
     }
-    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))) {
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
         Err(CheckError::BindingInconsistent { edge: 0 }) => {}
         other => panic!("expected BindingInconsistent, got {other:?}"),
     }
@@ -274,7 +347,7 @@ fn structure_rejects_arity_mismatch() {
     let mut m = sample_manifest();
     // The query has 1 BGP pattern; declare 2 attributions.
     m.attributions = vec![vec![0], vec![0]];
-    assert!(prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))).is_err());
+    assert!(prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()).is_err());
 }
 
 #[test]
@@ -284,7 +357,7 @@ fn structure_rejects_circuit_id_mismatch() {
     if let ProofInputs::Scan { id, .. } = &mut m.sub_proofs[0].inputs {
         *id = CircuitId::Scan { k: 2, n: 16, r: 4 };
     }
-    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))) {
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
         Err(CheckError::CircuitIdMismatch { proof: 0, .. }) => {}
         other => panic!("expected CircuitIdMismatch, got {other:?}"),
     }
@@ -300,7 +373,7 @@ fn structure_rejects_cross_graph_bnode_join() {
     m.attributions = vec![vec![0], vec![1]];
     m.join_obligations = vec![]; // omit the obligation on ?x
     assert!(matches!(
-        prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))),
+        prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()),
         Err(CheckError::Sparqzk(_))
     ));
 }
@@ -541,14 +614,16 @@ fn full_manifest_prove_verify_scan() {
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge },
-        revocation: None,
+        // [OPUS-4.8] audit #12: issuer-bound, non-revoked, fresh.
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof {
             inputs: scan.inputs,
             proof_hex: encode_artifacts(&art),
         }],
         binding_edges: vec![],
     };
-    attest_all(&mut manifest, &test_issuer_sk(1), salt); // [OPUS-4.8] audit #3/#9 (salt-bound)
+    attest_all(&mut manifest, &test_issuer_sk(1), salt); // [OPUS-4.8] audit #3/#9/#12 (salt+status-bound)
     // [OPUS-4.8] audit #4: the verifier issues the nonce that the proof committed
     // (0x2a) and a fresh single-use store; the happy path verifies.
     verify_manifest(
@@ -556,6 +631,7 @@ fn full_manifest_prove_verify_scan() {
         &prover,
         &scratch("manifest_verify"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -652,17 +728,21 @@ fn filter_manifest(
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge },
-        revocation: None,
+        // [OPUS-4.8] audit #12: non-revoked, fresh, issuer-bound — so the #1/#2/#4
+        // forge tests reach the gate they probe (not the revocation gate).
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![
             SubProof { inputs: scan_inputs, proof_hex: scan_hex },
             SubProof { inputs, proof_hex },
         ],
         binding_edges: vec![],
     };
-    // [OPUS-4.8] audit #3/#9: attest the honest scan (salt-bound) so the #1/#2
-    // forge tests reach the crypto gate (the FILTER forge they probe), not the
-    // #3 attestation gate. The scan comes from `honest_age_scan`, which commits
-    // under salt byte 7 — so the attestation salt must match.
+    // [OPUS-4.8] audit #3/#9/#12: attest the honest scan (salt- AND status-bound)
+    // so the #1/#2 forge tests reach the crypto gate (the FILTER forge they
+    // probe), not the #3/#12 attestation/revocation gate. The scan comes from
+    // `honest_age_scan`, which commits under salt byte 7 — so the attestation
+    // salt must match.
     attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[7u8; 32]));
     m
 }
@@ -687,6 +767,7 @@ fn forge_positive_honest_filter_verifies() {
         &prover,
         &scratch("forge_pos_verify"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -719,6 +800,7 @@ fn forge_reject_statement_substitution() {
         &prover,
         &scratch("forge_sub_verify"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -751,6 +833,7 @@ fn forge_reject_verdict_substitution() {
         &prover,
         &scratch("forge_verdict_verify"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -785,6 +868,7 @@ fn forge_reject_challenge_rebind() {
         &prover,
         &scratch("forge_chal_verify"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for("0xdead"),
         &InMemorySeenNonces::new(),
     ) {
@@ -841,6 +925,7 @@ fn nonce_happy_path_fresh_nonce_verifies() {
         &prover,
         &scratch("nonce_happy_verify"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for(nonce_hex),
         &InMemorySeenNonces::new(),
     )
@@ -875,6 +960,7 @@ fn nonce_replay_under_new_nonce_rejected() {
         &prover,
         &scratch("nonce_replay_verify"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for("0xbeef"),
         &InMemorySeenNonces::new(),
     ) {
@@ -909,6 +995,7 @@ fn nonce_single_use_second_presentation_rejected() {
         &prover,
         &scratch("nonce_single_use_verify1"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce,
         &seen,
     )
@@ -919,6 +1006,7 @@ fn nonce_single_use_second_presentation_rejected() {
         &prover,
         &scratch("nonce_single_use_verify2"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce,
         &seen,
     ) {
@@ -952,7 +1040,10 @@ fn nonce_binding_mismatch_rejected() {
         entailment_regime: EntailmentRegime::Simple,
         // Binding declares 0x2a...
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
-        revocation: None,
+        // [OPUS-4.8] audit #12: non-revoked, fresh, so the prefilter (incl. the
+        // revocation gate) passes and the nonce/binding check is reached.
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
     };
@@ -964,6 +1055,7 @@ fn nonce_binding_mismatch_rejected() {
         &prover,
         &scratch("nonce_binding_mismatch"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for("0x99"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1006,6 +1098,7 @@ fn forge_reject_noncanonical_vk() {
         &prover,
         &scratch("forge_vk_verify"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
@@ -1039,6 +1132,7 @@ fn forge_artvk_is_ignored() {
         &prover,
         &scratch("forge_ignorevk_verify"),
         &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     )
@@ -1184,13 +1278,14 @@ fn filter_reject_comparison_substitution_17_vs_18() {
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
+        status_snapshots: vec![],
         sub_proofs: vec![
             SubProof { inputs: scan, proof_hex: String::new() },
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
     };
-    match prefilter_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
         other => panic!("expected UnboundFilter(o), got {other:?}"),
     }
@@ -1213,10 +1308,11 @@ fn filter_reject_filter_add_on_scan_only() {
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
+        status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
     };
-    match prefilter_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
         other => panic!("expected UnboundFilter(o), got {other:?}"),
     }
@@ -1239,10 +1335,11 @@ fn filter_reject_constant_swap_age_as_salary() {
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
+        status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
     };
-    match prefilter_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundPattern { pattern: 0 }) => {}
         other => panic!("expected UnboundPattern(0), got {other:?}"),
     }
@@ -1280,6 +1377,7 @@ fn filter_reject_operand_slot_substitution() {
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
+        status_snapshots: vec![],
         sub_proofs: vec![
             SubProof { inputs: salary_scan, proof_hex: String::new() }, // proof 0
             SubProof { inputs: age_scan, proof_hex: String::new() },    // proof 1
@@ -1288,7 +1386,7 @@ fn filter_reject_operand_slot_substitution() {
         // Edge points at proof 0 (salary scan) slot 2 — the WRONG column for ?age.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 2 }],
     };
-    match prefilter_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "age" => {}
         other => panic!("expected UnboundFilter(age), got {other:?}"),
     }
@@ -1322,13 +1420,14 @@ fn filter_reject_false_verdict_row() {
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
+        status_snapshots: vec![],
         sub_proofs: vec![
             SubProof { inputs: scan, proof_hex: String::new() },
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
     };
-    match prefilter_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
         other => panic!("expected UnboundFilter(o), got {other:?}"),
     }
@@ -1351,10 +1450,11 @@ fn filter_reject_unbindable_filter_fragment() {
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
+        status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
     };
-    match prefilter_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::Sparqzk(_)) => {}
         other => panic!("expected Sparqzk(UnsupportedFragment), got {other:?}"),
     }
@@ -1385,17 +1485,20 @@ fn filter_binding_happy_path_structure() {
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
-        revocation: None,
+        // [OPUS-4.8] audit #12: non-revoked, fresh, issuer-bound.
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![
             SubProof { inputs: scan, proof_hex: String::new() },
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
     };
-    // [OPUS-4.8] audit #3/#9: attest the scan (salt-bound). `scan_inputs_for`
-    // commits under salt byte 9, so the attestation salt must match.
+    // [OPUS-4.8] audit #3/#9/#12: attest the scan (salt- AND status-bound).
+    // `scan_inputs_for` commits under salt byte 9, so the attestation salt must
+    // match.
     attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
-    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)))
+    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy())
         .expect("correct composed FILTER manifest verifies structurally");
 }
 
@@ -1445,6 +1548,7 @@ fn filter_reject_unproven_failing_row() {
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
+        status_snapshots: vec![],
         sub_proofs: vec![
             SubProof { inputs: scan, proof_hex: String::new() },
             SubProof { inputs: filt, proof_hex: String::new() },
@@ -1452,7 +1556,7 @@ fn filter_reject_unproven_failing_row() {
         // Edge only for row 0 — row 1 has no true-verdict filter proof.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
     };
-    match prefilter_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::UnboundFilter { variable }) if variable == "o" => {}
         other => panic!("expected UnboundFilter(o) for the unproven failing row, got {other:?}"),
     }
@@ -1490,7 +1594,9 @@ fn filter_two_rows_both_gated_verifies() {
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
-        revocation: None,
+        // [OPUS-4.8] audit #12: non-revoked, fresh, issuer-bound.
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![
             SubProof { inputs: scan, proof_hex: String::new() },  // proof 0
             SubProof { inputs: filt0, proof_hex: String::new() }, // proof 1
@@ -1504,7 +1610,7 @@ fn filter_two_rows_both_gated_verifies() {
     // [OPUS-4.8] audit #3/#9: attest the scan (salt-bound). `scan_inputs_for`
     // commits under salt byte 9.
     attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
-    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)))
+    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy())
         .expect("both rows gated true => verifies");
 }
 
@@ -1546,7 +1652,13 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
         join_obligations: vec![],
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
-        revocation: None,
+        // [OPUS-4.8] audit #12: a non-revoked, fresh, issuer-bound reference so a
+        // status-bound attestation (`attest_with_salt`) reaches the signature
+        // gate the #3 tests probe. Tests that probe an EARLIER gate (unsigned,
+        // key-not-in-K, salt-missing) still hit it first; the #12 forges override
+        // this (drop/revoke/stale it).
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
     };
@@ -1560,7 +1672,7 @@ fn issuer_reject_unsigned_commitment() {
     let (m, _c, _salt) = scan_only_manifest(&credential_graph(), 7);
     // No commitment_attestations, no key_set. The external K trusts a real
     // issuer, so the rejection is "unattested", not "untrusted".
-    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1))) {
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
         Err(CheckError::UnattestedCommitment { proof: 0, .. }) => {}
         other => panic!("expected UnattestedCommitment, got {other:?}"),
     }
@@ -1585,7 +1697,7 @@ fn issuer_reject_invalid_signature() {
     m.key_set.push(public_key_to_hex(&sk.public_key()));
     // External K trusts sk (so the declared key_set is a valid subset); the
     // failure is the invalid signature, not the trust anchor.
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::InvalidIssuerSignature { .. }) => {}
         other => panic!("expected InvalidIssuerSignature, got {other:?}"),
     }
@@ -1630,10 +1742,11 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: None,
+        status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
     };
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::UnattestedCommitment { proof: 0, .. }) => {}
         other => panic!("expected UnattestedCommitment for the truncated recommit, got {other:?}"),
     }
@@ -1652,7 +1765,7 @@ fn issuer_reject_key_not_in_keyset() {
     // the external K — not a subset violation.
     let trusted = test_issuer_sk(3);
     m.key_set.push(public_key_to_hex(&trusted.public_key()));
-    match prefilter_manifest_structure(&m, &trusted_k(&trusted)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&trusted), &fresh_policy()) {
         Err(CheckError::IssuerKeyNotInKeySet { .. }) => {}
         other => panic!("expected IssuerKeyNotInKeySet, got {other:?}"),
     }
@@ -1667,7 +1780,7 @@ fn issuer_reject_empty_keyset() {
     m.commitment_attestations.push(attest_with_salt(c, salt, &signer));
     // The EXTERNAL K is empty (trusts no issuer); the declared key_set is empty
     // too, so the subset check is vacuous and the attestation key falls outside K.
-    match prefilter_manifest_structure(&m, &empty_k()) {
+    match prefilter_manifest_structure(&m, &empty_k(), &fresh_policy()) {
         Err(CheckError::IssuerKeyNotInKeySet { .. }) => {}
         other => panic!("expected IssuerKeyNotInKeySet (empty K), got {other:?}"),
     }
@@ -1682,7 +1795,7 @@ fn issuer_accept_signed_commitment_in_keyset() {
     m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
     // The relying party's EXTERNAL K trusts exactly this issuer.
-    prefilter_manifest_structure(&m, &trusted_k(&sk))
+    prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy())
         .expect("issuer-signed, in-K commitment verifies");
 }
 
@@ -1697,7 +1810,7 @@ fn issuer_reject_unknown_cryptosuite() {
     att.cryptosuite = "https://sparq.dev/ns/zk#some-future-scheme".into();
     m.commitment_attestations.push(att);
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::InvalidIssuerSignature { .. }) => {}
         other => panic!("expected InvalidIssuerSignature (unknown cryptosuite), got {other:?}"),
     }
@@ -1734,7 +1847,7 @@ fn issuer_reject_prover_self_signed_key_not_in_external_k() {
     // The relying party's EXTERNAL K trusts a DIFFERENT, real issuer (the DMV,
     // say) — it has never heard of the prover's self-minted key.
     let real_issuer = test_issuer_sk(1);
-    match prefilter_manifest_structure(&m, &trusted_k(&real_issuer)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&real_issuer), &fresh_policy()) {
         // The prover tried to WIDEN the external trust anchor with its own key.
         Err(CheckError::UntrustedDeclaredKey { .. }) => {}
         other => panic!(
@@ -1757,7 +1870,7 @@ fn issuer_reject_prover_self_signed_empty_declared_keyset() {
     // manifest.key_set deliberately EMPTY (no subset violation to lean on).
     assert!(m.key_set.is_empty());
     let real_issuer = test_issuer_sk(1);
-    match prefilter_manifest_structure(&m, &trusted_k(&real_issuer)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&real_issuer), &fresh_policy()) {
         Err(CheckError::IssuerKeyNotInKeySet { .. }) => {}
         other => panic!(
             "expected IssuerKeyNotInKeySet (forged self-signed key not in external K), got {other:?}"
@@ -1777,7 +1890,7 @@ fn issuer_accept_when_external_k_trusts_the_key() {
     m.commitment_attestations.push(attest_with_salt(c, salt, &key));
     m.key_set.push(public_key_to_hex(&key.public_key()));
     // The relying party DECIDES to trust this issuer, out of band.
-    prefilter_manifest_structure(&m, &trusted_k(&key))
+    prefilter_manifest_structure(&m, &trusted_k(&key), &fresh_policy())
         .expect("verifies once the EXTERNAL K trusts the signing key");
 }
 
@@ -1809,7 +1922,7 @@ fn issuer_reject_declared_keyset_omits_attestation_key() {
         public_key_to_hex(&signer.public_key()),
         public_key_to_hex(&declared_only.public_key()),
     ]);
-    match prefilter_manifest_structure(&m, &trusted) {
+    match prefilter_manifest_structure(&m, &trusted, &fresh_policy()) {
         Err(CheckError::AttestationKeyNotInDeclaredSet { .. }) => {}
         other => panic!(
             "expected AttestationKeyNotInDeclaredSet (declared narrowing omits real signer), got {other:?}"
@@ -1827,7 +1940,7 @@ fn issuer_accept_declared_keyset_includes_attestation_key() {
     let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
     m.commitment_attestations.push(attest_with_salt(c, salt, &signer));
     m.key_set.push(public_key_to_hex(&signer.public_key()));
-    prefilter_manifest_structure(&m, &trusted_k(&signer))
+    prefilter_manifest_structure(&m, &trusted_k(&signer), &fresh_policy())
         .expect("verifies once the declared key_set contains the real signer");
 }
 
@@ -1841,7 +1954,7 @@ fn issuer_accept_empty_declared_keyset_skips_consistency_check() {
     m.commitment_attestations.push(attest_with_salt(c, salt, &signer));
     // Deliberately leave the declared key_set empty (no narrowing).
     assert!(m.key_set.is_empty());
-    prefilter_manifest_structure(&m, &trusted_k(&signer))
+    prefilter_manifest_structure(&m, &trusted_k(&signer), &fresh_policy())
         .expect("empty declared key_set => external K governs, in-K attestation verifies");
 }
 
@@ -1938,14 +2051,19 @@ fn cross_graph_manifest(
         join_obligations: obligations,
         entailment_regime: EntailmentRegime::Simple,
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
-        revocation: None,
+        // [OPUS-4.8] audit #12: a non-revoked, fresh, issuer-bound reference for
+        // BOTH graphs (both attestations bind the same fixture index/version), so
+        // tests reach the gate they probe (#8 attribution / #9 salt / #3 sig).
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![
             SubProof { inputs: scan_age.inputs, proof_hex: String::new() },
             SubProof { inputs: scan_role.inputs, proof_hex: String::new() },
         ],
         binding_edges: vec![],
     };
-    // Salt-bound attestations for BOTH commitments (audit #3 + #9), distinct salts.
+    // Salt- AND status-bound attestations for BOTH commitments (audit #3+#9+#12),
+    // distinct salts, shared fixture status reference.
     m.commitment_attestations.push(attest_with_salt(g0.commitment, salt0, sk));
     m.commitment_attestations.push(attest_with_salt(g1.commitment, salt1, sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
@@ -1961,7 +2079,7 @@ fn cross_graph_manifest(
 fn attribution_lie_collapse_two_graphs_rejected() {
     let sk = test_issuer_sk(1);
     let m = cross_graph_manifest(vec![vec![0], vec![0]], vec![], &sk);
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::AttributionUnderDeclared { proof_graph: 1, .. }) => {}
         other => panic!(
             "expected AttributionUnderDeclared (the [[0],[0]] collapse-two-graphs forge), got {other:?}"
@@ -1975,7 +2093,7 @@ fn attribution_lie_collapse_two_graphs_rejected() {
 fn attribution_lie_collapse_onto_graph_one_rejected() {
     let sk = test_issuer_sk(1);
     let m = cross_graph_manifest(vec![vec![1], vec![1]], vec![], &sk);
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::AttributionUnderDeclared { pattern: 0, proof_graph: 0 }) => {}
         other => panic!("expected AttributionUnderDeclared on pattern 0, got {other:?}"),
     }
@@ -1993,7 +2111,7 @@ fn attribution_honest_cross_graph_with_obligation_verifies() {
         vec![("x".to_string(), 0, 1)], // the required non-bnode obligation on ?x
         &sk,
     );
-    prefilter_manifest_structure(&m, &trusted_k(&sk))
+    prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy())
         .expect("honest [[0],[1]] cross-graph with a satisfied obligation verifies");
 }
 
@@ -2004,7 +2122,7 @@ fn attribution_honest_cross_graph_with_obligation_verifies() {
 fn attribution_honest_cross_graph_without_obligation_rejected() {
     let sk = test_issuer_sk(1);
     let m = cross_graph_manifest(vec![vec![0], vec![1]], vec![], &sk);
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::Sparqzk(_)) => {} // MissingObligation
         other => panic!("expected Sparqzk(MissingObligation), got {other:?}"),
     }
@@ -2023,7 +2141,7 @@ fn attribution_over_declared_is_accepted() {
         vec![("x".to_string(), 0, 1)],
         &sk,
     );
-    prefilter_manifest_structure(&m, &trusted_k(&sk))
+    prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy())
         .expect("over-declared (superset) attribution with obligation verifies");
 }
 
@@ -2066,7 +2184,7 @@ fn salt_reuse_across_distinct_graphs_rejected() {
         attest_with_salt(g0.commitment, reused, &sk),
         attest_with_salt(g1.commitment, reused, &sk),
     ];
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::SaltReused { .. }) => {}
         other => panic!("expected SaltReused (cross-graph salt collision), got {other:?}"),
     }
@@ -2097,7 +2215,7 @@ fn unrelated_extra_attestation_reusing_salt_does_not_reject() {
     assert_ne!(unrelated, c, "the extra attestation must cover a different commitment");
     m.commitment_attestations.push(attest_with_salt(unrelated, salt, &sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    prefilter_manifest_structure(&m, &trusted_k(&sk))
+    prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy())
         .expect("an unrelated extra attestation reusing a salt must not false-reject");
 }
 
@@ -2124,7 +2242,7 @@ fn salt_reuse_across_two_scan_referenced_commitments_still_rejects() {
         attest_with_salt(g0.commitment, reused, &sk),
         attest_with_salt(g1.commitment, reused, &sk),
     ];
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::SaltReused { .. }) => {}
         other => panic!("expected SaltReused (two scan-referenced graphs sharing a salt), got {other:?}"),
     }
@@ -2147,7 +2265,7 @@ fn salt_swap_breaks_issuer_signature() {
     att.salt = Some(FieldHex::from_field(&salt_from_bytes(&[99u8; 32]))); // swapped
     m.commitment_attestations = vec![att];
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::InvalidIssuerSignature { .. }) => {}
         other => panic!("expected InvalidIssuerSignature (salt swap), got {other:?}"),
     }
@@ -2161,7 +2279,7 @@ fn distinct_salts_verify() {
     // cross_graph_manifest already uses distinct salts (10 vs 11) and salt-bound
     // attestations; with the obligation declared it verifies end to end.
     let m = cross_graph_manifest(vec![vec![0], vec![1]], vec![("x".into(), 0, 1)], &sk);
-    prefilter_manifest_structure(&m, &trusted_k(&sk))
+    prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy())
         .expect("distinct issuer-attested salts verify");
 }
 
@@ -2195,7 +2313,7 @@ fn forge_scan_covering_attestation_salt_none_rejected() {
     // scan-covering attestation may no longer be salt-less.
     m.commitment_attestations.push(attest(c, &sk)); // salt: None
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::ScanCommitmentSaltMissing { proof: 0, .. }) => {}
         other => panic!(
             "expected ScanCommitmentSaltMissing (salt-less scan-covering attestation must be rejected), got {other:?}"
@@ -2221,7 +2339,7 @@ fn forge_omitted_attribution_rejected() {
     }
     m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::AttributionMalformed { proof: 0, expected: 1, got: 0 }) => {}
         other => panic!(
             "expected AttributionMalformed (omitted attribution must be rejected), got {other:?}"
@@ -2246,7 +2364,7 @@ fn forge_wrong_length_attribution_rejected() {
     }
     m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
     m.key_set.push(public_key_to_hex(&sk.public_key()));
-    match prefilter_manifest_structure(&m, &trusted_k(&sk)) {
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
         Err(CheckError::AttributionMalformed { proof: 0, expected: 1, got: 2 }) => {}
         other => panic!(
             "expected AttributionMalformed (wrong-length attribution must be rejected), got {other:?}"
@@ -2284,4 +2402,322 @@ fn probe_scan_public_inputs_hex() {
     eprintln!("SCAN_PUBLIC_INPUTS_LEN={}", art.public_inputs.len());
     eprintln!("SCAN_PUBLIC_INPUTS_HEX={hex}");
     eprintln!("SCAN_INPUTS_JSON={}", serde_json::to_string(&scan.inputs).unwrap());
+}
+
+// ===========================================================================
+// [OPUS-4.8] audit #12: revocation / freshness (forge-and-verify).
+// ===========================================================================
+//
+// The hole (issue #12): revocation was entirely unimplemented — `verify_manifest`
+// ignored `manifest.revocation`, the status-list index was disclosed in the clear
+// (linkability), and a REVOKED/SUSPENDED credential still verified. There was no
+// status-list inclusion / bit-unset check and no freshness window.
+//
+// The fix (verifier-side interim, leveraging #3): the issuer signature — which
+// already binds C(G) + salt — ALSO binds the credential's status-list reference
+// (H(list IRI), index, version) via `commitment_message_with_status`. So a
+// scan-covering attestation MUST carry an issuer-bound status reference
+// (mandatory / fail-closed), the disclosed `manifest.revocation` must match it,
+// the disclosed status-list snapshot must show the credential's status bit UNSET,
+// and the snapshot version must be within the relying party's freshness window.
+//
+// Minimum bar (all asserted below):
+//   - a REVOKED credential                         => REJECT (CredentialRevoked)
+//   - a revoked credential whose prover OMITS the
+//     revocation field                             => REJECT (status-bound sig
+//                                                     can't be checked => fail)
+//   - a STALE status list (outside the window)     => REJECT (StatusListStale)
+//   - a non-revoked credential with a fresh list   => VERIFIES
+//
+// The status check is MANDATORY: there is no path that accepts a scan-covering
+// commitment without an issuer-bound status reference + a fresh, bit-unset
+// snapshot. The privacy upgrade (in-circuit HIDDEN-index inclusion + bit-unset,
+// removing the clear-index linkability channel) is the documented remaining step.
+
+/// (1) A REVOKED credential ⇒ REJECT. The disclosed snapshot has the
+/// credential's status bit SET; everything else (issuer signature, salt,
+/// reference, freshness) is honest, so the ONLY fault is revocation.
+#[test]
+fn revocation_revoked_credential_rejected() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    // Flip the snapshot bit at the credential's index => REVOKED.
+    m.status_snapshots = vec![fixture_snapshot(true)];
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+        Err(CheckError::CredentialRevoked { index, .. }) if index == FIXTURE_STATUS_INDEX => {}
+        other => panic!("expected CredentialRevoked, got {other:?}"),
+    }
+}
+
+/// (2a) A revoked credential whose prover OMITS `manifest.revocation` ⇒ REJECT.
+/// This is THE optional-field-bypass forge (the one that bit #3/#8/#9/#4): the
+/// issuer signed a STATUS-BOUND message, so dropping the disclosed reference
+/// leaves the verifier unable to recompute the signed digest — and because a
+/// scan-covering attestation MUST be status-bound, the missing reference is
+/// rejected (`RevocationReferenceMissing`), NOT silently un-checked. The prover
+/// cannot evade the revocation check by simply not disclosing it.
+#[test]
+fn revocation_omitted_field_still_rejected() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    // A STATUS-BOUND attestation (as the issuer issued it) ...
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    // ... but the prover DROPS the disclosed revocation reference (and any
+    // snapshot), trying to skip the bit-unset check.
+    m.revocation = None;
+    m.status_snapshots = vec![];
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+        Err(CheckError::RevocationReferenceMissing { proof: 0 }) => {}
+        other => panic!("expected RevocationReferenceMissing (omitted revocation field), got {other:?}"),
+    }
+}
+
+/// (2b) The other omission path: the prover strips the issuer-bound STATUS
+/// reference off the attestation (`status: None`), reverting to a status-unbound
+/// (legacy) attestation, to dodge the mandatory status binding ⇒ REJECT with
+/// `ScanCommitmentStatusMissing`. A scan-covering attestation MUST bind a status
+/// reference — a status-unbound one is never accepted on the scan-verify path.
+#[test]
+fn revocation_status_unbound_attestation_rejected() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    // A salt-bound but STATUS-UNBOUND attestation (status: None). It would have
+    // verified before #12; now a scan-covering attestation must be status-bound.
+    let mut att = attest_with_salt(c, salt, &sk);
+    att.status = None;
+    // Re-sign salt-only so the (now status-unbound) attestation is otherwise
+    // internally valid — proving the REJECT is the missing status binding, not a
+    // bad signature.
+    att.signature = sk.sign_commitment_with_salt(&c, &salt);
+    m.commitment_attestations.push(att);
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+        Err(CheckError::ScanCommitmentStatusMissing { proof: 0, .. }) => {}
+        other => panic!("expected ScanCommitmentStatusMissing (status-unbound attestation), got {other:?}"),
+    }
+}
+
+/// (2c) The prover discloses a DIFFERENT reference than the issuer signed (e.g.
+/// pointing the index at another slot whose bit is unset) ⇒ REJECT. The disclosed
+/// index/version no longer match the attestation's issuer-signed `AttestedStatusRef`.
+#[test]
+fn revocation_reference_mismatch_rejected() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    // Disclose a different index than the issuer signed (3); also disclose a
+    // matching unset snapshot for the lied-about index, so the only fault is the
+    // reference mismatch.
+    m.revocation = Some(RevocationStatus {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        index: 5,
+        version: FIXTURE_STATUS_VERSION,
+    });
+    m.status_snapshots = vec![StatusListSnapshot {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        version: FIXTURE_STATUS_VERSION,
+        bits: vec![0u8],
+    }];
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+        Err(CheckError::RevocationReferenceMismatch { .. }) => {}
+        other => panic!("expected RevocationReferenceMismatch, got {other:?}"),
+    }
+}
+
+/// (3) A STALE status list (snapshot version outside the verifier freshness
+/// window) ⇒ REJECT. The credential is genuinely non-revoked in the disclosed
+/// snapshot, but the snapshot is too old to trust (a revoked-since-snapshot
+/// credential must not slip through on a stale "active" view). The issuer signed
+/// the OLD version, so to reach the freshness gate the disclosed reference +
+/// snapshot are both the old version; the policy only accepts a newer one.
+#[test]
+fn revocation_stale_status_list_rejected() {
+    let sk = test_issuer_sk(1);
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let c = commit.commitment;
+    let scan = build_scan(
+        &[commit],
+        &Pattern { s: Slot::Var, p: Slot::Const(Term::NamedNode(iri("http://ex/age"))), o: Slot::Var },
+    )
+    .unwrap();
+    // The issuer signed the reference at an OLD version (1).
+    let old_version = 1u64;
+    let att = attest_with_status(c, salt, FIXTURE_STATUS_LIST, FIXTURE_STATUS_INDEX, old_version, &sk);
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![public_key_to_hex(&sk.public_key())],
+        commitment_attestations: vec![att],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        // Disclose the (issuer-signed) old-version reference + a non-revoked
+        // snapshot at that old version.
+        revocation: Some(RevocationStatus {
+            status_list: FIXTURE_STATUS_LIST.to_string(),
+            index: FIXTURE_STATUS_INDEX,
+            version: old_version,
+        }),
+        status_snapshots: vec![StatusListSnapshot {
+            status_list: FIXTURE_STATUS_LIST.to_string(),
+            version: old_version,
+            bits: vec![0u8], // bit 3 UNSET (genuinely "active" in this old view)
+        }],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        binding_edges: vec![],
+    };
+    // The relying party only trusts version 5 (window 0): the old-version
+    // snapshot is STALE.
+    let policy = RevocationPolicy::accept_version(5);
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &policy) {
+        Err(CheckError::StatusListStale { version, .. }) if version == old_version => {}
+        other => panic!("expected StatusListStale, got {other:?}"),
+    }
+}
+
+/// (3b) No disclosed snapshot for the credential's (issuer-bound) reference ⇒
+/// REJECT: the verifier cannot check the status bit, so it fails closed (a prover
+/// cannot skip the bit-unset check by omitting the snapshot).
+#[test]
+fn revocation_missing_snapshot_rejected() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    // Reference present + issuer-bound, but NO matching snapshot disclosed.
+    m.status_snapshots = vec![];
+    match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+        Err(CheckError::StatusSnapshotMissing { version, .. }) if version == FIXTURE_STATUS_VERSION => {}
+        other => panic!("expected StatusSnapshotMissing, got {other:?}"),
+    }
+}
+
+/// (4) Happy path (structural): a non-revoked credential with a fresh,
+/// issuer-bound status reference + matching unset snapshot VERIFIES. The positive
+/// control for the #12 gate. (`scan_only_manifest` already carries the fixture
+/// revocation + snapshot; we just attach the in-K status-bound attestation.)
+#[test]
+fn revocation_non_revoked_fresh_verifies_structurally() {
+    let (mut m, c, salt) = scan_only_manifest(&credential_graph(), 7);
+    let sk = test_issuer_sk(1);
+    m.commitment_attestations.push(attest_with_salt(c, salt, &sk));
+    m.key_set.push(public_key_to_hex(&sk.public_key()));
+    prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy())
+        .expect("non-revoked, fresh, issuer-bound credential verifies");
+}
+
+/// (4b) A snapshot WITHIN a freshness window (not just the exact version)
+/// verifies: the relying party accepts versions in `[now-window, now]`.
+#[test]
+fn revocation_within_window_verifies() {
+    let sk = test_issuer_sk(1);
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let c = commit.commitment;
+    let scan = build_scan(
+        &[commit],
+        &Pattern { s: Slot::Var, p: Slot::Const(Term::NamedNode(iri("http://ex/age"))), o: Slot::Var },
+    )
+    .unwrap();
+    let ver = 3u64; // issuer-signed version 3
+    let att = attest_with_status(c, salt, FIXTURE_STATUS_LIST, FIXTURE_STATUS_INDEX, ver, &sk);
+    let m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![public_key_to_hex(&sk.public_key())],
+        commitment_attestations: vec![att],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(RevocationStatus {
+            status_list: FIXTURE_STATUS_LIST.to_string(),
+            index: FIXTURE_STATUS_INDEX,
+            version: ver,
+        }),
+        status_snapshots: vec![StatusListSnapshot {
+            status_list: FIXTURE_STATUS_LIST.to_string(),
+            version: ver,
+            bits: vec![0u8],
+        }],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        binding_edges: vec![],
+    };
+    // now=5, window=3 => accepts [2, 5]; version 3 is fresh.
+    let policy = RevocationPolicy::up_to(5, 3);
+    prefilter_manifest_structure(&m, &trusted_k(&sk), &policy)
+        .expect("a snapshot within the freshness window verifies");
+}
+
+/// (5) HAPPY PATH (slow, real bb prove+verify): a non-revoked credential with a
+/// fresh, issuer-bound status reference verifies through the FULL
+/// `verify_manifest` path (reconstruction byte-match + canonical vk + bb verify +
+/// the #12 revocation gate). The full-pipeline positive control for #12.
+#[test]
+#[ignore = "slow: full bb prove of a scan + filter member (audit #12 happy path)"]
+fn revocation_full_prove_verify_non_revoked_verifies() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let challenge = FieldHex("0x2a".into());
+    let (scan_inputs, scan_hex) = honest_age_scan(&challenge, &prover, "rev_happy_scan");
+    let (inputs, art) =
+        honest_filter_d1(5, FilterOp::Lt, 10, true, &challenge, &prover, "rev_happy");
+    // `filter_manifest` already attaches the fixture revocation + snapshot +
+    // status-bound attestation (honest_age_scan commits under salt byte 7).
+    let m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
+    verify_manifest(
+        &m,
+        &prover,
+        &scratch("rev_happy_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("non-revoked, fresh credential verifies through the full pipeline");
+}
+
+/// (6) FORGE (slow, real bb prove+verify): a REVOKED credential presented with a
+/// genuine bb proof of the scan still REJECTS through the FULL pipeline — the
+/// crypto gate passes (the scan IS a real proof) but the #12 revocation gate
+/// fires. Confirms revocation is enforced END-TO-END, not just structurally.
+#[test]
+#[ignore = "slow: full bb prove (audit #12 revoked-end-to-end forge)"]
+fn revocation_full_prove_verify_revoked_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let challenge = FieldHex("0x2a".into());
+    let (scan_inputs, scan_hex) = honest_age_scan(&challenge, &prover, "rev_forge_scan");
+    let (inputs, art) =
+        honest_filter_d1(5, FilterOp::Lt, 10, true, &challenge, &prover, "rev_forge");
+    let mut m = filter_manifest(scan_inputs, scan_hex, inputs, encode_artifacts(&art), challenge);
+    // Flip the disclosed snapshot bit => the credential is REVOKED, even though
+    // the bb proof of the scan is genuine.
+    m.status_snapshots = vec![fixture_snapshot(true)];
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("rev_forge_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::CredentialRevoked { .. }) => {}
+        other => panic!("expected CredentialRevoked end-to-end, got {other:?}"),
+    }
 }

@@ -155,6 +155,26 @@ impl SecretKey {
         let sig = sign_deterministic(self, &commitment_message_with_salt(commitment, salt));
         signature_to_hex(&sig)
     }
+
+    /// Sign a per-graph commitment, its salt, AND its status-list reference
+    /// digest (audit #12), returning the signature hex. The signed message is
+    /// [`commitment_message_with_status`], so the credential's revocation
+    /// reference (list id + index + version) is issuer-attested and cannot be
+    /// omitted or forged by the prover. Same deterministic `(sk, m)` nonce
+    /// discipline as [`Self::sign_commitment`].
+    // [OPUS-4.8] audit #12: status-bound issuance.
+    pub fn sign_commitment_with_status(
+        &self,
+        commitment: &Fr,
+        salt: &Fr,
+        status_ref: &Fr,
+    ) -> String {
+        let sig = sign_deterministic(
+            self,
+            &commitment_message_with_status(commitment, salt, status_ref),
+        );
+        signature_to_hex(&sig)
+    }
 }
 
 /// Derive a deterministic Schnorr nonce `k` from the secret key and the message
@@ -263,6 +283,79 @@ pub fn commitment_message(commitment: &Fr) -> Fr {
 const SIG_DOMAIN_COMMITMENT_SALT: u64 = 0x5a4b_5349_475f_4332; // "ZKSIG_C2"
 pub fn commitment_message_with_salt(commitment: &Fr, salt: &Fr) -> Fr {
     poseidon2::hash(&[Fr::from(SIG_DOMAIN_COMMITMENT_SALT), *commitment, *salt])
+}
+
+/// A domain-separated digest of a credential's STATUS-LIST REFERENCE (audit
+/// #12): the status list the credential's liveness is tracked in, the
+/// credential's index into that list, and the list VERSION (a monotone
+/// freshness counter, e.g. the issuer's status-list `validFrom` epoch or
+/// publication sequence number). Folded into the issuer signature by
+/// [`commitment_message_with_status`] so the reference cannot be omitted,
+/// forged, or swapped by the prover.
+///
+/// `list_id` is the caller-hashed status-list IRI (a field element — the
+/// verifier hashes the disclosed `manifest.revocation.status_list` IRI the same
+/// way and asserts equality, so the in-the-clear IRI is bound). The index and
+/// version enter as field elements directly.
+// [OPUS-4.8] audit #12: status-list reference digest.
+pub fn status_ref_digest(list_id: &Fr, index: u64, version: u64) -> Fr {
+    const SIG_DOMAIN_STATUS_REF: u64 = 0x5a4b_5349_475f_5352; // "ZKSIG_SR"
+    poseidon2::hash(&[
+        Fr::from(SIG_DOMAIN_STATUS_REF),
+        *list_id,
+        Fr::from(index),
+        Fr::from(version),
+    ])
+}
+
+/// Hash a status-list IRI string to a field element (domain-separated), so the
+/// in-the-clear `manifest.revocation.status_list` IRI can be bound under the
+/// issuer signature. Issuer and verifier both call this, so a drift cannot make
+/// a wrong IRI verify (single source of truth).
+// [OPUS-4.8] audit #12.
+pub fn status_list_id_to_field(list_iri: &str) -> Fr {
+    const SIG_DOMAIN_STATUS_LIST_IRI: u64 = 0x5a4b_5349_475f_4c49; // "ZKSIG_LI"
+    // Fold the UTF-8 bytes 31 at a time (each chunk fits a BN254 field element
+    // headroom-safe) through the sponge, prefixed by the domain tag and the
+    // byte length so two IRIs differing only by trailing padding cannot collide.
+    let bytes = list_iri.as_bytes();
+    let mut acc: Vec<Fr> = Vec::with_capacity(2 + bytes.len() / 31 + 1);
+    acc.push(Fr::from(SIG_DOMAIN_STATUS_LIST_IRI));
+    acc.push(Fr::from(bytes.len() as u64));
+    for chunk in bytes.chunks(31) {
+        acc.push(Fr::from_be_bytes_mod_order(chunk));
+    }
+    poseidon2::hash(&acc)
+}
+
+/// The signed message for a per-graph commitment that binds BOTH the per-graph
+/// RDFC10 salt (audit #9) AND the credential's status-list reference (audit
+/// #12). The issuer signs `(C(G), salt_G, status_ref_digest)` under a distinct
+/// domain tag, so the status reference (which list, which index, which version)
+/// becomes ISSUER-ATTESTED.
+///
+/// # Why bind the status reference at all (the audit #12 fix)
+/// Before this, revocation was entirely unchecked: a prover could OMIT
+/// `manifest.revocation` (or point it at an empty/attacker list) and a
+/// revoked/suspended credential would still verify, because nothing tied the
+/// status reference to the credential. By folding the status-reference digest
+/// into the SAME issuer signature that already binds `C(G)` and the salt, the
+/// reference is mandatory and unforgeable: an omitted/forged/swapped reference
+/// yields a different signed message and so has no valid issuer signature
+/// (fail-closed — exactly the optional-field bypass that bit #3/#8/#9/#4). The
+/// verifier then (a) recomputes this message from the disclosed reference and
+/// checks the signature, (b) checks the disclosed status-list snapshot's
+/// bit[index] is UNSET, and (c) checks the snapshot version is within a
+/// freshness window. See `sparq_zk_compose::verifier`.
+// [OPUS-4.8] audit #12: status-bound commitment message.
+const SIG_DOMAIN_COMMITMENT_STATUS: u64 = 0x5a4b_5349_475f_4333; // "ZKSIG_C3"
+pub fn commitment_message_with_status(commitment: &Fr, salt: &Fr, status_ref: &Fr) -> Fr {
+    poseidon2::hash(&[
+        Fr::from(SIG_DOMAIN_COMMITMENT_STATUS),
+        *commitment,
+        *salt,
+        *status_ref,
+    ])
 }
 
 /// Sign a message field element `m` with `sk`, drawing the nonce `k` from `rng`.
@@ -555,5 +648,57 @@ mod tests {
         let r1 = sign_deterministic(&sk, &commitment_message(&Fr::from(1u64))).r;
         let r2 = sign_deterministic(&sk, &commitment_message(&Fr::from(2u64))).r;
         assert_ne!(r1, r2, "distinct messages must use distinct nonces R");
+    }
+
+    // --- audit #12: status-bound commitment message ----------------------
+
+    /// [OPUS-4.8] audit #12: a status-bound signature verifies over the SAME
+    /// `(C(G), salt, status_ref)` and is REJECTED if any of the three differ —
+    /// the property that makes an omitted/forged/swapped status reference (a
+    /// different version, index, or list id) unverifiable.
+    #[test]
+    fn status_bound_signature_binds_the_reference() {
+        let sk = SecretKey::from_seed(21);
+        let pk = sk.public_key();
+        let c = Fr::from(0xc0ffeeu64);
+        let salt = Fr::from(0x5a17u64);
+        let list_id = status_list_id_to_field("https://dmv.example/status/3");
+        let sref = status_ref_digest(&list_id, 94, 7);
+        let hex = sk.sign_commitment_with_status(&c, &salt, &sref);
+        let sig = signature_from_hex(&hex).expect("round-trips");
+        let msg = commitment_message_with_status(&c, &salt, &sref);
+        assert!(verify(&pk, &msg, &sig), "honest status-bound signature verifies");
+
+        // A DIFFERENT version (freshness rollover) ⇒ different message ⇒ fails.
+        let sref_v8 = status_ref_digest(&list_id, 94, 8);
+        let msg_v8 = commitment_message_with_status(&c, &salt, &sref_v8);
+        assert!(!verify(&pk, &msg_v8, &sig), "wrong version must not verify");
+        // A DIFFERENT index ⇒ fails (cannot point at another credential's bit).
+        let sref_idx = status_ref_digest(&list_id, 95, 7);
+        let msg_idx = commitment_message_with_status(&c, &salt, &sref_idx);
+        assert!(!verify(&pk, &msg_idx, &sig), "wrong index must not verify");
+        // A DIFFERENT list id ⇒ fails (cannot swap to an attacker-controlled list).
+        let other_list = status_list_id_to_field("https://attacker.example/empty");
+        let sref_other = status_ref_digest(&other_list, 94, 7);
+        let msg_other = commitment_message_with_status(&c, &salt, &sref_other);
+        assert!(!verify(&pk, &msg_other, &sig), "wrong list id must not verify");
+        // The bare salt-only message (the prover OMITTING the status ref) ⇒
+        // fails: a status-bound credential cannot be presented as salt-only.
+        let salt_only = commitment_message_with_salt(&c, &salt);
+        assert!(
+            !verify(&pk, &salt_only, &sig),
+            "salt-only (status-omitted) message must not verify against a status-bound sig"
+        );
+    }
+
+    /// [OPUS-4.8] audit #12: the list-id hash is collision-resistant on distinct
+    /// IRIs and length-separated (a prefix cannot collide with a longer IRI).
+    #[test]
+    fn status_list_id_is_distinct_per_iri() {
+        let a = status_list_id_to_field("https://dmv.example/status/3");
+        let b = status_list_id_to_field("https://dmv.example/status/4");
+        let c = status_list_id_to_field("https://dmv.example/status/3x");
+        assert_ne!(a, b, "distinct lists hash distinctly");
+        assert_ne!(a, c, "a prefix must not collide with a longer IRI");
     }
 }

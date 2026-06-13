@@ -56,6 +56,13 @@ pub const ZK_ISSUER_PUBLIC_KEY: &str = "https://sparq.dev/ns/zk#issuerPublicKey"
 pub const ZK_COMMITMENT_SIGNATURE: &str = "https://sparq.dev/ns/zk#commitmentSignature";
 pub const ZK_SIGNATURE_GRAPH: &str = "https://sparq.dev/ns/zk#signatureGraph";
 pub const ZK_STATUS_LIST: &str = "https://sparq.dev/ns/zk#statusList";
+/// The credential's index into its status list, and the status-list version the
+/// signature is bound to (audit #12). Both are folded — with `H(zk:statusList)`
+/// — into the issuer-signed status reference digest, so the reference is
+/// unforgeable/un-omittable on the verify path.
+// [OPUS-4.8] audit #12: issuer-bound status-list index + version.
+pub const ZK_STATUS_LIST_INDEX: &str = "https://sparq.dev/ns/zk#statusListIndex";
+pub const ZK_STATUS_LIST_VERSION: &str = "https://sparq.dev/ns/zk#statusListVersion";
 pub const ZK_RDFC10_SALT: &str = "https://sparq.dev/ns/zk#rdfc10Salt";
 pub const ZK_STATUS: &str = "https://sparq.dev/ns/zk#status";
 pub const ZK_INGESTED: &str = "https://sparq.dev/ns/zk#ingested";
@@ -105,6 +112,14 @@ pub struct RegistryEntry {
     pub signature_graph: Option<NamedNode>,
     /// Status-list reference (plan §2.6).
     pub status_list: Option<NamedNode>,
+    /// The credential's index into its status list (audit #12). Bound — with
+    /// `status_list_version` and `H(status_list)` — under the issuer signature
+    /// when the entry is issued via [`Self::issued_with_status`].
+    // [OPUS-4.8] audit #12.
+    pub status_list_index: Option<u64>,
+    /// The status-list version this entry's signature is bound to (audit #12).
+    // [OPUS-4.8] audit #12.
+    pub status_list_version: Option<u64>,
     /// The per-graph RDFC10 bnode salt (Q6).
     pub salt: Fr,
     pub status: Status,
@@ -125,6 +140,8 @@ impl RegistryEntry {
             commitment_signature: None,
             signature_graph: None,
             status_list: None,
+            status_list_index: None,
+            status_list_version: None,
             salt,
             status: Status::Active,
             ingested: None,
@@ -166,6 +183,76 @@ impl RegistryEntry {
         e.issuer_public_key = Some(crate::sig::public_key_to_hex(&pk));
         e.commitment_signature = Some(sig_hex);
         e
+    }
+
+    /// An attested entry whose signature ALSO binds the credential's status-list
+    /// reference (audit #12): the issuer signs
+    /// `commitment_message_with_status(C(G), salt, status_ref_digest)` where
+    /// `status_ref_digest = status_ref_digest(H(status_list), index, version)`.
+    /// So the reference (which list, which index, which version) is
+    /// issuer-attested and cannot be omitted or forged by the prover on the
+    /// verify path. Same deterministic `(sk, m)` nonce discipline as
+    /// [`Self::issued`].
+    // [OPUS-4.8] audit #12: status-bound issuance.
+    pub fn issued_with_status(
+        document: NamedNode,
+        commitment: Fr,
+        salt: Fr,
+        status_list: NamedNode,
+        index: u64,
+        version: u64,
+        status: Status,
+        sk: &crate::sig::SecretKey,
+    ) -> Self {
+        let pk = sk.public_key();
+        let list_id = crate::sig::status_list_id_to_field(status_list.as_str());
+        let status_ref = crate::sig::status_ref_digest(&list_id, index, version);
+        let sig_hex = sk.sign_commitment_with_status(&commitment, &salt, &status_ref);
+        let mut e = RegistryEntry::new(document, commitment, salt);
+        e.cryptosuite = Some(NamedNode::new_unchecked(
+            crate::sig::SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+        ));
+        e.issuer_public_key = Some(crate::sig::public_key_to_hex(&pk));
+        e.commitment_signature = Some(sig_hex);
+        e.status_list = Some(status_list);
+        e.status_list_index = Some(index);
+        e.status_list_version = Some(version);
+        e.status = status;
+        e
+    }
+
+    /// Verify that this entry's recorded signature is a valid STATUS-BOUND issuer
+    /// signature (audit #12): over `(commitment, salt, status_ref_digest)` where
+    /// the digest folds `H(status_list)`, `status_list_index`, and
+    /// `status_list_version`. Fail-closed: a missing key/signature/cryptosuite/
+    /// status-list/index/version, an unknown cryptosuite, or malformed hex all
+    /// return `false`. The caller must ALSO check the key is in the disclosed
+    /// key-set `K` and validate liveness (status bit + freshness) separately.
+    // [OPUS-4.8] audit #12.
+    pub fn verify_commitment_signature_with_status(&self) -> bool {
+        let (Some(pk_hex), Some(sig_hex), Some(cs), Some(sl), Some(idx), Some(ver)) = (
+            &self.issuer_public_key,
+            &self.commitment_signature,
+            &self.cryptosuite,
+            &self.status_list,
+            self.status_list_index,
+            self.status_list_version,
+        ) else {
+            return false;
+        };
+        if crate::sig::SignatureScheme::from_cryptosuite_iri(cs.as_str()).is_none() {
+            return false;
+        }
+        let (Some(pk), Some(sig)) = (
+            crate::sig::public_key_from_hex(pk_hex),
+            crate::sig::signature_from_hex(sig_hex),
+        ) else {
+            return false;
+        };
+        let list_id = crate::sig::status_list_id_to_field(sl.as_str());
+        let status_ref = crate::sig::status_ref_digest(&list_id, idx, ver);
+        let msg = crate::sig::commitment_message_with_status(&self.commitment, &self.salt, &status_ref);
+        crate::sig::verify(&pk, &msg, &sig)
     }
 
     /// Verify that this entry's recorded signature is a valid issuer signature
@@ -256,6 +343,22 @@ impl RegistryEntry {
         }
         if let Some(sl) = &self.status_list {
             out.push([s.clone(), pred(ZK_STATUS_LIST), Term::NamedNode(sl.clone())]);
+        }
+        // [OPUS-4.8] audit #12: the issuer-bound status-list index + version.
+        let xsd_int = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#nonNegativeInteger");
+        if let Some(idx) = self.status_list_index {
+            out.push([
+                s.clone(),
+                pred(ZK_STATUS_LIST_INDEX),
+                Term::Literal(oxrdf::Literal::new_typed_literal(idx.to_string(), xsd_int.clone())),
+            ]);
+        }
+        if let Some(ver) = self.status_list_version {
+            out.push([
+                s.clone(),
+                pred(ZK_STATUS_LIST_VERSION),
+                Term::Literal(oxrdf::Literal::new_typed_literal(ver.to_string(), xsd_int)),
+            ]);
         }
         if let Some(ts) = &self.ingested {
             out.push([
@@ -394,6 +497,13 @@ pub fn read_registry(graph: &Graph) -> Vec<RegistryEntry> {
                 _ => None,
             })
         };
+        // [OPUS-4.8] audit #12: integer literal (status-list index / version).
+        let u64_of = |pred: &str| -> Option<u64> {
+            props.iter().find_map(|(p, o)| match o {
+                Term::Literal(l) if p == pred => l.value().parse::<u64>().ok(),
+                _ => None,
+            })
+        };
         out.push(RegistryEntry {
             document: doc,
             commitment,
@@ -404,6 +514,8 @@ pub fn read_registry(graph: &Graph) -> Vec<RegistryEntry> {
             commitment_signature: str_of(ZK_COMMITMENT_SIGNATURE),
             signature_graph: iri_of(ZK_SIGNATURE_GRAPH),
             status_list: iri_of(ZK_STATUS_LIST),
+            status_list_index: u64_of(ZK_STATUS_LIST_INDEX),
+            status_list_version: u64_of(ZK_STATUS_LIST_VERSION),
             salt,
             status,
             ingested,
@@ -451,6 +563,47 @@ mod tests {
         let back = read_registry(&g);
         assert_eq!(back, vec![e]);
         assert!(back[0].verify_commitment_signature(), "read-back entry verifies");
+    }
+
+    // [OPUS-4.8] audit #12: a status-bound issued entry verifies, round-trips
+    // through the store (index + version survive), and rejects a tampered
+    // status-list reference (index/version/list) — the property that makes an
+    // omitted/forged status reference unverifiable on the verify path.
+    #[test]
+    fn issued_with_status_round_trips_and_binds_the_reference() {
+        use crate::sig::SecretKey;
+        let sk = SecretKey::from_seed(31);
+        let commitment = Fr::from(0xbeefu64);
+        let salt = salt_from_bytes(&[5u8; 32]);
+        let sl = NamedNode::new("https://dmv.example/status/3").unwrap();
+        let e = RegistryEntry::issued_with_status(
+            NamedNode::new("https://dmv.example/vc/lic-st").unwrap(),
+            commitment,
+            salt,
+            sl.clone(),
+            94,
+            7,
+            Status::Active,
+            &sk,
+        );
+        assert!(e.verify_commitment_signature_with_status(), "fresh status-bound entry verifies");
+        // Round-trips through the store.
+        let mut g = Graph::load_str("", "turtle").unwrap();
+        install_registry(&mut g, &[e.clone()]).unwrap();
+        let back = read_registry(&g);
+        assert_eq!(back, vec![e.clone()]);
+        assert!(back[0].verify_commitment_signature_with_status(), "read-back verifies");
+
+        // Tamper the index/version/list => the recomputed digest diverges => fail.
+        let mut tampered = e.clone();
+        tampered.status_list_index = Some(95);
+        assert!(!tampered.verify_commitment_signature_with_status(), "wrong index must fail");
+        let mut tampered = e.clone();
+        tampered.status_list_version = Some(8);
+        assert!(!tampered.verify_commitment_signature_with_status(), "wrong version must fail");
+        let mut tampered = e;
+        tampered.status_list = Some(NamedNode::new("https://attacker.example/empty").unwrap());
+        assert!(!tampered.verify_commitment_signature_with_status(), "wrong list must fail");
     }
 
     #[test]
