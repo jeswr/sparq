@@ -1,5 +1,22 @@
 # Benchmarks
 
+> **On the numbers in this document (read first).** Per AGENTS.md, benchmark
+> figures are not the source of truth — the generated data is. The tables below
+> are **machine-specific, point-in-time snapshots** kept for the *analysis* (the
+> QLever-gap narrative, the negative results, the methodology); they drift and are
+> not maintained by hand. For current figures:
+> - **Per-commit CI metrics** (deterministic: wasm bundle bytes, store B/triple,
+>   dict B/term) → the perf dashboard <https://jeswr.github.io/sparq/dev/bench>
+>   (orphan `benchmark-data` branch).
+> - **The benchmark registry + exact invocations** → `bench/benchmarks.toml`
+>   and `bench/CATALOG.md`. Regenerate any figure by running the named harness.
+> - **The QLever comparison baselines** are single-sourced in
+>   `bench/qlever-baselines.md`; the **rung5 1B Wikidata ingest** result is
+>   single-sourced in `research/wikidata-ingestion-benchmark.md`.
+>
+> Each section below names the harness/CLI command that produces its numbers; run
+> that command for live data rather than citing the snapshot.
+
 `crates/sparq-bench` runs an identical dataset and query workload through **sparq**
 and through **Oxigraph** (a mature, widely-used Rust SPARQL engine), and:
 
@@ -19,9 +36,9 @@ cargo run -p sparq-bench --release -- --scale 50000 --iters 4
   attributes and `ex:follows` edges → star joins, chains, triangles).
 - **What this is *not* (yet).** Oxigraph is *a* SOTA-class engine but not the
   fastest; QLever and RDFox are the engines to beat on the public benchmarks, and
-  those comparisons (SP2Bench, WatDiv, WDBench, etc. from docs.qlever.dev) are
-  still TODO. We compare against Oxigraph first because it embeds cleanly as a
-  Rust crate, giving a continuous, reproducible correctness + perf gate.
+  those comparisons (SP2Bench, WatDiv, WDBench, etc. from docs.qlever.dev) are not
+  yet run (tracked in beads). We compare against Oxigraph first because it embeds
+  cleanly as a Rust crate, giving a continuous, reproducible correctness + perf gate.
 - **Memory caveat.** Oxigraph's *in-memory* `Store` (`Store::new()`, no RocksDB)
   is measured. Oxigraph's primary, optimised backend is on-disk RocksDB; the
   in-memory store is not its most space-efficient mode, so the memory comparison

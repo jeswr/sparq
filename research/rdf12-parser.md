@@ -336,17 +336,21 @@ Multiple annotation blocks likewise each get their own fresh blank node, all rei
 
 ---
 
-## Appendix: minimal conformance checklist for the sparq parser
+## Appendix: minimal conformance reference for the sparq parser
 
-- [ ] Tokenize `<<(`, `)>>`, `<<`, `>>`, `~`, `{|`, `|}` as distinct lexemes; `LANG_DIR` with optional `--dir`.
-- [ ] N-Triples/N-Quads: accept `tripleTerm` in object only; right-branching nesting; depth guard.
-- [ ] N-Quads: optional 4th `graphLabel` (IRI/blank only).
-- [ ] Turtle/TriG: `reifiedTriple` (`<< … >>`) with optional `~reifier`, desugaring to base triple + `reifier rdf:reifies <<( … )>>`; fresh blank-node reifier when omitted.
-- [ ] Turtle/TriG: `{| … |}` annotation blocks on each object; multiple reifiers/blocks each mint a reifier over the **same** triple term.
-- [ ] Reject triple terms in subject/predicate/graph-label; reject collections/blankNodePropertyLists inside `tripleTerm`.
-- [ ] `@lang--dir` → `rdf:dirLangString` + stored direction; validate `dir ∈ {ltr, rtl}`; `@lang` → `rdf:langString`.
-- [ ] Accept (may ignore) `VERSION "1.2"` / `@version` directives.
-- [ ] Everything else (IRI resolution, numerics, booleans, escapes, UCHAR/ECHAR, prefixes/base) unchanged from RDF 1.1.
+The implementation work is tracked in beads (`bd list -l area:sparq-core`); this
+is the spec digest the beads reference, kept here as design reference (not a task
+list). RDF 1.2 surface-syntax requirements for the parser:
+
+- Tokenize `<<(`, `)>>`, `<<`, `>>`, `~`, `{|`, `|}` as distinct lexemes; `LANG_DIR` with optional `--dir`.
+- N-Triples/N-Quads: accept `tripleTerm` in object only; right-branching nesting; depth guard.
+- N-Quads: optional 4th `graphLabel` (IRI/blank only).
+- Turtle/TriG: `reifiedTriple` (`<< … >>`) with optional `~reifier`, desugaring to base triple + `reifier rdf:reifies <<( … )>>`; fresh blank-node reifier when omitted.
+- Turtle/TriG: `{| … |}` annotation blocks on each object; multiple reifiers/blocks each mint a reifier over the **same** triple term.
+- Reject triple terms in subject/predicate/graph-label; reject collections/blankNodePropertyLists inside `tripleTerm`.
+- `@lang--dir` → `rdf:dirLangString` + stored direction; validate `dir ∈ {ltr, rtl}`; `@lang` → `rdf:langString`.
+- Accept (may ignore) `VERSION "1.2"` / `@version` directives.
+- Everything else (IRI resolution, numerics, booleans, escapes, UCHAR/ECHAR, prefixes/base) unchanged from RDF 1.1.
 
 ### Primary sources
 - RDF 1.2 Concepts (CR): https://www.w3.org/TR/rdf12-concepts/

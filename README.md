@@ -178,46 +178,37 @@ a memory-bounded out-of-core path.
 - `research/` — design notes and measured verdicts on indexing, compression, inference,
   parallelism, RDF 1.2, hardware tuning, and the rejected/parked experiments.
 
-## Benchmarks — sparq vs QLever
+## Performance
 
-Benchmarked against **QLever** (a state-of-the-art engine) running natively on the same
-machine (2020 MacBook Air M1, 16 GB), compute-only, cold, identical COUNT-wrapped queries.
-Methodology, caveats, and per-query tables:
-[`bench/qlever-baselines.md`](bench/qlever-baselines.md).
+Per [AGENTS.md](AGENTS.md), benchmark figures are not baked into the docs — they
+drift. The live numbers come from the generated data:
 
-| workload | scale | sparq vs QLever |
-|---|---|---|
-| synthetic joins/OPTIONAL | 10M | **2.2–17× faster** |
-| synthetic joins/OPTIONAL | 100M (in-memory) | **2.3–20× faster** |
-| synthetic, **out-of-core (mmap)** | 100M | **2.6–20× faster**, ~0 committed heap, 0.67 s open |
-| **real data (DBpedia olympics)** | 1.8M (skewed) | **1.7–12× faster** |
+- **Per-commit metrics** (wasm bundle bytes, store B/triple, dict B/term) →
+  the dashboard at <https://jeswr.github.io/sparq/dev/bench> (orphan
+  `benchmark-data` branch, updated by CI).
+- **The benchmark registry + exact invocations** → [`bench/benchmarks.toml`](bench/benchmarks.toml)
+  and [`bench/CATALOG.md`](bench/CATALOG.md). Run the named harness to reproduce any figure.
 
-Selected per-query numbers (min-of-N, compute-only; QLever 0.5.47 native, reproduced):
+### sparq vs QLever
 
-| query | 10M QLever | 10M sparq | 100M QLever | 100M sparq | sparq advantage |
-|---|--:|--:|--:|--:|--|
-| 3-pattern star join | 73 ms | 14.5 ms | 900 ms | 158 ms | 5.0× / 5.7× |
-| 2-pattern join | 54 ms | 24.8 ms | 600 ms | 266 ms | 2.2× / 2.3× |
-| OPTIONAL | 59 ms | 3.4 ms | 650 ms | 33 ms | 17× / 20× |
-| 1-pattern COUNT | 4 ms | 0.002 ms | 35 ms | 0.004 ms | range-count short-circuit |
-| FILTER range | 3 ms | 0.005 ms | 8 ms | 0.005 ms | range-prune short-circuit |
+Benchmarked against **QLever** (a state-of-the-art engine) running natively on the
+same machine, compute-only, cold, identical COUNT-wrapped queries. sparq matches or
+beats native QLever on compute across synthetic and real (DBpedia olympics) data, at
+10M and 100M triples, in-memory and out-of-core — and the out-of-core (mmap) path
+holds that with near-zero committed heap (QLever's low-RAM serving model covered too).
+Methodology, caveats, the per-query baselines, and how to reproduce them are
+single-sourced in [`bench/qlever-baselines.md`](bench/qlever-baselines.md); run
+`bench/qlever-olympics/compare.py` / `bench/qlever-synthetic/` for live numbers.
 
-The advantage holds across scale, real/synthetic data, and the in-memory vs out-of-core
-paths — and the out-of-core (mmap) path matches or beats the in-memory query times with
-near-zero committed heap, so QLever's low-RAM serving model is covered too.
+### Ingestion at scale (real Wikidata)
 
-**Ingestion at scale (real Wikidata):** 1,000,000,000 truthy triples → queryable
-six-permutation out-of-core store in **737.8 s (1.355 M triples/s)** on an 8-vCPU
-`r7i.2xlarge` (51.5 GB peak RSS, ~90 B/triple on disk; `COUNT(*)` over the result in 27 ms)
-— [`research/wikidata-ingestion-benchmark.md`](research/wikidata-ingestion-benchmark.md).
-Load thread-scaling reaches 2.99× @ 8 threads after the parallel dictionary-consolidation
-work ([`research/dict-consolidation-verdict.md`](research/dict-consolidation-verdict.md)).
-
-A 16 GB machine can reach the billion-triple regime too, with the dictionary as the wall:
-the same 1B build on a 2-vCPU/16 GB `r8g.large` (Graviton4) completes in 4,691 s
-(0.213 M triples/s) — swap-bound, because the term dictionary stays RAM-resident and grows
-past 16 GB on a billion distinct terms, so a feasibility result, not a throughput one
-([`research/wikidata-lowresource-stage1.md`](research/wikidata-lowresource-stage1.md)).
+sparq builds a queryable six-permutation out-of-core store from 1,000,000,000 truthy
+Wikidata triples on a single 8-vCPU box — the run log, hardware, throughput, peak RSS,
+and the low-resource (16 GB, swap-bound) feasibility variant are single-sourced in
+[`research/wikidata-ingestion-benchmark.md`](research/wikidata-ingestion-benchmark.md)
+and [`research/wikidata-lowresource-stage1.md`](research/wikidata-lowresource-stage1.md).
+Load thread-scaling after the parallel dictionary-consolidation work is in
+[`research/dict-consolidation-verdict.md`](research/dict-consolidation-verdict.md).
 
 <!-- [OPUS-4.8] section written/updated by Opus 4.8 (Fable 5 unavailable) — re-review when Fable returns -->
 ## Parsing
@@ -225,62 +216,45 @@ past 16 GB on a billion distinct terms, so a feasibility result, not a throughpu
 N-Triples / N-Quads use a **custom byte-level parser** that interns directly into the
 dictionary with parallel newline-split chunking and a sharded dict merge; Turtle / TriG go
 through `oxttl` under a custom statement-terminator chunker (`turtle_chunks`) that parallelises
-even in the presence of blank nodes. Measured on the development machine (M1 Air, 4P+4E, 16 GB)
-over a real 1.5M-triple Wikidata slice (`bench/parse/` harness, median of 3;
-[`research/custom-parsers-baseline.md`](research/custom-parsers-baseline.md)):
+even in the presence of blank nodes. The custom serial N-Triples parser parses *and* interns
+faster than `oxttl` parses-and-discards; Turtle parses slower per byte but its files are
+smaller, so per-*triple* the two are comparable at one thread and the gap is parallelism. The
+Turtle chunk-parallel path is shown byte-identical to serial `oxttl` on the real slice
+(1,500,000 statements, 41 distinct blank-node labels). RDF 1.2 / RDF-star terms parse but have
+no standalone throughput figure yet.
 
-| format | task | 1 thread | 8 threads | parallel speedup |
-|---|---|--:|--:|--:|
-| N-Triples | parse + intern | 234 MB/s (2.02 M/s) | 896 MB/s (7.76 M/s) | **3.84×** |
-| N-Triples | full ingest (`load_str`, +6 perms) | 155 MB/s (1.34 M/s) | 585 MB/s (5.06 M/s) | 3.78× |
-| Turtle | parse + intern | 0.998 s | 0.479 s | **2.1×** |
-| Turtle | full ingest (`load_str`) | 1.207 s | 0.613 s | 2.0× |
-
-The custom serial N-Triples parser (234 MB/s) already parses *and* interns faster than
-`oxttl` parses-and-discards (185 MB/s, 1.27×). Turtle parses ~2.5× slower per byte than
-N-Triples but its files are ~3.2× smaller, so per-*triple* the two are comparable at one
-thread; the gap is parallelism (NT 5.06 vs Turtle 1.24 M/s at 8T full ingest). The Turtle
-chunk-parallel path is shown byte-identical to serial `oxttl` on the real slice (1,500,000
-statements, 41 distinct blank-node labels). RDF 1.2 / RDF-star terms parse but have no
-standalone throughput figure yet.
+The parse/ingest throughput figures (per-thread + parallel speedup, N-Triples and Turtle)
+are measured by the `bench/parse/` harness and single-sourced in
+[`research/custom-parsers-baseline.md`](research/custom-parsers-baseline.md); run that
+harness for live numbers (see [`bench/CATALOG.md`](bench/CATALOG.md)).
 
 **Streaming & compressed ingest.** Decompression overlaps parsing on a producer thread, so a
-`.gz` / `.zst` stream is parsed without ever materialising the decompressed copy in RAM —
-gzip-streaming ingest of the slice is **0.661 s** (8.5× faster than the pre-fix per-`read()`
-flush) and zstd-streaming **0.576 s** (6.9×), both matching or beating decompress-to-RAM-then-parse
+`.gz` / `.zst` stream is parsed without ever materialising the decompressed copy in RAM, both
+matching or beating decompress-to-RAM-then-parse
 ([`research/custom-parsers-baseline.md`](research/custom-parsers-baseline.md)). For the
-external (out-of-core) build, overlapping bzip2 decode with parse lifts a `.bz2` build from
-~0.39 to ~0.96 M triples/s (~2.4×), and parallelising the sibling-permutation sorts cuts a
-10M external build 6.8 → 4.4 s (−35%)
-([`research/fast-ingestion.md`](research/fast-ingestion.md)).
+external (out-of-core) build, overlapping bzip2 decode with parse and parallelising the
+sibling-permutation sorts are measured in
+[`research/fast-ingestion.md`](research/fast-ingestion.md).
 
 <!-- [OPUS-4.8] section written/updated by Opus 4.8 (Fable 5 unavailable) — re-review when Fable returns -->
 ## Serialisation
 
 The SPARQL-results JSON writer is chunk-parallel and the chunked path avoids the giant
-single-string concat — a 1M-row scan returns its first chunk in 79 ms vs 305 ms for the
-monolithic `query_json` (3.8×, a **memory/peak-RSS win**, not incremental delivery yet)
-([`research/concurrent-serving.md`](research/concurrent-serving.md)). On a 302 MB JSON result
-the writer alone runs at ~3.1 GB/s (8T)
-([`research/custom-parsers-D4-compressed-serialization.md`](research/custom-parsers-D4-compressed-serialization.md)).
-The per-cell JSON escaper was rewritten to bulk-copy already-safe runs, cutting a 701 MB
-(5M-row) result's serialisation 1276 → 1034 ms (−19%)
-([`research/BENCHMARKS.md`](research/BENCHMARKS.md)).
+single-string concat — returning its first chunk far sooner than the monolithic `query_json`
+(a **memory/peak-RSS win**, not incremental delivery yet)
+([`research/concurrent-serving.md`](research/concurrent-serving.md)). The per-cell JSON
+escaper bulk-copies already-safe runs rather than emitting char-by-char
+([`research/BENCHMARKS.md`](research/BENCHMARKS.md)). Writer throughput and escaper figures
+are measured by the `bench/parse/` compress-bench harness, single-sourced in
+[`research/custom-parsers-D4-compressed-serialization.md`](research/custom-parsers-D4-compressed-serialization.md).
 
 A `CompressedSink` frames the chunked output as multi-member gzip / multi-frame zstd so each
-chunk compresses in parallel as it is produced. Measured on the same 302 MB JSON result
-([`research/custom-parsers-D4-compressed-serialization.md`](research/custom-parsers-D4-compressed-serialization.md)):
-
-| codec | output | ratio | parallel 8T throughput |
-|---|--:|--:|--:|
-| zstd −3 | 16.3 MB | **18.5×** | 6.5 GB/s |
-| gzip −6 | 17.4 MB | 17.4× | 0.75 GB/s |
-| gzip −1 | 22.6 MB | 13.4× | 3.8 GB/s |
-
-zstd −3 strictly dominates gzip −6 (better ratio, ~8.7× faster parallel) and compresses
-2.1× faster than the serializer produces, so overlapping it adds only ~8 ms to a 98 ms
-serialization. On genuinely small (≤1 KiB) point-query responses a trained zstd vocabulary
-dictionary takes the ratio from 2.3× to 11.4× (278 → 56 B per response). **Honesty caveat:**
+chunk compresses in parallel as it is produced. The codec comparison (compression ratio +
+parallel throughput for zstd / gzip, and the trained-dictionary win on small point-query
+responses) is measured by the compress-bench harness and single-sourced in
+[`research/custom-parsers-D4-compressed-serialization.md`](research/custom-parsers-D4-compressed-serialization.md);
+zstd −3 strictly dominates gzip −6 (better ratio, faster parallel) and compresses faster than
+the serializer produces, so overlapping it adds negligible latency. **Honesty caveat:**
 the streaming overlap is measured by *replaying* committed chunks, not yet driven by a live
 streaming server; and browsers / Node silently truncate multi-member `Content-Encoding: gzip`
 and multi-frame zstd to the first member, so the shipped sink uses a single-member-gzip
