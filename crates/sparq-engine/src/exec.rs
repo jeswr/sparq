@@ -4533,17 +4533,21 @@ fn eval_aggregate(graph: &Graph, local: &LocalVocab, b: &Bindings, members: &[us
                     return Ok(v);
                 }
             }
-            // Collect the per-member values of `expr`. An unbound / errored member is
-            // recorded: SUM and AVG must ERROR on it (yielding an unbound aggregate),
-            // while COUNT/MIN/MAX/SAMPLE/GROUP_CONCAT skip it.
+            // Collect the per-member values of `expr`. [OPUS-4.8] An UNBOUND member (a variable
+            // with no binding in that row, e.g. an OPTIONAL one) is SKIPPED for every aggregate,
+            // matching SPARQL "aggregate over the bound values": SUM/AVG over an OPTIONAL column
+            // must still sum the rows that do have a value, not collapse to unbound. Only a
+            // genuine expression ERROR (`Value::Error`, e.g. a type error inside `expr`) is fatal
+            // for SUM/AVG. A BOUND but non-numeric member is pushed into `vals` and turns SUM/AVG
+            // into a type error downstream (`as_numeric` -> None), per agg-err-01.
             let mut vals: Vec<Value> = Vec::with_capacity(members.len());
             let mut errored = false;
             for &ri in members {
                 let v = eval_expr(graph, local, b, &b.rows[ri], expr)?;
-                if matches!(v, Value::Unbound | Value::Error) {
-                    errored = true;
-                } else {
-                    vals.push(v);
+                match v {
+                    Value::Unbound => {}             // skip: aggregate ignores unbound rows
+                    Value::Error => errored = true,  // fatal for SUM/AVG (-> unbound aggregate)
+                    _ => vals.push(v),
                 }
             }
             if *distinct {
@@ -5766,16 +5770,32 @@ impl Dec {
     /// Rounds to an integer-valued decimal (scale 0), preserving the decimal TYPE
     /// (`CEIL("2.5"^^xsd:decimal)` is `"3"^^xsd:decimal`).
     fn round_to_int(self, mode: RoundMode) -> Dec {
-        if self.scale == 0 {
-            return self;
+        if self.scale == 0 || self.mant == 0 {
+            return Dec { mant: self.mant, scale: 0 };
         }
-        let p = 10i128.pow(self.scale);
-        let q = self.mant.div_euclid(p);
-        let r = self.mant.rem_euclid(p); // 0..p
-        let mant = match mode {
-            RoundMode::Floor => q,
-            RoundMode::Ceil => q + i128::from(r > 0),
-            RoundMode::HalfUp => q + i128::from(r * 2 >= p),
+        // [OPUS-4.8] `10i128.pow(self.scale)` overflows (debug panic / release wrap) for any
+        // valid decimal whose scale is >= 39 (10^39 > i128::MAX). When the power exceeds i128
+        // the integer part is necessarily 0 (|mant| < i128::MAX < 10^scale), so |value| < 1 and
+        // also < 0.5 (2*i128::MAX < 10^39 <= 10^scale), making the rounded result obvious from
+        // the sign alone — derive it directly instead of constructing the overflowing power.
+        let mant = match 10i128.checked_pow(self.scale) {
+            Some(p) => {
+                let q = self.mant.div_euclid(p);
+                let r = self.mant.rem_euclid(p); // 0..p
+                match mode {
+                    RoundMode::Floor => q,
+                    RoundMode::Ceil => q + i128::from(r > 0),
+                    RoundMode::HalfUp => q + i128::from(r * 2 >= p),
+                }
+            }
+            None => match mode {
+                // |value| < 1: floor of a tiny positive is 0, of a tiny negative is -1.
+                RoundMode::Floor => i128::from(self.mant < 0) * -1,
+                // ceil of a tiny positive is 1, of a tiny negative is 0.
+                RoundMode::Ceil => i128::from(self.mant > 0),
+                // |value| < 0.5 always at this scale, so half-up rounds to 0.
+                RoundMode::HalfUp => 0,
+            },
         };
         Dec { mant, scale: 0 }
     }

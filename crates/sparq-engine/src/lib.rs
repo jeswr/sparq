@@ -958,6 +958,54 @@ mod tests {
         assert!(r.rows[0][3].as_ref().unwrap().to_string().contains("35"));
     }
 
+    /// [OPUS-4.8] roborev 1610 (High): SUM/AVG over a column that is UNBOUND for some
+    /// rows (here via OPTIONAL) must still aggregate the rows that DO have a value — an
+    /// unbound member is skipped, not fatal. Previously any unbound member collapsed the
+    /// whole aggregate to unbound.
+    #[test]
+    fn sum_avg_skip_unbound_members() {
+        // ex:a..ex:d all exist; only a (10) and c (30) carry ex:score.
+        let data = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:a ex:t 1 . ex:b ex:t 1 . ex:c ex:t 1 . ex:d ex:t 1 .
+            ex:a ex:score 10 . ex:c ex:score 30 ."#;
+        let gg = Graph::load_str(data, "turtle").unwrap();
+        let pfx = "PREFIX ex: <http://ex/> ";
+        let one = |q: &str| -> String {
+            let r = query(&gg, &format!("{pfx}{q}")).unwrap();
+            r.rows[0][0].as_ref().unwrap().to_string()
+        };
+        // SUM/AVG over the OPTIONAL ?score: two bound rows (10, 30) out of four solutions.
+        let s = one("SELECT (SUM(?score) AS ?v) WHERE { ?s ex:t ?t OPTIONAL { ?s ex:score ?score } }");
+        assert!(s.contains("40"), "SUM over OPTIONAL must sum bound rows only, got {s}");
+        let a = one("SELECT (AVG(?score) AS ?v) WHERE { ?s ex:t ?t OPTIONAL { ?s ex:score ?score } }");
+        assert!(a.contains("20"), "AVG over OPTIONAL must average bound rows only, got {a}");
+    }
+
+    /// [OPUS-4.8] roborev 1610 (High/Med): CEIL/FLOOR/ROUND on a decimal with a very
+    /// large fractional scale must not overflow `10^scale` (debug panic / release wrap).
+    /// The value here is +/-1e-40, i.e. magnitude < 0.5, so the rounded results follow
+    /// purely from the sign.
+    #[test]
+    fn round_large_scale_decimal_no_overflow() {
+        let tiny = format!("0.{}1", "0".repeat(39)); // scale 40, value 1e-40
+        let data = format!(
+            r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:p ex:v "{tiny}"^^xsd:decimal .
+            ex:n ex:v "-{tiny}"^^xsd:decimal ."#
+        );
+        let gg = Graph::load_str(&data, "turtle").unwrap();
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        let n = |q: &str| query(&gg, &format!("{pfx}{q}")).unwrap().len();
+        // CEIL(+1e-40)=1, FLOOR(+1e-40)=0, ROUND(+1e-40)=0  (decimal-typed).
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(CEIL(?v) = \"1\"^^xsd:decimal) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(FLOOR(?v) = \"0\"^^xsd:decimal) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:p ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"), 1);
+        // CEIL(-1e-40)=0, FLOOR(-1e-40)=-1, ROUND(-1e-40)=0.
+        assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(CEIL(?v) = \"0\"^^xsd:decimal) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(FLOOR(?v) = \"-1\"^^xsd:decimal) }"), 1);
+        assert_eq!(n("SELECT ?s WHERE { ex:n ex:v ?v FILTER(ROUND(?v) = \"0\"^^xsd:decimal) }"), 1);
+    }
+
     #[test]
     fn order_by() {
         let r = query(
