@@ -1,0 +1,599 @@
+# [OPUS-4.8] sparq benchmark registry — authored by Opus 4.8 (Fable unavailable;
+# flag for re-review when Fable returns). Machine-readable catalog of EVERY
+# benchmark/measurement in the repo. Companion human guide: bench/CATALOG.md.
+# Companion results doc: research/BENCHMARKS.md ("what we measured"); this file
+# is "what benchmarks exist + how to run them". Invocations are verified against
+# the actual code/scripts as of 2026-06-13 — do not edit a command without
+# re-checking the source it cites.
+#
+# Field semantics:
+#   id                  stable slug
+#   name                human title
+#   category            parse | ingest | query | serve | inference | zk |
+#                       compression | scaling | conformance
+#   measures            what + units
+#   invoke              EXACT command(s); paths relative to repo root unless noted
+#   source              file(s) the invocation is defined in (provenance)
+#   dataset             source + how to obtain/regenerate + approx size
+#   quiet_box_sensitive true  => wall-clock throughput/latency (needs idle box)
+#                       false => gate-counts/byte-identity/correctness (load-robust)
+#   pinning             SHA/seed/dataset-version that must be fixed, if any
+#   records_to          where results land
+#   status              ok | stale | broken | external-cost | planning
+
+# =============================================================================
+# QUERY — engine compute + differential correctness vs reference engines
+# =============================================================================
+
+[[benchmark]]
+id          = "sparq-bench-compare"
+name        = "sparq vs Oxigraph differential + perf"
+category    = "query"
+measures    = "load time, per-query min-of-K warm latency, peak RSS (MiB); solution-count agreement"
+invoke      = "cargo run -p sparq-bench --release -- --scale 50000 --iters 4"
+source      = "crates/sparq-bench/src/main.rs (compare), src/dataset.rs"
+dataset     = "synthetic WatDiv-flavoured social graph, generated in-process by dataset::generate; --scale = entities (~8 triples/entity); 50k entities ~= 400k triples"
+quiet_box_sensitive = true
+pinning     = "dataset deterministic (fixed SplitMix64 seed 0x9E3779B97F4A7C15); pin --scale/--iters for comparable numbers"
+records_to  = "stdout; results table in research/BENCHMARKS.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "sparq-bench-fuzz"
+name        = "Differential fuzzer vs Oxigraph"
+category    = "query"
+measures    = "correctness only: sparq query().len() == Oxigraph count AND == sparq count(), over N random (graph,query) cases; mismatch prints deterministic repro"
+invoke      = "cargo run -p sparq-bench --release -- fuzz <seed_start> <count> [all|bgp|filter|optional|union|minus|limit|distinct|order]"
+source      = "crates/sparq-bench/src/fuzz.rs, src/main.rs (fuzz dispatch)"
+dataset     = "random small graphs (3..=16 subjects), mixed-datatype ex:val column; generated per-seed in-process"
+quiet_box_sensitive = false
+pinning     = "seed_start fully determines the case set (deterministic SplitMix64); category shards the space"
+records_to  = "stdout (PASS summary or repro on mismatch)"
+status      = "ok"
+
+[[benchmark]]
+id          = "sparq-bench-diff"
+name        = "Single hand-crafted differential probe"
+category    = "query"
+measures    = "correctness: sparq query/count vs Oxigraph count on ONE (data,query); exit 1 on mismatch"
+invoke      = "cargo run -p sparq-bench --release -- diff <data.ttl> <query.rq|inline-sparql>"
+source      = "crates/sparq-bench/src/main.rs (diff)"
+dataset     = "user-supplied Turtle file + query (adversarial edge-case probe)"
+quiet_box_sensitive = false
+pinning     = "none (inputs are the pin)"
+records_to  = "stdout"
+status      = "ok"
+
+[[benchmark]]
+id          = "cli-bench-suite"
+name        = "CLI query-suite runner (count/materialize/json)"
+category    = "query"
+measures    = "per-query rows + min-of-iters latency (microseconds); TSV name<TAB>rows<TAB>micros"
+invoke      = "cargo build -p sparq-cli --release && ./target/release/sparq-cli bench <data-file> <turtle|ntriples|nquads|trig> <queries-dir> [iters=5] [count|materialize|json]"
+source      = "crates/sparq-cli/src/main.rs (cmd_bench, run_query_suite)"
+dataset     = "any RDF file + a directory of *.rq; used by the QLever/selective/u64 harnesses"
+quiet_box_sensitive = true
+pinning     = "dataset + query dir; mode (count vs materialize vs json) must match when comparing"
+records_to  = "stdout (TSV)"
+status      = "ok"
+
+[[benchmark]]
+id          = "cli-bench-mmap"
+name        = "Out-of-core (mmap) query-suite runner"
+category    = "query"
+measures    = "open time, committed heap, per-query min-of-iters latency over a memory-mapped on-disk index"
+invoke      = "./target/release/sparq-cli bench-mmap <index-dir> <queries-dir> [iters=5] [count|materialize|json] [decompress]"
+source      = "crates/sparq-cli/src/main.rs (cmd_bench_mmap)"
+dataset     = "an index dir built by `save`/`build` (see ingest entries); query dir of *.rq"
+quiet_box_sensitive = true
+pinning     = "index dir + query dir; OS page cache state affects cold/warm — run cold for first-touch numbers"
+records_to  = "stdout (TSV); used in bench/qlever-baselines.md mmap comparison"
+status      = "ok"
+
+[[benchmark]]
+id          = "selective-bindjoin"
+name        = "Selective (index-nested-loop / bind) join"
+category    = "query"
+measures    = "count + materialize latency, bind-join vs merge-join; intermediate peak memory; vs Oxigraph correctness"
+invoke      = "python3 bench/selective/gen.py 500000 > bench/selective/selective.nt && ./target/release/sparq-cli bench bench/selective/selective.nt ntriples bench/selective/queries 3 count"
+source      = "bench/selective/gen.py, gen2.py, queries/, queries2/, README.md"
+dataset     = "dense follows graph (N nodes x4 edges) + rare premium leaf; gen2.py adds a second rare predicate for two-sided/predicate-transfer characterization; 500k nodes ~= 2M triples"
+quiet_box_sensitive = true
+pinning     = "gen.py seed fixed (random.seed(7)); pin N + fanout"
+records_to  = "stdout; tables in bench/selective/README.md; analysis research/predicate-transfer-measured.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "u64-valueids"
+name        = "Inline value-id / dict-resolve cost probe (literals)"
+category    = "query"
+measures    = "FILTER/BIND/GROUP-BY/ORDER-BY latency split by value path: inline int vs dict+numerics-cache (big int/decimal) vs dict-materialized (dateTime)"
+invoke      = "python3 bench/u64-valueids/gen.py 1000000 /tmp/t3-literals.nt && ./target/release/sparq-cli bench /tmp/t3-literals.nt ntriples bench/u64-valueids/queries 3 materialize"
+source      = "bench/u64-valueids/gen.py, queries/ (q01..q11)"
+dataset     = "literal-heavy synthetic, ~5N triples (int inline / big int / decimal / dateTime / group key); 1M subjects ~= 5M triples"
+quiet_box_sensitive = true
+pinning     = "deterministic generator (index-derived values); pin N"
+records_to  = "stdout (TSV)"
+status      = "ok"
+
+# =============================================================================
+# QUERY — sparq vs QLever (external reference engine)
+# =============================================================================
+
+[[benchmark]]
+id          = "qlever-olympics"
+name        = "sparq vs QLever — Olympics (real skewed data)"
+category    = "query"
+measures    = "min-of-N COLD per-query time; endtoend (compute+SPARQL-JSON) and compute (count) passes; result-size/count correctness cross-check"
+invoke      = "../../.qlever-venv/bin/python compare.py 5 endtoend   # (run from bench/qlever-olympics; also: compare.py 5 compute). Setup: qlever setup-config olympics / get-data / index / start"
+source      = "bench/qlever-olympics/{compare.py,README.md,Qleverfile}, queries/, queries-count/"
+dataset     = "Olympics (DBpedia/Wallscope), ~1.78M triples (~323 MB); fetched via qlever get-data (gitignored)"
+quiet_box_sensitive = true
+pinning     = "QLever version + dataset version (note date/commit on re-measure); QLever cache cleared each cold run; PORT 7019"
+records_to  = "stdout; results in research/BENCHMARKS.md + bench/qlever-baselines.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "qlever-synthetic-10m"
+name        = "sparq vs QLever — 10M synthetic"
+category    = "query"
+measures    = "min-of-N cold compute (QLever query-time-ms vs sparq count us) on 10M synthetic; endtoend + compute passes"
+invoke      = "./target/release/sparq-bench dump 1250000 bench/qlever-synthetic/synthetic.nt   # 10M triples; then (from bench/qlever-synthetic) ../../.qlever-venv/bin/python compare.py 5 compute"
+source      = "bench/qlever-synthetic/{compare.py,Qleverfile,synthetic.settings.json}, queries/, queries-count/"
+dataset     = "sparq-bench synthetic dump, 1.25M entities x8 = 10M triples; QLever index built from synthetic.nt; PORT 7029"
+quiet_box_sensitive = true
+pinning     = "scale (1.25M entities), QLever version; stored QLever reference in bench/qlever-baselines.md (M1, QLever 0.5.47)"
+records_to  = "stdout; bench/qlever-baselines.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "qlever-synthetic-100m"
+name        = "sparq vs QLever — 100M synthetic (in-mem + mmap)"
+category    = "query"
+measures    = "compute latency in-memory and via bench-mmap; external-build wall + peak RAM + on-disk index size; vs stored QLever baselines"
+invoke      = "./target/release/sparq-bench dump 12500000 bench/qlever-100m/synthetic100m.nt   # 100M triples; then sparq-cli bench (count) and/or save+bench-mmap; compare to bench/qlever-baselines.md"
+source      = "bench/qlever-100m/{compare.py,Qleverfile}, queries/, queries-count/; bench/qlever-baselines.md"
+dataset     = "sparq-bench synthetic dump, 12.5M entities x8 = 100M triples (~10.8GB in-mem store+dict; ~7.9GB on-disk uncompressed perms); PORT 7030"
+quiet_box_sensitive = true
+pinning     = "scale (12.5M entities); QLever 100M baselines recorded 2026-06-08/09 in bench/qlever-baselines.md"
+records_to  = "stdout; bench/qlever-baselines.md (incl. mmap-vs-QLever table)"
+status      = "ok"
+
+# =============================================================================
+# INGEST / PARSE — load + dictionary + external-memory build throughput
+# =============================================================================
+
+[[benchmark]]
+id          = "cli-ingest"
+name        = "Ingestion throughput probe (parse|intern|full)"
+category    = "ingest"
+measures    = "M triples/s for decompress+parse (parse), +dict intern (intern), +6-permutation build (full); extrapolation to full Wikidata truthy (~8B)"
+invoke      = "./target/release/sparq-cli ingest <file[.gz|.bz2|.zst]> [parse|intern|full] [max_millions]"
+source      = "crates/sparq-cli/src/main.rs (cmd_ingest)"
+dataset     = "any N-Triples (optionally gz/bz2/zst); typically a Wikidata truthy slice (gitignored)"
+quiet_box_sensitive = true
+pinning     = "input file + mode + cap; codec (zstd ~12x faster decode than bz2)"
+records_to  = "stdout summary; analysis research/fast-ingestion.md, research/wikidata-ingestion-benchmark.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "cli-save-build"
+name        = "Index persist (save) + external-memory build"
+category    = "ingest"
+measures    = "build/persist wall-clock; external-memory build bounds peak RSS for >RAM datasets (dict-spill optional)"
+invoke      = "./target/release/sparq-cli save <data> <format> <dir> [compressed]   # in-RAM build+persist\n./target/release/sparq-cli build <file[.gz|.bz2|.zst]> <format> <dir> [chunk_millions=16]   # external-memory"
+source      = "crates/sparq-cli/src/main.rs (cmd_save, cmd_build, cmd_recompress)"
+dataset     = "any RDF file; output is an on-disk index dir queryable via query-mmap/bench-mmap"
+quiet_box_sensitive = true
+pinning     = "chunk_millions (run size); SPARQ_DICT_SPILL=1 + SPARQ_DICT_SPILL_BUDGET_MB for spill; output is byte-identical regardless of chunk"
+records_to  = "stderr timing; research/external-dictionary.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "cli-bench-remap"
+name        = "Dict-remap gather micro-benchmark (per-ISA prefetch)"
+category    = "ingest"
+measures    = "M triples/s for the latency-bound dictionary-id remap gather; prefetch on vs off delta"
+invoke      = "./target/release/sparq-cli bench-remap [n_triples=20000000] [dict_size=50000000] [iters=5]   # run again with SPARQ_NO_PREFETCH=1 for the delta"
+source      = "crates/sparq-cli/src/main.rs (cmd_bench_remap); sparq_core::bench_remap"
+dataset     = "synthesized id arrays (no file); sizes are the args"
+quiet_box_sensitive = true
+pinning     = "n_triples, dict_size, iters; SPARQ_NO_PREFETCH toggles the variable under test"
+records_to  = "stdout (TSV line); per-ISA validation feeds research/hw-bench-results.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "parse-baseline"
+name        = "Custom-parsers BASELINE harness (NT/TTL/compressed)"
+category    = "parse"
+measures    = "MB/s over decompressed bytes: memscan ceiling, oxttl parse-only/parse+intern/full Graph, incumbent NT parser serial+all-cores, gzip/zstd decode-only, streaming-vs-two-stage; median of 3 wall"
+invoke      = "cd bench/parse && cargo build --release && ./target/release/parse-baseline bench-nt <data.nt>   # also bench-ttl, bench-zip; gen/to-ttl/compress prepare datasets"
+source      = "bench/parse/{README.md,Cargo.toml}, parse-baseline bin"
+dataset     = "data/ (gitignored): Wikidata truthy first 1.5M lines (~173MB) and synthetic (gen 320000 ~162MB NT/~57MB TTL); + compressed variants"
+quiet_box_sensitive = true
+pinning     = "dataset slice size; mimalloc + fat LTO build to match shipped ingest"
+records_to  = "stdout; analysis research/custom-parsers-baseline.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "compress-bench"
+name        = "Compressed result-serialization (D4)"
+category    = "compression"
+measures    = "gzip/zstd ratio + serial-vs-rayon walls, zstd dictionaries, end-to-end serialize+compress, paced-replay TTFB proxy (big); point-query response sizes (small); reference-decoder artifacts"
+invoke      = "cd bench/parse && ./target/release/compress-bench big <data.nt>   # also: small <data.nt>; artifacts <data.nt> <outdir>"
+source      = "bench/parse/Cargo.toml (compress-bench bin); crates/sparq-parse CompressedSink"
+dataset     = "same data/ slices as parse-baseline (gitignored)"
+quiet_box_sensitive = true
+pinning     = "dataset slice; codec levels fixed in harness"
+records_to  = "stdout; analysis research/custom-parsers-D4-compressed-serialization.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "wikidata-8b"
+name        = "Wikidata full-truthy (~8-9.4B) low-resource external build"
+category    = "ingest"
+measures    = "external-memory build wall (8-17h), peak RSS, peak swap, on-disk index bytes, validation COUNT queries; the 'Wikidata on a 16GB box' claim"
+invoke      = "cd bench/wikidata-8b/scripts && ./launch.sh (dry-run) ; EXECUTE=1 ./launch.sh && EXECUTE=1 ./run.sh && EXECUTE=1 ./collect.sh && EXECUTE=1 ./terminate.sh   # core build: SPARQ_DICT_SPILL=1 ... sparq-cli build ~/data/truthy.nt.zst ntriples ~/idx 32"
+source      = "bench/wikidata-8b/{RUNBOOK.md,STATUS.md}, scripts/ (config/launch/run/collect/terminate/remote-8b/mem-sampler)"
+dataset     = "Wikidata latest-truthy.nt.gz (~70.65GB, ~8-9.4B triples); external EC2 r8g.large + 2200GB gp3; gitignored"
+quiet_box_sensitive = true
+pinning     = "SPARQ_SHA pinned in config.sh (post dict-spill merge); dump rolls weekly so re-verify Content-Length; record exact line count = triple count"
+records_to  = "bench/wikidata-8b/results/ + STATUS.md; research/wikidata-lowresource-stage{1,2}.md"
+status      = "external-cost"  # HARD GATE: blocked on dict-spill merge to main + budget; ~$5-17 instance cost. See RUNBOOK §0.
+
+# =============================================================================
+# COMPRESSION — index footprint / B-per-triple tradeoffs
+# =============================================================================
+
+[[benchmark]]
+id          = "cli-probe-compress"
+name        = "Permutation-index compression probe (measure-first)"
+category    = "compression"
+measures    = "B/triple: raw vs lexicographic-delta+LEB128-varint vs gzip; +block-directory random-access overhead; decode-cost M/s"
+invoke      = "./target/release/sparq-cli probe-compress <perm-file>"
+source      = "crates/sparq-cli/src/main.rs (cmd_probe_compress)"
+dataset     = "a single saved permutation index file (12 B/row [u32;3]); from a `save` dir"
+quiet_box_sensitive = false  # byte-counts are deterministic; the M/s scan figures are not
+pinning     = "the perm file is the pin"
+records_to  = "stdout; research/compressed-perms-verdict.md, research/term-index-compression.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "cli-compare-compress"
+name        = "Raw vs block-compressed index footprint + query latency"
+category    = "compression"
+measures    = "in-RAM index footprint raw vs compressed (MB, B/triple, % of raw), encode time; optional query latency raw vs compressed"
+invoke      = "./target/release/sparq-cli compare-compress <data-file> <format> [<sparql>]"
+source      = "crates/sparq-cli/src/main.rs (cmd_compare_compress)"
+dataset     = "any RDF file (loaded raw then re-encoded compressed in-process)"
+quiet_box_sensitive = true  # footprint is deterministic; query latency arm is quiet-box-sensitive
+pinning     = "dataset + optional query"
+records_to  = "stdout; research/compressed-perms-verdict.md, research/dict-compression-measured.md"
+status      = "ok"
+
+# =============================================================================
+# SCALING — parallel thread sweep
+# =============================================================================
+
+[[benchmark]]
+id          = "cli-scaling"
+name        = "Per-subsystem parallel scaling sweep"
+category    = "scaling"
+measures    = "best ms, speedup, parallel efficiency (speedup / thread-ratio) per subsystem (load + each query) across a thread-count sweep"
+invoke      = "./target/release/sparq-cli scaling <data-file> <format> <queries-dir> [threads=1,2,4,8,...] [iters=3]   # many-core box: 1,2,4,8,16,32,64,128,192"
+source      = "crates/sparq-cli/src/main.rs (cmd_scaling)"
+dataset     = "any RDF file + query dir; rayon pool sized per sweep point"
+quiet_box_sensitive = true
+pinning     = "dataset + query dir + thread list; must be the ONLY load on the box (it owns all cores)"
+records_to  = "stdout (TSV subsystem/threads/best_ms/speedup/efficiency)"
+status      = "ok"
+
+# =============================================================================
+# INFERENCE — N3 / RDFS / OWL closure throughput + incremental maintenance
+# =============================================================================
+
+[[benchmark]]
+id          = "inference-eye-comparison"
+name        = "sparq-reason vs EYE — N3 forward closure"
+category    = "inference"
+measures    = "wall seconds parse->closure->serialize; sparq min-of-3, EYE min-of-3/single; closure-size correctness cross-check"
+invoke      = "EYE=$HOME/.local/bin/eye SPARQ_CLI=target/release/sparq-cli bench/inference/eye-comparison.sh   # NOTE: EYE dt100k is ~9h, skipped unless EYE_DT100K=1"
+source      = "bench/inference/eye-comparison.sh, eye-comparison.md, gen_deeptaxonomy.py"
+dataset     = "socrates (vendored), DeepTaxonomy dt1k/10k/100k (gen_deeptaxonomy.py), anc500 (transitive chain), grid30 (30x30 reachability) — generated in-script"
+quiet_box_sensitive = true
+pinning     = "EYE version (v11.24.4 / SWI-Prolog), pinned generators; use CLI engine-internal 'in Xs' timer for load-robust comparison"
+records_to  = "bench/inference/eye-comparison.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "inference-owl-bench"
+name        = "RDFS / OWL-RL materialization throughput"
+category    = "inference"
+measures    = "min-of-3 closure seconds (CLI 'in Xs' timer): rdfs-instances, owl-route-rdfs, owl-transitive, owl-restrictions; <5% regression budget gate"
+invoke      = "SPARQ_CLI=target/release/sparq-cli bench/inference/owl-bench.sh"
+source      = "bench/inference/owl-bench.sh"
+dataset     = "synthesized in-script: 100k individuals x depth-20 subClassOf; 2k-edge owl:TransitiveProperty chain; 50k individuals x restriction axioms"
+quiet_box_sensitive = true
+pinning     = "in-script generators are deterministic; trans chain capped at 2k (quadratic closure)"
+records_to  = "stdout; bench/inference/eye-comparison.md (RDFS/OWL section)"
+status      = "ok"
+
+[[benchmark]]
+id          = "inference-incremental"
+name        = "Incremental inference maintenance (insert/delete deltas)"
+category    = "inference"
+measures    = "per-delta insert/delete time (us/ms) vs full re-materialization, RDFS / OWL-RL CountingMono+Fixpoint / N3 WAC; full_rebuilds() == 0 invariant"
+invoke      = "cargo run -p sparq-reason --example incremental_olympics_bench --release [bench/qlever-olympics/olympics.nt]"
+source      = "crates/sparq-reason/examples/{incremental_olympics_bench.rs,incremental_bench.rs}; bench/inference/incremental-bench.md"
+dataset     = "bench/qlever-olympics/olympics.nt (1.78M triples, gitignored — fetch via qlever-olympics harness) + synthesized TBox + synthetic 1k-doc WAC pod"
+quiet_box_sensitive = true  # single-shot timings (not best-of-N); orders of magnitude are stable
+pinning     = "olympics dataset version; synthesized TBox defined in olympics_tbox"
+records_to  = "stdout; bench/inference/incremental-bench.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "solid-wac-bench"
+name        = "sparq-solid WAC/ACP auth-view materialization"
+category    = "inference"
+measures    = "auth-view materialization + re-materialization-after-ACL-change time; per-query cost (zero-copy dataset-view vs FROM-NAMED rewrite vs direct); session graph-set cold vs cached"
+invoke      = "cargo run -p sparq-solid --example bench --release"
+source      = "crates/sparq-solid/examples/bench.rs"
+dataset     = "~1.1k-graph WAC fixture (+ ACP variant), built in-crate (sparq_solid::fixture)"
+quiet_box_sensitive = true
+pinning     = "in-crate fixture is deterministic"
+records_to  = "stdout; cross-checked in bench/inference/incremental-bench.md (0.84s WAC re-run baseline)"
+status      = "ok"
+
+# =============================================================================
+# ZK — commitment pipeline, trace seam, circuit gate counts, prove/verify
+# =============================================================================
+
+[[benchmark]]
+id          = "zk-commit-throughput"
+name        = "sparq-zk commitment-pipeline criterion bench"
+category    = "zk"
+measures    = "triples/s + mean time: RDFC10 canon (iri/bnode x 64/256/1024), end-to-end commit, leaves+fold, Poseidon2 permutation + hash40"
+invoke      = "cd bench/zk && cargo bench"
+source      = "bench/zk/{Cargo.toml,README.md}, benches/zk_throughput.rs (groups: canon, commit, poseidon2)"
+dataset     = "synthetic graph shapes generated in-bench (iri = all-ground; bnode = bnode chain)"
+quiet_box_sensitive = true
+pinning     = "standalone cargo project (own workspace), fat LTO release profile; baseline recorded 2026-06-13 fanless M1"
+records_to  = "criterion output; baseline table in bench/zk/README.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "zk-trace-overhead"
+name        = "zk-trace per-operator capture overhead criterion bench"
+category    = "zk"
+measures    = "traced (recorder armed+drained) vs untraced latency + overhead ratio, per plan shape (bgp star/chain/triangle, filter, optional, union, distinct, count)"
+invoke      = "cd bench/zk-trace && cargo bench"
+source      = "bench/zk-trace/{Cargo.toml,README.md}, benches/trace_overhead.rs (group trace/<n>entities)"
+dataset     = "synthetic social graph, 100 and 1000 entities (~9 triples/entity), generated in-bench"
+quiet_box_sensitive = true
+pinning     = "standalone cargo project; sparq-engine built WITH the non-default `zk` feature; baseline 2026-06-13 M-series"
+records_to  = "criterion output; baseline table in bench/zk-trace/README.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "zk-compose-gates"
+name        = "zk/compose circuit gate counts (bb gates)"
+category    = "zk"
+measures    = "ultra_honk circuit_size (gate count) per circuit-family member; ground-truth per noir-optimisation skill"
+invoke      = "bench/zk-compose/scripts/gate_counts.sh > bench/zk-compose/gate_counts_latest.json"
+source      = "bench/zk-compose/scripts/gate_counts.sh, README.md; circuits in zk/compose/"
+dataset     = "compiled Noir circuits (nargo compile --workspace); no external data"
+quiet_box_sensitive = false  # gate counts are deterministic given toolchain
+pinning     = "nargo 1.0.0-beta.21, bb 5.0.0-nightly.20260324; members list fixed in script"
+records_to  = "bench/zk-compose/gate_counts_latest.json"
+status      = "ok"
+
+[[benchmark]]
+id          = "zk-compose-prove-verify"
+name        = "zk/compose prove + verify wall-clock"
+category    = "zk"
+measures    = "prove (incl --write_vk) + verify seconds, proof bytes, vk bytes for one circuit member"
+invoke      = "bench/zk-compose/scripts/prove_verify.sh <member>   # e.g. filter_int_d1, scan_k1_n16_r4"
+source      = "bench/zk-compose/scripts/prove_verify.sh, README.md"
+dataset     = "witness from the member's Prover.toml (crate e2e tests leave real ones, or hand-write)"
+quiet_box_sensitive = true  # wall-clock; proof/vk bytes are deterministic
+pinning     = "nargo + bb versions; bb num_threads; member name"
+records_to  = "stdout; bench/zk-compose/prove_verify_timing.json"
+status      = "ok"
+
+# =============================================================================
+# GENAI / AUX-INDEX measurement harnesses (crate examples)
+# =============================================================================
+
+[[benchmark]]
+id          = "text-index-bench"
+name        = "sparq-text full-text index build + query"
+category    = "query"
+measures    = "build time, index size, AND/OR/prefix query latency on synthetic literal-heavy data"
+invoke      = "cargo run --release -p sparq-text --example bench_text"
+source      = "crates/sparq-text/examples/bench_text.rs"
+dataset     = "N seeded Zipf-flavoured sentences over ~10k-word vocab, loaded as N-Triples in-example"
+quiet_box_sensitive = true
+pinning     = "seeded generator"
+records_to  = "stdout; sparq-text crate README"
+status      = "ok"
+
+[[benchmark]]
+id          = "geo-index-bench"
+name        = "sparq-geo spatial index build + query"
+category    = "query"
+measures    = "build + within_distance/nearest/intersects query latency on ~100k random CRS84 points"
+invoke      = "cargo run --release -p sparq-geo --example bench_geo"
+source      = "crates/sparq-geo/examples/bench_geo.rs"
+dataset     = "N seeded random points over an 8x8 degree window, geo:asWKT N-Triples, in-example"
+quiet_box_sensitive = true
+pinning     = "seeded generator"
+records_to  = "stdout; sparq-geo crate README"
+status      = "ok"
+
+[[benchmark]]
+id          = "hdt-load-bench"
+name        = "sparq-hdt load throughput (HDT vs gzipped N-Triples)"
+category    = "ingest"
+measures    = "load wall-clock: HDT archive vs gzipped N-Triples on ~1M synthetic triples"
+invoke      = "cargo run --release -p sparq-hdt --example bench_load"
+source      = "crates/sparq-hdt/examples/bench_load.rs"
+dataset     = "1M synthetic triples; generates crates/sparq-hdt/bench-data/ on first run (gitignored)"
+quiet_box_sensitive = true
+pinning     = "N_TRIPLES const = 1_000_000"
+records_to  = "stdout"
+status      = "ok"
+
+[[benchmark]]
+id          = "rsp-throughput"
+name        = "sparq-rsp continuous-query throughput"
+category    = "query"
+measures    = "triples/s + windows/s pushing synthetic sensor readings through a registered continuous query, per EvalMode"
+invoke      = "cargo run --release -p sparq-rsp --example throughput"
+source      = "crates/sparq-rsp/examples/throughput.rs"
+dataset     = "synthetic sensor readings generated in-example"
+quiet_box_sensitive = true
+pinning     = "in-example generator"
+records_to  = "stdout; sparq-rsp README"
+status      = "ok"
+
+[[benchmark]]
+id          = "gpu-bench"
+name        = "CPU vs GPU hot-path kernels (T24d experiment)"
+category    = "query"
+measures    = "best-of-N interleaved latency: cpu1 / cpuN / gpu-resident / gpu-e2e per kernel x column size (1M/10M/100M); host->device transfer charged honestly; checksums asserted equal"
+invoke      = "cargo run --release -p sparq-gpu --example gpu_bench"
+source      = "crates/sparq-gpu/examples/gpu_bench.rs"
+dataset     = "synthetic column data generated in-example"
+quiet_box_sensitive = true
+pinning     = "column sizes fixed; GPU backend availability"
+records_to  = "stdout"
+status      = "ok"
+
+[[benchmark]]
+id          = "sim-olympics-eval"
+name        = "sparq-sim entity-similarity accuracy + latency"
+category    = "query"
+measures    = "AUC (same-class vs cross-class pairs), precision@10, most_similar(k=10) latency (mean/p50/p95/max); type triples excluded (leakage rule)"
+invoke      = "cargo run --release -p sparq-sim --example olympics_eval"
+source      = "crates/sparq-sim/examples/olympics_eval.rs"
+dataset     = "bench/qlever-olympics/olympics.nt (1.78M triples, gitignored)"
+quiet_box_sensitive = true
+pinning     = "olympics dataset version; ground truth = rdf:type classes"
+records_to  = "stdout; research/genai-design.md §4 gate"
+status      = "ok"
+
+[[benchmark]]
+id          = "introspect-olympics"
+name        = "sparq-introspect build + output measurement"
+category    = "query"
+measures    = "load time, Introspection::build time, to_json/to_text_summary time + sizes; olympics (+ optional 8M synthetic)"
+invoke      = "cargo run -p sparq-introspect --example olympics_introspect --release"
+source      = "crates/sparq-introspect/examples/olympics_introspect.rs"
+dataset     = "bench/qlever-olympics/olympics.nt (SPARQ_OLYMPICS_NT); optional bench/qlever-synthetic/synthetic.nt (SPARQ_SYNTHETIC_NT)"
+quiet_box_sensitive = true
+pinning     = "dataset version"
+records_to  = "stdout; research/genai-design.md §4 gate"
+status      = "ok"
+
+# =============================================================================
+# CONFORMANCE — correctness against official W3C suites (NOT perf)
+# =============================================================================
+
+[[benchmark]]
+id          = "sparql-conformance"
+name        = "W3C SPARQL 1.0/1.1/1.2 + syntax conformance scoreboard"
+category    = "conformance"
+measures    = "per-suite pass/fail/skip pass-rate; --strict exits 1 on any FAIL (ratchet)"
+invoke      = "scripts/fetch-conformance.sh && cargo run -p sparq-conformance [-- --strict]"
+source      = "crates/sparq-conformance/src/main.rs; scripts/fetch-conformance.sh"
+dataset     = "w3c/rdf-tests SPARQL suites, fetched to tests/w3c/ (gitignored)"
+quiet_box_sensitive = false  # correctness, not timing
+pinning     = "w3c/rdf-tests PINNED commit f25dbc092c654d792974848e81bb519d7328f0e8 (pass-rates only comparable at a fixed suite rev)"
+records_to  = "stdout + conformance-report.md"
+status      = "ok"
+
+[[benchmark]]
+id          = "inference-conformance"
+name        = "RDF-MT / OWL2-RL / N3 / SPARQL-entailment conformance"
+category    = "conformance"
+measures    = "four-bucket pass/fail scoreboard against the reasoning suites; --strict ratchet"
+invoke      = "scripts/fetch-inference-suites.sh && cargo run -p sparq-conformance --bin sparq-inference-conformance [-- --strict]"
+source      = "crates/sparq-conformance/src/bin/inference.rs; scripts/fetch-inference-suites.sh"
+dataset     = "RDF Semantics rdf-mt / OWL 2 RL / N3 / SPARQL entailment suites, fetched to tests/w3c/ (gitignored)"
+quiet_box_sensitive = false
+pinning     = "fetched suite revisions (see fetch-inference-suites.sh)"
+records_to  = "stdout + inference-conformance-report.md"
+status      = "ok"
+
+# =============================================================================
+# SERVE — concurrent serving spikes + memory-tiering spikes
+# =============================================================================
+
+[[benchmark]]
+id          = "serve-spikes"
+name        = "Concurrent-serving research spikes"
+category    = "serve"
+measures    = "HTTP throughput/latency closed+open loop (loadgen); result-cache hit ceiling (cache_spike); point-BGP->JSON ceiling (point_spike); snapshot cost + RSS/generation (snapshot_spike); update-stream latency+RSS stability (update_stream_spike); TTFC streaming (stream_spike); group-commit writer throughput + reader p50/p99 (writer_spike)"
+invoke      = "cd bench/serve && cargo build --release && ./target/release/<bin>   # bins: loadgen cache_spike point_spike snapshot_spike update_stream_spike stream_spike writer_spike"
+source      = "bench/serve/{README.md,Cargo.toml}, src/bin/*.rs"
+dataset     = "synthetic, in-spike; writer_spike uses WRITER_UPDATES env (recorded run 30000)"
+quiet_box_sensitive = true  # research spikes, NOT maintained benchmarks; re-run on target hardware before trusting absolutes
+pinning     = "standalone cargo project; per-spike env knobs; numbers calibrate research/concurrent-serving.md"
+records_to  = "stdout; research/concurrent-serving.md §1; bench/serve/README.md (writer_spike recorded run)"
+status      = "ok"  # explicitly measurement spikes, not a regression gate
+
+[[benchmark]]
+id          = "memtier-spikes"
+name        = "Memory-tiering research spikes"
+category    = "serve"
+measures    = "query battery latency + RSS + per-file page-cache residency (mincore); 6-perm vs 3-perm (--features compact); atomic-swap cost; madvise effects; mix/rebuild costs"
+invoke      = "cd bench/memtier && cargo build --release && ./target/release/<bin>   # bins: suite mix rebuild atomic_cost madvise; build twice (default 6-perm vs --features compact 3-perm) to compare"
+source      = "bench/memtier/{Cargo.toml,src/lib.rs,src/bin/*.rs}"
+dataset     = "synthetic, in-spike (mincore residency measured on the store's own perm files)"
+quiet_box_sensitive = true
+pinning     = "standalone cargo project; compact feature = wasm 3-perm {SPO,POS,OSP} config"
+records_to  = "stdout; research/memory-tiering.md"
+status      = "ok"  # research spikes, not a regression gate
+
+# =============================================================================
+# CI — cross-commit regression tracking (github-action-benchmark)
+# =============================================================================
+
+[[benchmark]]
+id          = "ci-bench"
+name        = "CI cross-commit benchmark emitter (free GitHub runners)"
+category    = "scaling"
+measures    = "customSmallerIsBetter JSON: load_s, store_bytes_per_triple, dict_bytes_per_term, per-query {count,materialize,json}_us, rdfs_infer_s, wasm_bundle_bytes"
+invoke      = "bash scripts/ci-bench.sh [scale_entities=200000] [out.json=bench-results.json]   # CI: .github/workflows/bench.yml on push to main"
+source      = "scripts/ci-bench.sh; .github/workflows/bench.yml"
+dataset     = "sparq-bench dump at scale_entities; queries bench/qlever-synthetic/queries"
+quiet_box_sensitive = true  # GitHub runners are noisy: value is the TREND + large-regression alert (200% threshold, no hard-fail); memory/bundle metrics ARE deterministic
+pinning     = "scale_entities; deterministic memory + wasm-bundle metrics anchor the noisy timings"
+records_to  = "benchmark-data branch (dev/bench), github-action-benchmark alert comments"
+status      = "ok"
+
+[[benchmark]]
+id          = "ci-bench-ec2"
+name        = "CI heavy benchmark on EC2 spot (cost-capped)"
+category    = "scaling"
+measures    = "same metric set as ci-bench at ~10x scale on real hardware (c7g.4xlarge, 16 vCPU)"
+invoke      = "bash scripts/ec2-bench.sh   # CI: .github/workflows/bench-ec2.yml, weekly cron + manual dispatch only"
+source      = "scripts/ec2-bench.sh; .github/workflows/bench-ec2.yml"
+dataset     = "sparq-bench dump at BENCH_SCALE=2000000 (~16M triples)"
+quiet_box_sensitive = true
+pinning     = "GITHUB_SHA; c7g.4xlarge spot; NOT LIVE until vars.AWS_BENCH_ROLE_ARN is set (fails harmlessly at OIDC, no instance, no cost)"
+records_to  = "benchmark-data branch (dev/bench-ec2)"
+status      = "ok"
+
+[[benchmark]]
+id          = "hw-bench"
+name        = "Per-platform hardware throughput + build-tier uplift"
+category    = "scaling"
+measures    = "load M/s, json/materialize query us, rdfs infer s — native build vs -Ctarget-cpu tier build (the per-ISA AVX2/AVX-512/Neoverse uplift)"
+invoke      = "./scripts/hw-bench.sh [scale_entities=500000] [out.csv=hw-bench-results.csv]"
+source      = "scripts/hw-bench.sh"
+dataset     = "sparq-bench dump at scale_entities (~8x triples); one scan + one join query synthesized in-script"
+quiet_box_sensitive = true
+pinning     = "scale; run per target (Apple Silicon, Intel Mac, x86-64 v2/v3/v4, Graviton, Windows); tier-cpu auto-detected"
+records_to  = "appended to hw-bench-results.csv; research/hw-bench-results.md"
+status      = "ok"
