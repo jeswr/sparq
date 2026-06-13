@@ -30,6 +30,14 @@ use hdt::{Hdt, IdKind};
 use std::io::BufRead;
 use std::path::Path;
 
+// [OPUS-4.8] Direct sparq-side decoder (plan levers H1–H4): one-shot SPO scan that
+// skips the upstream `TriplesBitmap` query machinery (wavelet matrix + OP-index +
+// rank/select) sparq never uses on a bulk load. This is the default decode path;
+// `graph_from_hdt` (below) is kept as the upstream-backed differential oracle and
+// for callers that already hold an `Hdt` (e.g. to also query its header).
+mod decode;
+pub use decode::graph_from_reader;
+
 /// The error type for HDT loading.
 #[derive(Debug)]
 pub enum Error {
@@ -115,6 +123,16 @@ pub fn load(path: impl AsRef<Path>) -> Result<Graph, Error> {
 /// cookie, or the gzip magic of a compressed container (decompressed
 /// transparently, as in [`load`]).
 pub fn load_reader<R: BufRead>(reader: R) -> Result<Graph, Error> {
+    // [OPUS-4.8] Default path is the direct decoder (H1–H4): it never builds the
+    // upstream wavelet matrix / OP-index that a one-shot SPO load throws away.
+    with_hdt_stream(reader, |r| decode::graph_from_reader(r))
+}
+
+/// Loads via the WRAPPED `hdt` crate's full `Hdt::read` (which builds the query
+/// indexes) and the per-id `id_to_string` translation — the path the direct
+/// decoder ([`load_reader`]) replaces. Kept as the in-process differential oracle
+/// for the round-trip tests and for callers that need an [`Hdt`] for other reasons.
+pub fn load_reader_via_upstream<R: BufRead>(reader: R) -> Result<Graph, Error> {
     with_hdt_stream(reader, |r| graph_from_hdt(&Hdt::read(r)?))
 }
 
@@ -229,7 +247,7 @@ const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langSt
 /// `_:label`, and literals in N-Triples-like shape — `"lexical"`,
 /// `"lexical"@lang`, or `"lexical"^^<datatype>` — with the lexical form stored
 /// raw (NOT N-Triples-escaped).
-fn intern_hdt_term(dict: &mut Dict, s: &str) -> Result<Id, Error> {
+pub(crate) fn intern_hdt_term(dict: &mut Dict, s: &str) -> Result<Id, Error> {
     if let Some(rest) = s.strip_prefix('"') {
         // Literal. The lexical form may itself contain '"', so split at the LAST
         // quote (the lang tag / datatype suffix cannot contain one) — same rule as
