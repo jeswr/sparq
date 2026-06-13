@@ -406,16 +406,138 @@ fn set_operations_on_polygons() {
 }
 
 #[test]
-fn set_operations_reject_non_polygonal_operands_and_crs_mismatch() {
+fn set_operations_crs_mismatch_still_errors() {
     let poly = "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))";
-    assert!(matches!(lex::intersection("POINT(1 1)", poly), Err(GeoError::Unsupported(_))));
-    assert!(matches!(lex::union(poly, "LINESTRING(0 0, 1 1)"), Err(GeoError::Unsupported(_))));
     let bng = "<http://www.opengis.net/def/crs/EPSG/0/27700> POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))";
     assert!(matches!(lex::difference(poly, bng), Err(GeoError::CrsMismatch(_, _))));
     // MULTIPOLYGON operands work; result CRS follows the operands.
     let mp = "<http://www.opengis.net/def/crs/EPSG/0/27700> MULTIPOLYGON(((0 0, 2 0, 2 2, 0 2, 0 0)))";
     let r = lex::intersection(mp, bng).unwrap();
     assert!(r.starts_with("<http://www.opengis.net/def/crs/EPSG/0/27700>"), "got {r}");
+}
+
+// ---- Set operations: line / point operands (sq-gn3) --------------------------------
+
+#[test]
+fn intersection_point_in_and_out_of_polygon() {
+    let poly = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    // Inside: the point survives (as a MULTIPOINT containing it).
+    let inside = parse_wkt_literal(&lex::intersection("POINT(2 2)", poly).unwrap()).unwrap();
+    assert!(geof::sf_equals(&inside, &parse_wkt_literal("POINT(2 2)").unwrap()).unwrap());
+    // On the boundary: still kept.
+    let onb = lex::intersection("POINT(4 2)", poly).unwrap();
+    assert!(onb.contains("MULTIPOINT") && onb.contains('4'), "got {onb}");
+    // Outside: empty result.
+    let outside = lex::intersection("POINT(9 9)", poly).unwrap();
+    assert!(outside.contains("EMPTY") || outside.contains("MULTIPOINT()"), "got {outside}");
+    // Operand order is symmetric.
+    let flipped = lex::intersection(poly, "POINT(2 2)").unwrap();
+    assert!(flipped.contains('2'), "got {flipped}");
+}
+
+#[test]
+fn intersection_polygon_clips_line() {
+    // A horizontal line from x=-1 to x=5 at y=2 across the unit-4 square: the
+    // clipped portion is the segment from (0,2) to (4,2).
+    let poly = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    let line = "LINESTRING(-1 2, 5 2)";
+    let clipped = parse_wkt_literal(&lex::intersection(line, poly).unwrap()).unwrap();
+    let expected = parse_wkt_literal("LINESTRING(0 2, 4 2)").unwrap();
+    assert!(geof::sf_equals(&clipped, &expected).unwrap(), "got {}", clipped.to_wkt_literal());
+    // A line entirely inside is returned whole.
+    let inside = parse_wkt_literal(&lex::intersection("LINESTRING(1 1, 3 3)", poly).unwrap()).unwrap();
+    assert!(geof::sf_equals(&inside, &parse_wkt_literal("LINESTRING(1 1, 3 3)").unwrap()).unwrap());
+    // A line entirely outside clips to empty.
+    let outside = lex::intersection("LINESTRING(5 5, 6 6)", poly).unwrap();
+    assert!(outside.contains("EMPTY") || outside.contains("()"), "got {outside}");
+}
+
+#[test]
+fn intersection_line_crosses_line() {
+    // Two crossing diagonals of the unit square meet at the centre (0.5, 0.5).
+    let r = parse_wkt_literal(
+        &lex::intersection("LINESTRING(0 0, 1 1)", "LINESTRING(0 1, 1 0)").unwrap(),
+    )
+    .unwrap();
+    let centre = parse_wkt_literal("POINT(0.5 0.5)").unwrap();
+    assert!(geof::sf_equals(&r, &centre).unwrap(), "got {}", r.to_wkt_literal());
+    // Parallel non-touching lines: empty intersection.
+    let none = lex::intersection("LINESTRING(0 0, 1 0)", "LINESTRING(0 1, 1 1)").unwrap();
+    assert!(none.contains("EMPTY") || none.contains("()"), "got {none}");
+    // Collinear overlap: the shared sub-segment is a LINESTRING.
+    let overlap = parse_wkt_literal(
+        &lex::intersection("LINESTRING(0 0, 3 0)", "LINESTRING(1 0, 5 0)").unwrap(),
+    )
+    .unwrap();
+    let shared = parse_wkt_literal("LINESTRING(1 0, 3 0)").unwrap();
+    assert!(geof::sf_equals(&overlap, &shared).unwrap(), "got {}", overlap.to_wkt_literal());
+}
+
+#[test]
+fn union_same_dimension_operands() {
+    // point ∪ point -> MULTIPOINT.
+    let pts = lex::union("POINT(0 0)", "POINT(1 1)").unwrap();
+    assert!(pts.contains("MULTIPOINT"), "got {pts}");
+    let parsed = parse_wkt_literal(&pts).unwrap();
+    assert!(geof::sf_contains(&parsed, &parse_wkt_literal("POINT(0 0)").unwrap()).unwrap());
+    assert!(geof::sf_contains(&parsed, &parse_wkt_literal("POINT(1 1)").unwrap()).unwrap());
+    // Coincident points collapse.
+    let dup = parse_wkt_literal(&lex::union("POINT(2 2)", "POINT(2 2)").unwrap()).unwrap();
+    assert!(geof::sf_equals(&dup, &parse_wkt_literal("POINT(2 2)").unwrap()).unwrap());
+
+    // line ∪ line -> MULTILINESTRING.
+    let lines = lex::union("LINESTRING(0 0, 1 1)", "LINESTRING(2 2, 3 3)").unwrap();
+    assert!(lines.contains("MULTILINESTRING"), "got {lines}");
+    let lparsed = parse_wkt_literal(&lines).unwrap();
+    assert!(geof::sf_intersects(&lparsed, &parse_wkt_literal("LINESTRING(2 2, 3 3)").unwrap()).unwrap());
+}
+
+#[test]
+fn union_mixed_dimension_is_geometry_collection() {
+    let gc = lex::union("POINT(5 5)", "LINESTRING(0 0, 1 1)").unwrap();
+    assert!(gc.contains("GEOMETRYCOLLECTION"), "got {gc}");
+    // It round-trips through the parser and contains both operands.
+    let parsed = parse_wkt_literal(&gc).unwrap();
+    assert!(geof::sf_intersects(&parsed, &parse_wkt_literal("POINT(5 5)").unwrap()).unwrap());
+    assert!(geof::sf_intersects(&parsed, &parse_wkt_literal("LINESTRING(0 0, 1 1)").unwrap()).unwrap());
+}
+
+#[test]
+fn difference_and_symdifference_point_operands() {
+    // point − polygon: keep only the points NOT on the polygon.
+    let poly = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    let mp = "MULTIPOINT(2 2, 9 9)"; // (2,2) inside, (9,9) outside
+    let d = parse_wkt_literal(&lex::difference(mp, poly).unwrap()).unwrap();
+    assert!(geof::sf_equals(&d, &parse_wkt_literal("POINT(9 9)").unwrap()).unwrap(), "got {}", d.to_wkt_literal());
+
+    // point ∆ point: symmetric difference of the coordinate sets.
+    let sym = parse_wkt_literal(
+        &lex::sym_difference("MULTIPOINT(0 0, 1 1)", "MULTIPOINT(1 1, 2 2)").unwrap(),
+    )
+    .unwrap();
+    let expected = parse_wkt_literal("MULTIPOINT(0 0, 2 2)").unwrap();
+    assert!(geof::sf_equals(&sym, &expected).unwrap(), "got {}", sym.to_wkt_literal());
+}
+
+#[test]
+fn line_subtraction_is_cleanly_unsupported_not_a_panic() {
+    // 1-D set subtraction has no linear-referencing primitive in geo: honest
+    // Unsupported, never a panic / wrong answer.
+    assert!(matches!(
+        lex::difference("LINESTRING(0 0, 2 0)", "LINESTRING(1 0, 3 0)"),
+        Err(GeoError::Unsupported(_))
+    ));
+    assert!(matches!(
+        lex::difference("LINESTRING(0 0, 2 0)", "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"),
+        Err(GeoError::Unsupported(_))
+    ));
+    assert!(matches!(
+        lex::sym_difference("LINESTRING(0 0, 2 0)", "LINESTRING(1 0, 3 0)"),
+        Err(GeoError::Unsupported(_))
+    ));
+    // Intersection of two points that are NOT equal: empty, not an error.
+    let empty = lex::intersection("POINT(0 0)", "POINT(1 1)").unwrap();
+    assert!(empty.contains("EMPTY") || empty.contains("()"), "got {empty}");
 }
 
 // ---- geof:buffer -------------------------------------------------------------------

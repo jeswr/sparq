@@ -25,8 +25,24 @@ All previously-deferred functions landed (2026-06-12):
   GeoSPARQL 1.0 Req 25/26 matrix patterns over the same DE-9IM machinery;
   partition + inverse-consistency truth tables in `tests/relations.rs`.
 - `geof:intersection` / `union` / `difference` / `symDifference` — implemented
-  for the POLYGONAL subset (geo's `BooleanOps`: polygon/multipolygon, plus the
-  rect/triangle shorthands); result is a MULTIPOLYGON.
+  as dimension-keyed point-set operations (sq-gn3, 2026-06-13). Polygon overlay
+  via geo's `BooleanOps`; the lower-dimension cases directly over geo's
+  `line_intersection` / `CoordinatePosition`: point-in/on tests,
+  line-to-polygon clipping, line∩line (crossings + collinear overlaps),
+  point∪point→MULTIPOINT, line∪line→MULTILINESTRING, mixed-dimension
+  union→GEOMETRYCOLLECTION, point−/∆ set subtraction. Supported-vs-error matrix
+  in README.md ("Set-operation operand matrix").
+  - DEFERRED — 1-D set SUBTRACTION (line − line, line − polygon, and the line
+    cases of symDifference): needs a linear-referencing / line-noding overlay
+    geo 0.33 does not provide. These return a clean `GeoError::Unsupported`
+    (per-row expression error through the registry) rather than a wrong answer.
+    Revisit if geo gains a 1-D overlay, or implement a parametric line-noding
+    pass (split every line at all crossings, keep the sub-segments not covered
+    by the subtrahend) — tractable but non-trivial and untested against an
+    authority, so scoped out for now.
+  - CAVEAT — line∪line / line∪polygon unions are NOT noded/dissolved: an
+    overlapping line∪line keeps both curves (a valid OGC union point-set, but
+    not minimal). Same geo limitation.
 - `geof:buffer` — implemented (geo bumped 0.30 → 0.33, which ships the
   `Buffer` trait). Metric radii require a geographic CRS and buffer in a
   LOCAL EQUIRECTANGULAR metre frame about the geometry's mean latitude (same
