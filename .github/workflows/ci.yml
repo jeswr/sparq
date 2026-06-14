@@ -73,7 +73,7 @@ jobs:
       # RUNS the exported API (JsError/serialisation across the JS boundary), so the
       # web.rs #[wasm_bindgen_test]s run via wasm-pack in the Node executor — closing
       # exactly that gap. Verified locally: 20 passed.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
       - name: Install wasm-pack
