@@ -267,7 +267,7 @@ fn run_fixtures(fixtures: &[Fixture]) -> (usize, usize, Vec<String>) {
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, f)| *f)
-            .unwrap_or_else(|| panic!("fixture names unknown relation {name:?}"))
+            .unwrap_or_else(|| panic!("fixture references an unknown relation: {name:?}"))
     };
     let mut pass = 0usize;
     let mut fail = 0usize;
@@ -324,12 +324,15 @@ fn gml_equivalence_for_topology() {
         relation: &'static str,
         expected: bool,
     }
-    // A 2x2 square at the origin, in GML-SF.
-    const SQUARE_GML: &str = "<gml:Polygon><gml:exterior><gml:LinearRing>\
+    // A 2x2 square at the origin, in GML-SF. The gml: prefix is declared on the
+    // root element so the fixture is well-formed XML. [OPUS-4.8]
+    const SQUARE_GML: &str = "<gml:Polygon xmlns:gml=\"http://www.opengis.net/gml\">\
+<gml:exterior><gml:LinearRing>\
 <gml:posList>0 0 2 0 2 2 0 2 0 0</gml:posList>\
 </gml:LinearRing></gml:exterior></gml:Polygon>";
-    // A point, in GML-SF.
-    const POINT_GML: &str = "<gml:Point><gml:pos>1 1</gml:pos></gml:Point>";
+    // A point, in GML-SF (gml: prefix declared on the root element). [OPUS-4.8]
+    const POINT_GML: &str =
+        "<gml:Point xmlns:gml=\"http://www.opengis.net/gml\"><gml:pos>1 1</gml:pos></gml:Point>";
 
     let fixtures = [
         // Point inside the GML square: within / intersects.

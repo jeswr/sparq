@@ -13,10 +13,16 @@
 //!   * `geof::sf_within(a,b)` against `geo::Contains` with operands swapped
 //!     (`geo` has no `Within` trait; `within(a,b) ≡ contains(b,a)`),
 //!
-//! and asserts agreement. A disagreement is therefore a real signal: either a
-//! bug in sparq-geo's wrapper or a genuine, documented semantic divergence
-//! between `Relate`-DE-9IM and the standalone predicate (see the
-//! [`KNOWN_DIVERGENCES`] handling below).
+//! and asserts agreement in the load-bearing direction. A disagreement there is
+//! a real signal: either a bug in sparq-geo's wrapper or a genuine semantic
+//! divergence between `Relate`-DE-9IM and the standalone predicate. The one
+//! known, deliberate divergence is on `sfContains`: OGC `contains` (via `Relate`,
+//! pattern `T*****FF*`) requires the operands' INTERIORS to intersect, so it is
+//! `false` for a sub-geometry lying entirely on the boundary, whereas
+//! `geo::Contains` can answer `true` for such boundary-only containment. The
+//! `sfContains` check below therefore only asserts the direction that catches an
+//! over-permissive bug (sparq-true must imply geo-true); the OGC
+//! interior-vs-boundary asymmetric case is not asserted on.
 //!
 //! It additionally checks the **DE-9IM matrix laws** that any correct relation
 //! set must obey (`sfDisjoint ≡ ¬sfIntersects`, `sfWithin(a,b) ≡
@@ -150,15 +156,16 @@ fn de9im_differential_vs_geo_predicates() {
         }
 
         // ---- sfContains vs geo::Contains ----------------------------------
-        // DOCUMENTED DIVERGENCE: the OGC simple-features `contains` (which
-        // sparq-geo implements via Relate, pattern `T*****FF*`) requires the
-        // operands' INTERIORS to intersect, so a geometry does NOT contain a
-        // sub-geometry that lies entirely on its boundary. `geo::Contains`
-        // uses a point-set ⊇ test on some type pairs and can answer `true`
-        // for a boundary-only containment. We therefore only assert agreement
-        // when geo::Contains is true AND interiors plausibly intersect; the
-        // asymmetric case is recorded but not failed (see report). The reverse
-        // (sparq true => geo true) is always required.
+        // [OPUS-4.8] DOCUMENTED DIVERGENCE: the OGC simple-features `contains`
+        // (which sparq-geo implements via Relate, pattern `T*****FF*`) requires
+        // the operands' INTERIORS to intersect, so a geometry does NOT contain a
+        // sub-geometry that lies entirely on its boundary. `geo::Contains` uses a
+        // point-set ⊇ test on some type pairs and can answer `true` for a
+        // boundary-only containment. So we assert ONLY the load-bearing
+        // direction: sparq-true must imply geo-true (an over-permissive
+        // sfContains is a bug). The reverse asymmetric case — geo-true while
+        // sparq-false (OGC interior-vs-boundary) — is the known divergence and is
+        // simply NOT asserted on here.
         let sparq_contains = geof::sf_contains(&a, &b).unwrap();
         let geo_contains = ga.contains(&gb);
         stats.contains_checked += 1;
