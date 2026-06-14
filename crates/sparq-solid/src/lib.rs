@@ -408,16 +408,25 @@ impl PodStore {
     ///   is left untouched (the whole check runs before [`sparq_engine::update_in_place`]);
     /// - writes to the **default graph** are always denied (pod data lives in named
     ///   graphs only);
-    /// - a target whose graph name is only known at evaluation time (`DELETE`/`INSERT`
-    ///   with a `GRAPH ?var` slot) or that spans all graphs (`CLEAR`/`DROP` `ALL`/
-    ///   `NAMED`) requires write on **every** graph in the store — sound (never
-    ///   permissive), at the cost of denying some updates a per-solution check might
-    ///   allow (tracked as a follow-up bead).
+    /// - a `DELETE`/`INSERT … WHERE` with a `GRAPH ?var` slot is resolved **precisely**
+    ///   ([OPUS-4.8] sq-biss): the operation's WHERE is evaluated to enumerate the
+    ///   concrete graphs `?var` binds to (exactly the set the apply will write), and
+    ///   write is required only on those — not on every store graph. Still fail-closed:
+    ///   any bound graph the actor cannot write denies the whole update, and a binding
+    ///   that cannot be reduced to a writable named graph (a blank-node graph name, a
+    ///   `USING`/`WITH`-re-scoped op, or a WHERE the check cannot evaluate) falls back to
+    ///   the conservative all-graphs check below;
+    /// - a target that spans all graphs (`CLEAR`/`DROP` `ALL`/`NAMED`), or a `GRAPH ?var`
+    ///   slot that fell back, requires write on **every** graph in the store — sound
+    ///   (never permissive), at the cost of denying some updates a per-solution check
+    ///   might allow.
     ///
-    /// On a permitted update that touched an `.acl`/`.acr`/group document (or any
-    /// graph-wildcard update, conservatively), the auth view is **re-materialized**
-    /// automatically (WAC by default; pass [`PodStore::update_as_acp`] for ACP pods),
-    /// so a changed rule takes effect on the next call.
+    /// On a permitted update that touched an `.acl`/`.acr`/group document — any static
+    /// control-doc write, any precisely-resolved variable-graph update (its targets could
+    /// include a group document, which has no naming convention), or any graph-wildcard
+    /// update — the auth view is **re-materialized** automatically (WAC by default; pass
+    /// [`PodStore::update_as_acp`] for ACP pods), so a changed rule takes effect on the
+    /// next call.
     ///
     /// # Errors
     ///
