@@ -172,11 +172,52 @@ eq(lubmComp && lubmComp.oxigraph, 200, 'competitor matched by canonical stem (na
 ok(watdivComp && watdivComp.oxigraph === undefined, 'unmatched competitor cell stays absent (renders —)');
 
 // ============================================================================================
-// [OPUS-4.8] BROWSER-DOM SIMULATION — confirm the featured section actually builds DOM
-// (sq-xvow #featured), like sq-ocuf's renderSummary smoke would. A tiny stub document/window/Chart
-// lets the (browser-only) render fns run under node: we import dashboard.js a SECOND time with its
-// module.exports branch suppressed so its DOM half executes. (sq-viby extends this to assert
-// #scaling too once the scaling charts land.)
+// [OPUS-4.8] sq-viby — scaling comparison: size/depth axis derived from the metric NAME.
+// ============================================================================================
+ok(typeof D.sizeAxisOf === 'function', 'dashboard.js exports sizeAxisOf');
+ok(typeof D.buildScalingFamilies === 'function', 'dashboard.js exports buildScalingFamilies');
+
+// sizeAxisOf: recognise depth / scale-factor tokens; ignore incidental digits (S1, q06, star3).
+const dt = D.sizeAxisOf('deeptax_d10_count_us');
+ok(dt && dt.axisLabel === 'depth' && dt.axis === 10, 'sizeAxisOf reads deep-taxonomy depth (_d10 -> 10)');
+const dt2 = D.sizeAxisOf('deep_taxonomy_depth20_count_us');
+ok(dt2 && dt2.axisLabel === 'depth' && dt2.axis === 20, 'sizeAxisOf reads _depth20 -> 20');
+const sf = D.sizeAxisOf('watdiv_sf100_C1_count_us');
+ok(sf && sf.axisLabel === 'scale factor' && sf.axis === 100, 'sizeAxisOf reads WatDiv SF (_sf100 -> 100)');
+const sfk = D.sizeAxisOf('watdiv_sf1k_C1_count_us');
+ok(sfk && sfk.axis === 1000, 'sizeAxisOf honours k multiplier (_sf1k -> 1000)');
+ok(D.sizeAxisOf('watdiv_S1_count_us') === null, 'sizeAxisOf ignores S1 (not a size token)');
+ok(D.sizeAxisOf('lubm_q06_count_us') === null, 'sizeAxisOf ignores q06 (not a size token)');
+ok(D.sizeAxisOf('op_q02_star3_count_us') === null, 'sizeAxisOf ignores star3 (not a size token)');
+// two sizes of the same query collapse to ONE base -> one family.
+eq(D.sizeAxisOf('deeptax_d1_count_us').base, D.sizeAxisOf('deeptax_d10_count_us').base,
+   'different sizes of the same query share a family base');
+
+// buildScalingFamilies: groups by base, points sorted ascending by axis; single-point family kept.
+const scaleEntries = [{
+  commit: { id: 'abc', message: 's', url: '#' }, date: Date.now(),
+  benches: [
+    { name: 'deeptax_d1_count_us', value: 10, unit: 'µs' },
+    { name: 'deeptax_d10_count_us', value: 120, unit: 'µs' },
+    { name: 'deeptax_d5_count_us', value: 40, unit: 'µs' },     // out of order on purpose
+    { name: 'watdiv_sf100_C1_count_us', value: 800, unit: 'µs' }, // single-point family
+    { name: 'lubm_q06_count_us', value: 99, unit: 'µs' }          // NOT size-parametrised
+  ]
+}];
+const fams = D.buildScalingFamilies(scaleEntries);
+ok(fams.length === 2, 'buildScalingFamilies found exactly the two size-parametrised families');
+const dtFam = fams.filter(function (f) { return f.axisLabel === 'depth'; })[0];
+ok(dtFam && dtFam.points.length === 3, 'deep-taxonomy family has 3 depth points');
+ok(dtFam.points[0].axis === 1 && dtFam.points[2].axis === 10, 'scaling points sorted ascending by axis');
+const sfFam = fams.filter(function (f) { return f.axisLabel === 'scale factor'; })[0];
+ok(sfFam && sfFam.points.length === 1, 'single-size family is kept (renders a single marker + note)');
+ok(fams.every(function (f) { return !/lubm_q06/.test(f.base); }), 'non-size-parametrised metric excluded');
+
+// ============================================================================================
+// [OPUS-4.8] BROWSER-DOM SIMULATION — confirm the featured section + scaling charts actually
+// build DOM (sq-xvow #featured / sq-viby #scaling), like sq-ocuf's renderSummary smoke would. A
+// tiny stub document/window/Chart lets the (browser-only) render fns run under node: we import
+// dashboard.js a SECOND time with its module.exports branch suppressed so its DOM half executes.
 // ============================================================================================
 (function domSimulation() {
   // --- minimal DOM shim: just enough for el()/renderFeatured()/renderSummary()/render(). -------
@@ -213,7 +254,10 @@ ok(watdivComp && watdivComp.oxigraph === undefined, 'unmatched competitor cell s
         benches: [
           { name: 'load_s', value: 1.2, unit: 's' },
           { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },
-          { name: 'lubm_q06_count_us', value: 99, unit: 'µs' }
+          { name: 'lubm_q06_count_us', value: 99, unit: 'µs' },
+          // size-parametrised family (sq-viby): two depths -> a real scaling curve.
+          { name: 'deeptax_d1_count_us', value: 10, unit: 'µs' },
+          { name: 'deeptax_d10_count_us', value: 120, unit: 'µs' }
         ]
       }] }
     },
@@ -231,10 +275,14 @@ ok(watdivComp && watdivComp.oxigraph === undefined, 'unmatched competitor cell s
   (function (module, exports, require) { eval(dashSrc); })(undefined, undefined, undefined);
 
   ok(hosts.featured.children.length > 0, 'DOM: #featured populated (sq-xvow rendered)');
+  ok(hosts.scaling.children.length > 0, 'DOM: #scaling populated (sq-viby rendered)');
   ok(hosts.summary.children.length > 0, 'DOM: #summary still populated (existing path intact)');
   // featured host should contain at least one suite section with a table.
   const featuredSection = hosts.featured.children[0];
   ok(featuredSection && featuredSection.tagName === 'section', 'DOM: featured host holds suite sections');
+  // scaling host should contain a chart-grid with at least one scaling card.
+  ok(hosts.scaling.children[0] && hosts.scaling.children[0].attributes['class'] === 'chart-grid',
+     'DOM: scaling host holds a chart-grid');
 
   delete global.document; delete global.window; delete global.Chart;
 })();

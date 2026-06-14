@@ -55,6 +55,19 @@
          compares the latest commit against the all-time minimum for that metric.</p>
       <div id="charts"></div>
     </section>
+
+    <!-- [OPUS-4.8] sq-viby: scaling comparison charts at the BOTTOM. dashboard.js fills #scaling
+         with one chart per size-parametrised benchmark family (Deep Taxonomy depths, WatDiv SF, …),
+         x = the size/depth axis DERIVED FROM THE METRIC NAME, y = the metric value. One line for
+         sparq today; competitor lines share the same x-axis when sq-t0c3 supplies them. Graceful:
+         absent families show a hint, single-point families show a marker + note. -->
+    <section class="card" id="scaling-card">
+      <h2>Scaling</h2>
+      <p class="hint">How a metric scales with dataset size / depth, for suites run at multiple
+         sizes (e.g. Deep Taxonomy depths, WatDiv scale factors). The size/depth axis is read from
+         the metric name.</p>
+      <div id="scaling"></div>
+    </section>
   </main>
 
   <footer class="site-footer">

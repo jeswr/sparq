@@ -260,6 +260,78 @@
     return (competitors && Array.isArray(competitors.engines)) ? competitors.engines : [];
   }
 
+  // ---- scaling comparison charts (sq-viby) ---------------------------------
+  // [OPUS-4.8] sq-viby (design sq-i0nm): for SIZE-PARAMETRISED benchmarks (Deep Taxonomy at
+  // increasing depth; WatDiv at increasing scale factor; any family whose metrics differ only by a
+  // size/depth token) plot the engine's metric value vs that size/depth axis — so the reader sees
+  // how it SCALES, not just one point in time. The axis is DERIVED FROM THE METRIC NAME, since the
+  // benchmark harness encodes the size in the metric name (e.g. `deeptax_d10_count_us`,
+  // `watdiv_sf100_S1_count_us`). Pure + node-testable.
+
+  // Recognise a size/depth token in a metric name and split it out. Returns
+  //   { base, axisLabel, axis } | null
+  // where `base` is the metric name with the size token REMOVED (so two sizes of the same query
+  // share a base and form one family), `axis` is the numeric magnitude (SF / depth / scale), and
+  // `axisLabel` names the axis ("scale factor" / "depth" / "scale"). Suffix multipliers k/m are
+  // honoured (sf1k -> 1000). We anchor the END of the magnitude with `(?![0-9])` (NOT \b — a \b
+  // between a digit and a following `_` never matches, both are word chars) so it fires on a
+  // `_token<digits>` segment but NOT on incidental digits (q06, S1, star3 have no size keyword).
+  var SIZE_TOKENS = [
+    { re: /_sf(\d+)([km]?)(?![0-9])/i,    label: 'scale factor' },
+    { re: /_depth(\d+)(?![0-9])/i,        label: 'depth' },
+    { re: /_d(\d+)(?![0-9])/i,            label: 'depth' },
+    { re: /_scale(\d+)([km]?)(?![0-9])/i, label: 'scale' },
+    { re: /_size(\d+)([km]?)(?![0-9])/i,  label: 'size' }
+  ];
+
+  function sizeAxisOf(name) {
+    for (var i = 0; i < SIZE_TOKENS.length; i++) {
+      var t = SIZE_TOKENS[i];
+      var m = name.match(t.re);
+      if (m) {
+        var mag = parseInt(m[1], 10);
+        var suffix = (m[2] || '').toLowerCase();
+        if (suffix === 'k') mag *= 1000;
+        else if (suffix === 'm') mag *= 1000000;
+        return { base: name.replace(m[0], '_'), axisLabel: t.label, axis: mag };
+      }
+    }
+    return null;
+  }
+
+  // Group the LATEST commit's benches into scaling FAMILIES keyed by `base` (the size-token-stripped
+  // name). Each family lists its {axis,value,name,unit} points sorted ascending by axis, plus a
+  // readable label/title taken from the family's first (smallest) member. A family with a single
+  // point is kept (degenerate scaling chart -> single marker; the renderer notes it). Families with
+  // NO size token never appear here. Pure + node-testable.
+  function buildScalingFamilies(entries) {
+    var latest = entries[entries.length - 1];
+    var fams = {};
+    latest.benches.forEach(function (b) {
+      var s = sizeAxisOf(b.name);
+      if (!s) return;
+      var fam = fams[s.base] || (fams[s.base] = {
+        base: s.base, axisLabel: s.axisLabel, suite: suiteFor(b.name),
+        // readable label/title for the family from this metric (humanized fallback until the
+        // suite is in the label map — e.g. Deep Taxonomy, sq-1hgz).
+        label: labelFor(b.name), title: titleFor(b.name), unit: b.unit || '', points: []
+      });
+      fam.points.push({ axis: s.axis, value: b.value, name: b.name, unit: b.unit || '' });
+    });
+    var out = [];
+    Object.keys(fams).forEach(function (k) {
+      var f = fams[k];
+      f.points.sort(function (a, c) { return a.axis - c.axis; });
+      out.push(f);
+    });
+    // Stable, readable order: by suite then label.
+    out.sort(function (a, c) {
+      if (a.suite !== c.suite) return a.suite < c.suite ? -1 : 1;
+      return a.label < c.label ? -1 : a.label > c.label ? 1 : 0;
+    });
+    return out;
+  }
+
   // Export pure fns for node smoke-test (no effect in the browser).
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = { classify: classify, bestOf: bestOf, deltaVsBest: deltaVsBest,
@@ -270,7 +342,9 @@
                        // sq-xvow (featured well-known suites + competitor seam)
                        FEATURED_SUITES: FEATURED_SUITES, featuredSuiteOf: featuredSuiteOf,
                        buildFeatured: buildFeatured, competitorsFor: competitorsFor,
-                       competitorEngines: competitorEngines };
+                       competitorEngines: competitorEngines,
+                       // sq-viby (scaling comparison)
+                       sizeAxisOf: sizeAxisOf, buildScalingFamilies: buildScalingFamilies };
     return;
   }
 
@@ -454,6 +528,76 @@
     });
   }
 
+  // ---- scaling comparison charts: DOM (sq-viby) ----------------------------
+  // Renders the #scaling host (a card at the BOTTOM). One line chart per scaling family: x = the
+  // derived size/depth axis (LINEAR, ascending), y = the metric value. ONE line for sparq today;
+  // the same x-axis is the seam where sq-t0c3 competitor series would add lines. Graceful: a
+  // single-point family renders as one marker plus a "single data point" note.
+  function renderScaling(families) {
+    var host = document.getElementById('scaling');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!families.length) {
+      host.appendChild(el('p', { 'class': 'hint',
+        text: 'No size-parametrised benchmark families detected yet — scaling charts appear once a '
+            + 'suite reports a metric at multiple sizes/depths (e.g. Deep Taxonomy depths, WatDiv SF).' }));
+      return;
+    }
+    var darkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var grid = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)';
+    var tick = darkMode ? '#9aa4b2' : '#586069';
+    var gridEl = el('div', { 'class': 'chart-grid' });
+    families.forEach(function (f, i) {
+      var single = f.points.length < 2;
+      var card = el('div', { 'class': 'chart-card scaling-card' }, [
+        el('div', { 'class': 'chart-title', title: f.title,
+          text: f.label + ' — vs ' + f.axisLabel + ' (' + f.unit + ')' }),
+        el('code', { 'class': 'chart-stem', title: f.title, text: f.base })
+      ]);
+      if (single) {
+        card.appendChild(el('div', { 'class': 'scaling-note',
+          text: 'single data point (axis: ' + f.axisLabel + ' = ' + f.points[0].axis + ') — '
+              + 'curve appears once more sizes are reported' }));
+      }
+      var canvas = el('canvas');
+      card.appendChild(canvas);
+      gridEl.appendChild(card);
+      if (typeof Chart === 'undefined') return;
+      var color = PALETTE[i % PALETTE.length];
+      // points are {axis,value}; plot as {x:axis,y:value} on a LINEAR x-axis so spacing reflects
+      // magnitude (SF=1 vs SF=1000 are far apart, as they should be).
+      var pts = f.points.map(function (p) { return { x: p.axis, y: p.value }; });
+      // eslint-disable-next-line no-new
+      new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { datasets: [{
+          label: 'sparq', data: pts, borderColor: color,
+          backgroundColor: color + '22', borderWidth: 2,
+          pointRadius: 3, pointHoverRadius: 5, fill: false, lineTension: 0
+        }] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          legend: { display: false },
+          tooltips: {
+            mode: 'nearest', intersect: false,
+            callbacks: {
+              title: function (items) { return f.axisLabel + ' = ' + items[0].xLabel; },
+              label: function (item) { return fmtNum(item.yLabel) + ' ' + f.unit; }
+            }
+          },
+          scales: {
+            xAxes: [{ type: 'linear', position: 'bottom',
+                      scaleLabel: { display: true, labelString: f.axisLabel, fontColor: tick },
+                      gridLines: { color: grid }, ticks: { fontColor: tick, maxTicksLimit: 6 } }],
+            yAxes: [{ gridLines: { color: grid },
+                      ticks: { fontColor: tick, maxTicksLimit: 4, callback: function (v) { return fmtNum(v); } } }]
+          }
+        }
+      });
+    });
+    host.appendChild(gridEl);
+  }
+
   function render() {
     var data = window.BENCHMARK_DATA;
     if (!data || !data.entries || !data.entries[SERIES] || !data.entries[SERIES].length) {
@@ -468,6 +612,7 @@
     // competitor cell would go. We never gather them here.
     var competitors = (typeof window !== 'undefined' && window.COMPETITORS) || null;
     var featured = buildFeatured(entries, competitors);
+    var families = buildScalingFamilies(entries);
     document.getElementById('updated').textContent =
       'last updated ' + new Date(data.lastUpdate).toLocaleString() +
       ' · ' + entries.length + ' commits';
@@ -476,6 +621,7 @@
     renderFeatured(featured);                 // sq-xvow — TOP
     renderSummary(summary);
     if (typeof Chart !== 'undefined') renderCharts(entries, summary);
+    renderScaling(families);                  // sq-viby — BOTTOM
   }
 
   // [OPUS-4.8] sq-ocuf: load metric-labels.json (readable labels) BEFORE rendering. The file is
