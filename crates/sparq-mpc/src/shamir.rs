@@ -187,11 +187,22 @@ impl ShamirBackend {
         ShamirDealer { n: self.n, t: self.t, rng }
     }
 
-    /// Reconstruct the secret `f(0)` from `>= t+1` shares via Lagrange
-    /// interpolation. Fewer than `t+1` shares is a protocol error (the whole
-    /// point of the threshold). Shares must have distinct `x`. RNG-free.
+    /// Reconstruct the secret `f(0)` from `>= t+1` shares. Fewer than `t+1`
+    /// shares is a protocol error (the whole point of the threshold). Shares must
+    /// have distinct `x`. RNG-free.
+    ///
+    /// **Consistency-checked / robust (sq-m34i, WI-1).** When redundancy is
+    /// present (`n > t+1`) this routes through [`crate::robust::reconstruct_robust`]:
+    /// it verifies all points lie on one degree-`t` polynomial, CORRECTS up to
+    /// `e = ⌊(n−t−1)/2⌋` tampered shares (returning the true secret), and aborts
+    /// with [`MpcError::Tampered`] on any inconsistency it cannot repair —
+    /// closing the malicious-security gap (D) at the Shamir layer (parent bead
+    /// sq-uu0u). On clean input it returns exactly the same value as plain
+    /// Lagrange (no behaviour change). At exactly `t+1` shares (no redundancy)
+    /// tampering is information-theoretically undetectable, so it falls back to
+    /// plain Lagrange and makes NO detection claim.
     pub fn reconstruct(&self, shares: &[Share]) -> Result<Fp, MpcError> {
-        reconstruct_at_zero(shares, self.t)
+        crate::robust::reconstruct_robust(shares, self.t)
     }
 }
 
@@ -254,9 +265,10 @@ impl ShamirDealer {
             .collect()
     }
 
-    /// Reconstruct (RNG-free; delegates to the backend's Lagrange interpolation).
+    /// Reconstruct (RNG-free). Like [`ShamirBackend::reconstruct`], this uses the
+    /// consistency-checked / robust path (sq-m34i) when redundancy is present.
     pub fn reconstruct(&self, shares: &[Share]) -> Result<Fp, MpcError> {
-        reconstruct_at_zero(shares, self.t)
+        crate::robust::reconstruct_robust(shares, self.t)
     }
 }
 
@@ -271,7 +283,14 @@ fn eval_poly(coeffs: &[Fp], x: Fp) -> Fp {
 
 /// Lagrange-interpolate the shares' polynomial and evaluate it at `x = 0` (the
 /// secret). Requires `>= t+1` distinct points.
-fn reconstruct_at_zero(shares: &[Share], t: usize) -> Result<Fp, MpcError> {
+///
+/// This is the unchecked RS-decode-under-no-errors primitive — it does NOT
+/// detect tampering. The consistency-checked / robust entry point that callers
+/// use is [`crate::robust::reconstruct_robust`] (wired into
+/// [`ShamirBackend::reconstruct`]); this stays the underlying building block
+/// (e.g. for the degree-`2t` [`reconstruct_degree`] open). `pub(crate)` so the
+/// adversarial differential suite can compare the robust path against it.
+pub(crate) fn reconstruct_at_zero(shares: &[Share], t: usize) -> Result<Fp, MpcError> {
     if shares.len() < t + 1 {
         return Err(MpcError::Protocol(format!(
             "Shamir reconstruction needs >= {} shares, got {}",

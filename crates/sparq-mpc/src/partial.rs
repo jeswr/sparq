@@ -89,6 +89,20 @@ pub enum MpcError {
     /// land first. Carrying the gate in the value (not just a doc-comment) keeps
     /// the deferral auditable at the call site.
     NotYetImplemented { what: String, gated_on: String },
+    /// **Active tampering detected** during a consistency-checked / robust
+    /// reconstruction (guarantee (D), malicious-honest-majority abort — sq-m34i).
+    /// Returned when redundant Shamir shares (`n > t+1`) do NOT all lie on one
+    /// degree-`t` polynomial and the inconsistency exceeds the correctable error
+    /// budget `e = ⌊(n−t−1)/2⌋`. This is **not** a precondition bug
+    /// ([`MpcError::Protocol`]) nor a deferred stub ([`MpcError::NotYetImplemented`]):
+    /// it means a party fed an inconsistent share value, so the result is
+    /// REFUSED rather than silently corrupted. `cheaters` lists the evaluation
+    /// points (`Share::x`) identified as off-curve where attribution is possible
+    /// (best-effort when correction itself is impossible — detection is sound,
+    /// attribution is heuristic). NOTE: at exactly `t+1` shares (no redundancy)
+    /// tampering is information-theoretically undetectable and this is NEVER
+    /// returned there — see [`crate::robust::reconstruct_robust`].
+    Tampered { detail: String, cheaters: Vec<u64> },
 }
 
 impl MpcError {
@@ -109,6 +123,12 @@ impl std::fmt::Display for MpcError {
             MpcError::Protocol(m) => write!(f, "MPC protocol precondition violated: {m}"),
             MpcError::NotYetImplemented { what, gated_on } => {
                 write!(f, "not yet implemented: {what} (gated on {gated_on})")
+            }
+            MpcError::Tampered { detail, cheaters } => {
+                write!(
+                    f,
+                    "tampered share(s) detected: {detail} (suspect evaluation points: {cheaters:?})"
+                )
             }
         }
     }
