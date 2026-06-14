@@ -62,8 +62,8 @@ than materialising it — a large saving on a memory-constrained device.
 The browser is the memory-constrained target — wasm32 linear memory caps at 4 GB and a
 real tab is happier under ~2 GB. The wasm build therefore enables `compact-index`: only
 **three** permutation indexes (SPO, POS, OSP) instead of six — every triple pattern is
-still answered by one of them, at roughly half the index structures (some merge joins
-fall back to hashing). The `test/mem.cjs` harness measures the store footprint (B/triple) for `load`
+still answered by one of these three indexes, so the store holds far fewer index
+structures (some merge joins fall back to hashing). The `test/mem.cjs` harness measures the store footprint (B/triple) for `load`
 (raw) vs `loadCompressed` over synthetic N-Triples and derives the browser triple ceiling;
 the per-commit `store_bytes_per_triple` / `dict_bytes_per_term` metrics are also tracked
 on the perf dashboard (<https://jeswr.github.io/sparq/dev/bench>). Run it for the numbers:

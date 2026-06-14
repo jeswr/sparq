@@ -107,7 +107,7 @@ cargo run -p sparq-introspect --example olympics_introspect --release
 ```
 
 The design-doc §4 gates it enforces: the full introspection scan stays within dataset
-load time; summary generation is sub-second at olympics scale; and the olympics text
+load time; summary generation is quick relative to that load (see the perf dashboard for timings); and the olympics text
 summary names the dataset's actual classes (foaf:Person, dbo:SportsEvent,
 dbo:SportsTeam, dbo:Olympics, …) — asserted by `tests/olympics.rs`.
 
