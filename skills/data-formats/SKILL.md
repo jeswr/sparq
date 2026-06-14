@@ -98,6 +98,10 @@ pub fn load_reader<R: BufRead>(reader: R) -> Result<Graph, Error>   // any buffe
 pub fn header(path: impl AsRef<Path>) -> Result<Graph, Error>       // HDT header metadata as a Graph
 pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error>
 // also: load_reader_via_upstream (differential oracle), graph_from_hdt, graph_from_reader
+
+// WRITE (opt-in `write` feature): Graph -> .hdt (honours .gz/.zst/.bz2 by extension)
+#[cfg(feature = "write")]
+pub fn save(graph: &Graph, path: impl AsRef<Path>) -> Result<(), Error>
 ```
 
 ## Common recipes
@@ -127,6 +131,9 @@ assert_eq!(g.named.len(), 1);          // each named graph is its own sub-Graph
 let g    = sparq_hdt::load("dataset.hdt")?;        // .hdt / .hdt.gz / .hdt.zst / .hdt.bz2 (by magic bytes)
 let meta = sparq_hdt::header("dataset.hdt")?;      // VoID stats / provenance as a queryable Graph
 // from memory: sparq_hdt::load_reader(std::io::Cursor::new(bytes))?
+// WRITE back (opt-in `write` feature): sparq_hdt::save(&g, "out.hdt.gz")?;
+//   (currently a temp-N-Triples round-trip through the wrapped builder — see
+//    sparq-hdt/UPSTREAM.md for the queued in-memory-builder contribution)
 ```
 
 **4. Out-of-core build for a dataset larger than RAM** (requires `sparq-core` `mmap` feature):
@@ -190,7 +197,14 @@ w.finish()?;
   in a streaming fashion.
 - **HDT format coverage:** standard v1.0 layout only (FourSectionDictionary / Plain Front
   Coding + BitmapTriples, SPO order) as emitted by hdt-cpp / hdt-java. Exotic submission
-  layouts are rejected with an error. **Writing HDT is not supported** (blocked upstream).
+  layouts are rejected with an error.
+- **Writing HDT is opt-in** (`sparq-hdt`'s `write` feature): `save(&graph, path)` emits the
+  same standard v1.0 layout. The path currently round-trips through a **temporary
+  N-Triples file** via the wrapped crate's builder (`Hdt::read_nt` + `Hdt::write`, behind
+  its `sophia` feature) — correct and interoperable, but it re-serialises + re-parses the
+  whole graph, so it is NOT free. A direct in-memory builder (no text round-trip) is queued
+  upstream (`sparq-hdt/UPSTREAM.md`). HDT carries a single default graph, so `save` ignores
+  named graphs.
 - **`load_dataset` is in-memory only.** Numeric/temporal filter caches are built on load
   in all in-memory paths; `into_compressed()` / `load_str_compressed()` trade a small
   per-scan decode for ~2.5× more triples per byte of RAM (browser target).
