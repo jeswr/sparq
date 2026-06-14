@@ -39,7 +39,7 @@
 //!    typed error that names its gate — never `Ok` with a fabricated/plaintext
 //!    value. This is what stops the scaffold being mistaken for finished crypto.
 
-use crate::backend::{BackendInfo, MpcBackend, TrustModel};
+use crate::backend::{BackendInfo, MaliciousSecurity, MpcBackend, TrustModel};
 use crate::field::{Fp, P};
 use crate::holder::Holder;
 use crate::join::{DisclosedKeyJoin, GlobalJoin, HiddenValueJoin, JoinPlan};
@@ -1099,7 +1099,7 @@ mod no_fake_crypto {
             BackendInfo {
                 name: "stub-deferred",
                 trust_model: TrustModel::DishonestMajority,
-                malicious_secure: false,
+                malicious_security: MaliciousSecurity::SemiHonestOnly,
             }
         }
         fn share_private_input(&self, _h: &Holder) -> Result<Vec<()>, MpcError> {
@@ -1257,10 +1257,17 @@ mod no_fake_crypto {
             &b.reconstruct_disclosed(&[]).unwrap_err(),
             &["reconstruct", "Q2"],
         );
-        // And its self-declared guarantees are honest: NOT malicious-secure.
+        // And its self-declared guarantees are honest: NO active-security claim.
+        // Assert the precise enum variant (not just the coarse bool) so a stub
+        // cannot smuggle in a detect/robust claim it does not deliver.
+        assert_eq!(
+            b.info().malicious_security,
+            MaliciousSecurity::SemiHonestOnly,
+            "stub backend must not claim any malicious-security guarantee"
+        );
         assert!(
-            !b.info().malicious_secure,
-            "stub backend must not claim malicious security"
+            !b.info().malicious_secure(),
+            "coarse accessor must agree: stub is not malicious-secure"
         );
     }
 
@@ -1290,13 +1297,57 @@ mod no_fake_crypto {
 
         // And the honest path still really works (the table doesn't break it).
         assert_eq!(b.reconstruct(&shares).unwrap(), fp(5));
-        // The real backend declares its honest guarantees: honest-majority,
-        // semi-honest (NOT malicious-secure).
+        // The real backend declares its honest guarantees: honest-majority, and
+        // the PRECISE active-security level WI-1's RS-checked reconstruction
+        // delivers for THIS `(n, t)` — no over-claim, no under-claim. At n=3,
+        // t=1 there is one redundant share (n > t+1) but the correction budget
+        // e = ⌊(n−t−1)/2⌋ = 0, so the honest guarantee is detect-and-abort.
         let info = b.info();
         assert_eq!(info.trust_model, TrustModel::HonestMajority);
+        assert_eq!(
+            info.malicious_security,
+            MaliciousSecurity::HonestMajorityAbort,
+            "n=3,t=1 has one redundant share → detect-and-abort, no robust correction"
+        );
+        // It must NOT claim ROBUST here (it cannot correct a cheater at n=3) —
+        // the no-fake-crypto invariant: never claim a guarantee not provided.
         assert!(
-            !info.malicious_secure,
-            "v1 Shamir must NOT claim malicious security"
+            !matches!(
+                info.malicious_security,
+                MaliciousSecurity::HonestMajorityRobust { .. }
+            ),
+            "n=3 Shamir must NOT claim robust correction"
+        );
+
+        // Boundary table — the report tracks the real RS redundancy, nothing more.
+        // HONESTY: with the honest-majority `t = ⌊(n−1)/2⌋`, EVERY valid `n >= 2`
+        // already carries at least one redundant share at degree `t`, so the
+        // degree-`t` reconstruction is NEVER `SemiHonestOnly` (that variant is
+        // reachable only on the no-redundancy degree-`2t` equality open / a stub
+        // backend).
+        // n=2,t=0: one redundant share, e = ⌊(2−0−1)/2⌋ = 0 → detect-and-abort.
+        assert_eq!(
+            ShamirBackend::new(2).unwrap().malicious_security(),
+            MaliciousSecurity::HonestMajorityAbort,
+            "n=2,t=0: one redundant share, e=0 → detect-and-abort (never SemiHonestOnly at degree t)"
+        );
+        // n=4,t=1: e = ⌊(4−1−1)/2⌋ = 1 → robust correction of one cheater.
+        assert_eq!(
+            ShamirBackend::new(4).unwrap().malicious_security(),
+            MaliciousSecurity::HonestMajorityRobust { max_cheaters: 1 },
+            "n=4,t=1: redundancy admits robust correction of 1 cheater"
+        );
+        // n=5,t=2: e = ⌊(5−2−1)/2⌋ = 1 → robust correction of one cheater.
+        assert_eq!(
+            ShamirBackend::new(5).unwrap().malicious_security(),
+            MaliciousSecurity::HonestMajorityRobust { max_cheaters: 1 },
+            "n=5,t=2: redundancy admits robust correction of 1 cheater"
+        );
+        // n=9,t=4: e = ⌊(9−4−1)/2⌋ = 2 → robust correction of two cheaters.
+        assert_eq!(
+            ShamirBackend::new(9).unwrap().malicious_security(),
+            MaliciousSecurity::HonestMajorityRobust { max_cheaters: 2 },
+            "n=9,t=4: redundancy admits robust correction of 2 cheaters"
         );
     }
 

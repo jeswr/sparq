@@ -1,13 +1,13 @@
 ---
 name: mpc
-description: Run a SPARQL query across multiple mutually-distrusting RDF data holders (federated MPC) — per-holder local sub-evaluation, crypto-free disclosed-key global-IRI joins, and an honest-majority Shamir secret-sharing backend for secure cumulative aggregates + hidden-value (private-key) joins. Use for confidential federated SPARQL / secret-shared aggregates / private set-intersection joins over RDF. EARLY/RESEARCH, native-only, semi-honest; collaborative ZK proof of correctness+attestation is a stub.
+description: Run a SPARQL query across multiple mutually-distrusting RDF data holders (federated MPC) — per-holder local sub-evaluation, crypto-free disclosed-key global-IRI joins, and an honest-majority Shamir secret-sharing backend for secure cumulative aggregates + hidden-value (private-key) joins. Use for confidential federated SPARQL / secret-shared aggregates / private set-intersection joins over RDF. EARLY/RESEARCH, native-only; honest-majority with RS-consistency-checked reconstruction (tamper DETECTION + abort, and robust correction where redundancy allows) — semi-honest is the floor when no redundancy exists (e.g. the degree-2t equality open at n=2t+1, detection-only); NOT dishonest-majority / not full malicious security. Collaborative ZK proof of correctness+attestation is a stub.
 ---
 
 # sparq-mpc — MPC over federated SPARQL
 
-`sparq-mpc` lets a set of mutually-distrusting **holders**, each owning private RDF named graphs, jointly answer ONE SPARQL query over the *union* of their data while minimising what each holder reveals. Today it delivers a real per-holder local evaluator, a crypto-free join on disclosed global IRIs, and an honest-majority Shamir secret-sharing backend (semi-honest) that powers secure cumulative aggregates and a hidden-value (private-key) join.
+`sparq-mpc` lets a set of mutually-distrusting **holders**, each owning private RDF named graphs, jointly answer ONE SPARQL query over the *union* of their data while minimising what each holder reveals. Today it delivers a real per-holder local evaluator, a crypto-free join on disclosed global IRIs, and an honest-majority Shamir secret-sharing backend that powers secure cumulative aggregates and a hidden-value (private-key) join. The reconstruction path is **honest-majority with tamper DETECTION + abort** — and **robust correction where the `(n, t)` redundancy allows** — over RS-consistency-checked opens; the degree-`2t` equality open is **detection-only above `n = 2t + 1`**, and semi-honest is the floor when a given configuration carries no redundancy. It is **not** dishonest-majority and **not** full malicious security; each backend reports its exact level via `BackendInfo.malicious_security`.
 
-> **Maturity (read first).** EARLY / RESEARCH, **native-only** (deliberately not in the wasm build). The Shamir layer is **semi-honest** (no malicious security) and runs as an **in-process simulation** (one process plays all parties — there is no network transport). The **collaborative ZK proof** of correctness + issuer-attestation is **not implemented**: those methods return `MpcError::NotYetImplemented` naming their gate. No fake crypto anywhere. See *Gotchas* for the full envelope.
+> **Maturity (read first).** EARLY / RESEARCH, **native-only** (deliberately not in the wasm build). The Shamir layer's reconstruction is **RS-consistency-checked**: it detects (and, with enough redundancy, robustly corrects) actively-tampered shares and reports the exact guarantee via `BackendInfo.malicious_security` — but the degree-`2t` equality open in the hidden-value join is **not** hardened at `n = 2t+1` (see *Gotchas*). It runs as an **in-process simulation** (one process plays all parties — there is no network transport). The **collaborative ZK proof** of correctness + issuer-attestation is **not implemented**: those methods return `MpcError::NotYetImplemented` naming their gate. No fake crypto anywhere. See *Gotchas* for the full envelope.
 
 ## Quickstart
 
@@ -56,10 +56,13 @@ Top-level re-exports (`use sparq_mpc::...`):
 - `GlobalJoin` trait + `DisclosedKeyJoin` — `fn join(&self, partials: &[PartialResult], plan: &JoinPlan) -> Result<PartialResult, MpcError>`. SPARQL compatible-mapping inner join over shared columns; independently checks the planner-named key is present (does not trust the planner for soundness). `key_disclosed == false` returns `NotYetImplemented` (use `HiddenValueJoin` instead).
 - `JoinPlan { join_var: oxrdf::Variable, key_disclosed: bool }`.
 - `MpcBackend` trait — the secret-sharing primitive seam. `type Share`; `info() -> BackendInfo`; `share_private_input(&self, &Holder) -> Result<Vec<Self::Share>, MpcError>`; `run_secure(&self, &[Self::Share]) -> Result<Vec<Self::Share>, MpcError>`; `reconstruct_disclosed(&self, &[Self::Share]) -> Result<PartialResult, MpcError>`.
-- `ShamirBackend` — the only concrete backend (honest-majority Shamir `t`-of-`n`, semi-honest).
+- `BackendInfo { name: &'static str, trust_model: TrustModel, malicious_security: MaliciousSecurity }` — the guarantees a federation inspects **before** trusting a backend. `BackendInfo::malicious_secure() -> bool` is a coarse "hardened at all?" accessor (`!= None`).
+- `TrustModel { HonestMajority, DishonestMajority }` — the majority axis.
+- `MaliciousSecurity { SemiHonestOnly, HonestMajorityAbort, HonestMajorityRobust { max_cheaters: usize } }` — the active-security axis (guarantee D), surfaced from the real RS reconstruction redundancy. `SemiHonestOnly` = semi-honest only, an active deviation is undetected (named so it cannot be confused with `Option::None`); `HonestMajorityAbort` = tampering is detected and the protocol aborts (no guaranteed output); `HonestMajorityRobust { max_cheaters }` = guaranteed-correct output even when up to `max_cheaters` parties actively cheat. Derives `Copy`/`Eq`.
+- `ShamirBackend` — the only concrete backend (honest-majority Shamir `t`-of-`n`; its reconstruction reports tamper detect-and-abort or robust correction per the `(n, t)` redundancy via `BackendInfo.malicious_security`, falling back to `SemiHonestOnly` only where no redundancy exists).
   - `ShamirBackend::new(n: usize) -> Result<ShamirBackend, MpcError>` — `n >= 2`, threshold `t = (n-1)/2`; masks come from an OS-seeded ChaCha20 CSPRNG. **No seed parameter** by design.
   - `ShamirBackend::new_seeded(n, seed)` — **test/bench only**, behind `cfg(test)` or feature `insecure-test-rng`; predictable masks, no security.
-  - `parties()`, `threshold()`, `reconstruct(&[Share]) -> Result<Fp, MpcError>`, `dealer() -> ShamirDealer`.
+  - `parties()`, `threshold()`, `malicious_security() -> MaliciousSecurity` (the active-security level for this `(n, t)`), `reconstruct(&[Share]) -> Result<Fp, MpcError>`, `dealer() -> ShamirDealer`.
 - `HiddenValueJoin::new(backend: ShamirBackend)` + `join(&self, left: &HiddenKeyedRows, right: &HiddenKeyedRows) -> Result<PartialResult, MpcError>` — joins on a **private** key via secret-shared equality; output schema is `left.payload_vars ++ right.payload_vars`, the key is never projected/reconstructed.
 - `HiddenKeyedRows { holder: HolderId, payload_vars: Vec<Variable>, rows: Vec<(Fp, Vec<Option<Term>>)> }` — caller encodes each private key into `Fp` (must be injective; see Gotchas).
 - `Fp` — field element over `F_p`, `p = 2^61 - 1`. `Fp::new(u64)`, `Fp::value() -> u64`, `Fp::zero()`, `Fp::one()`.
@@ -126,10 +129,14 @@ let abc = DisclosedKeyJoin.join(&[ab, pc], &JoinPlan { join_var: v("y"), key_dis
 A federation should refuse a backend whose guarantees don't match its threat model.
 
 ```rust
-use sparq_mpc::{ShamirBackend, MpcBackend, TrustModel};
+use sparq_mpc::{ShamirBackend, MpcBackend, TrustModel, MaliciousSecurity};
 let info = ShamirBackend::new(3)?.info();
 assert_eq!(info.trust_model, TrustModel::HonestMajority);
-assert_eq!(info.malicious_secure, false);   // semi-honest only — verify this matches your model
+// At n=3,t=1 there is one redundant share → tampering is detected & aborts
+// (but a cheater can still force an abort: no guaranteed output). With more
+// redundancy (n>=4) it becomes HonestMajorityRobust { max_cheaters }.
+assert_eq!(info.malicious_security, MaliciousSecurity::HonestMajorityAbort);
+assert!(info.malicious_secure());           // coarse "hardened at all?" bit
 # Ok::<(), sparq_mpc::MpcError>(())
 ```
 
@@ -161,7 +168,7 @@ match some_result {
 
 - **Native-only, not in wasm.** `sparq-mpc` is intentionally absent from `sparq-wasm`'s dependency graph (`cargo tree -p sparq-wasm` must not show it). The browser bundle carries zero MPC/crypto surface.
 - **`insecure-test-rng` feature (OFF by default).** Gates `ShamirBackend::new_seeded` and `rng::InsecureTestRng` (a deterministic SplitMix64). The masks it produces are **predictable** — enabling it in a deployment reintroduces the very confidentiality weakness the CSPRNG default fixes. Use it only for reproducible tests/benchmarks. Default builds physically cannot construct a predictable masking RNG.
-- **Semi-honest only.** `ShamirBackend` provides confidentiality against `<= t` colluding *honest-but-curious* parties. It does **not** detect an actively-malicious party feeding inconsistent shares (`BackendInfo.malicious_secure == false`). Malicious honest-majority hardening is future work behind the same `MpcBackend` trait.
+- **Malicious-security is now SURFACED, not blanket-absent.** Confidentiality holds against `<= t` colluding *honest-but-curious* parties. Against an *actively-deviating* party, `ShamirBackend` reports the precise guarantee via `BackendInfo.malicious_security` (`ShamirBackend::malicious_security()`): the WI-1 RS-checked / Berlekamp–Welch reconstruction **detects** tampered shares and aborts when there is redundancy (`n > t+1`, always true for the honest-majority `t`), and **robustly corrects** up to `max_cheaters = ⌊(n−t−1)/2⌋` cheaters when redundancy allows (`n >= 4`). **Boundaries that are NOT hardened (do not over-trust):** the degree-`2t` equality/mult open in the hidden-value join has *no* RS redundancy at `n = 2t+1` (the common odd-`n` case, e.g. n=3,5,7) — a tampered product share there is undetectable; a fix needs an information-theoretic MAC (deferred, bead sq-6d6g). Dishonest-majority remains future work behind the same `MpcBackend` trait.
 - **In-process simulation, not a network protocol.** The "multi-party" computation runs in one process (the dealer/`HiddenValueJoin` plays all parties to deal shares and open results). There is no transport, no party-to-party messaging, no real party isolation yet. Cleartext inputs are passed to the simulator only to be shared internally.
 - **Field & range.** `Fp` is over `p = 2^61 - 1`. Keep values (salaries, counts, key encodings) well under `2^61` so sums never wrap. `Fp::inv(0)` panics (only nonzero differences are inverted internally).
 - **Shamir headroom.** A single multiplication (the equality test) needs `n >= 2t+1`. `ShamirBackend::new` picks `t = (n-1)/2`, so the happy path holds; `HiddenValueJoin` errors with `Protocol` if you somehow under-provision. `reconstruct` needs `>= t+1` distinct-`x` shares.

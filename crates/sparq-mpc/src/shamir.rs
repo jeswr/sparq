@@ -77,7 +77,7 @@
 //! duplicates (and thus reuses) a CSPRNG keystream. Each `dealer()` call gets
 //! independent randomness.
 
-use crate::backend::{BackendInfo, MpcBackend, TrustModel};
+use crate::backend::{BackendInfo, MaliciousSecurity, MpcBackend, TrustModel};
 use crate::field::Fp;
 use crate::holder::Holder;
 use crate::partial::{HolderId, MpcError, PartialResult};
@@ -174,6 +174,27 @@ impl ShamirBackend {
     /// independent of the secret.
     pub fn threshold(&self) -> usize {
         self.t
+    }
+
+    /// The active-security guarantee this `(n, t)` configuration delivers at the
+    /// degree-`t` reconstruction (WI-1, parent bead sq-uu0u), derived purely from
+    /// the RS redundancy `n − (t + 1)`. See [`MaliciousSecurity`] and
+    /// [`crate::robust::reconstruct_robust`] for the bound; surfaced via
+    /// [`MpcBackend::info`]. `[OPUS-4.8]`
+    pub fn malicious_security(&self) -> MaliciousSecurity {
+        // No redundancy at exactly `t+1` shares: tampering is information-
+        // theoretically undetectable, so claim nothing.
+        if self.n <= self.t + 1 {
+            return MaliciousSecurity::SemiHonestOnly;
+        }
+        // RS / Berlekamp–Welch correction budget at degree `t`.
+        let max_cheaters = (self.n - self.t - 1) / 2;
+        if max_cheaters == 0 {
+            // One redundant share lets us cross-check and detect, but not correct.
+            MaliciousSecurity::HonestMajorityAbort
+        } else {
+            MaliciousSecurity::HonestMajorityRobust { max_cheaters }
+        }
     }
 
     /// Mint a fresh [`ShamirDealer`] with **independent** masking randomness for
@@ -455,8 +476,24 @@ impl MpcBackend for ShamirBackend {
         BackendInfo {
             name: "shamir-honest-majority",
             trust_model: TrustModel::HonestMajority,
-            // Semi-honest only at v1 — see module "Security model".
-            malicious_secure: false,
+            // The REAL active-security guarantee the WI-1 RS-checked degree-`t`
+            // reconstruction delivers for THIS `(n, t)`, reported precisely (it
+            // does not over-claim — the n=t+1 / n=2t+1 boundaries are unchanged,
+            // we only surface the guarantee). Shamir shares are an [n, t+1] RS
+            // codeword, so `reconstruct` (degree `t`):
+            //   - n == t+1 (NO redundancy)  → no detection possible → None.
+            //   - n  > t+1, e == 0          → detect-and-abort       → Abort.
+            //   - n  > t+1, e >= 1          → robust up to e cheaters → Robust{e}.
+            // NB: with the honest-majority t = ⌊(n−1)/2⌋, every valid n >= 2 has
+            // n > t+1, so the `None` branch is UNREACHABLE here (it is real only
+            // for the no-redundancy degree-`2t` equality open / a stub backend).
+            // where e = ⌊(n − t − 1)/2⌋ is the RS/Berlekamp–Welch correction
+            // bound (see `crate::robust::reconstruct_robust`). Honest scope: this
+            // is the LINEAR / cumulative-aggregate reconstruction guarantee at
+            // degree `t`; the degree-`2t` equality open (`reconstruct_degree`)
+            // has its OWN, weaker boundary (no redundancy at n=2t+1), already
+            // documented at its call site and NOT claimed here. `[OPUS-4.8]`
+            malicious_security: self.malicious_security(),
         }
     }
 
