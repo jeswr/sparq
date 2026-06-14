@@ -17,6 +17,15 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] sq-2te: HDT WRITE support (`save`: sparq `Graph` -> `.hdt`).
+# Opt-in because the only tractable path on hdt 0.4 is the crate's `Hdt::read_nt`
+# (N-Triples -> FourSectDict PFC + BitmapTriples) + `Hdt::write`, BOTH gated behind
+# the wrapped crate's experimental `sophia` feature — which pulls the sophia adapter
+# (a non-trivial dep tree we deliberately drop on the read path, see below). Reading
+# stays default and sophia-free; only writers pay for it.
+[features]
+write = ["hdt/sophia"]
+
 # Opt-in HDT ingestion (T24a). This is a SEPARATE crate so the core engine — and in
 # particular the wasm build — carries zero HDT code or dependencies; HDT support is
 # engaged only by depending on this crate. Native-only by design (the wrapped reader
@@ -34,6 +43,8 @@ readme = "README.md"
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
+# Read path uses NO features (id-level translation, no sophia adapter). The `write`
+# feature (above) turns on `hdt/sophia` to reach `Hdt::read_nt` + `Hdt::write`.
 hdt = { version = "0.4", default-features = false }
 # GZipped-HDT auto-detection (`.hdt.gz`): magic-byte sniff + streaming decode.
 # The default backend (miniz_oxide) is pure Rust; flate2 is already used

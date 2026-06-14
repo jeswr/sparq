@@ -1,12 +1,17 @@
 # sparq-hdt
 
-Opt-in [HDT](https://www.rdfhdt.org/) (Header Dictionary Triples) reader for the
-sparq RDF engine: load `.hdt` archives straight into a `sparq_core::Graph`.
+Opt-in [HDT](https://www.rdfhdt.org/) (Header Dictionary Triples) reader (and,
+behind the `write` feature, writer) for the sparq RDF engine: load `.hdt` archives
+straight into a `sparq_core::Graph`, and save a `Graph` back out.
 
 ```rust
 let graph = sparq_hdt::load("dataset.hdt")?;   // .hdt.gz sniffed + decompressed too
 let meta  = sparq_hdt::header("dataset.hdt")?; // the HDT header (VoID stats, provenance) as a Graph
 // query them like any other sparq graph
+
+// writing (opt-in `write` feature): Graph -> .hdt (honours .gz/.zst/.bz2 by extension)
+# #[cfg(feature = "write")]
+sparq_hdt::save(&graph, "out.hdt")?;
 ```
 
 In sparq-cli (behind the opt-in `hdt` cargo feature —
@@ -51,6 +56,12 @@ carries zero HDT code or dependencies. Native-only by design.
   (unicode, lang tags, datatypes, blank nodes, shared subject/object terms,
   inline-integer literals) must match sparq's direct N-Triples load.
 
+`tests/write_roundtrip.rs` (the `write` feature): a `Graph` saved with `save` and
+reloaded with `load` must equal the original term set — over the term zoo, a
+multi-block graph, the empty graph, all three compression containers, and the
+upstream-oracle load path (so the bytes `save` writes are spec-conformant, not just
+something our own decoder accepts).
+
 ## Load throughput
 
 The `bench_load` example loads ~1M synthetic triples (100k subjects, 50 predicates,
@@ -66,8 +77,25 @@ objects the HDT file is about the size of the `.nt.gz`; on real corpora with hea
 term reuse HDT archives are typically several times smaller than gzipped N-Triples,
 which is the format's main draw alongside no-text-parse loading.
 
+## Writing (opt-in `write` feature)
+
+`save(&graph, path)` serialises a `Graph` to a standard-layout `.hdt` (or
+`.hdt.gz` / `.hdt.zst` / `.hdt.bz2`, chosen by the output extension). HDT carries a
+single default graph, so named graphs are ignored.
+
+**Cost.** The current path round-trips through a **temporary N-Triples file**: it
+renders the graph to N-Triples text, hands it to the wrapped crate's builder
+(`Hdt::read_nt`, which re-parses and re-interns it), then `Hdt::write`s the result.
+That is correct and interoperable, but it re-serialises and re-parses the whole
+graph — work sparq already did on ingest. A direct in-memory builder that skips the
+text round-trip (the inverse of `src/decode.rs`) is the faster path; it is queued
+as an upstream contribution — see [`UPSTREAM.md`](./UPSTREAM.md). Enable with
+`--features write`.
+
 ## Not (yet) supported
 
-See the open beads for this crate (`bd list -l area:sparq-hdt`): writing HDT archives (blocked upstream — the wrapped crate has no
-in-memory builder API, re-verified against hdt 0.6) and a decode-only fast path
-(upstream builds pattern-query indexes ingest never uses).
+See the open beads for this crate (`bd list -l area:sparq-hdt`): the faster
+direct-builder write path (`save` works today via the temp-N-Triples round-trip
+above; the in-memory builder is queued upstream, `UPSTREAM.md`) and a decode-only
+ingest fast path (we already roll our own in `decode.rs`; upstream builds
+pattern-query indexes ingest never uses — also queued in `UPSTREAM.md`).

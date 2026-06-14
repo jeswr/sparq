@@ -12,6 +12,17 @@
 //! let graph = sparq_hdt::load("dataset.hdt").unwrap();
 //! ```
 //!
+//! Writing back out (`Graph` -> `.hdt`) is opt-in behind the `write` cargo feature
+//! (it currently round-trips through a temp N-Triples file via the wrapped crate's
+//! builder — see [`save`] and the crate's `UPSTREAM.md`):
+//!
+//! ```no_run
+//! # #[cfg(feature = "write")]
+//! # fn demo(graph: &sparq_core::Graph) -> Result<(), sparq_hdt::Error> {
+//! sparq_hdt::save(graph, "out.hdt")?;        // or out.hdt.gz / .hdt.zst / .hdt.bz2
+//! # Ok(()) }
+//! ```
+//!
 //! The translation works at the **id level**: each distinct HDT dictionary id is
 //! decompressed to its term string ONCE, interned into the sparq [`Dict`], and the
 //! mapping memoized in a flat per-section table — so the term set is never
@@ -40,6 +51,15 @@ use std::path::Path;
 // for callers that already hold an `Hdt` (e.g. to also query its header).
 mod decode;
 pub use decode::graph_from_reader;
+
+// [OPUS-4.8] sq-2te: HDT write support (sparq `Graph` -> `.hdt`). Opt-in via the
+// `write` feature (it pulls the wrapped crate's `sophia` feature for the builder/
+// writer). The current path is a temp N-Triples round-trip — see `write.rs` for the
+// cost and `UPSTREAM.md` for the queued in-memory-builder contribution.
+#[cfg(feature = "write")]
+mod write;
+#[cfg(feature = "write")]
+pub use write::save;
 
 /// The error type for HDT loading.
 #[derive(Debug)]
