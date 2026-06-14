@@ -251,6 +251,22 @@ pub(crate) fn lang_with_dir(l: &Literal) -> Option<std::borrow::Cow<'_, str>> {
     }
 }
 
+/// Inverse of [`lang_with_dir`]: split a STORED language slot back into its BCP47 tag and
+/// (optional) RDF 1.2 base direction. A stored slot of `en--ltr` is `("en", Some("ltr"))`;
+/// a plain `en` is `("en", None)`. `--` can never occur inside a valid language tag, so the
+/// split is unambiguous. The returned tag/direction are the spec-distinct components the
+/// SPARQL 1.2 results formats keep apart (`xml:lang` vs `its:dir`) — see the engine's
+/// `json.rs` and the conformance results reader.
+// [OPUS-4.8] sq-bj7o: the JSON fast path serialises straight from this stored slot, so it
+// needs the same split the `oxrdf::Term` path gets for free via `Literal::direction()`.
+#[inline]
+pub fn split_lang_dir(slot: &str) -> (&str, Option<&str>) {
+    match slot.split_once("--") {
+        Some((tag, dir)) => (tag, Some(dir)),
+        None => (slot, None),
+    }
+}
+
 #[inline]
 fn hash_term(t: &Term) -> u64 {
     match t {
