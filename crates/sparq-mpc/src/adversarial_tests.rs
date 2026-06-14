@@ -1099,7 +1099,7 @@ mod no_fake_crypto {
             BackendInfo {
                 name: "stub-deferred",
                 trust_model: TrustModel::DishonestMajority,
-                malicious_security: MaliciousSecurity::None,
+                malicious_security: MaliciousSecurity::SemiHonestOnly,
             }
         }
         fn share_private_input(&self, _h: &Holder) -> Result<Vec<()>, MpcError> {
@@ -1262,7 +1262,7 @@ mod no_fake_crypto {
         // cannot smuggle in a detect/robust claim it does not deliver.
         assert_eq!(
             b.info().malicious_security,
-            MaliciousSecurity::None,
+            MaliciousSecurity::SemiHonestOnly,
             "stub backend must not claim any malicious-security guarantee"
         );
         assert!(
@@ -1322,13 +1322,14 @@ mod no_fake_crypto {
         // Boundary table — the report tracks the real RS redundancy, nothing more.
         // HONESTY: with the honest-majority `t = ⌊(n−1)/2⌋`, EVERY valid `n >= 2`
         // already carries at least one redundant share at degree `t`, so the
-        // degree-`t` reconstruction is NEVER `None` (that variant is reachable
-        // only on the no-redundancy degree-`2t` equality open / a stub backend).
+        // degree-`t` reconstruction is NEVER `SemiHonestOnly` (that variant is
+        // reachable only on the no-redundancy degree-`2t` equality open / a stub
+        // backend).
         // n=2,t=0: one redundant share, e = ⌊(2−0−1)/2⌋ = 0 → detect-and-abort.
         assert_eq!(
             ShamirBackend::new(2).unwrap().malicious_security(),
             MaliciousSecurity::HonestMajorityAbort,
-            "n=2,t=0: one redundant share, e=0 → detect-and-abort (never None at degree t)"
+            "n=2,t=0: one redundant share, e=0 → detect-and-abort (never SemiHonestOnly at degree t)"
         );
         // n=4,t=1: e = ⌊(4−1−1)/2⌋ = 1 → robust correction of one cheater.
         assert_eq!(

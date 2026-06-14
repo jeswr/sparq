@@ -54,7 +54,7 @@
 //!   consuming triples for multiplications and tracking MACs; (3)
 //!   `reconstruct_disclosed` doing a MAC-check before opening (abort on cheat →
 //!   guarantee (D), malicious security). It reports
-//!   `TrustModel::DishonestMajority` + a non-`None`
+//!   `TrustModel::DishonestMajority` + a non-`SemiHonestOnly`
 //!   [`MaliciousSecurity`] via [`BackendInfo`]. Crucially the
 //!   `share_private_input` / `run_secure` /
 //!   `reconstruct_disclosed` SIGNATURES are unchanged, so
@@ -90,15 +90,17 @@ pub enum TrustModel {
 /// are ordered from weakest to strongest. `[OPUS-4.8]`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaliciousSecurity {
-    /// **No active-security guarantee.** Security holds only against
-    /// semi-honest / honest-but-curious parties; an actively-deviating party can
-    /// silently corrupt the output with no detection. The honest baseline for a
-    /// not-yet-built / stub backend, and the guarantee for any reconstruction at
-    /// exactly `degree + 1` shares (no RS redundancy — e.g. the degree-`2t`
-    /// equality open at `n = 2t + 1`). NB: with the honest-majority
+    /// **No active-security guarantee — semi-honest only.** Security holds only
+    /// against semi-honest / honest-but-curious parties; an actively-deviating
+    /// party can silently corrupt the output with no detection. The honest
+    /// baseline for a not-yet-built / stub backend, and the guarantee for any
+    /// reconstruction at exactly `degree + 1` shares (no RS redundancy — e.g. the
+    /// degree-`2t` equality open at `n = 2t + 1`). NB: with the honest-majority
     /// `t = ⌊(n−1)/2⌋` the degree-`t` cumulative-aggregate path always has
-    /// redundancy, so it never reports `None`.
-    None,
+    /// redundancy, so it never reports `SemiHonestOnly`. Named `SemiHonestOnly`
+    /// (not `None`) so it cannot be confused with [`Option::None`] nor collide
+    /// under a `use MaliciousSecurity::*` glob import. `[OPUS-4.8]`
+    SemiHonestOnly,
     /// **Detect-and-abort (no guaranteed output).** Any tampering by an
     /// actively-deviating party is *detected* and the protocol aborts with a
     /// typed error rather than returning a wrong answer — but a single cheater
@@ -123,11 +125,11 @@ pub enum MaliciousSecurity {
 impl MaliciousSecurity {
     /// `true` iff the backend provides *some* active-security guarantee (detects
     /// or corrects an actively-deviating party), i.e. anything other than
-    /// [`MaliciousSecurity::None`]. The backwards-compatible projection of the
-    /// former `malicious_secure: bool` field, for callers that only need the
-    /// coarse "is this hardened at all?" bit.
+    /// [`MaliciousSecurity::SemiHonestOnly`]. The backwards-compatible projection
+    /// of the former `malicious_secure: bool` field, for callers that only need
+    /// the coarse "is this hardened at all?" bit.
     pub fn is_malicious_secure(self) -> bool {
-        self != MaliciousSecurity::None
+        self != MaliciousSecurity::SemiHonestOnly
     }
 }
 

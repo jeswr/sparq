@@ -189,7 +189,7 @@ mod tests {
             BackendInfo {
                 name: "stub",
                 trust_model: TrustModel::HonestMajority,
-                malicious_security: MaliciousSecurity::None,
+                malicious_security: MaliciousSecurity::SemiHonestOnly,
             }
         }
         fn share_private_input(&self, _h: &crate::holder::Holder) -> Result<Vec<()>, MpcError> {

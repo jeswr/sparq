@@ -185,7 +185,7 @@ impl ShamirBackend {
         // No redundancy at exactly `t+1` shares: tampering is information-
         // theoretically undetectable, so claim nothing.
         if self.n <= self.t + 1 {
-            return MaliciousSecurity::None;
+            return MaliciousSecurity::SemiHonestOnly;
         }
         // RS / Berlekamp–Welch correction budget at degree `t`.
         let max_cheaters = (self.n - self.t - 1) / 2;
