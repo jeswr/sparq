@@ -73,6 +73,7 @@
 //! collaborative proving) has no browser story at this milestone. Keeping
 //! `sparq-mpc` out of `sparq-wasm`'s dependency graph guarantees the browser
 //! bundle carries zero MPC surface (mirrors how `sparq-zk` is isolated).
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod backend;
 pub mod field;

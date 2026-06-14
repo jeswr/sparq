@@ -27,6 +27,7 @@
 //!
 //! Long-running engine calls release the GIL (`py.detach`) so other Python
 //! threads keep running during parse / query / reasoning.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;

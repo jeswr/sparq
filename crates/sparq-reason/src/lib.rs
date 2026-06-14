@@ -24,6 +24,7 @@
 //! premises, recursively down to asserted facts (see the [`explain`] module docs for the
 //! flat, ZK-witness-friendly shape and the consistency model). Off by default: zero cost,
 //! zero wasm impact.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};

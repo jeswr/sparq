@@ -7,6 +7,7 @@
 //! - `sparq-inference-conformance` (src/bin/inference.rs) — the reasoning
 //!   suites (RDF Semantics rdf-mt, OWL 2 RL, N3, SPARQL entailment regimes)
 //!   run against `sparq-reason`.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod compare;
 pub mod inference;

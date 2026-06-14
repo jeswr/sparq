@@ -29,6 +29,7 @@
 //! carries zero text-search code); full-text support is engaged only by
 //! depending on `sparq-text` — mirroring how `sparq-geo` and `sparq-vectors`
 //! stay out of the default build.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod index;
 #[cfg(feature = "engine")]

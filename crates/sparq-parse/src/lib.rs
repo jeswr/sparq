@@ -38,6 +38,7 @@
 //! }
 //! assert_eq!(decode_gzip_concat(&wire).unwrap(), chunks.concat().into_bytes());
 //! ```
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};

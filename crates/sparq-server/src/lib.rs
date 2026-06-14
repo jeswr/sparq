@@ -17,6 +17,7 @@
 //! content negotiation ([`negotiate`]) — are always compiled and unit-tested. The async
 //! HTTP surface ([`http`]) is behind the default-on `server` feature so the wasm build (and
 //! any consumer that only wants the serialisers) never pulls axum/tokio.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod exec;
 pub mod negotiate;

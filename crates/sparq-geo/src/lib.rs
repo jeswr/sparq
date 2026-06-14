@@ -37,6 +37,7 @@
 //! the wasm build carries zero geometry code); spatial support is engaged only
 //! by depending on `sparq-geo` — e.g. sparq-server's opt-in `geo` cargo
 //! feature, which installs [`geof_registry`] on its SPARQL endpoints.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod geof;
 pub mod index;

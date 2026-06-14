@@ -30,6 +30,7 @@
 //! - WGSL has **no f64**: the f64 filter compares IEEE-754 *bit patterns* mapped
 //!   to a monotonic u64 key (sign-flip trick) — exact, no precision loss, but a
 //!   real portability cost worth knowing about (see README §limits).
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use bytemuck::{Pod, Zeroable};
 

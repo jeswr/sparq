@@ -69,6 +69,7 @@
 //! let avg = Literal::new_typed_literal("15.0", oxrdf::vocab::xsd::DECIMAL);
 //! assert_eq!(avgs, vec![Some(avg.into())]);
 //! ```
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod eval;
 mod multi;

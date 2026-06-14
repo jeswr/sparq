@@ -34,6 +34,7 @@
 //!
 //! NOTHING in the sparq workspace depends on this crate; default builds and
 //! the wasm artifact are byte-identical with or without it.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod canon;
 pub mod commit;

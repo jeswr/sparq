@@ -6,6 +6,7 @@
 //!
 //! Informational by default (always exits 0); `--strict` exits 1 on any FAIL
 //! so the pass rate can be ratcheted in CI once it stabilizes.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use sparq_conformance::inference::{n3_suite, owl_suite, rdfmt, report, sparql_entail};
 use sparq_conformance::inference::report::{Outcome, Section, TestResult};
