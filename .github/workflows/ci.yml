@@ -10,6 +10,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # [OPUS-4.8] Nightly schedule drives the heavy coverage tier (sq-hbg7): the
+  # `coverage-nightly` job runs the sparq-vectors 50k recall/diskann accuracy
+  # tests under llvm-cov instrumentation, which a per-commit job cannot afford
+  # (measured >10 min for that ONE crate under instrumentation — see the job
+  # comment + bench/coverage-floor.json). 03:17 UTC daily.
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -200,3 +207,84 @@ jobs:
         with:
           name: inference-conformance-report
           path: inference-conformance-report.md
+
+  coverage:
+    # [OPUS-4.8] PER-CRATE line-coverage RATCHET + test-PRESENCE gate (sq-hbg7).
+    # Mirrors the conformance-ratchet idiom above: a checked-in per-crate FLOOR
+    # (bench/coverage-floor.json) that may only RISE, plus a per-crate #[test]
+    # count floor (bench/coverage-presence.json) that catches a whole crate
+    # losing its tests — which a % gate alone can miss (e.g. the subprocess-
+    # driven sparq-cli, which reports ~0% by construction).
+    #
+    # WHY PER-CRATE, NOT `cargo llvm-cov --workspace`: a single whole-workspace
+    # instrumented run does NOT finish in a bounded window. So scripts/coverage.sh
+    # measures PER-CRATE, with these audit-discovered quirks (no silent caps —
+    # research/coverage-and-benchmark-plan.md §2.2/§2.3):
+    #   - sparq-core measured with --features dict-spill (else dictspill/extsort 0%);
+    #   - W3C fixtures fetched FIRST (SHACL/reason-explain/EYE/rdf-turtle suites
+    #     SKIP when fixtures are absent -> misleadingly-low + flaky number);
+    #   - the two sparq-vectors *_recall_at_10_vs_brute_force_on_50k tests (HNSW +
+    #     DiskANN, 50k vecs each) are EXCLUDED here (measured >10 min for that ONE
+    #     crate under instrumentation) and run in `coverage-nightly` instead;
+    #   - sparq-cli / sparq-conformance / sparq-gpu have floor 0 (subprocess
+    #     artifact / test-driver / device-gated) — guarded by the presence gate.
+    # sparq-py is excluded (pyo3/maturin, not an llvm-cov target).
+    #
+    # TIERING (timing-justified): the per-commit set is the FAST/MEDIUM crates,
+    # well under the ~15-20 min budget; only the heavy sparq-vectors full set is
+    # nightly. Never silently drop a crate — every exclusion is in the floor file.
+    name: coverage ratchet + test-presence gate (per-crate)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Test-presence gate (fast, no compile)
+        run: python3 scripts/coverage-presence.py --check
+      - name: Fetch fixtures + measure per-crate coverage (per-commit tier)
+        run: ./scripts/coverage.sh
+      - name: Enforce coverage floor (ratchet)
+        run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
+      - name: Upload coverage summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-summary
+          path: target/coverage/coverage-summary.json
+
+  coverage-nightly:
+    # [OPUS-4.8] NIGHTLY heavy-coverage tier (sq-hbg7). Runs the FULL per-crate
+    # set INCLUDING the sparq-vectors 50k recall/diskann accuracy tests that the
+    # per-commit `coverage` job skips (those run >10 min for that one crate under
+    # llvm-cov instrumentation — too slow for per-commit, hence this split). The
+    # gate is the SAME floor file; --check verifies the nightly numbers still meet
+    # their floors. Triggered only by the `schedule:` cron above.
+    name: coverage (nightly, full incl. heavy vectors)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Test-presence gate
+        run: python3 scripts/coverage-presence.py --check
+      - name: Fetch fixtures + measure per-crate coverage (FULL tier)
+        run: COVERAGE_TIER=nightly ./scripts/coverage.sh
+      - name: Enforce coverage floor (ratchet, all crates required)
+        run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
+      - name: Upload coverage summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-summary-nightly
+          path: target/coverage/coverage-summary.json

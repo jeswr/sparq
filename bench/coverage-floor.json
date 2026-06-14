@@ -1,0 +1,85 @@
+{
+  "_comment": [
+    "[OPUS-4.8] COVERAGE RATCHET (sq-hbg7) \u2014 committed per-crate line-coverage FLOOR, reviewed in diffs exactly like the conformance ratchet counts in .github/workflows/ci.yml. scripts/coverage-gate.py --check FAILS CI when a crate's measured line% drops below its floor.",
+    "Floor = floor(measured) - 2 (min 0): a small margin so run-to-run / toolchain noise never trips the gate. The floor only ever RISES (--seed will not lower it without --allow-lower).",
+    "Tiering: the FAST/MEDIUM crates are measured + gated PER-COMMIT; the heavy sparq-vectors 50k recall/diskann tests are EXCLUDED per-commit (measured in the NIGHTLY tier \u2014 see the .github/workflows/ci.yml coverage-nightly job and the per-crate notes below). No crate is silently dropped.",
+    "Floors with floor:0 are crates whose llvm-cov line% is a known measurement artifact (see each note) \u2014 they are guarded by the test-PRESENCE gate (bench/coverage-presence.json) instead of the % gate.",
+    "Regenerate after a deliberate coverage rise: scripts/coverage.sh && scripts/coverage-gate.py --seed target/coverage/coverage-summary.json"
+  ],
+  "crates": {
+    "sparq-cli": {
+      "floor": 0,
+      "note": "subprocess artifact: tests spawn the COMPILED binary (assert_cmd / CARGO_BIN_EXE), not the instrumented profile \u2014 line% is ~0 by construction, not a real gap. Presence-gated instead."
+    },
+    "sparq-conformance": {
+      "floor": 0,
+      "note": "test-driver crate: the W3C suites run as the BINARIES (cargo run), so `cargo llvm-cov --package` (which runs cargo test) sees only a few unit tests. Low % is expected; floor 0."
+    },
+    "sparq-core": {
+      "floor": 78
+    },
+    "sparq-engine": {
+      "floor": 83
+    },
+    "sparq-geo": {
+      "floor": 87
+    },
+    "sparq-gpu": {
+      "floor": 0,
+      "note": "GPU kernels need a device; CPU-only line coverage is low by design."
+    },
+    "sparq-hdt": {
+      "floor": 87
+    },
+    "sparq-introspect": {
+      "floor": 94
+    },
+    "sparq-mpc": {
+      "floor": 88
+    },
+    "sparq-nlq": {
+      "floor": 85
+    },
+    "sparq-parse": {
+      "floor": 91
+    },
+    "sparq-reason": {
+      "floor": 81
+    },
+    "sparq-rsp": {
+      "floor": 87
+    },
+    "sparq-serve": {
+      "floor": 83
+    },
+    "sparq-server": {
+      "floor": 85
+    },
+    "sparq-shacl": {
+      "floor": 90
+    },
+    "sparq-sim": {
+      "floor": 94
+    },
+    "sparq-solid": {
+      "floor": 84
+    },
+    "sparq-text": {
+      "floor": 84
+    },
+    "sparq-vectors": {
+      "floor": 91,
+      "note": "per-commit floor is measured with the two *_recall_at_10_vs_brute_force_on_50k tests SKIPPED; the nightly tier measures the full set."
+    },
+    "sparq-wasm": {
+      "floor": 77
+    },
+    "sparq-zk": {
+      "floor": 88
+    },
+    "sparq-zk-compose": {
+      "floor": 76
+    }
+  },
+  "margin_points": 2
+}
