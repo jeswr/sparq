@@ -135,7 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust (pinned MSRV)
-        uses: dtolnay/rust-toolchain@1.88
+        uses: dtolnay/rust-toolchain@1.100
       - uses: Swatinem/rust-cache@v2
       - name: cargo check on the declared MSRV
         run: cargo check --workspace --exclude sparq-py --exclude sparq-hdt
