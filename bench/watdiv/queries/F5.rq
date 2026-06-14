@@ -1,0 +1,14 @@
+# [OPUS-4.8] WatDiv Basic-Testing F5 (Snowflake). Placeholder %v2% (wsdbm:Retailer)
+# instantiated to wsdbm:Retailer0 (exists at SF=1; yields a stable result).
+PREFIX gr:    <http://purl.org/goodrelations/>
+PREFIX og:    <http://ogp.me/ns#>
+PREFIX rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+SELECT ?v0 ?v1 ?v3 ?v4 ?v5 ?v6 WHERE {
+  ?v0 gr:includes ?v1 .
+  wsdbm:Retailer0 gr:offers ?v0 .
+  ?v0 gr:price ?v3 .
+  ?v0 gr:validThrough ?v4 .
+  ?v1 og:title ?v5 .
+  ?v1 rdf:type ?v6 .
+}

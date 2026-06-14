@@ -1,0 +1,11 @@
+# [OPUS-4.8] WatDiv Basic-Testing S6 (Star). Placeholder %v3% (wsdbm:SubGenre)
+# instantiated to wsdbm:SubGenre43 (the lowest-id SubGenre whose mo:conductor star is
+# non-empty at SF=1; yields a stable result).
+PREFIX mo:    <http://purl.org/ontology/mo/>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+PREFIX rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?v0 ?v1 ?v2 WHERE {
+  ?v0 mo:conductor ?v1 .
+  ?v0 rdf:type ?v2 .
+  ?v0 wsdbm:hasGenre wsdbm:SubGenre43 .
+}

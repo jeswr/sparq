@@ -1,0 +1,17 @@
+# [OPUS-4.8] WatDiv Basic-Testing S5 (Star, 4-pattern). Placeholder %v1%
+# (wsdbm:ProductCategory) instantiated to wsdbm:ProductCategory12.
+# DEVIATION (documented in README): the canonical 4th star arm is
+# `sorg:language wsdbm:Language0`, which never co-occurs with description+keywords on
+# the same subject at SF=1 (empty result). To keep the 4-arm STAR shape non-empty and
+# stable at SF=1 we substitute the 4th arm `og:title` (co-occurs on the same typed
+# products). The canonical-constant form lives in queries-heavy/ for the SF=1000 tier.
+PREFIX og:    <http://ogp.me/ns#>
+PREFIX sorg:  <http://schema.org/>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+PREFIX rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?v0 ?v2 ?v3 WHERE {
+  ?v0 rdf:type wsdbm:ProductCategory12 .
+  ?v0 sorg:description ?v2 .
+  ?v0 sorg:keywords ?v3 .
+  ?v0 og:title ?v4 .
+}

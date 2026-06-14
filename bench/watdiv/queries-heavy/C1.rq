@@ -1,0 +1,20 @@
+# [OPUS-4.8] WatDiv Basic-Testing C1 (Complex) — EC2/nightly tier (SF>=10).
+# No placeholder; verbatim canonical template.
+# EMPTY at the per-commit SF=1 scale: requires a product with caption+text+
+# contentRating that ALSO has a review whose reviewer is the actor of some other
+# product — a 4-hop snowflake that does not connect in ~100k triples (only ~2 products
+# carry caption+text+contentRating at SF=1, none of them reviewed). Populates at scale
+# (at SF=10 the constituent stars are well-populated: ~227 caption+text+contentRating+
+# review subjects, 126 reviewers that are also actors). Run at SF=1000.
+PREFIX sorg:  <http://schema.org/>
+PREFIX rev:   <http://purl.org/stuff/rev#>
+SELECT ?v0 ?v4 ?v6 ?v7 WHERE {
+  ?v0 sorg:caption ?v1 .
+  ?v0 sorg:text ?v2 .
+  ?v0 sorg:contentRating ?v3 .
+  ?v0 rev:hasReview ?v4 .
+  ?v4 rev:title ?v5 .
+  ?v4 rev:reviewer ?v6 .
+  ?v7 sorg:actor ?v6 .
+  ?v7 sorg:language ?v8 .
+}

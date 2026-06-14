@@ -1,0 +1,16 @@
+# [OPUS-4.8] WatDiv Basic-Testing S1 (Star). Placeholder %v2% (wsdbm:Retailer)
+# instantiated to wsdbm:Retailer0 (exists at SF=1; yields a small stable result).
+PREFIX gr:    <http://purl.org/goodrelations/>
+PREFIX sorg:  <http://schema.org/>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+SELECT ?v0 ?v1 ?v3 ?v4 ?v5 ?v6 ?v7 ?v8 ?v9 WHERE {
+  ?v0 gr:includes ?v1 .
+  wsdbm:Retailer0 gr:offers ?v0 .
+  ?v0 gr:price ?v3 .
+  ?v0 gr:serialNumber ?v4 .
+  ?v0 gr:validFrom ?v5 .
+  ?v0 gr:validThrough ?v6 .
+  ?v0 sorg:eligibleQuantity ?v7 .
+  ?v0 sorg:eligibleRegion ?v8 .
+  ?v0 sorg:priceValidUntil ?v9 .
+}
