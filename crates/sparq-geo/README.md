@@ -46,8 +46,9 @@ fragment in the OGC *GML Simple-Features* profile. No maintained pure-Rust GML
 *geometry* parser crate exists (the georust stack covers WKT/WKB/GeoJSON but
 not GML), so per AGENTS.md "Upstream blockers" this crate ships a focused
 GML-SF geometry parser in [`src/gml.rs`](src/gml.rs) built on
-[`quick-xml`](https://crates.io/crates/quick-xml) (already in the lockfile —
-no new transitive crates). It walks only the geometry subset GeoSPARQL uses
+[`quick-xml`](https://crates.io/crates/quick-xml) (the same pull-parser the
+oxigraph stack already pulls transitively, here pinned to a newer major — see
+the `Cargo.toml` note). It walks only the geometry subset GeoSPARQL uses
 (Point/LineString/Polygon/Multi\*) and maps it onto the SAME
 `geo_types::Geometry<f64>` + `Crs` the WKT path produces, so every downstream
 `geof:` function and the `GeoIndex` work unchanged. The parser is namespace-

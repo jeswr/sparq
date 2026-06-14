@@ -6,9 +6,27 @@ use crate::rdf::{as_node, MiniGraph};
 use oxrdf::{Literal, NamedNode, Term};
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use std::borrow::Cow;
 use std::path::Path;
 
 const RS: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#";
+
+// [OPUS-4.8] quick-xml 0.40 removed `BytesText::unescape()` / deprecated
+// `Attribute::unescape_value()`. Both used to decode + resolve the XML
+// predefined entities (`&amp;`/`&lt;`/`&gt;`/`&apos;`/`&quot;` and numeric
+// char-refs) without applying attribute-value whitespace folding. We replicate
+// that EXACT semantics here — `quick_xml::escape::unescape` is
+// `unescape_with(resolve_predefined_entity)`, the same resolver the old
+// methods called — so the SPARQL-XML-results parse path is byte-for-byte
+// unchanged (CONFORMANCE-CRITICAL: this file feeds the W3C ratchet). We
+// deliberately do NOT switch to 0.40's `normalized_value`/`xml_content`, which
+// would add AVN whitespace folding / EOL normalization the old path never did.
+fn unescape_utf8(raw: &[u8]) -> Result<String, String> {
+    let s = std::str::from_utf8(raw).map_err(|e| e.to_string())?;
+    quick_xml::escape::unescape(s)
+        .map(Cow::into_owned)
+        .map_err(|e| e.to_string())
+}
 
 /// One solution: `(variable name, bound term)` pairs.
 pub type Binding = Vec<(String, Term)>;
@@ -232,7 +250,7 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
                         let k = std::str::from_utf8(a.key.as_ref()).ok()?;
                         // Matches both `datatype` and `xml:lang`-style keys.
                         if k == key || k.ends_with(&format!(":{key}")) {
-                            Some(a.unescape_value().ok()?.into_owned())
+                            Some(unescape_utf8(&a.value).ok()?)
                         } else {
                             None
                         }
@@ -277,7 +295,12 @@ fn parse_srx(path: &Path) -> Result<Expected, String> {
                 }
             }
             Event::Text(t) => {
-                let s = t.unescape().map_err(|e| e.to_string())?.into_owned();
+                // [OPUS-4.8] 0.40: `decode()` (no EOL normalization, matching the
+                // old `unescape`) then resolve predefined entities — see `unescape_utf8`.
+                let decoded = t.decode().map_err(|e| e.to_string())?;
+                let s = quick_xml::escape::unescape(&decoded)
+                    .map_err(|e| e.to_string())?
+                    .into_owned();
                 if in_boolean {
                     boolean = Some(s.trim() == "true");
                 } else if let Some(v) = cur_val.as_mut() {
