@@ -65,6 +65,34 @@ This repo tracks work in **beads** (`bd`, a git-native dependency-graph issue tr
   This writes the shared Dolt DB (exclusive-lock-serialized — safe across parallel agents). For the rationale behind a *deferred* task, put it in the bead's `-d` description or `--design` field so the bead is self-contained. **Never edit `.beads/issues.jsonl` (or any `.beads/` file) by hand** — it causes merge conflicts; `bd export` regenerates it.
 - Run `bd ready` to see unblocked work; close with `bd close <id>`.
 
+## Orchestration — delegate to sub-agents + run a continuous bead loop
+
+If you are an ORCHESTRATING agent (driving multi-step work on this repo), two standing rules:
+
+1. **Delegate every substantive task to a sub-agent in an isolated git worktree** — implementation, research, test/triage, merge-conflict resolution, doc writing, AND the heavy verification/gating of a change. The orchestrator keeps only cheap glue: sequencing, `git merge`/`push`, worktree add/remove, bead bookkeeping (`bd close`/`export`), and reading one-line gate results. Do NOT run builds, toolchain installs, CI-log spelunking, or end-to-end gate runs in the main thread when an agent can — keep the orchestrator context small. Parallelise independent agents; serialise only CPU-heavy wall-clock *measurements* (those need a quiet box).
+2. **Continuous loop:** iteratively `bd ready` → spin up sub-agents (parallel, worktree-isolated, smallest context-independent briefs) to address the ready beads → gate + merge one at a time → re-check `bd ready` → repeat. Don't wait to be prompted bead-by-bead. Sequence beads that touch the same files; respect dependency edges (`bd dep`).
+
+Each sub-agent brief must: work in its own worktree, NOT push/merge (the orchestrator does), gate in-worktree (scope tests to affected crates; the orchestrator does the authoritative full-workspace gate at merge), create beads for any discovered work (`bd create`, never edit `.beads/`), and report a concise result. See the per-batch re-evaluation checklist below to decide which gates a given change must re-run.
+
+## Post-batch re-evaluation checklist — what to re-run after a change
+
+After a batch of changes, re-run only the evaluations whose inputs changed (and always the base gate: full-workspace `clippy -D warnings` + `cargo test` for touched crates). Map change → evaluation:
+
+| If the change touches… | Re-run |
+|---|---|
+| a parser (turtle/nt/nq/trig, `sparq-core` parse, `spargebra`) | W3C SPARQL + rdf-turtle conformance; the chunked-vs-serial parser oracle; `sparq-bench fuzz` |
+| query execution / operators (`sparq-engine` exec/optimizer) | full conformance ratchet; the operator-coverage bench; per-builtin error table |
+| the reasoner (`sparq-reason`, rules, closure) | inference conformance ratchet; incremental==batch property tests; LUBM entailed tier |
+| a public API (`pub` item / CLI flag / HTTP route / Py/JS binding) | update the matching `skills/<surface>/SKILL.md` (REQUIRED, same change); the surface's tests |
+| `sparq-wasm` / the wasm graph | `scripts/wasm-deps-guard.sh`; `wasm-pack test --node`; the `wasm_bundle_bytes` size gate |
+| Cargo dependencies (`Cargo.toml`/`Cargo.lock`) | `cargo audit` + `cargo deny check` + regenerate the SBOM (supply-chain gate) |
+| the ZK verifier / circuits (`sparq-zk`, `sparq-zk-compose`) | `forge_gates` + `differential_fuzz`; the gate-count snapshot; re-open the soundness audit |
+| SHACL (`sparq-shacl`) | the W3C SHACL conformance ratchet (core ≥98, sparql ≥5) |
+| storage/encoding (`sparq-core` store/dict/compress, mmap, dict-spill) | the deterministic perf-gate metrics; byte-identity differentials; coverage with `--features dict-spill` |
+| anything merged | the per-crate coverage ratchet + test-presence gate (`scripts/coverage*.py`) |
+
+(Keep this table in sync as gates are added.)
+
 ## No hard-coded performance numbers
 
 Do not bake benchmark numbers (MB/s, ×-faster, recall, gate counts, latencies) into markdown. Reference the **generated structured data** instead (the benchmark harnesses emit JSON; CI publishes results). If you cite a number, cite where it was generated.
