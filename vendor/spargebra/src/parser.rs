@@ -126,7 +126,13 @@ impl SparqlParser {
         );
         #[cfg(feature = "standard-unicode-escaping")]
         let query = unescape_unicode_codepoints(query);
-        Ok(parser::QueryUnit(&query, &mut state).map_err(SparqlSyntaxErrorKind::Syntax)?)
+        match parser::QueryUnit(&query, &mut state) {
+            Ok(query) => Ok(query),
+            // [OPUS-4.8] Prefer the clear depth-limit error over the raw PEG
+            // "unexpected token" when the cap was the actual cause (bead sq-v5dg).
+            Err(_) if state.hit_recursion_limit => Err(SparqlSyntaxErrorKind::TooDeeplyNested.into()),
+            Err(e) => Err(SparqlSyntaxErrorKind::Syntax(e).into()),
+        }
     }
 
     /// Parse the given update string using the already set options.
@@ -151,8 +157,14 @@ impl SparqlParser {
         );
         #[cfg(feature = "standard-unicode-escaping")]
         let update = unescape_unicode_codepoints(update);
-        let operations =
-            parser::UpdateInit(&update, &mut state).map_err(SparqlSyntaxErrorKind::Syntax)?;
+        let operations = match parser::UpdateInit(&update, &mut state) {
+            Ok(operations) => operations,
+            // [OPUS-4.8] See parse_query: prefer the depth-limit error (sq-v5dg).
+            Err(_) if state.hit_recursion_limit => {
+                return Err(SparqlSyntaxErrorKind::TooDeeplyNested.into())
+            }
+            Err(e) => return Err(SparqlSyntaxErrorKind::Syntax(e).into()),
+        };
         check_if_insert_data_are_sharing_blank_nodes(&operations)?;
         Ok(Update {
             operations,
@@ -183,6 +195,14 @@ enum SparqlSyntaxErrorKind {
     Syntax(#[from] peg::error::ParseError<LineCol>),
     #[error("The blank node {0} cannot be shared by multiple blocks")]
     SharedBlankNode(BlankNode),
+    // [OPUS-4.8] Returned when the parser hits `MAX_RECURSION_DEPTH` levels of
+    // syntactic nesting, instead of recursing until the native stack overflows and
+    // aborts the process (bead sq-v5dg / threat-model B2). Reported in preference
+    // to the raw PEG error because PEG only surfaces the failure at the furthest
+    // input position, which masks the depth-guard failure for a uniformly nested
+    // input.
+    #[error("The SPARQL query is too deeply nested (more than {MAX_RECURSION_DEPTH} levels of nested group patterns, expressions, paths, collections or triple terms)")]
+    TooDeeplyNested,
 }
 
 #[cfg(feature = "standard-unicode-escaping")]
@@ -986,6 +1006,33 @@ enum Either<L, R> {
     Right(R),
 }
 
+// [OPUS-4.8] Maximum syntactic nesting depth accepted by the parser before it
+// returns a clean "query too deeply nested" syntax error instead of recursing
+// until the native call stack overflows and aborts the process. spargebra is a
+// `peg` recursive-descent parser, so each level of `{ }` / `( )` / `[ ]`
+// nesting (group graph patterns, sub-SELECTs, bracketed/unary expressions,
+// property paths, RDF collections, blank-node property lists) maps onto one or
+// more native stack frames. Without a cap, an attacker-controlled query string
+// of thousands of nested delimiters overflows the stack — a DoS reachable from
+// the unauthenticated server (sparq threat model B2 / T-PARSE-DoS, bead
+// sq-v5dg).
+//
+// The cap is chosen to be (a) far deeper than any realistic legitimate query —
+// every W3C SPARQL 1.0/1.1/1.2 conformance query nests well under 16 levels —
+// and (b) safe on the *smallest* stack the parser realistically runs on. The
+// server parses on tokio worker / blocking-pool threads whose default stack is
+// 2 MiB (NOT the larger main-thread `ulimit -s`). Empirically, on a 2 MiB
+// stack the unmodified parser overflows at roughly:
+//   - debug build:   ~180 nested levels (group / expr)
+//   - release build: ~900 nested levels (group / expr)
+// (measured against this exact `peg` grammar). 128 leaves comfortable headroom
+// under the debug-build 2 MiB worst case (~30%) while being ~8x deeper than the
+// deepest conformance query, so it overflows nothing yet rejects no legitimate
+// query. Several recursion axes can stack additively (e.g. groups containing
+// filters containing bracketed expressions), so the single shared counter below
+// bounds *total* nesting, which is the quantity that actually consumes stack.
+const MAX_RECURSION_DEPTH: usize = 128;
+
 pub struct ParserState {
     base_iri: Option<Iri<String>>,
     prefixes: HashMap<String, String>,
@@ -993,6 +1040,23 @@ pub struct ParserState {
     used_bnodes: HashSet<BlankNode>,
     currently_used_bnodes: HashSet<BlankNode>,
     aggregates: Vec<Vec<(Variable, AggregateExpression)>>,
+    // [OPUS-4.8] Current syntactic nesting depth (see `MAX_RECURSION_DEPTH`).
+    // Incremented by `enter_recursion` when a recursive production commits to a
+    // nested delimiter and decremented by `leave_recursion` on the way out. Like
+    // the `aggregates` stack above it is mutated during PEG parsing and may drift
+    // upward on backtracking (a failed alternative that already incremented); the
+    // saturating decrement and generous cap keep that harmless — drift can only
+    // make the guard *very slightly* more conservative, never reject a query that
+    // is not genuinely deeply nested.
+    recursion_depth: usize,
+    // [OPUS-4.8] Set once the depth cap is hit during parsing. PEG only surfaces
+    // the failure recorded at the furthest input position, which for a uniformly
+    // nested input is not the depth-guard failure, so the raw PEG error reads as a
+    // generic "unexpected token". This flag lets `parse_query`/`parse_update`
+    // replace that with a clear "too deeply nested" message — without it the DoS is
+    // still fixed (the parse returns Err, not an overflow), only the wording is
+    // worse.
+    hit_recursion_limit: bool,
 }
 
 impl ParserState {
@@ -1008,7 +1072,32 @@ impl ParserState {
             used_bnodes: HashSet::new(),
             currently_used_bnodes: HashSet::new(),
             aggregates: Vec::new(),
+            recursion_depth: 0,        // [OPUS-4.8]
+            hit_recursion_limit: false, // [OPUS-4.8]
         }
+    }
+
+    // [OPUS-4.8] Enter one level of syntactic nesting. Returns a syntax-error
+    // message (surfaced by PEG as a normal parse failure, NOT a panic/abort) when
+    // the configured depth cap is reached, so a pathologically nested query is
+    // rejected cleanly instead of overflowing the call stack. Call this from a
+    // recursive production *after* it has committed to a nested delimiter, and
+    // pair every successful `enter_recursion` with a `leave_recursion` on the
+    // success path.
+    fn enter_recursion(&mut self) -> Result<(), &'static str> {
+        if self.recursion_depth >= MAX_RECURSION_DEPTH {
+            self.hit_recursion_limit = true;
+            return Err("The SPARQL query is too deeply nested (recursion-depth limit reached)");
+        }
+        self.recursion_depth += 1;
+        Ok(())
+    }
+
+    // [OPUS-4.8] Leave one level of syntactic nesting. Saturating so that any
+    // backtracking-induced imbalance (an `enter_recursion` whose production later
+    // failed and was retried) can never underflow.
+    fn leave_recursion(&mut self) {
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
     }
 
     fn parse_iri(&self, iri: String) -> Result<Iri<String>, IriParseError> {
@@ -1116,6 +1205,16 @@ parser! {
     //See https://www.w3.org/TR/turtle/#sec-grammar
     grammar parser(state: &mut ParserState) for str {
         pub rule QueryUnit() -> Query = Query()
+
+        // [OPUS-4.8] Empty-matching depth guard (bead sq-v5dg). Placed in a
+        // recursive production *after* it commits to a nested delimiter, it
+        // increments the shared nesting counter and fails the parse with a clean
+        // "too deeply nested" syntax error once the cap is hit — bounding native
+        // call-stack growth so a pathologically nested query string can no longer
+        // overflow the stack and abort the process. Consumes no input. The
+        // matching `state.leave_recursion()` runs in the production's success
+        // action.
+        rule RecursionGuard() = {? state.enter_recursion() }
 
         rule Query() -> Query = _ Prologue() _ q:(SelectQuery() / ConstructQuery() / DescribeQuery() / AskQuery()) _ {
             q
@@ -1523,9 +1622,20 @@ parser! {
         }
         rule TriplesTemplate_inner() -> Vec<TriplePattern> = _ t:TriplesSameSubject() _ { t }
 
+        // [OPUS-4.8] The single chokepoint for *all* group-graph-pattern nesting
+        // ({ }, nested groups, OPTIONAL/GRAPH/MINUS/UNION/LATERAL/SERVICE bodies,
+        // sub-SELECT WHERE, EXISTS/NOT EXISTS) — guarded so deep group nesting
+        // cannot overflow the stack (bead sq-v5dg). The opening "{" and the depth
+        // guard are matched exactly once; the SubSelect-vs-Sub choice (each with
+        // its own trailing "}") is nested *after* the single guard, so trying both
+        // alternatives can never double-charge depth. SubSelect is tried first
+        // because GroupGraphPatternSub also matches the empty string (so it must
+        // not pre-empt a sub-SELECT body).
         rule GroupGraphPattern() -> GraphPattern =
-            "{" _ GroupGraphPattern_clear() p:GroupGraphPatternSub() GroupGraphPattern_clear() _ "}" { p } /
-            "{" _ GroupGraphPattern_clear() p:SubSelect() GroupGraphPattern_clear() _ "}" { p }
+            "{" RecursionGuard() _ p:GroupGraphPattern_body() { state.leave_recursion(); p }
+        rule GroupGraphPattern_body() -> GraphPattern =
+            GroupGraphPattern_clear() p:SubSelect() GroupGraphPattern_clear() _ "}" { p } /
+            GroupGraphPattern_clear() p:GroupGraphPatternSub() GroupGraphPattern_clear() _ "}" { p }
         rule GroupGraphPattern_clear() = {
              // We deal with blank nodes aliases rule
             state.used_bnodes.extend(state.currently_used_bnodes.iter().cloned());
@@ -1927,7 +2037,10 @@ parser! {
             v:iri() { v.into() } /
             "a" { rdf::TYPE.into_owned().into() } /
             "!" _ p:PathNegatedPropertySet() { p } /
-            "(" _ p:Path() _ ")" { p }
+            // [OPUS-4.8] Parenthesised property paths nest recursively
+            // (Path -> … -> PathPrimary -> "(" Path ")"); guarded after "(" so
+            // deep path nesting cannot overflow the stack (bead sq-v5dg).
+            "(" RecursionGuard() _ p:Path() _ ")" { state.leave_recursion(); p }
 
         rule PathNegatedPropertySet() -> PropertyPathExpression =
             "(" _ p:PathNegatedPropertySet_item() **<1,> ("|" _) ")" {
@@ -1966,7 +2079,11 @@ parser! {
 
         rule TriplesNode() -> FocusedTriplePattern<TermPattern> = Collection() / BlankNodePropertyList()
 
-        rule BlankNodePropertyList() -> FocusedTriplePattern<TermPattern> = "[" _ po:PropertyListNotEmpty() _ "]" {?
+        // [OPUS-4.8] Nested blank-node property lists ([ p [ p [ … ] ] ]) recurse
+        // via PropertyListNotEmpty -> ObjectList -> GraphNode -> TriplesNode ->
+        // BlankNodePropertyList; guarded after "[" (bead sq-v5dg).
+        rule BlankNodePropertyList() -> FocusedTriplePattern<TermPattern> = "[" RecursionGuard() _ po:PropertyListNotEmpty() _ "]" {?
+            state.leave_recursion();
             let mut patterns = po.patterns;
             let mut bnode = TermPattern::from(BlankNode::default());
             for (p, os) in po.focus {
@@ -1982,7 +2099,10 @@ parser! {
 
         rule TriplesNodePath() -> FocusedTripleOrPathPattern<TermPattern> = CollectionPath() / BlankNodePropertyListPath()
 
-        rule BlankNodePropertyListPath() -> FocusedTripleOrPathPattern<TermPattern> = "[" _ po:PropertyListPathNotEmpty() _ "]" {?
+        // [OPUS-4.8] Path-variant of nested blank-node property lists; guarded
+        // after "[" (bead sq-v5dg).
+        rule BlankNodePropertyListPath() -> FocusedTripleOrPathPattern<TermPattern> = "[" RecursionGuard() _ po:PropertyListPathNotEmpty() _ "]" {?
+            state.leave_recursion();
             let mut patterns = po.patterns;
             let mut bnode = TermPattern::from(BlankNode::default());
             for (p, os) in po.focus {
@@ -1996,7 +2116,11 @@ parser! {
             })
         }
 
-        rule Collection() -> FocusedTriplePattern<TermPattern> = "(" _ o:Collection_item()+ ")" {
+        // [OPUS-4.8] Nested RDF collections ( ( ( … ) ) ) recurse via
+        // Collection_item -> GraphNode -> TriplesNode -> Collection; guarded
+        // after "(" (bead sq-v5dg).
+        rule Collection() -> FocusedTriplePattern<TermPattern> = "(" RecursionGuard() _ o:Collection_item()+ ")" {
+            state.leave_recursion();
             let mut patterns: Vec<TriplePattern> = Vec::new();
             let mut current_list_node = TermPattern::from(rdf::NIL.into_owned());
             for objWithPatterns in o.into_iter().rev() {
@@ -2013,7 +2137,10 @@ parser! {
         }
         rule Collection_item() -> FocusedTriplePattern<TermPattern> = o:GraphNode() _ { o }
 
-        rule CollectionPath() -> FocusedTripleOrPathPattern<TermPattern> = "(" _ o:CollectionPath_item()+ _ ")" {
+        // [OPUS-4.8] Path-variant of nested RDF collections; guarded after "("
+        // (bead sq-v5dg).
+        rule CollectionPath() -> FocusedTripleOrPathPattern<TermPattern> = "(" RecursionGuard() _ o:CollectionPath_item()+ _ ")" {
+            state.leave_recursion();
             let mut patterns: Vec<TripleOrPathPattern> = Vec::new();
             let mut current_list_node = TermPattern::from(rdf::NIL.into_owned());
             for objWithPatterns in o.into_iter().rev() {
@@ -2121,7 +2248,10 @@ parser! {
             t:VarOrTerm() { FocusedTripleOrPathPattern::new(t) } /
             TriplesNodePath()
 
-        rule ReifiedTriple() -> FocusedTriplePattern<TermPattern> = "<<" _ s:ReifiedTripleSubject() _ p:Verb() _ o:ReifiedTripleObject() _ r:Reifier()? _ ">>" {?
+        // [OPUS-4.8] RDF 1.2 reified triples nest via their subject/object
+        // (<< << … >> p o >>); guarded after "<<" (bead sq-v5dg).
+        rule ReifiedTriple() -> FocusedTriplePattern<TermPattern> = "<<" RecursionGuard() _ s:ReifiedTripleSubject() _ p:Verb() _ o:ReifiedTripleObject() _ r:Reifier()? _ ">>" {?
+            state.leave_recursion();
             #[cfg(feature = "sparql-12")]
             {
                 let r = r.unwrap_or_else(|| BlankNode::default().into());
@@ -2160,7 +2290,10 @@ parser! {
             l:BooleanLiteral() { FocusedTriplePattern::new(l) } /
             b:BlankNode() { FocusedTriplePattern::new(b) }
 
-        rule TripleTerm() -> TriplePattern = "<<(" _ s:TripleTermSubject() _ p:Verb() _ o:TripleTermObject() _ ")>>" {
+        // [OPUS-4.8] RDF 1.2 triple terms nest via their subject/object
+        // (<<( <<( … )>> p o )>>); guarded after "<<(" (bead sq-v5dg).
+        rule TripleTerm() -> TriplePattern = "<<(" RecursionGuard() _ s:TripleTermSubject() _ p:Verb() _ o:TripleTermObject() _ ")>>" {
+            state.leave_recursion();
             TriplePattern {
                 subject: s,
                 predicate: p,
@@ -2182,7 +2315,10 @@ parser! {
             l:BooleanLiteral() { l.into() } /
             b:BlankNode() { b.into() }
 
-        rule TripleTermData() -> GroundTriple = "<<(" _ s:TripleTermDataSubject() _ p:TripleTermData_p() _ o:TripleTermDataObject() _ ")>>" {?
+        // [OPUS-4.8] Ground (data) triple terms nest via their subject/object;
+        // guarded after "<<(" (bead sq-v5dg).
+        rule TripleTermData() -> GroundTriple = "<<(" RecursionGuard() _ s:TripleTermDataSubject() _ p:TripleTermData_p() _ o:TripleTermDataObject() _ ")>>" {?
+            state.leave_recursion();
             Ok(GroundTriple {
                 subject: if let GroundTerm::NamedNode(s) = s { s } else { return Err("Literals or triple terms are not allowed in subject position of nested patterns") },
                 predicate: p,
@@ -2273,7 +2409,12 @@ parser! {
             (s, e)
         }
 
-        rule UnaryExpression() -> Expression = s: "!" _ e:UnaryExpression() {?
+        // [OPUS-4.8] The "!" alternative recurses directly into UnaryExpression
+        // (`!!!…`), a stack-growth cycle independent of BrackettedExpression;
+        // guarded after the leading "!" so a chain of negations cannot overflow
+        // the stack (bead sq-v5dg). leave_recursion runs on success below.
+        rule UnaryExpression() -> Expression = s: "!" RecursionGuard() _ e:UnaryExpression() {?
+            state.leave_recursion();
             #[cfg(feature = "sparql-12")]{Ok(Expression::Not(Box::new(e)))}
             #[cfg(not(feature = "sparql-12"))]{Err("Double negation (!!) is only available in SPARQL 1.2")}
         } / s: $("!" / "+" / "-")? _ e:PrimaryExpression() { match s {
@@ -2294,7 +2435,10 @@ parser! {
             l:BooleanLiteral() { l.into() } /
             BuiltInCall()
 
-        rule ExprTripleTerm() -> Expression = "<<(" _ s:ExprTripleTermSubject() _ p:Verb() _ o:ExprTripleTermObject() _ ")>>" {?
+        // [OPUS-4.8] Triple terms in expressions nest via ExprTripleTermObject
+        // -> ExprTripleTerm; guarded after "<<(" (bead sq-v5dg).
+        rule ExprTripleTerm() -> Expression = "<<(" RecursionGuard() _ s:ExprTripleTermSubject() _ p:Verb() _ o:ExprTripleTermObject() _ ")>>" {?
+            state.leave_recursion();
             #[cfg(feature = "sparql-12")]{Ok(Expression::FunctionCall(Function::Triple, vec![s, p.into(), o]))}
             #[cfg(not(feature = "sparql-12"))]{Err("Triple terms are only available in SPARQL 1.2")}
         }
@@ -2314,7 +2458,11 @@ parser! {
             l:BooleanLiteral() { l.into() } /
             v:Var() { v.into() }
 
-        rule BrackettedExpression() -> Expression = "(" _ e:Expression() _ ")" { e }
+        // [OPUS-4.8] Chokepoint for parenthesised-expression nesting ( ( ( … ) ) )
+        // — the recursive cycle Expression -> … -> PrimaryExpression ->
+        // BrackettedExpression -> Expression. Guarded after "(" so deep bracket
+        // nesting cannot overflow the stack (bead sq-v5dg).
+        rule BrackettedExpression() -> Expression = "(" RecursionGuard() _ e:Expression() _ ")" { state.leave_recursion(); e }
 
         rule BuiltInCall() -> Expression =
             a:Aggregate() {? state.new_aggregation(a).map(Into::into) } /

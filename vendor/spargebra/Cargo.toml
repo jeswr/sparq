@@ -49,6 +49,14 @@ standard-unicode-escaping = []
 name = "spargebra"
 path = "src/lib.rs"
 
+# [OPUS-4.8] The upstream manifest sets `autotests = false` (the published crate
+# ships no `tests/` dir; oxigraph validates it via an external suite). The vendored
+# fork adds a regression test for the recursion-depth cap (SPARQ-PATCHES.md §8,
+# bead sq-v5dg), so the target must be declared explicitly. Not an upstream change.
+[[test]]
+name = "recursion_depth"
+path = "tests/recursion_depth.rs"
+
 [dependencies.oxilangtag]
 version = "0.1"
 
