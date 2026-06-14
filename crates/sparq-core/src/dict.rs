@@ -253,17 +253,43 @@ pub(crate) fn lang_with_dir(l: &Literal) -> Option<std::borrow::Cow<'_, str>> {
 
 /// Inverse of [`lang_with_dir`]: split a STORED language slot back into its BCP47 tag and
 /// (optional) RDF 1.2 base direction. A stored slot of `en--ltr` is `("en", Some("ltr"))`;
-/// a plain `en` is `("en", None)`. `--` can never occur inside a valid language tag, so the
-/// split is unambiguous. The returned tag/direction are the spec-distinct components the
-/// SPARQL 1.2 results formats keep apart (`xml:lang` vs `its:dir`) — see the engine's
-/// `json.rs` and the conformance results reader.
-// [OPUS-4.8] sq-bj7o: the JSON fast path serialises straight from this stored slot, so it
-// needs the same split the `oxrdf::Term` path gets for free via `Literal::direction()`.
+/// a plain `en` is `("en", None)`. The returned tag/direction are the spec-distinct
+/// components the SPARQL 1.2 results formats keep apart (`xml:lang` vs `its:dir`) — see the
+/// engine's `json.rs` and the conformance results reader.
+///
+/// [OPUS-4.8] sq-bj7o: VALIDATION. The base direction in RDF 1.2 / SPARQL 1.2 is exactly
+/// `ltr` or `rtl`, lowercase (oxrdf's `BaseDirection` enum, whose `Display` emits those two
+/// strings — the only suffixes `lang_with_dir` ever writes). A trusted store therefore only
+/// ever holds `lang--ltr` / `lang--rtl`. But a STORED slot can come from an untrusted/mmap'd
+/// index, where the suffix after `--` is attacker-controlled; treating *any* suffix as a
+/// direction would (a) emit an arbitrary `its:dir` value and (b) diverge from the
+/// materialised `oxrdf::Term` path. So a suffix that is not exactly `ltr`/`rtl` is NOT a
+/// direction: the whole slot is returned as the language tag and no direction is reported —
+/// the same decision the materialised `reconstruct_ref` path makes (both call
+/// [`parse_lang_dir_suffix`]), so the fast path and the materialised path AGREE.
 #[inline]
 pub fn split_lang_dir(slot: &str) -> (&str, Option<&str>) {
     match slot.split_once("--") {
-        Some((tag, dir)) => (tag, Some(dir)),
-        None => (slot, None),
+        Some((tag, dir)) if parse_lang_dir_suffix(dir).is_some() => (tag, Some(dir)),
+        // No `--`, or a `--suffix` that is not a valid base direction: the entire slot is the
+        // language tag and there is no direction. Keeping the full slot intact (rather than
+        // dropping the bogus suffix) matches `reconstruct_ref`'s plain-language-tag fallback.
+        _ => (slot, None),
+    }
+}
+
+/// [OPUS-4.8] sq-bj7o: the single source of truth for "is this `lang--<suffix>` suffix a
+/// valid RDF 1.2 base direction?". The two possible directions are `ltr` / `rtl`, lowercase
+/// and case-sensitive (matching oxrdf `BaseDirection::Display` and the W3C RDF 1.2 / SPARQL
+/// 1.2 grammar — `LTR` / `Ltr` are NOT directions). Returns the typed enum so the
+/// materialised path ([`reconstruct_ref`]) and the validating split ([`split_lang_dir`]) can
+/// share exactly one definition and never drift apart.
+#[inline]
+fn parse_lang_dir_suffix(suffix: &str) -> Option<oxrdf::BaseDirection> {
+    match suffix {
+        "ltr" => Some(oxrdf::BaseDirection::Ltr),
+        "rtl" => Some(oxrdf::BaseDirection::Rtl),
+        _ => None,
     }
 }
 
@@ -537,12 +563,18 @@ fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
         }
         StoredRef::Lit { value, datatype, lang } => Term::Literal(match lang {
             // A stored `lang--dir` slot is an RDF 1.2 directional language-tagged string
-            // (see `lang_with_dir`); a plain tag is an ordinary one.
-            Some(l) => match l.split_once("--") {
+            // (see `lang_with_dir`); a plain tag is an ordinary one. [OPUS-4.8] sq-bj7o: the
+            // suffix is only a base direction when it is exactly `ltr`/`rtl`
+            // (`parse_lang_dir_suffix`) — the SAME validation `split_lang_dir` (the JSON fast
+            // path) applies, so a malformed slot like `en--bogus` from an untrusted/mmap'd
+            // index decodes to a PLAIN language-tagged literal with tag `en--bogus` here AND
+            // to `("en--bogus", None)` there. Previously any non-`rtl` suffix was silently
+            // coerced to `ltr`, which both fabricated a direction and diverged from the split.
+            Some(l) => match l.split_once("--").and_then(|(tag, dir)| parse_lang_dir_suffix(dir).map(|d| (tag, d))) {
                 Some((tag, dir)) => Literal::new_directional_language_tagged_literal_unchecked(
                     value.to_string(),
                     tag.to_string(),
-                    if dir == "rtl" { oxrdf::BaseDirection::Rtl } else { oxrdf::BaseDirection::Ltr },
+                    dir,
                 ),
                 None => Literal::new_language_tagged_literal_unchecked(value.to_string(), l.to_string()),
             },
@@ -2296,6 +2328,64 @@ mod tests {
         let d = d.into_blob();
         let Term::Triple(t) = d.term(bad_subj) else { panic!("expected a triple term") };
         assert_eq!(t.subject, oxrdf::BlankNode::new_unchecked(OOR_TRIPLE_SUBJECT).into());
+    }
+
+    /// [OPUS-4.8] sq-bj7o — base-direction VALIDATION + cross-path PARITY. The stored
+    /// language slot can come from an untrusted/mmap'd index whose `--<suffix>` is
+    /// attacker-controlled. The split used by the JSON fast path (`split_lang_dir`) and the
+    /// materialised-`Term` path (`reconstruct_ref`, reached via `Dict::term`) must AGREE on
+    /// every slot — and an invalid suffix must NOT fabricate an `its:dir`. This test feeds
+    /// raw slots directly through `intern_lit` (the same entry an mmap record takes) and
+    /// asserts both paths agree.
+    #[test]
+    fn lang_dir_suffix_validated_and_paths_agree() {
+        // A valid base direction must be lowercase `ltr`/`rtl` (case-sensitive, per
+        // BaseDirection::Display / RDF 1.2). A trusted store only ever writes those two; the
+        // others model a tampered/untrusted slot.
+        // (slot, expected (tag, dir) from split_lang_dir)
+        let cases: &[(&str, (&str, Option<&str>))] = &[
+            // Valid directions: split out, direction reported.
+            ("en--ltr", ("en", Some("ltr"))),
+            ("ar--rtl", ("ar", Some("rtl"))),
+            // Plain language tag: no `--`, no direction.
+            ("en", ("en", None)),
+            // Malformed / hostile suffixes: NOT a direction → whole slot is the tag, no dir.
+            ("en--bogus", ("en--bogus", None)),
+            ("en--LTR", ("en--LTR", None)), // case-sensitive: uppercase is NOT a direction
+            ("en--", ("en--", None)),       // empty suffix
+            ("en--ltr--rtl", ("en--ltr--rtl", None)), // suffix `ltr--rtl` is not a direction
+        ];
+
+        for &(slot, (want_tag, want_dir)) in cases {
+            // (1) The fast-path split validates the suffix.
+            assert_eq!(
+                split_lang_dir(slot),
+                (want_tag, want_dir),
+                "split_lang_dir disagreed for slot {slot:?}"
+            );
+
+            // (2) Round-trip the SAME raw slot through the dictionary and materialise it
+            //     (the `oxrdf::Term` path). Both the in-arena and compacted-blob records must
+            //     agree with the split.
+            let mut d = Dict::new();
+            let id = d.intern_lit("v", xsd::STRING.as_str(), Some(slot));
+            for d in [d.clone(), d.clone().into_blob()] {
+                // The stored slot is preserved verbatim (the fast path reads exactly this).
+                let TermParts::Lit { lang: Some(stored), .. } = d.term_parts(id) else {
+                    panic!("expected a lang literal for slot {slot:?}");
+                };
+                assert_eq!(stored, slot, "stored slot mutated for {slot:?}");
+
+                // The materialised Term: direction() and language() MUST match the split.
+                let Term::Literal(l) = d.term(id) else { panic!("expected a literal for {slot:?}") };
+                let mat_dir = l.direction().map(|x| match x {
+                    oxrdf::BaseDirection::Ltr => "ltr",
+                    oxrdf::BaseDirection::Rtl => "rtl",
+                });
+                assert_eq!(mat_dir, want_dir, "materialised direction != split for {slot:?}");
+                assert_eq!(l.language(), Some(want_tag), "materialised lang != split tag for {slot:?}");
+            }
+        }
     }
 
     #[test]
