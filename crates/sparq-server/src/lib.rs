@@ -1,25 +1,4 @@
-//! sparq-server: a W3C-conformant HTTP server over the sparq query engine.
-//!
-//! Implements two W3C specs against an in-memory [`sparq_core::Graph`]:
-//!
-//! * **SPARQL 1.1 Protocol** (<https://www.w3.org/TR/sparql11-protocol/>) — the `query`
-//!   operation over `GET`/`POST` at `/sparql`, with content negotiation to SPARQL Results
-//!   JSON / XML / CSV / TSV (and boolean JSON/XML for `ASK`), and the `update` operation
-//!   (`POST` with `application/sparql-update`), applied through sparq-serve's single
-//!   sequenced group-commit writer over the lock-free generation ring (Wave A wiring —
-//!   see `http::AppState` and the README's "Update concurrency model").
-//! * **SPARQL 1.1 Graph Store HTTP Protocol** (<https://www.w3.org/TR/sparql11-http-rdf-update/>)
-//!   — `GET`/`HEAD` (read) and `PUT`/`POST`/`DELETE` (write) on a graph resource (direct
-//!   `/graphs/...` and indirect `?graph=<uri>` / `?default`). [OPUS-4.8] (sq-gxsj) the write
-//!   verbs translate into a server-minted SPARQL Update through the same sequenced writer.
-//!   Reads serialise in the negotiated RDF syntax — N-Triples / prefix-compacting Turtle /
-//!   RDF/XML — and writes accept those same body types (sq-rt6v).
-//!
-//! The pure pieces — result serialisers ([`results`]), the RDF graph serialisers/parser
-//! ([`graph`]), query classification ([`exec`]) and content negotiation ([`negotiate`]) —
-//! are always compiled and unit-tested. The async
-//! HTTP surface ([`http`]) is behind the default-on `server` feature so the wasm build (and
-//! any consumer that only wants the serialisers) never pulls axum/tokio.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod exec;
