@@ -116,7 +116,7 @@ jobs:
     permissions:
       contents: write # create the release + upload assets — the only write this pipeline needs
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: pkg-*
           path: assets
