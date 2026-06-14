@@ -1,0 +1,11 @@
+# [OPUS-4.8] WatDiv Basic-Testing S7 (Star). Placeholder %v3% (wsdbm:User)
+# instantiated to wsdbm:User6 (the lowest-id user whose likes/sorg:text star is
+# non-empty at SF=1; yields a stable result).
+PREFIX sorg:  <http://schema.org/>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+PREFIX rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?v0 ?v1 ?v2 WHERE {
+  ?v0 rdf:type ?v1 .
+  ?v0 sorg:text ?v2 .
+  wsdbm:User6 wsdbm:likes ?v0 .
+}

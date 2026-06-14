@@ -1,0 +1,9 @@
+# [OPUS-4.8] WatDiv Basic-Testing L1 (Linear). Placeholder %v1% (wsdbm:Website)
+# instantiated to wsdbm:Website0 (exists at SF=1; yields a small stable result).
+PREFIX sorg:  <http://schema.org/>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+SELECT ?v0 ?v2 ?v3 WHERE {
+  ?v0 wsdbm:subscribes wsdbm:Website0 .
+  ?v2 sorg:caption ?v3 .
+  ?v0 wsdbm:likes ?v2 .
+}

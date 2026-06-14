@@ -1,0 +1,10 @@
+# [OPUS-4.8] WatDiv Basic-Testing L5 (Linear). Placeholder %v2% (wsdbm:City)
+# instantiated to wsdbm:City1 (exists at SF=1; yields a stable result).
+PREFIX gn:    <http://www.geonames.org/ontology#>
+PREFIX sorg:  <http://schema.org/>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+SELECT ?v0 ?v1 ?v3 WHERE {
+  ?v0 sorg:jobTitle ?v1 .
+  wsdbm:City1 gn:parentCountry ?v3 .
+  ?v0 sorg:nationality ?v3 .
+}

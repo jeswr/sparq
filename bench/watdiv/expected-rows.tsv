@@ -1,0 +1,27 @@
+# [OPUS-4.8] WatDiv per-commit expected result sizes (count mode = solution count).
+# Differential check: at the FIXED SF=1 corpus (bench/watdiv/gen.sh 1, ~106k distinct
+# triples after dedup; deterministic byte-identical output via the seed-pinned generator
+# + vendored wordlist), each instantiated query's solution count is deterministic, so a
+# row-count drift = a correctness regression. Format: <query>\t<rows>.
+# Counts are independent of the wordlist CONTENT (they bind to typed/structural entities,
+# not literal text — verified by regenerating with an alternate wordlist).
+# Heavy-tier queries (F1/F4/C1/C2) are EMPTY at SF=1 (need scale) and live in
+# queries-heavy/ — they are checked at the EC2/nightly SF>=10 tier, not here.
+#
+# Grouping: Linear L1-L5, Star S1-S7, Snowflake F2/F3/F5, Complex C3.
+C3	8763
+F2	1
+F3	3
+F5	34
+L1	4
+L2	3
+L3	41
+L4	2
+L5	1
+S1	6
+S2	4
+S3	6
+S4	4
+S5	8
+S6	1
+S7	2

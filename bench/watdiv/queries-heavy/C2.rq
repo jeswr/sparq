@@ -1,0 +1,23 @@
+# [OPUS-4.8] WatDiv Basic-Testing C2 (Complex) — EC2/nightly tier (SF>=10).
+# Verbatim canonical template (embedded constant wsdbm:Country5 kept).
+# EMPTY at the per-commit SF=1 scale: a 10-pattern complex query joining a retailer's
+# offer (region-restricted) -> included product -> reviewed, AND a separate purchaser
+# (jobTitle+homepage) whose purchase is FOR that same product. This whole chain does not
+# connect in ~100k triples. Populates at scale; run at SF=1000 on the EC2/nightly tier.
+PREFIX foaf:  <http://xmlns.com/foaf/>
+PREFIX gr:    <http://purl.org/goodrelations/>
+PREFIX rev:   <http://purl.org/stuff/rev#>
+PREFIX sorg:  <http://schema.org/>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+SELECT ?v0 ?v3 ?v4 ?v8 WHERE {
+  ?v0 sorg:legalName ?v1 .
+  ?v0 gr:offers ?v2 .
+  ?v2 sorg:eligibleRegion wsdbm:Country5 .
+  ?v2 gr:includes ?v3 .
+  ?v4 sorg:jobTitle ?v5 .
+  ?v4 foaf:homepage ?v6 .
+  ?v4 wsdbm:makesPurchase ?v7 .
+  ?v7 wsdbm:purchaseFor ?v3 .
+  ?v3 rev:hasReview ?v8 .
+  ?v8 rev:totalVotes ?v9 .
+}

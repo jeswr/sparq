@@ -1,0 +1,13 @@
+# [OPUS-4.8] WatDiv Basic-Testing F3 (Snowflake). Placeholder %v3% (wsdbm:SubGenre)
+# instantiated to wsdbm:SubGenre46 (lowest-id SubGenre with a non-empty F3 snowflake at
+# SF=1; yields a stable result).
+PREFIX sorg:  <http://schema.org/>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+SELECT ?v0 ?v1 ?v2 ?v4 ?v5 ?v6 WHERE {
+  ?v0 sorg:contentRating ?v1 .
+  ?v0 sorg:contentSize ?v2 .
+  ?v0 wsdbm:hasGenre wsdbm:SubGenre46 .
+  ?v4 wsdbm:makesPurchase ?v5 .
+  ?v5 wsdbm:purchaseDate ?v6 .
+  ?v5 wsdbm:purchaseFor ?v0 .
+}

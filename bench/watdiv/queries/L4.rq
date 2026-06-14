@@ -1,0 +1,9 @@
+# [OPUS-4.8] WatDiv Basic-Testing L4 (Linear). Placeholder %v1% (wsdbm:Topic)
+# instantiated to wsdbm:Topic1 (exists at SF=1; yields a small stable result).
+PREFIX og:    <http://ogp.me/ns#>
+PREFIX sorg:  <http://schema.org/>
+PREFIX wsdbm: <http://db.uwaterloo.ca/~galuc/wsdbm/>
+SELECT ?v0 ?v2 WHERE {
+  ?v0 og:tag wsdbm:Topic1 .
+  ?v0 sorg:caption ?v2 .
+}
