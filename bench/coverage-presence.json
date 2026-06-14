@@ -1,0 +1,110 @@
+{
+  "_comment": [
+    "[OPUS-4.8] TEST-PRESENCE gate (sq-hbg7). Per-crate FLOOR on the number of #[test]/#[tokio::test]/#[rstest] functions + whether the crate keeps its tests/ integration dir. Catches a whole crate losing its tests \u2014 which the line-% ratchet (bench/coverage-floor.json) can miss (esp. the subprocess-driven sparq-cli). Counts are FLOORS (>=); adding tests is always fine.",
+    "Counted from source (no compile) by scripts/coverage-presence.py, run every commit by the .github/workflows/ci.yml coverage job. The floor only RISES (--seed will not lower without --allow-lower). Regenerate after adding tests: scripts/coverage-presence.py --seed."
+  ],
+  "crates": {
+    "sparq-bench": {
+      "had_integration_dir": false,
+      "min_tests": 0,
+      "note": "perf-harness crate (benchmarks, not #[test]s)"
+    },
+    "sparq-cli": {
+      "had_integration_dir": true,
+      "min_tests": 2
+    },
+    "sparq-conformance": {
+      "had_integration_dir": true,
+      "min_tests": 10
+    },
+    "sparq-core": {
+      "had_integration_dir": true,
+      "min_tests": 67
+    },
+    "sparq-engine": {
+      "had_integration_dir": true,
+      "min_tests": 238
+    },
+    "sparq-geo": {
+      "had_integration_dir": true,
+      "min_tests": 85
+    },
+    "sparq-gpu": {
+      "had_integration_dir": true,
+      "min_tests": 4
+    },
+    "sparq-hdt": {
+      "had_integration_dir": true,
+      "min_tests": 14
+    },
+    "sparq-introspect": {
+      "had_integration_dir": true,
+      "min_tests": 15
+    },
+    "sparq-mpc": {
+      "had_integration_dir": false,
+      "min_tests": 61
+    },
+    "sparq-nlq": {
+      "had_integration_dir": true,
+      "min_tests": 9
+    },
+    "sparq-parse": {
+      "had_integration_dir": false,
+      "min_tests": 13
+    },
+    "sparq-py": {
+      "had_integration_dir": true,
+      "min_tests": 0,
+      "note": "pyo3 bindings; tested via pytest, not Rust #[test] (see crates/sparq-py/tests)"
+    },
+    "sparq-reason": {
+      "had_integration_dir": true,
+      "min_tests": 127
+    },
+    "sparq-rsp": {
+      "had_integration_dir": true,
+      "min_tests": 44
+    },
+    "sparq-serve": {
+      "had_integration_dir": true,
+      "min_tests": 54
+    },
+    "sparq-server": {
+      "had_integration_dir": true,
+      "min_tests": 107
+    },
+    "sparq-shacl": {
+      "had_integration_dir": true,
+      "min_tests": 103
+    },
+    "sparq-sim": {
+      "had_integration_dir": true,
+      "min_tests": 14
+    },
+    "sparq-solid": {
+      "had_integration_dir": true,
+      "min_tests": 15
+    },
+    "sparq-text": {
+      "had_integration_dir": true,
+      "min_tests": 37
+    },
+    "sparq-vectors": {
+      "had_integration_dir": true,
+      "min_tests": 55
+    },
+    "sparq-wasm": {
+      "had_integration_dir": false,
+      "min_tests": 14
+    },
+    "sparq-zk": {
+      "had_integration_dir": true,
+      "min_tests": 79
+    },
+    "sparq-zk-compose": {
+      "had_integration_dir": true,
+      "min_tests": 147
+    }
+  }
+}
