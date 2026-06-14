@@ -82,7 +82,7 @@ fn concurrent_readers_pin_across_many_publishes_without_torn_reads() {
                     loads += 1;
                     // Pin some generations across many future publishes; stagger
                     // per reader so pins span different windows.
-                    if loads % (1_000 + 137 * r as u64) == 0 {
+                    if loads.is_multiple_of(1_000 + 137 * r as u64) {
                         held.push(gen);
                         if held.len() > 8 {
                             // Long-held pins must still be intact before release.

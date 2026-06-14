@@ -338,7 +338,9 @@ impl<T: Clone> WindowedStream<T> {
         if self.ring.len() > rows {
             self.ring.pop_front();
         }
-        if self.arrivals % slide as u64 == 0 {
+        // [OPUS-4.8] (sq-qmth) stable-1.96 clippy `manual_is_multiple_of` (is_multiple_of
+        // stable since 1.87, within the 1.88 MSRV floor).
+        if self.arrivals.is_multiple_of(slide as u64) {
             // Reported on arrival, so the ring is never empty here.
             let start = self.ring.front().expect("non-empty ring").ts;
             let end = self.ring.back().expect("non-empty ring").ts;
