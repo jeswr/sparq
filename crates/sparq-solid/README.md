@@ -305,4 +305,3 @@ for any custom authorization storage.
   pending follow-ups: a *precise* per-solution check for variable `GRAPH ?var` template
   slots (today: deny unless the actor can write every graph) and `acl:Append`-only
   insert-into-absent-graph nuances. <!-- [OPUS-4.8] sq-xor3 -->
-

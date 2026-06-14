@@ -279,7 +279,6 @@ point). Fixed in `crates/sparq-engine` (commits on `conformance-round2`):
    *SUM with GROUP BY* expects `"3.21E4"^^xsd:double` (canonical scientific)
    for the same construct; the engine follows the canonical convention.
 
-
 First full run of `sparq-conformance` against w3c/rdf-tests @ `f25dbc092c654d792974848e81bb519d7328f0e8`
 (sparq @ `d555096`). Headline: **344 pass / 110 fail / 148 skip over 602 evaluation
 tests — 75.8% of executed tests pass** (data-r2 query 85.3%, data-sparql11 query 62.4%,
@@ -344,7 +343,7 @@ The engine computes arithmetic/aggregates in f64 and stamps the result `xsd:doub
 ### F5. Expression type errors not propagated — ~6 tests
 SPARQL type errors must make the expression error (binding left unbound / row
 filtered), not produce a value:
-- *IF() error propogation*: expected `{}` (unbound), got `?error="false"^^xsd:boolean`.
+- *IF() error propagation*: expected `{}` (unbound), got `?error="false"^^xsd:boolean`.
 - *Error in AVG* / *Protect from error in AVG*: AVG over a group containing a
   non-numeric must error → group row with unbound aggregate.
 - Integer division by zero must be an error, not NaN (see COALESCE above).

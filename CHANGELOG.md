@@ -190,7 +190,6 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
   unchanged (no extra maintenance state). Design lever if that ever matters: build the
   indexes lazily on first `why()`.
 
-
 - **Opt-in full-text search over literals (`sparq-text`, new crate)** — a small,
   owned BM25 inverted index over a graph's string literals (UAX #29 tokenizer +
   Unicode lowercasing via `unicode-segmentation`; deliberately no tantivy) where
@@ -387,7 +386,6 @@ publish set). The API is unstable; SERVICE federation remains unimplemented — 
   Inference conformance unchanged (1637 pass / 0 fail / 17 documented divergences);
   wasm artifact size unchanged; refreshed EYE head-to-head in
   `bench/inference/eye-comparison.md`.
-
 
 - **`sparq-geo` depends on geo 0.33** (was 0.30; clean API compatibility): brings
   the `Buffer` trait that makes `geof:buffer` implementable.

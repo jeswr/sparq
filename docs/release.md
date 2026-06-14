@@ -72,7 +72,7 @@ in sync until they're unified. (The retired `macos-13` runner label has been rep
 **16 crates publish.** The publish order follows the dependency DAG, leaf-first (a crate's
 deps must exist on crates.io before it can be verified):
 
-```
+```text
 sparq-core                      # no internal deps — first
   ├── sparq-introspect          # core only                ┐
   ├── sparq-reason              # core only                │ order among these

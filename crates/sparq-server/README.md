@@ -16,7 +16,8 @@ Implements the **read** side of two W3C specifications over an in-memory
   share its atomicity and the **no-auth posture below** — a GSP write is as powerful as an
   UPDATE). Implemented in bead `sq-gxsj`. <!-- [OPUS-4.8] -->
 
-## Security posture (no built-in auth) — read before exposing it <!-- [OPUS-4.8] sq-o4qf / sq-2v6f -->
+<!-- [OPUS-4.8] sq-o4qf / sq-2v6f -->
+## Security posture (no built-in auth) — read before exposing it
 
 **`sparq-server` has NO authentication on any endpoint.** This is by design: the engine is
 not an auth boundary — authorization belongs to a layer in front of it (a reverse proxy /

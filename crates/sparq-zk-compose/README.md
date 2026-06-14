@@ -11,7 +11,7 @@ full query-result proof and verifies one.
 
 ## Architecture
 
-```
+```text
 sparq-zk (stage 1)                 sparq-zk-compose (stage 2, this crate)
 ─────────────────────              ──────────────────────────────────────
 canonicalize + commit  ──leaves──▶ build::build_scan      ──┐
