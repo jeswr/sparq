@@ -1,0 +1,104 @@
+# ci-summary — the SINGLE required status check for branch protection on `main`
+# (bead sq-prg4). [OPUS-4.8]
+#
+# WHY: sparq's gates live across many workflows + jobs (ci.yml's build/test/clippy/
+# conformance/SHACL/inference/coverage/wasm/MSRV, supply-chain.yml, python.yml,
+# js.yml, codeql.yml, scorecard.yml, …). Requiring each by name in the branch-
+# protection ruleset is brittle: every job rename or added gate breaks the rule and
+# silently weakens the gate. `needs:` cannot span workflows, so we cannot aggregate
+# with a normal dependency edge. Instead this workflow contributes ONE check —
+# `ci-summary / gate` — that the ruleset requires; it POLLS every OTHER check-run on
+# the head commit and passes iff none failed. Add/rename jobs freely; the gate adapts.
+# (Pattern ported from jeswr/prod-solid-server's pr-gate.yml, incl. its stability-
+# window race fix.)
+#
+# SEMANTICS: success / skipped / neutral are non-failing; failure / cancelled /
+# timed_out / action_required / stale fail the gate. The gate EXCLUDES ITSELF (no
+# self-deadlock). It waits until the discovered set of sibling check names has
+# stabilised AND every one of them is terminal, bounded by the job timeout. A
+# stable-empty set passes (e.g. a docs-only change that triggers no other workflow).
+name: ci-summary
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only: the gate only READS check-runs + commit statuses for the head commit.
+permissions:
+  checks: read
+  statuses: read
+  contents: read
+
+# One in-flight gate per PR (or per branch on push). Cancel a superseded run so a
+# new push doesn't leave a stale, slowly-timing-out gate behind.
+concurrency:
+  group: ci-summary-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    # > the slowest sibling gate (coverage / conformance are the long poles, well
+    # under ~20 min on a warm cache) with generous headroom; the poll loop below
+    # caps itself under this wall-clock so it emits a clear timeout error first.
+    timeout-minutes: 45
+    steps:
+      - name: Wait for all other checks, then aggregate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # On pull_request the head commit is the PR head; on push it's github.sha.
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # STABILITY WINDOW (handles the startup race + late-registering workflows):
+          # a fixed settle can't eliminate the race — a sibling check-run can register
+          # late, after we've read a partial set. So we require the DISCOVERED SET OF
+          # CHECK NAMES to stay unchanged across STABLE_POLLS consecutive polls before
+          # we trust it. Any new check-run appearing resets the counter, so a slow-to-
+          # register workflow is always folded in. Only once the set is stable AND
+          # nothing is pending do we render a verdict; a stable-empty set passes.
+          STABLE_POLLS=4          # set must hold for 4 × 20s = 80s of quiet
+          INTERVAL=20
+          prev_names=""
+          stable=0
+          for attempt in $(seq 1 110); do   # 110 × 20s ≈ 37 min, under the job timeout
+            # Exclude THIS gate's own check-run from the aggregate. The Checks API
+            # returns the bare job name ("gate"); we also exclude the
+            # "ci-summary / gate" workflow/job form so a future API/naming change can't
+            # make the gate count itself into `pending` and self-deadlock.
+            runs=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
+              --jq '.check_runs[] | select(.name != "gate" and .name != "ci-summary / gate") | {name, status, conclusion}')
+            names=$(printf '%s\n' "$runs" | jq -rs '[.[].name] | unique | join(",")')
+            pending=$(printf '%s\n' "$runs" | jq -rs '[.[] | select(.status != "completed")] | length')
+            total=$(printf '%s\n' "$runs" | jq -rs 'length')
+            if [ "$names" = "$prev_names" ]; then stable=$((stable + 1)); else stable=1; prev_names="$names"; fi
+            echo "attempt $attempt: $total check-run(s), $pending running, set stable for $stable/$STABLE_POLLS poll(s)"
+            if [ "$stable" -ge "$STABLE_POLLS" ] && [ "$pending" -eq 0 ]; then
+              # Set has settled and everything is terminal — render the verdict.
+              if [ "$total" -eq 0 ]; then
+                echo "ci-summary: no sibling checks to aggregate (stable empty set) — passing." \
+                  | tee -a "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              failed=$(printf '%s\n' "$runs" | jq -rs '[.[]
+                | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")]')
+              n=$(printf '%s' "$failed" | jq 'length')
+              if [ "$n" -gt 0 ]; then
+                {
+                  echo "### ci-summary: FAILED — $n non-passing check(s) of $total"
+                  printf '%s' "$failed" | jq -r '.[] | "- ✗ \(.name): \(.conclusion // "incomplete")"'
+                } | tee -a "$GITHUB_STEP_SUMMARY"
+                echo "::error::ci-summary failed — see the non-passing checks above."
+                exit 1
+              fi
+              echo "### ci-summary: PASSED — all $total sibling checks green (or skipped/neutral), set stable." \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep "$INTERVAL"
+          done
+          echo "::error::ci-summary timed out waiting for the sibling check-run set to stabilise and complete."
+          exit 1

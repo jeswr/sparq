@@ -1,0 +1,77 @@
+# CodeQL SAST — static security/quality analysis for the Rust workspace.
+# Resolves the OpenSSF Scorecard `SAST` alert and is the security-quality SAST gate
+# (the `analyze` job feeds the ci-summary aggregator; CodeQL findings also land in the
+# code-scanning dashboard and the Copilot/CodeQL PR review). [OPUS-4.8]
+#
+# Rust CodeQL is GA, so we analyse the `rust` language. We use CodeQL's buildless
+# extraction (`build-mode: none`): the Rust extractor reads the Cargo workspace +
+# sources directly, so no `cargo build` step is needed and the analysis is not gated on
+# the whole workspace compiling under instrumentation (which would duplicate ci.yml's
+# build job and be slow). If a future CodeQL release needs a trace-based build for a
+# query pack we rely on, switch this matrix entry to `build-mode: manual` + a
+# `cargo build --workspace` step (see the CodeQL Rust docs).
+#
+# Third-party actions pinned by full commit SHA (supply-chain hardening); the trailing
+# `# vX.Y.Z` comment is what Dependabot follows to bump the pin.
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Weekly cadence so the latest CodeQL query packs are re-run against an otherwise
+  # quiet default branch (catches newly-published queries on unchanged code).
+  schedule:
+    - cron: "41 4 * * 1" # Mondays 04:41 UTC (off-peak, odd minute)
+
+# Top-level read-only; the analysis job opts into exactly what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL analysis (rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      # Upload the SARIF results to the code-scanning dashboard.
+      security-events: write
+      # Read the workspace.
+      contents: read
+      # Needed by CodeQL on private repos / for some workflow events.
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # Initialise the CodeQL tooling + database for the matrix language.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-and-quality runs the security queries plus the maintainability/
+          # reliability quality queries — the SAST gate Scorecard's `SAST` check wants.
+          queries: security-and-quality
+
+      # Buildless extraction (build-mode: none) above means no explicit build step is
+      # required for Rust. If a build mode that traces compilation is adopted later,
+      # add the `cargo build --workspace` here.
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3.36.2
+        with:
+          category: "/language:${{ matrix.language }}"
