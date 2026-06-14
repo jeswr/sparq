@@ -1,18 +1,4 @@
-//! sparq-engine: a SPARQL query engine over [`sparq_core::Graph`].
-//!
-//! Supported (M2): SELECT with Basic Graph Patterns evaluated by greedy
-//! cardinality-ordered sort-merge / hash joins over the permutation indexes;
-//! FILTER (a useful expression subset with XSD-numeric-aware comparisons);
-//! OPTIONAL, UNION, MINUS, BIND, VALUES; aggregation (COUNT/SUM/AVG/MIN/MAX/
-//! GROUP_CONCAT) with GROUP BY and HAVING (as a post-group FILTER); ORDER BY;
-//! DISTINCT/REDUCED/LIMIT/OFFSET; projection and sub-SELECT. SPARQL is parsed
-//! to algebra by `spargebra`. Values computed at query time (BIND, aggregates)
-//! are interned in a per-query local vocabulary. ASK runs natively; CONSTRUCT
-//! and DESCRIBE (T16) return RDF graphs — see [`construct`] / [`describe`].
-//! A query carrying a dataset clause (FROM / FROM NAMED) is evaluated against
-//! the ACTIVE dataset assembled from the store's named graphs (see `dataset`).
-//! Later milestones add worst-case-optimal joins, a DP planner and property
-//! paths.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod construct;
