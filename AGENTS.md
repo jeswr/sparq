@@ -78,7 +78,7 @@ Each sub-agent brief must: work in its own worktree, NOT push/merge (the orchest
 
 ## Post-batch re-evaluation checklist — what to re-run after a change
 
-After a batch of changes, re-run only the evaluations whose inputs changed (and always the base gate: full-workspace `clippy -D warnings` + `cargo test` for touched crates). Map change → evaluation:
+After a batch of changes, re-run only the evaluations whose inputs changed — on top of the base gate, which is always required. The base gate is full-workspace `clippy -D warnings` **plus full-workspace `cargo test`**: a sub-agent may scope its in-worktree test run to the affected crates for speed, but the orchestrator's authoritative pre-merge gate runs `cargo test` across the **whole workspace** (feature-unification and cross-crate regressions only surface workspace-wide). Map change → evaluation:
 
 | If the change touches… | Re-run |
 |---|---|
@@ -121,6 +121,30 @@ Do NOT wait to be told. Whenever you notice a **repeated behaviour, a standing r
 When orchestrating, run agents and long shell commands (builds, gates, fetches, watches) **in the background** by default, and parallelise independent work. A foreground/blocking call stalls the loop and prevents picking up new instructions or other ready beads meanwhile. Reserve foreground for genuinely sequential, short glue. (Continues the delegation + continuous-loop rules above.)
 
 **Reconcile finished-but-unnotified agents.** Completion notifications can occasionally not surface. Don't wait indefinitely on a background agent: if it's gone quiet, check the real state — `git worktree list`, the branch's last commit (`git log -1 <branch>`), and whether any of its processes are still alive (`pgrep -af cargo`). A committed branch + no live process = done; verify with your own gate and merge. (Trust ground truth over the notification stream.)
+
+## Contribution workflow — PRs, reviews resolved, the `ci-summary` gate
+
+Changes land on `main` via **pull requests**, not direct pushes (direct push is reserved for the rare hotfix the team agrees on). For every PR:
+
+1. Branch → open a PR (`gh pr create`). Request review, **including GitHub Copilot** code review.
+2. **Address and RESOLVE every review comment** before merge — especially Copilot's. "Resolve" means: make the change or reply with the reason it's declined, and mark the conversation resolved. An unresolved thread blocks merge.
+3. CI must be green: a single **`ci-summary`** check aggregates every other workflow's result and passes ONLY when they all pass. It is the one required status check for branch protection.
+4. Merge only when: `ci-summary` is green AND all review threads are resolved. Then squash/merge and delete the branch.
+
+Branch protection (owner-set, out-of-repo) enforces this: require `ci-summary`, require conversation resolution, require the Copilot/CodeQL review. The repo documents the required set in `docs/branch-protection.md`.
+
+**Security & quality gating:** new security/quality regressions must not merge. CodeQL (SAST) + `cargo clippy -D warnings` + `cargo-deny` + the coverage/conformance ratchets all feed `ci-summary`. Keep the GitHub **code-scanning** alert count at zero — SHA-pin every action (`uses: owner/action@<full-sha> # vX.Y.Z`), and resolve/triage Scorecard + CodeQL alerts as they appear.
+
+## Automated review — roborev on every commit, including in worktrees
+
+Every commit is auto-reviewed by **roborev**: a `.git/hooks/post-commit` hook enqueues a review job to the local roborev daemon. The reviewer agent is **codex — a deliberately non-Anthropic model**, so the engine is never reviewed by the same model family that wrote it. Git worktrees share the main repo's `.git/hooks`, so commits made by worktree sub-agents are reviewed too. Verify the loop is live with `roborev list` (recent jobs, all `done`) and `~/.roborev/post-commit.log` (the per-repo enqueue trail, incl. `sparq-wt-*` worktrees).
+
+Findings must be **addressed, not merely gathered.** A finding is resolved in exactly one of two ways — **never** by merging the branch:
+
+1. **the flagged code changed** — the lines the reviewer objected to were rewritten or removed, so the finding no longer describes anything that exists on `main` (verify against current HEAD, *not* the WIP SHA the review was filed on); or
+2. **explicit triage** — it is fixed, beaded as real-but-deferred work (`bd create`), or closed with a written reason (`roborev close <id>`) when it's a false positive.
+
+Squashing a branch into `main` does **not** address its findings: if the flagged code survived the squash it is still live — just orphaned onto a SHA that no longer appears in `git log`, which is *worse* than an open finding on a current commit because it's invisible. So before merging a branch, reconcile its roborev findings against current `main` HEAD and dispose of each (fix / bead / close-with-reason). Periodically run `roborev list --open` and drain the backlog; don't let unaddressed findings accumulate.
 
 ## Monitor CI after every push to main — and fix red
 
