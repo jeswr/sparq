@@ -28,6 +28,20 @@
   </header>
 
   <main class="wrap">
+    <!-- [OPUS-4.8] sq-xvow: featured well-known suites at the TOP. dashboard.js fills #featured
+         with one table per recognised public suite (LUBM / WatDiv / SP2Bench / Deep Taxonomy /
+         BSBM / DBPSB). The "sparq" column is the latest-commit value; the COMPETITOR COLUMNS are a
+         seam for sq-t0c3 (bench/competitors.json -> window.COMPETITORS) and render "—" until it
+         lands. This is a promotion of existing labelled metrics — it does not change sq-ocuf's
+         labels or grouping below. -->
+    <section class="card" id="featured-card">
+      <h2>Featured suites</h2>
+      <p class="hint">Recognised public benchmark suites, latest commit. The <strong>sparq</strong>
+         column is this run; competitor columns are populated by the competitor harness
+         (<code>bench/competitors.json</code>) and show <code>—</code> until gathered.</p>
+      <div id="featured">loading…</div>
+    </section>
+
     <section class="card" id="summary-card">
       <h2>Latest commit</h2>
       <div id="summary">loading…</div>

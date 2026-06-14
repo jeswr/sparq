@@ -172,13 +172,105 @@
     return pts;
   }
 
+  // ---- featured well-known suites (sq-xvow) --------------------------------
+  // [OPUS-4.8] sq-xvow (design sq-i0nm §B): surface the RECOGNISED public benchmark suites
+  // (LUBM / WatDiv / SP2Bench / Deep Taxonomy / BSBM / DBPSB) front-and-centre ABOVE the
+  // per-metric trends, so a reader lands on the suites they already know. This is purely a
+  // PROMOTION/regrouping of metrics that already flow through suiteFor()/labelFor() (sq-ocuf) —
+  // it does NOT change the labels, the grouping, or the existing summary/trend sections.
+
+  // The suites we feature, in display order. Keys are matched against suiteFor() (which is driven
+  // by metric-labels.json). FEATURED_ALIASES lets a suite be recognised under several spellings
+  // (e.g. Deep Taxonomy isn't in the label map yet — sq-1hgz promotes it — so we also accept the
+  // structural-fallback / naming spellings it WILL carry). title = the card heading.
+  var FEATURED_SUITES = [
+    { key: 'LUBM',          title: 'LUBM',          aliases: ['lubm (reasoning)', 'lubm'] },
+    { key: 'WatDiv',        title: 'WatDiv',        aliases: ['watdiv'] },
+    { key: 'SP2Bench',      title: 'SP2Bench',      aliases: ['sp2bench', 'sp2b'] },
+    { key: 'Deep Taxonomy', title: 'Deep Taxonomy', aliases: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy'] },
+    { key: 'BSBM',          title: 'BSBM',          aliases: ['bsbm'] },
+    { key: 'DBPSB',         title: 'DBPSB',         aliases: ['dbpsb', 'dbpedia sparql benchmark'] }
+  ];
+
+  // Which featured suite (if any) a metric belongs to. Consults suiteFor() FIRST (label-map driven,
+  // the source of truth); if that misses, falls back to a token match on the raw metric name so a
+  // not-yet-labelled suite (Deep Taxonomy today) is still recognised. Returns the FEATURED_SUITES
+  // entry or null. Pure + node-testable.
+  function featuredSuiteOf(name) {
+    var suite = (suiteFor(name) || '').toLowerCase();
+    var lowerName = (name || '').toLowerCase();
+    for (var i = 0; i < FEATURED_SUITES.length; i++) {
+      var f = FEATURED_SUITES[i];
+      for (var j = 0; j < f.aliases.length; j++) {
+        var a = f.aliases[j];
+        // label-map suite match (exact, normalised) OR a name-token prefix like `deeptax_…`.
+        if (suite === a) return f;
+        if (lowerName.indexOf(a.replace(/[ -]/g, '')) === 0 ||
+            lowerName.indexOf(a.replace(/[ -]/g, '_')) === 0) return f;
+      }
+    }
+    return null;
+  }
+
+  // Build the featured-suites view from the LATEST commit's benches. One group per recognised
+  // suite (only suites that actually have data appear). Each row carries the readable label, raw
+  // stem, latest value, unit, Δ-vs-best — AND a `competitors` SEAM (see below). Sorted by label.
+  //
+  // COMPETITOR SEAM (for sq-t0c3): every row gets `competitors: {}` and the view carries
+  // `competitorEngines: []`. This dashboard does NOT gather competitor numbers (that's sq-t0c3,
+  // which writes bench/competitors.json). When that file exists, the caller passes it in as the
+  // 2nd arg and we map matching numbers onto each row's `competitors[engine]`; absent/unmatched
+  // cells stay undefined and render as "—"/"n/a". Shape expected from sq-t0c3:
+  //   { engines:[{id,label,version,env}], values:{ "<metric stem or name>": { "<engineId>": <µs> } } }
+  // We match on the raw metric NAME first, then the stem (name minus _us), so the competitor file
+  // can key either way. We never invent numbers — a missing key is simply absent.
+  function buildFeatured(entries, competitors) {
+    var latest = entries[entries.length - 1];
+    var bySuite = {};
+    latest.benches.forEach(function (b) {
+      var f = featuredSuiteOf(b.name);
+      if (!f) return;
+      var best = bestOf(entries, b.name);
+      var row = {
+        name: b.name, label: labelFor(b.name), title: titleFor(b.name),
+        value: b.value, unit: b.unit || '',
+        best: best, delta: deltaVsBest(b.value, best),
+        competitors: competitorsFor(competitors, b.name)
+      };
+      (bySuite[f.key] = bySuite[f.key] || { title: f.title, rows: [] }).rows.push(row);
+    });
+    var groups = [];
+    FEATURED_SUITES.forEach(function (f) {
+      if (bySuite[f.key]) groups.push({ suite: f.key, title: f.title, rows: sortRows(bySuite[f.key].rows) });
+    });
+    return { commit: latest.commit, date: latest.date, groups: groups,
+             competitorEngines: competitorEngines(competitors) };
+  }
+
+  // SEAM helper (sq-t0c3): read the per-engine competitor numbers for one metric, or {} when the
+  // competitor file is absent/has no entry. Tolerant of both `name` and stem keys.
+  function competitorsFor(competitors, name) {
+    if (!competitors || !competitors.values) return {};
+    return competitors.values[name] || competitors.values[name.replace(/_us$/, '')] || {};
+  }
+
+  // SEAM helper (sq-t0c3): the ordered list of competitor engines (id+label+version) to render as
+  // extra columns; [] when the competitor file is absent — the featured table then shows only sparq.
+  function competitorEngines(competitors) {
+    return (competitors && Array.isArray(competitors.engines)) ? competitors.engines : [];
+  }
+
   // Export pure fns for node smoke-test (no effect in the browser).
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = { classify: classify, bestOf: bestOf, deltaVsBest: deltaVsBest,
                        buildSummary: buildSummary, humanize: humanize, fmtNum: fmtNum,
                        trendPoints: trendPoints, GROUP_ORDER: GROUP_ORDER,
                        labelFor: labelFor, suiteFor: suiteFor, titleFor: titleFor,
-                       lookup: lookup };
+                       lookup: lookup,
+                       // sq-xvow (featured well-known suites + competitor seam)
+                       FEATURED_SUITES: FEATURED_SUITES, featuredSuiteOf: featuredSuiteOf,
+                       buildFeatured: buildFeatured, competitorsFor: competitorsFor,
+                       competitorEngines: competitorEngines };
     return;
   }
 
@@ -301,6 +393,67 @@
     });
   }
 
+  // ---- featured well-known suites: DOM (sq-xvow) ---------------------------
+  // Renders the #featured host (a card at the TOP). One table per recognised suite, with the
+  // sparq latest value + Δ-pill, and ONE COLUMN PER competitor engine (the sq-t0c3 seam). When no
+  // competitor file is present, only the sparq column shows. Competitor cells with no number for a
+  // given metric render "—" (na). Reuses pill()/fmtNum()/labelFor tooltips — no new label logic.
+  function renderFeatured(featured) {
+    var host = document.getElementById('featured');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!featured.groups.length) {
+      host.appendChild(el('p', { 'class': 'hint',
+        text: 'No recognised public-suite metrics in the latest commit yet.' }));
+      return;
+    }
+    var engines = featured.competitorEngines; // [] until sq-t0c3 lands
+    featured.groups.forEach(function (g) {
+      var section = el('section', { 'class': 'featured-suite' }, [
+        el('h3', { 'class': 'featured-title', text: g.title })
+      ]);
+      var table = el('table', { 'class': 'summary-table featured-table' });
+      var headCells = [
+        el('th', { text: 'Query' }),
+        el('th', { 'class': 'num', text: 'sparq' }),
+        el('th', { text: 'Unit' }),
+        el('th', { 'class': 'num', text: 'Δ vs best' })
+      ];
+      // Competitor columns (seam): one per engine, header shows id + version when supplied.
+      engines.forEach(function (e) {
+        headCells.push(el('th', { 'class': 'num competitor-col',
+          text: e.label || e.id,
+          title: (e.version ? e.id + ' ' + e.version : e.id) + (e.env ? ' · ' + e.env : '') }));
+      });
+      table.appendChild(el('thead', null, [el('tr', null, headCells)]));
+      var tbody = el('tbody');
+      g.rows.forEach(function (r) {
+        var metricCell = el('td', { 'class': 'metric', title: r.title }, [
+          el('span', { 'class': 'metric-label', text: r.label }),
+          el('code', { 'class': 'metric-stem', text: r.name })
+        ]);
+        var cells = [
+          metricCell,
+          el('td', { 'class': 'num', text: fmtNum(r.value) }),
+          el('td', { 'class': 'unit', text: r.unit }),
+          el('td', { 'class': 'num delta' })
+        ];
+        cells[3].appendChild(pill(r.delta));
+        // Competitor cells (seam): render the number if present, else "—" (n/a).
+        engines.forEach(function (e) {
+          var v = r.competitors && r.competitors[e.id];
+          cells.push(el('td', { 'class': 'num competitor-col' + (v == null ? ' competitor-na' : ''),
+            text: v == null ? '—' : fmtNum(v),
+            title: v == null ? 'no competitor number gathered (sq-t0c3)' : '' }));
+        });
+        tbody.appendChild(el('tr', null, cells));
+      });
+      table.appendChild(tbody);
+      section.appendChild(table);
+      host.appendChild(section);
+    });
+  }
+
   function render() {
     var data = window.BENCHMARK_DATA;
     if (!data || !data.entries || !data.entries[SERIES] || !data.entries[SERIES].length) {
@@ -310,11 +463,17 @@
     }
     var entries = data.entries[SERIES];
     var summary = buildSummary(entries);
+    // sq-t0c3 SEAM: competitor numbers live in window.COMPETITORS (loaded from bench/competitors.json
+    // by sq-t0c3). Absent today -> featured table shows only the sparq column and "—" everywhere a
+    // competitor cell would go. We never gather them here.
+    var competitors = (typeof window !== 'undefined' && window.COMPETITORS) || null;
+    var featured = buildFeatured(entries, competitors);
     document.getElementById('updated').textContent =
       'last updated ' + new Date(data.lastUpdate).toLocaleString() +
       ' · ' + entries.length + ' commits';
     var repo = el('a', { href: data.repoUrl, target: '_blank', text: data.repoUrl.replace(/^https?:\/\//, '') });
     document.getElementById('repo').appendChild(repo);
+    renderFeatured(featured);                 // sq-xvow — TOP
     renderSummary(summary);
     if (typeof Chart !== 'undefined') renderCharts(entries, summary);
   }

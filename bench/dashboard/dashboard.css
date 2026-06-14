@@ -100,4 +100,18 @@ table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem
 }
 .chart-card canvas { height: 140px !important; width: 100% !important; }
 
+/* [OPUS-4.8] sq-xvow: featured well-known suites at the top. One table per suite, with sparq's
+   latest value + optional competitor columns (the sq-t0c3 seam). Reuses .summary-table styling. */
+#featured-card .featured-suite { margin-bottom: 22px; }
+#featured-card .featured-suite:last-child { margin-bottom: 0; }
+.featured-title {
+  margin: 0 0 10px; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--accent); font-weight: 700;
+}
+.featured-table th.competitor-col, .featured-table td.competitor-col { color: var(--muted); }
+/* sparq's own column reads slightly stronger than competitor columns so the engine-under-test is
+   visually anchored. */
+.featured-table thead th:nth-child(2) { color: var(--fg); }
+.featured-table td.competitor-na { color: var(--muted); opacity: 0.7; }
+
 .site-footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 0.82rem; padding: 18px 0; }
