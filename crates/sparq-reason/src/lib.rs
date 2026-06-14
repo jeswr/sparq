@@ -1,29 +1,4 @@
-//! Opt-in reasoning for sparq: forward-chaining **materialization** of the deductive
-//! closure over dictionary-encoded triples.
-//!
-//! Materialization (compute all entailed triples and add them to the store, à la RDFox's
-//! datalog approach) is the right fit for a dictionary-encoded triplestore: rules are joins
-//! over fixed-width integer ids, and the closure is computed once at load/build time — so
-//! querying stays exactly as fast as before and the default (no-reason) build is completely
-//! unaffected (this crate is not even compiled unless depended upon).
-//!
-//! Profiles:
-//! - [`Profile::Rdfs`] — RDFS entailment (the non-explosive subset rdfs2,3,5,7,9,11), DONE.
-//! - `Profile::OwlRl` — OWL 2 RL property/class axioms (sameAs, inverseOf, Transitive/
-//!   Symmetric, equivalentClass/Property, …) — roadmap, builds on the same fixpoint engine.
-//! - Notation3 / EYE-style rules (`{ … } => { … }` with builtins) — a separate, larger
-//!   subsystem (see `n3` module, roadmap).
-//!
-//! Beyond batch materialization, [`MaterializedGraph`] maintains the RDFS closure
-//! **incrementally** under inserts/deletes (exact derivation counting; see the
-//! `incremental` module docs) so a data update costs time proportional to the change, not
-//! a full re-materialization.
-//!
-//! With the **non-default `explain` feature**, the materialized handles answer
-//! `why(triple)` with a [`ProofTree`](explain::ProofTree) — which rule fired from which
-//! premises, recursively down to asserted facts (see the [`explain`] module docs for the
-//! flat, ZK-witness-friendly shape and the consistency model). Off by default: zero cost,
-//! zero wasm impact.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use rustc_hash::{FxHashMap, FxHashSet};
