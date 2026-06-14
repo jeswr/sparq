@@ -65,7 +65,8 @@ mod tamper {
     /// faulty party feeding a wrong share). `delta != 0` guarantees the value
     /// actually changes in the field.
     fn corrupt_one(shares: &mut [Share], idx: usize, delta: u64) {
-        let nonzero = if delta % P == 0 { 1 } else { delta };
+        // [OPUS-4.8] (sq-qmth) stable-1.96 clippy `manual_is_multiple_of`.
+        let nonzero = if delta.is_multiple_of(P) { 1 } else { delta };
         shares[idx].y = shares[idx].y.add(fp(nonzero));
     }
 

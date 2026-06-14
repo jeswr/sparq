@@ -3489,7 +3489,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// process under the release `panic="abort"` profile).
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    // [OPUS-4.8] sq-hbg7: stable-1.96 clippy `manual_is_multiple_of`.
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
