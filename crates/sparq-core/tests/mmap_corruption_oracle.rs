@@ -109,6 +109,10 @@ fn store_files(dir: &Path) -> Vec<std::path::PathBuf> {
         "perm5.bin",
         "numerics.bin",
         "temporals.bin",
+        // [OPUS-4.8] sq-f5jh: `predstats.bin` is an untrusted on-disk file too — its u64
+        // record-count drove an unbounded `FxHashMap::reserve` (OOM-abort DoS) before the
+        // cap in `TripleStore::load_pred_stats`. Sweeping it here keeps that cap exercised.
+        "predstats.bin",
     ] {
         let p = dir.join(name);
         if p.exists() && std::fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false) {
