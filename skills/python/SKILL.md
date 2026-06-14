@@ -65,7 +65,7 @@ All on the `sparq.Graph` class (the only entry point). Constructors are static m
 
 `QueryResult`: `.vars: list[str]`, `.rows: list[dict[str, Term]]`, plus `len(res)`, `res[i]` (negative indices/slices ok), and iteration.
 
-`Term` (frozen, value-based `==`/`hash`): `.kind` ∈ `"uri"` | `"literal"` | `"bnode"` | `"triple"` (RDF-star); `.value` (IRI / lexical form / bnode label); `.language` (literals only, else `None`); `.datatype` (literals only — always set: plain → `xsd:string`, lang-tagged → `rdf:langString`; else `None`). `str(term)` → bare `.value`; `repr(term)` → N-Triples-ish (e.g. `Term("Bob"@en)`).
+`Term` (frozen, value-based `==`/`hash`): `.kind` ∈ `"uri"` | `"literal"` | `"bnode"` | `"triple"` (RDF-star); `.value` (IRI / lexical form / bnode label); `.language` (literals only — the bare BCP-47 tag, else `None`); `.datatype` (literals only — always set: plain → `xsd:string`, lang-tagged → `rdf:langString`, directional → `rdf:dirLangString`; else `None`); `.direction` (RDF 1.2 base direction `"ltr"` / `"rtl"` of a directional language string — the SPARQL 1.2 `its:dir`; `None` otherwise). `str(term)` → bare `.value`; `repr(term)` → N-Triples-ish (e.g. `Term("Bob"@en)`, `Term("hi"@en--ltr)`).
 
 `sparq.__version__` is the package version string.
 

@@ -33,9 +33,21 @@ pub(crate) fn parts_to_json(s: &mut String, parts: TermParts<'_>) {
             escape_into(s, value);
             s.push('"');
             if let Some(lang) = lang {
+                // [OPUS-4.8] sq-bj7o: the stored slot folds an RDF 1.2 base direction into
+                // the tag as `lang--dir` (see `dict::lang_with_dir`). The SPARQL 1.2 JSON
+                // results format keeps them apart: `xml:lang` is the bare tag and `its:dir`
+                // the direction. Splitting here (instead of emitting `xml:lang:"en--ltr"`)
+                // makes this path spec-conformant AND match the materialised `oxrdf::Term`
+                // path (`term_to_json`) — the two were diverging for directional literals.
+                let (tag, dir) = sparq_core::dict::split_lang_dir(lang);
                 s.push_str(",\"xml:lang\":\"");
-                escape_into(s, lang);
+                escape_into(s, tag);
                 s.push('"');
+                if let Some(dir) = dir {
+                    s.push_str(",\"its:dir\":\"");
+                    escape_into(s, dir);
+                    s.push('"');
+                }
             } else if datatype != XSD_STRING {
                 s.push_str(",\"datatype\":\"");
                 escape_into(s, datatype);
@@ -134,6 +146,20 @@ pub(crate) fn term_to_json(s: &mut String, t: &Term) {
                 s.push_str(",\"xml:lang\":\"");
                 escape_into(s, lang);
                 s.push('"');
+                // [OPUS-4.8] sq-bj7o: RDF 1.2 base direction → SPARQL 1.2 `its:dir` (kept
+                // separate from `xml:lang`, matching the stored-slot fast path above). Map the
+                // two-variant `BaseDirection` enum to a `&'static str` rather than
+                // `dir.to_string()` — the latter heap-allocated a fresh `String` per
+                // directional literal (a Display call) for no reason.
+                if let Some(dir) = l.direction() {
+                    let dir = match dir {
+                        oxrdf::BaseDirection::Ltr => "ltr",
+                        oxrdf::BaseDirection::Rtl => "rtl",
+                    };
+                    s.push_str(",\"its:dir\":\"");
+                    escape_into(s, dir);
+                    s.push('"');
+                }
             } else {
                 let dt = l.datatype();
                 if dt.as_str() != "http://www.w3.org/2001/XMLSchema#string" {
