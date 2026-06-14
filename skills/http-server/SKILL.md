@@ -1,14 +1,14 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (JSON/XML/CSV/TSV/N-Triples/Turtle), Graph Store read, EXPLAIN, Prometheus /metrics, WebSocket subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (JSON/XML/CSV/TSV/N-Triples/Turtle), Graph Store read AND write (PUT/POST/DELETE on graph resources), EXPLAIN, Prometheus /metrics, WebSocket subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
 
 `sparq-server` is a W3C-conformant HTTP server (axum/tokio) that exposes the sparq
 query engine over an in-memory `sparq_core::Graph`. It implements the **SPARQL 1.1
-Protocol** (`query` + `update` at `/sparql`) and the **read** side of the **Graph Store
-HTTP Protocol**, with `Accept`-driven content negotiation, hardening guards, Prometheus
+Protocol** (`query` + `update` at `/sparql`) and the **Graph Store HTTP Protocol**
+(read + write), with `Accept`-driven content negotiation, hardening guards, Prometheus
 `/metrics`, WebSocket subscriptions, and opt-in time-travel + GeoSPARQL.
 
 ## Quickstart
@@ -170,17 +170,33 @@ server:  {"unsubscribed": {"id": 1}}
 `addedResults`/`removedResults` are each full SPARQL-JSON results objects. Refusals and
 failed re-evaluations come back as `{"error": {"message": …, "id"?: n}}`.
 
-**5. Graph Store read + operational endpoints.**
+**5. Graph Store read + write + operational endpoints.**
 
 ```sh
+# READ (GET/HEAD): serialises the addressed graph as N-Triples (also satisfies Accept: text/turtle)
 curl http://127.0.0.1:3030/sparql/graph?default                 # GSP indirect (default graph)
 curl 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'     # GSP indirect (named graph)
-curl http://127.0.0.1:3030/graphs/whatever                      # GSP direct
+curl http://127.0.0.1:3030/graphs/whatever                      # GSP direct (request URI is the graph IRI)
+
+# WRITE (sq-gxsj): body is RDF, format by Content-Type (turtle | n-triples | n-quads | trig)
+# PUT = REPLACE graph contents (201 if created, 204 if replaced):
+curl -X PUT 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
+     -H 'content-type: text/turtle' --data '<http://ex/s> <http://ex/p> <http://ex/o> .'
+# POST = MERGE (additive); selector-less POST to /sparql/graph creates a fresh server-named graph:
+curl -X POST 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
+     -H 'content-type: application/n-triples' --data '<http://ex/s2> <http://ex/p> <http://ex/o2> .'
+# DELETE = DROP the graph (204; 404 if a named graph is absent; ?default → CLEAR DEFAULT, always 204):
+curl -X DELETE 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'
+
 curl http://127.0.0.1:3030/health                               # -> "ok"
 curl http://127.0.0.1:3030/metrics                              # Prometheus text exposition
 ```
-GSP read serialises as N-Triples (also satisfies `Accept: text/turtle`). GSP **write**
-verbs (PUT/POST/DELETE) return `501`.
+GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
+DATA`) and submit through the SAME sequenced group-commit writer the
+`application/sparql-update` operation uses — so they share its atomicity, snapshot
+consistency, blocking-on-commit semantics, the `Sparq-Generation` header (time-travel
+feature), AND its **no-auth** posture (a GSP write is as powerful as an UPDATE — see the
+security gotcha). A malformed body → `400`; an unsupported body Content-Type → `415`.
 
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
 env overrides the default.
@@ -219,16 +235,23 @@ then `router(state)`, or `harden(my_router, &config)`.
   functions on query/update/subscription paths; without it an unknown `geof:` IRI is a
   `500`. Run feature tests: `cargo test -p sparq-server --features time-travel` /
   `--features geo`.
-- **No named-graph store.** The engine has a single default graph. `GRAPH` patterns error
-  at execution; `FROM`/`FROM NAMED` and the protocol's `default-graph-uri`/`named-graph-uri`
-  params are accepted/threaded but have **no effect**; every GSP graph resource maps onto
-  the default graph. Time-travel pinning is `/sparql` queries only (GSP read and
-  subscriptions always serve current).
-- **Supported Update operations are limited.** Engine handles `INSERT DATA`, `DELETE DATA`,
-  `CLEAR` (DEFAULT/ALL), and `DELETE/INSERT … WHERE` on the default graph; named-graph
-  targets, `USING`, `LOAD`, etc. are refused with `400` (atomically). `apply_update`
-  **blocks** (group-commit + O(graph) fork) — never call it on the async runtime directly;
-  the HTTP handler already uses `spawn_blocking`.
+- **Named graphs are real (since conformance round 3).** The engine stores the FULL dataset
+  — default graph + named graphs — so `GRAPH <g> { … }` / `GRAPH ?g { … }` evaluate, and a
+  GSP graph resource (`?graph=<iri>` or the direct request URI) addresses a genuine named
+  graph (no longer a default-graph alias). `FROM`/`FROM NAMED` and the protocol's
+  `default-graph-uri`/`named-graph-uri` params are accepted/threaded. Time-travel pinning is
+  `/sparql` queries only (GSP read/write and subscriptions always operate on current).
+- **Update operations.** Engine handles `INSERT DATA`, `DELETE DATA`, `CLEAR`/`DROP`/`CREATE`
+  (DEFAULT / named / ALL), `LOAD`, and `DELETE/INSERT … WHERE` — over the default graph AND
+  named graphs. A failing operation is refused with `400`, atomically (no partial effect
+  published). `apply_update` **blocks** (group-commit + O(graph) fork) — never call it on the
+  async runtime directly; the HTTP handler (and the GSP write verbs) already use
+  `spawn_blocking`.
+- **GSP write created-vs-replaced status is advisory.** PUT/POST sample graph existence from
+  the current generation to choose `201` vs `204`/`200`; the write itself is atomic on the
+  sequenced writer regardless. An existing-but-empty named graph reads as absent (the engine
+  has no separate "empty graph exists" bit outside an in-flight update), so it may report
+  `201` on a write — this never affects correctness of the data, only the status code.
 - **In-memory only / no durability.** Updates are not persisted across restart.
 - **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
   (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.

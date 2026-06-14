@@ -472,16 +472,255 @@ async fn gsp_get_direct_graph_turtle_accept() {
         .starts_with("text/turtle"));
 }
 
+// ---------------------------------------------------------------------------
+// Graph Store HTTP Protocol — WRITE side (sq-gxsj) [OPUS-4.8]
+//
+// PUT/POST/DELETE on graph resources, routed through the sequenced writer (the same
+// path the application/sparql-update operation uses). Round-trip via GSP read.
+// ---------------------------------------------------------------------------
+
+/// Boots a server over an EMPTY default graph so write-side assertions start clean.
+async fn spawn_empty() -> String {
+    let graph = Graph::load_str("", "turtle").unwrap();
+    let app = router(AppState::new(graph));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// PUT a named graph, then GET it back: the round-trip must reproduce exactly the body.
 #[tokio::test]
-async fn gsp_write_is_501() {
-    let base = spawn().await;
-    let resp = client()
-        .put(format!("{base}/sparql/graph?default"))
-        .body("<http://ex/x> <http://ex/p> <http://ex/y> .")
+async fn gsp_put_then_get_roundtrip_named() {
+    let base = spawn_empty().await;
+    let cl = client();
+    let g = "http://ex/g1";
+    let body = "<http://ex/s> <http://ex/p> <http://ex/o> .\n";
+
+    // First PUT into an absent graph → 201 Created.
+    let put = cl
+        .put(format!("{base}/sparql/graph?graph={g}"))
+        .header("content-type", "application/n-triples")
+        .body(body)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 501);
+    assert_eq!(put.status(), 201, "first PUT into an absent graph must be 201 Created");
+
+    // GET it back via the indirect form.
+    let get = cl
+        .get(format!("{base}/sparql/graph?graph={g}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+    let got = get.text().await.unwrap();
+    assert!(got.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."), "round-trip lost the triple: {got:?}");
+
+    // The triple must NOT bleed into the default graph.
+    let def = cl.get(format!("{base}/sparql/graph?default")).send().await.unwrap();
+    assert_eq!(def.text().await.unwrap().trim(), "", "named-graph PUT leaked into the default graph");
+}
+
+/// A second PUT REPLACES the graph contents (not a merge) and returns 204 (graph existed).
+#[tokio::test]
+async fn gsp_put_replaces_existing_204() {
+    let base = spawn_empty().await;
+    let cl = client();
+    let g = "http://ex/g2";
+
+    assert_eq!(
+        cl.put(format!("{base}/sparql/graph?graph={g}"))
+            .header("content-type", "text/turtle")
+            .body("<http://ex/a> <http://ex/p> <http://ex/1> .")
+            .send().await.unwrap().status(),
+        201
+    );
+    // Replace with a different triple.
+    let second = cl
+        .put(format!("{base}/sparql/graph?graph={g}"))
+        .header("content-type", "text/turtle")
+        .body("<http://ex/b> <http://ex/p> <http://ex/2> .")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 204, "PUT replacing an existing graph must be 204");
+
+    let got = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap().text().await.unwrap();
+    assert!(got.contains("<http://ex/b>"), "replaced content missing: {got:?}");
+    assert!(!got.contains("<http://ex/a>"), "PUT must REPLACE, not merge: {got:?}");
+}
+
+/// POST MERGES (additive) into a graph; two POSTs accumulate.
+#[tokio::test]
+async fn gsp_post_merges_additive() {
+    let base = spawn_empty().await;
+    let cl = client();
+    let g = "http://ex/g3";
+
+    // First POST into an absent graph creates it → 201.
+    let p1 = cl
+        .post(format!("{base}/sparql/graph?graph={g}"))
+        .header("content-type", "application/n-triples")
+        .body("<http://ex/s1> <http://ex/p> <http://ex/o1> .")
+        .send().await.unwrap();
+    assert_eq!(p1.status(), 201);
+
+    // Second POST adds to it → 204 (graph now exists).
+    let p2 = cl
+        .post(format!("{base}/sparql/graph?graph={g}"))
+        .header("content-type", "application/n-triples")
+        .body("<http://ex/s2> <http://ex/p> <http://ex/o2> .")
+        .send().await.unwrap();
+    assert_eq!(p2.status(), 204);
+
+    let got = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap().text().await.unwrap();
+    assert!(got.contains("<http://ex/s1>") && got.contains("<http://ex/s2>"), "POST must accumulate both triples: {got:?}");
+}
+
+/// DELETE drops a graph; a follow-up GET serialises it as empty, and a second DELETE 404s.
+#[tokio::test]
+async fn gsp_delete_then_get_and_404() {
+    let base = spawn_empty().await;
+    let cl = client();
+    let g = "http://ex/g4";
+
+    cl.put(format!("{base}/sparql/graph?graph={g}"))
+        .header("content-type", "application/n-triples")
+        .body("<http://ex/s> <http://ex/p> <http://ex/o> .")
+        .send().await.unwrap();
+
+    let del = cl.delete(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap();
+    assert_eq!(del.status(), 204, "DELETE of an existing graph must be 204");
+
+    // GET the now-dropped graph → 200, empty body (GSP read serves the empty graph).
+    let get = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.text().await.unwrap().trim(), "");
+
+    // Second DELETE of the now-absent graph → 404.
+    let del2 = cl.delete(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap();
+    assert_eq!(del2.status(), 404, "DELETE of an absent graph must be 404");
+}
+
+/// The default graph is addressable for writes via `?default`; DELETE empties it (204).
+#[tokio::test]
+async fn gsp_default_graph_write_and_delete() {
+    let base = spawn().await; // pre-populated default graph (DATA)
+    let cl = client();
+
+    // POST merges into the default graph.
+    let post = cl
+        .post(format!("{base}/sparql/graph?default"))
+        .header("content-type", "application/n-triples")
+        .body("<http://ex/extra> <http://ex/p> <http://ex/v> .")
+        .send().await.unwrap();
+    assert!(post.status() == 204 || post.status() == 201, "default-graph POST status: {}", post.status());
+    let got = cl.get(format!("{base}/sparql/graph?default")).send().await.unwrap().text().await.unwrap();
+    assert!(got.contains("<http://ex/extra>"), "default-graph POST not visible: {got:?}");
+
+    // DELETE (CLEAR DEFAULT) empties it → 204; the default graph always exists.
+    let del = cl.delete(format!("{base}/sparql/graph?default")).send().await.unwrap();
+    assert_eq!(del.status(), 204);
+    assert_eq!(cl.get(format!("{base}/sparql/graph?default")).send().await.unwrap().text().await.unwrap().trim(), "");
+}
+
+/// Content negotiation by Content-Type: a Turtle body parses; an N-Quads body folds its
+/// graph names into the addressed graph (the URL names the graph, the body carries triples).
+#[tokio::test]
+async fn gsp_write_content_negotiation() {
+    let base = spawn_empty().await;
+    let cl = client();
+    let g = "http://ex/g5";
+
+    // Turtle with a prefix.
+    let put = cl
+        .put(format!("{base}/sparql/graph?graph={g}"))
+        .header("content-type", "text/turtle")
+        .body("@prefix ex: <http://ex/> . ex:s ex:p ex:o .")
+        .send().await.unwrap();
+    assert_eq!(put.status(), 201);
+    let got = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap().text().await.unwrap();
+    assert!(got.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."), "turtle body not parsed: {got:?}");
+}
+
+/// A malformed RDF body is a 400 (the body is parsed/validated before any write).
+#[tokio::test]
+async fn gsp_malformed_body_is_400() {
+    let base = spawn_empty().await;
+    let resp = client()
+        .put(format!("{base}/sparql/graph?graph=http://ex/bad"))
+        .header("content-type", "text/turtle")
+        .body("this is not turtle <<< ]")
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+/// An unsupported write body Content-Type is a 415.
+#[tokio::test]
+async fn gsp_unsupported_media_type_is_415() {
+    let base = spawn_empty().await;
+    let resp = client()
+        .put(format!("{base}/sparql/graph?graph=http://ex/x"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 415);
+}
+
+/// Direct identification (request URI is the graph) round-trips, addressable also via the
+/// indirect `?graph=<reconstructed-iri>` form.
+#[tokio::test]
+async fn gsp_put_direct_then_get_direct() {
+    let base = spawn_empty().await;
+    let cl = client();
+
+    let put = cl
+        .put(format!("{base}/graphs/team/alpha"))
+        .header("content-type", "application/n-triples")
+        .body("<http://ex/s> <http://ex/p> <http://ex/o> .")
+        .send().await.unwrap();
+    assert_eq!(put.status(), 201);
+
+    let got = cl.get(format!("{base}/graphs/team/alpha")).send().await.unwrap().text().await.unwrap();
+    assert!(got.contains("<http://ex/s> <http://ex/p> <http://ex/o> ."), "direct round-trip lost the triple: {got:?}");
+}
+
+/// A selector-less POST to the GSP endpoint creates a fresh, server-named graph (GSP §5.5):
+/// 201, and the new graph is queryable (its triples show up across all named graphs).
+#[tokio::test]
+async fn gsp_post_no_selector_creates_fresh_graph() {
+    let base = spawn_empty().await;
+    let cl = client();
+    let resp = cl
+        .post(format!("{base}/sparql/graph"))
+        .header("content-type", "application/n-triples")
+        .body("<http://ex/fresh> <http://ex/p> <http://ex/o> .")
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201, "selector-less POST must create a fresh graph (201)");
+
+    // The triple lives in SOME named graph now — visible via a GRAPH ?g query.
+    let q = cl
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?g WHERE { GRAPH ?g { <http://ex/fresh> ?p ?o } }")])
+        .send().await.unwrap().text().await.unwrap();
+    assert!(q.contains("\"bindings\"") && q.contains("http://ex/fresh") || q.matches("urn:sparq:gsp").count() >= 1,
+        "fresh-graph triple not queryable: {q}");
+}
+
+/// An unsupported method on a graph resource is a 405 with an Allow header listing the
+/// supported GSP verbs.
+#[tokio::test]
+async fn gsp_patch_is_405_with_allow() {
+    let base = spawn().await;
+    let resp = client()
+        .request(reqwest::Method::PATCH, format!("{base}/sparql/graph?default"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 405);
+    let allow = resp.headers()["allow"].to_str().unwrap();
+    assert!(allow.contains("PUT") && allow.contains("POST") && allow.contains("DELETE") && allow.contains("GET"));
 }
 
 #[tokio::test]

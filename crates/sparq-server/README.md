@@ -9,9 +9,12 @@ Implements the **read** side of two W3C specifications over an in-memory
   `Content-Type: application/sparql-update`; see the supported-operations note under
   Limitations and the [update concurrency model](#update-concurrency-model)).
 * **[SPARQL 1.1 Graph Store HTTP Protocol](https://www.w3.org/TR/sparql11-http-rdf-update/)**
-  — `GET`/`HEAD` on a graph resource. The Graph Store *write* verbs
-  (`PUT`/`POST`/`DELETE`) are answered with `501 Not Implemented`; implementing
-  them is tracked as bead `sq-gxsj`. <!-- [OPUS-4.8] -->
+  — `GET`/`HEAD` (read) AND `PUT`/`POST`/`DELETE` (write) on a graph resource, via both
+  indirect (`?graph=<iri>` / `?default`) and direct (request-URI-as-graph) identification.
+  The write verbs translate into a server-minted SPARQL Update submitted through the same
+  sequenced group-commit writer the `application/sparql-update` operation uses (so they
+  share its atomicity and the **no-auth posture below** — a GSP write is as powerful as an
+  UPDATE). Implemented in bead `sq-gxsj`. <!-- [OPUS-4.8] -->
 
 ## Security posture (no built-in auth) — read before exposing it <!-- [OPUS-4.8] sq-o4qf / sq-2v6f -->
 
@@ -325,15 +328,31 @@ whole hardening stack, so shed requests (429), body-limit rejections (413) and p
 | `sparq_graph_triples` | gauge | triples in the published graph (read at scrape time) |
 | `sparq_updates_total` | counter | successfully applied SPARQL updates |
 
-### Graph Store HTTP Protocol — read
+### Graph Store HTTP Protocol — read + write <!-- [OPUS-4.8] sq-gxsj -->
 
 | Resource | How |
 | --- | --- |
-| Indirect | `GET /sparql/graph?default` or `GET /sparql/graph?graph=<iri>` |
-| Direct | `GET /graphs/<path>` |
+| Indirect | `/sparql/graph?default` or `/sparql/graph?graph=<iri>` |
+| Direct | `/graphs/<path>` (the request URI IS the graph IRI: `http://<host>/graphs/<path>`) |
 
-`GET`/`HEAD` serialise the graph as **N-Triples** (also offered for an `Accept: text/turtle`
-request, since N-Triples is a syntactic subset of Turtle). Write verbs → `501`.
+**Read.** `GET`/`HEAD` serialise the addressed graph as **N-Triples** (also offered for an
+`Accept: text/turtle` request, since N-Triples is a syntactic subset of Turtle).
+
+**Write** (`PUT`/`POST`/`DELETE`). The request body is RDF, parsed by `Content-Type`
+(`text/turtle` | `application/n-triples` | `application/n-quads` | `application/trig`;
+absent → Turtle); a malformed body is a `400`, an unsupported type a `415`. The body
+carries the triples for the one addressed graph (the URL names the graph, not the body —
+quad-syntax graph names are folded in). Each verb is translated into a server-minted SPARQL
+Update and submitted through the **same sequenced group-commit writer** the
+`application/sparql-update` operation uses, so a GSP write inherits its atomicity, snapshot
+consistency, the `Sparq-Generation` header (time-travel feature), and **no-auth posture**.
+
+| Verb | Effect | Update | Status |
+| --- | --- | --- | --- |
+| `PUT <g>` | REPLACE the graph contents | `DROP SILENT GRAPH <g>` / `CLEAR DEFAULT` then `INSERT DATA { … }` | `201` created / `204` replaced |
+| `POST <g>` | MERGE (additive) into the graph | `INSERT DATA { … }` | `201` created / `204` merged |
+| `POST /sparql/graph` (no selector) | create a fresh server-named graph (§5.5) | `INSERT DATA { GRAPH <minted> { … } }` | `201` |
+| `DELETE <g>` | DROP the graph (`?default` → `CLEAR DEFAULT`) | `DROP GRAPH <g>` / `CLEAR DEFAULT` | `204`; `404` if a named graph is absent |
 
 ### SPARQL subscriptions — `ws://…/subscriptions` (T23)
 
@@ -395,26 +414,32 @@ implementation; CBD is the de-facto standard choice.
 | Query timed out (`--query-timeout`) | `503` |
 | SPARQL Update success | `204` |
 | SPARQL Update failure (malformed / unsupported operation) | `400` (atomic — no partial effect) |
-| Graph Store write (`PUT`/`POST`/`DELETE`) | `501` |
+| Graph Store write success (`PUT`/`POST`) | `201` (created) / `204` (replaced/merged) |
+| Graph Store `DELETE` success | `204` |
+| Graph Store `DELETE` of an absent named graph | `404` |
+| Graph Store write — malformed RDF body | `400` |
+| Graph Store write — unsupported body `Content-Type` | `415` |
 
 All error bodies are structured JSON: `{"error": "..."}`.
 
 ## Limitations / follow-ups
 
-* **Named graphs.** The engine has a single default graph and no named-graph store
-  (`GRAPH` patterns error at execution; `FROM` / `FROM NAMED` are ignored). The protocol's
-  `default-graph-uri` / `named-graph-uri` params and the Graph Store *named*-graph
-  selectors are **accepted and threaded through** but, with one default graph, have no
-  effect — every graph resource maps onto the default graph. This needs roadmap **T9**
-  (named-graph storage) before it can be made fully conformant.
+* **Named graphs.** The engine stores the FULL dataset (default + named graphs) since
+  conformance round 3: `GRAPH <g> { … }` / `GRAPH ?g { … }` evaluate, `FROM` / `FROM NAMED`
+  scope the active dataset, and the Graph Store named-graph selectors (`?graph=<iri>` and the
+  direct request-URI form) address genuine named graphs. The protocol's `default-graph-uri`
+  / `named-graph-uri` query params are accepted and threaded through. <!-- [OPUS-4.8] sq-gxsj -->
 * **CONSTRUCT / DESCRIBE serialisations.** Implemented (T16) via the engine's RDF-graph
   result API (`sparq_engine::construct` / `describe`), negotiated between
   `application/n-triples` and `text/turtle` (the body is N-Triples either way — valid
   Turtle). `application/rdf+xml` and a prefix-compacting Turtle writer are follow-ups.
 * **SPARQL Update operations.** The engine supports `INSERT DATA`, `DELETE DATA`,
-  `CLEAR` (DEFAULT/ALL) and `DELETE/INSERT … WHERE` on the default graph; named-graph
-  targets, `USING`, `LOAD` etc. are refused with `400` (atomically — see the update
-  concurrency model). Graph Store **write** verbs are still `501`.
+  `CLEAR` / `DROP` / `CREATE` (DEFAULT / named / ALL), `LOAD`, and `DELETE/INSERT … WHERE`
+  over the default graph AND named graphs; a failing operation is refused with `400`
+  (atomically — see the update concurrency model). The Graph Store **write** verbs
+  (`PUT`/`POST`/`DELETE`) are implemented on top of this same path (bead `sq-gxsj`). The GSP
+  read serialisation is N-Triples only (`application/rdf+xml` is a follow-up, as for
+  CONSTRUCT/DESCRIBE). <!-- [OPUS-4.8] sq-gxsj -->
 * **Update durability.** The served graph is in-memory; updates are not persisted across
   a restart (the engine's WAL-backed directory graphs are a CLI/embedding feature the
   server does not use yet).
@@ -436,9 +461,10 @@ pointed at a running server:
 1. Start the server against the suite's data:
    `cargo run -p sparq-server -- --format turtle <suite-data>.ttl`
 2. Configure the harness's service endpoint to `http://127.0.0.1:3030/sparql`.
-3. The **query** (including CONSTRUCT/DESCRIBE), **result-format** and **HTTP-semantics**
-   sections are expected to pass; **named-graph dataset** tests are expected to report
-   not-implemented per the limitations above.
+3. The **query** (including CONSTRUCT/DESCRIBE), **result-format**, **HTTP-semantics**,
+   **named-graph dataset** and **Graph Store HTTP Protocol** (read + write) sections are
+   expected to pass; the only remaining gap is the `application/rdf+xml` graph
+   serialisation (N-Triples / Turtle are conformant).
 
 The in-process `tests/protocol.rs` suite mirrors the same assertions and runs in CI via
 `cargo test -p sparq-server`.
