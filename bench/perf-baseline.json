@@ -39,7 +39,7 @@
       "mode": "auto"
     },
     "parse_ns_per_byte": {
-      "floor": 4.9336,
+      "floor": 4.9143,
       "threshold": 0.12,
       "mode": "noise"
     }
