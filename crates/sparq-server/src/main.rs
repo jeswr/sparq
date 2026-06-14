@@ -32,6 +32,7 @@
 //! model"): sparq-serve's sequenced group-commit writer over the generation ring. The
 //! old `--compact-every` flag is gone — every batch commit forks a freshly folded base,
 //! so overlays never accumulate across batches and there is nothing left to compact.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use std::net::SocketAddr;
 use std::time::Duration;

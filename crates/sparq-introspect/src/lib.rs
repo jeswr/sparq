@@ -33,6 +33,7 @@
 //!
 //! The crate is opt-in and read-only over the public `sparq-core` API; the default
 //! engine build does not include it and carries no introspection code.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};

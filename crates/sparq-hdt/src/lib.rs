@@ -22,6 +22,7 @@
 //! and decompressed on the fly, STREAMING (the decompressed `.hdt` is never fully
 //! materialized) by every entry point; [`header`] exposes the archive's metadata
 //! triples (the H in HDT) as a queryable sparq [`Graph`].
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph;

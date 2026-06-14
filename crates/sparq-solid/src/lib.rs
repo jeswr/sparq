@@ -71,6 +71,7 @@
 //!
 //! A full end-to-end walk-through over the bundled ~1.1k-graph pod fixture is
 //! `examples/quickstart.rs` (`cargo run -p sparq-solid --example quickstart --release`).
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod authindex;
 pub mod fixture;

@@ -63,6 +63,7 @@
 //! handle instead of introducing a `StoreSnapshot` trait that would carry no methods.
 //! The integration test `tests/real_store.rs` instantiates the ring with the real
 //! `Graph`; unit tests use an instrumented mock to observe drops.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod applier;
 mod epoch;

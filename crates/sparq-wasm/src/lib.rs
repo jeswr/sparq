@@ -9,6 +9,7 @@
 //! const json = store.query("SELECT * WHERE { ?s ?p ?o } LIMIT 10");
 //! const { results } = JSON.parse(json);
 //! ```
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use sparq_core::Graph;
 use wasm_bindgen::prelude::*;

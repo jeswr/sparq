@@ -22,6 +22,7 @@
 //!
 //! Everything here is read-only over the public `sparq-core` API; the crate is opt-in
 //! and the default engine build does not include it.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashMap;

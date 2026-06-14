@@ -35,6 +35,7 @@
 //! assert!(!report.conforms);
 //! assert_eq!(report.results.len(), 1);
 //! ```
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod eval;
 pub mod model;

@@ -13,6 +13,7 @@
 //! the ACTIVE dataset assembled from the store's named graphs (see `dataset`).
 //! Later milestones add worst-case-optimal joins, a DP planner and property
 //! paths.
+#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod construct;
 #[cfg(feature = "cs-planner")]
