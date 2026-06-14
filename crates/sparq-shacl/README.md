@@ -56,8 +56,21 @@ property shapes), each solution a violation; honours `sh:prefixes`
 `sh:message` (`{?var}` templating). Maps `?value`→`sh:value` (defaulting to the
 focus node when unprojected), `?path`→`sh:resultPath`, `?message`→
 `sh:resultMessage`. Pinned by the W3C `sparql/node` + `sparql/property`
-sub-suites. SPARQL-based constraint *components* (custom `sh:ConstraintComponent`
-with `sh:parameter`/`sh:validator`) are deferred — see the open beads for this crate (`bd list -l area:sparq-shacl`).
+sub-suites.
+
+**SPARQL-based constraint *components* (custom `sh:ConstraintComponent`, §6):**
+implemented. A component node — typed `sh:ConstraintComponent` or any
+`rdfs:subClassOf*` descendant — declaring `sh:parameter`s and a validator
+(`sh:validator`, or the kind-specific `sh:nodeValidator`/`sh:propertyValidator`,
+chosen per shape kind, §6.2.2) activates on any shape that carries the
+parameter predicates. The validator runs with `$this`, `$value`, each parameter
+VALUE (`$paramName`) and (on a property shape) `$PATH` pre-bound; `sh:ask`
+validators run per value node (`false` ⇒ violation), `sh:select` validators run
+per focus node (each solution a violation, §6.3). `sh:optional true` parameters
+need not be present. The component's IRI is the
+`sh:sourceConstraintComponent`. The remaining §6 limit is the full
+`sparql/pre-binding` semantics (rejecting variable re-binding, `$shapesGraph`) —
+see the open beads for this crate (`bd list -l area:sparq-shacl`).
 
 Targets: `sh:targetNode`, `sh:targetClass` (with `rdfs:subClassOf*` closure),
 implicit class targets (a shape that is itself an `rdfs:Class`),
@@ -128,10 +141,13 @@ for data in data_graphs {
 
 ## Scope and non-goals
 
-- **SHACL Core + `sh:sparql`.** The SPARQL-based constraint *component*
-  declaration machinery (custom `sh:ConstraintComponent` with `sh:parameter` /
-  `sh:validator`) and the full `sparql/pre-binding` semantics (rejecting
-  variable re-binding, `$shapesGraph`) are out of scope; see the open beads for this crate (`bd list -l area:sparq-shacl`).
+- **SHACL Core + `sh:sparql` + custom §6 components.** SHACL Core, `sh:sparql`
+  (§5.2) and the SPARQL-based constraint *component* declaration machinery
+  (custom `sh:ConstraintComponent` with `sh:parameter` / `sh:validator`, §6) are
+  all implemented (see "Supported constraint components" above). What remains out
+  of scope is the full `sparql/pre-binding` semantics (rejecting variable
+  re-binding, `$shapesGraph`); see the open beads for this crate
+  (`bd list -l area:sparq-shacl`).
 - Validation results are **not deduplicated** across traversal routes /
   component occurrences — matching the test suite's expectations (a nested
   shape reached through two parents reports twice).
