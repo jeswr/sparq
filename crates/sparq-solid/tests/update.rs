@@ -219,3 +219,143 @@ fn unparseable_update_is_an_error() {
     let mut s = wac_store();
     assert!(s.update_as(&sess(Some(ALICE)), "NONSENSE not sparql").is_err());
 }
+
+// --- [OPUS-4.8] sq-biss: PRECISE per-solution variable-GRAPH write checks ------------
+//
+// The conservative path (variable_graph_target_fails_closed_for_non_owner / clear_all_…)
+// demands write on EVERY store graph for a `GRAPH ?var` slot. These tests cover the
+// precise resolution: the operation's WHERE is evaluated to find the CONCRETE graphs
+// `?var` actually binds to, and write is required only on those — strictly LESS
+// restrictive for the authorized case, still fail-closed for the unauthorized one.
+//
+// Expected outcomes are hand-computed against the WAC fixture's CAROL grant: CAROL is a
+// team-group member with Read+Write on the WHOLE `team2/` subtree (187 graphs, none of
+// them `.acl`) and NOTHING else — but she can READ far more (e.g. all of `mixed4/`, which
+// any authenticated agent reads). The 144 `team2/…` content documents carry an
+// `<ex:title>` triple; the team2 `.acl` documents do not (they hold WAC Authorizations),
+// so an `<ex:title>`-only WHERE restricted to the team2 prefix binds `?g` to exactly the
+// 144 content graphs, every one of which CAROL may write.
+
+const TITLE: &str = "https://ex.dev/ns#title";
+const TEAM2_DOC: &str = "https://pod.ex/team2/c3/g0/d0.ttl"; // subtree 2, c3, g0, d0
+const MIXED4_DOC: &str = "https://pod.ex/mixed4/c3/g0/d0.ttl";
+
+/// A `DELETE { GRAPH ?g { … } } WHERE { GRAPH ?g { ?s <title> ?o } FILTER prefix }` —
+/// the `?g` slot binds only to graphs under `prefix` that carry a title.
+fn var_delete_title_under(prefix: &str) -> String {
+    format!(
+        "DELETE {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} }} \
+         WHERE  {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} FILTER(STRSTARTS(STR(?g), \"{prefix}\")) }}"
+    )
+}
+
+#[test]
+fn var_graph_precise_allows_authorized_subset() {
+    // CAROL, variable GRAPH, WHERE bound to the team2 subtree she fully owns.
+    // OLD behaviour: the same actor's UNFILTERED variable-GRAPH delete is denied
+    // (variable_graph_target_fails_closed_for_non_owner), because the all-graphs check
+    // demands write on graphs outside team2 she cannot write. The precise check resolves
+    // `?g` to the 144 writable team2 content graphs only -> PERMITTED.
+    let mut s = wac_store();
+    let before = graph_len(&s, TEAM2_DOC);
+    assert!(before > 0, "team2 doc has a title triple to delete");
+
+    s.update_as(&sess(Some(CAROL)), &var_delete_title_under("https://pod.ex/team2/"))
+        .expect("precise check: carol may delete titles across the team2 subtree she owns");
+
+    // the delete actually applied (the doc lost its single title triple)
+    assert_eq!(graph_len(&s, TEAM2_DOC), before - 1, "title deleted from a bound team2 graph");
+}
+
+#[test]
+fn var_graph_precise_denies_readable_but_unwritable_binding() {
+    // CAROL can READ all of mixed4/ (authenticated-agent read) but can WRITE none of it.
+    // The precise check must NOT confuse read with write: resolving `?g` to the mixed4
+    // content graphs and finding CAROL lacks Write -> DENIED, store untouched.
+    let mut s = wac_store();
+    let before = graph_len(&s, MIXED4_DOC);
+    assert!(before > 0, "mixed4 doc non-empty");
+
+    let r = s.update_as(&sess(Some(CAROL)), &var_delete_title_under("https://pod.ex/mixed4/"));
+    assert!(r.is_err(), "carol may read but not write mixed4 -> denied: {r:?}");
+    assert_eq!(graph_len(&s, MIXED4_DOC), before, "denied variable-graph delete changed nothing");
+}
+
+#[test]
+fn var_graph_precise_denies_when_a_bound_graph_is_unwritable_control_doc() {
+    // A WHERE matching ANY predicate under team2 also binds `?g` to the team2 `.acl`
+    // graphs (they hold triples). CAROL has Read+Write on team2 content but NO Control,
+    // so she lacks Write on the `.acl` graphs -> the precise check denies (an `.acl`
+    // target needs the Write grant only a Control-holder has), store untouched.
+    let mut s = wac_store();
+    let acl = "https://pod.ex/team2/.acl";
+    let before_acl = graph_len(&s, acl);
+    let before_doc = graph_len(&s, TEAM2_DOC);
+    let upd = "DELETE { GRAPH ?g { ?s ?p ?o } } \
+               WHERE  { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \"https://pod.ex/team2/\")) }";
+    let r = s.update_as(&sess(Some(CAROL)), upd);
+    assert!(r.is_err(), "binding includes team2 .acl docs carol cannot control: {r:?}");
+    assert_eq!(graph_len(&s, acl), before_acl, ".acl untouched on deny");
+    assert_eq!(graph_len(&s, TEAM2_DOC), before_doc, "content untouched on deny (check is pre-apply)");
+}
+
+#[test]
+fn var_graph_precise_insert_authorized_subset_succeeds() {
+    // INSERT through a variable GRAPH needs Write-OR-Append per bound graph. CAROL copies
+    // a tag onto every team2 content graph that has a title (bound `?g` = the 144 team2
+    // content graphs, all writable). Old all-graphs check: denied. Precise check: ok.
+    let mut s = wac_store();
+    let before = graph_len(&s, TEAM2_DOC);
+    let upd = format!(
+        "INSERT {{ GRAPH ?g {{ ?s <{TAG}> \"v\" }} }} \
+         WHERE  {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} FILTER(STRSTARTS(STR(?g), \"https://pod.ex/team2/\")) }}"
+    );
+    s.update_as(&sess(Some(CAROL)), &upd).expect("precise insert into team2 graphs carol owns");
+    assert_eq!(graph_len(&s, TEAM2_DOC), before + 1, "one tag inserted into a bound team2 graph");
+}
+
+#[test]
+fn var_graph_precise_insert_into_unwritable_binding_denied() {
+    // Same INSERT shape, but `?g` resolves to mixed4 (readable, not writable) -> denied.
+    let mut s = wac_store();
+    let before = graph_len(&s, MIXED4_DOC);
+    let upd = format!(
+        "INSERT {{ GRAPH ?g {{ ?s <{TAG}> \"v\" }} }} \
+         WHERE  {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} FILTER(STRSTARTS(STR(?g), \"https://pod.ex/mixed4/\")) }}"
+    );
+    let r = s.update_as(&sess(Some(CAROL)), &upd);
+    assert!(r.is_err(), "insert into unwritable mixed4 graphs denied: {r:?}");
+    assert_eq!(graph_len(&s, MIXED4_DOC), before, "store unchanged on deny");
+}
+
+#[test]
+fn var_graph_empty_binding_is_a_permitted_noop() {
+    // A WHERE that binds `?g` to NOTHING (no graph under this absent prefix) resolves to
+    // an empty target set -> the precise check has nothing to authorize and permits the
+    // (no-op) update for any session, even one with no write grants. Fail-closed is about
+    // not WRITING without permission; writing nothing needs nothing.
+    let mut s = wac_store();
+    let upd = var_delete_title_under("https://pod.ex/no-such-subtree/");
+    s.update_as(&Session::default(), &upd).expect("empty-binding variable-graph update is a no-op");
+}
+
+#[test]
+fn var_graph_with_using_clause_falls_back_to_conservative() {
+    // A USING/WITH re-scope on a variable-GRAPH op cannot be faithfully reproduced by a
+    // plain SELECT (the apply's `build_using` keeps all store named graphs for `WITH`,
+    // while a query's FROM-only dataset has an EMPTY named set), so precise resolution
+    // would UNDER-count the bound graphs. The check fails closed to the all-graphs
+    // wildcard: CAROL — who could write this exact team2-bounded delete WITHOUT the WITH
+    // clause (var_graph_precise_allows_authorized_subset) — is now denied, because she
+    // cannot write every store graph.
+    let mut s = wac_store();
+    let before = graph_len(&s, TEAM2_DOC);
+    let upd = format!(
+        "WITH <{TEAM2_DOC}> \
+         DELETE {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} }} \
+         WHERE  {{ GRAPH ?g {{ ?s <{TITLE}> ?o }} FILTER(STRSTARTS(STR(?g), \"https://pod.ex/team2/\")) }}"
+    );
+    let r = s.update_as(&sess(Some(CAROL)), &upd);
+    assert!(r.is_err(), "USING/WITH variable-graph op falls back to conservative deny: {r:?}");
+    assert_eq!(graph_len(&s, TEAM2_DOC), before, "conservative fallback applied nothing");
+}
