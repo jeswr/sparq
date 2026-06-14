@@ -21,10 +21,12 @@
 //!
 //! - [`SecureRng`] — the **production / default** masking RNG. A
 //!   [`rand_chacha::ChaCha20Rng`] CSPRNG seeded from OS entropy
-//!   ([`rand_core::SeedableRng::from_os_rng`] → `getrandom`). This is what the
+//!   (`rand_core::SeedableRng::from_os_rng` → `getrandom`). This is what the
 //!   real protocol uses and the only RNG reachable from the default
 //!   [`crate::shamir::ShamirBackend::new`] constructor.
-//! - [`InsecureTestRng`] — a **deterministic, seedable SplitMix64** PRNG for
+//! - `InsecureTestRng` (`#[cfg(any(test, feature = "insecure-test-rng"))]`,
+//!   so not an intra-doc link in default builds) — a **deterministic, seedable
+//!   SplitMix64** PRNG for
 //!   reproducible tests/benchmarks ONLY. It is gated behind
 //!   `#[cfg(any(test, feature = "insecure-test-rng"))]` so it cannot be
 //!   constructed from a normal (non-test, default-feature) build. Its name
@@ -52,7 +54,8 @@ use rand::RngCore;
 ///
 /// Implementors yield uniform field elements over `F_p`. The trait exists so the
 /// security-critical [`SecureRng`] (CSPRNG) is the production default while a
-/// deterministic [`InsecureTestRng`] stays available for reproducible tests —
+/// deterministic `InsecureTestRng` (test-gated, so not an intra-doc link) stays
+/// available for reproducible tests —
 /// without the two being silently swappable in the real protocol (the insecure
 /// impl is `cfg`-gated out of normal builds).
 pub trait MpcRng {

@@ -186,19 +186,27 @@ mod tamper {
         }
     }
 
-    /// The secure-equality primitive (`HiddenValueJoin::secure_equal`) opens
-    /// `m = d·r` at degree `2t` and reports `m == 0` as the match bit. We
-    /// reproduce that EXACT primitive from the public `shamir` ops and show that
-    /// tampering one share of the opened product FLIPS the verdict undetected:
-    /// a forged share can turn a true match into a false non-match (and a
-    /// non-match into a spurious match). This is the join-layer face of the same
-    /// missing guarantee — pinned, not implied.
+    /// **POSITIVE detection test (sq-7q9i, WI-2; was the `…_flips_secure_
+    /// equality_verdict_undetected` pin).** The secure-equality primitive
+    /// (`HiddenValueJoin::secure_equal`) opens `m = d·r` at degree `2t` and
+    /// reports `m == 0` as the match bit. We reproduce that EXACT primitive from
+    /// the public `shamir` ops. WI-2 routes the degree-`2t` open through the WI-1
+    /// Reed–Solomon checker, so when redundancy is present at degree `2t`
+    /// (`n > 2t+1`) tampering one product share is now DETECTED rather than
+    /// silently flipping the verdict.
+    ///
+    /// Redundancy at degree `2t` needs `n > 2t+1`. The honest-majority
+    /// constructor fixes `t = ⌊(n−1)/2⌋`, so EVEN `n` gives `2t+1 = n−1 < n`
+    /// (exactly one redundant share at degree `2t`, `e_max = 0` ⇒ detect-only).
+    /// We use `n = 4, t = 1` (`2t = 2`, opened with all 4 shares ⇒ `4 > 3`).
     #[test]
-    fn tampered_share_flips_secure_equality_verdict_undetected() {
-        // n = 5, t = 2 → one multiplication opens at degree 2t = 4 (needs 5 pts).
-        let backend = ShamirBackend::new_seeded(5, 0xEEEE).unwrap();
+    fn tampered_share_in_secure_equality_open_is_detected_when_redundant() {
+        // n = 4, t = 1 → equality opens at degree 2t = 2 with all n=4 shares:
+        // 4 > 2t+1 = 3 ⇒ one redundant share ⇒ detect-and-abort (e_max = 0).
+        let backend = ShamirBackend::new_seeded(4, 0xEEEE).unwrap();
         let mut dealer = backend.dealer();
         let t = dealer.threshold();
+        assert_eq!(t, 1);
 
         // Two EQUAL keys → honest verdict is "match" (m == 0).
         let key = fp(42);
@@ -208,8 +216,67 @@ mod tamper {
         let r = dealer.share(mask);
         let d = shamir::sub_shares(&sa, &sb).unwrap();
         let m_shares = mul_shares_raw(&d, &r).unwrap();
+        assert_eq!(
+            m_shares.len(),
+            4,
+            "all n=4 product shares opened (redundant)"
+        );
 
-        // Honest open: equal keys ⇒ m == 0 ⇒ match.
+        // Honest open: equal keys ⇒ m == 0 ⇒ match (no behaviour change clean).
+        let m_honest = reconstruct_degree(&m_shares, 2 * t).unwrap();
+        assert_eq!(
+            m_honest,
+            Fp::zero(),
+            "sanity: equal keys open to m = 0 (match) on the checked path"
+        );
+
+        // Tamper ONE product share: with n > 2t+1 the RS check now DETECTS the
+        // off-curve share and ABORTS instead of silently flipping the verdict.
+        let mut tampered = m_shares.clone();
+        tampered[0].y = tampered[0].y.add(fp(1));
+        let err = reconstruct_degree(&tampered, 2 * t).unwrap_err();
+        assert!(
+            matches!(err, MpcError::Tampered { .. }),
+            "sq-7q9i: a tampered degree-2t product share with redundancy (n > 2t+1) \
+             must be DETECTED (MpcError::Tampered), not silently flip the match bit; got {err:?}"
+        );
+    }
+
+    /// **NON-detection BOUNDARY pin (sq-7q9i, WI-2).** At EXACTLY the honest-
+    /// majority minimum `n = 2t+1`, the degree-`2t` product open has ZERO RS
+    /// redundancy (it is the minimal `2t+1` points that pin a unique degree-`2t`
+    /// polynomial — analogous to the degree-`t` `t+1`-share no-redundancy case).
+    /// So tampering one product share is information-theoretically UNDETECTABLE:
+    /// it simply selects a different (wrong) degree-`2t` polynomial whose value at
+    /// 0 flips the match verdict, with NO inconsistency to detect. WI-2 must NOT
+    /// fake a guarantee here — the open must return the (flipped, wrong) value,
+    /// never a false-positive [`MpcError::Tampered`]. This mirrors WI-1's exact-
+    /// `t+1` non-detection pin. A true fix at `n = 2t+1` needs a MAC (deferred
+    /// WI-4 / bead sq-6d6g).
+    #[test]
+    fn tampered_share_in_secure_equality_open_is_undetectable_at_n_eq_2t_plus_1() {
+        // n = 5, t = 2 → equality opens at degree 2t = 4 with all n=5 shares:
+        // n = 2t+1 = 5 ⇒ NO redundancy at degree 2t ⇒ tampering is undetectable.
+        let backend = ShamirBackend::new_seeded(5, 0xEEEE).unwrap();
+        let mut dealer = backend.dealer();
+        let t = dealer.threshold();
+        assert_eq!(t, 2);
+        assert_eq!(dealer.parties(), 2 * t + 1, "exact honest-majority minimum");
+
+        // Two EQUAL keys → honest verdict is "match" (m == 0).
+        let key = fp(42);
+        let sa = dealer.share(key);
+        let sb = dealer.share(key);
+        let mask = dealer.draw_nonzero_fp();
+        let r = dealer.share(mask);
+        let d = shamir::sub_shares(&sa, &sb).unwrap();
+        let m_shares = mul_shares_raw(&d, &r).unwrap();
+        assert_eq!(
+            m_shares.len(),
+            2 * t + 1,
+            "exactly 2t+1 product shares (no redundancy)"
+        );
+
         let m_honest = reconstruct_degree(&m_shares, 2 * t).unwrap();
         assert_eq!(
             m_honest,
@@ -217,17 +284,25 @@ mod tamper {
             "sanity: equal keys open to m = 0 (match)"
         );
 
-        // Tamper ONE product share: the opened m is now nonzero ⇒ verdict flips to
-        // "no match", with NO signal that a share was corrupted.
+        // Tamper ONE product share at n = 2t+1: NO redundancy ⇒ the open must NOT
+        // report Tampered (no false positive) and the verdict silently flips. This
+        // is the honest boundary — RS cannot help; a MAC is required (WI-4).
         let mut tampered = m_shares.clone();
         tampered[0].y = tampered[0].y.add(fp(1));
-        let m_tampered = reconstruct_degree(&tampered, 2 * t).unwrap();
-        assert_ne!(
-            m_tampered,
-            Fp::zero(),
-            "FINDING (sq-nuok pin → bead sq-uu0u): tampering one product share flips a true secure- \
-             equality MATCH into a non-match undetected (semi-honest; no integrity)"
-        );
+        match reconstruct_degree(&tampered, 2 * t) {
+            Ok(m_tampered) => assert_ne!(
+                m_tampered,
+                Fp::zero(),
+                "sq-7q9i boundary: at n = 2t+1 a tampered product share flips the verdict \
+                 (different valid degree-2t poly), so m must be nonzero — but NO detection"
+            ),
+            Err(MpcError::Tampered { .. }) => panic!(
+                "sq-7q9i boundary FALSE POSITIVE: degree-2t open at n = 2t+1 has no RS \
+                 redundancy, so tampering is undetectable and must NOT report Tampered \
+                 (a MAC is the deferred WI-4 fix, not RS)"
+            ),
+            Err(other) => panic!("unexpected error at the n=2t+1 boundary: {other:?}"),
+        }
     }
 
     /// Mismatched evaluation points (a party submitting a share on the WRONG `x`)
@@ -481,6 +556,190 @@ mod robust_props {
                         "n={n} take={take}: robust must equal honest Lagrange on clean input"
                     );
                     assert_eq!(robust, secret, "and equal the true secret");
+                }
+            }
+        }
+    }
+
+    // =================================================================
+    // [OPUS-4.8] sq-7q9i (WI-2): degree-2t open property tests. The
+    // equality/mult path opens m = d·r at degree 2t; these pin the
+    // n>2t+1 (detect/correct) vs n=2t+1 (no detection) boundary at the
+    // ACTUAL product degree, mirroring the degree-t props above.
+    // =================================================================
+
+    /// Build a degree-`degree` Shamir-style sharing of `secret` at points
+    /// `x = 1..=n` directly (the production dealer only deals degree `t`). Free
+    /// coefficients are drawn from the deterministic test RNG so the resulting
+    /// codeword genuinely has the requested degree.
+    ///
+    /// [OPUS-4.8] sq-7q9i (WI-2): the LEADING (highest-index) coefficient is
+    /// forced non-zero by rejection sampling. If it were left as a raw RNG draw
+    /// it could be 0 with probability ~1/P, silently dropping the polynomial
+    /// below the requested `degree`; that would hand the degree-`2t` boundary /
+    /// correction-budget tests MORE RS redundancy than intended and weaken them.
+    /// Resampling stays deterministic (it only consumes extra draws from the
+    /// seeded test RNG). `degree >= 1` at every call site (always `2t`, `t >= 1`).
+    fn share_degree(rng: &mut Lcg, secret: Fp, degree: usize, n: usize) -> Vec<Share> {
+        let mut coeffs = Vec::with_capacity(degree + 1);
+        coeffs.push(secret);
+        // Free (middle) coefficients: zero is harmless for the degree.
+        for _ in 0..degree.saturating_sub(1) {
+            coeffs.push(fp(rng.next_fp()));
+        }
+        // Leading coefficient must be non-zero so the codeword is genuinely
+        // degree `degree` (only relevant when `degree >= 1`).
+        if degree >= 1 {
+            let mut lead = rng.next_fp();
+            while lead == 0 {
+                lead = rng.next_fp();
+            }
+            coeffs.push(fp(lead));
+        }
+        (1..=n as u64)
+            .map(|x| {
+                // Horner eval of the degree-`degree` polynomial at x.
+                let xf = fp(x);
+                let mut acc = Fp::zero();
+                for &c in coeffs.iter().rev() {
+                    acc = acc.mul(xf).add(c);
+                }
+                Share { x, y: acc }
+            })
+            .collect()
+    }
+
+    /// Reproduce the EXACT secure-equality open (`m = d·r` at degree `2t`) for
+    /// honest-majority party counts and assert the WI-2 boundary as a PROPERTY:
+    /// whenever `n > 2t+1` (redundancy at degree `2t`) a single tampered product
+    /// share is DETECTED (abort) — never a silently flipped verdict. Even `n`
+    /// gives `2t+1 = n−1 < n` (one redundant share), which is the regime the
+    /// honest-majority constructor actually reaches.
+    #[test]
+    fn equality_open_detects_tamper_whenever_redundant() {
+        let mut rng = Lcg(0x2E0F_7A11);
+        for &n in &[4usize, 6, 8] {
+            let backend = ShamirBackend::new_seeded(n, 0x9E5 + n as u64).unwrap();
+            let t = backend.threshold();
+            // Honest-majority even-n invariant: redundancy at degree 2t is n - (2t+1).
+            assert!(n > 2 * t + 1, "n={n} t={t}: expected degree-2t redundancy");
+            for _ in 0..150 {
+                let mut dealer = backend.dealer();
+                // EQUAL keys ⇒ honest m = 0 (match). (Unequal keys would open to a
+                // random nonzero m; either way one tampered share is off-curve.)
+                let key = fp(rng.next_fp());
+                let sa = dealer.share(key);
+                let sb = dealer.share(key);
+                let mask = dealer.draw_nonzero_fp();
+                let r = dealer.share(mask);
+                let d = shamir::sub_shares(&sa, &sb).unwrap();
+                let m_shares = mul_shares_raw(&d, &r).unwrap();
+                // Honest open is the match (no behaviour change on clean input).
+                assert_eq!(
+                    reconstruct_degree(&m_shares, 2 * t).unwrap(),
+                    Fp::zero(),
+                    "n={n}: honest equal-key open must be m = 0"
+                );
+                // Tamper one product share ⇒ detected (redundancy present).
+                let mut tampered = m_shares.clone();
+                let i = rng.next_in(n);
+                let mut delta = rng.next_fp();
+                if delta == 0 {
+                    delta = 1;
+                }
+                tampered[i].y = tampered[i].y.add(fp(delta));
+                match reconstruct_degree(&tampered, 2 * t) {
+                    Err(MpcError::Tampered { .. }) => { /* detected — correct */ }
+                    Ok(v) => panic!(
+                        "n={n} t={t}: tampered degree-2t product share with redundancy must \
+                         ABORT, got {v:?} (would silently flip the match verdict)"
+                    ),
+                    Err(other) => panic!("n={n}: must be Tampered, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// PROPERTY: the degree-`2t` open CORRECTS up to `e` tampered shares when the
+    /// codeword carries enough redundancy (`n ≥ 2t + 2e + 1`). The honest-
+    /// majority constructor (`t = ⌊(n−1)/2⌋`) never provisions this headroom for a
+    /// degree-`2t` product, so we build the degree-`2t` sharing DIRECTLY at a
+    /// chosen `n` to exercise the checker's correction arm at the product degree
+    /// (the equality primitive itself only ever DETECTS, never corrects — that is
+    /// the honest envelope, documented on `reconstruct_degree`).
+    #[test]
+    fn degree_2t_open_corrects_up_to_budget_when_overprovisioned() {
+        let mut rng = Lcg(0x4C0F_FEE2);
+        // (t, n) with n >= 2t + 3 so e_max = floor((n - 2t - 1)/2) >= 1 at deg 2t.
+        for &(t, n) in &[(1usize, 5usize), (1, 7), (2, 7), (2, 9), (3, 11)] {
+            let degree = 2 * t;
+            let e_max = (n - degree - 1) / 2;
+            assert!(e_max >= 1, "t={t} n={n}: expected a correction budget");
+            for _ in 0..150 {
+                let secret = fp(rng.next_fp());
+                let clean = share_degree(&mut rng, secret, degree, n);
+                // Honest open recovers the secret.
+                assert_eq!(
+                    reconstruct_degree(&clean, degree).unwrap(),
+                    secret,
+                    "t={t} n={n}: honest degree-2t open must recover the secret"
+                );
+                // Tamper up to e_max shares ⇒ corrected back to the truth.
+                let num_err = rng.next_in(e_max + 1); // 0..=e_max
+                let mut shares = clean.clone();
+                let idxs = distinct_indices(&mut rng, n, num_err);
+                tamper(&mut rng, &mut shares, &idxs);
+                let got = reconstruct_degree(&shares, degree).unwrap_or_else(|e| {
+                    panic!("t={t} n={n} e_max={e_max} num_err={num_err}: must correct, got {e:?}")
+                });
+                assert_eq!(
+                    got, secret,
+                    "t={t} n={n} num_err={num_err}: degree-2t open must correct to the truth"
+                );
+            }
+        }
+    }
+
+    /// PROPERTY (documented non-detection at the boundary): at EXACTLY
+    /// `n = 2t + 1` the degree-`2t` open has NO redundancy, so a single tampered
+    /// product share is undetectable — the open must NOT report `Tampered` (no
+    /// false positive) and simply interpolates to a different (wrong) value. This
+    /// is the degree-`2t` analogue of `exact_threshold_set_never_reports_tampered`
+    /// and pins the honest WI-2 boundary across the honest-majority odd-`n` counts
+    /// (where `2t+1 = n`). A MAC is the deferred WI-4 fix here, not RS.
+    #[test]
+    fn degree_2t_open_never_reports_tampered_at_n_eq_2t_plus_1() {
+        let mut rng = Lcg(0x2717_B0DE);
+        for &n in &[3usize, 5, 7, 9] {
+            let backend = ShamirBackend::new_seeded(n, 0xB0 + n as u64).unwrap();
+            let t = backend.threshold();
+            assert_eq!(
+                n,
+                2 * t + 1,
+                "odd honest-majority n: degree-2t has no redundancy"
+            );
+            let degree = 2 * t;
+            for _ in 0..150 {
+                let secret = fp(rng.next_fp());
+                // Exactly n = 2t+1 points of a degree-2t sharing (no redundancy).
+                let mut shares = share_degree(&mut rng, secret, degree, n);
+                let i = rng.next_in(n);
+                let mut delta = rng.next_fp();
+                if delta == 0 {
+                    delta = 1;
+                }
+                shares[i].y = shares[i].y.add(fp(delta));
+                match reconstruct_degree(&shares, degree) {
+                    Ok(v) => assert_ne!(
+                        v, secret,
+                        "n={n} t={t}: degree-2t tamper at n=2t+1 must change the value \
+                         (no magic correction)"
+                    ),
+                    Err(MpcError::Tampered { .. }) => panic!(
+                        "n={n} t={t}: FALSE POSITIVE — degree-2t open at n=2t+1 has no \
+                         redundancy; tampering is undetectable, must not report Tampered"
+                    ),
+                    Err(other) => panic!("n={n}: unexpected error {other:?}"),
                 }
             }
         }

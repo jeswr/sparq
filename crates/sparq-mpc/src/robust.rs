@@ -11,7 +11,8 @@
 //! codeword over the existing field `F_p` ([`crate::field`]). The message is the
 //! `t+1` low coefficients of `Q` (the secret is `Q(0)`); the codeword is the `n`
 //! evaluations `y_i = Q(x_i)`. Plain Lagrange interpolation
-//! ([`crate::shamir::reconstruct_at_zero`]) is RS *decoding under the assumption
+//! (`shamir::reconstruct_at_zero`, now `#[cfg(test)]` — no production caller after
+//! WI-2, so not an intra-doc link) is RS *decoding under the assumption
 //! that every symbol is correct* — it has no consistency check, so one tampered
 //! `y_i` silently yields the wrong `Q(0)` even when redundancy is present
 //! (pinned by `adversarial_tests::tamper`; bead sq-uu0u).
@@ -43,9 +44,13 @@
 //!   second valid codeword within distance `e` — needs `> e` coordinated errors
 //!   and is the standard RS limitation, not a regression over plain Lagrange,
 //!   which silently miscorrects on a SINGLE error.)
-//! - **The degree-`2t` equality/mult open** (`join::secure_equal`, opened at
-//!   `n = 2t+1` with NO RS redundancy). That is WI-2 (bead sq-7q9i), deliberately
-//!   out of scope here; this module does not touch it.
+//! - **The degree-`2t` equality/mult open at `n = 2t+1`** (`join::secure_equal`).
+//!   WI-2 (bead sq-7q9i) routes that open through THIS primitive at degree `2t`
+//!   ([`crate::shamir::reconstruct_degree`]): it detects/corrects when
+//!   `n > 2t+1`, but at exactly `n = 2t+1` degree `2t` has NO RS redundancy, so
+//!   the same no-redundancy non-detection above applies — a forged product share
+//!   is undetectable there. A true fix at `n = 2t+1` needs an information-
+//!   theoretic MAC (deferred WI-4, bead sq-6d6g), not RS redundancy.
 //!
 //! ## Algorithm — Berlekamp–Welch via Gaussian elimination over `F_p`
 //!
