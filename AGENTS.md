@@ -93,6 +93,41 @@ After a batch of changes, re-run only the evaluations whose inputs changed (and 
 
 (Keep this table in sync as gates are added.)
 
+## Documents must stay current — research records become architecture docs
+
+A document must never describe the code as it ISN'T. Concretely:
+
+- **No "not implemented" / "TODO" / "future work" statements left standing in a doc when they describe a real gap** — that is a disguised markdown TODO. Convert it to a **bead** and edit the doc to either delete the claim or replace it with a forward reference to the bead id. (If the feature IS now implemented, the statement is stale — fix the doc.)
+- **A `research/` design record is provisional.** Once its design is implemented, it should graduate: either rewrite it into an **architecture document** describing what the code actually does (and where), or fold the durable parts into the relevant crate `README.md` / `skills/<surface>/SKILL.md` and delete the speculative design. A research doc that still says "we will…" or "X is not implemented" about shipped code is a bug in the docs.
+- When you touch code, check the docs that describe it; if your change makes a doc statement false (in either direction), update the doc in the SAME change.
+
+## Upstream blockers — roll your own, then contribute back
+
+When a feature or a performance goal is **blocked by an upstream dependency** (a parser that rejects valid input, a missing API, a slow hot path), do NOT just mark it "unsupported/blocked-upstream" and stop. Instead:
+
+1. **Vendor a local copy** of the upstream code (under `vendor/` or as a forked crate via `[patch.crates-io]`, as already done for `spargebra`), implement the feature/fix there, and ship it so sparq is unblocked.
+2. **Open an issue + PR upstream** offering the change. Record the upstream issue/PR URL in the relevant bead and in the vendored copy's `*-PATCHES.md` (as `vendor/spargebra/SPARQ-PATCHES.md` does).
+3. **Keep the PR live:** if you later change that vendored code, update the open PR; if the upstream PR was already merged/closed, open a new one for the delta.
+4. A `blocked-upstream` bead is therefore a signal to roll-your-own + contribute, NOT a dead end. When the local implementation lands, the bead is unblocked.
+
+## Proactively maintain this file (and the skills)
+
+Do NOT wait to be told. Whenever you notice a **repeated behaviour, a standing rule, a convention, or a hard-won lesson** that future agents should follow, add it to this `AGENTS.md` (or the matching `skills/<surface>/SKILL.md`) as part of the same work — the same way you'd capture a follow-up as a bead. This file is the durable home for "how we work here"; keep it current without prompting.
+
+## Orchestration cadence — background by default
+
+When orchestrating, run agents and long shell commands (builds, gates, fetches, watches) **in the background** by default, and parallelise independent work. A foreground/blocking call stalls the loop and prevents picking up new instructions or other ready beads meanwhile. Reserve foreground for genuinely sequential, short glue. (Continues the delegation + continuous-loop rules above.)
+
+## Maximise parallelism — many agents + extra compute
+
+Aim to keep **as many sub-agents running in parallel as possible** without (a) conflicting work or (b) competing for the same resource. Partition by **file/area ownership** so no two concurrent agents edit the same file (give each a distinct crate/dir; wire shared files — `ci-bench.sh`, `benchmarks.toml`, workflows, `AGENTS.md` — centrally afterward). The only things to serialise: two agents that must touch the same file, and CPU-heavy **wall-clock measurements** (benchmarks need a quiet box — read-only/light analysis parallelises freely). Don't sit at one or two agents when the `bd ready` set has more independent work — fan out.
+
+**Extra compute:** you MAY launch additional **EC2 instances** to run work in parallel (e.g. the heavy full-scale benchmark tiers, large fuzzing, coverage). Follow the EC2 rules in memory: orphan-proof self-terminate is MANDATORY (instance-initiated-shutdown=terminate + a user-data watchdog), ~$5/day cap, tag `purpose=sparq-bench`/`sparq-dev`, **never touch the prod or dev boxes**, and a fresh session must orphan-check first. **If AWS SSO has expired** (`aws sts get-caller-identity --profile pss` fails), you cannot launch instances — raise a `needs:user` item (below) asking the user to re-auth, and keep surfacing it until they do.
+
+## Inputs needed from the user — the `needs:user` bead queue
+
+Anything blocked on a **human decision, credential, or out-of-repo action** (re-auth SSO, enable GitHub Pages, approve a destructive step, a product decision) is tracked as a **bead labelled `needs:user`**, with the exact ask in the description. This is the standard human-in-the-loop pattern (a dedicated review/blocked-on-human queue) mapped onto the existing tracker, so nothing waiting on the user is lost in the chat scroll. List them with `bd list -l needs:user`. An orchestrator should **surface the open `needs:user` items in its responses** (concise, at the end) until the user resolves them, so they can be actioned whenever the user is next available.
+
 ## No hard-coded performance numbers
 
 Do not bake benchmark numbers (MB/s, ×-faster, recall, gate counts, latencies) into markdown. Reference the **generated structured data** instead (the benchmark harnesses emit JSON; CI publishes results). If you cite a number, cite where it was generated.
