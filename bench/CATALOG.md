@@ -58,7 +58,7 @@ conventions first, then a per-category map that points at the registry, then a
 
 | category | what it covers | registry ids |
 |---|---|---|
-| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
+| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
 | **parse** | text-format parse throughput (MB/s) | `parse-baseline` |
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
@@ -80,6 +80,15 @@ Notes on a few that need care:
   intentionally-pathological queries (q05a/q06/q12a, tens of seconds at 250k) sit in
   `queries-heavy/` for the EC2/nightly tier; the **full 5M-100M scale** belongs to
   `bench-ec2.yml`/nightly (`bench/sp2b/gen.sh <triples>` at a larger `-t`).
+- **`dbpsb` (DBPSB/FEASIBLE) is tiered + fetch-and-cache (real DBpedia)** — see
+  [`bench/dbpsb/README.md`](./dbpsb/README.md). Per-commit, `fetch.sh` downloads ONE
+  sha256-pinned DBpedia Databus slice (CC-BY-SA; `mappingbased-objects_lang=en` 2019.09.01,
+  N-Triples despite the `.ttl` ext) and emits a DETERMINISTIC head cut of 750k triples, then
+  runs 13 sub-second curated FEASIBLE/DBPSB queries emitting `dbpsb_<query>_<mode>_us`
+  (trend-only) plus a HARD expected-rows correctness diff. Three unselective queries
+  (`queries-heavy/`) and the **full ~11.8M artifact** (the `.bz2` ingested directly via the
+  fused-decompress path) — up to DBpedia 'latest-core' ~1B triples — belong to the
+  EC2/nightly tier.
 - **`wikidata-8b` is external-cost and gated.** It builds the full Wikidata
   truthy dump (~8-9.4B triples) on a 16 GB EC2 box (~$5-17). It is **blocked
   until dict-spill merges to public main** — see

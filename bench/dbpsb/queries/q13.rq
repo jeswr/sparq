@@ -1,0 +1,10 @@
+# [OPUS-4.8] Subquery + aggregate: top occupations by number of distinct holders.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT ?occ ?holders WHERE {
+  {
+    SELECT ?occ (COUNT(DISTINCT ?person) AS ?holders) WHERE {
+      ?person dbo:occupation ?occ .
+    } GROUP BY ?occ
+  }
+  FILTER(?holders >= 2)
+} ORDER BY DESC(?holders) ?occ LIMIT 25

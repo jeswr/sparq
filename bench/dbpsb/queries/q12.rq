@@ -1,0 +1,9 @@
+# [OPUS-4.8] BGP join anchored on a constant place (bounded): people who died in London and,
+# through that same place, people born there — the place-join shape kept selective by a
+# constant anchor so it is per-commit-cheap (the unbounded form is queries-heavy/h03).
+PREFIX dbo: <http://dbpedia.org/ontology/>
+PREFIX dbr: <http://dbpedia.org/resource/>
+SELECT DISTINCT ?deceased ?native WHERE {
+  ?deceased dbo:deathPlace dbr:London .
+  ?native   dbo:birthPlace dbr:London .
+}

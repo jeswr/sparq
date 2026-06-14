@@ -1,0 +1,6 @@
+# [OPUS-4.8] DISTINCT + FILTER on an IRI string (regex over the country resource name).
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT DISTINCT ?country WHERE {
+  ?x dbo:country ?country .
+  FILTER(regex(str(?country), "United"))
+}

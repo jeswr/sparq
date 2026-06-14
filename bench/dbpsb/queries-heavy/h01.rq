@@ -1,0 +1,8 @@
+# [OPUS-4.8] HEAVY (EC2/nightly): unselective co-birthplace pairs — every pair of people
+# sharing a birthplace. Large intermediate (self-join on a high-cardinality predicate).
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT (COUNT(*) AS ?pairs) WHERE {
+  ?a dbo:birthPlace ?place .
+  ?b dbo:birthPlace ?place .
+  FILTER(?a != ?b)
+}

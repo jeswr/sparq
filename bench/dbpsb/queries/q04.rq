@@ -1,0 +1,6 @@
+# [OPUS-4.8] OPTIONAL left-join: everyone with an occupation, optional spouse.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT ?person ?occ ?spouse WHERE {
+  ?person dbo:occupation ?occ .
+  OPTIONAL { ?person dbo:spouse ?spouse }
+}

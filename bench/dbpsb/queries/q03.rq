@@ -1,0 +1,6 @@
+# [OPUS-4.8] Star join (2 patterns sharing the subject): both birthPlace and deathPlace.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT ?person ?bp ?dp WHERE {
+  ?person dbo:birthPlace ?bp .
+  ?person dbo:deathPlace ?dp .
+}

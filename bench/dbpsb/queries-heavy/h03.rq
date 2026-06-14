@@ -1,0 +1,8 @@
+# [OPUS-4.8] HEAVY (EC2/nightly): unbounded place self-join — people who died where someone
+# else was born, across ALL shared places. ~3M solutions on the 750k cut (DBPSB-pathological
+# unselective join); json-materialises ~700 MB, so it is NOT in the per-commit subset.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT DISTINCT ?deceased ?native ?place WHERE {
+  ?deceased dbo:deathPlace ?place .
+  ?native   dbo:birthPlace ?place .
+}

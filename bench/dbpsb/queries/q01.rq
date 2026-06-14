@@ -1,0 +1,6 @@
+# [OPUS-4.8] BGP, single triple pattern, bound object — "born in New York City".
+PREFIX dbo: <http://dbpedia.org/ontology/>
+PREFIX dbr: <http://dbpedia.org/resource/>
+SELECT ?person WHERE {
+  ?person dbo:birthPlace dbr:New_York_City .
+}

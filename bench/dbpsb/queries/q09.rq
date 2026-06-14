@@ -1,0 +1,5 @@
+# [OPUS-4.8] Aggregate: GROUP BY birthplace, COUNT, HAVING (>=50), ORDER BY DESC, LIMIT.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT ?bp (COUNT(?person) AS ?n) WHERE {
+  ?person dbo:birthPlace ?bp .
+} GROUP BY ?bp HAVING (COUNT(?person) >= 50) ORDER BY DESC(?n) LIMIT 50

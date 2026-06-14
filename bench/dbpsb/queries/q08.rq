@@ -1,0 +1,5 @@
+# [OPUS-4.8] DISTINCT projection + ORDER BY + LIMIT (bounded, deterministic top-K).
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT DISTINCT ?bp WHERE {
+  ?person dbo:birthPlace ?bp .
+} ORDER BY ?bp LIMIT 100
