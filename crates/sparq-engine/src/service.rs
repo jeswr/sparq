@@ -150,12 +150,12 @@ fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
                 // direction, so a `dirLangString` arrived as a plain language-tagged literal
                 // and silently lost its direction on the way in. We now reconstruct the
                 // directional literal, validating the direction through the single source of
-                // truth (`dict::parse_lang_dir_suffix`, also used by the stored-slot,
+                // truth (`dict::parse_base_direction`, also used by the stored-slot,
                 // materialised and outbound paths). An ABSENT or INVALID `its:dir` degrades
                 // to a plain language-tagged literal — the SAME decision `split_lang_dir` /
                 // `reconstruct_ref` make for a malformed stored slot — so all four paths AGREE
                 // on `(lang, dir)`.
-                match get("its:dir").and_then(sparq_core::dict::parse_lang_dir_suffix) {
+                match get("its:dir").and_then(sparq_core::dict::parse_base_direction) {
                     Some(dir) => Ok(Term::Literal(
                         Literal::new_directional_language_tagged_literal(value, lang, dir).map_err(
                             |e| format!("SERVICE: bad language tag {lang:?}: {e}"),

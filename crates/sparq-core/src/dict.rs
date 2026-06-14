@@ -266,11 +266,11 @@ pub(crate) fn lang_with_dir(l: &Literal) -> Option<std::borrow::Cow<'_, str>> {
 /// materialised `oxrdf::Term` path. So a suffix that is not exactly `ltr`/`rtl` is NOT a
 /// direction: the whole slot is returned as the language tag and no direction is reported —
 /// the same decision the materialised `reconstruct_ref` path makes (both call
-/// [`parse_lang_dir_suffix`]), so the fast path and the materialised path AGREE.
+/// [`parse_base_direction`]), so the fast path and the materialised path AGREE.
 #[inline]
 pub fn split_lang_dir(slot: &str) -> (&str, Option<&str>) {
     match slot.split_once("--") {
-        Some((tag, dir)) if parse_lang_dir_suffix(dir).is_some() => (tag, Some(dir)),
+        Some((tag, dir)) if parse_base_direction(dir).is_some() => (tag, Some(dir)),
         // No `--`, or a `--suffix` that is not a valid base direction: the entire slot is the
         // language tag and there is no direction. Keeping the full slot intact (rather than
         // dropping the bogus suffix) matches `reconstruct_ref`'s plain-language-tag fallback.
@@ -278,22 +278,30 @@ pub fn split_lang_dir(slot: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// [OPUS-4.8] sq-bj7o: the single source of truth for "is this RDF 1.2 base direction string
-/// valid?". The two possible directions are `ltr` / `rtl`, lowercase and case-sensitive
+/// [OPUS-4.8] sq-bj7o / sq-s955: the single source of truth for "is this RDF 1.2 base
+/// direction string valid?" — the base-direction validator for the whole stack. Takes a
+/// candidate direction string (NOT a `lang--dir` slot; just the direction component) and
+/// returns the typed [`oxrdf::BaseDirection`] when it is one of the two valid values, else
+/// `None`. The two possible directions are `ltr` / `rtl`, lowercase and case-sensitive
 /// (matching oxrdf `BaseDirection::Display` and the W3C RDF 1.2 / SPARQL 1.2 grammar — `LTR`
-/// / `Ltr` are NOT directions). Returns the typed enum so the materialised path
-/// ([`reconstruct_ref`]) and the validating split ([`split_lang_dir`]) can share exactly one
-/// definition and never drift apart.
+/// / `Ltr` are NOT directions).
 ///
-/// [OPUS-4.8] sq-s955: also the validator for the *inbound* SERVICE results parser, where
-/// `its:dir` arrives as its own JSON/XML field (not a `lang--dir` slot suffix). Routing that
-/// field through this one function makes the inbound path agree with the stored-slot
-/// (`split_lang_dir`), materialised (`reconstruct_ref`) and outbound (`json.rs`) paths on
-/// what a valid direction is — and, with the caller's fallback, on what an *invalid* one
-/// degrades to (a plain language-tagged literal).
+/// Returning the typed enum lets every direction-bearing path share exactly one definition
+/// and never drift apart:
+/// - stored-slot fast path — [`split_lang_dir`] (splits off the `--dir` suffix, then validates
+///   it here);
+/// - materialised path — [`reconstruct_ref`] (same split-then-validate of a stored slot);
+/// - outbound SPARQL 1.2 results — `sparq-engine`'s `json.rs` (emits the validated direction
+///   as a separate `its:dir` field);
+/// - inbound SERVICE results parser — `sparq-engine`'s `service.rs` (sq-s955), where `its:dir`
+///   arrives as its own JSON/XML field rather than a slot suffix and is validated directly
+///   through this function.
+///
+/// With each caller's fallback, all paths also agree on what an *invalid* direction degrades
+/// to (a plain language-tagged literal).
 #[inline]
-pub fn parse_lang_dir_suffix(suffix: &str) -> Option<oxrdf::BaseDirection> {
-    match suffix {
+pub fn parse_base_direction(dir: &str) -> Option<oxrdf::BaseDirection> {
+    match dir {
         "ltr" => Some(oxrdf::BaseDirection::Ltr),
         "rtl" => Some(oxrdf::BaseDirection::Rtl),
         _ => None,
@@ -572,12 +580,12 @@ fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
             // A stored `lang--dir` slot is an RDF 1.2 directional language-tagged string
             // (see `lang_with_dir`); a plain tag is an ordinary one. [OPUS-4.8] sq-bj7o: the
             // suffix is only a base direction when it is exactly `ltr`/`rtl`
-            // (`parse_lang_dir_suffix`) — the SAME validation `split_lang_dir` (the JSON fast
+            // (`parse_base_direction`) — the SAME validation `split_lang_dir` (the JSON fast
             // path) applies, so a malformed slot like `en--bogus` from an untrusted/mmap'd
             // index decodes to a PLAIN language-tagged literal with tag `en--bogus` here AND
             // to `("en--bogus", None)` there. Previously any non-`rtl` suffix was silently
             // coerced to `ltr`, which both fabricated a direction and diverged from the split.
-            Some(l) => match l.split_once("--").and_then(|(tag, dir)| parse_lang_dir_suffix(dir).map(|d| (tag, d))) {
+            Some(l) => match l.split_once("--").and_then(|(tag, dir)| parse_base_direction(dir).map(|d| (tag, d))) {
                 Some((tag, dir)) => Literal::new_directional_language_tagged_literal_unchecked(
                     value.to_string(),
                     tag.to_string(),
