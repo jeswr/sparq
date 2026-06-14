@@ -1,0 +1,7 @@
+# [OPUS-4.8] BSBM Explore query 9 — instantiated from bsbmtools-0.2 queries/explore/query9.txt.
+# %ReviewXYZ% = .../instances/dataFromRatingSite1/Review201 (full IRI; a review of Product167).
+# DESCRIBE form — the bench runner returns the count of triples describing the reviewer.
+PREFIX rev: <http://purl.org/stuff/rev#>
+
+DESCRIBE ?x
+WHERE { <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/dataFromRatingSite1/Review201> rev:reviewer ?x }

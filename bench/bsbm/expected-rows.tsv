@@ -1,0 +1,26 @@
+# [OPUS-4.8] BSBM Explore-mix per-commit expected result sizes at the FIXED -pc 300 corpus
+# (bench/bsbm/gen.sh -> ~115,987 N-Triples, deterministic). A drift in any count is a
+# correctness regression. Format: <query>\t<rows>. The query stem is the .rq filename without
+# extension. Counts are mode-independent here: SELECT queries report their solution count and
+# the graph-valued forms (query09 DESCRIBE, query12 CONSTRUCT) report produced-triple count,
+# so `count` and `materialize` agree for every row below.
+#
+# Notes on a few sizes (verified against the corpus, not guessed):
+#   query02 = 26  -> Product167 has 26 product features, each with a label.
+#   query07 = 24  -> 24 reviews; the offer OPTIONAL hardcodes country DE (no DE vendor exists at
+#                    -pc 300, only GB/US/CN), so it binds nothing — faithful to the template.
+#   query09 =  6  -> DESCRIBE reviewer = 6 triples describing the reviewer.
+#   query11 = 10  -> Offer8 has 10 outgoing triples, 0 incoming -> UNION = 10.
+#   query12 =  8  -> CONSTRUCT export template = 8 triples for a fully-bound offer.
+# query06 (regex; NOT in the official Explore querymix) lives in queries-heavy/ for EC2/nightly.
+query01	10
+query02	26
+query03	7
+query04	9
+query05	2
+query07	24
+query08	10
+query09	6
+query10	10
+query11	10
+query12	8

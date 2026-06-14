@@ -1,0 +1,36 @@
+# [OPUS-4.8] BSBM Explore query 7 — instantiated from bsbmtools-0.2 queries/explore/query7.txt.
+# %ProductXYZ% = .../instances/dataFromProducer4/Product167 (full IRI). %currentDate% =
+# "2008-01-01T00:00:00"^^xsd:dateTime (before the corpus's offer/review validity window).
+# NOTE: the offer OPTIONAL hardcodes country DE; at -pc 300 only 3 vendors exist (GB/US/CN),
+# none in DE, so that OPTIONAL binds nothing — faithful to the template. The result stays
+# non-empty and stable via the product label + the review OPTIONAL (Product167 has 24 reviews).
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX rev: <http://purl.org/stuff/rev#>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX bsbm: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/>
+PREFIX dc: <http://purl.org/dc/elements/1.1/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+SELECT ?productLabel ?offer ?price ?vendor ?vendorTitle ?review ?revTitle
+       ?reviewer ?revName ?rating1 ?rating2
+WHERE {
+	<http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/dataFromProducer4/Product167> rdfs:label ?productLabel .
+    OPTIONAL {
+        ?offer bsbm:product <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/dataFromProducer4/Product167> .
+		?offer bsbm:price ?price .
+		?offer bsbm:vendor ?vendor .
+		?vendor rdfs:label ?vendorTitle .
+        ?vendor bsbm:country <http://downlode.org/rdf/iso-3166/countries#DE> .
+        ?offer dc:publisher ?vendor .
+        ?offer bsbm:validTo ?date .
+        FILTER (?date > "2008-01-01T00:00:00"^^xsd:dateTime )
+    }
+    OPTIONAL {
+	?review bsbm:reviewFor <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/dataFromProducer4/Product167> .
+	?review rev:reviewer ?reviewer .
+	?reviewer foaf:name ?revName .
+	?review dc:title ?revTitle .
+    OPTIONAL { ?review bsbm:rating1 ?rating1 . }
+    OPTIONAL { ?review bsbm:rating2 ?rating2 . }
+    }
+}

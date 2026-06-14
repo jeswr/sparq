@@ -1,0 +1,24 @@
+# [OPUS-4.8] BSBM Explore query 3 — instantiated from bsbmtools-0.2 queries/explore/query3.txt.
+# %ProductType%=ProductType2, %ProductFeature1%=ProductFeature23, %ProductFeature2%=ProductFeature36,
+# %x%=340, %y%=900. Exercises negation-by-OPTIONAL+!bound.
+PREFIX bsbm-inst: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/>
+PREFIX bsbm: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+SELECT ?product ?label
+WHERE {
+    ?product rdfs:label ?label .
+    ?product a bsbm-inst:ProductType2 .
+	?product bsbm:productFeature bsbm-inst:ProductFeature23 .
+	?product bsbm:productPropertyNumeric1 ?p1 .
+	FILTER ( ?p1 > 340 )
+	?product bsbm:productPropertyNumeric3 ?p3 .
+	FILTER (?p3 < 900 )
+    OPTIONAL {
+        ?product bsbm:productFeature bsbm-inst:ProductFeature36 .
+        ?product rdfs:label ?testVar }
+    FILTER (!bound(?testVar))
+}
+ORDER BY ?label
+LIMIT 10

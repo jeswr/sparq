@@ -1,0 +1,19 @@
+# [OPUS-4.8] BSBM Explore query 1 — instantiated from bsbmtools-0.2 queries/explore/query1.txt.
+# Constants pinned to entities present at `gen.sh` (-pc 300): %ProductType%=ProductType2,
+# %ProductFeature1%=ProductFeature23, %ProductFeature2%=ProductFeature36, %x%=500.
+PREFIX bsbm-inst: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/>
+PREFIX bsbm: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+SELECT DISTINCT ?product ?label
+WHERE {
+    ?product rdfs:label ?label .
+    ?product a bsbm-inst:ProductType2 .
+    ?product bsbm:productFeature bsbm-inst:ProductFeature23 .
+    ?product bsbm:productFeature bsbm-inst:ProductFeature36 .
+    ?product bsbm:productPropertyNumeric1 ?value1 .
+	FILTER (?value1 > 500)
+	}
+ORDER BY ?label
+LIMIT 10
