@@ -3188,6 +3188,7 @@ version = "0.1.0"
 dependencies = [
  "geo",
  "geo-types",
+ "i_overlay",
  "oxrdf 0.3.3",
  "proj4rs",
  "rand 0.9.4",

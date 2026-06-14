@@ -30,7 +30,7 @@ Geometry parsing and algorithms wrap the standard pure-Rust geo stack
 | 9 | `geof:relate(g1, g2, pattern)` — generic DE-9IM test | ✅ `IntersectionMatrix::matches` |
 | 8.7 | `geof:envelope`, `geof:boundary`, `geof:convexHull` | ✅ (`boundary` of a GEOMETRYCOLLECTION unsupported) |
 | 8.7 | `geof:buffer(g, radius, units)` | ✅ geo 0.33 `Buffer`; metric radii via a local equirectangular metre frame (accuracy notes below); result MULTIPOLYGON |
-| 8.7 | `geof:intersection/union/difference/symDifference` | ✅ point-set ops: polygon overlay (geo `BooleanOps`) **plus** the well-defined line/point cases — see the table below; genuinely-intractable combos (1-D set subtraction) are a per-row expression error |
+| 8.7 | `geof:intersection/union/difference/symDifference` | ✅ point-set ops: polygon overlay (geo `BooleanOps`), the line/point cases, **and the 1-D set-subtraction cases** (line−line / line−polygon / their symDifference) via `i_overlay` string-line clip + linear referencing — see the table below |
 | 8.7 | `geof:getSRID` | ✅ the CRS IRI as `xsd:anyURI` |
 | 8.3/8.4 | Core RDF shape: `geo:hasGeometry`, `geo:hasDefaultGeometry`, `geo:asWKT` | ✅ extracted by `GeoIndex::build` (default + named graphs) |
 | 8.5.2 | `geo:gmlLiteral` | ❌ WKT only (no maintained pure-Rust GML parser — tracked in beads, `bd list -l area:sparq-geo`) |
@@ -116,26 +116,52 @@ a hard query error.
 ### Set-operation operand matrix
 
 The four set operations are GeoSPARQL point-set operations. `geo`'s
-`BooleanOps` realises polygon overlay; the lower-dimension cases are
-implemented directly over `geo`'s `line_intersection` / `CoordinatePosition`.
-"point" covers `POINT`/`MULTIPOINT`, "line" `LINESTRING`/`MULTILINESTRING`,
-"polygon" `POLYGON`/`MULTIPOLYGON` (and the rect/triangle shorthands).
+`BooleanOps` realises polygon overlay; the line∩line / line∩polygon cases are
+implemented over `geo`'s `line_intersection` / `CoordinatePosition`, and the
+**1-D set-subtraction** cases (line−line / line−polygon and their
+symDifference) over [`i_overlay`](https://crates.io/crates/i_overlay)'s
+string-line clip + a linear-referencing collinear-overlap subtraction — see the
+roll-your-own note below. "point" covers `POINT`/`MULTIPOINT`, "line"
+`LINESTRING`/`MULTILINESTRING`, "polygon" `POLYGON`/`MULTIPOLYGON` (and the
+rect/triangle shorthands).
 
 | operands | `intersection` | `union` | `difference` (a − b) | `symDifference` |
 |---|---|---|---|---|
 | polygon × polygon | ✅ overlay | ✅ overlay | ✅ overlay | ✅ overlay |
 | point × point | ✅ shared points | ✅ MULTIPOINT | ✅ set subtraction | ✅ set sym-diff |
 | point × line/polygon | ✅ points on the other | ✅ GEOMETRYCOLLECTION | ✅ points not on the other | ✅ (point−other) ∪ other |
-| line × line | ✅ crossings + collinear overlaps | ✅ MULTILINESTRING | ❌ no linear-referencing in `geo` | ❌ ditto |
-| line × polygon | ✅ line clipped to the polygon | ✅ GEOMETRYCOLLECTION | ❌ ditto | ❌ ditto |
+| line × line | ✅ crossings + collinear overlaps | ✅ MULTILINESTRING | ✅ collinear-overlap subtraction | ✅ (a−b) ∪ (b−a) |
+| line × polygon | ✅ line clipped to the polygon | ✅ GEOMETRYCOLLECTION | ✅ line outside the polygon | ✅ (line outside) ∪ polygon |
+| polygon × line/point | (symmetric) | (symmetric) | ✅ polygon unchanged (measure-zero) | ✅ (symmetric) |
 
-A ❌ cell is a clean `GeoError::Unsupported` (a per-row expression error through
-the registry), never a wrong answer or panic. Results are the lowest-dimension
-geometry that captures the answer (a line merely *touching* a polygon at a
-point yields a `MULTIPOINT`; a line∩line that is purely a crossing yields a
-`MULTIPOINT`/`POINT`), and serialise back to `geo:wktLiteral`. Line/line and
-line/polygon unions are NOT noded/dissolved (`geo` has no 1-D overlay), so an
-overlapping line∪line keeps both curves.
+Results are the lowest-dimension geometry that captures the answer (a line
+merely *touching* a polygon at a point yields a `MULTIPOINT`; a line∩line that
+is purely a crossing yields a `MULTIPOINT`/`POINT`), and serialise back to
+`geo:wktLiteral`. Line/line and line/polygon **unions** are NOT noded/dissolved
+(union is a plain set-union, not an overlay), so an overlapping line∪line keeps
+both curves. The remaining clean `GeoError::Unsupported` cases are operands the
+dimension-keyed dispatch cannot classify (e.g. a heterogeneous
+`GEOMETRYCOLLECTION`); these surface as a per-row expression error through the
+registry, never a wrong answer or panic.
+
+**1-D set-subtraction semantics (OGC point-set, measure-zero rule).**
+`line − line` removes only the **collinear** overlaps of `b` from `a` (a curve
+minus a finite set of crossing points is the same curve, since points are
+measure-zero in a 1-D point set). `line − polygon` keeps the portions of the
+line **strictly outside** the polygon's closure — a span running ALONG the
+boundary belongs to the polygon and is removed, and the interior of a hole
+counts as outside (so a line through a holed polygon survives in the hole).
+`polygon − line` / `polygon − point` leave the surface unchanged.
+
+**Roll-your-own + upstream.** `geo 0.33`'s `BooleanOps` nodes/overlays only
+*polygons* — it has no overlay for open paths — so the line cases above could
+not be done with `geo` alone. Per AGENTS.md "Upstream blockers" this crate
+implements them locally: line−polygon uses `i_overlay`'s `FloatClip::clip_by`
+(the very overlay engine `geo` itself depends on, exposed for the string-line
+case `geo` does not re-export); line−line uses an in-crate linear-referencing
+subtraction. A feature request offering a `geo`-side `BooleanOps`/linear-
+referencing difference for `LineString` operands has been prepared for
+[georust/geo](https://github.com/georust/geo) (see the bead `sq-fxv3`).
 
 Build the registry **once** and reuse it: it is cheaply cloneable and
 `Send + Sync`. sparq-server exposes exactly this wiring behind its opt-in

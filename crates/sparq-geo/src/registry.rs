@@ -320,9 +320,16 @@ mod tests {
             "got {}",
             outside.value()
         );
-        // 1-D set subtraction stays a clean expression error (no wrong answer).
+        // 1-D set subtraction is now supported (sq-fxv3): line − line removes
+        // the collinear-overlapping span, leaving LINESTRING(0 0, 1 0). [OPUS-4.8]
         let diff = reg.get(&format!("{GEOF_NS}difference")).unwrap();
-        assert!(diff(&[wkt("LINESTRING(0 0, 2 0)"), wkt("LINESTRING(1 0, 3 0)")]).is_err());
+        let Term::Literal(d) =
+            diff(&[wkt("LINESTRING(0 0, 2 0)"), wkt("LINESTRING(1 0, 3 0)")]).unwrap()
+        else {
+            panic!("literal")
+        };
+        assert_eq!(d.datatype().as_str(), WKT_LITERAL);
+        assert!(d.value().contains("LINESTRING") && d.value().contains('1'), "got {}", d.value());
         // buffer: polygon out, radius must be numeric, unit must be known.
         let buffer = reg.get(&format!("{GEOF_NS}buffer")).unwrap();
         let metre = Term::NamedNode(NamedNode::new_unchecked(format!("{}metre", crate::vocab::UOM_NS)));

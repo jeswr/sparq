@@ -519,22 +519,146 @@ fn difference_and_symdifference_point_operands() {
     assert!(geof::sf_equals(&sym, &expected).unwrap(), "got {}", sym.to_wkt_literal());
 }
 
+// ---- 1-D set subtraction: line−line / line−polygon / symDifference (sq-fxv3) -------
+//
+// Now SUPPORTED via i_overlay's string-line clip (line−polygon) plus a
+// linear-referencing collinear-overlap subtraction (line−line). Hand-computed
+// expected geometries below; compared with geof::sf_equals (topological
+// equality, so vertex order / multi-wrapping don't matter). [OPUS-4.8]
+
+/// Assert a wktLiteral result is topologically equal to `expected`.
+fn assert_geo_eq(got_lit: &str, expected: &str) {
+    let got = parse_wkt_literal(got_lit).unwrap();
+    let exp = parse_wkt_literal(expected).unwrap();
+    assert!(
+        geof::sf_equals(&got, &exp).unwrap(),
+        "got {}, expected {expected}",
+        got.to_wkt_literal()
+    );
+}
+
 #[test]
-fn line_subtraction_is_cleanly_unsupported_not_a_panic() {
-    // 1-D set subtraction has no linear-referencing primitive in geo: honest
-    // Unsupported, never a panic / wrong answer.
-    assert!(matches!(
-        lex::difference("LINESTRING(0 0, 2 0)", "LINESTRING(1 0, 3 0)"),
-        Err(GeoError::Unsupported(_))
-    ));
-    assert!(matches!(
-        lex::difference("LINESTRING(0 0, 2 0)", "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"),
-        Err(GeoError::Unsupported(_))
-    ));
-    assert!(matches!(
-        lex::sym_difference("LINESTRING(0 0, 2 0)", "LINESTRING(1 0, 3 0)"),
-        Err(GeoError::Unsupported(_))
-    ));
+fn difference_line_minus_line() {
+    // Collinear partial overlap: a=[0,2] minus b covering [1,2] -> [0,1].
+    assert_geo_eq(
+        &lex::difference("LINESTRING(0 0, 2 0)", "LINESTRING(1 0, 3 0)").unwrap(),
+        "LINESTRING(0 0, 1 0)",
+    );
+    // b strictly interior to a: a splits into two pieces.
+    assert_geo_eq(
+        &lex::difference("LINESTRING(0 0, 4 0)", "LINESTRING(1 0, 3 0)").unwrap(),
+        "MULTILINESTRING((0 0, 1 0), (3 0, 4 0))",
+    );
+    // b covers a entirely: empty result.
+    let cover = lex::difference("LINESTRING(1 0, 2 0)", "LINESTRING(0 0, 3 0)").unwrap();
+    assert!(cover.contains("EMPTY") || cover.contains("()"), "got {cover}");
+    // b merely CROSSES a (a point, measure-zero): a unchanged.
+    assert_geo_eq(
+        &lex::difference("LINESTRING(0 0, 2 0)", "LINESTRING(1 -1, 1 1)").unwrap(),
+        "LINESTRING(0 0, 2 0)",
+    );
+    // Disjoint b: a unchanged.
+    assert_geo_eq(
+        &lex::difference("LINESTRING(0 0, 2 0)", "LINESTRING(5 5, 6 6)").unwrap(),
+        "LINESTRING(0 0, 2 0)",
+    );
+}
+
+#[test]
+fn difference_line_minus_polygon() {
+    let sq = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    // A horizontal line crossing the square: only the two outside spans survive.
+    assert_geo_eq(
+        &lex::difference("LINESTRING(-1 2, 5 2)", sq).unwrap(),
+        "MULTILINESTRING((-1 2, 0 2), (4 2, 5 2))",
+    );
+    // Line entirely inside the polygon: empty.
+    let inside = lex::difference("LINESTRING(1 1, 3 3)", sq).unwrap();
+    assert!(inside.contains("EMPTY") || inside.contains("()"), "got {inside}");
+    // Line entirely outside: whole line back.
+    assert_geo_eq(&lex::difference("LINESTRING(5 5, 6 6)", sq).unwrap(), "LINESTRING(5 5, 6 6)");
+    // Polygon WITH A HOLE: the hole interior counts as OUTSIDE the polygon, so
+    // a line crossing both the outer ring and the hole keeps 3 spans.
+    let holed = "POLYGON((0 0, 6 0, 6 6, 0 6, 0 0), (2 2, 4 2, 4 4, 2 4, 2 2))";
+    assert_geo_eq(
+        &lex::difference("LINESTRING(-1 3, 7 3)", holed).unwrap(),
+        "MULTILINESTRING((-1 3, 0 3), (2 3, 4 3), (6 3, 7 3))",
+    );
+    // Difference and intersection PARTITION the original line (complementary).
+    let inter = lex::intersection("LINESTRING(-1 3, 7 3)", holed).unwrap();
+    assert_geo_eq(&inter, "MULTILINESTRING((0 3, 2 3), (4 3, 6 3))");
+}
+
+#[test]
+fn difference_line_along_polygon_boundary_excludes_the_boundary_span() {
+    // A line running exactly ALONG the polygon's top edge (y=4). The polygon is
+    // a CLOSED set, so the boundary span belongs to the polygon: it is REMOVED
+    // from line−polygon (only the two outside overhangs survive) and KEPT in
+    // line∩polygon — the two operations remain a clean partition. [OPUS-4.8]
+    let sq = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    let along = "LINESTRING(-1 4, 5 4)";
+    assert_geo_eq(
+        &lex::difference(along, sq).unwrap(),
+        "MULTILINESTRING((-1 4, 0 4), (4 4, 5 4))",
+    );
+    assert_geo_eq(&lex::intersection(along, sq).unwrap(), "LINESTRING(0 4, 4 4)");
+}
+
+#[test]
+fn difference_polygon_minus_line_or_point_is_unchanged() {
+    // Subtracting a measure-zero 1-D / 0-D set from a 2-D surface leaves it intact.
+    let sq = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    assert_geo_eq(&lex::difference(sq, "LINESTRING(-1 2, 5 2)").unwrap(), sq);
+    assert_geo_eq(&lex::difference(sq, "POINT(2 2)").unwrap(), sq);
+    // …and line − point.
+    assert_geo_eq(
+        &lex::difference("LINESTRING(0 0, 2 0)", "POINT(1 0)").unwrap(),
+        "LINESTRING(0 0, 2 0)",
+    );
+}
+
+#[test]
+fn sym_difference_line_cases() {
+    // line ∆ line = (a−b) ∪ (b−a): the non-shared portions of both curves.
+    assert_geo_eq(
+        &lex::sym_difference("LINESTRING(0 0, 2 0)", "LINESTRING(1 0, 3 0)").unwrap(),
+        "MULTILINESTRING((0 0, 1 0), (2 0, 3 0))",
+    );
+    // Identical lines: empty symmetric difference.
+    let same = lex::sym_difference("LINESTRING(0 0, 2 0)", "LINESTRING(0 0, 2 0)").unwrap();
+    assert!(same.contains("EMPTY") || same.contains("()"), "got {same}");
+    // line ∆ polygon = (line outside polygon) ∪ polygon -> a GEOMETRYCOLLECTION
+    // (polygon − line is the polygon unchanged).
+    let sq = "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))";
+    let sym = lex::sym_difference("LINESTRING(-1 2, 5 2)", sq).unwrap();
+    assert!(sym.contains("GEOMETRYCOLLECTION"), "got {sym}");
+    let parsed = parse_wkt_literal(&sym).unwrap();
+    // Contains the polygon and the outside line span.
+    assert!(geof::sf_intersects(&parsed, &parse_wkt_literal(sq).unwrap()).unwrap());
+    assert!(geof::sf_intersects(&parsed, &parse_wkt_literal("LINESTRING(-1 2, -0.5 2)").unwrap())
+        .unwrap());
+    // Operand order is symmetric (polygon ∆ line == line ∆ polygon).
+    let flipped = lex::sym_difference(sq, "LINESTRING(-1 2, 5 2)").unwrap();
+    assert!(flipped.contains("GEOMETRYCOLLECTION"), "got {flipped}");
+}
+
+#[test]
+fn line_symdifference_recombines_from_the_two_differences() {
+    // By definition a∆b = (a−b) ∪ (b−a); cross-check on collinear lines.
+    let a = "LINESTRING(0 0, 3 0)";
+    let b = "LINESTRING(1 0, 5 0)";
+    let amb = lex::difference(a, b).unwrap(); // (0,0)-(1,0)
+    let bma = lex::difference(b, a).unwrap(); // (3,0)-(5,0)
+    let sym = lex::sym_difference(a, b).unwrap();
+    let recombined = parse_wkt_literal(&lex::union(&amb, &bma).unwrap()).unwrap();
+    assert!(
+        geof::sf_equals(&recombined, &parse_wkt_literal(&sym).unwrap()).unwrap(),
+        "sym {sym} != union of diffs"
+    );
+}
+
+#[test]
+fn intersection_of_unequal_points_is_empty_not_error() {
     // Intersection of two points that are NOT equal: empty, not an error.
     let empty = lex::intersection("POINT(0 0)", "POINT(1 1)").unwrap();
     assert!(empty.contains("EMPTY") || empty.contains("()"), "got {empty}");
