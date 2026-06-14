@@ -2,13 +2,14 @@
 
 
 [RDF/JS](https://rdf.js.org/)-style bindings for **sparq**, a Rust RDF
-triplestore + SPARQL engine compiled to WebAssembly. One ~1.6 MB wasm artifact,
+triplestore + SPARQL engine compiled to WebAssembly. One compact wasm artifact,
 one tiny runtime npm dependency ([`fzstd`](https://www.npmjs.com/package/fzstd),
 dynamically imported only when ingesting zstd); works in Node ≥ 18 and the
-browser.
+browser. (The wasm bundle bytes are tracked per-commit on the perf dashboard,
+<https://jeswr.github.io/sparq/dev/bench>.)
 
-- Dictionary-encoded in-memory store (optionally block-compressed: about half
-  the index memory for a bounded scan cost).
+- Dictionary-encoded in-memory store (optionally block-compressed: substantially
+  less index memory for a bounded scan cost).
 - SPARQL 1.1 SELECT (BGPs with worst-case-optimal joins, FILTER, OPTIONAL,
   UNION, MINUS, BIND, VALUES, aggregates, ORDER BY, DISTINCT/LIMIT/OFFSET,
   sub-SELECT) and ASK — both evaluated natively (ASK early-exits at the first
@@ -106,7 +107,7 @@ store.free(); // release wasm memory (also `using store = …` via Symbol.dispos
 ### Talking to a sparq server: dictionary-fetch protocol
 
 Sparq servers compress small SPARQL responses with shared zstd *vocabulary
-dictionaries* (≈5× smaller on ≤1 KiB bodies) — but only when the client proves
+dictionaries* (markedly smaller on small bodies) — but only when the client proves
 it already holds the dictionary, so no request ever waits on one.
 `SparqDictionaryClient` wraps `fetch` with the whole negotiation:
 

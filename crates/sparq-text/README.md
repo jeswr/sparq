@@ -131,13 +131,14 @@ with `ORDER BY DESC(?s)` over a `text:score` variable.
 The `bench_text` example builds an index over 1,000,000 distinct 8-word literals
 over a ~10k-token Zipf-flavoured vocabulary and reports graph-load / index-build
 time, index size (B/doc), and AND / OR / prefix query latency. Run it for the
-numbers (machine- and load-dependent):
+numbers (machine- and load-dependent), or see the perf dashboard
+(<https://jeswr.github.io/sparq/dev/bench>) for the tracked figures:
 
 ```sh
 cargo run --release -p sparq-text --example bench_text
 ```
 
 Query cost is dominated by the number of hits scored: the synthetic
-vocabulary makes a 4-character prefix match ~⅓ of the corpus (336k docs
-scored + sorted) — a worst case by construction; real prefix queries
+vocabulary makes a short prefix match a large fraction of the corpus (many
+documents scored + sorted) — a worst case by construction; real prefix queries
 (autocomplete) touch far fewer expansions.

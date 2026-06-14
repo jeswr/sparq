@@ -99,16 +99,17 @@ the subject→types map.
 The `olympics_introspect` example reports load / `Introspection::build` / `to_json` /
 `to_text_summary` time over the olympics (1.78M triples) and qlever-synthetic (10M)
 fixtures. Run it for the numbers (fixture paths via `SPARQ_OLYMPICS_NT` /
-`SPARQ_SYNTHETIC_NT`):
+`SPARQ_SYNTHETIC_NT`) — the tracked figures live on the perf dashboard
+(<https://jeswr.github.io/sparq/dev/bench>):
 
 ```sh
 cargo run -p sparq-introspect --example olympics_introspect --release
 ```
 
-The design-doc §4 gates it enforces: full introspection scan ≤ dataset load time;
-summary generation < 100 ms at olympics scale; and the olympics text summary names
-the dataset's actual classes (foaf:Person, dbo:SportsEvent, dbo:SportsTeam,
-dbo:Olympics, …) — asserted by `tests/olympics.rs`.
+The design-doc §4 gates it enforces: the full introspection scan stays within dataset
+load time; summary generation is sub-second at olympics scale; and the olympics text
+summary names the dataset's actual classes (foaf:Person, dbo:SportsEvent,
+dbo:SportsTeam, dbo:Olympics, …) — asserted by `tests/olympics.rs`.
 
 Olympics summary excerpt (budget 2500):
 
