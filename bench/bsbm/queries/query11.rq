@@ -1,0 +1,9 @@
+# [OPUS-4.8] BSBM Explore query 11 — instantiated from bsbmtools-0.2 queries/explore/query11.txt.
+# %OfferXYZ% = .../instances/dataFromVendor1/Offer8 (full IRI; an offer of Product167).
+# UNION of outgoing + incoming triples of the offer (an entity "all properties" probe).
+SELECT ?property ?hasValue ?isValueOf
+WHERE {
+  { <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/dataFromVendor1/Offer8> ?property ?hasValue }
+  UNION
+  { ?isValueOf ?property <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/dataFromVendor1/Offer8> }
+}

@@ -1,0 +1,15 @@
+# [OPUS-4.8] BSBM Explore query 6 — instantiated from bsbmtools-0.2 queries/explore/query6.txt.
+# Q6 is INTENTIONALLY excluded from the official Explore querymix (see querymix.txt — it lists
+# 1-5,7-12, never 6) because its unanchored regex over every product label is a full scan that
+# upstream dropped from the steady-state mix. We keep it here for the EC2/nightly tier only.
+# %word1% = "warping" (a substring present in at least one generated product label at -pc 300).
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX bsbm: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/>
+
+SELECT ?product ?label
+WHERE {
+	?product rdfs:label ?label .
+    ?product rdf:type bsbm:Product .
+	FILTER regex(?label, "warping")
+}

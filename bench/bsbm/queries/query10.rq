@@ -1,0 +1,22 @@
+# [OPUS-4.8] BSBM Explore query 10 — instantiated from bsbmtools-0.2 queries/explore/query10.txt.
+# %ProductXYZ% = .../instances/dataFromProducer4/Product167 (full IRI). %currentDate% =
+# "2008-01-01T00:00:00"^^xsd:dateTime. Country US is hardcoded by the template; Vendor2 is the
+# US vendor at -pc 300, so this binds (US offers of Product167 with deliveryDays<=3, valid).
+PREFIX bsbm: <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/vocabulary/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+PREFIX dc: <http://purl.org/dc/elements/1.1/>
+
+SELECT DISTINCT ?offer ?price
+WHERE {
+	?offer bsbm:product <http://www4.wiwiss.fu-berlin.de/bizer/bsbm/v01/instances/dataFromProducer4/Product167> .
+	?offer bsbm:vendor ?vendor .
+    ?offer dc:publisher ?vendor .
+	?vendor bsbm:country <http://downlode.org/rdf/iso-3166/countries#US> .
+	?offer bsbm:deliveryDays ?deliveryDays .
+	FILTER (?deliveryDays <= 3)
+	?offer bsbm:price ?price .
+    ?offer bsbm:validTo ?date .
+    FILTER (?date > "2008-01-01T00:00:00"^^xsd:dateTime )
+}
+ORDER BY xsd:double(str(?price))
+LIMIT 10
