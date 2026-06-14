@@ -1,8 +1,45 @@
-//! sparq-core: dictionary-encoded RDF storage with six permutation indexes.
+//! sparq-core: the dictionary-encoded RDF triplestore at the heart of sparq.
 //!
-//! This is the storage substrate for the query engine: a [`Graph`] holds the
-//! term [`Dict`]ionary and the [`TripleStore`] (six sorted permutations), and
-//! is built from an RDF document via the bulk loader.
+//! This crate is the storage substrate every other sparq crate builds on. A [`Graph`]
+//! holds the term [`Dict`]ionary and the [`TripleStore`] (six sorted permutations), and is
+//! built from an RDF document via the bulk loader.
+//!
+//! # Model
+//!
+//! Every RDF term is interned into a compact integer id once, in the [`Dict`]ionary; the
+//! [`TripleStore`] keeps the resulting `[Id; 3]` triples in **six sorted permutation
+//! indexes** (SPO/SOP/PSO/POS/OSP/OPS). The payoff is that every triple-pattern shape — any
+//! combination of bound/unbound subject, predicate and object — becomes a contiguous range
+//! scan over one permutation, with no full-graph filtering. Joins downstream
+//! ([`sparq_engine`](https://docs.rs/sparq-engine)) operate on fixed-width integer keys
+//! rather than strings.
+//!
+//! # Ingest
+//!
+//! The bulk loaders read the RDF text formats (Turtle / N-Triples / N-Quads / TriG) and
+//! decompress `.gz` / `.bz2` / `.zst` inputs transparently, fusing decompression into the
+//! parse. Loading is **parallel** (chunk-parallel scanning, behind the `parallel` feature)
+//! and **streaming** where the format allows. See [`Graph::load_str`], [`Graph::load_reader`]
+//! and, for the reasoning seam, [`Graph::parse_to_triples`] + [`Graph::from_parts`].
+//!
+//! # Updates and out-of-core
+//!
+//! Inserts and deletes are applied as delta overlays (see [`Graph::apply_delta`]), with an
+//! optional write-ahead log for durability. Behind the `mmap` feature the same six
+//! permutations are stored **out-of-core**, memory-mapped from disk with optional
+//! block-compressed permutations, so datasets larger than RAM are queried with near-zero
+//! resident heap.
+//!
+//! # Named graphs and RDF 1.2
+//!
+//! [`Graph`] stores the full dataset (default graph plus named graphs / quads), and quoted
+//! triple terms (RDF 1.2 / RDF-star) are stored structurally so triple-term patterns match.
+//!
+//! # Feature flags
+//!
+//! - `parallel` — chunk-parallel loaders (rayon).
+//! - `mmap` — the out-of-core, memory-mapped store and external-merge sort.
+//! - `dict-spill` — spill the dictionary to disk during very large ingests.
 
 pub mod compress;
 pub mod dict;
