@@ -90,6 +90,20 @@ pinning     = "index dir + query dir; OS page cache state affects cold/warm — 
 records_to  = "stdout (TSV); used in bench/qlever-baselines.md mmap comparison"
 status      = "ok"
 
+# [OPUS-4.8] sq-ca4 — one query per SPARQL operator family; trend-only latency coverage.
+[[benchmark]]
+id          = "operator-coverage"
+name        = "SPARQL operator-coverage latency suite"
+category    = "query"
+measures    = "per-operator min-of-iters latency (us) across count/materialize/json for one query per operator family (BGP/star/chain/triangle, UNION, OPTIONAL/!bound, MINUS, FILTER {numeric,string,IN,EXISTS}, BIND, VALUES, aggregates+GROUP BY+HAVING, DISTINCT, ORDER BY+LIMIT/OFFSET, property paths {+,*,?,seq,alt,inverse,negated-set}, subquery, ASK/CONSTRUCT/DESCRIBE); each query returns a small stable non-empty result"
+invoke      = "cargo build -p sparq-cli sparq-bench --release && ./target/release/sparq-bench dump 2000 /tmp/op.nt && ./target/release/sparq-cli bench /tmp/op.nt ntriples bench/operators/queries 3 count   # also materialize|json; CI runs all three via scripts/ci-bench.sh -> op_<query>_<mode>_us"
+source      = "bench/operators/queries/*.rq; crates/sparq-cli/src/main.rs (run_query_suite — routes CONSTRUCT/DESCRIBE to construct_or_describe via PreparedQuery::is_graph_form); scripts/ci-bench.sh"
+dataset     = "sparq-bench synthetic dump (deterministic WatDiv-flavoured social graph); queries hit fixed subjects/cities so row counts are stable across scales"
+quiet_box_sensitive = true  # wall-clock latency; trend-only, NOT in the deterministic perf-gate (scripts/perf-gate.py)
+pinning     = "query dir + mode; dataset deterministic; queries pinned to fixed subjects so result counts are scale-stable"
+records_to  = "stdout (TSV); CI emits op_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh"
+status      = "ok"
+
 [[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
@@ -454,6 +468,20 @@ dataset     = "synthetic sensor readings generated in-example"
 quiet_box_sensitive = true
 pinning     = "in-example generator"
 records_to  = "stdout; sparq-rsp README"
+status      = "ok"
+
+# [OPUS-4.8] sq-cu8c — vector store/HNSW throughput behind an #[ignore]d test.
+[[benchmark]]
+id          = "vectors-throughput"
+name        = "sparq-vectors store + HNSW build/query throughput"
+category    = "query"
+measures    = "put/finalize/open (mmap) time, HNSW build time, exact vs HNSW top-k query throughput (ms/query, q/s) on a 50k x 32 random workload (same as the recall gate)"
+invoke      = "cargo test -p sparq-vectors --release --test throughput -- --ignored --nocapture"
+source      = "crates/sparq-vectors/tests/throughput.rs (throughput_50k, #[ignore]d)"
+dataset     = "50,000 x 32-dim vectors from a seeded splitmix64 PRNG, generated in-test (no external data)"
+quiet_box_sensitive = true
+pinning     = "N=50000, DIM=32, K=10, QUERIES=200 consts in the test; seeds fixed (0xC0FFEE data, 0xDECAF queries)"
+records_to  = "stderr (--nocapture); source of the sparq-vectors README numbers"
 status      = "ok"
 
 [[benchmark]]
