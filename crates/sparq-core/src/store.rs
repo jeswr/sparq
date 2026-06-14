@@ -417,9 +417,21 @@ impl TripleStore {
             r.read_exact(&mut b).ok()?;
             Some(Id::from_le_bytes(b))
         }
+        // [OPUS-4.8] sq-f5jh: `predstats.bin` is an UNTRUSTED on-disk file (trust boundary
+        // B5). `n` is a u64 count read straight from it, and `reserve(n)` was unbounded — a
+        // single flipped count byte could ask `FxHashMap` to pre-allocate billions of slots
+        // (~17 B each) and ABORT the process (uncatchable OOM DoS; under llvm-cov's added
+        // memory pressure this is the residual rc=101 / coverage-undercount trigger). Each
+        // record on disk is `size_of::<Id>() + 24` bytes (id + three u64s), so the file
+        // length is a hard upper bound on the real record count: clamp the reservation to it
+        // (the per-record `read_exact`s below still error cleanly via `?`/`None` if the file
+        // actually ends early). We never reserve for more records than can possibly fit.
         let n = rd8(&mut r)? as usize;
+        const PREDSTAT_REC_BYTES: usize = std::mem::size_of::<Id>() + 24; // id + count + ndv_subj + ndv_obj
+        let file_len = std::fs::metadata(dir.join("predstats.bin")).ok()?.len() as usize;
+        let max_records = file_len.saturating_sub(8) / PREDSTAT_REC_BYTES; // 8-byte header
         let mut stats = FxHashMap::default();
-        stats.reserve(n);
+        stats.reserve(n.min(max_records));
         for _ in 0..n {
             let p = rd_id(&mut r)?;
             let count = rd8(&mut r)? as usize;
