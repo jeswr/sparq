@@ -85,6 +85,14 @@ pub mod proof;
 pub mod rng;
 pub mod shamir;
 
+// [OPUS-4.8] sq-nuok: adversarial-share negative suite + 'no fake crypto' stub
+// gate. Test-only; compiled only under `cfg(test)` so it can drive the seedable
+// simulation RNG (`ShamirBackend::new_seeded`) and the deferred-stub trait
+// surface. Asserts the honest-but-robust properties that ARE claimed and PINS
+// that the deferred parts fail closed. See the module docs.
+#[cfg(test)]
+mod adversarial_tests;
+
 pub use backend::{BackendInfo, MpcBackend, TrustModel};
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
