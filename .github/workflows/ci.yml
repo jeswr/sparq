@@ -10,6 +10,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch: # [OPUS-4.8] manual trigger forces the nightly tier regardless of the freshness gate
   # [OPUS-4.8] Nightly schedule drives the heavy coverage tier (sq-hbg7): the
   # `coverage-nightly` job runs the sparq-vectors 50k recall/diskann accuracy
   # tests under llvm-cov instrumentation, which a per-commit job cannot afford
@@ -262,15 +263,49 @@ jobs:
           name: coverage-summary
           path: target/coverage/coverage-summary.json
 
+  nightly-gate:
+    # [OPUS-4.8] Freshness gate for ALL nightly (schedule-triggered) jobs: run them
+    # only if HEAD changed since the last nightly run — so the heavy nightly tier does
+    # not re-run on an unchanged repo. Compares github.sha to the head_sha of the most
+    # recent COMPLETED schedule-triggered run of this workflow (ci.yml). A manual
+    # workflow_dispatch always passes; if the lookup fails or no prior nightly exists,
+    # we FAIL-OPEN (run) so a transient API error never silently disables the nightly.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      fresh: ${{ steps.gate.outputs.fresh }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"; echo "manual dispatch — running nightly"; exit 0
+          fi
+          CUR='${{ github.sha }}'
+          PREV=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?event=schedule&status=completed&per_page=1" \
+                   --jq '.workflow_runs[0].head_sha' 2>/dev/null || echo "")
+          echo "current HEAD=$CUR ; last nightly HEAD=${PREV:-<none>}"
+          if [ -z "$PREV" ] || [ "$PREV" != "$CUR" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"; echo "new commit(s) since last nightly — running"
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"; echo "no new commit since last nightly ($PREV) — skipping"
+          fi
+
   coverage-nightly:
     # [OPUS-4.8] NIGHTLY heavy-coverage tier (sq-hbg7). Runs the FULL per-crate
     # set INCLUDING the sparq-vectors 50k recall/diskann accuracy tests that the
     # per-commit `coverage` job skips (those run >10 min for that one crate under
     # llvm-cov instrumentation — too slow for per-commit, hence this split). The
     # gate is the SAME floor file; --check verifies the nightly numbers still meet
-    # their floors. Triggered only by the `schedule:` cron above.
+    # their floors. Triggered by the `schedule:` cron (or manual dispatch), and only
+    # when the nightly-gate says HEAD changed since the last nightly.
     name: coverage (nightly, full incl. heavy vectors)
-    if: github.event_name == 'schedule'
+    needs: nightly-gate
+    if: needs.nightly-gate.outputs.fresh == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
