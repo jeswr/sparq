@@ -77,6 +77,12 @@ impl ServiceAllowlist {
     /// lower-cased; surrounding whitespace is trimmed. A `*` anywhere other than a
     /// leading `*.` is rejected (we deliberately support only the simple
     /// apex-and-subdomain suffix wildcard, not arbitrary globs).
+    ///
+    /// [OPUS-4.8] sq-4w18: exact-host entries are NORMALISED to the bare host the
+    /// engine actually compares against (see [`Self::normalize_host`]), so a copy-
+    /// pasted endpoint like `example.org:443` or a bracketed IPv6 `[::1]` matches
+    /// instead of silently never matching (which would make the allowlist look
+    /// configured but be inert — a fail-open footgun).
     pub fn add(&mut self, raw: &str) -> Result<(), String> {
         let e = raw.trim().to_ascii_lowercase();
         if e.is_empty() {
@@ -95,8 +101,50 @@ impl ServiceAllowlist {
                 "invalid SERVICE allow entry {raw:?}: '*' is only supported as a leading '*.' suffix wildcard"
             ));
         }
-        self.exact.insert(e);
+        self.exact.insert(Self::normalize_host(&e));
         Ok(())
+    }
+
+    /// [OPUS-4.8] sq-4w18: normalise an exact-host entry to the EXACT string the
+    /// engine's egress resolver compares the SERVICE IRI authority against.
+    ///
+    /// The engine ([`sparq_engine`]'s `EgressFilterResolver`) is handed `netloc` as
+    /// `host:port` (IPv6 bracketed: `[::1]:80`) and derives the bare host by
+    /// (1) dropping a trailing `:port` via `rsplit_once(':')` and (2) stripping a
+    /// surrounding `[ ]`. An allowlist entry that still carries a port or brackets
+    /// would therefore NEVER equal what the engine looks up. We apply the same two
+    /// transforms here so an operator can paste an authority verbatim:
+    ///
+    ///   * `example.org:443`  -> `example.org`        (port stripped)
+    ///   * `[::1]`            -> `::1`                 (brackets stripped)
+    ///   * `[::1]:443`        -> `::1`                 (port + brackets stripped)
+    ///   * `192.0.2.10:8080`  -> `192.0.2.10`         (port stripped)
+    ///   * `example.org`      -> `example.org`        (unchanged)
+    ///   * `::1` (bare IPv6)  -> `::1`                 (unchanged — NOT mangled)
+    ///
+    /// A trailing `:port` is only stripped when the entry is unambiguously
+    /// `host:port`: either bracketed (`[...]:port`) or a single-colon `host:digits`
+    /// form. A bare IPv6 literal (multiple colons, unbracketed) is left intact so we
+    /// never amputate its last hextet.
+    fn normalize_host(e: &str) -> String {
+        // Bracketed IPv6: `[addr]` or `[addr]:port`. Strip the optional `:port`
+        // that follows the closing bracket, then strip the brackets themselves.
+        if let Some(rest) = e.strip_prefix('[') {
+            if let Some((inner, _after)) = rest.split_once(']') {
+                // `_after` is either empty or `:port`; the engine drops it either way.
+                return inner.to_string();
+            }
+            // Malformed (no closing bracket) — leave verbatim; it just won't match.
+            return e.to_string();
+        }
+        // Unbracketed. Only a single-colon `host:port` is a port-bearing authority;
+        // anything with more than one colon is a bare IPv6 literal we must NOT touch.
+        if let Some((host, port)) = e.split_once(':') {
+            if !host.contains(':') && !port.contains(':') && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+                return host.to_string();
+            }
+        }
+        e.to_string()
     }
 
     /// Builds an allowlist from the CLI flag values, an optional file, and the
@@ -161,6 +209,30 @@ impl ServiceAllowlist {
 mod tests {
     use super::*;
 
+    /// [OPUS-4.8] sq-4w18: RAII guard that restores `SPARQ_SERVICE_ALLOW` to its
+    /// pre-test value on drop — INCLUDING on a panic mid-test. `from_sources` reads
+    /// this process-global var, so a test that set/removed it and then panicked would
+    /// otherwise leak the mutated value into sibling tests (and other crates' tests in
+    /// the same process). Mirrors the `EnvRestore` pattern in
+    /// `sparq-core::dictspill` tests. (roborev/Copilot 2026-06-14)
+    struct EnvRestore {
+        key: &'static str,
+        saved: Option<String>,
+    }
+    impl EnvRestore {
+        fn new(key: &'static str) -> Self {
+            EnvRestore { key, saved: std::env::var(key).ok() }
+        }
+    }
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.saved {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn empty_is_deny_all() {
         let a = ServiceAllowlist::default();
@@ -180,6 +252,31 @@ mod tests {
         let mut e = a.engine_entries();
         e.sort();
         assert_eq!(e, vec!["192.0.2.10".to_string(), "sparql.example.org".to_string()]);
+    }
+
+    #[test]
+    fn exact_host_normalised_to_engine_bare_host() {
+        // [OPUS-4.8] sq-4w18: the engine compares the SERVICE IRI authority with the
+        // port dropped and IPv6 brackets stripped, so `add` must normalise to the same
+        // form or the entry would silently never match (fail-open).
+        for (raw, want) in [
+            ("example.org:443", "example.org"),    // host:port -> bare host
+            ("192.0.2.10:8080", "192.0.2.10"),     // ipv4:port -> bare ip
+            ("[::1]", "::1"),                       // bracketed ipv6 -> bare ipv6
+            ("[::1]:443", "::1"),                   // bracketed ipv6 + port -> bare ipv6
+            ("[2001:db8::1]:80", "2001:db8::1"),    // full bracketed ipv6 + port
+            ("example.org", "example.org"),         // already bare -> unchanged
+            ("::1", "::1"),                          // bare (unbracketed) ipv6 -> NOT mangled
+            ("2001:db8::1", "2001:db8::1"),          // bare full ipv6 -> NOT mangled
+        ] {
+            let mut a = ServiceAllowlist::default();
+            a.add(raw).unwrap();
+            assert_eq!(
+                a.engine_entries(),
+                vec![want.to_string()],
+                "{raw:?} should normalise to the bare host {want:?} the engine compares against",
+            );
+        }
     }
 
     #[test]
@@ -215,13 +312,14 @@ mod tests {
 
     #[test]
     fn from_sources_unions_cli_file_env() {
+        // [OPUS-4.8] sq-4w18: restore SPARQ_SERVICE_ALLOW on drop (incl. on panic).
+        let _env = EnvRestore::new("SPARQ_SERVICE_ALLOW");
         std::env::set_var("SPARQ_SERVICE_ALLOW", "env.example.org, *.env.example.org");
         let a = ServiceAllowlist::from_sources(
             &["cli.example.org".to_string(), "*.cli.example.org".to_string()],
             None,
         )
         .unwrap();
-        std::env::remove_var("SPARQ_SERVICE_ALLOW");
         assert!(a.engine_entries().contains(&"env.example.org".to_string()));
         assert!(a.engine_entries().contains(&".env.example.org".to_string()));
         assert!(a.engine_entries().contains(&"cli.example.org".to_string()));
@@ -231,6 +329,8 @@ mod tests {
 
     #[test]
     fn from_sources_reads_file_with_comments_and_blanks() {
+        // [OPUS-4.8] sq-4w18: restore SPARQ_SERVICE_ALLOW on drop (incl. on panic).
+        let _env = EnvRestore::new("SPARQ_SERVICE_ALLOW");
         let dir = std::env::temp_dir();
         let path = dir.join(format!("sparq-svc-allow-{}.txt", std::process::id()));
         std::fs::write(
@@ -248,6 +348,8 @@ mod tests {
 
     #[test]
     fn from_sources_missing_file_errors() {
+        // [OPUS-4.8] sq-4w18: restore SPARQ_SERVICE_ALLOW on drop (incl. on panic).
+        let _env = EnvRestore::new("SPARQ_SERVICE_ALLOW");
         std::env::remove_var("SPARQ_SERVICE_ALLOW");
         let err = ServiceAllowlist::from_sources(&[], Some("/no/such/sparq-allow-file")).unwrap_err();
         assert!(err.contains("service-allow-file"));
