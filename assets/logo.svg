@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 96" role="img" aria-label="sparq">
+  <style>.ink{fill:currentColor}.edge{stroke:currentColor;stroke-width:5;fill:none}.spark{fill:#f5a623}</style>
+  <g transform="translate(20,24)">
+    <line class="edge" x1="12" y1="36" x2="44" y2="12"/><line class="edge" x1="44" y1="12" x2="76" y2="36"/>
+    <circle class="ink" cx="12" cy="36" r="9"/><circle class="ink" cx="44" cy="12" r="9"/><circle class="ink" cx="76" cy="36" r="9"/>
+    <path class="spark" d="M76 -2 l-8 18 h7 l-5 16 14 -22 h-7 z"/>
+  </g>
+  <text x="120" y="64" class="ink" font-family="ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace" font-size="56" font-weight="700" letter-spacing="-1">sparq</text>
+</svg>
