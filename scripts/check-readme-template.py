@@ -26,7 +26,17 @@ REQUIRED_SECTIONS = [
     ("✨", re.compile(r"^##\s*✨", re.M)),    # Features
     ("📚", re.compile(r"^##\s*📚", re.M)),    # Learn more
 ]
-LICENSE_RE = re.compile(r"^#+\s*License|\bLicense\b", re.M | re.I)
+# [OPUS-4.8] Require a real License *section*, not any inline mention of the word
+# "License" (e.g. "licensed under", a "license" badge). The template's License is a
+# heading or a one-line section label at line-start: a markdown heading (`## License`),
+# a bold label (`**License**`), or a leading `License` followed by `:`/`—`/`-`. Each
+# alternative is anchored to the start of a line (re.M) so prose mentions don't count.
+LICENSE_RE = re.compile(
+    r"^\s{0,3}(?:#{1,6}\s*License\b"          # markdown heading: ## License
+    r"|\*\*License\*\*"                         # bold label: **License**
+    r"|License\s*(?:[:—-]|$))",                # one-line section: "License:" / "License —"
+    re.M | re.I,
+)
 # A README that openly declares itself an internal/unpublished stub is exempt from the
 # section requirement (the template allows a 15-line stub for publish=false crates).
 STUB_MARKERS = ("not published", "internal, not published", "internal crate", "not on crates.io")

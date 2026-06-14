@@ -97,6 +97,14 @@ def is_exempt_path(path: str) -> bool:
     return any(path == p or path.startswith(p) for p in ALLOW_PATH_PREFIXES)
 
 
+class FileReadError(Exception):
+    """[OPUS-4.8] Raised when a scanned file cannot be read/decoded.
+
+    Surfaced rather than swallowed: silently skipping an unreadable file would hide
+    any perf-number violations inside it and make --enforce non-deterministic.
+    """
+
+
 def scan_file(path: str) -> list[tuple[int, str, str]]:
     findings: list[tuple[int, str, str]] = []
     in_code_fence = False
@@ -104,7 +112,11 @@ def scan_file(path: str) -> list[tuple[int, str, str]]:
         with open(path, encoding="utf-8") as fh:
             for lineno, raw in enumerate(fh, 1):
                 line = raw.rstrip("\n")
-                stripped = line.lstrip()
+                # [OPUS-4.8] Strip leading blockquote markers (`>` + spaces, possibly
+                # nested e.g. `> > `) BEFORE the fence test, so blockquoted code fences
+                # (`> ```lang`, as in docs/upstream-proposals.md) are recognised — else
+                # perf-number lines inside them would be mis-scanned as prose.
+                stripped = re.sub(r"^(?:\s*>)+\s*", "", line).lstrip()
                 # Track fenced code blocks; perf numbers inside example output /
                 # console transcripts are illustrative, not doc claims — skip them.
                 if stripped.startswith("```") or stripped.startswith("~~~"):
@@ -119,8 +131,10 @@ def scan_file(path: str) -> list[tuple[int, str, str]]:
                     if m:
                         findings.append((lineno, label, m.group(0).strip()))
                         break  # one finding per line is enough to flag it
-    except (OSError, UnicodeDecodeError):
-        return findings
+    except (OSError, UnicodeDecodeError) as e:
+        # [OPUS-4.8] Don't swallow the error: surface it so the caller can warn and,
+        # in --enforce mode, fail (a skipped file could hide real violations).
+        raise FileReadError(f"{path}: could not read: {e}") from e
     return findings
 
 
@@ -144,11 +158,21 @@ def main() -> int:
     files = args.paths or [p for p in tracked_markdown() if not is_exempt_path(p)]
 
     total = 0
+    read_errors = 0  # [OPUS-4.8] unreadable files — never silently skipped
     summary_lines: list[str] = []
     for path in sorted(files):
         if not args.paths and is_exempt_path(path):
             continue
-        for lineno, label, snippet in scan_file(path):
+        try:
+            file_findings = scan_file(path)
+        except FileReadError as e:
+            # [OPUS-4.8] Warn on stderr always; in --enforce/non-advisory mode this
+            # also counts as a failure below so a hidden file can't pass silently.
+            read_errors += 1
+            print(f"::warning::{e}", file=sys.stderr)
+            summary_lines.append(f"- `{path}` — UNREADABLE (counted as a failure under --enforce)")
+            continue
+        for lineno, label, snippet in file_findings:
             total += 1
             print(f"{path}:{lineno}: perf-number [{label}]: {snippet!r}")
             summary_lines.append(f"- `{path}:{lineno}` — {label}: `{snippet}`")
@@ -157,11 +181,12 @@ def main() -> int:
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:
         with open(step_summary, "a", encoding="utf-8") as fh:
-            if total == 0:
+            if total == 0 and read_errors == 0:
                 fh.write("### no-perf-numbers: clean ✅\n\n"
                          "No hard-coded performance figures found in the scanned docs.\n")
             else:
-                fh.write(f"### no-perf-numbers (ADVISORY): {total} finding(s) ⚠️\n\n")
+                fh.write(f"### no-perf-numbers (ADVISORY): {total} finding(s)"
+                         f"{f', {read_errors} unreadable file(s)' if read_errors else ''} ⚠️\n\n")
                 fh.write("Benchmark figures drift — relocate these to `bench/`/`research/` "
                          "and link the perf dashboard (AGENTS.md house rule). "
                          "Allowlist a justified line with `<!-- perf-ok -->`.\n\n")
@@ -171,9 +196,16 @@ def main() -> int:
                 if len(summary_lines) > 60:
                     fh.write(f"\n…and {len(summary_lines) - 60} more (see the job log).\n")
 
-    print(f"\nno-perf-numbers: {total} finding(s) across {len(files)} scanned file(s).")
-    if total and args.enforce and not args.advisory:
-        print("::error::hard-coded performance numbers found (see above) — relocate to bench/research.")
+    print(f"\nno-perf-numbers: {total} finding(s) across {len(files)} scanned file(s)"
+          f"{f'; {read_errors} unreadable file(s)' if read_errors else ''}.")
+    # [OPUS-4.8] --advisory always exits 0 (reports only). In --enforce/non-advisory
+    # mode, BOTH perf-number findings AND unreadable files are failures — a file we
+    # couldn't scan might be hiding a violation, so it must not pass silently.
+    if args.enforce and not args.advisory and (total or read_errors):
+        if total:
+            print("::error::hard-coded performance numbers found (see above) — relocate to bench/research.")
+        if read_errors:
+            print(f"::error::{read_errors} file(s) could not be read (see warnings) — cannot certify clean.")
         return 1
     return 0
 
