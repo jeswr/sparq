@@ -52,7 +52,15 @@ RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 
 def _term_dict(t):
     """A `Term` as a plain dict — what we compare against hand-computed truth."""
-    return {"kind": t.kind, "value": t.value, "language": t.language, "datatype": t.datatype}
+    return {
+        "kind": t.kind,
+        "value": t.value,
+        "language": t.language,
+        "datatype": t.datatype,
+        # [OPUS-4.8] sq-bj7o: RDF 1.2 base direction (its:dir) — None for all but
+        # directional language strings.
+        "direction": t.direction,
+    }
 
 
 def _rows_via_json(graph, sparql):
@@ -69,21 +77,30 @@ def _rows_via_json(graph, sparql):
             if kind == "literal":
                 # SPARQL JSON: language-tagged literals carry "xml:lang" and no
                 # explicit datatype (it is implicitly rdf:langString); plain ones
-                # carry "datatype" only when it is not xsd:string.
+                # carry "datatype" only when it is not xsd:string. RDF 1.2
+                # directional language strings additionally carry "its:dir" (the
+                # base direction) and are implicitly rdf:dirLangString.
                 lang = cell.get("xml:lang")
                 dt = cell.get("datatype")
+                direction = cell.get("its:dir")  # [OPUS-4.8] sq-bj7o
                 if lang is not None:
-                    dt = RDF + "langString"
+                    dt = RDF + ("dirLangString" if direction is not None else "langString")
                 elif dt is None:
                     dt = XSD + "string"
-                row[var] = {"kind": "literal", "value": cell["value"], "language": lang, "datatype": dt}
+                row[var] = {
+                    "kind": "literal",
+                    "value": cell["value"],
+                    "language": lang,
+                    "datatype": dt,
+                    "direction": direction,
+                }
             elif kind == "triple":
                 # The JSON writer nests the quoted triple; `Term` renders it as an
                 # N-Triples string. Compare only kind here (value rendering differs
                 # by design) — the dedicated triple-term test covers the value.
                 row[var] = {"kind": "triple"}
             else:  # uri / bnode
-                row[var] = {"kind": kind, "value": cell["value"], "language": None, "datatype": None}
+                row[var] = {"kind": kind, "value": cell["value"], "language": None, "datatype": None, "direction": None}
         out.append(row)
     return out
 
@@ -124,18 +141,20 @@ def _object_of(graph, pred):
 @pytest.mark.parametrize(
     "pred,expected",
     [
-        ("iri", {"kind": "uri", "value": "http://ex/object", "language": None, "datatype": None}),
-        ("plain", {"kind": "literal", "value": "plain text", "language": None, "datatype": XSD + "string"}),
+        ("iri", {"kind": "uri", "value": "http://ex/object", "language": None, "datatype": None, "direction": None}),
+        ("plain", {"kind": "literal", "value": "plain text", "language": None, "datatype": XSD + "string", "direction": None}),
         # An explicit ^^xsd:string is indistinguishable from a plain literal (RDF 1.1).
-        ("typedStr", {"kind": "literal", "value": "typed", "language": None, "datatype": XSD + "string"}),
-        ("int", {"kind": "literal", "value": "42", "language": None, "datatype": XSD + "integer"}),
-        ("dec", {"kind": "literal", "value": "3.14", "language": None, "datatype": XSD + "decimal"}),
-        ("dbl", {"kind": "literal", "value": "1.0e3", "language": None, "datatype": XSD + "double"}),
-        ("bool", {"kind": "literal", "value": "true", "language": None, "datatype": XSD + "boolean"}),
-        ("date", {"kind": "literal", "value": "2020-01-01", "language": None, "datatype": XSD + "date"}),
-        ("custom", {"kind": "literal", "value": "abc", "language": None, "datatype": "http://ex/myType"}),
+        ("typedStr", {"kind": "literal", "value": "typed", "language": None, "datatype": XSD + "string", "direction": None}),
+        ("int", {"kind": "literal", "value": "42", "language": None, "datatype": XSD + "integer", "direction": None}),
+        ("dec", {"kind": "literal", "value": "3.14", "language": None, "datatype": XSD + "decimal", "direction": None}),
+        ("dbl", {"kind": "literal", "value": "1.0e3", "language": None, "datatype": XSD + "double", "direction": None}),
+        ("bool", {"kind": "literal", "value": "true", "language": None, "datatype": XSD + "boolean", "direction": None}),
+        ("date", {"kind": "literal", "value": "2020-01-01", "language": None, "datatype": XSD + "date", "direction": None}),
+        ("custom", {"kind": "literal", "value": "abc", "language": None, "datatype": "http://ex/myType", "direction": None}),
         # Language tag is preserved and lower-cased per the parser; datatype is rdf:langString.
-        ("lang", {"kind": "literal", "value": "bonjour", "language": "fr", "datatype": RDF + "langString"}),
+        ("lang", {"kind": "literal", "value": "bonjour", "language": "fr", "datatype": RDF + "langString", "direction": None}),
+        # [OPUS-4.8] sq-bj7o: directional language string keeps its base direction.
+        ("dir", {"kind": "literal", "value": "hello", "language": "en", "datatype": RDF + "dirLangString", "direction": "ltr"}),
     ],
 )
 def test_term_kind_roundtrip(pred, expected):
@@ -163,46 +182,49 @@ def test_term_kind_blank_node_roundtrip():
 
 def test_term_kind_directional_language_string():
     """RDF 1.2 directional language string: `"hello"@en--ltr` round-trips with
-    language 'en' and datatype rdf:dirLangString. The Term type currently
-    surfaces only kind/value/language/datatype (no separate base-direction
-    field) — this test PINS that observed contract so a future change is caught."""
+    language 'en', datatype rdf:dirLangString, AND base direction 'ltr' exposed
+    on the dedicated `Term.direction` field.
+
+    [OPUS-4.8] sq-bj7o: before the fix the Term path dropped the base direction
+    (only kind/value/language/datatype surfaced); now `direction` carries the
+    RDF 1.2 base direction (the SPARQL 1.2 `its:dir` value)."""
     g = sparq.Graph.load(TERMS_DATA)
     o = _object_of(g, "dir")
     assert o.kind == "literal"
     assert o.value == "hello"
     assert o.language == "en"
     assert o.datatype == RDF + "dirLangString"
+    assert o.direction == "ltr"
 
 
-# [OPUS-4.8] sq-f9tu DISCOVERED PARITY GAP (filed as bead sq-bj7o): the base DIRECTION
-# of an RDF-1.2 directional language string is LOST by the Term path but PRESERVED
-# by the JSON path — so `Graph.query` and `Graph.query_json` DIVERGE for these
-# literals. Through `Term`, `@en--ltr` and `@en--rtl` are indistinguishable (both
-# language="en", datatype=rdf:dirLangString); through `query_json` they correctly
-# carry `xml:lang="en--ltr"` vs `"en--rtl"`. Documented as xfail (not a hard fail)
-# so the suite stays green while the gap is tracked; flip to a hard assert when the
-# bead lands a fix (extend Term with a base-direction field / fold it into language).
-@pytest.mark.xfail(
-    reason="bead sq-bj7o: Term loses base-direction of rdf:dirLangString; "
-    "query vs query_json diverge (query_json keeps en--ltr/en--rtl, Term does not)",
-    strict=True,
-)
+# [OPUS-4.8] sq-bj7o REGRESSION TEST. The base DIRECTION of an RDF-1.2 directional
+# language string used to be LOST by the Term path but smuggled (into `xml:lang` as
+# `en--ltr`) by the JSON path — so `Graph.query` and `Graph.query_json` DIVERGED.
+# The fix gives the Term a dedicated `direction` field and makes `query_json` emit
+# the spec-correct SPARQL 1.2 `its:dir` (with `xml:lang` now the bare tag). This
+# test asserts the two paths now AGREE on the direction for both ltr and rtl.
 def test_directional_literal_direction_parity_query_vs_json():
     ltr = sparq.Graph.load('@prefix ex: <http://ex/> . ex:s ex:p "x"@en--ltr .')
     rtl = sparq.Graph.load('@prefix ex: <http://ex/> . ex:s ex:p "x"@en--rtl .')
 
-    def term_lang(g):
-        return g.query("SELECT ?o WHERE { ?s ?p ?o }").rows[0]["o"].language
+    def term_dir(g):
+        o = g.query("SELECT ?o WHERE { ?s ?p ?o }").rows[0]["o"]
+        # The Term keeps the bare tag in `language` and the direction separately.
+        assert o.language == "en"
+        return o.direction
 
-    def json_lang(g):
-        doc = json.loads(g.query_json("SELECT ?o WHERE { ?s ?p ?o }"))
-        return doc["results"]["bindings"][0]["o"].get("xml:lang")
+    def json_dir(g):
+        cell = json.loads(g.query_json("SELECT ?o WHERE { ?s ?p ?o }"))["results"]["bindings"][0]["o"]
+        # SPARQL 1.2 JSON: `xml:lang` is the bare tag, `its:dir` the direction.
+        assert cell.get("xml:lang") == "en"
+        return cell.get("its:dir")
 
-    # The JSON path keeps the direction (en--ltr vs en--rtl); the Term path must
-    # ALSO distinguish them for the two result paths to be at parity. Today it
-    # does not, so this fails (xfail) until the bead's fix lands.
-    assert json_lang(ltr) != json_lang(rtl)  # holds today
-    assert term_lang(ltr) != term_lang(rtl)  # the parity claim — currently FALSE
+    # Both paths distinguish ltr from rtl ...
+    assert term_dir(ltr) != term_dir(rtl)
+    assert json_dir(ltr) != json_dir(rtl)
+    # ... and the two paths AGREE term-by-term (the parity claim the bead is about).
+    assert term_dir(ltr) == json_dir(ltr) == "ltr"
+    assert term_dir(rtl) == json_dir(rtl) == "rtl"
 
 
 # ===========================================================================
@@ -306,6 +328,7 @@ def test_construct_literal_object_parity():
         "value": "Bob",
         "language": "en",
         "datatype": RDF + "langString",
+        "direction": None,
     }
 
 

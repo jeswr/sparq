@@ -55,7 +55,13 @@ fn engine_err(e: String) -> PyErr {
 /// `value` is the IRI / lexical form / blank-node label. For literals,
 /// `language` is the language tag (if any) and `datatype` the datatype IRI
 /// (always set — plain literals carry `xsd:string`, language-tagged ones
-/// `rdf:langString`). Non-literals have `language = datatype = None`.
+/// `rdf:langString`, directional ones `rdf:dirLangString`). `direction` is the
+/// RDF 1.2 base direction (`"ltr"` / `"rtl"`) of a directional language string,
+/// else `None` — it is the SPARQL 1.2 `its:dir` value `Graph.query_json` emits.
+/// Non-literals have `language = datatype = direction = None`.
+// [OPUS-4.8] sq-bj7o: `direction` added so a directional language string
+// (`"hi"@en--ltr`) keeps its base direction through `query` — previously the
+// Term path dropped it while `query_json` kept it, so the two diverged.
 // `skip_from_py_object`: pyo3 0.29 makes the auto `FromPyObject` for Clone
 // pyclasses opt-in; nothing here extracts a `Term` from Python, so skip it.
 #[pyclass(frozen, eq, hash, skip_from_py_object, module = "sparq")]
@@ -69,6 +75,10 @@ struct Term {
     language: Option<String>,
     #[pyo3(get)]
     datatype: Option<String>,
+    /// RDF 1.2 base direction (`"ltr"` / `"rtl"`) of a directional language
+    /// string; `None` for every other term. [OPUS-4.8] sq-bj7o
+    #[pyo3(get)]
+    direction: Option<String>,
 }
 
 impl Term {
@@ -79,18 +89,24 @@ impl Term {
                 value: n.as_str().to_string(),
                 language: None,
                 datatype: None,
+                direction: None,
             },
             oxrdf::Term::BlankNode(b) => Term {
                 kind: "bnode".into(),
                 value: b.as_str().to_string(),
                 language: None,
                 datatype: None,
+                direction: None,
             },
             oxrdf::Term::Literal(l) => Term {
                 kind: "literal".into(),
                 value: l.value().to_string(),
                 language: l.language().map(str::to_string),
                 datatype: Some(l.datatype().as_str().to_string()),
+                // [OPUS-4.8] sq-bj7o: preserve the RDF 1.2 base direction (the
+                // SPARQL 1.2 `its:dir` value) so a directional language string
+                // round-trips through `query` at parity with `query_json`.
+                direction: l.direction().map(|d| d.to_string()),
             },
             // RDF-star quoted triple: keep the N-Triples rendering as the value.
             oxrdf::Term::Triple(t) => Term {
@@ -98,6 +114,7 @@ impl Term {
                 value: t.to_string(),
                 language: None,
                 datatype: None,
+                direction: None,
             },
         }
     }
@@ -112,7 +129,12 @@ impl Term {
             _ => {
                 let v = self.value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                 if let Some(lang) = &self.language {
-                    format!("\"{v}\"@{lang}")
+                    // [OPUS-4.8] sq-bj7o: a directional language string renders as
+                    // `"v"@lang--dir` (the RDF 1.2 / Turtle surface form).
+                    match &self.direction {
+                        Some(dir) => format!("\"{v}\"@{lang}--{dir}"),
+                        None => format!("\"{v}\"@{lang}"),
+                    }
                 } else {
                     match self.datatype.as_deref() {
                         None | Some(XSD_STRING) => format!("\"{v}\""),
