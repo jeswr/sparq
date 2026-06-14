@@ -44,7 +44,7 @@ blake3 = "1"
 # by construction. Already in the workspace lockfile (via ark-std's rand).
 # [OPUS-4.8] sq-610.
 getrandom = "0.2"
-ark-ed-on-bn254 = { version = "0.5", default-features = false }
+ark-ed-on-bn254 = { version = "0.6", default-features = false }
 ark-ec = { version = "0.5", default-features = false }
 ark-serialize = { version = "0.5", default-features = false }
 ark-std = { version = "0.5", default-features = false, features = ["std"] }
