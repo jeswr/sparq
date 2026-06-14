@@ -33,7 +33,7 @@ jobs:
       # checks. `command` defaults to `check` (all four checks); spelled out for
       # clarity. The vendored spargebra path source is allowlisted in deny.toml.
       - name: cargo-deny check
-        uses: EmbarkStudios/cargo-deny-action@e2f4ede4a4e60ea15ff31bc0647485d80c66cfba # v2.0.4
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check advisories bans sources licenses
 
