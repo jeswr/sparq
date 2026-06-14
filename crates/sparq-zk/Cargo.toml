@@ -61,4 +61,4 @@ serde_json = "1"
 # digest 0.10, and the test feeds `sha2::Sha384` straight into canonicalize_quads_with::<D>.
 # Bumping this crate's sha2 to 0.11 (digest 0.11) makes the type fail rdf-canon's 0.10 bound.
 # Lift only once rdf-canon publishes a digest-0.11 release. See Dependabot PR #17 / bead.
-sha2 = "0.10"
+sha2 = "0.11"
