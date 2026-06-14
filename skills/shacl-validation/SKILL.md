@@ -227,9 +227,9 @@ let g = sparq_shacl::load_turtle_with_base(&text, &format!("file://{path}")).unw
 - **W3C conformance:** 98/98 of the core `sht:Validate` suite passes. Reproduce with
   `crates/sparq-shacl/fetch-shacl-tests.sh` then
   `cargo test -p sparq-shacl --test w3c_core` (self-skips if the gitignored suite is absent).
-- Note: the crate README still lists §6 SPARQL-based constraint *components* as
-  "deferred" — that line is stale; they are implemented and tested
-  (`tests/sparql_components.rs`).
+- §6 SPARQL-based constraint *components* are implemented and tested
+  (`tests/sparql_components.rs`); the crate README documents them under
+  "Supported constraint components".
 
 ## See also
 

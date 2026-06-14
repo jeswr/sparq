@@ -119,20 +119,46 @@ enum Container {
     None,
 }
 
-/// Sniffs the container from the head of the stream WITHOUT consuming it (peeks
-/// the [`BufRead`] buffer). `.hdt` magic itself is `$HDT` (`24 48 44 54`); any
-/// non-compression head is returned as [`Container::None`] and passed through.
-fn sniff_container<R: BufRead>(reader: &mut R) -> std::io::Result<Container> {
-    let buf = reader.fill_buf()?;
-    Ok(if buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b {
+/// The longest magic prefix we need to classify a container (zstd's `28 b5 2f
+/// fd`). gzip is 2, bzip2 3, zstd 4 — reading 4 covers all of them.
+const MAGIC_PREFIX_LEN: usize = 4;
+
+/// Reads up to [`MAGIC_PREFIX_LEN`] bytes off the front of `reader` into an owned
+/// buffer and classifies the container by its magic bytes.
+///
+/// [OPUS-4.8] roborev 2272: a streaming [`BufRead`] may legally return fewer
+/// bytes than requested per `fill_buf()` — even a single byte — so peeking the
+/// buffer once (`buf.len() >= N`) can misclassify a real gzip/zstd/bzip2 stream
+/// as bare HDT and fail the load. We instead drain a fixed-size prefix robustly
+/// (looping `read` until EOF or the buffer is full, the same contract as
+/// `read_exact` but tolerant of a short stream), and the caller chains that
+/// owned prefix back onto the remaining reader for EVERY path — so detection
+/// never depends on how the underlying reader chunks its data.
+fn sniff_prefix<R: BufRead>(reader: &mut R) -> std::io::Result<(Vec<u8>, Container)> {
+    // `BufRead: Read`, so `read` is available without an extra import.
+    let mut prefix = [0u8; MAGIC_PREFIX_LEN];
+    let mut filled = 0;
+    // Loop because a single `read` may return fewer bytes than requested even
+    // when more data is available (it is not an error). Stop on a 0-length read
+    // (genuine EOF) so an HDT shorter than the prefix still classifies correctly.
+    while filled < MAGIC_PREFIX_LEN {
+        let n = reader.read(&mut prefix[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    let prefix = prefix[..filled].to_vec();
+    let container = if filled >= 2 && prefix[0] == 0x1f && prefix[1] == 0x8b {
         Container::Gzip
-    } else if buf.len() >= 4 && buf[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+    } else if filled >= 4 && prefix[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
         Container::Zstd
-    } else if buf.len() >= 3 && buf[..3] == [0x42, 0x5a, 0x68] {
+    } else if filled >= 3 && prefix[..3] == [0x42, 0x5a, 0x68] {
         Container::Bzip2
     } else {
         Container::None
-    })
+    };
+    Ok((prefix, container))
 }
 
 /// Runs `f` over the (transparently decompressed) HDT byte stream. A stream
@@ -141,31 +167,43 @@ fn sniff_container<R: BufRead>(reader: &mut R) -> std::io::Result<Container> {
 /// fully materialized, it is decoded on demand as `f` reads it; anything else is
 /// passed through unchanged. Detection is by CONTENT, not file name.
 fn with_hdt_stream<T>(
-    mut reader: impl BufRead,
+    reader: impl BufRead,
     f: impl FnOnce(&mut dyn BufRead) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    match sniff_container(&mut reader)? {
+    // [OPUS-4.8] roborev 2272: consume a fixed magic-byte prefix robustly, then
+    // chain it back so the decoder/HDT reader sees the full, unmodified stream —
+    // both the compressed and the bare-HDT path. `Read::chain` re-prepends the
+    // owned prefix; we wrap the chain in a `BufReader` to satisfy the `BufRead`
+    // bound the decoders need (the prefix is at most 4 bytes, so this adds no
+    // meaningful buffering cost on the bare-HDT path).
+    let mut reader = reader;
+    let (prefix, container) = sniff_prefix(&mut reader)?;
+    let stream = std::io::Read::chain(std::io::Cursor::new(prefix), reader);
+    let stream = std::io::BufReader::new(stream);
+    match container {
         // `MultiGzDecoder` / `MultiBzDecoder` already buffer per the `bufread`
         // input, but their `Read` output needs a `BufRead` for the HDT reader;
-        // zstd's `Decoder` likewise. One wrapping `BufReader` each — no double
-        // buffering on the bare-HDT path (it is already a `BufRead`).
+        // zstd's `Decoder` likewise. One wrapping `BufReader` each.
         Container::Gzip => {
-            let mut d = std::io::BufReader::new(flate2::bufread::MultiGzDecoder::new(reader));
+            let mut d = std::io::BufReader::new(flate2::bufread::MultiGzDecoder::new(stream));
             f(&mut d)
         }
         Container::Zstd => {
             // `zstd::stream::read::Decoder::with_buffer` takes a `BufRead` source
             // directly (no inner re-buffer); its output is wrapped once.
-            let dec = zstd::stream::read::Decoder::with_buffer(reader)
+            let dec = zstd::stream::read::Decoder::with_buffer(stream)
                 .map_err(Error::Io)?;
             let mut d = std::io::BufReader::new(dec);
             f(&mut d)
         }
         Container::Bzip2 => {
-            let mut d = std::io::BufReader::new(bzip2::bufread::MultiBzDecoder::new(reader));
+            let mut d = std::io::BufReader::new(bzip2::bufread::MultiBzDecoder::new(stream));
             f(&mut d)
         }
-        Container::None => f(&mut reader),
+        Container::None => {
+            let mut d = stream;
+            f(&mut d)
+        }
     }
 }
 
@@ -379,5 +417,81 @@ mod tests {
         assert!(intern_hdt_term(&mut dict, "\"x\"^^<>").is_err());
         assert!(intern_hdt_term(&mut dict, "\"x\"!!").is_err());
         assert!(intern_hdt_term(&mut dict, "").is_err());
+    }
+
+    // [OPUS-4.8] roborev 2272 regression: a `BufRead` that hands back exactly
+    // ONE byte per `fill_buf()`/`read()` (a legal streaming reader) must not
+    // defeat magic-byte container detection, and the consumed prefix must be
+    // chained back so the downstream reader sees the full, unmodified stream.
+    struct OneByteAtATime<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+
+    impl std::io::Read for OneByteAtATime<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.data.len() || out.is_empty() {
+                return Ok(0);
+            }
+            out[0] = self.data[self.pos];
+            self.pos += 1;
+            Ok(1) // never more than one byte, even when more is available
+        }
+    }
+
+    impl BufRead for OneByteAtATime<'_> {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            // Expose at most ONE byte of the available buffer — the worst case a
+            // streaming reader may legally present.
+            let end = (self.pos + 1).min(self.data.len());
+            Ok(&self.data[self.pos..end])
+        }
+        fn consume(&mut self, amt: usize) {
+            self.pos = (self.pos + amt).min(self.data.len());
+        }
+    }
+
+    #[test]
+    fn one_byte_at_a_time_detects_containers() {
+        // gzip / zstd / bzip2 magic + a bare-HDT head must all classify the same
+        // way they would if delivered in one chunk, even at 1 byte per read.
+        for (bytes, want) in [
+            (vec![0x1f, 0x8b, 0x00, 0x00], Container::Gzip),
+            (vec![0x28, 0xb5, 0x2f, 0xfd], Container::Zstd),
+            (vec![0x42, 0x5a, 0x68, 0x39], Container::Bzip2),
+            (b"$HDT".to_vec(), Container::None),
+        ] {
+            let mut r = OneByteAtATime { data: &bytes, pos: 0 };
+            let (prefix, got) = sniff_prefix(&mut r).unwrap();
+            assert_eq!(got, want, "classification for {bytes:02x?}");
+            // The whole 4-byte prefix is preserved (none dropped or duplicated).
+            assert_eq!(prefix, &bytes[..MAGIC_PREFIX_LEN.min(bytes.len())]);
+        }
+    }
+
+    #[test]
+    fn prefix_is_chained_back_for_passthrough() {
+        // A bare-HDT stream delivered 1 byte at a time must round-trip BYTE-FOR-BYTE
+        // through `with_hdt_stream` (the prefix is re-prepended, not lost).
+        let payload = b"$HDT then some more dictionary/triples bytes here".to_vec();
+        let r = OneByteAtATime { data: &payload, pos: 0 };
+        let round_tripped = with_hdt_stream(r, |reader| {
+            let mut v = Vec::new();
+            std::io::Read::read_to_end(reader, &mut v).map_err(Error::Io)?;
+            Ok(v)
+        })
+        .unwrap();
+        assert_eq!(round_tripped, payload);
+    }
+
+    #[test]
+    fn short_stream_below_prefix_len_classifies_as_none() {
+        // A stream shorter than the magic prefix must not hang or misclassify.
+        for bytes in [vec![], vec![0x24], vec![0x24, 0x48], vec![0x24, 0x48, 0x44]] {
+            let mut r = OneByteAtATime { data: &bytes, pos: 0 };
+            let (prefix, got) = sniff_prefix(&mut r).unwrap();
+            assert_eq!(got, Container::None);
+            assert_eq!(prefix, bytes);
+        }
     }
 }

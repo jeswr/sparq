@@ -1238,3 +1238,63 @@ fn utf8_len(b: u8) -> usize {
         4
     }
 }
+
+#[cfg(test)]
+mod resolve_iri_tests {
+    use super::resolve_iri;
+
+    // [OPUS-4.8] roborev 2318 regression: excess `..` segments must NOT ascend
+    // above the path root and swallow the authority (RFC 3986 §5.2.4 step 2C:
+    // a leading `..` against an empty/root output buffer is discarded, never
+    // popping past root). The finding claimed `../../../x` against
+    // `http://example.org/a/b/c.n3` would yield `http://example.orgx`.
+    #[test]
+    fn excess_dotdot_does_not_pop_root() {
+        assert_eq!(
+            resolve_iri("http://example.org/a/b/c.n3", "../../../x"),
+            "http://example.org/x"
+        );
+        // Exactly enough `..` to reach root, plus more, all clamp at root.
+        assert_eq!(
+            resolve_iri("http://example.org/a/b/c.n3", "../../x"),
+            "http://example.org/x"
+        );
+        assert_eq!(
+            resolve_iri("http://example.org/a/b/c.n3", "../x"),
+            "http://example.org/a/x"
+        );
+        // Authority is preserved even with a single excess `..` from a shallow base.
+        assert_eq!(
+            resolve_iri("http://example.org/a", "../../x"),
+            "http://example.org/x"
+        );
+    }
+
+    // RFC 3986 §5.4 normal + abnormal reference-resolution examples (the ones
+    // exercising dot-segment removal), against base `http://a/b/c/d;p?q`.
+    #[test]
+    fn rfc3986_dot_segment_examples() {
+        let base = "http://a/b/c/d;p?q";
+        for (rel, want) in [
+            ("g", "http://a/b/c/g"),
+            ("./g", "http://a/b/c/g"),
+            ("g/", "http://a/b/c/g/"),
+            ("/g", "http://a/g"),
+            ("..", "http://a/b/"),
+            ("../", "http://a/b/"),
+            ("../g", "http://a/b/g"),
+            ("../..", "http://a/"),
+            ("../../", "http://a/"),
+            ("../../g", "http://a/g"),
+            // Abnormal: extra `..` must not climb past root.
+            ("../../../g", "http://a/g"),
+            ("../../../../g", "http://a/g"),
+            ("/./g", "http://a/g"),
+            ("/../g", "http://a/g"),
+            (".", "http://a/b/c/"),
+            ("./", "http://a/b/c/"),
+        ] {
+            assert_eq!(resolve_iri(base, rel), want, "rel={rel}");
+        }
+    }
+}
