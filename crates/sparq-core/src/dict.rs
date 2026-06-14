@@ -336,20 +336,49 @@ fn stored_eq_term(s: &Stored, q: &Term, prefixes: &[Box<str>], datatypes: &[Name
     }
 }
 
+/// [OPUS-4.8] sq-cvug — the safe placeholders `reconstruct_triple` substitutes when a
+/// quoted-triple component id is IN RANGE but resolves to the WRONG term KIND (e.g. a
+/// literal id in the subject/predicate position). This can only arise from a tampered,
+/// checksum-less mmap'd index (threat-model B5 / T-MMAP-DoS); the trusted in-process
+/// interner only ever stores a valid `(IRI|blank, IRI, any-term)` shape. Decoding such a
+/// record to a placeholder is wrong-but-safe — the documented trusted-store integrity
+/// boundary — never a panic/DoS. Mirrors the [`OOR_TERM`] convention for out-of-range ids.
+const OOR_TRIPLE_SUBJECT: &str = "__sparq_wrong_kind_triple_subject__";
+const OOR_TRIPLE_PREDICATE: &str = "urn:sparq:wrong-kind-triple-predicate";
+
 /// Rebuilds an RDF 1.2 triple term from its stored component ids. Interning only ever
-/// stores a valid (IRI|blank, IRI, any-term) shape, so the inner matches cannot fail on
-/// ids produced by this dict.
-fn reconstruct_triple(d: &Dict, ids: [Id; 3]) -> Term {
-    let subject: oxrdf::NamedOrBlankNode = match d.term(ids[0]) {
+/// stores a valid (IRI|blank, IRI, any-term) shape, so on ids produced by this dict the
+/// inner matches always take a valid arm.
+///
+/// [OPUS-4.8] sq-cvug — on the UNTRUSTED mmap path a tampered index can carry a component
+/// id that is in range yet of the wrong kind (a literal where the subject must be IRI/blank
+/// or the predicate an IRI). That used to hit `unreachable!()` → a clean panic (DoS) on a
+/// hostile/corrupt file. Fail closed instead: substitute a safe placeholder of the required
+/// kind so a corrupt store yields wrong-but-safe results, never an abort. `open_mmap`
+/// additionally rejects such an index up front (`MappedDict::validate`).
+///
+/// `depth` bounds the triple-term nesting recursion (see [`term_at_depth`] / `MAX_TRIPLE_DEPTH`)
+/// so a tampered cyclic/self component reference cannot blow the stack.
+fn reconstruct_triple(d: &Dict, ids: [Id; 3], depth: u32) -> Term {
+    if depth >= MAX_TRIPLE_DEPTH {
+        // Pathological (only-from-tampering) nesting depth — stop recursing and return a
+        // safe, self-contained placeholder triple rather than risk a stack overflow.
+        return Term::Triple(Box::new(oxrdf::Triple::new(
+            oxrdf::BlankNode::new_unchecked(OOR_TRIPLE_SUBJECT),
+            NamedNode::new_unchecked(OOR_TRIPLE_PREDICATE),
+            Term::BlankNode(oxrdf::BlankNode::new_unchecked(OOR_TERM_LABEL)),
+        )));
+    }
+    let subject: oxrdf::NamedOrBlankNode = match term_at_depth(d, ids[0], depth + 1) {
         Term::NamedNode(n) => n.into(),
         Term::BlankNode(b) => b.into(),
-        other => unreachable!("stored triple-term subject must be an IRI or blank node, got {other}"),
+        _ => oxrdf::BlankNode::new_unchecked(OOR_TRIPLE_SUBJECT).into(),
     };
-    let predicate = match d.term(ids[1]) {
+    let predicate = match term_at_depth(d, ids[1], depth + 1) {
         Term::NamedNode(n) => n,
-        other => unreachable!("stored triple-term predicate must be an IRI, got {other}"),
+        _ => NamedNode::new_unchecked(OOR_TRIPLE_PREDICATE),
     };
-    Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, d.term(ids[2]))))
+    Term::Triple(Box::new(oxrdf::Triple::new(subject, predicate, term_at_depth(d, ids[2], depth + 1))))
 }
 
 // ---- Memory-mapped (out-of-core) dictionary --------------------------------------
@@ -373,7 +402,8 @@ pub(crate) enum StoredRef<'a> {
 /// that can only arise from a tampered, checksum-less permutation file; see `Dict::record`).
 /// A `Blank` needs no table lookup, so reconstructing it can never itself OOB. Decoding it
 /// is wrong-but-safe — exactly the documented trusted-store integrity boundary, never UB.
-const OOR_TERM: StoredRef<'static> = StoredRef::Blank("__sparq_out_of_range_id__");
+const OOR_TERM_LABEL: &str = "__sparq_out_of_range_id__";
+const OOR_TERM: StoredRef<'static> = StoredRef::Blank(OOR_TERM_LABEL);
 
 #[inline]
 fn rd_u32(b: &[u8], p: &mut usize) -> u32 {
@@ -503,7 +533,28 @@ fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
             None => Literal::new_typed_literal(value.to_string(), d.datatypes[datatype as usize].clone()),
         }),
         StoredRef::Blank(b) => Term::BlankNode(oxrdf::BlankNode::new_unchecked(b.to_string())),
-        StoredRef::Triple(ids) => reconstruct_triple(d, ids),
+        StoredRef::Triple(ids) => reconstruct_triple(d, ids, 0),
+    }
+}
+
+/// [OPUS-4.8] sq-cvug — depth-bounded term resolution for the quoted-triple reconstruction
+/// recursion. A validly-built store nests triple terms only shallowly (each is interned
+/// after its components, so the structure is a finite DAG), but a TAMPERED mmap'd index
+/// could encode a self/cyclic component reference that would recurse without bound →
+/// stack overflow → process abort. `open_mmap` rejects such an index up front
+/// (`MappedDict::validate` enforces component-id < own-id), but the reconstruct path is the
+/// fail-closed FLOOR for every storage mode: past this depth we stop and return a safe
+/// placeholder rather than recurse further.
+const MAX_TRIPLE_DEPTH: u32 = 64;
+
+#[inline]
+fn term_at_depth(d: &Dict, id: Id, depth: u32) -> Term {
+    if is_inline(id) {
+        return Term::Literal(Literal::new_typed_literal((id - INLINE_BASE).to_string(), xsd::INTEGER));
+    }
+    match d.record(id) {
+        StoredRef::Triple(ids) => reconstruct_triple(d, ids, depth),
+        other => reconstruct_ref(d, &other),
     }
 }
 
@@ -679,7 +730,11 @@ impl MappedDict {
         }
         let len_id = u32::try_from(len).map_err(|_| bad("term count exceeds u32 id space"))?;
         let blob: &[u8] = &self.blob;
-        for &off in self.offsets() {
+        // [OPUS-4.8] sq-cvug — quoted-triple `(own_id, subject, predicate)` ids collected
+        // during the parse pass, verified for KIND once every record offset is known in range.
+        let mut triple_sp: Vec<(Id, Id, Id)> = Vec::new();
+        for (idx, &off) in self.offsets().iter().enumerate() {
+            let own_id = (idx as Id) + 1; // records are stored in 1-based id order
             let off = off as usize;
             let rec = blob.get(off..).ok_or_else(|| bad("term offset is past the end of dict-terms.bin"))?;
             let parsed = parse_stored_ref_checked(rec)
@@ -700,13 +755,48 @@ impl MappedDict {
                 }
                 StoredRef::Triple(ids) => {
                     // A quoted-triple term's components are themselves dictionary ids; an
-                    // inline-integer id (>= INLINE_BASE) or a real term id (1..=len) is
-                    // valid, but 0 or a dangling id would later index OOB.
-                    if ids.iter().any(|&c| c == 0 || (c < INLINE_BASE && c > len_id)) {
-                        return Err(bad("a quoted-triple record references an out-of-range component id"));
+                    // inline-integer id (>= INLINE_BASE) or a real term id (1..=len) is in
+                    // range, but 0 or a dangling id would later index OOB. Beyond range, a
+                    // validly-built store interns each component BEFORE the triple (see
+                    // `intern_triple_ids`), so a non-inline component id is always STRICTLY
+                    // LESS than the triple's own id. Enforcing that here rejects a tampered
+                    // self/forward/cyclic reference (e.g. a triple whose object id is the
+                    // triple itself), which would otherwise drive `reconstruct_triple` into
+                    // UNBOUNDED RECURSION → stack overflow → process abort (a DoS). [OPUS-4.8]
+                    if ids
+                        .iter()
+                        .any(|&c| c == 0 || (c < INLINE_BASE && (c > len_id || c >= own_id)))
+                    {
+                        return Err(bad("a quoted-triple record references an out-of-range, forward, or self component id"));
                     }
+                    triple_sp.push((own_id, ids[0], ids[1]));
                 }
                 StoredRef::Blank(_) => {}
+            }
+        }
+        // [OPUS-4.8] sq-cvug — KIND check: a component id can be in range yet of the wrong
+        // kind (e.g. a literal where the subject must be IRI/blank or the predicate an IRI).
+        // `reconstruct_triple` now fails closed to a placeholder rather than panicking, but
+        // reject such an index here too so a corrupt store never opens. Resolving each id is
+        // safe now: every offset above was confirmed in range and every record parseable, so
+        // `record_kind` cannot OOB. (Inline-integer ids resolve to a literal — invalid in a
+        // subject/predicate slot.)
+        let record_kind = |c: Id| -> Option<u8> {
+            if is_inline(c) {
+                return Some(1); // inline integer => literal
+            }
+            let off = *self.offsets().get((c - 1) as usize)? as usize;
+            // tag byte: 0=IRI, 1=literal, 2=blank, 3=triple
+            blob.get(off).copied()
+        };
+        for (_own, s, p) in triple_sp {
+            match record_kind(s) {
+                Some(0 | 2) => {} // IRI or blank — valid subject
+                _ => return Err(bad("a quoted-triple subject component is not an IRI or blank node")),
+            }
+            match record_kind(p) {
+                Some(0) => {} // IRI — valid predicate
+                _ => return Err(bad("a quoted-triple predicate component is not an IRI")),
             }
         }
         // Every id in the sorted lookup array must be a valid 1-based term id: `mapped_find`
@@ -2142,6 +2232,54 @@ mod tests {
             assert_eq!(d.lookup(&int(&v.to_string())), id, "lookup agrees with intern");
         }
         assert_eq!(d.len(), 0, "no inline integer is stored in the dictionary");
+    }
+
+    /// [OPUS-4.8] sq-cvug — a quoted-triple component id that is IN RANGE but resolves to the
+    /// WRONG KIND (a literal where the subject must be IRI/blank, or where the predicate must
+    /// be an IRI) used to hit `reconstruct_triple`'s `unreachable!()` → a clean panic (DoS) on
+    /// a hostile/corrupt mmap'd index. It must now FAIL CLOSED to a safe placeholder, never
+    /// panic. The trusted interner never produces such a record, so we craft one directly via
+    /// the raw `intern_triple_ids` (the same path a tampered store would feed `reconstruct`).
+    #[test]
+    fn reconstruct_triple_wrong_kind_component_is_safe_not_panic() {
+        let mut d = Dict::new();
+        let lit = d.intern(&Term::Literal(Literal::new_simple_literal("not a node")));
+        let iri = d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/p")));
+        let blank = d.intern(&Term::BlankNode(oxrdf::BlankNode::new_unchecked("b0")));
+        let obj = d.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/o")));
+
+        // (a) Literal in the SUBJECT slot (subject must be IRI|blank). Must not panic; the
+        // result is a triple term whose subject is the safe blank-node placeholder.
+        let bad_subj = d.intern_triple_ids([lit, iri, obj]);
+        let Term::Triple(t) = d.term(bad_subj) else { panic!("expected a triple term") };
+        assert_eq!(
+            t.subject,
+            oxrdf::BlankNode::new_unchecked(OOR_TRIPLE_SUBJECT).into(),
+            "wrong-kind subject falls back to the safe placeholder"
+        );
+
+        // (b) Literal in the PREDICATE slot (predicate must be IRI). Must not panic; the
+        // predicate is the safe placeholder IRI.
+        let bad_pred = d.intern_triple_ids([iri, lit, obj]);
+        let Term::Triple(t) = d.term(bad_pred) else { panic!("expected a triple term") };
+        assert_eq!(
+            t.predicate,
+            NamedNode::new_unchecked(OOR_TRIPLE_PREDICATE),
+            "wrong-kind predicate falls back to the safe placeholder"
+        );
+
+        // A blank-node subject and an inline-integer object are valid and decode normally.
+        let inline_obj = d.intern(&int("7"));
+        let ok = d.intern_triple_ids([blank, iri, inline_obj]);
+        let Term::Triple(t) = d.term(ok) else { panic!("expected a triple term") };
+        assert_eq!(t.subject, oxrdf::BlankNode::new_unchecked("b0").into());
+        assert_eq!(t.predicate, NamedNode::new_unchecked("http://ex/p"));
+        assert_eq!(t.object, int("7"));
+
+        // The same fail-closed behaviour must hold after compaction (the blob record path).
+        let d = d.into_blob();
+        let Term::Triple(t) = d.term(bad_subj) else { panic!("expected a triple term") };
+        assert_eq!(t.subject, oxrdf::BlankNode::new_unchecked(OOR_TRIPLE_SUBJECT).into());
     }
 
     #[test]

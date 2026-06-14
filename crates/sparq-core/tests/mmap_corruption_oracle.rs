@@ -274,6 +274,57 @@ fn dict_blob_non_utf8_is_rejected_not_ub() {
     assert!(saw_rejection, "no blob corruption was rejected — the oracle is vacuous");
 }
 
+/// [OPUS-4.8] sq-cvug — a graph containing RDF 1.2 quoted/triple terms `<<( s p o )>>` so
+/// the store holds tag-3 records whose components cross-reference other dictionary ids. The
+/// byte-flip sweeps above never synthesise these from the plain `sample_graph` (no triple
+/// terms in it), so this focused test drives the quoted-triple reconstruction path directly.
+fn sample_star_graph() -> Graph {
+    let mut nt = String::new();
+    for i in 0..40u32 {
+        // A quoted triple term in the OBJECT position (the RDF 1.2 N-Triples grammar) — a
+        // tag-3 record whose subject/predicate/object are themselves dictionary ids.
+        nt.push_str(&format!(
+            "<http://example.org/s/{i}> <http://example.org/says> <<( <http://example.org/inner/{i}> <http://example.org/p> \"object {i}\" )>> .\n"
+        ));
+    }
+    Graph::load_str(&nt, "nt").expect("valid RDF 1.2 N-Triples with triple terms")
+}
+
+/// sq-cvug — a quoted-triple component id that is IN RANGE but resolves to the WRONG KIND
+/// (e.g. a literal where the subject must be IRI/blank) used to hit `reconstruct_triple`'s
+/// `unreachable!()` → a clean panic (DoS) on a hostile/corrupt store. We exercise the whole
+/// store-shaped boundary: save a store with triple terms, brute-force flip every byte of the
+/// term blob (which includes the tag-3 records' inline component ids), and require the loader
+/// to be SAFE on every variant — a clean `Err` from `open` (the kind check in
+/// `MappedDict::validate` rejects it), or a graph that fully materialises without a panic
+/// (`reconstruct_triple` falls back to a safe placeholder). Pre-fix this aborts the process.
+#[test]
+fn quoted_triple_wrong_kind_component_is_safe_not_panic() {
+    let tmp = tempdir();
+    let pristine = tmp.join("pristine");
+    let g = sample_star_graph();
+    g.save(&pristine).unwrap();
+    // Pristine store with triple terms must open and materialise cleanly.
+    let clean = Graph::open(&pristine).expect("pristine star store must open");
+    let reference = exercise(&clean);
+    assert!(reference.iter().any(|r| r[2].contains("<<")), "the reference dump must contain triple terms");
+
+    let blob = pristine.join("dict-terms.bin");
+    let len = std::fs::metadata(&blob).unwrap().len() as usize;
+    let scratch = tmp.join("scratch");
+    // Flip each blob byte to a spread of values: this rewrites tag bytes (so a record's KIND
+    // changes) and the inline u32 component ids inside tag-3 records (so a triple component
+    // can come to point at a wrong-kind term). Every variant must be SAFE.
+    let mut pos = 0usize;
+    while pos < len {
+        for xor in [0x01u8, 0x02, 0x03, 0x80, 0xFF] {
+            corrupt_flip(&pristine, &scratch, &blob, pos, xor);
+            assert_safe(&scratch, &reference, &format!("star-blob flip @{pos}^{xor:#x}"));
+        }
+        pos += 1;
+    }
+}
+
 // ---- tiny tempdir (no dev-dep): a unique scratch dir under the OS temp, cleaned on drop is
 // not needed (CI temp is ephemeral); we just need a unique path per run. ----
 fn tempdir() -> std::path::PathBuf {
