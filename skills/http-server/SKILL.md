@@ -25,12 +25,20 @@ cargo run -p sparq-server
 cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriples data.nt
 ```
 
-> **Security: no built-in auth.** Every endpoint is unauthenticated — including the
-> mutating `application/sparql-update` path and the `/subscriptions` WebSocket. The
-> server binds **loopback by default** and **refuses a non-loopback bind** (e.g.
-> `0.0.0.0`) unless you set `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`), warning loudly
-> even then. Do not expose it to an untrusted network without a reverse proxy / API
-> gateway (or `sparq-solid`) enforcing auth in front. SPARQL `SERVICE` federation is OFF
+> **Security: optional Bearer-token write gate; loopback by default.** With no token
+> configured, every endpoint is unauthenticated (the back-compat default). Set
+> `--auth-token <TOKEN>` (env `SPARQ_AUTH_TOKEN`) to require `Authorization: Bearer <TOKEN>`
+> on every **write** (a SPARQL Update on `/sparql` — `application/sparql-update`, or a
+> `query`/`update` body that parses as an update — and the GSP `PUT`/`POST`/`DELETE`
+> methods); otherwise `401` with `WWW-Authenticate: Bearer` (constant-time compared; mirrors
+> QLever's `-a <token>`). Add `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO
+> gate reads. The `/subscriptions` WebSocket is a read surface and is NOT gated by this token
+> (bead `sq-cxk5`). The server binds **loopback by default** and **refuses a non-loopback
+> bind** (e.g. `0.0.0.0`) unless you set `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`) OR the
+> whole surface is authenticated (`--auth-token` AND `--auth-token-read`) — a write-token
+> alone still leaves reads open. Deliver the token over TLS (terminate it at a proxy). For
+> real per-user authz, front it with a reverse proxy / API gateway (or `sparq-solid`). SPARQL
+> `SERVICE` federation is OFF
 > in the default build (the `service` cargo feature is off); a `SERVICE` clause then
 > errors at execution. Build with `--features service` to enable it — and even then the
 > server is **default-DENY-all SERVICE**: a `SERVICE <iri>` reaches **nothing** unless its
@@ -95,13 +103,20 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   (**`time-travel` feature only**).
 - `struct ServerConfig { query_timeout: Option<Duration>, max_body_bytes: usize,
   max_concurrent: usize, max_results: Option<usize>, max_subscriptions: usize,
-  max_subscriptions_per_conn: usize, verbose: bool, allow_remote: bool, /* + time_travel_*
-  under feature */ }` with `ServerConfig::default()` and `ServerConfig::from_env()`.
-- `fn bind_posture(addr: &SocketAddr, allow_remote: bool) -> BindPosture` — the no-auth
-  bind gate the binary applies: `Loopback` (proceed), `RemoteAllowed { warning }` (proceed
-  + log), or `RemoteRefused { message }` (refuse). `allow_remote` is a *binary* posture
-  gate only — it does not add per-request auth and the library `router`/`harden` surface
-  ignores it.
+  max_subscriptions_per_conn: usize, verbose: bool, allow_remote: bool,
+  auth_token: Option<String>, auth_token_read: bool, /* + time_travel_* under feature */ }`
+  with `ServerConfig::default()` and `ServerConfig::from_env()`. `auth_token` (set: gates the
+  write surface with a Bearer token, constant-time compared; `None`: no write auth) and
+  `auth_token_read` (gate reads too) are honoured by the library `router` itself — embedders
+  get the gate for free.
+- `fn bind_posture(addr: &SocketAddr, allow_remote: bool, auth: AuthPosture) -> BindPosture`
+  — the bind gate the binary applies: `Loopback` (proceed), `RemoteAllowed { warning }`
+  (proceed + log), or `RemoteRefused { message }` (refuse). `AuthPosture::{None, WriteOnly,
+  ReadAndWrite}` (via `AuthPosture::from_config(&config)`) folds the token + read-gate into
+  the decision: a non-loopback bind is allowed when `--allow-remote` is set OR the surface is
+  fully authenticated (`ReadAndWrite`); a write-token alone (`WriteOnly`) still requires
+  `--allow-remote` because reads stay open. This is a *bind-time* posture gate; per-request
+  auth is the `auth_token` fields above (enforced by `router`/`harden`-wrapped handlers).
 - `fn harden(routes: axum::Router, config: &ServerConfig) -> axum::Router` — wrap any
   router in the production middleware (panic→500, concurrency-limit→429, body-limit→413,
   JSON error bodies, optional trace).
@@ -222,8 +237,9 @@ GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `I
 DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot
 consistency, blocking-on-commit semantics, the `Sparq-Generation` header (time-travel
-feature), AND its **no-auth** posture (a GSP write is as powerful as an UPDATE — see the
-security gotcha). A malformed body → `400`; an unsupported body Content-Type → `415`.
+feature), AND its **auth gate** (a GSP write is as powerful as an UPDATE, so `PUT`/`POST`/
+`DELETE` are gated by `--auth-token` exactly like an UPDATE; `GET`/`HEAD` are reads). A
+malformed body → `400`; an unsupported body Content-Type → `415`.
 
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
 env overrides the default.
@@ -237,7 +253,9 @@ env overrides the default.
 | `--max-subscriptions N` | `SPARQ_MAX_SUBSCRIPTIONS` | `256` | server-wide subs |
 | `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | per-socket subs |
 | `--verbose` | — | off | TraceLayer request logging (respects `RUST_LOG`) |
-| `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | opt in to a non-loopback bind despite no auth; without it a non-loopback `--addr` is **refused** at startup, with it it warns and proceeds |
+| `--auth-token TOKEN` | `SPARQ_AUTH_TOKEN` | off (no auth) | require `Authorization: Bearer TOKEN` on every WRITE (SPARQL Update + GSP PUT/POST/DELETE) → `401` + `WWW-Authenticate: Bearer` otherwise; constant-time compared (QLever's `-a`) |
+| `--auth-token-read` | `SPARQ_AUTH_TOKEN_READ` | off | ALSO gate reads with the same token (only meaningful with a token set) |
+| `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | opt in to a non-loopback bind; without it a non-loopback `--addr` is **refused** unless the surface is fully authenticated (`--auth-token` AND `--auth-token-read`), with it it warns and proceeds |
 | `--service-allow HOST\|*.SUFFIX` (repeatable) | `SPARQ_SERVICE_ALLOW` (comma/ws-sep) | empty = **deny ALL SERVICE** | (feature `service`) allowlist a SERVICE egress host (exact or `*.suffix` wildcard); CLI + file + env are all merged (combined additively) |
 | `--service-allow-file PATH` | — | — | (feature `service`) load allowlist entries, one per line (`#` comments + blanks ignored) |
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
@@ -248,13 +266,23 @@ then `router(state)`, or `harden(my_router, &config)`.
 
 ## Gotchas / feature flags / prerequisites
 
-- **No built-in auth — loopback-by-default, non-loopback bind is refused.** Every endpoint
-  (query, `application/sparql-update`, `/subscriptions` WS) is unauthenticated → read+write
-  open to anyone who can reach the port. The binary binds `127.0.0.1:3030` by default and
-  **refuses** a non-loopback `--addr` (incl. `0.0.0.0`/`::`) unless `--allow-remote` /
-  `SPARQ_ALLOW_REMOTE=1`; even then it warns. Front it with a reverse proxy / gateway (or
-  `sparq-solid`) for auth. No rate limit and `--max-results` is unlimited by default — set
-  caps + a gateway rate limiter if exposing it (beads `sq-o4qf`, `sq-ebii`).
+- **Auth — optional Bearer write gate; loopback-by-default; non-loopback bind refused
+  unless safe.** With no `--auth-token` the server is unauthenticated (read+write open to
+  anyone who can reach the port) — the back-compat default. Set `--auth-token <TOKEN>` (env
+  `SPARQ_AUTH_TOKEN`) to require `Authorization: Bearer <TOKEN>` on every WRITE (SPARQL Update
+  + GSP `PUT`/`POST`/`DELETE`); `401` + `WWW-Authenticate: Bearer` otherwise (constant-time
+  compared; QLever's `-a <token>`; missing-vs-wrong are indistinguishable). The classification
+  keys on whether the request **mutates**, not the route — an Update smuggled through the
+  query path is gated too. Add `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO
+  gate reads. The `/subscriptions` WS is a read surface and is NOT gated by this token (bead
+  `sq-cxk5`). The binary binds `127.0.0.1:3030` by default and **refuses** a non-loopback
+  `--addr` (incl. `0.0.0.0`/`::`) unless `--allow-remote` / `SPARQ_ALLOW_REMOTE=1` OR the
+  whole surface is authenticated (`--auth-token` AND `--auth-token-read`); even then it warns.
+  A write-token alone still leaves reads open, so it does NOT by itself make a remote bind
+  safe. Deliver the token over TLS (terminate at a proxy). For per-user authz front it with a
+  reverse proxy / gateway (or `sparq-solid`). No rate limit and `--max-results` is unlimited by
+  default — set caps + a gateway rate limiter if exposing it (beads `sq-zcby`, `sq-o4qf`,
+  `sq-ebii`).
 - **SERVICE federation (egress allowlist).** `SERVICE` is OFF in the default build (build
   with `--features service` to enable it). Even enabled, the server is **default-DENY-all
   SERVICE**: a `SERVICE <iri>` clause reaches **nothing** unless its host is allowlisted —
