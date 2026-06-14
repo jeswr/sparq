@@ -146,14 +146,23 @@ measure() {
 
   local start end rc=0 json="$WORK/$crate.json"
   start=$(date +%s)
-  # [OPUS-4.8] sq-x4jy: retry a per-crate measurement up to MEASURE_ATTEMPTS times. A
-  # transient TEST-BINARY race on the shared runner (a binary that aborts / "was never
-  # executed") makes llvm-cov emit a partial/empty profraw and UNDERCOUNT the crate
-  # (sparq-core seen at ~71% instead of ~91%) or fail outright (rc=101). The racing tests
-  # are now hermetic (the dict-spill / service-allow env tests no longer mutate the
-  # process-global environment), so this retry is belt-and-braces for any residual runner
-  # flake — a clean re-measure self-heals it instead of failing CI on an unrelated PR.
+  # [OPUS-4.8] sq-x4jy: retry a per-crate measurement up to MEASURE_ATTEMPTS times, but
+  # ONLY on the aborted-binary signature: a non-zero rc (e.g. rc=101 when a test binary
+  # aborts / "was never executed") OR a missing/empty JSON output (a partial profraw that
+  # llvm-cov couldn't summarise). A run that exits 0 with a valid, non-empty JSON is taken
+  # as a REAL result and is NOT retried — retrying a valid-but-low number would mask a
+  # genuine coverage regression. The undercount this flake produced (sparq-core ~71% vs
+  # ~91%) came FROM the aborted binary (no/partial profraw → empty/invalid JSON), which is
+  # exactly the retried case; the real fix is making the racing env tests hermetic (the
+  # dict-spill / service-allow tests no longer mutate the process-global environment), so
+  # this retry is belt-and-braces for any residual runner flake of that same shape.
   local attempt=0 attempts="${MEASURE_ATTEMPTS:-2}"
+  # Validate MEASURE_ATTEMPTS is a positive integer; fall back to 2 otherwise (a
+  # non-numeric value would break the `-ge` test below and could loop surprisingly).
+  case "$attempts" in
+    ''|*[!0-9]*) attempts=2 ;;
+  esac
+  [ "$attempts" -ge 1 ] 2>/dev/null || attempts=2
   while :; do
     attempt=$((attempt + 1))
     rc=0
