@@ -23,6 +23,10 @@ OUT="${2:-bench-results.json}"
 CLI=target/release/sparq-cli
 GEN=target/release/sparq-bench
 Q=bench/qlever-synthetic/queries
+# [OPUS-4.8] Operator-coverage suite (one query per SPARQL operator family). Wall-clock /
+# trend-only like the query latencies above — NOT a hard perf-gate (only the byte/parse
+# metrics in scripts/perf-gate.py are gated). Registry: bench/benchmarks.toml (operator-coverage).
+OPQ=bench/operators/queries
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -85,6 +89,24 @@ for mode in count materialize json; do
     [ -n "${us:-}" ] && add "${name}_${mode}_us" us "$us"
   done < "$TMP/o"
 done
+
+# [OPUS-4.8] operator-coverage latencies — one *.rq per SPARQL operator family
+# (BGP/star/chain/triangle, UNION, OPTIONAL/!bound, MINUS, FILTER {num,string,IN,EXISTS},
+# BIND, VALUES, aggregates+GROUP BY+HAVING, DISTINCT, ORDER BY+LIMIT/OFFSET, property paths
+# {+,*,?,seq,alt,inverse,negated-set}, subquery, ASK/CONSTRUCT/DESCRIBE). Same TSV runner +
+# naming as the query latencies, namespaced `op_<query>_<mode>_us`. Graph forms (CONSTRUCT/
+# DESCRIBE) are routed by `bench` to the construct/describe executor (rows = produced triples).
+# Wall-clock / trend-only: these are NOT in the deterministic perf-gate (scripts/perf-gate.py).
+if [ -d "$OPQ" ]; then
+  for mode in count materialize json; do
+    "$CLI" bench "$TMP/data.nt" ntriples "$OPQ" 3 "$mode" 2>/dev/null > "$TMP/op" || true
+    while IFS=$'\t' read -r name rows us; do
+      # skip any query that errored (rows == ERROR) so the JSON stays valid + numeric.
+      [ "${rows:-}" = "ERROR" ] && continue
+      [ -n "${us:-}" ] && add "op_${name}_${mode}_us" us "$us"
+    done < "$TMP/op"
+  done
+fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.
 { echo '@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .'; echo '@prefix : <http://ex/> .'

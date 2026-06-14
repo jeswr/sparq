@@ -882,19 +882,28 @@ fn run_query_suite(g: &sparq_core::Graph, dir: &str, iters: usize, mode: &str) {
     for path in entries {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         let sparql = std::fs::read_to_string(&path).unwrap();
+        // [OPUS-4.8] Route the graph-valued forms (CONSTRUCT / DESCRIBE) through the
+        // construct/describe executor — count()/query()/query_json() only handle SELECT/ASK.
+        // This lets the operator-coverage suite (bench/operators/queries) exercise every
+        // SPARQL query form through the same `bench` runner; "rows" = produced triples.
+        let graph_form = sparq_engine::PreparedQuery::parse(&sparql).map(|p| p.is_graph_form()).unwrap_or(false);
         let mut best = f64::INFINITY;
         let mut rows = 0;
         let mut err = None;
         for _ in 0..iters {
             let t = Instant::now();
-            let r: Result<usize, String> = match mode {
-                "count" => sparq_engine::count(g, &sparql),
-                "json" => sparq_engine::query_json(g, &sparql).map(|s| {
-                    let n = s.len();
-                    std::hint::black_box(s);
-                    n
-                }),
-                _ => sparq_engine::query(g, &sparql).map(|r| r.len()),
+            let r: Result<usize, String> = if graph_form {
+                sparq_engine::construct_or_describe(g, &sparql).map(|ts| ts.len())
+            } else {
+                match mode {
+                    "count" => sparq_engine::count(g, &sparql),
+                    "json" => sparq_engine::query_json(g, &sparql).map(|s| {
+                        let n = s.len();
+                        std::hint::black_box(s);
+                        n
+                    }),
+                    _ => sparq_engine::query(g, &sparql).map(|r| r.len()),
+                }
             };
             match r {
                 Ok(n) => {

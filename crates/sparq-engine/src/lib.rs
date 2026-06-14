@@ -387,6 +387,15 @@ impl PreparedQuery {
         &self.query
     }
 
+    /// True for the graph-valued query forms (CONSTRUCT / DESCRIBE), which produce a set
+    /// of triples rather than a solution sequence. SELECT/ASK go through [`query`]/[`count`];
+    /// the graph forms go through [`construct_or_describe`]. Lets callers (e.g. the CLI bench
+    /// suite) route a query to the right executor without re-parsing or string-matching.
+    // [OPUS-4.8]
+    pub fn is_graph_form(&self) -> bool {
+        matches!(self.query, Query::Construct { .. } | Query::Describe { .. })
+    }
+
     /// Unwraps into the `spargebra` algebra.
     pub fn into_query(self) -> Query {
         self.query
@@ -853,6 +862,16 @@ mod tests {
     #[test]
     fn single_pattern() {
         assert_eq!(count("SELECT ?s WHERE { ?s <http://ex/age> ?a }"), 3);
+    }
+
+    // [OPUS-4.8] is_graph_form classifies CONSTRUCT/DESCRIBE (graph-valued) vs SELECT/ASK.
+    #[test]
+    fn graph_form_classification() {
+        let gf = |q: &str| PreparedQuery::parse(q).unwrap().is_graph_form();
+        assert!(!gf("SELECT ?s WHERE { ?s <http://ex/age> ?a }"));
+        assert!(!gf("ASK { ?s <http://ex/age> ?a }"));
+        assert!(gf("CONSTRUCT { ?s <http://ex/a> ?a } WHERE { ?s <http://ex/age> ?a }"));
+        assert!(gf("DESCRIBE <http://ex/alice>"));
     }
 
     #[test]
