@@ -152,3 +152,65 @@ this vendored tree once the fixes land in a released spargebra.
 - **Upstream**: nothing to propose — this is an artifact of path-patching, not
   an upstream bug. (At most, oxigraph could drop the rand 0.8 compatibility
   range, but it is harmless when consumed from crates.io.)
+
+## 8. Cap the parser recursion depth (DoS hardening) [OPUS-4.8]
+
+- **Why (security, not spec)**: `spargebra` is a `peg` recursive-descent parser,
+  so each level of syntactic nesting — group graph patterns (`{ … }`,
+  OPTIONAL/GRAPH/MINUS/UNION/LATERAL/SERVICE bodies, sub-SELECT WHERE,
+  EXISTS/NOT EXISTS), bracketed/unary expressions (`( … )`, `!!…`), parenthesised
+  property paths, RDF collections (`( … )`), blank-node property lists (`[ … ]`),
+  and RDF 1.2 reified triples / triple terms (`<< … >>`, `<<( … )>>`) — maps onto
+  one or more *native call-stack frames*. Upstream applies no recursion-depth,
+  input-length, or stack-growth bound, so an attacker-controlled query string of
+  a few thousand nested delimiters recurses until the call stack **overflows and
+  ABORTS the process** (SIGABRT/SIGSEGV). This is reachable from sparq's
+  unauthenticated `/sparql` endpoint via
+  `PreparedQuery::parse → SparqlParser::parse_query` — a denial of service
+  (sparq threat-model boundary **B2 / T-PARSE-DoS**, bead **sq-v5dg**).
+- **Measured** (against this exact grammar, on a 2 MiB stack — the default for
+  the tokio worker / blocking-pool threads on which the server parses, *not* the
+  larger main-thread `ulimit -s`): the unmodified parser overflows at roughly
+  **~180 nested levels in a debug build** and **~900 in a release build** (group
+  nesting and bracketed-expression nesting behave alike). The shell `ulimit -s`
+  (often 8 MiB) is irrelevant to the server's actual parse threads.
+- **Fix**: thread a single shared nesting counter through `ParserState`
+  (`recursion_depth`, cap `MAX_RECURSION_DEPTH = 128`). An empty-matching PEG
+  guard rule `RecursionGuard() = {? state.enter_recursion() }` is placed in each
+  recursive production *immediately after it commits to its opening delimiter*; it
+  increments the counter and fails the parse with a clean syntax error once the
+  cap is reached. Each guarded production calls `state.leave_recursion()`
+  (saturating) in its success action, so on the matched path the counter is
+  exactly balanced; backtracking can only leave it transiently *higher* (never
+  lower), which at worst makes the guard marginally more conservative and is
+  discarded with the `ParserState` on a failing parse — the same
+  mutate-during-PEG-parse pattern the crate already relies on for its
+  `aggregates` stack. Because PEG only surfaces the failure at the *furthest*
+  input position (which masks the depth-guard failure for a uniformly nested
+  input), `parse_query`/`parse_update` additionally check a `hit_recursion_limit`
+  flag and, when set on a failed parse, return a dedicated
+  `SparqlSyntaxErrorKind::TooDeeplyNested` error ("The SPARQL query is too deeply
+  nested …") in preference to the raw "unexpected token" message. The cap chosen
+  (128) sits with comfortable headroom (~30%) below the debug-build 2 MiB
+  overflow point and ~8× above the deepest query in the W3C SPARQL 1.0/1.1/1.2
+  conformance suites, so it overflows nothing yet rejects no legitimate query.
+- **Tests**: `vendor/spargebra/tests/recursion_depth.rs` — a pathologically
+  nested query for *each* recursion axis (groups, bracketed expressions, `!!`
+  chains, property paths, collections, blank-node lists, triple terms, and the
+  UPDATE template path) is run on a 2 MiB thread and must return a clean `Err`
+  (reaching `join()` at all proves no overflow); positive controls assert that
+  64-deep nesting and a spread of ordinary queries still parse, and a boundary
+  test pins that crossing the cap flips OK→Err in a sane range.
+- **Verified**: `cargo test -p spargebra` (incl. doctests) and the full W3C
+  SPARQL conformance suite stay green (Overall ≥ 1229 pass+divergence — see the
+  report). `cargo clippy --all-targets` is clean for the changed code (the two
+  remaining `build_select` lints — `too_many_arguments`, `type_complexity` — are
+  pre-existing upstream and untouched; they never gate because the project lints
+  spargebra as a `[patch.crates-io]` dependency, which clippy does not lint).
+- **Upstream**: proposed to oxigraph/oxigraph (the recursion cap is generally
+  useful, not sparq-specific). See the PR description prepared with this change.
+
+> Manifest note: the upstream manifest sets `autotests = false` (the published
+> crate ships no `tests/` dir), so this patch also adds an explicit `[[test]]`
+> target entry for `tests/recursion_depth.rs`. Like the `[workspace]` table and
+> the `rand` pin (§7), that is a vendoring artifact, not an upstream change.
