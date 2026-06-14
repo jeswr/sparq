@@ -10,9 +10,14 @@
 //!   `fox`, `ΣΟΦΙΑ` == `σοφια`, `STRASSE` == `strasse`. No stemming, no
 //!   stopword removal, no diacritic stripping (`café` ≠ `cafe`): exact-token
 //!   semantics are predictable across languages and never throw data away.
-//! - **CJK caveat**: UAX #29 keeps unspaced Han/Kana runs as single segments
-//!   (no dictionary-based word splitting) — CJK search is effectively
-//!   whole-run match.
+//! - **CJK caveat**: there is no dictionary-based word splitting. UAX #29 emits
+//!   each Han/CJK ideograph as its OWN word segment (`東京都` → `東`,`京`,`都`),
+//!   so an unspaced ideograph run becomes one token per character — a query
+//!   token matches a document iff that ideograph occurs in it, and a multi-char
+//!   CJK term behaves like the AND of its characters (use `phrase` for adjacency,
+//!   which then requires the characters consecutive). Kana/Hangul runs that
+//!   UAX #29 treats as a single word stay one token. (Empirically pinned in
+//!   `tests/analyzer_edges.rs`.) [OPUS-4.8]
 //!
 //! Query strings go through [`tokenize_query`], which additionally recognises
 //! a trailing `*` on a token as a PREFIX (autocomplete) marker: `auto*`
