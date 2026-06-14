@@ -62,7 +62,13 @@ mkdir -p "$CACHE"
 # ---- 1. fetch + verify (skipped if the slice is already cached & valid) -------------------
 if [ ! -f "$SLICE" ] || ! echo "$SLICE_SHA256  $SLICE" | sha256sum -c --status - 2>/dev/null; then
   echo "[dbpsb] downloading pinned slice (~$((SLICE_BYTES/1000000)) MB): $SLICE_URL" >&2
-  curl -fsSL -o "$SLICE.tmp" "$SLICE_URL"
+  # [OPUS-4.8] Robust fetch for CI: the slice is a ~120 MB file behind a 307 redirect to
+  # downloads.dbpedia.org. A bare `curl -fsSL` with no retry/timeout flaked on the GitHub
+  # runner (one transient error -> the whole DBPSB suite skipped). Retry on any error
+  # (incl. transient HTTP/connection failures) with backoff + a generous cap so a blip no
+  # longer drops the suite; sha256 verification below still guards integrity.
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+       --connect-timeout 30 --max-time 600 -o "$SLICE.tmp" "$SLICE_URL"
   echo "$SLICE_SHA256  $SLICE.tmp" | sha256sum -c - >&2
   mv "$SLICE.tmp" "$SLICE"
   echo "[dbpsb] cached + verified: $SLICE" >&2
