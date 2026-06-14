@@ -163,7 +163,8 @@ Users get `sparq-cli` plus a `sparq` symlink on PATH.
 - Bump `[workspace.package] version` to the next `-dev` cycle if desired, and start a new
   `## [Unreleased]` section in `CHANGELOG.md`.
 
-## Python wheels (PyPI) — follow-up, not wired yet
+<!-- [OPUS-4.8] release publishing tracked: bead sq-7re (wheels matrix), sq-ed5 (PyPI name). -->
+## Python wheels (PyPI) — release publishing not yet wired (beads `sq-7re`, `sq-ed5`)
 
 `crates/sparq-py` packages the engine as the Python package **`sparq`** (pyo3 +
 maturin, `abi3-py39` so one wheel per platform covers CPython ≥ 3.9). CI builds and

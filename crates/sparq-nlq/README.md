@@ -134,7 +134,7 @@ cargo run -p sparq-nlq --example record_olympics --release
   `RecordingLlm`, after which the recorded fixtures become the regression set.
 - **Not yet wired**: entity/relation linking from `sparq-sim` (design §2 phase 3
   lists it as input to grounding; the schema summary alone is enough for the
-  olympics-scale schema), and N2 grammar-constrained decoding against the live
-  dictionary.
+  olympics-scale schema) — bead `sq-uw40`; and N2 grammar-constrained decoding
+  against the live dictionary — bead `sq-9yjp`. <!-- [OPUS-4.8] -->
 - `AnthropicLlm` is compile-checked in CI (`--features live`) but never called there;
   no test touches the network.

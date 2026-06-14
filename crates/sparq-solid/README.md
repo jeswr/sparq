@@ -274,4 +274,5 @@ for any custom authorization storage.
   §5.4).
 - Unsupported vocabulary: see the support matrix above.
 - Update-path enforcement (write gating + auto-re-materialization on `.acl` writes)
-  is designed but not wired (design doc §4.4).
+  is designed but not wired (design doc §4.4); tracked as bead `sq-xor3`. <!-- [OPUS-4.8] -->
+

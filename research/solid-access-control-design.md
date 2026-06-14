@@ -1,8 +1,15 @@
 # Solid access control on sparq: pods as named graphs, WAC/ACP as rules, queries as dataset views
 
-Status: design + v1 prototype (`crates/sparq-solid`). The L1 engine change is **specified
-here but not implemented** — it is a follow-up thread; nothing in `sparq-engine`/`sparq-core`
-is modified by this design's v1.
+Status: **shipped** (`crates/sparq-solid`), with this document now serving as the
+architecture + design-rationale record. The L1 engine change specified in §5 **has been
+implemented and wired** as `sparq-solid`'s default query path — the zero-copy `DatasetView`
+(`crates/sparq-engine/src/lib.rs`) and the `exec::view` named-graph filter
+(`crates/sparq-engine/src/exec.rs`), measured in §6.1; `sparq-core` itself is unchanged. The
+one remaining design item that is **not** wired is the update path (write gating +
+auto-re-materialization on `.acl` writes, §4.4/§7 item 6) — tracked as a bead (see §7). <!-- [OPUS-4.8] doc-freshness sweep sq-7woa: L1 view shipped; header was stale -->
+
+Below, "L1 phase 1 ships X" and similar past-tense-as-future phrasing is preserved as the
+original design narrative; the §6.1 "done" note and §7 record what actually landed.
 
 User-facing documentation of the shipped crate (quick start, support matrix, security
 model, API docs): [`crates/sparq-solid/README.md`](../crates/sparq-solid/README.md) and
@@ -144,7 +151,8 @@ Relevant supported features (verified in `mod.rs`/`parser.rs`):
 - `string:concatenation` — deterministic minting of pair-principal / grant-node IRIs.
 - `string:startsWith/contains/matches/…`, `math:*` comparisons, `list:member/in`,
   `log:dtlit`, `log:conjunction`.
-- **Not supported / gaps** (small `sparq-reason` follow-ups rather than contortions, §7):
+- **Not supported / gaps** (small `sparq-reason` follow-ups rather than contortions, §7;
+  tracked as bead `sq-jwsp`): <!-- [OPUS-4.8] -->
   no aggregate/count over *property values* (`math:memberCount` is list/formula-only — would
   simplify allOf), no `log:collectAllIn`/`e:findall`, no built-in URI-encoding (pair-IRI
   minting concatenates raw IRIs with reserved-char delimiters instead), backward-rule depth
@@ -526,7 +534,7 @@ Update path (out of v1 scope, designed): writes to graph `G` require `auth:write
 on `G`; `.acl`/`.acr` writes require `auth:control` (WAC) / ACR write (ACP); after any
 acl/acr/group-doc write, re-materialize.
 
-## 5. L1 — engine dataset-view (precise spec for the follow-up thread)
+## 5. L1 — engine dataset-view (the shipped spec; see §6.1 for the wiring)
 
 Generic named-graph-subset evaluation; no Solid concepts. Mirrors Stardog's "silently drop
 unreadable graphs" model (§1.3) with sparq's existing thread-local-guard idiom.
@@ -711,12 +719,14 @@ Reading the numbers honestly:
    DONE (RFC 3986 / fn:encode-for-uri percent-encoding; wac.n3/acp-a.n3/acp-c.n3 pair
    and candidate minting now encode their components, the session side shares the same
    `encode_for_uri` helper, and the reserved-encoding validation is KEPT as defense in
-   depth). Still open: a documented multi-stratum entry point
+   depth). Still open (bead `sq-jwsp`): a documented multi-stratum entry point
    (`reason_n3_stratified(&[src])`) so the ACP pipeline does not re-serialize closures
    between strata; optionally `log:forAllIn`/count-over-property-values to collapse ACP
-   strata B+C into one.
+   strata B+C into one. <!-- [OPUS-4.8] -->
 3. **Incremental auth maintenance**: re-materialization is v1 (measured §6); N3-incremental
    needs derivation counting under stratified NAF — T18's counting is RDFS-only today.
 4. **ACP issuer/vc/Creator/Owner**, custom ACP modes, `acl:accessToClass` — §3.6.
 5. **Shared-dict named graphs** enabling true zero-copy union-default — §5.4(c).
 6. Update-path enforcement (write gating + auto-re-materialization on acl writes) — §4.4.
+   Tracked: bead **sq-xor3**. <!-- [OPUS-4.8] -->
+
