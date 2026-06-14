@@ -23,7 +23,7 @@ From `research/ARCHITECTURE.md` and `research/BENCHMARKS.md`:
   multiplicities + **characteristic sets** for stars.
 - **Execution:** a **materialising evaluator** — builds `Vec<SmallVec<[Id;4]>>`
   rows. **No vectorization, no SIMD kernels, no compilation.** Vectorized
-  `DataChunk` execution is the M4 plan, not implemented.
+  `DataChunk` execution is the M4 plan (not implemented; bead `sq-hvfe`). <!-- [OPUS-4.8] -->
 - **Two targets:** native billion-scale (beat QLever) **and** a sub-~1.5 MB-gzip
   WASM browser build (Solid/RDFJS), where the only vector path is `+simd128`
   autovectorization and shipping a JIT is impractical.
@@ -405,9 +405,9 @@ codebase.
 1. **The field pivoted from better *cardinality estimation* to *order-robust execution*.**
    The strongest cross-cutting signal: with semi-join reduction (Yannakakis revival —
    Predicate Transfer, RPT, Yannakakis+, Shredded Yannakakis, TreeTracker) join order
-   becomes *almost irrelevant* (371×→1.6× variance). For sparq this means the planned
+   becomes *almost irrelevant* (371×→1.6× variance). For sparq this means the shipped
    DPccp + characteristic-set investment is **partly substitutable** by a semi-join-
-   reduction layer that makes GOO's mistakes cheap. `[M]`
+   reduction layer that makes GOO's mistakes cheap. `[M]` <!-- [OPUS-4.8] doc-sweep: DPccp is shipped (see top-of-doc architecture summary), was 'planned' -->
 2. **sparq's dictionary encoding — chosen for compression — is a semi-join superpower.**
    The literature settled on *probabilistic Bloom* filters precisely because general
    SQL keys are wide/sparse. sparq's dense u32 ids make the **exact bitmap** variant

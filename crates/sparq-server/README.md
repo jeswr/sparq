@@ -10,7 +10,8 @@ Implements the **read** side of two W3C specifications over an in-memory
   Limitations and the [update concurrency model](#update-concurrency-model)).
 * **[SPARQL 1.1 Graph Store HTTP Protocol](https://www.w3.org/TR/sparql11-http-rdf-update/)**
   — `GET`/`HEAD` on a graph resource. The Graph Store *write* verbs
-  (`PUT`/`POST`/`DELETE`) are still answered with `501 Not Implemented`.
+  (`PUT`/`POST`/`DELETE`) are answered with `501 Not Implemented`; implementing
+  them is tracked as bead `sq-gxsj`. <!-- [OPUS-4.8] -->
 
 ## Running
 

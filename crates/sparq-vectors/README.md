@@ -247,7 +247,8 @@ byte-identical neighbours to the freshly built one.
 *Scope note:* full-precision vectors are searched straight from the mmap; the
 PQ-compressed in-RAM candidate cache that *full* DiskANN ranks on now exists as
 a standalone, tested layer (`src/quant.rs`, below) but is **not yet wired into
-`search_slots`** — that integration is tracked in beads. The
+`search_slots`** — that integration is tracked as bead `sq-qamd`. <!-- [OPUS-4.8] -->
+The
 Vamana build is single-threaded and a little slower than the rayon HNSW build,
 but the **open** is what this buys you: no per-process rebuild.
 

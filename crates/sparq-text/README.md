@@ -106,9 +106,11 @@ with `ORDER BY DESC(?s)` over a `text:score` variable.
   (token, doc) pair — so only callers that need phrase search pay for it.
   `with_positions()` seeds an empty position-enabled index for the delta-fed
   case; `has_positions()` reports the mode. A phrase match is boolean adjacency
-  (no BM25 ranking) and is **not** yet wired into the `text:` magic predicates.
-- **Future work**: a `text:phrase` magic predicate exposing `phrase()` inside
-  SPARQL; positional postings are also the basis for proximity/slop scoring.
+  (no BM25 ranking) and is **not** yet wired into the `text:` magic predicates
+  (bead `sq-c0wn`). <!-- [OPUS-4.8] -->
+- **Planned (bead `sq-c0wn`)**: a `text:phrase` magic predicate exposing
+  `phrase()` inside SPARQL; positional postings are also the basis for
+  proximity/slop scoring.
 
 ## Benchmark
 

@@ -10,7 +10,8 @@ design. The reports remain the references; this document is the plan of record.
 ## 0. Invariants (inherited, non-negotiable)
 
 - Every GenAI feature is an **opt-in crate**, trivially removable, **zero perf/memory/binary impact**
-  on the default engine. No core crate is modified; gaps in public APIs go to `TODO.md`.
+  on the default engine. No core crate is modified; gaps in public APIs are captured as
+  beads (`bd`), not in-repo `TODO.md` files. <!-- [OPUS-4.8] doc-sweep: align with AGENTS.md bead policy -->
 - Approximate signals **never serve BGP answers** (data-structures §R6/R7): they power similarity /
   retrieval / linking / planner *estimates* only. Exact stays exact.
 - Every feature ships with **accuracy AND performance benchmarks** (machine spec inline, M1 Air
