@@ -1,0 +1,109 @@
+# cargo-deny supply-chain policy (sq-0sye) — practices mapped from
+# prod-solid-server onto this Rust workspace. Run by:
+#   - .github/workflows/supply-chain.yml          (gating, every push/PR)
+#   - .github/workflows/dependency-monitoring.yml (daily advisories watchdog)
+# Locally: `cargo deny check` (install: `cargo install --locked cargo-deny`).
+#
+# Schema targets cargo-deny >= 0.18 (advisories/licenses "version 2" — no
+# vulnerability/unmaintained severity knobs, no copyleft/osi-fsf fields).
+# [OPUS-4.8]
+
+[graph]
+# Check every target the workspace can build for, so a license/advisory that
+# only appears on (e.g.) wasm or windows is still caught.
+all-features = true
+
+[advisories]
+# RustSec advisory DB (the default source); pulled fresh in CI.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Refuse any dependency pinned to a version that has been YANKED from the
+# registry — a yanked crate is an unbuildable / pulled release.
+yanked = "deny"
+# Advisory IDs to tolerate — each MUST carry a justification. The policy here is
+# strict on what matters: a real VULNERABILITY or a YANKED crate FAILS the gate
+# (nothing below is one). The two entries are `unmaintained` *informational*
+# advisories on TRANSITIVE deps with NO safe upgrade available today; they are
+# tracked as beads to migrate off (see reason in each `reason`). Re-audit when an
+# upgrade path appears — drop the entry and the gate re-flags it.
+ignore = [
+  # `paste` (proc-macro) is no longer maintained. Transitive via the GPU stack
+  # (wgpu) and others; no vulnerability, no drop-in successor yet. Bead: sq-l8bv.
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro `paste`, transitive (wgpu et al.), no vuln + no safe upgrade; tracked in bead sq-l8bv" },
+  # `rustls-pemfile` is archived; its code now lives in rustls-pki-types. Pulled
+  # in via ureq -> rustls-native-certs. "No safe upgrade is available" per the
+  # advisory (needs an upstream ureq/rustls-native-certs bump). Bead: sq-g2xs.
+  { id = "RUSTSEC-2025-0134", reason = "unmaintained `rustls-pemfile`, transitive via ureq->rustls-native-certs, no vuln + no safe upgrade; tracked in bead sq-g2xs" },
+]
+
+[licenses]
+# Confidence floor for SPDX detection from license text (cargo-deny default).
+confidence-threshold = 0.8
+# Allowlist — permissive licenses only. A dependency whose license is not on
+# this list (and has no per-crate exception below) FAILS the gate.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "Zlib",
+  "BlueOak-1.0.0",
+]
+# Per-crate exceptions: a crate here may use a license NOT in `allow` above,
+# scoped to that crate ONLY (so the broad allowlist stays permissive-only).
+# Populated from the REAL tree via `cargo deny check licenses` — every license
+# below is OSI-approved and/or FSF-Free; none is strong/network copyleft.
+exceptions = [
+  # --- sophia / HDT ecosystem (CeCILL-B — a French BSD-style permissive
+  #     licence, FSF-Free). Pulled in only by `hdt` -> sparq-hdt (opt-in HDT
+  #     archive support). Scoped per-crate rather than allowing CeCILL-B tree-wide.
+  { crate = "mownstr@0.3.1",            allow = ["CECILL-B"] },
+  { crate = "sophia@0.9.0",             allow = ["CECILL-B"] },
+  { crate = "sophia_api@0.9.0",         allow = ["CECILL-B"] },
+  { crate = "sophia_c14n@0.9.0",        allow = ["CECILL-B"] },
+  { crate = "sophia_inmem@0.9.0",       allow = ["CECILL-B"] },
+  { crate = "sophia_iri@0.9.0",         allow = ["CECILL-B"] },
+  { crate = "sophia_isomorphism@0.9.0", allow = ["CECILL-B"] },
+  { crate = "sophia_resource@0.9.0",    allow = ["CECILL-B"] },
+  { crate = "sophia_rio@0.9.0",         allow = ["CECILL-B"] },
+  { crate = "sophia_term@0.9.0",        allow = ["CECILL-B"] },
+  { crate = "sophia_turtle@0.9.0",      allow = ["CECILL-B"] },
+  # --- ntriple (AFL-3.0 — Academic Free License, OSI-approved + FSF-Free,
+  #     permissive). Also only via `hdt` -> sparq-hdt.
+  { crate = "ntriple@0.1.1", allow = ["AFL-3.0"] },
+  # --- resiter (MPL-2.0 — Mozilla Public License, FILE-level weak copyleft,
+  #     OSI-approved; safe to consume as an unmodified dependency). Via sophia.
+  { crate = "resiter@0.5.0", allow = ["MPL-2.0"] },
+  # --- target-lexicon (Apache-2.0 WITH LLVM-exception — strictly MORE
+  #     permissive than the plain Apache-2.0 already on the allowlist; the SPDX
+  #     `WITH` expression just isn't matched by the bare "Apache-2.0" entry).
+  #     Build-dep of pyo3 -> sparq-py.
+  { crate = "target-lexicon@0.13.5", allow = ["Apache-2.0 WITH LLVM-exception"] },
+  # --- webpki-roots (CDLA-Permissive-2.0 — Community Data License Agreement,
+  #     a permissive data licence covering the bundled Mozilla CA root set).
+  #     Two majors are in the tree (via ureq and reqwest/hyper-rustls).
+  { crate = "webpki-roots@0.26.11", allow = ["CDLA-Permissive-2.0"] },
+  { crate = "webpki-roots@1.0.7",   allow = ["CDLA-Permissive-2.0"] },
+]
+
+[bans]
+# Surface (but do not fail on) duplicate versions of the same crate — useful
+# signal for dependency-tree bloat without blocking routine churn.
+multiple-versions = "warn"
+# When duplicates exist, highlight the whole dependency tree for each.
+highlight = "all"
+wildcards = "allow"
+
+[sources]
+# Crates from an unknown registry / git source are rejected — the supply-chain
+# boundary. crates.io is the only allowed registry.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The workspace vendors spargebra via `[patch.crates-io]` with a PATH source
+# (vendor/spargebra). A path patch is not a registry/git source, so it does not
+# trip unknown-registry/unknown-git; this block documents the boundary and is
+# the hook for any future git source we deliberately allow.
+allow-git = []
