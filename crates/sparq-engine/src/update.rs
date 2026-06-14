@@ -1017,3 +1017,238 @@ mod tests {
         assert_eq!(one_subj, 1, "same label in one INSERT DATA op is one node");
     }
 }
+
+/// [OPUS-4.8] (sq-qu8o) Pins the SPARQL 1.1 Update SILENT / non-SILENT error contract per
+/// operation AND request-level atomicity, against the W3C SPARQL 1.1 Update Recommendation.
+///
+/// IMPORTANT — read before changing an assertion here. Two findings this module DOCUMENTS
+/// (neither is a bug; both are spec-conformant choices that diverge from a naive "must error"
+/// reading, so they are written down rather than left implicit):
+///
+///  1. **CLEAR / DROP of an absent graph, and CREATE of an existing one, SUCCEED here whether or
+///     not SILENT is present.** The spec's failure clauses for these are normative **SHOULD**,
+///     not MUST, and are explicitly conditioned on whether the store *records the existence of
+///     empty graphs* (§3.1.3 CLEAR, §3.1.4 DROP, §3.1.5 CREATE: "If the store records the
+///     existence of empty graphs … SHOULD return failure"). sparq is an auto-creating graph
+///     store — `Dataset::graph_mut` materialises an absent named graph on demand and CLEAR keeps
+///     empty entries — so the SHOULD's precondition does not hold and success is conformant. The
+///     consequence is that `SILENT` is a **no-op distinction** for CLEAR/DROP/CREATE (the flag is
+///     accepted by the parser but the outcome is success either way). The ONE operation where
+///     SILENT genuinely changes the outcome is **LOAD** (§3.1.2): a failing dereference/parse is
+///     an error without SILENT and a success no-op with it. The table below asserts that exact
+///     split so a future change that makes CLEAR/DROP/CREATE start erroring (or makes LOAD stop
+///     honouring SILENT) trips a test instead of silently changing the public contract.
+///
+///  2. **Request-level atomicity differs by entry point — by design, and the layering is the
+///     point.** [`update`] (the rebuild path) is atomic *by construction*: it decodes a private
+///     working `Dataset`, applies every op to it, and only returns the rebuilt graph if ALL ops
+///     succeed — a mid-request failure drops the working copy and the borrowed input is untouched
+///     (full rollback). [`update_in_place`] (the delta-overlay path) is, by its documented
+///     contract (`sparq_serve::ApplyUpdates::apply`: "On `Err` the working copy may hold a
+///     partially applied prefix"), NOT atomic on its own — request-level atomicity for the
+///     in-place path is the caller's responsibility and is provided in production by the serve
+///     writer's fork → apply → seal-only-on-`Ok` recovery. The atomicity tests below pin all
+///     three: rebuild rolls back fully; in-place leaves a partial prefix on failure (the hazard,
+///     captured so a regression that "fixes" it in place is a deliberate decision); and the
+///     fork-and-discard pattern recovers full atomicity. The shape mirrors sparq-core's
+///     `wal_torn_multi_record_batch_is_all_or_nothing` — failed multi-record unit applies nothing.
+#[cfg(test)]
+mod update_contract {
+    use super::*;
+    use sparq_core::store::Pattern as IdPattern;
+
+    /// Total triple count across the default graph and every named graph — the dataset-wide
+    /// "did anything change" probe used by the atomicity assertions.
+    fn dataset_count(g: &Graph) -> usize {
+        let pat: IdPattern = [None, None, None];
+        g.store.scan(&pat).rows.len() + g.named.iter().map(|(_, sub)| sub.store.scan(&pat).rows.len()).sum::<usize>()
+    }
+
+    /// A canonical dataset dump (sorted (s,p,o,graph) strings) for exact PRE/POST-request
+    /// equality — the "rolled back to the pre-request snapshot" assertion. Mirrors the dump
+    /// helper in `update_in_place_matches_rebuild`.
+    fn dump(g: &Graph) -> Vec<(String, String, String, String)> {
+        let mut v: Vec<(String, String, String, String)> = Vec::new();
+        let mut one = |g: &Graph, name: &str| {
+            let scan = g.store.scan(&[None, None, None]);
+            for r in scan.rows.iter() {
+                let t = scan.to_spo(r);
+                v.push((
+                    g.dict.term(t[0]).to_string(),
+                    g.dict.term(t[1]).to_string(),
+                    g.dict.term(t[2]).to_string(),
+                    name.to_string(),
+                ));
+            }
+        };
+        one(g, "");
+        for (name, sub) in &g.named {
+            one(sub, &name.to_string());
+        }
+        v.sort();
+        v
+    }
+
+    /// A store with one named graph `:g1` (and an empty default graph) — the fixture for the
+    /// graph-management contract rows. Returned fresh per row so rows never interfere.
+    fn store() -> Graph {
+        Graph::load_dataset("<http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .", "nquads").unwrap()
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // 1. SILENT / non-SILENT outcome table — one row per applicable operation, each anchored by
+    //    the OPPOSITE (valid) case, with the governing spec clause cited inline.
+    // ------------------------------------------------------------------------------------------
+
+    /// CLEAR (§3.1.3). Non-existent target: spec SHOULD-error is *conditioned* on a store that
+    /// records empty graphs — sparq auto-creates, so CLEAR of an absent graph is a no-op SUCCESS
+    /// with AND without SILENT. Valid anchor: CLEARing an existing graph empties it (success).
+    #[test]
+    fn contract_clear() {
+        // Absent target — success either way (auto-create store; SHOULD precondition unmet).
+        assert!(update(&store(), "CLEAR GRAPH <http://ex/absent>").is_ok(), "CLEAR absent (non-SILENT) is a no-op success here");
+        assert!(update(&store(), "CLEAR SILENT GRAPH <http://ex/absent>").is_ok(), "CLEAR SILENT absent is a no-op success");
+        // Anchor (valid): CLEAR of the existing :g1 succeeds and empties it.
+        let g = update(&store(), "CLEAR GRAPH <http://ex/g1>").unwrap();
+        let g1 = g.named.iter().find(|(n, _)| n.to_string().contains("g1")).expect("entry kept");
+        assert_eq!(g1.1.store.scan(&[None, None, None]).rows.len(), 0, "CLEAR empties the existing graph");
+    }
+
+    /// DROP (§3.1.4). Same SHOULD-conditioned-on-empty-graph-recording story as CLEAR: DROP of an
+    /// absent graph is a no-op SUCCESS with/without SILENT. Valid anchor: DROP of :g1 removes it.
+    #[test]
+    fn contract_drop() {
+        assert!(update(&store(), "DROP GRAPH <http://ex/absent>").is_ok(), "DROP absent (non-SILENT) is a no-op success here");
+        assert!(update(&store(), "DROP SILENT GRAPH <http://ex/absent>").is_ok(), "DROP SILENT absent is a no-op success");
+        // Anchor (valid): DROP of the existing :g1 removes its entry.
+        let g = update(&store(), "DROP GRAPH <http://ex/g1>").unwrap();
+        assert!(!g.named.iter().any(|(n, _)| n.to_string().contains("g1")), "DROP removes the existing graph entry");
+    }
+
+    /// CREATE (§3.1.5). Existing target: spec SHOULD-error, again conditioned on recording empty
+    /// graphs — sparq's CREATE is idempotent, so CREATE of an existing graph is a no-op SUCCESS
+    /// with/without SILENT. Valid anchor: CREATE of a fresh graph adds a queryable empty entry.
+    #[test]
+    fn contract_create() {
+        assert!(update(&store(), "CREATE GRAPH <http://ex/g1>").is_ok(), "CREATE existing (non-SILENT) is a no-op success here");
+        assert!(update(&store(), "CREATE SILENT GRAPH <http://ex/g1>").is_ok(), "CREATE SILENT existing is a no-op success");
+        // Anchor (valid): CREATE of a fresh graph materialises an (empty) entry.
+        let g = update(&store(), "CREATE GRAPH <http://ex/fresh>").unwrap();
+        assert!(g.named.iter().any(|(n, _)| n.to_string().contains("fresh")), "CREATE adds the new graph");
+    }
+
+    /// LOAD (§3.1.2) — the ONE operation where SILENT actually flips the outcome. A failing LOAD
+    /// (here: a non-`file://` scheme, which `load_document` rejects; and a `file://` with no
+    /// allowlisted base, also rejected — see `load_file_uri_refused_by_default_and_sandboxed`)
+    /// is an ERROR without SILENT and a SUCCESS no-op (loads nothing) with SILENT.
+    #[test]
+    fn contract_load_silent_is_the_real_lever() {
+        // Unsupported scheme: hard error without SILENT.
+        let e = update(&store(), "LOAD <http://ex/data.ttl>");
+        assert!(e.is_err(), "non-SILENT LOAD of an unfetchable source must ERROR (§3.1.2)");
+        // SILENT swallows the failure into a no-op success that changes nothing.
+        let before = dump(&store());
+        let g = update(&store(), "LOAD SILENT <http://ex/data.ttl>").expect("LOAD SILENT failure is success");
+        assert_eq!(dump(&g), before, "LOAD SILENT failure loads nothing (no-op success)");
+        // file:// with no allowlisted base is likewise refused without SILENT, no-op with it.
+        assert!(update(&store(), "LOAD <file:///etc/hostname>").is_err(), "file:// LOAD refused by default (non-SILENT errors)");
+        assert!(update(&store(), "LOAD SILENT <file:///etc/hostname>").is_ok(), "file:// LOAD refusal is swallowed by SILENT");
+    }
+
+    /// ADD / MOVE / COPY with source == destination (§3.2). The parser desugars the identity case
+    /// to an EMPTY operation list, so it is a no-op SUCCESS that leaves the source graph intact —
+    /// regardless of SILENT. Valid anchor: a real MOVE between distinct graphs relocates triples.
+    #[test]
+    fn contract_add_move_copy_self_is_noop() {
+        for verb in ["ADD", "MOVE", "COPY"] {
+            let req = format!("{verb} GRAPH <http://ex/g1> TO GRAPH <http://ex/g1>");
+            let g = update(&store(), &req).unwrap_or_else(|e| panic!("{verb} self must be a no-op success, got: {e}"));
+            // The source/destination graph is untouched (its one triple survives).
+            let g1 = g.named.iter().find(|(n, _)| n.to_string().contains("g1")).expect("g1 preserved");
+            assert_eq!(g1.1.store.scan(&[None, None, None]).rows.len(), 1, "{verb} self leaves the graph unchanged");
+            // SILENT identity is also a success no-op.
+            let req_s = format!("{verb} SILENT GRAPH <http://ex/g1> TO GRAPH <http://ex/g1>");
+            assert!(update(&store(), &req_s).is_ok(), "{verb} SILENT self is a no-op success");
+        }
+        // Anchor (valid): MOVE between DISTINCT graphs relocates the triple and drops the source.
+        let g = update(&store(), "MOVE GRAPH <http://ex/g1> TO GRAPH <http://ex/g2>").unwrap();
+        assert!(!g.named.iter().any(|(n, _)| n.to_string().contains("g1")), "MOVE drops the source");
+        let g2 = g.named.iter().find(|(n, _)| n.to_string().contains("g2")).expect("destination created");
+        assert_eq!(g2.1.store.scan(&[None, None, None]).rows.len(), 1, "MOVE delivered the triple");
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // 2. Request-level atomicity. A SPARQL Update *request* is a sequence of operations separated
+    //    by `;`; if operation K fails, the WHOLE request must roll back. Mirrors the all-or-nothing
+    //    shape of sparq-core's `wal_torn_multi_record_batch_is_all_or_nothing`.
+    // ------------------------------------------------------------------------------------------
+
+    /// REBUILD path ([`update`]): a multi-op request whose later op fails must leave the dataset
+    /// EXACTLY at its pre-request snapshot (full rollback); an all-succeed request commits fully.
+    #[test]
+    fn rebuild_request_is_atomic() {
+        let base = Graph::load_str("@prefix : <http://ex/> . :seed :p :o .", "turtle").unwrap();
+        let snapshot = dump(&base);
+        assert_eq!(dataset_count(&base), 1);
+
+        // A request: a VALID INSERT DATA, then a non-SILENT LOAD that fails (op K = 2).
+        let failing = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; LOAD <http://ex/nope.ttl>";
+        let r = update(&base, failing);
+        assert!(r.is_err(), "the request must fail (the LOAD op errors)");
+        // `update` borrows `base` and rebuilds a private copy, so the input is provably untouched;
+        // the *returned* (would-be-new) graph is never produced — full rollback.
+        assert_eq!(dump(&base), snapshot, "a failed multi-op request rolls the dataset back to its pre-request snapshot");
+        assert_eq!(dataset_count(&base), 1, "the valid INSERT DATA prefix must NOT have committed");
+
+        // The all-succeed counterpart commits every operation.
+        let ok = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; INSERT DATA { :c :p :d }";
+        let g = update(&base, ok).expect("an all-succeed request commits");
+        assert_eq!(dataset_count(&g), 3, "an all-succeed request commits every operation");
+    }
+
+    /// IN-PLACE path ([`update_in_place`]): by its DOCUMENTED contract it is NOT atomic on its own
+    /// — a failing later op leaves the earlier ops' partial prefix applied. This is the hazard the
+    /// serve writer recovers from; pinning it means any change that makes the raw call atomic (or
+    /// makes it leak a different partial state) is a deliberate, reviewed decision.
+    #[test]
+    fn in_place_request_is_partial_on_error_by_contract() {
+        let mut g = Graph::load_str("@prefix : <http://ex/> . :seed :p :o .", "turtle").unwrap();
+        let before = dataset_count(&g);
+        let failing = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; LOAD <http://ex/nope.ttl>";
+        let r = update_in_place(&mut g, failing);
+        assert!(r.is_err(), "the request still reports the failure");
+        // The INSERT DATA prefix committed before the LOAD failed — documented non-atomicity.
+        assert_eq!(dataset_count(&g), before + 1, "in-place leaves the pre-failure prefix applied (documented contract)");
+    }
+
+    /// The PRODUCTION request-level-atomicity pattern for the in-place path: fork a private
+    /// working copy, apply the request to it, and publish (here: keep) the working copy ONLY on
+    /// `Ok` — on `Err` discard it and keep the original. This is exactly what the serve writer
+    /// does (fork → `update_in_place` → seal-only-on-success), and it recovers full atomicity.
+    #[test]
+    fn fork_and_seal_recovers_request_atomicity() {
+        let base = Graph::load_str("@prefix : <http://ex/> . :seed :p :o .", "turtle").unwrap();
+        let snapshot = dump(&base);
+        let failing = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; LOAD <http://ex/nope.ttl>";
+
+        // Apply to a fork; the failing request leaves the fork partial — but we never seal it.
+        let mut working = base.fork();
+        let published = match update_in_place(&mut working, failing) {
+            Ok(()) => working,        // would seal the new state
+            Err(_) => base.fork(),    // discard the partial fork, re-fork from the untouched base
+        };
+        assert_eq!(dump(&published), snapshot, "fork-and-discard on error publishes the pre-request snapshot (atomic)");
+
+        // The all-succeed counterpart seals the new state.
+        let ok = "PREFIX : <http://ex/> INSERT DATA { :a :p :b } ; INSERT DATA { :c :p :d }";
+        let mut working = base.fork();
+        let published = match update_in_place(&mut working, ok) {
+            Ok(()) => working,
+            Err(_) => base.fork(),
+        };
+        assert_eq!(dataset_count(&published), 3, "an all-succeed request seals the fully-applied working copy");
+        // The base the fork came from is, throughout, untouched by either request.
+        assert_eq!(dump(&base), snapshot, "the published base is never mutated by a working-copy apply");
+    }
+}
+
