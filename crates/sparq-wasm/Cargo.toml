@@ -25,6 +25,14 @@ wasm-bindgen = "0.2"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
+[dev-dependencies]
+# [OPUS-4.8] sq-9qz6 pt2 — headless wasm test harness. Exercises the #[wasm_bindgen]
+# JS-facing API (Store load/query/ask/queryQuads/cursors) in a REAL wasm runtime via
+# `wasm-pack test --node`. Dev-only: it must NOT enter the non-dev wasm graph (the
+# wasm-deps-guard checks `-e no-dev`), and its runner pairs with the crate's
+# wasm-bindgen 0.2.122 (the 0.3.x line is co-released with the 0.2.x wasm-bindgen).
+wasm-bindgen-test = "0.3"
+
 [package.metadata.wasm-pack.profile.release]
 # Optimise the wasm for size.
 wasm-opt = ["-Oz"]
