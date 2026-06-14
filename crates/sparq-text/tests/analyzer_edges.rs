@@ -154,22 +154,33 @@ fn punctuation_at_phrase_boundaries() {
     let idx = TextIndex::build_with_positions(&g);
 
     // The punctuation-heavy doc still matches the adjacency, just like the clean one.
-    let mut hits = idx.phrase("quick brown");
-    hits.sort_unstable();
-    let vals: Vec<String> = hits
+    // [OPUS-4.8] (sq-qmth) Compare by VALUE, not by dict id: `Graph::load_str` takes the
+    // SHARDED parallel-merge path on a multi-core host (>=2 rayon threads), which assigns
+    // dictionary ids by hash bucket, NOT document order. Sorting `hits` (a `Vec<Id>`) and
+    // mapping to values therefore yields a host-dependent order — green locally, RED in CI.
+    // Sort the resulting values lexically so the assertion is id-order-independent.
+    let hits = idx.phrase("quick brown");
+    let mut vals: Vec<String> = hits
         .iter()
         .map(|&id| match g.dict.term(id) {
             Term::Literal(l) => l.value().to_string(),
             _ => unreachable!(),
         })
         .collect();
-    assert_eq!(vals, ["quick brown fox", "quick, brown! fox.", "quick — brown — dog"]);
+    vals.sort();
+    // Expected list is in byte-lexicographic order (how `Vec<String>::sort` orders them):
+    // index 5 is space(0x20) < comma(0x2C), so the comma doc sorts LAST; between the two
+    // space docs, 'b'(0x62) < the em-dash's leading UTF-8 byte(0xE2). [OPUS-4.8]
+    assert_eq!(vals, ["quick brown fox", "quick — brown — dog", "quick, brown! fox."]);
 
     // A phrase query with leading/trailing/embedded punctuation tokenizes the
-    // same way and matches identically.
+    // same way and matches identically. Sort BOTH id lists before comparing so the
+    // equality is independent of the (hash-sharded) dict-id assignment order.
     let mut hits2 = idx.phrase("  quick,  brown  ");
     hits2.sort_unstable();
-    assert_eq!(hits2, hits);
+    let mut hits_sorted = hits;
+    hits_sorted.sort_unstable();
+    assert_eq!(hits2, hits_sorted);
 
     // The joined token is NOT split — "quick" alone never matches "quickbrown".
     assert!(idx.search("quick").iter().all(|h| match g.dict.term(h.id) {

@@ -109,25 +109,33 @@ jobs:
 
   msrv:
     # [OPUS-4.8] sq-ucwf: ENFORCE the declared MSRV. The workspace pins
-    # `rust-version = "1.85"` in the root Cargo.toml ([workspace.package]); without a
+    # `rust-version = "1.88"` in the root Cargo.toml ([workspace.package]); without a
     # job that actually compiles on that toolchain the floor is just documentation — a
-    # new use of a >1.85 stdlib/lang feature would silently raise the real MSRV. This
-    # builds the whole workspace on the pinned 1.85 toolchain so the declared floor is a
+    # new use of a >floor stdlib/lang feature would silently raise the real MSRV. This
+    # builds the whole workspace on the pinned floor toolchain so the declared floor is a
     # checked invariant, GATING.
+    #
+    # [OPUS-4.8] (sq-qmth) Floor BUMPED 1.85 -> 1.88. Upstream-driven, verified
+    # empirically (cargo +1.87/+1.88 check, this exact --exclude scope): on 1.87 the
+    # resolver rejects ONLY `geo@0.33.1 requires rustc 1.88` (a transitive dep of
+    # sparq-geo); the released oxigraph parser stack (oxrdf/oxttl/oxrdfio/spargebra/…)
+    # needs 1.87; on 1.88 the whole MSRV-scope workspace builds clean. So 1.88 is the
+    # true minimal floor — not an over-bump. Keep this pin == root rust-version.
     #
     # Two crates are excluded, each for a concrete reason:
     #   - sparq-py: pyo3/maturin extension module (excluded from native jobs throughout
     #     this workflow; built by python.yml with the correct profile).
-    #   - sparq-hdt: declares its own higher `rust-version = "1.87"` (the wrapped `hdt`
-    #     crate's MSRV is above the workspace floor — see crates/sparq-hdt/Cargo.toml),
-    #     so it is exempt from the 1.85 floor by design and cannot compile on 1.85.
-    # If the root MSRV is bumped, update the `@1.85` toolchain pin below to match.
-    name: MSRV check (Rust 1.85, declared floor)
+    #   - sparq-hdt: declares its own `rust-version = "1.87"` for the wrapped `hdt` crate
+    #     (see crates/sparq-hdt/Cargo.toml). Now AT/BELOW the 1.88 floor, so its
+    #     exclusion is no longer load-bearing, but kept to decouple sparq-hdt from the
+    #     workspace-floor pin.
+    # If the root MSRV is bumped, update the `@1.88` toolchain pin below to match.
+    name: MSRV check (Rust 1.88, declared floor)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (pinned MSRV)
-        uses: dtolnay/rust-toolchain@1.85
+        uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - name: cargo check on the declared MSRV
         run: cargo check --workspace --exclude sparq-py --exclude sparq-hdt

@@ -1650,6 +1650,13 @@ impl Dict {
     /// document that contains any triple term falls back to the serial `merge_remap`,
     /// which interns triple terms structurally and correctly. Arena-mode (partial) dicts
     /// only — that is all the loader ever inspects here.
+    //
+    // [OPUS-4.8] (sq-qmth) Gated on `parallel`: the only callers are the parallel
+    // N-Triples loader (`parse_ntriples_parallel`) and the external-build triple-term
+    // guard, both `#[cfg(feature = "parallel")]`. Without this gate the method is dead
+    // code on the wasm build (no `parallel` feature), which the wasm32 `clippy -D warnings`
+    // job promotes to a hard error (`-D dead-code`).
+    #[cfg(feature = "parallel")]
     pub(crate) fn has_triple_terms(&self) -> bool {
         self.terms.iter().any(|s| matches!(s, Stored::Triple(_)))
     }
