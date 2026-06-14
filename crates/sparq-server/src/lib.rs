@@ -29,6 +29,14 @@ pub mod exec;
 pub mod graph;
 pub mod negotiate;
 pub mod results;
+/// [OPUS-4.8] (sq-4w18) SERVICE federation egress allowlist — the
+/// [`service_config::ServiceAllowlist`] config type (parse `--service-allow` /
+/// `--service-allow-file` / `SPARQ_SERVICE_ALLOW`, exact-host + `*.suffix` matcher).
+/// Pure (no async), always compiled + unit-tested; it only *carries* the policy. The
+/// policy is enforced by the engine's `service` feature, which the server enables via
+/// its own opt-in `service` feature. See the module docs for the default-DENY-all
+/// posture and rationale.
+pub mod service_config;
 
 #[cfg(feature = "server")]
 pub mod http;
@@ -45,6 +53,10 @@ pub mod subscriptions;
 pub use http::{
     bind_posture, harden, router, AppState, BindPosture, PinnedGen, ServerConfig, GLOBAL_POD,
 }; // [OPUS-4.8] sq-o4qf: bind_posture / BindPosture for the no-auth non-loopback bind gate
+
+/// [OPUS-4.8] (sq-4w18) The SERVICE egress allowlist config type, re-exported at the
+/// crate root next to [`ServerConfig`].
+pub use service_config::ServiceAllowlist;
 
 /// [OPUS-4.8] (sq-uqh, Wave B) Re-exported for consumers (and tests) that introspect a
 /// pinned generation's per-pod epoch vector — the cache-invalidation hook the server's

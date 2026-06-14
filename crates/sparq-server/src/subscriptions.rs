@@ -365,7 +365,10 @@ async fn evaluate(state: &AppState, query: String) -> Result<(Vec<String>, HashM
     // Pin the current generation for this evaluation (lock-free; never blocked by the
     // writer). Each re-evaluation pins afresh, so it always sees the latest commit.
     let gen = state.current();
-    let task = tokio::task::spawn_blocking(move || eval_rows(gen.snapshot(), &query, &budget));
+    // [OPUS-4.8] sq-4w18: the SERVICE egress allowlist applies to subscription SELECTs
+    // exactly as to /sparql ones — a federated subscription is gated like a read.
+    let cfg = config.clone();
+    let task = tokio::task::spawn_blocking(move || eval_rows(gen.snapshot(), &query, &budget, &cfg));
     let joined = match config.query_timeout {
         Some(t) => tokio::time::timeout(t + TIMEOUT_GRACE, task)
             .await
@@ -397,10 +400,10 @@ fn budget_error(e: &str, config: &ServerConfig) -> String {
 /// object; the serialised object is the row's identity key. `serde_json`'s map keeps a
 /// deterministic key order, so equal rows always serialise identically. Duplicate rows
 /// collapse (set semantics — see module docs).
-fn eval_rows(graph: &Graph, query: &str, budget: &QueryBudget) -> Result<(Vec<String>, HashMap<String, Value>), String> {
-    // Extension functions (the `geo` feature's geof: registry) apply to
-    // subscription SELECTs exactly as to /sparql ones.
-    let r = crate::http::with_extensions(|| sparq_engine::query_with_budget(graph, query, budget))?;
+fn eval_rows(graph: &Graph, query: &str, budget: &QueryBudget, config: &ServerConfig) -> Result<(Vec<String>, HashMap<String, Value>), String> {
+    // Extension functions (the `geo` feature's geof: registry) AND the SERVICE egress
+    // allowlist (sq-4w18) apply to subscription SELECTs exactly as to /sparql ones.
+    let r = crate::http::with_engine_scope(config, || sparq_engine::query_with_budget(graph, query, budget))?;
     let vars: Vec<String> = r.vars.iter().map(|v| v.as_str().to_string()).collect();
     let mut rows = HashMap::with_capacity(r.rows.len());
     for row in &r.rows {
@@ -531,8 +534,8 @@ mod tests {
     fn eval_rows_canonical_keys_are_stable_across_evaluations() {
         let g = graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b . ex:c ex:p \"x\"@en .");
         let q = "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }";
-        let (vars1, rows1) = eval_rows(&g, q, &QueryBudget::unlimited()).unwrap();
-        let (vars2, rows2) = eval_rows(&g, q, &QueryBudget::unlimited()).unwrap();
+        let (vars1, rows1) = eval_rows(&g, q, &QueryBudget::unlimited(), &ServerConfig::default()).unwrap();
+        let (vars2, rows2) = eval_rows(&g, q, &QueryBudget::unlimited(), &ServerConfig::default()).unwrap();
         assert_eq!(vars1, vec!["s", "o"]);
         assert_eq!(vars1, vars2);
         assert_eq!(rows1.keys().collect::<std::collections::BTreeSet<_>>(), rows2.keys().collect());
@@ -544,8 +547,8 @@ mod tests {
         let before = graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b . ex:c ex:p ex:d .");
         let after = graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b . ex:e ex:p ex:f .");
         let q = "SELECT ?s WHERE { ?s <http://ex/p> ?o }";
-        let (_, old) = eval_rows(&before, q, &QueryBudget::unlimited()).unwrap();
-        let (_, new) = eval_rows(&after, q, &QueryBudget::unlimited()).unwrap();
+        let (_, old) = eval_rows(&before, q, &QueryBudget::unlimited(), &ServerConfig::default()).unwrap();
+        let (_, new) = eval_rows(&after, q, &QueryBudget::unlimited(), &ServerConfig::default()).unwrap();
         let added = sorted_pairs(new.iter().filter(|(k, _)| !old.contains_key(*k)));
         let removed = sorted_pairs(old.iter().filter(|(k, _)| !new.contains_key(*k)));
         assert_eq!(added.len(), 1);
@@ -575,7 +578,7 @@ mod tests {
     fn unbound_variables_are_omitted_from_the_binding() {
         let g = graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b .");
         let q = "SELECT ?s ?missing WHERE { ?s <http://ex/p> ?o OPTIONAL { ?s <http://ex/q> ?missing } }";
-        let (vars, rows) = eval_rows(&g, q, &QueryBudget::unlimited()).unwrap();
+        let (vars, rows) = eval_rows(&g, q, &QueryBudget::unlimited(), &ServerConfig::default()).unwrap();
         assert_eq!(vars, vec!["s", "missing"]);
         let binding = rows.values().next().unwrap();
         assert!(binding.get("missing").is_none());
@@ -586,7 +589,7 @@ mod tests {
     fn max_rows_budget_refuses_oversized_results() {
         let g = graph("@prefix ex: <http://ex/> . ex:a ex:p ex:b . ex:c ex:p ex:d . ex:e ex:p ex:f .");
         let budget = QueryBudget { deadline: None, max_rows: Some(2) };
-        let err = eval_rows(&g, "SELECT ?s WHERE { ?s ?p ?o }", &budget).unwrap_err();
+        let err = eval_rows(&g, "SELECT ?s WHERE { ?s ?p ?o }", &budget, &ServerConfig::default()).unwrap_err();
         assert!(err.contains("max-rows"), "unexpected error: {err}");
     }
 

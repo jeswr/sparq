@@ -5,7 +5,16 @@
 //!   sparq-server [--addr 127.0.0.1:3030] [--allow-remote] [--format turtle]
 //!                [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
 //!                [--max-results N] [--max-subscriptions N]
-//!                [--max-subscriptions-per-conn N] [--verbose] [DATA_FILE]
+//!                [--max-subscriptions-per-conn N]
+//!                [--service-allow HOST|*.SUFFIX]... [--service-allow-file PATH]
+//!                [--verbose] [DATA_FILE]
+//!
+//! SERVICE federation (`service` build feature) is DENY-ALL by default: a `SERVICE <iri>`
+//! clause reaches NOTHING unless its host is allowlisted via `--service-allow` (repeatable;
+//! exact host or `*.suffix` wildcard), `--service-allow-file` (one entry per line) or the
+//! `SPARQ_SERVICE_ALLOW` env var (comma/whitespace-separated). This is an SSRF guard: a
+//! `SERVICE` clause turns attacker-controlled query text into an outbound request from this
+//! host. See crates/sparq-server/README.md -> "SERVICE federation (egress allowlist)". [OPUS-4.8]
 //!
 //! SECURITY: the server has NO built-in authentication on any endpoint (query, the
 //! `application/sparql-update` mutation path, the `/subscriptions` WebSocket). `--addr`
@@ -63,6 +72,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut data_file: Option<String> = None;
     // Env first, flags override.
     let mut config = ServerConfig::from_env();
+    // [OPUS-4.8] sq-4w18: collect SERVICE egress allowlist entries from the CLI; they
+    // are UNIONed with the SPARQ_SERVICE_ALLOW env baseline (already in `config`) + an
+    // optional --service-allow-file, after the arg loop. An allowlist is additive, so
+    // the CLI only ever widens what env granted (never silently narrows it).
+    let mut service_allow_cli: Vec<String> = Vec::new();
+    let mut service_allow_file: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -102,9 +117,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // posture. Without this (and without SPARQ_ALLOW_REMOTE), a non-loopback --addr is
             // refused — see bind_posture below.
             "--allow-remote" => config.allow_remote = true,
+            // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
+            // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
+            // allowlist (the default) every SERVICE clause is refused (default-DENY-all).
+            "--service-allow" => {
+                service_allow_cli.push(args.next().ok_or("--service-allow requires a host/pattern")?);
+            }
+            "--service-allow-file" => {
+                service_allow_file = Some(args.next().ok_or("--service-allow-file requires a path")?);
+            }
             "-h" | "--help" => {
                 let time_travel = if cfg!(feature = "time-travel") {
                     " [--time-travel-generations N] [--time-travel-max-age SECS]"
+                } else {
+                    ""
+                };
+                let service = if cfg!(feature = "service") {
+                    " [--service-allow HOST|*.SUFFIX]... [--service-allow-file PATH]"
                 } else {
                     ""
                 };
@@ -112,16 +141,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--format FMT] \
                      [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel} [--verbose] [DATA_FILE]\n\n  \
+                     [--max-subscriptions-per-conn N]{time_travel}{service} [--verbose] [DATA_FILE]\n\n  \
                      SECURITY: no built-in auth. --addr defaults to loopback (127.0.0.1); a \
                      non-loopback bind (e.g. 0.0.0.0) is REFUSED unless --allow-remote (or \
                      SPARQ_ALLOW_REMOTE=1) is set, because it would expose READ+WRITE to the \
-                     network. Put it behind a reverse proxy / gateway that enforces auth."
+                     network. Put it behind a reverse proxy / gateway that enforces auth.\n  \
+                     SERVICE federation (the `service` build feature) is DENY-ALL by default: \
+                     SERVICE <iri> reaches NOTHING unless the host is allowlisted via \
+                     --service-allow / --service-allow-file / SPARQ_SERVICE_ALLOW \
+                     (exact host or *.suffix wildcard) — an SSRF guard."
                 );
                 return Ok(());
             }
             other => data_file = Some(other.to_string()),
         }
+    }
+
+    // [OPUS-4.8] sq-4w18: merge the --service-allow-file + --service-allow CLI entries
+    // INTO the env baseline already in config.service_allow (union — additive). A
+    // malformed entry or unreadable file is a hard startup error: better to refuse to
+    // boot than to silently run with an allowlist narrower than the operator wrote.
+    if let Some(path) = &service_allow_file {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("--service-allow-file {path}: {e}"))?;
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            config.service_allow.add(line)?;
+        }
+    }
+    for entry in &service_allow_cli {
+        config.service_allow.add(entry)?;
     }
 
     if config.verbose {
@@ -156,6 +204,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.max_subscriptions,
         config.max_subscriptions_per_conn,
     );
+    // [OPUS-4.8] sq-4w18: surface the SERVICE egress posture at startup so an operator
+    // sees whether (and where) federation can reach. Only meaningful with the `service`
+    // build feature; without it a SERVICE clause errors at execution regardless.
+    #[cfg(feature = "service")]
+    eprintln!("SERVICE egress allowlist: {}", config.service_allow.display());
     #[cfg(feature = "time-travel")]
     eprintln!(
         "time travel: ?generation=N enabled — generations={} max-age={} (each retained generation is a full graph)",

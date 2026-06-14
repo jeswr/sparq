@@ -39,6 +39,13 @@ server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-ht
 # real: each retained generation is a FULL Graph until the structural-fork follow-up
 # lands (see sparq_serve::TimeTravelConfig).
 time-travel = ["server"]
+# [OPUS-4.8] (sq-4w18) `service` (default OFF) enables the engine's SPARQL 1.1 federated
+# SERVICE clause (passthrough to sparq-engine/service: ureq + serde_json, native-only).
+# It makes the host an SSRF surface, so it is gated behind a default-DENY-all egress
+# allowlist (--service-allow / --service-allow-file / SPARQ_SERVICE_ALLOW). Off (default),
+# no federation code compiles and a SERVICE clause errors at execution. See the README
+# and skills/http-server/SKILL.md.
+service = ["server", "sparq-engine/service"]
 # `geo` (default OFF) installs sparq-geo's geof: extension-function registry
 # (GeoSPARQL distance / sf* relations / envelope / boundary / convexHull) on the
 # query, update and subscription paths — see docs/extension-functions.md. Off, the
