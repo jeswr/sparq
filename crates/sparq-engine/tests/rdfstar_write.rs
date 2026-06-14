@@ -380,13 +380,13 @@ fn reifier_triple_term_serialises_to_canonical_form_and_reparses_via_turtle() {
 }
 
 #[test]
-#[ignore = "sq-hxgb: sparq-core's fast N-Triples loader does not yet parse <<( s p o )>> (N-Triples 1.2)"]
-fn ntriples_triple_term_reparse_is_a_known_gap() {
-    // ASPIRATIONAL (documented non-feature, bead sq-hxgb): the CONSTRUCT writer EMITS
-    // the N-Triples 1.2 triple-term object syntax `<<( … )>>`, but sparq-core's
-    // hand-written fast N-Triples parser (`nt::parse_chunk`) does not yet accept it, so
-    // a serialise->reload round-trip through the "ntriples" loader fails today. When
-    // sq-hxgb lands, drop the `#[ignore]` — this asserts the desired round-trip.
+fn ntriples_triple_term_object_reparses_via_nt_loader() {
+    // [OPUS-4.8] (sq-hxgb FIXED) The CONSTRUCT writer EMITS the N-Triples 1.2 triple-term
+    // object syntax `<<( … )>>`; sparq-core's fast N-Triples loader (`nt::parse_chunk`) now
+    // ACCEPTS it in the object position, so a serialise->reload round-trip through the
+    // "ntriples" loader yields the identical structural term as the Turtle reload (which
+    // already worked — see `reifier_triple_term_serialises_to_canonical_form_and_reparses_via_turtle`).
+    // (Was the `#[ignore]`d `ntriples_triple_term_reparse_is_a_known_gap`.)
     let g = Graph::load_str(
         &format!("PREFIX : <http://ex/> :r1 <{RDF_REIFIES}> <<( :alice :age 30 )>> ."),
         "turtle",
@@ -396,7 +396,14 @@ fn ntriples_triple_term_reparse_is_a_known_gap() {
     let g2 =
         Graph::load_str(&nt, "ntriples").expect("N-Triples loader should accept <<( )>> (sq-hxgb)");
     let r = query(&g2, &format!("SELECT ?t WHERE {{ ?r <{RDF_REIFIES}> ?t }}")).unwrap();
+    assert_eq!(r.rows.len(), 1, "exactly the reifies triple round-trips");
     assert_eq!(r.rows[0][0], Some(age_triple_term("alice", 30)));
+
+    // The N-Triples reload must equal the Turtle reload of the SAME serialised bytes
+    // (write/read symmetry: the two loaders agree on the triple-term structure).
+    let g_ttl = Graph::load_str(&nt, "turtle").unwrap();
+    let r_ttl = query(&g_ttl, &format!("SELECT ?t WHERE {{ ?r <{RDF_REIFIES}> ?t }}")).unwrap();
+    assert_eq!(r_ttl.rows, r.rows, "N-Triples reload must match Turtle reload");
 }
 
 #[test]

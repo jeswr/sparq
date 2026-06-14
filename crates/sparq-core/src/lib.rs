@@ -2301,9 +2301,19 @@ pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
 fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
     let partials = parse_block(bytes)?;
     let total: usize = partials.iter().map(|(_, t)| t.len()).sum();
-    // One rayon thread: the sharded merge would only add routing/consolidation overhead —
-    // keep the proven serial merge (also the byte-reference the differential tests pin).
-    if rayon::current_num_threads() <= 1 {
+    // [OPUS-4.8] (sq-hxgb) The SHARDED merge cannot consolidate RDF 1.2 triple terms
+    // (a triple term's components are hash-routed to a shard AND referenced structurally
+    // by the triple, breaking the term↔id bijection across shards — see
+    // `ShardedDict::intern_partials`). The byte parser now accepts `<<( … )>>` object
+    // terms, so a document MAY contain them; when any partial does, take the serial
+    // `merge_remap` path, which interns triple terms structurally and correctly. Triple
+    // terms are rare (reification metadata), and detection is a single arena scan per
+    // partial (`Dict::has_triple_terms`) — no cost on the common triple-term-free input.
+    let has_triple_terms = partials.iter().any(|(d, _)| d.has_triple_terms());
+    // One rayon thread (or any triple-term partial): the sharded merge would only add
+    // routing/consolidation overhead (or cannot run at all) — keep the proven serial
+    // merge (also the byte-reference the differential tests pin).
+    if rayon::current_num_threads() <= 1 || has_triple_terms {
         let cap = partials.iter().map(|(d, _)| d.len()).max().unwrap_or(0);
         let mut global = Dict::with_capacity(cap);
         let mut all = Vec::with_capacity(total);
@@ -2962,6 +2972,9 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
                     continue;
                 }
                 let partials = parse_block(&block)?;
+                // [OPUS-4.8] (sq-hxgb) The sharded/spill consolidation cannot represent
+                // triple terms; fail clearly rather than panic / corrupt (see helper).
+                reject_triple_terms_in_external_build(&partials)?;
                 if ptx.send(partials).is_err() {
                     return Ok(());
                 }
@@ -3108,6 +3121,9 @@ fn build_external_ntriples_dictspill<R: std::io::Read + Send>(
                     continue;
                 }
                 let partials = parse_block(&block)?;
+                // [OPUS-4.8] (sq-hxgb) The sharded/spill consolidation cannot represent
+                // triple terms; fail clearly rather than panic / corrupt (see helper).
+                reject_triple_terms_in_external_build(&partials)?;
                 if ptx.send(partials).is_err() {
                     return Ok(());
                 }
@@ -3145,6 +3161,25 @@ fn parse_block(bytes: &[u8]) -> Result<ChunkPartials, String> {
         .collect::<Result<Vec<_>, _>>()?;
     build_timing::record(t_parse, &build_timing::PARSE_NS);
     Ok(partials)
+}
+
+/// [OPUS-4.8] (sq-hxgb) The disk-spilling external N-Triples builders (sharded /
+/// dict-spill) consolidate partial dicts through a HASH-SHARDED interner that cannot
+/// represent RDF 1.2 triple terms (`<<( … )>>`) — a triple term's components are both
+/// hash-routed to a shard AND referenced structurally by the triple, which breaks the
+/// term↔id bijection across shards (the in-shard interners assert/panic on `Term::Triple`).
+/// The in-MEMORY loader handles triple terms by falling back to the serial `merge_remap`,
+/// but that fallback does not exist for the streaming external build. Until it does
+/// (bead sq-t3rt), surface a CLEAR error here instead of a panic / silent corruption.
+#[cfg(all(feature = "parallel", any(feature = "mmap", feature = "dict-spill")))]
+fn reject_triple_terms_in_external_build(partials: &[(Dict, Vec<[Id; 3]>)]) -> Result<(), String> {
+    if partials.iter().any(|(d, _)| d.has_triple_terms()) {
+        return Err("N-Triples: RDF 1.2 triple terms `<<( … )>>` are not yet supported by the \
+                    external disk-spilling builder (Graph::build_external); load this document \
+                    in memory (Graph::load_str/load_reader) instead (sq-hxgb / sq-t3rt)"
+            .to_string());
+    }
+    Ok(())
 }
 
 /// Env-gated (`SPARQ_BUILD_TIMING`) phase-time accumulators for the parallel ingest path,
@@ -4105,6 +4140,39 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// [OPUS-4.8] (sq-hxgb) Triple-term support across the external (disk-spilling) build
+    /// paths: the SERIAL-merge path handles `<<( … )>>` correctly (it interns triple terms
+    /// structurally via `merge_remap`, like the in-memory serial fallback), but the
+    /// hash-SHARDED consolidation cannot represent them — so the sharded path must surface a
+    /// CLEAR error (naming `build_external` + the in-memory alternative) rather than panic in
+    /// a shard worker or silently corrupt the dictionary. (Full sharded/spill triple-term
+    /// support is bead sq-t3rt.)
+    #[cfg(all(feature = "mmap", feature = "parallel"))]
+    #[test]
+    fn external_build_triple_terms_serial_ok_sharded_errors() {
+        let nt = "<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+                  <<( <http://ex/alice> <http://ex/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n";
+        // The in-memory loader handles it (reference).
+        let mem = Graph::load_str(nt, "ntriples").expect("in-memory loader must accept triple terms");
+
+        // SERIAL external path (sharded = false) builds it and matches the in-memory load.
+        let base = std::env::temp_dir().join(format!("sparq_ext_tt_{}", std::process::id()));
+        let ser_dir = base.join("serial");
+        Graph::build_external_opts(nt.as_bytes(), "ntriples", &ser_dir, 256, false)
+            .expect("serial external build must accept triple terms");
+        let ser = Graph::open(&ser_dir).unwrap();
+        assert_eq!(ser.len(), mem.len(), "serial external triple count differs");
+        assert_eq!(ser.dict.len(), mem.dict.len(), "serial external dict size differs");
+
+        // SHARDED external path (sharded = true) rejects it with a clear, actionable error.
+        let sh_dir = base.join("sharded");
+        let err = Graph::build_external_opts(nt.as_bytes(), "ntriples", &sh_dir, 256, true)
+            .expect_err("sharded external build must reject triple terms");
+        assert!(err.contains("triple term"), "error must name triple terms: {err}");
+        assert!(err.contains("build_external"), "error must point at the external builder: {err}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn ntriples_parallel_matches_sequential() {
         // >4KB so the input spans multiple parallel chunks; subjects/predicates repeat
@@ -4128,6 +4196,13 @@ mod tests {
         nt.push_str("<http://ex/s> <http://ex/v> \"1.5\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n");
         nt.push_str("<http://ex/s> <http://ex/plain> \"just a string\" .\n");
         nt.push_str("<http://ex/s> <http://ex/big> \"\\U0001F600 grin\" .\n");
+        // [OPUS-4.8] (sq-hxgb) RDF 1.2 triple-term objects `<<( s p o )>>` (object-only),
+        // including a NESTED one and a blank-node component — cross-checked against oxttl's
+        // `NTriplesParser` (the sequential `load_reader` path, which already accepts them via
+        // the `rdf-12` feature). This is the byte-parser-vs-oxttl oracle for triple terms.
+        nt.push_str("<http://ex/r1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <http://ex/alice> <http://ex/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n");
+        nt.push_str("<http://ex/r2> <http://ex/about> <<( _:b0 <http://ex/p> \"v\" )>> .\n");
+        nt.push_str("<http://ex/r3> <http://ex/nested> <<( <http://ex/x> <http://ex/q> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> )>> .\n");
         let par = Graph::load_str(&nt, "ntriples").unwrap(); // parallel (when feature on)
         let seq = Graph::load_reader(nt.as_bytes(), "ntriples").unwrap(); // sequential
         assert_eq!(par.len(), seq.len());
