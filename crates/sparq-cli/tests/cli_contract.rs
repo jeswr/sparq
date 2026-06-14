@@ -315,7 +315,12 @@ fn save_then_query_mmap_round_trip() {
     assert_eq!(sc, 0, "save stderr: {se}");
     assert!(idx.is_dir(), "save did not create the index dir");
 
-    let (qc, qo, qe) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    // [OPUS-4.8] (sq-iwyy) These round-trip tests assert the index encodes/decodes the right
+    // number of triples — codec/build equivalence, not the table rendering — so they use
+    // `--count` to keep the assertion on the solution COUNT (now that a bare SELECT emits a
+    // table). The default-format SELECT rendering is exercised by the dedicated parity tests
+    // below.
+    let (qc, qo, qe) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
     assert_eq!(qc, 0, "query-mmap stderr: {qe}");
     assert!(qo.contains("3 solutions"), "query-mmap stdout: {qo}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -330,7 +335,7 @@ fn save_compressed_then_query_mmap_round_trip() {
     let (sc, _so, se) = run3(&["save", s(&data), "ntriples", s(&idx), "compressed"]);
     assert_eq!(sc, 0, "save stderr: {se}");
 
-    let (qc, qo, qe) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    let (qc, qo, qe) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
     assert_eq!(qc, 0, "query-mmap stderr: {qe}");
     assert!(qo.contains("3 solutions"), "query-mmap stdout: {qo}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -346,7 +351,7 @@ fn build_external_then_query_mmap_round_trip() {
     assert_eq!(bc, 0, "build stderr: {be}");
     assert!(idx.is_dir(), "build did not create the index dir");
 
-    let (qc, qo, qe) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    let (qc, qo, qe) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
     assert_eq!(qc, 0, "query-mmap stderr: {qe}");
     assert!(qo.contains("3 solutions"), "query-mmap stdout: {qo}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -363,9 +368,165 @@ fn recompress_raw_index_then_query() {
     let (rc, _ro, re) = run3(&["recompress", s(&raw), s(&cmp)]);
     assert_eq!(rc, 0, "recompress stderr: {re}");
 
-    let (qc, qo, _) = run3(&["query-mmap", s(&cmp), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    let (qc, qo, _) = run3(&["query-mmap", s(&cmp), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
     assert_eq!(qc, 0);
     assert!(qo.contains("3 solutions"), "stdout: {qo}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// 3b. `query-mmap` OUTPUT PARITY with `query` (sq-iwyy).
+//
+// [OPUS-4.8] query-mmap shares `query`'s exact emission core, so it must emit the same
+// SHAPES: SELECT rows (default table + each `--format`), ASK boolean, CONSTRUCT/DESCRIBE
+// N-Triples, and the `--count` legacy line. These mirror the `query` happy-path cases but
+// drive the mmap path (save -> query-mmap). The unknown-`--format` usage error (exit 2) is
+// shared verbatim via `out_format_flag`, so it's covered for both by `query`'s case.
+// ---------------------------------------------------------------------------
+
+/// Build an on-disk index from the canonical NT fixture and return (scratch dir, index dir).
+/// The caller queries `idx` via `query-mmap` and is responsible for removing `dir`.
+fn mmap_index(tag: &str) -> (PathBuf, PathBuf) {
+    let dir = scratch(tag);
+    let data = write(&dir, "data.nt", NT);
+    let idx = dir.join("idx");
+    let (sc, _so, se) = run3(&["save", s(&data), "ntriples", s(&idx)]);
+    assert_eq!(sc, 0, "save stderr: {se}");
+    (dir, idx)
+}
+
+#[test]
+fn query_mmap_select_emits_rows_default_table() {
+    // [OPUS-4.8] (sq-iwyy) A bare SELECT via query-mmap now prints the solution BINDINGS in a
+    // readable table (header with ?-sigil vars, one row per solution, `(K row(s))` footer) —
+    // identical to `query`, not a count.
+    let (dir, idx) = mmap_index("mmap-select-table");
+    let (code, stdout, stderr) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("?s") && stdout.contains("?p") && stdout.contains("?o"), "header: {stdout}");
+    assert!(stdout.contains("<http://ex/alice>"), "rows should contain alice: {stdout}");
+    assert!(stdout.contains("<http://ex/knows>"), "rows should contain knows: {stdout}");
+    assert!(stdout.contains("\"30\""), "rows should contain the age literal: {stdout}");
+    assert!(stdout.contains("3 row(s)"), "row count footer: {stdout}");
+    // Crucially NOT the legacy count line (that is what parity fixed).
+    assert!(!stdout.contains("3 solutions"), "default SELECT must not be a count: {stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_mmap_ask_prints_boolean() {
+    // [OPUS-4.8] (sq-iwyy) ASK via query-mmap prints a boolean, not a 1/0 solution count.
+    let (dir, idx) = mmap_index("mmap-ask");
+    let (ct, ot, et) = run3(&["query-mmap", s(&idx), "ASK { ?s <http://ex/knows> ?o }"]);
+    assert_eq!(ct, 0, "stderr: {et}");
+    assert_eq!(ot.trim(), "true", "ASK-true stdout: {ot}");
+
+    let (cf, of, _) = run3(&["query-mmap", s(&idx), "ASK { <http://ex/nobody> ?p ?o }"]);
+    assert_eq!(cf, 0);
+    assert_eq!(of.trim(), "false", "ASK-false stdout: {of}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_mmap_construct_and_describe_emit_triples() {
+    // [OPUS-4.8] (sq-iwyy) The graph forms via query-mmap emit the resulting triples as
+    // N-Triples (previously query-mmap could only count).
+    let (dir, idx) = mmap_index("mmap-construct");
+    let (cc, oc, ec) = run3(&["query-mmap", s(&idx), "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"]);
+    assert_eq!(cc, 0, "CONSTRUCT stderr: {ec}");
+    let lines: Vec<&str> = oc.lines().filter(|l| l.trim_end().ends_with(" .")).collect();
+    assert_eq!(lines.len(), 3, "expected 3 N-Triples lines; stdout: {oc}");
+    assert!(
+        oc.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."),
+        "CONSTRUCT stdout: {oc}"
+    );
+
+    let (cd, od, ed) = run3(&["query-mmap", s(&idx), "DESCRIBE <http://ex/alice>"]);
+    assert_eq!(cd, 0, "DESCRIBE stderr: {ed}");
+    assert!(od.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."), "DESCRIBE stdout: {od}");
+    assert!(od.contains("<http://ex/alice> <http://ex/age> \"30\" ."), "DESCRIBE stdout: {od}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_mmap_select_format_shapes() {
+    // [OPUS-4.8] (sq-iwyy) Each `--format` emits the right SHAPE for SELECT bindings via the
+    // mmap path — mirrors `query_select_format_shapes`.
+    let (dir, idx) = mmap_index("mmap-formats");
+    let q = "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }";
+
+    let (ct, ot, et) = run3(&["query-mmap", s(&idx), q, "--format", "tsv"]);
+    assert_eq!(ct, 0, "tsv stderr: {et}");
+    assert_eq!(ot.lines().next().unwrap(), "?s\t?o", "tsv header: {ot}");
+    assert!(ot.contains("<http://ex/alice>\t\"30\""), "tsv row: {ot}");
+
+    let (cc, oc, _) = run3(&["query-mmap", s(&idx), q, "--format", "csv"]);
+    assert_eq!(cc, 0);
+    assert_eq!(oc.lines().next().unwrap(), "s,o", "csv header: {oc}");
+    assert!(oc.contains("http://ex/alice,30"), "csv row: {oc}");
+
+    let (cj, oj, _) = run3(&["query-mmap", s(&idx), q, "--format", "json"]);
+    assert_eq!(cj, 0);
+    assert!(oj.contains("\"head\"") && oj.contains("\"vars\"") && oj.contains("\"bindings\""), "json: {oj}");
+    assert!(oj.contains("\"value\":\"http://ex/alice\""), "json binding: {oj}");
+
+    let (cx, ox, _) = run3(&["query-mmap", s(&idx), q, "--format", "xml"]);
+    assert_eq!(cx, 0);
+    assert!(ox.contains("xmlns=\"http://www.w3.org/2005/sparql-results#\""), "xml ns: {ox}");
+    assert!(ox.contains("<uri>http://ex/alice</uri>"), "xml binding: {ox}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_mmap_ask_format_json_xml() {
+    // [OPUS-4.8] (sq-iwyy) ASK under `--format json|xml` via query-mmap emits the W3C boolean
+    // documents — mirrors `query_ask_format_json_xml`.
+    let (dir, idx) = mmap_index("mmap-ask-formats");
+    let (cj, oj, _) = run3(&["query-mmap", s(&idx), "ASK { ?s <http://ex/knows> ?o }", "--format", "json"]);
+    assert_eq!(cj, 0);
+    assert!(oj.contains("\"boolean\":true"), "ask json: {oj}");
+
+    let (cx, ox, _) = run3(&["query-mmap", s(&idx), "ASK { <http://ex/nobody> ?p ?o }", "--format", "xml"]);
+    assert_eq!(cx, 0);
+    assert!(ox.contains("<boolean>false</boolean>"), "ask xml: {ox}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_mmap_count_flag_preserves_legacy_count_output() {
+    // [OPUS-4.8] (sq-iwyy) `--count` restores the historical count-only line for both SELECT
+    // (solutions) and the graph forms (triples) via the mmap path.
+    let (dir, idx) = mmap_index("mmap-count");
+    let (cs, os, es) = run3(&["query-mmap", s(&idx), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
+    assert_eq!(cs, 0, "stderr: {es}");
+    assert!(os.contains("3 solutions"), "SELECT --count stdout: {os}");
+    assert!(!os.contains("<http://ex/alice>"), "count mode must not emit rows: {os}");
+
+    let (cc, oc, _) = run3(&["query-mmap", s(&idx), "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", "--count"]);
+    assert_eq!(cc, 0);
+    assert!(oc.contains("3 triples"), "CONSTRUCT --count stdout: {oc}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_mmap_unknown_format_exits_2() {
+    // [OPUS-4.8] (sq-iwyy) An unknown `--format` value is a usage error (exit 2) on query-mmap
+    // too — it shares `query`'s `out_format_flag` validation.
+    let (dir, idx) = mmap_index("mmap-err-outformat");
+    let (code, _o, stderr) = run3(&["query-mmap", s(&idx), "SELECT ?s WHERE { ?s ?p ?o }", "--format", "bogus"]);
+    assert_eq!(code, 2, "unknown --format must exit 2; stderr: {stderr}");
+    assert!(stderr.contains("unknown --format"), "stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_mmap_malformed_query_exits_1() {
+    // [OPUS-4.8] (sq-iwyy) A malformed query via query-mmap is a runtime error (exit 1) with a
+    // useful stderr — same contract as `query`.
+    let (dir, idx) = mmap_index("mmap-err-badquery");
+    let (code, _o, stderr) = run3(&["query-mmap", s(&idx), "SELECT ?s WHERE { this is not sparql"]);
+    assert_eq!(code, 1, "parse failure is a runtime error (exit 1); stderr: {stderr}");
+    assert!(stderr.to_lowercase().contains("error"), "stderr should explain the failure: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
