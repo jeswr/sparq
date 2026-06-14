@@ -157,6 +157,19 @@ pub struct Proof {
     _private: (),
 }
 
+impl Proof {
+    /// Test-only constructor for the opaque proof placeholder. The deferred
+    /// `CollaborativeProof::verify` stub ignores its `&Proof` argument (it returns
+    /// the typed `NotYetImplemented` before reading it), but the trait still needs
+    /// a value to pass. This exists ONLY so the `no_fake_crypto` adversarial table
+    /// (sq-nuok) can call `verify` and assert it fails closed. It implies NO byte
+    /// layout — the proof type is deliberately field-less at M0. [OPUS-4.8]
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> Self {
+        Proof { _private: () }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! M0 contract tests: the crypto boundary must COMPILE and every deferred
