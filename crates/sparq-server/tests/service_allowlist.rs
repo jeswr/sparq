@@ -25,16 +25,24 @@ use tokio::net::TcpListener;
 const DATA: &str = "@prefix ex: <http://ex/> . ex:alice a ex:Person . ex:bob a ex:Person .";
 
 /// A one-shot loopback HTTP endpoint returning a canned SPARQL-Results-JSON body to the
-/// first `n` requests, then exiting. With `n == 0` it accepts nothing — so a test that
-/// expects the egress filter to refuse BEFORE dialling proves no socket was opened.
-fn serve(body: String, n: usize) -> String {
+/// first `n` requests, then exiting.
+///
+/// [OPUS-4.8] sq-4w18: returns `(url, accepts)` where `accepts` is a channel that fires
+/// once for every connection the listener actually `accept()`s. A deny-posture test can
+/// therefore PROVE the egress filter refused before any socket was opened — by asserting
+/// nothing arrives on `accepts` within a window — rather than relying on a request count
+/// (a count of 0 alone does not distinguish "no socket opened" from "dialled but the OS
+/// returned a fast `ECONNREFUSED`"). With `n == 0` the listener accepts nothing.
+fn serve(body: String, n: usize) -> (String, mpsc::Receiver<()>) {
     let listener = StdListener::bind("127.0.0.1:0").expect("bind loopback");
     let addr = listener.local_addr().unwrap();
-    let (tx, rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (accept_tx, accept_rx) = mpsc::channel();
     thread::spawn(move || {
-        tx.send(()).ok();
+        ready_tx.send(()).ok();
         for _ in 0..n {
             let Ok((mut stream, _)) = listener.accept() else { return };
+            accept_tx.send(()).ok(); // a connection was accepted
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf);
             let resp = format!(
@@ -46,8 +54,8 @@ fn serve(body: String, n: usize) -> String {
             let _ = stream.flush();
         }
     });
-    rx.recv().unwrap();
-    format!("http://{addr}/")
+    ready_rx.recv().unwrap();
+    (format!("http://{addr}/"), accept_rx)
 }
 
 async fn spawn_with(config: ServerConfig) -> String {
@@ -72,13 +80,20 @@ fn remote_body() -> String {
 
 #[tokio::test]
 async fn empty_allowlist_refuses_service_before_any_network_call() {
-    // The fake remote serves ZERO requests: if the server dialled it the assertion that
-    // the query failed would still hold, but the point is the egress filter refuses the
-    // loopback host before opening a socket.
-    let remote = serve(remote_body(), 0);
+    // [OPUS-4.8] sq-4w18: the fake remote stays LIVE and ready to accept one connection
+    // (n == 1). Under the strict deny posture the engine refuses the host before DNS
+    // resolution, so the server must never dial it — we PROVE that by asserting nothing
+    // is ever `accept()`ed on the live listener (see the `accepts` channel below). A
+    // bare request count of 0 would not distinguish "no socket opened" from "dialled but
+    // got a fast ECONNREFUSED on a closed port".
+    let (remote, accepts) = serve(remote_body(), 1);
     let host = remote.trim_start_matches("http://").trim_end_matches('/');
-    // Default config => empty allowlist => deny ALL SERVICE.
-    let base = spawn_with(ServerConfig::default()).await;
+    // Default config + a SHORT query timeout: if the strict pre-DNS refusal ever
+    // regresses and the server actually dials the (live) endpoint, the request must not
+    // hang on the 30s default and slow CI — the timeout bounds the failure.
+    let mut config = ServerConfig::default();
+    config.query_timeout = Some(std::time::Duration::from_secs(2)); // empty allowlist => deny ALL SERVICE
+    let base = spawn_with(config).await;
     let q = format!(
         "PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <http://{host}/> {{ ?s ex:name ?name }} }}"
     );
@@ -96,11 +111,18 @@ async fn empty_allowlist_refuses_service_before_any_network_call() {
         body.contains("egress") || body.contains("allowlist") || body.contains("service"),
         "expected an egress/allowlist refusal in the body, got: {body}"
     );
+    // The query has already returned; give any in-flight dial a brief window, then assert
+    // the live listener accepted NOTHING — i.e. the refusal happened before any socket
+    // was opened to the endpoint.
+    assert!(
+        accepts.recv_timeout(std::time::Duration::from_millis(250)).is_err(),
+        "strict deny posture must refuse BEFORE dialling — the listener must accept no connection",
+    );
 }
 
 #[tokio::test]
 async fn allowlisted_loopback_host_reaches_the_endpoint() {
-    let remote = serve(remote_body(), 1);
+    let (remote, _accepts) = serve(remote_body(), 1);
     let host = remote.trim_start_matches("http://").trim_end_matches('/');
     let bare_host = host.split(':').next().unwrap().to_string(); // "127.0.0.1"
     // Allowlist the loopback host => SERVICE to it is permitted.
@@ -126,9 +148,14 @@ async fn allowlisted_loopback_host_reaches_the_endpoint() {
 
 #[tokio::test]
 async fn silent_service_under_deny_yields_identity() {
-    let remote = serve(remote_body(), 0);
+    // [OPUS-4.8] sq-4w18: live listener (n == 1) so a regression that dials would hit a
+    // real accept, plus a SHORT query timeout so such a regression cannot hang CI on the
+    // 30s default. (SILENT swallows the refusal either way, but the timeout bounds it.)
+    let (remote, _accepts) = serve(remote_body(), 1);
     let host = remote.trim_start_matches("http://").trim_end_matches('/');
-    let base = spawn_with(ServerConfig::default()).await; // empty allowlist
+    let mut config = ServerConfig::default(); // empty allowlist => deny ALL SERVICE
+    config.query_timeout = Some(std::time::Duration::from_secs(2));
+    let base = spawn_with(config).await;
     let q = format!(
         "PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <http://{host}/> {{ ?s ex:name ?name }} }}"
     );
