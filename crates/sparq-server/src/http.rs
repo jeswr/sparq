@@ -43,7 +43,7 @@ use sparq_engine::QueryBudget;
 use sparq_serve::{ApplyUpdates, Generation, GenerationRing, GraphApplier, PodId, WriteError, Writer, WriterConfig};
 
 use crate::exec::{prepare, PrepareError, QueryForm};
-use crate::negotiate::{negotiate, negotiate_graph, Format};
+use crate::negotiate::{negotiate, negotiate_graph, Format, GraphFormat};
 use crate::results;
 
 // ---------------------------------------------------------------------------
@@ -996,8 +996,14 @@ async fn run_query_pinned(
             let budget = make_budget(&config, true);
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
-                match with_extensions(|| sparq_engine::construct_ntriples_with_budget(gen.snapshot(), &query, &budget)) {
-                    Ok(body) => text_response(StatusCode::OK, gfmt.content_type(), body, head_only),
+                // [OPUS-4.8] sq-rt6v: produce the triple list once, then serialise it in the
+                // negotiated graph syntax — N-Triples (default), prefix-compacting Turtle, or
+                // RDF/XML — rather than always emitting N-Triples.
+                match with_extensions(|| sparq_engine::construct_or_describe_with_budget(gen.snapshot(), &query, &budget)) {
+                    Ok(triples) => {
+                        let body = serialise_graph_triples(&triples, gfmt);
+                        text_response(StatusCode::OK, gfmt.content_type(), body, head_only)
+                    }
                     Err(e) => engine_error_response(&e, &cfg),
                 }
             });
@@ -1200,47 +1206,82 @@ async fn graph_store(state: &AppState, method: &Method, graph: GraphRef, headers
 // Graph Store HTTP Protocol — WRITE side (sq-gxsj) [OPUS-4.8]
 // ---------------------------------------------------------------------------
 
-/// The set of RDF body media types a GSP write accepts, mapped to the sparq-core parser
-/// `format` token. The body of a GSP write carries the triples for ONE graph (the graph is
-/// named by the URL, not the body), so a quad syntax (N-Quads/TriG) is parsed as triples
-/// too — its graph names are folded, exactly as `Graph::load_str` does.
-fn rdf_format_for(content_type: &str) -> Option<&'static str> {
+/// The body media type a GSP write carries. `sparq-core` token formats parse through
+/// `Graph::load_str`; RDF/XML is parsed by `oxrdfxml` ([OPUS-4.8] sq-rt6v) since the engine
+/// loader has no RDF/XML token. The body carries the triples for ONE graph (the graph is
+/// named by the URL, not the body), so a quad syntax (N-Quads/TriG) is parsed as triples too
+/// — its graph names are folded, exactly as `Graph::load_str` does.
+enum BodyFormat {
+    /// A `sparq-core` `Graph::load_str` token format ("turtle"/"ntriples"/"nquads"/"trig").
+    Core(&'static str),
+    /// `application/rdf+xml`, parsed via `oxrdfxml`. [OPUS-4.8] sq-rt6v.
+    RdfXml,
+}
+
+/// Classifies a GSP write-body `Content-Type` into the [`BodyFormat`] used to parse it.
+fn rdf_format_for(content_type: &str) -> Option<BodyFormat> {
     // `content_type` is already lowercased by `content_type()`; ignore any `; charset=…`.
     let mt = content_type.split(';').next().unwrap_or("").trim();
     match mt {
-        "text/turtle" | "application/x-turtle" => Some("turtle"),
-        "application/n-triples" | "text/plain" => Some("ntriples"),
-        "application/n-quads" => Some("nquads"),
-        "application/trig" => Some("trig"),
+        "text/turtle" | "application/x-turtle" => Some(BodyFormat::Core("turtle")),
+        "application/n-triples" | "text/plain" => Some(BodyFormat::Core("ntriples")),
+        "application/n-quads" => Some(BodyFormat::Core("nquads")),
+        "application/trig" => Some(BodyFormat::Core("trig")),
+        // [OPUS-4.8] sq-rt6v: RDF/XML request body.
+        "application/rdf+xml" => Some(BodyFormat::RdfXml),
         // No explicit Content-Type: default to Turtle (a superset of N-Triples), matching
         // the read side's default emission and common GSP client behaviour.
-        "" => Some("turtle"),
+        "" => Some(BodyFormat::Core("turtle")),
         _ => None,
     }
 }
 
 /// Parses a GSP request body into canonical N-Triples (the term syntax accepted verbatim
-/// inside a SPARQL `INSERT DATA` block), validating the RDF in the process. Reuses
-/// `Graph::load_str` (the same parsers the loader uses) so content negotiation by
-/// Content-Type matches the rest of the engine. A parse failure is the caller's 400.
+/// inside a SPARQL `INSERT DATA` block), validating the RDF in the process. The `sparq-core`
+/// token formats reuse `Graph::load_str` (the same parsers the loader uses); RDF/XML is
+/// parsed by `oxrdfxml` and serialised straight to canonical N-Triples ([OPUS-4.8] sq-rt6v).
+/// A parse failure is the caller's 400. `base` resolves any relative IRIs in the body — the
+/// addressed graph's IRI, so a relative reference resolves predictably.
 // clippy: Err is axum's `Response` (the idiomatic handler error, as in `resolve_pin`);
 // boxing it would only desync this from the rest of the handler error convention.
 #[allow(clippy::result_large_err)]
-fn body_to_ntriples(body: &Bytes, content_type: &str) -> Result<String, Response> {
+fn body_to_ntriples(body: &Bytes, content_type: &str, base: Option<&str>) -> Result<String, Response> {
     let format = match rdf_format_for(content_type) {
         Some(f) => f,
         None => {
             return Err(json_error(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "GSP write body must be RDF: Content-Type 'text/turtle', 'application/n-triples', 'application/n-quads' or 'application/trig'",
+                "GSP write body must be RDF: Content-Type 'text/turtle', 'application/n-triples', 'application/n-quads', 'application/trig' or 'application/rdf+xml'",
             ))
         }
     };
-    let text = std::str::from_utf8(body).map_err(|_| bad_request("request body is not valid UTF-8"))?;
-    let graph = Graph::load_str(text, format).map_err(|e| bad_request(&format!("malformed RDF body: {e}")))?;
-    // Re-emit as canonical N-Triples via the engine scan — no private store API needed,
-    // and the terms are exactly what `INSERT DATA` will re-intern.
-    nt_dump(&graph, &QueryBudget::default()).map_err(|e| execution_error(&e))
+    match format {
+        BodyFormat::Core(format) => {
+            let text = std::str::from_utf8(body).map_err(|_| bad_request("request body is not valid UTF-8"))?;
+            let graph = Graph::load_str(text, format).map_err(|e| bad_request(&format!("malformed RDF body: {e}")))?;
+            // Re-emit as canonical N-Triples via the engine scan — no private store API needed,
+            // and the terms are exactly what `INSERT DATA` will re-intern.
+            nt_dump(&graph, &QueryBudget::default()).map_err(|e| execution_error(&e))
+        }
+        // [OPUS-4.8] sq-rt6v: parse RDF/XML to triples and emit canonical N-Triples directly.
+        // `oxrdf`'s Display is canonical N-Triples term syntax, exactly what `INSERT DATA`
+        // re-interns, so no Graph round-trip is needed (and RDF/XML is not a loader token).
+        BodyFormat::RdfXml => {
+            let triples = crate::graph::parse_rdfxml(body, base).map_err(|e| bad_request(&format!("malformed RDF/XML body: {e}")))?;
+            Ok(crate::graph::triples_to_ntriples(&triples))
+        }
+    }
+}
+
+/// [OPUS-4.8] sq-rt6v: the base IRI a GSP write body resolves relative references against —
+/// the addressed named graph's IRI (a sensible, round-trippable base), or `None` for the
+/// default graph (no natural base; an RDF/XML body with relative IRIs against the default
+/// graph is then a parse error, which is the honest outcome).
+fn base_iri(graph: &GraphRef) -> Option<&str> {
+    match graph {
+        GraphRef::Default => None,
+        GraphRef::Named(iri) => Some(iri.as_str()),
+    }
 }
 
 /// Wraps an N-Triples body in the `GRAPH <iri> { … }` block for a named graph, or returns
@@ -1293,7 +1334,7 @@ async fn apply_gsp_update(state: &AppState, update: String, success: StatusCode)
 /// DATA` for the default graph) so the replace is one atomic, group-committed generation.
 /// 201 when the graph did not exist (created), 204 when it replaced an existing one.
 async fn gsp_put(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &Bytes) -> Response {
-    let ntriples = match body_to_ntriples(body, &content_type(headers)) {
+    let ntriples = match body_to_ntriples(body, &content_type(headers), base_iri(&graph)) {
         Ok(nt) => nt,
         Err(resp) => return resp,
     };
@@ -1321,7 +1362,7 @@ async fn gsp_put(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &
 /// `INSERT DATA { GRAPH <g> { … } }`. 201 when the merge created the graph (a selector-less
 /// POST, or a POST to an absent named graph), 204 when it added to an existing graph.
 async fn gsp_post(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &Bytes) -> Response {
-    let ntriples = match body_to_ntriples(body, &content_type(headers)) {
+    let ntriples = match body_to_ntriples(body, &content_type(headers), base_iri(&graph)) {
         Ok(nt) => nt,
         Err(resp) => return resp,
     };
@@ -1380,45 +1421,74 @@ fn graph_exists(state: &AppState, graph: &GraphRef) -> bool {
 // Graph Store HTTP Protocol — READ side
 // ---------------------------------------------------------------------------
 
-/// Serialises the addressed graph as N-Triples (the one RDF serialisation we can emit from
-/// the engine's term-level scan without a full Turtle writer). Negotiation is minimal:
-/// `text/turtle` and `application/n-triples` both yield N-Triples (valid Turtle), default
-/// `application/n-triples`. CPU-bound (a full-graph dump), so it runs on the blocking pool
+/// Serialises the addressed graph in the negotiated RDF syntax: `application/n-triples`
+/// (default), prefix-compacting `text/turtle`, or `application/rdf+xml` ([OPUS-4.8] sq-rt6v
+/// — `text/turtle` is now a real compact Turtle document, not N-Triples-as-Turtle, and
+/// RDF/XML is newly offered). CPU-bound (a full-graph dump), so it runs on the blocking pool
 /// under the request timeout (no row cap: a dump is inherently graph-sized). A named graph
 /// that does not exist serialises as the empty graph (200, empty body) per GSP read.
 async fn serialise_graph(state: &AppState, graph: GraphRef, headers: &HeaderMap, head_only: bool) -> Response {
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    // N-Triples is a syntactic subset of Turtle, so it satisfies a text/turtle Accept too.
-    let ct = if accept.contains("text/turtle") {
-        "text/turtle; charset=utf-8"
-    } else {
-        "application/n-triples; charset=utf-8"
-    };
-    let ct = ct.to_string();
+    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
+    let gfmt = negotiate_graph(accept);
+    let ct = gfmt.content_type().to_string();
     let config = state.config.clone();
     let budget = make_budget(&config, false);
     // Pinned for the whole dump: the serialisation is consistent with request start.
     let gen = state.current();
     let cfg = config.clone();
-    let task = tokio::task::spawn_blocking(move || match nt_dump_graph(gen.snapshot(), &graph, &budget) {
-        Ok(body) => text_response(StatusCode::OK, &ct, body, head_only),
+    let task = tokio::task::spawn_blocking(move || match graph_dump_triples(gen.snapshot(), &graph, &budget) {
+        Ok(triples) => text_response(StatusCode::OK, &ct, serialise_graph_triples(&triples, gfmt), head_only),
         Err(e) => engine_error_response(&e, &cfg),
     });
     await_worker(task, &config).await
 }
 
-/// Dumps the addressed graph as N-Triples by reusing the engine's SELECT path and the
+/// [OPUS-4.8] sq-rt6v: serialises an RDF graph (triple list) in the negotiated [`GraphFormat`]
+/// — the single dispatch shared by the CONSTRUCT/DESCRIBE and GSP-read paths. N-Triples is the
+/// canonical line form; Turtle compacts the [`crate::graph::COMMON_PREFIXES`]; RDF/XML is the
+/// `application/rdf+xml` document. The writers are guaranteed to emit well-formed output.
+fn serialise_graph_triples(triples: &[oxrdf::Triple], gfmt: GraphFormat) -> String {
+    match gfmt {
+        GraphFormat::NTriples => crate::graph::triples_to_ntriples(triples),
+        GraphFormat::Turtle => crate::graph::triples_to_turtle(triples),
+        GraphFormat::RdfXml => crate::graph::triples_to_rdfxml(triples),
+    }
+}
+
+/// Dumps the addressed graph as a triple list by reusing the engine's SELECT path and the
 /// materialised terms — `?s ?p ?o` for the default graph, `GRAPH <g> { ?s ?p ?o }` for a
-/// named graph — so no private store API is needed.
-fn nt_dump_graph(graph: &Graph, target: &GraphRef, budget: &QueryBudget) -> Result<String, String> {
+/// named graph — so no private store API is needed. [OPUS-4.8] sq-rt6v: returns `Vec<Triple>`
+/// (was N-Triples text) so the caller can serialise in any RDF syntax.
+fn graph_dump_triples(graph: &Graph, target: &GraphRef, budget: &QueryBudget) -> Result<Vec<oxrdf::Triple>, String> {
     let select = match target {
         GraphRef::Default => "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
         GraphRef::Named(iri) => format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{}> {{ ?s ?p ?o }} }}", escape_iri(iri)),
     };
-    nt_dump_select(graph, &select, budget)
+    let r = sparq_engine::query_with_budget(graph, &select, budget)?;
+    let mut triples = Vec::with_capacity(r.rows.len());
+    for row in &r.rows {
+        let (Some(s), Some(p), Some(o)) = (&row[0], &row[1], &row[2]) else { continue };
+        // A triple from a real RDF graph always has a NamedNode/BlankNode subject and a
+        // NamedNode predicate; a row that somehow violates that (it cannot, for `?s ?p ?o`
+        // over a graph) is skipped rather than panicked on.
+        if let Some(t) = row_to_triple(s, p, o) {
+            triples.push(t);
+        }
+    }
+    Ok(triples)
+}
+
+/// [OPUS-4.8] sq-rt6v: builds an [`oxrdf::Triple`] from an `?s ?p ?o` solution row, or `None`
+/// if the slots are not a legal triple shape (subject must be IRI/bnode, predicate an IRI).
+fn row_to_triple(s: &oxrdf::Term, p: &oxrdf::Term, o: &oxrdf::Term) -> Option<oxrdf::Triple> {
+    use oxrdf::{NamedOrBlankNode, Term};
+    let subject = match s {
+        Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n.clone()),
+        Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b.clone()),
+        _ => return None,
+    };
+    let Term::NamedNode(predicate) = p else { return None };
+    Some(oxrdf::Triple::new(subject, predicate.clone(), o.clone()))
 }
 
 /// Dumps the whole default graph as N-Triples by reusing the engine's SELECT path

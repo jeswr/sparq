@@ -335,12 +335,15 @@ whole hardening stack, so shed requests (429), body-limit rejections (413) and p
 | Indirect | `/sparql/graph?default` or `/sparql/graph?graph=<iri>` |
 | Direct | `/graphs/<path>` (the request URI IS the graph IRI: `http://<host>/graphs/<path>`) |
 
-**Read.** `GET`/`HEAD` serialise the addressed graph as **N-Triples** (also offered for an
-`Accept: text/turtle` request, since N-Triples is a syntactic subset of Turtle).
+**Read.** `GET`/`HEAD` serialise the addressed graph in the `Accept`-negotiated RDF syntax
+(q-value aware; default N-Triples): **N-Triples** (`application/n-triples`),
+**prefix-compacting Turtle** (`text/turtle`) or **RDF/XML** (`application/rdf+xml`).
+<!-- [OPUS-4.8] sq-rt6v: Turtle is now a real prefix-compacting document and RDF/XML is offered. -->
 
 **Write** (`PUT`/`POST`/`DELETE`). The request body is RDF, parsed by `Content-Type`
-(`text/turtle` | `application/n-triples` | `application/n-quads` | `application/trig`;
-absent → Turtle); a malformed body is a `400`, an unsupported type a `415`. The body
+(`text/turtle` | `application/n-triples` | `application/n-quads` | `application/trig` |
+`application/rdf+xml`; absent → Turtle); a malformed body is a `400`, an unsupported type a
+`415`. The body
 carries the triples for the one addressed graph (the URL names the graph, not the body —
 quad-syntax graph names are folded in). Each verb is translated into a server-minted SPARQL
 Update and submitted through the **same sequenced group-commit writer** the
@@ -381,10 +384,14 @@ server:  {"unsubscribed": {"id": 1}}
 | SELECT | `text/csv` | `text/csv; charset=utf-8` | conformant — [CSV/TSV](https://www.w3.org/TR/sparql11-results-csv-tsv/) (RFC 4180 quoting, CRLF) |
 | SELECT | `text/tab-separated-values` | `text/tab-separated-values; charset=utf-8` | conformant — TSV term syntax + escaping |
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` | conformant boolean |
-| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` | `application/n-triples` / `text/turtle` `; charset=utf-8` | conformant graph result (T16); the body is N-Triples — a syntactic subset of Turtle — under either type |
+| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` | matching media `; charset=utf-8` | conformant graph result (T16, sq-rt6v): N-Triples, prefix-compacting Turtle (via `oxttl`), or RDF/XML (via `oxrdfxml`) |
 
 Negotiation is q-value aware; unsupported / absent `Accept` defaults to JSON (SELECT/ASK)
-or N-Triples (CONSTRUCT/DESCRIBE).
+or N-Triples (CONSTRUCT/DESCRIBE + GSP read). The graph syntaxes share one writer set
+(`crate::graph`) — N-Triples (canonical line form), **prefix-compacting Turtle** (a small set
+of common namespaces — rdf/rdfs/xsd/owl/foaf/dc/dcterms/skos/schema — compact to
+`prefix:local`) and **RDF/XML** — used by both CONSTRUCT/DESCRIBE and the GSP read side.
+<!-- [OPUS-4.8] sq-rt6v -->.
 
 **Streamed SELECT bodies (T16).** JSON SELECT results are evaluated to an ordered chunk
 sequence inside the engine and streamed to the socket chunk by chunk instead of being
@@ -431,15 +438,17 @@ All error bodies are structured JSON: `{"error": "..."}`.
   / `named-graph-uri` query params are accepted and threaded through. <!-- [OPUS-4.8] sq-gxsj -->
 * **CONSTRUCT / DESCRIBE serialisations.** Implemented (T16) via the engine's RDF-graph
   result API (`sparq_engine::construct` / `describe`), negotiated between
-  `application/n-triples` and `text/turtle` (the body is N-Triples either way — valid
-  Turtle). `application/rdf+xml` and a prefix-compacting Turtle writer are follow-ups.
+  `application/n-triples`, prefix-compacting `text/turtle` and `application/rdf+xml`
+  (`crate::graph`, via `oxttl` / `oxrdfxml`). <!-- [OPUS-4.8] sq-rt6v: RDF/XML + prefix Turtle landed -->
+  The last result-format conformance gap is closed.
 * **SPARQL Update operations.** The engine supports `INSERT DATA`, `DELETE DATA`,
   `CLEAR` / `DROP` / `CREATE` (DEFAULT / named / ALL), `LOAD`, and `DELETE/INSERT … WHERE`
   over the default graph AND named graphs; a failing operation is refused with `400`
   (atomically — see the update concurrency model). The Graph Store **write** verbs
-  (`PUT`/`POST`/`DELETE`) are implemented on top of this same path (bead `sq-gxsj`). The GSP
-  read serialisation is N-Triples only (`application/rdf+xml` is a follow-up, as for
-  CONSTRUCT/DESCRIBE). <!-- [OPUS-4.8] sq-gxsj -->
+  (`PUT`/`POST`/`DELETE`) are implemented on top of this same path (bead `sq-gxsj`). GSP
+  read negotiates N-Triples / prefix-compacting Turtle / RDF/XML, and GSP write accepts an
+  `application/rdf+xml` body in addition to the Turtle/N-Triples/N-Quads/TriG forms.
+  <!-- [OPUS-4.8] sq-gxsj, sq-rt6v -->
 * **Update durability.** The served graph is in-memory; updates are not persisted across
   a restart (the engine's WAL-backed directory graphs are a CLI/embedding feature the
   server does not use yet).
@@ -463,8 +472,9 @@ pointed at a running server:
 2. Configure the harness's service endpoint to `http://127.0.0.1:3030/sparql`.
 3. The **query** (including CONSTRUCT/DESCRIBE), **result-format**, **HTTP-semantics**,
    **named-graph dataset** and **Graph Store HTTP Protocol** (read + write) sections are
-   expected to pass; the only remaining gap is the `application/rdf+xml` graph
-   serialisation (N-Triples / Turtle are conformant).
+   expected to pass; all result formats — SPARQL-results JSON/XML/CSV/TSV (SELECT/ASK) and
+   N-Triples / prefix-compacting Turtle / RDF/XML (CONSTRUCT/DESCRIBE + GSP) — are conformant.
+   <!-- [OPUS-4.8] sq-rt6v: RDF/XML gap closed -->
 
 The in-process `tests/protocol.rs` suite mirrors the same assertions and runs in CI via
 `cargo test -p sparq-server`.

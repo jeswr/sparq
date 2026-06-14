@@ -3396,6 +3396,8 @@ dependencies = [
  "futures-util",
  "mimalloc",
  "oxrdf 0.3.3",
+ "oxrdfxml",
+ "oxttl 0.2.3",
  "reqwest",
  "serde_json",
  "sparesults",
