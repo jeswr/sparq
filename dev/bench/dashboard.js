@@ -46,6 +46,16 @@
     return rec && rec.label ? rec.label : humanize(name);
   }
 
+  // [OPUS-4.8] Unit-LESS readable label — same as labelFor() but with any trailing ` (<unit>)`
+  // stripped. Used where the unit is shown in a SEPARATE cell/column (the featured table's metric
+  // cell, sq-xvow; the scaling card title, sq-viby) so the unit isn't printed twice. The label map
+  // labels (sq-ocuf) don't carry a trailing unit, so this only bites the humanize() fallback (which
+  // appends `(µs)`/`(s)` for UNLABELLED metrics like Deep Taxonomy). We strip ONLY a trailing
+  // parenthesised token, leaving mid-label parentheses (e.g. "LUBM (reasoning)") untouched.
+  function labelForBare(name) {
+    return labelFor(name).replace(/\s*\([^()]*\)\s*$/, '').trim();
+  }
+
   // A rich tooltip/title for a metric: the raw stem first (transparency), then dataset + query.
   function titleFor(name) {
     var rec = lookup(name);
@@ -172,13 +182,189 @@
     return pts;
   }
 
+  // ---- featured well-known suites (sq-xvow) --------------------------------
+  // [OPUS-4.8] sq-xvow (design sq-i0nm §B): surface the RECOGNISED public benchmark suites
+  // (LUBM / WatDiv / SP2Bench / Deep Taxonomy / BSBM / DBPSB) front-and-centre ABOVE the
+  // per-metric trends, so a reader lands on the suites they already know. This is purely a
+  // PROMOTION/regrouping of metrics that already flow through suiteFor()/labelFor() (sq-ocuf) —
+  // it does NOT change the labels, the grouping, or the existing summary/trend sections.
+
+  // The suites we feature, in display order. Keys are matched against suiteFor() (which is driven
+  // by metric-labels.json). FEATURED_ALIASES lets a suite be recognised under several spellings
+  // (e.g. Deep Taxonomy isn't in the label map yet — sq-1hgz promotes it — so we also accept the
+  // structural-fallback / naming spellings it WILL carry). title = the card heading.
+  var FEATURED_SUITES = [
+    { key: 'LUBM',          title: 'LUBM',          aliases: ['lubm (reasoning)', 'lubm'] },
+    { key: 'WatDiv',        title: 'WatDiv',        aliases: ['watdiv'] },
+    { key: 'SP2Bench',      title: 'SP2Bench',      aliases: ['sp2bench', 'sp2b'] },
+    { key: 'Deep Taxonomy', title: 'Deep Taxonomy', aliases: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy'] },
+    { key: 'BSBM',          title: 'BSBM',          aliases: ['bsbm'] },
+    { key: 'DBPSB',         title: 'DBPSB',         aliases: ['dbpsb', 'dbpedia sparql benchmark'] }
+  ];
+
+  // Which featured suite (if any) a metric belongs to. Consults suiteFor() FIRST (label-map driven,
+  // the source of truth); if that misses, falls back to a token match on the raw metric name so a
+  // not-yet-labelled suite (Deep Taxonomy today) is still recognised. Returns the FEATURED_SUITES
+  // entry or null. Pure + node-testable.
+  function featuredSuiteOf(name) {
+    var suite = (suiteFor(name) || '').toLowerCase();
+    var lowerName = (name || '').toLowerCase();
+    for (var i = 0; i < FEATURED_SUITES.length; i++) {
+      var f = FEATURED_SUITES[i];
+      for (var j = 0; j < f.aliases.length; j++) {
+        var a = f.aliases[j];
+        // label-map suite match (exact, normalised) OR a name-token prefix like `deeptax_…`.
+        if (suite === a) return f;
+        if (lowerName.indexOf(a.replace(/[ -]/g, '')) === 0 ||
+            lowerName.indexOf(a.replace(/[ -]/g, '_')) === 0) return f;
+      }
+    }
+    return null;
+  }
+
+  // Build the featured-suites view from the LATEST commit's benches. One group per recognised
+  // suite (only suites that actually have data appear). Each row carries the readable label, raw
+  // stem, latest value, unit, Δ-vs-best — AND a `competitors` SEAM (see below). Sorted by label.
+  //
+  // COMPETITOR SEAM (for sq-t0c3): every row gets `competitors: {}` and the view carries
+  // `competitorEngines: []`. This dashboard does NOT gather competitor numbers (that's sq-t0c3,
+  // which writes bench/competitors.json). When that file exists, the caller passes it in as the
+  // 2nd arg and we map matching numbers onto each row's `competitors[engine]`; absent/unmatched
+  // cells stay undefined and render as "—"/"n/a". Shape expected from sq-t0c3:
+  //   { engines:[{id,label,version,env}], values:{ "<metric stem or name>": { "<engineId>": <µs> } } }
+  // We match on the raw metric NAME first, then the stem (name minus _us), so the competitor file
+  // can key either way. We never invent numbers — a missing key is simply absent.
+  function buildFeatured(entries, competitors) {
+    var latest = entries[entries.length - 1];
+    var bySuite = {};
+    latest.benches.forEach(function (b) {
+      var f = featuredSuiteOf(b.name);
+      if (!f) return;
+      var best = bestOf(entries, b.name);
+      var row = {
+        // [OPUS-4.8] unit-less label: the featured table prints the unit in its OWN column, so use
+        // labelForBare() to avoid a doubled `(µs)` on humanize()-fallback metrics (Deep Taxonomy).
+        name: b.name, label: labelForBare(b.name), title: titleFor(b.name),
+        value: b.value, unit: b.unit || '',
+        best: best, delta: deltaVsBest(b.value, best),
+        competitors: competitorsFor(competitors, b.name)
+      };
+      (bySuite[f.key] = bySuite[f.key] || { title: f.title, rows: [] }).rows.push(row);
+    });
+    var groups = [];
+    FEATURED_SUITES.forEach(function (f) {
+      if (bySuite[f.key]) groups.push({ suite: f.key, title: f.title, rows: sortRows(bySuite[f.key].rows) });
+    });
+    return { commit: latest.commit, date: latest.date, groups: groups,
+             competitorEngines: competitorEngines(competitors) };
+  }
+
+  // SEAM helper (sq-t0c3): read the per-engine competitor numbers for one metric, or {} when the
+  // competitor file is absent/has no entry. Tolerant of both `name` and stem keys.
+  function competitorsFor(competitors, name) {
+    if (!competitors || !competitors.values) return {};
+    return competitors.values[name] || competitors.values[name.replace(/_us$/, '')] || {};
+  }
+
+  // SEAM helper (sq-t0c3): the ordered list of competitor engines (id+label+version) to render as
+  // extra columns; [] when the competitor file is absent — the featured table then shows only sparq.
+  function competitorEngines(competitors) {
+    return (competitors && Array.isArray(competitors.engines)) ? competitors.engines : [];
+  }
+
+  // ---- scaling comparison charts (sq-viby) ---------------------------------
+  // [OPUS-4.8] sq-viby (design sq-i0nm): for SIZE-PARAMETRISED benchmarks (Deep Taxonomy at
+  // increasing depth; WatDiv at increasing scale factor; any family whose metrics differ only by a
+  // size/depth token) plot the engine's metric value vs that size/depth axis — so the reader sees
+  // how it SCALES, not just one point in time. The axis is DERIVED FROM THE METRIC NAME, since the
+  // benchmark harness encodes the size in the metric name (e.g. `deeptax_d10_count_us`,
+  // `watdiv_sf100_S1_count_us`). Pure + node-testable.
+
+  // Recognise a size/depth token in a metric name and split it out. Returns
+  //   { base, axisLabel, axis } | null
+  // where `base` is the metric name with the size token REMOVED (so two sizes of the same query
+  // share a base and form one family), `axis` is the numeric magnitude (SF / depth / scale), and
+  // `axisLabel` names the axis ("scale factor" / "depth" / "scale"). Suffix multipliers k/m are
+  // honoured (sf1k -> 1000). We anchor the END of the magnitude with `(?![0-9])` (NOT \b — a \b
+  // between a digit and a following `_` never matches, both are word chars) so it fires on a
+  // `_token<digits>` segment but NOT on incidental digits (q06, S1, star3 have no size keyword).
+  var SIZE_TOKENS = [
+    { re: /_sf(\d+)([km]?)(?![0-9])/i,    label: 'scale factor' },
+    { re: /_depth(\d+)(?![0-9])/i,        label: 'depth' },
+    { re: /_d(\d+)(?![0-9])/i,            label: 'depth' },
+    { re: /_scale(\d+)([km]?)(?![0-9])/i, label: 'scale' },
+    { re: /_size(\d+)([km]?)(?![0-9])/i,  label: 'size' }
+  ];
+
+  function sizeAxisOf(name) {
+    for (var i = 0; i < SIZE_TOKENS.length; i++) {
+      var t = SIZE_TOKENS[i];
+      var m = name.match(t.re);
+      if (m) {
+        var mag = parseInt(m[1], 10);
+        var suffix = (m[2] || '').toLowerCase();
+        if (suffix === 'k') mag *= 1000;
+        else if (suffix === 'm') mag *= 1000000;
+        // [OPUS-4.8] Removing the size token leaves a placeholder `_`; that can collide with the
+        // surrounding underscores (e.g. `deeptax_d10_count_us` -> `deeptax__count_us`) and `base`
+        // is DISPLAYED (the scaling card stem). Collapse repeated `_` and trim leading/trailing so
+        // the family stem renders cleanly (`deeptax_count_us`). Two sizes still share one base.
+        var base = name.replace(m[0], '_').replace(/_{2,}/g, '_').replace(/^_|_$/g, '');
+        return { base: base, axisLabel: t.label, axis: mag };
+      }
+    }
+    return null;
+  }
+
+  // Group the LATEST commit's benches into scaling FAMILIES keyed by `base` (the size-token-stripped
+  // name). Each family lists its {axis,value,name,unit} points sorted ascending by axis, plus a
+  // readable label/title taken from the family's first (smallest) member. A family with a single
+  // point is kept (degenerate scaling chart -> single marker; the renderer notes it). Families with
+  // NO size token never appear here. Pure + node-testable.
+  function buildScalingFamilies(entries) {
+    var latest = entries[entries.length - 1];
+    var fams = {};
+    latest.benches.forEach(function (b) {
+      var s = sizeAxisOf(b.name);
+      if (!s) return;
+      var fam = fams[s.base] || (fams[s.base] = {
+        base: s.base, axisLabel: s.axisLabel, suite: suiteFor(b.name),
+        // readable label/title for the family from this metric (humanized fallback until the
+        // suite is in the label map — e.g. Deep Taxonomy, sq-1hgz). [OPUS-4.8] unit-LESS label:
+        // renderScaling() appends ` (<unit>)` to the card title itself, so use labelForBare() to
+        // avoid a doubled unit on humanize()-fallback metrics.
+        label: labelForBare(b.name), title: titleFor(b.name), unit: b.unit || '', points: []
+      });
+      fam.points.push({ axis: s.axis, value: b.value, name: b.name, unit: b.unit || '' });
+    });
+    var out = [];
+    Object.keys(fams).forEach(function (k) {
+      var f = fams[k];
+      f.points.sort(function (a, c) { return a.axis - c.axis; });
+      out.push(f);
+    });
+    // Stable, readable order: by suite then label.
+    out.sort(function (a, c) {
+      if (a.suite !== c.suite) return a.suite < c.suite ? -1 : 1;
+      return a.label < c.label ? -1 : a.label > c.label ? 1 : 0;
+    });
+    return out;
+  }
+
   // Export pure fns for node smoke-test (no effect in the browser).
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = { classify: classify, bestOf: bestOf, deltaVsBest: deltaVsBest,
                        buildSummary: buildSummary, humanize: humanize, fmtNum: fmtNum,
                        trendPoints: trendPoints, GROUP_ORDER: GROUP_ORDER,
-                       labelFor: labelFor, suiteFor: suiteFor, titleFor: titleFor,
-                       lookup: lookup };
+                       labelFor: labelFor, labelForBare: labelForBare,
+                       suiteFor: suiteFor, titleFor: titleFor,
+                       lookup: lookup,
+                       // sq-xvow (featured well-known suites + competitor seam)
+                       FEATURED_SUITES: FEATURED_SUITES, featuredSuiteOf: featuredSuiteOf,
+                       buildFeatured: buildFeatured, competitorsFor: competitorsFor,
+                       competitorEngines: competitorEngines,
+                       // sq-viby (scaling comparison)
+                       sizeAxisOf: sizeAxisOf, buildScalingFamilies: buildScalingFamilies };
     return;
   }
 
@@ -301,6 +487,140 @@
     });
   }
 
+  // ---- featured well-known suites: DOM (sq-xvow) ---------------------------
+  // Renders the #featured host (a card at the TOP). One table per recognised suite, with the
+  // sparq latest value + Δ-pill, and ONE COLUMN PER competitor engine (the sq-t0c3 seam). When no
+  // competitor file is present, only the sparq column shows. Competitor cells with no number for a
+  // given metric render "—" (na). Reuses pill()/fmtNum()/labelFor tooltips — no new label logic.
+  function renderFeatured(featured) {
+    var host = document.getElementById('featured');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!featured.groups.length) {
+      host.appendChild(el('p', { 'class': 'hint',
+        text: 'No recognised public-suite metrics in the latest commit yet.' }));
+      return;
+    }
+    var engines = featured.competitorEngines; // [] until sq-t0c3 lands
+    featured.groups.forEach(function (g) {
+      var section = el('section', { 'class': 'featured-suite' }, [
+        el('h3', { 'class': 'featured-title', text: g.title })
+      ]);
+      var table = el('table', { 'class': 'summary-table featured-table' });
+      var headCells = [
+        // [OPUS-4.8] Header is "Metric" (matching the summary table) — the cell holds a general
+        // metric label + raw stem and may carry NON-query metrics (load/store/dict), so "Query" was
+        // inaccurate.
+        el('th', { text: 'Metric' }),
+        el('th', { 'class': 'num', text: 'sparq' }),
+        el('th', { text: 'Unit' }),
+        el('th', { 'class': 'num', text: 'Δ vs best' })
+      ];
+      // Competitor columns (seam): one per engine, header shows id + version when supplied.
+      engines.forEach(function (e) {
+        headCells.push(el('th', { 'class': 'num competitor-col',
+          text: e.label || e.id,
+          title: (e.version ? e.id + ' ' + e.version : e.id) + (e.env ? ' · ' + e.env : '') }));
+      });
+      table.appendChild(el('thead', null, [el('tr', null, headCells)]));
+      var tbody = el('tbody');
+      g.rows.forEach(function (r) {
+        var metricCell = el('td', { 'class': 'metric', title: r.title }, [
+          el('span', { 'class': 'metric-label', text: r.label }),
+          el('code', { 'class': 'metric-stem', text: r.name })
+        ]);
+        var cells = [
+          metricCell,
+          el('td', { 'class': 'num', text: fmtNum(r.value) }),
+          el('td', { 'class': 'unit', text: r.unit }),
+          el('td', { 'class': 'num delta' })
+        ];
+        cells[3].appendChild(pill(r.delta));
+        // Competitor cells (seam): render the number if present, else "—" (n/a).
+        engines.forEach(function (e) {
+          var v = r.competitors && r.competitors[e.id];
+          cells.push(el('td', { 'class': 'num competitor-col' + (v == null ? ' competitor-na' : ''),
+            text: v == null ? '—' : fmtNum(v),
+            title: v == null ? 'no competitor number gathered (sq-t0c3)' : '' }));
+        });
+        tbody.appendChild(el('tr', null, cells));
+      });
+      table.appendChild(tbody);
+      section.appendChild(table);
+      host.appendChild(section);
+    });
+  }
+
+  // ---- scaling comparison charts: DOM (sq-viby) ----------------------------
+  // Renders the #scaling host (a card at the BOTTOM). One line chart per scaling family: x = the
+  // derived size/depth axis (LINEAR, ascending), y = the metric value. ONE line for sparq today;
+  // the same x-axis is the seam where sq-t0c3 competitor series would add lines. Graceful: a
+  // single-point family renders as one marker plus a "single data point" note.
+  function renderScaling(families) {
+    var host = document.getElementById('scaling');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!families.length) {
+      host.appendChild(el('p', { 'class': 'hint',
+        text: 'No size-parametrised benchmark families detected yet — scaling charts appear once a '
+            + 'suite reports a metric at multiple sizes/depths (e.g. Deep Taxonomy depths, WatDiv SF).' }));
+      return;
+    }
+    var darkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var grid = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)';
+    var tick = darkMode ? '#9aa4b2' : '#586069';
+    var gridEl = el('div', { 'class': 'chart-grid' });
+    families.forEach(function (f, i) {
+      var single = f.points.length < 2;
+      var card = el('div', { 'class': 'chart-card scaling-card' }, [
+        el('div', { 'class': 'chart-title', title: f.title,
+          text: f.label + ' — vs ' + f.axisLabel + ' (' + f.unit + ')' }),
+        el('code', { 'class': 'chart-stem', title: f.title, text: f.base })
+      ]);
+      if (single) {
+        card.appendChild(el('div', { 'class': 'scaling-note',
+          text: 'single data point (axis: ' + f.axisLabel + ' = ' + f.points[0].axis + ') — '
+              + 'curve appears once more sizes are reported' }));
+      }
+      var canvas = el('canvas');
+      card.appendChild(canvas);
+      gridEl.appendChild(card);
+      if (typeof Chart === 'undefined') return;
+      var color = PALETTE[i % PALETTE.length];
+      // points are {axis,value}; plot as {x:axis,y:value} on a LINEAR x-axis so spacing reflects
+      // magnitude (SF=1 vs SF=1000 are far apart, as they should be).
+      var pts = f.points.map(function (p) { return { x: p.axis, y: p.value }; });
+      // eslint-disable-next-line no-new
+      new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { datasets: [{
+          label: 'sparq', data: pts, borderColor: color,
+          backgroundColor: color + '22', borderWidth: 2,
+          pointRadius: 3, pointHoverRadius: 5, fill: false, lineTension: 0
+        }] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          legend: { display: false },
+          tooltips: {
+            mode: 'nearest', intersect: false,
+            callbacks: {
+              title: function (items) { return f.axisLabel + ' = ' + items[0].xLabel; },
+              label: function (item) { return fmtNum(item.yLabel) + ' ' + f.unit; }
+            }
+          },
+          scales: {
+            xAxes: [{ type: 'linear', position: 'bottom',
+                      scaleLabel: { display: true, labelString: f.axisLabel, fontColor: tick },
+                      gridLines: { color: grid }, ticks: { fontColor: tick, maxTicksLimit: 6 } }],
+            yAxes: [{ gridLines: { color: grid },
+                      ticks: { fontColor: tick, maxTicksLimit: 4, callback: function (v) { return fmtNum(v); } } }]
+          }
+        }
+      });
+    });
+    host.appendChild(gridEl);
+  }
+
   function render() {
     var data = window.BENCHMARK_DATA;
     if (!data || !data.entries || !data.entries[SERIES] || !data.entries[SERIES].length) {
@@ -310,13 +630,21 @@
     }
     var entries = data.entries[SERIES];
     var summary = buildSummary(entries);
+    // sq-t0c3 SEAM: competitor numbers live in window.COMPETITORS (loaded from bench/competitors.json
+    // by sq-t0c3). Absent today -> featured table shows only the sparq column and "—" everywhere a
+    // competitor cell would go. We never gather them here.
+    var competitors = (typeof window !== 'undefined' && window.COMPETITORS) || null;
+    var featured = buildFeatured(entries, competitors);
+    var families = buildScalingFamilies(entries);
     document.getElementById('updated').textContent =
       'last updated ' + new Date(data.lastUpdate).toLocaleString() +
       ' · ' + entries.length + ' commits';
     var repo = el('a', { href: data.repoUrl, target: '_blank', text: data.repoUrl.replace(/^https?:\/\//, '') });
     document.getElementById('repo').appendChild(repo);
+    renderFeatured(featured);                 // sq-xvow — TOP
     renderSummary(summary);
     if (typeof Chart !== 'undefined') renderCharts(entries, summary);
+    renderScaling(families);                  // sq-viby — BOTTOM
   }
 
   // [OPUS-4.8] sq-ocuf: load metric-labels.json (readable labels) BEFORE rendering. The file is
