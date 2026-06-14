@@ -1,0 +1,14 @@
+# [OPUS-4.8] LUBM Q9 — ENTAILED (rdfs:subClassOf via Student AND Faculty). The "triangle":
+# a Student advised by a Faculty member who teaches a Course the student takes. Both Student
+# (undergrad+grad, see Q6) and Faculty (super of the professor/lecturer ranks) require the
+# subclass closure; 0 without reasoning. The heaviest LUBM query.
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x ?y ?z WHERE {
+  ?x rdf:type ub:Student .
+  ?y rdf:type ub:Faculty .
+  ?z rdf:type ub:Course .
+  ?x ub:advisor ?y .
+  ?y ub:teacherOf ?z .
+  ?x ub:takesCourse ?z .
+}

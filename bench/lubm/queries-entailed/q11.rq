@@ -1,0 +1,10 @@
+# [OPUS-4.8] LUBM Q11 — ENTAILED (owl:TransitiveProperty subOrganizationOf). ResearchGroups
+# that are sub-organizations of University0. The data asserts ResearchGroup -> Department and
+# Department -> University0 separately; the direct ResearchGroup -> University0 link only exists
+# after transitive closure of subOrganizationOf. 0 without reasoning.
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x WHERE {
+  ?x rdf:type ub:ResearchGroup .
+  ?x ub:subOrganizationOf <http://www.University0.edu> .
+}

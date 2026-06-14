@@ -1,0 +1,11 @@
+# [OPUS-4.8] LUBM Q13 — ENTAILED (owl:inverseOf + rdfs:subClassOf). People who are an alumnus of
+# University0. The data asserts <person> degreeFrom University0 (via the *DegreeFrom subprops);
+# ub:hasAlumnus is the INVERSE of degreeFrom, so University0 hasAlumnus <person> only exists
+# after inverse-property reasoning. ub:Person also needs the subclass closure. 0 without
+# reasoning. (Inverse handling is the LUBM feature most engines skip — this query tests it.)
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x WHERE {
+  ?x rdf:type ub:Person .
+  <http://www.University0.edu> ub:hasAlumnus ?x .
+}

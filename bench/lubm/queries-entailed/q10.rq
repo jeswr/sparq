@@ -1,0 +1,9 @@
+# [OPUS-4.8] LUBM Q10 — ENTAILED (Student closure, see Q6). Students who take GraduateCourse0.
+# The takers are GraduateStudents, whose Student membership is only derivable via the OWL
+# restriction reasoning — RDFS alone returns 0 here; OWL-RL returns the grad-student takers.
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x WHERE {
+  ?x rdf:type ub:Student .
+  ?x ub:takesCourse <http://www.Department0.University0.edu/GraduateCourse0> .
+}

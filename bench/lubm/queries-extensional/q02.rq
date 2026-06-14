@@ -1,0 +1,14 @@
+# [OPUS-4.8] LUBM Q2 — EXTENSIONAL. Triangular join over the three EXPLICIT leaf types
+# (GraduateStudent / University / Department). Empty at LUBM(1) (the canonical answer is 0 for
+# a single university — no student's undergrad-degree university coincides with their dept's
+# parent university at this scale); the 0 is a deterministic, reasoning-independent result.
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x ?y ?z WHERE {
+  ?x rdf:type ub:GraduateStudent .
+  ?y rdf:type ub:University .
+  ?z rdf:type ub:Department .
+  ?x ub:memberOf ?z .
+  ?z ub:subOrganizationOf ?y .
+  ?x ub:undergraduateDegreeFrom ?y .
+}

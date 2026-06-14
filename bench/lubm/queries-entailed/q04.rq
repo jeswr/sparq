@@ -1,0 +1,12 @@
+# [OPUS-4.8] LUBM Q4 — ENTAILED (rdfs:subClassOf). Asks for ub:Professor, a SUPERCLASS; the
+# data only types the leaf ranks (FullProfessor/AssociateProfessor/AssistantProfessor). Without
+# the subclass closure this returns 0; with OWL-RL it returns the professors of Department0.
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x ?y1 ?y2 ?y3 WHERE {
+  ?x rdf:type ub:Professor .
+  ?x ub:worksFor <http://www.Department0.University0.edu> .
+  ?x ub:name ?y1 .
+  ?x ub:emailAddress ?y2 .
+  ?x ub:telephone ?y3 .
+}
