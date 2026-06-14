@@ -29,7 +29,7 @@ Documentation = "https://github.com/jeswr/sparq#readme"
 Issues = "https://github.com/jeswr/sparq/issues"
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+test = ["pytest>=8.4.2"]
 
 [tool.maturin]
 # The cdylib's lib name and #[pymodule] are both `sparq`, so no module-name
