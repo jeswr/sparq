@@ -70,8 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut addr = "127.0.0.1:3030".to_string();
     let mut format = "turtle".to_string();
     let mut data_file: Option<String> = None;
-    // Env first, flags override.
-    let mut config = ServerConfig::from_env();
+    // Env first, flags override. [OPUS-4.8] sq-4w18: a malformed SPARQ_SERVICE_ALLOW
+    // surfaces here as a clean config error (the `?` turns the String into the boxed
+    // error main returns -> a one-line message to stderr + non-zero exit), not a panic.
+    let mut config = ServerConfig::from_env()?;
     // [OPUS-4.8] sq-4w18: collect SERVICE egress allowlist entries from the CLI; they
     // are UNIONed with the SPARQ_SERVICE_ALLOW env baseline (already in `config`) + an
     // optional --service-allow-file, after the arg loop. An allowlist is additive, so

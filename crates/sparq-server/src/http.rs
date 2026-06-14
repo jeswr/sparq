@@ -198,7 +198,14 @@ impl ServerConfig {
     /// and `SPARQ_SERVICE_ALLOW` (comma/whitespace-separated SERVICE egress allowlist;
     /// [OPUS-4.8] sq-4w18). CLI flags override / widen these in `main` (the allowlist is
     /// additive: `--service-allow` / `--service-allow-file` UNION with the env baseline).
-    pub fn from_env() -> Self {
+    ///
+    /// [OPUS-4.8] sq-4w18: returns `Err` (rather than panicking) on a malformed
+    /// `SPARQ_SERVICE_ALLOW` entry. `from_env` is public config API an embedder may
+    /// call, and a panic in a config constructor is a hostile surprise; a `Result`
+    /// (the crate's `Result<_, String>` error style, e.g. `from_sources` / nlq's
+    /// `from_env`) lets the caller surface a clean user-facing message. The valid
+    /// path is byte-for-byte unchanged.
+    pub fn from_env() -> Result<Self, String> {
         let mut cfg = Self::default();
         if let Some(secs) = env_parse::<u64>("SPARQ_QUERY_TIMEOUT") {
             cfg.query_timeout = (secs > 0).then(|| Duration::from_secs(secs));
@@ -236,14 +243,15 @@ impl ServerConfig {
         // [OPUS-4.8] sq-4w18: SERVICE egress allowlist baseline from SPARQ_SERVICE_ALLOW
         // (comma/whitespace-separated). The binary then ADDS any `--service-allow` /
         // `--service-allow-file` entries (the union — CLI only ever widens). A malformed
-        // env entry is a hard startup error rather than a silently-dropped host, so the
-        // operator's allowlist is never quietly narrower than written.
+        // env entry is a hard startup error (propagated, not panicked) rather than a
+        // silently-dropped host, so the operator's allowlist is never quietly narrower
+        // than written.
         if let Ok(v) = std::env::var("SPARQ_SERVICE_ALLOW") {
             cfg.service_allow
                 .add_many(&v)
-                .unwrap_or_else(|e| panic!("SPARQ_SERVICE_ALLOW: {e}"));
+                .map_err(|e| format!("SPARQ_SERVICE_ALLOW: {e}"))?;
         }
-        cfg
+        Ok(cfg)
     }
 }
 
