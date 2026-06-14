@@ -1235,24 +1235,38 @@ mod tests {
         let c = SpillConfig::detected();
         assert!(c.mem_budget >= 64 << 20, "budget floors at 64 MiB: {}", c.mem_budget);
         assert_eq!(c.disk_floor, 1 << 30, "default disk floor is 1 GiB");
-        // detected_ram_bytes is unix-only; on this CI host it must report a positive value.
+        // detected_ram_bytes is unix-only and documented to return None when undetectable
+        // (sysconf can legitimately fail on some targets/sandboxes). Only assert positivity
+        // when a value is actually reported, so the test never flakes where detection is
+        // unavailable. (roborev/Copilot 2026-06-14)
         #[cfg(unix)]
-        assert!(detected_ram_bytes().unwrap_or(0) > 0, "physical RAM must be detectable on unix");
+        if let Some(ram) = detected_ram_bytes() {
+            assert!(ram > 0, "detected physical RAM must be positive when reported");
+        }
     }
 
     #[test]
     fn spill_config_from_env_gate_and_overrides() {
-        // The env gate is process-global; serialize the reads/writes within this one test
-        // and always restore, so we never race a parallel test on the same vars.
-        let keys = ["SPARQ_DICT_SPILL", "SPARQ_DICT_SPILL_BUDGET_MB", "SPARQ_DICT_SPILL_DISK_FLOOR_MB"];
-        let saved: Vec<Option<String>> = keys.iter().map(|k| std::env::var(k).ok()).collect();
-        let restore = || {
-            for (k, v) in keys.iter().zip(&saved) {
-                match v {
-                    Some(s) => std::env::set_var(k, s),
-                    None => std::env::remove_var(k),
+        // The env gate is process-global. Restore the original values via an RAII guard so
+        // they're put back even if an assertion panics mid-test — a manual restore at the
+        // end would leak mutated vars into other tests that read SpillConfig::from_env when
+        // a panic short-circuits it. (roborev/Copilot 2026-06-14)
+        struct EnvRestore {
+            saved: Vec<(&'static str, Option<String>)>,
+        }
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (k, v) in &self.saved {
+                    match v {
+                        Some(s) => std::env::set_var(k, s),
+                        None => std::env::remove_var(k),
+                    }
                 }
             }
+        }
+        let keys = ["SPARQ_DICT_SPILL", "SPARQ_DICT_SPILL_BUDGET_MB", "SPARQ_DICT_SPILL_DISK_FLOOR_MB"];
+        let _guard = EnvRestore {
+            saved: keys.iter().map(|k| (*k, std::env::var(k).ok())).collect(),
         };
 
         // Disabled / unset -> None.
@@ -1276,7 +1290,7 @@ mod tests {
         let c = SpillConfig::from_env().expect("auto enables");
         assert_eq!(c.mem_budget, 1 << 20, "0 MB budget clamps to the 1 MiB minimum");
 
-        restore();
+        // _guard restores the original env on drop (including on a panic above).
     }
 
     #[test]
