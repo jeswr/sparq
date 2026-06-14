@@ -3240,6 +3240,89 @@ mod tests {
         assert!(turtle_chunks(bn.as_bytes(), 32).is_some(), "blank nodes must no longer bail to serial");
     }
 
+    /// [OPUS-4.8] sq-t267: RDF 1.2 / RDF-star quoted triples must parse IDENTICALLY through the
+    /// chunk-parallel Turtle path and the serial path — including a quoted triple that lands at a
+    /// CHUNK BOUNDARY. The terminator pre-scan ([`next_terminator`]) treats the `<` of `<<( … )>>`
+    /// as an IRI start and scans to the first `>`, so it skips the whole triple term as one opaque
+    /// span; the load-bearing risk is a DECIMAL or a `.`-bearing IRI *inside* the term being misread
+    /// as a top-level statement terminator (which would split a chunk mid-triple-term and corrupt
+    /// the parse). This pins chunked == serial for: (a) plain quoted-triple objects, (b) a decimal
+    /// INSIDE the triple term, (c) the `{| … |}` annotation form (asserts base triple + reifies +
+    /// annotation), and (d) a single LARGE quoted-triple statement whose body straddles the split
+    /// point — the chunk boundary falls right after its terminator, not inside it.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_turtle_quoted_triples_match_serial() {
+        let differential = |ttl: &str, target: usize, want_fanout: bool| {
+            let chunks = turtle_chunks(ttl.as_bytes(), target);
+            if want_fanout {
+                let c = chunks.expect("quoted-triple doc must fan out, not bail to serial");
+                assert!(c.len() > 1, "doc must split into multiple chunks (boundaries between triple-term statements)");
+            }
+            let (pd, pt) = parse_turtle_chunked(ttl.as_bytes(), target).unwrap();
+            let mut sd = Dict::new();
+            let st = parse_turtle_chunk(ttl.as_bytes(), &mut sd).unwrap();
+            assert_eq!(
+                canon_bnodes(&pd, &pt),
+                canon_bnodes(&sd, &st),
+                "quoted-triple chunked parse must equal serial"
+            );
+            (pt.len(), st.len())
+        };
+
+        // (a) Plain quoted-triple objects, one statement each, many statements so the splitter
+        //     puts chunk boundaries BETWEEN triple-term statements. The `>` inside `>>` and the
+        //     `<` of `<<(` must not desync the terminator scan.
+        let mut plain = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..500 {
+            plain.push_str(&format!(":s{i} :annotates <<( :a{i} :age {i} )>> .\n"));
+        }
+        assert!(plain.len() > 8192);
+        let (p, s) = differential(&plain, 32, true);
+        assert_eq!(p, s);
+        assert_eq!(p, 500, "every quoted-triple statement must parse");
+
+        // (b) A DECIMAL inside the triple term (`3.5`) — the `.` is inside the `<…>`-skipped span,
+        //     so it must NOT be read as a statement terminator. Plus a `.`-bearing IRI inside.
+        let mut decimals = String::from("@prefix : <http://ex/> .\n@prefix ex: <http://e.x/foo.bar#> .\n");
+        for i in 0..400 {
+            decimals.push_str(&format!(
+                ":m{i} :stmt <<( ex:r{i} :weight {i}.5 )>> ; :note <<( :a :seeAlso <http://x.y/p.{i}> )>> .\n"
+            ));
+        }
+        assert!(decimals.len() > 8192);
+        differential(&decimals, 32, true);
+
+        // (c) The `{| … |}` annotation form: each statement expands to the asserted base triple,
+        //     a fresh `rdf:reifies <<( … )>>`, and the annotation triple — all of which must
+        //     survive chunking identically (anonymous reifier ids canonicalised by position).
+        let mut annot = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..400 {
+            annot.push_str(&format!(":a{i} :age {i} {{| :certainty {i}.5 ; :by :src{i} |}} .\n"));
+        }
+        assert!(annot.len() > 8192);
+        differential(&annot, 32, true);
+
+        // (d) A SINGLE large quoted-triple statement (long IRIs, internal newlines/decimals)
+        //     padded with ground statements either side, so a chunk boundary falls right AFTER
+        //     the big statement's terminator — exercising the boundary-adjacent case without
+        //     splitting the term itself. chunked == serial is the witness it stayed intact.
+        let mut boundary = String::from("@prefix : <http://ex/> .\n");
+        for i in 0..400 {
+            boundary.push_str(&format!(":prefix{i} :predicate :object{i} .\n"));
+        }
+        boundary.push_str(
+            ":big :annotates\n  <<( <http://very.long/iri.with.dots/subject>\n      :measuredAt\n      3.14159 )>> .\n",
+        );
+        for i in 0..400 {
+            boundary.push_str(&format!(":postfix{i} :predicate :object{i} .\n"));
+        }
+        assert!(boundary.len() > 8192, "len={}", boundary.len());
+        let (p, s) = differential(&boundary, 32, true);
+        assert_eq!(p, s);
+        assert_eq!(p, 801, "400 pre + 1 quoted + 400 post");
+    }
+
     /// Decodes a parsed triple sequence to strings with blank nodes renumbered by FIRST
     /// OCCURRENCE in document order. This makes serial-vs-parallel comparison EXACT (plain
     /// `assert_eq!`) rather than requiring graph-isomorphism search: the chunked parse
