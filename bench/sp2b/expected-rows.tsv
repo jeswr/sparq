@@ -1,0 +1,22 @@
+# [OPUS-4.8] SP2Bench per-commit expected result sizes (count mode = solution count).
+# Differential check: at the FIXED 250k-triple corpus (bench/sp2b/gen.sh 250000), each
+# query's solution count is deterministic, so a row-count drift = a correctness regression.
+# Format: <query>\t<rows>. Wired into scripts/ci-bench.sh (sp2b hook) as a hard equality
+# check on count mode. Heavy-tier queries (q05a/q06/q12a) live in queries-heavy/ and are
+# checked in the EC2/nightly tier, not here.
+#
+# ASK queries report 1 (true) / 0 (false) in count mode: q12b=true(1), q12c=false(0).
+q01	1
+q02	6067
+q03a	15823
+q03b	114
+q03c	0
+q04	541911
+q05b	6933
+q07	48
+q08	358
+q09	4
+q10	452
+q11	10
+q12b	1
+q12c	0
