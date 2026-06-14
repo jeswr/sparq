@@ -35,7 +35,9 @@ pub mod metrics;
 pub mod subscriptions;
 
 #[cfg(feature = "server")]
-pub use http::{harden, router, AppState, PinnedGen, ServerConfig, GLOBAL_POD};
+pub use http::{
+    bind_posture, harden, router, AppState, BindPosture, PinnedGen, ServerConfig, GLOBAL_POD,
+}; // [OPUS-4.8] sq-o4qf: bind_posture / BindPosture for the no-auth non-loopback bind gate
 
 /// [OPUS-4.8] (sq-uqh, Wave B) Re-exported for consumers (and tests) that introspect a
 /// pinned generation's per-pod epoch vector — the cache-invalidation hook the server's
