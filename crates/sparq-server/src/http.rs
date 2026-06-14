@@ -71,6 +71,34 @@ pub(crate) fn with_extensions<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// [OPUS-4.8] (sq-4w18) Runs an engine call inside the full per-request engine scope:
+/// the SERVICE egress allowlist policy AND the SPARQL extension functions.
+///
+/// With the `service` cargo feature, this installs
+/// [`sparq_engine::with_service_egress_policy`] in STRICT (allowlist-only) mode for the
+/// config's [`ServerConfig::service_allow`]: SERVICE may reach ONLY allowlisted hosts —
+/// an empty allowlist (the default) refuses ALL federation before any network call.
+/// Every engine entry point that can evaluate a `SERVICE` clause (query, ASK,
+/// CONSTRUCT/DESCRIBE, the subscription re-eval, and updates with a federated WHERE) is
+/// wrapped in this, so the policy applies uniformly. The policy is a thread-local
+/// installed for the closure's duration; the engine re-checks it inside the ureq
+/// resolver on the same thread, so it covers the blocking-pool worker that runs the call.
+///
+/// Without the `service` feature this is exactly [`with_extensions`] — no federation
+/// code exists, so there is nothing to gate (a SERVICE clause errors at execution).
+#[cfg(feature = "service")]
+pub(crate) fn with_engine_scope<T>(config: &ServerConfig, f: impl FnOnce() -> T) -> T {
+    sparq_engine::with_service_egress_policy(true, config.service_allow.engine_entries(), || {
+        with_extensions(f)
+    })
+}
+
+#[cfg(not(feature = "service"))]
+#[inline(always)]
+pub(crate) fn with_engine_scope<T>(_config: &ServerConfig, f: impl FnOnce() -> T) -> T {
+    with_extensions(f)
+}
+
 // ---------------------------------------------------------------------------
 // Hardening configuration (T15)
 // ---------------------------------------------------------------------------
@@ -124,6 +152,20 @@ pub struct ServerConfig {
     /// This is purely a *bind-time* posture gate in the binary; it does not add any
     /// per-request auth and does not affect the library `router`/`harden` surface.
     pub allow_remote: bool,
+    /// [OPUS-4.8] (sq-4w18) SERVICE federation egress allowlist. SPARQL `SERVICE <iri>`
+    /// makes attacker-controlled query text trigger an outbound HTTP request from the
+    /// server host — an SSRF surface. The server's posture is **default-DENY-all
+    /// SERVICE**: with the `service` cargo feature on but this allowlist EMPTY (the
+    /// default), every SERVICE clause is refused before any network call. An operator
+    /// opts hosts back in via `--service-allow` / `--service-allow-file` /
+    /// `SPARQ_SERVICE_ALLOW` (see [`crate::ServiceAllowlist`]); only listed hosts (or
+    /// `*.suffix` matches) become reachable — even a public host must be listed.
+    ///
+    /// Enforced by installing [`sparq_engine::with_service_egress_policy`] (strict =
+    /// allowlist-only) around every engine call. Without the `service` cargo feature
+    /// this field is still present (so the config shape is stable) but inert: no
+    /// federation code is compiled and a SERVICE clause errors at execution as before.
+    pub service_allow: crate::service_config::ServiceAllowlist,
 }
 
 impl Default for ServerConfig {
@@ -141,6 +183,8 @@ impl Default for ServerConfig {
             time_travel_max_age: None,
             verbose: false,
             allow_remote: false, // [OPUS-4.8] sq-o4qf: safe default — refuse non-loopback bind unless opted in
+            // [OPUS-4.8] sq-4w18: safe default — empty allowlist = deny ALL SERVICE.
+            service_allow: crate::service_config::ServiceAllowlist::default(),
         }
     }
 }
@@ -150,8 +194,18 @@ impl ServerConfig {
     /// `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT` and `SPARQ_MAX_RESULTS`
     /// environment variables — plus, with the `time-travel` feature,
     /// `SPARQ_TIME_TRAVEL_GENERATIONS` and `SPARQ_TIME_TRAVEL_MAX_AGE` (seconds;
-    /// `0` disables the age bound). CLI flags override these in `main`.
-    pub fn from_env() -> Self {
+    /// `0` disables the age bound), `SPARQ_ALLOW_REMOTE` (non-loopback bind opt-in),
+    /// and `SPARQ_SERVICE_ALLOW` (comma/whitespace-separated SERVICE egress allowlist;
+    /// [OPUS-4.8] sq-4w18). CLI flags override / widen these in `main` (the allowlist is
+    /// additive: `--service-allow` / `--service-allow-file` UNION with the env baseline).
+    ///
+    /// [OPUS-4.8] sq-4w18: returns `Err` (rather than panicking) on a malformed
+    /// `SPARQ_SERVICE_ALLOW` entry. `from_env` is public config API an embedder may
+    /// call, and a panic in a config constructor is a hostile surprise; a `Result`
+    /// (the crate's `Result<_, String>` error style, e.g. `from_sources` / nlq's
+    /// `from_env`) lets the caller surface a clean user-facing message. The valid
+    /// path is byte-for-byte unchanged.
+    pub fn from_env() -> Result<Self, String> {
         let mut cfg = Self::default();
         if let Some(secs) = env_parse::<u64>("SPARQ_QUERY_TIMEOUT") {
             cfg.query_timeout = (secs > 0).then(|| Duration::from_secs(secs));
@@ -186,7 +240,18 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("SPARQ_ALLOW_REMOTE") {
             cfg.allow_remote = env_truthy(&v);
         }
-        cfg
+        // [OPUS-4.8] sq-4w18: SERVICE egress allowlist baseline from SPARQ_SERVICE_ALLOW
+        // (comma/whitespace-separated). The binary then ADDS any `--service-allow` /
+        // `--service-allow-file` entries (the union — CLI only ever widens). A malformed
+        // env entry is a hard startup error (propagated, not panicked) rather than a
+        // silently-dropped host, so the operator's allowlist is never quietly narrower
+        // than written.
+        if let Ok(v) = std::env::var("SPARQ_SERVICE_ALLOW") {
+            cfg.service_allow
+                .add_many(&v)
+                .map_err(|e| format!("SPARQ_SERVICE_ALLOW: {e}"))?;
+        }
+        Ok(cfg)
     }
 }
 
@@ -410,11 +475,23 @@ impl TouchedPods {
 
 /// The sequenced writer's snapshot-production strategy: sparq-serve's [`GraphApplier`]
 /// (per-batch O(graph) fork + O(batch) `update_in_place` — see its module docs for the
-/// recorded cost decision), with every engine call wrapped in [`with_extensions`] so the
-/// opt-in `geo` registry applies to updates exactly as it does to queries. The trait is
-/// sparq-serve's documented seam for exactly this wrapper.
-#[derive(Default)]
-struct ServerApplier(GraphApplier);
+/// recorded cost decision), with every engine call wrapped in [`with_engine_scope`] so the
+/// opt-in `geo` registry AND the SERVICE egress allowlist (sq-4w18) apply to updates
+/// exactly as they do to queries — an `INSERT … WHERE { SERVICE <iri> { … } }` update
+/// federates under the same default-deny allowlist as a read. The trait is sparq-serve's
+/// documented seam for exactly this wrapper. [OPUS-4.8]
+struct ServerApplier {
+    inner: GraphApplier,
+    /// The config the writer thread enforces around every engine call (carries the
+    /// SERVICE egress allowlist; the writer has no per-request config, so it owns its own).
+    config: Arc<ServerConfig>,
+}
+
+impl ServerApplier {
+    fn new(config: Arc<ServerConfig>) -> Self {
+        Self { inner: GraphApplier::default(), config }
+    }
+}
 
 impl ApplyUpdates for ServerApplier {
     type Snapshot = Graph;
@@ -422,15 +499,15 @@ impl ApplyUpdates for ServerApplier {
     type Update = String;
 
     fn fork(&mut self, base: &Graph) -> Result<Graph, String> {
-        with_extensions(|| self.0.fork(base))
+        with_engine_scope(&self.config, || self.inner.fork(base))
     }
 
     fn apply(&mut self, working: &mut Graph, update: &String) -> Result<(), String> {
-        with_extensions(|| self.0.apply(working, update))
+        with_engine_scope(&self.config, || self.inner.apply(working, update))
     }
 
     fn seal(&mut self, working: Graph) -> Graph {
-        self.0.seal(working)
+        self.inner.seal(working)
     }
 }
 
@@ -489,11 +566,19 @@ impl AppState {
             ..sparq_serve::RingConfig::default()
         };
         let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
-        let writer = Arc::new(Writer::spawn(ring.clone(), ServerApplier::default(), WriterConfig::default()));
+        // [OPUS-4.8] sq-4w18: share the config Arc with the writer so its update path
+        // enforces the same SERVICE egress allowlist (a federated `INSERT … WHERE` is
+        // gated like a read).
+        let config = Arc::new(config);
+        let writer = Arc::new(Writer::spawn(
+            ring.clone(),
+            ServerApplier::new(config.clone()),
+            WriterConfig::default(),
+        ));
         Self {
             ring,
             writer,
-            config: Arc::new(config),
+            config,
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
             metrics: Arc::new(crate::metrics::Metrics::default()),
@@ -939,7 +1024,10 @@ async fn run_query_pinned(
         let budget = make_budget(&config, true);
         let task = tokio::task::spawn_blocking(move || {
             let graph = gen.snapshot();
-            let r = with_extensions(|| {
+            // [OPUS-4.8] sq-4w18: EXPLAIN ANALYZE executes (can hit SERVICE), so it runs
+            // under the egress allowlist policy like a normal query; plan-only is a dry
+            // run but is wrapped identically for uniformity (it never dials).
+            let r = with_engine_scope(&cfg, || {
                 if analyze {
                     sparq_engine::explain_analyze_with_budget(graph, &q, &budget)
                 } else {
@@ -968,7 +1056,7 @@ async fn run_query_pinned(
             let budget = make_budget(&config, !is_ask);
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
-                with_extensions(|| if is_ask {
+                with_engine_scope(&cfg, || if is_ask {
                     match sparq_engine::ask_with_budget(gen.snapshot(), &select, &budget) {
                         Ok(value) => {
                             let (body, ct) = match fmt {
@@ -999,7 +1087,7 @@ async fn run_query_pinned(
                 // [OPUS-4.8] sq-rt6v: produce the triple list once, then serialise it in the
                 // negotiated graph syntax — N-Triples (default), prefix-compacting Turtle, or
                 // RDF/XML — rather than always emitting N-Triples.
-                match with_extensions(|| sparq_engine::construct_or_describe_with_budget(gen.snapshot(), &query, &budget)) {
+                match with_engine_scope(&cfg, || sparq_engine::construct_or_describe_with_budget(gen.snapshot(), &query, &budget)) {
                     Ok(triples) => {
                         let body = serialise_graph_triples(&triples, gfmt);
                         text_response(StatusCode::OK, gfmt.content_type(), body, head_only)
@@ -1900,5 +1988,40 @@ mod bind_posture_tests {
         for f in ["", "0", "false", "no", "off", "2", "maybe"] {
             assert!(!env_truthy(f), "{f:?} should be falsy");
         }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-4w18 — SERVICE egress allowlist config wiring tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod service_allow_config_tests {
+    //! The default posture and the ServerConfig <-> engine-entries plumbing. These are
+    //! pure (no process-env mutation) so they parallelise; the env-precedence path
+    //! (SPARQ_SERVICE_ALLOW baseline + CLI/file union) is covered by
+    //! `service_config::tests::from_sources_unions_cli_file_env`.
+    use super::ServerConfig;
+    use crate::service_config::ServiceAllowlist;
+
+    #[test]
+    fn default_config_denies_all_service() {
+        // The safe default: no host allowlisted => deny ALL SERVICE.
+        let cfg = ServerConfig::default();
+        assert!(cfg.service_allow.is_empty(), "default must be deny-all");
+        assert!(cfg.service_allow.engine_entries().is_empty());
+    }
+
+    #[test]
+    fn populated_allowlist_flows_to_engine_entries() {
+        let mut cfg = ServerConfig::default();
+        let mut allow = ServiceAllowlist::default();
+        allow.add("sparql.example.org").unwrap();
+        allow.add("*.internal").unwrap();
+        cfg.service_allow = allow;
+        let mut e = cfg.service_allow.engine_entries();
+        e.sort();
+        // Exact host verbatim; the wildcard in the engine's leading-dot form.
+        assert_eq!(e, vec![".internal".to_string(), "sparql.example.org".to_string()]);
     }
 }

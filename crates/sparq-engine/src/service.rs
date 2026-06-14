@@ -242,41 +242,105 @@ pub(crate) fn is_forbidden_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// SERVICE egress allowlist. A host (DNS name or IP literal, exactly as written
-/// in the SERVICE IRI authority) on this list is exempt from [`is_forbidden_ip`]
-/// — its resolved addresses are permitted even when private. Empty by default
-/// (full default-deny). Installed for a scope via [`with_service_egress_allow`],
-/// mirroring `update.rs`'s `with_load_base` thread-local allowlist pattern.
+/// SERVICE egress allowlist + policy mode. A host (DNS name or IP literal, exactly
+/// as written in the SERVICE IRI authority) on this list is exempt from
+/// [`is_forbidden_ip`] — its resolved addresses are permitted even when private.
+///
+/// Two modes (the [`Mode`] flag), both default-deny but at different strictnesses:
+///
+/// * **`Mode::DenyPrivate`** (the engine's standalone default, installed by
+///   [`with_service_egress_allow`]): public IPs are reachable, private/internal IPs
+///   are refused unless the host is on the allowlist. Allowlist entries only *add*
+///   permission (re-open a private host).
+/// * **`Mode::AllowlistOnly`** (the strict mode the *server* uses, installed by
+///   [`with_service_egress_policy`]): ONLY hosts on the allowlist may be reached at
+///   all — every other host is refused even if it resolves to a public address. An
+///   empty allowlist in this mode is therefore "deny ALL SERVICE", which is the
+///   server's safe default for the network-exposed surface.
+///
+/// Empty + `DenyPrivate` (the thread-local default before any scope installs a
+/// policy) preserves the original behaviour: public allowed, private denied.
+/// Installed for a scope via [`with_service_egress_allow`] /
+/// [`with_service_egress_policy`], mirroring `update.rs`'s `with_load_base`
+/// thread-local allowlist pattern. [OPUS-4.8] (sq-4w18)
 #[cfg(feature = "service")]
 pub(crate) mod egress_policy {
     use std::cell::RefCell;
     use std::collections::HashSet;
 
-    thread_local! {
-        static ALLOW: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// How the allowlist is interpreted for hosts NOT on it. [OPUS-4.8] (sq-4w18)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Mode {
+        /// Hosts off the allowlist are reachable iff they resolve to a *public*
+        /// address (private/internal IPs are refused). The engine's standalone
+        /// default and the semantics of [`super::with_service_egress_allow`].
+        DenyPrivate,
+        /// Hosts off the allowlist are refused unconditionally (even public IPs).
+        /// The server installs this so federation is restricted to exactly the
+        /// operator-listed hosts; an empty allowlist = deny ALL SERVICE.
+        AllowlistOnly,
     }
 
-    /// Restores the previous allowlist when the installing scope returns (also on
+    struct Policy {
+        allow: HashSet<String>,
+        mode: Mode,
+    }
+
+    thread_local! {
+        static POLICY: RefCell<Policy> =
+            RefCell::new(Policy { allow: HashSet::new(), mode: Mode::DenyPrivate });
+    }
+
+    /// Restores the previous policy when the installing scope returns (also on
     /// unwind, so a panicking SERVICE call never leaks a relaxed policy).
-    pub(crate) struct Guard(HashSet<String>);
+    pub(crate) struct Guard(Option<Policy>);
     impl Drop for Guard {
         fn drop(&mut self) {
-            ALLOW.with(|a| *a.borrow_mut() = std::mem::take(&mut self.0));
+            if let Some(prev) = self.0.take() {
+                POLICY.with(|p| *p.borrow_mut() = prev);
+            }
         }
     }
 
-    /// Installs `hosts` (lower-cased) as the allowlisted SERVICE hosts for the
-    /// duration of the returned guard; the previous set is restored on drop.
-    pub(crate) fn install(hosts: impl IntoIterator<Item = String>) -> Guard {
-        let set: HashSet<String> = hosts.into_iter().map(|h| h.to_ascii_lowercase()).collect();
-        // Swap in the new set and hand the previous one to the Guard for restore.
-        ALLOW.with(|a| Guard(std::mem::replace(&mut *a.borrow_mut(), set)))
+    /// Installs `hosts` (lower-cased) + `mode` as the active SERVICE egress policy
+    /// for the duration of the returned guard; the previous policy is restored on
+    /// drop.
+    pub(crate) fn install(hosts: impl IntoIterator<Item = String>, mode: Mode) -> Guard {
+        let allow: HashSet<String> = hosts.into_iter().map(|h| h.to_ascii_lowercase()).collect();
+        let next = Policy { allow, mode };
+        // Swap in the new policy and hand the previous one to the Guard for restore.
+        POLICY.with(|p| Guard(Some(std::mem::replace(&mut *p.borrow_mut(), next))))
     }
 
-    /// True if `host` (case-insensitive) is on the active allowlist.
+    /// True if `host` (case-insensitive) is on the active allowlist. An entry is
+    /// matched two ways: [OPUS-4.8] (sq-4w18)
+    ///   * **exact** — the entry equals the host (`"sparql.example.org"`).
+    ///   * **suffix wildcard** — an entry beginning with a dot (`".example.org"`)
+    ///     matches any host ending in that suffix INCLUDING the bare apex
+    ///     (`example.org`, `a.example.org`, `a.b.example.org`). This is the engine
+    ///     representation of the server's `*.example.org` pattern. The leading-dot
+    ///     boundary means `.example.org` does NOT match `notexample.org`.
     pub(crate) fn is_allowed(host: &str) -> bool {
         let h = host.to_ascii_lowercase();
-        ALLOW.with(|a| a.borrow().contains(&h))
+        POLICY.with(|p| {
+            let allow = &p.borrow().allow;
+            if allow.contains(&h) {
+                return true;
+            }
+            // Suffix-wildcard entries (".suffix"): match the apex and any subdomain.
+            allow.iter().any(|e| {
+                if let Some(suffix) = e.strip_prefix('.') {
+                    h == suffix || h.ends_with(e.as_str())
+                } else {
+                    false
+                }
+            })
+        })
+    }
+
+    /// The active policy mode.
+    pub(crate) fn mode() -> Mode {
+        POLICY.with(|p| p.borrow().mode)
     }
 }
 
@@ -304,7 +368,46 @@ pub fn with_service_egress_allow<R>(
     hosts: impl IntoIterator<Item = String>,
     f: impl FnOnce() -> R,
 ) -> R {
-    let _guard = egress_policy::install(hosts);
+    let _guard = egress_policy::install(hosts, egress_policy::Mode::DenyPrivate);
+    f()
+}
+
+/// Runs `f` under a STRICT SERVICE egress policy: only the listed `hosts` may be
+/// reached, and EVERY other host is refused — even one resolving to a public
+/// address. This is the policy the network-exposed **server** installs (bead
+/// sq-4w18): the SERVICE clause turns attacker-controlled SPARQL into outbound HTTP,
+/// so federation is restricted to exactly the operator-configured endpoints.
+///
+/// `strict = false` is identical to [`with_service_egress_allow`] (default-deny
+/// *private*: public hosts reachable, private/internal only if allowlisted). The
+/// server wires this directly to its `--service-allow` config so the same call site
+/// expresses both "no federation at all" (strict + empty list) and "an explicit
+/// allowlist" (strict + hosts). Host matching is case-insensitive against the
+/// SERVICE IRI *authority* (DNS name or IP literal), exactly like
+/// [`with_service_egress_allow`].
+///
+/// ```no_run
+/// # #[cfg(feature = "service")] {
+/// // Restrict SERVICE to a single trusted endpoint; anything else is refused.
+/// sparq_engine::with_service_egress_policy(true, ["sparql.example.org".to_string()], || {
+///     // ... run a query that may contain `SERVICE <…> { ... }`
+/// });
+/// // Strict + empty list = federation fully disabled (deny ALL SERVICE).
+/// sparq_engine::with_service_egress_policy(true, std::iter::empty(), || { /* ... */ });
+/// # }
+/// ```
+#[cfg(feature = "service")]
+pub fn with_service_egress_policy<R>(
+    strict: bool,
+    hosts: impl IntoIterator<Item = String>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let mode = if strict {
+        egress_policy::Mode::AllowlistOnly
+    } else {
+        egress_policy::Mode::DenyPrivate
+    };
+    let _guard = egress_policy::install(hosts, mode);
     f()
 }
 
@@ -356,6 +459,20 @@ impl ureq::Resolver for EgressFilterResolver {
         };
         let host = host.trim_start_matches('[').trim_end_matches(']');
         let allowed = egress_policy::is_allowed(host);
+        // [OPUS-4.8] (sq-4w18) STRICT (AllowlistOnly) mode — the server's policy —
+        // refuses any host not on the allowlist BEFORE resolving DNS, so a host that
+        // is not explicitly permitted never triggers even a lookup (no network at all,
+        // and no public-IP escape hatch). An empty allowlist here = deny ALL SERVICE.
+        if !allowed && egress_policy::mode() == egress_policy::Mode::AllowlistOnly {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "SERVICE egress refused: host {host:?} is not on the SERVICE allowlist \
+                     (strict allowlist-only policy; add it via --service-allow / SPARQ_SERVICE_ALLOW \
+                     on the server, or with_service_egress_policy in an embedder)"
+                ),
+            ));
+        }
         let all: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
         let permitted: Vec<std::net::SocketAddr> = all
             .into_iter()
@@ -596,7 +713,10 @@ mod tests {
         // Default: nothing is allowlisted.
         assert!(!egress_policy::is_allowed("localhost"));
         {
-            let _g = egress_policy::install(["localhost".to_string(), "10.0.0.5".to_string()]);
+            let _g = egress_policy::install(
+                ["localhost".to_string(), "10.0.0.5".to_string()],
+                egress_policy::Mode::DenyPrivate,
+            );
             assert!(egress_policy::is_allowed("localhost"));
             assert!(egress_policy::is_allowed("LOCALHOST")); // case-insensitive
             assert!(egress_policy::is_allowed("10.0.0.5"));
@@ -615,6 +735,45 @@ mod tests {
         assert!(seen);
         // Allowlist is gone after the scope returns.
         assert!(!egress_policy::is_allowed("sparql.internal"));
+    }
+
+    #[test]
+    fn strict_allowlist_only_mode_scopes_and_restores() {
+        // [OPUS-4.8] (sq-4w18) Strict mode: only listed hosts are allowed; the mode
+        // and allowlist both restore on scope exit.
+        assert_eq!(egress_policy::mode(), egress_policy::Mode::DenyPrivate);
+        assert!(!egress_policy::is_allowed("a.example"));
+        with_service_egress_policy(true, ["a.example".to_string()], || {
+            assert_eq!(egress_policy::mode(), egress_policy::Mode::AllowlistOnly);
+            assert!(egress_policy::is_allowed("a.example"));
+            assert!(egress_policy::is_allowed("A.EXAMPLE")); // case-insensitive
+            assert!(!egress_policy::is_allowed("b.example"));
+        });
+        assert_eq!(egress_policy::mode(), egress_policy::Mode::DenyPrivate);
+        assert!(!egress_policy::is_allowed("a.example"));
+    }
+
+    #[test]
+    fn suffix_wildcard_allowlist_matches_apex_and_subdomains() {
+        // [OPUS-4.8] (sq-4w18) A ".example.org" entry matches the apex and any
+        // subdomain, but not a host that merely ends in the same letters.
+        with_service_egress_policy(true, [".example.org".to_string()], || {
+            assert!(egress_policy::is_allowed("example.org")); // apex
+            assert!(egress_policy::is_allowed("sparql.example.org")); // subdomain
+            assert!(egress_policy::is_allowed("a.b.example.org")); // deep subdomain
+            assert!(egress_policy::is_allowed("SPARQL.EXAMPLE.ORG")); // case-insensitive
+            assert!(!egress_policy::is_allowed("notexample.org")); // boundary respected
+            assert!(!egress_policy::is_allowed("example.org.evil.com")); // suffix only
+        });
+    }
+
+    #[test]
+    fn non_strict_policy_matches_allow_helper() {
+        // strict=false behaves exactly like with_service_egress_allow (DenyPrivate).
+        with_service_egress_policy(false, ["c.example".to_string()], || {
+            assert_eq!(egress_policy::mode(), egress_policy::Mode::DenyPrivate);
+            assert!(egress_policy::is_allowed("c.example"));
+        });
     }
 
     #[test]
@@ -680,6 +839,48 @@ mod tests {
             .unwrap();
             assert_eq!(addrs.len(), 1);
             assert!(addrs[0].ip().is_loopback());
+        }
+
+        // [OPUS-4.8] (sq-4w18) Strict allowlist-only mode — the server's policy.
+
+        #[test]
+        fn strict_refuses_public_host_off_the_allowlist() {
+            let r = EgressFilterResolver;
+            let err = with_service_egress_policy(true, std::iter::empty(), || r.resolve("8.8.8.8:443"))
+                .unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        }
+
+        #[test]
+        fn strict_empty_allowlist_denies_all() {
+            let r = EgressFilterResolver;
+            for netloc in ["8.8.8.8:443", "1.1.1.1:80", "127.0.0.1:8080"] {
+                let err = with_service_egress_policy(true, std::iter::empty(), || r.resolve(netloc))
+                    .unwrap_err();
+                assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{netloc} must be refused");
+            }
+        }
+
+        #[test]
+        fn strict_permits_allowlisted_host() {
+            let r = EgressFilterResolver;
+            let addrs = with_service_egress_policy(true, ["8.8.8.8".to_string()], || r.resolve("8.8.8.8:443"))
+                .unwrap();
+            assert_eq!(addrs.len(), 1);
+            assert_eq!(addrs[0].ip(), v4(8, 8, 8, 8));
+
+            let addrs = with_service_egress_policy(true, ["127.0.0.1".to_string()], || r.resolve("127.0.0.1:8080"))
+                .unwrap();
+            assert_eq!(addrs.len(), 1);
+            assert!(addrs[0].ip().is_loopback());
+        }
+
+        #[test]
+        fn non_strict_resolver_allows_public_off_list() {
+            let r = EgressFilterResolver;
+            let addrs = with_service_egress_policy(false, std::iter::empty(), || r.resolve("8.8.8.8:443"))
+                .unwrap();
+            assert_eq!(addrs.len(), 1);
         }
     }
 }
