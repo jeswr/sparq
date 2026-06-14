@@ -1,0 +1,89 @@
+/* [OPUS-4.8] sparq benchmark dashboard — eye-js / Jelly style: system font, light theme with a
+   dark-mode media query, card layout, sticky table header, zebra rows, tabular-nums, Δ pills. */
+:root {
+  --bg: #f6f8fa; --card: #ffffff; --fg: #1f2328; --muted: #586069; --line: #d8dee4;
+  --accent: #2563eb; --zebra: #fafbfc; --head: #f0f3f6;
+  --best-bg: #dcfce7; --best-fg: #166534; --worse-bg: #fee2e2; --worse-fg: #991b1b; --na: #e5e7eb;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --card: #161b22; --fg: #e6edf3; --muted: #9aa4b2; --line: #30363d;
+    --accent: #58a6ff; --zebra: #11161d; --head: #1b222c;
+    --best-bg: #0f3d24; --best-fg: #4ade80; --worse-bg: #4a1d1d; --worse-fg: #f87171; --na: #30363d;
+  }
+}
+
+* { box-sizing: border-box; }
+html { font-variant-numeric: tabular-nums; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font);
+  line-height: 1.5; -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: var(--mono); font-size: 0.9em; background: var(--head); padding: 1px 5px; border-radius: 4px; }
+
+.site-header { border-bottom: 1px solid var(--line); background: var(--card); padding: 22px 0; }
+.site-header h1 { margin: 0; font-size: 1.55rem; font-weight: 650; letter-spacing: -0.01em; }
+.site-header .sub { color: var(--muted); font-weight: 400; }
+.meta { margin: 6px 0 0; color: var(--muted); font-size: 0.85rem; }
+.meta .dot { margin: 0 8px; opacity: 0.5; }
+
+main.wrap { padding-top: 24px; padding-bottom: 48px; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 20px 22px; margin-bottom: 24px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+.card h2 { margin: 0 0 14px; font-size: 1.1rem; font-weight: 620; }
+.hint { color: var(--muted); font-size: 0.85rem; margin: -6px 0 16px; }
+
+.commit-meta { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; margin-bottom: 14px; font-size: 0.9rem; }
+.commit-meta .sha { font-family: var(--mono); font-weight: 600; }
+.commit-meta .msg { color: var(--fg); flex: 1 1 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commit-meta .when { color: var(--muted); }
+
+table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.summary-table thead th {
+  position: sticky; top: 0; z-index: 1; background: var(--head); text-align: left;
+  padding: 9px 12px; font-weight: 600; border-bottom: 1px solid var(--line); color: var(--muted);
+}
+.summary-table th.num, .summary-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.summary-table tbody td { padding: 7px 12px; border-bottom: 1px solid var(--line); }
+.summary-table tbody tr:nth-child(even):not(.group-row) { background: var(--zebra); }
+.summary-table tr.group-row th.group {
+  background: var(--card); text-align: left; padding: 14px 12px 6px; font-size: 0.78rem;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); font-weight: 700;
+}
+.summary-table td.metric { font-weight: 500; }
+.summary-table td.unit { color: var(--muted); }
+
+.pill {
+  display: inline-block; min-width: 48px; text-align: center; padding: 2px 9px;
+  border-radius: 999px; font-size: 0.78rem; font-weight: 650; font-variant-numeric: tabular-nums;
+}
+.pill-best { background: var(--best-bg); color: var(--best-fg); }
+.pill-worse { background: var(--worse-bg); color: var(--worse-fg); }
+.pill-na { background: var(--na); color: var(--muted); }
+
+.chart-group { margin-bottom: 26px; }
+.chart-group h3 {
+  margin: 0 0 12px; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--accent); font-weight: 700;
+}
+.chart-grid {
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+.chart-card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 12px 8px;
+}
+.chart-card .chart-title {
+  font-size: 0.82rem; font-weight: 550; margin-bottom: 6px; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chart-card canvas { height: 140px !important; width: 100% !important; }
+
+.site-footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 0.82rem; padding: 18px 0; }
