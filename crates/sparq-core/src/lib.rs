@@ -1106,7 +1106,6 @@ impl Graph {
             std::fs::remove_file(&manifest).ok();
             return Ok(());
         }
-        let _ = &manifest;
         // Rewrite the subtree from scratch so removed/renamed graphs cannot survive a re-save.
         std::fs::remove_dir_all(&named_dir).ok();
         std::fs::create_dir_all(&named_dir)?;
@@ -4138,10 +4137,12 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn save_open_named_graphs_roundtrip_lossless() {
+        type Triple = (String, String, String);
+        type Dataset = Vec<(String, Vec<Triple>)>;
         // Dump a single graph's triples as a sorted N-Triples-ish vector.
-        fn dump_one(gg: &Graph) -> Vec<(String, String, String)> {
+        fn dump_one(gg: &Graph) -> Vec<Triple> {
             let scan = gg.store.scan(&[None, None, None]);
-            let mut v: Vec<(String, String, String)> = scan
+            let mut v: Vec<Triple> = scan
                 .rows
                 .iter()
                 .map(|r| {
@@ -4153,8 +4154,8 @@ mod tests {
             v
         }
         // Dump the WHOLE dataset: default graph under key "", each named graph under its name.
-        fn dump_dataset(gg: &Graph) -> Vec<(String, Vec<(String, String, String)>)> {
-            let mut out: Vec<(String, Vec<(String, String, String)>)> = vec![(String::new(), dump_one(gg))];
+        fn dump_dataset(gg: &Graph) -> Dataset {
+            let mut out: Dataset = vec![(String::new(), dump_one(gg))];
             for (name, sub) in &gg.named {
                 out.push((name.to_string(), dump_one(sub)));
             }
