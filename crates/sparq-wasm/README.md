@@ -62,8 +62,8 @@ than materialising it — a large saving on a memory-constrained device.
 The browser is the memory-constrained target — wasm32 linear memory caps at 4 GB and a
 real tab is happier under ~2 GB. The wasm build therefore enables `compact-index`: only
 **three** permutation indexes (SPO, POS, OSP) instead of six — every triple pattern is
-still answered by one of them, but ~half the index memory (some merge joins fall back to
-hashing). The `test/mem.cjs` harness measures the store footprint (B/triple) for `load`
+still answered by one of these three indexes, so the store holds far fewer index
+structures (some merge joins fall back to hashing). The `test/mem.cjs` harness measures the store footprint (B/triple) for `load`
 (raw) vs `loadCompressed` over synthetic N-Triples and derives the browser triple ceiling;
 the per-commit `store_bytes_per_triple` / `dict_bytes_per_term` metrics are also tracked
 on the perf dashboard (<https://jeswr.github.io/sparq/dev/bench>). Run it for the numbers:
@@ -76,7 +76,7 @@ node test/mem.cjs
 decoded per touched block), (b) compacts the dictionary's id→term storage into a single
 blob (no per-term `Box<str>`), and (c) makes the numeric-value cache SPARSE (most terms are
 IRIs/strings, and small integers inline — so the dense f64-per-term cache is mostly NaN;
-only real numeric literals are kept). Together they cut the store substantially (~2.5× more
+only real numeric literals are kept). Together they cut the store substantially (materially more
 triples in the same tab) for a small per-scan decode (identical results). `loadCompressed`
 is the right default when the tab's RAM, not its CPU, is the constraint. The byte-level
 parser keeps load throughput high (single-threaded —
@@ -87,14 +87,13 @@ keeps all six permutations for maximum query speed.
 
 ## Bundle size (release, wasm-opt -Oz)
 
-| artifact | raw | gzip |
-|---|--:|--:|
-| `sparq_wasm_bg.wasm` | 886 KB | **314 KB** |
-| `sparq_wasm.js` (glue) | 10 KB | 2.9 KB |
-
-(Up from 787 KB raw as the engine gained block compression, exact >2⁵³/decimal
-comparison, materialisation-free counts, and the mmap-class storage abstraction — a
-~100 KB raw increase that buys ~1.8× browser capacity and broader conformance.)
+The build is tuned for a small bundle: the wasm artifact and its JS glue (raw and
+gzipped) are tracked per-commit on the perf dashboard
+(<https://jeswr.github.io/sparq/dev/bench>) as the `wasm_bundle_*` metrics, so they
+can't go stale here. The bundle has grown modestly over time as the engine gained
+block compression, exact >2⁵³/decimal comparison, materialisation-free counts, and the
+mmap-class storage abstraction — a small increase that buys substantially more browser
+capacity and broader conformance.
 
 The bulk is the SPARQL parser (`spargebra`/`peg`) + `oxttl`/`oxrdf` + `rand`
 (transitively, for blank-node ids, unused here). Size-reduction levers for the

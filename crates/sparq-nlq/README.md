@@ -104,15 +104,16 @@ committed fixture — 9 hand-written NL→SPARQL pairs over the olympics schema,
 realistic completions (only vocabulary visible in the grounding prompt), including
 **one deliberate parse failure that exercises the repair round**.
 
-Measured (Apple M1, 16 GB, `--release`, 2026-06-10):
+What the harness measures and gates (run it, or see the perf dashboard at
+<https://jeswr.github.io/sparq/dev/bench>, for the absolute figures):
 
-| Metric | Result |
+| Metric | What it checks |
 |---|---|
-| Parse success (after ≤1 repair) | 9/9 |
-| Execution success | 9/9 |
-| Result sanity (non-empty + exact row counts + spot-checked values) | 9/9 |
-| Repair rounds used | exactly 1 (the scripted malformed query) |
-| LLM-excluded `ask()` latency | gate: p50 < 50 ms (the recorded p50/max print from the example below) |
+| Parse success (after ≤1 repair) | every fixture pair parses |
+| Execution success | every fixture pair executes |
+| Result sanity | non-empty + exact row counts + spot-checked values |
+| Repair rounds used | the one scripted malformed query exercises a repair |
+| LLM-excluded `ask()` latency | gated low (the recorded p50/max print from the example below) |
 
 Re-record the fixture whenever the prompt template, default `NlqConfig`, or dataset
 changes:
