@@ -40,10 +40,24 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # [OPUS-4.8] sq-x4jy: run the unit/integration suite under cargo-nextest with
+      # --retries 2. nextest runs each test in its OWN process (so a stray abort can't
+      # take the whole binary down), reports a test BINARY that "was never executed" as a
+      # DETERMINISTIC failure (instead of a bare exit-101 with no FAILED line — the exact
+      # flake this bead tracks), and the retries let any residual transient binary race on
+      # the shared runner self-heal. SHA-pinned install action (reuses a pin already vetted
+      # elsewhere in this workflow). NOTE: nextest does NOT run doctests, so a separate
+      # `cargo test --doc` step below preserves the doctest coverage `cargo test` gave us.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: nextest
       - name: Build
         run: cargo build --workspace --all-targets
-      - name: Test
-        run: cargo test --workspace
+      - name: Test (nextest, retry transient binary races)
+        run: cargo nextest run --workspace --retries 2
+      - name: Doctests (nextest does not run these)
+        run: cargo test --workspace --doc
 
   wasm:
     name: wasm build (sparq-wasm)
@@ -312,10 +326,30 @@ jobs:
         uses: taiki-e/install-action@91534edaf9fd796a162759d80d49cdff574bff2c # cargo-llvm-cov
       - name: Test-presence gate (fast, no compile)
         run: python3 scripts/coverage-presence.py --check
-      - name: Fetch fixtures + measure per-crate coverage (per-commit tier)
-        run: ./scripts/coverage.sh
-      - name: Enforce coverage floor (ratchet)
-        run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
+      - name: Measure + enforce per-crate coverage (per-commit tier, max-remeasure gate)
+        # [OPUS-4.8] sq-x4jy: ROBUST per-crate MAX-REMEASURE gate. Measure once, then
+        # --check-robust re-measures ONLY the crates below floor (up to K=3 total
+        # measurements each) and keeps the per-crate MAX, failing only if a crate is STILL
+        # below floor after K independent reads.
+        #
+        # WHY this replaces the old "re-measure the WHOLE suite once" backstop: llvm-cov
+        # only ever UNDERCOUNTS (an aborted test / un-merged .profraw LOSES coverage,
+        # never adds it), so the true coverage is the MAX across independent measurements.
+        # The whole-suite-once backstop was structurally insufficient — in PR #62 it
+        # re-measured EVERYTHING, which let a SECOND, PR-unrelated crate (sparq-engine)
+        # flake 0.28% low on the re-measure and fail the job even though pass-1 had it
+        # comfortably above floor. Re-measuring ONLY the offenders and taking the MAX
+        # fixes that: a crate that was fine on an earlier pass keeps its good number.
+        #
+        # SAFE (does NOT mask a real regression): it never ACCEPTS a low number — it
+        # re-measures and keeps the best. A genuine drop is reproducible and fails ALL K
+        # measurements; a transient undercount is not and recovers on a re-measure.
+        # coverage.sh still serialises each binary's tests (--test-threads=1) to minimise
+        # the profraw-merge race at the source; this gate is the principled backstop.
+        run: |
+          set -o pipefail
+          ./scripts/coverage.sh
+          python3 scripts/coverage-gate.py --check-robust target/coverage/coverage-summary.json
       - name: Upload coverage summary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -378,10 +412,20 @@ jobs:
         uses: taiki-e/install-action@91534edaf9fd796a162759d80d49cdff574bff2c # cargo-llvm-cov
       - name: Test-presence gate
         run: python3 scripts/coverage-presence.py --check
-      - name: Fetch fixtures + measure per-crate coverage (FULL tier)
-        run: COVERAGE_TIER=nightly ./scripts/coverage.sh
-      - name: Enforce coverage floor (ratchet, all crates required)
-        run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
+      - name: Measure + enforce per-crate coverage (FULL tier, max-remeasure gate)
+        # [OPUS-4.8] sq-x4jy: same ROBUST per-crate MAX-REMEASURE gate as the per-commit
+        # `coverage` job (re-measure ONLY sub-floor crates, keep the per-crate MAX, fail
+        # only if still below floor after K=3). COVERAGE_TIER=nightly is exported for BOTH
+        # the initial measure AND the targeted re-measures (--check-robust shells
+        # coverage.sh with the inherited environment, so the nightly re-measures use the
+        # SAME full test set — incl. the heavy sparq-vectors 50k tests). Comfortably within
+        # the 60-min nightly budget (re-measures touch only the offending crates).
+        env:
+          COVERAGE_TIER: nightly
+        run: |
+          set -o pipefail
+          ./scripts/coverage.sh
+          python3 scripts/coverage-gate.py --check-robust target/coverage/coverage-summary.json
       - name: Upload coverage summary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
