@@ -77,33 +77,10 @@ jobs:
         working-directory: crates/sparq-wasm
         run: wasm-pack test --node
 
-  python:
-    # [OPUS-4.8] sparq-py (pyo3 + maturin) is EXCLUDED from the `cargo test --workspace`
-    # job (its tests are pytest, not cargo), so without this job the Python bindings'
-    # result-parity + panic-surface + FFI tests (crates/sparq-py/tests/) are never run in
-    # CI. This job builds the wheel with `maturin develop` into a fresh venv and runs the
-    # pytest suite, DESELECTING the `bench` marker (the timed FFI-overhead micro-bench in
-    # bench_py.py — quiet-box-sensitive, kept out of the correctness gate). Verified
-    # locally: 78 passed, 1 xfailed, 5 (bench) deselected.
-    name: python bindings (sparq-py pytest)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # maturin develop needs an active venv (it installs the built wheel editable into
-      # the venv's site-packages); a fresh venv is the robust, runner-agnostic path.
-      - name: Build + test sparq-py
-        working-directory: crates/sparq-py
-        run: |
-          python -m venv .venv
-          . .venv/bin/activate
-          pip install maturin pytest
-          maturin develop
-          pytest tests/ -m "not bench"
+  # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
+  # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python
+  # bindings"), which builds with the correct --profile python-release (unwinding
+  # panics — needed by the panic-surface test). No duplicate job here. [OPUS-4.8]
 
   lint:
     name: clippy (gate) + fmt (informational)

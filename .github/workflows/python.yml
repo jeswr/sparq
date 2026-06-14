@@ -40,4 +40,9 @@ jobs:
       - name: Install wheel
         run: pip install dist/*.whl
       - name: Run tests
-        run: pytest crates/sparq-py/tests -q
+        # [OPUS-4.8] Runs the full pytest suite incl. the new result-parity + panic-surface
+        # tests (test_parity.py). Deselect the `bench` marker (bench_py.py timed FFI-overhead
+        # micro-bench): it's quiet-box-sensitive + advisory, so it must not gate on a noisy
+        # GitHub runner. The python-release profile above is the unwinding build the
+        # panic-surface test needs. (sq-f9tu / sq-th1u)
+        run: pytest crates/sparq-py/tests -q -m "not bench"
