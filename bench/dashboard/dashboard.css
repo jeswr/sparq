@@ -58,6 +58,13 @@ table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem
   text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); font-weight: 700;
 }
 .summary-table td.metric { font-weight: 500; }
+/* [OPUS-4.8] sq-ocuf: readable label on top, raw metric stem muted underneath (transparency).
+   The full raw-stem + dataset + query tooltip is on the cell's title attr (hover anywhere). */
+.summary-table td.metric .metric-label { display: block; }
+.summary-table td.metric .metric-stem {
+  display: block; margin-top: 2px; background: none; padding: 0;
+  font-size: 0.74rem; color: var(--muted); font-weight: 400; cursor: help;
+}
 .summary-table td.unit { color: var(--muted); }
 
 .pill {
@@ -81,7 +88,14 @@ table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem
   background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 12px 8px;
 }
 .chart-card .chart-title {
-  font-size: 0.82rem; font-weight: 550; margin-bottom: 6px; color: var(--fg);
+  font-size: 0.82rem; font-weight: 550; margin-bottom: 2px; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* [OPUS-4.8] sq-ocuf: raw metric stem under each chart title (muted, transparency); hover for
+   the full dataset/query tooltip. */
+.chart-card .chart-stem {
+  display: block; background: none; padding: 0; margin-bottom: 6px; cursor: help;
+  font-size: 0.7rem; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .chart-card canvas { height: 140px !important; width: 100% !important; }
