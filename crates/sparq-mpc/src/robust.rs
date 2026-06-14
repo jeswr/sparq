@@ -43,9 +43,13 @@
 //!   second valid codeword within distance `e` — needs `> e` coordinated errors
 //!   and is the standard RS limitation, not a regression over plain Lagrange,
 //!   which silently miscorrects on a SINGLE error.)
-//! - **The degree-`2t` equality/mult open** (`join::secure_equal`, opened at
-//!   `n = 2t+1` with NO RS redundancy). That is WI-2 (bead sq-7q9i), deliberately
-//!   out of scope here; this module does not touch it.
+//! - **The degree-`2t` equality/mult open at `n = 2t+1`** (`join::secure_equal`).
+//!   WI-2 (bead sq-7q9i) routes that open through THIS primitive at degree `2t`
+//!   ([`crate::shamir::reconstruct_degree`]): it detects/corrects when
+//!   `n > 2t+1`, but at exactly `n = 2t+1` degree `2t` has NO RS redundancy, so
+//!   the same no-redundancy non-detection above applies — a forged product share
+//!   is undetectable there. A true fix at `n = 2t+1` needs an information-
+//!   theoretic MAC (deferred WI-4, bead sq-6d6g), not RS redundancy.
 //!
 //! ## Algorithm — Berlekamp–Welch via Gaussian elimination over `F_p`
 //!

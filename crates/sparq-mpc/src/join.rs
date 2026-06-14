@@ -396,6 +396,18 @@ impl HiddenValueJoin {
     /// one process; it secret-shares them internally and never uses the
     /// cleartext after sharing except to deal the shares — exactly what a dealer
     /// does. It returns the boolean match WITHOUT reconstructing `a` or `b`.
+    ///
+    /// **Consistency-checked open (sq-7q9i, WI-2).** The product `m = d·r` is a
+    /// degree-`2t` Reed–Solomon codeword over the `n` party points; the open
+    /// routes through [`shamir::reconstruct_degree`] → the WI-1 RS checker at
+    /// degree `2t`. When `n > 2t + 1` a tampered product share is detected (abort
+    /// with [`MpcError::Tampered`]) or corrected, so a forged share can no longer
+    /// silently flip the match verdict. HONESTY: the honest-majority instantiation
+    /// `t = ⌊(n−1)/2⌋` gives `n = 2t + 1` for odd `n`, where degree-`2t` has ZERO
+    /// RS redundancy — tampering is information-theoretically undetectable and is
+    /// NOT claimed otherwise (pinned by a boundary test; a true fix needs a MAC,
+    /// deferred WI-4 / bead sq-6d6g). Detection at `n > 2t + 1` thus requires
+    /// running the equality test on MORE than the minimal party count.
     fn secure_equal(&self, dealer: &mut ShamirDealer, a: Fp, b: Fp) -> Result<bool, MpcError> {
         let t = dealer.threshold();
         // Honest-majority headroom: one multiplication needs 2t+1 <= n parties.

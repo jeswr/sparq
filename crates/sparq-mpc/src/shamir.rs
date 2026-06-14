@@ -285,11 +285,14 @@ fn eval_poly(coeffs: &[Fp], x: Fp) -> Fp {
 /// secret). Requires `>= t+1` distinct points.
 ///
 /// This is the unchecked RS-decode-under-no-errors primitive — it does NOT
-/// detect tampering. The consistency-checked / robust entry point that callers
-/// use is [`crate::robust::reconstruct_robust`] (wired into
-/// [`ShamirBackend::reconstruct`]); this stays the underlying building block
-/// (e.g. for the degree-`2t` [`reconstruct_degree`] open). `pub(crate)` so the
-/// adversarial differential suite can compare the robust path against it.
+/// detect tampering. Every PRODUCTION reconstruction path now routes through the
+/// consistency-checked / robust entry point [`crate::robust::reconstruct_robust`]
+/// (wired into [`ShamirBackend::reconstruct`] AND, since WI-2 / sq-7q9i, into the
+/// degree-`2t` [`reconstruct_degree`] open). This unchecked Lagrange-at-0 helper
+/// therefore has NO production caller left; it is kept `#[cfg(test)]` purely as
+/// the differential REFERENCE the adversarial suite compares the robust path
+/// against (robust-vs-robust would be vacuous — see `robust.rs` tests).
+#[cfg(test)]
 pub(crate) fn reconstruct_at_zero(shares: &[Share], t: usize) -> Result<Fp, MpcError> {
     if shares.len() < t + 1 {
         return Err(MpcError::Protocol(format!(
@@ -405,9 +408,35 @@ pub fn mul_shares_raw(a: &[Share], b: &[Share]) -> Result<Vec<Share>, MpcError> 
 /// Reconstruct the secret of a sharing of a known polynomial `degree`, requiring
 /// `degree + 1` points. Used to open the degree-`2t` product of the equality
 /// test (`degree = 2t`).
+///
+/// **Consistency-checked / robust at degree `degree` (sq-7q9i, WI-2).** This
+/// routes the open through [`crate::robust::reconstruct_robust`] at the GIVEN
+/// `degree` — the SAME Reed–Solomon checker WI-1 wired into the degree-`t`
+/// reconstruction, just instantiated at the product's degree. The codeword view
+/// is identical: a sharing of a degree-`degree` polynomial at `n` distinct points
+/// is an `[n, degree+1]` RS codeword, so the checker:
+///
+/// - `n == degree + 1` (**NO redundancy**) → plain Lagrange; tampering is
+///   information-theoretically undetectable and is NOT claimed otherwise.
+/// - `n > degree + 1` (**redundancy**) → Berlekamp–Welch: detect any tampering
+///   and abort with [`MpcError::Tampered`], correcting up to
+///   `e = ⌊(n − degree − 1)/2⌋` tampered shares first.
+///
+/// HONESTY (the degree-`2t` boundary; bead sq-7q9i / parent sq-uu0u): for the
+/// equality/mult open `degree = 2t`, redundancy exists ONLY when `n > 2t + 1`.
+/// The honest-majority constructor fixes `t = ⌊(n−1)/2⌋`, so `n = 2t + 1` for odd
+/// `n` (e.g. n=3,5,7,9): there is **zero** RS redundancy at degree `2t` and
+/// tampering one product share is undetectable — pinned by a boundary test. A
+/// true fix at `n = 2t + 1` needs an information-theoretic MAC (the deferred WI-4
+/// seam, bead sq-6d6g), not RS redundancy. Even `n` (n=4,6,8) yields exactly one
+/// redundant share at degree `2t` (`e_max = 0`), so tampering is DETECT-only
+/// there; correction (`e_max ≥ 1`) at degree `2t` needs `n ≥ 2t + 3`.
 pub fn reconstruct_degree(shares: &[Share], degree: usize) -> Result<Fp, MpcError> {
-    // reconstruct_at_zero needs `t+1` points where here the "t" is `degree`.
-    reconstruct_at_zero(shares, degree)
+    // Same RS-consistency-checked entry point as ShamirBackend::reconstruct,
+    // instantiated at the product's `degree` (here `2t`) rather than `t`. At
+    // `n == degree+1` it falls back to plain Lagrange (no detection claim); with
+    // redundancy it detects/corrects. See the doc above for the degree-2t bound.
+    crate::robust::reconstruct_robust(shares, degree)
 }
 
 /// The Shamir `Share` representation surfaced through the trait. A holder's
