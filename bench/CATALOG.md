@@ -58,7 +58,7 @@ conventions first, then a per-category map that points at the registry, then a
 
 | category | what it covers | registry ids |
 |---|---|---|
-| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
+| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
 | **parse** | text-format parse throughput (MB/s) | `parse-baseline` |
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
@@ -89,6 +89,29 @@ Notes on a few that need care:
   (`queries-heavy/`) and the **full ~11.8M artifact** (the `.bz2` ingested directly via the
   fused-decompress path) — up to DBpedia 'latest-core' ~1B triples — belong to the
   EC2/nightly tier.
+- **`watdiv` (WatDiv) is tiered** — see [`bench/watdiv/README.md`](./watdiv/README.md). The
+  per-commit path builds+caches the real Waterloo v0.6 generator (research-use; sha256-pinned,
+  g++ + Boost, RNG seed-pinned to `1u`) and runs the 16 sub-ms Basic-Testing queries on a fixed
+  SF=1 corpus (~106k triples), emitting `watdiv_<query>_<mode>_us` (trend-only) plus a HARD
+  expected-rows correctness diff (count mode). Four templates empty at SF=1 (F1/F4/C1/C2) sit in
+  `queries-heavy/` for the **EC2/nightly SF≥10 tier** (`bench/watdiv/gen.sh <SF>`).
+- **`bsbm` (Berlin SPARQL Benchmark, Explore mix) is tiered + fetch-and-cache** — see
+  [`bench/bsbm/README.md`](./bsbm/README.md). Per-commit, `gen.sh` fetches the PREBUILT bsbmtools
+  v0.2 distribution (JRE-only; sha256-pinned zip) and emits a deterministic `-fc -pc 300` corpus
+  (~116k triples), then runs the 11 Explore queries emitting `bsbm_<query>_<mode>_us` (trend-only)
+  plus a HARD expected-rows correctness diff against **MATERIALIZE** mode (the mix has a CONSTRUCT
+  + a DESCRIBE — graph-valued forms report produced-triple counts). `query06` (unanchored regex,
+  omitted from the official mix) + the **full ~100M+ scale** and the Explore-and-Update / Business
+  Intelligence mixes belong to the EC2/nightly tier (`bench/bsbm/gen.sh <product_count>`).
+- **`lubm` (Lehigh University Benchmark) is the REASONING suite** — see
+  [`bench/lubm/README.md`](./lubm/README.md). `run.sh` is self-asserting: it builds the LUBM(1)
+  corpus + Univ-Bench TBox (UBA generator, Apache-2.0 pinned commit, javac-only; `rapper` for
+  RDF/XML→NT), materializes the **OWL-RL** closure (`sparq-cli reason … owl` — RDFS is incomplete
+  here), then runs the **extensional** tier (Q1/Q2/Q3/Q14 on the raw ABox) + the **entailed** tier
+  (Q4-Q13 on the closure; each returns 0 on raw data and its correct count only after reasoning),
+  asserting BOTH tiers' counts vs `expected-rows.tsv`. CI emits `lubm_<query>_count_us`
+  (trend-only) and fails on any count mismatch (reasoner OR engine regression). Full-scale
+  **LUBM(1000)** (~133M triples) is the EC2/nightly tier (`bench/lubm/gen.sh 1000 0`).
 - **`wikidata-8b` is external-cost and gated.** It builds the full Wikidata
   truthy dump (~8-9.4B triples) on a 16 GB EC2 box (~$5-17). It is **blocked
   until dict-spill merges to public main** — see
@@ -110,6 +133,13 @@ cargo build --release -p sparq-cli -p sparq-bench
 cargo run -p sparq-bench --release -- --scale 50000 --iters 4
 # continuous correctness fuzz (deterministic, shardable by category):
 cargo run -p sparq-bench --release -- fuzz 0 5000 all
+
+# --- well-known query suites (self-contained runners: gen/fetch + run + hard row diff) ---
+CORPUS=$(bench/sp2b/gen.sh 250000)   && ./target/release/sparq-cli bench "$CORPUS" turtle    bench/sp2b/queries 3 count
+CUT=$(bench/dbpsb/fetch.sh 750000)   && ./target/release/sparq-cli bench "$CUT"    ntriples bench/dbpsb/queries 3 count
+bench/watdiv/run.sh 1                 # WatDiv SF=1 (g++ + Boost): gen + count/materialize/json + row diff
+bench/bsbm/run.sh                     # BSBM Explore -pc 300 (JRE + unzip): gen + materialize + row diff
+bench/lubm/run.sh                     # LUBM(1) (javac + rapper): gen + OWL-RL closure + both tiers + row diff
 
 # --- selective bind-join + u64 value-id probes ---
 python3 bench/selective/gen.py 500000 > bench/selective/selective.nt

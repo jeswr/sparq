@@ -61,6 +61,49 @@ jobs:
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
         # dep leaks into sparq-wasm's wasm32 graph (bundle bloat / broken browser build).
         run: ./scripts/wasm-deps-guard.sh
+      # [OPUS-4.8] Headless wasm tests of the REAL #[wasm_bindgen] exports
+      # (crates/sparq-wasm/tests/web.rs). `cargo build --target wasm32` above never
+      # RUNS the exported API (JsError/serialisation across the JS boundary), so the
+      # web.rs #[wasm_bindgen_test]s run via wasm-pack in the Node executor — closing
+      # exactly that gap. Verified locally: 20 passed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: v0.13.1
+      - name: Headless wasm tests (wasm-pack test --node)
+        working-directory: crates/sparq-wasm
+        run: wasm-pack test --node
+
+  python:
+    # [OPUS-4.8] sparq-py (pyo3 + maturin) is EXCLUDED from the `cargo test --workspace`
+    # job (its tests are pytest, not cargo), so without this job the Python bindings'
+    # result-parity + panic-surface + FFI tests (crates/sparq-py/tests/) are never run in
+    # CI. This job builds the wheel with `maturin develop` into a fresh venv and runs the
+    # pytest suite, DESELECTING the `bench` marker (the timed FFI-overhead micro-bench in
+    # bench_py.py — quiet-box-sensitive, kept out of the correctness gate). Verified
+    # locally: 78 passed, 1 xfailed, 5 (bench) deselected.
+    name: python bindings (sparq-py pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # maturin develop needs an active venv (it installs the built wheel editable into
+      # the venv's site-packages); a fresh venv is the robust, runner-agnostic path.
+      - name: Build + test sparq-py
+        working-directory: crates/sparq-py
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin pytest
+          maturin develop
+          pytest tests/ -m "not bench"
 
   lint:
     name: clippy (gate) + fmt (informational)

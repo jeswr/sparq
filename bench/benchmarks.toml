@@ -133,6 +133,49 @@ pinning     = "slice sha256 (fetch.sh SLICE_SHA256) + exact Databus URL; DBPSB_T
 records_to  = "stdout (TSV); CI emits dbpsb_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/dbpsb/expected-rows.tsv"
 status      = "ok"
 
+# [OPUS-4.8] sq-13i — WatDiv (Waterloo SPARQL Diversity) at CI scale; query-SHAPE diversity suite.
+[[benchmark]]
+id          = "watdiv"
+name        = "WatDiv (Waterloo SPARQL Diversity Benchmark) — query-shape diversity"
+category    = "query"
+measures    = "per-query min-of-iters latency (us) across count/materialize/json for the 16 per-commit Basic-Testing queries grouped by join topology — Linear (L1-L5), Star (S1-S7), Snowflake (F2/F3/F5), Complex (C3); stresses join STRUCTURE across a deliberately wide structurality range. Per-commit subset also carries a HARD expected-rows correctness diff (count mode) on the fixed corpus"
+invoke      = "cargo build --release -p sparq-cli && CORPUS=$(bench/watdiv/gen.sh 1) && ./target/release/sparq-cli bench \"$CORPUS\" ntriples bench/watdiv/queries 3 count   # also materialize|json; self-contained runner: bench/watdiv/run.sh; heavy tier: bench/watdiv/queries-heavy; CI runs the subset via scripts/ci-bench.sh -> watdiv_<query>_<mode>_us"
+source      = "bench/watdiv/{gen.sh,run.sh,queries/*.rq,queries-heavy/*.rq,expected-rows.tsv,files/words.txt,README.md}; scripts/ci-bench.sh (watdiv hook); crates/sparq-cli/src/main.rs (run_query_suite)"
+dataset     = "REAL Waterloo DSG WatDiv v0.6 generator (research-use; fetched + built by gen.sh, sha256-pinned tarball fb8d930b…71d2, built g++ + Boost). Per-commit: SF=1 (~106k distinct N-Triples, deterministic byte-identical output via two seed patches -> seed 1u + a vendored ASCII wordlist). gitignored + regenerable (build-once-cache binary in /tmp/watdiv)"
+quiet_box_sensitive = true  # wall-clock latency trend-only, NOT in scripts/perf-gate.py; the expected-rows diff IS a hard correctness gate (deterministic, load-robust)
+pinning     = "watdiv tarball sha256 (gen.sh TARBALL_SHA256); generator RNG seed 1u (the PIN — query constants + expected-rows.tsv bind to the seed-1 SF=1 corpus); WATDIV_SF (1 per-commit); vendored files/words.txt (counts are wordlist-content-independent); queries are the published WatDiv Basic-Testing templates instantiated with fixed seed-1 constants"
+records_to  = "stdout (TSV); CI emits watdiv_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/watdiv/expected-rows.tsv"
+status      = "ok"
+
+# [OPUS-4.8] sq-13i family — BSBM (Berlin SPARQL Benchmark) Explore mix at CI scale; e-commerce graph.
+[[benchmark]]
+id          = "bsbm"
+name        = "BSBM (Berlin SPARQL Benchmark) — Explore mix, e-commerce graph"
+category    = "query"
+measures    = "per-query min-of-iters result-size + latency (us) across count/materialize/json for the 11 per-commit Explore queries (the official mix: 1-5, 7-12): navigational lookups, DISTINCT + ORDER BY + LIMIT/OFFSET, UNION, OPTIONAL-heavy left joins, negation-by-OPTIONAL+!bound, numeric-range + langMatches FILTERs, a self-join similarity query, a DESCRIBE (query09), a CONSTRUCT (query12). Carries a HARD expected-rows correctness diff (MATERIALIZE mode — graph-valued forms report produced-triple counts)"
+invoke      = "cargo build --release -p sparq-cli && CORPUS=$(bench/bsbm/gen.sh 300) && ./target/release/sparq-cli bench \"$CORPUS\" ntriples bench/bsbm/queries 3 materialize   # also count|json; self-contained runner: bench/bsbm/run.sh; heavy tier: bench/bsbm/queries-heavy (query06 regex); CI runs the subset via scripts/ci-bench.sh -> bsbm_<query>_<mode>_us"
+source      = "bench/bsbm/{gen.sh,run.sh,queries/*.rq,queries-heavy/*.rq,expected-rows.tsv,README.md}; scripts/ci-bench.sh (bsbm hook); crates/sparq-cli/src/main.rs (run_query_suite)"
+dataset     = "REAL bsbmtools v0.2 generator (Bizer/Schultz; GPL-family — fetched + cached PREBUILT jars by gen.sh, sha256-pinned zip 40f5e59b…0aaa, JRE-only, NO mvn/ant/compile). Per-commit: -fc -pc 300 (~115,987 deterministic N-Triples; -fc materialises the rdfs:subClassOf product-type closure into the data). gitignored + regenerable (/tmp/bsbm)"
+quiet_box_sensitive = true  # wall-clock latency trend-only, NOT in scripts/perf-gate.py; the expected-rows diff IS a hard correctness gate (deterministic, load-robust)
+pinning     = "bsbmtools zip sha256 (gen.sh ZIP_SHA256); BSBM_PC (300 per-commit); the generator is deterministic at a fixed -pc (seeded RNG, sha256-verified); queries are the official Explore templates instantiated with constants pinned to -pc 300 entities (see bench/bsbm/README.md)"
+records_to  = "stdout (TSV); CI emits bsbm_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/bsbm/expected-rows.tsv"
+status      = "ok"
+
+# [OPUS-4.8] sq-13i family — LUBM (Lehigh University Benchmark) at CI scale; the REASONING suite
+# (extensional + entailed tiers; exercises sparq-cli reason owl end-to-end).
+[[benchmark]]
+id          = "lubm"
+name        = "LUBM (Lehigh University Benchmark) — extensional + entailed (OWL-RL) tiers"
+category    = "query"
+measures    = "per-query min-of-iters count-mode latency (us) for the 14 canonical LUBM queries split by reasoning regime: extensional (Q1/Q2/Q3/Q14 on the raw ABox) + entailed (Q4-Q13 on the OWL-RL closure). Each entailed query returns 0 on raw data and its correct count only after `sparq-cli reason owl` — so the suite gates the REASONER end-to-end. run.sh carries a HARD expected-rows correctness diff on BOTH tiers' solution counts"
+invoke      = "cargo build --release -p sparq-cli && bench/lubm/run.sh   # self-contained: gen LUBM(1) ABox+TBox, materialize OWL-RL closure, run both tiers count-mode, assert expected-rows.tsv; CI runs it via scripts/ci-bench.sh -> lubm_<query>_count_us"
+source      = "bench/lubm/{gen.sh,run.sh,queries-extensional/*.rq,queries-entailed/*.rq,expected-rows.tsv,README.md}; scripts/ci-bench.sh (lubm hook); crates/sparq-cli/src/main.rs (cmd_reason, run_query_suite)"
+dataset     = "REAL UBA (Univ-Bench Artificial) generator (Apache-2.0 mirror github.com/nandana/LUBM-UBA, pinned commit 05c3f3a3…5894; built javac-only, NO mvn) + the Univ-Bench OWL TBox (byte-extracted from the mirror's webarchive, converted via rapper). Per-commit: LUBM(1) -univ 1 -seed 0 (~100.5k distinct ABox triples; OWL-RL closure adds ~49.7k entailed). gitignored + regenerable (/tmp/lubm)"
+quiet_box_sensitive = true  # wall-clock latency trend-only, NOT in scripts/perf-gate.py; the two-tier expected-rows diff IS a hard correctness gate (deterministic, load-robust; catches reasoner OR engine regressions)
+pinning     = "UBA pinned commit (gen.sh UBA_COMMIT) + LUBM(1) -univ 1 -seed 0 (deterministic byte-identical RDF/XML, sha256-verified); the entailed tier materializes the OWL-RL (not RDFS — incomplete here) closure; queries are SPARQL 1.1 translations of the canonical LUBM Q1-Q14"
+records_to  = "stdout (TSV); CI emits lubm_<query>_count_us into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/lubm/expected-rows.tsv"
+status      = "ok"
+
 [[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
@@ -620,12 +663,12 @@ status      = "ok"  # research spikes, not a regression gate
 id          = "ci-bench"
 name        = "CI cross-commit benchmark emitter (free GitHub runners)"
 category    = "scaling"
-measures    = "customSmallerIsBetter JSON: load_s, store_bytes_per_triple, dict_bytes_per_term, per-query {count,materialize,json}_us, op_<query>_<mode>_us (operator-coverage), sp2b_<query>_<mode>_us (SP2Bench subset, + hard expected-rows diff), dbpsb_<query>_<mode>_us (DBPSB/FEASIBLE subset over pinned DBpedia, + hard expected-rows diff), rdfs_infer_s, wasm_bundle_bytes"
+measures    = "customSmallerIsBetter JSON: load_s, store_bytes_per_triple, dict_bytes_per_term, per-query {count,materialize,json}_us, op_<query>_<mode>_us (operator-coverage), sp2b_<query>_<mode>_us (SP2Bench subset, + hard expected-rows diff), dbpsb_<query>_<mode>_us (DBPSB/FEASIBLE subset over pinned DBpedia, + hard expected-rows diff), watdiv_<query>_<mode>_us (WatDiv SF=1 subset, + hard expected-rows diff), bsbm_<query>_<mode>_us (BSBM Explore -pc 300 subset, + hard expected-rows diff vs materialize), lubm_<query>_count_us (LUBM(1) extensional + entailed tiers via run.sh, + hard expected-rows diff on both tiers), rdfs_infer_s, wasm_bundle_bytes"
 invoke      = "bash scripts/ci-bench.sh [scale_entities=200000] [out.json=bench-results.json]   # CI: .github/workflows/bench.yml on push to main"
 source      = "scripts/ci-bench.sh; .github/workflows/bench.yml"
-dataset     = "sparq-bench dump at scale_entities; queries bench/qlever-synthetic/queries + bench/operators/queries + bench/sp2b/queries (sp2b corpus via bench/sp2b/gen.sh) + bench/dbpsb/queries (pinned DBpedia cut via bench/dbpsb/fetch.sh)"
+dataset     = "sparq-bench dump at scale_entities; queries bench/qlever-synthetic/queries + bench/operators/queries + bench/sp2b/queries (sp2b corpus via bench/sp2b/gen.sh) + bench/dbpsb/queries (pinned DBpedia cut via bench/dbpsb/fetch.sh) + bench/watdiv/queries (SF=1 corpus via bench/watdiv/gen.sh) + bench/bsbm/queries (-pc 300 corpus via bench/bsbm/gen.sh) + bench/lubm (both tiers via bench/lubm/run.sh)"
 quiet_box_sensitive = true  # GitHub runners are noisy: value is the TREND + large-regression alert (200% threshold, no hard-fail); memory/bundle metrics ARE deterministic
-pinning     = "scale_entities; deterministic memory + wasm-bundle metrics anchor the noisy timings"
+pinning     = "scale_entities; deterministic memory + wasm-bundle metrics anchor the noisy timings; well-known suites pinned by their generators' sha256/seed/commit (sp2b/dbpsb/watdiv/bsbm/lubm)"
 records_to  = "benchmark-data branch (dev/bench), github-action-benchmark alert comments"
 status      = "ok"
 
