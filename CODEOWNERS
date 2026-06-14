@@ -1,0 +1,37 @@
+# CODEOWNERS — sparq
+#
+# [OPUS-4.8] Governance: code ownership (bead sq-fvip).
+#
+# GitHub applies the LAST matching pattern in this file to a changed path, so the
+# catch-all comes FIRST and the high-risk, security-sensitive paths come AFTER it
+# (a later, more specific line overrides the earlier catch-all). When branch
+# protection requires CODEOWNERS review (see docs/branch-protection.md), a PR
+# touching any path below requires approval from its listed owner.
+
+# Default owner for everything in the repo.
+*                               @jeswr
+
+# --- High-risk / security-sensitive paths (override the catch-all above) ---
+
+# Zero-knowledge proof estate: cryptographic soundness is load-bearing here and
+# the v1 verifier is NOT sound yet (see research/zk-soundness-audit.md + SECURITY.md).
+/crates/sparq-zk/               @jeswr
+/crates/sparq-zk-compose/       @jeswr
+
+# Multi-party computation scaffold: crypto deferred, no security guarantee.
+/crates/sparq-mpc/              @jeswr
+
+# Core engine: contains the `unsafe` and the mmap/encoding internals.
+/crates/sparq-core/             @jeswr
+
+# Network-facing surface: the SPARQL 1.1 Protocol HTTP server.
+/crates/sparq-server/           @jeswr
+
+# CI / workflows / issue + PR templates / this ownership file.
+/.github/                       @jeswr
+
+# Supply-chain policy (cargo-deny). Owned even before the file lands.
+deny.toml                       @jeswr
+
+# The security policy itself.
+SECURITY.md                     @jeswr

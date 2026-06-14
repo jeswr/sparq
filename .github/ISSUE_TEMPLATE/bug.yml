@@ -1,0 +1,64 @@
+# [OPUS-4.8] Governance: bug-report issue form (bead sq-rau7).
+name: Bug report
+description: Report a reproducible problem in sparq (engine, CLI, server, or a binding).
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug! Please give us enough to reproduce it.
+
+        **Do not use this form for security vulnerabilities** — report those privately
+        via the channels in [SECURITY.md](https://github.com/jeswr/sparq/blob/main/SECURITY.md).
+  - type: input
+    id: surface
+    attributes:
+      label: Affected surface / crate
+      description: e.g. sparq-core, sparq-engine, sparq-cli, sparq-server, @jeswr/sparq (npm), sparq (PyPI).
+      placeholder: sparq-engine
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The published version, or the git commit SHA if building from source.
+      placeholder: "0.1.0 or 937d9fd"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including the actual vs. expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal, self-contained reproduction (data + query + commands, or a code snippet).
+      placeholder: |
+        1. Load this Turtle: ...
+        2. Run this SPARQL: ...
+        3. Observe: ...
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, Rust/Node/Python toolchain versions as relevant.
+      placeholder: "Linux x86_64, rustc 1.x, node 20, ..."
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / backtrace
+      description: Any relevant output (set RUST_BACKTRACE=1 for panics). This is automatically formatted as code.
+      render: shell
+    validations:
+      required: false
