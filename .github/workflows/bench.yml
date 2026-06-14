@@ -45,11 +45,11 @@ jobs:
     name: run + track benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown   # enables the wasm bundle-size metric in ci-bench.sh
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # [OPUS-4.8] Well-known-suite toolchains (sp2b/dbpsb/watdiv/bsbm/lubm), MAIN ONLY. On push to
       # main the full well-known-suite set runs; on PRs we DELIBERATELY do NOT install these, so the
       # ci-bench.sh suite hooks SKIP gracefully (each is guarded on `command -v <tool>`) and PR perf
@@ -68,27 +68,27 @@ jobs:
       # generator scripts so a generator/pinning change busts the cache. PRs skip the toolchain install
       # above, so a cache miss on a PR is harmless (the hook skips); on main it just rebuilds once.
       - name: Cache sp2b generator + corpus
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: /tmp/sp2b
           key: bench-sp2b-${{ runner.os }}-${{ hashFiles('bench/sp2b/gen.sh') }}
       - name: Cache watdiv generator + corpus
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: /tmp/watdiv
           key: bench-watdiv-${{ runner.os }}-${{ hashFiles('bench/watdiv/gen.sh', 'bench/watdiv/files/words.txt') }}
       - name: Cache bsbm generator + corpus
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: /tmp/bsbm
           key: bench-bsbm-${{ runner.os }}-${{ hashFiles('bench/bsbm/gen.sh') }}
       - name: Cache lubm generator + corpus
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: /tmp/lubm
           key: bench-lubm-${{ runner.os }}-${{ hashFiles('bench/lubm/gen.sh') }}
       - name: Cache dbpsb pinned slice + cut
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: /tmp/dbpsb
           key: bench-dbpsb-${{ runner.os }}-${{ hashFiles('bench/dbpsb/fetch.sh') }}
@@ -207,7 +207,7 @@ jobs:
             echo "Created and pushed orphan benchmark-data branch."
           fi
       - name: Store + compare against history
-        uses: benchmark-action/github-action-benchmark@v1
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         with:
           name: sparq engine
           tool: customSmallerIsBetter

@@ -33,9 +33,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45        # hard wall-clock cap (backstop to the script's own cleanup)
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ vars.AWS_BENCH_ROLE_ARN }}
           aws-region: eu-west-2
@@ -66,7 +66,7 @@ jobs:
             echo "Created and pushed orphan benchmark-data branch."
           fi
       - name: Track EC2 benchmark series
-        uses: benchmark-action/github-action-benchmark@v1
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         with:
           name: sparq engine (EC2)
           tool: customSmallerIsBetter
