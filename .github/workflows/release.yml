@@ -29,6 +29,12 @@ jobs:
   package:
     name: package ${{ matrix.tier }}
     runs-on: ${{ matrix.os }}
+    # [OPUS-4.8] sq-zqq6: build-provenance attestation over the packaged archives
+    # needs the OIDC token + attestation write. Read-only otherwise.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +91,15 @@ jobs:
             win-*) 7z a "$PKG.zip" "$PKG" ;;
             *)     tar czf "$PKG.tar.gz" "$PKG" ;;
           esac
+      # [OPUS-4.8] sq-zqq6: SLSA build provenance over the packaged archives.
+      # Generates a signed attestation (Sigstore) binding each archive's digest
+      # to this workflow run; verifiable with `gh attestation verify <file>`.
+      - name: Attest build provenance (archives)
+        uses: actions/attest-build-provenance@520d128f165991a6c774bcb264f323e3d70747f4 # v2.2.0
+        with:
+          subject-path: |
+            pkg/*.tar.gz
+            pkg/*.zip
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-${{ matrix.tier }}
@@ -131,6 +146,10 @@ jobs:
     permissions:
       contents: read
       packages: write # push to ghcr.io with GITHUB_TOKEN
+      # [OPUS-4.8] sq-zqq6: buildkit attaches SLSA provenance + an SBOM to the
+      # pushed image; the OIDC token is what signs the provenance attestation.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -158,3 +177,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # [OPUS-4.8] sq-zqq6: max-mode SLSA provenance + an embedded SBOM,
+          # attached to the image in ghcr.io (verifiable via cosign / gh).
+          provenance: mode=max
+          sbom: true

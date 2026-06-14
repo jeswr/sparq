@@ -1,0 +1,92 @@
+# Dependabot — automated dependency-update PRs across every ecosystem this
+# repo ships (sq-biyi). Supply-chain hygiene mapped from prod-solid-server.
+#
+# Policy:
+#   - Weekly cadence, Monday off-peak (one batched sweep, not per-commit noise).
+#   - Routine minor/patch bumps are GROUPED into a single PR per ecosystem to
+#     keep review load low; SECURITY updates are deliberately left UNGROUPED so
+#     each advisory fix is its own reviewable, fast-mergeable PR.
+#   - GitHub Actions are version-pinned by SHA in the workflows; Dependabot
+#     still tracks them (it follows the trailing `# vX.Y.Z` comment) and will
+#     bump the pin + comment together.
+# [OPUS-4.8]
+version: 2
+
+updates:
+  # ---- Rust workspace (Cargo) ----
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "rust"
+    groups:
+      cargo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    # Security updates are NOT grouped (applies-to: security-updates omitted),
+    # so each advisory remediation lands as its own PR.
+
+  # ---- GitHub Actions ----
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # ---- npm (the @jeswr/sparq wasm package) ----
+  - package-ecosystem: npm
+    directory: "/js"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "javascript"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # ---- pip (the `sparq` Python bindings build/test deps) ----
+  - package-ecosystem: pip
+    directory: "/crates/sparq-py"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+    groups:
+      pip-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch

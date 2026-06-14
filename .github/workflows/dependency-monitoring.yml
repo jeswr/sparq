@@ -1,0 +1,116 @@
+# Continuous dependency-vulnerability monitoring (sq-jfer) — a daily off-peak
+# scan that opens/updates a SINGLE idempotent tracking issue when an advisory
+# affects the dependency tree, so a vuln disclosed between Dependabot's weekly
+# sweeps is surfaced within a day.
+#
+# Distinct from supply-chain.yml's `audit` job: that gates PRs/pushes; this is a
+# scheduled watchdog that turns findings into an actionable, deduplicated issue.
+#
+# Third-party actions pinned by full commit SHA. [OPUS-4.8]
+name: dependency-monitoring
+
+on:
+  # Daily, off-peak (05:13 UTC — odd minute to avoid the top-of-hour stampede).
+  schedule:
+    - cron: "13 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-monitoring
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: cargo-deny advisories -> tracking issue
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # open/update the security:dependency-vuln tracking issue
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@e03236526ace47fa2e04bebcfc6da471ebd4690c # v2.49.0
+        with:
+          tool: cargo-deny
+      # Run advisories only; capture the human-readable report. `|| true` so we
+      # can branch on the exit code ourselves (and still fail the job at the end).
+      - name: Run cargo-deny advisories
+        id: deny
+        run: |
+          set +e
+          REPORT="$(cargo deny check advisories 2>&1)"
+          CODE=$?
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          {
+            echo 'report<<DENY_EOF'
+            echo "$REPORT"
+            echo 'DENY_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "$REPORT"
+          exit 0
+      - name: Open or update the tracking issue
+        if: steps.deny.outputs.exit_code != '0'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const label = 'security:dependency-vuln';
+            const title = 'Dependency vulnerability advisory detected';
+            const report = process.env.DENY_REPORT || '(no report captured)';
+            const body = [
+              '`cargo deny check advisories` reported one or more findings on the',
+              'scheduled dependency-monitoring run.',
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '<details><summary>cargo-deny report</summary>',
+              '',
+              '```',
+              report,
+              '```',
+              '',
+              '</details>',
+              '',
+              '_This issue is maintained idempotently by `.github/workflows/dependency-monitoring.yml`._',
+            ].join('\n');
+
+            // Ensure the label exists (ignore "already exists").
+            try {
+              await github.rest.issues.createLabel({
+                ...context.repo, name: label, color: 'b60205',
+                description: 'A dependency advisory affects the tree',
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e;
+            }
+
+            // Find an existing OPEN tracking issue with the label.
+            const existing = await github.rest.issues.listForRepo({
+              ...context.repo, state: 'open', labels: label, per_page: 100,
+            });
+            const hit = existing.data.find(i => i.title === title);
+
+            if (hit) {
+              await github.rest.issues.update({
+                ...context.repo, issue_number: hit.number, body,
+              });
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: hit.number,
+                body: `Re-detected on run ${context.runId}. Body refreshed above.`,
+              });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo, title, body, labels: [label],
+              });
+            }
+        env:
+          DENY_REPORT: ${{ steps.deny.outputs.report }}
+      - name: Fail the job if advisories were found
+        if: steps.deny.outputs.exit_code != '0'
+        run: |
+          echo "cargo-deny advisories reported findings (exit ${{ steps.deny.outputs.exit_code }})."
+          exit 1
