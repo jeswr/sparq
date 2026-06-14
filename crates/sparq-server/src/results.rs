@@ -270,6 +270,35 @@ fn tsv_escape(out: &mut String, v: &str) {
 // ---------------------------------------------------------------------------
 
 fn xml_text_escape(out: &mut String, s: &str) {
+    // [OPUS-4.8] Leading/trailing whitespace in element TEXT content is silently dropped by
+    // any XML parser that trims text events (the default for quick-xml / the `sparesults`
+    // reference parser, and most SAX-style consumers) — so a literal `"  pad  "` written as
+    // `<literal>  pad  </literal>` round-trips to `"pad"`. (Found by the serializer oracle in
+    // tests/serializer_oracle.rs.) Escape BOUNDARY whitespace (space/tab/CR/LF at the start
+    // or end) as numeric character references so it survives the round trip; interior
+    // whitespace is preserved by parsers and is left verbatim. Mirrors the reference
+    // serializer's `escape_including_bound_whitespaces` (sparesults' xml.rs).
+    // The whitespace set XML parsers trim from text events.
+    const XML_BOUND_WS: [char; 4] = ['\t', '\n', '\r', ' '];
+    let trimmed = s.trim_matches(XML_BOUND_WS);
+    if trimmed.len() == s.len() {
+        // No boundary whitespace — the common path.
+        xml_text_escape_body(out, s);
+        return;
+    }
+    let prefix_len = s.len() - s.trim_start_matches(XML_BOUND_WS).len();
+    for ch in s[..prefix_len].chars() {
+        push_ws_charref(out, ch);
+    }
+    xml_text_escape_body(out, trimmed);
+    for ch in s[prefix_len + trimmed.len()..].chars() {
+        push_ws_charref(out, ch);
+    }
+}
+
+/// Escapes the XML-significant characters (`&`, `<`, `>`) in text content; boundary
+/// whitespace handling is done by [`xml_text_escape`]. [OPUS-4.8]
+fn xml_text_escape_body(out: &mut String, s: &str) {
     for ch in s.chars() {
         match ch {
             '&' => out.push_str("&amp;"),
@@ -277,6 +306,18 @@ fn xml_text_escape(out: &mut String, s: &str) {
             '>' => out.push_str("&gt;"),
             _ => out.push(ch),
         }
+    }
+}
+
+/// Writes a whitespace character as its XML numeric character reference. [OPUS-4.8]
+fn push_ws_charref(out: &mut String, ch: char) {
+    match ch {
+        '\t' => out.push_str("&#9;"),
+        '\n' => out.push_str("&#10;"),
+        '\r' => out.push_str("&#13;"),
+        ' ' => out.push_str("&#32;"),
+        // `trim_matches` above strips only these four, so nothing else reaches here.
+        _ => out.push(ch),
     }
 }
 

@@ -86,6 +86,15 @@ serde_json = { version = "1", optional = true }
 mimalloc = "0.1"
 
 [dev-dependencies]
+# [OPUS-4.8] Reference SPARQL-results parser (oxigraph's) for the serializer oracle
+# (tests/serializer_oracle.rs): re-parses OUR XML/TSV output and asserts the round-trip
+# result set equals the source QueryResult. Pinned to 0.3 so its `oxrdf` (0.3.3) is the
+# SAME version sparq-server resolves — Term/Variable compare directly, no conversion.
+# (sparesults intentionally REFUSES to parse CSV — declares it "lossy" — so the CSV arm
+# of the oracle uses a self-contained RFC 4180 validator instead; see the test file.)
+# `sparql-12` turns on the reference parser's RDF 1.2 / quoted-triple-term (`<<( … )>>`)
+# support so the oracle can round-trip an rdf-star object through XML and TSV. [OPUS-4.8]
+sparesults = { version = "0.3", features = ["sparql-12"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "time"] }
 # In-process HTTP client for integration tests (spin the server, assert protocol shape).
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
