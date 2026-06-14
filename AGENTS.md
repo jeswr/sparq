@@ -92,6 +92,7 @@ After a batch of changes, re-run only the evaluations whose inputs changed — o
 | SHACL (`sparq-shacl`) | the W3C SHACL conformance ratchet (core ≥98, sparql ≥5) |
 | storage/encoding (`sparq-core` store/dict/compress, mmap, dict-spill) | the deterministic perf-gate metrics; byte-identity differentials; coverage with `--features dict-spill` |
 | anything merged | the per-crate coverage ratchet + test-presence gate (`scripts/coverage*.py`) |
+| this `AGENTS.md` / any "how we work" convention | ask whether it's portable to a sibling repo's charter — if so, file it there (see *Cross-pollinate the charter with sibling repos*) |
 
 (Keep this table in sync as gates are added.)
 
@@ -112,9 +113,22 @@ When a feature or a performance goal is **blocked by an upstream dependency** (a
 3. **Keep the PR live:** if you later change that vendored code, update the open PR; if the upstream PR was already merged/closed, open a new one for the delta.
 4. A `blocked-upstream` bead is therefore a signal to roll-your-own + contribute, NOT a dead end. When the local implementation lands, the bead is unblocked.
 
+**Proactive upstreaming, not just unblocking.** The rule above triggers on a blocker, but it also runs the other direction: when a fix or feature built here against a vendored or forked upstream (`spargebra`, the `hdt` crate, any `[patch.crates-io]` dependency) would be useful to that upstream even though nothing here was blocked, proactively offer it upstream (an issue + PR) rather than siloing it in the vendored copy. Record the upstream URL in the relevant bead and in the vendored copy's `*-PATCHES.md`. Keeping vendored deltas flowing upstream shrinks the patch set we carry.
+
 ## Proactively maintain this file (and the skills)
 
 Do NOT wait to be told. Whenever you notice a **repeated behaviour, a standing rule, a convention, or a hard-won lesson** that future agents should follow, add it to this `AGENTS.md` (or the matching `skills/<surface>/SKILL.md`) as part of the same work — the same way you'd capture a follow-up as a bead. This file is the durable home for "how we work here"; keep it current without prompting.
+
+## Cross-pollinate the charter with sibling repos
+
+This charter is shared, adapted, with sibling repositories (e.g. **github.com/jeswr/prod-solid-server**, a production Solid server whose AGENTS.md was adapted from this one). Keep the charters **convergent on the shared *principles*** while each keeps its own domain-specific gates. The shared core that should stay aligned across siblings: *delegate to worktree sub-agents + the continuous bead loop*; *track work in beads, never markdown TODOs*; *no `HANDOVER`/`SESSION` scratch docs*; *docs must stay current*; *the `needs:user` queue*; *proactively maintain this file*. sparq's domain-specific gates (cargo/clippy `-D warnings`, the W3C-conformance + best-ever-perf ratchets, the crate/wasm/CLI/HTTP/Py/JS surfaces, roborev/codex review) stay sparq's; a sibling's HTTP/Solid-specific gates stay theirs.
+
+The flow is **bidirectional**:
+
+- **Inbound (pull).** Siblings file *portable-pattern* issues on this repo. Review them; for each, decide if it is **genuinely portable** to sparq (be conservative — do not copy repo-specific bits). If portable, fold it into this `AGENTS.md` **adapted to sparq's reality**, then close or comment the issue. Also, periodically read a sibling's full charter for portable **repeat-workflow behaviours** that were never filed as issues, and adopt the genuinely-shared ones. (Both are step 1 of the *Maintenance loop*.)
+- **Outbound (push).** When YOU add a convention to this file that would help a sibling, **file an issue (or open a PR) on the sibling repo** so it can adopt it — the mirror of how it files here.
+
+**Task-completion checklist item (the mirror of the siblings' rule):** before considering a change done, ask — *"did this change produce a convention worth upstreaming to a sibling repo's charter?"* If yes, file the outbound issue/PR as part of the same work.
 
 ## Orchestration cadence — background by default
 
@@ -135,6 +149,8 @@ Branch protection (owner-set, out-of-repo) enforces this: require `ci-summary`, 
 
 **Security & quality gating:** new security/quality regressions must not merge. CodeQL (SAST) + `cargo clippy -D warnings` + `cargo-deny` + the coverage/conformance ratchets all feed `ci-summary`. Keep the GitHub **code-scanning** alert count at zero — SHA-pin every action (`uses: owner/action@<full-sha> # vX.Y.Z`), and resolve/triage Scorecard + CodeQL alerts as they appear.
 
+**Contingency — if CI is genuinely unreachable.** The PR + `ci-summary` flow above is the standing rule and applies whenever CI can run. If GitHub Actions is genuinely unavailable (a platform/account outage — *not* a red run, which you fix), don't let the gate stall indefinitely: run the **full local gate** (full-workspace `clippy -D warnings` + `cargo test` + the conformance/perf ratchets) and treat **roborev's PASS verdict on the commit as the standing human-review substitute** (codex is non-Anthropic, so the substitute reviewer is still cross-family). This degrades the *review* and *gate-execution* to local; it does **not** authorise pushing to a protected `main` — that's a branch-protection change (a `needs:user` item), not something to bake in. Raise the outage itself as `needs:user`. The moment CI returns, revert to the normal flow and reconcile anything that landed during the outage against a green run.
+
 ## Automated review — roborev on every commit, including in worktrees
 
 Every commit is auto-reviewed by **roborev**: a `.git/hooks/post-commit` hook enqueues a review job to the local roborev daemon. The reviewer agent is **codex — a deliberately non-Anthropic model**, so the engine is never reviewed by the same model family that wrote it. Git worktrees share the main repo's `.git/hooks`, so commits made by worktree sub-agents are reviewed too. Verify the loop is live with `roborev list` (recent jobs, all `done`) and `~/.roborev/post-commit.log` (the per-repo enqueue trail, incl. `sparq-wt-*` worktrees).
@@ -145,6 +161,16 @@ Findings must be **addressed, not merely gathered.** A finding is resolved in ex
 2. **explicit triage** — it is fixed, beaded as real-but-deferred work (`bd create`), or closed with a written reason (`roborev close <id>`) when it's a false positive.
 
 Squashing a branch into `main` does **not** address its findings: if the flagged code survived the squash it is still live — just orphaned onto a SHA that no longer appears in `git log`, which is *worse* than an open finding on a current commit because it's invisible. So before merging a branch, reconcile its roborev findings against current `main` HEAD and dispose of each (fix / bead / close-with-reason). Periodically run `roborev list --open` and drain the backlog; don't let unaddressed findings accumulate.
+
+## Model provenance — tag fallback-model work for re-review
+
+When work is authored under a **downgraded or fallback model** (the intended stronger model is temporarily unavailable), tag it so it can be deliberately re-reviewed or regenerated when the stronger model returns. This is provenance for re-review, not blame.
+
+- **Commit trailer + co-author.** Add a `Co-Authored-By: <model> <noreply@anthropic.com>` trailer. Current standing instance (Fable unavailable): author as **Claude Opus 4.8** with `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+- **Inline marker on new code/notes.** Mark substantive new source or design notes with an `[OPUS-4.8]` inline marker (the current fallback tag), so fallback-authored spans are greppable for re-review without trawling `git blame`.
+- **Carry it into sub-agent briefs.** Every sub-agent brief inherits the same tagging requirement, so worktree-authored commits are tagged too.
+
+The trailer + inline-marker pair *is* the ledger — git history is already greppable (`git log --grep`, `grep -rn '\[OPUS-4.8\]'`); do **not** add a separate tracked `MODEL-PROVENANCE.md` doc (it would duplicate git and drift — see Repository hygiene). When the stronger model returns, sweep the markers/trailers and re-review or regenerate as warranted.
 
 ## Monitor CI after every push to main — and fix red
 
@@ -159,6 +185,21 @@ Aim to keep **as many sub-agents running in parallel as possible** without (a) c
 ## Inputs needed from the user — the `needs:user` bead queue
 
 Anything blocked on a **human decision, credential, or out-of-repo action** (re-auth SSO, enable GitHub Pages, approve a destructive step, a product decision) is tracked as a **bead labelled `needs:user`**, with the exact ask in the description. This is the standard human-in-the-loop pattern (a dedicated review/blocked-on-human queue) mapped onto the existing tracker, so nothing waiting on the user is lost in the chat scroll. List them with `bd list -l needs:user`. An orchestrator should **surface the open `needs:user` items in its responses** (concise, at the end) until the user resolves them, so they can be actioned whenever the user is next available.
+
+## Maintenance loop — the repeat-tasks sweep (the concrete instantiation of the above)
+
+This is the standing orchestration loop that ties the sections above together. Run it as a sweep; it is **lightweight — a no-op pass when nothing is actionable.** Each step is the concrete form of a rule already stated above.
+
+0. **Reconcile first (cheap, every pass).** `git worktree list` + `gh pr list`; reap finished-but-unnotified worktree agents (a committed branch + no live `cargo` process = done → open its PR); merge any PR that is `ci-summary`-green **and** has all review threads resolved (squash, delete branch, then watch main CI); rebase any PR gone stale/red. (See *Orchestration cadence* + *Contribution workflow*.)
+1. **Charter cross-pollination.** *Pull:* fetch each sibling charter (`gh api repos/<sibling>/contents/AGENTS.md --jq .content | base64 -d`) + the open cross-pollination issues on this repo; fold genuinely-portable conventions into THIS file — **adapted to sparq** (cargo/clippy `-D warnings` + the W3C-conformance + best-ever-perf ratchets as the gate; roborev/codex as the reviewer; beads; the crate/wasm/CLI/HTTP/Py/JS surfaces) — via a PR, conservatively; then close/comment the issue. *Push:* for any convention this charter gains that a sibling lacks, file an issue (or PR) on the sibling repo. No-op when there is no charter drift. (See *Cross-pollinate the charter with sibling repos*.)
+2. **Replenish beads.** Scan this repo's issues/PRs + Dependabot + open roborev findings + the siblings for recurring or again-needed work → `bd create` (never hand-edit `.beads/`).
+3. **Drive `bd ready` (the engine).** Pick the largest set of unblocked beads on **disjoint file-areas**; delegate each to a **background** worktree sub-agent (smallest context-independent brief; gates in-worktree scoped to its crates; `bd create`s discovered work; does **not** push). Maximise parallelism — serialise only (a) two beads touching the same file and (b) CPU-heavy perf/benchmark **measurements** (those need a quiet box). Cap concurrent *cargo-heavy* agents to the core budget; doc/research/config agents parallelise freely. (See *Maximise parallelism*.)
+4. **Land each finished agent via a PR — one through merge at a time.** The orchestrator pushes the branch, opens the PR, requests Copilot review. **`ci-summary` is the authoritative full gate** (workspace clippy `-D warnings` + `cargo test` + SPARQL/SHACL/inference ratchets + coverage ratchet + best-ever perf floor) — **read CI; do not re-run the heavy gate locally.** Address every Copilot **and** roborev finding (fix it, or reply with the decline reason) and resolve the thread; merge only when `ci-summary` is green **and** all threads resolved; squash; `bd close`; re-export beads in a bookkeeping PR. (See *Contribution workflow* + *Automated review*.)
+5. **roborev hygiene.** Before merging a branch, reconcile its roborev (codex, non-Anthropic) findings against current `main` HEAD — never assume a merge cleared them; fix / bead / close-with-reason.
+6. **Watch main CI after every push; a red main is stop-the-line** → fix it before any further merge. (See *Monitor CI after every push to main*.)
+7. **Surface the `needs:user` queue at pass end** (`bd list -l needs:user`) — owner-only items (branch protection, SSO, Pages, upstream-PR filings); never block the loop on them.
+
+**Done when** `bd ready` minus `needs:user` is empty and no PR / agent / CI is in flight.
 
 ## No hard-coded performance numbers
 
