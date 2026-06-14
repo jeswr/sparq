@@ -60,7 +60,7 @@ rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
 regex = { version = "1", optional = true }
-md-5 = { version = "0.10", optional = true }
+md-5 = { version = "0.11", optional = true }
 sha1 = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
 # SPARQL-Results-JSON parsing for the `service` (federation) feature. serde_json is
