@@ -4,8 +4,8 @@
 //! Usage:
 //!   sparq-server [--addr 127.0.0.1:3030] [--allow-remote] [--format turtle]
 //!                [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
-//!                [--max-results N] [--max-subscriptions N]
-//!                [--max-subscriptions-per-conn N]
+//!                [--max-results N] [--max-query-rows N] [--max-decompress-ratio N]
+//!                [--max-subscriptions N] [--max-subscriptions-per-conn N]
 //!                [--service-allow HOST|*.SUFFIX]... [--service-allow-file PATH]
 //!                [--verbose] [DATA_FILE]
 //!
@@ -29,13 +29,19 @@
 //! they just return no rows). The format defaults to `turtle`; pass `--format ntriples |
 //! nquads | trig` to match the file.
 //!
-//! Hardening flags (T15) — defaults in brackets; each flag overrides the matching
-//! `SPARQ_*` environment variable (see crates/sparq-server/README.md):
-//!   --query-timeout SECS   per-request query timeout, 0 disables   [30, env SPARQ_QUERY_TIMEOUT]
-//!   --max-body-bytes N     maximum request body in bytes           [1048576, env SPARQ_MAX_BODY_BYTES]
-//!   --max-concurrent N     maximum in-flight requests (429 beyond) [32, env SPARQ_MAX_CONCURRENT]
-//!   --max-results N        maximum SELECT rows (413 beyond), 0 off [unlimited, env SPARQ_MAX_RESULTS]
-//!   --verbose              per-request logging (TraceLayer)
+//! Hardening flags (T15 + sq-ebii) — defaults in brackets; each flag overrides the matching
+//! `SPARQ_*` environment variable (see crates/sparq-server/README.md and the four-limit
+//! "Server hardening" section in skills/http-server/SKILL.md):
+//!   --query-timeout SECS      per-request query timeout, 0 disables      [30, env SPARQ_QUERY_TIMEOUT]
+//!   --max-body-bytes N        maximum request body in bytes              [1048576, env SPARQ_MAX_BODY_BYTES]
+//!   --max-concurrent N        maximum in-flight requests (429 beyond)    [32, env SPARQ_MAX_CONCURRENT]
+//!   --max-results N           maximum SELECT rows (413 beyond), 0 off    [unlimited, env SPARQ_MAX_RESULTS]
+//!   --max-query-rows N        [OPUS-4.8 sq-ebii] coarse MEMORY CAP: working-set row ceiling on EVERY
+//!                             query form (413 beyond), 0 off             [unlimited, env SPARQ_MAX_QUERY_ROWS]
+//!   --max-decompress-ratio N  [OPUS-4.8 sq-ebii] DECOMPRESSION-RATIO cap for a `Content-Encoding: gzip`
+//!                             request body (zip-bomb guard; 413), 0 = refuse gzip bodies
+//!                                                                        [20, env SPARQ_MAX_DECOMPRESS_RATIO]
+//!   --verbose                 per-request logging (TraceLayer)
 //!
 //! Subscription limits (T23, the /subscriptions WebSocket — see SUBSCRIPTIONS.md):
 //!   --max-subscriptions N           server-wide active subscriptions [256, env SPARQ_MAX_SUBSCRIPTIONS]
@@ -99,6 +105,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let n: usize = parse_flag(&mut args, "--max-results")?;
                 config.max_results = (n > 0).then_some(n);
             }
+            // [OPUS-4.8] sq-ebii: memory cap (coarse working-set row ceiling, all forms);
+            // 0 disables it.
+            "--max-query-rows" => {
+                let n: usize = parse_flag(&mut args, "--max-query-rows")?;
+                config.max_query_rows = (n > 0).then_some(n);
+            }
+            // [OPUS-4.8] sq-ebii: decompression-ratio cap (zip-bomb guard); 0 disables
+            // decompression of Content-Encoding: gzip request bodies (they are then refused).
+            "--max-decompress-ratio" => {
+                config.max_decompress_ratio = parse_flag(&mut args, "--max-decompress-ratio")?;
+            }
             "--max-subscriptions" => {
                 config.max_subscriptions = parse_flag(&mut args, "--max-subscriptions")?;
             }
@@ -142,7 +159,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--format FMT] \
                      [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
-                     [--max-results N] [--max-subscriptions N] \
+                     [--max-results N] [--max-query-rows N] [--max-decompress-ratio N] \
+                     [--max-subscriptions N] \
                      [--max-subscriptions-per-conn N]{time_travel}{service} [--verbose] [DATA_FILE]\n\n  \
                      SECURITY: no built-in auth. --addr defaults to loopback (127.0.0.1); a \
                      non-loopback bind (e.g. 0.0.0.0) is REFUSED unless --allow-remote (or \
@@ -198,11 +216,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("loaded {} triples", graph.len());
     eprintln!(
         "guards: query-timeout={} max-body-bytes={} max-concurrent={} max-results={} \
-         max-subscriptions={} max-subscriptions-per-conn={}",
+         max-query-rows={} max-decompress-ratio={}x max-subscriptions={} \
+         max-subscriptions-per-conn={}",
         config.query_timeout.map_or("off".into(), |t| format!("{}s", t.as_secs())),
         config.max_body_bytes,
         config.max_concurrent,
         config.max_results.map_or("off".into(), |n| n.to_string()),
+        // [OPUS-4.8] sq-ebii: memory cap + decompression-ratio cap in the startup guard line.
+        config.max_query_rows.map_or("off".into(), |n| n.to_string()),
+        config.max_decompress_ratio,
         config.max_subscriptions,
         config.max_subscriptions_per_conn,
     );
