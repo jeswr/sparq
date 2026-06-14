@@ -72,7 +72,8 @@ pub struct GeoGeometry {
 }
 
 /// Swaps x and y in every coordinate (EPSG:4326 lat/long <-> internal long/lat).
-fn swap_xy(g: Geometry<f64>) -> Geometry<f64> {
+/// `pub(crate)` so the GML path can normalise EPSG:4326 axis order identically. [OPUS-4.8]
+pub(crate) fn swap_xy(g: Geometry<f64>) -> Geometry<f64> {
     g.map_coords(|c| Coord { x: c.y, y: c.x })
 }
 
@@ -96,6 +97,28 @@ pub fn parse_wkt_literal(lex: &str) -> Result<GeoGeometry, GeoError> {
         .map_err(|e| GeoError::Parse(e.to_string()))?;
     let geometry = if crs == Crs::Epsg4326 { swap_xy(geom) } else { geom };
     Ok(GeoGeometry { crs, geometry })
+}
+
+/// Parses a geometry literal by its DATATYPE: `geo:wktLiteral` lexical forms via
+/// [`parse_wkt_literal`], `geo:gmlLiteral` via
+/// [`parse_gml_literal`](crate::gml::parse_gml_literal). Both yield the same
+/// [`GeoGeometry`] (CRS-tagged, long/lat-normalised), so downstream `geof:`
+/// functions and the [`GeoIndex`](crate::GeoIndex) treat the two serializations
+/// identically (GeoSPARQL §8.5). Any other datatype is `GeoError::Unsupported`. [OPUS-4.8]
+pub fn parse_geometry_literal(value: &str, datatype: &str) -> Result<GeoGeometry, GeoError> {
+    match datatype {
+        vocab::WKT_LITERAL => parse_wkt_literal(value),
+        vocab::GML_LITERAL => crate::gml::parse_gml_literal(value),
+        other => Err(GeoError::Unsupported(format!(
+            "geometry datatype <{other}> is not a geo:wktLiteral or geo:gmlLiteral"
+        ))),
+    }
+}
+
+/// Whether a datatype IRI is one of the GeoSPARQL geometry serializations this
+/// crate parses (`geo:wktLiteral` or `geo:gmlLiteral`). [OPUS-4.8]
+pub fn is_geometry_datatype(datatype: &str) -> bool {
+    datatype == vocab::WKT_LITERAL || datatype == vocab::GML_LITERAL
 }
 
 impl GeoGeometry {

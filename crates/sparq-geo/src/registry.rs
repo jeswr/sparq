@@ -34,10 +34,11 @@
 //!   is the same expression error.
 
 use crate::geof::lex;
-use crate::vocab::{GEOF_NS, WKT_LITERAL};
+use crate::vocab::{GEOF_NS, GML_LITERAL, WKT_LITERAL};
 use crate::GeoError;
 use oxrdf::{Literal, NamedNode, Term};
 use sparq_engine::FunctionRegistry;
+use std::borrow::Cow;
 
 /// `Err` unless exactly `n` arguments were passed.
 fn arity(name: &str, args: &[Term], n: usize) -> Result<(), String> {
@@ -48,12 +49,20 @@ fn arity(name: &str, args: &[Term], n: usize) -> Result<(), String> {
     }
 }
 
-/// The lexical form of argument `i`, which must be a `geo:wktLiteral` literal.
-fn wkt_lex<'a>(name: &str, args: &'a [Term], i: usize) -> Result<&'a str, String> {
+/// The geometry of argument `i` as a WKT lexical form. A `geo:wktLiteral` is
+/// returned borrowed; a `geo:gmlLiteral` (GeoSPARQL accepts BOTH serializations
+/// as geometry arguments, §8.5) is parsed and re-serialised to the equivalent
+/// WKT lexical form so the WKT-keyed `geof::lex` functions handle it unchanged.
+/// Any other term is a per-row expression error. [OPUS-4.8]
+fn wkt_lex<'a>(name: &str, args: &'a [Term], i: usize) -> Result<Cow<'a, str>, String> {
     match &args[i] {
-        Term::Literal(l) if l.datatype().as_str() == WKT_LITERAL => Ok(l.value()),
+        Term::Literal(l) if l.datatype().as_str() == WKT_LITERAL => Ok(Cow::Borrowed(l.value())),
+        Term::Literal(l) if l.datatype().as_str() == GML_LITERAL => {
+            let g = crate::gml::parse_gml_literal(l.value()).map_err(|e| e.to_string())?;
+            Ok(Cow::Owned(g.to_wkt_literal()))
+        }
         other => Err(format!(
-            "geof:{name}: argument {} must be a geo:wktLiteral literal, got {other}",
+            "geof:{name}: argument {} must be a geo:wktLiteral or geo:gmlLiteral literal, got {other}",
             i + 1
         )),
     }
@@ -124,7 +133,7 @@ pub fn geof_registry() -> FunctionRegistry {
         let a = wkt_lex("distance", args, 0)?;
         let b = wkt_lex("distance", args, 1)?;
         let unit = unit_iri("distance", args, 2)?;
-        let d = lex::distance(a, b, unit).map_err(|e| e.to_string())?;
+        let d = lex::distance(&a, &b, unit).map_err(|e| e.to_string())?;
         Ok(Term::Literal(Literal::from(d)))
     });
 
@@ -161,7 +170,8 @@ pub fn geof_registry() -> FunctionRegistry {
     for (name, f) in relations {
         reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
             arity(name, args, 2)?;
-            let v = f(wkt_lex(name, args, 0)?, wkt_lex(name, args, 1)?).map_err(|e| e.to_string())?;
+            let v = f(&wkt_lex(name, args, 0)?, &wkt_lex(name, args, 1)?)
+                .map_err(|e| e.to_string())?;
             Ok(Term::Literal(Literal::from(v)))
         });
     }
@@ -179,7 +189,7 @@ pub fn geof_registry() -> FunctionRegistry {
                 ))
             }
         };
-        let v = lex::relate(a, b, pattern).map_err(|e| e.to_string())?;
+        let v = lex::relate(&a, &b, pattern).map_err(|e| e.to_string())?;
         Ok(Term::Literal(Literal::from(v)))
     });
 
@@ -192,7 +202,7 @@ pub fn geof_registry() -> FunctionRegistry {
     for (name, f) in unary {
         reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
             arity(name, args, 1)?;
-            Ok(wkt_term(f(wkt_lex(name, args, 0)?).map_err(|e| e.to_string())?))
+            Ok(wkt_term(f(&wkt_lex(name, args, 0)?).map_err(|e| e.to_string())?))
         });
     }
 
@@ -207,7 +217,10 @@ pub fn geof_registry() -> FunctionRegistry {
     for (name, f) in set_ops {
         reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
             arity(name, args, 2)?;
-            Ok(wkt_term(f(wkt_lex(name, args, 0)?, wkt_lex(name, args, 1)?).map_err(|e| e.to_string())?))
+            Ok(wkt_term(
+                f(&wkt_lex(name, args, 0)?, &wkt_lex(name, args, 1)?)
+                    .map_err(|e| e.to_string())?,
+            ))
         });
     }
 
@@ -217,13 +230,13 @@ pub fn geof_registry() -> FunctionRegistry {
         let g = wkt_lex("buffer", args, 0)?;
         let radius = num_arg("buffer", args, 1)?;
         let unit = unit_iri("buffer", args, 2)?;
-        Ok(wkt_term(lex::buffer(g, radius, unit).map_err(|e| e.to_string())?))
+        Ok(wkt_term(lex::buffer(&g, radius, unit).map_err(|e| e.to_string())?))
     });
 
     // geof:getSRID(?g) -> xsd:anyURI (the geometry's CRS IRI).
     reg.register(format!("{GEOF_NS}getSRID"), |args: &[Term]| {
         arity("getSRID", args, 1)?;
-        let iri = lex::get_srid(wkt_lex("getSRID", args, 0)?).map_err(|e| e.to_string())?;
+        let iri = lex::get_srid(&wkt_lex("getSRID", args, 0)?).map_err(|e| e.to_string())?;
         Ok(Term::Literal(Literal::new_typed_literal(
             iri,
             NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#anyURI"),

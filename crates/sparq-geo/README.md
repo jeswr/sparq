@@ -1,8 +1,8 @@
 # sparq-geo
 
 Opt-in GeoSPARQL 1.0/1.1 core for the [sparq](https://github.com/jeswr/sparq)
-RDF engine: `geo:wktLiteral` parsing, the `geof:` spatial functions, and an
-R-tree `GeoIndex` over sparq `Graph`s.
+RDF engine: `geo:wktLiteral` and `geo:gmlLiteral` parsing, the `geof:` spatial
+functions, and an R-tree `GeoIndex` over sparq `Graph`s.
 
 This is a **separate crate** by design: no existing sparq crate (and in
 particular not the wasm build) depends on it unconditionally — spatial support
@@ -33,11 +33,30 @@ Geometry parsing and algorithms wrap the standard pure-Rust geo stack
 | 8.7 | `geof:intersection/union/difference/symDifference` | ✅ point-set ops: polygon overlay (geo `BooleanOps`), the line/point cases, **and the 1-D set-subtraction cases** (line−line / line−polygon / their symDifference) via `i_overlay` string-line clip + linear referencing — see the table below |
 | 8.7 | `geof:getSRID` | ✅ the CRS IRI as `xsd:anyURI` |
 | 8.3/8.4 | Core RDF shape: `geo:hasGeometry`, `geo:hasDefaultGeometry`, `geo:asWKT` | ✅ extracted by `GeoIndex::build` (default + named graphs) |
-| 8.5.2 | `geo:gmlLiteral` | ❌ WKT only (no maintained pure-Rust GML parser — tracked in beads, `bd list -l area:sparq-geo`) |
+| 8.5.2 | `geo:gmlLiteral` | ✅ GML Simple-Features geometry profile (`parse_gml_literal`): `gml:Point`, `gml:LineString`, `gml:Polygon` (exterior + interior rings), `gml:MultiPoint`/`MultiCurve`/`MultiSurface` (+ the GML 2 `MultiLineString`/`MultiPolygon` aggregates); `srsName`→CRS (incl. URN/`EPSG:` spellings, EPSG:4326 axis swap) identical to the WKT path; `geof:` functions and `GeoIndex` (`geo:asGML`) treat it interchangeably with WKT. `gml:Envelope`, arc-segment `gml:Curve`/`Surface`, and 3-D coordinates are deferred (clean `GeoError::Unsupported`; `bd list -l area:sparq-geo`) |
 | 7 / 9 | RIF/SPARQL rewrite rules, `geor:` query rewriting | ❌ needs engine-level query rewriting (tracked in beads, `bd list -l area:sparq-geo`) |
 
 Formal OGC conformance testing is **skipped** (the official suite needs a full
 SPARQL endpoint harness); the table above is the implemented subset.
+
+### GML parsing — roll-your-own + upstream
+
+GeoSPARQL's second geometry serialization, `geo:gmlLiteral`, is an XML
+fragment in the OGC *GML Simple-Features* profile. No maintained pure-Rust GML
+*geometry* parser crate exists (the georust stack covers WKT/WKB/GeoJSON but
+not GML), so per AGENTS.md "Upstream blockers" this crate ships a focused
+GML-SF geometry parser in [`src/gml.rs`](src/gml.rs) built on
+[`quick-xml`](https://crates.io/crates/quick-xml) (already in the lockfile —
+no new transitive crates). It walks only the geometry subset GeoSPARQL uses
+(Point/LineString/Polygon/Multi\*) and maps it onto the SAME
+`geo_types::Geometry<f64>` + `Crs` the WKT path produces, so every downstream
+`geof:` function and the `GeoIndex` work unchanged. The parser is namespace-
+prefix-agnostic (matches on local names) and accepts both GML 3 (`gml:pos`/
+`posList`/`exterior`/`interior`) and GML 2 (`gml:coordinates`/
+`outerBoundaryIs`/`innerBoundaryIs`) spellings. **Upstream proposal:** factor
+this profile into a standalone `gml-geometry` crate and offer it to
+[georust](https://github.com/georust) so others stop hitting the same gap — see
+the bead `sq-zy0` and the contributor notes.
 
 ### Distance semantics & accuracy
 
@@ -106,8 +125,10 @@ Registered IRIs (35, all under `http://www.opengis.net/def/function/geosparql/`)
 plus the generic `relate(g1, g2, de9imPattern)` (all `xsd:boolean`);
 `envelope` / `boundary` / `convexHull` and `buffer(g, radius, unitIri)` /
 `intersection` / `union` / `difference` / `symDifference` (`geo:wktLiteral`);
-`getSRID` (`xsd:anyURI`). Geometry arguments must be `geo:wktLiteral`
-literals. Any geo error (malformed WKT, wrong datatype, CRS mismatch, unknown
+`getSRID` (`xsd:anyURI`). Geometry arguments may be `geo:wktLiteral` **or**
+`geo:gmlLiteral` literals (GeoSPARQL §8.5 — a GML argument is parsed and
+handled identically to its WKT twin; the two serializations interoperate in one
+call). Any geo error (malformed WKT/GML, wrong datatype, CRS mismatch, unknown
 unit, an unsupported set-operation operand pair, wrong arity) is a per-row
 SPARQL *expression* error — the row is dropped by a `FILTER`, left unbound by a
 `BIND` — exactly like the builtin functions; an IRI not in the registry stays
@@ -175,9 +196,9 @@ down into index windows automatically needs a planner hook (tracked in beads, `b
 
 ## Index design
 
-`GeoIndex::build` scans `geo:asWKT` once (plus one scan per `hasGeometry`
-predicate to map geometry nodes back to their owning features), parses each
-wktLiteral, and bulk-loads an `rstar` R-tree (packed STR build) of
+`GeoIndex::build` scans `geo:asWKT` and `geo:asGML` once each (plus one scan per
+`hasGeometry` predicate to map geometry nodes back to their owning features),
+parses each wktLiteral/gmlLiteral, and bulk-loads an `rstar` R-tree (packed STR build) of
 `{entry-index, AABB}` leaves in long/lat degree space; parsed geometries live
 in a flat side array. Queries prune by bounding box and refine against the
 true geometry:

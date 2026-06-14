@@ -149,20 +149,27 @@ fn extract_graph(graph: &Graph, graph_name: Option<&Term>) -> (Vec<Entry>, usize
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut skipped = 0usize;
-    let as_wkt = NamedNode::new_unchecked(vocab::AS_WKT);
-    if let Some(pattern) = graph.pattern(None, Some(&as_wkt), None) {
+    // Scan both geometry-serialization predicates: geo:asWKT (wktLiteral) and
+    // geo:asGML (gmlLiteral). Both flow through the same dispatch. [OPUS-4.8]
+    for serial_pred in [vocab::AS_WKT, vocab::AS_GML] {
+        let pred = NamedNode::new_unchecked(serial_pred);
+        let Some(pattern) = graph.pattern(None, Some(&pred), None) else {
+            continue;
+        };
         let scan = graph.store.scan(&pattern);
         for row in scan.rows.iter() {
             let [s, _, o] = scan.to_spo(row);
-            // Only geo:wktLiteral-typed literals; everything else is skipped.
+            // Only geometry-typed literals (geo:wktLiteral / geo:gmlLiteral);
+            // everything else is skipped. [OPUS-4.8]
             let lit = match graph.dict.term(o) {
-                Term::Literal(l) if l.datatype().as_str() == vocab::WKT_LITERAL => l,
+                Term::Literal(l) if crate::is_geometry_datatype(l.datatype().as_str()) => l,
                 _ => {
                     skipped += 1;
                     continue;
                 }
             };
-            let geometry = match crate::parse_wkt_literal(lit.value()) {
+            let geometry = match crate::parse_geometry_literal(lit.value(), lit.datatype().as_str())
+            {
                 // The index computes great-circle metres: non-geographic
                 // CRSs have no defined conversion, so they are skipped
                 // (still usable via the geof:: functions directly). EMPTY
@@ -189,7 +196,7 @@ fn extract_graph(graph: &Graph, graph_name: Option<&Term>) -> (Vec<Entry>, usize
                 }
                 None => entries.push(Entry {
                     entity: node.clone(),
-                    node,
+                    node: node.clone(),
                     literal,
                     graph: graph_name.cloned(),
                     geometry,
@@ -276,7 +283,10 @@ impl GeoIndex {
         };
         for [s, p, o] in inserts.iter().chain(deletes) {
             match p {
-                Term::NamedNode(p) if p.as_str() == vocab::AS_WKT => push_unique(s),
+                // Both geometry-serialization predicates touch the subject node. [OPUS-4.8]
+                Term::NamedNode(p) if p.as_str() == vocab::AS_WKT || p.as_str() == vocab::AS_GML => {
+                    push_unique(s)
+                }
                 Term::NamedNode(p)
                     if p.as_str() == vocab::HAS_GEOMETRY
                         || p.as_str() == vocab::HAS_DEFAULT_GEOMETRY =>
@@ -310,7 +320,6 @@ impl GeoIndex {
         }
 
         // 3. Re-extract the affected nodes from the graph's current state.
-        let as_wkt = NamedNode::new_unchecked(vocab::AS_WKT);
         for node in &nodes {
             // The node's owning features, post-delta.
             let mut owners: Vec<Term> = Vec::new();
@@ -327,45 +336,55 @@ impl GeoIndex {
                     }
                 }
             }
-            // The node's wktLiterals, post-delta (same skip rules as build).
-            let Some(pattern) = graph.pattern(Some(node), Some(&as_wkt), None) else {
-                continue;
-            };
-            let scan = graph.store.scan(&pattern);
-            for row in scan.rows.iter() {
-                let [_, _, o] = scan.to_spo(row);
-                let lit = match graph.dict.term(o) {
-                    Term::Literal(l) if l.datatype().as_str() == vocab::WKT_LITERAL => l,
-                    _ => {
-                        self.skipped += 1;
-                        continue;
-                    }
+            // The node's geometry literals, post-delta, over BOTH serialization
+            // predicates (same skip rules as build). [OPUS-4.8]
+            for serial_pred in [vocab::AS_WKT, vocab::AS_GML] {
+                let pred = NamedNode::new_unchecked(serial_pred);
+                let Some(pattern) = graph.pattern(Some(node), Some(&pred), None) else {
+                    continue;
                 };
-                let geometry = match crate::parse_wkt_literal(lit.value()) {
-                    Ok(g) if g.crs.is_geographic() && g.geometry.bounding_rect().is_some() => g,
-                    _ => {
-                        self.skipped += 1;
-                        continue;
-                    }
-                };
-                let literal = Term::Literal(lit.clone());
-                if owners.is_empty() {
-                    self.insert_entry(Entry {
-                        entity: node.clone(),
-                        node: node.clone(),
-                        literal,
-                        graph: None,
-                        geometry,
-                    });
-                } else {
-                    for feature in &owners {
+                let scan = graph.store.scan(&pattern);
+                for row in scan.rows.iter() {
+                    let [_, _, o] = scan.to_spo(row);
+                    let lit = match graph.dict.term(o) {
+                        Term::Literal(l) if crate::is_geometry_datatype(l.datatype().as_str()) => l,
+                        _ => {
+                            self.skipped += 1;
+                            continue;
+                        }
+                    };
+                    let geometry =
+                        match crate::parse_geometry_literal(lit.value(), lit.datatype().as_str()) {
+                            Ok(g)
+                                if g.crs.is_geographic()
+                                    && g.geometry.bounding_rect().is_some() =>
+                            {
+                                g
+                            }
+                            _ => {
+                                self.skipped += 1;
+                                continue;
+                            }
+                        };
+                    let literal = Term::Literal(lit.clone());
+                    if owners.is_empty() {
                         self.insert_entry(Entry {
-                            entity: feature.clone(),
+                            entity: node.clone(),
                             node: node.clone(),
-                            literal: literal.clone(),
+                            literal,
                             graph: None,
-                            geometry: geometry.clone(),
+                            geometry,
                         });
+                    } else {
+                        for feature in &owners {
+                            self.insert_entry(Entry {
+                                entity: feature.clone(),
+                                node: node.clone(),
+                                literal: literal.clone(),
+                                graph: None,
+                                geometry: geometry.clone(),
+                            });
+                        }
                     }
                 }
             }

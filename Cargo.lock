@@ -3191,6 +3191,7 @@ dependencies = [
  "i_overlay",
  "oxrdf 0.3.3",
  "proj4rs",
+ "quick-xml",
  "rand 0.9.4",
  "rstar",
  "rustc-hash 2.1.2",
