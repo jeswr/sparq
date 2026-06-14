@@ -33,6 +33,11 @@ mod service;
 // (threat-model B4 / sq-2v6f). [OPUS-4.8]
 #[cfg(feature = "service")]
 pub use service::with_service_egress_allow;
+// Strict allowlist-only egress policy: only listed hosts reachable (even public ones
+// off the list are refused). The network-exposed server wires this to --service-allow
+// so federation is restricted to operator-configured endpoints. [OPUS-4.8] (sq-4w18)
+#[cfg(feature = "service")]
+pub use service::with_service_egress_policy;
 mod update;
 // zk-trace seam (NON-DEFAULT `zk` feature; consumed only by `sparq-zk`).
 // When off, zero zk code is compiled — default builds and wasm are untouched.
