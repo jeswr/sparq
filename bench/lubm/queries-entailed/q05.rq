@@ -1,0 +1,9 @@
+# [OPUS-4.8] LUBM Q5 — ENTAILED (rdfs:subClassOf). Asks for ub:Person, a top-level SUPERCLASS;
+# no individual is typed ub:Person in the data. OWL-RL classifies every student/faculty/staff
+# individual as a Person, so this returns all members of Department0 (0 without reasoning).
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x WHERE {
+  ?x rdf:type ub:Person .
+  ?x ub:memberOf <http://www.Department0.University0.edu> .
+}

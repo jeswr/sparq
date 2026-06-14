@@ -1,0 +1,10 @@
+# [OPUS-4.8] LUBM Q6 — ENTAILED (OWL property-restriction classification). Asks for ub:Student.
+# UndergraduateStudent IS subClassOf Student (plain rdfs), but GraduateStudent is NOT — it is
+# subClassOf a (takesCourse some GraduateCourse) RESTRICTION, and Student is the DEFINED class
+# "Person AND (takesCourse some Course)". Inferring GraduateStudent individuals are Students
+# needs OWL someValuesFrom/intersectionOf reasoning (beyond RDFS). OWL-RL: undergrad+grad.
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x WHERE {
+  ?x rdf:type ub:Student .
+}

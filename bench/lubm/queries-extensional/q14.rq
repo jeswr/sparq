@@ -1,0 +1,7 @@
+# [OPUS-4.8] LUBM Q14 — EXTENSIONAL. The simplest query: all UndergraduateStudent instances.
+# UndergraduateStudent is an explicit leaf type, so no entailment is needed. (Canonical Q14.)
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x WHERE {
+  ?x rdf:type ub:UndergraduateStudent .
+}

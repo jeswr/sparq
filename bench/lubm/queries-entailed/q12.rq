@@ -1,0 +1,13 @@
+# [OPUS-4.8] LUBM Q12 — ENTAILED (OWL defined-class Chair + TransitiveProperty). Chairs of a
+# department that is a sub-organization of University0. Chair is the DEFINED class
+# "Person AND (headOf some Department)" (intersectionOf) and subClassOf Professor — no
+# individual is asserted ub:Chair in the data. Plus the dept->University0 link needs the
+# transitive subOrganizationOf closure. 0 without reasoning.
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x ?y WHERE {
+  ?x rdf:type ub:Chair .
+  ?y rdf:type ub:Department .
+  ?x ub:worksFor ?y .
+  ?y ub:subOrganizationOf <http://www.University0.edu> .
+}

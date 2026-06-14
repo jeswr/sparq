@@ -1,0 +1,11 @@
+# [OPUS-4.8] LUBM Q7 — ENTAILED (rdfs:subClassOf via Student, see Q6). Students taking a course
+# taught by AssociateProfessor0. Needs the Student closure (undergrad + grad) to be complete;
+# 0 without reasoning.
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?x ?y WHERE {
+  ?x rdf:type ub:Student .
+  ?y rdf:type ub:Course .
+  ?x ub:takesCourse ?y .
+  <http://www.Department0.University0.edu/AssociateProfessor0> ub:teacherOf ?y .
+}

@@ -1,0 +1,39 @@
+# [OPUS-4.8] LUBM(1) per-commit expected solution counts (count mode = solution count), split
+# by reasoning regime. Deterministic at gen.sh's fixed (-univ 1 -seed 0) corpus, so a row-count
+# drift = a correctness regression (engine OR reasoner). Format: <query>\t<rows>\t<regime>.
+#
+# REGIME column:
+#   extensional  measured against the RAW LUBM(1) ABox (no ontology, no entailment).
+#   entailed     measured against the OWL-RL closure of (ABox + Univ-Bench TBox), i.e. after
+#                `sparq-cli reason ... owl`. These ALL return 0 on the raw data — the whole
+#                point of the suite is the entailment delta (see the "raw" column below).
+#
+# REASONING DELTA (entailed query result on RAW data -> on OWL closure), the suite's raison
+# d'etre — every entailed query goes from EMPTY to its correct count once the closure exists:
+#   q04 0->34   q05 0->719  q06 0->7790  q07 0->67   q08 0->7790
+#   q09 0->208  q10 0->4    q11 0->224   q12 0->15   q13 0->1
+#
+# Which OWL feature each entailed query exercises (see the per-query .rq headers):
+#   q04 rdfs:subClassOf (Professor)        q05 rdfs:subClassOf (Person)
+#   q06 OWL restriction class (Student)    q07 Student closure
+#   q08 Student closure                    q09 Student + Faculty closure
+#   q10 Student closure (grad)             q11 owl:TransitiveProperty (subOrganizationOf)
+#   q12 OWL defined-class Chair + transitive  q13 owl:inverseOf (hasAlumnus) + subClassOf
+#
+# NOTE: RDFS-only reasoning is INCOMPLETE for this suite — it under-counts q06/q08 (misses
+# GraduateStudent subset of Student, which is an OWL restriction inference) and returns 0 for
+# q10/q11/q12/q13. run.sh therefore materializes the OWL-RL closure for the entailed tier.
+q01	4	extensional
+q02	0	extensional
+q03	6	extensional
+q14	5916	extensional
+q04	34	entailed
+q05	719	entailed
+q06	7790	entailed
+q07	67	entailed
+q08	7790	entailed
+q09	208	entailed
+q10	4	entailed
+q11	224	entailed
+q12	15	entailed
+q13	1	entailed
