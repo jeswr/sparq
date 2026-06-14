@@ -176,7 +176,7 @@ mod tests {
     //! method must fail with a clear, gate-naming [`MpcError::NotYetImplemented`]
     //! — never a panic, never a fake success.
     use super::*;
-    use crate::backend::{BackendInfo, MpcBackend, TrustModel};
+    use crate::backend::{BackendInfo, MaliciousSecurity, MpcBackend, TrustModel};
     use oxrdf::Variable;
 
     /// A do-nothing backend used ONLY to instantiate the generic trait surface
@@ -186,7 +186,11 @@ mod tests {
     impl MpcBackend for StubBackend {
         type Share = ();
         fn info(&self) -> BackendInfo {
-            BackendInfo { name: "stub", trust_model: TrustModel::HonestMajority, malicious_secure: false }
+            BackendInfo {
+                name: "stub",
+                trust_model: TrustModel::HonestMajority,
+                malicious_security: MaliciousSecurity::None,
+            }
         }
         fn share_private_input(&self, _h: &crate::holder::Holder) -> Result<Vec<()>, MpcError> {
             Err(MpcError::not_yet("secret-share private input", "M3 + Q2"))

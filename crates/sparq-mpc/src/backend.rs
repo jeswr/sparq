@@ -54,8 +54,9 @@
 //!   consuming triples for multiplications and tracking MACs; (3)
 //!   `reconstruct_disclosed` doing a MAC-check before opening (abort on cheat →
 //!   guarantee (D), malicious security). It reports
-//!   `TrustModel::DishonestMajority` + `malicious_secure: true` via
-//!   [`BackendInfo`]. Crucially the `share_private_input` / `run_secure` /
+//!   `TrustModel::DishonestMajority` + a non-`None`
+//!   [`MaliciousSecurity`] via [`BackendInfo`]. Crucially the
+//!   `share_private_input` / `run_secure` /
 //!   `reconstruct_disclosed` SIGNATURES are unchanged, so
 //!   [`crate::join::HiddenValueJoin`] and the future collaborative-proof layer
 //!   compose onto it unmodified.
@@ -80,6 +81,56 @@ pub enum TrustModel {
     DishonestMajority,
 }
 
+/// The malicious-security guarantee a backend delivers against *actively*
+/// deviating parties — guarantee (D) of §4.2, orthogonal to [`TrustModel`]'s
+/// majority axis. A `bool` is too coarse: WI-1/WI-2 gave the honest-majority
+/// Shamir backend two *distinct* active-security levels depending on how much
+/// reconstruction redundancy a given `(n, t)` configuration carries, and a
+/// federation inspecting [`BackendInfo`] needs to tell them apart. The variants
+/// are ordered from weakest to strongest. `[OPUS-4.8]`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaliciousSecurity {
+    /// **No active-security guarantee.** Security holds only against
+    /// semi-honest / honest-but-curious parties; an actively-deviating party can
+    /// silently corrupt the output with no detection. The honest baseline for a
+    /// not-yet-built / stub backend, and the guarantee for any reconstruction at
+    /// exactly `degree + 1` shares (no RS redundancy — e.g. the degree-`2t`
+    /// equality open at `n = 2t + 1`). NB: with the honest-majority
+    /// `t = ⌊(n−1)/2⌋` the degree-`t` cumulative-aggregate path always has
+    /// redundancy, so it never reports `None`.
+    None,
+    /// **Detect-and-abort (no guaranteed output).** Any tampering by an
+    /// actively-deviating party is *detected* and the protocol aborts with a
+    /// typed error rather than returning a wrong answer — but a single cheater
+    /// can still force an abort, so a correct output is NOT guaranteed. This is
+    /// the guarantee when there is at least one redundant share to cross-check
+    /// (`n > t + 1`) but not enough to *correct* a cheater (`max_cheaters == 0`).
+    HonestMajorityAbort,
+    /// **Robust: guaranteed-correct output up to a cheater budget.** The protocol
+    /// returns the *true* output even when up to `max_cheaters` parties actively
+    /// deviate (Reed–Solomon / Berlekamp–Welch correction), and detect-and-aborts
+    /// beyond that budget. `max_cheaters >= 1` always (a `0` budget is
+    /// [`MaliciousSecurity::HonestMajorityAbort`], not this variant).
+    HonestMajorityRobust {
+        /// The maximum number of actively-cheating parties tolerated while still
+        /// producing the guaranteed-correct output. For the honest-majority
+        /// Shamir backend at degree `t` this is `e = ⌊(n − t − 1)/2⌋` (the RS
+        /// correction bound); always `>= 1` for this variant.
+        max_cheaters: usize,
+    },
+}
+
+impl MaliciousSecurity {
+    /// `true` iff the backend provides *some* active-security guarantee (detects
+    /// or corrects an actively-deviating party), i.e. anything other than
+    /// [`MaliciousSecurity::None`]. The backwards-compatible projection of the
+    /// former `malicious_secure: bool` field, for callers that only need the
+    /// coarse "is this hardened at all?" bit.
+    pub fn is_malicious_secure(self) -> bool {
+        self != MaliciousSecurity::None
+    }
+}
+
 /// Static description of a concrete backend's guarantees — what a federation
 /// inspects to decide whether a backend is acceptable BEFORE running anything.
 #[derive(Debug, Clone)]
@@ -88,11 +139,23 @@ pub struct BackendInfo {
     pub name: &'static str,
     /// The trust regime (the Q2 axis).
     pub trust_model: TrustModel,
-    /// Whether the backend is secure against actively-malicious parties (as
-    /// opposed to semi-honest / honest-but-curious only). Distinct from
-    /// `trust_model`: §4.2's guarantee (D) malicious-security is orthogonal to
-    /// the majority assumption.
-    pub malicious_secure: bool,
+    /// The malicious-security guarantee against actively-deviating parties
+    /// (§4.2's guarantee (D)), orthogonal to `trust_model`. Replaces the former
+    /// coarse `malicious_secure: bool` so the *kind* of active security
+    /// (detect-and-abort vs robust-up-to-`max_cheaters`) is legible to a
+    /// federation. Use [`BackendInfo::malicious_secure`] for the coarse bool.
+    /// `[OPUS-4.8]`
+    pub malicious_security: MaliciousSecurity,
+}
+
+impl BackendInfo {
+    /// Backwards-compatible coarse bool: `true` iff this backend provides *any*
+    /// active-security guarantee (i.e. `malicious_security != None`). Preserves
+    /// the question the old `malicious_secure: bool` field answered for callers
+    /// that don't need the finer variant.
+    pub fn malicious_secure(&self) -> bool {
+        self.malicious_security.is_malicious_secure()
+    }
 }
 
 /// Abstracts the secret-sharing / MPC primitive over which the federated SPARQL

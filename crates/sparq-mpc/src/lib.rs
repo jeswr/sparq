@@ -99,7 +99,7 @@ pub mod shamir;
 #[cfg(test)]
 mod adversarial_tests;
 
-pub use backend::{BackendInfo, MpcBackend, TrustModel};
+pub use backend::{BackendInfo, MaliciousSecurity, MpcBackend, TrustModel};
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, JoinPlan};
