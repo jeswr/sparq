@@ -29,11 +29,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions): top-level is read-only
+# so the dashboard-labels job (and any future read-only job) inherits no write scope. The
+# writes the benchmark job needs (push to benchmark-data, deployment status, PR comment) are
+# scoped to the `bench` job below.
 permissions:
-  contents: write          # github-action-benchmark pushes the results to the benchmark-data branch
-  deployments: write
-  pull-requests: write     # [OPUS-4.8] comment-always posts the comparison table on PRs (same-repo PRs;
-                           # fork PRs get a read-only token, so the action skips the comment gracefully)
+  contents: read
 
 # Do NOT cancel an in-progress benchmark run (it would corrupt the stored series).
 concurrency:
@@ -65,6 +66,16 @@ jobs:
   bench:
     name: run + track benchmarks
     runs-on: ubuntu-latest
+    # [OPUS-4.8] Job-scoped writes (least privilege; the rest of the workflow stays read-only):
+    #   contents: write     — auto-ratchet commits bench/perf-baseline.json back to main and
+    #                         github-action-benchmark pushes the point to the benchmark-data branch
+    #   deployments: write  — github-action-benchmark records a GitHub deployment status
+    #   pull-requests: write— comment-always posts the comparison table on (same-repo) PRs;
+    #                         fork PRs get a read-only token, so the action skips the comment.
+    permissions:
+      contents: write
+      deployments: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
