@@ -51,8 +51,9 @@ pub mod subscriptions;
 
 #[cfg(feature = "server")]
 pub use http::{
-    bind_posture, harden, router, AppState, BindPosture, PinnedGen, ServerConfig, GLOBAL_POD,
-}; // [OPUS-4.8] sq-o4qf: bind_posture / BindPosture for the no-auth non-loopback bind gate
+    bind_posture, harden, router, AppState, AuthPosture, BindPosture, PinnedGen, ServerConfig,
+    GLOBAL_POD,
+}; // [OPUS-4.8] sq-o4qf: bind_posture / BindPosture for the bind gate; sq-zcby: AuthPosture folds the --auth-token gate into it
 
 /// [OPUS-4.8] (sq-4w18) The SERVICE egress allowlist config type, re-exported at the
 /// crate root next to [`ServerConfig`].
