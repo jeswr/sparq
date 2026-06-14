@@ -214,3 +214,481 @@ fn closure(g: &GraphView, start: &Term, inner: &Path, forward: bool, reflexive: 
     }
     out
 }
+
+// [OPUS-4.8] Unit coverage for SHACL property paths (sq-qap0): parsing every
+// path form (and its error branches), value-node evaluation (step + closure)
+// with hand-computed expectations, and both serialisations (Turtle path
+// expression + SPARQL property path). path.rs was the lowest-covered file in the
+// crate (~36%); these exercise the parse/eval/serialise surface directly.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdf::{NamedNode, Term};
+    use sparq_core::Graph;
+
+    const EX: &str = "http://example.org/";
+
+    /// IRI term in the ex: namespace.
+    fn n(local: &str) -> Term {
+        Term::NamedNode(NamedNode::new_unchecked(format!("{EX}{local}")))
+    }
+
+    /// The IRI string in the ex: namespace (for `Path::Predicate`).
+    fn p(local: &str) -> String {
+        format!("{EX}{local}")
+    }
+
+    /// Loads a Turtle shapes/data graph (the leak of the `Graph` keeps the
+    /// `GraphView` borrow simple in each test).
+    fn graph(ttl: &str) -> Graph {
+        let doc = format!("@prefix ex: <{EX}> .\n@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n{ttl}");
+        Graph::load_str(&doc, "turtle").unwrap()
+    }
+
+    /// Parses the path rooted at the object of `ex:root ex:path ?o` in a shapes
+    /// graph, returning the parsed `Path` (the path-expression blank/IRI tree is
+    /// declared as `ex:root sh:path <expr>`).
+    fn parse_path(shapes_ttl: &str) -> Result<Path, String> {
+        let g = graph(shapes_ttl);
+        let view = GraphView::new(&g);
+        let root = n("root");
+        let path_obj = view
+            .object(&root, "http://www.w3.org/ns/shacl#path")
+            .expect("ex:root sh:path <expr>");
+        Path::parse(&view, &path_obj)
+    }
+
+    /// `path.values(view, start)` as a set, sorted by string for stable
+    /// comparison (value-node order is discovery order, which we don't assert).
+    fn values_set(g: &Graph, path: &Path, start: &Term) -> Vec<String> {
+        let view = GraphView::new(g);
+        let mut v: Vec<String> = path
+            .values(&view, start)
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn names(locals: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = locals.iter().map(|l| n(l).to_string()).collect();
+        v.sort();
+        v
+    }
+
+    // ---- parsing: every form + error branches ----
+
+    #[test]
+    fn parse_predicate_path() {
+        let path = parse_path("ex:root sh:path ex:knows .").unwrap();
+        assert_eq!(path, Path::Predicate(p("knows")));
+    }
+
+    #[test]
+    fn parse_inverse_path() {
+        let path = parse_path("ex:root sh:path [ sh:inversePath ex:parent ] .").unwrap();
+        assert_eq!(path, Path::Inverse(Box::new(Path::Predicate(p("parent")))));
+    }
+
+    #[test]
+    fn parse_sequence_path() {
+        let path = parse_path("ex:root sh:path ( ex:a ex:b ex:c ) .").unwrap();
+        assert_eq!(
+            path,
+            Path::Sequence(vec![
+                Path::Predicate(p("a")),
+                Path::Predicate(p("b")),
+                Path::Predicate(p("c")),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_alternative_path() {
+        let path = parse_path("ex:root sh:path [ sh:alternativePath ( ex:a ex:b ) ] .").unwrap();
+        assert_eq!(
+            path,
+            Path::Alternative(vec![Path::Predicate(p("a")), Path::Predicate(p("b"))])
+        );
+    }
+
+    #[test]
+    fn parse_recursive_forms() {
+        assert_eq!(
+            parse_path("ex:root sh:path [ sh:zeroOrMorePath ex:p ] .").unwrap(),
+            Path::ZeroOrMore(Box::new(Path::Predicate(p("p"))))
+        );
+        assert_eq!(
+            parse_path("ex:root sh:path [ sh:oneOrMorePath ex:p ] .").unwrap(),
+            Path::OneOrMore(Box::new(Path::Predicate(p("p"))))
+        );
+        assert_eq!(
+            parse_path("ex:root sh:path [ sh:zeroOrOnePath ex:p ] .").unwrap(),
+            Path::ZeroOrOne(Box::new(Path::Predicate(p("p"))))
+        );
+    }
+
+    #[test]
+    fn parse_nested_path() {
+        // ( [inverse ex:a] [zeroOrMore ex:b] ) — a sequence of non-predicate parts.
+        let path =
+            parse_path("ex:root sh:path ( [ sh:inversePath ex:a ] [ sh:zeroOrMorePath ex:b ] ) .")
+                .unwrap();
+        assert_eq!(
+            path,
+            Path::Sequence(vec![
+                Path::Inverse(Box::new(Path::Predicate(p("a")))),
+                Path::ZeroOrMore(Box::new(Path::Predicate(p("b")))),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_literal_in_path_is_error() {
+        let g = graph("ex:root sh:path 42 .");
+        let view = GraphView::new(&g);
+        let obj = view
+            .object(&n("root"), "http://www.w3.org/ns/shacl#path")
+            .unwrap();
+        assert!(matches!(obj, Term::Literal(_)));
+        assert_eq!(
+            Path::parse(&view, &obj).unwrap_err(),
+            "literal in path expression"
+        );
+    }
+
+    #[test]
+    fn parse_sequence_too_short_is_error() {
+        // A one-element rdf:list is not a valid sequence path.
+        let err = parse_path("ex:root sh:path ( ex:a ) .").unwrap_err();
+        assert_eq!(err, "sequence path with fewer than two members");
+    }
+
+    #[test]
+    fn parse_alternative_too_short_is_error() {
+        let err = parse_path("ex:root sh:path [ sh:alternativePath ( ex:a ) ] .").unwrap_err();
+        assert_eq!(err, "alternative path with fewer than two members");
+    }
+
+    #[test]
+    fn parse_ill_formed_blank_is_error() {
+        // A blank node that is neither a list head nor any sh:*Path wrapper.
+        let err = parse_path("ex:root sh:path [ ex:notAPathPredicate ex:x ] .").unwrap_err();
+        assert_eq!(err, "ill-formed path blank node");
+    }
+
+    #[test]
+    fn parse_cyclic_path_is_error() {
+        // A blank node whose inversePath points back at itself: re-entry on the
+        // current chain is a cycle.
+        let g = graph("ex:root sh:path _:b . _:b sh:inversePath _:b .");
+        let view = GraphView::new(&g);
+        let obj = view
+            .object(&n("root"), "http://www.w3.org/ns/shacl#path")
+            .unwrap();
+        assert_eq!(
+            Path::parse(&view, &obj).unwrap_err(),
+            "cyclic path expression"
+        );
+    }
+
+    #[test]
+    fn parse_sibling_reuse_is_not_cyclic() {
+        // The SAME inverse-path blank node used twice as siblings in a sequence
+        // is legal (the chain guard removes it after each subtree) — regression
+        // for the documented `( _:inv _:inv )` case.
+        let g = graph("ex:root sh:path ( _:inv _:inv ) . _:inv sh:inversePath ex:p .");
+        let view = GraphView::new(&g);
+        let obj = view
+            .object(&n("root"), "http://www.w3.org/ns/shacl#path")
+            .unwrap();
+        let path = Path::parse(&view, &obj).unwrap();
+        let inv = Path::Inverse(Box::new(Path::Predicate(p("p"))));
+        assert_eq!(path, Path::Sequence(vec![inv.clone(), inv]));
+    }
+
+    // ---- evaluation: hand-computed value sets, positive + negative ----
+
+    #[test]
+    fn eval_predicate_forward_and_empty() {
+        let g = graph("ex:a ex:knows ex:b , ex:c .");
+        let path = Path::Predicate(p("knows"));
+        assert_eq!(values_set(&g, &path, &n("a")), names(&["b", "c"]));
+        // No outgoing ex:knows from ex:b — empty (negative).
+        assert!(values_set(&g, &path, &n("b")).is_empty());
+    }
+
+    #[test]
+    fn eval_inverse() {
+        // ex:b ex:parent ex:a , ex:c ; inverse(parent) from ex:a yields {ex:b}.
+        let g = graph("ex:b ex:parent ex:a . ex:d ex:parent ex:a .");
+        let path = Path::Inverse(Box::new(Path::Predicate(p("parent"))));
+        assert_eq!(values_set(&g, &path, &n("a")), names(&["b", "d"]));
+        // No one has ex:c as a parent value — empty.
+        assert!(values_set(&g, &path, &n("c")).is_empty());
+    }
+
+    #[test]
+    fn eval_sequence_direction_matters() {
+        // a -knows-> b -name-> "Bob"; ( ex:knows ex:name ) from a yields {"Bob"}.
+        let g = graph(r#"ex:a ex:knows ex:b . ex:b ex:name "Bob" ."#);
+        let path = Path::Sequence(vec![
+            Path::Predicate(p("knows")),
+            Path::Predicate(p("name")),
+        ]);
+        let view = GraphView::new(&g);
+        let vals = path.values(&view, &n("a"));
+        assert_eq!(vals.len(), 1);
+        assert!(matches!(&vals[0], Term::Literal(l) if l.value() == "Bob"));
+        // A sequence where the first step dead-ends: empty (the early break).
+        assert!(path.values(&view, &n("b")).is_empty());
+    }
+
+    #[test]
+    fn eval_sequence_inverse_first_step() {
+        // ( [inverse ex:parent] ex:name ): from ex:a, step inverse(parent) ->
+        // {ex:b}, then ex:name -> {"B"}. Exercises the inverse-inside-sequence
+        // forward/!forward interplay.
+        let g = graph(r#"ex:b ex:parent ex:a . ex:b ex:name "B" ."#);
+        let path = Path::Sequence(vec![
+            Path::Inverse(Box::new(Path::Predicate(p("parent")))),
+            Path::Predicate(p("name")),
+        ]);
+        let view = GraphView::new(&g);
+        let vals: Vec<String> = path
+            .values(&view, &n("a"))
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        assert_eq!(vals, vec![r#""B""#.to_string()]);
+    }
+
+    #[test]
+    fn eval_alternative_dedups() {
+        // a -p1-> b ; a -p2-> b , c. Alternative(p1,p2) from a = {b, c} (b once).
+        let g = graph("ex:a ex:p1 ex:b . ex:a ex:p2 ex:b , ex:c .");
+        let path = Path::Alternative(vec![Path::Predicate(p("p1")), Path::Predicate(p("p2"))]);
+        let view = GraphView::new(&g);
+        let vals = path.values(&view, &n("a"));
+        assert_eq!(vals.len(), 2, "duplicate ex:b must be collapsed");
+        assert_eq!(values_set(&g, &path, &n("a")), names(&["b", "c"]));
+    }
+
+    #[test]
+    fn eval_zero_or_one_includes_start() {
+        // a -p-> b. ZeroOrOne(p) from a = {a, b}; from a leaf c = {c}.
+        let g = graph("ex:a ex:p ex:b .");
+        let path = Path::ZeroOrOne(Box::new(Path::Predicate(p("p"))));
+        assert_eq!(values_set(&g, &path, &n("a")), names(&["a", "b"]));
+        assert_eq!(values_set(&g, &path, &n("c")), names(&["c"]));
+    }
+
+    #[test]
+    fn eval_zero_or_more_reflexive_and_transitive() {
+        // Chain a -p-> b -p-> c -p-> d. ZeroOrMore(p) from a = {a,b,c,d}.
+        let g = graph("ex:a ex:p ex:b . ex:b ex:p ex:c . ex:c ex:p ex:d .");
+        let path = Path::ZeroOrMore(Box::new(Path::Predicate(p("p"))));
+        assert_eq!(values_set(&g, &path, &n("a")), names(&["a", "b", "c", "d"]));
+        // From a node with no successors: just itself (reflexive).
+        assert_eq!(values_set(&g, &path, &n("d")), names(&["d"]));
+    }
+
+    #[test]
+    fn eval_one_or_more_excludes_start_unless_reachable() {
+        // Same chain. OneOrMore(p) from a = {b,c,d} (NOT a — non-reflexive).
+        let g = graph("ex:a ex:p ex:b . ex:b ex:p ex:c . ex:c ex:p ex:d .");
+        let path = Path::OneOrMore(Box::new(Path::Predicate(p("p"))));
+        assert_eq!(values_set(&g, &path, &n("a")), names(&["b", "c", "d"]));
+        // A leaf with no successors yields nothing under oneOrMore.
+        assert!(values_set(&g, &path, &n("d")).is_empty());
+    }
+
+    #[test]
+    fn eval_one_or_more_includes_start_in_a_cycle() {
+        // A cycle a -p-> b -p-> a. OneOrMore(p) from a reaches b AND back to a,
+        // so a IS in the result (reachable in >=1 step). The closure's seen-set
+        // must terminate the cycle.
+        let g = graph("ex:a ex:p ex:b . ex:b ex:p ex:a .");
+        let path = Path::OneOrMore(Box::new(Path::Predicate(p("p"))));
+        assert_eq!(values_set(&g, &path, &n("a")), names(&["a", "b"]));
+    }
+
+    #[test]
+    fn eval_zero_or_more_inverse() {
+        // ZeroOrMore over an inverse path: with b -p-> a, c -p-> b, the inverse
+        // closure from a = {a, b, c}.
+        let g = graph("ex:b ex:p ex:a . ex:c ex:p ex:b .");
+        let path = Path::ZeroOrMore(Box::new(Path::Inverse(Box::new(Path::Predicate(p("p"))))));
+        assert_eq!(values_set(&g, &path, &n("a")), names(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn eval_inverse_of_sequence_reverses_order() {
+        // ^(ex:a/ex:b) from t = { s : s -a-> m -b-> t }. The inverse must walk
+        // the sequence in REVERSE (b then a, each step inverted) — exercises the
+        // `parts.iter().rev()` + !forward interplay in `step`.
+        let g = graph("ex:s ex:a ex:m . ex:m ex:b ex:t .");
+        let path = Path::Inverse(Box::new(Path::Sequence(vec![
+            Path::Predicate(p("a")),
+            Path::Predicate(p("b")),
+        ])));
+        assert_eq!(values_set(&g, &path, &n("t")), names(&["s"]));
+        // From a node with no inbound a/b walk: empty.
+        assert!(values_set(&g, &path, &n("m")).is_empty());
+    }
+
+    #[test]
+    fn eval_alternative_with_inverse_branch() {
+        // (ex:a | ^ex:b) from t: forward a -> {u}; inverse b -> {s} (s -b-> t).
+        let g = graph("ex:t ex:a ex:u . ex:s ex:b ex:t .");
+        let path = Path::Alternative(vec![
+            Path::Predicate(p("a")),
+            Path::Inverse(Box::new(Path::Predicate(p("b")))),
+        ]);
+        assert_eq!(values_set(&g, &path, &n("t")), names(&["s", "u"]));
+    }
+
+    #[test]
+    fn eval_zero_or_more_of_sequence() {
+        // (ex:a/ex:b)* from x over x -a-> m1 -b-> y -a-> m2 -b-> z: the closure's
+        // inner step is a two-hop sequence, so the reachable set is {x, y, z}
+        // (the intermediate m1/m2 are NOT value nodes of the composite step).
+        let g = graph("ex:x ex:a ex:m1 . ex:m1 ex:b ex:y . ex:y ex:a ex:m2 . ex:m2 ex:b ex:z .");
+        let path = Path::ZeroOrMore(Box::new(Path::Sequence(vec![
+            Path::Predicate(p("a")),
+            Path::Predicate(p("b")),
+        ])));
+        assert_eq!(values_set(&g, &path, &n("x")), names(&["x", "y", "z"]));
+    }
+
+    #[test]
+    fn eval_nested_sequence_with_star() {
+        // ( ex:friend [zeroOrMore ex:friend] ): from a, ex:friend -> {b}, then
+        // zeroOrMore(friend) from b. With b -friend-> c -friend-> d:
+        // result = {b, c, d}.
+        let g = graph("ex:a ex:friend ex:b . ex:b ex:friend ex:c . ex:c ex:friend ex:d .");
+        let path = Path::Sequence(vec![
+            Path::Predicate(p("friend")),
+            Path::ZeroOrMore(Box::new(Path::Predicate(p("friend")))),
+        ]);
+        assert_eq!(values_set(&g, &path, &n("a")), names(&["b", "c", "d"]));
+    }
+
+    // ---- serialisation: Turtle path expression ----
+
+    #[test]
+    fn to_turtle_round_trips_each_form() {
+        let cases = [
+            (Path::Predicate(p("knows")), format!("<{EX}knows>")),
+            (
+                Path::Inverse(Box::new(Path::Predicate(p("p")))),
+                format!("[ <{SH}inversePath> <{EX}p> ]"),
+            ),
+            (
+                Path::Sequence(vec![Path::Predicate(p("a")), Path::Predicate(p("b"))]),
+                format!("( <{EX}a> <{EX}b> )"),
+            ),
+            (
+                Path::Alternative(vec![Path::Predicate(p("a")), Path::Predicate(p("b"))]),
+                format!("[ <{SH}alternativePath> ( <{EX}a> <{EX}b> ) ]"),
+            ),
+            (
+                Path::ZeroOrMore(Box::new(Path::Predicate(p("p")))),
+                format!("[ <{SH}zeroOrMorePath> <{EX}p> ]"),
+            ),
+            (
+                Path::OneOrMore(Box::new(Path::Predicate(p("p")))),
+                format!("[ <{SH}oneOrMorePath> <{EX}p> ]"),
+            ),
+            (
+                Path::ZeroOrOne(Box::new(Path::Predicate(p("p")))),
+                format!("[ <{SH}zeroOrOnePath> <{EX}p> ]"),
+            ),
+        ];
+        for (path, expect) in cases {
+            assert_eq!(path.to_turtle(), expect, "to_turtle for {path:?}");
+        }
+    }
+
+    /// The Turtle of a path expression must re-parse to the same `Path` when
+    /// placed back as a `sh:path` object.
+    #[test]
+    fn to_turtle_reparses_to_same_path() {
+        let path = Path::Sequence(vec![
+            Path::Inverse(Box::new(Path::Predicate(p("a")))),
+            Path::Alternative(vec![
+                Path::Predicate(p("b")),
+                Path::ZeroOrMore(Box::new(Path::Predicate(p("c")))),
+            ]),
+        ]);
+        let g = graph(&format!("ex:root sh:path {} .", path.to_turtle()));
+        let view = GraphView::new(&g);
+        let obj = view
+            .object(&n("root"), "http://www.w3.org/ns/shacl#path")
+            .unwrap();
+        assert_eq!(Path::parse(&view, &obj).unwrap(), path);
+    }
+
+    // ---- serialisation: SPARQL property path ----
+
+    #[test]
+    fn to_sparql_property_path_each_form() {
+        assert_eq!(
+            Path::Predicate(p("a")).to_sparql_property_path().unwrap(),
+            format!("<{EX}a>")
+        );
+        assert_eq!(
+            Path::Inverse(Box::new(Path::Predicate(p("a"))))
+                .to_sparql_property_path()
+                .unwrap(),
+            format!("^(<{EX}a>)")
+        );
+        assert_eq!(
+            Path::Sequence(vec![Path::Predicate(p("a")), Path::Predicate(p("b"))])
+                .to_sparql_property_path()
+                .unwrap(),
+            format!("(<{EX}a>/<{EX}b>)")
+        );
+        assert_eq!(
+            Path::Alternative(vec![Path::Predicate(p("a")), Path::Predicate(p("b"))])
+                .to_sparql_property_path()
+                .unwrap(),
+            format!("(<{EX}a>|<{EX}b>)")
+        );
+        assert_eq!(
+            Path::ZeroOrMore(Box::new(Path::Predicate(p("a"))))
+                .to_sparql_property_path()
+                .unwrap(),
+            format!("(<{EX}a>)*")
+        );
+        assert_eq!(
+            Path::OneOrMore(Box::new(Path::Predicate(p("a"))))
+                .to_sparql_property_path()
+                .unwrap(),
+            format!("(<{EX}a>)+")
+        );
+        assert_eq!(
+            Path::ZeroOrOne(Box::new(Path::Predicate(p("a"))))
+                .to_sparql_property_path()
+                .unwrap(),
+            format!("(<{EX}a>)?")
+        );
+    }
+
+    #[test]
+    fn to_sparql_property_path_none_for_empty() {
+        // Degenerate empty sequence / alternative have no SPARQL form.
+        assert_eq!(Path::Sequence(vec![]).to_sparql_property_path(), None);
+        assert_eq!(Path::Alternative(vec![]).to_sparql_property_path(), None);
+        // A degenerate child propagates None through a wrapper.
+        assert_eq!(
+            Path::ZeroOrMore(Box::new(Path::Sequence(vec![]))).to_sparql_property_path(),
+            None
+        );
+        assert_eq!(
+            Path::Inverse(Box::new(Path::Alternative(vec![]))).to_sparql_property_path(),
+            None
+        );
+    }
+}
