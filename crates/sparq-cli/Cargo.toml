@@ -55,3 +55,13 @@ bzip2 = "0.5"
 zstd = "0.13"
 # Direct mmap for the compression probe (measure-first sizing of permutation indexes).
 memmap2 = { workspace = true }
+
+[dev-dependencies]
+# [OPUS-4.8] cli_contract.rs generates gzip/zstd/bzip2 copies of the same N-Triples
+# fixture in a tempdir to assert the CLI's compressed-input auto-detection. These are
+# already regular deps above (the CLI decodes the same three codecs), so declaring them
+# as dev-deps adds nothing to the dependency tree — it just lets the integration test
+# link them. (hdt_cli.rs uses flate2 the same way under the `hdt` feature.)
+flate2 = "1"
+bzip2 = "0.5"
+zstd = "0.13"
