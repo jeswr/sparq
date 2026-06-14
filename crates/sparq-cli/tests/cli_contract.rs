@@ -14,23 +14,24 @@
 //! These tests are intentionally datasets-tiny and self-contained: each builds its own
 //! fixtures under `CARGO_TARGET_TMPDIR` and cleans them up.
 //!
-//! NOTE on the `query` output contract (verified empirically, see beads from sq-q50l).
+//! NOTE on the `query` output contract (sq-l4ki — `query` is now a real query CLI). [OPUS-4.8]
 //!
-//! `query` routes SELECT **and** ASK **and** CONSTRUCT through `sparq_engine::query`,
-//! which only handles SELECT/ASK. So:
+//! `query` classifies the parsed query FORM and routes each to its executor, emitting real
+//! results (not just a count):
 //!
-//! - SELECT -> prints "<n> solutions in <ms>ms"
-//! - ASK -> prints "1 solutions" (true) / "0 solutions" (false)  [NOT a boolean]
-//! - CONSTRUCT/DESCRIBE -> "query error: only SELECT and ASK queries are supported",
-//!   and exits 1.
+//! - SELECT: the solution bindings. Default a readable ASCII table; `--format
+//!   <table|tsv|csv|xml|json|ntriples>` selects a W3C result format (tsv/csv/xml reuse
+//!   sparq-server's serialisers; json reuses the engine's direct serialiser).
+//! - ASK: a boolean (`true` / `false`); `--format json|xml` emit the W3C boolean documents.
+//! - CONSTRUCT/DESCRIBE: the resulting triples as N-Triples (NOT an error any more).
+//! - `--count`: restores the historical count-only output ("<n> solutions/triples in
+//!   <ms>ms") for scripts that depended on it.
 //!
-//! i.e. the `query` subcommand has **no result-format / row-emitting output** — it is a
-//! solution *counter*. The CONSTRUCT-as-error and the missing rows/boolean/format output
-//! are tracked as enhancement beads; this table asserts the *actual* contract so a future
-//! change to it is a deliberate, test-visible decision.
-//!
-//! The CONSTRUCT path that *does* work today is `bench` (run_query_suite routes graph
-//! forms through construct_or_describe) — exercised below.
+//! Before sq-l4ki, `query` routed everything through `sparq_engine::query` (SELECT/ASK only):
+//! SELECT/ASK surfaced only as a solution count (ASK as 1/0), and CONSTRUCT/DESCRIBE errored
+//! out with "only SELECT and ASK queries are supported" (exit 1). The cases below assert the
+//! FIXED behaviour; the `bench` CONSTRUCT case (run_query_suite routes graph forms through
+//! construct_or_describe) is still exercised too.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -94,12 +95,22 @@ fn s(p: &Path) -> &str {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn query_select_counts_solutions_nt() {
+fn query_select_emits_rows_nt() {
+    // [OPUS-4.8] (sq-l4ki) SELECT now prints the solution BINDINGS, not a count. The
+    // default format is a readable table: a header row with the projected variables and one
+    // row per solution carrying the actual terms.
     let dir = scratch("select-nt");
     let data = write(&dir, "data.nt", NT);
     let (code, stdout, stderr) = run3(&["query", s(&data), "ntriples", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("3 solutions"), "stdout: {stdout}");
+    // Header carries the projected variables (with the SPARQL `?` sigil).
+    assert!(stdout.contains("?s") && stdout.contains("?p") && stdout.contains("?o"), "header: {stdout}");
+    // Rows carry actual bound terms — not just a count.
+    assert!(stdout.contains("<http://ex/alice>"), "rows should contain alice: {stdout}");
+    assert!(stdout.contains("<http://ex/knows>"), "rows should contain knows: {stdout}");
+    assert!(stdout.contains("\"30\""), "rows should contain the age literal: {stdout}");
+    // Three solutions => the table reports three rows.
+    assert!(stdout.contains("3 row(s)"), "row count footer: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -107,36 +118,37 @@ fn query_select_counts_solutions_nt() {
 fn query_select_turtle_and_ttl_alias_load_identically() {
     let dir = scratch("select-ttl");
     let data = write(&dir, "data.ttl", TTL);
-    // canonical name
+    // canonical name — emits bindings (rows), not a count.
     let (c1, o1, e1) = run3(&["query", s(&data), "turtle", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
     assert_eq!(c1, 0, "stderr: {e1}");
-    assert!(o1.contains("3 solutions"), "stdout: {o1}");
-    // alias
+    assert!(o1.contains("3 row(s)") && o1.contains("<http://ex/alice>"), "stdout: {o1}");
+    // alias loads identically.
     let (c2, o2, _) = run3(&["query", s(&data), "ttl", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"]);
     assert_eq!(c2, 0);
-    assert!(o2.contains("3 solutions"), "stdout: {o2}");
+    assert!(o2.contains("3 row(s)") && o2.contains("<http://ex/alice>"), "stdout: {o2}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn query_ask_true_and_false_are_distinguishable() {
+fn query_ask_prints_boolean() {
+    // [OPUS-4.8] (sq-l4ki) ASK now prints a boolean (`true`/`false`), not a 1/0 solution
+    // count. The two must be unambiguously distinguishable as booleans.
     let dir = scratch("ask");
     let data = write(&dir, "data.nt", NT);
-    // ASK currently surfaces as a solution count: 1 == true, 0 == false (see module note).
     let (ct, ot, et) = run3(&["query", s(&data), "ntriples", "ASK { ?s <http://ex/knows> ?o }"]);
     assert_eq!(ct, 0, "stderr: {et}");
-    assert!(ot.contains("1 solutions"), "ASK-true stdout: {ot}");
+    assert_eq!(ot.trim(), "true", "ASK-true stdout: {ot}");
 
     let (cf, of, _) = run3(&["query", s(&data), "ntriples", "ASK { <http://ex/nobody> ?p ?o }"]);
     assert_eq!(cf, 0);
-    assert!(of.contains("0 solutions"), "ASK-false stdout: {of}");
+    assert_eq!(of.trim(), "false", "ASK-false stdout: {of}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn query_with_reason_flag_loads() {
     // `--reason rdfs` on a graph with no schema is a no-op closure, but it must
-    // route through the reasoning load path and still answer the query.
+    // route through the reasoning load path and still answer the query (emit rows).
     let dir = scratch("reason-flag");
     let data = write(&dir, "data.nt", NT);
     let (code, stdout, stderr) = run3(&[
@@ -148,7 +160,85 @@ fn query_with_reason_flag_loads() {
         "rdfs",
     ]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("solutions"), "stdout: {stdout}");
+    assert!(stdout.contains("3 row(s)"), "stdout: {stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_count_flag_preserves_legacy_count_output() {
+    // [OPUS-4.8] (sq-l4ki) `--count` is the backward-compatible escape hatch: it restores
+    // the historical count-only line for both SELECT (solutions) and the graph forms (triples).
+    let dir = scratch("count-flag");
+    let data = write(&dir, "data.nt", NT);
+    let (cs, os, es) = run3(&["query", s(&data), "ntriples", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "--count"]);
+    assert_eq!(cs, 0, "stderr: {es}");
+    assert!(os.contains("3 solutions"), "SELECT --count stdout: {os}");
+    // No table border / row terms when counting.
+    assert!(!os.contains("<http://ex/alice>"), "count mode must not emit rows: {os}");
+
+    let (cc, oc, _) = run3(&["query", s(&data), "ntriples", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", "--count"]);
+    assert_eq!(cc, 0);
+    assert!(oc.contains("3 triples"), "CONSTRUCT --count stdout: {oc}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_select_format_shapes() {
+    // [OPUS-4.8] (sq-l4ki) Each `--format` emits the right SHAPE for SELECT bindings.
+    let dir = scratch("select-formats");
+    let data = write(&dir, "data.nt", NT);
+    let q = "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }";
+
+    // TSV: header WITH `?` sigil, TAB-separated; literals in SPARQL term syntax (quoted).
+    let (ct, ot, et) = run3(&["query", s(&data), "ntriples", q, "--format", "tsv"]);
+    assert_eq!(ct, 0, "tsv stderr: {et}");
+    assert_eq!(ot.lines().next().unwrap(), "?s\t?o", "tsv header: {ot}");
+    assert!(ot.contains("<http://ex/alice>\t\"30\""), "tsv row: {ot}");
+
+    // CSV: header WITHOUT `?`, comma-separated; literal as bare lexical value.
+    let (cc, oc, _) = run3(&["query", s(&data), "ntriples", q, "--format", "csv"]);
+    assert_eq!(cc, 0);
+    assert_eq!(oc.lines().next().unwrap(), "s,o", "csv header: {oc}");
+    assert!(oc.contains("http://ex/alice,30"), "csv row: {oc}");
+
+    // JSON: SPARQL 1.1 Results JSON object with head.vars + results.bindings.
+    let (cj, oj, _) = run3(&["query", s(&data), "ntriples", q, "--format", "json"]);
+    assert_eq!(cj, 0);
+    assert!(oj.contains("\"head\"") && oj.contains("\"vars\"") && oj.contains("\"bindings\""), "json: {oj}");
+    assert!(oj.contains("\"value\":\"http://ex/alice\""), "json binding: {oj}");
+
+    // XML: SPARQL Results XML with the sparql-results namespace + <binding> elements.
+    let (cx, ox, _) = run3(&["query", s(&data), "ntriples", q, "--format", "xml"]);
+    assert_eq!(cx, 0);
+    assert!(ox.contains("xmlns=\"http://www.w3.org/2005/sparql-results#\""), "xml ns: {ox}");
+    assert!(ox.contains("<uri>http://ex/alice</uri>"), "xml binding: {ox}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_ask_format_json_xml() {
+    // [OPUS-4.8] (sq-l4ki) ASK under `--format json|xml` emits the W3C boolean documents.
+    let dir = scratch("ask-formats");
+    let data = write(&dir, "data.nt", NT);
+    let (cj, oj, _) = run3(&["query", s(&data), "ntriples", "ASK { ?s <http://ex/knows> ?o }", "--format", "json"]);
+    assert_eq!(cj, 0);
+    assert!(oj.contains("\"boolean\":true"), "ask json: {oj}");
+
+    let (cx, ox, _) = run3(&["query", s(&data), "ntriples", "ASK { <http://ex/nobody> ?p ?o }", "--format", "xml"]);
+    assert_eq!(cx, 0);
+    assert!(ox.contains("<boolean>false</boolean>"), "ask xml: {ox}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn query_unknown_format_exits_2() {
+    // [OPUS-4.8] (sq-l4ki) An unknown `--format` value is a usage error (exit 2), matching
+    // the CLI's flag-validation contract.
+    let dir = scratch("err-outformat");
+    let data = write(&dir, "data.nt", NT);
+    let (code, _o, stderr) = run3(&["query", s(&data), "ntriples", "SELECT ?s WHERE { ?s ?p ?o }", "--format", "bogus"]);
+    assert_eq!(code, 2, "unknown --format must exit 2; stderr: {stderr}");
+    assert!(stderr.contains("unknown --format"), "stderr: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -190,7 +280,9 @@ fn compressed_input_autodetect_gzip_zstd_bzip2_load_identically() {
     let q = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }";
     let mut counts = Vec::new();
     for f in [&raw, &gz, &bz, &zst] {
-        let (code, stdout, stderr) = run3(&["query", s(f), "ntriples", q]);
+        // [OPUS-4.8] (sq-l4ki) Use `--count` here so the assertion is on the solution COUNT
+        // (codec-equivalence is about how many triples decoded, not the table rendering).
+        let (code, stdout, stderr) = run3(&["query", s(f), "ntriples", q, "--count"]);
         assert_eq!(code, 0, "{}: stderr {stderr}", f.display());
         assert!(stdout.contains("3 solutions"), "{}: stdout {stdout}", f.display());
         // capture the solution count token to assert byte-identical results across codecs
@@ -396,17 +488,34 @@ fn build_unsupported_format_exits_nonzero() {
 }
 
 #[test]
-fn construct_via_query_subcommand_errors_today() {
-    // Documents the CURRENT contract (tracked for change via a bead): the `query`
-    // subcommand only supports SELECT/ASK, so CONSTRUCT is a runtime error, not rows.
-    let dir = scratch("err-construct");
+fn construct_via_query_subcommand_emits_triples() {
+    // [OPUS-4.8] (sq-l4ki) CONSTRUCT via `query` now produces the resulting triples as
+    // N-Triples (it used to error with "only SELECT and ASK queries are supported", exit 1).
+    let dir = scratch("construct");
     let data = write(&dir, "data.nt", NT);
-    let (code, _stdout, stderr) = run3(&["query", s(&data), "ntriples", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"]);
-    assert_eq!(code, 1, "CONSTRUCT via `query` is currently a runtime error; stderr: {stderr}");
+    let (code, stdout, stderr) = run3(&["query", s(&data), "ntriples", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"]);
+    assert_eq!(code, 0, "CONSTRUCT via `query` should succeed; stderr: {stderr}");
+    // The three source triples come back as canonical N-Triples lines (`s p o .`).
+    let lines: Vec<&str> = stdout.lines().filter(|l| l.trim_end().ends_with(" .")).collect();
+    assert_eq!(lines.len(), 3, "expected 3 N-Triples lines; stdout: {stdout}");
     assert!(
-        stderr.contains("only SELECT and ASK"),
-        "stderr should explain the unsupported form: {stderr}"
+        stdout.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."),
+        "stdout should contain the constructed triple: {stdout}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn describe_via_query_subcommand_emits_triples() {
+    // [OPUS-4.8] (sq-l4ki) DESCRIBE is the other graph form — it returns the resource's
+    // concise bounded description as N-Triples (also previously a runtime error).
+    let dir = scratch("describe");
+    let data = write(&dir, "data.nt", NT);
+    let (code, stdout, stderr) = run3(&["query", s(&data), "ntriples", "DESCRIBE <http://ex/alice>"]);
+    assert_eq!(code, 0, "DESCRIBE via `query` should succeed; stderr: {stderr}");
+    // alice has two outgoing triples (knows bob, age 30).
+    assert!(stdout.contains("<http://ex/alice> <http://ex/knows> <http://ex/bob> ."), "stdout: {stdout}");
+    assert!(stdout.contains("<http://ex/alice> <http://ex/age> \"30\" ."), "stdout: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
