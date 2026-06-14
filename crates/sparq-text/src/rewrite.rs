@@ -26,10 +26,15 @@
 //! - `?lit text:matchesAny "query"` — OR of tokens;
 //! - `?lit text:phrase "foo bar"` — tokens ADJACENT and IN ORDER (a positional
 //!   phrase match; needs a positions-enabled index — see below). [OPUS-4.8]
-//! - `?lit text:score ?s` — companion to exactly one `text:matches`/
-//!   `text:matchesAny` on the same `?lit` in the same BGP, binds the BM25 score
-//!   (`xsd:double`). NOT valid for `text:phrase` (a phrase match is boolean
-//!   adjacency, not a ranking).
+//! - `?lit text:near "foo bar"` — tokens IN ORDER within a bounded gap (the
+//!   proximity/slop generalisation of `text:phrase`), RELEVANCE-RANKED; the gap
+//!   budget defaults to [`DEFAULT_SLOP`] and is set by a `?lit text:slop N`
+//!   companion. Also needs a positions-enabled index. [OPUS-4.8]
+//! - `?lit text:score ?s` — companion to exactly one scored match on the same
+//!   `?lit` in the same BGP — `text:matches`/`text:matchesAny` (the BM25 score)
+//!   or `text:near` (the proximity score `1/(1+gap)`) — binds it as an
+//!   `xsd:double`. NOT valid for `text:phrase` (boolean adjacency, unscored).
+//!   [OPUS-4.8]
 //!
 //! is REMOVED and replaced by an inline [`Values`](GraphPattern::Values)
 //! table of the index's hits — the matching literal terms (and scores),
@@ -47,9 +52,11 @@
 //! (bind-time rewriting has no per-row values); `text:score` needs exactly
 //! one match pattern for its variable; `text:phrase` requires the index to
 //! carry positions ([`TextIndex::build_with_positions`]) and rejects a
-//! `text:score` companion; any other IRI in the `text:` namespace is unknown.
-//! The index is per-graph (dictionary-local ids), so hits come from the index
-//! you pass — typically the default graph's.
+//! `text:score` companion; `text:near` likewise requires positions, takes an
+//! optional `text:slop N` (a non-negative integer; at most one per `?lit`,
+//! valid only beside a `text:near`); any other IRI in the `text:` namespace is
+//! unknown. The index is per-graph (dictionary-local ids), so hits come from
+//! the index you pass — typically the default graph's.
 
 use crate::index::TextIndex;
 use crate::vocab;
@@ -131,6 +138,12 @@ fn rewrite_pattern(p: &mut GraphPattern, graph: &Graph, index: &TextIndex) -> Re
     Ok(())
 }
 
+/// Default proximity gap budget for `text:near` when no `text:slop` companion
+/// is given. Zero means `text:near "q"` defaults to exact adjacency — the same
+/// hits as `text:phrase "q"` — and a `text:slop N` companion only ever widens
+/// it; an explicit budget is the common case. [OPUS-4.8]
+pub const DEFAULT_SLOP: u32 = 0;
+
 /// Which index query a `text:` match request runs.
 enum ReqKind {
     /// `text:matches` — AND of tokens (BM25-scored).
@@ -139,9 +152,15 @@ enum ReqKind {
     Any,
     /// `text:phrase` — adjacent, in-order tokens (positional, unscored). [OPUS-4.8]
     Phrase,
+    /// `text:near` — in-order tokens within a bounded total gap, proximity-scored
+    /// (`1/(1+gap)`); `slop` is `Some` once a `text:slop` companion has set it,
+    /// `None` (→ [`DEFAULT_SLOP`] at execution) otherwise. The `Option` makes a
+    /// duplicate `text:slop` detectable for ANY value (including 0). [OPUS-4.8]
+    Near { slop: Option<u32> },
 }
 
-/// One `text:matches`/`text:matchesAny`/`text:phrase` request found in a BGP.
+/// One `text:matches`/`text:matchesAny`/`text:phrase`/`text:near` request found
+/// in a BGP. [OPUS-4.8]
 struct MatchReq {
     var: Variable,
     query: String,
@@ -159,6 +178,9 @@ fn rewrite_bgp(
     let mut rest: Vec<TriplePattern> = Vec::with_capacity(patterns.len());
     let mut reqs: Vec<MatchReq> = Vec::new();
     let mut scores: Vec<(Variable, Variable)> = Vec::new();
+    // (subject var, parsed slop) collected from `text:slop` patterns, attached
+    // to the matching `text:near` after the scan (order-independent). [OPUS-4.8]
+    let mut slops: Vec<(Variable, u32)> = Vec::new();
 
     for tp in patterns {
         let NamedNodePattern::NamedNode(pred) = &tp.predicate else {
@@ -177,7 +199,7 @@ fn rewrite_bgp(
             }
         };
         match iri {
-            vocab::MATCHES | vocab::MATCHES_ANY | vocab::PHRASE => {
+            vocab::MATCHES | vocab::MATCHES_ANY | vocab::PHRASE | vocab::NEAR => {
                 let var = subject_var(&tp.subject)?;
                 let TermPattern::Literal(q) = &tp.object else {
                     return Err(format!(
@@ -188,9 +210,29 @@ fn rewrite_bgp(
                 let kind = match iri {
                     vocab::MATCHES_ANY => ReqKind::Any,
                     vocab::PHRASE => ReqKind::Phrase,
+                    vocab::NEAR => ReqKind::Near { slop: None },
                     _ => ReqKind::All,
                 };
                 reqs.push(MatchReq { var, query: q.value().to_string(), kind, score: None });
+            }
+            vocab::SLOP => {
+                let var = subject_var(&tp.subject)?;
+                let TermPattern::Literal(n) = &tp.object else {
+                    return Err(format!(
+                        "text: the object of text:slop must be a constant non-negative integer \
+                         literal, got {}",
+                        tp.object
+                    ));
+                };
+                // Accept any literal whose lexical form is a non-negative integer
+                // (xsd:integer and friends print bare digits); reject anything else.
+                let slop: u32 = n.value().parse().map_err(|_| {
+                    format!(
+                        "text: text:slop must be a non-negative integer, got \"{}\"",
+                        n.value()
+                    )
+                })?;
+                slops.push((var, slop));
             }
             vocab::SCORE => {
                 let var = subject_var(&tp.subject)?;
@@ -205,7 +247,41 @@ fn rewrite_bgp(
             _ => {
                 return Err(format!(
                     "text: unknown magic predicate <{iri}> (supported: text:matches, \
-                     text:matchesAny, text:phrase, text:score)"
+                     text:matchesAny, text:phrase, text:near, text:slop, text:score)"
+                ))
+            }
+        }
+    }
+
+    // Attach each text:slop to the single text:near request on its variable
+    // (before scores: scoring is uniform across the resolved kind). [OPUS-4.8]
+    for (var, value) in slops {
+        let mut owners = reqs.iter_mut().filter(|r| r.var == var);
+        match (owners.next(), owners.next()) {
+            (Some(req), None) => match &mut req.kind {
+                ReqKind::Near { slop } => {
+                    // A second text:slop on the same near is ambiguous (caught
+                    // for any value, including 0, via the Option).
+                    if slop.replace(value).is_some() {
+                        return Err(format!("text: duplicate text:slop for {var}"));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "text: text:slop on {var} is only valid alongside text:near (got a \
+                         different text: match for {var})"
+                    ))
+                }
+            },
+            (None, _) => {
+                return Err(format!(
+                    "text: text:slop on {var} has no text:near in the same basic graph pattern"
+                ))
+            }
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "text: text:slop on {var} is ambiguous ({var} has more than one text: match \
+                     pattern in this basic graph pattern)"
                 ))
             }
         }
@@ -219,7 +295,8 @@ fn rewrite_bgp(
                 if matches!(req.kind, ReqKind::Phrase) {
                     return Err(format!(
                         "text: text:score on {var} is not valid for text:phrase (a phrase \
-                         match is boolean adjacency, not a BM25 ranking)"
+                         match is boolean adjacency, not a ranking; use text:near for a scored \
+                         proximity variant)"
                     ));
                 }
                 if req.score.replace(score_var).is_some() {
@@ -228,8 +305,8 @@ fn rewrite_bgp(
             }
             (None, _) => {
                 return Err(format!(
-                    "text: text:score on {var} has no text:matches/text:matchesAny in the same \
-                     basic graph pattern"
+                    "text: text:score on {var} has no text:matches/text:matchesAny/text:near in \
+                     the same basic graph pattern"
                 ))
             }
             (Some(_), Some(_)) => {
@@ -244,8 +321,9 @@ fn rewrite_bgp(
     // Join the hit tables onto the remaining ordinary patterns.
     let mut out = GraphPattern::Bgp { patterns: rest };
     for req in reqs {
-        // Each hit is a matching literal id; BM25 modes also carry a score, the
-        // positional phrase mode is unscored (id only). [OPUS-4.8]
+        // Each hit is a matching literal id; the scored modes (BM25 and the
+        // proximity `text:near`) also carry a score, the positional phrase mode
+        // is unscored (id only). [OPUS-4.8]
         let hits: Vec<(Id, Option<f32>)> = match req.kind {
             ReqKind::All => index.search(&req.query).into_iter().map(|h| (h.id, Some(h.score))).collect(),
             ReqKind::Any => {
@@ -261,6 +339,17 @@ fn rewrite_bgp(
                 }
                 index.phrase(&req.query).into_iter().map(|id| (id, None)).collect()
             }
+            ReqKind::Near { slop } => {
+                if !index.has_positions() {
+                    return Err(
+                        "text: text:near requires a positions-enabled index; build it with \
+                         TextIndex::build_with_positions (the default index stores no positions)"
+                            .to_string(),
+                    );
+                }
+                let slop = slop.unwrap_or(DEFAULT_SLOP);
+                index.phrase_near(&req.query, slop).into_iter().map(|h| (h.id, Some(h.score))).collect()
+            }
         };
         let mut variables = vec![req.var];
         if let Some(s) = &req.score {
@@ -274,7 +363,7 @@ fn rewrite_bgp(
                 };
                 let mut row = vec![Some(GroundTerm::Literal(lit))];
                 if req.score.is_some() {
-                    let score = score.expect("text:score only attaches to BM25 match requests");
+                    let score = score.expect("text:score only attaches to scored match requests");
                     row.push(Some(GroundTerm::Literal(Literal::from(f64::from(score)))));
                 }
                 row

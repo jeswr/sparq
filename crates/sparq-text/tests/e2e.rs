@@ -240,6 +240,86 @@ fn phrase_without_positions_errors() {
     assert!(err.contains("build_with_positions"), "error {err:?}");
 }
 
+/// `text:near` end-to-end: the proximity/slop variant joins ranked hits to
+/// triples; `text:slop N` widens the gap budget; `text:score` binds the
+/// proximity score; tighter matches rank first under ORDER BY. [OPUS-4.8]
+#[test]
+fn near_with_slop_and_score() {
+    let data = r#"
+        <http://ex/post1> <http://ex/title> "quick brown fox" .
+        <http://ex/post2> <http://ex/title> "quick lazy brown dog" .
+        <http://ex/post3> <http://ex/title> "quick the lazy brown bird" .
+        <http://ex/post4> <http://ex/title> "brown quick reversed" .
+    "#;
+    let g = Graph::load_str(data, "ntriples").unwrap();
+    let idx = TextIndex::build_with_positions(&g);
+
+    // Default slop (0) == exact adjacency: only post1.
+    let r = query_text(
+        &g,
+        r#"PREFIX text: <http://sparq.dev/text#>
+           SELECT ?post WHERE { ?post <http://ex/title> ?t . ?t text:near "quick brown" }"#,
+        &idx,
+    )
+    .unwrap();
+    let posts: Vec<String> = r.rows.iter().map(|row| iri(&row[0])).collect();
+    assert_eq!(posts, ["http://ex/post1"], "default slop is exact adjacency");
+
+    // text:slop 2 admits post1 (gap 0), post2 (gap 1), post3 (gap 2); the
+    // reversed post4 never matches. text:score binds the proximity score; ORDER
+    // BY DESC ranks tightest first.
+    let r = query_text(
+        &g,
+        r#"PREFIX text: <http://sparq.dev/text#>
+           SELECT ?post ?s WHERE {
+             ?post <http://ex/title> ?t .
+             ?t text:near "quick brown" .
+             ?t text:slop 2 .
+             ?t text:score ?s .
+           } ORDER BY DESC(?s)"#,
+        &idx,
+    )
+    .unwrap();
+    let posts: Vec<String> = r.rows.iter().map(|row| iri(&row[0])).collect();
+    assert_eq!(
+        posts,
+        ["http://ex/post1", "http://ex/post2", "http://ex/post3"],
+        "ranked tightest-first; reversed excluded"
+    );
+    let scores: Vec<f64> = r
+        .rows
+        .iter()
+        .map(|row| match &row[1] {
+            Some(Term::Literal(l)) => {
+                assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
+                l.value().parse().unwrap()
+            }
+            other => panic!("expected a score literal, got {other:?}"),
+        })
+        .collect();
+    // 1/(1+gap) for gaps 0,1,2 — strictly decreasing. The score is computed in
+    // f32 then widened to the xsd:double, so compare against the f32 value.
+    let want = |gap: u32| f64::from(1.0f32 / (1.0 + gap as f32));
+    assert_eq!(scores, [want(0), want(1), want(2)]);
+    assert!(scores.windows(2).all(|w| w[0] > w[1]));
+}
+
+/// `text:near` against the cheap (positionless) default index is a hard query
+/// error, like `text:phrase`. [OPUS-4.8]
+#[test]
+fn near_without_positions_errors() {
+    let (g, idx) = setup(); // TextIndex::build — no positions.
+    let err = query_text(
+        &g,
+        r#"PREFIX text: <http://sparq.dev/text#>
+           SELECT ?post WHERE { ?post <http://ex/title> ?t . ?t text:near "brown fox" }"#,
+        &idx,
+    )
+    .unwrap_err();
+    assert!(err.contains("positions-enabled index"), "error {err:?}");
+    assert!(err.contains("build_with_positions"), "error {err:?}");
+}
+
 #[test]
 fn rewrite_errors() {
     let (g, idx) = setup();
@@ -273,6 +353,29 @@ fn rewrite_errors() {
         (
             r#"SELECT ?t WHERE { ?t <http://sparq.dev/text#phrase> "fox" . ?t <http://sparq.dev/text#score> ?s }"#,
             "not valid for text:phrase",
+        ),
+        // text:slop must be a non-negative integer. [OPUS-4.8]
+        (
+            r#"SELECT ?t WHERE { ?t <http://sparq.dev/text#near> "fox" . ?t <http://sparq.dev/text#slop> "wide" }"#,
+            "non-negative integer",
+        ),
+        (
+            r#"SELECT ?t WHERE { ?t <http://sparq.dev/text#near> "fox" . ?t <http://sparq.dev/text#slop> "-1" }"#,
+            "non-negative integer",
+        ),
+        // text:slop with no text:near on the same variable. [OPUS-4.8]
+        (
+            r#"SELECT ?t WHERE { ?t <http://sparq.dev/text#matches> "fox" . ?t <http://sparq.dev/text#slop> 2 }"#,
+            "only valid alongside text:near",
+        ),
+        (
+            r#"SELECT ?t WHERE { ?t <http://sparq.dev/text#slop> 2 }"#,
+            "no text:near",
+        ),
+        // Duplicate text:slop on one text:near. [OPUS-4.8]
+        (
+            r#"SELECT ?t WHERE { ?t <http://sparq.dev/text#near> "fox" . ?t <http://sparq.dev/text#slop> 1 . ?t <http://sparq.dev/text#slop> 2 }"#,
+            "duplicate text:slop",
         ),
     ];
     for (q, needle) in cases {

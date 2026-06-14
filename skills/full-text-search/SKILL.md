@@ -1,6 +1,6 @@
 ---
 name: full-text-search
-description: Full-text search over RDF string literals in sparq via the sparq-text crate: build a BM25 inverted index (TextIndex) and run text: magic predicates (text:matches / text:matchesAny / text:phrase / text:score) inside plain SPARQL. Use when an agent needs keyword/prefix/phrase search, BM25 relevance ranking, or autocomplete over literals in a sparq Graph.
+description: Full-text search over RDF string literals in sparq via the sparq-text crate: build a BM25 inverted index (TextIndex) and run text: magic predicates (text:matches / text:matchesAny / text:phrase / text:near / text:slop / text:score) inside plain SPARQL. Use when an agent needs keyword/prefix/phrase/proximity search, BM25 or proximity relevance ranking, or autocomplete over literals in a sparq Graph.
 ---
 
 # sparq full-text search (sparq-text)
@@ -54,6 +54,7 @@ Index (always available, `index` module — re-exported at crate root as `TextIn
 - `TextIndex::search(&self, query: &str) -> Vec<Hit>` — AND of tokens (`*`-suffix = prefix token), BM25-ranked best-first.
 - `TextIndex::search_any(&self, query: &str) -> Vec<Hit>` — OR of tokens; scores sum over tokens present.
 - `TextIndex::phrase(&self, query: &str) -> Vec<Id>` — adjacent-and-in-order tokens, ascending ids (unranked). **Panics** if the index has no positions.
+- `TextIndex::phrase_near(&self, query: &str, slop: u32) -> Vec<Hit>` — proximity/slop: in-order tokens within a bounded total gap, **relevance-ranked** best-first (`score = 1/(1+gap)`, so adjacency = 1.0). `phrase_near(q, 0)` == `phrase(q)` (each at score 1.0); the hit set grows monotonically with `slop`; order stays significant. Same positions requirement / panic as `phrase`. [OPUS-4.8]
 - `TextIndex::apply_delta(&mut self, graph: &Graph, inserts: &[[Term;3]], deletes: &[[Term;3]])` — mirror a `Graph::apply_delta` batch (inserts of new string literals are indexed; deletes are a documented no-op).
 - `TextIndex::has_positions(&self) -> bool`, `len()`, `is_empty()`, `token_count()`, `heap_bytes()`.
 - `struct Hit { pub id: sparq_core::dict::Id, pub score: f32 }` (`score` comparable within one query only).
@@ -68,7 +69,9 @@ Magic predicates (`sparq_text::vocab`, namespace `http://sparq.dev/text#`):
 - `?lit text:matches "q"` — `?lit` ranges over literals containing **every** token of `q` (token ending in `*` = prefix).
 - `?lit text:matchesAny "q"` — literals containing **at least one** token.
 - `?lit text:phrase "foo bar"` — literals where the tokens are **adjacent and in order** (needs a positions-enabled index).
-- `?lit text:score ?s` — binds the BM25 score as `xsd:double`; must accompany exactly one `text:matches`/`text:matchesAny` on the same subject variable in the same BGP. **Not** valid with `text:phrase`.
+- `?lit text:near "foo bar"` — proximity/slop generalisation of `text:phrase`: tokens **in order within a bounded gap**, **relevance-ranked**. Needs positions. Gap budget defaults to 0 (== `text:phrase`); set it with a `text:slop N` companion. Takes an optional `text:score ?s` (the proximity score). [OPUS-4.8]
+- `?lit text:slop N` — sets the proximity gap budget for the `text:near` on the same subject variable in the same BGP (a non-negative integer; at most one; valid only beside a `text:near`). [OPUS-4.8]
+- `?lit text:score ?s` — binds the relevance score as `xsd:double`: the BM25 score for a `text:matches`/`text:matchesAny`, or the proximity score (`1/(1+gap)`) for a `text:near`. Must accompany exactly one such scored match on the same subject variable in the same BGP. **Not** valid with `text:phrase` (boolean adjacency, unscored). [OPUS-4.8]
 
 ## Common recipes
 
@@ -98,6 +101,17 @@ let ids = pidx.phrase("quick brown fox");               // literal ids, ascendin
 //   ?title text:phrase "quick brown"
 ```
 
+**Proximity / slop search (ranked near-phrases).** `text:near` is the scored, bounded-gap variant of `text:phrase` over the same positional index — tokens still in order, but allowed a total gap up to the slop, ranked tightest-first (`score = 1/(1+gap)`):
+```rust
+let hits = pidx.phrase_near("quick fox", 2);            // Vec<Hit>, best-first; "quick lazy fox" (gap 1) before "quick the lazy fox" (gap 2)
+// In SPARQL — text:slop sets the gap budget, text:score binds the proximity score:
+//   ?title text:near  "quick fox" .
+//   ?title text:slop  2 .
+//   ?title text:score ?s .
+// ... ORDER BY DESC(?s)
+// phrase_near(q, 0) == phrase(q); a larger slop only ever admits more docs.
+```
+
 **Incremental upkeep after updates.** Mirror the same batch you fed to the graph:
 ```rust
 g.apply_delta(&inserts, &deletes)?;                     // inserts/deletes: &[[Term;3]]
@@ -122,8 +136,9 @@ sparq-text = { path = "../sparq-text", default-features = false }   # or default
 - **Feature flags.** `engine` (default on) brings in the `rewrite` module + `sparq-engine`/`spargebra` — needed for `query_text`/`prepare_text`/`rewrite_query` and all `text:` magic predicates. `parallel` (default on) rayon-shards `TextIndex::build`. Disable defaults for the bare index (tokenizer + `TextIndex` + BM25) with no engine in the graph (the wasm-friendly shape).
 - **What gets indexed.** Only plain/`xsd:string` and language-tagged literals from the graph's dictionary. Typed literals (numbers, dates, `geo:wktLiteral`, ...) are skipped.
 - **Per-graph indexes.** Dictionary ids are local to each graph. Named graphs have their own dictionaries — build one `TextIndex` per graph you want searchable, and pass the matching index to `query_text`. Hits come from the index you pass (typically the default graph's).
-- **`text:phrase` needs positions.** Running it against the cheap `TextIndex::build` index is a **hard query error** ("text:phrase requires a positions-enabled index; build it with TextIndex::build_with_positions"), not a silent empty result. The bare `TextIndex::phrase(...)` method **panics** in the same situation — guard with `has_positions()` if unsure.
-- **Rewrite constraints (each a hard error).** Match/phrase subject must be a variable; the query string must be a **constant** literal (no per-row bind-time values); `text:score`'s object must be a variable and must bind exactly one match pattern on its subject in the same BGP; any unknown IRI under `http://sparq.dev/text#` is rejected (typo guard). A query whose tokens match nothing yields zero rows (empty `VALUES`), not an error.
+- **`text:phrase` / `text:near` need positions.** Running either against the cheap `TextIndex::build` index is a **hard query error** ("text:phrase/text:near requires a positions-enabled index; build it with TextIndex::build_with_positions"), not a silent empty result. The bare `TextIndex::phrase(...)` / `phrase_near(...)` methods **panic** in the same situation — guard with `has_positions()` if unsure.
+- **Proximity scoring is `1/(1+gap)`.** The `text:near` / `phrase_near` score is a closed form of the document's *tightest* in-order gap (`gap = (last − first) − (n − 1)`): 1.0 for an adjacent occurrence, decreasing monotonically as the best occurrence loosens; ties break by ascending id (the `search` ordering). `slop 0` is exact adjacency (== `text:phrase`), and the hit set is monotonic in slop. Order is significant — no slop makes a reversed phrase match. [OPUS-4.8]
+- **Rewrite constraints (each a hard error).** Match/phrase/near subject must be a variable; the query string must be a **constant** literal (no per-row bind-time values); `text:score`'s object must be a variable and must bind exactly one scored match (`text:matches`/`text:matchesAny`/`text:near`, **not** `text:phrase`) on its subject in the same BGP; `text:slop`'s object must be a constant non-negative integer, valid only alongside a `text:near` on the same subject (at most one per near); any unknown IRI under `http://sparq.dev/text#` is rejected (typo guard). A query whose tokens match nothing yields zero rows (empty `VALUES`), not an error.
 - **Tokenizer semantics.** UAX #29 Unicode word segmentation + full Unicode lowercasing. No stemming, no stopword list, **no diacritic folding** (`café` != `cafe`). Numbers are tokens. Unspaced CJK runs stay single segments (no dictionary word-splitting → effectively whole-run match).
 - **BM25 scoring.** k1 = 1.2, b = 0.75, idf with the +1 floor. `Hit.score` (and the `text:score` `xsd:double`) is only comparable within a single query. A `*`-prefix token scores as one pseudo-term (its expansions' postings unioned). A wide prefix (e.g. a 4-char prefix matching a third of the corpus) is the dominant cost case — real autocomplete prefixes touch far fewer expansions.
 - **Deletes + compaction.** `apply_delta` deletions are intentionally a no-op: the dictionary keeps terms until `Graph::compact`, so the incremental index stays exactly equal to a rebuild and orphaned literal ids simply join to zero triples. After `Graph::compact` (ids reassigned), rebuild the index.
