@@ -216,9 +216,9 @@ async fn max_results_refuses_with_413() {
 
 #[tokio::test]
 async fn max_query_rows_caps_every_form() {
-    // 3 ex:age triples. A cap of 2 must trip on the SELECT working set AND — unlike
-    // --max-results, which only caps the final SELECT projection — on a CONSTRUCT, whose
-    // WHERE pattern materialises the same 3 rows.
+    // 3 ex:age triples. A cap of 2 must trip on the SELECT working set AND on a CONSTRUCT,
+    // whose WHERE pattern materialises the same 3 rows — --max-query-rows is the coarse
+    // working-set ceiling that applies on EVERY form, the property under test here.
     let config = ServerConfig { max_query_rows: Some(2), ..ServerConfig::default() };
     let base = spawn_with(DATA, config).await;
 
@@ -233,7 +233,8 @@ async fn max_query_rows_caps_every_form() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("max-query-rows"), "should name the memory cap: {body}");
 
-    // CONSTRUCT materialises the same 3 WHERE rows → also 413 (max-results would NOT cap this).
+    // CONSTRUCT materialises the same 3 WHERE rows → also 413, bounded by --max-query-rows
+    // (the every-form working-set ceiling this test sets and asserts).
     let resp = client()
         .get(format!("{base}/sparql"))
         .query(&[("query", "CONSTRUCT { ?s <http://ex/a> ?a } WHERE { ?s <http://ex/age> ?a }")])
@@ -250,6 +251,45 @@ async fn max_query_rows_caps_every_form() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-ebii) The 413 row-cap message names the knob that ACTUALLY tripped on THIS
+// path. On a path that does not fold in --max-results (ASK / GSP-read / UPDATE), a
+// smaller-but-inapplicable --max-results must NOT be mis-named as the cause; the path's real
+// cap is --max-query-rows. (Regression for the engine_error_response path-accuracy fix:
+// previously the message picked the tighter of the GLOBAL config caps regardless of whether
+// --max-results participated, so a GSP-read with --max-results < --max-query-rows reported
+// "--max-results" and the smaller, never-applied row number.)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn row_cap_413_names_the_applied_knob_on_non_select_paths() {
+    // --max-results (1) is SMALLER than --max-query-rows (2) but does NOT apply to a GSP-read
+    // (which uses make_budget(_, false)); the real cap there is --max-query-rows.
+    let config = ServerConfig { max_query_rows: Some(2), max_results: Some(1), ..ServerConfig::default() };
+    let base = spawn_with(DATA, config).await;
+
+    // GSP-read of the default graph (6 triples) > the working-set cap of 2 → 413, and the
+    // message must name --max-query-rows (the cap that fed this path's budget), never
+    // --max-results (not applied on a GSP-read).
+    let resp = client().get(format!("{base}/sparql/graph?default")).send().await.unwrap();
+    assert_eq!(resp.status(), 413);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("max-query-rows"), "GSP-read 413 must name --max-query-rows: {body}");
+    assert!(!body.contains("--max-results"), "GSP-read 413 must NOT name --max-results: {body}");
+
+    // SELECT, by contrast, DOES fold in --max-results: with --max-results (1) tighter than
+    // --max-query-rows (2) the projection cap is the one that trips → name it.
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT ?s WHERE { ?s <http://ex/age> ?a }")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("--max-results"), "SELECT 413 must name --max-results: {body}");
 }
 
 // ---------------------------------------------------------------------------

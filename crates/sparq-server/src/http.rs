@@ -136,9 +136,12 @@ pub struct ServerConfig {
     /// next check. Treat it as a blunt anti-OOM circuit-breaker, NOT an RSS quota. `None`
     /// (the default) disables it. A true byte-accounted allocator cap is deferred (bead).
     ///
-    /// Distinct from [`max_results`]: `max_results` caps only the FINAL SELECT projection
-    /// (ASK/CONSTRUCT/DESCRIBE ignore it); this caps the working set on *all* forms. When
-    /// both are set, a SELECT uses the tighter of the two.
+    /// Distinct from [`max_results`]: this caps the working set on *all* forms, whereas
+    /// `max_results` is folded into the budget only on the paths that pass
+    /// `make_budget(_, true)` — SELECT (the final projection) AND CONSTRUCT/DESCRIBE (their
+    /// WHERE-pattern solution count) AND EXPLAIN ANALYZE. It is NOT applied on the
+    /// `make_budget(_, false)` paths — ASK and GSP-read — nor to UPDATE (`update_budget`,
+    /// which has no projection). When both apply, the effective cap is the tighter of the two.
     pub max_query_rows: Option<usize>,
     /// [OPUS-4.8] (sq-ebii) **Decompression-ratio cap (zip-bomb guard).** When a request
     /// body arrives `Content-Encoding: gzip` (the GSP write / RDF-load path), the server
@@ -1011,9 +1014,13 @@ async fn handle_post(
                 let task = tokio::task::spawn_blocking(move || st.apply_update(&u));
                 // [OPUS-4.8] sq-ebii: enforce the query timeout on the UPDATE path too — the
                 // SAME wall-clock hard cap (`timeout + TIMEOUT_GRACE`) the read paths use via
-                // `await_worker`. See `await_update_worker` for the honest caveat (the
-                // engine's update WHERE evaluation is not yet cooperatively budgeted, so this
-                // is a wall-clock cap on the await, not a mid-evaluation abort).
+                // `await_worker`. The cooperative QueryBudget ALSO reaches the update itself
+                // (`ServerApplier::apply` runs it via `update_in_place_with_budget`), so a
+                // `DELETE/INSERT … WHERE` aborts at the deadline / row cap mid-evaluation —
+                // this wall-clock await cap is the BACKSTOP for an uninstrumented stretch, not
+                // the only stop. See `await_update_worker` for the remaining caveats (coarse
+                // cooperative checks; single sequenced writer; the writer finishes its next
+                // budget check after the HTTP side has already answered 503).
                 match await_update_worker(task, &state.config).await {
                     UpdateOutcome::Ok(number) => {
                         state.metrics().inc_updates();
@@ -1101,7 +1108,8 @@ async fn run_query_pinned(
                 Ok(text) => text_response(StatusCode::OK, "text/plain; charset=utf-8", text, head_only),
                 // ANALYZE of a non-SELECT/ASK form is a client error, not a server one.
                 Err(e) if e.contains("EXPLAIN ANALYZE supports") => bad_request(&e),
-                Err(e) => engine_error_response(&e, &cfg),
+                // EXPLAIN ANALYZE used `make_budget(_, true)` → max_results applied.
+                Err(e) => engine_error_response(&e, &cfg, true),
             }
         });
         return await_worker(task, &config).await;
@@ -1128,7 +1136,8 @@ async fn run_query_pinned(
                             };
                             text_response(StatusCode::OK, ct, body, head_only)
                         }
-                        Err(e) => engine_error_response(&e, &cfg),
+                        // ASK used `make_budget(_, false)` → max_results did NOT apply.
+                        Err(e) => engine_error_response(&e, &cfg, false),
                     }
                 } else {
                     render_select(&gen, &select, fmt, head_only, &budget, &cfg)
@@ -1155,7 +1164,8 @@ async fn run_query_pinned(
                         let body = serialise_graph_triples(&triples, gfmt);
                         text_response(StatusCode::OK, gfmt.content_type(), body, head_only)
                     }
-                    Err(e) => engine_error_response(&e, &cfg),
+                    // CONSTRUCT/DESCRIBE used `make_budget(_, true)` → max_results applied.
+                    Err(e) => engine_error_response(&e, &cfg, true),
                 }
             });
             await_worker(task, &config).await
@@ -1165,13 +1175,16 @@ async fn run_query_pinned(
 
 /// The per-request engine budget: deadline from the configured timeout; the row cap from
 /// the memory cap (`--max-query-rows`, applied on EVERY form) AND — when `apply_max_results`
-/// is set (SELECT projections) — `--max-results`, whichever is tighter.
+/// is set — `--max-results`, whichever is tighter.
 ///
 /// [OPUS-4.8] (sq-ebii) `--max-query-rows` is the coarse memory cap: it bounds the
 /// working-set cardinality of any materialised intermediate/final result on all forms
 /// (SELECT/ASK/CONSTRUCT/DESCRIBE/GSP-read), so a join blow-up aborts (413) instead of
-/// OOMing. `--max-results` is the narrower SELECT-projection cap (ASK ignores it). Both map
-/// onto the single engine `max_rows` budget, so the effective ceiling is their min.
+/// OOMing. `--max-results` is the narrower result/solution cap: callers pass
+/// `apply_max_results = true` on SELECT (the final projection), CONSTRUCT/DESCRIBE (their
+/// WHERE-pattern solution count) and EXPLAIN ANALYZE; `false` on ASK and GSP-read (which
+/// have no projection to cap). Both map onto the single engine `max_rows` budget, so the
+/// effective ceiling on a path where both apply is their min.
 pub(crate) fn make_budget(config: &ServerConfig, apply_max_results: bool) -> QueryBudget {
     let results_cap = if apply_max_results { config.max_results } else { None };
     QueryBudget {
@@ -1235,14 +1248,19 @@ pub(crate) enum UpdateOutcome {
 /// `DELETE/INSERT … WHERE` whose WHERE pattern blows up) cannot pin a connection indefinitely.
 ///
 /// **Honest scope — what this does and does NOT bound:** this is a wall-clock cap on the
-/// HTTP *await*. Unlike the read paths, the cooperative [`QueryBudget`] deadline does NOT
-/// reach inside the update: the engine's update entry point (`update_in_place`) takes no
-/// budget, so an in-progress update's WHERE evaluation is not interrupted at the deadline —
-/// the writer thread keeps running it to completion and the result is simply discarded once
-/// the HTTP side has already answered 503. Updates are also *sequenced* on a single writer,
-/// so a long-running update blocks the queue behind it until it finishes (this cap bounds
-/// the client's wait, not the writer's work). Threading a real cooperative budget through the
-/// engine update path + the sequenced writer is the proper fix — deferred (bead).
+/// HTTP *await*, and it is a BACKSTOP, not the only stop. The cooperative [`QueryBudget`]
+/// (deadline + `max_rows`) DOES reach inside the update: `ServerApplier::apply` runs it via
+/// [`sparq_engine::update_in_place_with_budget`] with [`update_budget`], which installs the
+/// budget thread-locally, so a `DELETE/INSERT … WHERE` whose WHERE pattern blows up aborts
+/// mid-evaluation at the row cap / deadline exactly as a budgeted `SELECT` does. The
+/// remaining caveats this wall-clock cap covers: (1) the cooperative budget is checked only
+/// at *coarse* sites (operator entry / per outer-loop iteration), so a single uninstrumented
+/// stretch can overrun the deadline before the next check — this await then answers 503 on
+/// time while the writer thread keeps running to its next budget check and discards the
+/// result; (2) the non-WHERE operations (INSERT/DELETE DATA, CLEAR/DROP/CREATE/LOAD) do not
+/// consult the budget (they are bounded by operand size, already capped by `--max-body-bytes`);
+/// (3) updates are *sequenced* on a single writer, so a long-running update blocks the queue
+/// behind it until it finishes — this cap bounds the client's wait, not the writer's work.
 async fn await_update_worker(
     task: tokio::task::JoinHandle<Result<u64, String>>,
     config: &ServerConfig,
@@ -1283,14 +1301,15 @@ fn render_select(
     let graph = gen.snapshot();
     let ct = fmt.select_content_type();
     let body = match fmt {
+        // SELECT projections fold in --max-results (`make_budget(_, true)`) → name it.
         Format::Json => match sparq_engine::query_json_chunks_with_budget(graph, select, budget) {
             Ok(chunks) => return chunked_response(StatusCode::OK, ct, chunks, head_only, gen.clone()),
-            Err(e) => return engine_error_response(&e, config),
+            Err(e) => return engine_error_response(&e, config, true),
         },
         _ => {
             let result = match sparq_engine::query_with_budget(graph, select, budget) {
                 Ok(r) => r,
-                Err(e) => return engine_error_response(&e, config),
+                Err(e) => return engine_error_response(&e, config, true),
             };
             match fmt {
                 Format::Xml => results::select_to_xml(&result),
@@ -1305,16 +1324,30 @@ fn render_select(
 
 /// Maps an engine error string onto the HTTP guard semantics: budget timeout → 503,
 /// budget row cap → 413 (honest refusal), anything else → 500.
-fn engine_error_response(e: &str, config: &ServerConfig) -> Response {
+///
+/// `apply_max_results` MUST match the flag the path passed to [`make_budget`]: it tells this
+/// function whether `--max-results` actually contributed to the `max_rows` budget on THIS
+/// request, so the 413 message names the right knob.
+///
+/// [OPUS-4.8] (sq-ebii) Only SELECT projections (and EXPLAIN ANALYZE / CONSTRUCT / DESCRIBE,
+/// which also pass `apply_max_results = true`) fold `--max-results` into the budget. ASK,
+/// GSP-read and UPDATE build their budget from `--max-query-rows` ALONE
+/// (`make_budget(_, false)` / `update_budget`), so on those paths `--max-results` did NOT
+/// participate even when it is set and smaller. Picking the named knob from the global config
+/// (the old behaviour) therefore misreported the cap on those paths — e.g. an ASK with
+/// `--max-query-rows 100 --max-results 10` aborts at 100 rows but would have been reported as
+/// "10 rows, --max-results". Gating the `max_results` consideration on `apply_max_results`
+/// makes the message path-accurate (the 413 status itself was always correct — only the
+/// human-readable knob name / row number could be wrong).
+fn engine_error_response(e: &str, config: &ServerConfig, apply_max_results: bool) -> Response {
     if e.contains("query budget exceeded (timeout)") {
         return timeout_response(config);
     }
     if e.contains("query budget exceeded (max-rows)") {
-        // [OPUS-4.8] sq-ebii: the row budget is fed by BOTH --max-results (SELECT projection)
-        // and --max-query-rows (the coarse memory cap, all forms); name the tighter one that
-        // actually tripped so the operator knows which knob to raise.
-        let max = tighter(config.max_query_rows, config.max_results).unwrap_or(0);
-        let which = match (config.max_query_rows, config.max_results) {
+        // Only the caps that actually fed THIS path's budget are eligible to be named.
+        let results_cap = apply_max_results.then_some(config.max_results).flatten();
+        let max = tighter(config.max_query_rows, results_cap).unwrap_or(0);
+        let which = match (config.max_query_rows, results_cap) {
             (Some(q), Some(r)) if q <= r => "--max-query-rows (memory cap)",
             (Some(_), None) => "--max-query-rows (memory cap)",
             _ => "--max-results",
@@ -1332,7 +1365,9 @@ fn engine_error_response(e: &str, config: &ServerConfig) -> Response {
 /// exactly like a query; any other rejection (parse / semantic error) is the client's 400.
 fn update_rejection_response(e: &str, config: &ServerConfig) -> Response {
     if e.contains("query budget exceeded") {
-        return engine_error_response(e, config);
+        // Updates budget from `--max-query-rows` alone (`update_budget`, no `--max-results`),
+        // so the 413 message must not consider `--max-results` → `apply_max_results = false`.
+        return engine_error_response(e, config, false);
     }
     bad_request(&format!("update failed: {e}"))
 }
@@ -1701,7 +1736,8 @@ async fn serialise_graph(state: &AppState, graph: GraphRef, headers: &HeaderMap,
     let cfg = config.clone();
     let task = tokio::task::spawn_blocking(move || match graph_dump_triples(gen.snapshot(), &graph, &budget) {
         Ok(triples) => text_response(StatusCode::OK, &ct, serialise_graph_triples(&triples, gfmt), head_only),
-        Err(e) => engine_error_response(&e, &cfg),
+        // GSP-read used `make_budget(_, false)` → max_results did NOT apply.
+        Err(e) => engine_error_response(&e, &cfg, false),
     });
     await_worker(task, &config).await
 }
@@ -1895,8 +1931,10 @@ impl DecodeError {
 /// RDF-load path). It does NOT cover a compressed payload the *engine* fetches behind a
 /// SPARQL `LOAD <url>` or `SERVICE` — those go through their own ingest path; the SERVICE
 /// surface is separately bounded by the egress allowlist (sq-4w18). The request body-size
-/// limit (`--max-body-bytes`, 413) still caps the COMPRESSED bytes first, so the absolute
-/// decompressed ceiling here is at most `max_body_bytes × max_decompress_ratio`.
+/// limit (`--max-body-bytes`, 413) caps the COMPRESSED bytes first, and the decompressed
+/// ceiling is `min(max_decompress_ratio × compressed_len, max_body_bytes)` (see
+/// [`decode_gzip_bounded`]) — so the decompressed output is itself capped at `max_body_bytes`,
+/// never `max_body_bytes × max_decompress_ratio`.
 fn decode_request_body(body: &Bytes, headers: &HeaderMap, config: &ServerConfig) -> Result<Bytes, DecodeError> {
     let encoding = headers
         .get(header::CONTENT_ENCODING)

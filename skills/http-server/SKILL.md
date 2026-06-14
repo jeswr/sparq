@@ -235,7 +235,7 @@ env overrides the default.
 | `--query-timeout SECS` | `SPARQ_QUERY_TIMEOUT` | `30` (`0`=off) | per-request timeout → `503` |
 | `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` | body cap → `413` |
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | in-flight cap, load-shed → `429` |
-| `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0`=off) | SELECT row cap → honest `413` (not truncation) |
+| `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0`=off) | result/solution cap (SELECT + CONSTRUCT/DESCRIBE WHERE-solutions + EXPLAIN ANALYZE; not ASK/GSP-read/UPDATE) → honest `413` (not truncation) |
 | `--max-query-rows N` | `SPARQ_MAX_QUERY_ROWS` | unlimited (`0`=off) | **memory cap** (coarse): working-set row ceiling on **every** form → honest `413` (`sq-ebii`) |
 | `--max-decompress-ratio N` | `SPARQ_MAX_DECOMPRESS_RATIO` | `20` (`0`=refuse gzip) | **zip-bomb guard**: cap on decompressed:compressed for a `Content-Encoding: gzip` body → `413` (`sq-ebii`) |
 | `--max-subscriptions N` | `SPARQ_MAX_SUBSCRIPTIONS` | `256` | server-wide subs |
@@ -278,8 +278,10 @@ memory cap is a *cardinality* ceiling, not an RSS quota:
    query with few but very wide rows (many vars / huge literals) can still exceed the implied
    memory; dictionary growth, sort/group scratch and a CONSTRUCT template are outside it. It
    is also approximate in time (coarse checks). Treat it as a blunt anti-OOM breaker, **not**
-   an RSS quota. Distinct from `--max-results` (which caps only the final SELECT projection);
-   a SELECT uses the tighter of the two. A true byte-accounted allocator cap is deferred
+   an RSS quota. Distinct from `--max-results` (the result/solution cap, folded into the
+   budget on SELECT / CONSTRUCT/DESCRIBE / EXPLAIN ANALYZE — but not ASK / GSP-read / UPDATE);
+   on a path where both apply, the effective cap is the tighter of the two. A true
+   byte-accounted allocator cap is deferred
    (`sq-s5is`); writer-queue head-of-line blocking from a slow UPDATE is deferred (`sq-nulp`).
 3. **Decompression-ratio cap** (`--max-decompress-ratio`, `SPARQ_MAX_DECOMPRESS_RATIO`,
    default `20`×, `0`=refuse gzip). When a GSP write body arrives `Content-Encoding: gzip`
@@ -291,8 +293,9 @@ memory cap is a *cardinality* ceiling, not an RSS quota:
    (GSP `PUT`/`POST`). An unknown `Content-Encoding` is a `415`. *Caveat:* it does **not**
    cover a compressed payload the *engine* fetches behind a SPARQL `LOAD <url>` / `SERVICE`
    — those use their own ingest; `SERVICE` egress is bounded separately by limit 4. The
-   compressed bytes still pass the `--max-body-bytes` gate first, so the absolute
-   decompressed ceiling is `max_body_bytes × ratio`.
+   compressed bytes pass the `--max-body-bytes` gate first, and the decompressed ceiling is
+   `min(ratio × compressed_len, max_body_bytes)` — so the decompressed output is itself capped
+   at `max_body_bytes`, never `max_body_bytes × ratio`.
 4. **SERVICE-SSRF egress allowlist** (`--service-allow` / `--service-allow-file` /
    `SPARQ_SERVICE_ALLOW`, default **deny ALL**, feature `service`) — shipped in `sq-4w18`,
    see "SERVICE federation (egress allowlist)" below. A `SERVICE <iri>` turns
