@@ -3122,10 +3122,12 @@ dependencies = [
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "rayon",
+ "spargebra",
  "sparq-core",
  "sparq-engine",
  "sparq-hdt",
  "sparq-reason",
+ "sparq-server",
  "zstd",
 ]
 

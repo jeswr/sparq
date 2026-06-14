@@ -1,7 +1,13 @@
 //! sparq command-line interface.
 //!
-//!   sparq-cli query <data-file> <format> <sparql>
-//!       load a file and run one query, printing the solution count.
+//!   sparq-cli query <data-file> <format> <sparql> [--format <out>] [--count] [--reason <p>]
+//!       load a file and run one query, printing its results:
+//!         SELECT             -> the solution bindings (default: a readable table)
+//!         ASK                -> a boolean (`true` / `false`)
+//!         CONSTRUCT/DESCRIBE -> the resulting triples as N-Triples
+//!       `--format <table|tsv|csv|xml|json|ntriples>` picks the SELECT/ASK serialisation
+//!       (CONSTRUCT/DESCRIBE always emit N-Triples); `--count` restores the old
+//!       count-only output (`<n> solutions in <ms>ms`). [OPUS-4.8] (sq-l4ki)
 //!
 //!   sparq-cli bench <data-file> <format> <queries-dir> [iters] [mode]
 //!       load the file once, then run every `*.rq` file in <queries-dir>
@@ -43,7 +49,7 @@ fn main() {
         Some("bench-remap") => cmd_bench_remap(&args),
         Some("scaling") => cmd_scaling(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql>\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
         }
     }
@@ -841,26 +847,207 @@ fn load(path: &str, format: &str) -> sparq_core::Graph {
     g
 }
 
+/// [OPUS-4.8] (sq-l4ki) Output serialisation chosen by `query --format`. `Table` (the
+/// human-readable default) and the four W3C SELECT result formats apply to SELECT (and,
+/// where meaningful, ASK); CONSTRUCT/DESCRIBE always emit N-Triples regardless of this.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutFormat {
+    Table,
+    Tsv,
+    Csv,
+    Xml,
+    Json,
+    NTriples,
+}
+
+impl OutFormat {
+    /// Parses the `--format` value; `None` for an unknown name (caller reports + exits 2).
+    fn parse(s: &str) -> Option<OutFormat> {
+        Some(match s {
+            "table" => OutFormat::Table,
+            "tsv" => OutFormat::Tsv,
+            "csv" => OutFormat::Csv,
+            "xml" => OutFormat::Xml,
+            "json" => OutFormat::Json,
+            "ntriples" | "n-triples" | "nt" => OutFormat::NTriples,
+            _ => return None,
+        })
+    }
+}
+
+/// [OPUS-4.8] (sq-l4ki) Pull an optional `--format <name>` flag out of the argument list,
+/// defaulting to a readable `Table`. Exits 2 (usage error) on a missing/unknown value —
+/// matching the rest of the CLI's flag-validation contract.
+fn out_format_flag(args: &[String]) -> OutFormat {
+    match args.iter().position(|a| a == "--format") {
+        None => OutFormat::Table,
+        Some(i) => {
+            let val = args.get(i + 1).unwrap_or_else(|| {
+                eprintln!("--format needs a value (table | tsv | csv | xml | json | ntriples)");
+                std::process::exit(2);
+            });
+            OutFormat::parse(val).unwrap_or_else(|| {
+                eprintln!("unknown --format '{val}' (known: table | tsv | csv | xml | json | ntriples)");
+                std::process::exit(2);
+            })
+        }
+    }
+}
+
+/// [OPUS-4.8] (sq-l4ki) Renders a SELECT [`QueryResult`] as a fixed-width ASCII table —
+/// the default human-readable `query` output. Unbound cells render empty; each term uses
+/// its SPARQL/Turtle term syntax (oxrdf's `Display`). Column widths are sized to the
+/// widest cell so columns line up; for a zero-variable result (which only ASK produces,
+/// not SELECT) it prints the row count.
+fn select_to_table(r: &sparq_engine::QueryResult) -> String {
+    use std::fmt::Write;
+    if r.vars.is_empty() {
+        return format!("({} row(s))\n", r.rows.len());
+    }
+    let headers: Vec<String> = r.vars.iter().map(|v| format!("?{}", v.as_str())).collect();
+    let cells: Vec<Vec<String>> = r
+        .rows
+        .iter()
+        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default()).collect())
+        .collect();
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    for row in &cells {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    let sep = |out: &mut String| {
+        out.push('+');
+        for w in &widths {
+            for _ in 0..w + 2 {
+                out.push('-');
+            }
+            out.push('+');
+        }
+        out.push('\n');
+    };
+    let row_line = |out: &mut String, fields: &[String]| {
+        out.push('|');
+        for (i, f) in fields.iter().enumerate() {
+            let pad = widths[i] - f.chars().count();
+            let _ = write!(out, " {f}{} |", " ".repeat(pad));
+        }
+        out.push('\n');
+    };
+    let mut out = String::new();
+    sep(&mut out);
+    row_line(&mut out, &headers);
+    sep(&mut out);
+    for row in &cells {
+        row_line(&mut out, row);
+    }
+    sep(&mut out);
+    let _ = writeln!(out, "({} row(s))", r.rows.len());
+    out
+}
+
 fn cmd_query(args: &[String]) {
     let (path, format, sparql) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(q)) => (p, f, q),
         _ => {
-            eprintln!("usage: sparq-cli query <data-file> <format> <sparql>");
+            eprintln!(
+                "usage: sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]"
+            );
             std::process::exit(2);
         }
     };
+    // [OPUS-4.8] (sq-l4ki) `--count` preserves the historical count-only output; otherwise
+    // we emit real results. `--format` selects the SELECT/ASK serialisation (default table).
+    let count_only = args.iter().any(|a| a == "--count");
+    let out_fmt = out_format_flag(args);
+
     let g = match reason_flag(args) {
         Some(profile) => load_with_reasoning(path, format, &profile),
         None => load(path, format),
     };
+
+    // Parse once so we can classify the query FORM (SELECT / ASK / CONSTRUCT / DESCRIBE)
+    // and route it to the matching executor — the engine's `query`/`query_json` only run
+    // SELECT/ASK; the graph-valued forms go through `construct_or_describe` (the same path
+    // the `bench` runner already uses). [OPUS-4.8]
+    let prepared = sparq_engine::PreparedQuery::parse(sparql).unwrap_or_else(|e| {
+        eprintln!("query error: {e}");
+        std::process::exit(1);
+    });
+
     let t = Instant::now();
-    match sparq_engine::query(&g, sparql) {
-        Ok(r) => println!("{} solutions in {:.3}ms", r.len(), t.elapsed().as_secs_f64() * 1e3),
-        Err(e) => {
-            eprintln!("query error: {e}");
-            std::process::exit(1);
+
+    // Backward-friendly count-only path (the pre-sq-l4ki behaviour).
+    if count_only {
+        if prepared.is_graph_form() {
+            match sparq_engine::construct_or_describe(&g, sparql) {
+                Ok(ts) => println!("{} triples in {:.3}ms", ts.len(), t.elapsed().as_secs_f64() * 1e3),
+                Err(e) => die_query(e),
+            }
+        } else {
+            match sparq_engine::query(&g, sparql) {
+                Ok(r) => println!("{} solutions in {:.3}ms", r.len(), t.elapsed().as_secs_f64() * 1e3),
+                Err(e) => die_query(e),
+            }
         }
+        return;
     }
+
+    // CONSTRUCT / DESCRIBE -> the resulting triples as N-Triples (always; `--format` is a
+    // SELECT/ASK results-format selector and does not apply to the graph forms).
+    if prepared.is_graph_form() {
+        match sparq_engine::construct_ntriples(&g, sparql) {
+            Ok(nt) => print!("{nt}"),
+            Err(e) => die_query(e),
+        }
+        return;
+    }
+
+    // ASK -> a boolean. (`--format json`/`xml` emit the W3C boolean documents; the other
+    // formats fall back to the bare `true`/`false` token.)
+    if matches!(prepared.query(), spargebra::Query::Ask { .. }) {
+        let value = match sparq_engine::ask(&g, sparql) {
+            Ok(b) => b,
+            Err(e) => die_query(e),
+        };
+        match out_fmt {
+            OutFormat::Json => println!("{}", sparq_server::results::ask_to_json(value)),
+            OutFormat::Xml => print!("{}", sparq_server::results::ask_to_xml(value)),
+            _ => println!("{value}"),
+        }
+        return;
+    }
+
+    // SELECT -> the solution bindings. JSON reuses the engine's fast direct serialiser; the
+    // other formats reuse sparq-server's W3C SELECT serialisers over the QueryResult.
+    if out_fmt == OutFormat::Json {
+        match sparq_engine::query_json(&g, sparql) {
+            Ok(s) => println!("{s}"),
+            Err(e) => die_query(e),
+        }
+        return;
+    }
+    let r = match sparq_engine::query(&g, sparql) {
+        Ok(r) => r,
+        Err(e) => die_query(e),
+    };
+    match out_fmt {
+        OutFormat::Table => print!("{}", select_to_table(&r)),
+        OutFormat::Tsv => print!("{}", sparq_server::results::select_to_tsv(&r)),
+        OutFormat::Csv => print!("{}", sparq_server::results::select_to_csv(&r)),
+        OutFormat::Xml => print!("{}", sparq_server::results::select_to_xml(&r)),
+        // A SELECT has no graph form, so N-Triples is meaningless for bindings — fall back
+        // to TSV (the closest line-oriented bindings format) rather than error.
+        OutFormat::NTriples => print!("{}", sparq_server::results::select_to_tsv(&r)),
+        OutFormat::Json => unreachable!("json handled above"),
+    }
+}
+
+/// [OPUS-4.8] (sq-l4ki) Reports a query execution error to stderr and exits 1 (runtime
+/// error) — the shared failure tail of every `query` dispatch arm.
+fn die_query(e: String) -> ! {
+    eprintln!("query error: {e}");
+    std::process::exit(1);
 }
 
 fn cmd_bench(args: &[String]) {

@@ -34,6 +34,18 @@ hdt = ["dep:sparq-hdt"]
 # version on crates.io (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["mmap"] }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
+# [OPUS-4.8] (sq-l4ki) `query` reuses sparq-server's W3C SELECT result serialisers
+# (XML/CSV/TSV) for its `--format` flag instead of re-implementing them. We take ONLY
+# the pure serialiser library (`results`) — `default-features = false` drops the `server`
+# feature so axum/tokio/hyper are NOT pulled into the CLI (verified: `cargo tree -p
+# sparq-cli -e normal | grep -c axum` == 0). JSON / ASK-boolean / CONSTRUCT come straight
+# from sparq-engine (`query_json` / `construct_ntriples`), so the dep is serialiser-only.
+sparq-server = { path = "../sparq-server", version = "0.1.0", default-features = false }
+# [OPUS-4.8] Classify the parsed query form (Select / Ask / Construct / Describe) so
+# `query` can dispatch SELECT→rows, ASK→boolean, CONSTRUCT/DESCRIBE→triples. Mirrors how
+# sparq-server classifies before dispatch; already in the CLI's tree transitively via
+# sparq-engine, so the direct dep adds no new code.
+spargebra.workspace = true
 # Direct dep so the `scaling` harness can build fixed-size rayon pools (ThreadPoolBuilder) and
 # sweep RAYON thread counts in one process — the per-subsystem parallel-efficiency instrument.
 rayon = "1"
