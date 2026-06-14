@@ -170,7 +170,7 @@ jobs:
           echo "pass: ${PASS:-unknown} + documented divergences: ${DIV:-0} = $TOTAL (ratchet: $RATCHET)"
           [ -n "$PASS" ] && [ "$TOTAL" -ge "$RATCHET" ] || { echo "::error::conformance regressed below the ratchet ($TOTAL < $RATCHET)"; exit 1; }
       - name: Upload report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: conformance-report
@@ -214,7 +214,7 @@ jobs:
           [ -n "$CORE_PASS" ] && [ "$CORE_PASS" -ge "$CORE_FLOOR" ] || { echo "::error::SHACL core regressed below the ratchet (${CORE_PASS:-?} < $CORE_FLOOR)"; exit 1; }
           [ -n "$SPARQL_PASS" ] && [ "$SPARQL_PASS" -ge "$SPARQL_FLOOR" ] || { echo "::error::SHACL-SPARQL regressed below the ratchet (${SPARQL_PASS:-?} < $SPARQL_FLOOR)"; exit 1; }
       - name: Upload scoreboard
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: shacl-conformance
@@ -260,7 +260,7 @@ jobs:
           echo "pass: ${PASS:-unknown} + documented divergences: ${DIV:-0} = $TOTAL (ratchet: $RATCHET)"
           [ -n "$PASS" ] && [ "$TOTAL" -ge "$RATCHET" ] || { echo "::error::inference conformance regressed below the ratchet ($TOTAL < $RATCHET)"; exit 1; }
       - name: Upload report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: inference-conformance-report
@@ -309,7 +309,7 @@ jobs:
       - name: Enforce coverage floor (ratchet)
         run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
       - name: Upload coverage summary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-summary
@@ -375,7 +375,7 @@ jobs:
       - name: Enforce coverage floor (ratchet, all crates required)
         run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
       - name: Upload coverage summary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-summary-nightly

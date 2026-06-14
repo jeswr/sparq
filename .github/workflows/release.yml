@@ -100,7 +100,7 @@ jobs:
           subject-path: |
             pkg/*.tar.gz
             pkg/*.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pkg-${{ matrix.tier }}
           path: |
