@@ -35,7 +35,7 @@ jobs:
     name: build + test (workspace)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo + target
@@ -49,7 +49,7 @@ jobs:
     name: wasm build (sparq-wasm)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -73,7 +73,7 @@ jobs:
       # RUNS the exported API (JsError/serialisation across the JS boundary), so the
       # web.rs #[wasm_bindgen_test]s run via wasm-pack in the Node executor — closing
       # exactly that gap. Verified locally: 20 passed.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
       - name: Install wasm-pack
@@ -93,7 +93,7 @@ jobs:
     name: clippy (gate) + fmt (informational)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -133,7 +133,7 @@ jobs:
     name: MSRV check (Rust 1.88, declared floor)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Rust (pinned MSRV)
         uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
@@ -153,7 +153,7 @@ jobs:
     name: W3C SPARQL conformance (ratchet >= 1229 pass+divergence)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Fetch W3C test suites (pinned)
@@ -178,7 +178,7 @@ jobs:
           echo "pass: ${PASS:-unknown} + documented divergences: ${DIV:-0} = $TOTAL (ratchet: $RATCHET)"
           [ -n "$PASS" ] && [ "$TOTAL" -ge "$RATCHET" ] || { echo "::error::conformance regressed below the ratchet ($TOTAL < $RATCHET)"; exit 1; }
       - name: Upload report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: conformance-report
@@ -199,7 +199,7 @@ jobs:
     name: W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Fetch W3C SHACL test suite (pinned)
@@ -222,7 +222,7 @@ jobs:
           [ -n "$CORE_PASS" ] && [ "$CORE_PASS" -ge "$CORE_FLOOR" ] || { echo "::error::SHACL core regressed below the ratchet (${CORE_PASS:-?} < $CORE_FLOOR)"; exit 1; }
           [ -n "$SPARQL_PASS" ] && [ "$SPARQL_PASS" -ge "$SPARQL_FLOOR" ] || { echo "::error::SHACL-SPARQL regressed below the ratchet (${SPARQL_PASS:-?} < $SPARQL_FLOOR)"; exit 1; }
       - name: Upload scoreboard
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: shacl-conformance
@@ -245,7 +245,7 @@ jobs:
     name: Inference conformance (ratchet >= 1967 pass+divergence)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Fetch inference test suites (pinned)
@@ -268,7 +268,7 @@ jobs:
           echo "pass: ${PASS:-unknown} + documented divergences: ${DIV:-0} = $TOTAL (ratchet: $RATCHET)"
           [ -n "$PASS" ] && [ "$TOTAL" -ge "$RATCHET" ] || { echo "::error::inference conformance regressed below the ratchet ($TOTAL < $RATCHET)"; exit 1; }
       - name: Upload report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: inference-conformance-report
@@ -303,7 +303,7 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -317,7 +317,7 @@ jobs:
       - name: Enforce coverage floor (ratchet)
         run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
       - name: Upload coverage summary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-summary
@@ -369,7 +369,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -383,7 +383,7 @@ jobs:
       - name: Enforce coverage floor (ratchet, all crates required)
         run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
       - name: Upload coverage summary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-summary-nightly
@@ -401,7 +401,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-geiger

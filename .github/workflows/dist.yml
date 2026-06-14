@@ -42,7 +42,7 @@ jobs:
           # Windows on ARM (Surface Pro X, Snapdragon X Elite) — cross-compiled from the x64 runner.
           - { tier: win-arm64,        os: windows-latest,   target: aarch64-pc-windows-msvc,   cpu: "",          ext: ".exe" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Rust + target
         shell: bash
         run: |
@@ -57,7 +57,7 @@ jobs:
           RUSTFLAGS="$FLAGS" cargo build --release -p sparq-cli --target ${{ matrix.target }}
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/sparq-cli${{ matrix.ext }}" "dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sparq-cli-${{ matrix.tier }}
           path: dist/sparq-cli-${{ matrix.tier }}${{ matrix.ext }}
