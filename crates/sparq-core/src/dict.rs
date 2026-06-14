@@ -369,6 +369,12 @@ pub(crate) enum StoredRef<'a> {
     Triple([Id; 3]),
 }
 
+/// [OPUS-4.8] sq-ky2a — the safe placeholder `record` returns for an OUT-OF-RANGE id (one
+/// that can only arise from a tampered, checksum-less permutation file; see `Dict::record`).
+/// A `Blank` needs no table lookup, so reconstructing it can never itself OOB. Decoding it
+/// is wrong-but-safe — exactly the documented trusted-store integrity boundary, never UB.
+const OOR_TERM: StoredRef<'static> = StoredRef::Blank("__sparq_out_of_range_id__");
+
 #[inline]
 fn rd_u32(b: &[u8], p: &mut usize) -> u32 {
     let v = u32::from_le_bytes([b[*p], b[*p + 1], b[*p + 2], b[*p + 3]]);
@@ -381,7 +387,12 @@ fn rd_str<'a>(b: &'a [u8], p: &mut usize) -> &'a str {
     let n = rd_u32(b, p) as usize;
     let s = &b[*p..*p + n];
     *p += n;
-    // SAFETY: written from a `&str` in `save_mmap`; the blob is immutable.
+    // SAFETY: written from a `&str` in `save_mmap`; the blob is immutable. This is the
+    // TRUSTED fast path: it parses an in-process-built blob (the in-memory compacted dict
+    // / forked base), whose records are GUARANTEED valid UTF-8 by construction. The
+    // untrusted mmap path (a hostile/corrupt `.spq` file) MUST NOT reach here — it uses
+    // the bounds-/UTF-8-checked `rd_str_checked` below and is fully validated at open
+    // (`Dict::open_mmap` → `MappedDict::validate`). See bead sq-znld. [OPUS-4.8]
     unsafe { std::str::from_utf8_unchecked(s) }
 }
 
@@ -408,6 +419,65 @@ fn parse_stored_ref(b: &[u8]) -> StoredRef<'_> {
         3 => StoredRef::Triple([rd_u32(b, &mut p), rd_u32(b, &mut p), rd_u32(b, &mut p)]),
         _ => StoredRef::Blank(rd_str(b, &mut p)),
     }
+}
+
+// [OPUS-4.8] sq-znld — bounds-/UTF-8-CHECKED record parser for the UNTRUSTED mmap path.
+// `parse_stored_ref` / `rd_str` use `from_utf8_unchecked` and unguarded slice indexing,
+// which is sound ONLY for in-process-built blobs. A memory-mapped `.spq` file is
+// attacker-controlled: an out-of-range offset/length panics (DoS) and a non-UTF-8 byte
+// run fed to `from_utf8_unchecked` is immediate UNDEFINED BEHAVIOUR. These `*_checked`
+// helpers return `None` on ANY malformation (short read, OOB length, non-UTF-8) so the
+// mmap loader can reject a hostile file with a clean `Err` instead — never UB, never a
+// panic, never a mis-decoded term.
+// [OPUS-4.8] The `*_checked` helpers only serve the mmap loader (gated below); gate them
+// too so non-mmap builds don't trip `dead_code` / `-D warnings`.
+#[cfg(feature = "mmap")]
+#[inline]
+fn rd_u32_checked(b: &[u8], p: &mut usize) -> Option<u32> {
+    let end = p.checked_add(4)?;
+    let v = u32::from_le_bytes(b.get(*p..end)?.try_into().ok()?);
+    *p = end;
+    Some(v)
+}
+
+#[cfg(feature = "mmap")]
+#[inline]
+fn rd_str_checked<'a>(b: &'a [u8], p: &mut usize) -> Option<&'a str> {
+    let n = rd_u32_checked(b, p)? as usize;
+    let end = p.checked_add(n)?;
+    let s = std::str::from_utf8(b.get(*p..end)?).ok()?;
+    *p = end;
+    Some(s)
+}
+
+/// Parses one term record with FULL bounds + UTF-8 validation; `None` on any malformation.
+/// Used for the untrusted memory-mapped term blob (see [`rd_str_checked`]). [OPUS-4.8]
+#[cfg(feature = "mmap")]
+#[inline]
+fn parse_stored_ref_checked(b: &[u8]) -> Option<StoredRef<'_>> {
+    let mut p = 1;
+    Some(match *b.first()? {
+        0 => {
+            let prefix = rd_u32_checked(b, &mut p)?;
+            StoredRef::Iri { prefix, suffix: rd_str_checked(b, &mut p)? }
+        }
+        1 => {
+            let value = rd_str_checked(b, &mut p)?;
+            let datatype = rd_u32_checked(b, &mut p)?;
+            let lang = match *b.get(p)? {
+                1 => {
+                    p += 1;
+                    Some(rd_str_checked(b, &mut p)?)
+                }
+                0 => None,
+                _ => return None, // the lang-present flag is a strict 0/1
+            };
+            StoredRef::Lit { value, datatype, lang }
+        }
+        3 => StoredRef::Triple([rd_u32_checked(b, &mut p)?, rd_u32_checked(b, &mut p)?, rd_u32_checked(b, &mut p)?]),
+        2 => StoredRef::Blank(rd_str_checked(b, &mut p)?),
+        _ => return None, // unknown record tag
+    })
 }
 
 fn reconstruct_ref(d: &Dict, s: &StoredRef) -> Term {
@@ -563,10 +633,89 @@ impl MappedDict {
         unsafe { std::slice::from_raw_parts(self.hashids.as_ptr().cast::<u32>(), self.hashids.len() / 4) }
     }
     /// The parsed term record for a 1-based id.
+    ///
+    /// [OPUS-4.8] sq-znld: this reads from an UNTRUSTED memory-mapped blob, so it uses the
+    /// bounds-/UTF-8-CHECKED parser. `Dict::open_mmap` runs [`validate`](Self::validate)
+    /// up front, which proves every offset is in range and every record parses, so by the
+    /// time `stored` is reached the `expect` is structurally impossible — but the checked
+    /// parse remains as a sound floor (no `from_utf8_unchecked` over attacker bytes, ever),
+    /// and the cost is negligible against the mmap page-fault that produced the bytes.
     #[inline]
     fn stored(&self, id: Id) -> StoredRef<'_> {
         let off = self.offsets()[(id - 1) as usize] as usize;
-        parse_stored_ref(&self.blob[off..])
+        parse_stored_ref_checked(self.blob.get(off..).unwrap_or_default())
+            .expect("mmap dict record validated at open (sq-znld); a failure here means the mapped file changed under us")
+    }
+
+    /// [OPUS-4.8] sq-znld — validate the four UNTRUSTED data files at open time so the
+    /// hostile-on-disk-file boundary (B5 in research/threat-model.md, T-MMAP-UB) never
+    /// reaches `unsafe`/unchecked code with attacker-controlled bytes.
+    ///
+    /// `len` is the term count read from the (already magic/version-validated) meta file.
+    /// We require:
+    ///   * `dict-offs.bin` is exactly `len * 8` bytes (one `u64` offset per term),
+    ///   * `dict-hash.bin` is exactly `len * 8` bytes and `dict-hid.bin` exactly `len * 4`
+    ///     (the parallel sorted lookup arrays — a mismatch would make `mapped_find`'s
+    ///     binary search read past the hashids array),
+    ///   * every offset is `<= blob.len()` AND the record at that offset parses fully with
+    ///     valid UTF-8 (via [`parse_stored_ref_checked`]),
+    ///   * every record's `prefix` / `datatype` index is within the prefix / datatype
+    ///     tables, and every `Triple` component id is a valid 1-based term id — otherwise a
+    ///     later `reconstruct_ref` / `hash_stored_ref` would index those tables out of
+    ///     bounds (a panic) on a hostile record.
+    ///
+    /// Any violation is a clean `InvalidData` error — never a panic, never UB.
+    #[cfg(feature = "mmap")]
+    fn validate(&self, len: usize, prefixes: &[Box<str>], datatypes: &[NamedNode]) -> std::io::Result<()> {
+        let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("mmap dict: {m}"));
+        if self.offsets.len() != len.checked_mul(8).ok_or_else(|| bad("term count overflows offset-array size"))? {
+            return Err(bad("dict-offs.bin length is not term_count * 8 (corrupt or truncated)"));
+        }
+        if self.hashes.len() != len * 8 {
+            return Err(bad("dict-hash.bin length is not term_count * 8 (corrupt or truncated)"));
+        }
+        if self.hashids.len() != len.checked_mul(4).ok_or_else(|| bad("term count overflows hashid-array size"))? {
+            return Err(bad("dict-hid.bin length is not term_count * 4 (corrupt or truncated)"));
+        }
+        let len_id = u32::try_from(len).map_err(|_| bad("term count exceeds u32 id space"))?;
+        let blob: &[u8] = &self.blob;
+        for &off in self.offsets() {
+            let off = off as usize;
+            let rec = blob.get(off..).ok_or_else(|| bad("term offset is past the end of dict-terms.bin"))?;
+            let parsed = parse_stored_ref_checked(rec)
+                .ok_or_else(|| bad("a term record is malformed (bad tag/length or non-UTF-8 bytes)"))?;
+            // Range-check the table indices / component ids the record carries: these are
+            // attacker-controlled u32s in the blob, used unchecked as `prefixes[..]` /
+            // `datatypes[..]` indices and as ids when the term is reconstructed.
+            match parsed {
+                StoredRef::Iri { prefix, .. } => {
+                    if prefix as usize >= prefixes.len() {
+                        return Err(bad("an IRI record references an out-of-range prefix id"));
+                    }
+                }
+                StoredRef::Lit { datatype, .. } => {
+                    if datatype as usize >= datatypes.len() {
+                        return Err(bad("a literal record references an out-of-range datatype id"));
+                    }
+                }
+                StoredRef::Triple(ids) => {
+                    // A quoted-triple term's components are themselves dictionary ids; an
+                    // inline-integer id (>= INLINE_BASE) or a real term id (1..=len) is
+                    // valid, but 0 or a dangling id would later index OOB.
+                    if ids.iter().any(|&c| c == 0 || (c < INLINE_BASE && c > len_id)) {
+                        return Err(bad("a quoted-triple record references an out-of-range component id"));
+                    }
+                }
+                StoredRef::Blank(_) => {}
+            }
+        }
+        // Every id in the sorted lookup array must be a valid 1-based term id: `mapped_find`
+        // feeds it straight to `stored` (→ `offsets()[id-1]`), so `id == 0` (underflow) or
+        // `id > len` (OOB) would be an out-of-bounds read on a hostile dict-hid.bin.
+        if self.hashids().iter().any(|&id| id == 0 || id > len_id) {
+            return Err(bad("dict-hid.bin contains an out-of-range term id (corrupt lookup index)"));
+        }
+        Ok(())
     }
 }
 
@@ -995,9 +1144,26 @@ impl Dict {
     /// or the in-memory blob. Pure-arena dicts always take the first branch (base = 0).
     #[inline]
     fn record(&self, id: Id) -> StoredRef<'_> {
+        // [OPUS-4.8] sq-ky2a: `id == 0` is never a valid 1-based id, but a tampered perm can
+        // contain it; `id - 1` would underflow (a panic in debug). Treat it as out-of-range.
+        if id == 0 {
+            return OOR_TERM;
+        }
         let i = (id - 1) as usize;
         if i >= self.base {
-            return stored_as_ref(&self.terms[i - self.base]);
+            // [OPUS-4.8] sq-ky2a: `id` can originate from a TAMPERED permutation file (the
+            // raw/compressed perm is a trusted-format asset with no per-row checksum — see
+            // research/threat-model.md T-MMAP-DoS). A garbage id beyond the arena would
+            // index `self.terms` OUT OF BOUNDS (a panic, and with the unchecked blob path a
+            // potential OOB read). Resolve it through a bounds-CHECKED access and fall back
+            // to a safe placeholder so a corrupt store yields wrong-but-safe results, never
+            // UB / OOB. The valid-id hot path is one predictable bounds check (always in
+            // range for an untampered store).
+            return self
+                .terms
+                .get(i - self.base)
+                .map(stored_as_ref)
+                .unwrap_or(OOR_TERM);
         }
         if let Some(f) = &self.frozen {
             return f.record(id); // the shared immutable base of a forked dict
@@ -1007,7 +1173,10 @@ impl Dict {
             return m.stored(id);
         }
         let (blob, offs) = self.blob.as_ref().expect("an id below `base` requires the blob or mmap store");
-        parse_stored_ref(&blob[offs[i] as usize..])
+        match offs.get(i) {
+            Some(&off) => parse_stored_ref(&blob[off as usize..]),
+            None => OOR_TERM,
+        }
     }
 
     /// Compacts the id→term storage into a single concatenated BLOB + per-term `u32`
@@ -1279,7 +1448,15 @@ impl Dict {
     #[cfg(feature = "mmap")]
     pub fn open_mmap(dir: &std::path::Path) -> std::io::Result<Dict> {
         use std::io::Read;
-        let mut r = std::io::BufReader::new(std::fs::File::open(dir.join("dict-meta.bin"))?);
+        let meta_file = std::fs::File::open(dir.join("dict-meta.bin"))?;
+        // [OPUS-4.8] sq-znld: `dict-meta.bin` is attacker-controlled. Its entry COUNTS (np,
+        // nd) and every string LENGTH are u32s read from it; the original code fed them
+        // straight to `Vec::with_capacity` / `vec![0u8; n]`, so one flipped count byte drove
+        // a multi-GB allocation that ABORTS the process (uncatchable OOM DoS). The file
+        // length is a hard upper bound on any count (each entry costs >= 4 bytes) and on any
+        // string length, so we clamp pre-allocations to it and bound each `read_str`.
+        let meta_len = meta_file.metadata()?.len() as usize;
+        let mut r = std::io::BufReader::new(meta_file);
         // [OPUS-4.8] (review 1409) Validate the on-disk id-space partition before trusting any
         // persisted RAW id. A header-less file (legacy, written before this marker) or one
         // whose INLINE_BASE differs from the running build must be REJECTED — its inline vs
@@ -1311,15 +1488,18 @@ impl Dict {
                 ),
             ));
         }
+        // Each entry occupies >= 4 bytes (its length prefix), so a count larger than the
+        // meta file is corrupt; clamp the reservation regardless so it can never abort. The
+        // read loop then errors cleanly via `read_exact` if the file actually ends early.
         let np = read_u32(&mut r)? as usize;
-        let mut prefixes = Vec::with_capacity(np);
+        let mut prefixes = Vec::with_capacity(np.min(meta_len / 4));
         for _ in 0..np {
-            prefixes.push(read_str(&mut r)?);
+            prefixes.push(read_str_bounded(&mut r, meta_len)?);
         }
         let nd = read_u32(&mut r)? as usize;
-        let mut datatypes = Vec::with_capacity(nd);
+        let mut datatypes = Vec::with_capacity(nd.min(meta_len / 4));
         for _ in 0..nd {
-            datatypes.push(NamedNode::new_unchecked(String::from(read_str(&mut r)?)));
+            datatypes.push(NamedNode::new_unchecked(String::from(read_str_bounded(&mut r, meta_len)?)));
         }
         let mut nbuf = [0u8; 8];
         r.read_exact(&mut nbuf)?;
@@ -1336,6 +1516,11 @@ impl Dict {
             hashes: map("dict-hash.bin")?,
             hashids: map("dict-hid.bin")?,
         };
+        // [OPUS-4.8] sq-znld: the four data files above are attacker-controlled. Validate
+        // their sizes + every offset + every record (bounds + UTF-8 + table-index range)
+        // BEFORE handing back a Dict whose `term`/`lookup` paths would otherwise
+        // dereference them unchecked.
+        mapped.validate(len, &prefixes, &datatypes)?;
         Ok(Dict { prefixes, datatypes, mapped: Some(std::sync::Arc::new(mapped)), base: len, ..Default::default() })
     }
 
@@ -1594,6 +1779,26 @@ fn read_u8(r: &mut impl std::io::Read) -> std::io::Result<u8> {
 
 fn read_str(r: &mut impl std::io::Read) -> std::io::Result<Box<str>> {
     let n = read_u32(r)? as usize;
+    let mut buf = vec![0u8; n];
+    r.read_exact(&mut buf)?;
+    String::from_utf8(buf)
+        .map(String::into_boxed_str)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid utf-8 in dictionary"))
+}
+
+/// [OPUS-4.8] sq-znld — `read_str` for UNTRUSTED metadata: rejects a length larger than
+/// `max` (the bytes that can possibly remain in the source file) BEFORE allocating, so a
+/// hostile u32 length cannot trigger a multi-GB `vec![0u8; n]` allocation/abort. The
+/// subsequent `read_exact` still errors cleanly if the file actually ends early.
+#[cfg(feature = "mmap")]
+fn read_str_bounded(r: &mut impl std::io::Read, max: usize) -> std::io::Result<Box<str>> {
+    let n = read_u32(r)? as usize;
+    if n > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "dictionary string length exceeds the metadata file size (corrupt or truncated)",
+        ));
+    }
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf)?;
     String::from_utf8(buf)
