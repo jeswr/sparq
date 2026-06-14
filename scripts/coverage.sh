@@ -13,8 +13,25 @@
 #
 # PER-CRATE QUIRKS this script encodes (discovered by the 2026-06-14 coverage audit,
 # research/coverage-and-benchmark-plan.md §2.2/§2.3):
-#   - sparq-core      MUST be measured with `--features dict-spill`, else dictspill.rs
-#                     / extsort.rs are 0% (the feature is off by default).
+#   - sparq-core      MUST be measured with `--features mmap,dict-spill`. Two distinct
+#                     reasons, BOTH load-bearing for a representative number:
+#                       * dict-spill  -> dictspill.rs / extsort.rs (the spillable build
+#                                       pipeline) are otherwise compiled out / 0%.
+#                       * mmap        -> the on-disk store SECURITY surface this gate is
+#                                       meant to guard is `#[cfg(feature = "mmap")]`:
+#                                       `Dict::open_mmap` validation, `CompressedPerm::
+#                                       from_mmap`, and the `tests/mmap_corruption_oracle.rs`
+#                                       integration test (itself `#![cfg(feature="mmap")]`)
+#                                       + the byte-identical save/open roundtrips. Without
+#                                       `mmap` that code is compiled out, so the line% is
+#                                       computed over a DIFFERENT (smaller, security-free)
+#                                       denominator — a non-representative measurement.
+#                     dict-spill ALREADY pulls in mmap transitively (see Cargo.toml:
+#                     `dict-spill = ["mmap", ...]`), so naming `mmap` here is currently a
+#                     no-op for the number (measured identical: 91.23% either way) — it is
+#                     stated EXPLICITLY so a future refactor that decouples dict-spill from
+#                     mmap cannot silently drop the security-code coverage this gate exists
+#                     to enforce. [OPUS-4.8]
 #   - sparq-vectors   the two `*_recall_at_10_vs_brute_force_on_50k` tests (HNSW +
 #                     DiskANN) are EXCLUDED from the per-commit subset via `--skip`
 #                     (they dominate wall-clock under instrumentation). They are
@@ -116,7 +133,10 @@ measure() {
 
   case "$crate" in
     sparq-core)
-      cargo_args+=(--features dict-spill); features+=("dict-spill") ;;
+      # mmap is named EXPLICITLY (not relied on via the dict-spill -> mmap transitive
+      # dep) so the on-disk-store security surface this gate guards is always compiled +
+      # exercised. See the PER-CRATE QUIRKS header for the full rationale. [OPUS-4.8]
+      cargo_args+=(--features mmap,dict-spill); features+=("mmap" "dict-spill") ;;
     sparq-vectors)
       # Only skip the heavy 50k tests OUTSIDE the nightly/full tiers.
       if [ "$TIER" = "per-commit" ]; then

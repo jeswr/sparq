@@ -4140,6 +4140,115 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// [OPUS-4.8] The SPILLED external build (`dict-spill`) must produce a store that is
+    /// BYTE-IDENTICAL to the in-RAM sharded path's: same dedup, same ids, same on-disk
+    /// dictionary + permutation + numeric/temporal cache files. This is `dictspill.rs`'s
+    /// core correctness contract (research/external-dictionary.md). Driven with a TINY
+    /// memory budget so the per-shard dedup caches overflow and get cleared at batch
+    /// boundaries (the EPOCH path) and the external sorts spill across many runs — the
+    /// previously-uncovered `intern_batch`/`consolidate`/`remap_staged`/`ShardWindow`
+    /// pipeline. The dataset deliberately mixes inline integers (passthrough), repeated
+    /// IRIs (prefix factoring + dedup), language-tagged + datatyped literals, a numeric
+    /// literal (numerics.bin), an xsd:dateTime (temporals.bin), and blank nodes.
+    #[cfg(feature = "dict-spill")]
+    #[test]
+    fn dict_spill_build_byte_identical_to_sharded() {
+        use store::BUILT;
+        let mut nt = String::new();
+        for i in 0..6000u32 {
+            nt.push_str(&format!(
+                "<http://ex/subj/{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                i % 211,
+                i % 13,
+                i % 500
+            ));
+        }
+        // Non-inline objects exercising every dictionary record shape.
+        nt.push_str("<http://ex/subj/0> <http://ex/name> \"caf\\u00e9\"@fr .\n");
+        nt.push_str("<http://ex/subj/0> <http://ex/name> \"plain string\" .\n");
+        nt.push_str("<http://ex/subj/1> <http://ex/score> \"3.14\"^^<http://www.w3.org/2001/XMLSchema#double> .\n");
+        nt.push_str("<http://ex/subj/2> <http://ex/when> \"2021-03-04T05:06:07Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .\n");
+        nt.push_str("_:b0 <http://ex/p0> _:b1 .\n");
+        // A duplicate (must dedup to one triple) and a repeated term across batches.
+        nt.push_str("<http://ex/subj/0> <http://ex/name> \"plain string\" .\n");
+
+        let base = std::env::temp_dir().join(format!("sparq_spill_{}", std::process::id()));
+        let sharded_dir = base.join("sharded");
+        let spill_dir = base.join("spill");
+
+        // Reference: the default sharded in-RAM external build.
+        Graph::build_external_opts(nt.as_bytes(), "ntriples", &sharded_dir, 256, true).unwrap();
+
+        // SPILLED build with a tiny budget (forces cache eviction/epochs + many sort runs)
+        // — drive build_external_spill DIRECTLY with an explicit SpillConfig (no env-var
+        // race with parallel tests). disk_floor 0 so it never aborts in CI sandboxes.
+        let cfg = dictspill::SpillConfig { mem_budget: 64 << 10, disk_floor: 0 };
+        Graph::build_external_spill(nt.as_bytes(), "ntriples", &spill_dir, 256, &cfg).unwrap();
+
+        let shg = Graph::open(&sharded_dir).unwrap();
+        let spg = Graph::open(&spill_dir).unwrap();
+        assert_eq!(shg.len(), spg.len(), "triple count differs (spill vs sharded)");
+        assert_eq!(shg.dict.len(), spg.dict.len(), "dict size differs (spill vs sharded)");
+
+        // Every on-disk file the spill path streams must be byte-identical to the sharded
+        // path's — the design's central claim.
+        let files = [
+            "dict-meta.bin", "dict-terms.bin", "dict-offs.bin",
+            "dict-hash.bin", "dict-hid.bin", "numerics.bin", "temporals.bin",
+        ];
+        for f in files {
+            let a = std::fs::read(sharded_dir.join(f))
+                .unwrap_or_else(|e| panic!("sharded {f}: {e}"));
+            let b = std::fs::read(spill_dir.join(f))
+                .unwrap_or_else(|e| panic!("spill {f}: {e}"));
+            assert_eq!(a, b, "dictionary file {f} differs between spill and sharded build");
+        }
+        for &perm in BUILT {
+            let f = format!("perm{}.bin", perm as usize);
+            let a = std::fs::read(sharded_dir.join(&f)).unwrap();
+            let b = std::fs::read(spill_dir.join(&f)).unwrap();
+            assert_eq!(a, b, "permutation {f} differs between spill and sharded build");
+        }
+
+        // And the materialized triples round-trip identically through terms.
+        let dump = |gg: &Graph| {
+            let scan = gg.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(dump(&shg), dump(&spg), "spill-built store differs from sharded");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] The spilled external build still supports its mmap'd read-back path, and
+    /// it rejects non-N-Triples formats with a clear error (the documented restriction).
+    #[cfg(feature = "dict-spill")]
+    #[test]
+    fn dict_spill_rejects_non_ntriples_and_opens_mmap() {
+        let dir = std::env::temp_dir().join(format!("sparq_spill_fmt_{}", std::process::id()));
+        let cfg = dictspill::SpillConfig { mem_budget: 1 << 20, disk_floor: 0 };
+        let err = Graph::build_external_spill(b"@prefix : <x> .".as_slice(), "turtle", &dir, 256, &cfg)
+            .expect_err("spill build must reject non-ntriples");
+        assert!(err.contains("N-Triples"), "error must name the restriction: {err}");
+
+        let nt = "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
+                  <http://ex/a> <http://ex/p> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n";
+        let ok_dir = dir.join("ok");
+        Graph::build_external_spill(nt.as_bytes(), "ntriples", &ok_dir, 64, &cfg).unwrap();
+        // `Graph::open` mmaps the `dict-meta.bin` dictionary the spill build streams.
+        let g = Graph::open(&ok_dir).unwrap();
+        assert_eq!(g.len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// [OPUS-4.8] (sq-hxgb) Triple-term support across the external (disk-spilling) build
     /// paths: the SERIAL-merge path handles `<<( … )>>` correctly (it interns triple terms
     /// structurally via `merge_remap`, like the in-memory serial fallback), but the

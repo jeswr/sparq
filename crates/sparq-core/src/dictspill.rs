@@ -1224,4 +1224,237 @@ mod tests {
         drop(m);
         std::fs::remove_dir_all(&tmp).ok();
     }
+
+    // [OPUS-4.8] ---- focused coverage for the previously-untested defensive / config
+    // surface of the spilled dictionary (sq-corecov). These are cheap unit tests; the
+    // full end-to-end pipeline (intern_batch/consolidate/remap_staged/ShardWindow byte-
+    // identity vs the sharded path) lives in lib.rs::tests::dict_spill_build_byte_*.
+
+    #[test]
+    fn spill_config_detected_has_sane_defaults() {
+        let c = SpillConfig::detected();
+        assert!(c.mem_budget >= 64 << 20, "budget floors at 64 MiB: {}", c.mem_budget);
+        assert_eq!(c.disk_floor, 1 << 30, "default disk floor is 1 GiB");
+        // detected_ram_bytes is unix-only and documented to return None when undetectable
+        // (sysconf can legitimately fail on some targets/sandboxes). Only assert positivity
+        // when a value is actually reported, so the test never flakes where detection is
+        // unavailable. (roborev/Copilot 2026-06-14)
+        #[cfg(unix)]
+        if let Some(ram) = detected_ram_bytes() {
+            assert!(ram > 0, "detected physical RAM must be positive when reported");
+        }
+    }
+
+    #[test]
+    fn spill_config_from_env_gate_and_overrides() {
+        // The env gate is process-global. Restore the original values via an RAII guard so
+        // they're put back even if an assertion panics mid-test — a manual restore at the
+        // end would leak mutated vars into other tests that read SpillConfig::from_env when
+        // a panic short-circuits it. (roborev/Copilot 2026-06-14)
+        struct EnvRestore {
+            saved: Vec<(&'static str, Option<String>)>,
+        }
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (k, v) in &self.saved {
+                    match v {
+                        Some(s) => std::env::set_var(k, s),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+        let keys = ["SPARQ_DICT_SPILL", "SPARQ_DICT_SPILL_BUDGET_MB", "SPARQ_DICT_SPILL_DISK_FLOOR_MB"];
+        let _guard = EnvRestore {
+            saved: keys.iter().map(|k| (*k, std::env::var(k).ok())).collect(),
+        };
+
+        // Disabled / unset -> None.
+        std::env::set_var("SPARQ_DICT_SPILL", "off");
+        assert!(SpillConfig::from_env().is_none(), "off => disabled");
+        std::env::remove_var("SPARQ_DICT_SPILL");
+        assert!(SpillConfig::from_env().is_none(), "unset => disabled");
+
+        // Enabled with explicit budget + floor overrides.
+        std::env::set_var("SPARQ_DICT_SPILL", "1");
+        std::env::set_var("SPARQ_DICT_SPILL_BUDGET_MB", "7");
+        std::env::set_var("SPARQ_DICT_SPILL_DISK_FLOOR_MB", "3");
+        let c = SpillConfig::from_env().expect("=1 enables");
+        assert_eq!(c.mem_budget, 7 * (1 << 20));
+        assert_eq!(c.disk_floor, 3 * (1 << 20));
+
+        // "auto" + a 0-MB budget clamps to the 1 MiB minimum.
+        std::env::set_var("SPARQ_DICT_SPILL", "auto");
+        std::env::set_var("SPARQ_DICT_SPILL_BUDGET_MB", "0");
+        std::env::remove_var("SPARQ_DICT_SPILL_DISK_FLOOR_MB");
+        let c = SpillConfig::from_env().expect("auto enables");
+        assert_eq!(c.mem_budget, 1 << 20, "0 MB budget clamps to the 1 MiB minimum");
+
+        // _guard restores the original env on drop (including on a panic above).
+    }
+
+    #[test]
+    fn ensure_disk_passes_above_floor_and_fails_below() {
+        let tmp = std::env::temp_dir();
+        // Floor 0 always passes (and a real fs reports SOME free space).
+        assert!(ensure_disk(&tmp, 0).is_ok());
+        assert!(free_disk_bytes(&tmp).map(|b| b > 0).unwrap_or(true));
+        // An absurd floor (above any plausible free space) must fail with a clear message
+        // — only when free space is actually detectable (statvfs available).
+        if free_disk_bytes(&tmp).is_some() {
+            let err = ensure_disk(&tmp, u64::MAX).expect_err("u64::MAX floor must fail");
+            assert!(err.contains("below the configured floor"), "msg: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_term_roundtrips_all_shapes_via_resolve_record() {
+        // Cover both the leading-component (rd) and trailing-component (rest) readers for
+        // every tag, plus the lang present/absent split of TAG_LIT.
+        let cases: Vec<TermParts> = vec![
+            TermParts::Iri { prefix: "http://example.org/ns#", suffix: "Thing" },
+            TermParts::Lit {
+                value: "hello",
+                datatype: "http://www.w3.org/2001/XMLSchema#string",
+                lang: None,
+            },
+            TermParts::Lit {
+                value: "bonjour",
+                datatype: "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+                lang: Some("fr-CA"),
+            },
+            TermParts::Blank("blank-42"),
+        ];
+        let mut buf = Vec::new();
+        for tp in &cases {
+            serialize_termparts(tp, &mut buf);
+            let got = parse_term(&buf);
+            // Structural equality via re-serialization (TermParts isn't PartialEq).
+            let mut buf2 = Vec::new();
+            serialize_termparts(&got, &mut buf2);
+            assert_eq!(buf, buf2, "parse_term must invert serialize_termparts");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "triple term")]
+    fn serialize_rejects_triple_terms() {
+        let mut buf = Vec::new();
+        serialize_termparts(&TermParts::Triple([1, 2, 3]), &mut buf);
+    }
+
+    #[test]
+    fn pod_records_read_write_roundtrip() {
+        for (min_seq, seq) in [(0u32, 0u32), (7, 9), (u32::MAX - 1, u32::MAX)] {
+            let mut b = Vec::new();
+            MinSeqPair { min_seq, seq }.write(&mut b).unwrap();
+            assert_eq!(b.len(), MinSeqPair::SIZE);
+            let r = MinSeqPair::read(&b);
+            assert_eq!((r.min_seq, r.seq), (min_seq, seq));
+        }
+        for (seq, final_id) in [(0u32, 1u32), (5, 99), (u32::MAX, 0)] {
+            let mut b = Vec::new();
+            SeqFinal { seq, final_id }.write(&mut b).unwrap();
+            assert_eq!(b.len(), SeqFinal::SIZE);
+            let r = SeqFinal::read(&b);
+            assert_eq!((r.seq, r.final_id), (seq, final_id));
+        }
+        for (hash, id) in [(0u64, 0u32), (0xdead_beef_cafe_1234, 7), (u64::MAX, u32::MAX)] {
+            let mut b = Vec::new();
+            HashPair { hash, id }.write(&mut b).unwrap();
+            assert_eq!(b.len(), HashPair::SIZE);
+            let r = HashPair::read(&b);
+            assert_eq!((r.hash, r.id), (hash, id));
+        }
+    }
+
+    #[test]
+    fn read_full_signals_clean_eof_and_truncation() {
+        use std::io::Cursor;
+        // Exactly one full record then clean EOF at a boundary -> Ok(true) then Ok(false).
+        let mut c = Cursor::new(vec![1u8, 2, 3, 4]);
+        let mut buf = [0u8; 4];
+        assert!(read_full(&mut c, &mut buf).unwrap(), "first read fills");
+        assert_eq!(buf, [1, 2, 3, 4]);
+        assert!(!read_full(&mut c, &mut buf).unwrap(), "clean EOF at boundary => false");
+
+        // A partial record (EOF mid-record) is corruption -> UnexpectedEof error.
+        let mut c = Cursor::new(vec![1u8, 2]);
+        let err = read_full(&mut c, &mut buf).expect_err("truncated record must error");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn table_builder_dedups_and_assigns_dense_ids() {
+        let mut t = TableBuilder::default();
+        assert_eq!(t.intern("a"), 0);
+        assert_eq!(t.intern("b"), 1);
+        assert_eq!(t.intern("a"), 0, "repeat => same id");
+        assert_eq!(t.intern("c"), 2);
+        assert_eq!(t.intern("b"), 1);
+        assert_eq!(t.names.len(), 3, "only distinct names retained, in first-seen order");
+        assert_eq!(&*t.names[0], "a");
+        assert_eq!(&*t.names[2], "c");
+    }
+
+    #[test]
+    fn shard_window_maps_across_epochs_and_rejects_out_of_window() {
+        // Build a remap file with two epochs: seqs 0..3 -> finals [10,11,12] (epoch 0),
+        // seqs 3..5 -> finals [20,21] (epoch 1). The window must advance forward across
+        // the epoch boundary and reject a seq that falls outside the active epoch slice.
+        let tmp = std::env::temp_dir().join(format!("sparq_dsp_win_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let remap_path = tmp.join("win-remap.bin");
+        {
+            let mut w = BufWriter::new(std::fs::File::create(&remap_path).unwrap());
+            for f in [10u32, 11, 12, 20, 21] {
+                w.write_all(&f.to_le_bytes()).unwrap();
+            }
+            w.flush().unwrap();
+        }
+        // epochs: (staged-triple index, first seq) boundaries; sentinel terminates.
+        let plan = ShardRemap {
+            remap_path: remap_path.clone(),
+            epochs: vec![(0, 0), (100, 3), (u64::MAX, 5)],
+        };
+        let mut win = ShardWindow::open(&plan).unwrap();
+        // Triples staged in epoch 0 (t < 100) resolve from the first slice.
+        assert_eq!(win.map(0, 0).unwrap(), 10);
+        assert_eq!(win.map(50, 2).unwrap(), 12);
+        // A triple staged in epoch 1 (t >= 100) advances the window and reads the 2nd slice.
+        assert_eq!(win.map(100, 3).unwrap(), 20);
+        assert_eq!(win.map(120, 4).unwrap(), 21);
+        // A seq outside the now-active epoch window fails closed (never panics / mis-reads).
+        let err = win.map(120, 9).expect_err("seq beyond the epoch window must error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        drop(win);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn shard_state_resolve_caches_and_spills() {
+        let tmp = std::env::temp_dir().join(format!("sparq_dsp_ss_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let rec_path = tmp.join("rec.bin");
+        let mut st = ShardState {
+            cache: FxHashMap::default(),
+            cache_bytes: 0,
+            seq: 0,
+            rec: BufWriter::new(std::fs::File::create(&rec_path).unwrap()),
+            rec_path: rec_path.clone(),
+            epochs: vec![(0, 0)],
+        };
+        // First sighting assigns seq 0 and spills the record; the repeat reuses it.
+        assert_eq!(st.resolve(b"alpha").unwrap(), 0);
+        assert_eq!(st.resolve(b"beta").unwrap(), 1);
+        assert_eq!(st.resolve(b"alpha").unwrap(), 0, "cache hit reuses the seq");
+        assert_eq!(st.seq, 2, "only distinct terms advance the counter");
+        assert!(st.cache_bytes > 0, "cache accounting accrued");
+        st.rec.flush().unwrap();
+        // The record file holds exactly the two distinct spilled terms (len-prefixed).
+        let raw = std::fs::read(&rec_path).unwrap();
+        // 4-byte len + "alpha"(5) + 4-byte len + "beta"(4) = 18 bytes.
+        assert_eq!(raw.len(), 4 + 5 + 4 + 4);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }
