@@ -51,6 +51,14 @@ jobs:
           REPO: ${{ github.repository }}
           # On pull_request the head commit is the PR head; on push it's github.sha.
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # This workflow RUN's id — unique to THIS gate run. Every check-run's
+          # details_url embeds the run id of the workflow run that produced it
+          # (…/actions/runs/<RUN_ID>/job/<JOB_ID>), so we self-exclude by exact
+          # run id rather than by the job NAME. A name match ("gate") is fragile:
+          # it would also drop any FUTURE sibling job literally named `gate` in any
+          # workflow, undermining the "add/rename jobs freely" goal. The run id is
+          # ours alone, so the exclusion is exact and collision-proof. [OPUS-4.8]
+          SELF_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           # STABILITY WINDOW (handles the startup race + late-registering workflows):
@@ -65,13 +73,23 @@ jobs:
           prev_names=""
           stable=0
           for attempt in $(seq 1 110); do   # 110 × 20s ≈ 37 min, under the job timeout
-            # Exclude THIS gate's own check-run from the aggregate. The Checks API
-            # returns the bare job name ("gate"); we also exclude the
-            # "ci-summary / gate" workflow/job form so a future API/naming change can't
-            # make the gate count itself into `pending` and self-deadlock.
+            # Exclude THIS gate's own check-run from the aggregate so it can't count
+            # itself into `pending` and self-deadlock. We exclude by THIS workflow
+            # run's id (SELF_RUN_ID), which the check-run's details_url embeds as
+            # …/actions/runs/<RUN_ID>/…, NOT by job name: a name match would also
+            # drop a future sibling job literally named `gate`. The match is anchored
+            # to "/runs/<id>" so it can't accidentally hit a substring of some other
+            # numeric id elsewhere in the URL.
             runs=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
-              --jq '.check_runs[] | select(.name != "gate" and .name != "ci-summary / gate") | {name, status, conclusion}')
-            names=$(printf '%s\n' "$runs" | jq -rs '[.[].name] | unique | join(",")')
+              --jq "[.check_runs[]
+                     | select((.details_url // .html_url // \"\") | contains(\"/runs/$SELF_RUN_ID\") | not)
+                     | {name, status, conclusion}] | .[]")
+            # Stability key: join the SORTED, de-duplicated check NAMES with newlines.
+            # A newline cannot appear inside a check name, whereas a comma can (e.g.
+            # "MSRV check (Rust 1.88, declared floor)"), so a comma-joined key was
+            # collision/ambiguity-prone — two distinct sets could fold to the same
+            # string. The newline-joined sorted-unique set is an unambiguous key.
+            names=$(printf '%s\n' "$runs" | jq -rs '[.[].name] | unique | join("\n")')
             pending=$(printf '%s\n' "$runs" | jq -rs '[.[] | select(.status != "completed")] | length')
             total=$(printf '%s\n' "$runs" | jq -rs 'length')
             if [ "$names" = "$prev_names" ]; then stable=$((stable + 1)); else stable=1; prev_names="$names"; fi
