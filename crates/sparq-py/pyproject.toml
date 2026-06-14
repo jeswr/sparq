@@ -40,3 +40,13 @@ test = ["pytest>=7"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# [OPUS-4.8] sq-th1u: also collect bench_*.py (pytest's default python_files is
+# only test_*.py / *_test.py, so without this the FFI micro-bench file would be
+# silently skipped by a plain `pytest tests/` directory run).
+python_files = ["test_*.py", "bench_*.py"]
+# Register the `bench` marker (the FFI-overhead micro-bench in tests/bench_py.py).
+# CI selects it with `pytest -m bench` or skips it with `pytest -m "not bench"`;
+# registering it here silences the "unknown mark" warning.
+markers = [
+  "bench: timed FFI-overhead micro-benchmarks (prints measurements; select/deselect with -m bench / -m 'not bench')",
+]

@@ -597,6 +597,22 @@ impl Graph {
     fn __repr__(&self) -> String {
         format!("Graph({} triples)", self.inner.len())
     }
+
+    // [OPUS-4.8] sq-f9tu: test-only affordance to exercise the panic SURFACE of
+    // the FFI boundary. The whole point of the `python-release` profile is
+    // `panic = "unwind"` (workspace Cargo.toml) so that a Rust panic inside the
+    // `sparq` module is caught by pyo3 and re-raised as
+    // `pyo3_runtime.PanicException` instead of `panic = "abort"` killing the
+    // interpreter. The engine itself proved robust — no normal-input
+    // query/update/load reaches a panic (verified empirically while writing
+    // test_parity.py: division-by-zero, bad regex, RDF-star, unsupported
+    // patterns all return a clean ValueError), so there is no organic input that
+    // drives a panic. This private hook is the only reliable way to assert the
+    // unwind path is wired correctly. The leading underscore marks it private;
+    // it is intentionally undocumented in SKILL.md (not part of the public API).
+    fn _panic_for_test(&self) {
+        panic!("sparq-py panic-surface test: this must reach Python as a PanicException, not abort");
+    }
 }
 
 // ---------------------------------------------------------------------------
