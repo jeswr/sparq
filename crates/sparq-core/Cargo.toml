@@ -11,6 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
 
+# [OPUS-4.8] wire docs.rs to build all-features + the `docsrs` cfg so the README
+# front page and every feature-gated item render on docs.rs.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 # Parallel index construction via rayon. On by default for native builds; turn it
 # off (e.g. for wasm, which has no threads by default) for a smaller, simpler build.
