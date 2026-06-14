@@ -139,19 +139,42 @@ pub struct ServerConfig {
     pub verbose: bool,
     /// [OPUS-4.8] sq-o4qf: explicit opt-in to bind a **non-loopback** address.
     ///
-    /// The server has **no authentication** on any endpoint — including the mutating
-    /// `application/sparql-update` path and the `/subscriptions` WebSocket. Binding a
-    /// non-loopback address (e.g. `0.0.0.0`) therefore exposes the entire dataset for
-    /// **read AND write** to anyone who can reach the port. To make that a deliberate
-    /// act rather than a foot-gun, the binary REFUSES to bind a non-loopback address
-    /// unless this is set (CLI `--allow-remote` / env `SPARQ_ALLOW_REMOTE=1`); even
-    /// then it logs a loud warning. Loopback binds are unaffected. See
-    /// [`bind_posture`] for the decision, and `crates/sparq-server/README.md` →
-    /// "Security posture (no built-in auth)".
+    /// By default the server has **no authentication** on any endpoint — including the
+    /// mutating `application/sparql-update` path and the `/subscriptions` WebSocket.
+    /// Binding a non-loopback address (e.g. `0.0.0.0`) therefore exposes the entire dataset
+    /// for **read AND write** to anyone who can reach the port. To make that a deliberate
+    /// act rather than a foot-gun, the binary REFUSES to bind a non-loopback address unless
+    /// this is set (CLI `--allow-remote` / env `SPARQ_ALLOW_REMOTE=1`) OR the whole surface
+    /// is authenticated by [`auth_token`](Self::auth_token) AND
+    /// [`auth_token_read`](Self::auth_token_read) (sq-zcby) — a write-token alone still
+    /// leaves reads open, so it does NOT by itself make a remote bind safe. Even an allowed
+    /// remote bind logs a warning. Loopback binds are unaffected. See [`bind_posture`] for
+    /// the decision, and `crates/sparq-server/README.md` → "Security posture".
     ///
     /// This is purely a *bind-time* posture gate in the binary; it does not add any
     /// per-request auth and does not affect the library `router`/`harden` surface.
     pub allow_remote: bool,
+    /// [OPUS-4.8] sq-zcby (PSS gh-46): the required Bearer token that gates the **write
+    /// surface**. When `Some(token)`, every request that MUTATES the dataset must present
+    /// `Authorization: Bearer <token>` (scheme casing tolerated) or it is refused `401`
+    /// with `WWW-Authenticate: Bearer`. The write surface is: a SPARQL UPDATE on `/sparql`
+    /// — `Content-Type: application/sparql-update` OR an `update=` form field (BOTH are
+    /// updates by SPARQL-Protocol definition, gated as writes UNCONDITIONALLY), and ALSO a
+    /// `query=`/`application/sparql-query` body that *parses as an update* (an update smuggled
+    /// through the query path — classification there keys on whether the request mutates, not
+    /// the route) — and the Graph-Store-Protocol write methods (`PUT`/`POST`/`DELETE`/`PATCH`) on
+    /// `/sparql/graph` and `/graphs/{*path}`. The token is compared in **constant time**
+    /// ([`constant_time_eq`]). A missing vs a wrong token produce the *identical* 401, so an
+    /// attacker cannot learn whether a token was presented. `None` (the default) means **no
+    /// write auth** — today's behaviour, preserved exactly. Mirrors QLever's `-a <token>`.
+    /// Enforced by the library `router` itself, so an embedder gets the gate for free.
+    pub auth_token: Option<String>,
+    /// [OPUS-4.8] sq-zcby: ALSO gate **reads** (SPARQL query, GSP `GET`/`HEAD`) with the same
+    /// [`auth_token`](Self::auth_token). Off by default (QLever-style: writes gated, reads
+    /// open). Has no effect unless `auth_token` is also set. When on, the whole surface is
+    /// authenticated, which the bind posture ([`AuthPosture`]) treats as "auth present" for
+    /// allowing a non-loopback bind without `--allow-remote`.
+    pub auth_token_read: bool,
     /// [OPUS-4.8] (sq-4w18) SERVICE federation egress allowlist. SPARQL `SERVICE <iri>`
     /// makes attacker-controlled query text trigger an outbound HTTP request from the
     /// server host — an SSRF surface. The server's posture is **default-DENY-all
@@ -183,6 +206,9 @@ impl Default for ServerConfig {
             time_travel_max_age: None,
             verbose: false,
             allow_remote: false, // [OPUS-4.8] sq-o4qf: safe default — refuse non-loopback bind unless opted in
+            // [OPUS-4.8] sq-zcby: safe default — no token => no write auth (back-compat).
+            auth_token: None,
+            auth_token_read: false,
             // [OPUS-4.8] sq-4w18: safe default — empty allowlist = deny ALL SERVICE.
             service_allow: crate::service_config::ServiceAllowlist::default(),
         }
@@ -240,6 +266,15 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("SPARQ_ALLOW_REMOTE") {
             cfg.allow_remote = env_truthy(&v);
         }
+        // [OPUS-4.8] sq-zcby: SPARQ_AUTH_TOKEN sets the write-gate token (an empty value is
+        // treated as "unset" — an empty shared secret is a footgun, never a valid token);
+        // SPARQ_AUTH_TOKEN_READ truthy ("1"/"true"/"yes"/"on") additionally gates reads.
+        if let Ok(v) = std::env::var("SPARQ_AUTH_TOKEN") {
+            cfg.auth_token = (!v.is_empty()).then_some(v);
+        }
+        if let Ok(v) = std::env::var("SPARQ_AUTH_TOKEN_READ") {
+            cfg.auth_token_read = env_truthy(&v);
+        }
         // [OPUS-4.8] sq-4w18: SERVICE egress allowlist baseline from SPARQ_SERVICE_ALLOW
         // (comma/whitespace-separated). The binary then ADDS any `--service-allow` /
         // `--service-allow-file` entries (the union — CLI only ever widens). A malformed
@@ -262,64 +297,258 @@ fn env_truthy(v: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// [OPUS-4.8] sq-o4qf — bind-time security posture (no built-in auth)
+// [OPUS-4.8] sq-o4qf / sq-zcby — bind-time security posture (auth-aware)
 // ---------------------------------------------------------------------------
 
 /// [OPUS-4.8] sq-o4qf: the decision the binary makes about a requested bind address,
-/// given the no-auth posture. Returned by [`bind_posture`] so `main` (and tests) can act
-/// on it without the side effect of actually binding.
+/// given the configured auth posture. Returned by [`bind_posture`] so `main` (and tests)
+/// can act on it without the side effect of actually binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindPosture {
     /// Loopback (or otherwise not-remotely-reachable) bind — safe, proceed silently.
     Loopback,
-    /// Non-loopback bind explicitly opted into (`--allow-remote` / `SPARQ_ALLOW_REMOTE`).
-    /// Proceed, but the caller MUST surface `warning` (the unauthenticated surface is now
-    /// reachable from the network).
+    /// Non-loopback bind that is allowed to proceed (opted in via `--allow-remote` /
+    /// `SPARQ_ALLOW_REMOTE`, or the whole surface is authenticated — sq-zcby). Proceed, but the
+    /// caller MUST surface `warning` (it describes exactly what is now reachable: a fully open
+    /// surface, an open read endpoint behind a write gate, or a fully authenticated surface).
     RemoteAllowed { warning: String },
-    /// Non-loopback bind WITHOUT the opt-in. The caller MUST refuse to bind and print
-    /// `message` (which explains the no-auth risk and how to opt in).
+    /// Non-loopback bind that is refused. The caller MUST refuse to bind and print `message`
+    /// (which explains the exposure and how to proceed: gate the surface or opt in).
     RemoteRefused { message: String },
 }
 
-/// [OPUS-4.8] sq-o4qf: classify a requested bind address under the no-built-in-auth posture.
+/// [OPUS-4.8] sq-o4qf / sq-zcby: classify a requested bind address under the configured auth
+/// posture.
 ///
-/// `sparq-server` has no authentication on any endpoint (query, `application/sparql-update`,
-/// the `/subscriptions` WebSocket). A loopback bind (`127.0.0.0/8`, `::1`) is only reachable
-/// from the same host, so it is safe by default. A **non-loopback** bind exposes the full
-/// read+write surface to the network, so the binary refuses it unless the operator explicitly
-/// opts in via `--allow-remote` / `SPARQ_ALLOW_REMOTE=1` (and even then warns).
+/// By default `sparq-server` has no authentication on any endpoint (query,
+/// `application/sparql-update`, the `/subscriptions` WebSocket). A loopback bind
+/// (`127.0.0.0/8`, `::1`) is only reachable from the same host, so it is safe by default. A
+/// **non-loopback** bind exposes the surface to the network, so the binary refuses it unless
+/// the operator opts in via `--allow-remote` / `SPARQ_ALLOW_REMOTE=1` (and even then warns) OR
+/// the whole surface is authenticated ([`AuthPosture::ReadAndWrite`]). A write-token alone
+/// ([`AuthPosture::WriteOnly`]) leaves reads open, so it is treated like no auth for this
+/// decision: still refused without `--allow-remote`.
 ///
 /// "Loopback" here means the literal loopback ranges. Note `0.0.0.0` / `::` (the unspecified
 /// "bind to all interfaces" addresses) are NOT loopback — they are the most common way the
 /// surface gets exposed, so they are treated as remote. This is a deliberately blunt,
 /// fail-closed check: it errs toward refusing exposure, not toward allowing it.
-pub fn bind_posture(addr: &SocketAddr, allow_remote: bool) -> BindPosture {
+///
+/// [OPUS-4.8] sq-zcby: `auth` folds the configured Bearer-token gate into the decision. A
+/// non-loopback bind is allowed when `--allow-remote` is set OR the **whole surface** is
+/// authenticated ([`AuthPosture::ReadAndWrite`]) — a write-token alone ([`AuthPosture::
+/// WriteOnly`]) still requires `--allow-remote`, because it leaves an OPEN read endpoint on
+/// the remote bind; we still warn in that case that reads remain open.
+pub fn bind_posture(addr: &SocketAddr, allow_remote: bool, auth: AuthPosture) -> BindPosture {
     if addr.ip().is_loopback() {
         return BindPosture::Loopback;
     }
+    // A fully-authenticated surface (token gates reads AND writes) is safe to expose without
+    // --allow-remote: there is no open endpoint left. We still warn (a single shared secret
+    // is not per-user authz, and the token must be carried over TLS).
+    if auth == AuthPosture::ReadAndWrite {
+        return BindPosture::RemoteAllowed {
+            warning: format!(
+                "WARNING: sparq-server is binding the non-loopback address {addr}. The whole \
+                 surface is gated by the --auth-token Bearer token (reads AND writes), so it \
+                 is not open to anonymous access. NOTE: the token is a single shared secret \
+                 (not per-user authz) — deliver it over TLS (terminate at a proxy), and front \
+                 it with a real authorization layer (a reverse proxy / gateway or sparq-solid) \
+                 for per-user access control. The /subscriptions WebSocket is a read surface \
+                 NOT gated by this token."
+            ),
+        };
+    }
     if allow_remote {
+        // The surface is reachable from the network; describe exactly what is open.
+        let exposure = match auth {
+            AuthPosture::None => {
+                "The full dataset is exposed for READ AND WRITE (SPARQL Update + the \
+                 /subscriptions WebSocket) to anyone who can reach this port — there is NO \
+                 authentication."
+            }
+            // WriteOnly: writes are gated, but reads are still open on this remote bind.
+            AuthPosture::WriteOnly => {
+                "Writes are gated by --auth-token, but READS remain OPEN to anyone who can \
+                 reach this port (add --auth-token-read to gate reads too). The /subscriptions \
+                 WebSocket (a read surface) is also open."
+            }
+            AuthPosture::ReadAndWrite => unreachable!("handled above"),
+        };
         BindPosture::RemoteAllowed {
             warning: format!(
-                "WARNING: sparq-server is binding the non-loopback address {addr} and has NO \
-                 built-in authentication. The full dataset is exposed for READ AND WRITE \
-                 (SPARQL Update + the /subscriptions WebSocket) to anyone who can reach this \
-                 port. Put it behind a reverse proxy / API gateway (or sparq-solid) that \
-                 enforces auth before exposing it to an untrusted network. \
+                "WARNING: sparq-server is binding the non-loopback address {addr}. {exposure} \
+                 Put it behind a reverse proxy / API gateway (or sparq-solid) that enforces \
+                 auth before exposing it to an untrusted network. \
                  (--allow-remote / SPARQ_ALLOW_REMOTE is set, so this bind proceeds.)"
             ),
         }
     } else {
+        // Refused. A write-token alone is NOT sufficient (reads stay open), so we name the
+        // two ways to proceed: gate reads too (--auth-token-read) or opt in (--allow-remote).
+        let reason = match auth {
+            AuthPosture::None => {
+                "sparq-server has NO authentication, so this would expose the full dataset for \
+                 READ AND WRITE to the network"
+            }
+            AuthPosture::WriteOnly => {
+                "--auth-token gates writes but READS would still be OPEN on a non-loopback bind \
+                 (add --auth-token-read to gate reads too, which makes the whole surface \
+                 authenticated and the bind safe)"
+            }
+            AuthPosture::ReadAndWrite => unreachable!("handled above"),
+        };
         BindPosture::RemoteRefused {
             message: format!(
-                "refusing to bind non-loopback address {addr}: sparq-server has NO built-in \
-                 authentication, so this would expose the full dataset for READ AND WRITE \
-                 (SPARQL Update + the /subscriptions WebSocket) to the network. If that is \
-                 intended, run behind a reverse proxy / gateway that enforces auth and \
-                 re-run with --allow-remote (or SPARQ_ALLOW_REMOTE=1). To serve only this \
-                 host, bind a loopback address such as 127.0.0.1."
+                "refusing to bind non-loopback address {addr}: {reason}. If a network bind is \
+                 intended, either gate the whole surface (--auth-token AND --auth-token-read) \
+                 or run behind a reverse proxy / gateway that enforces auth and re-run with \
+                 --allow-remote (or SPARQ_ALLOW_REMOTE=1). To serve only this host, bind a \
+                 loopback address such as 127.0.0.1."
             ),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-zcby (PSS gh-46) — the Bearer-token auth gate (write surface +
+// optional read gate), mirroring QLever's `-a <token>`.
+// ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] sq-zcby: how much of the surface a configured token authenticates — folded into
+/// the bind decision ([`bind_posture`]). `WriteOnly` (a token, reads open) still requires
+/// `--allow-remote` for a non-loopback bind because reads stay open; `ReadAndWrite` (token +
+/// `--auth-token-read`) makes the whole surface authenticated, so it does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthPosture {
+    /// No token configured — no auth on any endpoint.
+    None,
+    /// A token gates writes; reads are open.
+    WriteOnly,
+    /// A token gates writes AND reads (`--auth-token-read`).
+    ReadAndWrite,
+}
+
+impl AuthPosture {
+    /// Derives the posture from a [`ServerConfig`]: no token → `None`; a token without the
+    /// read gate → `WriteOnly`; a token with `--auth-token-read` → `ReadAndWrite`.
+    pub fn from_config(config: &ServerConfig) -> Self {
+        match (config.auth_token.is_some(), config.auth_token_read) {
+            (false, _) => AuthPosture::None,
+            (true, false) => AuthPosture::WriteOnly,
+            (true, true) => AuthPosture::ReadAndWrite,
+        }
+    }
+}
+
+/// [OPUS-4.8] sq-zcby: whether a request is a WRITE (mutates the dataset) or a READ, for the
+/// auth gate. Classification keys on "does this mutate", NOT the route — an UPDATE smuggled
+/// through the query path is a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Operation {
+    Read,
+    Write,
+}
+
+/// [OPUS-4.8] sq-zcby: constant-time byte-string equality. Returns `true` iff `a == b`,
+/// taking time that depends only on `a.len()` (not on the contents or on how far the first
+/// difference is), so a token check cannot be turned into a timing oracle that recovers the
+/// secret byte-by-byte.
+///
+/// Hand-rolled rather than pulling in the `subtle` crate: it is a few lines, sparq-server
+/// has no other crypto dependency (keeping it out of the supply-chain / SBOM surface), and a
+/// length-difference + per-byte XOR-accumulate is the standard, well-understood construction.
+/// `a` is the configured secret and `b` the presented token; the length comparison reveals
+/// only whether the *presented* token has the secret's length (already inferable, and not the
+/// secret's bytes). The accumulator is `#[inline(never)]` and read into a `black_box`-style
+/// volatile-ish fold to keep the optimiser from short-circuiting (no data-dependent branch).
+#[inline(never)]
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    // [OPUS-4.8] sq-zcby (Copilot PR#71 fix): route the accumulator through
+    // `core::hint::black_box` BEFORE the `== 0` test so the optimiser cannot prove anything
+    // about `diff` and rewrite the loop+compare into an early-exit `memcmp`-style
+    // short-circuit. This matches the doc claim ("black_box-style fold"): without it the
+    // bare `diff == 0` was a plain data-dependent comparison the compiler is free to
+    // short-circuit. Fold to bool with no data-dependent branch on the secret.
+    core::hint::black_box(diff) == 0
+}
+
+/// [OPUS-4.8] sq-zcby: extracts the token from an `Authorization: Bearer <token>` header,
+/// tolerant of scheme casing (`Bearer`/`bearer`/`BEARER`) and of leading/trailing space. Any
+/// other scheme (or no header) yields `None`.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = raw.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Some(token.trim())
+    } else {
+        None
+    }
+}
+
+/// [OPUS-4.8] sq-zcby: the per-request auth gate. Returns `None` to proceed, or `Some(401)` to
+/// refuse. A request is gated when its [`Operation`] is covered by the configured posture:
+/// a `Write` whenever a token is set; a `Read` only additionally when `--auth-token-read` is on.
+/// An ungated operation (or no token at all) always proceeds. A gated request must present the
+/// exact token (constant-time compared, scheme casing tolerant); the 401 is byte-identical for a
+/// missing vs a wrong token, so it never leaks which.
+fn auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Operation) -> Option<Response> {
+    let token = config.auth_token.as_deref()?; // no token configured => never gated
+    let gated = match op {
+        Operation::Write => true,
+        Operation::Read => config.auth_token_read,
+    };
+    if !gated {
+        return None;
+    }
+    let ok = bearer_token(headers).is_some_and(|presented| constant_time_eq(token.as_bytes(), presented.as_bytes()));
+    if ok {
+        None
+    } else {
+        Some(unauthorized())
+    }
+}
+
+/// [OPUS-4.8] sq-zcby: the 401 a gated request without a valid token gets — `WWW-Authenticate:
+/// Bearer` plus the server's standard JSON error body. Identical for a missing vs a wrong
+/// token (the body carries no hint either way), so it never leaks which.
+fn unauthorized() -> Response {
+    let mut resp = json_error(StatusCode::UNAUTHORIZED, "authentication required: present a valid Bearer token");
+    resp.headers_mut().insert(header::WWW_AUTHENTICATE, header::HeaderValue::from_static("Bearer"));
+    resp
+}
+
+/// [OPUS-4.8] sq-zcby: does this SPARQL string MUTATE the dataset, for the auth classifier?
+/// The classifier keys on this, not on the route or Content-Type, so an UPDATE smuggled
+/// through a `query=`/generic body path is still gated as a write.
+///
+/// [OPUS-4.8] (Copilot PR#71 doc/impl-consistency fix) The implemented rule is
+/// **default-to-write unless it provably parses as a read-only query**: a string that parses
+/// as a read-only query (SELECT/ASK/CONSTRUCT/DESCRIBE) returns `false` (a read); EVERYTHING
+/// ELSE returns `true` (gated as a write). That "everything else" deliberately collapses the
+/// "parses as a SPARQL Update" and the "parses as NEITHER" cases into one branch — both are
+/// fail-safe to gate as a write, so a positive `parse_update` check would only add cost
+/// without changing the answer. This is the conservative/secure default: ambiguous or
+/// malformed bodies are gated as writes (fail-closed), so a body can never slip past the
+/// write gate by being unparsable, and gating a non-mutating-but-unparsable body as a write
+/// never wrongly OPENS the write surface (the writer/query handler rejects it anyway).
+///
+/// Note this function is only the classifier for the AMBIGUOUS body path; the unambiguous
+/// `update=` form field and `application/sparql-update` Content-Type are gated as writes
+/// unconditionally at their call sites (they ARE updates by protocol definition), without
+/// consulting this function.
+pub(crate) fn payload_mutates(sparql: &str) -> bool {
+    // Provably a read-only query => a read (`is_ok`). Otherwise (parses as an update, OR
+    // parses as neither) => fail-safe to a write (`is_err`). The two non-read cases share one
+    // branch on purpose: both must be gated as a write, so distinguishing them changes nothing.
+    spargebra::SparqlParser::new().parse_query(sparql).is_err()
 }
 
 fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
@@ -877,7 +1106,12 @@ async fn sparql_endpoint(
     match method {
         Method::GET | Method::HEAD => {
             // Query string carries `query=` (+ optional dataset params). Per protocol, a
-            // GET without a `query` parameter is a malformed request (400).
+            // GET without a `query` parameter is a malformed request (400). A GET is always a
+            // READ (the protocol has no GET update), so it is gated only under --auth-token-read.
+            // [OPUS-4.8] sq-zcby.
+            if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+                return resp;
+            }
             match url_params.get("query") {
                 Some(q) => {
                     let pin = match resolve_pin(&state, &url_params, None) {
@@ -903,25 +1137,65 @@ async fn handle_post(
 ) -> Response {
     let ct = content_type(headers);
     if ct.starts_with(SPARQL_QUERY_CT) {
-        // POST directly — body IS the SPARQL query.
-        match std::str::from_utf8(body) {
-            Ok(q) => {
-                let pin = match resolve_pin(state, url_params, None) {
-                    Ok(pin) => pin,
-                    Err(resp) => return resp,
-                };
-                let explain = explain_mode(url_params, None, headers);
-                run_query(state, q, headers, false, explain, pin).await
-            }
-            Err(_) => bad_request("request body is not valid UTF-8"),
+        // POST directly — body IS the SPARQL query. [OPUS-4.8] sq-zcby: the auth gate keys on
+        // whether the body MUTATES, not on the route — an UPDATE smuggled through the query
+        // Content-Type is gated as a write before the query handler ever sees it.
+        let s = match std::str::from_utf8(body) {
+            Ok(s) => s,
+            Err(_) => return bad_request("request body is not valid UTF-8"),
+        };
+        let op = if payload_mutates(s) { Operation::Write } else { Operation::Read };
+        if let Some(resp) = auth_gate(state.config(), headers, op) {
+            return resp;
         }
+        let pin = match resolve_pin(state, url_params, None) {
+            Ok(pin) => pin,
+            Err(resp) => return resp,
+        };
+        let explain = explain_mode(url_params, None, headers);
+        run_query(state, s, headers, false, explain, pin).await
     } else if ct.starts_with(FORM_CT) {
-        // POST url-encoded — `query=` in the body.
+        // POST url-encoded — `query=` (read) or `update=` (write) in the body. [OPUS-4.8]
+        // sq-zcby: classify on the payload for the ambiguous `query=` path; an `update=` form
+        // is ALWAYS a write (see below).
         let s = match std::str::from_utf8(body) {
             Ok(s) => s,
             Err(_) => return bad_request("request body is not valid UTF-8"),
         };
         let params = parse_form(s);
+        // [OPUS-4.8] sq-zcby (Copilot PR#71 SECURITY fix): the `update=` form field IS an
+        // update operation BY DEFINITION (SPARQL 1.1 Protocol §2.2), so it is a WRITE
+        // UNCONDITIONALLY — regardless of whether its value happens to parse as a read-only
+        // query (e.g. `update=SELECT…`). Classifying it on its payload (the old
+        // `payload_mutates(u)`) let such a request slip past the write gate: the auth-bypass
+        // this fixes. Only the ambiguous `query=`/generic path falls through to content
+        // inspection — a `query=` whose value parses as an UPDATE is still gated as a write
+        // (an UPDATE smuggled through the query parameter).
+        let op = if params.contains_key("update") {
+            Operation::Write
+        } else {
+            match params.get("query") {
+                Some(q) if payload_mutates(q) => Operation::Write,
+                Some(_) => Operation::Read,
+                // Neither parameter present: not a write, let the query handler return its 400.
+                None => Operation::Read,
+            }
+        };
+        if let Some(resp) = auth_gate(state.config(), headers, op) {
+            return resp;
+        }
+        // The SPARQL 1.1 Protocol url-encoded UPDATE operation (`update=` form) submits through
+        // the same sequenced writer as `application/sparql-update`.
+        if let Some(u) = params.get("update") {
+            #[cfg(feature = "time-travel")]
+            if url_params.contains_key("generation") {
+                return bad_request(
+                    "the 'generation' parameter pins queries to a retained generation; \
+                     updates always apply to the current generation",
+                );
+            }
+            return run_update(state, u.clone()).await;
+        }
         match params.get("query") {
             Some(q) => {
                 let pin = match resolve_pin(state, url_params, Some(&params)) {
@@ -931,10 +1205,14 @@ async fn handle_post(
                 let explain = explain_mode(url_params, Some(&params), headers);
                 run_query(state, q, headers, false, explain, pin).await
             }
-            None => bad_request("missing 'query' parameter in url-encoded body"),
+            None => bad_request("missing 'query' or 'update' parameter in url-encoded body"),
         }
     } else if ct.starts_with("application/sparql-update") {
         // SPARQL 1.1 Protocol — update operation (T11b). Body IS the update; success → 204.
+        // [OPUS-4.8] sq-zcby: an UPDATE is always a write — gate it before doing any work.
+        if let Some(resp) = auth_gate(state.config(), headers, Operation::Write) {
+            return resp;
+        }
         // `apply_update` blocks for the writer's group-commit ack (window + batch
         // application, which includes an O(graph) fork), so it runs off the async workers.
         // Time travel is a READ concept: an update can only apply to the current
@@ -948,21 +1226,7 @@ async fn handle_post(
             );
         }
         match std::str::from_utf8(body) {
-            Ok(u) => {
-                let st = state.clone();
-                let u = u.to_string();
-                let joined = tokio::task::spawn_blocking(move || st.apply_update(&u)).await;
-                match joined {
-                    Ok(Ok(number)) => {
-                        state.metrics().inc_updates();
-                        // The 204 carries the generation containing the update (the
-                        // read-your-writes token) under the time-travel feature.
-                        with_generation_header(StatusCode::NO_CONTENT.into_response(), number)
-                    }
-                    Ok(Err(e)) => bad_request(&format!("update failed: {e}")),
-                    Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
-                }
-            }
+            Ok(u) => run_update(state, u.to_string()).await,
             Err(_) => bad_request("request body is not valid UTF-8"),
         }
     } else {
@@ -971,6 +1235,26 @@ async fn handle_post(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "POST requires Content-Type 'application/sparql-query' or 'application/x-www-form-urlencoded'",
         )
+    }
+}
+
+/// Applies a SPARQL Update string through the sequenced writer off the async workers (it
+/// blocks for the group-commit ack), mapping the outcome onto 204/400/500. Shared by the
+/// `application/sparql-update` body path and the url-encoded `update=` form path (T11b /
+/// [OPUS-4.8] sq-zcby). The caller is responsible for the auth gate (so the gate runs before
+/// any work) and any `generation`-pin refusal.
+async fn run_update(state: &AppState, update: String) -> Response {
+    let st = state.clone();
+    let joined = tokio::task::spawn_blocking(move || st.apply_update(&update)).await;
+    match joined {
+        Ok(Ok(number)) => {
+            state.metrics().inc_updates();
+            // The 204 carries the generation containing the update (the read-your-writes
+            // token) under the time-travel feature.
+            with_generation_header(StatusCode::NO_CONTENT.into_response(), number)
+        }
+        Ok(Err(e)) => bad_request(&format!("update failed: {e}")),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
     }
 }
 
@@ -1277,6 +1561,18 @@ fn mint_graph_iri() -> String {
 /// READ (`GET`/`HEAD`) serialises the addressed graph; WRITE (`PUT`/`POST`/`DELETE`)
 /// translates into a SPARQL Update submitted through the sequenced writer.
 async fn graph_store(state: &AppState, method: &Method, graph: GraphRef, headers: &HeaderMap, body: Bytes) -> Response {
+    // [OPUS-4.8] sq-zcby: the GSP write methods (PUT/POST/DELETE, and PATCH which we 405) are
+    // as powerful as an UPDATE, so they are gated as writes; GET/HEAD are reads (gated only
+    // under --auth-token-read). Any other method is gated as a write too (fail-closed). The
+    // gate runs before any work — even the 405 for an unsupported method is behind it for a
+    // write verb, so an attacker cannot probe the surface without the token.
+    let op = match *method {
+        Method::GET | Method::HEAD => Operation::Read,
+        _ => Operation::Write,
+    };
+    if let Some(resp) = auth_gate(state.config(), headers, op) {
+        return resp;
+    }
     match *method {
         Method::GET | Method::HEAD => {
             let head_only = *method == Method::HEAD;
@@ -1937,7 +2233,7 @@ mod bind_posture_tests {
     //! which are the usual way the surface gets exposed); (c) WITH the opt-in it proceeds
     //! but warns. Pure functions over an explicit `allow_remote` flag — no process-env
     //! mutation, so they are parallel-safe.
-    use super::{bind_posture, env_truthy, BindPosture};
+    use super::{bind_posture, env_truthy, AuthPosture, BindPosture};
     use std::net::SocketAddr;
 
     fn addr(s: &str) -> SocketAddr {
@@ -1947,17 +2243,17 @@ mod bind_posture_tests {
     #[test]
     fn loopback_proceeds_regardless_of_flag() {
         for a in ["127.0.0.1:3030", "127.0.0.5:80", "[::1]:3030"] {
-            assert_eq!(bind_posture(&addr(a), false), BindPosture::Loopback, "{a} (no opt-in)");
-            assert_eq!(bind_posture(&addr(a), true), BindPosture::Loopback, "{a} (opt-in)");
+            assert_eq!(bind_posture(&addr(a), false, AuthPosture::None), BindPosture::Loopback, "{a} (no opt-in)");
+            assert_eq!(bind_posture(&addr(a), true, AuthPosture::None), BindPosture::Loopback, "{a} (opt-in)");
         }
     }
 
     #[test]
     fn non_loopback_without_optin_is_refused() {
         // 0.0.0.0 / :: (all-interfaces), an RFC1918 address, a link-local, and the cloud
-        // metadata IP all fail closed without --allow-remote.
+        // metadata IP all fail closed without --allow-remote (and with no auth).
         for a in ["0.0.0.0:3030", "[::]:3030", "10.0.0.1:8080", "169.254.169.254:80", "192.168.1.5:3030"] {
-            match bind_posture(&addr(a), false) {
+            match bind_posture(&addr(a), false, AuthPosture::None) {
                 BindPosture::RemoteRefused { message } => {
                     assert!(message.contains("refusing to bind"), "{a}: {message}");
                     assert!(message.contains("--allow-remote"), "{a}: must name the opt-in flag");
@@ -1970,13 +2266,55 @@ mod bind_posture_tests {
 
     #[test]
     fn non_loopback_with_optin_warns_but_proceeds() {
-        match bind_posture(&addr("0.0.0.0:3030"), true) {
+        match bind_posture(&addr("0.0.0.0:3030"), true, AuthPosture::None) {
             BindPosture::RemoteAllowed { warning } => {
                 assert!(warning.contains("WARNING"), "{warning}");
                 assert!(warning.contains("READ AND WRITE"), "{warning}");
                 assert!(warning.contains("0.0.0.0:3030"), "must name the address: {warning}");
             }
             other => panic!("opt-in must allow with a warning, got {other:?}"),
+        }
+    }
+
+    // [OPUS-4.8] sq-zcby — auth folded into the bind decision.
+
+    /// A WRITE-only token (reads still open) is NOT sufficient to bind a non-loopback address:
+    /// --allow-remote is still required, because reads remain open on the remote bind. The
+    /// refusal must point at --auth-token-read as the way to make the whole surface safe.
+    #[test]
+    fn write_only_token_still_refused_without_optin() {
+        match bind_posture(&addr("0.0.0.0:3030"), false, AuthPosture::WriteOnly) {
+            BindPosture::RemoteRefused { message } => {
+                assert!(message.contains("refusing to bind"), "{message}");
+                assert!(message.contains("--auth-token-read"), "must name the read-gate flag: {message}");
+            }
+            other => panic!("a write-only token must still be refused without opt-in, got {other:?}"),
+        }
+    }
+
+    /// A WRITE-only token WITH --allow-remote proceeds, but warns that READS remain open.
+    #[test]
+    fn write_only_token_with_optin_warns_reads_open() {
+        match bind_posture(&addr("0.0.0.0:3030"), true, AuthPosture::WriteOnly) {
+            BindPosture::RemoteAllowed { warning } => {
+                assert!(warning.contains("WARNING"), "{warning}");
+                assert!(warning.to_ascii_uppercase().contains("READS"), "must warn reads are open: {warning}");
+            }
+            other => panic!("write-only + opt-in must allow with a warning, got {other:?}"),
+        }
+    }
+
+    /// A FULLY authenticated surface (token gates reads AND writes) is allowed to bind a
+    /// non-loopback address WITHOUT --allow-remote — there is no open endpoint left. It still
+    /// warns (single shared secret, deliver over TLS, /subscriptions not gated).
+    #[test]
+    fn full_auth_allows_remote_bind_without_optin() {
+        match bind_posture(&addr("0.0.0.0:3030"), false, AuthPosture::ReadAndWrite) {
+            BindPosture::RemoteAllowed { warning } => {
+                assert!(warning.contains("WARNING"), "{warning}");
+                assert!(warning.contains("--auth-token"), "must name the gate: {warning}");
+            }
+            other => panic!("full auth must allow a remote bind without opt-in, got {other:?}"),
         }
     }
 
@@ -1988,6 +2326,145 @@ mod bind_posture_tests {
         for f in ["", "0", "false", "no", "off", "2", "maybe"] {
             assert!(!env_truthy(f), "{f:?} should be falsy");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-zcby — auth-gate unit tests (constant-time eq, Bearer parsing,
+// mutation classification, the gate decision, posture derivation)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod auth_tests {
+    //! Pure-function coverage for the Bearer-token write gate. The end-to-end HTTP behaviour
+    //! (401 shape, mutation-applied, read-gate, GSP write gate, update-via-query/form path) is
+    //! the integration suite in `tests/auth.rs`; these pin the building blocks.
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn headers_with_auth(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    #[test]
+    fn constant_time_eq_matches_plain_eq() {
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"", b""),
+            (b"a", b"a"),
+            (b"a", b"b"),
+            (b"token", b"token"),
+            (b"token", b"toker"),
+            (b"token", b"tokens"), // length mismatch
+            (b"", b"x"),
+        ];
+        for (a, b) in cases {
+            assert_eq!(constant_time_eq(a, b), a == b, "{a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn bearer_token_tolerates_scheme_casing() {
+        for v in ["Bearer t0k", "bearer t0k", "BEARER t0k", "BeArEr t0k"] {
+            assert_eq!(bearer_token(&headers_with_auth(v)), Some("t0k"), "{v:?}");
+        }
+        // Trailing/leading space around the token is trimmed.
+        assert_eq!(bearer_token(&headers_with_auth("Bearer  t0k  ")), Some("t0k"));
+    }
+
+    #[test]
+    fn bearer_token_rejects_other_schemes_and_absence() {
+        assert_eq!(bearer_token(&headers_with_auth("Basic abc")), None);
+        assert_eq!(bearer_token(&headers_with_auth("t0k")), None); // no scheme
+        assert_eq!(bearer_token(&HeaderMap::new()), None); // no header
+    }
+
+    #[test]
+    fn payload_mutates_classifies_reads_and_writes() {
+        // Reads (well-formed queries) do not mutate.
+        for q in [
+            "SELECT ?s WHERE { ?s ?p ?o }",
+            "ASK { ?s ?p ?o }",
+            "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+            "DESCRIBE <http://ex/s>",
+        ] {
+            assert!(!payload_mutates(q), "{q:?} must be a read");
+        }
+        // Writes (updates) mutate.
+        for u in [
+            "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }",
+            "DELETE DATA { <http://ex/s> <http://ex/p> <http://ex/o> }",
+            "DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }",
+            "DROP ALL",
+            "CLEAR DEFAULT",
+            "LOAD <http://ex/d> INTO GRAPH <http://ex/g>",
+        ] {
+            assert!(payload_mutates(u), "{u:?} must be a write");
+        }
+        // Garbage that parses as neither is fail-closed to a write.
+        assert!(payload_mutates("this is not sparql"), "unparsable must fail closed to a write");
+    }
+
+    #[test]
+    fn auth_posture_from_config() {
+        let mut cfg = ServerConfig::default();
+        assert_eq!(AuthPosture::from_config(&cfg), AuthPosture::None);
+        cfg.auth_token = Some("t".into());
+        assert_eq!(AuthPosture::from_config(&cfg), AuthPosture::WriteOnly);
+        cfg.auth_token_read = true;
+        assert_eq!(AuthPosture::from_config(&cfg), AuthPosture::ReadAndWrite);
+        // read-gate without a token is still "None" (no token => nothing to gate with).
+        cfg.auth_token = None;
+        assert_eq!(AuthPosture::from_config(&cfg), AuthPosture::None);
+    }
+
+    #[test]
+    fn auth_gate_no_token_never_gates() {
+        let cfg = ServerConfig::default(); // no auth_token
+        let h = HeaderMap::new();
+        assert!(auth_gate(&cfg, &h, Operation::Write).is_none());
+        assert!(auth_gate(&cfg, &h, Operation::Read).is_none());
+    }
+
+    #[test]
+    fn auth_gate_write_only_gates_writes_not_reads() {
+        let cfg = ServerConfig { auth_token: Some("secret".into()), ..ServerConfig::default() };
+        // Writes need the token.
+        assert!(auth_gate(&cfg, &HeaderMap::new(), Operation::Write).is_some(), "missing token => 401");
+        assert!(
+            auth_gate(&cfg, &headers_with_auth("Bearer wrong"), Operation::Write).is_some(),
+            "wrong token => 401"
+        );
+        assert!(
+            auth_gate(&cfg, &headers_with_auth("Bearer secret"), Operation::Write).is_none(),
+            "correct token => proceed"
+        );
+        // Reads stay open (no read gate).
+        assert!(auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_none(), "reads open in write-only mode");
+    }
+
+    #[test]
+    fn auth_gate_read_gate_also_gates_reads() {
+        let cfg = ServerConfig {
+            auth_token: Some("secret".into()),
+            auth_token_read: true,
+            ..ServerConfig::default()
+        };
+        assert!(auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_some(), "read gated => 401");
+        assert!(
+            auth_gate(&cfg, &headers_with_auth("bearer secret"), Operation::Read).is_none(),
+            "correct token (lowercase scheme) => proceed"
+        );
+    }
+
+    #[test]
+    fn unauthorized_carries_www_authenticate_bearer() {
+        let resp = unauthorized();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers().get(header::WWW_AUTHENTICATE).and_then(|v| v.to_str().ok()),
+            Some("Bearer")
+        );
     }
 }
 
