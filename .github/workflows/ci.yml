@@ -326,28 +326,30 @@ jobs:
         uses: taiki-e/install-action@91534edaf9fd796a162759d80d49cdff574bff2c # cargo-llvm-cov
       - name: Test-presence gate (fast, no compile)
         run: python3 scripts/coverage-presence.py --check
-      - name: Measure + enforce per-crate coverage (per-commit tier, re-measure backstop)
-        # [OPUS-4.8] sq-x4jy (2nd flake): measure -> check; if the ratchet FAILS, RE-MEASURE
-        # the whole suite ONCE and re-check before declaring failure. scripts/coverage.sh
-        # already serialises each binary's tests (--test-threads=1) to kill the profraw-merge
-        # race that intermittently undercounted sparq-core (~71% vs ~91%); this is a
-        # belt-and-braces backstop for any residual run-to-run profraw flake of THAT shape.
+      - name: Measure + enforce per-crate coverage (per-commit tier, max-remeasure gate)
+        # [OPUS-4.8] sq-x4jy: ROBUST per-crate MAX-REMEASURE gate. Measure once, then
+        # --check-robust re-measures ONLY the crates below floor (up to K=3 total
+        # measurements each) and keeps the per-crate MAX, failing only if a crate is STILL
+        # below floor after K independent reads.
         #
-        # WHY THIS IS SAFE (does NOT mask a real regression): it RE-MEASURES the same tests
-        # and re-applies the floor — it never ACCEPTS the low number. A genuine coverage drop
-        # is reproducible and fails BOTH passes; a transient profraw-merge undercount is not
-        # reproducible and passes the second pass. This is categorically different from
-        # retrying-and-accepting a valid-but-low value (which coverage.sh deliberately refuses
-        # to do, for exactly this reason — see its retry comment).
+        # WHY this replaces the old "re-measure the WHOLE suite once" backstop: llvm-cov
+        # only ever UNDERCOUNTS (an aborted test / un-merged .profraw LOSES coverage,
+        # never adds it), so the true coverage is the MAX across independent measurements.
+        # The whole-suite-once backstop was structurally insufficient — in PR #62 it
+        # re-measured EVERYTHING, which let a SECOND, PR-unrelated crate (sparq-engine)
+        # flake 0.28% low on the re-measure and fail the job even though pass-1 had it
+        # comfortably above floor. Re-measuring ONLY the offenders and taking the MAX
+        # fixes that: a crate that was fine on an earlier pass keeps its good number.
+        #
+        # SAFE (does NOT mask a real regression): it never ACCEPTS a low number — it
+        # re-measures and keeps the best. A genuine drop is reproducible and fails ALL K
+        # measurements; a transient undercount is not and recovers on a re-measure.
+        # coverage.sh still serialises each binary's tests (--test-threads=1) to minimise
+        # the profraw-merge race at the source; this gate is the principled backstop.
         run: |
           set -o pipefail
           ./scripts/coverage.sh
-          if python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json; then
-            exit 0
-          fi
-          echo "::warning::coverage gate failed on pass 1 — RE-MEASURING once (profraw-merge flake backstop; a real regression will fail again)"
-          ./scripts/coverage.sh
-          python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
+          python3 scripts/coverage-gate.py --check-robust target/coverage/coverage-summary.json
       - name: Upload coverage summary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -410,22 +412,20 @@ jobs:
         uses: taiki-e/install-action@91534edaf9fd796a162759d80d49cdff574bff2c # cargo-llvm-cov
       - name: Test-presence gate
         run: python3 scripts/coverage-presence.py --check
-      - name: Measure + enforce per-crate coverage (FULL tier, re-measure backstop)
-        # [OPUS-4.8] sq-x4jy (2nd flake): same SAFE re-measure backstop as the per-commit
-        # `coverage` job — measure -> check; if the ratchet fails, RE-MEASURE the full tier
-        # ONCE and re-check before failing. coverage.sh serialises each binary's tests
-        # (--test-threads=1) to kill the profraw-merge undercount race; this re-measures
-        # (never accepts a low number), so a real regression fails BOTH passes. Within the
-        # 60-min nightly budget.
+      - name: Measure + enforce per-crate coverage (FULL tier, max-remeasure gate)
+        # [OPUS-4.8] sq-x4jy: same ROBUST per-crate MAX-REMEASURE gate as the per-commit
+        # `coverage` job (re-measure ONLY sub-floor crates, keep the per-crate MAX, fail
+        # only if still below floor after K=3). COVERAGE_TIER=nightly is exported for BOTH
+        # the initial measure AND the targeted re-measures (--check-robust shells
+        # coverage.sh with the inherited environment, so the nightly re-measures use the
+        # SAME full test set — incl. the heavy sparq-vectors 50k tests). Comfortably within
+        # the 60-min nightly budget (re-measures touch only the offending crates).
+        env:
+          COVERAGE_TIER: nightly
         run: |
           set -o pipefail
-          COVERAGE_TIER=nightly ./scripts/coverage.sh
-          if python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json; then
-            exit 0
-          fi
-          echo "::warning::coverage gate failed on pass 1 — RE-MEASURING once (profraw-merge flake backstop; a real regression will fail again)"
-          COVERAGE_TIER=nightly ./scripts/coverage.sh
-          python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
+          ./scripts/coverage.sh
+          python3 scripts/coverage-gate.py --check-robust target/coverage/coverage-summary.json
       - name: Upload coverage summary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
