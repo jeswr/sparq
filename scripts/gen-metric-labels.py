@@ -29,7 +29,6 @@
 import argparse
 import json
 import os
-import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -278,29 +277,41 @@ def build():
     for sub, heavy in (("watdiv/queries", False), ("watdiv/queries-heavy", True)):
         for s in stems(sub):
             fam = WATDIV_FAMILY.get(s[0], "query")
-            tag = " (heavy, SF≥10)" if heavy else ""
+            # Per-commit runs at SF=1 (~106k triples); the heavy queries are empty at SF=1
+            # and only populate at the EC2/nightly scale (SF≥10, up to SF=1000 ≈ 100M+),
+            # per bench/watdiv/README.md — so do NOT claim SF=1 for a heavy metric.
+            dataset = ("WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples"
+                       if heavy else "WatDiv SF=1, ~106k triples")
             desc = "%s query" % fam
             labels.update(mode_records(
                 "watdiv_" + s, "WatDiv " + s, "WatDiv",
-                "WatDiv SF=1, ~106k triples" + tag, desc))
+                dataset, desc))
 
     # 6) BSBM Explore mix -> "BSBM query01 — <desc>, <mode>".
     for sub, heavy in (("bsbm/queries", False), ("bsbm/queries-heavy", True)):
         for s in stems(sub):
             desc = BSBM_DESC.get(s, BSBM_OP.get(s, s))
-            tag = " (heavy)" if heavy else ""
+            # Per-commit is -pc 300 (~116k triples); the heavy query (query06) runs at the
+            # EC2/nightly full reference scale (-pc ~284,826 ≈ 100M triples), per
+            # bench/bsbm/README.md — so do NOT claim the small -pc 300 count for it.
+            dataset = ("BSBM Explore, full-scale (nightly), -pc ~284,826 ≈ 100M triples (heavy)"
+                       if heavy else "BSBM Explore, -pc 300, ~116k triples")
             labels.update(mode_records(
                 "bsbm_" + s, "BSBM " + s, "BSBM",
-                "BSBM Explore, -pc 300, ~116k triples" + tag, desc))
+                dataset, desc))
 
     # 7) DBPSB / FEASIBLE -> "DBPSB q01 — <desc>, <mode>".
     for sub, heavy in (("dbpsb/queries", False), ("dbpsb/queries-heavy", True)):
         for s in stems(sub):
             desc = DBPSB_DESC.get(s, DBPSB_OP.get(s, s))
-            tag = " (heavy)" if heavy else ""
+            # Per-commit runs against the 750k-triple head cut; the heavy queries run against
+            # the FULL pinned artifact (~11.8M object-property triples) on the EC2/nightly
+            # tier, per bench/dbpsb/README.md — so do NOT claim the 750k cut for them.
+            dataset = ("DBpedia full artifact, ~11.8M triples (heavy, nightly)"
+                       if heavy else "DBpedia slice, 750k-triple cut")
             labels.update(mode_records(
                 "dbpsb_" + s, "DBPSB " + s, "DBPSB",
-                "DBpedia slice, 750k-triple cut" + tag, desc))
+                dataset, desc))
 
     # 8) LUBM reasoning suite (COUNT ONLY) -> "LUBM Q06 — Students …, count [entailed]".
     for sub in ("lubm/queries-extensional", "lubm/queries-entailed"):
@@ -338,7 +349,11 @@ def main():
     ap.add_argument("--stdout", action="store_true", help="print JSON to stdout, do not write")
     args = ap.parse_args()
 
-    text = serialize(build())
+    # Build the label map ONCE and reuse it for both the serialized output and the count, so
+    # the filesystem scan is not duplicated and the reported count can never diverge from the
+    # content actually written.
+    labels = build()
+    text = serialize(labels)
 
     if args.stdout:
         sys.stdout.write(text)
@@ -361,8 +376,7 @@ def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as fh:
         fh.write(text)
-    n = sum(1 for _ in build())
-    print("wrote %s (%d metrics labeled)" % (OUT, n))
+    print("wrote %s (%d metrics labeled)" % (OUT, len(labels)))
     return 0
 
 

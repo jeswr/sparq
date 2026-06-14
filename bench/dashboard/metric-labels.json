@@ -128,7 +128,7 @@
     "bsbm_query06_count": {
       "label": "BSBM query06 — HEAVY — unanchored regex over product labels (full scan), count",
       "suite": "BSBM",
-      "dataset": "BSBM Explore, -pc 300, ~116k triples (heavy)",
+      "dataset": "BSBM Explore, full-scale (nightly), -pc ~284,826 ≈ 100M triples (heavy)",
       "query": "HEAVY — unanchored regex over product labels (full scan)",
       "mode": "count",
       "unit": "µs"
@@ -136,7 +136,7 @@
     "bsbm_query06_json": {
       "label": "BSBM query06 — HEAVY — unanchored regex over product labels (full scan), json",
       "suite": "BSBM",
-      "dataset": "BSBM Explore, -pc 300, ~116k triples (heavy)",
+      "dataset": "BSBM Explore, full-scale (nightly), -pc ~284,826 ≈ 100M triples (heavy)",
       "query": "HEAVY — unanchored regex over product labels (full scan)",
       "mode": "json",
       "unit": "µs"
@@ -144,7 +144,7 @@
     "bsbm_query06_materialize": {
       "label": "BSBM query06 — HEAVY — unanchored regex over product labels (full scan), materialize",
       "suite": "BSBM",
-      "dataset": "BSBM Explore, -pc 300, ~116k triples (heavy)",
+      "dataset": "BSBM Explore, full-scale (nightly), -pc ~284,826 ≈ 100M triples (heavy)",
       "query": "HEAVY — unanchored regex over product labels (full scan)",
       "mode": "materialize",
       "unit": "µs"
@@ -296,7 +296,7 @@
     "dbpsb_h01_count": {
       "label": "DBPSB h01 — HEAVY — co-birthplace pairs (unselective self-join), count",
       "suite": "DBPSB",
-      "dataset": "DBpedia slice, 750k-triple cut (heavy)",
+      "dataset": "DBpedia full artifact, ~11.8M triples (heavy, nightly)",
       "query": "HEAVY — co-birthplace pairs (unselective self-join)",
       "mode": "count",
       "unit": "µs"
@@ -304,7 +304,7 @@
     "dbpsb_h01_json": {
       "label": "DBPSB h01 — HEAVY — co-birthplace pairs (unselective self-join), json",
       "suite": "DBPSB",
-      "dataset": "DBpedia slice, 750k-triple cut (heavy)",
+      "dataset": "DBpedia full artifact, ~11.8M triples (heavy, nightly)",
       "query": "HEAVY — co-birthplace pairs (unselective self-join)",
       "mode": "json",
       "unit": "µs"
@@ -312,7 +312,7 @@
     "dbpsb_h01_materialize": {
       "label": "DBPSB h01 — HEAVY — co-birthplace pairs (unselective self-join), materialize",
       "suite": "DBPSB",
-      "dataset": "DBpedia slice, 750k-triple cut (heavy)",
+      "dataset": "DBpedia full artifact, ~11.8M triples (heavy, nightly)",
       "query": "HEAVY — co-birthplace pairs (unselective self-join)",
       "mode": "materialize",
       "unit": "µs"
@@ -320,7 +320,7 @@
     "dbpsb_h02_count": {
       "label": "DBPSB h02 — HEAVY — unbounded 3-pattern chain, count",
       "suite": "DBPSB",
-      "dataset": "DBpedia slice, 750k-triple cut (heavy)",
+      "dataset": "DBpedia full artifact, ~11.8M triples (heavy, nightly)",
       "query": "HEAVY — unbounded 3-pattern chain",
       "mode": "count",
       "unit": "µs"
@@ -328,7 +328,7 @@
     "dbpsb_h02_json": {
       "label": "DBPSB h02 — HEAVY — unbounded 3-pattern chain, json",
       "suite": "DBPSB",
-      "dataset": "DBpedia slice, 750k-triple cut (heavy)",
+      "dataset": "DBpedia full artifact, ~11.8M triples (heavy, nightly)",
       "query": "HEAVY — unbounded 3-pattern chain",
       "mode": "json",
       "unit": "µs"
@@ -336,7 +336,7 @@
     "dbpsb_h02_materialize": {
       "label": "DBPSB h02 — HEAVY — unbounded 3-pattern chain, materialize",
       "suite": "DBPSB",
-      "dataset": "DBpedia slice, 750k-triple cut (heavy)",
+      "dataset": "DBpedia full artifact, ~11.8M triples (heavy, nightly)",
       "query": "HEAVY — unbounded 3-pattern chain",
       "mode": "materialize",
       "unit": "µs"
@@ -344,7 +344,7 @@
     "dbpsb_h03_count": {
       "label": "DBPSB h03 — HEAVY — unbounded place self-join (~3M solutions), count",
       "suite": "DBPSB",
-      "dataset": "DBpedia slice, 750k-triple cut (heavy)",
+      "dataset": "DBpedia full artifact, ~11.8M triples (heavy, nightly)",
       "query": "HEAVY — unbounded place self-join (~3M solutions)",
       "mode": "count",
       "unit": "µs"
@@ -352,7 +352,7 @@
     "dbpsb_h03_json": {
       "label": "DBPSB h03 — HEAVY — unbounded place self-join (~3M solutions), json",
       "suite": "DBPSB",
-      "dataset": "DBpedia slice, 750k-triple cut (heavy)",
+      "dataset": "DBpedia full artifact, ~11.8M triples (heavy, nightly)",
       "query": "HEAVY — unbounded place self-join (~3M solutions)",
       "mode": "json",
       "unit": "µs"
@@ -360,7 +360,7 @@
     "dbpsb_h03_materialize": {
       "label": "DBPSB h03 — HEAVY — unbounded place self-join (~3M solutions), materialize",
       "suite": "DBPSB",
-      "dataset": "DBpedia slice, 750k-triple cut (heavy)",
+      "dataset": "DBpedia full artifact, ~11.8M triples (heavy, nightly)",
       "query": "HEAVY — unbounded place self-join (~3M solutions)",
       "mode": "materialize",
       "unit": "µs"
@@ -2079,7 +2079,7 @@
     "watdiv_C1_count": {
       "label": "WatDiv C1 — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
@@ -2087,7 +2087,7 @@
     "watdiv_C1_json": {
       "label": "WatDiv C1 — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
@@ -2095,7 +2095,7 @@
     "watdiv_C1_materialize": {
       "label": "WatDiv C1 — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
@@ -2103,7 +2103,7 @@
     "watdiv_C2_count": {
       "label": "WatDiv C2 — complex query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "complex query",
       "mode": "count",
       "unit": "µs"
@@ -2111,7 +2111,7 @@
     "watdiv_C2_json": {
       "label": "WatDiv C2 — complex query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "complex query",
       "mode": "json",
       "unit": "µs"
@@ -2119,7 +2119,7 @@
     "watdiv_C2_materialize": {
       "label": "WatDiv C2 — complex query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "complex query",
       "mode": "materialize",
       "unit": "µs"
@@ -2151,7 +2151,7 @@
     "watdiv_F1_count": {
       "label": "WatDiv F1 — snowflake query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
@@ -2159,7 +2159,7 @@
     "watdiv_F1_json": {
       "label": "WatDiv F1 — snowflake query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
@@ -2167,7 +2167,7 @@
     "watdiv_F1_materialize": {
       "label": "WatDiv F1 — snowflake query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
@@ -2223,7 +2223,7 @@
     "watdiv_F4_count": {
       "label": "WatDiv F4 — snowflake query, count",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "snowflake query",
       "mode": "count",
       "unit": "µs"
@@ -2231,7 +2231,7 @@
     "watdiv_F4_json": {
       "label": "WatDiv F4 — snowflake query, json",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "snowflake query",
       "mode": "json",
       "unit": "µs"
@@ -2239,7 +2239,7 @@
     "watdiv_F4_materialize": {
       "label": "WatDiv F4 — snowflake query, materialize",
       "suite": "WatDiv",
-      "dataset": "WatDiv SF=1, ~106k triples (heavy, SF≥10)",
+      "dataset": "WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples",
       "query": "snowflake query",
       "mode": "materialize",
       "unit": "µs"
