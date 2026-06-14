@@ -9,6 +9,12 @@
 //!       (CONSTRUCT/DESCRIBE always emit N-Triples); `--count` restores the old
 //!       count-only output (`<n> solutions in <ms>ms`). [OPUS-4.8] (sq-l4ki)
 //!
+//!   sparq-cli query-mmap <dir> <sparql> [--format <out>] [--count]
+//!       like `query`, but opens a saved/built dir with indexes MEMORY-MAPPED
+//!       (out-of-core) instead of loading into RAM. Output is at parity with `query`
+//!       (SELECT rows / ASK boolean / CONSTRUCT/DESCRIBE N-Triples / `--format` /
+//!       `--count`) — it shares the exact same emission core. [OPUS-4.8] (sq-iwyy)
+//!
 //!   sparq-cli bench <data-file> <format> <queries-dir> [iters] [mode]
 //!       load the file once, then run every `*.rq` file in <queries-dir>
 //!       (sorted by name) `iters` times each, printing one TSV line per query:
@@ -49,7 +55,7 @@ fn main() {
         Some("bench-remap") => cmd_bench_remap(&args),
         Some("scaling") => cmd_scaling(&args),
         _ => {
-            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli query-mmap <dir> <sparql>               # query with indexes MEMORY-MAPPED (out-of-core)");
+            eprintln!("usage:\n  sparq-cli query <data-file> <format> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]\n  sparq-cli bench <data-file> <format> <queries-dir> [iters]\n  sparq-cli ingest <file[.gz|.bz2]> [parse|intern|full] [max_millions]\n  sparq-cli save <data-file> <format> <dir> [compressed]  # build + persist indexes to disk\n  sparq-cli recompress <src-dir> <dst-dir>          # re-persist with block-compressed indexes\n  sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]  # query with indexes MEMORY-MAPPED (out-of-core)");
             std::process::exit(2);
         }
     }
@@ -705,17 +711,30 @@ fn cmd_reason(args: &[String]) {
     }
 }
 
-/// `query-mmap <dir> <sparql>` — open a saved dataset with memory-mapped indexes and
-/// run a query. Reports load time + the store self-estimate (≈0 GB heap for the
-/// mmap'd permutations — they live in the OS page cache, not the process heap).
+/// `query-mmap <dir> <sparql> [--format <out>] [--count]` — open a saved dataset with
+/// memory-mapped indexes and run a query, printing its RESULTS. Reports load time + the
+/// store self-estimate to stderr (≈0 GB heap for the mmap'd permutations — they live in the
+/// OS page cache, not the process heap).
+///
+/// [OPUS-4.8] (sq-iwyy) Output is at PARITY with `query`: it shares the exact same
+/// `emit_query_results` emission core, so SELECT prints bindings (default a readable table),
+/// ASK prints a boolean, CONSTRUCT/DESCRIBE print N-Triples, `--format <table|tsv|csv|xml|
+/// json|ntriples>` selects the SELECT/ASK serialisation, and `--count` restores the old
+/// count-only line (`<n> solutions/triples in <ms>ms`). The only difference from `query` is
+/// the data source: an mmap-backed `Graph::open` instead of an in-RAM `load`.
 fn cmd_query_mmap(args: &[String]) {
     let (dir, sparql) = match (args.get(2), args.get(3)) {
         (Some(d), Some(q)) => (d.as_str(), q.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli query-mmap <dir> <sparql>");
+            eprintln!("usage: sparq-cli query-mmap <dir> <sparql> [--format <table|tsv|csv|xml|json|ntriples>] [--count]");
             std::process::exit(2);
         }
     };
+    // [OPUS-4.8] (sq-iwyy) Same flag surface as `query`: `--count` for the legacy count-only
+    // line, `--format` for the SELECT/ASK serialisation (default table).
+    let count_only = args.iter().any(|a| a == "--count");
+    let out_fmt = out_format_flag(args);
+
     let t = Instant::now();
     let g = sparq_core::Graph::open(std::path::Path::new(dir)).unwrap_or_else(|e| {
         eprintln!("open error: {e}");
@@ -728,14 +747,9 @@ fn cmd_query_mmap(args: &[String]) {
         g.heap_bytes() as f64 / 1e9,
         g.dict.heap_bytes() as f64 / 1e9,
     );
-    let t = Instant::now();
-    match sparq_engine::count(&g, sparql) {
-        Ok(n) => println!("{n} solutions in {:.3}ms", t.elapsed().as_secs_f64() * 1e3),
-        Err(e) => {
-            eprintln!("query error: {e}");
-            std::process::exit(1);
-        }
-    }
+    // The mmap-backed Graph borrows its on-disk permutations for the whole of `g`'s scope;
+    // `emit_query_results` takes `&g` and finishes before `g` drops, so the borrow is sound.
+    emit_query_results(&g, sparql, count_only, out_fmt);
 }
 
 /// [OPUS-4.8] Whether `format` is an RDF serialization this CLI accepts. Kept in lock-step
@@ -966,6 +980,19 @@ fn cmd_query(args: &[String]) {
         None => load(path, format),
     };
 
+    emit_query_results(&g, sparql, count_only, out_fmt);
+}
+
+/// [OPUS-4.8] (sq-iwyy) The shared result-emission core used by BOTH `query` and
+/// `query-mmap`, so the two stay at output PARITY by construction. Classifies the parsed
+/// query FORM (SELECT / ASK / CONSTRUCT / DESCRIBE) once and routes each to its executor —
+/// the engine's `query`/`query_json` run SELECT/ASK; the graph-valued forms go through
+/// `construct_or_describe`/`construct_ntriples` (the same path the `bench` runner uses).
+///
+/// `count_only` restores the historical count-only line; `out_fmt` selects the SELECT/ASK
+/// serialisation (CONSTRUCT/DESCRIBE always emit N-Triples). Takes `&Graph` by reference, so
+/// it is agnostic to whether the graph is in-RAM (`query`) or mmap-backed (`query-mmap`).
+fn emit_query_results(g: &sparq_core::Graph, sparql: &str, count_only: bool, out_fmt: OutFormat) {
     // Parse once so we can classify the query FORM (SELECT / ASK / CONSTRUCT / DESCRIBE)
     // and route it to the matching executor — the engine's `query`/`query_json` only run
     // SELECT/ASK; the graph-valued forms go through `construct_or_describe` (the same path
@@ -980,12 +1007,12 @@ fn cmd_query(args: &[String]) {
     // Backward-friendly count-only path (the pre-sq-l4ki behaviour).
     if count_only {
         if prepared.is_graph_form() {
-            match sparq_engine::construct_or_describe(&g, sparql) {
+            match sparq_engine::construct_or_describe(g, sparql) {
                 Ok(ts) => println!("{} triples in {:.3}ms", ts.len(), t.elapsed().as_secs_f64() * 1e3),
                 Err(e) => die_query(e),
             }
         } else {
-            match sparq_engine::query(&g, sparql) {
+            match sparq_engine::query(g, sparql) {
                 Ok(r) => println!("{} solutions in {:.3}ms", r.len(), t.elapsed().as_secs_f64() * 1e3),
                 Err(e) => die_query(e),
             }
@@ -996,7 +1023,7 @@ fn cmd_query(args: &[String]) {
     // CONSTRUCT / DESCRIBE -> the resulting triples as N-Triples (always; `--format` is a
     // SELECT/ASK results-format selector and does not apply to the graph forms).
     if prepared.is_graph_form() {
-        match sparq_engine::construct_ntriples(&g, sparql) {
+        match sparq_engine::construct_ntriples(g, sparql) {
             Ok(nt) => print!("{nt}"),
             Err(e) => die_query(e),
         }
@@ -1006,7 +1033,7 @@ fn cmd_query(args: &[String]) {
     // ASK -> a boolean. (`--format json`/`xml` emit the W3C boolean documents; the other
     // formats fall back to the bare `true`/`false` token.)
     if matches!(prepared.query(), spargebra::Query::Ask { .. }) {
-        let value = match sparq_engine::ask(&g, sparql) {
+        let value = match sparq_engine::ask(g, sparql) {
             Ok(b) => b,
             Err(e) => die_query(e),
         };
@@ -1021,13 +1048,13 @@ fn cmd_query(args: &[String]) {
     // SELECT -> the solution bindings. JSON reuses the engine's fast direct serialiser; the
     // other formats reuse sparq-server's W3C SELECT serialisers over the QueryResult.
     if out_fmt == OutFormat::Json {
-        match sparq_engine::query_json(&g, sparql) {
+        match sparq_engine::query_json(g, sparql) {
             Ok(s) => println!("{s}"),
             Err(e) => die_query(e),
         }
         return;
     }
-    let r = match sparq_engine::query(&g, sparql) {
+    let r = match sparq_engine::query(g, sparql) {
         Ok(r) => r,
         Err(e) => die_query(e),
     };
