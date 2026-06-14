@@ -147,10 +147,17 @@ pub(crate) fn term_to_json(s: &mut String, t: &Term) {
                 escape_into(s, lang);
                 s.push('"');
                 // [OPUS-4.8] sq-bj7o: RDF 1.2 base direction → SPARQL 1.2 `its:dir` (kept
-                // separate from `xml:lang`, matching the stored-slot fast path above).
+                // separate from `xml:lang`, matching the stored-slot fast path above). Map the
+                // two-variant `BaseDirection` enum to a `&'static str` rather than
+                // `dir.to_string()` — the latter heap-allocated a fresh `String` per
+                // directional literal (a Display call) for no reason.
                 if let Some(dir) = l.direction() {
+                    let dir = match dir {
+                        oxrdf::BaseDirection::Ltr => "ltr",
+                        oxrdf::BaseDirection::Rtl => "rtl",
+                    };
                     s.push_str(",\"its:dir\":\"");
-                    escape_into(s, &dir.to_string());
+                    escape_into(s, dir);
                     s.push('"');
                 }
             } else {
