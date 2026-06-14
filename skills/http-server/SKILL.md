@@ -31,8 +31,12 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > `0.0.0.0`) unless you set `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`), warning loudly
 > even then. Do not expose it to an untrusted network without a reverse proxy / API
 > gateway (or `sparq-solid`) enforcing auth in front. SPARQL `SERVICE` federation is OFF
-> in the shipped server (engine `service` feature not enabled); enabling it on an
-> untrusted-facing server is an SSRF risk (no egress filter yet — bead `sq-2v6f`).
+> in the shipped server (engine `service` feature not enabled). When the `service`
+> feature *is* compiled in, the engine applies a **default-deny SSRF egress filter**: a
+> `SERVICE` endpoint that resolves to a loopback / RFC1918 / link-local (incl. the
+> `169.254.169.254` cloud-metadata IP) / unique-local / unspecified address is refused.
+> The check runs on the *resolved* IP (DNS-rebinding-safe). Opt a trusted internal host
+> back in with `sparq_engine::with_service_egress_allow([host], || …)` (bead `sq-2v6f`).
 
 Point a client at it (the endpoint is `/sparql`):
 
@@ -226,8 +230,11 @@ then `router(state)`, or `harden(my_router, &config)`.
   `SPARQ_ALLOW_REMOTE=1`; even then it warns. Front it with a reverse proxy / gateway (or
   `sparq-solid`) for auth. No rate limit and `--max-results` is unlimited by default — set
   caps + a gateway rate limiter if exposing it (beads `sq-o4qf`, `sq-ebii`). `SERVICE`
-  federation is OFF in the shipped server; enabling the engine `service` feature on an
-  untrusted-facing server is an un-filtered SSRF risk (bead `sq-2v6f`).
+  federation is OFF in the shipped server; when the engine `service` feature is compiled
+  in, outbound `SERVICE` fetches are guarded by a **default-deny SSRF egress filter**
+  (loopback / RFC1918 / link-local incl. `169.254.169.254` cloud-metadata / unique-local
+  / unspecified are refused on the *resolved* IP; opt a trusted host back in via
+  `sparq_engine::with_service_egress_allow`) — bead `sq-2v6f`.
 - **Feature flags.** `server` (default-on) pulls axum/tokio/tower — the binary needs it
   (`required-features = ["server"]`). `time-travel` (default **off**) enables
   `?generation=N` pinning, the `Sparq-Generation` header, `AppState::at`, and the

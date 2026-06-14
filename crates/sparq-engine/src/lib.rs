@@ -29,6 +29,10 @@ pub mod json;
 // federation code compiles. [OPUS-4.8]
 #[cfg(feature = "service")]
 mod service;
+// SSRF default-deny egress filter + opt-in allowlist for SERVICE federation
+// (threat-model B4 / sq-2v6f). [OPUS-4.8]
+#[cfg(feature = "service")]
+pub use service::with_service_egress_allow;
 mod update;
 // zk-trace seam (NON-DEFAULT `zk` feature; consumed only by `sparq-zk`).
 // When off, zero zk code is compiled — default builds and wasm are untouched.

@@ -17,8 +17,17 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
 
-use sparq_engine::query;
+use sparq_engine::{query, with_service_egress_allow};
 use sparq_core::Graph;
+
+/// The loopback test endpoints below resolve to `127.0.0.1`, which the default-deny
+/// SSRF egress filter ([OPUS-4.8], bead sq-2v6f) refuses. The tests are legitimately
+/// federating to a known-safe local server, so they opt the loopback host back in via
+/// the allowlist — exercising the end-to-end allowlist path against the real ureq
+/// transport, not just the policy classifier.
+fn query_local(g: &Graph, q: &str) -> Result<sparq_engine::QueryResult, String> {
+    with_service_egress_allow(["127.0.0.1".to_string()], || query(g, q))
+}
 
 /// Spawn a one-shot HTTP/1.1 server that replies to the first request with
 /// `status` + `body` (Content-Type sparql-results+json). Returns the bound URL.
@@ -80,7 +89,7 @@ fn service_returns_and_joins_remote_solutions() {
         "PREFIX ex: <http://ex/>\n\
          SELECT ?s ?name WHERE {{ ?s a ex:Person . SERVICE <{url}> {{ ?s ex:name ?name }} }}"
     );
-    let res = query(&g, &q).expect("federated query");
+    let res = query_local(&g, &q).expect("federated query");
 
     // Two local Persons joined with two remote names => two rows.
     assert_eq!(res.rows.len(), 2, "expected the remote names joined onto both local persons");
@@ -113,7 +122,7 @@ fn service_join_restricts_to_overlapping_subject() {
         "PREFIX ex: <http://ex/>\n\
          SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <{url}> {{ ?s ex:name ?name }} }}"
     );
-    let res = query(&g, &q).expect("federated query");
+    let res = query_local(&g, &q).expect("federated query");
     assert_eq!(res.rows.len(), 1, "only alice has a remote name");
 }
 
@@ -147,15 +156,52 @@ fn service_malformed_response_errors_but_silent_swallows() {
         "PREFIX ex: <http://ex/>\n\
          SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <{url}> {{ ?s ex:name ?name }} }}"
     );
-    assert!(query(&g, &q).is_err(), "malformed remote body must error (non-SILENT)");
+    assert!(query_local(&g, &q).is_err(), "malformed remote body must error (non-SILENT)");
 
     let url2 = serve("200 OK", "still not json".to_string(), 1);
     let q2 = format!(
         "PREFIX ex: <http://ex/>\n\
          SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <{url2}> {{ ?s ex:name ?name }} }}"
     );
-    let res = query(&g, &q2).expect("SILENT swallows a malformed body");
+    let res = query_local(&g, &q2).expect("SILENT swallows a malformed body");
     assert_eq!(res.rows.len(), 2, "SILENT malformed -> identity -> local persons survive");
+}
+
+#[test]
+fn service_default_deny_refuses_loopback_endpoint() {
+    // SSRF default-deny [OPUS-4.8] (bead sq-2v6f): with NO allowlist, a SERVICE
+    // endpoint that resolves to loopback must be refused by the egress filter — even
+    // though a real server is listening there. Non-SILENT => the query errors.
+    let body = r#"{"head":{"vars":["name"]},"results":{"bindings":[]}}"#.to_string();
+    // Serve 0 requests: the filter must reject before any socket is opened.
+    let url = serve("200 OK", body, 0);
+    let g = local_graph();
+    let q = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <{url}> {{ ?s ex:name ?name }} }}"
+    );
+    // No `with_service_egress_allow` wrapper => default-deny is in force.
+    let err = query(&g, &q).expect_err("loopback SERVICE must be refused by default-deny SSRF policy");
+    assert!(
+        err.to_lowercase().contains("egress")
+            || err.to_lowercase().contains("private")
+            || err.to_lowercase().contains("dns"),
+        "expected an egress/SSRF refusal, got: {err}"
+    );
+}
+
+#[test]
+fn service_silent_default_deny_loopback_yields_identity() {
+    // Same default-deny refusal, but under SILENT: the surrounding bindings survive.
+    let body = r#"{"head":{"vars":["name"]},"results":{"bindings":[]}}"#.to_string();
+    let url = serve("200 OK", body, 0);
+    let g = local_graph();
+    let q = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <{url}> {{ ?s ex:name ?name }} }}"
+    );
+    let res = query(&g, &q).expect("SILENT swallows the egress refusal");
+    assert_eq!(res.rows.len(), 2, "SILENT egress refusal -> identity -> local persons survive");
 }
 
 #[test]
@@ -166,6 +212,6 @@ fn service_http_error_status_handled() {
         "PREFIX ex: <http://ex/>\n\
          SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <{url}> {{ ?s ex:name ?name }} }}"
     );
-    let res = query(&g, &q).expect("SILENT swallows a 5xx");
+    let res = query_local(&g, &q).expect("SILENT swallows a 5xx");
     assert_eq!(res.rows.len(), 2);
 }

@@ -187,6 +187,13 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
 - **`update` vs `update_in_place`** — `update` returns a fresh `Graph` (input borrowed, untouched);
   `update_in_place(&mut g, …)` mutates via the delta overlay (call `Graph::compact` periodically).
   `LOAD` only resolves `file://`; set the base dir with `with_load_base(path, || update(...))`.
+- **SPARQL `SERVICE` federation** is the non-default `service` cargo feature (pulls `ureq`; off on
+  wasm). When enabled, outbound `SERVICE` fetches go through a **default-deny SSRF egress filter**:
+  an endpoint that resolves to a loopback / RFC1918 / link-local (incl. the `169.254.169.254`
+  cloud-metadata IP) / unique-local / unspecified address is refused (checked on the *resolved* IP,
+  so DNS rebinding can't bypass it). To federate to a trusted internal endpoint, allowlist its host
+  for the scope: `with_service_egress_allow([host.to_string()], || query(&g, q))`. Public endpoints
+  need no opt-in.
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`
   powers MD5/SHA*; `parallel` enables rayon scan/join/sort/aggregate. The **wasm** crate
   (`sparq-wasm`) disables defaults, so on `wasm32-unknown-unknown` REGEX/hash builtins and
