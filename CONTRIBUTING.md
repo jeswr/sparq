@@ -63,6 +63,48 @@ Run `bd ready` to see unblocked work and `bd close <id>` to close. See the "Task
 tracking — beads" section of `AGENTS.md` for the full rules (and never hand-edit
 `.beads/issues.jsonl`).
 
+## Crate README conventions
+
+<!-- [OPUS-4.8] Canonical concise-README template (bead sq-kuqa, per design sq-9jw5). The
+     per-crate README beads (sq-xogx / sq-h1s7 / sq-rt1t / sq-q2em / sq-puyy / sq-4kr5) follow
+     this. The root README.md is the worked example of the publishable-crate shape. -->
+
+Every crate carries a README, and they are **concise and human-readable**: a front page, not a
+manual. The detail lives where it is single-sourced — how-tos in `skills/<surface>/SKILL.md`,
+format/API reference in the crate's own rustdoc (`//!` and item docs), design rationale in
+`research/`, and **all performance numbers in the benchmark dashboard / harness output** (the
+"no hard-coded performance numbers" rule in `AGENTS.md` applies to every README). A README's job
+is to orient and link, not to duplicate.
+
+**Publishable crate (the default).** Target **~110 lines, hard cap 120**. Exactly **three emoji
+section markers — 🚀 ✨ 📚, in that order** (tasteful, no others), with a final unmarked License
+section. Required sections, in order:
+
+1. **Title + badges** — crate name, then a badge row: crates.io, docs.rs, license (and CI where
+   it fits). The root README is the example.
+2. **One-line pitch** — what this crate is, in a sentence.
+3. **What / why** — 3–5 lines: the capability and why it exists.
+4. **## 🚀 Quickstart** — *one* `rust` code block, runnable as a doctest. Hide the scaffolding
+   with `#` lines (`# fn main() -> Result<(), Box<dyn std::error::Error>> {` … `# Ok(()) }`) so
+   the visible body is the API call, and end fallible lines with `?`. CLI/server/JS crates may
+   use a `sh` block instead.
+5. **## ✨ Features** — a short bullet list of *capabilities* (what it can do), not internals.
+6. **## 📚 Learn more** — links only: `skills/<surface>/SKILL.md` (how-to), docs.rs (API),
+   the relevant `research/<doc>.md` (design + measured verdicts), the benchmarks dashboard for
+   numbers, and `AGENTS.md`.
+7. **License** — one line.
+
+Wire the README into rustdoc so the two never drift: `#![doc = include_str!("../README.md")]` at
+the crate root, and `[package.metadata.docs.rs] all-features = true` in `Cargo.toml`. If a
+Quickstart block contains a ```` ```rust ```` fence, `cargo test --doc -p <crate>` must pass.
+
+**Internal crate (`publish = false`).** A **~15-line stub**, *no badges*: title + 3–5 lines of
+what/why + a one-line "internal crate, not published to crates.io" note + a link to `AGENTS.md`.
+
+**Tone.** Plain, factual, honest about scope. State limitations rather than overselling; move the
+caveats and edge-cases into the SKILL.md / rustdoc rather than the README. Do not delete content
+when trimming — relocate it to its single-source home and link from the README.
+
 ## Reporting security issues
 
 **Do not report security vulnerabilities through public issues or PRs.** Use the private
