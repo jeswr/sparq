@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "[OPUS-4.8] PERF RATCHET — the committed best-ever FLOOR per deterministic metric (smaller is better).",
+    "[OPUS-4.8] PERF RATCHET \u2014 the committed best-ever FLOOR per deterministic metric (smaller is better).",
     "This is the source-of-record ratchet, reviewed in diffs exactly like the conformance RATCHET counts",
     "in .github/workflows/ci.yml. scripts/perf-gate.py FAILS CI when a metric exceeds floor*(1+threshold),",
     "so a sub-threshold regression EVERY commit can no longer slow-drift unbounded (the boiling-frog bug",
@@ -14,14 +14,34 @@
     "    edit this file in a reviewed PR, OR set PERF_GATE_ALLOW='metric' for that run (re-floors to current).",
     "Floors seeded 2026-06-13 from origin/benchmark-data dev/bench/data.js (57 published points): the",
     "byte metrics are dead-flat (store=92, dict=53, small=88); wasm grew 1518547->1579288 across the series",
-    "via accepted feature additions, so its floor is seeded at the latest ACCEPTED value (1579288) — future",
+    "via accepted feature additions, so its floor is seeded at the latest ACCEPTED value (1579288) \u2014 future",
     "growth beyond +2% must now be an EXPLICIT raise. parse floor = median of the recent published points."
   ],
   "metrics": {
-    "store_bytes_per_triple":       { "floor": 92,      "threshold": 0.02, "mode": "auto" },
-    "store_bytes_per_triple_small": { "floor": 88,      "threshold": 0.02, "mode": "auto" },
-    "dict_bytes_per_term":          { "floor": 53,      "threshold": 0.02, "mode": "auto" },
-    "wasm_bundle_bytes":            { "floor": 1579288, "threshold": 0.02, "mode": "auto" },
-    "parse_ns_per_byte":            { "floor": 4.95,    "threshold": 0.12, "mode": "noise" }
+    "store_bytes_per_triple": {
+      "floor": 92,
+      "threshold": 0.02,
+      "mode": "auto"
+    },
+    "store_bytes_per_triple_small": {
+      "floor": 88,
+      "threshold": 0.02,
+      "mode": "auto"
+    },
+    "dict_bytes_per_term": {
+      "floor": 53,
+      "threshold": 0.02,
+      "mode": "auto"
+    },
+    "wasm_bundle_bytes": {
+      "floor": 1579288,
+      "threshold": 0.02,
+      "mode": "auto"
+    },
+    "parse_ns_per_byte": {
+      "floor": 4.9336,
+      "threshold": 0.12,
+      "mode": "noise"
+    }
   }
 }
