@@ -204,12 +204,65 @@ def load_current(path, metric_names):
     return {b["name"]: float(b["value"]) for b in data if b["name"] in metric_names}
 
 
+def _parse_remeasure_stdout(stdout, metric_names):
+    """[OPUS-4.8] (sq-dzfu) Defensive parse of a re-measure command's stdout into {metric: float}.
+
+    The expected shape is the github-action-benchmark customSmallerIsBetter JSON: a LIST of
+    {name, unit, value} objects. This is hardened against *valid-but-unexpected* JSON so a re-measure
+    can NEVER crash the gate (the whole point of re-measure is a safety net — a broken net must degrade
+    to a no-op, not a traceback). Specifically: if the payload is not a list (e.g. `{}` — a dict), or an
+    entry is not a dict, or an entry lacks a `name`/`value` field, or `value` is non-numeric, that entry
+    is skipped (and a non-list payload yields {} — "no improvement", keeping the prior value). Returns
+    {} on any parse failure. Happy-path behaviour is identical to the previous comprehension."""
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        # The harness prints "wrote ...:" then the JSON — fall back to the first '[' onward.
+        brace = stdout.find("[")
+        if brace < 0:
+            sys.stderr.write("perf-gate: re-measure output was not valid JSON.\n")
+            return {}
+        try:
+            data = json.loads(stdout[brace:])
+        except ValueError:
+            sys.stderr.write("perf-gate: re-measure output was not valid JSON.\n")
+            return {}
+    # [OPUS-4.8] guard: a valid-but-unexpected payload (a dict like `{}`, a scalar, a list of non-dicts,
+    # entries missing `value` or with a non-numeric `value`) must degrade to a safe no-op, never raise.
+    if not isinstance(data, list):
+        sys.stderr.write(
+            f"perf-gate: re-measure JSON was not a list of metric objects (got {type(data).__name__}); "
+            "ignoring it (no improvement applied).\n"
+        )
+        return {}
+    out = {}
+    for b in data:
+        if not isinstance(b, dict):
+            sys.stderr.write("perf-gate: re-measure entry was not an object; skipping it.\n")
+            continue
+        name = b.get("name")
+        if name not in metric_names:
+            continue
+        if "value" not in b:
+            sys.stderr.write(f"perf-gate: re-measure entry {name!r} had no 'value'; skipping it.\n")
+            continue
+        try:
+            out[name] = float(b["value"])
+        except (TypeError, ValueError):
+            sys.stderr.write(
+                f"perf-gate: re-measure entry {name!r} had a non-numeric value {b['value']!r}; skipping it.\n"
+            )
+            continue
+    return out
+
+
 def make_shell_remeasure(cmd, metric_names):
     """[OPUS-4.8] (sq-dzfu) Build a remeasure callback that runs `cmd` (a shell command that re-emits the
     customSmallerIsBetter JSON to stdout) and parses the metric values back out. Returns a 0-arg fn
-    suitable for gate_with_remeasure; on a non-zero exit / unparseable output it returns {} (treated as
-    'no improvement', so a broken re-measure can only ever leave the gate where it was — never PASS a
-    real regression). Imported lazily so --self-test never needs subprocess."""
+    suitable for gate_with_remeasure; on a non-zero exit / unparseable / malformed-but-valid output it
+    returns {} or skips the bad entries (treated as 'no improvement', so a broken re-measure can only
+    ever leave the gate where it was — never PASS a real regression, never crash). Imported lazily so
+    --self-test never needs subprocess."""
     import subprocess
 
     def _run():
@@ -221,20 +274,7 @@ def make_shell_remeasure(cmd, metric_names):
         if proc.returncode != 0:
             sys.stderr.write(f"perf-gate: re-measure command exited {proc.returncode}; stderr:\n{proc.stderr}\n")
             return {}
-        try:
-            data = json.loads(proc.stdout)
-        except ValueError:
-            # The harness prints "wrote ...:" then the JSON — fall back to the first '[' onward.
-            brace = proc.stdout.find("[")
-            if brace < 0:
-                sys.stderr.write("perf-gate: re-measure output was not valid JSON.\n")
-                return {}
-            try:
-                data = json.loads(proc.stdout[brace:])
-            except ValueError:
-                sys.stderr.write("perf-gate: re-measure output was not valid JSON.\n")
-                return {}
-        return {b["name"]: float(b["value"]) for b in data if b.get("name") in metric_names}
+        return _parse_remeasure_stdout(proc.stdout, metric_names)
 
     return _run
 
@@ -629,6 +669,52 @@ def self_test():
     #     the gate where it was; it can NEVER turn a real regression into a PASS.
     regsE, _, _ = gate_with_remeasure(bad_reading, baseT, remeasure_fn=lambda: {}, k=3)
     assert [r[0] for r in regsE] == ["parse_ns_per_byte"], regsE
+
+    # ============================================================================================
+    # 14) [OPUS-4.8] (sq-dzfu) DEFENSIVE re-measure PARSE — a re-measure command that emits *valid* JSON
+    #     of an UNEXPECTED shape must degrade to a safe no-op, NEVER raise a traceback that crashes the
+    #     gate. (Copilot finding on PR #72.) `_parse_remeasure_stdout` is exactly what the shell
+    #     re-measure callback uses, so testing it directly covers the production path without subprocess.
+    # --------------------------------------------------------------------------------------------
+    mset = {"parse_ns_per_byte"}
+    # happy path is UNCHANGED: a well-formed list of metric objects parses to {name: float}.
+    assert _parse_remeasure_stdout(
+        '[{"name":"parse_ns_per_byte","unit":"ns/byte","value":4.95}]', mset
+    ) == {"parse_ns_per_byte": 4.95}
+    # valid JSON but a DICT (e.g. `{}`) — not a list -> {} (no-op), no crash.
+    assert _parse_remeasure_stdout("{}", mset) == {}
+    assert _parse_remeasure_stdout('{"parse_ns_per_byte": 4.95}', mset) == {}
+    # valid JSON scalar / null -> {} (no-op), no crash.
+    assert _parse_remeasure_stdout("42", mset) == {}
+    assert _parse_remeasure_stdout("null", mset) == {}
+    # a list with a NON-DICT entry is skipped (the good sibling still parses), no crash.
+    assert _parse_remeasure_stdout(
+        '["oops", {"name":"parse_ns_per_byte","value":4.95}]', mset
+    ) == {"parse_ns_per_byte": 4.95}
+    # an entry MISSING the `value` field is skipped -> {} (no-op), no crash.
+    assert _parse_remeasure_stdout('[{"name":"parse_ns_per_byte","unit":"ns/byte"}]', mset) == {}
+    # an entry with a NON-NUMERIC `value` is skipped -> {} (no-op), no crash.
+    assert _parse_remeasure_stdout('[{"name":"parse_ns_per_byte","value":"fast"}]', mset) == {}
+    assert _parse_remeasure_stdout('[{"name":"parse_ns_per_byte","value":null}]', mset) == {}
+    # genuinely-unparseable text (no JSON, no '[') -> {} (no-op), no crash.
+    assert _parse_remeasure_stdout("error: build failed", mset) == {}
+    # the harness "wrote ...:" preamble before a good list still parses (fallback to first '[').
+    assert _parse_remeasure_stdout(
+        'wrote results: [{"name":"parse_ns_per_byte","value":4.95}]', mset
+    ) == {"parse_ns_per_byte": 4.95}
+    # END-TO-END: a malformed-but-valid re-measure ({}) feeding the gate is a safe no-op on a real
+    # regression (can't crash, can't turn a regression into a PASS) — and a GOOD re-measure still
+    # improves the metric (parsed straight out of customSmallerIsBetter JSON).
+    regsF, _, _ = gate_with_remeasure(
+        bad_reading, baseT,
+        remeasure_fn=lambda: _parse_remeasure_stdout("{}", {"parse_ns_per_byte"}), k=3)
+    assert [r[0] for r in regsF] == ["parse_ns_per_byte"], regsF  # malformed -> no-op, regression stands
+    regsG, _, effG = gate_with_remeasure(
+        spike, baseT,
+        remeasure_fn=lambda: _parse_remeasure_stdout(
+            '[{"name":"parse_ns_per_byte","unit":"ns/byte","value":4.95}]', {"parse_ns_per_byte"}), k=4)
+    assert regsG == [], regsG                            # good re-measure cleared the band -> PASS
+    assert effG["parse_ns_per_byte"] == 4.95, effG       # ...and improved the metric to the true value
 
     print("perf-gate self-test: ALL ASSERTIONS PASSED")
     return 0
