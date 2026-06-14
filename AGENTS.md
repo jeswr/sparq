@@ -118,6 +118,12 @@ Do NOT wait to be told. Whenever you notice a **repeated behaviour, a standing r
 
 When orchestrating, run agents and long shell commands (builds, gates, fetches, watches) **in the background** by default, and parallelise independent work. A foreground/blocking call stalls the loop and prevents picking up new instructions or other ready beads meanwhile. Reserve foreground for genuinely sequential, short glue. (Continues the delegation + continuous-loop rules above.)
 
+**Reconcile finished-but-unnotified agents.** Completion notifications can occasionally not surface. Don't wait indefinitely on a background agent: if it's gone quiet, check the real state — `git worktree list`, the branch's last commit (`git log -1 <branch>`), and whether any of its processes are still alive (`pgrep -af cargo`). A committed branch + no live process = done; verify with your own gate and merge. (Trust ground truth over the notification stream.)
+
+## Monitor CI after every push to main — and fix red
+
+A local gate is necessary but NOT sufficient: CI runs on a clean checkout with different toolchains/targets/feature-unification than your incrementally-built box, so it catches things your local gate cannot (e.g. a `cargo test --workspace` that includes a crate your local gate `--exclude`s; a wasm-target-only lint; an action container with an older cargo). Therefore: **after pushing to main, watch the CI runs to completion and fix any failure immediately** — a red main is a stop-the-line condition. `gh run watch <id> --exit-status` (background) or `gh run list --branch main`; on failure `gh run view <id> --log-failed`. Roll the fix into the next push and re-watch. Do not pile more pushes onto a red main.
+
 ## Maximise parallelism — many agents + extra compute
 
 Aim to keep **as many sub-agents running in parallel as possible** without (a) conflicting work or (b) competing for the same resource. Partition by **file/area ownership** so no two concurrent agents edit the same file (give each a distinct crate/dir; wire shared files — `ci-bench.sh`, `benchmarks.toml`, workflows, `AGENTS.md` — centrally afterward). The only things to serialise: two agents that must touch the same file, and CPU-heavy **wall-clock measurements** (benchmarks need a quiet box — read-only/light analysis parallelises freely). Don't sit at one or two agents when the `bd ready` set has more independent work — fan out.
