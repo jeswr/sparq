@@ -26,9 +26,14 @@
 # (sq-9jw5), so they advise until their scope is clean, then flip to HARD.
 #
 # ci-summary aggregation: it polls every check-run on the head commit and fails iff one
-# concluded failure. A job with `continue-on-error: true` reports conclusion=success to
-# the Checks API even when its steps fail, so the ADVISORY jobs below are invisible to
-# the gate by construction — no extra wiring needed.
+# concluded failure. So every ADVISORY job must CONCLUDE SUCCESS or it would block the
+# gate. JOB-level `continue-on-error: true` is NOT sufficient — it stops the run from
+# failing but the job's check-run still concludes `failure` (verified: vale showed as a
+# failing check on PR #42). Therefore advisory jobs make their findings non-fatal AT THE
+# STEP: script steps end with `|| true` (markdownlint-advisory, custom-checks); action
+# steps that exit non-zero on findings (vale/reviewdog) carry step-level
+# `continue-on-error: true`. (lychee uses `fail: false`.) Job-level continue-on-error is
+# kept as defence-in-depth. [OPUS-4.8]
 #
 # Third-party actions are pinned by full commit SHA with a trailing `# vX.Y.Z`
 # (repo hard rule, #34) so the supply chain + Scorecard/CodeQL stay green.
@@ -157,6 +162,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Vale prose lint (vendored styles, no network)
+        # [OPUS-4.8] STEP-level continue-on-error: reviewdog exits 1 on findings, and
+        # JOB-level continue-on-error does NOT make the job's check-run conclude success
+        # (it only stops the run from failing) — so ci-summary, which fails iff any
+        # check-run concluded failure, would wrongly block on this advisory job. Swallowing
+        # at the step makes the job conclude success while the findings still print.
+        continue-on-error: true
         uses: errata-ai/vale-action@85f9f7f2c5f449ac0ae5b66662961bae3f77ca6a # v2.1.2
         with:
           version: 3.9.1

@@ -53,7 +53,7 @@ API gateway, or [`sparq-solid`](../sparq-solid/README.md)). Concretely:
   clause reaches **nothing** unless its host is on the egress allowlist. A `SERVICE` clause turns
   attacker-controlled query text into an outbound request from the server host (textbook SSRF;
   worst case `169.254.169.254` cloud-metadata), so the operator must opt in to every reachable
-  host. Configure the allowlist with any of (UNIONed, additive):
+  host. Configure the allowlist with any of the following (combined additively):
   * `--service-allow HOST` / `--service-allow *.SUFFIX` — repeatable; exact host or suffix wildcard;
   * `--service-allow-file PATH` — one entry per line (`#` comments + blanks ignored);
   * `SPARQ_SERVICE_ALLOW` — comma/whitespace-separated.
