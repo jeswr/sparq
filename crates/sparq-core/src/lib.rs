@@ -1154,8 +1154,20 @@ impl Graph {
             return Err(bad(&format!("unsupported format version {version} (this build writes/reads {NAMED_FORMAT_VERSION})")));
         }
         let count = u32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes")) as usize;
+        // [OPUS-4.8] (Copilot review #69, finding 3) `count` is attacker-controlled: a corrupt
+        // or hostile manifest can declare a huge count behind a tiny file, and the old
+        // `Vec::with_capacity(count)` would attempt a multi-GB reservation (OOM/abort) BEFORE
+        // any per-entry bounds check ran. Each entry costs >= MIN_MANIFEST_ENTRY_BYTES on disk
+        // (kind byte + u32 length prefix, zero-length value), so the post-header byte count is
+        // a hard upper bound on how many entries can possibly follow — clamp the reservation to
+        // it. The decode loop below still errors cleanly via `decode_graph_name`'s bounds checks
+        // if the file actually ends early, so a count the file can't back is a clean
+        // `InvalidData` (truncated manifest), never an OOM. Same defensive idiom as
+        // `Dict::open_mmap` (dict.rs) and the rest of the corruption-hardened `open` path.
+        let remaining = bytes.len() - 12;
+        let cap = count.min(remaining / MIN_MANIFEST_ENTRY_BYTES);
         let named_dir = dir.join(NAMED_SUBDIR);
-        let mut out = Vec::with_capacity(count);
+        let mut out = Vec::with_capacity(cap);
         let mut pos = 12usize;
         for i in 0..count {
             let (name, next) = decode_graph_name(&bytes, pos).map_err(|m| bad(&m))?;
@@ -1948,11 +1960,19 @@ impl Graph {
         // Persist an empty sub-graph, then open it so it carries its own WAL.
         let empty = Graph::from_parts(Dict::new(), Vec::new());
         empty.save(&sub_dir).map_err(|e| e.to_string())?;
+        // fsync `dir/named/` so the new sub-graph DIRECTORY's existence is durable before the
+        // manifest names it (otherwise a crash could leave the manifest pointing at a dir whose
+        // creation never reached disk).
+        fsync_dir(&named_dir).map_err(|e| e.to_string())?;
         // Rewrite the manifest with the new entry appended (index order == named order).
+        // [OPUS-4.8] (Copilot review #69, finding 2) `named.bin` lives in the PARENT `dir`, not
+        // in `dir/named/`. The old code only fsync'd `dir/named/`, so a crash could lose the
+        // manifest entry even though the sub-graph was on disk. `write_named_manifest` now does
+        // an atomic temp+rename AND fsyncs the parent `dir` (the dir that holds `named.bin`), so
+        // the manifest entry — the recovery commit point — is itself durable.
         let mut names: Vec<Term> = self.named.iter().map(|(n, _)| n.clone()).collect();
         names.push(name.clone());
         write_named_manifest(dir, &names).map_err(|e| e.to_string())?;
-        fsync_dir(&named_dir).map_err(|e| e.to_string())?;
         Graph::open(&sub_dir).map_err(|e| e.to_string())
     }
 
@@ -2104,6 +2124,11 @@ fn recover_compaction(dir: &std::path::Path) -> std::io::Result<()> {
 const NAMED_SUBDIR: &str = "named";
 #[cfg(feature = "mmap")]
 const NAMED_MANIFEST: &str = "named.bin";
+/// [OPUS-4.8] (Copilot review #69, finding 1) Temp filename for the ATOMIC manifest write: the
+/// full image is written here, fsync'd, then renamed over [`NAMED_MANIFEST`] so a crash
+/// mid-write never leaves a partial/corrupt `named.bin`. See [`write_named_manifest`].
+#[cfg(feature = "mmap")]
+const NAMED_MANIFEST_TMP: &str = "named.bin.tmp";
 /// Manifest magic ("NMG1" little-endian) — identifies a named-graph manifest and lets a
 /// stray/legacy file be rejected rather than misread.
 #[cfg(feature = "mmap")]
@@ -2112,13 +2137,30 @@ const NAMED_MANIFEST_MAGIC: u32 = 0x31_47_4D_4E;
 /// incompatibly; `open_named` refuses an unknown version rather than silently misreading.
 #[cfg(feature = "mmap")]
 const NAMED_FORMAT_VERSION: u32 = 1;
+/// [OPUS-4.8] (Copilot review #69, finding 3) Smallest possible on-disk size of one manifest
+/// entry: `[kind u8][len u32]` (1 + 4) with a zero-length value. The post-header byte count
+/// divided by this is a hard upper bound on the entry count, so `open_named` clamps its
+/// pre-allocation to it — a hostile `count` field can never drive an unbounded reservation.
+#[cfg(feature = "mmap")]
+const MIN_MANIFEST_ENTRY_BYTES: usize = 5;
 
 /// [OPUS-4.8] (sq-3ui0) Writes the named-graph manifest `dir/named.bin`: the magic +
 /// format version + count, then each graph name in order (see [`encode_graph_name`]). The
 /// sub-graph directories `dir/named/<i>/` must already be durable before this is called —
 /// the manifest's presence is the commit point for the named-graph set.
+///
+/// [OPUS-4.8] (Copilot review #69, findings 1+2) The write is ATOMIC and DURABLE: a plain
+/// `std::fs::write` truncates `named.bin` IN PLACE, so a crash mid-write leaves a partial
+/// (corrupt) manifest that `open_named` then rejects as `InvalidData` — bricking the dataset.
+/// Instead we write the full image to a sibling `named.bin.tmp`, fsync IT (its bytes are
+/// durable), `rename` it over `named.bin` (the rename is atomic — a reader sees either the old
+/// complete manifest or the new complete manifest, never a torn one), then fsync the PARENT
+/// `dir` (which is what actually contains `named.bin`) so the rename — i.e. the commit point of
+/// the whole named-graph set — survives a crash. This is the same temp-file + fsync + rename +
+/// dir-fsync discipline the compaction directory-swap uses (`Graph::compact`).
 #[cfg(feature = "mmap")]
 fn write_named_manifest(dir: &std::path::Path, names: &[Term]) -> std::io::Result<()> {
+    use std::io::Write;
     let mut buf = Vec::with_capacity(12 + names.len() * 32);
     buf.extend_from_slice(&NAMED_MANIFEST_MAGIC.to_le_bytes());
     buf.extend_from_slice(&NAMED_FORMAT_VERSION.to_le_bytes());
@@ -2126,7 +2168,20 @@ fn write_named_manifest(dir: &std::path::Path, names: &[Term]) -> std::io::Resul
     for name in names {
         encode_graph_name(&mut buf, name);
     }
-    std::fs::write(dir.join(NAMED_MANIFEST), &buf)
+    let final_path = dir.join(NAMED_MANIFEST);
+    let tmp_path = dir.join(NAMED_MANIFEST_TMP);
+    // Write the full image to a sibling temp file and fsync its CONTENTS before the rename, so
+    // the bytes the rename publishes are already durable (a crash can't surface a
+    // zero-length/partial file under the canonical name).
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+    }
+    // Atomically publish: rename can't tear, so `named.bin` is always a COMPLETE manifest.
+    std::fs::rename(&tmp_path, &final_path)?;
+    // fsync the dir holding `named.bin` so the rename (the commit) is itself durable.
+    fsync_dir(dir)
 }
 
 /// [OPUS-4.8] (sq-3ui0) Serialise a graph-name term into the manifest buffer as
@@ -4258,6 +4313,75 @@ mod tests {
             Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "unknown version must be a hard InvalidData error"),
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (Copilot review #69, finding 3) A hostile/corrupt manifest that declares a
+    /// HUGE entry `count` behind a tiny file must fail as a clean `InvalidData` (truncated)
+    /// error — NEVER an unbounded `Vec::with_capacity` allocation (OOM/abort). The reservation
+    /// is clamped to the file's remaining length, and the decode loop then errors on the
+    /// missing entry bytes.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn named_manifest_hostile_count_is_bounded_not_oom() {
+        let nq = "<http://res/x> <http://ex/p> <http://ex/o> <http://res/x> .\n";
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+        let dir = std::env::temp_dir().join(format!("sparq_named_hostile_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        g.save(&dir).unwrap();
+        // Set the count field (bytes 8..12) to ~4 billion — a real `with_capacity(count)` would
+        // try to reserve tens of GB (an uncatchable abort) before any bounds check ran.
+        let mut bytes = std::fs::read(dir.join("named.bin")).unwrap();
+        bytes[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(dir.join("named.bin"), &bytes).unwrap();
+        // Must return cleanly (the clamp + the bounded decode loop), not OOM/panic.
+        match Graph::open(&dir) {
+            Ok(_) => panic!("a manifest whose count exceeds the file must NOT open"),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::InvalidData,
+                "a hostile count must be a clean InvalidData error (truncated manifest), not an OOM"
+            ),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (Copilot review #69, findings 1+2) The manifest write is ATOMIC: it goes
+    /// through a temp file + rename, so the canonical `named.bin` is always a COMPLETE image,
+    /// never a torn one. This asserts the temp file is cleaned up (renamed away, not left
+    /// behind) and that a simulated CRASH that leaves a stale `named.bin.tmp` behind does NOT
+    /// affect a subsequent open (the canonical manifest is the only commit point).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn named_manifest_write_is_atomic_temp_then_rename() {
+        let nq = concat!(
+            "<http://ex/d> <http://ex/p> <http://ex/o> .\n",
+            "<http://res/x> <http://ex/p> <http://ex/ox> <http://res/x> .\n",
+            "<http://res/y> <http://ex/p> <http://ex/oy> <http://res/y> .\n",
+        );
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+        let dir = std::env::temp_dir().join(format!("sparq_named_atomic_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        g.save(&dir).unwrap();
+        // The atomic write must leave the canonical manifest and NO leftover temp file.
+        assert!(dir.join("named.bin").exists(), "canonical manifest missing after atomic write");
+        assert!(!dir.join("named.bin.tmp").exists(), "temp manifest must be renamed away, not left behind");
+        // Simulate a crash mid-write of a *previous* attempt: a stale, GARBAGE temp file is on
+        // disk. It must be IGNORED on open (only `named.bin` is the commit point) — `open_named`
+        // reads `named.bin`, never `named.bin.tmp`, so the torn temp can never be misread.
+        std::fs::write(dir.join("named.bin.tmp"), b"torn-garbage-not-a-manifest").unwrap();
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g2.named.len(), 2, "stale temp file must not affect the open");
+        // A fresh atomic write (into a clean dir) must leave NO leftover temp file: the rename
+        // consumed it. (We save the in-memory copy to a SEPARATE dir — re-saving an mmap'd
+        // graph back over its own source files is unsupported on every save path here.)
+        let dir2 = std::env::temp_dir().join(format!("sparq_named_atomic2_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir2).ok();
+        g.save(&dir2).unwrap();
+        assert!(!dir2.join("named.bin.tmp").exists(), "atomic write must rename the temp file away");
+        let g3 = Graph::open(&dir2).unwrap();
+        assert_eq!(g3.named.len(), 2, "named graphs lost after atomic write");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir2).ok();
     }
 
     /// [OPUS-4.8] (sq-3ui0, gh-45) PER-GRAPH WAL durability: a NEW named graph created via
