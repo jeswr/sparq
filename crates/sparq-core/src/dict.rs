@@ -856,7 +856,12 @@ impl Dict {
     /// Interns an RDF 1.2 triple term whose components are ALREADY interned in this dict
     /// (ids may include inline-integer ids). Content-addressed by the component ids, so
     /// separately-interned identical triples share one id.
-    fn intern_triple_ids(&mut self, ids: [Id; 3]) -> Id {
+    ///
+    /// [OPUS-4.8] `pub(crate)` so the byte-level N-Triples parser (`nt`) can intern a
+    /// `<<( s p o )>>` triple-term object STRUCTURALLY (interning s/p/o first, then the
+    /// triple by their ids) — the identical path `intern(&Term::Triple(_))` takes — so the
+    /// N-Triples and Turtle loaders agree on triple-term content-addressing.
+    pub(crate) fn intern_triple_ids(&mut self, ids: [Id; 3]) -> Id {
         let hash = hash_triple_ids(ids);
         if let Some(id) = self.find_triple_ids(hash, ids) {
             return id;
@@ -890,9 +895,12 @@ impl Dict {
     /// concatenating the IRI — the fast path used by the sharded parallel merge.
     ///
     /// Triple terms are NOT supported here: `TermParts::Triple` carries ids of the
-    /// SOURCE dict, which are meaningless in another dict. The callers that feed this
-    /// (the sharded N-Triples bulk loaders) can never produce one — the byte-level
-    /// N-Triples parser rejects RDF-star syntax — so this is a loud guard, not a path.
+    /// SOURCE dict, which are meaningless in another dict. [OPUS-4.8] (sq-hxgb) The
+    /// byte-level N-Triples parser now ACCEPTS `<<( … )>>` triple-term objects, so a
+    /// partial dict CAN contain one — but the loader detects that (`has_triple_terms`)
+    /// and routes such documents to the SERIAL `merge_remap` (which interns triple terms
+    /// structurally), so the sharded parts-based path is never reached for them. This
+    /// remains a loud guard, not a path.
     #[inline]
     fn intern_parts(&mut self, tp: &TermParts) -> Id {
         match tp {
@@ -1447,6 +1455,18 @@ impl Dict {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// [OPUS-4.8] (sq-hxgb) Whether this dict stores any RDF 1.2 triple term
+    /// (`Stored::Triple`). The parallel N-Triples loader checks each parsed PARTIAL with
+    /// this to pick the merge path: the SHARDED merge cannot consolidate triple terms
+    /// (a triple's components are both hash-routed to a shard AND referenced by the
+    /// triple, breaking the term↔id bijection on merge — see `intern_partials`), so a
+    /// document that contains any triple term falls back to the serial `merge_remap`,
+    /// which interns triple terms structurally and correctly. Arena-mode (partial) dicts
+    /// only — that is all the loader ever inspects here.
+    pub(crate) fn has_triple_terms(&self) -> bool {
+        self.terms.iter().any(|s| matches!(s, Stored::Triple(_)))
     }
 
     /// Iterates every REAL dictionary term in id order as `(id, parts)` — the official

@@ -6,6 +6,12 @@
 //! a byte buffer can be split at newlines and parsed in parallel).
 //!
 //! Blank-node labels are kept verbatim (file-scoped, as the loader folds one document).
+//!
+//! [OPUS-4.8] (sq-hxgb) RDF 1.2 triple terms `<<( s p o )>>` are accepted in the OBJECT
+//! position (object-only, may nest), interned structurally to agree with the Turtle loader
+//! and the engine's CONSTRUCT N-Triples serializer (which emits this form). The fast plain-
+//! triple path is unchanged: a triple term is only looked for when the object byte is `<`
+//! AND the next two bytes are `<(`, so a plain `<…>` IRI pays just two extra byte peeks.
 
 use crate::dict::{Dict, Id};
 use std::borrow::Cow;
@@ -29,7 +35,10 @@ pub fn parse_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String
         i = skip_ws(bytes, j);
         let (p, j) = term(bytes, i, dict)?;
         i = skip_ws(bytes, j);
-        let (o, j) = term(bytes, i, dict)?;
+        // [OPUS-4.8] (sq-hxgb) Only the OBJECT position may be an RDF 1.2 triple term
+        // `<<( s p o )>>` (matching the Turtle loader / RDF 1.2 grammar — triple terms
+        // are object-only and may nest through their own object).
+        let (o, j) = object_term(bytes, i, dict)?;
         i = skip_ws(bytes, j);
         if i >= n || bytes[i] != b'.' {
             return Err(format!("N-Triples: expected '.' at byte {i}"));
@@ -67,6 +76,40 @@ fn term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
         Some(b'_') => blank(b, i, dict),
         Some(b'"') => literal(b, i, dict),
         _ => Err(format!("N-Triples: unexpected term start at byte {i}")),
+    }
+}
+
+/// [OPUS-4.8] (sq-hxgb) Parses a term in the OBJECT position, where (and only where) RDF 1.2
+/// N-Triples permits a triple term `<<( s p o )>>`. The `<<(` opener disambiguates a triple
+/// term from a plain IRIREF (`<…>`); anything else falls through to the shared [`term`] path.
+fn object_term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
+    if b.get(i) == Some(&b'<') && b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') {
+        triple_term(b, i, dict)
+    } else {
+        term(b, i, dict)
+    }
+}
+
+/// [OPUS-4.8] (sq-hxgb) Parses an RDF 1.2 triple term `<<( s p o )>>` and interns it
+/// STRUCTURALLY (subject/predicate/object interned first, then the triple by their ids — the
+/// same `Dict::intern_triple_ids` path `intern(&Term::Triple(_))` and the Turtle loader take,
+/// so the two loaders content-address triple terms identically). The subject is an IRI or
+/// blank node, the predicate an IRI, and the object any term — including a NESTED triple term
+/// (recursion through `object_term`). Returns the interned id and the index past the `>>`.
+fn triple_term(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
+    // Skip the `<<(` opener.
+    let mut j = skip_ws(b, i + 3);
+    let (s, k) = term(b, j, dict)?;
+    j = skip_ws(b, k);
+    let (p, k) = term(b, j, dict)?;
+    j = skip_ws(b, k);
+    let (o, k) = object_term(b, j, dict)?;
+    j = skip_ws(b, k);
+    // Closer `)>>`.
+    if b.get(j) == Some(&b')') && b.get(j + 1) == Some(&b'>') && b.get(j + 2) == Some(&b'>') {
+        Ok((dict.intern_triple_ids([s, p, o]), j + 3))
+    } else {
+        Err(format!("N-Triples: expected ')>>' closing triple term at byte {j}"))
     }
 }
 
@@ -184,4 +227,84 @@ fn hex(it: &mut std::str::Chars<'_>, n: usize) -> Result<char, String> {
         cp = cp * 16 + d;
     }
     char::from_u32(cp).ok_or_else(|| "N-Triples: invalid code point".into())
+}
+
+// [OPUS-4.8] (sq-hxgb) Triple-term parsing in the OBJECT position: structural interning,
+// nesting, blank-node components, fast-path-unchanged, and the rejection cases.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdf::{BlankNode, Literal, NamedNode, Term, Triple};
+
+    fn iri(s: &str) -> Term {
+        Term::NamedNode(NamedNode::new_unchecked(s))
+    }
+
+    #[test]
+    fn triple_term_object_parses_and_interns_structurally() {
+        // The exact byte form the CONSTRUCT serializer emits.
+        let nt = b"<http://ex/r1> <http://ex/reifies> <<( <http://ex/alice> <http://ex/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        assert_eq!(t.len(), 1);
+        let [s, p, o] = t[0];
+        assert_eq!(d.term(s), iri("http://ex/r1"));
+        assert_eq!(d.term(p), iri("http://ex/reifies"));
+        // Object is a structural Term::Triple — not a literal or opaque IRI.
+        let want = Term::Triple(Box::new(Triple::new(
+            NamedNode::new_unchecked("http://ex/alice"),
+            NamedNode::new_unchecked("http://ex/age"),
+            Term::Literal(Literal::new_typed_literal("30", NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"))),
+        )));
+        assert_eq!(d.term(o), want);
+        // Content-addressed: re-interning the identical term shares the id.
+        assert_eq!(d.lookup(&want), o);
+    }
+
+    #[test]
+    fn nested_and_blank_node_triple_terms_parse() {
+        let nt = b"<http://ex/r> <http://ex/p> <<( _:b0 <http://ex/q> <<( <http://ex/a> <http://ex/b> <http://ex/c> )>> )>> .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        assert_eq!(t.len(), 1);
+        let inner = Term::Triple(Box::new(Triple::new(
+            NamedNode::new_unchecked("http://ex/a"),
+            NamedNode::new_unchecked("http://ex/b"),
+            iri("http://ex/c"),
+        )));
+        let outer = Term::Triple(Box::new(Triple::new(
+            BlankNode::new_unchecked("b0"),
+            NamedNode::new_unchecked("http://ex/q"),
+            inner,
+        )));
+        assert_eq!(d.term(t[0][2]), outer);
+    }
+
+    #[test]
+    fn plain_triples_unaffected() {
+        // A plain IRI object (`<…>`) must NOT be mistaken for a triple term, and a literal
+        // object beginning with `<`-free bytes parses as before.
+        let nt = b"<http://ex/s> <http://ex/p> <http://ex/o> .\n<http://ex/s> <http://ex/p> \"v\" .\n";
+        let mut d = Dict::new();
+        let t = parse_chunk(nt, &mut d).unwrap();
+        assert_eq!(t.len(), 2);
+        assert_eq!(d.term(t[0][2]), iri("http://ex/o"));
+        assert_eq!(d.term(t[1][2]), Term::Literal(Literal::new_simple_literal("v")));
+    }
+
+    #[test]
+    fn unterminated_triple_term_errors() {
+        let nt = b"<http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/b> <http://ex/c> .\n";
+        let mut d = Dict::new();
+        assert!(parse_chunk(nt, &mut d).is_err(), "missing )>> must error, not silently accept");
+    }
+
+    #[test]
+    fn triple_term_only_in_object_position() {
+        // A `<<(` in SUBJECT position is not a valid term start for `term` (subjects are
+        // never triple terms in RDF 1.2) — the parser must reject it rather than misparse.
+        let nt = b"<<( <http://ex/a> <http://ex/b> <http://ex/c> )>> <http://ex/p> <http://ex/o> .\n";
+        let mut d = Dict::new();
+        assert!(parse_chunk(nt, &mut d).is_err(), "triple term in subject position must be rejected");
+    }
 }
