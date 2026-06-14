@@ -67,7 +67,7 @@ standard it implements.
 - **SPARQL Update** — insert, delete, and load data with
   [SPARQL 1.1 Update](https://www.w3.org/TR/sparql11-update/)
   ([guide](skills/sparql-query/SKILL.md)).
-- **RDF parsing & serialisation** — read and write Turtle, N-Triples, N-Quads, and TriG, with
+- **RDF parsing & ingest** — load and parse Turtle, N-Triples, N-Quads, and TriG, with
   transparent `.gz` / `.bz2` / `.zst` decompression ([guide](skills/data-formats/SKILL.md)).
 - **RDF-star / quoted triples** — store and query triple terms per
   [RDF 1.2 Concepts](https://www.w3.org/TR/rdf12-concepts/) ([guide](skills/sparql-query/SKILL.md)).
