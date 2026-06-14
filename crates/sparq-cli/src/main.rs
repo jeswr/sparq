@@ -369,6 +369,12 @@ fn cmd_build(args: &[String]) {
             std::process::exit(2);
         }
     };
+    // [OPUS-4.8] `build` calls Graph::build_external directly (not load_quiet), which shares
+    // the same Turtle catch-all — so reject an unknown format here too (bug sq-q50l). HDT is
+    // not a build target (build streams text formats), so it is excluded from the accepted set.
+    if !is_known_format(format) || format == "hdt" {
+        die_unknown_format(format);
+    }
     let chunk = args.get(5).and_then(|s| s.parse::<usize>().ok()).unwrap_or(16) * 1_000_000;
 
     let file = std::fs::File::open(path).unwrap_or_else(|e| {
@@ -726,6 +732,36 @@ fn cmd_query_mmap(args: &[String]) {
     }
 }
 
+/// [OPUS-4.8] Whether `format` is an RDF serialization this CLI accepts. Kept in lock-step
+/// with the format arms in `load_quiet` / `cmd_build` and with `sparq_core::parse_to_triples`.
+/// `parse_to_triples` falls back to Turtle for ANY unrecognised string, so the CLI must
+/// gate on this set itself to honour the "unsupported format → non-zero exit" contract.
+fn is_known_format(format: &str) -> bool {
+    matches!(
+        format,
+        "hdt"
+            | "ntriples"
+            | "n-triples"
+            | "nquads"
+            | "n-quads"
+            | "trig"
+            | "application/trig"
+            | "turtle"
+            | "ttl"
+            | "text/turtle"
+            | "application/turtle"
+    )
+}
+
+/// [OPUS-4.8] Report an unknown `--format` value and exit 2 (usage error).
+fn die_unknown_format(format: &str) -> ! {
+    eprintln!(
+        "unknown format '{format}' (known: turtle | ntriples | nquads | trig{})",
+        if cfg!(feature = "hdt") { " | hdt" } else { "" }
+    );
+    std::process::exit(2);
+}
+
 /// Opens a (possibly compressed) RDF document as a streaming reader. `.gz`/`.bz2`/`.zst[d]` are
 /// decompressed transparently on the fly — the decompressed bytes are never all held at once.
 fn open_reader(path: &str) -> std::io::Result<Box<dyn std::io::Read + Send>> {
@@ -748,6 +784,15 @@ fn load_quiet(path: &str, format: &str) -> sparq_core::Graph {
         eprintln!("error loading {path}: {e}");
         std::process::exit(1);
     };
+    // [OPUS-4.8] Reject an unknown format argument up-front (exit 2 = usage error).
+    // sparq-core's `parse_to_triples` treats ANY unrecognised format string as Turtle
+    // (a catch-all `_ => Turtle` arm), so without this guard a typo'd / unsupported
+    // format value would SILENTLY parse the input as Turtle and exit 0 — the opposite
+    // of the "unsupported format → non-zero exit" CLI contract (bug sq-q50l).
+    let ext_routed = path.ends_with(".hdt") || path.ends_with(".hdt.gz");
+    if !is_known_format(format) && !ext_routed {
+        die_unknown_format(format);
+    }
     // HDT archives — `hdt` as the format argument, or a `.hdt`/`.hdt.gz` file
     // extension — route through sparq-hdt (gzip is sniffed by magic bytes
     // there, so a mislabelled extension still loads). Opt-in cargo feature:
