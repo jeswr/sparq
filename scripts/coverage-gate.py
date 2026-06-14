@@ -120,8 +120,10 @@ def seed(summary_path, floor_path, allow_lower):
         "_comment": [
             "[OPUS-4.8] COVERAGE RATCHET (sq-hbg7) — committed per-crate line-coverage "
             "FLOOR, reviewed in diffs exactly like the conformance ratchet counts in "
-            ".github/workflows/ci.yml. scripts/coverage-gate.py --check FAILS CI when a "
-            "crate's measured line% drops below its floor.",
+            ".github/workflows/ci.yml. CI runs scripts/coverage-gate.py --check-robust "
+            "(sq-x4jy): it re-measures ONLY the sub-floor crates up to K=3 times and keeps "
+            "the per-crate MAX (llvm-cov only undercounts), FAILING only if a crate is "
+            "STILL below its floor after K independent measurements — a genuine regression.",
             f"Floor = floor(measured) - {MARGIN} (min 0): a small margin so run-to-run / "
             "toolchain noise never trips the gate. The floor only ever RISES "
             "(--seed will not lower it without --allow-lower).",
