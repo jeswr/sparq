@@ -18,7 +18,9 @@
 //!    predicates ([`vocab`]): `?lit text:matches "query"` (AND of tokens,
 //!    `*`-suffix prefix tokens), `?lit text:matchesAny "query"` (OR),
 //!    `?lit text:phrase "foo bar"` (adjacent, in-order tokens — needs a
-//!    positions-enabled index), and `?lit text:score ?s` (the BM25 score).
+//!    positions-enabled index), `?lit text:near "foo bar"` (proximity/slop:
+//!    in-order within a bounded gap, relevance-ranked — `text:slop N` sets the
+//!    gap budget), and `?lit text:score ?s` (the relevance score). [OPUS-4.8]
 //!    [`query_text`] rewrites them into
 //!    inline `VALUES` over the index's hits at the spargebra-algebra level and
 //!    executes through sparq-engine's prepared-query seam
@@ -57,8 +59,26 @@ pub mod vocab {
     /// time. No `text:score` companion (a phrase match is boolean adjacency).
     /// [OPUS-4.8]
     pub const PHRASE: &str = "http://sparq.dev/text#phrase";
-    /// `?lit text:score ?s` — binds the BM25 score of `?lit`'s match (must
-    /// accompany exactly one `text:matches`/`text:matchesAny` on the same
-    /// subject variable in the same basic graph pattern).
+    /// `?lit text:near "foo bar"` — the proximity/slop generalisation of
+    /// `text:phrase`: literals where the tokens occur IN ORDER within a bounded
+    /// total gap, RELEVANCE-RANKED (tighter clustering scores higher). The gap
+    /// budget defaults to [`DEFAULT_SLOP`](crate::rewrite::DEFAULT_SLOP); set it
+    /// with a `?lit text:slop N` companion (a non-negative integer literal) on
+    /// the same subject variable in the same basic graph pattern. Unlike
+    /// `text:phrase` (boolean adjacency) it IS scored, so it also takes an
+    /// optional `text:score ?s` companion. Requires a positions-enabled index
+    /// ([`TextIndex::build_with_positions`]); `text:near "foo bar"` at slop 0 is
+    /// exactly `text:phrase "foo bar"`. [OPUS-4.8]
+    pub const NEAR: &str = "http://sparq.dev/text#near";
+    /// `?lit text:slop N` — sets the proximity gap budget for the `text:near`
+    /// on the same subject variable in the same basic graph pattern (a
+    /// non-negative `xsd:integer`). Only meaningful alongside `text:near`.
+    /// [OPUS-4.8]
+    pub const SLOP: &str = "http://sparq.dev/text#slop";
+    /// `?lit text:score ?s` — binds the relevance score of `?lit`'s match: the
+    /// BM25 score for a `text:matches`/`text:matchesAny`, or the proximity score
+    /// for a `text:near` (`1/(1+gap)`). Must accompany exactly one such scored
+    /// match on the same subject variable in the same basic graph pattern. NOT
+    /// valid for `text:phrase` (boolean adjacency, unscored). [OPUS-4.8]
     pub const SCORE: &str = "http://sparq.dev/text#score";
 }

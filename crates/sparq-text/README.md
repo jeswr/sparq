@@ -34,6 +34,8 @@ for hit in &hits {
 let pidx = TextIndex::build_with_positions(&graph);
 let ids  = pidx.phrase("quick brown fox"); // literal ids where the tokens are
                                            // adjacent & in order (ascending ids)
+// Proximity/slop: the ranked, bounded-gap variant over the same positions.
+let near = pidx.phrase_near("quick fox", 2); // Vec<Hit>, best-first; score 1/(1+gap)
 
 
 // Incremental upkeep, mirroring Graph::apply_delta (the GeoIndex shape):
@@ -49,8 +51,10 @@ The magic predicates live under `http://sparq.dev/text#`:
 | --- | --- |
 | `?lit text:matches "q"` | `?lit` ranges over indexed literals containing **every** token of `q` (a token ending in `*` matches as a prefix) |
 | `?lit text:matchesAny "q"` | … containing **at least one** token |
-| `?lit text:phrase "foo bar"` | … where the tokens occur **adjacent and in order** (a positional phrase match — needs a positions-enabled index; **not** BM25-ranked, so no `text:score` companion) <!-- [OPUS-4.8] --> |
-| `?lit text:score ?s` | binds the BM25 score (`xsd:double`); must accompany exactly one `text:matches`/`text:matchesAny` on `?lit` in the same BGP |
+| `?lit text:phrase "foo bar"` | … where the tokens occur **adjacent and in order** (a positional phrase match — needs a positions-enabled index; **not** ranked, so no `text:score` companion) <!-- [OPUS-4.8] --> |
+| `?lit text:near "foo bar"` | proximity/slop generalisation of `text:phrase`: tokens **in order within a bounded gap**, **relevance-ranked** (`1/(1+gap)`); needs positions. Gap defaults to 0 (== `text:phrase`); set it with a `text:slop N` companion; takes an optional `text:score ?s` <!-- [OPUS-4.8] --> |
+| `?lit text:slop N` | sets the proximity gap budget for the `text:near` on `?lit` in the same BGP (non-negative integer; at most one) <!-- [OPUS-4.8] --> |
+| `?lit text:score ?s` | binds the relevance score (`xsd:double`) — BM25 for `text:matches`/`text:matchesAny`, proximity (`1/(1+gap)`) for `text:near`; must accompany exactly one such scored match on `?lit` in the same BGP <!-- [OPUS-4.8] --> |
 
 ```rust
 use sparq_text::{query_text, TextIndex};
@@ -111,9 +115,16 @@ with `ORDER BY DESC(?s)` over a `text:score` variable.
   [`text:phrase`](#running-text-inside-sparql-the-engine-feature-default-on)
   magic predicate; against the cheap positionless `TextIndex::build` index it is
   a hard query error (the bare `phrase()` method panics). <!-- [OPUS-4.8] -->
-- **Future (bead `sq-hajq`, proximity/slop)**: positional postings are also the
-  basis for proximity/slop scoring (a relevance variant of `text:phrase` with a
-  bounded gap), which is **not** yet implemented. <!-- [OPUS-4.8] -->
+- **Proximity / slop (`phrase_near` / `text:near`)**: the relevance-ranked,
+  bounded-gap generalisation of `phrase` over the same positional postings.
+  Tokens still IN ORDER, but spread over at most `slop` extra span (the Lucene
+  notion of slop: `gap = (last − first) − (n − 1)`, zero when adjacent), scored
+  `1/(1+gap)` so tighter clustering ranks higher (adjacency = 1.0).
+  `phrase_near(q, 0)` is exactly `phrase(q)`, and the hit set grows monotonically
+  with `slop`. In SPARQL: `?lit text:near "foo bar"` with an optional
+  `text:slop N` (gap budget, default 0) and `text:score ?s` (the proximity
+  score); same positions requirement / hard error as `text:phrase`.
+  <!-- [OPUS-4.8] -->
 
 ## Benchmark
 

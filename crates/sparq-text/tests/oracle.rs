@@ -9,10 +9,15 @@
 //!    as a prefix);
 //!  * `search_any` (OR) — at least one query token present;
 //!  * `phrase` — the query's tokens occur at consecutive positions, in order.
+//!  * `phrase_near` — the query's tokens occur IN ORDER within a bounded total
+//!    gap (slop), relevance-scored `1/(1+gap)`; the oracle recomputes the
+//!    smallest in-order gap per document independently. [OPUS-4.8]
 //!
 //! For ranked queries we compare the hit-ID SET (not BM25 scores — the prompt's
 //! "SET, not exact scores" rule); for `phrase` we compare the exact ascending ID
-//! list the index returns. Because the index keys documents by dictionary term
+//! list the index returns. For `phrase_near` the proximity score is a closed
+//! form of the oracle's min-gap, so there we DO pin the exact per-doc score (and
+//! the best-first ordering). Because the index keys documents by dictionary term
 //! id, the oracle scans the dictionary's string literals (the documents), so
 //! duplicate literals collapse to one document identically on both sides.
 
@@ -149,6 +154,58 @@ fn brute_phrase(corpus: &[(Id, Vec<String>)], query: &str) -> Vec<Id> {
     ids
 }
 
+/// The smallest in-order phrase gap of `needle` within a document's `tokens`,
+/// computed by an INDEPENDENT exhaustive scan (the proximity oracle): for every
+/// occurrence of token 0, greedily take the earliest later occurrence of each
+/// subsequent token (positions are in document order), and keep the smallest
+/// `(last − first) − (n − 1)`. `None` if the tokens never occur in order.
+/// [OPUS-4.8]
+fn brute_min_gap(tokens: &[String], needle: &[String]) -> Option<u32> {
+    if needle.len() == 1 {
+        return tokens.contains(&needle[0]).then_some(0);
+    }
+    // Positions of each needle token within the document, in document order.
+    let pos: Vec<Vec<usize>> = needle
+        .iter()
+        .map(|t| tokens.iter().enumerate().filter(|(_, w)| *w == t).map(|(i, _)| i).collect())
+        .collect();
+    let mut best: Option<u32> = None;
+    for &start in &pos[0] {
+        let mut prev = start;
+        let mut ok = true;
+        for ps in &pos[1..] {
+            match ps.iter().copied().find(|&p| p > prev) {
+                Some(next) => prev = next,
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            let gap = (prev - start - (needle.len() - 1)) as u32;
+            best = Some(best.map_or(gap, |b| b.min(gap)));
+        }
+    }
+    best
+}
+
+/// Brute-force proximity: `(doc id, min gap)` for docs where the query's tokens
+/// occur in order within `slop` total gap. A trailing `*` is plain text (no
+/// prefix marker), as for phrase; empty phrase matches nothing. [OPUS-4.8]
+fn brute_phrase_near(corpus: &[(Id, Vec<String>)], query: &str, slop: u32) -> Vec<(Id, u32)> {
+    let needle = sparq_text::tokenize::tokenize(query);
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<(Id, u32)> = corpus
+        .iter()
+        .filter_map(|(id, toks)| brute_min_gap(toks, &needle).filter(|&g| g <= slop).map(|g| (*id, g)))
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 /// The hit ids of a ranked search, sorted (we compare the SET, not the order or
 /// BM25 scores — see the module docs).
 fn hit_ids(hits: &[sparq_text::Hit]) -> Vec<Id> {
@@ -235,6 +292,43 @@ fn brute_force_oracle_over_random_documents() {
             let mut got = positional.phrase(q);
             got.sort_unstable();
             assert_eq!(got, brute_phrase(&corp, q), "phrase({q:?}) != brute force at n={n}");
+
+            // Proximity/slop: at every slop level the index must agree with the
+            // brute-force min-gap oracle on BOTH the id set AND the per-doc gap
+            // (encoded in the score 1/(1+gap)), and rank tightest-first. [OPUS-4.8]
+            for slop in [0u32, 1, 2, 4, 8] {
+                let hits = positional.phrase_near(q, slop);
+                let oracle = brute_phrase_near(&corp, q, slop);
+
+                // Same id set.
+                assert_eq!(
+                    hit_ids(&hits),
+                    oracle.iter().map(|&(id, _)| id).collect::<Vec<_>>(),
+                    "phrase_near({q:?}, {slop}) id set != brute force at n={n}"
+                );
+                // Each score is exactly 1/(1+oracle_gap) for that doc.
+                let want: std::collections::HashMap<Id, u32> = oracle.iter().copied().collect();
+                for h in &hits {
+                    let g = want[&h.id];
+                    assert_eq!(
+                        h.score,
+                        1.0 / (1.0 + g as f32),
+                        "phrase_near({q:?}, {slop}) score for {} != 1/(1+{g}) at n={n}",
+                        h.id
+                    );
+                }
+                // Ranked tightest-first: non-increasing score (== non-decreasing gap).
+                assert!(
+                    hits.windows(2).all(|w| w[0].score >= w[1].score),
+                    "phrase_near({q:?}, {slop}) not ranked best-first at n={n}"
+                );
+            }
+            // slop 0 reproduces exact-adjacency `phrase` (gap 0 = adjacency).
+            assert_eq!(
+                hit_ids(&positional.phrase_near(q, 0)),
+                got,
+                "phrase_near({q:?}, 0) != phrase({q:?}) at n={n}"
+            );
         }
     }
 }

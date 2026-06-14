@@ -52,6 +52,13 @@
 //! analyzer (UAX #29 segmentation + Unicode casefolding) as indexing, so phrase
 //! tokens match exactly how the literals were tokenized.
 //!
+//! [`phrase_near`](TextIndex::phrase_near) is the proximity/slop generalisation
+//! over the same positional postings: tokens still in order, but spread over a
+//! bounded total gap (the `slop`), and RELEVANCE-RANKED — tighter clustering
+//! scores higher (`1 / (1 + gap)`, so adjacency scores 1.0). `phrase_near(q, 0)`
+//! is exactly `phrase(q)` (gap 0 = adjacency), and the hit set grows
+//! monotonically with `slop`. [OPUS-4.8]
+//!
 //! ## Incremental maintenance
 //!
 //! [`apply_delta`](TextIndex::apply_delta) mirrors a [`Graph::apply_delta`]
@@ -437,6 +444,116 @@ impl TextIndex {
                 lists[k as usize][&id].binary_search(&want).is_ok()
             })
         })
+    }
+
+    /// Proximity ("slop") phrase query: literals where the query's tokens occur
+    /// IN ORDER within a bounded total gap, RANKED by how tightly they cluster.
+    /// [OPUS-4.8]
+    ///
+    /// `slop` is the maximum *extra* span the tokens may spread over their
+    /// tightest possible (adjacent) packing — the same notion of slop Lucene's
+    /// `PhraseQuery` uses. For a candidate alignment placing token `k` at
+    /// position `p_k` (with `p_0 < p_1 < … < p_{n-1}`, i.e. strictly in order),
+    /// its gap is `(p_{n-1} − p_0) − (n − 1)`: zero when the tokens are exactly
+    /// adjacent, growing by one for every position of separation introduced.
+    /// A document matches when SOME in-order alignment has gap ≤ `slop`; its
+    /// score is `1 / (1 + g)` where `g` is the *smallest* gap any alignment in
+    /// that document achieves (so 1.0 for an adjacent occurrence, decreasing
+    /// monotonically as the best occurrence loosens).
+    ///
+    /// Relationship to [`phrase`](Self::phrase): `phrase_near(q, 0)` returns
+    /// exactly [`phrase`](Self::phrase)`(q)`'s ids — gap 0 is adjacency — each
+    /// at score 1.0; and the id SET grows monotonically with `slop` (a larger
+    /// slop only ever admits more documents). Order remains significant:
+    /// `"foo bar"` and `"bar foo"` are different queries (the reverse never
+    /// matches, no matter how large the slop). Results are returned best-first
+    /// (highest score), ties broken by ascending id — the same ordering
+    /// [`search`](Self::search) uses.
+    ///
+    /// The query is analyzed by the SAME pipeline as the indexed text (UAX #29
+    /// segmentation + Unicode casefolding, via [`tokenize`]); a trailing `*` is
+    /// NOT a prefix marker (it is segmentation punctuation). An empty phrase (no
+    /// word tokens) returns no hits. A single-token phrase is presence (gap 0,
+    /// score 1.0) for any `slop`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index was built without positions; build it with
+    /// [`build_with_positions`](Self::build_with_positions) (or seed it with
+    /// [`with_positions`](Self::with_positions)). Guard with
+    /// [`has_positions`](Self::has_positions) if unsure.
+    pub fn phrase_near(&self, query: &str, slop: u32) -> Vec<Hit> {
+        let positions = self.positions.as_ref().expect(
+            "phrase_near() requires a positional index: build with TextIndex::build_with_positions",
+        );
+        let tokens = tokenize(query);
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+
+        // Per-token doc -> sorted positions. A missing token means an
+        // unsatisfiable phrase; the rarest token (fewest docs) drives the scan.
+        let mut lists: Vec<&FxHashMap<Id, Vec<u32>>> = Vec::with_capacity(tokens.len());
+        for t in &tokens {
+            match positions.get(t.as_str()) {
+                Some(docs) => lists.push(docs),
+                None => return Vec::new(),
+            }
+        }
+        let (driver_i, driver) = lists
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, docs)| docs.len())
+            .map(|(i, docs)| (i, *docs))
+            .unwrap();
+
+        let mut hits: Vec<Hit> = driver
+            .keys()
+            .copied()
+            .filter_map(|id| {
+                Self::min_phrase_gap(&lists, driver_i, id)
+                    .filter(|&g| g <= slop)
+                    .map(|g| Hit { id, score: 1.0 / (1.0 + g as f32) })
+            })
+            .collect();
+        // Best-first (tighter proximity = higher score), ties by ascending id —
+        // the ordering `search` uses.
+        hits.sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
+        hits
+    }
+
+    /// The smallest in-order phrase gap achievable in document `id`, or `None`
+    /// if the tokens never occur in order there. The gap of an alignment placing
+    /// token `k` at `p_k` (strictly increasing) is `(p_{n-1} − p_0) − (n − 1)`.
+    /// `lists[k]` is token k's doc->positions map; `driver_i` is the token whose
+    /// docs we are iterating (already known to contain `id`). [OPUS-4.8]
+    fn min_phrase_gap(lists: &[&FxHashMap<Id, Vec<u32>>], driver_i: usize, id: Id) -> Option<u32> {
+        // Every token must occur in this doc for any alignment to exist.
+        for (k, docs) in lists.iter().enumerate() {
+            if k != driver_i && !docs.contains_key(&id) {
+                return None;
+            }
+        }
+        let n = lists.len() as u32;
+        // Single token: presence is a perfect (gap-0) match.
+        if n == 1 {
+            return Some(0);
+        }
+        // For each placement of token 0, greedily place each later token at the
+        // EARLIEST position strictly after the previous token's — that minimises
+        // the span (`last − start`), hence the gap, for this start. The best gap
+        // over all starts is the document's minimum. Positions are ascending, so
+        // `partition_point` is a binary search for "strictly greater than prev".
+        let first = &lists[0][&id];
+        first.iter().filter_map(|&start| {
+            let mut prev = start;
+            for docs in &lists[1..] {
+                let ps = &docs[&id];
+                let i = ps.partition_point(|&p| p <= prev);
+                prev = *ps.get(i)?; // no in-order position for this token after prev
+            }
+            Some((prev - start) - (n - 1))
+        }).min()
     }
 
     fn run(&self, query: &str, all: bool) -> Vec<Hit> {
