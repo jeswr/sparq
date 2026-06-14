@@ -572,11 +572,29 @@ mod robust_props {
     /// `x = 1..=n` directly (the production dealer only deals degree `t`). Free
     /// coefficients are drawn from the deterministic test RNG so the resulting
     /// codeword genuinely has the requested degree.
+    ///
+    /// [OPUS-4.8] sq-7q9i (WI-2): the LEADING (highest-index) coefficient is
+    /// forced non-zero by rejection sampling. If it were left as a raw RNG draw
+    /// it could be 0 with probability ~1/P, silently dropping the polynomial
+    /// below the requested `degree`; that would hand the degree-`2t` boundary /
+    /// correction-budget tests MORE RS redundancy than intended and weaken them.
+    /// Resampling stays deterministic (it only consumes extra draws from the
+    /// seeded test RNG). `degree >= 1` at every call site (always `2t`, `t >= 1`).
     fn share_degree(rng: &mut Lcg, secret: Fp, degree: usize, n: usize) -> Vec<Share> {
         let mut coeffs = Vec::with_capacity(degree + 1);
         coeffs.push(secret);
-        for _ in 0..degree {
+        // Free (middle) coefficients: zero is harmless for the degree.
+        for _ in 0..degree.saturating_sub(1) {
             coeffs.push(fp(rng.next_fp()));
+        }
+        // Leading coefficient must be non-zero so the codeword is genuinely
+        // degree `degree` (only relevant when `degree >= 1`).
+        if degree >= 1 {
+            let mut lead = rng.next_fp();
+            while lead == 0 {
+                lead = rng.next_fp();
+            }
+            coeffs.push(fp(lead));
         }
         (1..=n as u64)
             .map(|x| {

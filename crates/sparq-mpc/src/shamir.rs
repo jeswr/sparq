@@ -65,8 +65,9 @@
 //!   [`ShamirBackend::dealer`]) mints a fresh [`crate::rng::SecureRng`] — a
 //!   ChaCha20 CSPRNG seeded from OS entropy — for each dealing session. Field
 //!   elements are drawn uniformly via rejection sampling (no modulo bias).
-//! - A **deterministic, seedable** path ([`ShamirBackend::new_seeded`], gated
-//!   behind `#[cfg(any(test, feature = "insecure-test-rng"))]`) drives the
+//! - A **deterministic, seedable** path (`ShamirBackend::new_seeded`, gated
+//!   behind `#[cfg(any(test, feature = "insecure-test-rng"))]` — so not an
+//!   intra-doc link in default builds) drives the
 //!   in-process multi-party SIMULATION and its differential/stress tests
 //!   reproducibly. It is feature-gated out of normal builds: the real masking
 //!   path cannot reach the deterministic RNG. No security is claimed for it.
@@ -115,7 +116,7 @@ enum RngSource {
 ///
 /// `n` = number of compute parties (= holders in the flatmate model); the
 /// privacy threshold is `t = ⌊(n-1)/2⌋` (honest majority). The backend holds NO
-/// live RNG state — only `n`, `t`, and the [`RngSource`] descriptor — so it is
+/// live RNG state — only `n`, `t`, and the `RngSource` descriptor (private) — so it is
 /// freely `Clone`-able without ever cloning a CSPRNG keystream. The masking
 /// randomness lives on the short-lived [`ShamirDealer`] minted by [`Self::dealer`].
 ///
@@ -138,7 +139,8 @@ impl ShamirBackend {
     /// Masking randomness comes from a fresh OS-seeded ChaCha20 CSPRNG per
     /// dealing session — the only RNG this constructor wires in (sq-1vt). There
     /// is no seed parameter: a real masking RNG must not be predictable. For a
-    /// reproducible test simulation use [`Self::new_seeded`] (test-gated).
+    /// reproducible test simulation use `Self::new_seeded` (test-gated, so not an
+    /// intra-doc link in default builds).
     pub fn new(n: usize) -> Result<Self, MpcError> {
         Self::with_source(n, RngSource::Os)
     }

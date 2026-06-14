@@ -11,7 +11,8 @@
 //! codeword over the existing field `F_p` ([`crate::field`]). The message is the
 //! `t+1` low coefficients of `Q` (the secret is `Q(0)`); the codeword is the `n`
 //! evaluations `y_i = Q(x_i)`. Plain Lagrange interpolation
-//! ([`crate::shamir::reconstruct_at_zero`]) is RS *decoding under the assumption
+//! (`shamir::reconstruct_at_zero`, now `#[cfg(test)]` — no production caller after
+//! WI-2, so not an intra-doc link) is RS *decoding under the assumption
 //! that every symbol is correct* — it has no consistency check, so one tampered
 //! `y_i` silently yields the wrong `Q(0)` even when redundancy is present
 //! (pinned by `adversarial_tests::tamper`; bead sq-uu0u).
