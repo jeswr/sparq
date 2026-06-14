@@ -41,6 +41,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # [OPUS-4.8] sq-ocuf: fast, dependency-light gate for the dashboard's readable labels. Runs on
+  # PRs + main (no rust/wasm build) so a query added/renamed without regenerating metric-labels.json
+  # fails BEFORE merge: validates the JSON, runs the generator's --check drift gate, syntax-checks
+  # dashboard.js, and runs the node smoke test (scripts/dashboard-smoke.js).
+  dashboard-labels:
+    name: dashboard labels (lint + drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+      - name: Validate metric-labels.json
+        run: python3 -c "import json; json.load(open('bench/dashboard/metric-labels.json')); print('metric-labels.json is valid JSON')"
+      - name: Drift gate (regenerate + diff)
+        run: python3 scripts/gen-metric-labels.py --check
+      - name: Syntax-check dashboard.js
+        run: node --check bench/dashboard/dashboard.js
+      - name: Dashboard smoke test
+        run: node scripts/dashboard-smoke.js
+
   bench:
     name: run + track benchmarks
     runs-on: ubuntu-latest
@@ -261,7 +282,9 @@ jobs:
           git -C "$tmp" checkout -q -B benchmark-data FETCH_HEAD
           mkdir -p "$tmp/dev/bench"
           changed=0
-          for f in index.html dashboard.js dashboard.css; do
+          # [OPUS-4.8] metric-labels.json (sq-ocuf) is part of the served dashboard — copy it
+          # alongside index.html/dashboard.js/dashboard.css so dashboard.js can fetch it.
+          for f in index.html dashboard.js dashboard.css metric-labels.json; do
             if [ ! -f "$tmp/dev/bench/$f" ] || ! cmp -s "$src/$f" "$tmp/dev/bench/$f"; then
               cp "$src/$f" "$tmp/dev/bench/$f"
               changed=1
@@ -273,7 +296,8 @@ jobs:
           fi
           git -C "$tmp" -c user.name='github-actions[bot]' \
                         -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-                        add dev/bench/index.html dev/bench/dashboard.js dev/bench/dashboard.css
+                        add dev/bench/index.html dev/bench/dashboard.js dev/bench/dashboard.css \
+                            dev/bench/metric-labels.json
           git -C "$tmp" -c user.name='github-actions[bot]' \
                         -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
                         commit -q -m "chore(bench): seed/update Pages dashboard under dev/bench [skip ci]"

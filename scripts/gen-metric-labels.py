@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+# [OPUS-4.8] Generate bench/dashboard/metric-labels.json — a map from raw benchmark metric
+# STEM (the github-action-benchmark `name` minus its mode/unit suffix) to a readable
+# {label, suite, dataset, query, unit} record, so the dashboard can render
+# "WatDiv S1 — star query, count" instead of the cryptic stem "watdiv_S1_count_us".
+#
+# Authored by Opus 4.8 (Fable unavailable; flag for re-review when Fable returns). Implements
+# bead sq-ocuf (parent design sq-i0nm, plan A): labels derived from the SAME ground truth the
+# CI harness uses — the per-suite *.rq files (filenames + header comments) and expected-rows
+# tables — NOT invented. The naming convention is fixed by scripts/ci-bench.sh:
+#
+#   load_s, rdfs_infer_s, parse_ns_per_byte, store_bytes_per_triple[_small],
+#   dict_bytes_per_term, wasm_bundle_bytes                 -> pipeline / memory metrics
+#   <q-stem>_<mode>_us       (mode in count|materialize|json) from bench/qlever-synthetic/queries
+#   op_<q-stem>_<mode>_us                                   from bench/operators/queries
+#   sp2b_<q>_<mode>_us, watdiv_<q>_<mode>_us, bsbm_<q>_<mode>_us, dbpsb_<q>_<mode>_us
+#   lubm_<q>_count_us                                       (count-only; reasoning suite)
+#
+# where <q-stem> is the *.rq file_stem() (sparq-cli `bench` uses path.file_stem()).
+#
+# Usage:
+#   scripts/gen-metric-labels.py                 # (re)write bench/dashboard/metric-labels.json
+#   scripts/gen-metric-labels.py --check         # drift gate: exit 1 if the file is out of date
+#   scripts/gen-metric-labels.py --stdout        # print JSON to stdout, don't write
+#
+# DRIFT GATE: `--check` regenerates in memory and diffs against the committed file. Wire it into
+# CI so adding/renaming a query without regenerating labels fails fast (the committed JSON is the
+# served artifact — generation at serve time would need Python in the Pages job).
+import argparse
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BENCH = os.path.join(ROOT, "bench")
+OUT = os.path.join(BENCH, "dashboard", "metric-labels.json")
+
+# The three result-extraction modes ci-bench iterates (per scripts/ci-bench.sh). Each query
+# metric is emitted once per mode it ran in; the dashboard shows one chart per (stem,mode).
+MODES = {
+    "count": "count (solution count)",
+    "materialize": "materialize (build all rows)",
+    "json": "json (serialize results)",
+}
+# LUBM is count-only (reasoning suite asserts solution counts; see ci-bench lubm hook).
+
+# --- non-query (pipeline / memory) metrics: fixed, hand-curated from ci-bench.sh -------------
+# These are NOT per-query, so they carry no <mode> suffix; keyed by their exact metric name.
+FIXED = {
+    "load_s": {
+        "label": "Load — parse + index build (synthetic)",
+        "suite": "Pipeline", "dataset": "synthetic (sparq-bench dump, SCALE entities)",
+        "query": "end-to-end load: N-Triples parse + store/dict build", "unit": "s"},
+    "rdfs_infer_s": {
+        "label": "RDFS inference — depth-20 class closure",
+        "suite": "Pipeline", "dataset": "synthetic (SCALE individuals, depth-20 subClassOf chain)",
+        "query": "materialize the RDFS closure (rdfs:subClassOf)", "unit": "s"},
+    "parse_ns_per_byte": {
+        "label": "Parse cost — ns per input byte (fixed corpus)",
+        "suite": "Memory / Size", "dataset": "synthetic, fixed 50k-entity corpus (deterministic)",
+        "query": "N-Triples parse throughput as ns/byte (= 1000 / MB/s)", "unit": "ns/byte"},
+    "store_bytes_per_triple": {
+        "label": "Store size — bytes per triple",
+        "suite": "Memory / Size", "dataset": "synthetic (primary SCALE)",
+        "query": "triple-store memory layout footprint", "unit": "bytes"},
+    "store_bytes_per_triple_small": {
+        "label": "Store size — bytes per triple (fixed small corpus)",
+        "suite": "Memory / Size", "dataset": "synthetic, fixed 50k-entity corpus (deterministic)",
+        "query": "per-triple overhead on a second, fixed scale", "unit": "bytes"},
+    "dict_bytes_per_term": {
+        "label": "Dictionary size — bytes per term",
+        "suite": "Memory / Size", "dataset": "synthetic (primary SCALE)",
+        "query": "term-dictionary memory layout footprint", "unit": "bytes"},
+    "wasm_bundle_bytes": {
+        "label": "WASM bundle size",
+        "suite": "Memory / Size", "dataset": "n/a (build artifact)",
+        "query": "compiled sparq-wasm browser bundle size", "unit": "bytes"},
+}
+
+# --- qlever-synthetic: descriptive filenames (qNN_<slug>); slug words are the description -----
+# The filename slug IS the human description (e.g. q03_star3 -> "star3", q10_optional_age).
+SYN_DESC = {
+    "q02_type_person": "type lookup — ?s a ex:Person",
+    "q03_star3": "3-way star join (name/age/city on one subject)",
+    "q04_follows_name": "2-hop chain — follows then name",
+    "q06_filter_age": "FILTER on numeric age (> 90)",
+    "q09_count_edges": "COUNT(*) over follows edges",
+    "q10_optional_age": "OPTIONAL left-join — name with optional age",
+}
+
+# --- operators: one-line description per family (from the .rq header comments) ----------------
+OP_DESC = {
+    "q01_bgp": "BGP — single triple pattern",
+    "q02_star3": "star join — 3 patterns sharing the subject",
+    "q03_chain": "chain join — 2-hop follows path",
+    "q04_triangle": "cyclic join — directed triangle",
+    "q05_union": "UNION of two subjects",
+    "q06_optional": "OPTIONAL (left join) with optional age",
+    "q07_optional_notbound": "negation via OPTIONAL + !BOUND",
+    "q08_minus": "MINUS — set difference",
+    "q09_filter_numeric": "FILTER — numeric range",
+    "q10_filter_string": "FILTER — regex / CONTAINS on a literal",
+    "q11_filter_in": "FILTER IN — membership in a fixed set",
+    "q12_filter_exists": "FILTER EXISTS",
+    "q13_bind": "BIND — computed value",
+    "q14_values": "VALUES — inline data table join",
+    "q15_agg_group_having": "aggregates + GROUP BY + HAVING",
+    "q16_distinct": "DISTINCT",
+    "q17_orderby_limit_offset": "ORDER BY + LIMIT + OFFSET",
+    "q18_path_plus": "property path + (one-or-more), ASK",
+    "q19_path_star": "property path * (zero-or-more)",
+    "q20_path_opt": "property path ? (zero-or-one)",
+    "q21_path_seq": "property path sequence (a/b)",
+    "q22_path_alt": "property path alternative (a|b)",
+    "q23_path_inverse": "property path inverse (^a)",
+    "q24_path_negated_pset": "property path negated set !(...)",
+    "q25_subquery": "subquery (nested SELECT aggregate)",
+    "q26_ask": "ASK form",
+    "q27_construct": "CONSTRUCT form (produced triples)",
+    "q28_describe": "DESCRIBE form (produced triples)",
+}
+
+# --- well-known suites: per-query short descriptions, derived from the .rq files + readmes -----
+SP2B_DESC = {
+    "q01": "single journal's issue year (selective lookup)",
+    "q02": "all inproceedings with bibliographic detail (large star + ORDER)",
+    "q03a": "articles with a property (FILTER property = pages)",
+    "q03b": "articles with a property (FILTER property = month)",
+    "q03c": "articles with a property (FILTER property = ISBN; empty)",
+    "q04": "DISTINCT co-author name pairs (large self-join)",
+    "q05a": "author identity by name (implicit join, heavy)",
+    "q05b": "author of both an article and an inproceedings (DISTINCT)",
+    "q06": "OPTIONAL + !bound negation (heavy)",
+    "q07": "nested OPTIONAL over document references (DISTINCT)",
+    "q08": "Erdős co-author DISTINCT names (UNION + nested joins)",
+    "q09": "DISTINCT incoming/outgoing predicates of persons (UNION)",
+    "q10": "all statements about a fixed person",
+    "q11": "seeAlso links — ORDER BY + LIMIT/OFFSET",
+    "q12a": "Q8-as-ASK boolean (heavy)",
+    "q12b": "ASK — does an Erdős co-author chain exist? (true)",
+    "q12c": "ASK — is a fixed person typed foaf:Person? (false)",
+}
+SP2B_OP = {
+    "q01": "BGP, selective lookup", "q02": "large star + ORDER BY", "q03a": "FILTER on property",
+    "q03b": "FILTER on property", "q03c": "FILTER on property (empty)", "q04": "DISTINCT self-join",
+    "q05a": "implicit join", "q05b": "DISTINCT join", "q06": "OPTIONAL + !bound",
+    "q07": "nested OPTIONAL", "q08": "UNION + nested joins", "q09": "UNION over predicates",
+    "q10": "statements about a resource", "q11": "ORDER + LIMIT/OFFSET", "q12a": "ASK (heavy)",
+    "q12b": "ASK (true)", "q12c": "ASK (false)",
+}
+
+# WatDiv Basic-Testing families (README: Linear L, Star S, Snowflake F, Complex C).
+WATDIV_FAMILY = {"L": "linear", "S": "star", "F": "snowflake", "C": "complex"}
+
+DBPSB_DESC = {
+    "q01": "BGP — people born in New York City",
+    "q02": "chain join — person → birthPlace → country",
+    "q03": "star join — birthPlace and deathPlace on one person",
+    "q04": "OPTIONAL — occupation with optional spouse",
+    "q05": "UNION of two predicates onto one variable",
+    "q06": "DISTINCT + FILTER regex over IRI",
+    "q07": "FILTER ≠ — people not born in the USA",
+    "q08": "DISTINCT + ORDER BY + LIMIT (top-K)",
+    "q09": "GROUP BY + COUNT + HAVING + ORDER + LIMIT",
+    "q10": "scalar aggregate — COUNT(*)",
+    "q11": "negation by OPTIONAL + !bound (no deathPlace)",
+    "q12": "place-anchored BGP join (born/died at one place)",
+    "q13": "subquery + aggregate — top occupations by holders",
+    "h01": "HEAVY — co-birthplace pairs (unselective self-join)",
+    "h02": "HEAVY — unbounded 3-pattern chain",
+    "h03": "HEAVY — unbounded place self-join (~3M solutions)",
+}
+DBPSB_OP = {
+    "q01": "BGP", "q02": "chain join", "q03": "star join", "q04": "OPTIONAL", "q05": "UNION",
+    "q06": "DISTINCT + FILTER regex", "q07": "FILTER ≠", "q08": "DISTINCT + ORDER + LIMIT",
+    "q09": "GROUP BY + HAVING", "q10": "scalar aggregate", "q11": "OPTIONAL + !bound",
+    "q12": "anchored BGP join", "q13": "subquery aggregate", "h01": "heavy self-join",
+    "h02": "heavy chain", "h03": "heavy self-join",
+}
+
+BSBM_DESC = {
+    "query01": "find products by type + two features (ORDER/LIMIT)",
+    "query02": "product detail — labels + 3 OPTIONALs",
+    "query03": "products by type/feature with negation (OPTIONAL+!bound)",
+    "query04": "two-branch UNION + OFFSET/LIMIT",
+    "query05": "similar products — self-join + numeric FILTERs",
+    "query06": "HEAVY — unanchored regex over product labels (full scan)",
+    "query07": "product offers + reviews (nested OPTIONALs)",
+    "query08": "reviews in English — langMatches + ratings + ORDER",
+    "query09": "DESCRIBE a reviewer (produced triples)",
+    "query10": "cheapest offers for a product (FILTER + ORDER/LIMIT)",
+    "query11": "all in/out triples of an offer (UNION)",
+    "query12": "CONSTRUCT — export an offer (produced triples)",
+}
+BSBM_OP = {
+    "query01": "type + feature filter", "query02": "detail + OPTIONALs", "query03": "OPTIONAL + !bound",
+    "query04": "UNION + OFFSET/LIMIT", "query05": "self-join + FILTER", "query06": "heavy regex scan",
+    "query07": "nested OPTIONALs", "query08": "langMatches + ORDER", "query09": "DESCRIBE",
+    "query10": "FILTER + ORDER/LIMIT", "query11": "UNION", "query12": "CONSTRUCT",
+}
+
+# LUBM: split extensional (raw ABox) vs entailed (OWL-RL closure) — directory tells us which.
+LUBM_DESC = {
+    "q01": ("extensional", "GraduateStudent taking a course (leaf type)"),
+    "q02": ("extensional", "triangular join over 3 explicit leaf types"),
+    "q03": ("extensional", "publications by an AssistantProfessor"),
+    "q14": ("extensional", "all UndergraduateStudent instances"),
+    "q04": ("entailed", "Professors (rdfs:subClassOf superclass)"),
+    "q05": ("entailed", "Persons (top-level subClassOf)"),
+    "q06": ("entailed", "Students (OWL restriction classification)"),
+    "q07": ("entailed", "Students taking a professor's course (Student closure)"),
+    "q08": ("entailed", "Students in a department, with email (Student closure)"),
+    "q09": ("entailed", "Student–Faculty–Course triangle (heaviest)"),
+    "q10": ("entailed", "Students taking GraduateCourse0 (grad closure)"),
+    "q11": ("entailed", "ResearchGroups under University0 (transitive)"),
+    "q12": ("entailed", "Chairs of a sub-department (defined-class + transitive)"),
+    "q13": ("entailed", "Alumni of University0 (owl:inverseOf)"),
+}
+
+
+def stems(subdir):
+    """Sorted *.rq file stems under bench/<subdir> (matches sparq-cli `bench` ordering)."""
+    d = os.path.join(BENCH, subdir)
+    if not os.path.isdir(d):
+        return []
+    return sorted(f[:-3] for f in os.listdir(d) if f.endswith(".rq"))
+
+
+def mode_records(stem_key, base_label, suite, dataset, query_desc, modes=MODES):
+    """Emit one {label,...} record per mode for a query stem, keyed `<stem>_<mode>`.
+
+    The visible label is "<base_label> — <desc>, <mode>"; if <desc> is empty (the
+    base_label already says everything, e.g. a descriptive op family) we drop the dash."""
+    out = {}
+    for mode in modes:
+        head = "%s — %s" % (base_label, query_desc) if query_desc else base_label
+        out["%s_%s" % (stem_key, mode)] = {
+            "label": "%s, %s" % (head, mode),
+            "suite": suite, "dataset": dataset, "query": query_desc or base_label,
+            "mode": mode, "unit": "µs",
+        }
+    return out
+
+
+def build():
+    labels = {}
+
+    # 1) fixed pipeline / memory metrics (exact names; no mode suffix).
+    for name, rec in FIXED.items():
+        labels[name] = dict(rec)
+
+    # 2) qlever-synthetic engine queries -> "Synthetic: <desc>, <mode>".
+    for s in stems("qlever-synthetic/queries"):
+        desc = SYN_DESC.get(s, s.replace("_", " "))
+        labels.update(mode_records(
+            s, "Synthetic", "Synthetic (qlever-style)",
+            "synthetic social graph (sparq-bench dump)", desc))
+
+    # 3) operator-coverage suite -> "Operator: <family desc>, <mode>". The descriptive slug
+    # already names the operator, so the label leads with the human description, not the stem.
+    for s in stems("operators/queries"):
+        desc = OP_DESC.get(s, s.replace("_", " "))
+        labels.update(mode_records(
+            "op_" + s, "Operator", "Operators",
+            "synthetic social graph (sparq-bench dump)", desc))
+
+    # 4) SP2Bench (per-commit + heavy) -> "SP2Bench <q> — <desc>, <mode>".
+    for sub, heavy in (("sp2b/queries", False), ("sp2b/queries-heavy", True)):
+        for s in stems(sub):
+            desc = SP2B_DESC.get(s, SP2B_OP.get(s, s))
+            tag = " (heavy)" if heavy else ""
+            labels.update(mode_records(
+                "sp2b_" + s, "SP2Bench " + s, "SP2Bench",
+                "SP2Bench DBLP-in-RDF, 250k triples" + tag, desc))
+
+    # 5) WatDiv (family from the leading letter L/S/F/C) -> "WatDiv S1 — star, <mode>".
+    for sub, heavy in (("watdiv/queries", False), ("watdiv/queries-heavy", True)):
+        for s in stems(sub):
+            fam = WATDIV_FAMILY.get(s[0], "query")
+            # Per-commit runs at SF=1 (~106k triples); the heavy queries are empty at SF=1
+            # and only populate at the EC2/nightly scale (SF≥10, up to SF=1000 ≈ 100M+),
+            # per bench/watdiv/README.md — so do NOT claim SF=1 for a heavy metric.
+            dataset = ("WatDiv SF≥10 full-scale (nightly), up to SF=1000 ≈ 100M+ triples"
+                       if heavy else "WatDiv SF=1, ~106k triples")
+            desc = "%s query" % fam
+            labels.update(mode_records(
+                "watdiv_" + s, "WatDiv " + s, "WatDiv",
+                dataset, desc))
+
+    # 6) BSBM Explore mix -> "BSBM query01 — <desc>, <mode>".
+    for sub, heavy in (("bsbm/queries", False), ("bsbm/queries-heavy", True)):
+        for s in stems(sub):
+            desc = BSBM_DESC.get(s, BSBM_OP.get(s, s))
+            # Per-commit is -pc 300 (~116k triples); the heavy query (query06) runs at the
+            # EC2/nightly full reference scale (-pc ~284,826 ≈ 100M triples), per
+            # bench/bsbm/README.md — so do NOT claim the small -pc 300 count for it.
+            dataset = ("BSBM Explore, full-scale (nightly), -pc ~284,826 ≈ 100M triples (heavy)"
+                       if heavy else "BSBM Explore, -pc 300, ~116k triples")
+            labels.update(mode_records(
+                "bsbm_" + s, "BSBM " + s, "BSBM",
+                dataset, desc))
+
+    # 7) DBPSB / FEASIBLE -> "DBPSB q01 — <desc>, <mode>".
+    for sub, heavy in (("dbpsb/queries", False), ("dbpsb/queries-heavy", True)):
+        for s in stems(sub):
+            desc = DBPSB_DESC.get(s, DBPSB_OP.get(s, s))
+            # Per-commit runs against the 750k-triple head cut; the heavy queries run against
+            # the FULL pinned artifact (~11.8M object-property triples) on the EC2/nightly
+            # tier, per bench/dbpsb/README.md — so do NOT claim the 750k cut for them.
+            dataset = ("DBpedia full artifact, ~11.8M triples (heavy, nightly)"
+                       if heavy else "DBpedia slice, 750k-triple cut")
+            labels.update(mode_records(
+                "dbpsb_" + s, "DBPSB " + s, "DBPSB",
+                dataset, desc))
+
+    # 8) LUBM reasoning suite (COUNT ONLY) -> "LUBM Q06 — Students …, count [entailed]".
+    for sub in ("lubm/queries-extensional", "lubm/queries-entailed"):
+        for s in stems(sub):
+            regime, desc = LUBM_DESC.get(s, ("extensional", s))
+            labels["lubm_%s_count" % s] = {
+                "label": "LUBM %s — %s, count [%s]" % (s.upper(), desc, regime),
+                "suite": "LUBM (reasoning)",
+                "dataset": "LUBM(1) %s" % (
+                    "raw ABox" if regime == "extensional" else "OWL-RL closure"),
+                "query": desc, "mode": "count", "regime": regime, "unit": "µs",
+            }
+
+    return labels
+
+
+def serialize(labels):
+    # Stable key order so `--check` is deterministic and diffs are minimal.
+    ordered = {k: labels[k] for k in sorted(labels)}
+    return json.dumps({
+        "_comment": ("[OPUS-4.8] GENERATED by scripts/gen-metric-labels.py from the per-suite "
+                     "*.rq files + ci-bench naming — DO NOT edit by hand; run the generator "
+                     "(or `--check` in CI gates drift). Maps metric STEM (name minus _us) to a "
+                     "readable record. bead sq-ocuf / design sq-i0nm."),
+        "_schema": {"key": "metric stem (github-action-benchmark name without the _us suffix)",
+                    "value": "{label, suite, dataset, query, mode?, regime?, unit}"},
+        "labels": ordered,
+    }, indent=2, ensure_ascii=False) + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Generate the dashboard metric-labels.json")
+    ap.add_argument("--check", action="store_true",
+                    help="exit 1 if the committed file is out of date (drift gate)")
+    ap.add_argument("--stdout", action="store_true", help="print JSON to stdout, do not write")
+    args = ap.parse_args()
+
+    # Build the label map ONCE and reuse it for both the serialized output and the count, so
+    # the filesystem scan is not duplicated and the reported count can never diverge from the
+    # content actually written.
+    labels = build()
+    text = serialize(labels)
+
+    if args.stdout:
+        sys.stdout.write(text)
+        return 0
+
+    if args.check:
+        try:
+            with open(OUT, encoding="utf-8") as fh:
+                current = fh.read()
+        except FileNotFoundError:
+            current = None
+        if current != text:
+            sys.stderr.write(
+                "ERROR: %s is out of date — run scripts/gen-metric-labels.py "
+                "(a query was added/renamed without regenerating labels).\n" % OUT)
+            return 1
+        print("metric-labels.json is up to date.")
+        return 0
+
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    with open(OUT, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    print("wrote %s (%d metrics labeled)" % (OUT, len(labels)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
