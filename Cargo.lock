@@ -3280,6 +3280,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "reqwest",
  "serde_json",
+ "sparesults",
  "spargebra",
  "sparq-core",
  "sparq-engine",
