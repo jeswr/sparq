@@ -278,14 +278,21 @@ pub fn split_lang_dir(slot: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// [OPUS-4.8] sq-bj7o: the single source of truth for "is this `lang--<suffix>` suffix a
-/// valid RDF 1.2 base direction?". The two possible directions are `ltr` / `rtl`, lowercase
-/// and case-sensitive (matching oxrdf `BaseDirection::Display` and the W3C RDF 1.2 / SPARQL
-/// 1.2 grammar — `LTR` / `Ltr` are NOT directions). Returns the typed enum so the
-/// materialised path ([`reconstruct_ref`]) and the validating split ([`split_lang_dir`]) can
-/// share exactly one definition and never drift apart.
+/// [OPUS-4.8] sq-bj7o: the single source of truth for "is this RDF 1.2 base direction string
+/// valid?". The two possible directions are `ltr` / `rtl`, lowercase and case-sensitive
+/// (matching oxrdf `BaseDirection::Display` and the W3C RDF 1.2 / SPARQL 1.2 grammar — `LTR`
+/// / `Ltr` are NOT directions). Returns the typed enum so the materialised path
+/// ([`reconstruct_ref`]) and the validating split ([`split_lang_dir`]) can share exactly one
+/// definition and never drift apart.
+///
+/// [OPUS-4.8] sq-s955: also the validator for the *inbound* SERVICE results parser, where
+/// `its:dir` arrives as its own JSON/XML field (not a `lang--dir` slot suffix). Routing that
+/// field through this one function makes the inbound path agree with the stored-slot
+/// (`split_lang_dir`), materialised (`reconstruct_ref`) and outbound (`json.rs`) paths on
+/// what a valid direction is — and, with the caller's fallback, on what an *invalid* one
+/// degrades to (a plain language-tagged literal).
 #[inline]
-fn parse_lang_dir_suffix(suffix: &str) -> Option<oxrdf::BaseDirection> {
+pub fn parse_lang_dir_suffix(suffix: &str) -> Option<oxrdf::BaseDirection> {
     match suffix {
         "ltr" => Some(oxrdf::BaseDirection::Ltr),
         "rtl" => Some(oxrdf::BaseDirection::Rtl),

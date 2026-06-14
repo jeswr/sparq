@@ -143,10 +143,29 @@ fn srj_term(val: &serde_json::Value) -> Result<Term, String> {
                 .ok_or_else(|| "SERVICE: literal binding without value".to_string())?
                 .to_string();
             if let Some(lang) = get("xml:lang") {
-                Ok(Term::Literal(
-                    Literal::new_language_tagged_literal(value, lang)
-                        .map_err(|e| format!("SERVICE: bad language tag {lang:?}: {e}"))?,
-                ))
+                // [OPUS-4.8] sq-s955: the INBOUND counterpart to the outbound `its:dir`
+                // emission (sq-bj7o, `json.rs::term_to_json`). A remote endpoint's SPARQL 1.2
+                // results carry the RDF 1.2 base direction as a SEPARATE `its:dir` field
+                // alongside the bare `xml:lang` tag; reading only `xml:lang` dropped the
+                // direction, so a `dirLangString` arrived as a plain language-tagged literal
+                // and silently lost its direction on the way in. We now reconstruct the
+                // directional literal, validating the direction through the single source of
+                // truth (`dict::parse_lang_dir_suffix`, also used by the stored-slot,
+                // materialised and outbound paths). An ABSENT or INVALID `its:dir` degrades
+                // to a plain language-tagged literal — the SAME decision `split_lang_dir` /
+                // `reconstruct_ref` make for a malformed stored slot — so all four paths AGREE
+                // on `(lang, dir)`.
+                match get("its:dir").and_then(sparq_core::dict::parse_lang_dir_suffix) {
+                    Some(dir) => Ok(Term::Literal(
+                        Literal::new_directional_language_tagged_literal(value, lang, dir).map_err(
+                            |e| format!("SERVICE: bad language tag {lang:?}: {e}"),
+                        )?,
+                    )),
+                    None => Ok(Term::Literal(
+                        Literal::new_language_tagged_literal(value, lang)
+                            .map_err(|e| format!("SERVICE: bad language tag {lang:?}: {e}"))?,
+                    )),
+                }
             } else if let Some(dt) = get("datatype") {
                 let dt = NamedNode::new(dt).map_err(|e| format!("SERVICE: bad datatype {dt:?}: {e}"))?;
                 Ok(Term::Literal(Literal::new_typed_literal(value, dt)))
@@ -584,6 +603,62 @@ mod tests {
             NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
         );
         assert_eq!(rel.rows[0][0], Some(Term::Literal(want)));
+    }
+
+    /// [OPUS-4.8] sq-s955: inbound parity for the outbound `its:dir` emission. A SERVICE
+    /// endpoint's results carry the RDF 1.2 base direction as a SEPARATE `its:dir` field
+    /// next to the bare `xml:lang` tag; the parser must reconstruct the `dirLangString` so
+    /// the direction survives INTO the local join (it was previously dropped). This mirrors
+    /// the outbound `json.rs` parity test — direction round-trips both ways.
+    #[test]
+    fn dir_lang_string_direction_roundtrips_inbound() {
+        for (dir, want) in [
+            ("ltr", oxrdf::BaseDirection::Ltr),
+            ("rtl", oxrdf::BaseDirection::Rtl),
+        ] {
+            let body = format!(
+                r#"{{
+                "head": {{ "vars": ["g"] }},
+                "results": {{ "bindings": [
+                    {{ "g": {{"type":"literal","value":"مرحبا","xml:lang":"ar","its:dir":"{dir}"}} }}
+                ] }}
+            }}"#
+            );
+            let rel = parse_srj(&body).unwrap();
+            match &rel.rows[0][0] {
+                Some(Term::Literal(l)) => {
+                    assert_eq!(l.value(), "مرحبا");
+                    assert_eq!(l.language(), Some("ar"));
+                    // The direction round-trips inbound (the bug: it was None).
+                    assert_eq!(l.direction(), Some(want), "its:dir={dir} must survive inbound");
+                }
+                other => panic!("expected a directional literal, got {other:?}"),
+            }
+        }
+    }
+
+    /// [OPUS-4.8] sq-s955: an ABSENT or INVALID `its:dir` degrades to a PLAIN language-tagged
+    /// literal — the same decision `dict::split_lang_dir` / `reconstruct_ref` make for a
+    /// malformed stored slot — so the inbound, stored-slot, materialised and outbound paths
+    /// all AGREE on `(lang, dir)`. (An uppercase `LTR` or any other value is not a direction.)
+    #[test]
+    fn invalid_or_absent_its_dir_is_plain_language_literal() {
+        let plain = Literal::new_language_tagged_literal("hi", "en").unwrap();
+        for cell in [
+            r#"{"type":"literal","value":"hi","xml:lang":"en"}"#, // absent its:dir
+            r#"{"type":"literal","value":"hi","xml:lang":"en","its:dir":"LTR"}"#, // wrong case
+            r#"{"type":"literal","value":"hi","xml:lang":"en","its:dir":"sideways"}"#, // bogus
+            r#"{"type":"literal","value":"hi","xml:lang":"en","its:dir":""}"#, // empty
+        ] {
+            let body =
+                format!(r#"{{"head":{{"vars":["g"]}},"results":{{"bindings":[{{"g":{cell}}}]}}}}"#);
+            let rel = parse_srj(&body).unwrap();
+            assert_eq!(
+                rel.rows[0][0],
+                Some(Term::Literal(plain.clone())),
+                "invalid/absent its:dir in {cell} must degrade to a plain language-tagged literal"
+            );
+        }
     }
 
     #[test]
