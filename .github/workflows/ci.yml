@@ -55,6 +55,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build sparq-wasm for the browser target
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
+      - name: Guard the wasm dependency graph (no native-only deps)
+        # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
+        # enter the wasm graph" invariant (was comment-only) — fails if a native-only
+        # dep leaks into sparq-wasm's wasm32 graph (bundle bloat / broken browser build).
+        run: ./scripts/wasm-deps-guard.sh
 
   lint:
     name: clippy (gate) + fmt (informational)
