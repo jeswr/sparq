@@ -84,6 +84,11 @@ pub mod proof;
 // [OPUS-4.8] sq-1vt: the CSPRNG masking seam (production SecureRng + test-only
 // InsecureTestRng). The real protocol's secret-sharing randomness lives here.
 pub mod rng;
+// [OPUS-4.8] sq-m34i (MPC WI-1): Reed-Solomon consistency-checked + robust
+// (Berlekamp-Welch) reconstruction over Fp — detect-and-abort / correct tampered
+// shares when redundancy is present. Closes malicious-security gap (D) at the
+// Shamir layer (parent bead sq-uu0u). See the module docs for the threat model.
+pub mod robust;
 pub mod shamir;
 
 // [OPUS-4.8] sq-nuok: adversarial-share negative suite + 'no fake crypto' stub
@@ -101,4 +106,5 @@ pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, J
 pub use partial::{HolderId, MpcError, PartialResult};
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
 pub use rng::{MpcRng, SecureRng};
+pub use robust::reconstruct_robust;
 pub use shamir::{Share, ShamirBackend};
