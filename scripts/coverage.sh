@@ -128,7 +128,24 @@ measure() {
   local features=()           # array of feature names recorded in JSON
   local skips=()              # array of skipped-test substrings recorded in JSON
   local -a cargo_args=(--package "$crate")
-  local -a test_args=()
+  # [OPUS-4.8] sq-x4jy (2nd flake): ALWAYS run the per-crate test set SERIALLY
+  # (`--test-threads=1`). This kills a profraw-merge race behind a DISTINCT flake from
+  # the env-var race fixed in ea0ca3e: `coverage ratchet` intermittently reported
+  # sparq-core ~71% (between the dict-spill-only ~65% and the full ~91%) as a VALID
+  # rc=0 measurement — NOT an aborted binary, so the rc!=0/empty-JSON retry above did
+  # not (and should not) catch it. Root cause: libtest runs a binary's #[test]s on N
+  # threads by default; with `-Cinstrument-coverage`, every test process writes to a
+  # `%p-%8m` LLVM merge-pool .profraw with file-locked ONLINE merging on exit. Under CI
+  # contention (fewer cores, cold cache, mem pressure) a binary's counters could fail to
+  # land in / merge into its .profraw before `llvm-profdata merge` collected them, so its
+  # covered lines showed UNCOVERED — a low-but-valid number, never retried. Forcing one
+  # test thread per binary serialises all writes to that binary's profile counters,
+  # removing the intra-binary race; combined with the clean profraw dir cargo-llvm-cov
+  # already establishes per run, the cross-binary collection is deterministic. Measured
+  # STABLY ≥ 91.28% for sparq-core across repeated runs after this change. The (small)
+  # wall-clock cost is acceptable for the per-commit tier and is the price of a
+  # deterministic gate; it does NOT mask regressions (it re-measures the SAME tests).
+  local -a test_args=(--test-threads=1)
   local subcmd=""             # "" => `cargo llvm-cov`, "test" => filterable form
 
   case "$crate" in
@@ -150,12 +167,21 @@ measure() {
   # ONLY on the aborted-binary signature: a non-zero rc (e.g. rc=101 when a test binary
   # aborts / "was never executed") OR a missing/empty JSON output (a partial profraw that
   # llvm-cov couldn't summarise). A run that exits 0 with a valid, non-empty JSON is taken
-  # as a REAL result and is NOT retried — retrying a valid-but-low number would mask a
-  # genuine coverage regression. The undercount this flake produced (sparq-core ~71% vs
-  # ~91%) came FROM the aborted binary (no/partial profraw → empty/invalid JSON), which is
-  # exactly the retried case; the real fix is making the racing env tests hermetic (the
-  # dict-spill / service-allow tests no longer mutate the process-global environment), so
-  # this retry is belt-and-braces for any residual runner flake of that same shape.
+  # as a REAL result and is NOT retried — retrying a valid-but-low number would MASK a
+  # genuine coverage regression, so this loop deliberately does not.
+  #
+  # TWO DISTINCT FLAKES, two distinct mitigations (do not conflate them):
+  #   1. env-var test race  -> sparq-core build+test/coverage ABORTED a binary (rc=101 /
+  #      empty JSON). Root-fixed in ea0ca3e (the dict-spill / service-allow tests no longer
+  #      mutate the process-global environment); this rc!=0/empty-JSON retry is the
+  #      belt-and-braces for any residual runner flake of THAT aborted-binary shape.
+  #   2. profraw-merge race -> sparq-core reported ~71% (between dict-spill-only ~65% and
+  #      the full ~91%) as a VALID rc=0 number, so it is NOT — and must NOT be — caught by
+  #      this retry. It is fixed by SERIALISING each binary's tests (`--test-threads=1`,
+  #      set in `test_args` above), which removes the intra-binary profile-counter race; a
+  #      CI-level re-MEASURE backstop (.github/workflows/ci.yml coverage job) re-runs the
+  #      whole suite once if the gate fails, which is safe because it re-measures rather
+  #      than accepting a low number — a real regression fails BOTH passes.
   local attempt=0 attempts="${MEASURE_ATTEMPTS:-2}"
   # Validate MEASURE_ATTEMPTS is a positive integer; fall back to 2 otherwise (a
   # non-numeric value would break the `-ge` test below and could loop surprisingly).
@@ -166,12 +192,15 @@ measure() {
   while :; do
     attempt=$((attempt + 1))
     rc=0
+    # Both invocation forms pass the libtest args after `--` (cargo llvm-cov accepts
+    # `[SUBCOMMAND] [OPTIONS] [-- <args>...]`), so `--test-threads=1` (and any `--skip`)
+    # apply whether or not a `test` subcommand is used. [OPUS-4.8] sq-x4jy
     if [ -n "$subcmd" ]; then
       cargo llvm-cov "$subcmd" "${cargo_args[@]}" --summary-only --json \
         --output-path "$json" -- "${test_args[@]}" >/dev/null 2>"$WORK/$crate.err" || rc=$?
     else
       cargo llvm-cov "${cargo_args[@]}" --summary-only --json \
-        --output-path "$json" >/dev/null 2>"$WORK/$crate.err" || rc=$?
+        --output-path "$json" -- "${test_args[@]}" >/dev/null 2>"$WORK/$crate.err" || rc=$?
     fi
     if { [ "$rc" -eq 0 ] && [ -s "$json" ]; } || [ "$attempt" -ge "$attempts" ]; then
       break

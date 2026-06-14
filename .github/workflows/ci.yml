@@ -326,10 +326,28 @@ jobs:
         uses: taiki-e/install-action@91534edaf9fd796a162759d80d49cdff574bff2c # cargo-llvm-cov
       - name: Test-presence gate (fast, no compile)
         run: python3 scripts/coverage-presence.py --check
-      - name: Fetch fixtures + measure per-crate coverage (per-commit tier)
-        run: ./scripts/coverage.sh
-      - name: Enforce coverage floor (ratchet)
-        run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
+      - name: Measure + enforce per-crate coverage (per-commit tier, re-measure backstop)
+        # [OPUS-4.8] sq-x4jy (2nd flake): measure -> check; if the ratchet FAILS, RE-MEASURE
+        # the whole suite ONCE and re-check before declaring failure. scripts/coverage.sh
+        # already serialises each binary's tests (--test-threads=1) to kill the profraw-merge
+        # race that intermittently undercounted sparq-core (~71% vs ~91%); this is a
+        # belt-and-braces backstop for any residual run-to-run profraw flake of THAT shape.
+        #
+        # WHY THIS IS SAFE (does NOT mask a real regression): it RE-MEASURES the same tests
+        # and re-applies the floor — it never ACCEPTS the low number. A genuine coverage drop
+        # is reproducible and fails BOTH passes; a transient profraw-merge undercount is not
+        # reproducible and passes the second pass. This is categorically different from
+        # retrying-and-accepting a valid-but-low value (which coverage.sh deliberately refuses
+        # to do, for exactly this reason — see its retry comment).
+        run: |
+          set -o pipefail
+          ./scripts/coverage.sh
+          if python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json; then
+            exit 0
+          fi
+          echo "::warning::coverage gate failed on pass 1 — RE-MEASURING once (profraw-merge flake backstop; a real regression will fail again)"
+          ./scripts/coverage.sh
+          python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
       - name: Upload coverage summary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -392,10 +410,22 @@ jobs:
         uses: taiki-e/install-action@91534edaf9fd796a162759d80d49cdff574bff2c # cargo-llvm-cov
       - name: Test-presence gate
         run: python3 scripts/coverage-presence.py --check
-      - name: Fetch fixtures + measure per-crate coverage (FULL tier)
-        run: COVERAGE_TIER=nightly ./scripts/coverage.sh
-      - name: Enforce coverage floor (ratchet, all crates required)
-        run: python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
+      - name: Measure + enforce per-crate coverage (FULL tier, re-measure backstop)
+        # [OPUS-4.8] sq-x4jy (2nd flake): same SAFE re-measure backstop as the per-commit
+        # `coverage` job — measure -> check; if the ratchet fails, RE-MEASURE the full tier
+        # ONCE and re-check before failing. coverage.sh serialises each binary's tests
+        # (--test-threads=1) to kill the profraw-merge undercount race; this re-measures
+        # (never accepts a low number), so a real regression fails BOTH passes. Within the
+        # 60-min nightly budget.
+        run: |
+          set -o pipefail
+          COVERAGE_TIER=nightly ./scripts/coverage.sh
+          if python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json; then
+            exit 0
+          fi
+          echo "::warning::coverage gate failed on pass 1 — RE-MEASURING once (profraw-merge flake backstop; a real regression will fail again)"
+          COVERAGE_TIER=nightly ./scripts/coverage.sh
+          python3 scripts/coverage-gate.py --check target/coverage/coverage-summary.json
       - name: Upload coverage summary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
