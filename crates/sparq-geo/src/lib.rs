@@ -5,7 +5,10 @@
 //! 1. [`literal`] — `geo:wktLiteral` lexical forms <-> [`GeoGeometry`] (a
 //!    [`geo_types::Geometry`] tagged with its [`Crs`]). Handles the optional
 //!    leading `<CRS-IRI>` per GeoSPARQL Req 10 / section 8.5.1 (default CRS84)
-//!    and the EPSG:4326 lat/long axis order.
+//!    and the EPSG:4326 lat/long axis order. The sibling [`gml`] module parses
+//!    `geo:gmlLiteral` (the GML Simple-Features geometry profile) into the SAME
+//!    [`GeoGeometry`], so both serializations share one downstream pipeline;
+//!    [`parse_geometry_literal`] dispatches by datatype. [OPUS-4.8]
 //! 2. [`geof`] — the `geof:` function namespace: `geof:distance` (with unit
 //!    IRIs); the relation families — simple-features `geof:sfEquals` ..
 //!    `geof:sfOverlaps`, Egenhofer `geof:eh*`, RCC8 `geof:rcc8*` (all DE-9IM
@@ -40,6 +43,7 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod geof;
+pub mod gml; // [OPUS-4.8] sq-zy0: GML-SF geometry parser (geo:gmlLiteral)
 pub mod index;
 pub mod literal;
 #[cfg(feature = "engine")]
@@ -50,8 +54,11 @@ pub mod registry;
 pub mod reproject;
 
 pub use geof::Unit;
+pub use gml::parse_gml_literal; // [OPUS-4.8]
 pub use index::GeoIndex;
-pub use literal::{parse_wkt_literal, Crs, GeoGeometry};
+pub use literal::{
+    is_geometry_datatype, parse_geometry_literal, parse_wkt_literal, Crs, GeoGeometry,
+}; // [OPUS-4.8]
 #[cfg(feature = "engine")]
 pub use provider::GeoIndexProvider;
 #[cfg(feature = "engine")]
@@ -63,8 +70,14 @@ pub mod vocab {
     pub const GEO_NS: &str = "http://www.opengis.net/ont/geosparql#";
     /// `geo:wktLiteral` — the WKT serialization datatype (GeoSPARQL 8.5.1).
     pub const WKT_LITERAL: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
+    /// `geo:gmlLiteral` — the GML serialization datatype (GeoSPARQL 8.5.2). [OPUS-4.8]
+    pub const GML_LITERAL: &str = "http://www.opengis.net/ont/geosparql#gmlLiteral";
+    /// `gml:` — the GML 3.2 namespace (GML-SF geometry elements). [OPUS-4.8]
+    pub const GML_NS: &str = "http://www.opengis.net/gml/3.2";
     /// `geo:asWKT` — geometry node -> WKT serialization (GeoSPARQL 8.5.2).
     pub const AS_WKT: &str = "http://www.opengis.net/ont/geosparql#asWKT";
+    /// `geo:asGML` — geometry node -> GML serialization (GeoSPARQL 8.5.2). [OPUS-4.8]
+    pub const AS_GML: &str = "http://www.opengis.net/ont/geosparql#asGML";
     /// `geo:hasGeometry` — feature -> geometry node (GeoSPARQL 8.3).
     pub const HAS_GEOMETRY: &str = "http://www.opengis.net/ont/geosparql#hasGeometry";
     /// `geo:hasDefaultGeometry` — feature -> default geometry node (GeoSPARQL 8.3).
@@ -79,10 +92,11 @@ pub mod vocab {
     pub const EPSG_4326: &str = "http://www.opengis.net/def/crs/EPSG/0/4326";
 }
 
-/// Errors from WKT parsing, `geof:` evaluation, or index queries.
+/// Errors from WKT/GML parsing, `geof:` evaluation, or index queries.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GeoError {
-    /// The wktLiteral lexical form (or its CRS prefix) failed to parse.
+    /// A geometry literal lexical form (wktLiteral CRS prefix / WKT body, or a
+    /// gmlLiteral GML element) failed to parse.
     Parse(String),
     /// The two arguments are in incompatible CRSs (no transformation in v1).
     CrsMismatch(String, String),
@@ -97,7 +111,7 @@ pub enum GeoError {
 impl std::fmt::Display for GeoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GeoError::Parse(m) => write!(f, "WKT parse error: {m}"),
+            GeoError::Parse(m) => write!(f, "geometry parse error: {m}"),
             GeoError::CrsMismatch(a, b) => write!(f, "CRS mismatch: <{a}> vs <{b}>"),
             GeoError::NonGeographicCrs(c) => {
                 write!(f, "operation requires a geographic CRS (CRS84/EPSG:4326), got <{c}>")

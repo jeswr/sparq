@@ -1,11 +1,11 @@
 ---
 name: geosparql
-description: Use when adding GeoSPARQL spatial support to the sparq RDF/SPARQL engine — parsing geo:wktLiteral geometries, calling geof: functions (distance, sf*/eh*/rcc8* DE-9IM relations, envelope/boundary/convexHull/buffer, intersection/union/difference/symDifference, getSRID) inside SPARQL FILTER/BIND/SELECT via the sparq-engine extension-function registry, or building an R-tree GeoIndex over a Graph for within_distance / nearest / intersects queries. Crate: sparq-geo.
+description: Use when adding GeoSPARQL spatial support to the sparq RDF/SPARQL engine — parsing geo:wktLiteral and geo:gmlLiteral (GML Simple-Features) geometries, calling geof: functions (distance, sf*/eh*/rcc8* DE-9IM relations, envelope/boundary/convexHull/buffer, intersection/union/difference/symDifference, getSRID) inside SPARQL FILTER/BIND/SELECT via the sparq-engine extension-function registry, or building an R-tree GeoIndex over a Graph for within_distance / nearest / intersects queries. Crate: sparq-geo.
 ---
 
 # sparq-geosparql
 
-`sparq-geo` is the OPT-IN GeoSPARQL 1.0/1.1 **core** for the sparq engine: it parses `geo:wktLiteral` lexical forms, evaluates the `geof:` spatial functions, packages those functions as a `sparq_engine::FunctionRegistry` so they run inside real SPARQL `FILTER`/`BIND`/`SELECT`, and builds an R-tree `GeoIndex` over a `sparq_core::Graph` for distance/nearest/intersection queries. It is a separate crate so the core engine and the wasm build carry zero geometry code — you engage spatial support only by depending on `sparq-geo`.
+`sparq-geo` is the OPT-IN GeoSPARQL 1.0/1.1 **core** for the sparq engine: it parses `geo:wktLiteral` and `geo:gmlLiteral` (the GML Simple-Features geometry profile) lexical forms, evaluates the `geof:` spatial functions, packages those functions as a `sparq_engine::FunctionRegistry` so they run inside real SPARQL `FILTER`/`BIND`/`SELECT`, and builds an R-tree `GeoIndex` over a `sparq_core::Graph` for distance/nearest/intersection queries. It is a separate crate so the core engine and the wasm build carry zero geometry code — you engage spatial support only by depending on `sparq-geo`.
 
 ## Quickstart
 
@@ -46,8 +46,11 @@ assert_eq!(r.len(), 1);                   // London–Paris ≈ 343.6 km
 ## Key APIs
 
 ```rust
-// --- WKT literals (always available) ---
-pub fn parse_wkt_literal(lex: &str) -> Result<GeoGeometry, GeoError>;
+// --- Geometry literals (always available) ---
+pub fn parse_wkt_literal(lex: &str) -> Result<GeoGeometry, GeoError>;   // geo:wktLiteral
+pub fn parse_gml_literal(lex: &str) -> Result<GeoGeometry, GeoError>;   // geo:gmlLiteral (GML-SF)
+pub fn parse_geometry_literal(value: &str, datatype: &str) -> Result<GeoGeometry, GeoError>; // dispatch by datatype
+pub fn is_geometry_datatype(datatype: &str) -> bool;   // geo:wktLiteral | geo:gmlLiteral
 pub struct GeoGeometry { pub crs: Crs, pub geometry: geo_types::Geometry<f64> }
 impl GeoGeometry { pub fn new(g: Geometry<f64>) -> Self;        // CRS84
                    pub fn to_wkt_literal(&self) -> String; }    // lexical form
@@ -102,7 +105,7 @@ FILTER(geof:sfContains(geof:envelope(?poly), ?pt))
 use geo_types::Point;
 use sparq_geo::{GeoIndex, parse_wkt_literal};
 
-let index = GeoIndex::build(&graph);              // scans geo:asWKT (+ hasGeometry ownership)
+let index = GeoIndex::build(&graph);              // scans geo:asWKT + geo:asGML (+ hasGeometry ownership)
 let near  = index.nearest(Point::new(2.35, 48.86), 5);            // Vec<(&Term, f64 metres)>
 let ball  = index.within_distance(Point::new(2.35, 48.86), 50_000.0, Some(20)); // ≤50 km, top 20
 let hits  = index.intersects(&parse_wkt_literal(
@@ -127,6 +130,17 @@ let inside = geof::sf_within(&b, &parse_wkt_literal(
                 "POLYGON((-1 42.5,7 42.5,7 51,-1 51,-1 42.5))").unwrap()).unwrap();
 ```
 
+**Parse a GML literal (or any geometry literal by datatype):** GML rides the same `GeoGeometry` as WKT, so it works everywhere a parsed geometry does:
+```rust
+use sparq_geo::{geof, geof::Unit, parse_gml_literal, parse_geometry_literal, vocab};
+let london = parse_gml_literal(
+    "<gml:Point><gml:pos>-0.1278 51.5074</gml:pos></gml:Point>").unwrap();
+let paris  = parse_geometry_literal(           // dispatch by datatype IRI
+    "<gml:Point><gml:pos>2.3522 48.8566</gml:pos></gml:Point>", vocab::GML_LITERAL).unwrap();
+let km = geof::distance(&london, &paris, Unit::Kilometre).unwrap();   // ≈ 343.6 (== the WKT twin)
+```
+In SPARQL, a `"…"^^geo:gmlLiteral` object is accepted by every `geof:` function exactly like a `geo:wktLiteral`, and attaching geometry via `geo:asGML` makes it indexable by `GeoIndex::build` alongside `geo:asWKT`.
+
 **Reproject a projected literal into CRS84 (opt-in `reproject` feature):**
 ```rust
 // Cargo: sparq-geo = { path = "...", features = ["reproject"] }
@@ -140,11 +154,12 @@ let crs84 = to_crs84_lex(
 
 - **`engine` feature (default ON)** pulls in `sparq-engine` and exposes `geof_registry()`. Disable default features (`default-features = false`) for the pure geometry library (WKT literals, `geof::*` as plain Rust, `GeoIndex`) with no engine in the dependency graph — `geof_registry` / the registry then do not exist.
 - **`reproject` feature (OFF by default)** adds the `reproject` module (pure-Rust `proj4rs`). It ships only a **small curated EPSG table**: 27700 (British National Grid), 3857 (Web Mercator), 2154 (Lambert-93), 25832/25833 (ETRS89 UTM 32/33N), and WGS84 UTM zones 326xx/327xx. Any other code is `GeoError::Unsupported`.
-- **In SPARQL, every `geof:` failure is a per-row EXPRESSION error, not a hard query error**: a wrong datatype (must be a `geo:wktLiteral`), unparseable WKT, CRS mismatch, unknown unit IRI, or an unsupported operand combo drops the row in a `FILTER` / leaves the variable unbound in a `BIND` — the query still succeeds. But an **unregistered** `geof:` IRI (e.g. `geof:gmlToWkt`, which is not implemented) is the engine's usual hard "unsupported SPARQL function" error.
+- **In SPARQL, every `geof:` failure is a per-row EXPRESSION error, not a hard query error**: a wrong datatype (must be a `geo:wktLiteral` **or** `geo:gmlLiteral`), unparseable WKT/GML, CRS mismatch, unknown unit IRI, or an unsupported operand combo drops the row in a `FILTER` / leaves the variable unbound in a `BIND` — the query still succeeds. But an **unregistered** `geof:` IRI (e.g. `geof:gmlToWkt`, which is not implemented) is the engine's usual hard "unsupported SPARQL function" error.
 - **Relations are PLANAR DE-9IM** (via `geo`'s `Relate`) in coordinate/degree space, not geodesic. `geof:distance` with metric units (`metre`/`kilometre`/`mile`) requires a geographic CRS (CRS84/EPSG:4326) and is exact haversine when either operand is a point, but uses a **local equirectangular approximation between two extended geometries** (same for `geof:buffer` in metres) — accurate locally, distorted at continental scale or near the poles. `Unit::Degree`/`Radian` measure euclidean coordinate-space distance.
 - **Set ops cover the point/line/polygon matrix.** Polygon×polygon `intersection`/`union`/`difference`/`symDifference` are exact (`geo` `BooleanOps`); the point and line cases are handled where well-defined — including **1-D set subtraction** (`line−line`, `line−polygon` and their `symDifference`), done via `i_overlay`'s string-line clip plus a linear-referencing collinear-overlap subtraction (point-set semantics: crossing points are measure-zero, so `line−line` drops only collinear overlaps; `line−polygon` keeps the line strictly outside the polygon closure; `polygon−line/point` is unchanged). The only remaining `GeoError::Unsupported` set-op cases are operands the dimension dispatch can't classify (e.g. a heterogeneous `GEOMETRYCOLLECTION`). See the crate README's operand matrix.
-- **`GeoIndex` only indexes geographic-CRS, non-empty geometries** reached via `geo:asWKT` (default graph + named graphs), with the indexed *entity* resolved through `geo:hasGeometry` / `geo:hasDefaultGeometry` when present (else the `asWKT` subject itself). Other CRSs, empties, non-`wktLiteral` objects, and unparseable WKT are counted in `index.skipped()` and excluded — check it to detect mis-typed data. `intersects` also requires a geographic-CRS argument.
-- **No GML literals, no RIF/`geor:` query rewriting, no `.hdt` write-out.** This is the GeoSPARQL *core*; see the crate's open beads (`bd list -l area:sparq-geo`) for the boundary.
+- **`GeoIndex` only indexes geographic-CRS, non-empty geometries** reached via `geo:asWKT` or `geo:asGML` (default graph + named graphs), with the indexed *entity* resolved through `geo:hasGeometry` / `geo:hasDefaultGeometry` when present (else the serialization subject itself). Other CRSs, empties, non-geometry-typed objects, and unparseable WKT/GML are counted in `index.skipped()` and excluded — check it to detect mis-typed data. `intersects` also requires a geographic-CRS argument.
+- **`geo:gmlLiteral` rides the SAME pipeline as WKT.** GML literals use the OGC **GML Simple-Features geometry profile** (`parse_gml_literal`): `gml:Point`/`LineString`/`Polygon` (exterior + interior rings)/`MultiPoint`/`MultiCurve`/`MultiSurface`, both GML 3 (`gml:pos`/`posList`/`exterior`) and GML 2 (`gml:coordinates`/`outerBoundaryIs`) spellings, namespace-prefix-agnostic, with `srsName`→CRS (URN/`EPSG:` forms; EPSG:4326 axis swap) matching the WKT path. A `geof:` call may mix a GML and a WKT argument. **Deferred (clean `GeoError::Unsupported`):** `gml:Envelope`, arc-segment `gml:Curve`/`gml:Surface`, and 3-D coordinates.
+- **No RIF/`geor:` query rewriting, no `.hdt` write-out.** This is the GeoSPARQL *core*; see the crate's open beads (`bd list -l area:sparq-geo`) for the boundary.
 - **Server wiring:** `sparq-server` exposes exactly this behind its opt-in `geo` cargo feature (`cargo build -p sparq-server --features geo`), which installs `geof_registry()` on every SPARQL endpoint via `with_functions`. With the feature off, the server and the wasm build carry no geometry code.
 - **Reuse the registry:** `geof_registry()` is clone-cheap (`Arc`-shared fns) and `Send + Sync` — build it once (e.g. a `OnceLock`) and share across queries and threads.
 
