@@ -61,10 +61,11 @@ i_overlay = { version = "4.5.1, < 4.6.0", default-features = false }
 rstar = "0.13"
 # GML-SF geometry parsing (geo:gmlLiteral). A streaming XML reader, NOT a full
 # GML processor — we walk the OGC GML Simple-Features geometry subset GeoSPARQL
-# uses (Point/LineString/Polygon/Multi*). `quick-xml` is ALREADY in the lockfile
-# (transitive via oxrdf/spargebra), so this adds no new transitive crates;
-# `default-features = false` keeps it to the pull-parser with no serde. [OPUS-4.8]
-quick-xml = { version = "0.37", default-features = false }
+# uses (Point/LineString/Polygon/Multi*). `default-features = false` keeps it to
+# the pull-parser with no serde. The transitive oxigraph stack (oxrdfxml /
+# sparesults) still pins quick-xml 0.37, so this 0.40 requirement currently
+# resolves as a second copy in the lockfile until those upstreams bump. [OPUS-4.8]
+quick-xml = { version = "0.40", default-features = false }
 # Behind the `reproject` feature: pure-Rust proj4 (NOT the C `proj` binding —
 # the workspace's pure-Rust constraint holds). One transitive dep (thiserror).
 proj4rs = { version = "0.1", optional = true }

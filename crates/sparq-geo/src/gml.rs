@@ -53,6 +53,21 @@ use geo_types::{
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 
+// [OPUS-4.8] quick-xml 0.40 removed `BytesText::unescape()` and deprecated
+// `Attribute::unescape_value()`. Both used to decode + resolve the XML
+// predefined entities without attribute-value whitespace folding. We replicate
+// that exact behaviour with `quick_xml::escape::unescape`
+// (= `unescape_with(resolve_predefined_entity)`, the resolver the old methods
+// used), rather than 0.40's `normalized_value`/`xml_content` which would add
+// AVN whitespace folding / EOL normalization the old GML path never applied.
+fn unescape_attr_value(raw: &[u8]) -> Result<String, GeoError> {
+    let s =
+        std::str::from_utf8(raw).map_err(|e| GeoError::Parse(format!("GML attr error: {e}")))?;
+    quick_xml::escape::unescape(s)
+        .map(|c| c.into_owned())
+        .map_err(|e| GeoError::Parse(format!("GML attr error: {e}")))
+}
+
 /// Parses a `geo:gmlLiteral` LEXICAL FORM (the literal's string value, without
 /// the `^^geo:gmlLiteral` datatype): a GML-SF geometry element.
 ///
@@ -140,9 +155,7 @@ fn parse_root(lex: &str) -> Result<Node, GeoError> {
                 let mut crs = inherited_crs.clone();
                 for attr in e.attributes().flatten() {
                     if local_name(attr.key.as_ref()) == "srsname" {
-                        let val = attr
-                            .unescape_value()
-                            .map_err(|err| GeoError::Parse(format!("GML attr error: {err}")))?;
+                        let val = unescape_attr_value(&attr.value)?;
                         crs = crs_from_srs_name(&val);
                         inherited_crs = crs.clone();
                     }
@@ -151,8 +164,12 @@ fn parse_root(lex: &str) -> Result<Node, GeoError> {
             }
             Ok(Event::Text(t)) => {
                 if let Some(top) = stack.last_mut() {
-                    let txt = t
-                        .unescape()
+                    // [OPUS-4.8] 0.40: decode (no EOL normalization, matching the old
+                    // `unescape`) then resolve predefined entities.
+                    let decoded = t
+                        .decode()
+                        .map_err(|err| GeoError::Parse(format!("GML text error: {err}")))?;
+                    let txt = quick_xml::escape::unescape(&decoded)
                         .map_err(|err| GeoError::Parse(format!("GML text error: {err}")))?;
                     if !top.text.is_empty() {
                         top.text.push(' ');
@@ -175,9 +192,7 @@ fn parse_root(lex: &str) -> Result<Node, GeoError> {
                 let mut crs = inherited_crs.clone();
                 for attr in e.attributes().flatten() {
                     if local_name(attr.key.as_ref()) == "srsname" {
-                        let val = attr
-                            .unescape_value()
-                            .map_err(|err| GeoError::Parse(format!("GML attr error: {err}")))?;
+                        let val = unescape_attr_value(&attr.value)?;
                         crs = crs_from_srs_name(&val);
                         inherited_crs = crs.clone();
                     }
