@@ -107,33 +107,83 @@ mod tamper {
         );
     }
 
-    /// Even with MAXIMAL redundancy (all `n` shares present, of which any `t+1`
-    /// suffice), a single tampered share STILL silently corrupts the result. This
-    /// sharpens the finding: the impl does NOT exploit the available redundancy to
-    /// detect (let alone correct) the error — it just Lagrange-interpolates the
-    /// whole over-determined set, which an inconsistent point poisons. A
-    /// malicious-secure scheme (VSS / IT-MACs) WOULD catch this; v1 does not.
+    /// **POSITIVE detection/correction test (sq-m34i, was the `…_is_still_
+    /// undetected` pin).** With MAXIMAL redundancy (all `n` shares present), the
+    /// consistency-checked / robust reconstruction now EXPLOITS the redundancy
+    /// via Reed–Solomon (Berlekamp–Welch): it corrects up to
+    /// `e = ⌊(n−t−1)/2⌋` tampered shares and returns the TRUE secret, and aborts
+    /// with `MpcError::Tampered` when the tampering exceeds that budget. This was
+    /// the gap pinned by bead sq-uu0u and is now CLOSED at the Shamir layer.
     #[test]
-    fn tampered_share_with_full_redundancy_is_still_undetected() {
+    fn tampered_share_with_full_redundancy_is_corrected_or_aborts() {
+        // n = 7, t = 3 → e_max = ⌊(7−3−1)/2⌋ = 1: one error is CORRECTABLE.
         let backend = ShamirBackend::new_seeded(7, 0x5EED).unwrap();
+        let t = backend.threshold();
+        assert_eq!(t, 3);
         let secret = fp(2_024);
-        let mut shares = backend.dealer().share(secret); // n = 7 shares
+        let shares = backend.dealer().share(secret); // n = 7 shares
 
         assert_eq!(
             backend.reconstruct(&shares).unwrap(),
             secret,
-            "honest full set ok"
+            "honest full set ok (no behaviour change on clean input)"
         );
 
-        corrupt_one(&mut shares, 3, 1); // flip a single share by +1
-
-        let got = backend.reconstruct(&shares).unwrap();
-        assert_ne!(
-            got, secret,
-            "FINDING (sq-nuok pin → bead sq-uu0u): a single tampered share corrupts reconstruction \
-             even with full n-share redundancy — the impl does no consistency / \
-             error-detection across subsets (no malicious security)"
+        // ONE tampered share (within budget e_max=1) → robustly CORRECTED to the
+        // true secret. The redundancy that v1 wasted is now used.
+        let mut one_bad = shares.clone();
+        corrupt_one(&mut one_bad, 3, 1); // flip a single share by +1
+        assert_eq!(
+            backend.reconstruct(&one_bad).unwrap(),
+            secret,
+            "sq-m34i: a single tampered share is RS-corrected back to the true secret \
+             (Berlekamp–Welch, n≥t+2e+1)"
         );
+
+        // TWO tampered shares (> e_max=1) → cannot be corrected → detect-and-abort.
+        let mut two_bad = shares.clone();
+        corrupt_one(&mut two_bad, 3, 1);
+        corrupt_one(&mut two_bad, 5, 2);
+        let err = backend.reconstruct(&two_bad).unwrap_err();
+        assert!(
+            matches!(err, MpcError::Tampered { .. }),
+            "sq-m34i: tampering beyond the correctable budget must ABORT with \
+             MpcError::Tampered, never silently corrupt; got {err:?}"
+        );
+    }
+
+    /// **POSITIVE detection test (sq-m34i).** At the minimal redundancy where no
+    /// correction is possible but detection IS (`e_max = 0`, i.e. `n = t+2`), a
+    /// single tampered share is DETECTED and the reconstruction aborts. This is
+    /// the pure detect-and-abort regime (no correction budget).
+    #[test]
+    fn tampered_share_with_minimal_redundancy_is_detected_and_aborts() {
+        // n = 3, t = 1 → e_max = ⌊(3−1−1)/2⌋ = 0: a single error is DETECTABLE
+        // (abort) but not correctable.
+        let backend = ShamirBackend::new_seeded(3, 0xD00D).unwrap();
+        assert_eq!(backend.threshold(), 1);
+        let secret = fp(777);
+        let mut shares = backend.dealer().share(secret); // n = 3 > t+1 = 2
+
+        assert_eq!(backend.reconstruct(&shares).unwrap(), secret, "honest ok");
+
+        corrupt_one(&mut shares, 1, 9); // single tampered share
+        let err = backend.reconstruct(&shares).unwrap_err();
+        match err {
+            MpcError::Tampered { cheaters, .. } => {
+                // Detection is SOUND (we aborted). Attribution is best-effort:
+                // with e_max=0 the honest set is unknown, so the reported off-
+                // curve point(s) — relative to an arbitrary reference subset —
+                // need not be the true cheater. We assert only that SOME suspect
+                // is named (the message is actionable), per the documented
+                // best-effort attribution contract.
+                assert!(
+                    !cheaters.is_empty(),
+                    "sq-m34i: detect-and-abort should name at least one suspect point; got {cheaters:?}"
+                );
+            }
+            other => panic!("sq-m34i: a tampered share with redundancy must abort, got {other:?}"),
+        }
     }
 
     /// The secure-equality primitive (`HiddenValueJoin::secure_equal`) opens
@@ -199,11 +249,15 @@ mod tamper {
         );
     }
 
-    /// A tampered share inside a SECURE SUM (`run_secure`) likewise propagates to
-    /// a wrong reconstructed total — the aggregate is just as unprotected as a
-    /// single reconstruction. We pin it to cover the `run_secure` path too.
+    /// **POSITIVE detection/correction test (sq-m34i, was the `…_corrupts_secure_
+    /// sum_silently` pin).** A tampered share inside the SECURE SUM output
+    /// (`run_secure`) is now caught by the same consistency-checked / robust
+    /// reconstruction: with the available redundancy it is RS-corrected back to
+    /// the true total (within `e_max`), and aborts when the tampering exceeds the
+    /// correctable budget. The aggregate path is no longer silently corruptible.
     #[test]
-    fn tampered_share_corrupts_secure_sum_silently() {
+    fn tampered_share_in_secure_sum_is_corrected_or_aborts() {
+        // n = 4, t = 1 → e_max = ⌊(4−1−1)/2⌋ = 1: one error is CORRECTABLE.
         let backend = ShamirBackend::new_seeded(4, 0x5151).unwrap();
         let mut dealer = backend.dealer();
         let inputs: Vec<Vec<Share>> = [10u64, 20, 30]
@@ -217,16 +271,219 @@ mod tamper {
             "honest sum"
         );
 
-        // Corrupt one share of the summed sharing.
-        let mut bad = summed.clone();
-        bad[0][0].y = bad[0][0].y.add(fp(7));
-        let got = backend.reconstruct(&bad[0]).unwrap();
-        assert_ne!(
-            got,
+        // ONE corrupted share of the summed sharing → RS-corrected to the truth.
+        let mut one_bad = summed.clone();
+        one_bad[0][0].y = one_bad[0][0].y.add(fp(7));
+        assert_eq!(
+            backend.reconstruct(&one_bad[0]).unwrap(),
             fp(60),
-            "FINDING (sq-nuok pin → bead sq-uu0u): a tampered share in run_secure's output corrupts \
-             the reconstructed aggregate undetected"
+            "sq-m34i: a single tampered share in the aggregate is RS-corrected to the true sum"
         );
+
+        // TWO corrupted shares (> e_max=1) → detect-and-abort, never a wrong total.
+        let mut two_bad = summed.clone();
+        two_bad[0][0].y = two_bad[0][0].y.add(fp(7));
+        two_bad[0][2].y = two_bad[0][2].y.add(fp(11));
+        let err = backend.reconstruct(&two_bad[0]).unwrap_err();
+        assert!(
+            matches!(err, MpcError::Tampered { .. }),
+            "sq-m34i: tampering the aggregate beyond the correctable budget must ABORT \
+             (MpcError::Tampered), not silently change the total; got {err:?}"
+        );
+    }
+}
+
+// =====================================================================
+// PART 1b — RS robust/checked reconstruction PROPERTY tests (sq-m34i).
+// Random secret + random tamper patterns across the (n, t, e) regimes,
+// plus a differential against honest Lagrange on untampered inputs.
+// =====================================================================
+mod robust_props {
+    use super::*;
+    use crate::robust::reconstruct_robust;
+    use crate::shamir::reconstruct_at_zero;
+
+    /// Deterministic SplitMix64 (reproducible; same shape as `field_fuzz::Lcg`).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        /// A canonical field element in [0, P) via rejection (no modulo bias).
+        fn next_fp(&mut self) -> u64 {
+            loop {
+                let c = self.next() & ((1u64 << 61) - 1);
+                if c < P {
+                    return c;
+                }
+            }
+        }
+        fn next_in(&mut self, hi: usize) -> usize {
+            (self.next() % hi as u64) as usize
+        }
+    }
+
+    /// Choose `k` distinct indices in `[0, n)`.
+    fn distinct_indices(rng: &mut Lcg, n: usize, k: usize) -> Vec<usize> {
+        let mut chosen: Vec<usize> = Vec::with_capacity(k);
+        while chosen.len() < k {
+            let i = rng.next_in(n);
+            if !chosen.contains(&i) {
+                chosen.push(i);
+            }
+        }
+        chosen
+    }
+
+    /// Tamper exactly the chosen indices by a nonzero field delta.
+    fn tamper(rng: &mut Lcg, shares: &mut [Share], idxs: &[usize]) {
+        for &i in idxs {
+            let mut d = rng.next_fp();
+            if d == 0 {
+                d = 1;
+            }
+            shares[i].y = shares[i].y.add(fp(d));
+        }
+    }
+
+    /// PROPERTY: with `n ≥ t + 2e + 1` and up to `e` random tampered shares, the
+    /// robust reconstruction returns the TRUE secret (Berlekamp–Welch corrects).
+    #[test]
+    fn robust_corrects_up_to_e_errors_returns_truth() {
+        let mut rng = Lcg(0x00C0_DE15_F00D);
+        // Use n with comfortable redundancy so e_max >= 1 for several t.
+        for &n in &[4usize, 5, 7, 9] {
+            let backend = ShamirBackend::new_seeded(n, 0x5A5A + n as u64).unwrap();
+            let t = backend.threshold();
+            let e_max = (n - t - 1) / 2;
+            if e_max == 0 {
+                continue; // no correction budget at this (n, t)
+            }
+            for _ in 0..200 {
+                let secret = fp(rng.next_fp());
+                let clean = backend.dealer().share(secret);
+                // Tamper a random number of shares in 0..=e_max.
+                let num_err = rng.next_in(e_max + 1); // 0..=e_max
+                let mut shares = clean.clone();
+                let idxs = distinct_indices(&mut rng, n, num_err);
+                tamper(&mut rng, &mut shares, &idxs);
+                let got = reconstruct_robust(&shares, t).unwrap_or_else(|e| {
+                    panic!("n={n} t={t} e_max={e_max} num_err={num_err}: must correct, got {e:?}")
+                });
+                assert_eq!(
+                    got, secret,
+                    "n={n} t={t} e_max={e_max} num_err={num_err}: robust must return the truth"
+                );
+            }
+        }
+    }
+
+    /// PROPERTY: when the number of tampered shares is in `(e_max, n−t−1]` — i.e.
+    /// MORE than correctable but redundancy still present — the reconstruction
+    /// ABORTS with `MpcError::Tampered` rather than returning a wrong secret.
+    /// (`n−t−1` is the count of redundant shares; beyond it the codeword can be
+    /// underdetermined, so we cap at the detectable band.)
+    #[test]
+    fn robust_aborts_when_errors_exceed_budget() {
+        let mut rng = Lcg(0xDEAD_BEEF_F00D);
+        for &n in &[3usize, 4, 5, 7, 9] {
+            let backend = ShamirBackend::new_seeded(n, 0x1234 + n as u64).unwrap();
+            let t = backend.threshold();
+            let e_max = (n - t - 1) / 2;
+            // # excess shares over the threshold; the detectable-but-not-
+            // correctable band is (e_max, redundancy].
+            let redundancy = n - t - 1;
+            if redundancy <= e_max {
+                continue; // no such band (e.g. nothing beyond correctable to test)
+            }
+            for _ in 0..200 {
+                let secret = fp(rng.next_fp());
+                let clean = backend.dealer().share(secret);
+                // num_err strictly above e_max, up to `redundancy`.
+                let span = redundancy - e_max; // >= 1
+                let num_err = e_max + 1 + rng.next_in(span); // (e_max, redundancy]
+                let mut shares = clean.clone();
+                let idxs = distinct_indices(&mut rng, n, num_err);
+                tamper(&mut rng, &mut shares, &idxs);
+                match reconstruct_robust(&shares, t) {
+                    Err(MpcError::Tampered { .. }) => { /* detected — correct */ }
+                    Ok(v) => panic!(
+                        "n={n} t={t} e_max={e_max} num_err={num_err}: must ABORT, \
+                         but returned {v:?} (true secret was {secret:?})"
+                    ),
+                    Err(other) => {
+                        panic!("n={n} num_err={num_err}: must be Tampered, got {other:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    /// PROPERTY (documented non-detection): at EXACTLY `t+1` shares (no
+    /// redundancy) a single tampered share is information-theoretically
+    /// undetectable — robust reconstruction must NOT return `Tampered` and must
+    /// simply interpolate (to a different, wrong secret). No false positives.
+    #[test]
+    fn exact_threshold_set_never_reports_tampered() {
+        let mut rng = Lcg(0xFEED_FACE);
+        for &n in &[2usize, 3, 5, 7, 9] {
+            let backend = ShamirBackend::new_seeded(n, 0xABCD + n as u64).unwrap();
+            let t = backend.threshold();
+            for _ in 0..200 {
+                let secret = fp(rng.next_fp());
+                let clean = backend.dealer().share(secret);
+                // Take exactly t+1 shares, then tamper one of them.
+                let mut min_set = clean[..t + 1].to_vec();
+                let i = rng.next_in(t + 1);
+                let mut d = rng.next_fp();
+                if d == 0 {
+                    d = 1;
+                }
+                min_set[i].y = min_set[i].y.add(fp(d));
+                match reconstruct_robust(&min_set, t) {
+                    Ok(v) => assert_ne!(
+                        v, secret,
+                        "n={n} t={t}: t+1-share tamper must change the secret (no magic correction)"
+                    ),
+                    Err(MpcError::Tampered { .. }) => panic!(
+                        "n={n} t={t}: FALSE POSITIVE — no redundancy means tampering is \
+                         undetectable; must not report Tampered"
+                    ),
+                    Err(other) => panic!("n={n}: unexpected error {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// DIFFERENTIAL: on UNTAMPERED inputs the robust path returns EXACTLY the
+    /// same value as the honest primitive `reconstruct_at_zero` (plain Lagrange)
+    /// — no regression for the common, honest case, at every redundancy level.
+    #[test]
+    fn robust_matches_honest_lagrange_on_clean_inputs() {
+        let mut rng = Lcg(0x000F_F1CE);
+        for &n in &[2usize, 3, 4, 5, 7, 9] {
+            let backend = ShamirBackend::new_seeded(n, 0x7E57 + n as u64).unwrap();
+            let t = backend.threshold();
+            for _ in 0..300 {
+                let secret = fp(rng.next_fp());
+                let shares = backend.dealer().share(secret);
+                // Compare on every subset size from t+1 up to n.
+                for take in (t + 1)..=n {
+                    let subset = &shares[..take];
+                    let honest = reconstruct_at_zero(subset, t).unwrap();
+                    let robust = reconstruct_robust(subset, t).unwrap();
+                    assert_eq!(
+                        robust, honest,
+                        "n={n} take={take}: robust must equal honest Lagrange on clean input"
+                    );
+                    assert_eq!(robust, secret, "and equal the true secret");
+                }
+            }
+        }
     }
 }
 
