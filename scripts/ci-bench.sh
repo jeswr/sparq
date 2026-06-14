@@ -34,6 +34,14 @@ SP2B_GEN=bench/sp2b/gen.sh
 SP2B_Q=bench/sp2b/queries
 SP2B_EXP=bench/sp2b/expected-rows.tsv
 SP2B_TRIPLES="${SP2B_TRIPLES:-250000}"
+# [OPUS-4.8] DBPSB/FEASIBLE (well-known suite) — per-commit subset over a pinned, fetched +
+# cached DBpedia Databus slice (NO generator; fetch.sh verifies sha256 + emits a deterministic
+# 750k-triple N-Triples cut). Trend-only latency like sp2b, PLUS a hard expected-rows
+# correctness diff. Registry: bench/benchmarks.toml (dbpsb); details: bench/dbpsb/README.md.
+DBPSB_FETCH=bench/dbpsb/fetch.sh
+DBPSB_Q=bench/dbpsb/queries
+DBPSB_EXP=bench/dbpsb/expected-rows.tsv
+DBPSB_TRIPLES="${DBPSB_TRIPLES:-750000}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -147,6 +155,43 @@ if [ -x "$SP2B_GEN" ] && [ -d "$SP2B_Q" ]; then
     fi
   else
     echo "note: sp2b skipped (generator unavailable — no network/g++?)" >&2
+  fi
+fi
+
+# [OPUS-4.8] DBPSB/FEASIBLE per-commit subset. fetch.sh downloads ONE sha256-pinned DBpedia
+# Databus slice (mappingbased-objects_lang=en 2019.09.01, CC-BY-SA — see bench/dbpsb/README.md)
+# and emits a FIXED, deterministic 750k-triple N-Triples cut, then runs the 13 sub-second
+# curated FEASIBLE/DBPSB queries (BGP/star/chain joins, OPTIONAL, UNION, FILTER, DISTINCT,
+# ORDER+LIMIT, aggregates, subquery, negation-by-OPTIONAL+!bound). Emits `dbpsb_<query>_<mode>_us`
+# (trend-only, NOT in scripts/perf-gate.py) AND a HARD expected-rows equality check on count
+# mode (a solution-count drift on the fixed cut is a correctness regression and fails the run).
+# Guarded — if the slice can't be fetched (no network), the whole block is skipped gracefully so
+# ci-bench still emits valid JSON for everything else. (CI keys actions/cache on the pinned
+# URL+sha so the steady state does NO network — see bench/dbpsb/README.md "CI wiring".)
+if [ -x "$DBPSB_FETCH" ] && [ -d "$DBPSB_Q" ]; then
+  if DBPSB_CUT="$("$DBPSB_FETCH" "$DBPSB_TRIPLES" 2>/dev/null)" && [ -s "${DBPSB_CUT:-}" ]; then
+    for mode in count materialize json; do
+      "$CLI" bench "$DBPSB_CUT" ntriples "$DBPSB_Q" 3 "$mode" 2>/dev/null > "$TMP/dbpsb.$mode" || true
+      while IFS=$'\t' read -r name rows us; do
+        [ "${rows:-}" = "ERROR" ] && continue
+        [ -n "${us:-}" ] && add "dbpsb_${name}_${mode}_us" us "$us"
+      done < "$TMP/dbpsb.$mode"
+    done
+    # HARD differential: count-mode solution counts must match the committed expected sizes.
+    if [ -f "$DBPSB_EXP" ]; then
+      dbpsb_fail=0
+      while IFS=$'\t' read -r q exp; do
+        case "$q" in \#*|"") continue;; esac
+        got=$(awk -F'\t' -v k="$q" '$1==k{print $2}' "$TMP/dbpsb.count")
+        if [ "${got:-MISSING}" != "$exp" ]; then
+          echo "ERROR: dbpsb $q rows=${got:-MISSING} expected=$exp (correctness regression)" >&2
+          dbpsb_fail=1
+        fi
+      done < "$DBPSB_EXP"
+      [ "$dbpsb_fail" = 0 ] || exit 1
+    fi
+  else
+    echo "note: dbpsb skipped (pinned slice unavailable — no network?)" >&2
   fi
 fi
 

@@ -1,0 +1,7 @@
+# [OPUS-4.8] UNION of two predicates onto a common variable.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT ?person ?place WHERE {
+  { ?person dbo:birthPlace ?place }
+  UNION
+  { ?person dbo:deathPlace ?place }
+}

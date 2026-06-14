@@ -1,0 +1,5 @@
+# [OPUS-4.8] Single scalar aggregate over one predicate (deterministic count).
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT (COUNT(*) AS ?n) WHERE {
+  ?person dbo:birthPlace ?bp .
+}

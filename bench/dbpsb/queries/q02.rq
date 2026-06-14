@@ -1,0 +1,6 @@
+# [OPUS-4.8] Chain join (2 patterns): person -> birthPlace -> country.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT ?person ?country WHERE {
+  ?person dbo:birthPlace ?city .
+  ?city   dbo:country    ?country .
+}

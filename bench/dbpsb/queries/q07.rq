@@ -1,0 +1,7 @@
+# [OPUS-4.8] FILTER inequality on a bound IRI: people NOT born in the United States.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+PREFIX dbr: <http://dbpedia.org/resource/>
+SELECT ?person ?bp WHERE {
+  ?person dbo:birthPlace ?bp .
+  FILTER(?bp != dbr:United_States)
+}

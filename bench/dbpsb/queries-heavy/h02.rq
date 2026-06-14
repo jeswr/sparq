@@ -1,0 +1,8 @@
+# [OPUS-4.8] HEAVY (EC2/nightly): unbounded 3-pattern chain over object properties; no
+# constant anchors the BGP, so it materialises a large cross-predicate join.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT (COUNT(*) AS ?n) WHERE {
+  ?a dbo:birthPlace ?p .
+  ?b dbo:deathPlace ?p .
+  ?b dbo:country    ?c .
+}

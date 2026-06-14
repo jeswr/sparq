@@ -1,0 +1,20 @@
+# [OPUS-4.8] DBPSB per-commit expected result sizes (count mode = solution count).
+# Differential check: on the FIXED 750k-triple cut of the pinned DBpedia slice
+# (bench/dbpsb/fetch.sh 750000 — see bench/dbpsb/README.md for URL+sha256), each query's
+# solution count is deterministic (verified identical across repeated runs), so a row-count
+# drift = a correctness regression. Format: <query>\t<rows>. Wired into scripts/ci-bench.sh
+# (dbpsb hook) as a HARD equality check on count mode (latency stays trend-only).
+# Heavy-tier queries (h01/h02) live in queries-heavy/ for the EC2/nightly tier, not here.
+q01	873
+q02	9913
+q03	48064
+q04	23607
+q05	76077
+q06	43
+q07	49555
+q08	100
+q09	50
+q10	1
+q11	22763
+q12	367650
+q13	25

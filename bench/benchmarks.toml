@@ -118,6 +118,21 @@ pinning     = "sp2b tarball sha256 (gen.sh TARBALL_SHA256); SP2B_TRIPLES (250000
 records_to  = "stdout (TSV); CI emits sp2b_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/sp2b/expected-rows.tsv"
 status      = "ok"
 
+# [OPUS-4.8] sq-5mu — DBPSB/FEASIBLE (well-known suite) over REAL DBpedia at CI scale;
+# fetch-and-cache (no generator), per-commit subset + heavy tier.
+[[benchmark]]
+id          = "dbpsb"
+name        = "DBPSB/FEASIBLE (DBpedia SPARQL Benchmark) — real DBpedia"
+category    = "query"
+measures    = "per-query min-of-iters latency (us) across count/materialize/json for 13 curated FEASIBLE/DBPSB queries over a pinned DBpedia slice: BGP / star / chain joins, OPTIONAL, UNION, FILTER (regex on IRI / inequality), DISTINCT, ORDER BY + LIMIT, aggregates (COUNT/GROUP BY/HAVING), subquery, negation-by-OPTIONAL+!bound. Carries a HARD expected-rows correctness diff on the fixed cut"
+invoke      = "cargo build --release -p sparq-cli && CUT=$(bench/dbpsb/fetch.sh 750000) && ./target/release/sparq-cli bench \"$CUT\" ntriples bench/dbpsb/queries 3 count   # also materialize|json; heavy tier: bench/dbpsb/queries-heavy; CI runs the subset via scripts/ci-bench.sh -> dbpsb_<query>_<mode>_us"
+source      = "bench/dbpsb/{fetch.sh,queries/*.rq,queries-heavy/*.rq,expected-rows.tsv,README.md}; scripts/ci-bench.sh (dbpsb hook); crates/sparq-cli/src/main.rs (run_query_suite)"
+dataset     = "REAL DBpedia (CC-BY-SA), pinned Databus slice dbpedia/mappings/mappingbased-objects/2019.09.01/mappingbased-objects_lang=en.ttl.bz2 (sha256 1cd51b2f…ad7b, 119919822 B; file is N-Triples despite the .ttl ext). fetch.sh downloads+verifies ONCE then emits a DETERMINISTIC head cut of 750000 triples (full artifact ~11.8M = EC2/nightly). gitignored + regenerable (/tmp/dbpsb)"
+quiet_box_sensitive = true  # wall-clock latency trend-only, NOT in scripts/perf-gate.py; the expected-rows diff IS a hard correctness gate (deterministic, load-robust)
+pinning     = "slice sha256 (fetch.sh SLICE_SHA256) + exact Databus URL; DBPSB_TRIPLES (750000 per-commit); the cut is the deterministic head of a fixed-order, sha256-pinned file so it is byte-reproducible; queries adapted to the predicates present in the slice"
+records_to  = "stdout (TSV); CI emits dbpsb_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/dbpsb/expected-rows.tsv"
+status      = "ok"
+
 [[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
@@ -605,10 +620,10 @@ status      = "ok"  # research spikes, not a regression gate
 id          = "ci-bench"
 name        = "CI cross-commit benchmark emitter (free GitHub runners)"
 category    = "scaling"
-measures    = "customSmallerIsBetter JSON: load_s, store_bytes_per_triple, dict_bytes_per_term, per-query {count,materialize,json}_us, op_<query>_<mode>_us (operator-coverage), sp2b_<query>_<mode>_us (SP2Bench subset, + hard expected-rows diff), rdfs_infer_s, wasm_bundle_bytes"
+measures    = "customSmallerIsBetter JSON: load_s, store_bytes_per_triple, dict_bytes_per_term, per-query {count,materialize,json}_us, op_<query>_<mode>_us (operator-coverage), sp2b_<query>_<mode>_us (SP2Bench subset, + hard expected-rows diff), dbpsb_<query>_<mode>_us (DBPSB/FEASIBLE subset over pinned DBpedia, + hard expected-rows diff), rdfs_infer_s, wasm_bundle_bytes"
 invoke      = "bash scripts/ci-bench.sh [scale_entities=200000] [out.json=bench-results.json]   # CI: .github/workflows/bench.yml on push to main"
 source      = "scripts/ci-bench.sh; .github/workflows/bench.yml"
-dataset     = "sparq-bench dump at scale_entities; queries bench/qlever-synthetic/queries + bench/operators/queries + bench/sp2b/queries (sp2b corpus via bench/sp2b/gen.sh)"
+dataset     = "sparq-bench dump at scale_entities; queries bench/qlever-synthetic/queries + bench/operators/queries + bench/sp2b/queries (sp2b corpus via bench/sp2b/gen.sh) + bench/dbpsb/queries (pinned DBpedia cut via bench/dbpsb/fetch.sh)"
 quiet_box_sensitive = true  # GitHub runners are noisy: value is the TREND + large-regression alert (200% threshold, no hard-fail); memory/bundle metrics ARE deterministic
 pinning     = "scale_entities; deterministic memory + wasm-bundle metrics anchor the noisy timings"
 records_to  = "benchmark-data branch (dev/bench), github-action-benchmark alert comments"

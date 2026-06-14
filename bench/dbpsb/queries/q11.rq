@@ -1,0 +1,7 @@
+# [OPUS-4.8] Negation by OPTIONAL + !bound: born somewhere, no recorded deathPlace.
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT ?person ?bp WHERE {
+  ?person dbo:birthPlace ?bp .
+  OPTIONAL { ?person dbo:deathPlace ?dp }
+  FILTER(!bound(?dp))
+}
