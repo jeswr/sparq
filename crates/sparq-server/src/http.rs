@@ -581,7 +581,8 @@ pub fn router(state: AppState) -> Router {
         // Graph Store HTTP Protocol (indirect graph identification): ?graph=<uri> / ?default
         .route("/sparql/graph", any(graph_store_indirect))
         // Graph Store HTTP Protocol (direct graph identification).
-        .route("/graphs/*path", any(graph_store_direct))
+        // [OPUS-4.8] axum 0.8 (matchit 0.8) wildcard-capture syntax: `/*path` -> `/{*path}`.
+        .route("/graphs/{*path}", any(graph_store_direct))
         // SEPA-style SPARQL subscriptions over WebSocket (T23).
         .route("/subscriptions", get(crate::subscriptions::subscriptions_endpoint))
         // Liveness.

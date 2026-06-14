@@ -67,7 +67,7 @@ spargebra.workspace = true
 
 # --- async HTTP stack (feature-gated; native only) ---
 # `ws` powers the /subscriptions endpoint (T23, SEPA-style SPARQL subscriptions).
-axum = { version = "0.7", optional = true, default-features = false, features = ["http1", "tokio", "query", "json", "ws"] }
+axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "tokio", "query", "json", "ws"] }
 # `sync` adds the watch channel that carries the commit generation to subscription tasks (T23).
 tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 # `limit` + `load-shed` power the max-concurrency guard (T15); `util` for ServiceBuilder combinators.

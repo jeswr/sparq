@@ -33,8 +33,13 @@ oxrdf02 = { package = "oxrdf", version = "0.2.4" }
 oxttl01 = { package = "oxttl", version = "0.1.8" }
 
 # BN254 scalar field (the Noir `Field`) for Poseidon2.
-ark-bn254 = { version = "0.5", default-features = false, features = ["curve"] }
-ark-ff = { version = "0.5", default-features = false }
+# [OPUS-4.8] The whole arkworks stack (ark-bn254/ark-ff/ark-ec/ark-serialize/ark-ed-on-bn254/
+# ark-std) is bumped 0.5 -> 0.6 TOGETHER: the traits are version-coupled, so a partial bump
+# (Dependabot PRs #21 ark-std / #22 ark-ed-on-bn254 in isolation) mixes 0.5/0.6 trait
+# coherence and fails to compile. The combined bump compiles clean and all sparq-zk tests
+# (EdDSA/Poseidon2/commitment) pass.
+ark-bn254 = { version = "0.6", default-features = false, features = ["curve"] }
+ark-ff = { version = "0.6", default-features = false }
 
 # Off-circuit string hash h_s (plan §2.2: Enc_t(term) = h_2(type_code, h_s(value))).
 blake3 = "1"
@@ -44,12 +49,16 @@ blake3 = "1"
 # by construction. Already in the workspace lockfile (via ark-std's rand).
 # [OPUS-4.8] sq-610.
 getrandom = "0.2"
-ark-ed-on-bn254 = { version = "0.5", default-features = false }
-ark-ec = { version = "0.5", default-features = false }
-ark-serialize = { version = "0.5", default-features = false }
-ark-std = { version = "0.5", default-features = false, features = ["std"] }
+ark-ed-on-bn254 = { version = "0.6", default-features = false }
+ark-ec = { version = "0.6", default-features = false }
+ark-serialize = { version = "0.6", default-features = false }
+ark-std = { version = "0.6", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 serde_json = "1"
 # SHA-384 parameterized-hash cases of the W3C rdf-canon suite (test075).
+# [OPUS-4.8] Pinned to 0.10 (NOT 0.11): rdf-canon 0.15.3 exposes a `Digest` bound from
+# digest 0.10, and the test feeds `sha2::Sha384` straight into canonicalize_quads_with::<D>.
+# Bumping this crate's sha2 to 0.11 (digest 0.11) makes the type fail rdf-canon's 0.10 bound.
+# Lift only once rdf-canon publishes a digest-0.11 release. See Dependabot PR #17 / bead.
 sha2 = "0.10"
