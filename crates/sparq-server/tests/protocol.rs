@@ -753,3 +753,171 @@ async fn default_graph_uri_param_is_accepted() {
     // accepted + threaded through; with one default graph it has no effect but must not error
     assert_eq!(resp.status(), 200);
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-rt6v — RDF/XML body parsing + RDF/XML & prefix-Turtle serialisation
+// ---------------------------------------------------------------------------
+
+/// A simple, self-contained RDF/XML document with one triple (uses a registered prefix).
+const RDFXML_BODY: &str = r#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:foaf="http://xmlns.com/foaf/0.1/">
+  <rdf:Description rdf:about="http://ex/alice">
+    <foaf:name>Alice</foaf:name>
+  </rdf:Description>
+</rdf:RDF>"#;
+
+/// PUT an `application/rdf+xml` body, then GET the graph back as RDF/XML: the round-trip must
+/// preserve the triple (parse RDF/XML in → serialise RDF/XML out, both via oxrdfxml).
+#[tokio::test]
+async fn gsp_put_rdfxml_then_get_rdfxml_roundtrip() {
+    let base = spawn_empty().await;
+    let cl = client();
+    let g = "http://ex/rdfxml-g";
+
+    let put = cl
+        .put(format!("{base}/sparql/graph?graph={g}"))
+        .header("content-type", "application/rdf+xml")
+        .body(RDFXML_BODY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 201, "first PUT of an RDF/XML body into an absent graph must be 201");
+
+    // GET it back, asking for RDF/XML.
+    let get = cl
+        .get(format!("{base}/sparql/graph?graph={g}"))
+        .header("accept", "application/rdf+xml")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.headers()["content-type"], "application/rdf+xml; charset=utf-8");
+    let body = get.text().await.unwrap();
+    assert!(body.contains("<?xml"), "RDF/XML response must be a real XML document: {body}");
+    assert!(body.contains("rdf:RDF"), "RDF/XML response must have an rdf:RDF root: {body}");
+
+    // The recovered RDF/XML must re-parse to exactly the inserted triple.
+    let triples = sparq_server::graph::parse_rdfxml(body.as_bytes(), None).unwrap();
+    assert_eq!(triples.len(), 1, "RDF/XML round-trip must preserve the single triple: {body}");
+    assert_eq!(triples[0].subject.to_string(), "<http://ex/alice>");
+    assert_eq!(triples[0].predicate.as_str(), "http://xmlns.com/foaf/0.1/name");
+
+    // And it must also be readable as N-Triples (default Accept) — same one triple.
+    let nt = cl.get(format!("{base}/sparql/graph?graph={g}")).send().await.unwrap().text().await.unwrap();
+    assert!(nt.contains("<http://ex/alice> <http://xmlns.com/foaf/0.1/name> \"Alice\" ."), "N-Triples view lost the triple: {nt}");
+}
+
+/// A malformed `application/rdf+xml` body is a 400 (parsed/validated before any write).
+#[tokio::test]
+async fn gsp_malformed_rdfxml_body_is_400() {
+    let base = spawn_empty().await;
+    let resp = client()
+        .put(format!("{base}/sparql/graph?graph=http://ex/bad-xml"))
+        .header("content-type", "application/rdf+xml")
+        .body("<rdf:RDF><this is not well-formed xml")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "malformed RDF/XML must be a 400");
+}
+
+/// CONSTRUCT with `Accept: application/rdf+xml` returns a well-formed RDF/XML document that
+/// re-parses to the constructed triples.
+#[tokio::test]
+async fn construct_negotiates_rdfxml() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .header("accept", "application/rdf+xml")
+        .query(&[(
+            "query",
+            "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        )])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "application/rdf+xml; charset=utf-8");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<?xml") && body.contains("rdf:RDF"), "not RDF/XML: {body}");
+    // Three subjects have ex:age in DATA → three constructed triples.
+    let triples = sparq_server::graph::parse_rdfxml(body.as_bytes(), None).unwrap();
+    assert_eq!(triples.len(), 3, "RDF/XML CONSTRUCT result must carry all three triples: {body}");
+}
+
+/// CONSTRUCT with `Accept: text/turtle` returns PREFIX-COMPACTING Turtle (a real `@prefix`
+/// header + compact `prefix:local` IRIs), not N-Triples-as-Turtle.
+#[tokio::test]
+async fn construct_turtle_is_prefix_compacting() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .header("accept", "text/turtle")
+        .query(&[(
+            "query",
+            // rdf:type into an owl: class exercises two registered prefixes.
+            "PREFIX ex: <http://ex/> PREFIX owl: <http://www.w3.org/2002/07/owl#> \
+             CONSTRUCT { ?s a owl:Thing } WHERE { ?s ex:age ?a }",
+        )])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "text/turtle; charset=utf-8");
+    let body = resp.text().await.unwrap();
+    // A genuine Turtle document declares prefixes and uses the compact form.
+    assert!(body.contains("@prefix owl:"), "Turtle must declare the owl prefix: {body}");
+    assert!(body.contains("owl:Thing"), "Turtle must compact the owl: IRI: {body}");
+    // And it must still load as Turtle to the same triple count.
+    assert_eq!(Graph::load_str(&body, "turtle").unwrap().len(), 3);
+}
+
+/// GSP read negotiates RDF/XML when the client asks for it (via the q-value-aware Accept).
+#[tokio::test]
+async fn gsp_read_negotiates_rdfxml() {
+    let base = spawn().await; // pre-populated default graph (DATA)
+    let resp = client()
+        .get(format!("{base}/sparql/graph?default"))
+        .header("accept", "application/rdf+xml;q=0.9, application/n-triples;q=0.5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "application/rdf+xml; charset=utf-8");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("rdf:RDF"), "GSP RDF/XML read must be RDF/XML: {body}");
+    // The default graph (DATA): alice(knows/age/name)=3, bob(age/name)=2, carol(age)=1 → 6.
+    let triples = sparq_server::graph::parse_rdfxml(body.as_bytes(), None).unwrap();
+    assert_eq!(triples.len(), 6, "GSP RDF/XML read must carry every default-graph triple: {body}");
+}
+
+/// A Turtle body PUT round-trips through an RDF/XML GET (cross-format): write Turtle, read
+/// RDF/XML — content negotiation is independent on each side.
+#[tokio::test]
+async fn gsp_put_turtle_get_rdfxml_cross_format() {
+    let base = spawn_empty().await;
+    let cl = client();
+    let g = "http://ex/cross";
+
+    let put = cl
+        .put(format!("{base}/sparql/graph?graph={g}"))
+        .header("content-type", "text/turtle")
+        .body("@prefix ex: <http://ex/> . ex:s ex:p ex:o .")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 201);
+
+    let get = cl
+        .get(format!("{base}/sparql/graph?graph={g}"))
+        .header("accept", "application/rdf+xml")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.headers()["content-type"], "application/rdf+xml; charset=utf-8");
+    let body = get.text().await.unwrap();
+    let triples = sparq_server::graph::parse_rdfxml(body.as_bytes(), None).unwrap();
+    assert_eq!(triples.len(), 1, "cross-format round-trip lost the triple: {body}");
+    assert_eq!(triples[0].object.to_string(), "<http://ex/o>");
+}

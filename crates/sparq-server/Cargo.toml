@@ -61,6 +61,19 @@ sparq-serve = { path = "../sparq-serve", version = "0.1.0", optional = true }
 # feature is this same sparq-engine, so the graph gains just the georust stack).
 sparq-geo = { path = "../sparq-geo", version = "0.1.0", optional = true }
 oxrdf.workspace = true
+# [OPUS-4.8] sq-rt6v: prefix-compacting Turtle + RDF/XML graph serialisation, and RDF/XML
+# request-body parsing, for the GSP read/write + CONSTRUCT/DESCRIBE surface. Both crates are
+# the oxigraph RDF I/O pair that already sits in the workspace tree (oxttl is the workspace
+# Turtle parser; oxrdfxml is used by sparq-conformance), pinned to the same `oxrdf` 0.3 the
+# server resolves so `oxrdf::Triple`/`TripleRef` flow through without conversion. The graph
+# serialiser module is pure (no async), so — like `results` — these are NOT feature-gated:
+# they compile in the serialiser-only build too and are unit-testable. The wasm graph does
+# not depend on sparq-server (crates/sparq-wasm depends on sparq-core/-engine directly), so
+# this adds nothing to the bundle.
+oxttl.workspace = true
+# `rdf-12` matches the oxrdf `rdf-12` feature already on (quoted triple terms), so an
+# RDF-1.2 graph round-trips through RDF/XML consistently with the other serialisers.
+oxrdfxml = { version = "0.2", features = ["rdf-12"] }
 # Re-parse to classify the SPARQL query form (SELECT/ASK/CONSTRUCT/DESCRIBE) before
 # dispatching to the engine — the engine's public API only runs SELECT.
 spargebra.workspace = true

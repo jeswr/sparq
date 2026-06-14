@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (JSON/XML/CSV/TSV/N-Triples/Turtle), Graph Store read AND write (PUT/POST/DELETE on graph resources), EXPLAIN, Prometheus /metrics, WebSocket subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML), Graph Store read AND write (PUT/POST/DELETE on graph resources, RDF/XML bodies accepted), EXPLAIN, Prometheus /metrics, WebSocket subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -120,12 +120,16 @@ CONSTRUCT/DESCRIBE):
 | --- | --- | --- |
 | SELECT | `application/sparql-results+json` (default) / `+xml` / `text/csv` / `text/tab-separated-values` | matching results media |
 | ASK | json (default) / xml | `application/sparql-results+json` / `+xml` |
-| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` | N-Triples bytes (valid Turtle) |
+| CONSTRUCT / DESCRIBE | `application/n-triples` (default) / `text/turtle` / `application/rdf+xml` | matching RDF media; N-Triples, prefix-compacting Turtle, or RDF/XML <!-- [OPUS-4.8] sq-rt6v --> |
 
 ```sh
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/sparql-results+xml' \
      --data-urlencode 'query=SELECT ?s WHERE { ?s ?p ?o }'
+# prefix-compacting Turtle:
 curl -G http://127.0.0.1:3030/sparql -H 'Accept: text/turtle' \
+     --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
+# RDF/XML:
+curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/rdf+xml' \
      --data-urlencode 'query=CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
 ```
 
@@ -177,12 +181,15 @@ failed re-evaluations come back as `{"error": {"message": …, "id"?: n}}`.
 **5. Graph Store read + write + operational endpoints.**
 
 ```sh
-# READ (GET/HEAD): serialises the addressed graph as N-Triples (also satisfies Accept: text/turtle)
+# READ (GET/HEAD): serialises the addressed graph in the Accept-negotiated RDF syntax
+# (default N-Triples; also text/turtle = prefix-compacting Turtle, application/rdf+xml = RDF/XML)
 curl http://127.0.0.1:3030/sparql/graph?default                 # GSP indirect (default graph)
 curl 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'     # GSP indirect (named graph)
 curl http://127.0.0.1:3030/graphs/whatever                      # GSP direct (request URI is the graph IRI)
+curl -H 'Accept: application/rdf+xml' http://127.0.0.1:3030/sparql/graph?default   # RDF/XML read [OPUS-4.8] sq-rt6v
 
-# WRITE (sq-gxsj): body is RDF, format by Content-Type (turtle | n-triples | n-quads | trig)
+# WRITE (sq-gxsj): body is RDF, format by Content-Type
+#   (turtle | n-triples | n-quads | trig | application/rdf+xml [OPUS-4.8] sq-rt6v)
 # PUT = REPLACE graph contents (201 if created, 204 if replaced):
 curl -X PUT 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g' \
      -H 'content-type: text/turtle' --data '<http://ex/s> <http://ex/p> <http://ex/o> .'

@@ -38,13 +38,16 @@ impl Format {
     }
 }
 
-/// The negotiated RDF graph serialisation for CONSTRUCT / DESCRIBE results (T16).
-/// The body bytes are N-Triples either way (a syntactic subset of Turtle, so the
-/// `text/turtle` representation is honest); negotiation picks the `Content-Type`.
+/// The negotiated RDF graph serialisation for CONSTRUCT / DESCRIBE + Graph Store reads.
+/// `Turtle` is now a real prefix-compacting Turtle document, and `RdfXml` is a genuine
+/// RDF/XML document ([OPUS-4.8] sq-rt6v) — distinct serialisations, not all-N-Triples.
+/// Negotiation picks the format (and its `Content-Type`) from the `Accept` header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphFormat {
     NTriples,
     Turtle,
+    /// `application/rdf+xml` — RDF/XML. [OPUS-4.8] sq-rt6v.
+    RdfXml,
 }
 
 impl GraphFormat {
@@ -52,12 +55,16 @@ impl GraphFormat {
         match self {
             GraphFormat::NTriples => "application/n-triples; charset=utf-8",
             GraphFormat::Turtle => "text/turtle; charset=utf-8",
+            // [OPUS-4.8] sq-rt6v: RDF/XML registers `charset=utf-8` like the others; the
+            // document's own XML declaration also pins UTF-8.
+            GraphFormat::RdfXml => "application/rdf+xml; charset=utf-8",
         }
     }
 }
 
-/// Negotiates the CONSTRUCT/DESCRIBE graph serialisation from an `Accept` header:
-/// `text/turtle` and `application/n-triples` (q-value aware), default N-Triples.
+/// Negotiates the CONSTRUCT/DESCRIBE + GSP-read graph serialisation from an `Accept` header:
+/// `text/turtle`, `application/n-triples` and — [OPUS-4.8] sq-rt6v — `application/rdf+xml`
+/// (q-value aware), default N-Triples.
 pub fn negotiate_graph(accept: Option<&str>) -> GraphFormat {
     let accept = match accept {
         Some(a) if !a.trim().is_empty() => a,
@@ -68,6 +75,10 @@ pub fn negotiate_graph(accept: Option<&str>) -> GraphFormat {
         let (fmt, spec) = match media.as_str() {
             "application/n-triples" => (Some(GraphFormat::NTriples), 2),
             "text/turtle" => (Some(GraphFormat::Turtle), 2),
+            // [OPUS-4.8] sq-rt6v: RDF/XML (and the older `application/xml`/`text/xml` aliases
+            // some clients send for RDF/XML — kept lower-specificity so an exact match wins).
+            "application/rdf+xml" => (Some(GraphFormat::RdfXml), 2),
+            "application/xml" | "text/xml" => (Some(GraphFormat::RdfXml), 1),
             "*/*" => (Some(GraphFormat::NTriples), 0),
             _ => (None, 0),
         };
@@ -197,6 +208,16 @@ mod tests {
         );
         // exact beats wildcard; unsupported falls back to N-Triples.
         assert_eq!(negotiate_graph(Some("text/turtle, */*")), GraphFormat::Turtle);
-        assert_eq!(negotiate_graph(Some("application/rdf+xml")), GraphFormat::NTriples);
+        // [OPUS-4.8] sq-rt6v: RDF/XML is now a first-class graph format.
+        assert_eq!(negotiate_graph(Some("application/rdf+xml")), GraphFormat::RdfXml);
+        // The `application/xml`/`text/xml` aliases also map to RDF/XML, but at lower
+        // specificity, so an exact `application/rdf+xml` (or turtle/n-triples) wins a tie.
+        assert_eq!(negotiate_graph(Some("application/xml")), GraphFormat::RdfXml);
+        assert_eq!(negotiate_graph(Some("text/xml")), GraphFormat::RdfXml);
+        assert_eq!(negotiate_graph(Some("text/turtle, application/xml")), GraphFormat::Turtle);
+        // q=0 rejects RDF/XML, so Turtle wins.
+        assert_eq!(negotiate_graph(Some("application/rdf+xml;q=0, text/turtle")), GraphFormat::Turtle);
+        // An unsupported type still falls back to N-Triples.
+        assert_eq!(negotiate_graph(Some("application/pdf")), GraphFormat::NTriples);
     }
 }

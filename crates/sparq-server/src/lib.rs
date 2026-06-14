@@ -9,17 +9,24 @@
 //!   sequenced group-commit writer over the lock-free generation ring (Wave A wiring —
 //!   see `http::AppState` and the README's "Update concurrency model").
 //! * **SPARQL 1.1 Graph Store HTTP Protocol** (<https://www.w3.org/TR/sparql11-http-rdf-update/>)
-//!   — `GET`/`HEAD` on a graph resource (direct `/graphs/...` and indirect
-//!   `?graph=<uri>` / `?default`). The Graph Store **write** verbs (PUT/POST/DELETE)
-//!   are answered with `501`.
+//!   — `GET`/`HEAD` (read) and `PUT`/`POST`/`DELETE` (write) on a graph resource (direct
+//!   `/graphs/...` and indirect `?graph=<uri>` / `?default`). [OPUS-4.8] (sq-gxsj) the write
+//!   verbs translate into a server-minted SPARQL Update through the same sequenced writer.
+//!   Reads serialise in the negotiated RDF syntax — N-Triples / prefix-compacting Turtle /
+//!   RDF/XML — and writes accept those same body types (sq-rt6v).
 //!
-//! The pure pieces — result serialisers ([`results`]), query classification ([`exec`]) and
-//! content negotiation ([`negotiate`]) — are always compiled and unit-tested. The async
+//! The pure pieces — result serialisers ([`results`]), the RDF graph serialisers/parser
+//! ([`graph`]), query classification ([`exec`]) and content negotiation ([`negotiate`]) —
+//! are always compiled and unit-tested. The async
 //! HTTP surface ([`http`]) is behind the default-on `server` feature so the wasm build (and
 //! any consumer that only wants the serialisers) never pulls axum/tokio.
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod exec;
+/// [OPUS-4.8] sq-rt6v: RDF *graph* serialisation (N-Triples / prefix-compacting Turtle /
+/// RDF/XML) + RDF/XML body parsing for the CONSTRUCT/DESCRIBE + Graph Store read/write
+/// surface. Pure (no async), like [`results`].
+pub mod graph;
 pub mod negotiate;
 pub mod results;
 
