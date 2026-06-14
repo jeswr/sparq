@@ -196,3 +196,44 @@ jobs:
           comment-on-alert: true
           fail-on-alert: false
           alert-comment-cc-users: '@jeswr'
+      # [OPUS-4.8] Seed the custom Pages dashboard onto benchmark-data IF ABSENT (or stale).
+      # github-action-benchmark only writes its DEFAULT index.html when one does NOT already exist
+      # (fs.stat early-return) but OVERWRITES data.js every run — so a CUSTOM dashboard committed
+      # once is preserved forever while the data refreshes. This step pulls the freshly-pushed
+      # benchmark-data branch and copies bench/dashboard/{index.html,dashboard.js,dashboard.css}
+      # into dev/bench/ when dev/bench/dashboard.js is missing OR differs, then commits + pushes.
+      # Idempotent + MAIN ONLY (PRs/forks get a read-only token and never write the history branch),
+      # mirroring the "Ensure benchmark-data history branch exists" bootstrap above.
+      - name: Seed Pages dashboard onto benchmark-data (if absent)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          src="$GITHUB_WORKSPACE/bench/dashboard"
+          tmp="$(mktemp -d)"
+          git -C "$tmp" init -q
+          git -C "$tmp" remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$tmp" fetch -q --depth=1 origin benchmark-data
+          git -C "$tmp" checkout -q -B benchmark-data FETCH_HEAD
+          mkdir -p "$tmp/dev/bench"
+          changed=0
+          for f in index.html dashboard.js dashboard.css; do
+            if [ ! -f "$tmp/dev/bench/$f" ] || ! cmp -s "$src/$f" "$tmp/dev/bench/$f"; then
+              cp "$src/$f" "$tmp/dev/bench/$f"
+              changed=1
+            fi
+          done
+          if [ "$changed" = "0" ]; then
+            echo "dev/bench dashboard already up to date — nothing to seed."
+            exit 0
+          fi
+          git -C "$tmp" -c user.name='github-actions[bot]' \
+                        -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                        add dev/bench/index.html dev/bench/dashboard.js dev/bench/dashboard.css
+          git -C "$tmp" -c user.name='github-actions[bot]' \
+                        -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                        commit -q -m "chore(bench): seed/update Pages dashboard under dev/bench [skip ci]"
+          git -C "$tmp" push -q origin benchmark-data:benchmark-data
+          echo "Seeded/updated the custom Pages dashboard on benchmark-data."
