@@ -16,9 +16,11 @@
 //!
 //! # Ingest
 //!
-//! The bulk loaders read the RDF text formats (Turtle / N-Triples / N-Quads / TriG) and
-//! decompress `.gz` / `.bz2` / `.zst` inputs transparently, fusing decompression into the
-//! parse. Loading is **parallel** (chunk-parallel scanning, behind the `parallel` feature)
+//! The bulk loaders read the RDF text formats (Turtle / N-Triples / N-Quads / TriG) from a
+//! `&str` or any [`Read`](std::io::Read) — wrap a `.gz` / `.bz2` / `.zst` decompressor and it
+//! streams straight into the parse without buffering the whole input (the CLI detects the
+//! codec by extension; the library just consumes the decoded `Read`). Loading is **parallel**
+//! (chunk-parallel scanning, behind the `parallel` feature)
 //! and **streaming** where the format allows. See [`Graph::load_str`], [`Graph::load_reader`]
 //! and, for the reasoning seam, [`Graph::parse_to_triples`] + [`Graph::from_parts`].
 //!

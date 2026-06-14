@@ -11,9 +11,10 @@ The **dictionary-encoded RDF triplestore** at the heart of [sparq](../../README.
 
 It is the storage substrate every other sparq crate builds on. Terms are interned to
 integer ids once; the six permutations (SPO/SOP/PSO/POS/OSP/OPS) make every triple-pattern
-shape an index range scan. Loaders are parallel and streaming, read the RDF text formats
-with transparent `.gz` / `.bz2` / `.zst` decompression, and an out-of-core, memory-mapped
-store with optional block-compressed permutations queries datasets larger than RAM.
+shape an index range scan. Loaders are parallel and streaming, read the RDF text formats from
+a `&str` or any `Read` (wrap a `.gz` / `.bz2` / `.zst` decompressor to stream compressed input
+straight into the parse), and an out-of-core, memory-mapped store with optional
+block-compressed permutations queries datasets larger than RAM.
 
 ## 🚀 Quickstart
 
@@ -36,8 +37,8 @@ assert_eq!(count, 1);
   operate on fixed-width integers, not strings.
 - **Six permutation indexes** — every BGP triple pattern is an index range scan; no
   full-graph filtering.
-- **Parallel + streaming loaders** — Turtle / N-Triples / N-Quads / TriG, with transparent
-  `.gz` / `.bz2` / `.zst` decompression fused into the parse.
+- **Parallel + streaming loaders** — Turtle / N-Triples / N-Quads / TriG from a `&str` or any
+  `Read`; a caller-supplied `.gz` / `.bz2` / `.zst` decompressor streams straight into the parse.
 - **Incremental updates** — delta-overlay inserts/deletes with an optional write-ahead log.
 - **Out-of-core store** — memory-mapped permutations (optional block compression) for
   datasets larger than RAM, with near-zero resident heap.
