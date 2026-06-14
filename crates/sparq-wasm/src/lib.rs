@@ -271,7 +271,15 @@ impl Store {
     /// is unusable on `wasm32` — so only the portable row cap is exposed here.)
     #[wasm_bindgen(js_name = askWithMaxRows)]
     pub fn ask_with_max_rows(&self, sparql: &str, max_rows: usize) -> Result<bool, JsError> {
-        let budget = sparq_engine::QueryBudget { max_rows: Some(max_rows), ..Default::default() };
+        // [OPUS-4.8] `QueryBudget`'s fields are cfg-gated: on `wasm32` the struct has
+        // ONLY `max_rows` (the wall-clock `deadline` is native-only — `Instant` panics
+        // on wasm32), so `..Default::default()` would be a NEEDLESS struct update there
+        // (clippy::needless_update under a wasm-target lint). Start from the unlimited
+        // budget and set `max_rows` instead: this is target-agnostic — it fills the
+        // native `deadline` (None) without naming it, and degenerates to just `max_rows`
+        // on wasm32 — so it is clean under clippy on BOTH targets.
+        let mut budget = sparq_engine::QueryBudget::unlimited();
+        budget.max_rows = Some(max_rows);
         sparq_engine::ask_with_budget(&self.graph, sparql, &budget).map_err(|e| JsError::new(&e))
     }
 
@@ -511,9 +519,16 @@ mod tests {
         // without ever building a counted result, so it never approaches the cap — exactly the
         // early-exit win). A generous cap answers; a zero cap trips with a budget error.
         let q = "PREFIX ex: <http://ex/> ASK { ?s ex:knows ?o . ?s ex:age ?a FILTER(?a > 28) }";
-        let generous = sparq_engine::QueryBudget { max_rows: Some(1024), ..Default::default() };
+        // [OPUS-4.8] Mirror `ask_with_max_rows`: start from `unlimited()` and assign
+        // `max_rows`, rather than a struct literal with `..Default::default()`. On wasm32
+        // the struct has only the `max_rows` field, so a `..` fill is needless and a
+        // wasm-target clippy run flags it (clippy::needless_update); this form is clean
+        // on both targets.
+        let mut generous = sparq_engine::QueryBudget::unlimited();
+        generous.max_rows = Some(1024);
         assert!(sparq_engine::ask_with_budget(&g, q, &generous).unwrap());
-        let starved = sparq_engine::QueryBudget { max_rows: Some(0), ..Default::default() };
+        let mut starved = sparq_engine::QueryBudget::unlimited();
+        starved.max_rows = Some(0);
         let err = sparq_engine::ask_with_budget(&g, q, &starved).unwrap_err();
         assert!(err.contains("budget"), "starved budget must report a budget error, got: {err}");
     }
