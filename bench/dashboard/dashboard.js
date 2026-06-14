@@ -46,6 +46,16 @@
     return rec && rec.label ? rec.label : humanize(name);
   }
 
+  // [OPUS-4.8] Unit-LESS readable label — same as labelFor() but with any trailing ` (<unit>)`
+  // stripped. Used where the unit is shown in a SEPARATE cell/column (the featured table's metric
+  // cell, sq-xvow; the scaling card title, sq-viby) so the unit isn't printed twice. The label map
+  // labels (sq-ocuf) don't carry a trailing unit, so this only bites the humanize() fallback (which
+  // appends `(µs)`/`(s)` for UNLABELLED metrics like Deep Taxonomy). We strip ONLY a trailing
+  // parenthesised token, leaving mid-label parentheses (e.g. "LUBM (reasoning)") untouched.
+  function labelForBare(name) {
+    return labelFor(name).replace(/\s*\([^()]*\)\s*$/, '').trim();
+  }
+
   // A rich tooltip/title for a metric: the raw stem first (transparency), then dataset + query.
   function titleFor(name) {
     var rec = lookup(name);
@@ -232,7 +242,9 @@
       if (!f) return;
       var best = bestOf(entries, b.name);
       var row = {
-        name: b.name, label: labelFor(b.name), title: titleFor(b.name),
+        // [OPUS-4.8] unit-less label: the featured table prints the unit in its OWN column, so use
+        // labelForBare() to avoid a doubled `(µs)` on humanize()-fallback metrics (Deep Taxonomy).
+        name: b.name, label: labelForBare(b.name), title: titleFor(b.name),
         value: b.value, unit: b.unit || '',
         best: best, delta: deltaVsBest(b.value, best),
         competitors: competitorsFor(competitors, b.name)
@@ -293,7 +305,12 @@
         var suffix = (m[2] || '').toLowerCase();
         if (suffix === 'k') mag *= 1000;
         else if (suffix === 'm') mag *= 1000000;
-        return { base: name.replace(m[0], '_'), axisLabel: t.label, axis: mag };
+        // [OPUS-4.8] Removing the size token leaves a placeholder `_`; that can collide with the
+        // surrounding underscores (e.g. `deeptax_d10_count_us` -> `deeptax__count_us`) and `base`
+        // is DISPLAYED (the scaling card stem). Collapse repeated `_` and trim leading/trailing so
+        // the family stem renders cleanly (`deeptax_count_us`). Two sizes still share one base.
+        var base = name.replace(m[0], '_').replace(/_{2,}/g, '_').replace(/^_|_$/g, '');
+        return { base: base, axisLabel: t.label, axis: mag };
       }
     }
     return null;
@@ -313,8 +330,10 @@
       var fam = fams[s.base] || (fams[s.base] = {
         base: s.base, axisLabel: s.axisLabel, suite: suiteFor(b.name),
         // readable label/title for the family from this metric (humanized fallback until the
-        // suite is in the label map — e.g. Deep Taxonomy, sq-1hgz).
-        label: labelFor(b.name), title: titleFor(b.name), unit: b.unit || '', points: []
+        // suite is in the label map — e.g. Deep Taxonomy, sq-1hgz). [OPUS-4.8] unit-LESS label:
+        // renderScaling() appends ` (<unit>)` to the card title itself, so use labelForBare() to
+        // avoid a doubled unit on humanize()-fallback metrics.
+        label: labelForBare(b.name), title: titleFor(b.name), unit: b.unit || '', points: []
       });
       fam.points.push({ axis: s.axis, value: b.value, name: b.name, unit: b.unit || '' });
     });
@@ -337,7 +356,8 @@
     module.exports = { classify: classify, bestOf: bestOf, deltaVsBest: deltaVsBest,
                        buildSummary: buildSummary, humanize: humanize, fmtNum: fmtNum,
                        trendPoints: trendPoints, GROUP_ORDER: GROUP_ORDER,
-                       labelFor: labelFor, suiteFor: suiteFor, titleFor: titleFor,
+                       labelFor: labelFor, labelForBare: labelForBare,
+                       suiteFor: suiteFor, titleFor: titleFor,
                        lookup: lookup,
                        // sq-xvow (featured well-known suites + competitor seam)
                        FEATURED_SUITES: FEATURED_SUITES, featuredSuiteOf: featuredSuiteOf,
@@ -488,7 +508,10 @@
       ]);
       var table = el('table', { 'class': 'summary-table featured-table' });
       var headCells = [
-        el('th', { text: 'Query' }),
+        // [OPUS-4.8] Header is "Metric" (matching the summary table) — the cell holds a general
+        // metric label + raw stem and may carry NON-query metrics (load/store/dict), so "Query" was
+        // inaccurate.
+        el('th', { text: 'Metric' }),
         el('th', { 'class': 'num', text: 'sparq' }),
         el('th', { text: 'Unit' }),
         el('th', { 'class': 'num', text: 'Δ vs best' })

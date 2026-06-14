@@ -214,6 +214,58 @@ ok(sfFam && sfFam.points.length === 1, 'single-size family is kept (renders a si
 ok(fams.every(function (f) { return !/lubm_q06/.test(f.base); }), 'non-size-parametrised metric excluded');
 
 // ============================================================================================
+// [OPUS-4.8] Copilot review fixes on PR #59 — unit-less labels (#2/#4), clean scaling base (#3),
+// and the featured "Metric" column header (#1).
+// ============================================================================================
+ok(typeof D.labelForBare === 'function', 'dashboard.js exports labelForBare');
+
+// #2/#4 — labelForBare strips ONLY a trailing ` (<unit>)` so the unit isn't doubled when the unit
+// has its OWN cell/column. An UNLABELLED metric (humanize fallback) appends `(µs)`/`(s)` to its
+// label; labelForBare must remove it. Labelled metrics (sq-ocuf) carry no trailing unit -> unchanged.
+ok(/\(µs\)$/.test(D.labelFor('deeptax_d10_count_us')), 'labelFor (fallback) carries a trailing (µs)');
+ok(!/\(µs\)$/.test(D.labelForBare('deeptax_d10_count_us')),
+   'labelForBare strips the trailing (µs) from an unlabelled metric');
+ok(!/\(s\)$/.test(D.labelForBare('totally_new_metric_s')),
+   'labelForBare strips a trailing (s) too');
+eq(D.labelForBare('watdiv_S1_count_us'), D.labelFor('watdiv_S1_count_us'),
+   'labelForBare leaves a labelled (no-trailing-unit) label unchanged');
+// mid-label parentheses must survive: only a TRAILING parenthesised token is a unit. lubm_q06's
+// readable label mentions "Students" and carries no trailing unit, so it is returned untouched.
+eq(D.labelForBare('lubm_q06_count_us'), D.labelFor('lubm_q06_count_us'),
+   'labelForBare leaves a labelled metric (no trailing unit) untouched');
+
+// #2 — buildFeatured rows use the unit-less label (Deep Taxonomy is unlabelled -> would double).
+const dtFeatEntries = [{
+  commit: { id: 'd', message: 'd', url: '#' }, date: Date.now(),
+  benches: [{ name: 'deeptax_d10_count_us', value: 120, unit: 'µs' }]
+}];
+const dtFeat = D.buildFeatured(dtFeatEntries, null);
+let dtFeatRow = null;
+dtFeat.groups.forEach(function (g) { g.rows.forEach(function (r) {
+  if (r.name === 'deeptax_d10_count_us') dtFeatRow = r;
+}); });
+ok(dtFeatRow, 'featured view surfaces the deep-taxonomy row');
+ok(dtFeatRow && !/\(µs\)$/.test(dtFeatRow.label),
+   'featured row label has NO trailing unit (unit lives in its own column) — fix #2');
+
+// #4 — scaling family label is unit-less (renderScaling appends the unit to the card title).
+const dtScaleFam = D.buildScalingFamilies(scaleEntries).filter(function (f) {
+  return f.axisLabel === 'depth';
+})[0];
+ok(dtScaleFam && !/\(µs\)$/.test(dtScaleFam.label),
+   'scaling family label has NO trailing unit (title appends it) — fix #4');
+
+// #3 — sizeAxisOf base is normalized: no double/leading/trailing underscores, even though removing
+// the token leaves a placeholder `_` adjacent to existing underscores.
+eq(D.sizeAxisOf('deeptax_d10_count_us').base, 'deeptax_count_us',
+   'sizeAxisOf base collapses the placeholder underscore (no `deeptax__count_us`) — fix #3');
+ok(!/__/.test(D.sizeAxisOf('watdiv_sf100_C1_count_us').base), 'no double underscore in scaling base');
+ok(!/^_|_$/.test(D.sizeAxisOf('deeptax_d1_count_us').base), 'no leading/trailing underscore in base');
+// the base is still a SHARED key across sizes (fix #3 must not break family grouping).
+eq(D.sizeAxisOf('deeptax_d1_count_us').base, D.sizeAxisOf('deeptax_d10_count_us').base,
+   'normalized base is still shared across sizes (family grouping intact)');
+
+// ============================================================================================
 // [OPUS-4.8] BROWSER-DOM SIMULATION — confirm the featured section + scaling charts actually
 // build DOM (sq-xvow #featured / sq-viby #scaling), like sq-ocuf's renderSummary smoke would. A
 // tiny stub document/window/Chart lets the (browser-only) render fns run under node: we import
@@ -280,6 +332,17 @@ ok(fams.every(function (f) { return !/lubm_q06/.test(f.base); }), 'non-size-para
   // featured host should contain at least one suite section with a table.
   const featuredSection = hosts.featured.children[0];
   ok(featuredSection && featuredSection.tagName === 'section', 'DOM: featured host holds suite sections');
+  // #1 — the featured table's first column header is "Metric" (not "Query"): the cell may hold
+  // non-query metrics. Walk section -> table -> thead -> tr -> first th.
+  (function () {
+    var table = featuredSection.children.filter(function (c) { return c.tagName === 'table'; })[0];
+    var thead = table && table.children.filter(function (c) { return c.tagName === 'thead'; })[0];
+    var headRow = thead && thead.children[0];
+    var firstTh = headRow && headRow.children[0];
+    ok(firstTh && firstTh.textContent === 'Metric',
+       'DOM: featured table first column header is "Metric" (fix #1, got ' +
+       JSON.stringify(firstTh && firstTh.textContent) + ')');
+  })();
   // scaling host should contain a chart-grid with at least one scaling card.
   ok(hosts.scaling.children[0] && hosts.scaling.children[0].attributes['class'] === 'chart-grid',
      'DOM: scaling host holds a chart-grid');
