@@ -21,7 +21,13 @@ STATUS.md
 /.claude/worktrees/
 
 # Beads / Dolt files (added by bd init)
+# [OPUS-4.8] Scope the Dolt/SQLite ignore to .beads/ so legitimate *.db
+# fixtures elsewhere in the tree are NOT silently hidden from `git add`.
+# (The generated DBs live under .beads/, which also ships its own .gitignore.)
 .dolt/
-*.db
+.beads/*.db
+.beads/*.db-journal
+.beads/*.db-wal
+.beads/*.db-shm
 .beads-credential-key
 .beads/proxieddb/
