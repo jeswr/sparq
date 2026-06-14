@@ -118,6 +118,36 @@ pub struct ServerConfig {
     /// Maximum SELECT result rows. Exceeding it is an honest 413 refusal (the engine
     /// aborts evaluation via the row budget), never a silent truncation.
     pub max_results: Option<usize>,
+    /// [OPUS-4.8] (sq-ebii) **Memory cap (coarse).** Upper bound on the row count of any
+    /// *materialised intermediate or final* result the engine builds for ONE query, on
+    /// EVERY form (SELECT / ASK / CONSTRUCT / DESCRIBE / GSP-read), enforced via the
+    /// engine's cooperative [`QueryBudget::max_rows`] working-set bound — the query aborts
+    /// (413) the moment any materialised result crosses it. This is the OOM guard for a
+    /// pathological query whose join blows up the intermediate cardinality.
+    ///
+    /// **What it actually bounds — be precise:** it caps the NUMBER OF ROWS, not bytes.
+    /// Peak heap is roughly `max_query_rows × (per-row term cost)`, so it is a *cardinality*
+    /// ceiling, not a hard byte guarantee: a query that materialises few but very wide rows
+    /// (many projected vars, or huge string literals) can still use more memory than the row
+    /// count suggests, and the engine's non-row allocations (dictionary growth on UPDATE, a
+    /// CONSTRUCT template, sort/group scratch) are outside this bound. It is also approximate
+    /// in *time*: the budget is checked at coarse sites (operator entry / per outer loop
+    /// iteration), so a single uninstrumented stretch can transiently exceed it before the
+    /// next check. Treat it as a blunt anti-OOM circuit-breaker, NOT an RSS quota. `None`
+    /// (the default) disables it. A true byte-accounted allocator cap is deferred (bead).
+    ///
+    /// Distinct from [`max_results`]: `max_results` caps only the FINAL SELECT projection
+    /// (ASK/CONSTRUCT/DESCRIBE ignore it); this caps the working set on *all* forms. When
+    /// both are set, a SELECT uses the tighter of the two.
+    pub max_query_rows: Option<usize>,
+    /// [OPUS-4.8] (sq-ebii) **Decompression-ratio cap (zip-bomb guard).** When a request
+    /// body arrives `Content-Encoding: gzip` (the GSP write / RDF-load path), the server
+    /// streams the inflate but refuses once the decompressed size would exceed
+    /// `min(max_decompress_ratio × compressed_len, max_body_bytes)` — so a tiny highly-
+    /// compressible body cannot inflate into an OOM. Rejected with 413 BEFORE the full
+    /// decompressed image is held. `0` disables ratio-capped decompression entirely (a
+    /// `Content-Encoding` body is then refused outright — fail-closed). Default 20×.
+    pub max_decompress_ratio: usize,
     /// Maximum active subscriptions per WebSocket connection (T23); further `subscribe`
     /// requests on the socket are refused with a protocol error message.
     pub max_subscriptions_per_conn: usize,
@@ -175,6 +205,12 @@ impl Default for ServerConfig {
             max_body_bytes: 1024 * 1024, // 1 MiB
             max_concurrent: 32,
             max_results: None,
+            // [OPUS-4.8] sq-ebii: memory cap OFF by default (no surprise refusals on an
+            // unconfigured server); an operator exposing the endpoint opts a ceiling in.
+            max_query_rows: None,
+            // [OPUS-4.8] sq-ebii: 20× decompressed:compressed is a permissive-but-bounded
+            // default (well above real RDF gzip ratios ~3–8×, far below a bomb's ~1000×+).
+            max_decompress_ratio: 20,
             max_subscriptions_per_conn: 16,
             max_subscriptions: 256,
             #[cfg(feature = "time-travel")]
@@ -191,8 +227,10 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     /// Defaults overridden by the `SPARQ_QUERY_TIMEOUT` (seconds; `0` disables),
-    /// `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT` and `SPARQ_MAX_RESULTS`
-    /// environment variables — plus, with the `time-travel` feature,
+    /// `SPARQ_MAX_BODY_BYTES`, `SPARQ_MAX_CONCURRENT`, `SPARQ_MAX_RESULTS`,
+    /// `SPARQ_MAX_QUERY_ROWS` ([OPUS-4.8] sq-ebii: the coarse memory cap; `0` disables) and
+    /// `SPARQ_MAX_DECOMPRESS_RATIO` ([OPUS-4.8] sq-ebii: the zip-bomb guard; `0` refuses gzip
+    /// bodies) environment variables — plus, with the `time-travel` feature,
     /// `SPARQ_TIME_TRAVEL_GENERATIONS` and `SPARQ_TIME_TRAVEL_MAX_AGE` (seconds;
     /// `0` disables the age bound), `SPARQ_ALLOW_REMOTE` (non-loopback bind opt-in),
     /// and `SPARQ_SERVICE_ALLOW` (comma/whitespace-separated SERVICE egress allowlist;
@@ -218,6 +256,16 @@ impl ServerConfig {
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_RESULTS") {
             cfg.max_results = (n > 0).then_some(n);
+        }
+        // [OPUS-4.8] sq-ebii: memory cap (coarse working-set row ceiling on every form);
+        // 0 / unset disables it.
+        if let Some(n) = env_parse::<usize>("SPARQ_MAX_QUERY_ROWS") {
+            cfg.max_query_rows = (n > 0).then_some(n);
+        }
+        // [OPUS-4.8] sq-ebii: decompression-ratio cap (zip-bomb guard); 0 disables
+        // ratio-capped decompression (a Content-Encoding body is then refused outright).
+        if let Some(n) = env_parse::<usize>("SPARQ_MAX_DECOMPRESS_RATIO") {
+            cfg.max_decompress_ratio = n;
         }
         if let Some(n) = env_parse::<usize>("SPARQ_MAX_SUBSCRIPTIONS_PER_CONN") {
             cfg.max_subscriptions_per_conn = n;
@@ -503,7 +551,16 @@ impl ApplyUpdates for ServerApplier {
     }
 
     fn apply(&mut self, working: &mut Graph, update: &String) -> Result<(), String> {
-        with_engine_scope(&self.config, || self.inner.apply(working, update))
+        // [OPUS-4.8] sq-ebii: run the update under the SAME cooperative QueryBudget the read
+        // paths use — the memory cap (`max_query_rows`) bounds a `DELETE/INSERT … WHERE`
+        // whose WHERE blows up (cross-product alloc capped + abort at the row cap), and the
+        // deadline (from `query_timeout`, measured from when the writer starts THIS update)
+        // aborts a long WHERE evaluation cooperatively instead of running the writer thread
+        // to an OOM. The deadline here is the writer-side cooperative stop; the HTTP side
+        // separately hard-caps the client's await (see `await_update_worker`). With both
+        // limits off (the default) this is the unlimited budget — identical to before.
+        let budget = update_budget(&self.config);
+        with_engine_scope(&self.config, || sparq_engine::update_in_place_with_budget(working, update, &budget))
     }
 
     fn seal(&mut self, working: Graph) -> Graph {
@@ -951,16 +1008,22 @@ async fn handle_post(
             Ok(u) => {
                 let st = state.clone();
                 let u = u.to_string();
-                let joined = tokio::task::spawn_blocking(move || st.apply_update(&u)).await;
-                match joined {
-                    Ok(Ok(number)) => {
+                let task = tokio::task::spawn_blocking(move || st.apply_update(&u));
+                // [OPUS-4.8] sq-ebii: enforce the query timeout on the UPDATE path too — the
+                // SAME wall-clock hard cap (`timeout + TIMEOUT_GRACE`) the read paths use via
+                // `await_worker`. See `await_update_worker` for the honest caveat (the
+                // engine's update WHERE evaluation is not yet cooperatively budgeted, so this
+                // is a wall-clock cap on the await, not a mid-evaluation abort).
+                match await_update_worker(task, &state.config).await {
+                    UpdateOutcome::Ok(number) => {
                         state.metrics().inc_updates();
                         // The 204 carries the generation containing the update (the
                         // read-your-writes token) under the time-travel feature.
                         with_generation_header(StatusCode::NO_CONTENT.into_response(), number)
                     }
-                    Ok(Err(e)) => bad_request(&format!("update failed: {e}")),
-                    Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
+                    UpdateOutcome::Rejected(e) => update_rejection_response(&e, &state.config),
+                    UpdateOutcome::TimedOut => timeout_response(&state.config),
+                    UpdateOutcome::Panicked => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
                 }
             }
             Err(_) => bad_request("request body is not valid UTF-8"),
@@ -1100,12 +1163,41 @@ async fn run_query_pinned(
     }
 }
 
-/// The per-request engine budget: deadline from the configured timeout; the SELECT
-/// row cap from `--max-results` (ASK only needs existence, so no row cap there).
+/// The per-request engine budget: deadline from the configured timeout; the row cap from
+/// the memory cap (`--max-query-rows`, applied on EVERY form) AND — when `apply_max_results`
+/// is set (SELECT projections) — `--max-results`, whichever is tighter.
+///
+/// [OPUS-4.8] (sq-ebii) `--max-query-rows` is the coarse memory cap: it bounds the
+/// working-set cardinality of any materialised intermediate/final result on all forms
+/// (SELECT/ASK/CONSTRUCT/DESCRIBE/GSP-read), so a join blow-up aborts (413) instead of
+/// OOMing. `--max-results` is the narrower SELECT-projection cap (ASK ignores it). Both map
+/// onto the single engine `max_rows` budget, so the effective ceiling is their min.
 pub(crate) fn make_budget(config: &ServerConfig, apply_max_results: bool) -> QueryBudget {
+    let results_cap = if apply_max_results { config.max_results } else { None };
     QueryBudget {
         deadline: config.query_timeout.map(|t| std::time::Instant::now() + t),
-        max_rows: if apply_max_results { config.max_results } else { None },
+        max_rows: tighter(config.max_query_rows, results_cap),
+    }
+}
+
+/// [OPUS-4.8] (sq-ebii) The per-UPDATE engine budget: the coarse memory cap
+/// (`--max-query-rows`) as the working-set row ceiling, and the query timeout as a
+/// cooperative deadline measured from NOW (the moment the writer starts this update). The
+/// SELECT-projection cap (`--max-results`) does NOT apply to updates — there is no result to
+/// project — but the working-set memory cap and the deadline do.
+fn update_budget(config: &ServerConfig) -> QueryBudget {
+    QueryBudget {
+        deadline: config.query_timeout.map(|t| std::time::Instant::now() + t),
+        max_rows: config.max_query_rows,
+    }
+}
+
+/// [OPUS-4.8] (sq-ebii) The tighter (smaller) of two optional row caps: `None` is "no cap",
+/// so the combined cap is `None` only when both are `None`, else the min of those present.
+fn tighter(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
@@ -1123,6 +1215,49 @@ async fn await_worker(task: tokio::task::JoinHandle<Response>, config: &ServerCo
         Ok(resp) => resp,
         Err(e) if e.is_panic() => json_error(StatusCode::INTERNAL_SERVER_ERROR, "query worker panicked"),
         Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "query worker was cancelled"),
+    }
+}
+
+/// [OPUS-4.8] (sq-ebii) The result of awaiting a SPARQL Update worker under the timeout cap.
+pub(crate) enum UpdateOutcome {
+    /// Published; carries the generation number containing the update.
+    Ok(u64),
+    /// The writer rejected the update (parse / semantic error) — a client 400.
+    Rejected(String),
+    /// The wall-clock update cap elapsed before the writer acked — a 503.
+    TimedOut,
+    /// The blocking worker panicked / was cancelled — a 500.
+    Panicked,
+}
+
+/// [OPUS-4.8] (sq-ebii) Awaits a SPARQL Update worker under the SAME hard wall-clock cap the
+/// read paths use (`query_timeout + TIMEOUT_GRACE`), so a pathological UPDATE (e.g. a
+/// `DELETE/INSERT … WHERE` whose WHERE pattern blows up) cannot pin a connection indefinitely.
+///
+/// **Honest scope — what this does and does NOT bound:** this is a wall-clock cap on the
+/// HTTP *await*. Unlike the read paths, the cooperative [`QueryBudget`] deadline does NOT
+/// reach inside the update: the engine's update entry point (`update_in_place`) takes no
+/// budget, so an in-progress update's WHERE evaluation is not interrupted at the deadline —
+/// the writer thread keeps running it to completion and the result is simply discarded once
+/// the HTTP side has already answered 503. Updates are also *sequenced* on a single writer,
+/// so a long-running update blocks the queue behind it until it finishes (this cap bounds
+/// the client's wait, not the writer's work). Threading a real cooperative budget through the
+/// engine update path + the sequenced writer is the proper fix — deferred (bead).
+async fn await_update_worker(
+    task: tokio::task::JoinHandle<Result<u64, String>>,
+    config: &ServerConfig,
+) -> UpdateOutcome {
+    let joined = match config.query_timeout {
+        Some(t) => match tokio::time::timeout(t + TIMEOUT_GRACE, task).await {
+            Ok(j) => j,
+            Err(_elapsed) => return UpdateOutcome::TimedOut,
+        },
+        None => task.await,
+    };
+    match joined {
+        Ok(Ok(number)) => UpdateOutcome::Ok(number),
+        Ok(Err(e)) => UpdateOutcome::Rejected(e),
+        Err(_) => UpdateOutcome::Panicked,
     }
 }
 
@@ -1175,13 +1310,31 @@ fn engine_error_response(e: &str, config: &ServerConfig) -> Response {
         return timeout_response(config);
     }
     if e.contains("query budget exceeded (max-rows)") {
-        let max = config.max_results.unwrap_or(0);
+        // [OPUS-4.8] sq-ebii: the row budget is fed by BOTH --max-results (SELECT projection)
+        // and --max-query-rows (the coarse memory cap, all forms); name the tighter one that
+        // actually tripped so the operator knows which knob to raise.
+        let max = tighter(config.max_query_rows, config.max_results).unwrap_or(0);
+        let which = match (config.max_query_rows, config.max_results) {
+            (Some(q), Some(r)) if q <= r => "--max-query-rows (memory cap)",
+            (Some(_), None) => "--max-query-rows (memory cap)",
+            _ => "--max-results",
+        };
         return json_error(
             StatusCode::PAYLOAD_TOO_LARGE,
-            &format!("result exceeds the server's max-results limit ({max} rows); narrow the query (e.g. add LIMIT) or raise --max-results"),
+            &format!("result exceeds the server's working-set row limit ({max} rows, {which}); narrow the query (e.g. add LIMIT) or raise the limit"),
         );
     }
     execution_error(e)
+}
+
+/// [OPUS-4.8] (sq-ebii) Maps a writer-rejected UPDATE onto HTTP status: a cooperative budget
+/// hit (the memory cap / deadline tripped inside a `DELETE/INSERT … WHERE`) is a 413 / 503,
+/// exactly like a query; any other rejection (parse / semantic error) is the client's 400.
+fn update_rejection_response(e: &str, config: &ServerConfig) -> Response {
+    if e.contains("query budget exceeded") {
+        return engine_error_response(e, config);
+    }
+    bad_request(&format!("update failed: {e}"))
 }
 
 fn timeout_response(config: &ServerConfig) -> Response {
@@ -1406,14 +1559,25 @@ fn escape_iri(iri: &str) -> String {
 /// same status discipline as the `application/sparql-update` path.
 async fn apply_gsp_update(state: &AppState, update: String, success: StatusCode) -> Response {
     let st = state.clone();
-    let joined = tokio::task::spawn_blocking(move || st.apply_update(&update)).await;
-    match joined {
-        Ok(Ok(number)) => {
+    let task = tokio::task::spawn_blocking(move || st.apply_update(&update));
+    // [OPUS-4.8] sq-ebii: GSP writes inherit the same UPDATE timeout cap as the
+    // `application/sparql-update` path (they share the sequenced writer).
+    match await_update_worker(task, &state.config).await {
+        UpdateOutcome::Ok(number) => {
             state.metrics().inc_updates();
             with_generation_header(success.into_response(), number)
         }
-        Ok(Err(e)) => bad_request(&format!("graph store write failed: {e}")),
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
+        UpdateOutcome::Rejected(e) => {
+            // [OPUS-4.8] sq-ebii: a budget hit (timeout / memory cap) inside a GSP write's
+            // WHERE maps to 503/413; a genuine parse/semantic failure stays a 400.
+            if e.contains("query budget exceeded") {
+                update_rejection_response(&e, &state.config)
+            } else {
+                bad_request(&format!("graph store write failed: {e}"))
+            }
+        }
+        UpdateOutcome::TimedOut => timeout_response(&state.config),
+        UpdateOutcome::Panicked => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
     }
 }
 
@@ -1422,7 +1586,13 @@ async fn apply_gsp_update(state: &AppState, update: String, success: StatusCode)
 /// DATA` for the default graph) so the replace is one atomic, group-committed generation.
 /// 201 when the graph did not exist (created), 204 when it replaced an existing one.
 async fn gsp_put(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &Bytes) -> Response {
-    let ntriples = match body_to_ntriples(body, &content_type(headers), base_iri(&graph)) {
+    // [OPUS-4.8] sq-ebii: inflate a `Content-Encoding: gzip` body under the
+    // decompression-ratio cap (zip-bomb guard) before parsing it as RDF.
+    let body = match decode_request_body(body, headers, state.config()) {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+    let ntriples = match body_to_ntriples(&body, &content_type(headers), base_iri(&graph)) {
         Ok(nt) => nt,
         Err(resp) => return resp,
     };
@@ -1450,7 +1620,12 @@ async fn gsp_put(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &
 /// `INSERT DATA { GRAPH <g> { … } }`. 201 when the merge created the graph (a selector-less
 /// POST, or a POST to an absent named graph), 204 when it added to an existing graph.
 async fn gsp_post(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &Bytes) -> Response {
-    let ntriples = match body_to_ntriples(body, &content_type(headers), base_iri(&graph)) {
+    // [OPUS-4.8] sq-ebii: inflate a gzip body under the decompression-ratio cap first.
+    let body = match decode_request_body(body, headers, state.config()) {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+    let ntriples = match body_to_ntriples(&body, &content_type(headers), base_iri(&graph)) {
         Ok(nt) => nt,
         Err(resp) => return resp,
     };
@@ -1676,6 +1851,106 @@ fn content_type(headers: &HeaderMap) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-ebii — decompression-ratio cap (zip-bomb guard)
+// ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] (sq-ebii) The error of a bounded body decode, mapped to its HTTP status.
+#[derive(Debug)]
+enum DecodeError {
+    /// `Content-Encoding` names a codec we do not decode (only `gzip`/`x-gzip` and
+    /// `identity` are supported) → 415.
+    Unsupported(String),
+    /// The decompressed image crossed the ratio/absolute ceiling → 413 (zip-bomb guard),
+    /// or the gzip stream was malformed → 400.
+    TooLarge(String),
+    Malformed(String),
+}
+
+impl DecodeError {
+    fn into_response(self) -> Response {
+        match self {
+            DecodeError::Unsupported(m) => json_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, &m),
+            DecodeError::TooLarge(m) => json_error(StatusCode::PAYLOAD_TOO_LARGE, &m),
+            DecodeError::Malformed(m) => bad_request(&m),
+        }
+    }
+}
+
+/// [OPUS-4.8] (sq-ebii) Decodes a request body honouring `Content-Encoding`, under the
+/// decompression-ratio cap (zip-bomb guard). Returns the body verbatim for `identity` /
+/// no encoding; for `gzip` it inflates with a HARD ceiling of
+/// `min(max_decompress_ratio × compressed_len, max_body_bytes)` and refuses (413) the
+/// instant the inflated output would cross it — so a tiny but pathologically compressible
+/// body cannot inflate into an OOM. The ceiling is checked DURING inflate (bounded
+/// `Read::take`), so the full decompressed image is never materialised past the cap.
+///
+/// `max_decompress_ratio == 0` disables ratio-capped decompression entirely: a
+/// `Content-Encoding: gzip` body is then refused outright (fail-closed) rather than
+/// inflated.
+///
+/// **Honest scope:** this guards the bodies the server itself inflates (the GSP write /
+/// RDF-load path). It does NOT cover a compressed payload the *engine* fetches behind a
+/// SPARQL `LOAD <url>` or `SERVICE` — those go through their own ingest path; the SERVICE
+/// surface is separately bounded by the egress allowlist (sq-4w18). The request body-size
+/// limit (`--max-body-bytes`, 413) still caps the COMPRESSED bytes first, so the absolute
+/// decompressed ceiling here is at most `max_body_bytes × max_decompress_ratio`.
+fn decode_request_body(body: &Bytes, headers: &HeaderMap, config: &ServerConfig) -> Result<Bytes, DecodeError> {
+    let encoding = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match encoding.as_str() {
+        "" | "identity" => Ok(body.clone()),
+        "gzip" | "x-gzip" => decode_gzip_bounded(body, config),
+        other => Err(DecodeError::Unsupported(format!(
+            "unsupported Content-Encoding '{other}'; the server decodes only 'gzip' (and 'identity')"
+        ))),
+    }
+}
+
+/// [OPUS-4.8] (sq-ebii) gzip inflate bounded by the decompression-ratio cap. The ceiling is
+/// `min(ratio × compressed_len, max_body_bytes)`, clamped to at least 1 byte so an empty /
+/// tiny compressed body whose ratio product rounds below its real (small) output still
+/// decodes. Reading is wrapped in `Read::take(ceiling + 1)`: if the decoder produces more
+/// than `ceiling` bytes the read is cut short and we refuse (413) WITHOUT having held the
+/// whole bomb in memory.
+fn decode_gzip_bounded(body: &Bytes, config: &ServerConfig) -> Result<Bytes, DecodeError> {
+    use std::io::Read;
+    if config.max_decompress_ratio == 0 {
+        return Err(DecodeError::TooLarge(
+            "compressed (Content-Encoding: gzip) request bodies are disabled on this server \
+             (--max-decompress-ratio 0); send an uncompressed body"
+                .to_string(),
+        ));
+    }
+    let ratio = config.max_decompress_ratio;
+    // The decompressed ceiling: the ratio bound, but never above the absolute body limit's
+    // worth of plaintext, and at least 1 so a tiny body is decodable. `saturating_mul`
+    // avoids overflow on a huge compressed body (already bounded by --max-body-bytes anyway).
+    let ceiling = body
+        .len()
+        .saturating_mul(ratio)
+        .min(config.max_body_bytes.max(1))
+        .max(1);
+    let mut decoder = flate2::read::MultiGzDecoder::new(&body[..]).take(ceiling as u64 + 1);
+    let mut out = Vec::with_capacity(ceiling.min(64 * 1024));
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| DecodeError::Malformed(format!("malformed gzip body: {e}")))?;
+    if out.len() > ceiling {
+        return Err(DecodeError::TooLarge(format!(
+            "decompressed body exceeds the server's decompression-ratio cap (compressed {} bytes \
+             × {ratio}× ratio, capped at {ceiling} bytes; raise --max-decompress-ratio / \
+             --max-body-bytes or send a smaller body) — refused as a possible zip bomb",
+            body.len()
+        )));
+    }
+    Ok(Bytes::from(out))
 }
 
 /// Builds a `text`-ish response with the given content type; for HEAD, omits the body but
@@ -1995,6 +2270,86 @@ mod bind_posture_tests {
 // ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-4w18 — SERVICE egress allowlist config wiring tests
 // ---------------------------------------------------------------------------
+#[cfg(test)]
+mod hardening_unit_tests {
+    //! [OPUS-4.8] (sq-ebii) Pure-logic units for the memory cap (`tighter`) and the
+    //! decompression-ratio cap (`decode_request_body`). The HTTP-level 413/503 wiring is
+    //! covered by tests/hardening.rs; these pin the boundary math without a server boot.
+    use super::{decode_request_body, tighter, ServerConfig};
+    use axum::body::Bytes;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    #[test]
+    fn tighter_takes_the_smaller_present_cap() {
+        assert_eq!(tighter(None, None), None);
+        assert_eq!(tighter(Some(5), None), Some(5));
+        assert_eq!(tighter(None, Some(7)), Some(7));
+        assert_eq!(tighter(Some(5), Some(7)), Some(5));
+        assert_eq!(tighter(Some(9), Some(7)), Some(7));
+    }
+
+    fn gz(data: &[u8]) -> Bytes {
+        use std::io::Write;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        e.write_all(data).unwrap();
+        Bytes::from(e.finish().unwrap())
+    }
+
+    fn headers_with_encoding(enc: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(e) = enc {
+            h.insert(header::CONTENT_ENCODING, HeaderValue::from_str(e).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn identity_body_passes_through() {
+        let cfg = ServerConfig::default();
+        let body = Bytes::from_static(b"hello");
+        // No Content-Encoding and explicit identity both pass verbatim.
+        assert_eq!(decode_request_body(&body, &headers_with_encoding(None), &cfg).unwrap(), body);
+        assert_eq!(
+            decode_request_body(&body, &headers_with_encoding(Some("identity")), &cfg).unwrap(),
+            body
+        );
+    }
+
+    #[test]
+    fn gzip_within_ratio_decodes() {
+        let cfg = ServerConfig { max_decompress_ratio: 100, ..ServerConfig::default() };
+        let plain = b"some moderately repetitive payload payload payload";
+        let body = gz(plain);
+        let out = decode_request_body(&body, &headers_with_encoding(Some("gzip")), &cfg).unwrap();
+        assert_eq!(&out[..], &plain[..]);
+    }
+
+    #[test]
+    fn high_ratio_gzip_is_refused() {
+        // A 1 MiB run of zeros gzips to a tiny body — ratio far above 2× → refused.
+        let cfg = ServerConfig { max_decompress_ratio: 2, max_body_bytes: 1 << 30, ..ServerConfig::default() };
+        let body = gz(&vec![0u8; 1 << 20]);
+        let err = decode_request_body(&body, &headers_with_encoding(Some("gzip")), &cfg).unwrap_err();
+        assert!(matches!(err, super::DecodeError::TooLarge(_)));
+    }
+
+    #[test]
+    fn ratio_zero_refuses_gzip() {
+        let cfg = ServerConfig { max_decompress_ratio: 0, ..ServerConfig::default() };
+        let body = gz(b"x");
+        let err = decode_request_body(&body, &headers_with_encoding(Some("gzip")), &cfg).unwrap_err();
+        assert!(matches!(err, super::DecodeError::TooLarge(_)));
+    }
+
+    #[test]
+    fn unknown_encoding_is_unsupported() {
+        let cfg = ServerConfig::default();
+        let body = Bytes::from_static(b"x");
+        let err = decode_request_body(&body, &headers_with_encoding(Some("br")), &cfg).unwrap_err();
+        assert!(matches!(err, super::DecodeError::Unsupported(_)));
+    }
+}
+
 #[cfg(test)]
 mod service_allow_config_tests {
     //! The default posture and the ServerConfig <-> engine-entries plumbing. These are
