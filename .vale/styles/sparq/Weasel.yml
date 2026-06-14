@@ -1,0 +1,27 @@
+# [OPUS-4.8] ADVISORY: weasel words that weaken technical prose (bead sq-5fd1).
+# Vague intensifiers/hedges add no information. Prefer a concrete claim or cut it.
+extends: existence
+message: "'%s' is a weasel word — cut it or replace with a concrete claim."
+level: suggestion
+ignorecase: true
+tokens:
+  - very
+  - really
+  - quite
+  - extremely
+  - simply
+  - just
+  - basically
+  - actually
+  - essentially
+  - fairly
+  - somewhat
+  - relatively
+  - obviously
+  - clearly
+  - of course
+  - arguably
+  - virtually
+  - largely
+  - mostly
+  - generally

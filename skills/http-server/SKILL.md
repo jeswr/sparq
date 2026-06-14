@@ -225,7 +225,7 @@ env overrides the default.
 | `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | per-socket subs |
 | `--verbose` | — | off | TraceLayer request logging (respects `RUST_LOG`) |
 | `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | opt in to a non-loopback bind despite no auth; without it a non-loopback `--addr` is **refused** at startup, with it it warns and proceeds |
-| `--service-allow HOST\|*.SUFFIX` (repeatable) | `SPARQ_SERVICE_ALLOW` (comma/ws-sep) | empty = **deny ALL SERVICE** | (feature `service`) allowlist a SERVICE egress host (exact or `*.suffix` wildcard); CLI + file + env are UNIONed |
+| `--service-allow HOST\|*.SUFFIX` (repeatable) | `SPARQ_SERVICE_ALLOW` (comma/ws-sep) | empty = **deny ALL SERVICE** | (feature `service`) allowlist a SERVICE egress host (exact or `*.suffix` wildcard); CLI + file + env are all merged (combined additively) |
 | `--service-allow-file PATH` | — | — | (feature `service`) load allowlist entries, one per line (`#` comments + blanks ignored) |
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
@@ -247,7 +247,7 @@ then `router(state)`, or `harden(my_router, &config)`.
   SERVICE**: a `SERVICE <iri>` clause reaches **nothing** unless its host is allowlisted —
   via `--service-allow HOST` / `*.SUFFIX` (repeatable), `--service-allow-file PATH` (one
   entry per line), or `SPARQ_SERVICE_ALLOW` (comma/whitespace-separated). All three are
-  UNIONed (additive; the CLI only ever widens the env baseline). Rationale: a `SERVICE`
+  combined additively (the CLI only ever widens the env baseline). Rationale: a `SERVICE`
   clause turns attacker-controlled query text into an outbound request from the server
   host (textbook SSRF; worst case the `169.254.169.254` cloud-metadata IP), so the
   network-exposed surface must opt in to every reachable host. Matching is

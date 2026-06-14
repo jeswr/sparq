@@ -16,7 +16,8 @@ Implements the **read** side of two W3C specifications over an in-memory
   share its atomicity and the **no-auth posture below** — a GSP write is as powerful as an
   UPDATE). Implemented in bead `sq-gxsj`. <!-- [OPUS-4.8] -->
 
-## Security posture (no built-in auth) — read before exposing it <!-- [OPUS-4.8] sq-o4qf / sq-2v6f -->
+<!-- [OPUS-4.8] sq-o4qf / sq-2v6f -->
+## Security posture (no built-in auth) — read before exposing it
 
 **`sparq-server` has NO authentication on any endpoint.** This is by design: the engine is
 not an auth boundary — authorization belongs to a layer in front of it (a reverse proxy /
@@ -52,7 +53,7 @@ API gateway, or [`sparq-solid`](../sparq-solid/README.md)). Concretely:
   clause reaches **nothing** unless its host is on the egress allowlist. A `SERVICE` clause turns
   attacker-controlled query text into an outbound request from the server host (textbook SSRF;
   worst case `169.254.169.254` cloud-metadata), so the operator must opt in to every reachable
-  host. Configure the allowlist with any of (UNIONed, additive):
+  host. Configure the allowlist with any of the following (combined additively):
   * `--service-allow HOST` / `--service-allow *.SUFFIX` — repeatable; exact host or suffix wildcard;
   * `--service-allow-file PATH` — one entry per line (`#` comments + blanks ignored);
   * `SPARQ_SERVICE_ALLOW` — comma/whitespace-separated.

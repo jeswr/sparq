@@ -223,7 +223,7 @@ node). `GeoIndex::apply_delta(graph, inserts, deletes)` mirrors a
 points over an 8°×8° window (country-sized), 1 000 query points, Apple M-class
 laptop (2026-06-10):
 
-```
+```text
 graph load     : 100000 asWKT triples in 81.05ms
 index build    : 100000 entries in 96.15ms (1.04 Mentries/s)
 within     1km :      1.1 µs/query (0.7 avg hits)

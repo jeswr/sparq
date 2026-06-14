@@ -1,0 +1,23 @@
+# [OPUS-4.8] ADVISORY: superfluous / wordy phrases — tighten them (bead sq-5fd1).
+extends: substitution
+message: "'%s' is wordy — consider '%s'."
+level: suggestion
+ignorecase: true
+action:
+  name: replace
+swap:
+  "in order to": to
+  "due to the fact that": because
+  "in spite of the fact that": although
+  "for the purpose of": for
+  "in the event that": if
+  "a number of": several
+  "the vast majority of": most
+  "at this point in time": now
+  "in the process of": currently
+  "is able to": can
+  "are able to": can
+  "has the ability to": can
+  "with regard to": about
+  "in terms of": for
+  "a large number of": many

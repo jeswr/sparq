@@ -52,7 +52,6 @@ Then edit the corresponding `skills/<surface>/SKILL.md` (sparql-query / data-for
 
 If you add a brand-new public surface, add a new `skills/<surface>/` (dir name == the skill's `name` frontmatter) and link it from the list above and from the README.
 
-
 ## Task tracking — beads, not markdown TODOs
 
 This repo tracks work in **beads** (`bd`, a git-native dependency-graph issue tracker; the committed source-of-record is `.beads/issues.jsonl`). Rules for any agent working here:

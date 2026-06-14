@@ -12,8 +12,8 @@ release ships; re-run the conformance suite against that release, then retire
 **Section B (rdf-tests issues): not yet filed, awaiting go-ahead (tracked in beads).**
 Tracker search 2026-06-11: Issues 3+4 fall under the already-open w3c/rdf-tests#58
 "How to format decimals?" — file them as an evidence comment there (approved-vs-
-unapproved contradictory pairs), not new issues. Issues 1+2 are unreported (closed
-#81 was an author-retracted misreading, different specifics) — file as new issues.
+unapproved contradictory pairs), not new issues. Issues 1+2 are unreported
+(closed #81 was an author-retracted misreading, different specifics) — file as new issues.
 
 The final-eleven conformance work surfaced six parser bugs in spargebra 0.4.6
 (fixed in our vendored copy, `vendor/spargebra/SPARQ-PATCHES.md`) and four

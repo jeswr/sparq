@@ -1,0 +1,38 @@
+// markdownlint-cli2 ADVISORY config — whole-repo visibility (bead sq-5fd1). [OPUS-4.8]
+//
+// Same tuned ruleset as the HARD config (.markdownlint-cli2.jsonc) but globbed over
+// the ENTIRE corpus (research/, zk/, bench/, .claude/ included). Run ONLY by the
+// `markdownlint-advisory` job (continue-on-error) so the staged-rollout backlog in
+// the not-yet-clean dirs stays visible without blocking merges. As those dirs are
+// cleaned, fold them into the HARD config's `globs` and shrink this one.
+{
+  "config": {
+    "default": true,
+    "MD013": false,
+    "MD033": false,
+    "MD034": false,
+    "MD041": false,
+    "MD025": false,
+    "MD024": { "siblings_only": true },
+    "MD036": false,
+    "MD026": false,
+    "MD029": false,
+    "MD004": false,
+    "MD049": false,
+    "MD007": false,
+    "MD046": false,
+    "MD022": false,
+    "MD031": false,
+    "MD032": false
+  },
+  "globs": ["**/*.md"],
+  "ignores": [
+    "node_modules",
+    "**/node_modules",
+    "target",
+    "**/target",
+    "vendor",
+    "**/vendor",
+    "zk/xpath/vendor"
+  ]
+}

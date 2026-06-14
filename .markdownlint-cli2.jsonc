@@ -1,0 +1,58 @@
+// markdownlint-cli2 config — HARD documentation-quality gate (bead sq-5fd1). [OPUS-4.8]
+//
+// SCOPE (staged rollout): this HARD gate covers the user-facing + governance doc
+// surface that is already clean — the top-level governance docs, the `skills/` usage
+// tree (the source of truth for using sparq), `docs/`, and every crate README/doc.
+// `research/` and `zk/` (design records + research scaffolds) carry a large backlog
+// of cosmetic violations (mostly missing code-fence languages); bringing them under
+// the HARD gate is tracked as a follow-up bead. They are still checked in the
+// ADVISORY job (whole-repo, continue-on-error) so the backlog stays visible.
+//
+// RULESET: markdownlint defaults, MINUS the rules that fight this repo's deliberate
+// house style (long unwrapped lines, bare/autolink URLs, inline HTML for the logo +
+// metadata comments, CHANGELOG-style repeated/duplicate headings) and MINUS the
+// purely-cosmetic "blank line around X" rules that are render-irrelevant here. What
+// remains catches REAL defects: broken link fragments, mismatched table columns,
+// missing space after `#`, stray spaces in code/emphasis, trailing whitespace, and
+// missing/duplicate trailing newlines.
+{
+  "config": {
+    "default": true,
+
+    // --- disabled: deliberate house style (see README/AGENTS prose) ---
+    "MD013": false, // line-length: docs are intentionally not hard-wrapped at 80
+    "MD033": false, // inline HTML: logo SVG, <details>, metadata comments
+    "MD034": false, // bare URLs: <https://…> autolinks used throughout
+    "MD041": false, // first-line-heading: CHANGELOG / front-matter docs
+    "MD025": false, // single H1: CHANGELOG-style multi-section docs
+    "MD024": { "siblings_only": true }, // dup headings OK across sections (changelog)
+    "MD036": false, // emphasis-as-heading: used as soft sub-labels
+    "MD026": false, // trailing punctuation in headings ("… exposing it")
+    "MD029": false, // ordered-list numbering style varies by doc
+    "MD004": false, // unordered-list bullet style varies by doc
+    "MD049": false, // emphasis style (_ vs *) mixed deliberately
+    "MD007": false, // list indent width varies
+    "MD046": false, // code-block style (indented vs fenced) mixed
+
+    // --- disabled: purely cosmetic blank-line spacing (render-irrelevant here) ---
+    "MD022": false, // blanks around headings
+    "MD031": false, // blanks around fenced code
+    "MD032": false  // blanks around lists
+  },
+  // HARD-gate scope: governance docs + skills/ + docs/ + crates/.
+  "globs": [
+    "*.md",
+    "skills/**/*.md",
+    "docs/**/*.md",
+    "crates/**/*.md"
+  ],
+  "ignores": [
+    "node_modules",
+    "**/node_modules",
+    "target",
+    "**/target",
+    "vendor",
+    "**/vendor",
+    "zk/xpath/vendor"
+  ]
+}

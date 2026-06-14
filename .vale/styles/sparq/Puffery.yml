@@ -1,0 +1,23 @@
+# [OPUS-4.8] ADVISORY: unsubstantiated marketing adjectives (bead sq-5fd1).
+# The empirical-honesty house style avoids puffery — back claims with measurements
+# (link the perf dashboard) instead of "blazingly fast".
+extends: existence
+message: "'%s' is unsubstantiated puffery — make a measured, concrete claim instead."
+level: warning
+ignorecase: true
+tokens:
+  - blazing(ly)?
+  - lightning[- ]fast
+  - blistering(ly)?
+  - seamless(ly)?
+  - effortless(ly)?
+  - cutting[- ]edge
+  - bleeding[- ]edge
+  - world[- ]class
+  - best[- ]in[- ]class
+  - next[- ]generation
+  - revolutionary
+  - game[- ]changing
+  - unparalleled
+  - unmatched
+  - turbocharged
