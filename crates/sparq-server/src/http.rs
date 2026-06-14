@@ -2,8 +2,13 @@
 //!
 //! Two route groups:
 //!   * `/sparql` — the SPARQL 1.1 Protocol `query` operation (GET + the two POST forms).
-//!   * Graph Store HTTP Protocol READ — `GET`/`HEAD` on `/graphs/*path` (direct) and on
-//!     `/sparql/graph` via `?graph=<uri>` / `?default` (indirect). Write verbs → 501.
+//!   * Graph Store HTTP Protocol — `GET`/`HEAD` (read) and, since sq-gxsj, `PUT`/`POST`/
+//!     `DELETE` (write) on `/graphs/*path` (direct) and on `/sparql/graph` via
+//!     `?graph=<uri>` / `?default` (indirect). [OPUS-4.8] The write verbs translate into a
+//!     SPARQL Update and submit through the SAME sequenced [`sparq_serve::Writer`] the
+//!     `application/sparql-update` path uses, so they inherit its atomicity, group commit
+//!     and snapshot-consistency — and its **no-auth** posture (a GSP write is as powerful
+//!     as an UPDATE; see the README "Security posture").
 //!
 //! Shared state is the sparq-serve GENERATION RING + SEQUENCED WRITER (Wave A,
 //! research/concurrent-serving.md §6): queries pin the current generation once per request
@@ -1096,58 +1101,291 @@ fn timeout_response(config: &ServerConfig) -> Response {
 // Graph Store HTTP Protocol — READ side
 // ---------------------------------------------------------------------------
 
+/// [OPUS-4.8] (sq-gxsj) Which graph a GSP request addresses: the default graph or a
+/// concrete named graph. Indirect identification yields `?default` → [`GraphRef::Default`]
+/// or `?graph=<iri>` → [`GraphRef::Named`]; direct identification turns the request URI
+/// into the graph's IRI ([`GraphRef::Named`]). The engine has a real named-graph store
+/// (`crates/sparq-engine/src/update.rs` — "over the FULL DATASET"), so this is a faithful
+/// addressing scheme, not a default-graph alias.
+#[derive(Clone)]
+enum GraphRef {
+    Default,
+    Named(String),
+}
+
 /// Indirect graph identification: `?default` or `?graph=<iri>`.
 async fn graph_store_indirect(
     State(state): State<AppState>,
     method: Method,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
     let is_default = params.contains_key("default");
     let named = params.get("graph").cloned();
-    if !is_default && named.is_none() {
-        return bad_request("indirect graph identification requires '?default' or '?graph=<uri>'");
+    if is_default && named.is_some() {
+        return bad_request("indirect graph identification accepts exactly one of '?default' or '?graph=<uri>', not both");
     }
-    graph_store_read(&state, &method, named.as_deref(), &headers).await
+    let graph = match (is_default, named) {
+        (true, _) => GraphRef::Default,
+        (false, Some(g)) => GraphRef::Named(g),
+        // POST to the GSP endpoint with no graph selector creates a fresh graph (spec
+        // §5.5); other write verbs and reads still require an explicit selector.
+        (false, None) if method == Method::POST => GraphRef::Named(mint_graph_iri()),
+        (false, None) => return bad_request("indirect graph identification requires '?default' or '?graph=<uri>'"),
+    };
+    graph_store(&state, &method, graph, &headers, body).await
 }
 
-/// Direct graph identification: the path IS (a path under) the graph's resource.
+/// Direct graph identification: the request URI IS the graph's resource (RFC 3986). The
+/// engine stores named graphs, so the direct form addresses a real per-request graph IRI
+/// reconstructed from the `Host` header and the matched path — round-trippable with the
+/// indirect `?graph=<that-iri>` form.
 async fn graph_store_direct(
     State(state): State<AppState>,
     method: Method,
     axum::extract::Path(path): axum::extract::Path<String>,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
-    // The named graph here is the request's effective URI path; with no named-graph store,
-    // every direct graph maps onto the default graph (documented limitation).
-    let _ = path;
-    graph_store_read(&state, &method, None, &headers).await
+    let iri = direct_graph_iri(&headers, &path);
+    graph_store(&state, &method, GraphRef::Named(iri), &headers, body).await
 }
 
-/// Shared GSP handler. READ (GET/HEAD) serialises the (default) graph; write verbs → 501.
-async fn graph_store_read(state: &AppState, method: &Method, named: Option<&str>, headers: &HeaderMap) -> Response {
+/// Reconstructs the graph IRI a direct-identification request addresses: `http://<host>/
+/// graphs/<path>`, using the `Host` header (a sane default when absent). This is the
+/// request URI per the GSP "direct graph identification" rule, and is exactly the IRI a
+/// later indirect `?graph=<iri>` request must use to address the same graph.
+fn direct_graph_iri(headers: &HeaderMap, path: &str) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+    format!("http://{host}/graphs/{path}")
+}
+
+/// Mints a fresh, server-allocated graph IRI for a selector-less POST (GSP §5.5: "create a
+/// new graph"). UUID-free to avoid a dependency: a process-unique counter plus the nanos
+/// clock is collision-free within a process and good enough for an opaque server-chosen IRI.
+fn mint_graph_iri() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("urn:sparq:gsp:graph:{nanos:x}-{n:x}")
+}
+
+/// [OPUS-4.8] (sq-gxsj) Shared GSP dispatcher across direct + indirect identification.
+/// READ (`GET`/`HEAD`) serialises the addressed graph; WRITE (`PUT`/`POST`/`DELETE`)
+/// translates into a SPARQL Update submitted through the sequenced writer.
+async fn graph_store(state: &AppState, method: &Method, graph: GraphRef, headers: &HeaderMap, body: Bytes) -> Response {
     match *method {
         Method::GET | Method::HEAD => {
-            // The engine has no named-graph store: only the default graph is materialised.
-            // A request for a *named* graph other than default cannot be served as that
-            // graph; we serve the default-graph contents and document the limitation.
-            let _ = named;
             let head_only = *method == Method::HEAD;
-            serialise_default_graph(state, headers, head_only).await
+            serialise_graph(state, graph, headers, head_only).await
         }
-        Method::PUT | Method::POST | Method::DELETE | Method::PATCH => not_implemented(
-            "Graph Store write operations (PUT/POST/DELETE) are not implemented (thread T11b)",
-        ),
-        _ => method_not_allowed(&[Method::GET, Method::HEAD]),
+        Method::PUT => gsp_put(state, graph, headers, &body).await,
+        Method::POST => gsp_post(state, graph, headers, &body).await,
+        Method::DELETE => gsp_delete(state, graph).await,
+        // PATCH is not part of the Graph Store HTTP Protocol.
+        _ => method_not_allowed(&[Method::GET, Method::HEAD, Method::PUT, Method::POST, Method::DELETE]),
     }
 }
 
-/// Serialises the default graph as N-Triples (the one RDF serialisation we can emit from
+// ---------------------------------------------------------------------------
+// Graph Store HTTP Protocol — WRITE side (sq-gxsj) [OPUS-4.8]
+// ---------------------------------------------------------------------------
+
+/// The set of RDF body media types a GSP write accepts, mapped to the sparq-core parser
+/// `format` token. The body of a GSP write carries the triples for ONE graph (the graph is
+/// named by the URL, not the body), so a quad syntax (N-Quads/TriG) is parsed as triples
+/// too — its graph names are folded, exactly as `Graph::load_str` does.
+fn rdf_format_for(content_type: &str) -> Option<&'static str> {
+    // `content_type` is already lowercased by `content_type()`; ignore any `; charset=…`.
+    let mt = content_type.split(';').next().unwrap_or("").trim();
+    match mt {
+        "text/turtle" | "application/x-turtle" => Some("turtle"),
+        "application/n-triples" | "text/plain" => Some("ntriples"),
+        "application/n-quads" => Some("nquads"),
+        "application/trig" => Some("trig"),
+        // No explicit Content-Type: default to Turtle (a superset of N-Triples), matching
+        // the read side's default emission and common GSP client behaviour.
+        "" => Some("turtle"),
+        _ => None,
+    }
+}
+
+/// Parses a GSP request body into canonical N-Triples (the term syntax accepted verbatim
+/// inside a SPARQL `INSERT DATA` block), validating the RDF in the process. Reuses
+/// `Graph::load_str` (the same parsers the loader uses) so content negotiation by
+/// Content-Type matches the rest of the engine. A parse failure is the caller's 400.
+// clippy: Err is axum's `Response` (the idiomatic handler error, as in `resolve_pin`);
+// boxing it would only desync this from the rest of the handler error convention.
+#[allow(clippy::result_large_err)]
+fn body_to_ntriples(body: &Bytes, content_type: &str) -> Result<String, Response> {
+    let format = match rdf_format_for(content_type) {
+        Some(f) => f,
+        None => {
+            return Err(json_error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "GSP write body must be RDF: Content-Type 'text/turtle', 'application/n-triples', 'application/n-quads' or 'application/trig'",
+            ))
+        }
+    };
+    let text = std::str::from_utf8(body).map_err(|_| bad_request("request body is not valid UTF-8"))?;
+    let graph = Graph::load_str(text, format).map_err(|e| bad_request(&format!("malformed RDF body: {e}")))?;
+    // Re-emit as canonical N-Triples via the engine scan — no private store API needed,
+    // and the terms are exactly what `INSERT DATA` will re-intern.
+    nt_dump(&graph, &QueryBudget::default()).map_err(|e| execution_error(&e))
+}
+
+/// Wraps an N-Triples body in the `GRAPH <iri> { … }` block for a named graph, or returns
+/// it bare for the default graph — the shape an `INSERT DATA` / `DELETE DATA` operand takes.
+fn graph_data_block(graph: &GraphRef, ntriples: &str) -> String {
+    match graph {
+        GraphRef::Default => ntriples.to_string(),
+        GraphRef::Named(iri) => format!("GRAPH <{}> {{\n{ntriples}}}\n", escape_iri(iri)),
+    }
+}
+
+/// Minimal IRI escaping for safe interpolation into a SPARQL `<…>` term: the characters
+/// SPARQL forbids inside an IRIREF (controls, spaces, and the delimiters `<>"{}|^`\``).
+/// A graph IRI containing them would otherwise break the generated update; percent-encode
+/// them so the update parses and addresses a stable IRI.
+fn escape_iri(iri: &str) -> String {
+    let mut out = String::with_capacity(iri.len());
+    for c in iri.chars() {
+        match c {
+            '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\' | ' ' => {
+                for b in c.to_string().bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+            c if (c as u32) < 0x20 => out.push_str(&format!("%{:02X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Runs a server-minted SPARQL Update through the sequenced writer off the async workers
+/// (it blocks for the group-commit ack), mapping the outcome onto `success`/400/500 — the
+/// same status discipline as the `application/sparql-update` path.
+async fn apply_gsp_update(state: &AppState, update: String, success: StatusCode) -> Response {
+    let st = state.clone();
+    let joined = tokio::task::spawn_blocking(move || st.apply_update(&update)).await;
+    match joined {
+        Ok(Ok(number)) => {
+            state.metrics().inc_updates();
+            with_generation_header(success.into_response(), number)
+        }
+        Ok(Err(e)) => bad_request(&format!("graph store write failed: {e}")),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "update worker panicked"),
+    }
+}
+
+/// `PUT <graph>` — REPLACE the graph's contents with the request body (GSP §4.2). Maps to
+/// `DROP SILENT GRAPH <g>; INSERT DATA { GRAPH <g> { … } }` (or `CLEAR DEFAULT` + `INSERT
+/// DATA` for the default graph) so the replace is one atomic, group-committed generation.
+/// 201 when the graph did not exist (created), 204 when it replaced an existing one.
+async fn gsp_put(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &Bytes) -> Response {
+    let ntriples = match body_to_ntriples(body, &content_type(headers)) {
+        Ok(nt) => nt,
+        Err(resp) => return resp,
+    };
+    // Created (201) vs replaced (204) is decided by pre-existence, sampled from the current
+    // generation. A racing writer cannot break this: the status is advisory and the write
+    // itself is atomic on the sequenced writer regardless of the sampled flag.
+    let existed = graph_exists(state, &graph);
+    let clear = match &graph {
+        GraphRef::Default => "CLEAR DEFAULT".to_string(),
+        GraphRef::Named(iri) => format!("DROP SILENT GRAPH <{}>", escape_iri(iri)),
+    };
+    // An empty body means "the graph is now empty" — the clear alone achieves that; emitting
+    // an empty `INSERT DATA { }` would be a needless (and possibly unparsable) no-op clause.
+    let update = if ntriples.is_empty() {
+        clear
+    } else {
+        let block = graph_data_block(&graph, &ntriples);
+        format!("{clear} ;\nINSERT DATA {{ {block} }}")
+    };
+    let success = if existed { StatusCode::NO_CONTENT } else { StatusCode::CREATED };
+    apply_gsp_update(state, update, success).await
+}
+
+/// `POST <graph>` — MERGE (additive) the request body into the graph (GSP §5). Maps to
+/// `INSERT DATA { GRAPH <g> { … } }`. 201 when the merge created the graph (a selector-less
+/// POST, or a POST to an absent named graph), 204 when it added to an existing graph.
+async fn gsp_post(state: &AppState, graph: GraphRef, headers: &HeaderMap, body: &Bytes) -> Response {
+    let ntriples = match body_to_ntriples(body, &content_type(headers)) {
+        Ok(nt) => nt,
+        Err(resp) => return resp,
+    };
+    let existed = graph_exists(state, &graph);
+    // An empty merge body adds nothing. For an existing graph that is a 204 no-op; for an
+    // absent named graph the spec wants the graph created — `CREATE SILENT GRAPH <g>` makes
+    // the empty graph so a subsequent read addresses it (201).
+    let update = if ntriples.is_empty() {
+        match &graph {
+            GraphRef::Default => return with_generation_header(StatusCode::NO_CONTENT.into_response(), state.current().number()),
+            GraphRef::Named(_) if existed => {
+                return with_generation_header(StatusCode::NO_CONTENT.into_response(), state.current().number())
+            }
+            GraphRef::Named(iri) => format!("CREATE SILENT GRAPH <{}>", escape_iri(iri)),
+        }
+    } else {
+        let block = graph_data_block(&graph, &ntriples);
+        format!("INSERT DATA {{ {block} }}")
+    };
+    let success = if existed { StatusCode::NO_CONTENT } else { StatusCode::CREATED };
+    apply_gsp_update(state, update, success).await
+}
+
+/// `DELETE <graph>` — DROP the graph (GSP §6). 204 on success; 404 when the named graph is
+/// absent (per the spec's "graph does not exist" semantics). The default graph always
+/// exists, so `DELETE ?default` empties it and is always 204. Maps to `DROP GRAPH <g>` /
+/// `CLEAR DEFAULT`.
+async fn gsp_delete(state: &AppState, graph: GraphRef) -> Response {
+    match &graph {
+        GraphRef::Default => apply_gsp_update(state, "CLEAR DEFAULT".to_string(), StatusCode::NO_CONTENT).await,
+        GraphRef::Named(iri) => {
+            if !graph_exists(state, &graph) {
+                return json_error(StatusCode::NOT_FOUND, &format!("graph <{iri}> does not exist"));
+            }
+            let update = format!("DROP GRAPH <{}>", escape_iri(iri));
+            apply_gsp_update(state, update, StatusCode::NO_CONTENT).await
+        }
+    }
+}
+
+/// Whether the addressed graph currently exists / is non-empty in the current generation.
+/// For a named graph this is `ASK { GRAPH <g> { ?s ?p ?o } }`; for the default graph,
+/// `ASK { ?s ?p ?o }`. Note the engine has no separate "empty named graph exists" bit
+/// outside of an in-flight update, so an existing-but-empty named graph reads as absent —
+/// which only affects the advisory created-vs-replaced status code, never write atomicity.
+fn graph_exists(state: &AppState, graph: &GraphRef) -> bool {
+    let ask = match graph {
+        GraphRef::Default => "ASK { ?s ?p ?o }".to_string(),
+        GraphRef::Named(iri) => format!("ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}", escape_iri(iri)),
+    };
+    let gen = state.current();
+    matches!(sparq_engine::ask(gen.snapshot(), &ask), Ok(true))
+}
+
+// ---------------------------------------------------------------------------
+// Graph Store HTTP Protocol — READ side
+// ---------------------------------------------------------------------------
+
+/// Serialises the addressed graph as N-Triples (the one RDF serialisation we can emit from
 /// the engine's term-level scan without a full Turtle writer). Negotiation is minimal:
 /// `text/turtle` and `application/n-triples` both yield N-Triples (valid Turtle), default
 /// `application/n-triples`. CPU-bound (a full-graph dump), so it runs on the blocking pool
-/// under the request timeout (no row cap: a dump is inherently graph-sized).
-async fn serialise_default_graph(state: &AppState, headers: &HeaderMap, head_only: bool) -> Response {
+/// under the request timeout (no row cap: a dump is inherently graph-sized). A named graph
+/// that does not exist serialises as the empty graph (200, empty body) per GSP read.
+async fn serialise_graph(state: &AppState, graph: GraphRef, headers: &HeaderMap, head_only: bool) -> Response {
     let accept = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -1164,17 +1402,33 @@ async fn serialise_default_graph(state: &AppState, headers: &HeaderMap, head_onl
     // Pinned for the whole dump: the serialisation is consistent with request start.
     let gen = state.current();
     let cfg = config.clone();
-    let task = tokio::task::spawn_blocking(move || match nt_dump(gen.snapshot(), &budget) {
+    let task = tokio::task::spawn_blocking(move || match nt_dump_graph(gen.snapshot(), &graph, &budget) {
         Ok(body) => text_response(StatusCode::OK, &ct, body, head_only),
         Err(e) => engine_error_response(&e, &cfg),
     });
     await_worker(task, &config).await
 }
 
+/// Dumps the addressed graph as N-Triples by reusing the engine's SELECT path and the
+/// materialised terms — `?s ?p ?o` for the default graph, `GRAPH <g> { ?s ?p ?o }` for a
+/// named graph — so no private store API is needed.
+fn nt_dump_graph(graph: &Graph, target: &GraphRef, budget: &QueryBudget) -> Result<String, String> {
+    let select = match target {
+        GraphRef::Default => "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
+        GraphRef::Named(iri) => format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{}> {{ ?s ?p ?o }} }}", escape_iri(iri)),
+    };
+    nt_dump_select(graph, &select, budget)
+}
+
 /// Dumps the whole default graph as N-Triples by reusing the engine's SELECT path
 /// (`?s ?p ?o`) and the materialised terms — no private store API needed.
 fn nt_dump(graph: &Graph, budget: &QueryBudget) -> Result<String, String> {
-    let r = sparq_engine::query_with_budget(graph, "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", budget)?;
+    nt_dump_select(graph, "SELECT ?s ?p ?o WHERE { ?s ?p ?o }", budget)
+}
+
+/// Shared `?s ?p ?o` → N-Triples projection for the GSP read / body-canonicalisation paths.
+fn nt_dump_select(graph: &Graph, select: &str, budget: &QueryBudget) -> Result<String, String> {
+    let r = sparq_engine::query_with_budget(graph, select, budget)?;
     let mut out = String::with_capacity(r.rows.len() * 64);
     for row in &r.rows {
         let (Some(s), Some(p), Some(o)) = (&row[0], &row[1], &row[2]) else { continue };
@@ -1373,10 +1627,6 @@ fn bad_request(msg: &str) -> Response {
 
 fn execution_error(msg: &str) -> Response {
     json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("query execution error: {msg}"))
-}
-
-fn not_implemented(msg: &str) -> Response {
-    json_error(StatusCode::NOT_IMPLEMENTED, msg)
 }
 
 fn method_not_allowed(allow: &[Method]) -> Response {
