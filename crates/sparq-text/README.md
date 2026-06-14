@@ -49,7 +49,8 @@ The magic predicates live under `http://sparq.dev/text#`:
 | --- | --- |
 | `?lit text:matches "q"` | `?lit` ranges over indexed literals containing **every** token of `q` (a token ending in `*` matches as a prefix) |
 | `?lit text:matchesAny "q"` | … containing **at least one** token |
-| `?lit text:score ?s` | binds the BM25 score (`xsd:double`); must accompany exactly one match pattern on `?lit` in the same BGP |
+| `?lit text:phrase "foo bar"` | … where the tokens occur **adjacent and in order** (a positional phrase match — needs a positions-enabled index; **not** BM25-ranked, so no `text:score` companion) <!-- [OPUS-4.8] --> |
+| `?lit text:score ?s` | binds the BM25 score (`xsd:double`); must accompany exactly one `text:matches`/`text:matchesAny` on `?lit` in the same BGP |
 
 ```rust
 use sparq_text::{query_text, TextIndex};
@@ -106,11 +107,13 @@ with `ORDER BY DESC(?s)` over a `text:score` variable.
   (token, doc) pair — so only callers that need phrase search pay for it.
   `with_positions()` seeds an empty position-enabled index for the delta-fed
   case; `has_positions()` reports the mode. A phrase match is boolean adjacency
-  (no BM25 ranking) and is **not** yet wired into the `text:` magic predicates
-  (bead `sq-c0wn`). <!-- [OPUS-4.8] -->
-- **Planned (bead `sq-c0wn`)**: a `text:phrase` magic predicate exposing
-  `phrase()` inside SPARQL; positional postings are also the basis for
-  proximity/slop scoring.
+  (no BM25 ranking). The library `phrase()` call is exposed inside SPARQL by the
+  [`text:phrase`](#running-text-inside-sparql-the-engine-feature-default-on)
+  magic predicate; against the cheap positionless `TextIndex::build` index it is
+  a hard query error (the bare `phrase()` method panics). <!-- [OPUS-4.8] -->
+- **Future (bead `sq-hajq`, proximity/slop)**: positional postings are also the
+  basis for proximity/slop scoring (a relevance variant of `text:phrase` with a
+  bounded gap), which is **not** yet implemented. <!-- [OPUS-4.8] -->
 
 ## Benchmark
 
