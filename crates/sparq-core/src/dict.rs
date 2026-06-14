@@ -1458,37 +1458,49 @@ impl Dict {
 
     /// Loads a dictionary written by [`save`](Self::save), rebuilding the hash table.
     pub fn open(path: &std::path::Path) -> std::io::Result<Dict> {
-        let mut r = std::io::BufReader::new(std::fs::File::open(path)?);
+        let file = std::fs::File::open(path)?;
+        // [OPUS-4.8] sq-f5jh: the legacy single-file `dict.bin` is an UNTRUSTED on-disk file
+        // (trust boundary B5), the same as the mmap dict files. Its entry COUNTS (np/nd/nt)
+        // and every string LENGTH are read straight from it; `Vec::with_capacity(n)` /
+        // `vec![0u8; n]` on a hostile count drove a multi-GB allocation that ABORTS the
+        // process (uncatchable OOM DoS — the residual coverage-flake / rc=101 trigger under
+        // llvm-cov memory pressure). The file length is a hard upper bound: every prefix /
+        // datatype / term entry costs >= 1 byte on disk, and every string length costs
+        // <= the bytes that can still remain. Clamp each pre-allocation and bound each
+        // `read_str` to it; the per-entry `read_exact`s still error cleanly if the file
+        // actually ends early. Mirrors the `open_mmap` hardening.
+        let file_len = file.metadata()?.len() as usize;
+        let mut r = std::io::BufReader::new(file);
         let np = read_u32(&mut r)? as usize;
-        let mut prefixes = Vec::with_capacity(np);
+        let mut prefixes = Vec::with_capacity(np.min(file_len));
         let mut prefix_ids = FxHashMap::default();
         for i in 0..np {
-            let p = read_str(&mut r)?;
+            let p = read_str_bounded_io(&mut r, file_len)?;
             prefix_ids.insert(p.clone(), i as u32);
             prefixes.push(p);
         }
         let nd = read_u32(&mut r)? as usize;
-        let mut datatypes = Vec::with_capacity(nd);
+        let mut datatypes = Vec::with_capacity(nd.min(file_len));
         let mut datatype_ids = FxHashMap::default();
         for i in 0..nd {
-            let d = read_str(&mut r)?;
+            let d = read_str_bounded_io(&mut r, file_len)?;
             datatype_ids.insert(d.clone(), i as u32);
             datatypes.push(NamedNode::new_unchecked(String::from(d)));
         }
         let timing = std::env::var("SPARQ_DICT_TIMING").is_ok();
         let t0 = std::time::Instant::now();
         let nt = read_u32(&mut r)? as usize;
-        let mut terms = Vec::with_capacity(nt);
+        let mut terms = Vec::with_capacity(nt.min(file_len));
         for _ in 0..nt {
             terms.push(match read_u8(&mut r)? {
-                0 => Stored::Iri { prefix: read_u32(&mut r)?, suffix: read_str(&mut r)? },
+                0 => Stored::Iri { prefix: read_u32(&mut r)?, suffix: read_str_bounded_io(&mut r, file_len)? },
                 1 => {
-                    let value = read_str(&mut r)?;
+                    let value = read_str_bounded_io(&mut r, file_len)?;
                     let datatype = read_u32(&mut r)?;
-                    let lang = if read_u8(&mut r)? == 1 { Some(read_str(&mut r)?) } else { None };
+                    let lang = if read_u8(&mut r)? == 1 { Some(read_str_bounded_io(&mut r, file_len)?) } else { None };
                     Stored::Lit { value, datatype, lang }
                 }
-                2 => Stored::Blank(read_str(&mut r)?),
+                2 => Stored::Blank(read_str_bounded_io(&mut r, file_len)?),
                 3 => Stored::Triple([read_u32(&mut r)?, read_u32(&mut r)?, read_u32(&mut r)?]),
                 other => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad term tag {other}"))),
             });
@@ -1922,8 +1934,20 @@ fn read_u8(r: &mut impl std::io::Read) -> std::io::Result<u8> {
     Ok(b[0])
 }
 
-fn read_str(r: &mut impl std::io::Read) -> std::io::Result<Box<str>> {
+/// [OPUS-4.8] sq-f5jh — `read_str` for the UNTRUSTED legacy `dict.bin` loader (always
+/// compiled, unlike the `mmap`-gated [`read_str_bounded`]). Rejects a declared length
+/// larger than `max` (the bytes that can possibly remain in the source file) BEFORE
+/// allocating, so a hostile u32 length cannot trigger a multi-GB `vec![0u8; n]`
+/// allocation/abort. The subsequent `read_exact` still errors cleanly if the file ends
+/// early.
+fn read_str_bounded_io(r: &mut impl std::io::Read, max: usize) -> std::io::Result<Box<str>> {
     let n = read_u32(r)? as usize;
+    if n > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "dictionary string length exceeds the file size (corrupt or truncated)",
+        ));
+    }
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf)?;
     String::from_utf8(buf)
