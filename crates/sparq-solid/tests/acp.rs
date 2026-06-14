@@ -78,3 +78,33 @@ fn acp_rematerialization_picks_up_policy_change() {
     // …and bob lost the write grant the old policy carried
     assert!(!can(&mut s, Some(BOB), None, Mode::Write, "https://pod.ex/team2/c3/g0/d0.ttl"));
 }
+
+/// [OPUS-4.8] sq-xor3: ACP write-path enforcement. `update_as_acp` gates a SPARQL Update
+/// against `acl:Write` (cumulative ACP allow ∖ deny) before mutating. Expected from the
+/// ACP fixture: ALICE has Read/Write/Control everywhere (cumulative root owner policy);
+/// team2's `acp:allow Read,Write` anyOf {bob,carol} gives BOB+CAROL write; DAVE has none.
+#[test]
+fn acp_write_enforcement_matches_grants() {
+    let mut s = store();
+    let ins = |g: &str| format!("INSERT DATA {{ GRAPH <{g}> {{ <{g}#it> <https://ex.dev/ns#k> \"v\" }} }}");
+
+    let priv0 = "https://pod.ex/priv0/c4/g0/d0.ttl";
+    assert!(can(&mut s, Some(ALICE), None, Mode::Write, priv0));
+    s.update_as_acp(&Session { agent: Some(ALICE), client: None }, &ins(priv0))
+        .expect("alice (cumulative owner) writes priv0");
+    assert!(!can(&mut s, Some(BOB), None, Mode::Write, priv0));
+    assert!(
+        s.update_as_acp(&Session { agent: Some(BOB), client: None }, &ins(priv0)).is_err(),
+        "bob has no write on priv0"
+    );
+
+    let team2 = "https://pod.ex/team2/c3/g0/d0.ttl";
+    assert!(can(&mut s, Some(BOB), None, Mode::Write, team2));
+    s.update_as_acp(&Session { agent: Some(BOB), client: None }, &ins(team2))
+        .expect("bob (anyOf) writes team2");
+    assert!(!can(&mut s, Some(DAVE), None, Mode::Write, team2));
+    assert!(
+        s.update_as_acp(&Session { agent: Some(DAVE), client: None }, &ins(team2)).is_err(),
+        "dave denied write on team2"
+    );
+}
