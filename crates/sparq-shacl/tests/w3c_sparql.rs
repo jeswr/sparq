@@ -28,6 +28,11 @@ const MF: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#";
 const SHT: &str = "http://www.w3.org/ns/shacl-test#";
 const SH: &str = "http://www.w3.org/ns/shacl#";
 
+/// [OPUS-4.8] Pass-count floor for the `sh:sparql` node+property sub-suites at
+/// the pinned suite commit (`sq-qap0`). A ratchet: it may only RISE. Mirrors
+/// `w3c_core.rs`'s `BASELINE_PASS`. The CI `shacl-conformance` job re-checks it.
+const SHACL_SPARQL_FLOOR: usize = 5;
+
 fn sparql_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/shacl/data-shapes/data-shapes-test-suite/tests/sparql")
@@ -71,7 +76,11 @@ fn w3c_shacl_sparql_node_and_property() {
         "SHACL-SPARQL node/property regressions: {} failing",
         score.fail
     );
-    assert!(score.pass >= 5, "expected >=5 sh:sparql entries, got {}", score.pass);
+    assert!(
+        score.pass >= SHACL_SPARQL_FLOOR,
+        "SHACL-SPARQL pass count regressed: {} < floor {SHACL_SPARQL_FLOOR}",
+        score.pass
+    );
 }
 
 #[derive(Default)]
@@ -123,14 +132,20 @@ fn walk_manifest(path: &FsPath, root: &FsPath, score: &mut Scoreboard) {
     let path = match path.canonicalize() {
         Ok(p) => p,
         Err(e) => {
-            score.record(&path.display().to_string(), Outcome::Fail(format!("canonicalize: {e}")));
+            score.record(
+                &path.display().to_string(),
+                Outcome::Fail(format!("canonicalize: {e}")),
+            );
             return;
         }
     };
     let g = match load(&path) {
         Ok(g) => g,
         Err(e) => {
-            score.record(&path.display().to_string(), Outcome::Fail(format!("parse: {e}")));
+            score.record(
+                &path.display().to_string(),
+                Outcome::Fail(format!("parse: {e}")),
+            );
             return;
         }
     };
@@ -222,7 +237,12 @@ fn run_entry(file: &FsPath, g: &Graph, view: &GraphView, entry: &Term) -> Result
             summarize(&report.results)
         )));
     }
-    if !bipartite_match(&expected, &report.results, &mut vec![false; expected.len()], 0) {
+    if !bipartite_match(
+        &expected,
+        &report.results,
+        &mut vec![false; expected.len()],
+        0,
+    ) {
         return Ok(Outcome::Fail(format!(
             "results do not correspond — got {}",
             summarize(&report.results)
@@ -238,8 +258,14 @@ fn summarize(rs: &[ValidationResult]) -> String {
                 "[focus {} comp {} value {} path {}]",
                 r.focus_node,
                 r.source_component.rsplit('#').next().unwrap_or(""),
-                r.value.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
-                r.path.as_ref().map(|p| p.to_turtle()).unwrap_or_else(|| "-".into()),
+                r.value
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                r.path
+                    .as_ref()
+                    .map(|p| p.to_turtle())
+                    .unwrap_or_else(|| "-".into()),
             )
         })
         .collect::<Vec<_>>()

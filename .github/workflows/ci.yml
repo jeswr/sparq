@@ -111,6 +111,50 @@ jobs:
           name: conformance-report
           path: conformance-report.md
 
+  shacl-conformance:
+    # [OPUS-4.8] W3C SHACL conformance RATCHET (sq-qap0). The data-shapes
+    # sht:Validate suites run as `cargo test` (the runners live in
+    # crates/sparq-shacl/tests/w3c_core.rs + w3c_sparql.rs, each carrying its own
+    # pinned pass-count floor); the normal `cargo test --workspace` job runs
+    # OFFLINE and the runners self-SKIP when the fixtures are absent, so this
+    # dedicated job fetches the pinned suite first (mirroring the fetch-then-run
+    # split of the SPARQL/inference jobs above), then runs the runners with
+    # --nocapture and re-checks the scoreboard floor here. The runner's internal
+    # `assert!(pass >= BASELINE_PASS)` is the primary gate; the grep below is the
+    # same `>= N` belt-and-braces check the conformance jobs use. Never lower the
+    # ratchet (raise BASELINE_PASS / SHACL_SPARQL_FLOOR as coverage grows).
+    name: W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch W3C SHACL test suite (pinned)
+        run: ./crates/sparq-shacl/fetch-shacl-tests.sh
+      - name: Run SHACL core + SHACL-SPARQL suites
+        # The runners assert their own pinned floors; capture the scoreboards so
+        # the grep gate below can re-check the pass counts.
+        run: |
+          cargo test -p sparq-shacl --test w3c_core --test w3c_sparql -- --nocapture \
+            | tee shacl-conformance.out
+      - name: Enforce ratchet (pass counts must not regress)
+        run: |
+          CORE_FLOOR=98
+          SPARQL_FLOOR=5
+          # core runner prints: "TOTAL  <pass> <fail> <skip>"
+          CORE_PASS=$(grep -E '^TOTAL ' shacl-conformance.out | awk '{print $2}' | head -1)
+          # sparql runner prints: "pass <n> / fail <m> / skip <k>"
+          SPARQL_PASS=$(grep -oE 'pass [0-9]+ / fail' shacl-conformance.out | grep -oE '[0-9]+' | head -1)
+          echo "SHACL core pass: ${CORE_PASS:-unknown} (floor $CORE_FLOOR); SHACL-SPARQL pass: ${SPARQL_PASS:-unknown} (floor $SPARQL_FLOOR)"
+          [ -n "$CORE_PASS" ] && [ "$CORE_PASS" -ge "$CORE_FLOOR" ] || { echo "::error::SHACL core regressed below the ratchet (${CORE_PASS:-?} < $CORE_FLOOR)"; exit 1; }
+          [ -n "$SPARQL_PASS" ] && [ "$SPARQL_PASS" -ge "$SPARQL_FLOOR" ] || { echo "::error::SHACL-SPARQL regressed below the ratchet (${SPARQL_PASS:-?} < $SPARQL_FLOOR)"; exit 1; }
+      - name: Upload scoreboard
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shacl-conformance
+          path: shacl-conformance.out
+
   inference-conformance:
     # Inference/reasoning conformance RATCHET: RDF Semantics (rdf-mt), OWL 2 RL
     # (W3C OWL WG test cases), the w3c/N3 community-group suite, and
