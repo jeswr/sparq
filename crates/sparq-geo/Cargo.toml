@@ -58,7 +58,7 @@ geo-types = "0.7"
 # false` mirrors geo's own usage and keeps the lockfile stable. [OPUS-4.8]
 i_overlay = { version = "4.5.1, < 4.6.0", default-features = false }
 # R-tree (bulk-loaded STR) over geometry bounding boxes.
-rstar = "0.12"
+rstar = "0.13"
 # GML-SF geometry parsing (geo:gmlLiteral). A streaming XML reader, NOT a full
 # GML processor — we walk the OGC GML Simple-Features geometry subset GeoSPARQL
 # uses (Point/LineString/Polygon/Multi*). `quick-xml` is ALREADY in the lockfile
