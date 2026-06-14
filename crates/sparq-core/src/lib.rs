@@ -1050,6 +1050,13 @@ impl Graph {
     /// Persists the graph to `dir` (the permutation indexes + the dictionary) so it can
     /// later be QUERIED with the indexes MEMORY-MAPPED via [`open`](Self::open) — the
     /// out-of-core path for datasets larger than RAM.
+    ///
+    /// [OPUS-4.8] (sq-3ui0, gh-45) NAMED GRAPHS are persisted too: each named graph is
+    /// saved (recursively, identical format) under `dir/named/<i>/`, and a manifest
+    /// `dir/named.bin` records every graph's name term in index order. `open` replays the
+    /// manifest so a save→open round-trip is LOSSLESS for the whole dataset (every named
+    /// graph's triples + its IRI). A default-graph-only graph writes NO `named/` subtree
+    /// and NO `named.bin`, so its on-disk layout is byte-identical to before this change.
     #[cfg(feature = "mmap")]
     pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
@@ -1057,7 +1064,8 @@ impl Graph {
         self.dict.save_mmap(dir)?; // includes appended (delta-overlay) terms
         write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())?;
         let (tf, ti) = self.dense_temporals();
-        write_temporals(&dir.join("temporals.bin"), &tf, &ti)
+        write_temporals(&dir.join("temporals.bin"), &tf, &ti)?;
+        self.save_named(dir, false)
     }
 
     /// Like [`save`](Self::save) but persists the permutation indexes BLOCK-COMPRESSED
@@ -1072,7 +1080,91 @@ impl Graph {
         self.dict.save_mmap(dir)?;
         write_numerics(&dir.join("numerics.bin"), &self.dense_numerics())?;
         let (tf, ti) = self.dense_temporals();
-        write_temporals(&dir.join("temporals.bin"), &tf, &ti)
+        write_temporals(&dir.join("temporals.bin"), &tf, &ti)?;
+        // [OPUS-4.8] (sq-3ui0) Named graphs are persisted block-compressed too.
+        self.save_named(dir, true)
+    }
+
+    /// [OPUS-4.8] (sq-3ui0, gh-45) Persists every named graph under `dir/named/<i>/` and
+    /// writes the manifest `dir/named.bin` (the ordered list of graph-name terms). Each
+    /// sub-graph goes through the SAME [`save`](Self::save) / [`save_compressed`] machinery
+    /// (so it round-trips losslessly, recursively, and carries its own per-graph WAL on
+    /// `open`). No `named/` subtree and no `named.bin` are written when there are no named
+    /// graphs, so the default-graph-only directory layout is unchanged (byte-identical).
+    ///
+    /// STALE-STATE HYGIENE: when there ARE named graphs we first remove any pre-existing
+    /// `named/` subtree so a re-save into the same directory cannot leave orphaned old
+    /// sub-graphs behind; when there are none we remove both the subtree and the manifest
+    /// so a graph that lost all its named graphs persists as a clean default-only directory.
+    #[cfg(feature = "mmap")]
+    fn save_named(&self, dir: &std::path::Path, compressed: bool) -> std::io::Result<()> {
+        let named_dir = dir.join(NAMED_SUBDIR);
+        let manifest = dir.join(NAMED_MANIFEST);
+        if self.named.is_empty() {
+            // Default-graph-only: ensure no stale named state lingers, then write nothing.
+            std::fs::remove_dir_all(&named_dir).ok();
+            std::fs::remove_file(&manifest).ok();
+            return Ok(());
+        }
+        let _ = &manifest;
+        // Rewrite the subtree from scratch so removed/renamed graphs cannot survive a re-save.
+        std::fs::remove_dir_all(&named_dir).ok();
+        std::fs::create_dir_all(&named_dir)?;
+        for (i, (_, sub)) in self.named.iter().enumerate() {
+            let sub_dir = named_dir.join(i.to_string());
+            if compressed {
+                sub.save_compressed(&sub_dir)?;
+            } else {
+                sub.save(&sub_dir)?;
+            }
+        }
+        // Write the manifest LAST (after every sub-graph is durable) so a crash mid-save
+        // never leaves a manifest pointing at a missing/partial sub-graph. The presence of
+        // a complete `named.bin` is the commit point for the named-graph set.
+        let names: Vec<Term> = self.named.iter().map(|(n, _)| n.clone()).collect();
+        write_named_manifest(dir, &names)
+    }
+
+    /// [OPUS-4.8] (sq-3ui0, gh-45) Loads the named graphs persisted by
+    /// [`save_named`](Self::save_named) back into [`named`](Self::named), each opened via
+    /// [`open`](Self::open) (so every sub-graph is memory-mapped and carries its OWN
+    /// per-graph WAL). Returns an empty vec — backward compatible — when `dir` carries no
+    /// `named.bin` (a default-graph-only directory, or one saved before this format). A
+    /// present-but-malformed manifest (wrong magic / unknown version) is a hard error
+    /// rather than a silent misread, so an incompatible on-disk format is never opened as
+    /// if it were valid.
+    #[cfg(feature = "mmap")]
+    fn open_named(dir: &std::path::Path) -> std::io::Result<Vec<(Term, Graph)>> {
+        let manifest = dir.join(NAMED_MANIFEST);
+        let bytes = match std::fs::read(&manifest) {
+            Ok(b) => b,
+            // No manifest: default-graph-only or a pre-named-graph directory.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let bad = |msg: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("named.bin: {msg}"));
+        if bytes.len() < 12 {
+            return Err(bad("manifest too short for header"));
+        }
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().expect("4 bytes"));
+        if magic != NAMED_MANIFEST_MAGIC {
+            return Err(bad("bad magic (not a named-graph manifest)"));
+        }
+        let version = u32::from_le_bytes(bytes[4..8].try_into().expect("4 bytes"));
+        if version != NAMED_FORMAT_VERSION {
+            return Err(bad(&format!("unsupported format version {version} (this build writes/reads {NAMED_FORMAT_VERSION})")));
+        }
+        let count = u32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes")) as usize;
+        let named_dir = dir.join(NAMED_SUBDIR);
+        let mut out = Vec::with_capacity(count);
+        let mut pos = 12usize;
+        for i in 0..count {
+            let (name, next) = decode_graph_name(&bytes, pos).map_err(|m| bad(&m))?;
+            pos = next;
+            let sub = Graph::open(&named_dir.join(i.to_string()))?;
+            out.push((name, sub));
+        }
+        Ok(out)
     }
 
     /// Decodes any block-compressed permutation indexes into raw RAM (the load-time
@@ -1181,7 +1273,11 @@ impl Graph {
             // backward compatible, like the numerics cache.
             _ => TempData::Owned(temporals_of(&dict)),
         };
-        let mut g = Graph { dict, store, numerics, temporals, named: Vec::new(), wal: None };
+        // [OPUS-4.8] (sq-3ui0, gh-45) Restore the named graphs (each opened memory-mapped
+        // with its own per-graph WAL) so a save→open round-trip is lossless for the whole
+        // dataset. Empty for a default-graph-only / pre-named-graph directory.
+        let named = Self::open_named(dir)?;
+        let mut g = Graph { dict, store, numerics, temporals, named, wal: None };
         // Replay any write-ahead log into the delta-overlay (recovery after a crash or a
         // plain not-yet-compacted close), stopping cleanly at the first torn record and
         // truncating the log there — then keep the log open for further appends.
@@ -1806,6 +1902,13 @@ impl Graph {
                 }
             }
         }
+        // [OPUS-4.8] (sq-3ui0, gh-45) For a DIRECTORY-BACKED parent, a NEW named graph is
+        // created with its own on-disk directory + per-graph WAL under `dir/named/<i>/` so
+        // its very first mutation is WAL-logged + fsync'd (durable before this call
+        // returns) and the manifest is kept in sync — not deferred to the next save. An
+        // in-memory parent keeps the overlay-only path (no directory, no WAL).
+        #[cfg(feature = "mmap")]
+        let parent_dir = self.wal.as_ref().map(|w| w.dir.clone());
         for (slot, ins, del) in slots {
             match slot {
                 None => self.apply_delta(&ins, &del)?,
@@ -1813,6 +1916,13 @@ impl Graph {
                     if let Some(i) = self.named.iter().position(|(n, _)| *n == name) {
                         self.named[i].1.apply_delta(&ins, &del)?;
                     } else if !ins.is_empty() {
+                        #[cfg(feature = "mmap")]
+                        if let Some(dir) = &parent_dir {
+                            let mut g = self.create_durable_named(dir, &name)?;
+                            g.apply_delta(&ins, &[])?;
+                            self.named.push((name, g));
+                            continue;
+                        }
                         let mut g = Graph::from_parts(Dict::new(), Vec::new());
                         g.apply_delta(&ins, &[])?;
                         self.named.push((name, g));
@@ -1821,6 +1931,30 @@ impl Graph {
             }
         }
         Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-3ui0, gh-45) Creates a fresh, EMPTY named sub-graph that is
+    /// directory-backed (its own `dir/named/<i>/` + per-graph WAL) and appends/updates the
+    /// parent's `named.bin` manifest so the new graph is recoverable on the next
+    /// [`open`](Self::open) even before a full [`save`](Self::save)/[`compact`]. The index
+    /// `i` is the parent's current `named.len()` (the slot this graph will occupy). Saving
+    /// an empty graph then re-opening it yields a graph with its own WAL, so the caller can
+    /// immediately [`apply_delta`](Self::apply_delta) durably.
+    #[cfg(feature = "mmap")]
+    fn create_durable_named(&self, dir: &std::path::Path, name: &Term) -> Result<Graph, String> {
+        let i = self.named.len();
+        let named_dir = dir.join(NAMED_SUBDIR);
+        let sub_dir = named_dir.join(i.to_string());
+        std::fs::create_dir_all(&named_dir).map_err(|e| e.to_string())?;
+        // Persist an empty sub-graph, then open it so it carries its own WAL.
+        let empty = Graph::from_parts(Dict::new(), Vec::new());
+        empty.save(&sub_dir).map_err(|e| e.to_string())?;
+        // Rewrite the manifest with the new entry appended (index order == named order).
+        let mut names: Vec<Term> = self.named.iter().map(|(n, _)| n.clone()).collect();
+        names.push(name.clone());
+        write_named_manifest(dir, &names).map_err(|e| e.to_string())?;
+        fsync_dir(&named_dir).map_err(|e| e.to_string())?;
+        Graph::open(&sub_dir).map_err(|e| e.to_string())
     }
 
     /// The in-memory half of [`apply_delta`](Self::apply_delta) (no WAL append) — also
@@ -1963,6 +2097,81 @@ fn recover_compaction(dir: &std::path::Path) -> std::io::Result<()> {
         fsync_dir(parent)?;
     }
     Ok(())
+}
+
+/// [OPUS-4.8] (sq-3ui0, gh-45) The subdirectory holding the persisted named graphs (one
+/// numbered sub-directory per named graph), and the manifest file naming them in order.
+#[cfg(feature = "mmap")]
+const NAMED_SUBDIR: &str = "named";
+#[cfg(feature = "mmap")]
+const NAMED_MANIFEST: &str = "named.bin";
+/// Manifest magic ("NMG1" little-endian) — identifies a named-graph manifest and lets a
+/// stray/legacy file be rejected rather than misread.
+#[cfg(feature = "mmap")]
+const NAMED_MANIFEST_MAGIC: u32 = 0x31_47_4D_4E;
+/// On-disk named-graph format version. Bumped if the named-graph LAYOUT changes
+/// incompatibly; `open_named` refuses an unknown version rather than silently misreading.
+#[cfg(feature = "mmap")]
+const NAMED_FORMAT_VERSION: u32 = 1;
+
+/// [OPUS-4.8] (sq-3ui0) Writes the named-graph manifest `dir/named.bin`: the magic +
+/// format version + count, then each graph name in order (see [`encode_graph_name`]). The
+/// sub-graph directories `dir/named/<i>/` must already be durable before this is called —
+/// the manifest's presence is the commit point for the named-graph set.
+#[cfg(feature = "mmap")]
+fn write_named_manifest(dir: &std::path::Path, names: &[Term]) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(12 + names.len() * 32);
+    buf.extend_from_slice(&NAMED_MANIFEST_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&NAMED_FORMAT_VERSION.to_le_bytes());
+    buf.extend_from_slice(&(names.len() as u32).to_le_bytes());
+    for name in names {
+        encode_graph_name(&mut buf, name);
+    }
+    std::fs::write(dir.join(NAMED_MANIFEST), &buf)
+}
+
+/// [OPUS-4.8] (sq-3ui0) Serialise a graph-name term into the manifest buffer as
+/// `[kind u8][len u32][raw value bytes]`, where kind is 0 for a NamedNode (value = the
+/// raw IRI) and 1 for a BlankNode (value = the raw label). Storing the RAW string with a
+/// length prefix avoids any N-Triples escaping ambiguity on the round-trip. Graph names
+/// are only ever NamedNode or BlankNode (never a literal/triple — see
+/// [`load_dataset`](Graph::load_dataset) / [`apply_delta_nquads`](Graph::apply_delta_nquads)).
+#[cfg(feature = "mmap")]
+fn encode_graph_name(buf: &mut Vec<u8>, name: &Term) {
+    // Graph names are constrained to NamedNode | BlankNode by every public loader; encode
+    // each with its raw value. A literal/triple graph name cannot occur, so map it to its
+    // lexical form as a NamedNode rather than panicking (keeps the encoding total).
+    let (kind, val): (u8, String) = match name {
+        Term::NamedNode(n) => (0, n.as_str().to_string()),
+        Term::BlankNode(b) => (1, b.as_str().to_string()),
+        other => (0, other.to_string()),
+    };
+    buf.push(kind);
+    let bytes = val.as_bytes();
+    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+/// [OPUS-4.8] (sq-3ui0) Inverse of [`encode_graph_name`]: decode the term starting at
+/// `pos`, returning it plus the offset just past it. Bounds-checked — a truncated or
+/// non-UTF-8 record is a clean `Err`, never a panic / OOB read (the manifest is a trusted
+/// asset, but the loader stays memory-safe under corruption like the rest of `open`).
+#[cfg(feature = "mmap")]
+fn decode_graph_name(bytes: &[u8], pos: usize) -> Result<(Term, usize), String> {
+    let kind = *bytes.get(pos).ok_or("truncated manifest (missing kind byte)")?;
+    let lo = pos + 1;
+    let len_end = lo + 4;
+    let len_bytes = bytes.get(lo..len_end).ok_or("truncated manifest (missing length)")?;
+    let len = u32::from_le_bytes(len_bytes.try_into().expect("4 bytes")) as usize;
+    let val_end = len_end + len;
+    let val_bytes = bytes.get(len_end..val_end).ok_or("truncated manifest (length exceeds buffer)")?;
+    let val = std::str::from_utf8(val_bytes).map_err(|_| "non-UTF-8 graph name in manifest".to_string())?;
+    let term = match kind {
+        0 => Term::NamedNode(oxrdf::NamedNode::new(val).map_err(|e| format!("invalid IRI graph name: {e}"))?),
+        1 => Term::BlankNode(oxrdf::BlankNode::new(val).map_err(|e| format!("invalid blank-node graph name: {e}"))?),
+        k => return Err(format!("unknown graph-name kind byte {k}")),
+    };
+    Ok((term, val_end))
 }
 
 /// The append-only write-ahead log of update operations for a directory-backed graph.
@@ -3918,6 +4127,168 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [OPUS-4.8] (sq-3ui0, gh-45) A dataset with MULTIPLE named graphs must survive a
+    /// save→open round-trip LOSSLESSLY: every named graph's IRI + triples reopen exactly,
+    /// including a graph the default graph does not name. Sorted-dump equality of the whole
+    /// dataset (default + every named graph) on both sides is the data-loss guard — before
+    /// this fix `open` dropped `named` entirely (total data loss for PSS's per-resource
+    /// named graphs).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn save_open_named_graphs_roundtrip_lossless() {
+        // Dump a single graph's triples as a sorted N-Triples-ish vector.
+        fn dump_one(gg: &Graph) -> Vec<(String, String, String)> {
+            let scan = gg.store.scan(&[None, None, None]);
+            let mut v: Vec<(String, String, String)> = scan
+                .rows
+                .iter()
+                .map(|r| {
+                    let spo = scan.to_spo(r);
+                    (gg.dict.term(spo[0]).to_string(), gg.dict.term(spo[1]).to_string(), gg.dict.term(spo[2]).to_string())
+                })
+                .collect();
+            v.sort();
+            v
+        }
+        // Dump the WHOLE dataset: default graph under key "", each named graph under its name.
+        fn dump_dataset(gg: &Graph) -> Vec<(String, Vec<(String, String, String)>)> {
+            let mut out: Vec<(String, Vec<(String, String, String)>)> = vec![(String::new(), dump_one(gg))];
+            for (name, sub) in &gg.named {
+                out.push((name.to_string(), dump_one(sub)));
+            }
+            out.sort();
+            out
+        }
+
+        // A dataset shaped like PSS: a default graph plus several named graphs whose IRI ==
+        // the "resource" IRI (one of them with a literal + lang-tag, one a single triple).
+        let nq = concat!(
+            "<http://ex/default-s> <http://ex/p> <http://ex/default-o> .\n",
+            "<http://res/a> <http://ex/p> \"value a\" <http://res/a> .\n",
+            "<http://res/a> <http://ex/label> \"caf\\u00e9\"@fr <http://res/a> .\n",
+            "<http://res/b> <http://ex/p> <http://ex/o-b> <http://res/b> .\n",
+            "<http://res/b/.acl> <http://acl#mode> <http://acl#Read> <http://res/b/.acl> .\n",
+        );
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+        assert_eq!(g.named.len(), 3, "fixture should have 3 named graphs");
+        let before = dump_dataset(&g);
+
+        let dir = std::env::temp_dir().join(format!("sparq_named_rt_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        g.save(&dir).unwrap();
+        // The manifest + one sub-directory per named graph must exist.
+        assert!(dir.join("named.bin").exists(), "named-graph manifest not persisted");
+        for i in 0..3 {
+            assert!(dir.join("named").join(i.to_string()).join("perm0.bin").exists(), "named sub-graph {i} not persisted");
+        }
+
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g2.named.len(), 3, "named graphs dropped on reopen");
+        let after = dump_dataset(&g2);
+        assert_eq!(before, after, "named-graph dataset not losslessly round-tripped");
+
+        // Every reopened named graph must carry its OWN per-graph WAL (durable updates).
+        for (_, sub) in &g2.named {
+            assert!(sub.wal.is_some(), "reopened named graph lacks its own WAL");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-3ui0) The block-COMPRESSED save path must round-trip named graphs too.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn save_compressed_named_graphs_roundtrip_lossless() {
+        let nq = concat!(
+            "<http://ex/d> <http://ex/p> <http://ex/o> .\n",
+            "<http://res/x> <http://ex/p> <http://ex/ox> <http://res/x> .\n",
+            "<http://res/y> <http://ex/p> <http://ex/oy> <http://res/y> .\n",
+        );
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+        let dir = std::env::temp_dir().join(format!("sparq_named_zrt_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        g.save_compressed(&dir).unwrap();
+        let g2 = Graph::open(&dir).unwrap();
+        assert_eq!(g2.named.len(), 2);
+        let named_of = |gg: &Graph, name: &str| {
+            gg.named.iter().find(|(n, _)| n.to_string() == format!("<{name}>")).map(|(_, s)| s.len())
+        };
+        assert_eq!(named_of(&g2, "http://res/x"), Some(1));
+        assert_eq!(named_of(&g2, "http://res/y"), Some(1));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-3ui0) A DEFAULT-GRAPH-ONLY save writes NO `named/` subtree and NO
+    /// `named.bin`, so its on-disk layout is unchanged from before this feature
+    /// (byte-identity preserved for the common single-graph case).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn default_only_save_has_no_named_artifacts() {
+        let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .\n", "ntriples").unwrap();
+        assert!(g.named.is_empty());
+        let dir = std::env::temp_dir().join(format!("sparq_default_only_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        g.save(&dir).unwrap();
+        assert!(!dir.join("named.bin").exists(), "default-only save must not write a named manifest");
+        assert!(!dir.join("named").exists(), "default-only save must not write a named subtree");
+        let g2 = Graph::open(&dir).unwrap();
+        assert!(g2.named.is_empty());
+        assert_eq!(g2.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-3ui0) A named-graph manifest with an UNKNOWN format version (or bad
+    /// magic) is a hard error on open — never silently misread as the current format.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn named_manifest_unknown_version_is_rejected() {
+        let nq = "<http://res/x> <http://ex/p> <http://ex/o> <http://res/x> .\n";
+        let g = Graph::load_dataset(nq, "nquads").unwrap();
+        let dir = std::env::temp_dir().join(format!("sparq_named_badver_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        g.save(&dir).unwrap();
+        // Corrupt the manifest's version field (bytes 4..8) to a future version.
+        let mut bytes = std::fs::read(dir.join("named.bin")).unwrap();
+        bytes[4..8].copy_from_slice(&999u32.to_le_bytes());
+        std::fs::write(dir.join("named.bin"), &bytes).unwrap();
+        match Graph::open(&dir) {
+            Ok(_) => panic!("unknown manifest version must NOT open silently"),
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "unknown version must be a hard InvalidData error"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-3ui0, gh-45) PER-GRAPH WAL durability: a NEW named graph created via
+    /// `apply_delta_nquads` against a DIRECTORY-BACKED graph is WAL-logged + manifested at
+    /// once, so a crash-style reopen (no `save`/`compact` in between) still recovers both
+    /// the new graph AND a subsequent named-graph update — the named-graph analogue of the
+    /// default-graph WAL recovery.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn named_graph_updates_are_wal_durable() {
+        let dir = std::env::temp_dir().join(format!("sparq_named_wal_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        // Persist an empty (default-only) directory-backed graph, then open it for updates.
+        Graph::load_str("", "ntriples").unwrap().save(&dir).unwrap();
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            // Create a brand-new named graph (auto-created) and add a triple to it.
+            g.apply_delta_nquads("<http://res/a> <http://ex/p> <http://ex/o1> <http://res/a> .\n", "").unwrap();
+            // A second batch into the SAME named graph (exercises the per-graph WAL append).
+            g.apply_delta_nquads("<http://res/a> <http://ex/p> <http://ex/o2> <http://res/a> .\n", "").unwrap();
+            // A second named graph too.
+            g.apply_delta_nquads("<http://res/b> <http://ex/p> <http://ex/o3> <http://res/b> .\n", "").unwrap();
+            // Deliberately DROP `g` WITHOUT save()/compact() — only the WALs are on disk.
+        }
+        // Reopen: the named graphs + every WAL-logged triple must recover.
+        let g2 = Graph::open(&dir).unwrap();
+        let named_of = |gg: &Graph, name: &str| {
+            gg.named.iter().find(|(n, _)| n.to_string() == format!("<{name}>")).map(|(_, s)| s.len())
+        };
+        assert_eq!(named_of(&g2, "http://res/a"), Some(2), "named graph a lost a WAL-logged triple");
+        assert_eq!(named_of(&g2, "http://res/b"), Some(1), "named graph b not recovered from WAL");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(feature = "mmap")]
