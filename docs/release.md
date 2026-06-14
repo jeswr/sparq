@@ -204,8 +204,16 @@ maturin, `abi3-py39` so one wheel per platform covers CPython ≥ 3.9). CI build
 tests it informationally on pushes to main (`.github/workflows/python.yml`); release
 publishing is **not** wired. To ship wheels with a release later:
 
-1. Resolve the PyPI name: `sparq` is **taken** by an unrelated package (see §0a) — pick a
-   distinct distribution name (e.g. `sparq-rdf`) before the first PyPI publish.
+1. Resolve the PyPI **distribution** name only: the `[project] name` in
+   `crates/sparq-py/pyproject.toml` — i.e. the **PyPI project / distribution** name, the
+   `pip install <dist>` name — is currently `sparq`, which is **taken** by an unrelated
+   package (see §0a). Pick a distinct distribution name (e.g. `sparq-rdf`) before the first
+   PyPI publish. This is the **only** name that must change. Keep the Python
+   **import/module** name as `sparq` (it comes from the cdylib `[lib] name` + the
+   `#[pymodule] fn sparq`); since the distribution and module names would then differ, add
+   `[tool.maturin] module-name = "sparq"` to pin it. Net: users `pip install sparq-rdf` but
+   still `import sparq`. (Only the PyPI distribution name is contested — not the import
+   module, not any crate name.)
 2. Add a wheels job to `release.yml` using `PyO3/maturin-action` with a platform
    matrix (manylinux x86_64/aarch64, macOS arm64/x64, Windows x64), each step:
    `command: build`, `args: --manifest-path crates/sparq-py/Cargo.toml --profile
