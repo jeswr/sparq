@@ -56,6 +56,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build sparq-wasm for the browser target
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
+      # [OPUS-4.8] sq-085p follow-up: clippy AGAINST the wasm32 target (the target is
+      # already installed for this job). The native `lint` job's `clippy --all-targets`
+      # compiles sparq-wasm for the HOST triple, so it never sees wasm32-cfg'd code paths
+      # and misses wasm-target-only lints — e.g. the `needless_update` just fixed. -D
+      # warnings makes those a hard failure here, where the native clippy can't reach them.
+      - name: clippy (wasm32 target, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
       - name: Guard the wasm dependency graph (no native-only deps)
         # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
@@ -99,6 +106,31 @@ jobs:
       - name: rustfmt (informational)
         run: cargo fmt --all --check
         continue-on-error: true
+
+  msrv:
+    # [OPUS-4.8] sq-ucwf: ENFORCE the declared MSRV. The workspace pins
+    # `rust-version = "1.85"` in the root Cargo.toml ([workspace.package]); without a
+    # job that actually compiles on that toolchain the floor is just documentation — a
+    # new use of a >1.85 stdlib/lang feature would silently raise the real MSRV. This
+    # builds the whole workspace on the pinned 1.85 toolchain so the declared floor is a
+    # checked invariant, GATING.
+    #
+    # Two crates are excluded, each for a concrete reason:
+    #   - sparq-py: pyo3/maturin extension module (excluded from native jobs throughout
+    #     this workflow; built by python.yml with the correct profile).
+    #   - sparq-hdt: declares its own higher `rust-version = "1.87"` (the wrapped `hdt`
+    #     crate's MSRV is above the workspace floor — see crates/sparq-hdt/Cargo.toml),
+    #     so it is exempt from the 1.85 floor by design and cannot compile on 1.85.
+    # If the root MSRV is bumped, update the `@1.85` toolchain pin below to match.
+    name: MSRV check (Rust 1.85, declared floor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (pinned MSRV)
+        uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check on the declared MSRV
+        run: cargo check --workspace --exclude sparq-py --exclude sparq-hdt
 
   conformance:
     # W3C SPARQL conformance RATCHET (roadmap T13/38). The full 1229-test scope is at
@@ -348,3 +380,30 @@ jobs:
         with:
           name: coverage-summary-nightly
           path: target/coverage/coverage-summary.json
+
+  geiger:
+    # [OPUS-4.8] sq-emay: INFORMATIONAL `unsafe`-usage report (cargo-geiger). Pure
+    # visibility — surfaces the ~40 unsafe sites concentrated in sparq-core (mmap, the
+    # zero-copy dictionary, SIMD) so a PR that ADDS unsafe is visible in the run summary
+    # without blocking. Non-gating by design: every step is `continue-on-error: true`
+    # (cargo-geiger fails the run on some dependency-graph shapes, and we never want this
+    # report to break CI). Promote to a gate later only with a checked-in unsafe-count
+    # ratchet (mirroring the coverage/conformance idiom) — out of scope here.
+    name: unsafe report (cargo-geiger, informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-geiger
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-geiger
+        continue-on-error: true
+      - name: Report unsafe usage across the workspace
+        # `--all-features` would drag in device/heavy optional deps; the default feature
+        # set already covers the unsafe of interest (sparq-core). sparq-py is skipped
+        # (pyo3 extension module — not a plain cargo-geiger target, like the other jobs).
+        run: cargo geiger --workspace --exclude sparq-py >> "$GITHUB_STEP_SUMMARY"
+        continue-on-error: true
