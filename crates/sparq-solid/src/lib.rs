@@ -78,6 +78,7 @@ pub mod fixture;
 mod loader;
 mod materialize;
 mod rewrite;
+mod update; // [OPUS-4.8] sq-xor3: write/update-path enforcement
 
 pub use authindex::{pair_principal, AuthIndex, Mode, Session};
 pub use fixture::{acp_fixture, wac_fixture};
@@ -386,6 +387,95 @@ impl PodStore {
         let allowed = self.accessible(s, mode);
         let rewritten = rewrite_for(sparql, &allowed)?;
         sparq_engine::query(&self.graph, &rewritten)
+    }
+
+    /// Apply a SPARQL Update as `session`, **enforcing write access control** — the
+    /// write-path mirror of [`PodStore::query_as`] (design doc §4.4 / §7 item 6).
+    /// [OPUS-4.8] sq-xor3.
+    ///
+    /// Every graph the update could mutate is checked against the session's WAC/ACP
+    /// **write** permission BEFORE anything is applied: `acl:Write` ([`Mode::Write`])
+    /// for a delete/clear, and `acl:Write` OR `acl:Append` ([`Mode::Write`] /
+    /// [`Mode::Append`]) for a pure `INSERT`. The permission model is identical to the
+    /// read path — the same `∪ allow ∖ ∪ deny` per-mode graph sets from the materialized
+    /// auth view. Writing an `.acl`/`.acr` access-control document needs `Write` on that
+    /// graph, which the rules grant only to `acl:Control` holders — so Control gates the
+    /// rules through exactly the same auth view, with no Solid-specific branch.
+    ///
+    /// Fail-closed:
+    ///
+    /// - if any target is not writable, the update is **denied** (`Err`) and the store
+    ///   is left untouched (the whole check runs before [`sparq_engine::update_in_place`]);
+    /// - writes to the **default graph** are always denied (pod data lives in named
+    ///   graphs only);
+    /// - a target whose graph name is only known at evaluation time (`DELETE`/`INSERT`
+    ///   with a `GRAPH ?var` slot) or that spans all graphs (`CLEAR`/`DROP` `ALL`/
+    ///   `NAMED`) requires write on **every** graph in the store — sound (never
+    ///   permissive), at the cost of denying some updates a per-solution check might
+    ///   allow (tracked as a follow-up bead).
+    ///
+    /// On a permitted update that touched an `.acl`/`.acr`/group document (or any
+    /// graph-wildcard update, conservatively), the auth view is **re-materialized**
+    /// automatically (WAC by default; pass [`PodStore::update_as_acp`] for ACP pods),
+    /// so a changed rule takes effect on the next call.
+    ///
+    /// # Errors
+    ///
+    /// `Err` if `sparql` does not parse as a SPARQL Update, if the session lacks write
+    /// permission on any target (the deny path), or if the engine fails to apply the
+    /// (already-authorized) update.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sparq_solid::{PodStore, Session, Mode};
+    ///
+    /// let nquads = r#"
+    /// <https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+    /// <https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/.acl> .
+    /// "#;
+    /// let mut store = PodStore::new(sparq_core::Graph::load_dataset(nquads, "nquads")?);
+    /// store.materialize_wac()?;
+    ///
+    /// let alice = Session { agent: Some("https://alice.ex/card#me"), client: None };
+    /// let ins = "INSERT DATA { GRAPH <https://pod.ex/notes/n1> { \
+    ///     <https://pod.ex/notes/n1#it> <https://ex.dev/ns#tag> \"x\" } }";
+    /// // alice has acl:Write on n1 -> permitted
+    /// store.update_as(&alice, ins)?;
+    /// // anonymous has no write grant -> denied, store untouched
+    /// assert!(store.update_as(&Session::default(), ins).is_err());
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn update_as(&mut self, s: &Session, sparql: &str) -> Result<(), String> {
+        self.update_inner(s, sparql, false)
+    }
+
+    /// [`PodStore::update_as`] for **ACP** pods: identical write-access enforcement, but
+    /// a permitted control-doc/group write re-materializes the ACP view
+    /// ([`PodStore::materialize_acp`]) instead of the WAC one. [OPUS-4.8] sq-xor3.
+    pub fn update_as_acp(&mut self, s: &Session, sparql: &str) -> Result<(), String> {
+        self.update_inner(s, sparql, true)
+    }
+
+    fn update_inner(&mut self, s: &Session, sparql: &str, acp: bool) -> Result<(), String> {
+        // Authorize against the CURRENT auth view before mutating anything (fail-closed).
+        let auth = Arc::clone(&self.auth);
+        let permit = update::check(&self.graph, &auth, s, sparql)?;
+        // Authorized: apply through the engine's in-place delta path.
+        sparq_engine::update_in_place(&mut self.graph, sparql)?;
+        // A change to the access-control rules invalidates the auth view.
+        if permit.rematerialize {
+            if acp {
+                self.materialize_acp()?;
+            } else {
+                self.materialize_wac()?;
+            }
+        }
+        Ok(())
     }
 
     /// The current auth index (for direct inspection/tests).

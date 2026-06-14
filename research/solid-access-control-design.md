@@ -4,9 +4,12 @@ Status: **shipped** (`crates/sparq-solid`), with this document now serving as th
 architecture + design-rationale record. The L1 engine change specified in §5 **has been
 implemented and wired** as `sparq-solid`'s default query path — the zero-copy `DatasetView`
 (`crates/sparq-engine/src/lib.rs`) and the `exec::view` named-graph filter
-(`crates/sparq-engine/src/exec.rs`), measured in §6.1; `sparq-core` itself is unchanged. The
-one remaining design item that is **not** wired is the update path (write gating +
-auto-re-materialization on `.acl` writes, §4.4/§7 item 6) — tracked as a bead (see §7). <!-- [OPUS-4.8] doc-freshness sweep sq-7woa: L1 view shipped; header was stale -->
+(`crates/sparq-engine/src/exec.rs`), measured in §6.1; `sparq-core` itself is unchanged.
+The update path (write gating + auto-re-materialization on `.acl`/`.acr` writes, §4.4/§7
+item 6) **now also ships** as `PodStore::update_as` / `update_as_acp`
+(`crates/sparq-solid/src/update.rs`); the core check + deny path + auto-re-materialization
+are wired and tested (`tests/update.rs`), with the documented conservative sub-cases noted
+in §4.4. <!-- [OPUS-4.8] doc-freshness sweep sq-7woa: L1 view shipped; header was stale; sq-xor3: write path now ships -->
 
 Below, "L1 phase 1 ships X" and similar past-tense-as-future phrasing is preserved as the
 original design narrative; the §6.1 "done" note and §7 record what actually landed.
@@ -530,9 +533,32 @@ term triples and rebuilds a fresh dictionary + permutation indexes per query** �
 O(Σ triples in authorized graphs) time and memory *per query*. That is the copy the L1 view
 exists to delete; §6 measures it so L1 has a baseline to beat.
 
-Update path (out of v1 scope, designed): writes to graph `G` require `auth:write`/`append`
-on `G`; `.acl`/`.acr` writes require `auth:control` (WAC) / ACR write (ACP); after any
-acl/acr/group-doc write, re-materialize.
+Update path (**now shipped** — `crates/sparq-solid/src/update.rs`, `PodStore::update_as` /
+`update_as_acp`; sq-xor3): a SPARQL Update is authorized *before* it mutates, mirroring the
+read path's permission model. The update is parsed (`spargebra`), every graph it could
+write is extracted as a `(graph, need)` requirement, and each is checked against the
+session's per-mode accessible set:
+
+- writes to graph `G` require `auth:write` on `G`; a **pure insert** is satisfied by
+  `auth:write` OR `auth:append` (WAC `acl:Append` adds without removing); a delete/clear
+  requires `auth:write`;
+- `.acl`/`.acr` writes require `auth:write` on the `.acl`/`.acr` graph — and the WAC/ACP
+  rules grant `auth:write` on those graphs only to `acl:Control` holders (§3.3: "Control ⇒
+  read+write of the ACL graph itself"), so Control gates the rules through the *same* auth
+  view, with **no Solid-specific branch in the write guard** (the original "`.acl` writes
+  require `auth:control`" framing is realized as `auth:write` on the `.acl` graph);
+- the **default graph** is never writable (pod data is never there, §2.1) — denied;
+- the check runs entirely before `sparq_engine::update_in_place`, so an unauthorized target
+  denies the whole update fail-closed (a multi-graph update touching one forbidden graph
+  mutates nothing);
+- after any permitted acl/acr/group-doc write, the view is **auto-re-materialized** (epoch
+  bump → session cache dropped).
+
+Conservative sub-cases (sound — they can only *deny* more, never permit; beaded as
+follow-ups): a `DELETE`/`INSERT` template with a **variable** `GRAPH ?var` slot, or
+`CLEAR`/`DROP` of `ALL`/`NAMED`, demands write on **every** graph in the store (the precise
+per-solution graph-set is only known after the WHERE evaluates — a precise check is the
+follow-up); and the `auth:append`-only insert-into-absent-graph edge.
 
 ## 5. L1 — engine dataset-view (the shipped spec; see §6.1 for the wiring)
 
@@ -727,6 +753,12 @@ Reading the numbers honestly:
    needs derivation counting under stratified NAF — T18's counting is RDFS-only today.
 4. **ACP issuer/vc/Creator/Owner**, custom ACP modes, `acl:accessToClass` — §3.6.
 5. **Shared-dict named graphs** enabling true zero-copy union-default — §5.4(c).
-6. Update-path enforcement (write gating + auto-re-materialization on acl writes) — §4.4.
-   Tracked: bead **sq-xor3**. <!-- [OPUS-4.8] -->
+6. Update-path enforcement (write gating + auto-re-materialization on acl/acr writes) —
+   §4.4: **DONE** (sq-xor3) — `PodStore::update_as` / `update_as_acp`
+   (`crates/sparq-solid/src/update.rs`); core check, deny path, and auto-re-materialization
+   wired and tested (`tests/update.rs` + `*_write_enforcement_matches_grants` in
+   tests/wac.rs / tests/acp.rs). Remaining (beaded follow-ups, both conservative/sound
+   today): a *precise* per-solution check for variable `GRAPH ?var` template slots (today:
+   require write on every store graph), and the `auth:append`-only insert-into-absent-graph
+   edge. <!-- [OPUS-4.8] sq-xor3 -->
 

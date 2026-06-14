@@ -88,3 +88,37 @@ fn wac_rematerialization_revokes() {
     assert!(!can(&mut s, Some(CAROL), None, Mode::Read, "https://pod.ex/team2/c3/g0/d0.ttl"));
     assert!(can(&mut s, Some(BOB), None, Mode::Read, "https://pod.ex/team2/c3/g0/d0.ttl"));
 }
+
+/// [OPUS-4.8] sq-xor3: the WRITE path mirrors the read matrix. A SPARQL Update is
+/// permitted iff the actor holds write permission on EVERY graph it could touch, checked
+/// (fail-closed) before any mutation. Expected outcomes hand-derived from the fixture's
+/// write grants: ALICE owns Read/Write/Control via the root `acl:default` (inherited but
+/// SHADOWED out of team2/), the team group (BOB, CAROL) has Read+Write on team2/, and
+/// Control→`auth:write` on the `.acl` graph. See tests/update.rs for the per-operation
+/// matrix; this asserts the matrix lines up with the read-path grants.
+#[test]
+fn wac_write_enforcement_matches_grants() {
+    let mut s = store();
+    let ins = |g: &str| format!("INSERT DATA {{ GRAPH <{g}> {{ <{g}#it> <https://ex.dev/ns#k> \"v\" }} }}");
+
+    // owner writes inherited to depth 4 (read-matrix #1 has the Read twin)
+    let priv0 = "https://pod.ex/priv0/c4/g0/d0.ttl";
+    assert!(can(&mut s, Some(ALICE), None, Mode::Write, priv0));
+    s.update_as(&Session { agent: Some(ALICE), client: None }, &ins(priv0)).expect("alice writes");
+    // …and nobody else (read-matrix #2 twin)
+    assert!(!can(&mut s, Some(BOB), None, Mode::Write, priv0));
+    assert!(s.update_as(&Session { agent: Some(BOB), client: None }, &ins(priv0)).is_err());
+
+    // group read+write; nearest-ACL shadows alice (read-matrix #4/#5 twins)
+    let team2 = "https://pod.ex/team2/c3/g0/d0.ttl";
+    assert!(can(&mut s, Some(CAROL), None, Mode::Write, team2));
+    s.update_as(&Session { agent: Some(CAROL), client: None }, &ins(team2)).expect("carol writes");
+    assert!(!can(&mut s, Some(ALICE), None, Mode::Write, team2));
+    assert!(s.update_as(&Session { agent: Some(ALICE), client: None }, &ins(team2)).is_err());
+
+    // Control gates the .acl document: writing it needs Write, granted only to alice
+    let acl = "https://pod.ex/.acl";
+    assert!(can(&mut s, Some(ALICE), None, Mode::Write, acl)); // via Control->write
+    assert!(!can(&mut s, Some(BOB), None, Mode::Write, acl));
+    assert!(s.update_as(&Session { agent: Some(BOB), client: None }, &ins(acl)).is_err());
+}

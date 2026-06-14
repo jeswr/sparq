@@ -199,6 +199,32 @@ The honest cost of the rewrite path: the engine's `FROM NAMED` handling
 12 ms/query at 3k quads, 59 ms at 46k (linear in authorized data). That copy is
 exactly what the default view path deletes — measured below.
 
+### The write path — update enforcement (design doc §4.4)
+
+`PodStore::update_as` (WAC) / `PodStore::update_as_acp` (ACP) are the write-path
+mirror of `query_as`: before a SPARQL Update (`INSERT`/`DELETE`/`DELETE…INSERT…WHERE`,
+`CLEAR`/`DROP`/`CREATE`/`LOAD`) is applied, **every graph it could mutate** is checked
+against the session's write permission, using the *same* materialized auth view and
+`∪ allow ∖ ∪ deny` model as the read path:
+
+- a delete/clear needs `acl:Write`; a pure insert needs `acl:Write` **or** `acl:Append`;
+- writing an `.acl`/`.acr` document needs `Write` on that graph — which the rules grant
+  only to `acl:Control` holders (Control ⇒ `auth:write` on the ACL graph), so Control
+  gates the rules through the same view, with no Solid-specific branch;
+- the **default graph** is never writable (pod data lives in named graphs only);
+- the check runs **entirely before** any mutation — an unauthorized target denies the
+  *whole* update (a multi-graph update touching one forbidden graph changes nothing);
+- a target whose graph is only known at evaluation time (`DELETE`/`INSERT` with a
+  `GRAPH ?var` slot) or that spans all graphs (`CLEAR`/`DROP` `ALL`/`NAMED`) is treated
+  conservatively — write on **every** store graph is required, or the update is denied
+  (sound, never permissive; the precise per-solution check is a follow-up).
+
+A permitted update that touched an `.acl`/`.acr`/group document (or any graph-wildcard
+update) **auto-re-materializes** the auth view (epoch bump → session cache dropped), so
+a changed rule takes effect on the next call. The whole matrix is hand-derived and
+tested in `tests/update.rs` (+ the `*_write_enforcement_matches_grants` cases in
+`tests/wac.rs` / `tests/acp.rs`).
+
 ## Security model
 
 Fail-closed throughout — absence of a grant means a graph is invisible (D4), and a
@@ -273,6 +299,10 @@ for any custom authorization storage.
   a true zero-copy union default needs shared-dictionary named graphs (design doc
   §5.4).
 - Unsupported vocabulary: see the support matrix above.
-- Update-path enforcement (write gating + auto-re-materialization on `.acl` writes)
-  is designed but not wired (design doc §4.4); tracked as bead `sq-xor3`. <!-- [OPUS-4.8] -->
+- Update-path enforcement (write gating + auto-re-materialization on `.acl`/`.acr`
+  writes) **ships** — `PodStore::update_as` / `update_as_acp` (design doc §4.4; the
+  write-path section above). Remaining sub-cases are conservative (sound, fail-closed)
+  pending follow-ups: a *precise* per-solution check for variable `GRAPH ?var` template
+  slots (today: deny unless the actor can write every graph) and `acl:Append`-only
+  insert-into-absent-graph nuances. <!-- [OPUS-4.8] sq-xor3 -->
 

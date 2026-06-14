@@ -119,7 +119,11 @@ impl RdfsIndex {
 }
 
 /// Below this many input triples the ABox sweep runs single-threaded (rayon fan-out is not
-/// worth the overhead).
+/// worth the overhead). Only referenced by the rayon-backed sweep, so it is gated with
+/// `parallel` — without the feature (e.g. sparq-solid's `default-features = false`
+/// dependency) it would otherwise be dead code and trip `clippy -D warnings`.
+/// [OPUS-4.8] sq-xor3: discovered while running the bead's sparq-solid clippy gate.
+#[cfg(feature = "parallel")]
 const PAR_THRESHOLD: usize = 4096;
 
 /// Transitive closure of a directed relation (`node -> direct successors`): returns
