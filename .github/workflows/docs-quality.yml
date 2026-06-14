@@ -1,0 +1,207 @@
+# docs-quality — documentation-quality CI (bead sq-5fd1). [OPUS-4.8]
+#
+# WHAT: lints the repo's markdown for spelling, link integrity, style, and the
+# house rules (no baked-in perf numbers; concise crate-README template). Two tiers:
+#
+#   HARD gates (FAIL the build; picked up by the ci-summary aggregator):
+#     • markdownlint  — structural markdown defects over the user-facing + governance
+#                       doc surface (root docs, skills/, docs/, crates/). Tuned to the
+#                       repo's house style via .markdownlint-cli2.jsonc.
+#     • typos         — high-confidence spelling errors in those same docs (markdown
+#                       only), with a domain allowlist in _typos.toml.
+#     • internal-links — lychee --offline over those docs: every relative link AND
+#                       heading-anchor (#fragment) must resolve. Deterministic (no net).
+#
+#   ADVISORY (continue-on-error → reported in the job summary, never block a merge):
+#     • markdownlint-advisory — same rules over the WHOLE repo (research/, zk/, bench/)
+#                       so the staged-rollout backlog stays visible (tracked: sq-<TBD>).
+#     • vale          — prose hygiene: weasel words, wordy phrases, adjective puffery.
+#     • external-links — lychee online: dead http(s) links (network-flaky → advisory).
+#     • no-perf-numbers — greps docs for baked-in benchmark figures (AGENTS.md rule).
+#     • readme-template — crate-README length cap + required sections (pairs w/ sq-9jw5).
+#
+# WHY this split: markdownlint/typos/internal-links are deterministic and already pass
+# on the scoped doc surface, so they gate. Vale/external-links/the custom checks either
+# carry a large pre-existing backlog or depend on network/another in-flight bead
+# (sq-9jw5), so they advise until their scope is clean, then flip to HARD.
+#
+# ci-summary aggregation: it polls every check-run on the head commit and fails iff one
+# concluded failure. A job with `continue-on-error: true` reports conclusion=success to
+# the Checks API even when its steps fail, so the ADVISORY jobs below are invisible to
+# the gate by construction — no extra wiring needed.
+#
+# Third-party actions are pinned by full commit SHA with a trailing `# vX.Y.Z`
+# (repo hard rule, #34) so the supply chain + Scorecard/CodeQL stay green.
+name: docs-quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only: every job only reads the checked-out tree.
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ----------------------------- HARD GATES -----------------------------
+  markdownlint:
+    name: markdownlint (docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+      - name: markdownlint-cli2 (scoped HARD config)
+        # npx pins the exact cli2 version; the config (.markdownlint-cli2.jsonc) carries
+        # the tuned ruleset AND the HARD-scope globs (root docs + skills/ + docs/ + crates/).
+        run: npx --yes markdownlint-cli2@0.18.1
+
+  typos:
+    name: typos (docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install typos
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: typos@1.47.2
+      - name: typos (markdown doc surface only)
+        # Scope to the SAME doc surface as markdownlint: root *.md + skills + docs +
+        # crates, markdown only (typos over the full tree would flag code-side tokens
+        # out of this gate's scope). _typos.toml holds the domain-term allowlist.
+        run: |
+          set -euo pipefail
+          # HARD scope = root *.md + skills/ + docs/ + crates/ (markdown only).
+          # `git ls-files '*.md'` matches at any depth, so EXCLUDE the out-of-scope
+          # dirs to land exactly on the same set markdownlint's config globs (49 files).
+          git ls-files '*.md' \
+            ':!:research/**' ':!:zk/**' ':!:bench/**' ':!:js/**' \
+            ':!:.beads/**' ':!:.claude/**' ':!:.github/**' \
+            ':!:vendor/**' ':!:**/vendor/**' | sort -u > /tmp/doc-md.txt
+          echo "Scanning $(wc -l < /tmp/doc-md.txt) markdown file(s) for typos:"
+          typos --file-list /tmp/doc-md.txt
+
+  internal-links:
+    name: internal-links (lychee --offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: "lychee (offline: relative links + anchors)"
+        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
+        with:
+          # --offline → no network (deterministic); --include-fragments validates
+          # #heading anchors. fail=true makes broken internal links a HARD failure.
+          args: >-
+            --offline
+            --include-fragments
+            --no-progress
+            README.md AGENTS.md CONTRIBUTING.md SECURITY.md CHANGELOG.md CLAUDE.md
+            './skills/**/*.md' './docs/**/*.md' './crates/**/*.md'
+          fail: true
+          # Don't post a tracking issue (read-only token; gating is enough).
+          jobSummary: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # ----------------------------- ADVISORY -----------------------------
+  markdownlint-advisory:
+    name: markdownlint-advisory (whole repo)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+      - name: markdownlint over the FULL corpus (visibility for the staged rollout)
+        run: |
+          set -uo pipefail
+          # The advisory config (same tuned rules) must be named with a supported
+          # prefix so it's accepted by --config. Pass whole-repo globs explicitly.
+          npx --yes markdownlint-cli2@0.18.1 \
+            --config advisory.markdownlint-cli2.jsonc \
+            "**/*.md" "#node_modules" "#**/node_modules" "#target" "#**/target" \
+            "#vendor" "#**/vendor" "#zk/xpath/vendor" \
+            > md-advisory.txt 2>&1 || true
+          n=$(grep -cE ' MD[0-9]+/' md-advisory.txt || true)
+          {
+            echo "### markdownlint-advisory (whole repo): ${n} finding(s)"
+            echo ""
+            echo "Out-of-HARD-scope dirs (research/, zk/, bench/, .claude/) — staged rollout."
+            echo ""
+            echo '```'
+            grep -oE ' (MD[0-9]+/[a-z0-9-]+)' md-advisory.txt | sort | uniq -c | sort -rn || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  vale:
+    name: vale (prose, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Vale prose lint (vendored styles, no network)
+        uses: errata-ai/vale-action@85f9f7f2c5f449ac0ae5b66662961bae3f77ca6a # v2.1.2
+        with:
+          version: 3.9.1
+          files: README.md AGENTS.md CONTRIBUTING.md SECURITY.md skills docs crates
+          fail_on_error: false
+          # `local` reporter prints to the job log — no PR-annotation write scope
+          # needed (top-level permissions stay read-only). Advisory anyway.
+          reporter: local
+          token: ${{ github.token }}
+
+  external-links:
+    name: external-links (lychee online, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: lychee (online; dead http(s) links — network-flaky → advisory)
+        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
+        with:
+          args: >-
+            --no-progress
+            --cache
+            --max-cache-age 1d
+            --accept 200..=206,429
+            README.md AGENTS.md CONTRIBUTING.md SECURITY.md CHANGELOG.md
+            './skills/**/*.md' './docs/**/*.md' './crates/**/*.md'
+          fail: false
+          jobSummary: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  custom-checks:
+    name: custom-checks (perf-numbers + readme-template, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: No hard-coded performance numbers in user-facing docs
+        run: python3 scripts/check-no-perf-numbers.py --advisory
+      - name: Crate-README length cap + required sections (template, sq-9jw5)
+        run: python3 scripts/check-readme-template.py --advisory

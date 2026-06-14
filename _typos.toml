@@ -1,0 +1,66 @@
+# typos (crate-ci/typos) config — HARD spell-check gate (bead sq-5fd1). [OPUS-4.8]
+#
+# `typos` is conservative by design (it only flags high-confidence misspellings),
+# which makes it a sound HARD gate. The allowlist below pins the FALSE POSITIVES it
+# raises on this codebase: SPARQL/RDF keyword fragments that appear split across
+# table cells or wrapped lines, domain identifiers, author surnames, and short
+# code-token abbreviations. Each entry is "as-typed = corrected-to-itself", which is
+# typos' idiom for "this token is intentional, leave it".
+#
+# Genuine misspellings are fixed in the prose, NOT allowlisted — keep this list to
+# real domain vocabulary so the gate keeps catching actual typos.
+
+[files]
+# Don't scan generated, vendored, or build output.
+extend-exclude = [
+  "target",
+  "vendor",
+  "**/vendor",
+  "node_modules",
+  "**/node_modules",
+  "Cargo.lock",
+  "zk/xpath/vendor",
+  "*.svg",
+]
+
+[default]
+# Keep typos' default checks; we only extend the dictionaries below.
+
+[default.extend-identifiers]
+# Author surnames + tool/library identifiers flagged as typos.
+Hendler = "Hendler"      # Jim Hendler (BitMat paper author)
+
+[default.extend-words]
+# --- SPARQL / SQL keyword fragments split across table cells or wrapped lines ---
+flate = "flate"          # flate2 crate name fragment (typos splits on the digit)
+SELEC = "SELEC"          # "SELECT" wrapped mid-token in prose
+UPDAT = "UPDAT"          # "UPDATE" wrapped
+SER = "SER"              # SPARQL "SERVICE"/"SET" fragment in a plan table
+ser = "ser"              # lowercase variant (serde-style token)
+Buil = "Buil"            # "Build/Built" wrapped in a table cell
+# --- short identifiers / abbreviations in code, tables, and bench labels ---
+anc = "anc"              # "anc500" benchmark label (ancestor chain)
+mis = "mis"              # "mis-framed" / hyphenated prefix
+Mis = "Mis"              # capitalised "Mis-" prefix
+oly = "oly"              # "oly q07" (olympics benchmark) shorthand
+wrk = "wrk"              # the `wrk` HTTP benchmarking tool
+ede = "ede"             # "ede" node label in a graph diagram
+thr = "thr"              # "thr" (thread / throughput) abbreviation in a table
+pn = "pn"                # SPARQL grammar PN_* production fragment / table cell
+PN = "PN"                # uppercase grammar-production fragment
+iz = "iz"                # token in a diagram / pseudo-code
+ot = "ot"               # wrapped fragment in a table
+Fo = "Fo"               # wrapped "For/Of" fragment in a table
+Thm = "Thm"             # "Theorem" abbreviation
+IST = "IST"             # acronym in a table
+Rotat = "Rotat"         # "RotatE" KG-embedding model name (wraps to "Rotat")
+criticals = "criticals"  # audit jargon: "the audit's criticals"
+unparseable = "unparseable" # accepted variant spelling used in skills docs
+unstalled = "unstalled"  # "proceeding unstalled" (= not stalled) — intentional
+# --- domain acronyms / dataset + crypto names ---
+ANE = "ANE"              # Apple Neural Engine
+FPR = "FPR"              # false-positive rate
+LOV = "LOV"              # Linked Open Vocabularies (dataset)
+lov = "lov"              # lowercase var name in a SIMD code block
+LOD = "LOD"              # Linked Open Data
+Groth = "Groth"          # Groth16 zk-SNARK proving system
