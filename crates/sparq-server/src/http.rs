@@ -158,9 +158,11 @@ pub struct ServerConfig {
     /// surface**. When `Some(token)`, every request that MUTATES the dataset must present
     /// `Authorization: Bearer <token>` (scheme casing tolerated) or it is refused `401`
     /// with `WWW-Authenticate: Bearer`. The write surface is: a SPARQL UPDATE on `/sparql`
-    /// (`Content-Type: application/sparql-update`, OR a `query`/`update` body that *parses
-    /// as an update* — classification keys on whether the request mutates, not the route),
-    /// and the Graph-Store-Protocol write methods (`PUT`/`POST`/`DELETE`/`PATCH`) on
+    /// — `Content-Type: application/sparql-update` OR an `update=` form field (BOTH are
+    /// updates by SPARQL-Protocol definition, gated as writes UNCONDITIONALLY), and ALSO a
+    /// `query=`/`application/sparql-query` body that *parses as an update* (an update smuggled
+    /// through the query path — classification there keys on whether the request mutates, not
+    /// the route) — and the Graph-Store-Protocol write methods (`PUT`/`POST`/`DELETE`/`PATCH`) on
     /// `/sparql/graph` and `/graphs/{*path}`. The token is compared in **constant time**
     /// ([`constant_time_eq`]). A missing vs a wrong token produce the *identical* 401, so an
     /// attacker cannot learn whether a token was presented. `None` (the default) means **no
@@ -469,8 +471,13 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     for (x, y) in a.iter().zip(b.iter()) {
         diff |= x ^ y;
     }
-    // Fold to bool without a data-dependent branch on the secret.
-    diff == 0
+    // [OPUS-4.8] sq-zcby (Copilot PR#71 fix): route the accumulator through
+    // `core::hint::black_box` BEFORE the `== 0` test so the optimiser cannot prove anything
+    // about `diff` and rewrite the loop+compare into an early-exit `memcmp`-style
+    // short-circuit. This matches the doc claim ("black_box-style fold"): without it the
+    // bare `diff == 0` was a plain data-dependent comparison the compiler is free to
+    // short-circuit. Fold to bool with no data-dependent branch on the secret.
+    core::hint::black_box(diff) == 0
 }
 
 /// [OPUS-4.8] sq-zcby: extracts the token from an `Authorization: Bearer <token>` header,
@@ -518,21 +525,30 @@ fn unauthorized() -> Response {
     resp
 }
 
-/// [OPUS-4.8] sq-zcby: does this SPARQL string MUTATE the dataset? The auth classifier keys on
-/// this, not on the route or Content-Type, so an UPDATE smuggled through the query path is
-/// still gated as a write. A string that parses as a read-only query (SELECT/ASK/CONSTRUCT/
-/// DESCRIBE) is a read; otherwise, if it parses as a SPARQL Update, it is a write. A string
-/// that parses as NEITHER is treated conservatively as a write (fail-closed: the writer/query
-/// handler will reject it, and gating an unparsable body as a write never wrongly opens the
-/// write surface).
+/// [OPUS-4.8] sq-zcby: does this SPARQL string MUTATE the dataset, for the auth classifier?
+/// The classifier keys on this, not on the route or Content-Type, so an UPDATE smuggled
+/// through a `query=`/generic body path is still gated as a write.
+///
+/// [OPUS-4.8] (Copilot PR#71 doc/impl-consistency fix) The implemented rule is
+/// **default-to-write unless it provably parses as a read-only query**: a string that parses
+/// as a read-only query (SELECT/ASK/CONSTRUCT/DESCRIBE) returns `false` (a read); EVERYTHING
+/// ELSE returns `true` (gated as a write). That "everything else" deliberately collapses the
+/// "parses as a SPARQL Update" and the "parses as NEITHER" cases into one branch — both are
+/// fail-safe to gate as a write, so a positive `parse_update` check would only add cost
+/// without changing the answer. This is the conservative/secure default: ambiguous or
+/// malformed bodies are gated as writes (fail-closed), so a body can never slip past the
+/// write gate by being unparsable, and gating a non-mutating-but-unparsable body as a write
+/// never wrongly OPENS the write surface (the writer/query handler rejects it anyway).
+///
+/// Note this function is only the classifier for the AMBIGUOUS body path; the unambiguous
+/// `update=` form field and `application/sparql-update` Content-Type are gated as writes
+/// unconditionally at their call sites (they ARE updates by protocol definition), without
+/// consulting this function.
 pub(crate) fn payload_mutates(sparql: &str) -> bool {
-    if spargebra::SparqlParser::new().parse_query(sparql).is_ok() {
-        return false; // a well-formed read-only query
-    }
-    // Not a read-only query. If it parses as an update it definitely mutates; if it parses as
-    // neither, fail closed (treat as a write) so a malformed body can never slip past the
-    // write gate. Either way the answer is "this is not a read", i.e. gate it as a write.
-    true
+    // Provably a read-only query => a read (`is_ok`). Otherwise (parses as an update, OR
+    // parses as neither) => fail-safe to a write (`is_err`). The two non-read cases share one
+    // branch on purpose: both must be gated as a write, so distinguishing them changes nothing.
+    spargebra::SparqlParser::new().parse_query(sparql).is_err()
 }
 
 fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
@@ -1140,21 +1156,31 @@ async fn handle_post(
         run_query(state, s, headers, false, explain, pin).await
     } else if ct.starts_with(FORM_CT) {
         // POST url-encoded — `query=` (read) or `update=` (write) in the body. [OPUS-4.8]
-        // sq-zcby: classify on the payload — an `update=` form (or a `query=` whose value
-        // parses as an update) is a write and is gated as one.
+        // sq-zcby: classify on the payload for the ambiguous `query=` path; an `update=` form
+        // is ALWAYS a write (see below).
         let s = match std::str::from_utf8(body) {
             Ok(s) => s,
             Err(_) => return bad_request("request body is not valid UTF-8"),
         };
         let params = parse_form(s);
-        // An explicit `update=` form is a write; a `query=` form is classified by its payload.
-        let mutates = match (params.get("update"), params.get("query")) {
-            (Some(u), _) => payload_mutates(u),
-            (None, Some(q)) => payload_mutates(q),
-            // Neither parameter present: not a write, let the query handler return its 400.
-            (None, None) => false,
+        // [OPUS-4.8] sq-zcby (Copilot PR#71 SECURITY fix): the `update=` form field IS an
+        // update operation BY DEFINITION (SPARQL 1.1 Protocol §2.2), so it is a WRITE
+        // UNCONDITIONALLY — regardless of whether its value happens to parse as a read-only
+        // query (e.g. `update=SELECT…`). Classifying it on its payload (the old
+        // `payload_mutates(u)`) let such a request slip past the write gate: the auth-bypass
+        // this fixes. Only the ambiguous `query=`/generic path falls through to content
+        // inspection — a `query=` whose value parses as an UPDATE is still gated as a write
+        // (an UPDATE smuggled through the query parameter).
+        let op = if params.contains_key("update") {
+            Operation::Write
+        } else {
+            match params.get("query") {
+                Some(q) if payload_mutates(q) => Operation::Write,
+                Some(_) => Operation::Read,
+                // Neither parameter present: not a write, let the query handler return its 400.
+                None => Operation::Read,
+            }
         };
-        let op = if mutates { Operation::Write } else { Operation::Read };
         if let Some(resp) = auth_gate(state.config(), headers, op) {
             return resp;
         }

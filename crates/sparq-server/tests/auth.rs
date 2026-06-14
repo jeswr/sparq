@@ -385,8 +385,9 @@ async fn update_via_query_path_is_gated() {
     );
 }
 
-/// The url-encoded form path is classified on the payload too: an `update=` form parameter
-/// (or an update string in `query=`) is a write and is gated.
+/// The url-encoded form path: an `update=` form parameter is a write UNCONDITIONALLY (it IS
+/// an update by SPARQL-Protocol definition; see `update_form_with_select_body_is_gated_as_write`
+/// for the bypass guard), and an update string smuggled through `query=` is gated too.
 #[tokio::test]
 async fn update_via_form_path_is_gated() {
     let base = spawn_with(token_config(false)).await;
@@ -415,5 +416,53 @@ async fn update_via_form_path_is_gated() {
         read.status(),
         200,
         "a `query=` form read must stay open in write-only mode"
+    );
+}
+
+/// [OPUS-4.8] sq-zcby (Copilot PR#71 SECURITY regression test): the auth-bypass fix.
+///
+/// An `update=` form field IS an update operation BY DEFINITION (SPARQL 1.1 Protocol §2.2),
+/// so it MUST be gated as a write UNCONDITIONALLY — even when its value is a well-formed
+/// read-only query (e.g. `update=SELECT…`). The old classifier ran `payload_mutates(u)` on
+/// the `update=` value, which returned `false` for a SELECT-looking body and classified the
+/// request as a READ, so the write gate was BYPASSED. After the fix this request must be 401
+/// without a (correct) token, exactly like any other `update=` form.
+#[tokio::test]
+async fn update_form_with_select_body_is_gated_as_write() {
+    let base = spawn_with(token_config(false)).await;
+    let cl = client();
+    // `update=<SELECT…>` (a SELECT-looking body in the update field) with NO token => 401.
+    // This is the bypass: pre-fix it was classified as a read and allowed through.
+    let r = cl
+        .post(format!("{base}/sparql"))
+        .form(&[("update", SELECT)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        401,
+        "an `update=` form with a SELECT-looking body must still be gated as a write (no bypass)"
+    );
+    assert_eq!(
+        r.headers()
+            .get("www-authenticate")
+            .map(|v| v.to_str().unwrap()),
+        Some("Bearer"),
+        "the bypass-fix 401 must carry WWW-Authenticate: Bearer"
+    );
+
+    // With the WRONG token it must still be 401 (the gate ran, not bypassed).
+    let wrong = cl
+        .post(format!("{base}/sparql"))
+        .header("authorization", "Bearer not-the-token")
+        .form(&[("update", SELECT)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        wrong.status(),
+        401,
+        "wrong token on an `update=SELECT…` form must still be 401"
     );
 }
