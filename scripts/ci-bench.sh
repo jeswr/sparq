@@ -27,6 +27,13 @@ Q=bench/qlever-synthetic/queries
 # trend-only like the query latencies above — NOT a hard perf-gate (only the byte/parse
 # metrics in scripts/perf-gate.py are gated). Registry: bench/benchmarks.toml (operator-coverage).
 OPQ=bench/operators/queries
+# [OPUS-4.8] SP2Bench (well-known suite) — per-commit subset + fixed-corpus generator.
+# Trend-only latency like the operator suite, PLUS a hard expected-rows correctness diff.
+# Registry: bench/benchmarks.toml (sp2b); details: bench/sp2b/README.md. (sq-0jp)
+SP2B_GEN=bench/sp2b/gen.sh
+SP2B_Q=bench/sp2b/queries
+SP2B_EXP=bench/sp2b/expected-rows.tsv
+SP2B_TRIPLES="${SP2B_TRIPLES:-250000}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -106,6 +113,41 @@ if [ -d "$OPQ" ]; then
       [ -n "${us:-}" ] && add "op_${name}_${mode}_us" us "$us"
     done < "$TMP/op"
   done
+fi
+
+# [OPUS-4.8] SP2Bench per-commit subset (sq-0jp). Builds+caches the real Freiburg sp2b_gen
+# and generates a FIXED, deterministic 250k-triple DBLP-in-RDF corpus (Turtle), then runs the
+# 14 sub-second canonical queries (the 3 pathological ones — q05a/q06/q12a — are in
+# queries-heavy/ for the EC2/nightly tier). Emits `sp2b_<query>_<mode>_us` (trend-only, NOT in
+# scripts/perf-gate.py) AND a HARD expected-rows equality check on count mode: a solution-count
+# drift on the fixed corpus is a correctness regression and fails the run. The whole block is
+# guarded — if the generator can't be fetched/built (no network/g++), it is skipped gracefully
+# so ci-bench still emits valid JSON for the rest of the metrics.
+if [ -x "$SP2B_GEN" ] && [ -d "$SP2B_Q" ]; then
+  if SP2B_CORPUS="$("$SP2B_GEN" "$SP2B_TRIPLES" 2>/dev/null)" && [ -s "${SP2B_CORPUS:-}" ]; then
+    for mode in count materialize json; do
+      "$CLI" bench "$SP2B_CORPUS" turtle "$SP2B_Q" 3 "$mode" 2>/dev/null > "$TMP/sp2b.$mode" || true
+      while IFS=$'\t' read -r name rows us; do
+        [ "${rows:-}" = "ERROR" ] && continue
+        [ -n "${us:-}" ] && add "sp2b_${name}_${mode}_us" us "$us"
+      done < "$TMP/sp2b.$mode"
+    done
+    # HARD differential: count-mode solution counts must match the committed expected sizes.
+    if [ -f "$SP2B_EXP" ]; then
+      sp2b_fail=0
+      while IFS=$'\t' read -r q exp; do
+        case "$q" in \#*|"") continue;; esac
+        got=$(awk -F'\t' -v k="$q" '$1==k{print $2}' "$TMP/sp2b.count")
+        if [ "${got:-MISSING}" != "$exp" ]; then
+          echo "ERROR: sp2b $q rows=${got:-MISSING} expected=$exp (correctness regression)" >&2
+          sp2b_fail=1
+        fi
+      done < "$SP2B_EXP"
+      [ "$sp2b_fail" = 0 ] || exit 1
+    fi
+  else
+    echo "note: sp2b skipped (generator unavailable — no network/g++?)" >&2
+  fi
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.

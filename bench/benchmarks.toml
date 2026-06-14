@@ -104,6 +104,20 @@ pinning     = "query dir + mode; dataset deterministic; queries pinned to fixed 
 records_to  = "stdout (TSV); CI emits op_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh"
 status      = "ok"
 
+# [OPUS-4.8] sq-0jp — SP2Bench (well-known suite) at CI scale; per-commit subset + heavy tier.
+[[benchmark]]
+id          = "sp2b"
+name        = "SP2Bench (SPARQL Performance Benchmark) — DBLP-in-RDF"
+category    = "query"
+measures    = "per-query min-of-iters latency (us) across count/materialize/json for the 17 canonical SP2Bench queries (Q1-Q12 with Q3/Q5/Q12 a/b/c variants); long path joins, OPTIONAL-heavy left-joins, UNION, FILTER, negation via OPTIONAL+!bound, DISTINCT, ORDER BY, LIMIT/OFFSET, ASK. Per-commit subset (14) also carries a HARD expected-rows correctness diff on the fixed corpus"
+invoke      = "cargo build --release -p sparq-cli && CORPUS=$(bench/sp2b/gen.sh 250000) && ./target/release/sparq-cli bench \"$CORPUS\" turtle bench/sp2b/queries 3 count   # also materialize|json; heavy tier: bench/sp2b/queries-heavy; CI runs the subset via scripts/ci-bench.sh -> sp2b_<query>_<mode>_us"
+source      = "bench/sp2b/{gen.sh,queries/*.rq,queries-heavy/*.rq,expected-rows.tsv,README.md}; scripts/ci-bench.sh (sp2b hook); crates/sparq-cli/src/main.rs (run_query_suite)"
+dataset     = "REAL Freiburg DBIS sp2b_gen (BSD; fetched + built by gen.sh, sha256-pinned tarball 6640506c…3d73, built g++ -O2 NOT -O3 for determinism). Per-commit: -t 250000 (~250k triples, ~26 MB Turtle, deterministic byte-identical output; gen ~0.36s, sparq load ~0.17s). gitignored + regenerable (build-once-cache binary in /tmp/sp2b)"
+quiet_box_sensitive = true  # wall-clock latency trend-only, NOT in scripts/perf-gate.py; the expected-rows diff IS a hard correctness gate (deterministic, load-robust)
+pinning     = "sp2b tarball sha256 (gen.sh TARBALL_SHA256); SP2B_TRIPLES (250000 per-commit); -O2 build (the upstream Makefile warns -O3 changes generated documents); queries are the published SP2Bench texts verbatim"
+records_to  = "stdout (TSV); CI emits sp2b_<query>_<mode>_us into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/sp2b/expected-rows.tsv"
+status      = "ok"
+
 [[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
@@ -591,10 +605,10 @@ status      = "ok"  # research spikes, not a regression gate
 id          = "ci-bench"
 name        = "CI cross-commit benchmark emitter (free GitHub runners)"
 category    = "scaling"
-measures    = "customSmallerIsBetter JSON: load_s, store_bytes_per_triple, dict_bytes_per_term, per-query {count,materialize,json}_us, rdfs_infer_s, wasm_bundle_bytes"
+measures    = "customSmallerIsBetter JSON: load_s, store_bytes_per_triple, dict_bytes_per_term, per-query {count,materialize,json}_us, op_<query>_<mode>_us (operator-coverage), sp2b_<query>_<mode>_us (SP2Bench subset, + hard expected-rows diff), rdfs_infer_s, wasm_bundle_bytes"
 invoke      = "bash scripts/ci-bench.sh [scale_entities=200000] [out.json=bench-results.json]   # CI: .github/workflows/bench.yml on push to main"
 source      = "scripts/ci-bench.sh; .github/workflows/bench.yml"
-dataset     = "sparq-bench dump at scale_entities; queries bench/qlever-synthetic/queries"
+dataset     = "sparq-bench dump at scale_entities; queries bench/qlever-synthetic/queries + bench/operators/queries + bench/sp2b/queries (sp2b corpus via bench/sp2b/gen.sh)"
 quiet_box_sensitive = true  # GitHub runners are noisy: value is the TREND + large-regression alert (200% threshold, no hard-fail); memory/bundle metrics ARE deterministic
 pinning     = "scale_entities; deterministic memory + wasm-bundle metrics anchor the noisy timings"
 records_to  = "benchmark-data branch (dev/bench), github-action-benchmark alert comments"
