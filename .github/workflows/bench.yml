@@ -50,6 +50,48 @@ jobs:
         with:
           targets: wasm32-unknown-unknown   # enables the wasm bundle-size metric in ci-bench.sh
       - uses: Swatinem/rust-cache@v2
+      # [OPUS-4.8] Well-known-suite toolchains (sp2b/dbpsb/watdiv/bsbm/lubm), MAIN ONLY. On push to
+      # main the full well-known-suite set runs; on PRs we DELIBERATELY do NOT install these, so the
+      # ci-bench.sh suite hooks SKIP gracefully (each is guarded on `command -v <tool>`) and PR perf
+      # feedback stays lean (synthetic + operator + memory/bundle metrics only). The full SF/scale
+      # tiers are EC2/nightly (beads sq-uubq/xin1/8lgn/yc1q/z31u), NOT here.
+      #   g++ is preinstalled on ubuntu-latest (watdiv). default-jre = java (bsbm) + JRE for lubm's
+      #   javac comes from default-jdk... but default-jre has NO javac, so install default-jdk for
+      #   lubm's `javac` guard; libboost-all-dev = watdiv's Boost; raptor2-utils = lubm's `rapper`;
+      #   unzip = bsbm's distribution unpack.
+      - name: Install well-known-suite toolchains (main only)
+        if: github.ref == 'refs/heads/main'
+        run: sudo apt-get update && sudo apt-get install -y libboost-all-dev default-jdk raptor2-utils unzip
+      # [OPUS-4.8] Per-suite generator-cache restore/save so the steady state does NO rebuild/refetch:
+      # each suite's gen.sh/fetch.sh/run.sh build-once-and-cache their generator binary + the fixed
+      # corpus under /tmp/<suite> (sp2b/watdiv/bsbm/lubm) or the pinned slice (/tmp/dbpsb). Keyed on the
+      # generator scripts so a generator/pinning change busts the cache. PRs skip the toolchain install
+      # above, so a cache miss on a PR is harmless (the hook skips); on main it just rebuilds once.
+      - name: Cache sp2b generator + corpus
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sp2b
+          key: bench-sp2b-${{ runner.os }}-${{ hashFiles('bench/sp2b/gen.sh') }}
+      - name: Cache watdiv generator + corpus
+        uses: actions/cache@v4
+        with:
+          path: /tmp/watdiv
+          key: bench-watdiv-${{ runner.os }}-${{ hashFiles('bench/watdiv/gen.sh', 'bench/watdiv/files/words.txt') }}
+      - name: Cache bsbm generator + corpus
+        uses: actions/cache@v4
+        with:
+          path: /tmp/bsbm
+          key: bench-bsbm-${{ runner.os }}-${{ hashFiles('bench/bsbm/gen.sh') }}
+      - name: Cache lubm generator + corpus
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lubm
+          key: bench-lubm-${{ runner.os }}-${{ hashFiles('bench/lubm/gen.sh') }}
+      - name: Cache dbpsb pinned slice + cut
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dbpsb
+          key: bench-dbpsb-${{ runner.os }}-${{ hashFiles('bench/dbpsb/fetch.sh') }}
       - name: Build release binaries
         run: cargo build --release -p sparq-cli -p sparq-bench
       - name: Run benchmarks

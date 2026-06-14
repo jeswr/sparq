@@ -42,6 +42,30 @@ DBPSB_FETCH=bench/dbpsb/fetch.sh
 DBPSB_Q=bench/dbpsb/queries
 DBPSB_EXP=bench/dbpsb/expected-rows.tsv
 DBPSB_TRIPLES="${DBPSB_TRIPLES:-750000}"
+# [OPUS-4.8] WatDiv (Waterloo SPARQL Diversity, sq-13i) — per-commit subset over the FIXED SF=1
+# corpus from the real Waterloo generator (gen.sh; g++ + Boost). Trend-only latency like sp2b,
+# PLUS a hard expected-rows correctness diff (count mode). Registry: bench/benchmarks.toml (watdiv);
+# details: bench/watdiv/README.md. Mirrors the sp2b inline pattern.
+WATDIV_GEN=bench/watdiv/gen.sh
+WATDIV_Q=bench/watdiv/queries
+WATDIV_EXP=bench/watdiv/expected-rows.tsv
+WATDIV_SF="${WATDIV_SF:-1}"
+# [OPUS-4.8] BSBM (Berlin SPARQL Benchmark, Explore mix) — per-commit subset over the FIXED -pc 300
+# corpus from the prebuilt bsbmtools distribution (gen.sh; JRE + unzip). The Explore mix includes a
+# CONSTRUCT (query12) + a DESCRIBE (query09), so the expected-rows diff runs against MATERIALIZE
+# mode (graph-valued forms report produced-triple counts). Trend-only latency + hard correctness
+# diff. Registry: bench/benchmarks.toml (bsbm); details: bench/bsbm/README.md.
+BSBM_GEN=bench/bsbm/gen.sh
+BSBM_Q=bench/bsbm/queries
+BSBM_EXP=bench/bsbm/expected-rows.tsv
+BSBM_PC="${BSBM_PC:-300}"
+# [OPUS-4.8] LUBM (Lehigh University Benchmark) — the REASONING suite. Its run.sh is fully
+# self-contained: it builds the LUBM(1) corpus (gen.sh; javac + rapper), materializes the OWL-RL
+# closure with `sparq-cli reason`, runs BOTH the extensional + entailed tiers in count mode, and
+# asserts every solution count vs expected-rows.tsv internally (exit 1 on mismatch). So the hook
+# below just invokes run.sh (the self-asserting path) and harvests its count-mode TSV lines into
+# `lubm_<query>_count_us`. Registry: bench/benchmarks.toml (lubm); details: bench/lubm/README.md.
+LUBM_RUN=bench/lubm/run.sh
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -193,6 +217,110 @@ if [ -x "$DBPSB_FETCH" ] && [ -d "$DBPSB_Q" ]; then
   else
     echo "note: dbpsb skipped (pinned slice unavailable — no network?)" >&2
   fi
+fi
+
+# [OPUS-4.8] WatDiv per-commit subset (sq-13i). Builds+caches the real Waterloo generator and
+# emits a FIXED, deterministic SF=1 corpus (N-Triples), then runs the 16 sub-ms Basic-Testing
+# queries (Linear/Star/Snowflake/Complex; the 4 SF=1-empty ones live in queries-heavy/ for the
+# EC2/nightly tier). Emits `watdiv_<query>_<mode>_us` (trend-only, NOT in scripts/perf-gate.py)
+# AND a HARD expected-rows equality check on count mode (a solution-count drift on the fixed
+# corpus is a correctness regression and fails the run). Guarded on g++ (the generator needs
+# g++ + Boost; gen.sh handles Boost) — if g++/the generator is unavailable, the whole block is
+# skipped gracefully so ci-bench still emits valid JSON for everything else. (CI keys
+# actions/cache on /tmp/watdiv so the steady state does NO rebuild — see bench/watdiv/README.md.)
+if command -v g++ >/dev/null 2>&1 && [ -x "$WATDIV_GEN" ] && [ -d "$WATDIV_Q" ]; then
+  if WATDIV_CORPUS="$(bash "$WATDIV_GEN" "$WATDIV_SF" 2>/dev/null)" && [ -s "${WATDIV_CORPUS:-}" ]; then
+    for mode in count materialize json; do
+      "$CLI" bench "$WATDIV_CORPUS" ntriples "$WATDIV_Q" 3 "$mode" 2>/dev/null > "$TMP/watdiv.$mode" || true
+      while IFS=$'\t' read -r name rows us; do
+        [ "${rows:-}" = "ERROR" ] && continue
+        [ -n "${us:-}" ] && add "watdiv_${name}_${mode}_us" us "$us"
+      done < "$TMP/watdiv.$mode"
+    done
+    # HARD differential: count-mode solution counts must match the committed expected sizes.
+    if [ -f "$WATDIV_EXP" ]; then
+      watdiv_fail=0
+      while IFS=$'\t' read -r q exp; do
+        case "$q" in \#*|"") continue;; esac
+        got=$(awk -F'\t' -v k="$q" '$1==k{print $2}' "$TMP/watdiv.count")
+        if [ "${got:-MISSING}" != "$exp" ]; then
+          echo "ERROR: watdiv $q rows=${got:-MISSING} expected=$exp (correctness regression)" >&2
+          watdiv_fail=1
+        fi
+      done < "$WATDIV_EXP"
+      [ "$watdiv_fail" = 0 ] || exit 1
+    fi
+  else
+    echo "note: watdiv skipped (generator unavailable — no network/g++/boost?)" >&2
+  fi
+else
+  echo "note: watdiv skipped (g++ not on PATH)" >&2
+fi
+
+# [OPUS-4.8] BSBM Explore-mix per-commit subset. gen.sh fetches+caches the prebuilt bsbmtools
+# distribution (JRE-only; sha256-pinned zip) and emits a FIXED, deterministic -pc 300 corpus
+# (~116k N-Triples), then runs the 11 sub-ms Explore queries. The Explore mix includes a CONSTRUCT
+# (query12) + a DESCRIBE (query09), so the HARD expected-rows diff runs against MATERIALIZE mode
+# (the graph-valued forms report produced-triple counts through the bench runner; counts are
+# mode-independent for this mix). Emits `bsbm_<query>_<mode>_us` (trend-only, NOT in
+# scripts/perf-gate.py). Guarded on java + unzip (gen.sh needs a JRE to run the generator and
+# unzip to unpack the distribution) — if either is absent, the whole block is skipped gracefully
+# so ci-bench still emits valid JSON. (CI keys actions/cache on /tmp/bsbm — see bench/bsbm/README.md.)
+if command -v java >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1 && [ -x "$BSBM_GEN" ] && [ -d "$BSBM_Q" ]; then
+  if BSBM_CORPUS="$(bash "$BSBM_GEN" "$BSBM_PC" 2>/dev/null)" && [ -s "${BSBM_CORPUS:-}" ]; then
+    for mode in count materialize json; do
+      "$CLI" bench "$BSBM_CORPUS" ntriples "$BSBM_Q" 3 "$mode" 2>/dev/null > "$TMP/bsbm.$mode" || true
+      while IFS=$'\t' read -r name rows us; do
+        [ "${rows:-}" = "ERROR" ] && continue
+        [ -n "${us:-}" ] && add "bsbm_${name}_${mode}_us" us "$us"
+      done < "$TMP/bsbm.$mode"
+    done
+    # HARD differential: result sizes must match the committed expected sizes. The mix includes a
+    # CONSTRUCT + a DESCRIBE, so we diff MATERIALIZE mode (produced-triple counts for graph forms).
+    if [ -f "$BSBM_EXP" ]; then
+      bsbm_fail=0
+      while IFS=$'\t' read -r q exp; do
+        case "$q" in \#*|"") continue;; esac
+        got=$(awk -F'\t' -v k="$q" '$1==k{print $2}' "$TMP/bsbm.materialize")
+        if [ "${got:-MISSING}" != "$exp" ]; then
+          echo "ERROR: bsbm $q rows=${got:-MISSING} expected=$exp (correctness regression)" >&2
+          bsbm_fail=1
+        fi
+      done < "$BSBM_EXP"
+      [ "$bsbm_fail" = 0 ] || exit 1
+    fi
+  else
+    echo "note: bsbm skipped (generator unavailable — no network/java?)" >&2
+  fi
+else
+  echo "note: bsbm skipped (java/unzip not on PATH)" >&2
+fi
+
+# [OPUS-4.8] LUBM reasoning suite per-commit. Unlike watdiv/bsbm (inline sp2b-style), LUBM's
+# run.sh is the self-asserting entry point: it ensures the LUBM(1) corpus + Univ-Bench TBox
+# (gen.sh), materializes the OWL-RL closure with `sparq-cli reason`, runs the extensional tier on
+# the raw ABox + the entailed tier on the closure (count mode), and asserts EVERY count vs
+# expected-rows.tsv internally (exit 1 on any mismatch). So we invoke run.sh and harvest its
+# count-mode TSV (it prints `<query>\t<rows>\t<min_us>` lines for both tiers on stdout) into
+# `lubm_<query>_count_us` (trend-only, NOT in scripts/perf-gate.py). Guarded on javac + rapper
+# (gen.sh compiles the UBA generator with javac and converts RDF/XML via rapper) — if either is
+# absent, skipped gracefully so ci-bench still emits valid JSON. run.sh failing (a reasoner OR
+# engine correctness regression) fails the whole ci-bench run. (CI keys actions/cache on /tmp/lubm.)
+if command -v javac >/dev/null 2>&1 && command -v rapper >/dev/null 2>&1 && [ -x "$LUBM_RUN" ]; then
+  if CLI="$CLI" ITERS=3 bash "$LUBM_RUN" > "$TMP/lubm.tsv" 2>"$TMP/lubm.err"; then
+    while IFS=$'\t' read -r name rows us; do
+      [ "${rows:-}" = "ERROR" ] && continue
+      [ -n "${us:-}" ] && add "lubm_${name}_count_us" us "$us"
+    done < "$TMP/lubm.tsv"
+  else
+    # run.sh exits non-zero ONLY on a hard correctness mismatch (the gen/tool guards above already
+    # ensure the toolchain is present), so surface its diagnostics and fail the run.
+    echo "ERROR: lubm run.sh failed (correctness regression or reasoner/engine error)" >&2
+    cat "$TMP/lubm.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: lubm skipped (javac/rapper not on PATH)" >&2
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.
