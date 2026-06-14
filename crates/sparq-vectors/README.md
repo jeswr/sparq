@@ -20,7 +20,10 @@ depends on it.
 ## 🚀 Quickstart
 
 ```rust
+# use oxrdf::{NamedNode, Term};
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let ttl = "<http://ex/a> <http://www.w3.org/2000/01/rdf-schema#label> \"Alpha\" .";
+# let some_term: Term = NamedNode::new("http://ex/a")?.into();
 use sparq_core::Graph;
 use sparq_vectors::{embed_labels, HashEmbedder, VectorIndex, VectorStore};
 
@@ -32,9 +35,9 @@ store.finalize()?;                                  // handle becomes mmap-backe
 
 let index = VectorIndex::build(&store);             // HNSW
 let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
+# // [OPUS-4.8] doctest runs with cwd = crate root; clean up the store it wrote.
+# drop(index); drop(store); std::fs::remove_file("graph.spqv").ok();
 # Ok(()) }
-# const ttl: &str = "<http://ex/a> <http://www.w3.org/2000/01/rdf-schema#label> \"Alpha\" .";
-# use oxrdf::{NamedNode, Term}; let some_term: Term = NamedNode::new("http://ex/a").unwrap().into();
 ```
 
 ## ✨ Features
