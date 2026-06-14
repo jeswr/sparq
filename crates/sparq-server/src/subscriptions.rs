@@ -163,7 +163,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if !handle_client_message(&mut socket, &state, &mut subs, &mut slots, &text).await {
+                        // [OPUS-4.8] axum 0.8: ws Message::Text now wraps Utf8Bytes, not String.
+                        if !handle_client_message(&mut socket, &state, &mut subs, &mut slots, text.as_str()).await {
                             break;
                         }
                     }
@@ -510,7 +511,8 @@ fn error_msg(message: &str, id: Option<u64>, alias: Option<&str>) -> Value {
 }
 
 async fn send(socket: &mut WebSocket, msg: &Value) -> Result<(), axum::Error> {
-    socket.send(Message::Text(msg.to_string())).await
+    // [OPUS-4.8] axum 0.8: ws Message::Text wraps Utf8Bytes; String converts via Into.
+    socket.send(Message::Text(msg.to_string().into())).await
 }
 
 // ---------------------------------------------------------------------------

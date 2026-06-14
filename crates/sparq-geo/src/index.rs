@@ -466,7 +466,8 @@ impl GeoIndex {
         let mut seen: FxHashSet<u32> = FxHashSet::default();
         let mut hits: Vec<(&Term, f64)> = Vec::new();
         for window in &windows {
-            for item in self.tree.locate_in_envelope_intersecting(window) {
+            // [OPUS-4.8] rstar 0.13 takes the envelope by value (AABB is Copy); deref the &window.
+            for item in self.tree.locate_in_envelope_intersecting(*window) {
                 if windows.len() > 1 && !seen.insert(item.idx) {
                     continue;
                 }
@@ -533,7 +534,8 @@ impl GeoIndex {
         }
         let window = AABB::from_corners([rect.min().x, rect.min().y], [rect.max().x, rect.max().y]);
         self.tree
-            .locate_in_envelope_intersecting(&window)
+            // [OPUS-4.8] rstar 0.13 takes the envelope by value (AABB is Copy).
+            .locate_in_envelope_intersecting(window)
             .filter_map(|item| {
                 let e = self.slots[item.idx as usize].as_ref().expect("live slot");
                 e.geometry.geometry.intersects(&geometry.geometry).then_some(&e.entity)
@@ -565,7 +567,8 @@ impl GeoIndex {
         let mut seen: FxHashSet<u32> = FxHashSet::default();
         let mut out: Vec<Term> = Vec::new();
         for window in &windows {
-            for item in self.tree.locate_in_envelope_intersecting(window) {
+            // [OPUS-4.8] rstar 0.13 takes the envelope by value (AABB is Copy); deref the &window.
+            for item in self.tree.locate_in_envelope_intersecting(*window) {
                 if !seen.insert(item.idx) {
                     continue;
                 }
@@ -596,7 +599,8 @@ impl GeoIndex {
         let window = AABB::from_corners([rect.min().x, rect.min().y], [rect.max().x, rect.max().y]);
         let out: Vec<Term> = self
             .tree
-            .locate_in_envelope_intersecting(&window)
+            // [OPUS-4.8] rstar 0.13 takes the envelope by value (AABB is Copy).
+            .locate_in_envelope_intersecting(window)
             .map(|item| self.slots[item.idx as usize].as_ref().expect("live slot").literal.clone())
             .collect();
         dedupe(out)
