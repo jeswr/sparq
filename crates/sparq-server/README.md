@@ -44,15 +44,28 @@ API gateway, or [`sparq-solid`](../sparq-solid/README.md)). Concretely:
   **unlimited by default**, and there is no query-complexity bound. If you expose the server,
   set `--max-results`/`--max-concurrent` appropriately and put a rate limiter in the gateway.
   (Tracked: bead `sq-ebii` — the broader timeout/memory/rate-limit/SSRF policy.)
-* **`SERVICE` federation SSRF.** SPARQL `SERVICE` (federated query) is **OFF in the shipped
-  server** — it is gated behind the engine's non-default `service` cargo feature, which
-  `sparq-server` does not enable, so a `SERVICE` clause is *rejected* as unsupported (verified:
-  `ureq` is absent from the server's dependency tree). **If** a deployer enables that feature,
-  the federated-endpoint fetch currently has **no egress filtering** — a
-  `SERVICE <http://169.254.169.254/…>` / `http://127.0.0.1` / RFC1918 clause becomes an SSRF
-  primitive into the internal network / cloud-metadata endpoint. Do not enable the `service`
-  feature on a server reachable by untrusted query authors until the egress allow/deny filter
-  lands (tracked: bead `sq-2v6f`, engine-side `crates/sparq-engine/src/service.rs`).
+* **`SERVICE` federation SSRF — gated behind a default-deny egress allowlist** <!-- [OPUS-4.8] sq-4w18 -->.
+  SPARQL `SERVICE` (federated query) is **OFF in the default build** — gated behind the
+  server's non-default `service` cargo feature (which turns on the engine's `service` feature;
+  off, `ureq` is absent from the dependency tree and a `SERVICE` clause errors at execution).
+  Built with `--features service`, the server is **default-DENY-all SERVICE**: a `SERVICE <iri>`
+  clause reaches **nothing** unless its host is on the egress allowlist. A `SERVICE` clause turns
+  attacker-controlled query text into an outbound request from the server host (textbook SSRF;
+  worst case `169.254.169.254` cloud-metadata), so the operator must opt in to every reachable
+  host. Configure the allowlist with any of (UNIONed, additive):
+  * `--service-allow HOST` / `--service-allow *.SUFFIX` — repeatable; exact host or suffix wildcard;
+  * `--service-allow-file PATH` — one entry per line (`#` comments + blanks ignored);
+  * `SPARQ_SERVICE_ALLOW` — comma/whitespace-separated.
+
+  Matching is case-insensitive against the SERVICE IRI authority; `*.example.org` matches the apex
+  `example.org` and any subdomain. The server is **strict** — unlike the engine's standalone
+  default (which permits public IPs and only blocks private/internal ones via
+  `with_service_egress_allow`), here even a public host must be on the allowlist. Enforcement
+  happens before any socket is opened, on the *resolved* IP (DNS-rebinding-safe), and applies
+  uniformly to queries, ASK, CONSTRUCT/DESCRIBE, subscriptions and federated `INSERT … WHERE`
+  updates. The startup log prints the effective allowlist. (Beads `sq-4w18` this wiring, `sq-2v6f`
+  the engine SSRF filter; engine seam `crates/sparq-engine/src/service.rs`
+  `with_service_egress_policy`.)
 
 ## Running
 

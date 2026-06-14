@@ -31,12 +31,15 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > `0.0.0.0`) unless you set `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`), warning loudly
 > even then. Do not expose it to an untrusted network without a reverse proxy / API
 > gateway (or `sparq-solid`) enforcing auth in front. SPARQL `SERVICE` federation is OFF
-> in the shipped server (engine `service` feature not enabled). When the `service`
-> feature *is* compiled in, the engine applies a **default-deny SSRF egress filter**: a
-> `SERVICE` endpoint that resolves to a loopback / RFC1918 / link-local (incl. the
-> `169.254.169.254` cloud-metadata IP) / unique-local / unspecified address is refused.
-> The check runs on the *resolved* IP (DNS-rebinding-safe). Opt a trusted internal host
-> back in with `sparq_engine::with_service_egress_allow([host], || …)` (bead `sq-2v6f`).
+> in the default build (the `service` cargo feature is off); a `SERVICE` clause then
+> errors at execution. Build with `--features service` to enable it — and even then the
+> server is **default-DENY-all SERVICE**: a `SERVICE <iri>` reaches **nothing** unless its
+> host is on the egress allowlist (`--service-allow` / `--service-allow-file` /
+> `SPARQ_SERVICE_ALLOW`; bead `sq-4w18`). This is an SSRF guard: a `SERVICE` clause turns
+> attacker-controlled query text into an outbound request from the server host (worst case
+> the `169.254.169.254` cloud-metadata IP). The allowlist is enforced before any socket is
+> opened, on the *resolved* IP (DNS-rebinding-safe). See "SERVICE federation (egress
+> allowlist)" below.
 
 Point a client at it (the endpoint is `/sparql`):
 
@@ -222,6 +225,8 @@ env overrides the default.
 | `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | per-socket subs |
 | `--verbose` | — | off | TraceLayer request logging (respects `RUST_LOG`) |
 | `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | opt in to a non-loopback bind despite no auth; without it a non-loopback `--addr` is **refused** at startup, with it it warns and proceeds |
+| `--service-allow HOST\|*.SUFFIX` (repeatable) | `SPARQ_SERVICE_ALLOW` (comma/ws-sep) | empty = **deny ALL SERVICE** | (feature `service`) allowlist a SERVICE egress host (exact or `*.suffix` wildcard); CLI + file + env are UNIONed |
+| `--service-allow-file PATH` | — | — | (feature `service`) load allowlist entries, one per line (`#` comments + blanks ignored) |
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 
@@ -236,12 +241,26 @@ then `router(state)`, or `harden(my_router, &config)`.
   **refuses** a non-loopback `--addr` (incl. `0.0.0.0`/`::`) unless `--allow-remote` /
   `SPARQ_ALLOW_REMOTE=1`; even then it warns. Front it with a reverse proxy / gateway (or
   `sparq-solid`) for auth. No rate limit and `--max-results` is unlimited by default — set
-  caps + a gateway rate limiter if exposing it (beads `sq-o4qf`, `sq-ebii`). `SERVICE`
-  federation is OFF in the shipped server; when the engine `service` feature is compiled
-  in, outbound `SERVICE` fetches are guarded by a **default-deny SSRF egress filter**
-  (loopback / RFC1918 / link-local incl. `169.254.169.254` cloud-metadata / unique-local
-  / unspecified are refused on the *resolved* IP; opt a trusted host back in via
-  `sparq_engine::with_service_egress_allow`) — bead `sq-2v6f`.
+  caps + a gateway rate limiter if exposing it (beads `sq-o4qf`, `sq-ebii`).
+- **SERVICE federation (egress allowlist).** `SERVICE` is OFF in the default build (build
+  with `--features service` to enable it). Even enabled, the server is **default-DENY-all
+  SERVICE**: a `SERVICE <iri>` clause reaches **nothing** unless its host is allowlisted —
+  via `--service-allow HOST` / `*.SUFFIX` (repeatable), `--service-allow-file PATH` (one
+  entry per line), or `SPARQ_SERVICE_ALLOW` (comma/whitespace-separated). All three are
+  UNIONed (additive; the CLI only ever widens the env baseline). Rationale: a `SERVICE`
+  clause turns attacker-controlled query text into an outbound request from the server
+  host (textbook SSRF; worst case the `169.254.169.254` cloud-metadata IP), so the
+  network-exposed surface must opt in to every reachable host. Matching is
+  case-insensitive against the SERVICE IRI authority; a `*.example.org` entry matches the
+  apex `example.org` and any subdomain. Unlike the engine's standalone default (which lets
+  public IPs through and only blocks private ones), the server is **strict**: even a public
+  host must be on the allowlist. The allowlist applies uniformly to queries, ASK,
+  CONSTRUCT/DESCRIBE, subscriptions and federated `INSERT … WHERE` updates, and is enforced
+  before any socket is opened (DNS-rebinding-safe, on the *resolved* IP). The startup log
+  prints the effective allowlist. Beads `sq-4w18` (this wiring), `sq-2v6f` (the engine SSRF
+  filter). Embedders that drive the engine directly use
+  `sparq_engine::with_service_egress_policy(strict, [host], || …)` /
+  `with_service_egress_allow([host], || …)`.
 - **Feature flags.** `server` (default-on) pulls axum/tokio/tower — the binary needs it
   (`required-features = ["server"]`). `time-travel` (default **off**) enables
   `?generation=N` pinning, the `Sparq-Generation` header, `AppState::at`, and the
