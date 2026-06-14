@@ -45,9 +45,13 @@ As a library:
 ```rust
 use sparq_core::Graph;
 
-let g = Graph::load_str(turtle_text, "turtle")?;
-let rows = sparq_engine::query(&g, "SELECT ?s WHERE { ?s a <http://schema.org/Person> }")?;
-let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }")?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let turtle = r#"<http://example.org/alice> a <http://schema.org/Person> ."#;
+    let g = Graph::load_str(turtle, "turtle")?;
+    let _rows = sparq_engine::query(&g, "SELECT ?s WHERE { ?s a <http://schema.org/Person> }")?;
+    let _json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }")?;
+    Ok(())
+}
 ```
 
 The CLI, HTTP server, Python (`sparq` on PyPI), and JS/WASM (`@jeswr/sparq`) mirror the same
