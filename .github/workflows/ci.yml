@@ -40,10 +40,24 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # [OPUS-4.8] sq-x4jy: run the unit/integration suite under cargo-nextest with
+      # --retries 2. nextest runs each test in its OWN process (so a stray abort can't
+      # take the whole binary down), reports a test BINARY that "was never executed" as a
+      # DETERMINISTIC failure (instead of a bare exit-101 with no FAILED line — the exact
+      # flake this bead tracks), and the retries let any residual transient binary race on
+      # the shared runner self-heal. SHA-pinned install action (reuses a pin already vetted
+      # elsewhere in this workflow). NOTE: nextest does NOT run doctests, so a separate
+      # `cargo test --doc` step below preserves the doctest coverage `cargo test` gave us.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: nextest
       - name: Build
         run: cargo build --workspace --all-targets
-      - name: Test
-        run: cargo test --workspace
+      - name: Test (nextest, retry transient binary races)
+        run: cargo nextest run --workspace --retries 2
+      - name: Doctests (nextest does not run these)
+        run: cargo test --workspace --doc
 
   wasm:
     name: wasm build (sparq-wasm)

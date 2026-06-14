@@ -146,17 +146,33 @@ measure() {
 
   local start end rc=0 json="$WORK/$crate.json"
   start=$(date +%s)
-  if [ -n "$subcmd" ]; then
-    cargo llvm-cov "$subcmd" "${cargo_args[@]}" --summary-only --json \
-      --output-path "$json" -- "${test_args[@]}" >/dev/null 2>"$WORK/$crate.err" || rc=$?
-  else
-    cargo llvm-cov "${cargo_args[@]}" --summary-only --json \
-      --output-path "$json" >/dev/null 2>"$WORK/$crate.err" || rc=$?
-  fi
+  # [OPUS-4.8] sq-x4jy: retry a per-crate measurement up to MEASURE_ATTEMPTS times. A
+  # transient TEST-BINARY race on the shared runner (a binary that aborts / "was never
+  # executed") makes llvm-cov emit a partial/empty profraw and UNDERCOUNT the crate
+  # (sparq-core seen at ~71% instead of ~91%) or fail outright (rc=101). The racing tests
+  # are now hermetic (the dict-spill / service-allow env tests no longer mutate the
+  # process-global environment), so this retry is belt-and-braces for any residual runner
+  # flake — a clean re-measure self-heals it instead of failing CI on an unrelated PR.
+  local attempt=0 attempts="${MEASURE_ATTEMPTS:-2}"
+  while :; do
+    attempt=$((attempt + 1))
+    rc=0
+    if [ -n "$subcmd" ]; then
+      cargo llvm-cov "$subcmd" "${cargo_args[@]}" --summary-only --json \
+        --output-path "$json" -- "${test_args[@]}" >/dev/null 2>"$WORK/$crate.err" || rc=$?
+    else
+      cargo llvm-cov "${cargo_args[@]}" --summary-only --json \
+        --output-path "$json" >/dev/null 2>"$WORK/$crate.err" || rc=$?
+    fi
+    if { [ "$rc" -eq 0 ] && [ -s "$json" ]; } || [ "$attempt" -ge "$attempts" ]; then
+      break
+    fi
+    echo "  .. $crate measure attempt $attempt failed (rc=$rc) — retrying (transient binary race?)"
+  done
   end=$(date +%s)
 
   if [ "$rc" -ne 0 ] || [ ! -s "$json" ]; then
-    echo "  !! $crate FAILED to measure (rc=$rc) — see error tail:"
+    echo "  !! $crate FAILED to measure (rc=$rc) after $attempt attempt(s) — see error tail:"
     tail -8 "$WORK/$crate.err" | sed 's/^/     /'
     ROWS+=("$(python3 - "$crate" "$((end-start))" <<'PY'
 import json,sys
