@@ -13,6 +13,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions): the build matrix only
+# reads the repo and uploads artifacts (artifact upload needs no extra repo-scope token).
+permissions:
+  contents: read
+
 jobs:
   build:
     name: ${{ matrix.tier }}
