@@ -13,17 +13,57 @@ Implements the **read** side of two W3C specifications over an in-memory
   (`PUT`/`POST`/`DELETE`) are answered with `501 Not Implemented`; implementing
   them is tracked as bead `sq-gxsj`. <!-- [OPUS-4.8] -->
 
+## Security posture (no built-in auth) — read before exposing it <!-- [OPUS-4.8] sq-o4qf / sq-2v6f -->
+
+**`sparq-server` has NO authentication on any endpoint.** This is by design: the engine is
+not an auth boundary — authorization belongs to a layer in front of it (a reverse proxy /
+API gateway, or [`sparq-solid`](../sparq-solid/README.md)). Concretely:
+
+* Every endpoint is **unauthenticated**, including the **mutating** `application/sparql-update`
+  path on `/sparql` and the `/subscriptions` WebSocket. Anyone who can reach the port can
+  **read AND write the entire dataset**.
+* Therefore the server **binds loopback by default** (`127.0.0.1:3030`), reachable only from
+  the same host. A **non-loopback** bind (e.g. `--addr 0.0.0.0:8080`) is **refused** unless
+  you explicitly opt in with **`--allow-remote`** (env `SPARQ_ALLOW_REMOTE=1`). Even with the
+  opt-in, the server logs a loud warning at startup. (`0.0.0.0` / `::` — bind-all-interfaces —
+  count as remote: they are the usual way the surface gets exposed.)
+
+  > Do **not** expose `0.0.0.0` to an untrusted network without a reverse proxy / gateway (or
+  > sparq-solid) that enforces authentication and, if you need it, authorization, rate
+  > limiting, and TLS in front of this server.
+
+* **DoS controls that ARE built in** (safe defaults, see [Hardening flags](#hardening-flags-t15)):
+  per-request **query timeout** (30 s → 503), **request body cap** (1 MiB → 413),
+  **concurrency limit** with load-shedding (32 in-flight → 429), structured JSON errors, and
+  panic→500 recovery. An **opt-in SELECT row cap** (`--max-results`) gives an honest 413
+  refusal rather than silent truncation.
+* **DoS controls that are NOT built in:** there is **no rate limit**, `--max-results` is
+  **unlimited by default**, and there is no query-complexity bound. If you expose the server,
+  set `--max-results`/`--max-concurrent` appropriately and put a rate limiter in the gateway.
+  (Tracked: bead `sq-ebii` — the broader timeout/memory/rate-limit/SSRF policy.)
+* **`SERVICE` federation SSRF.** SPARQL `SERVICE` (federated query) is **OFF in the shipped
+  server** — it is gated behind the engine's non-default `service` cargo feature, which
+  `sparq-server` does not enable, so a `SERVICE` clause is *rejected* as unsupported (verified:
+  `ureq` is absent from the server's dependency tree). **If** a deployer enables that feature,
+  the federated-endpoint fetch currently has **no egress filtering** — a
+  `SERVICE <http://169.254.169.254/…>` / `http://127.0.0.1` / RFC1918 clause becomes an SSRF
+  primitive into the internal network / cloud-metadata endpoint. Do not enable the `service`
+  feature on a server reachable by untrusted query authors until the egress allow/deny filter
+  lands (tracked: bead `sq-2v6f`, engine-side `crates/sparq-engine/src/service.rs`).
+
 ## Running
 
 ```sh
 # build (native; the server stack is behind the default-on `server` feature)
 cargo build -p sparq-server
 
-# serve a Turtle file on the default address 127.0.0.1:3030
+# serve a Turtle file on the default address 127.0.0.1:3030 (loopback — safe default)
 cargo run -p sparq-server -- --format turtle data.ttl
 
-# custom address / format (turtle | ntriples | nquads | trig)
-cargo run -p sparq-server -- --addr 0.0.0.0:8080 --format ntriples data.nt
+# custom address / format (turtle | ntriples | nquads | trig). A NON-loopback bind is
+# REFUSED unless --allow-remote (or SPARQ_ALLOW_REMOTE=1) is set — see "Security posture".
+# Only do this behind a reverse proxy / gateway that enforces auth:
+cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriples data.nt
 
 # no data file => empty default graph (still answers queries)
 cargo run -p sparq-server
@@ -131,6 +171,7 @@ the matching `SPARQ_*` environment variable; the environment overrides the defau
 | `--max-subscriptions N` | `SPARQ_MAX_SUBSCRIPTIONS` | `256` | Maximum active subscriptions server-wide (T23); further `subscribe` requests are refused with a protocol `error`. |
 | `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | Maximum active subscriptions per WebSocket connection (T23). |
 | `--verbose` | — | off | Per-request logging via `tower_http::trace::TraceLayer` (respects `RUST_LOG`). |
+| `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | Opt in to a **non-loopback** bind despite the no-auth posture. Without it (and without the env var truthy: `1`/`true`/`yes`/`on`), a non-loopback `--addr` (e.g. `0.0.0.0`) is **refused** at startup; with it, the bind proceeds but logs a loud warning. See [Security posture](#security-posture-no-built-in-auth--read-before-exposing-it). <!-- [OPUS-4.8] sq-o4qf --> |
 
 Robustness, always on:
 

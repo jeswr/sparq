@@ -16,6 +16,7 @@
 //! pinned-snapshot writer stalls and reclaim polling) the ring removes by design.
 
 use std::collections::HashMap;
+use std::net::SocketAddr; // [OPUS-4.8] sq-o4qf: bind_posture classifies the listen address
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -103,6 +104,21 @@ pub struct ServerConfig {
     pub time_travel_max_age: Option<Duration>,
     /// Log every request/response via `tower_http::trace::TraceLayer`.
     pub verbose: bool,
+    /// [OPUS-4.8] sq-o4qf: explicit opt-in to bind a **non-loopback** address.
+    ///
+    /// The server has **no authentication** on any endpoint — including the mutating
+    /// `application/sparql-update` path and the `/subscriptions` WebSocket. Binding a
+    /// non-loopback address (e.g. `0.0.0.0`) therefore exposes the entire dataset for
+    /// **read AND write** to anyone who can reach the port. To make that a deliberate
+    /// act rather than a foot-gun, the binary REFUSES to bind a non-loopback address
+    /// unless this is set (CLI `--allow-remote` / env `SPARQ_ALLOW_REMOTE=1`); even
+    /// then it logs a loud warning. Loopback binds are unaffected. See
+    /// [`bind_posture`] for the decision, and `crates/sparq-server/README.md` →
+    /// "Security posture (no built-in auth)".
+    ///
+    /// This is purely a *bind-time* posture gate in the binary; it does not add any
+    /// per-request auth and does not affect the library `router`/`harden` surface.
+    pub allow_remote: bool,
 }
 
 impl Default for ServerConfig {
@@ -119,6 +135,7 @@ impl Default for ServerConfig {
             #[cfg(feature = "time-travel")]
             time_travel_max_age: None,
             verbose: false,
+            allow_remote: false, // [OPUS-4.8] sq-o4qf: safe default — refuse non-loopback bind unless opted in
         }
     }
 }
@@ -158,7 +175,80 @@ impl ServerConfig {
                 cfg.time_travel_max_age = (secs > 0).then(|| Duration::from_secs(secs));
             }
         }
+        // [OPUS-4.8] sq-o4qf: SPARQ_ALLOW_REMOTE truthy ("1"/"true"/"yes"/"on", case-insensitive)
+        // opts in to a non-loopback bind. Anything else (incl. unset / "0" / "false") leaves the
+        // safe default of refusing to expose the unauthenticated surface beyond loopback.
+        if let Ok(v) = std::env::var("SPARQ_ALLOW_REMOTE") {
+            cfg.allow_remote = env_truthy(&v);
+        }
         cfg
+    }
+}
+
+/// [OPUS-4.8] sq-o4qf: parse a boolean-ish env value. Truthy: `1`, `true`, `yes`, `on`
+/// (case-insensitive, trimmed); everything else (including empty) is false.
+fn env_truthy(v: &str) -> bool {
+    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-o4qf — bind-time security posture (no built-in auth)
+// ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] sq-o4qf: the decision the binary makes about a requested bind address,
+/// given the no-auth posture. Returned by [`bind_posture`] so `main` (and tests) can act
+/// on it without the side effect of actually binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindPosture {
+    /// Loopback (or otherwise not-remotely-reachable) bind — safe, proceed silently.
+    Loopback,
+    /// Non-loopback bind explicitly opted into (`--allow-remote` / `SPARQ_ALLOW_REMOTE`).
+    /// Proceed, but the caller MUST surface `warning` (the unauthenticated surface is now
+    /// reachable from the network).
+    RemoteAllowed { warning: String },
+    /// Non-loopback bind WITHOUT the opt-in. The caller MUST refuse to bind and print
+    /// `message` (which explains the no-auth risk and how to opt in).
+    RemoteRefused { message: String },
+}
+
+/// [OPUS-4.8] sq-o4qf: classify a requested bind address under the no-built-in-auth posture.
+///
+/// `sparq-server` has no authentication on any endpoint (query, `application/sparql-update`,
+/// the `/subscriptions` WebSocket). A loopback bind (`127.0.0.0/8`, `::1`) is only reachable
+/// from the same host, so it is safe by default. A **non-loopback** bind exposes the full
+/// read+write surface to the network, so the binary refuses it unless the operator explicitly
+/// opts in via `--allow-remote` / `SPARQ_ALLOW_REMOTE=1` (and even then warns).
+///
+/// "Loopback" here means the literal loopback ranges. Note `0.0.0.0` / `::` (the unspecified
+/// "bind to all interfaces" addresses) are NOT loopback — they are the most common way the
+/// surface gets exposed, so they are treated as remote. This is a deliberately blunt,
+/// fail-closed check: it errs toward refusing exposure, not toward allowing it.
+pub fn bind_posture(addr: &SocketAddr, allow_remote: bool) -> BindPosture {
+    if addr.ip().is_loopback() {
+        return BindPosture::Loopback;
+    }
+    if allow_remote {
+        BindPosture::RemoteAllowed {
+            warning: format!(
+                "WARNING: sparq-server is binding the non-loopback address {addr} and has NO \
+                 built-in authentication. The full dataset is exposed for READ AND WRITE \
+                 (SPARQL Update + the /subscriptions WebSocket) to anyone who can reach this \
+                 port. Put it behind a reverse proxy / API gateway (or sparq-solid) that \
+                 enforces auth before exposing it to an untrusted network. \
+                 (--allow-remote / SPARQ_ALLOW_REMOTE is set, so this bind proceeds.)"
+            ),
+        }
+    } else {
+        BindPosture::RemoteRefused {
+            message: format!(
+                "refusing to bind non-loopback address {addr}: sparq-server has NO built-in \
+                 authentication, so this would expose the full dataset for READ AND WRITE \
+                 (SPARQL Update + the /subscriptions WebSocket) to the network. If that is \
+                 intended, run behind a reverse proxy / gateway that enforces auth and \
+                 re-run with --allow-remote (or SPARQ_ALLOW_REMOTE=1). To serve only this \
+                 host, bind a loopback address such as 127.0.0.1."
+            ),
+        }
     }
 }
 
@@ -1424,5 +1514,70 @@ mod touched_pods_tests {
     #[test]
     fn unparsable_update_is_global() {
         assert!(is_global("THIS IS NOT SPARQL"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-o4qf — bind-posture (no-auth non-loopback gate) tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod bind_posture_tests {
+    //! The server has no built-in auth, so a non-loopback bind must be a deliberate opt-in.
+    //! These tests pin: (a) loopback always proceeds; (b) a non-loopback bind WITHOUT the
+    //! opt-in is refused (fail-closed, incl. the `0.0.0.0`/`::` all-interfaces addresses,
+    //! which are the usual way the surface gets exposed); (c) WITH the opt-in it proceeds
+    //! but warns. Pure functions over an explicit `allow_remote` flag — no process-env
+    //! mutation, so they are parallel-safe.
+    use super::{bind_posture, env_truthy, BindPosture};
+    use std::net::SocketAddr;
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn loopback_proceeds_regardless_of_flag() {
+        for a in ["127.0.0.1:3030", "127.0.0.5:80", "[::1]:3030"] {
+            assert_eq!(bind_posture(&addr(a), false), BindPosture::Loopback, "{a} (no opt-in)");
+            assert_eq!(bind_posture(&addr(a), true), BindPosture::Loopback, "{a} (opt-in)");
+        }
+    }
+
+    #[test]
+    fn non_loopback_without_optin_is_refused() {
+        // 0.0.0.0 / :: (all-interfaces), an RFC1918 address, a link-local, and the cloud
+        // metadata IP all fail closed without --allow-remote.
+        for a in ["0.0.0.0:3030", "[::]:3030", "10.0.0.1:8080", "169.254.169.254:80", "192.168.1.5:3030"] {
+            match bind_posture(&addr(a), false) {
+                BindPosture::RemoteRefused { message } => {
+                    assert!(message.contains("refusing to bind"), "{a}: {message}");
+                    assert!(message.contains("--allow-remote"), "{a}: must name the opt-in flag");
+                    assert!(message.contains("authentication"), "{a}: must explain the no-auth risk");
+                }
+                other => panic!("{a} must be refused without opt-in, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_loopback_with_optin_warns_but_proceeds() {
+        match bind_posture(&addr("0.0.0.0:3030"), true) {
+            BindPosture::RemoteAllowed { warning } => {
+                assert!(warning.contains("WARNING"), "{warning}");
+                assert!(warning.contains("READ AND WRITE"), "{warning}");
+                assert!(warning.contains("0.0.0.0:3030"), "must name the address: {warning}");
+            }
+            other => panic!("opt-in must allow with a warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_truthy_recognises_common_forms() {
+        for t in ["1", "true", "TRUE", " yes ", "On", "Yes"] {
+            assert!(env_truthy(t), "{t:?} should be truthy");
+        }
+        for f in ["", "0", "false", "no", "off", "2", "maybe"] {
+            assert!(!env_truthy(f), "{f:?} should be falsy");
+        }
     }
 }

@@ -2,10 +2,19 @@
 //! W3C SPARQL 1.1 Protocol + Graph Store HTTP Protocol (read side).
 //!
 //! Usage:
-//!   sparq-server [--addr 127.0.0.1:3030] [--format turtle]
+//!   sparq-server [--addr 127.0.0.1:3030] [--allow-remote] [--format turtle]
 //!                [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
 //!                [--max-results N] [--max-subscriptions N]
 //!                [--max-subscriptions-per-conn N] [--verbose] [DATA_FILE]
+//!
+//! SECURITY: the server has NO built-in authentication on any endpoint (query, the
+//! `application/sparql-update` mutation path, the `/subscriptions` WebSocket). `--addr`
+//! defaults to loopback (127.0.0.1:3030), reachable only from this host. A NON-loopback
+//! bind (e.g. `0.0.0.0`) exposes the full dataset for READ AND WRITE to the network and is
+//! REFUSED unless `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`) is set — and even then it
+//! logs a warning. Run behind a reverse proxy / API gateway (or sparq-solid) that enforces
+//! auth before exposing it to an untrusted network. See crates/sparq-server/README.md
+//! → "Security posture".
 //!
 //! With no DATA_FILE the server starts with an empty default graph (still answers queries —
 //! they just return no rows). The format defaults to `turtle`; pass `--format ntriples |
@@ -38,7 +47,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use sparq_core::Graph;
-use sparq_server::{router, AppState, ServerConfig};
+// [OPUS-4.8] sq-o4qf: bind_posture / BindPosture gate the non-loopback bind under the no-auth posture.
+use sparq_server::{bind_posture, router, AppState, BindPosture, ServerConfig};
 
 // Same allocator as the CLI (T1.0a, measured ~1.29x on the parallel join): the system allocator's
 // arena locks contend under rayon's per-row allocation, and the server is the long-running,
@@ -88,6 +98,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.time_travel_max_age = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--verbose" => config.verbose = true,
+            // [OPUS-4.8] sq-o4qf: opt in to binding a non-loopback address despite the no-auth
+            // posture. Without this (and without SPARQ_ALLOW_REMOTE), a non-loopback --addr is
+            // refused — see bind_posture below.
+            "--allow-remote" => config.allow_remote = true,
             "-h" | "--help" => {
                 let time_travel = if cfg!(feature = "time-travel") {
                     " [--time-travel-generations N] [--time-travel-max-age SECS]"
@@ -95,10 +109,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ""
                 };
                 eprintln!(
-                    "usage: sparq-server [--addr HOST:PORT] [--format FMT] [--query-timeout SECS] \
-                     [--max-body-bytes N] [--max-concurrent N] [--max-results N] \
-                     [--max-subscriptions N] [--max-subscriptions-per-conn N]{time_travel} \
-                     [--verbose] [DATA_FILE]"
+                    "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--format FMT] \
+                     [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
+                     [--max-results N] [--max-subscriptions N] \
+                     [--max-subscriptions-per-conn N]{time_travel} [--verbose] [DATA_FILE]\n\n  \
+                     SECURITY: no built-in auth. --addr defaults to loopback (127.0.0.1); a \
+                     non-loopback bind (e.g. 0.0.0.0) is REFUSED unless --allow-remote (or \
+                     SPARQ_ALLOW_REMOTE=1) is set, because it would expose READ+WRITE to the \
+                     network. Put it behind a reverse proxy / gateway that enforces auth."
                 );
                 return Ok(());
             }
@@ -145,10 +163,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.time_travel_max_age.map_or("off".into(), |t| format!("{}s", t.as_secs())),
     );
 
+    let addr: SocketAddr = addr.parse()?;
+    // [OPUS-4.8] sq-o4qf: enforce the no-auth bind posture BEFORE binding. A non-loopback
+    // address is refused unless explicitly opted into (--allow-remote / SPARQ_ALLOW_REMOTE),
+    // because the server exposes READ+WRITE with no authentication.
+    match bind_posture(&addr, config.allow_remote) {
+        BindPosture::Loopback => {}
+        BindPosture::RemoteAllowed { warning } => eprintln!("{warning}"),
+        BindPosture::RemoteRefused { message } => return Err(message.into()),
+    }
+
     let state = AppState::with_config(graph, config);
     let app = router(state);
 
-    let addr: SocketAddr = addr.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("sparq-server listening on http://{addr}  (SPARQL endpoint: /sparql, subscriptions: ws://{addr}/subscriptions)");
     axum::serve(listener, app)

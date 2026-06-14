@@ -16,13 +16,23 @@ HTTP Protocol**, with `Accept`-driven content negotiation, hardening guards, Pro
 Run the binary (server stack is the default-on `server` feature):
 
 ```sh
-# serve a Turtle file on the default address 127.0.0.1:3030
+# serve a Turtle file on the default address 127.0.0.1:3030 (loopback — safe default)
 cargo run -p sparq-server -- --format turtle data.ttl
 # no data file => empty default graph (still answers queries, just no rows)
 cargo run -p sparq-server
-# custom bind addr / format (turtle | ntriples | nquads | trig)
-cargo run -p sparq-server -- --addr 0.0.0.0:8080 --format ntriples data.nt
+# custom bind addr / format (turtle | ntriples | nquads | trig). A NON-loopback bind
+# (e.g. 0.0.0.0) is REFUSED unless --allow-remote / SPARQ_ALLOW_REMOTE=1 (no auth — see below).
+cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriples data.nt
 ```
+
+> **Security: no built-in auth.** Every endpoint is unauthenticated — including the
+> mutating `application/sparql-update` path and the `/subscriptions` WebSocket. The
+> server binds **loopback by default** and **refuses a non-loopback bind** (e.g.
+> `0.0.0.0`) unless you set `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`), warning loudly
+> even then. Do not expose it to an untrusted network without a reverse proxy / API
+> gateway (or `sparq-solid`) enforcing auth in front. SPARQL `SERVICE` federation is OFF
+> in the shipped server (engine `service` feature not enabled); enabling it on an
+> untrusted-facing server is an SSRF risk (no egress filter yet — bead `sq-2v6f`).
 
 Point a client at it (the endpoint is `/sparql`):
 
@@ -78,8 +88,13 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   (**`time-travel` feature only**).
 - `struct ServerConfig { query_timeout: Option<Duration>, max_body_bytes: usize,
   max_concurrent: usize, max_results: Option<usize>, max_subscriptions: usize,
-  max_subscriptions_per_conn: usize, verbose: bool, /* + time_travel_* under feature */ }`
-  with `ServerConfig::default()` and `ServerConfig::from_env()`.
+  max_subscriptions_per_conn: usize, verbose: bool, allow_remote: bool, /* + time_travel_*
+  under feature */ }` with `ServerConfig::default()` and `ServerConfig::from_env()`.
+- `fn bind_posture(addr: &SocketAddr, allow_remote: bool) -> BindPosture` — the no-auth
+  bind gate the binary applies: `Loopback` (proceed), `RemoteAllowed { warning }` (proceed
+  + log), or `RemoteRefused { message }` (refuse). `allow_remote` is a *binary* posture
+  gate only — it does not add per-request auth and the library `router`/`harden` surface
+  ignores it.
 - `fn harden(routes: axum::Router, config: &ServerConfig) -> axum::Router` — wrap any
   router in the production middleware (panic→500, concurrency-limit→429, body-limit→413,
   JSON error bodies, optional trace).
@@ -179,6 +194,7 @@ env overrides the default.
 | `--max-subscriptions N` | `SPARQ_MAX_SUBSCRIPTIONS` | `256` | server-wide subs |
 | `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | per-socket subs |
 | `--verbose` | — | off | TraceLayer request logging (respects `RUST_LOG`) |
+| `--allow-remote` | `SPARQ_ALLOW_REMOTE` | off | opt in to a non-loopback bind despite no auth; without it a non-loopback `--addr` is **refused** at startup, with it it warns and proceeds |
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 
@@ -187,6 +203,15 @@ then `router(state)`, or `harden(my_router, &config)`.
 
 ## Gotchas / feature flags / prerequisites
 
+- **No built-in auth — loopback-by-default, non-loopback bind is refused.** Every endpoint
+  (query, `application/sparql-update`, `/subscriptions` WS) is unauthenticated → read+write
+  open to anyone who can reach the port. The binary binds `127.0.0.1:3030` by default and
+  **refuses** a non-loopback `--addr` (incl. `0.0.0.0`/`::`) unless `--allow-remote` /
+  `SPARQ_ALLOW_REMOTE=1`; even then it warns. Front it with a reverse proxy / gateway (or
+  `sparq-solid`) for auth. No rate limit and `--max-results` is unlimited by default — set
+  caps + a gateway rate limiter if exposing it (beads `sq-o4qf`, `sq-ebii`). `SERVICE`
+  federation is OFF in the shipped server; enabling the engine `service` feature on an
+  untrusted-facing server is an un-filtered SSRF risk (bead `sq-2v6f`).
 - **Feature flags.** `server` (default-on) pulls axum/tokio/tower — the binary needs it
   (`required-features = ["server"]`). `time-travel` (default **off**) enables
   `?generation=N` pinning, the `Sparq-Generation` header, `AppState::at`, and the
