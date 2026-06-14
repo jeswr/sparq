@@ -50,6 +50,13 @@ wkt = "0.14"
 # Geometry algorithms: DE-9IM relate, convex hull, bounding rect, distances.
 geo = "0.33"
 geo-types = "0.7"
+# 1-D (string-line) overlay: clip a polyline by a polygon (line∩polygon and
+# line−polygon), which `geo`'s `BooleanOps` does NOT provide — `BooleanOps`
+# only nodes/overlays polygons. This is the SAME engine `geo 0.33` already
+# uses for polygon overlay (it depends on i_overlay 4.5.x), so adding it as a
+# direct dependency pulls in no new transitive crates. `default-features =
+# false` mirrors geo's own usage and keeps the lockfile stable. [OPUS-4.8]
+i_overlay = { version = "4.5.1, < 4.6.0", default-features = false }
 # R-tree (bulk-loaded STR) over geometry bounding boxes.
 rstar = "0.12"
 # Behind the `reproject` feature: pure-Rust proj4 (NOT the C `proj` binding —

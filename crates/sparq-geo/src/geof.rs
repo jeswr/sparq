@@ -19,10 +19,12 @@
 //! - the set operations [`intersection`] / [`union`] / [`difference`] /
 //!   [`sym_difference`] — point-set operations over `geo`'s `BooleanOps`
 //!   (polygon overlay) plus directly-implemented line/point cases: point-in/on
-//!   tests, line-to-polygon clipping, and line∩line via `geo`'s
-//!   `line_intersection`. The genuinely-intractable combinations (1-D
-//!   set-subtraction) return an honest [`GeoError::Unsupported`]; see each
-//!   function's docs for the supported matrix.
+//!   tests, line∩line via `geo`'s `line_intersection`, and the 1-D
+//!   set-subtraction cases (line−line / line−polygon and their symDifference)
+//!   via `i_overlay`'s string-line clip + linear referencing — the gap `geo`'s
+//!   polygon-only overlay leaves. Operands the dimension dispatch cannot
+//!   classify return an honest [`GeoError::Unsupported`]; see each function's
+//!   docs and the README for the supported matrix. [OPUS-4.8]
 //!
 //! The [`lex`] sub-module mirrors every function at the lexical level
 //! (wkt-literal strings in, values out) — the shape a SPARQL engine builtin
@@ -428,17 +430,34 @@ fn boundary_geometry(g: &Geometry<f64>) -> Result<Geometry<f64>, GeoError> {
 // GeoSPARQL defines `geof:intersection` / `union` / `difference` /
 // `symDifference` as the set-theoretic operations on the geometries' point
 // sets, returning the result geometry. `geo`'s `BooleanOps` realises this for
-// the POLYGON×POLYGON case (a polygon-overlay algorithm). For lower-dimension
-// operands we implement the well-defined cases directly over `geo`'s
-// primitives (`line_intersection`, `CoordinatePosition`) and return an honest
-// [`GeoError::Unsupported`] for the genuinely-intractable combinations (notably
-// line−line / line∆line, which need linear-referencing subtraction `geo` does
-// not provide) rather than a wrong answer. See README for the table.
+// the POLYGON×POLYGON case (a polygon-overlay algorithm) but does NOT touch
+// 1-D operands — it only nodes/overlays polygons. We fill the 1-D gap with two
+// roll-your-own pieces (see AGENTS.md "Upstream blockers"): [OPUS-4.8]
+//
+//   * line ∩ polygon / line − polygon — a robustly-noded polyline clip via
+//     `i_overlay`'s string-line overlay (`FloatClip::clip_by`). This is the
+//     SAME overlay engine `geo 0.33` itself uses for polygon overlay, exposed
+//     for the open-path (string) case `geo` does not re-export. `invert=false`
+//     keeps the in-polygon portions (intersection); `invert=true` keeps the
+//     out-of-polygon portions (difference).
+//   * line − line / line ∆ line — `i_overlay`'s string overlay clips lines
+//     only against CLOSED shapes, so a genuine line-on-line subtraction is
+//     done here directly: subtract the collinear-overlap parameter intervals of
+//     `b` from each segment of `a` (linear referencing). Crossing points are
+//     measure-zero and so do not change a 1-D point set.
+//
+// line ∩ line stays on `geo`'s `line_intersection` (unchanged; already
+// correct). Genuinely-intractable mixes still return an honest
+// [`GeoError::Unsupported`]. See the README operand matrix.
 
 use geo::coordinate_position::CoordPos;
 use geo::line_intersection::line_intersection;
 use geo::CoordinatePosition;
 use geo_types::Line;
+
+use i_overlay::core::fill_rule::FillRule;
+use i_overlay::float::clip::FloatClip;
+use i_overlay::string::clip::ClipRule;
 
 /// The topological dimension of a geometry: 0 = point(s), 1 = curve(s),
 /// 2 = surface(s). `None` for an empty geometry or a heterogeneous
@@ -747,6 +766,122 @@ fn merge_pieces(pieces: &mut Vec<LineString<f64>>) {
     *pieces = merged;
 }
 
+// ---- 1-D overlay via i_overlay (string-line clip) + linear-referencing -------------
+//
+// `geo`'s `BooleanOps` does not touch open paths; these helpers fill the gap.
+// [OPUS-4.8]
+
+/// A geo-types ring as an `i_overlay` contour ([`[f64; 2]`] is
+/// `FloatPointCompatible`). The closing duplicate vertex is dropped —
+/// `i_overlay` auto-closes contours.
+fn ring_to_contour(ring: &LineString<f64>) -> Vec<[f64; 2]> {
+    let mut coords: &[Coord<f64>] = &ring.0;
+    if let (Some(first), Some(last)) = (coords.first(), coords.last()) {
+        if coords.len() >= 2 && coord_eq(*first, *last) {
+            coords = &coords[..coords.len() - 1];
+        }
+    }
+    coords.iter().map(|c| [c.x, c.y]).collect()
+}
+
+/// A multipolygon as `i_overlay` "shapes" (each shape: outer contour + hole
+/// contours).
+fn polygon_to_shapes(poly: &MultiPolygon<f64>) -> Vec<Vec<Vec<[f64; 2]>>> {
+    poly.0
+        .iter()
+        .map(|p| {
+            std::iter::once(ring_to_contour(p.exterior()))
+                .chain(p.interiors().iter().map(ring_to_contour))
+                .collect()
+        })
+        .collect()
+}
+
+/// Clip the 1-D operand `line` by `poly` with `i_overlay`'s robustly-noded
+/// string-line overlay. `invert == false` keeps the in-polygon portions
+/// (intersection); `invert == true` keeps the out-of-polygon portions
+/// (difference). `boundary_included` decides whether a sub-segment running
+/// ALONG the polygon boundary is treated as inside (kept for intersection,
+/// dropped for difference). Returns the clipped pieces as geo-types
+/// linestrings (the caller wraps them into the narrowest 1-D geometry).
+fn clip_line_by_polygon(
+    line: &Geometry<f64>,
+    poly: &MultiPolygon<f64>,
+    invert: bool,
+    boundary_included: bool,
+) -> Vec<LineString<f64>> {
+    let shapes = polygon_to_shapes(poly);
+    // Even-odd fill is winding-direction-insensitive and resolves holes
+    // correctly regardless of how the WKT oriented the rings (verified by
+    // spike); the positive/negative rules are NOT — do not use them.
+    let rule = ClipRule { invert, boundary_included };
+    let mut out: Vec<LineString<f64>> = Vec::new();
+    for ls in line_strings(line) {
+        if ls.0.len() < 2 {
+            continue;
+        }
+        let path: Vec<[f64; 2]> = ls.0.iter().map(|c| [c.x, c.y]).collect();
+        for piece in path.clip_by(&shapes, FillRule::EvenOdd, rule) {
+            if piece.len() < 2 {
+                continue;
+            }
+            out.push(LineString(piece.into_iter().map(|p| Coord { x: p[0], y: p[1] }).collect()));
+        }
+    }
+    out
+}
+
+/// `a − b` for two 1-D operands (line − line): the portions of `a` not
+/// collinearly covered by `b`. Crossing points are measure-zero in a 1-D point
+/// set, so only the COLLINEAR overlaps of `b` are removed (a curve minus a set
+/// of isolated points is the same curve). Implemented by linear referencing:
+/// for each segment of `a`, subtract the parameter intervals where a segment of
+/// `b` overlaps it.
+fn line_minus_lines(a: &Geometry<f64>, b: &Geometry<f64>) -> Vec<LineString<f64>> {
+    let mut pieces: Vec<LineString<f64>> = Vec::new();
+    let b_segs: Vec<Line<f64>> =
+        line_strings(b).iter().flat_map(|ls| ls.lines().collect::<Vec<_>>()).collect();
+    for la in line_strings(a) {
+        for seg in la.lines() {
+            if coord_eq(seg.start, seg.end) {
+                continue;
+            }
+            // Covered parameter intervals [lo, hi] ⊆ [0,1] where `b` overlaps.
+            let mut covered: Vec<(f64, f64)> = Vec::new();
+            for bseg in &b_segs {
+                if let Some(LineIntersection::Collinear { intersection }) =
+                    line_intersection(seg, *bseg)
+                {
+                    let mut t0 = param_of(seg, intersection.start);
+                    let mut t1 = param_of(seg, intersection.end);
+                    if t0 > t1 {
+                        std::mem::swap(&mut t0, &mut t1);
+                    }
+                    let t0 = t0.clamp(0.0, 1.0);
+                    let t1 = t1.clamp(0.0, 1.0);
+                    if t1 - t0 > 1e-12 {
+                        covered.push((t0, t1));
+                    }
+                }
+            }
+            // Emit the GAPS between covered intervals as surviving sub-segments.
+            covered.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+            let mut cursor = 0.0_f64;
+            for (lo, hi) in covered {
+                if lo - cursor > 1e-12 {
+                    pieces.push(LineString(vec![at_param(seg, cursor), at_param(seg, lo)]));
+                }
+                cursor = cursor.max(hi);
+            }
+            if 1.0 - cursor > 1e-12 {
+                pieces.push(LineString(vec![at_param(seg, cursor), at_param(seg, 1.0)]));
+            }
+        }
+    }
+    merge_pieces(&mut pieces);
+    pieces
+}
+
 // ---- union ------------------------------------------------------------------------
 
 /// `geof:union` — the geometry of the points in `a` OR `b`.
@@ -795,11 +930,13 @@ fn union_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<f64>,
 ///
 /// - polygon − polygon → MULTIPOLYGON (`geo`'s `BooleanOps`),
 /// - point − anything → the points of `a` that do NOT lie on `b` (MULTIPOINT),
-/// - point − point (special-cased by the above): exact set subtraction.
-///
-/// 1-D − anything (line − line / line − polygon) needs linear-referencing
-/// subtraction that `geo` does not provide, so it is a clean
-/// [`GeoError::Unsupported`] rather than a wrong answer.
+/// - point − point (special-cased by the above): exact set subtraction,
+/// - line − polygon → the portions of the line OUTSIDE the polygon, as a
+///   (MULTI)LINESTRING (`i_overlay` string-line clip), [OPUS-4.8]
+/// - line − line → the portions of `a` not collinearly overlapped by `b`
+///   (linear-referencing subtraction; crossing points are measure-zero), [OPUS-4.8]
+/// - polygon − line / polygon − point → the polygon unchanged (subtracting a
+///   lower-dimensional, measure-zero set from a surface leaves it intact).
 pub fn difference(a: &GeoGeometry, b: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     ensure_compatible(a, b)?;
     let geometry = difference_geometry(&a.geometry, &b.geometry)?;
@@ -822,10 +959,27 @@ fn difference_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<
                 .collect();
             Ok(collect_points(kept))
         }
-        // 1-D / 2-D minus a lower-or-equal non-polygonal operand is not tractable
-        // with geo's primitives (no linear-referencing subtraction).
+        // Line − point: a point is measure-zero in a curve, so the line is
+        // unchanged.
+        (Some(1), Some(0)) => Ok(a.clone()),
+        // Line − line: subtract `b`'s collinear overlaps from `a`. [OPUS-4.8]
+        (Some(1), Some(1)) => Ok(collect_lines(line_minus_lines(a, b))),
+        // Line − polygon: keep the line OUTSIDE the polygon. The polygon is a
+        // CLOSED set, so a span lying ALONG its boundary belongs to the polygon
+        // and is removed — `boundary_included: true` under `invert` excludes the
+        // boundary from the "outside" result, making line−polygon the exact
+        // complement of line∩polygon (verified). [OPUS-4.8]
+        (Some(1), Some(2)) => {
+            let poly = polygonal(b).unwrap();
+            Ok(collect_lines(clip_line_by_polygon(a, &poly, true, true)))
+        }
+        // Polygon − (line | point): removing a measure-zero set leaves the
+        // surface unchanged.
+        (Some(2), Some(0)) | (Some(2), Some(1)) => Ok(a.clone()),
+        // No remaining combinations: only mixes involving a heterogeneous
+        // collection (dimension None) reach here, already handled above.
         _ => Err(GeoError::Unsupported(format!(
-            "geof:difference does not support {} − {} (no linear-referencing subtraction in geo)",
+            "geof:difference does not support {} − {}",
             wkt_type_name(a),
             wkt_type_name(b)
         ))),
@@ -839,10 +993,11 @@ fn difference_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> Result<Geometry<
 /// - point ∆ point → MULTIPOINT (the symmetric difference of the coord sets),
 /// - point ∆ line/polygon (either order) → the points of the 0-D operand not on
 ///   the other, unioned with the other operand (a GEOMETRYCOLLECTION when mixed
-///   dimension).
-///
-/// line ∆ line / line ∆ polygon are unsupported for the same reason as
-/// [`difference`].
+///   dimension),
+/// - line ∆ line → (a−b) ∪ (b−a): the non-shared portions of both curves, as a
+///   (MULTI)LINESTRING (linear-referencing subtraction), [OPUS-4.8]
+/// - line ∆ polygon (either order) → (line outside polygon) ∪ polygon, a
+///   GEOMETRYCOLLECTION (polygon − line is the polygon unchanged). [OPUS-4.8]
 pub fn sym_difference(a: &GeoGeometry, b: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     ensure_compatible(a, b)?;
     let geometry = sym_difference_geometry(&a.geometry, &b.geometry)?;
@@ -869,20 +1024,16 @@ fn sym_difference_geometry(
             out.extend(cb.iter().filter(|c| !ca.iter().any(|d| coord_eq(**c, *d))).copied());
             Ok(collect_points(out))
         }
-        // Point ∆ (line | polygon): (point − other) ∪ other.
-        (Some(0), Some(_)) => {
-            let pts = difference_geometry(a, b)?;
-            union_geometry(&pts, b)
+        // Every remaining combination is the generic symmetric difference
+        // (a−b) ∪ (b−a). With `difference_geometry` now covering the 1-D cases,
+        // this serves point∆line/polygon, line∆line, and line∆polygon alike;
+        // `union_geometry` collapses same-dimension results and emits a
+        // GEOMETRYCOLLECTION for mixed dimensions. [OPUS-4.8]
+        _ => {
+            let left = difference_geometry(a, b)?;
+            let right = difference_geometry(b, a)?;
+            union_geometry(&left, &right)
         }
-        (Some(_), Some(0)) => {
-            let pts = difference_geometry(b, a)?;
-            union_geometry(a, &pts)
-        }
-        _ => Err(GeoError::Unsupported(format!(
-            "geof:symDifference does not support {} ∆ {} (no linear-referencing subtraction in geo)",
-            wkt_type_name(a),
-            wkt_type_name(b)
-        ))),
     }
 }
 
@@ -1109,8 +1260,8 @@ pub mod lex {
         union
     );
     lex_set_operation!(
-        /// `geof:difference(?a, ?b)` -> wktLiteral lexical form (polygon − polygon
-        /// and point − anything; see [`super::difference`]).
+        /// `geof:difference(?a, ?b)` -> wktLiteral lexical form (polygon, point,
+        /// AND line operands incl. 1-D subtraction; see [`super::difference`]).
         difference
     );
     lex_set_operation!(
