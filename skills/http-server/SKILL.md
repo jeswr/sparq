@@ -205,6 +205,19 @@ curl -X DELETE 'http://127.0.0.1:3030/sparql/graph?graph=http://ex/g'
 curl http://127.0.0.1:3030/health                               # -> "ok"
 curl http://127.0.0.1:3030/metrics                              # Prometheus text exposition
 ```
+
+`/metrics` is hand-rolled Prometheus text exposition (no metrics dependency); the
+middleware wraps the whole hardening stack, so shed (`429`), body-limit (`413`) and panic
+(`500`) responses are counted with the status the client saw:
+
+| Metric | Type | What |
+| --- | --- | --- |
+| `sparq_http_requests_total{endpoint,status}` | counter | requests by endpoint + response status |
+| `sparq_query_duration_seconds` | histogram | wall time of `/sparql` (query + update); buckets 1 ms … 10 s |
+| `sparq_active_subscriptions` | gauge | active WebSocket subscriptions (scrape time) |
+| `sparq_graph_triples` | gauge | triples in the published graph (scrape time) |
+| `sparq_updates_total` | counter | successfully applied SPARQL updates |
+
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot
