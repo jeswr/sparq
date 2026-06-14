@@ -420,14 +420,23 @@ mod tests {
 
     #[test]
     fn untampered_full_set_reconstructs() {
-        // Differential vs honest Lagrange on clean inputs: no regression.
+        // [OPUS-4.8] Genuine differential vs the UNCHECKED Lagrange primitive on
+        // clean inputs: no regression. We must NOT compare against
+        // `ShamirBackend::reconstruct`, which now routes through
+        // `reconstruct_robust` itself (robust-vs-robust is vacuous). Compare the
+        // robust path against `reconstruct_at_zero` (the plain Lagrange-at-0
+        // building block, `pub(crate)` for exactly this suite) so the assertion
+        // genuinely pins robust == honest-Lagrange with no errors present.
         let b = ShamirBackend::new_seeded(7, 0xC0FFEE).unwrap();
         let t = b.threshold();
         for secret in [0u64, 1, 42, 100_000, crate::field::P - 1] {
             let shares = b.dealer().share(fp(secret));
             let robust = reconstruct_robust(&shares, t).unwrap();
-            let honest = b.reconstruct(&shares).unwrap();
-            assert_eq!(robust, honest, "robust must match honest on clean input");
+            let honest = crate::shamir::reconstruct_at_zero(&shares, t).unwrap();
+            assert_eq!(
+                robust, honest,
+                "robust must match unchecked Lagrange on clean input"
+            );
             assert_eq!(robust, fp(secret));
         }
     }
@@ -465,10 +474,13 @@ mod tests {
 
     #[test]
     fn corrects_two_tampers_at_n9() {
-        // n=9, t=2 → e_max = floor((9-2-1)/2) = 3: correct up to THREE errors.
+        // [OPUS-4.8] The backend fixes t = floor((n-1)/2), so for n=9, t=4 (NOT
+        // t=2). With t=4 the BW correction budget is e_max = floor((n-t-1)/2) =
+        // floor((9-4-1)/2) = 2: this test corrects exactly e_max = 2 errors and
+        // then asserts that a 3rd error (over budget) aborts.
         let b = ShamirBackend::new_seeded(9, 0x9999).unwrap();
         let t = b.threshold();
-        assert_eq!(t, 4); // (9-1)/2
+        assert_eq!(t, 4); // floor((9-1)/2) = 4
                           // t=4 ⇒ e_max = floor((9-4-1)/2) = 2: correct up to TWO errors.
         let secret = fp(555_555);
         let mut shares = b.dealer().share(secret);
