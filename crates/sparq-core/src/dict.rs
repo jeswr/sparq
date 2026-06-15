@@ -2043,7 +2043,9 @@ impl ShardedDict {
         // reserves the top stride-band for the triple shard so its temp ids stay below
         // INLINE_BASE; leaf shards' FINAL ids are unaffected (final = base + local).
         ShardedDict {
-            shards: (0..n_leaf + 1).map(|_| Dict::new()).collect(),
+            // [OPUS-4.8] `0..(n_leaf + 1)` (== `0..=n_leaf`) — `n_leaf` leaf shards plus the
+            // one trailing triple-term shard. Parenthesised so the bound reads unambiguously.
+            shards: (0..(n_leaf + 1)).map(|_| Dict::new()).collect(),
             n_leaf,
             stride: INLINE_BASE / (n_leaf as u32 + 1),
         }
@@ -2135,7 +2137,13 @@ impl ShardedDict {
     /// the per-partial remap entry of each component, leaf or nested triple, is already
     /// filled when the triple is reached). Triple terms are reification metadata (rare), so
     /// the serial pass is not on the hot path.
-    pub fn intern_partials(&mut self, partials: &[(Dict, Vec<[Id; 3]>)]) -> Vec<Vec<Id>> {
+    ///
+    /// # Errors
+    /// [OPUS-4.8] Returns `Err` if a partial is malformed — a triple term whose component
+    /// local id is out of the partial's range, or references a slot that was never
+    /// routed/interned (e.g. children-first arena ordering was violated). Such input is
+    /// rejected with a descriptive message rather than silently mis-indexing the remap.
+    pub fn intern_partials(&mut self, partials: &[(Dict, Vec<[Id; 3]>)]) -> Result<Vec<Vec<Id>>, String> {
         let n = self.n_leaf;
         let stride = self.stride;
         // Route each partial's LEAF terms to per-leaf-shard sub-buckets (parallel over
@@ -2204,8 +2212,8 @@ impl ShardedDict {
         self.shards[..n].iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
 
         // [OPUS-4.8] (sq-t3rt) Serial second pass — triple terms into the triple shard.
-        self.intern_triple_terms(partials, &mut remaps);
-        remaps
+        self.intern_triple_terms(partials, &mut remaps)?;
+        Ok(remaps)
     }
 
     /// [OPUS-4.8] (sq-t3rt) Intern every partial's RDF 1.2 triple terms into the dedicated
@@ -2216,19 +2224,44 @@ impl ShardedDict {
     /// term↔id bijection the hash-routed path could not preserve). Serial: triple-shard id
     /// assignment must follow first-occurrence (partial, then arena) order deterministically,
     /// and triple terms are rare metadata.
-    fn intern_triple_terms(&mut self, partials: &[(Dict, Vec<[Id; 3]>)], remaps: &mut [Vec<Id>]) {
+    fn intern_triple_terms(&mut self, partials: &[(Dict, Vec<[Id; 3]>)], remaps: &mut [Vec<Id>]) -> Result<(), String> {
         let tshard_idx = self.n_leaf; // the triple shard
         let stride = self.stride;
         // Resolve a component LOCAL id to its TEMP id via this partial's remap. Inline
         // integers (≥ INLINE_BASE) are global and pass through unchanged. A component is a
         // leaf (filled by the parallel pass) or a NESTED triple term (filled earlier in this
         // same ordered walk — children always precede their parent in arena order).
+        //
+        // [OPUS-4.8] (sq-t3rt review) A component id is VALIDATED before it indexes the remap:
+        // a malformed partial that violated children-first arena ordering, or that carried a
+        // component id which was never routed/interned, would otherwise index a wrong/empty
+        // slot silently. Both failures are recoverable bad input, not invariant breaches, so
+        // we return a descriptive `Err` rather than panicking or producing a garbage id. The
+        // leaf pass fills every routed slot with `base + local ≥ stride > 0`, so a remaining
+        // `0` marks an unpopulated (hence un-resolvable) component slot.
         for (pidx, (pd, _)) in partials.iter().enumerate() {
             for i in 1..=pd.len() as Id {
                 if let TermParts::Triple(local_ids) = pd.term_parts(i) {
                     let rm = &remaps[pidx];
-                    let resolve = |id: Id| if is_inline(id) { id } else { rm[id as usize] };
-                    let temp_ids = [resolve(local_ids[0]), resolve(local_ids[1]), resolve(local_ids[2])];
+                    let resolve = |id: Id| -> Result<Id, String> {
+                        if is_inline(id) {
+                            return Ok(id);
+                        }
+                        let slot = *rm.get(id as usize).ok_or_else(|| {
+                            format!(
+                                "malformed triple term in partial {pidx}: component local id {id} out of range (remap len {})",
+                                rm.len()
+                            )
+                        })?;
+                        if slot == 0 {
+                            return Err(format!(
+                                "malformed triple term in partial {pidx}: component local id {id} references an unpopulated slot \
+                                 (not routed/interned, or violates children-first ordering)"
+                            ));
+                        }
+                        Ok(slot)
+                    };
+                    let temp_ids = [resolve(local_ids[0])?, resolve(local_ids[1])?, resolve(local_ids[2])?];
                     let lid = self.shards[tshard_idx].intern_triple_ids(temp_ids);
                     // The triple shard, like every shard, must not overflow its STRIDE band.
                     assert!(lid < stride, "triple shard exceeded STRIDE ({stride}) — raise shard count / widen Id");
@@ -2236,6 +2269,7 @@ impl ShardedDict {
                 }
             }
         }
+        Ok(())
     }
 
     /// `base[s]` = number of terms in shards `< s` (the final id of shard `s`'s local 1 is
@@ -2741,6 +2775,55 @@ mod tests {
         assert_eq!(d2.term(iid), inner);
         assert_eq!(d2.lookup(&outer), oid);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-t3rt review) `intern_triple_terms` must REJECT a malformed partial whose
+    /// triple-term component id is out of range or references an unpopulated remap slot, rather
+    /// than silently mis-indexing the per-partial remap (returning garbage / panicking).
+    #[test]
+    fn intern_partials_rejects_malformed_triple_component() {
+        // Build a partial Dict with two real leaf terms (local ids 1, 2) followed by a triple
+        // term whose components reference an OUT-OF-RANGE local id (> pd.len()). The valid
+        // path always interns components first (children-first), so we use the low-level
+        // `intern_triple_ids` to forge the malformed arena a tampered/buggy producer might.
+        let mut pd = Dict::new();
+        let s = pd.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/s"))); // local 1
+        let p = pd.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/p"))); // local 2
+        let bogus = pd.len() as Id + 5; // out of range: no such local id exists
+        let _tt = pd.intern_triple_ids([s, p, bogus]);
+        let partials = vec![(pd, Vec::<[Id; 3]>::new())];
+
+        let mut sd = ShardedDict::new(4);
+        let err = sd
+            .intern_partials(&partials)
+            .expect_err("an out-of-range triple component id must be a descriptive Err, not garbage/panic");
+        assert!(err.contains("out of range"), "error should name the out-of-range cause: {err:?}");
+
+        // Second case: an IN-RANGE but UNPOPULATED component slot. The triple references a
+        // non-inline local id whose remap slot the leaf pass never fills (here the triple's
+        // own not-yet-written slot — a children-first ordering violation), so `rm[id]` is the
+        // `0` sentinel rather than a routed `base + local` temp id.
+        let mut pd2 = Dict::new();
+        let a = pd2.intern(&Term::NamedNode(NamedNode::new_unchecked("http://ex/a"))); // local 1
+        let phantom = pd2.len() as Id + 1; // == 2: the triple term's OWN slot, unwritten when resolved
+        let _tt2 = pd2.intern_triple_ids([a, a, phantom]);
+        let partials2 = vec![(pd2, Vec::<[Id; 3]>::new())];
+
+        let mut sd2 = ShardedDict::new(4);
+        let err2 = sd2
+            .intern_partials(&partials2)
+            .expect_err("an unpopulated triple component slot must be a descriptive Err, not garbage/panic");
+        assert!(
+            err2.contains("out of range") || err2.contains("unpopulated"),
+            "error should name the out-of-range / unpopulated cause: {err2:?}"
+        );
+
+        // Sanity: a WELL-FORMED triple-term partial still succeeds (no false rejection).
+        let mut pdok = Dict::new();
+        let _ok = pdok.intern(&triple("http://ex/x", "http://ex/y", int("7")));
+        let mut sdok = ShardedDict::new(4);
+        sdok.intern_partials(&[(pdok, Vec::<[Id; 3]>::new())])
+            .expect("a well-formed triple-term partial must intern without error");
     }
 
     #[cfg(feature = "mmap")]

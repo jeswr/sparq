@@ -1023,7 +1023,9 @@ impl Graph {
             // assignment matches the non-pipelined load (deterministic).
             for partials in prx {
                 if sharded {
-                    sharded_extend(&mut sd, &partials, &mut all);
+                    // [OPUS-4.8] Propagate a malformed-triple-term error (the streaming sharded
+                    // path is not triple-term-guarded) instead of panicking.
+                    sharded_extend(&mut sd, &partials, &mut all)?;
                 } else {
                     for (pd, pt) in partials {
                         let remap = global.merge_remap(&pd);
@@ -2689,7 +2691,10 @@ fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
     // ceiling — load plateaued at ~1.8× on 4 identical cores — was exactly this stage).
     let mut sd = dict::ShardedDict::new(default_shards());
     let mut all: Vec<[Id; 3]> = Vec::with_capacity(total);
-    sharded_extend(&mut sd, &partials, &mut all);
+    // [OPUS-4.8] `sharded_extend` can only `Err` on a malformed triple term, but the guard
+    // above (`has_triple_terms` ⇒ serial path) means this branch is triple-term-free — so an
+    // error here is an internal invariant breach, not recoverable input. Surface it loudly.
+    sharded_extend(&mut sd, &partials, &mut all).expect("sharded merge: triple-term-free path must not error");
     finish_sharded(sd, all)
 }
 
@@ -2704,15 +2709,22 @@ fn default_shards() -> usize {
 /// triples (remapped to TEMPORARY sharded ids, inline ids passing through) to `all` — the
 /// parallel-merge step shared by the in-memory N-Triples loaders. The remap gather runs
 /// in parallel (indexed `par_extend`, deterministic order).
+// [OPUS-4.8] Returns `Err` (propagated, not panicking) when a partial carries a malformed
+// triple term — see `ShardedDict::intern_partials`.
 #[cfg(feature = "parallel")]
-fn sharded_extend(sd: &mut dict::ShardedDict, partials: &[(Dict, Vec<[Id; 3]>)], all: &mut Vec<[Id; 3]>) {
+fn sharded_extend(
+    sd: &mut dict::ShardedDict,
+    partials: &[(Dict, Vec<[Id; 3]>)],
+    all: &mut Vec<[Id; 3]>,
+) -> Result<(), String> {
     use rayon::prelude::*;
-    let remaps = sd.intern_partials(partials);
+    let remaps = sd.intern_partials(partials)?;
     for (pidx, (_, ptriples)) in partials.iter().enumerate() {
         let rm = &remaps[pidx];
         let map = |id: Id| if id >= dict::INLINE_BASE { id } else { rm[id as usize] };
         all.par_extend(ptriples.par_iter().map(|&[s, p, o]| [map(s), map(p), map(o)]));
     }
+    Ok(())
 }
 
 /// Consolidates the sharded dict into one `Dict` (parallel arena move + parallel-hash
@@ -3381,7 +3393,8 @@ fn build_external_ntriples_sharded<R: std::io::Read + Send>(
         let feed = || -> Result<(), String> {
             for partials in prx {
                 let t_merge = build_timing::start(timing);
-                let remaps = sharded.intern_partials(&partials);
+                // [OPUS-4.8] Propagate a malformed-triple-term error instead of panicking.
+                let remaps = sharded.intern_partials(&partials)?;
                 build_timing::record(t_merge, &build_timing::MERGE_NS);
                 if rtx.send((partials, remaps)).is_err() {
                     return Ok(()); // the remap stage errored and dropped the receiver
