@@ -277,19 +277,21 @@ fn greater_than_public_bits(
     for k in (0..COMPARE_BITS).rev() {
         let a_k = &a_bits[k];
         let b_k = (pub_val >> k) & 1;
-        // a_k ∧ ¬b_k with b_k PUBLIC: if b_k=0 this is just a_k; if b_k=1 it is 0.
         // a_k == b_k with b_k PUBLIC: if b_k=1 it is a_k; if b_k=0 it is 1 - a_k.
-        let (a_gt_b_here, eq_here): (Vec<Share>, Vec<Share>) = if b_k == 1 {
-            // a_k ∧ ¬1 = 0 ; (a_k == 1) == a_k
-            (const_sharing(n, Fp::zero()), a_k.clone())
+        let eq_here: Vec<Share> = if b_k == 1 {
+            // [OPUS-4.8] When b_k=1, a_k ∧ ¬b_k = a_k ∧ ¬1 = 0 is a PUBLIC CONSTANT,
+            // so term = eq · 0 = 0 and `gt` is unchanged — adding it is a no-op.
+            // SKIP the `secret_and(dealer, &eq, a_gt_b_here)` here: it would be a
+            // wasted mul + degree-reduce round on a known-zero operand. Only the
+            // `eq` update remains a secure multiplication. (a_k == 1) == a_k.
+            a_k.clone()
         } else {
-            // a_k ∧ ¬0 = a_k ; (a_k == 0) == 1 - a_k
-            let not_a = shamir::add_constant(&shamir::scale(a_k, Fp::one().neg()), Fp::one());
-            (a_k.clone(), not_a)
+            // b_k=0: a_k ∧ ¬0 = a_k, so term = eq · a_k IS a real secure mult.
+            // (a_k == 0) == 1 - a_k.
+            let term = secret_and(dealer, &eq, a_k)?;
+            gt = shamir::add_shares(&gt, &term)?;
+            shamir::add_constant(&shamir::scale(a_k, Fp::one().neg()), Fp::one())
         };
-        // term = eq · (a_k ∧ ¬b_k) — one secure multiplication.
-        let term = secret_and(dealer, &eq, &a_gt_b_here)?;
-        gt = shamir::add_shares(&gt, &term)?;
         // eq = eq · (a_k == b_k) — one secure multiplication.
         eq = secret_and(dealer, &eq, &eq_here)?;
     }
@@ -380,21 +382,42 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// [`crate::shamir::ShamirBackend::run_secure`]); `public_threshold` is the public
 /// bar (e.g. £100k). Only the 1-bit verdict ever leaves the computation.
 ///
-/// NB on the in-process simulation: because this plays all parties in one process,
-/// it obtains the sum value by reconstructing `sum_shares` LOCALLY to re-deal its
-/// bits — the dealer legitimately holds cleartext to *share* it (mirroring
-/// `secure_equal`/[`share_bits`]). In a deployed protocol the parties would
-/// bit-decompose the EXISTING sum sharing in-MPC (a known sub-protocol — secret
-/// bit-decomposition, e.g. via edaBits) without any single party seeing the sum;
-/// that bit-decomposition-of-an-existing-sharing is the residual deployment step
-/// (tracked as a follow-up bead — see the PR). The DISCLOSURE guarantee — only the
-/// verdict bit leaves the computation — holds in both: the returned partial carries
-/// the boolean alone, never the integer total.
+/// [OPUS-4.8] NB on the in-process simulation — REAL protocol vs SIMULATION (be
+/// precise, do not overclaim "the sum is never reconstructed"): in the REAL
+/// multi-party protocol the sum stays secret-shared end-to-end — the parties
+/// bit-decompose the EXISTING sum sharing IN-MPC (a known secret bit-decomposition
+/// sub-protocol, e.g. via edaBits) so no single party ever sees the total, and only
+/// the verdict bit is opened. In THIS in-process SIMULATION, however, the routine
+/// plays ALL parties in one process, so it obtains the sum by reconstructing
+/// `sum_shares` LOCALLY and re-deals its bits — legitimate ONLY because one process
+/// holds every share (mirroring how the dealer holds cleartext to *share* inputs;
+/// cf. `secure_equal`/[`share_bits`]). That local open is a simulation artefact, not
+/// a disclosure: it never crosses the API boundary. The DISCLOSURE guarantee — only
+/// the verdict bit ever LEAVES the computation — holds in both: the returned partial
+/// carries the boolean alone, never the integer total. Removing even the
+/// simulation-local open (in-MPC bit-decomposition of the existing sum sharing) is
+/// the residual deployment step, tracked as a follow-up bead (sq-g7t5).
 pub fn disclose_threshold_verdict(
     backend: &ShamirBackend,
     sum_shares: &[Share],
     public_threshold: u64,
 ) -> Result<PartialResult, MpcError> {
+    // [OPUS-4.8] Fail closed BEFORE `Fp::new` reduces mod p. A `public_threshold`
+    // >= p would wrap to an in-range element and silently compare against the wrong
+    // bar; even a threshold in `[2^60, p)` is meaningless to the bit-decomposition
+    // comparison (it cannot represent it). Reject anything outside the SAME no-wrap
+    // safe range (`< 2^COMPARE_BITS`) the operands use, with a descriptive error,
+    // rather than `Fp::new` silently wrapping. `check_in_range` below re-validates
+    // the reduced element, but it would only see the post-wrap value — so the bound
+    // must be enforced on the raw `u64` here.
+    if public_threshold >= COMPARE_MAX_EXCLUSIVE {
+        return Err(MpcError::Protocol(format!(
+            "disclose_threshold_verdict: public_threshold = {public_threshold} is out of range \
+             (must be < 2^{COMPARE_BITS} = {COMPARE_MAX_EXCLUSIVE} so it neither wraps the field \
+             modulus p = 2^61-1 under Fp::new nor exceeds the bit-decomposition comparison's \
+             representable range)"
+        )));
+    }
     let sum = backend.reconstruct(sum_shares)?;
     let mut dealer = backend.dealer();
     let verdict_shares = secure_threshold(&mut dealer, sum, Fp::new(public_threshold))?;
@@ -413,8 +436,16 @@ mod tests {
     //! sq-rrz4 acceptance suite. The load-bearing ones are:
     //! - `differential_*`: across many (a,b)/(sum,threshold) pairs incl. edges,
     //!   the reconstructed verdict equals the plaintext `a > b` / `sum > threshold`.
-    //! - `disclosure_minimisation_*`: only the 1-bit verdict is reconstructed; the
-    //!   operand/sum value is never opened on the verdict path.
+    //! - `disclosure_minimisation_*`: only the 1-bit verdict ever LEAVES the
+    //!   computation. [OPUS-4.8] Precise claim: in the REAL multi-party protocol the
+    //!   operands and the sum stay secret-shared and are bit-decomposed in-MPC, so
+    //!   nothing but the verdict bit is ever opened. In THIS in-process SIMULATION
+    //!   `disclose_threshold_verdict` does a local `reconstruct(sum_shares)` — but
+    //!   only because one process holds ALL shares, exactly as the dealer holds
+    //!   cleartext to *share* inputs; that local open re-deals the sum's bits and
+    //!   never crosses the API boundary. The DISCLOSURE guarantee (only the boolean
+    //!   verdict is returned, never the operand/sum integer) holds in both, and the
+    //!   tests assert it structurally on the returned partial.
     //! - `verdict_is_valid_degree_t_bit_sharing`: the result reconstructs
     //!   consistently to a 0/1 from ANY t+1 shares.
     //! - `*_fails_closed`: n<2t+1 and out-of-range operands are descriptive errors.
@@ -685,6 +716,71 @@ mod tests {
         let mut d2 = backend.dealer();
         assert!(
             secure_greater_than(&mut d2, Fp::new(COMPARE_MAX_EXCLUSIVE - 1), Fp::new(0)).is_ok()
+        );
+    }
+
+    #[test]
+    fn disclose_threshold_out_of_range_public_threshold_fails_closed() {
+        // [OPUS-4.8] A `public_threshold` outside the safe no-wrap range must be
+        // REJECTED fail-closed, NOT silently reduced mod p by `Fp::new`. We exercise
+        // two distinct hazards:
+        //   (a) threshold >= p (= 2^61 - 1): `Fp::new` would wrap it to an in-range
+        //       element, silently comparing the sum against the WRONG bar.
+        //   (b) threshold in [2^60, p): in canonical range for Fp but NOT
+        //       representable by the COMPARE_BITS bit-decomposition comparison.
+        // Both must surface a descriptive Protocol error from disclose_threshold_verdict.
+        let backend = ShamirBackend::new_seeded(5, 0x7e57).unwrap();
+        // A small, legitimate secret-shared sum to compare against.
+        let summed = {
+            use crate::backend::MpcBackend;
+            let shared: Vec<Vec<Share>> = [50_000u64, 50_000]
+                .iter()
+                .map(|&s| backend.dealer().share(Fp::new(s)))
+                .collect();
+            backend.run_secure(&shared).unwrap()
+        };
+
+        // (a) threshold >= p would wrap under Fp::new — must be refused, not wrapped.
+        let p = (1u64 << 61) - 1;
+        for over_p in [p, p + 7, u64::MAX] {
+            let err = disclose_threshold_verdict(&backend, &summed[0], over_p).unwrap_err();
+            match err {
+                MpcError::Protocol(m) => assert!(
+                    m.contains("out of range") && m.contains("2^60"),
+                    "expected fail-closed range error for threshold {over_p}, got: {m}"
+                ),
+                other => panic!("expected Protocol range error, got {other:?}"),
+            }
+        }
+
+        // Concretely prove it did NOT silently wrap: p + 1 ≡ 1 (mod p). If the bound
+        // were missing, the threshold would become 1 and the (100_000 > 1) verdict
+        // would be `true`. The fail-closed error is returned instead.
+        assert!(matches!(
+            disclose_threshold_verdict(&backend, &summed[0], p + 1),
+            Err(MpcError::Protocol(_))
+        ));
+
+        // (b) threshold in [2^60, p): canonical Fp element but out of the
+        // bit-decomposition's representable range — also refused fail-closed.
+        for in_field_but_oob in [
+            COMPARE_MAX_EXCLUSIVE,
+            COMPARE_MAX_EXCLUSIVE + 1,
+            (1u64 << 61) - 2,
+        ] {
+            assert!(
+                matches!(
+                    disclose_threshold_verdict(&backend, &summed[0], in_field_but_oob),
+                    Err(MpcError::Protocol(_))
+                ),
+                "threshold {in_field_but_oob} (>= 2^60) must fail closed"
+            );
+        }
+
+        // The maximum IN-range threshold (2^60 - 1) is still accepted (boundary is
+        // exclusive) — the guard rejects only out-of-range values, not valid ones.
+        assert!(
+            disclose_threshold_verdict(&backend, &summed[0], COMPARE_MAX_EXCLUSIVE - 1).is_ok()
         );
     }
 
