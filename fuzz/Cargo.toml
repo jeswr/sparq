@@ -34,6 +34,10 @@ libfuzzer-sys = "0.4"
 # store) and `parallel` (for `load_reader_parallel`'s pipelined N-Triples path).
 sparq-core = { path = "../crates/sparq-core", features = ["mmap", "parallel"] }
 sparq-engine = { path = "../crates/sparq-engine" }
+# SHACL validation under test (bead sq-o4pi). Opt-in crate (the sparq-reason isolation
+# pattern); pulled in here ONLY for the `validate_shacl` target, never by the workspace
+# default build. [OPUS-4.8]
+sparq-shacl = { path = "../crates/sparq-shacl" }
 # Temp store directories for the `Graph::open` hostile-bytes target.
 tempfile = "3"
 
@@ -77,6 +81,16 @@ bench = false
 [[bin]]
 name = "graph_open"
 path = "fuzz_targets/graph_open.rs"
+test = false
+doc = false
+bench = false
+
+# bead sq-o4pi: SHACL validation (shape-parse + traversal) over hostile (data, shapes)
+# bytes. Auto-discovered by the CI fuzz lane's `cargo fuzz list`, so it runs in the same
+# bounded per-PR / nightly budget as the targets above with no workflow list to edit. [OPUS-4.8]
+[[bin]]
+name = "validate_shacl"
+path = "fuzz_targets/validate_shacl.rs"
 test = false
 doc = false
 bench = false
