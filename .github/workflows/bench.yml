@@ -307,8 +307,12 @@ jobs:
           changed=0
           # [OPUS-4.8] metric-labels.json (sq-ocuf) is part of the served dashboard — copy it
           # alongside index.html/dashboard.js/dashboard.css so dashboard.js can fetch it.
-          for f in index.html dashboard.js dashboard.css metric-labels.json; do
+          # [OPUS-4.8] vendor/Chart.min.js (sq-0rv3) is loaded by index.html now that the
+          # CDN dep is dropped — seed it (in its subdir) so the published Pages dashboard
+          # doesn't 404. The path has a dirname, so mkdir -p before copying.
+          for f in index.html dashboard.js dashboard.css metric-labels.json vendor/Chart.min.js; do
             if [ ! -f "$tmp/dev/bench/$f" ] || ! cmp -s "$src/$f" "$tmp/dev/bench/$f"; then
+              mkdir -p "$(dirname "$tmp/dev/bench/$f")"
               cp "$src/$f" "$tmp/dev/bench/$f"
               changed=1
             fi
@@ -320,7 +324,7 @@ jobs:
           git -C "$tmp" -c user.name='github-actions[bot]' \
                         -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
                         add dev/bench/index.html dev/bench/dashboard.js dev/bench/dashboard.css \
-                            dev/bench/metric-labels.json
+                            dev/bench/metric-labels.json dev/bench/vendor/Chart.min.js
           git -C "$tmp" -c user.name='github-actions[bot]' \
                         -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
                         commit -q -m "chore(bench): seed/update Pages dashboard under dev/bench [skip ci]"
