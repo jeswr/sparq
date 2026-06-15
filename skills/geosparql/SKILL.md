@@ -1,6 +1,6 @@
 ---
 name: geosparql
-description: Use when adding GeoSPARQL spatial support to the sparq RDF/SPARQL engine — parsing geo:wktLiteral and geo:gmlLiteral (GML Simple-Features) geometries, calling geof: functions (distance, sf*/eh*/rcc8* DE-9IM relations, envelope/boundary/convexHull/buffer, intersection/union/difference/symDifference, getSRID) inside SPARQL FILTER/BIND/SELECT via the sparq-engine extension-function registry, or building an R-tree GeoIndex over a Graph for within_distance / nearest / intersects queries. Crate: sparq-geo.
+description: "Use when adding GeoSPARQL spatial support to the sparq RDF/SPARQL engine — parsing geo:wktLiteral and geo:gmlLiteral (GML Simple-Features) geometries, calling geof: functions (distance, sf*/eh*/rcc8* DE-9IM relations, envelope/boundary/convexHull/buffer, intersection/union/difference/symDifference, getSRID) inside SPARQL FILTER/BIND/SELECT via the sparq-engine extension-function registry, or building an R-tree GeoIndex over a Graph for within_distance / nearest / intersects queries. Crate: sparq-geo."
 ---
 
 # sparq-geosparql
