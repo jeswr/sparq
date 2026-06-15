@@ -1,0 +1,154 @@
+# Coverage-guided fuzz gate (bead sq-ovnf; threat-model T-PARSE-FUZZ + T-MMAP-FUZZ).
+# [OPUS-4.8]
+#
+# WHAT: builds + runs the cargo-fuzz / libFuzzer targets in `fuzz/` against the RDF +
+# SPARQL parsers and the mmap store loader. Each target's invariant is "hostile bytes
+# must produce a clean Err or bounded behaviour — NEVER a panic, OOM/overflow abort,
+# or UB"; libFuzzer reports any crash and (in CI) the run fails with the reproducer.
+#
+# TRIGGER + BUDGET (kept BOUNDED + non-flaky so it is a real but fast gate):
+#   - pull_request : SHORT per-target smoke (`SMOKE_SECS`, default 30s each). This job
+#     is auto-discovered by `ci-summary / gate` (its name has no "advisory"/
+#     "informational" token) so a crash on a PR BLOCKS the merge — the gate sq-ovnf
+#     wants. ~4 targets × 30s + build ≈ a few minutes on a warm cache.
+#   - push to main : LONGER per-target run (`MAIN_SECS`, default 120s each) for deeper
+#     coverage on the integration branch, where a few extra minutes are affordable.
+#   - schedule (nightly) : HEAVY per-target run (`NIGHTLY_SECS`, default 600s each) to
+#     let coverage accumulate well past what per-PR CI can afford.
+#   - workflow_dispatch : manual run at the push (main) budget.
+# The fuzz crate is OUTSIDE the cargo workspace (root `Cargo.toml` `exclude = [...,
+# "fuzz"]`) and needs NIGHTLY (libFuzzer codegen), so it never touches the stable
+# `cargo build`/`test`/`clippy --workspace` gate in ci.yml.
+#
+# Third-party actions are pinned by full commit SHA (supply-chain hardening); the
+# trailing `# vX.Y.Z` comment is what Dependabot follows to bump the pin.
+name: fuzz
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Daily heavy tier. 04:23 UTC (offset from ci.yml's 03:17 coverage cron so the two
+  # heavy nightly lanes do not contend for the same runner window).
+  schedule:
+    - cron: "23 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Per-target wall-clock budgets by trigger (seconds). Bounded so the lane is fast +
+  # non-flaky; libFuzzer's `-max_total_time` caps each target hard.
+  SMOKE_SECS: "30"
+  MAIN_SECS: "120"
+  NIGHTLY_SECS: "600"
+  # Build the fuzz targets for the GNU triple. On x86_64 Linux cargo-fuzz defaults to
+  # the MUSL target (static libc), which the address sanitizer rejects; the gnu target
+  # links libc dynamically and is sanitizer-compatible. (On the runner this is the host
+  # triple, so it is also the cheapest to build.)
+  FUZZ_BUILD_TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  fuzz:
+    name: cargo-fuzz (parsers + mmap loader, bounded)
+    runs-on: ubuntu-latest
+    # Generous ceiling above the worst case (nightly: 4 targets × 600s + build) so a
+    # hung target fails with a clear timeout rather than running away.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # cargo-fuzz REQUIRES nightly (libFuzzer sancov codegen / `-Zsanitizer`). Pin the
+      # nightly channel by date so the lane is reproducible and a future nightly
+      # regression cannot silently break it; bump the date deliberately.
+      - name: Install Rust (nightly, pinned)
+        # Same SHA-pinned dtolnay/rust-toolchain action the rest of CI uses; the
+        # `toolchain:` input selects the NIGHTLY channel (the action reads the channel
+        # from this input, not the pin), pinned by DATE so the lane is reproducible and
+        # a future nightly regression cannot silently break it — bump the date
+        # deliberately. cargo-fuzz REQUIRES nightly (libFuzzer sancov / `-Zsanitizer`).
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly via toolchain input
+        with:
+          toolchain: nightly-2026-06-11
+          components: rust-src
+          # We build for the GNU triple explicitly (see FUZZ_BUILD_TARGET below): on an
+          # x86_64 Linux runner cargo-fuzz DEFAULTS to `*-linux-musl`, whose statically
+          # linked libc is incompatible with the sanitizer ("sanitizer is incompatible
+          # with statically linked libc") and whose std is not installed — so we pin the
+          # gnu target and ensure its std/core is present.
+          targets: x86_64-unknown-linux-gnu
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # The fuzz crate has its OWN target dir + lockfile under `fuzz/`; key the
+          # cache on its manifests so it is not shared with the workspace build.
+          workspaces: "fuzz"
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-fuzz
+      - name: Pick the per-target budget for this trigger
+        id: budget
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            schedule)          secs="$NIGHTLY_SECS" ;;
+            pull_request)      secs="$SMOKE_SECS" ;;
+            push|workflow_dispatch|*) secs="$MAIN_SECS" ;;
+          esac
+          echo "secs=$secs" >> "$GITHUB_OUTPUT"
+          echo "Per-target fuzz budget for '${{ github.event_name }}': ${secs}s"
+      # Build every target ONCE up front so a compile error is reported distinctly
+      # from a fuzzing crash, and the per-target runs below reuse the artifacts.
+      - name: Build fuzz targets
+        working-directory: fuzz
+        run: cargo +nightly-2026-06-11 fuzz build --target "$FUZZ_BUILD_TARGET"
+      # Runs ALL targets even if an earlier one crashes (each crash is recorded in
+      # `status`), then fails the gate at the end if ANY target crashed. This is
+      # deliberately run-all-then-fail rather than break-on-first: one CI run then
+      # surfaces EVERY crashing target + uploads EVERY reproducer in one pass, instead
+      # of hiding later findings behind the first failure. [OPUS-4.8]
+      - name: Run each target (bounded; run all, fail at end if any crashed)
+        working-directory: fuzz
+        env:
+          SECS: ${{ steps.budget.outputs.secs }}
+        run: |
+          set -euo pipefail
+          # `cargo fuzz list` enumerates the targets so adding a new fuzz_target file
+          # is picked up automatically (no list to keep in sync here).
+          targets="$(cargo +nightly-2026-06-11 fuzz list)"
+          echo "Targets: $targets"
+          status=0
+          for t in $targets; do
+            echo "::group::fuzz $t (-max_total_time=${SECS}s)"
+            # -max_total_time bounds wall-clock; -rss_limit_mb caps an allocator OOM so
+            # a hostile-bytes mega-allocation is reported as a finding, not a runner
+            # kill; -print_final_stats surfaces coverage/exec counts in the log. A
+            # nonzero exit (a crash/leak/timeout) is a genuine finding: we RECORD it in
+            # `status` and keep going so the remaining targets still run, then fail the
+            # gate once at the end (`exit "$status"`). [OPUS-4.8]
+            if ! cargo +nightly-2026-06-11 fuzz run --target "$FUZZ_BUILD_TARGET" "$t" -- \
+                  -max_total_time="${SECS}" -rss_limit_mb=2048 -print_final_stats=1; then
+              echo "::error::fuzz target '$t' reported a crash/leak/timeout — see the log + the saved reproducer artifact."
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          # Fail at the end iff ANY target above crashed (status was set to 1).
+          exit "$status"
+      # On a crash, libFuzzer writes the reproducing input to fuzz/artifacts/<target>/.
+      # Upload it so the failing case can be replayed locally with `cargo fuzz run
+      # <target> <artifact>`.
+      - name: Upload crash reproducers (on failure)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

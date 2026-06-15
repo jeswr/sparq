@@ -1119,6 +1119,9 @@ pub fn router(state: AppState) -> Router {
         .route("/graphs/{*path}", any(graph_store_direct))
         // SEPA-style SPARQL subscriptions over WebSocket (T23).
         .route("/subscriptions", get(crate::subscriptions::subscriptions_endpoint))
+        // [OPUS-4.8] sq-bxog: the same subscription engine over Server-Sent Events
+        // (text/event-stream) — one subscription per stream, query in the query string.
+        .route("/subscriptions/sse", get(crate::subscriptions::sse::sse_endpoint))
         // Liveness.
         .route("/health", get(|| async { "ok" }))
         // Prometheus metrics (T22).
@@ -2498,7 +2501,10 @@ fn chunked_response(status: StatusCode, content_type: &str, chunks: Vec<String>,
 
 /// Structured error body: every error the server emits is `{"error": "..."}` JSON, so
 /// programmatic clients never have to scrape prose out of plain text.
-fn json_error(status: StatusCode, msg: &str) -> Response {
+///
+/// [OPUS-4.8] sq-bxog: `pub(crate)` so the SSE subscription handler returns the SAME error
+/// envelope as the rest of the HTTP surface for a pre-stream registration refusal.
+pub(crate) fn json_error(status: StatusCode, msg: &str) -> Response {
     let mut body = String::with_capacity(msg.len() + 16);
     body.push_str("{\"error\":\"");
     for c in msg.chars() {

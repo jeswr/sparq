@@ -261,7 +261,11 @@ impl ShamirBackend {
             #[cfg(any(test, feature = "insecure-test-rng"))]
             RngSource::InsecureSeed(seed) => Box::new(crate::rng::InsecureTestRng::new(seed)),
         };
-        ShamirDealer { n: self.n, t: self.t, rng }
+        ShamirDealer {
+            n: self.n,
+            t: self.t,
+            rng,
+        }
     }
 
     /// Reconstruct the secret `f(0)` from `>= t+1` shares. Fewer than `t+1`
@@ -338,8 +342,157 @@ impl ShamirDealer {
             coeffs.push(self.rng.next_fp());
         }
         (1..=self.n as u64)
-            .map(|x| Share { x, y: eval_poly(&coeffs, Fp::new(x)) })
+            .map(|x| Share {
+                x,
+                y: eval_poly(&coeffs, Fp::new(x)),
+            })
             .collect()
+    }
+
+    /// **BGW/GRR degree-reduction round (sq-dvuc).** Reduce a degree-`2t` product
+    /// sharing back to a fresh degree-`t` sharing of the SAME secret, so that
+    /// secret-shared multiplications can **chain** (`a·b·c`, secure comparison /
+    /// threshold, conjunctive hidden-pattern joins) instead of being limited to a
+    /// single non-reducing product ([`mul_shares_raw`]). `[OPUS-4.8]`
+    ///
+    /// This is the standard **BGW** reduction with a **public recombination
+    /// vector** (Gennaro–Rabin–Rabin'98 simplification of BGW'88), run over the
+    /// in-process party simulation:
+    ///
+    /// 1. The component-wise product `h_i = f(x_i)·g(x_i)` of two degree-`t`
+    ///    sharings lies on a degree-`2t` polynomial `H` with `H(0) = a·b` (the
+    ///    secret product). Reconstructing `H(0)` from its first `2t+1` evaluation
+    ///    points is a FIXED public linear map — the Lagrange-at-0 weights
+    ///    `λ_1..λ_{2t+1}`: `H(0) = Σ_i λ_i · h_i`.
+    /// 2. Each simulated party `i` (`i = 1..2t+1`) **re-shares** its own degree-`2t`
+    ///    share value `h_i` under a FRESH, INDEPENDENT degree-`t` polynomial
+    ///    (`[h_i]_t`), using this dealer's masking RNG — a fresh OS-seeded ChaCha20
+    ///    CSPRNG in production (sq-1vt). This is the one (simulated) communication
+    ///    round.
+    /// 3. Every party then locally applies the SAME public recombination vector to
+    ///    the sub-shares it received: `[a·b]_t = Σ_i λ_i · [h_i]_t`. Because the
+    ///    `λ_i` are public scalars and the `[h_i]_t` are degree-`t` sharings, the
+    ///    result is a degree-`t` sharing whose secret is `Σ_i λ_i·H(x_i) = H(0) =
+    ///    a·b` — a fresh degree-`t` sharing of the original product.
+    ///
+    /// **Precondition (fail-closed):** `degree_reduce` requires `n >= 2t+1` (so a
+    /// degree-`2t` polynomial is determined by the `n` party points and the `2t+1`
+    /// recombination points exist). The honest-majority constructor already fixes
+    /// `t = ⌊(n−1)/2⌋`, so every backend `Self` builds satisfies this; the check is
+    /// here to fail with a descriptive [`MpcError::Protocol`] rather than panic if a
+    /// short / mis-built share vector is ever passed. The input must be the full
+    /// `n`-party degree-`2t` sharing on the canonical points `x = 1..n`, **in
+    /// order** — this is now ENFORCED (sq-dvuc / Copilot #119): the reduction is a
+    /// FIXED public linear map that pairs the recombination weights and the fresh
+    /// sub-sharings with the input shares *by position*, so a permuted or
+    /// non-canonical input is rejected with [`MpcError::Protocol`] (fail-closed in
+    /// BOTH debug and release builds) rather than silently mis-reduced. `[OPUS-4.8]`
+    ///
+    /// **Security model — UNCHANGED honest-majority / semi-honest (do not
+    /// over-claim).** The reduction is the BGW reduction step under the SAME trust
+    /// assumptions as the rest of this backend (module docs §"Security model"): it
+    /// is correct and confidentiality-preserving when every party follows the
+    /// protocol and at most `t` collude. It is **NOT** maliciously secure: a
+    /// deviating party can feed an inconsistent re-sharing, and — exactly as for the
+    /// degree-`2t` equality open at `n = 2t+1` — there is no in-protocol check here
+    /// that detects it. Each fresh re-sharing draws its own random masking
+    /// coefficients, so any `≤ t` parties' view of the sub-shares is independent of
+    /// the reduced secret (the standard BGW privacy argument). Malicious hardening
+    /// (IT-MACs / verifiable resharing) is future work behind the SAME backend, not
+    /// claimed here. See `research/mpc-security-models-and-benchmarks.md` §3 (the
+    /// "general Shamir multiplication needs degree reduction" gap) and §6 step 6.
+    ///
+    /// Returns a fresh degree-`t` sharing on the canonical points `x = 1..n`.
+    pub fn degree_reduce(&mut self, shares_2t: &[Share]) -> Result<Vec<Share>, MpcError> {
+        // Fail-closed precondition: we need n >= 2t+1 distinct party points so the
+        // degree-2t polynomial is over-determined and 2t+1 recombination points
+        // exist. (Equivalently: the supplied sharing must cover the full party set.)
+        if shares_2t.len() < 2 * self.t + 1 {
+            return Err(MpcError::Protocol(format!(
+                "degree_reduce: need a degree-2t product sharing on n >= 2t+1 = {} parties, \
+                 got {} shares (honest-majority needs n >= 2t+1 to reduce a degree-2t product)",
+                2 * self.t + 1,
+                shares_2t.len()
+            )));
+        }
+        if shares_2t.len() != self.n {
+            return Err(MpcError::Protocol(format!(
+                "degree_reduce: expected the full {}-party sharing, got {} shares",
+                self.n,
+                shares_2t.len()
+            )));
+        }
+        // `[OPUS-4.8]` Strict canonical-point check (Copilot #119, sq-dvuc). The
+        // whole reduction is a FIXED public linear map that ASSUMES the input is
+        // the full n-party degree-2t sharing on the canonical points `x = 1..=n`
+        // *in order*: the recombination λ-weights below are derived from the first
+        // 2t+1 x-coords and then paired BY POSITION with the fresh sub-sharings
+        // (which `share()` always emits on `x = 1..=n` in order). A permuted or
+        // non-canonical input would silently produce a WRONG reduced sharing, so we
+        // fail closed here rather than mis-reduce. (We choose the strict-canonical
+        // contract — matching the docs — over deriving weights from arbitrary x:
+        // it is simplest and the only ordering any in-process backend ever builds.)
+        for (i, s) in shares_2t.iter().enumerate() {
+            let expected_x = i as u64 + 1;
+            if s.x != expected_x {
+                return Err(MpcError::Protocol(format!(
+                    "degree_reduce: input must be the canonical n-party sharing on x = 1..={}, \
+                     in order; share[{i}] is on x = {} (expected {expected_x})",
+                    self.n, s.x
+                )));
+            }
+        }
+
+        // Public recombination vector: the Lagrange-at-0 weights for the first
+        // 2t+1 evaluation points. H(0) = Σ_{i=1}^{2t+1} λ_i · H(x_i), a FIXED
+        // public linear map (depends only on the party points, never on secrets).
+        // After the canonical-point check above, these are exactly `x = 1..=2t+1`.
+        let recomb_points: Vec<u64> = shares_2t[..2 * self.t + 1].iter().map(|s| s.x).collect();
+        let lambdas = lagrange_zero_weights(&recomb_points);
+
+        // Step 2: each of the 2t+1 recombination parties re-shares its degree-2t
+        // share h_i under a FRESH, independent degree-t polynomial. Each re-sharing
+        // is an n-vector of sub-shares on the canonical points x = 1..n.
+        let mut resharings: Vec<Vec<Share>> = Vec::with_capacity(2 * self.t + 1);
+        for s in &shares_2t[..2 * self.t + 1] {
+            resharings.push(self.share(s.y));
+        }
+
+        // Step 3: every party j locally forms Σ_i λ_i · (sub-share i held by j).
+        // The λ_i are public scalars, the sub-sharings are degree-t, so the result
+        // is a degree-t sharing of Σ_i λ_i·h_i = H(0) = a·b.
+        let mut reduced: Vec<Share> = shares_2t
+            .iter()
+            .map(|s| Share {
+                x: s.x,
+                y: Fp::zero(),
+            })
+            .collect();
+        for (i, sub) in resharings.iter().enumerate() {
+            let lambda = lambdas[i];
+            for (out, sub_share) in reduced.iter_mut().zip(sub.iter()) {
+                // `[OPUS-4.8]` Real fail-closed x-alignment check (Copilot #119,
+                // sq-dvuc). The accumulation pairs each output party with the
+                // sub-share at the SAME position, which is only correct when both
+                // run over the canonical points `x = 1..=n` in order. This was a
+                // `debug_assert_eq!`, which is COMPILED OUT in release — so a
+                // position/point mismatch could silently mis-accumulate in release
+                // builds. A real `if` guarantees it in both profiles. (Given the
+                // canonical-point check above and that `share()` always emits
+                // `x = 1..=n`, this is unreachable in practice; it is a defence-in-
+                // depth invariant, not a redundant assertion.)
+                if out.x != sub_share.x {
+                    return Err(MpcError::Protocol(format!(
+                        "degree_reduce: resharing point misalignment — output party x = {} \
+                         paired with sub-share x = {} (resharings must use the canonical \
+                         points x = 1..={} in order)",
+                        out.x, sub_share.x, self.n
+                    )));
+                }
+                out.y = out.y.add(lambda.mul(sub_share.y));
+            }
+        }
+        Ok(reduced)
     }
 
     /// Reconstruct (RNG-free). Like [`ShamirBackend::reconstruct`], this uses the
@@ -356,6 +509,34 @@ fn eval_poly(coeffs: &[Fp], x: Fp) -> Fp {
         acc = acc.mul(x).add(c);
     }
     acc
+}
+
+/// The public **Lagrange-at-0 recombination weights** `λ_i` for evaluation points
+/// `xs`: the unique scalars with `P(0) = Σ_i λ_i · P(x_i)` for any polynomial `P`
+/// of degree `< xs.len()` sampled at `xs`. `λ_i = Π_{j≠i} (0 − x_j)/(x_i − x_j)`.
+///
+/// This is the SAME basis-weight computation as Lagrange interpolation at zero,
+/// factored out so [`ShamirDealer::degree_reduce`] can reuse it as a FIXED public
+/// linear map (sq-dvuc). The points must be distinct and nonzero; the caller
+/// guarantees this (party indices are `1..=n`). RNG-free / public. `[OPUS-4.8]`
+fn lagrange_zero_weights(xs: &[u64]) -> Vec<Fp> {
+    xs.iter()
+        .enumerate()
+        .map(|(i, &xi_raw)| {
+            let xi = Fp::new(xi_raw);
+            let mut num = Fp::one();
+            let mut den = Fp::one();
+            for (j, &xj_raw) in xs.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let xj = Fp::new(xj_raw);
+                num = num.mul(xj.neg()); // (0 − x_j)
+                den = den.mul(xi.sub(xj)); // (x_i − x_j)
+            }
+            num.mul(den.inv())
+        })
+        .collect()
 }
 
 /// Lagrange-interpolate the shares' polynomial and evaluate it at `x = 0` (the
@@ -416,7 +597,10 @@ pub fn add_shares(a: &[Share], b: &[Share]) -> Result<Vec<Share>, MpcError> {
                     "add_shares: shares are on different evaluation points".into(),
                 ));
             }
-            Ok(Share { x: sa.x, y: sa.y.add(sb.y) })
+            Ok(Share {
+                x: sa.x,
+                y: sa.y.add(sb.y),
+            })
         })
         .collect()
 }
@@ -425,14 +609,24 @@ pub fn add_shares(a: &[Share], b: &[Share]) -> Result<Vec<Share>, MpcError> {
 /// to every share replaces `f(x)` by `f(x) + c`, whose value at `x = 0` is
 /// `secret + c`, still a valid degree-`t` sharing.
 pub fn add_constant(a: &[Share], c: Fp) -> Vec<Share> {
-    a.iter().map(|s| Share { x: s.x, y: s.y.add(c) }).collect()
+    a.iter()
+        .map(|s| Share {
+            x: s.x,
+            y: s.y.add(c),
+        })
+        .collect()
 }
 
 /// Multiply a sharing by a public field constant (local, non-interactive): scale
 /// every share. `c * f(x)` interpolates to `c * secret` at `x = 0` and stays
 /// degree `t`.
 pub fn scale(a: &[Share], c: Fp) -> Vec<Share> {
-    a.iter().map(|s| Share { x: s.x, y: s.y.mul(c) }).collect()
+    a.iter()
+        .map(|s| Share {
+            x: s.x,
+            y: s.y.mul(c),
+        })
+        .collect()
 }
 
 /// Subtract two sharings component-wise (local). `Share(a) - Share(b)` is a
@@ -447,7 +641,10 @@ pub fn sub_shares(a: &[Share], b: &[Share]) -> Result<Vec<Share>, MpcError> {
             if sa.x != sb.x {
                 return Err(MpcError::Protocol("sub_shares: point mismatch".into()));
             }
-            Ok(Share { x: sa.x, y: sa.y.sub(sb.y) })
+            Ok(Share {
+                x: sa.x,
+                y: sa.y.sub(sb.y),
+            })
         })
         .collect()
 }
@@ -455,18 +652,21 @@ pub fn sub_shares(a: &[Share], b: &[Share]) -> Result<Vec<Share>, MpcError> {
 /// **Local share-products before degree reduction.** Multiplying two degree-`t`
 /// sharings component-wise yields, at each party point, `f(x)·g(x)` — a sharing
 /// of `a·b` but on a polynomial of degree `2t`. Reconstructing it therefore
-/// needs `2t+1` points (honest-majority gives `2t+1 <= n`). In a full BGW/DN
-/// protocol the parties would *re-share and recombine* to bring the degree back
-/// to `t` in ONE communication round; for the in-process simulation we keep the
-/// degree-`2t` product and reconstruct it directly when the value is opened (the
-/// equality test opens its masked product, so no further multiplication chains
-/// on the high-degree result — degree reduction is unnecessary for THIS
-/// primitive). See [`reconstruct_degree`].
+/// needs `2t+1` points (honest-majority gives `2t+1 <= n`). For a single product
+/// that is opened immediately (the equality test opens its masked product) this
+/// degree-`2t` sharing is reconstructed directly via [`reconstruct_degree`] — no
+/// further work is needed.
+///
+/// To CHAIN multiplications (`a·b·c`, secure comparison/threshold, conjunctive
+/// hidden-pattern joins) the degree-`2t` product must be brought back to degree
+/// `t` first: feed the result of `mul_shares_raw` into
+/// [`ShamirDealer::degree_reduce`] (the BGW reshare-and-recombine round, sq-dvuc)
+/// before the next multiplication.
 ///
 /// HONESTY: the round/degree cost is real and stated — one multiplication is one
-/// interaction round and consumes the `n >= 2t+1` headroom. Chained
-/// multiplications need explicit degree reduction (not implemented; the equality
-/// primitive deliberately needs only a single product).
+/// interaction round and consumes the `n >= 2t+1` headroom; the degree-reduction
+/// round (sq-dvuc) is a SECOND (simulated) round that restores degree `t` so the
+/// next product fits, under the SAME honest-majority / semi-honest model.
 pub fn mul_shares_raw(a: &[Share], b: &[Share]) -> Result<Vec<Share>, MpcError> {
     if a.len() != b.len() {
         return Err(MpcError::Protocol("mul_shares_raw: length mismatch".into()));
@@ -477,7 +677,10 @@ pub fn mul_shares_raw(a: &[Share], b: &[Share]) -> Result<Vec<Share>, MpcError> 
             if sa.x != sb.x {
                 return Err(MpcError::Protocol("mul_shares_raw: point mismatch".into()));
             }
-            Ok(Share { x: sa.x, y: sa.y.mul(sb.y) })
+            Ok(Share {
+                x: sa.x,
+                y: sa.y.mul(sb.y),
+            })
         })
         .collect()
 }
@@ -604,7 +807,10 @@ impl MpcBackend for ShamirBackend {
     /// summed sharing to a single integer and surface it as a one-row partial.
     /// Any disclosed-property post-processing (e.g. the boolean `sum > £100k`)
     /// is recomputed by the verifier OUTSIDE the crypto core (M5), not here.
-    fn reconstruct_disclosed(&self, result_shares: &[Self::Share]) -> Result<PartialResult, MpcError> {
+    fn reconstruct_disclosed(
+        &self,
+        result_shares: &[Self::Share],
+    ) -> Result<PartialResult, MpcError> {
         if result_shares.len() != 1 {
             return Err(MpcError::Protocol(
                 "reconstruct_disclosed: expected exactly one result sharing".into(),
@@ -614,10 +820,12 @@ impl MpcBackend for ShamirBackend {
         Ok(PartialResult {
             holder: HolderId::new("federation"),
             vars: vec![oxrdf::Variable::new_unchecked("cumulative")],
-            rows: vec![vec![Some(oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
-                sum.value().to_string(),
-                oxrdf::vocab::xsd::INTEGER,
-            )))]],
+            rows: vec![vec![Some(oxrdf::Term::Literal(
+                oxrdf::Literal::new_typed_literal(
+                    sum.value().to_string(),
+                    oxrdf::vocab::xsd::INTEGER,
+                ),
+            ))]],
         })
     }
 }
@@ -715,7 +923,10 @@ mod tests {
         assert_eq!(b.reconstruct(&s1).unwrap(), Fp::new(42));
         assert_eq!(b.reconstruct(&s2).unwrap(), Fp::new(42));
         // ... but the share vectors differ (different random masking polynomials).
-        assert_ne!(s1, s2, "two production dealers reused the same masking randomness");
+        assert_ne!(
+            s1, s2,
+            "two production dealers reused the same masking randomness"
+        );
     }
 
     #[test]
@@ -738,8 +949,11 @@ mod tests {
         let forged_third = forge_third_share(two, target);
         let mut combined = two.to_vec();
         combined.push(forged_third);
-        assert_eq!(reconstruct_at_zero(&combined, 2).unwrap(), target,
-            "2 shares are consistent with a different secret → they hide it");
+        assert_eq!(
+            reconstruct_at_zero(&combined, 2).unwrap(),
+            target,
+            "2 shares are consistent with a different secret → they hide it"
+        );
     }
 
     /// Given 2 shares on a degree-2 polynomial, produce a 3rd share (at a fresh
@@ -747,7 +961,9 @@ mod tests {
     /// hiding property; test-only.
     fn forge_third_share(two: &[Share], target: Fp) -> Share {
         // Pick x3 distinct from the two.
-        let x3 = (1..=1000u64).find(|x| two.iter().all(|s| s.x != *x)).unwrap();
+        let x3 = (1..=1000u64)
+            .find(|x| two.iter().all(|s| s.x != *x))
+            .unwrap();
         // We need f(0)=target with f through (x1,y1),(x2,y2),(x3,y3). Solve y3 so
         // the Lagrange-at-0 of the three equals target.
         // target = y1 L1 + y2 L2 + y3 L3  where Li are the Lagrange weights at 0.
@@ -757,7 +973,9 @@ mod tests {
             let mut num = Fp::one();
             let mut den = Fp::one();
             for (j, &xj) in xs.iter().enumerate() {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 let xj = Fp::new(xj);
                 num = num.mul(xj.neg());
                 den = den.mul(xi.sub(xj));
@@ -813,13 +1031,226 @@ mod tests {
         assert!(matches!(ShamirBackend::new(1), Err(MpcError::Protocol(_))));
     }
 
+    // ---- BGW degree-reduction round (sq-dvuc) [OPUS-4.8] ------------------
+
+    #[test]
+    fn degree_reduce_round_trips_single_product() {
+        // Acceptance #1: degree_reduce(shares_2t) round-trips — reconstruct after
+        // reduction == reconstruct before == plaintext product. Use n=5 (t=2) so
+        // the degree-2t open at degree 2t=4 has the full 5 points, AND the reduced
+        // degree-t sharing genuinely has t=2 < 5 (real reduction, not a no-op).
+        let b = ShamirBackend::new_seeded(5, 0xD7C).unwrap();
+        let t = b.threshold();
+        assert_eq!(t, 2);
+        let mut dealer = b.dealer();
+        for (av, bv) in [
+            (0u64, 7u64),
+            (1, 1),
+            (6, 9),
+            (123_456, 654_321),
+            (crate::field::P - 1, crate::field::P - 1),
+            (crate::field::P - 1, 2),
+        ] {
+            let sa = dealer.share(Fp::new(av));
+            let sb = dealer.share(Fp::new(bv));
+            let prod_2t = mul_shares_raw(&sa, &sb).unwrap();
+            let expected = Fp::new(av).mul(Fp::new(bv));
+
+            // Reconstruct BEFORE reduction at degree 2t.
+            let before = reconstruct_degree(&prod_2t, 2 * t).unwrap();
+            assert_eq!(before, expected, "degree-2t product must equal a·b");
+
+            // Reduce, then reconstruct AFTER at degree t.
+            let reduced = dealer.degree_reduce(&prod_2t).unwrap();
+            assert_eq!(reduced.len(), 5);
+            let after = b.reconstruct(&reduced).unwrap();
+            assert_eq!(after, expected, "reduced degree-t sharing must equal a·b");
+            assert_eq!(before, after, "reduction must preserve the secret");
+        }
+    }
+
+    #[test]
+    fn two_multiplication_chain_a_b_c() {
+        // Acceptance #2: a TWO-multiplication chain a·b·c — share a,b,c;
+        // mul→degree-reduce→mul→degree-reduce; reconstruct; assert == plaintext
+        // a·b·c. Several field values incl. edge values (0, 1, large). This is THE
+        // load-bearing test: it proves multiplications now CHAIN.
+        let b = ShamirBackend::new_seeded(5, 0xC4A1_5EED).unwrap();
+        assert_eq!(b.threshold(), 2); // n=5 → t=2; chain stays well within 2t<n
+        let mut dealer = b.dealer();
+        let cases = [
+            (0u64, 5u64, 9u64),          // zero short-circuits
+            (1, 1, 1),                   // identities
+            (1, 0, 12345),               // zero in the middle
+            (2, 3, 4),                   // small
+            (7, 11, 13),                 // small primes
+            (100_000, 7, 9),             // mixed magnitude
+            (crate::field::P - 1, 2, 3), // large × small × small (wraps mod P)
+            (
+                crate::field::P - 1,
+                crate::field::P - 1,
+                crate::field::P - 1,
+            ), // all large
+        ];
+        for (av, bv, cv) in cases {
+            let (fa, fb, fc) = (Fp::new(av), Fp::new(bv), Fp::new(cv));
+            let expected = fa.mul(fb).mul(fc);
+
+            let sa = dealer.share(fa);
+            let sb = dealer.share(fb);
+            let sc = dealer.share(fc);
+
+            // mul → degree-reduce → mul → degree-reduce.
+            let ab_2t = mul_shares_raw(&sa, &sb).unwrap();
+            let ab_t = dealer.degree_reduce(&ab_2t).unwrap();
+            let abc_2t = mul_shares_raw(&ab_t, &sc).unwrap();
+            let abc_t = dealer.degree_reduce(&abc_2t).unwrap();
+
+            let got = b.reconstruct(&abc_t).unwrap();
+            assert_eq!(got, expected, "a·b·c chain failed for ({av}, {bv}, {cv})");
+        }
+    }
+
+    #[test]
+    fn degree_reduce_precondition_fails_closed() {
+        // Acceptance #3: with n < 2t+1, degree_reduce returns the descriptive
+        // error (no panic). We cannot build an honest-majority backend with
+        // n < 2t+1 (the constructor fixes t = ⌊(n−1)/2⌋), so we simulate the
+        // failure by handing degree_reduce a TRUNCATED share vector (fewer than
+        // the 2t+1 = n points it needs) — the fail-closed precondition must catch
+        // it with MpcError::Protocol, never a panic / wrong answer.
+        let b = ShamirBackend::new_seeded(5, 1).unwrap();
+        let t = b.threshold(); // 2 → needs 2t+1 = 5 shares
+        let mut dealer = b.dealer();
+        let prod = {
+            let sa = dealer.share(Fp::new(3));
+            let sb = dealer.share(Fp::new(4));
+            mul_shares_raw(&sa, &sb).unwrap()
+        };
+        // Too few points to determine the degree-2t = 4 polynomial.
+        let too_few = &prod[..2 * t]; // 4 < 2t+1 = 5
+        let err = dealer.degree_reduce(too_few).unwrap_err();
+        assert!(
+            matches!(err, MpcError::Protocol(_)),
+            "n < 2t+1 must be a descriptive protocol error, got {err:?}"
+        );
+        // A vector that has 2t+1 points but is NOT the full n-party set is also a
+        // protocol error (degree_reduce expects the canonical full sharing).
+        let mut wrong_n = prod.clone();
+        wrong_n.push(Share {
+            x: 99,
+            y: Fp::new(7),
+        });
+        let err2 = dealer.degree_reduce(&wrong_n).unwrap_err();
+        assert!(matches!(err2, MpcError::Protocol(_)), "got {err2:?}");
+    }
+
+    #[test]
+    fn degree_reduce_rejects_permuted_or_noncanonical_input() {
+        // `[OPUS-4.8]` Copilot #119 (sq-dvuc): the canonical-point precondition is
+        // enforced by a REAL runtime check (a fail-closed `if`, NOT a
+        // `debug_assert!` that compiles out). The reduction is a fixed public
+        // linear map that pairs recombination weights / fresh sub-sharings with the
+        // input BY POSITION, so a permuted-but-otherwise-valid sharing — or one on
+        // non-canonical x-coords — would silently mis-reduce if accepted. Assert it
+        // is rejected with `MpcError::Protocol`. Because the guard is a runtime
+        // `if`, this test holds identically in debug AND release (`--release`),
+        // which is the whole point of the fix.
+        let b = ShamirBackend::new_seeded(5, 0x9E2B).unwrap();
+        let t = b.threshold();
+        assert_eq!(t, 2); // n = 5, needs the full canonical x = 1..=5 in order
+        let mut dealer = b.dealer();
+        let prod_2t =
+            mul_shares_raw(&dealer.share(Fp::new(11)), &dealer.share(Fp::new(13))).unwrap();
+        // Sanity: the genuine canonical sharing still reduces correctly.
+        let expected = Fp::new(11).mul(Fp::new(13));
+        let ok = dealer.degree_reduce(&prod_2t).unwrap();
+        assert_eq!(b.reconstruct(&ok).unwrap(), expected);
+
+        // (a) PERMUTED: same shares, swapped order (x no longer 1,2,3,4,5).
+        let mut permuted = prod_2t.clone();
+        permuted.swap(0, 4); // x = 5,2,3,4,1
+        let err_perm = dealer.degree_reduce(&permuted).unwrap_err();
+        assert!(
+            matches!(err_perm, MpcError::Protocol(_)),
+            "permuted input must be a protocol error, got {err_perm:?}"
+        );
+
+        // (b) NON-CANONICAL x: full count, in order, but one point shifted off the
+        // canonical 1..=n lattice (here party 5 relabelled to x = 6).
+        let mut noncanon = prod_2t.clone();
+        noncanon[4].x = 6; // x = 1,2,3,4,6
+        let err_nc = dealer.degree_reduce(&noncanon).unwrap_err();
+        assert!(
+            matches!(err_nc, MpcError::Protocol(_)),
+            "non-canonical x must be a protocol error, got {err_nc:?}"
+        );
+
+        // (c) Off-by-one start (x = 0 reserved for the secret, never a party).
+        let mut zero_start = prod_2t;
+        zero_start[0].x = 0; // x = 0,2,3,4,5
+        let err_zs = dealer.degree_reduce(&zero_start).unwrap_err();
+        assert!(
+            matches!(err_zs, MpcError::Protocol(_)),
+            "x starting at 0 must be a protocol error, got {err_zs:?}"
+        );
+    }
+
+    #[test]
+    fn reduced_sharing_is_genuinely_degree_t() {
+        // Acceptance #4: the reduced sharing is genuinely degree-t — any t+1 of
+        // the new shares reconstruct the same secret, and a DIFFERENT t+1 subset
+        // agrees. (If the reduction left the sharing at degree 2t, a t+1 subset
+        // would interpolate to a WRONG value.) Use n=7 (t=3) so there are several
+        // distinct t+1 = 4 subsets to compare and ample headroom over 2t=6.
+        let b = ShamirBackend::new_seeded(7, 0x7E57).unwrap();
+        let t = b.threshold();
+        assert_eq!(t, 3);
+        let mut dealer = b.dealer();
+        let (av, bv) = (4321u64, 8765u64);
+        let expected = Fp::new(av).mul(Fp::new(bv));
+        let prod_2t =
+            mul_shares_raw(&dealer.share(Fp::new(av)), &dealer.share(Fp::new(bv))).unwrap();
+        let reduced = dealer.degree_reduce(&prod_2t).unwrap();
+        assert_eq!(reduced.len(), 7);
+
+        // First t+1 shares reconstruct the secret (use reconstruct_at_zero so we
+        // interpolate EXACTLY t+1 points at degree t — no robustness fallback).
+        let lo = reconstruct_at_zero(&reduced[..t + 1], t).unwrap();
+        assert_eq!(lo, expected, "first t+1 reduced shares must give a·b");
+        // A DIFFERENT, disjoint-ish t+1 subset agrees → consistent degree-t poly.
+        let hi = reconstruct_at_zero(&reduced[reduced.len() - (t + 1)..], t).unwrap();
+        assert_eq!(hi, expected, "last t+1 reduced shares must also give a·b");
+        assert_eq!(lo, hi, "two t+1 subsets must agree (degree exactly t)");
+
+        // Negative control: the ORIGINAL degree-2t product is NOT degree-t — any
+        // t+1 of its shares interpolated AT DEGREE t give the WRONG value (it
+        // takes 2t+1 of them). This pins that the reduction actually did work.
+        let wrong = reconstruct_at_zero(&prod_2t[..t + 1], t).unwrap();
+        assert_ne!(
+            wrong, expected,
+            "t+1 points of the degree-2t product must NOT give a·b (sanity: reduction was real)"
+        );
+    }
+
     #[test]
     fn share_private_input_from_holder_roundtrips() {
         // End-to-end: a holder's PRIVATE salary is shared (not disclosed), summed
         // with another holder's, and reconstructed to the plaintext total.
-        const PFX: &str = "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n";
-        let alice = Holder::from_rdf("alice", &format!("{PFX} ex:alice ex:salary \"30000\"^^xsd:integer ."), "turtle").unwrap();
-        let bob = Holder::from_rdf("bob", &format!("{PFX} ex:bob ex:salary \"45000\"^^xsd:integer ."), "turtle").unwrap();
+        const PFX: &str =
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n";
+        let alice = Holder::from_rdf(
+            "alice",
+            &format!("{PFX} ex:alice ex:salary \"30000\"^^xsd:integer ."),
+            "turtle",
+        )
+        .unwrap();
+        let bob = Holder::from_rdf(
+            "bob",
+            &format!("{PFX} ex:bob ex:salary \"45000\"^^xsd:integer ."),
+            "turtle",
+        )
+        .unwrap();
 
         // Production backend (OS-seeded CSPRNG) — the round-trip is seed-agnostic.
         let backend = ShamirBackend::new(2).unwrap();

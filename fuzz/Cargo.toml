@@ -1,0 +1,82 @@
+# Coverage-guided fuzz harness for sparq (bead sq-ovnf; threat-model T-PARSE-FUZZ +
+# T-MMAP-FUZZ). [OPUS-4.8]
+#
+# STANDALONE manifest — this crate is DELIBERATELY NOT a member of the root
+# workspace (the root `Cargo.toml` lists `exclude = ["fuzz", ...]`). cargo-fuzz
+# requires a nightly toolchain (libFuzzer's `-Cpasses=sancov-*` / `-Zsanitizer`),
+# so keeping it out of the workspace means `cargo build`/`cargo test`/`clippy
+# --workspace` on STABLE never try to compile it and the stable gate is unaffected.
+# Build/run it only via `cargo +nightly fuzz run <target>` from this directory (or
+# the CI fuzz lane), which uses THIS manifest, not the workspace.
+[package]
+name = "sparq-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+# Pin the same MSRV floor as the workspace for documentation parity; cargo-fuzz
+# itself still requires nightly to *run* (libFuzzer codegen), independent of this.
+rust-version = "1.88"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Empty [workspace] table => this manifest is its OWN workspace root. This severs the
+# fuzz crate from ANY ancestor workspace (belt-and-braces alongside the root's
+# `exclude = [..., "fuzz"]`), so `cargo +nightly fuzz build` here never trips the
+# "believes it's in a workspace when it's not" error, and the stable workspace gate
+# never picks this crate up regardless of where the checkout is nested. [OPUS-4.8]
+[workspace]
+
+[dependencies]
+# libFuzzer bindings: provides the `fuzz_target!` macro and the libFuzzer main.
+libfuzzer-sys = "0.4"
+# The crates under test. sparq-core needs `mmap` (for `Graph::open` over an on-disk
+# store) and `parallel` (for `load_reader_parallel`'s pipelined N-Triples path).
+sparq-core = { path = "../crates/sparq-core", features = ["mmap", "parallel"] }
+sparq-engine = { path = "../crates/sparq-engine" }
+# Temp store directories for the `Graph::open` hostile-bytes target.
+tempfile = "3"
+
+# A fast-but-instrumentable profile: opt-level 3 keeps the fuzzer throughput high
+# while `debug-assertions = true` + `overflow-checks = true` turn latent UB / integer
+# overflow into a clean, catchable panic the fuzzer flags as a crash (exactly what we
+# want a hostile-bytes corpus to surface). `panic = "unwind"` (NOT abort) lets
+# libFuzzer's hook report the crashing input.
+[profile.release]
+opt-level = 3
+debug = true
+debug-assertions = true
+overflow-checks = true
+panic = "unwind"
+incremental = false
+codegen-units = 1
+
+# Each entry point is its own libFuzzer binary. `test = false`/`doc = false` keep them
+# out of any `cargo test`/doc pass; `bench = false` keeps them off `cargo bench`.
+[[bin]]
+name = "parse_rdf_str"
+path = "fuzz_targets/parse_rdf_str.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load_reader_parallel"
+path = "fuzz_targets/load_reader_parallel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_sparql"
+path = "fuzz_targets/parse_sparql.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_open"
+path = "fuzz_targets/graph_open.rs"
+test = false
+doc = false
+bench = false
