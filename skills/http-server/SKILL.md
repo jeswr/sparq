@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML), Graph Store read AND write (PUT/POST/DELETE on graph resources, RDF/XML bodies accepted), EXPLAIN, Prometheus /metrics, WebSocket subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML), Graph Store read AND write (PUT/POST/DELETE on graph resources, RDF/XML bodies accepted), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -10,7 +10,7 @@ query engine over a `sparq_core::Graph` — in-memory by default, or **durable o
 with `--persist DIR` (updates WAL-fsync'd, survive a restart with no rebuild; see the
 "Durability" gotcha). It implements the **SPARQL 1.1 Protocol** (`query` + `update` at
 `/sparql`) and the **Graph Store HTTP Protocol** (read + write), with `Accept`-driven
-content negotiation, hardening guards, Prometheus `/metrics`, WebSocket subscriptions,
+content negotiation, hardening guards, Prometheus `/metrics`, WebSocket + SSE subscriptions,
 and opt-in time-travel + GeoSPARQL.
 
 ## Quickstart
@@ -34,8 +34,9 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > `query`/`update` body that parses as an update — and the GSP `PUT`/`POST`/`DELETE`
 > methods); otherwise `401` with `WWW-Authenticate: Bearer` (constant-time compared; mirrors
 > QLever's `-a <token>`). Add `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO
-> gate reads. The `/subscriptions` WebSocket is a read surface and is NOT gated by this token
-> (bead `sq-cxk5`). The server binds **loopback by default** and **refuses a non-loopback
+> gate reads. The subscription transports (`/subscriptions` WebSocket and `/subscriptions/sse`
+> SSE) are a read surface and are NOT gated by this token (bead `sq-cxk5` — both transports
+> must gate together when it lands). The server binds **loopback by default** and **refuses a non-loopback
 > bind** (e.g. `0.0.0.0`) unless you set `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`) OR the
 > whole surface is authenticated (`--auth-token` AND `--auth-token-read`) — a write-token
 > alone still leaves reads open. Deliver the token over TLS (terminate it at a proxy). For
@@ -91,7 +92,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Library surface re-exported from `sparq_server` (behind the default `server` feature):
 
 - `fn router(state: AppState) -> axum::Router` — builds the hardened endpoint router
-  (`/sparql`, `/sparql/graph`, `/graphs/*path`, `/subscriptions`, `/health`, `/metrics`).
+  (`/sparql`, `/sparql/graph`, `/graphs/*path`, `/subscriptions`, `/subscriptions/sse`,
+  `/health`, `/metrics`). [OPUS-4.8] sq-bxog: `/subscriptions/sse` is the SSE transport.
 - `AppState::new(graph: Graph) -> AppState` — default `ServerConfig`.
 - `AppState::with_config(graph: Graph, config: ServerConfig) -> AppState`.
 - `AppState::current(&self) -> PinnedGen` — lock-free pin of the current immutable
@@ -199,6 +201,38 @@ server:  {"unsubscribed": {"id": 1}}
 ```
 `addedResults`/`removedResults` are each full SPARQL-JSON results objects. Refusals and
 failed re-evaluations come back as `{"error": {"message": …, "id"?: n}}`.
+
+**4b. SSE subscriptions (`text/event-stream`).** [OPUS-4.8] sq-bxog: the SAME subscription
+engine over Server-Sent Events, for clients that prefer a plain HTTP GET stream to a
+WebSocket. `GET /subscriptions/sse?query=<SELECT>[&alias=<x>]` opens one subscription per
+stream (the query is in the query string — SSE is one-way, so there is no `subscribe`/
+`unsubscribe` frame; close the stream to unsubscribe). The events carry the SAME JSON as
+the WS path — only the framing differs (`event:` / `data:` / `id:` lines, blank-line
+terminated, `: ping` keep-alive comments hold idle connections open). The SSE `id:` mirrors
+the per-subscription `sequence`.
+
+```sh
+curl -N 'http://127.0.0.1:3030/subscriptions/sse?query=SELECT%20?s%20WHERE%20{%20?s%20%3Chttp://ex/age%3E%20?o%20}&alias=ages'
+```
+```text
+event: subscribed
+data: {"subscribed":{"id":1,"alias":"ages"}}
+
+event: notification
+id: 0
+data: {"notification":{"id":1,"sequence":0,"alias":"ages","addedResults":{…full result…},"removedResults":{…empty…}}}
+
+  …POST /sparql update commits…
+event: notification
+id: 1
+data: {"notification":{"id":1,"sequence":1,"alias":"ages","addedResults":{…},"removedResults":{…}}}
+```
+A registration refusal (missing/non-SELECT/malformed `query` → `400`; capacity/budget →
+`503`) is returned as a normal `{"error":"…"}` JSON HTTP response BEFORE the stream opens —
+SSE cannot set a status once the stream is flowing. A later re-evaluation failure ends the
+stream with a final `event: error` frame. Both transports share one registry + change
+source, so the per-conn / server-wide subscription caps and the `sparq_active_subscriptions`
+gauge count SSE streams and WS subscriptions together.
 
 **5. Graph Store read + write + operational endpoints.**
 
@@ -359,8 +393,9 @@ and `update_in_place_with_budget`, and wrap calls in
   compared; QLever's `-a <token>`; missing-vs-wrong are indistinguishable). The classification
   keys on whether the request **mutates**, not the route — an Update smuggled through the
   query path is gated too. Add `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO
-  gate reads. The `/subscriptions` WS is a read surface and is NOT gated by this token (bead
-  `sq-cxk5`). The binary binds `127.0.0.1:3030` by default and **refuses** a non-loopback
+  gate reads. The subscription transports (`/subscriptions` WS + `/subscriptions/sse` SSE)
+  are a read surface and are NOT gated by this token (bead `sq-cxk5`). The binary binds
+  `127.0.0.1:3030` by default and **refuses** a non-loopback
   `--addr` (incl. `0.0.0.0`/`::`) unless `--allow-remote` / `SPARQ_ALLOW_REMOTE=1` OR the
   whole surface is authenticated (`--auth-token` AND `--auth-token-read`); even then it warns.
   A write-token alone still leaves reads open, so it does NOT by itself make a remote bind
