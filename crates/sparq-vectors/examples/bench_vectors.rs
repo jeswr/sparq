@@ -152,9 +152,17 @@ fn main() {
     let store_path = tmp("hnsw.spqv", seed);
     let store = build_uniform_store(&store_path, n, corpus_word);
 
+    // Build EXACTLY `iters` times (the best-of-`iters` is the reported build time) — do NOT build
+    // an extra warm-up index outside the loop, or build runs iters+1× and skews the build metric.
+    // The last-built index is retained for the recall measurement below.
     let mut build_us = f64::INFINITY;
-    let mut index = VectorIndex::build(&store);
-    for _ in 0..iters {
+    let mut index = {
+        let t = Instant::now();
+        let idx = VectorIndex::build(&store);
+        build_us = build_us.min(t.elapsed().as_secs_f64() * 1e6);
+        idx
+    };
+    for _ in 1..iters {
         let t = Instant::now();
         index = VectorIndex::build(&store);
         build_us = build_us.min(t.elapsed().as_secs_f64() * 1e6);

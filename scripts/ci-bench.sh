@@ -615,10 +615,12 @@ elif command -v cargo >/dev/null 2>&1 && [ -x "$VECTOR_RUN" ]; then
         # the sentinel-0 count carries no gate.
         [ -n "${us:-}" ] && add vectors_build_s s "$(awk -v u="$us" 'BEGIN{printf "%.6f", u/1e6}')"
       else
-        # DETERMINISTIC recall DEFICIT (integer): vectors_<workload>_recall_at10. The diskann/pq
-        # deficits are mode:auto ratcheted in bench/perf-baseline.json; hnsw is floor-gated in
-        # run.sh only (rayon-parallel build jitter), so its deficit is harvested as TREND-only here.
-        [ -n "${count:-}" ] && add "vectors_${name}" deficit "$count"
+        # DETERMINISTIC recall DEFICIT: vectors_<workload>_recall_at10. The value is a MILLI-scaled
+        # deficit — round((1-recall)*1000) — so the emitted unit is `milli` (matching metric-labels.json),
+        # NOT a bare `deficit` (which would mis-state the value's scale on the dashboard). The diskann/pq
+        # deficits are mode:auto ratcheted in bench/perf-baseline.json; hnsw is floor-gated in run.sh
+        # only (rayon-parallel build jitter), so its deficit is harvested as TREND-only here.
+        [ -n "${count:-}" ] && add "vectors_${name}" milli "$count"
         # ADVISORY per-query latency (microseconds): vectors_<searcher>_query_us, trend-only.
         # name is `<searcher>_recall_at10`; strip the `_recall_at10` suffix for the timing stem.
         [ -n "${us:-}" ] && add "vectors_${name%_recall_at10}_query_us" us "$us"

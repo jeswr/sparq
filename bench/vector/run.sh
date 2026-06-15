@@ -8,7 +8,7 @@
 #      expected.tsv (exit 1 on any drift). The HNSW workload is FLOOR-gated only: its
 #      instant-distance build is rayon-PARALLEL, so float-sum reduction order can flip a
 #      single boundary neighbour (+/-1 deficit) — exact equality would be a FLAKY (dishonest)
-#      gate, so HNSW is asserted < its floor (recall@10 >= 0.95) instead. ALL workloads also
+#      gate, so HNSW is asserted <= its floor (recall@10 >= 0.95) instead. ALL workloads also
 #      assert floor headroom. This is the ANN analogue of LUBM's row-count diff / FTS's
 #      hit-count diff, adapted for an APPROXIMATE surface (recall vs exact-kNN as a deficit, G4).
 #   4. emit on STDOUT the 3-column `<workload>\t<count>\t<us>` contract the ci-bench hook
@@ -45,8 +45,10 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 "$BIN" "$N" "$SEED" "$ITERS" > "$TMP/vector.tsv"
 
-# Per-workload floor headroom: the recall deficit must stay STRICTLY below these (= the crate
-# gate-test floors expressed as deficits: 1-0.95=0.05=>50, 1-0.90=0.10=>100).
+# Per-workload floor headroom: the recall deficit must stay AT-OR-BELOW these (= the crate
+# gate-test floors expressed as deficits: recall>=0.95 <=> deficit<=50, recall>=0.90 <=> deficit<=100).
+# The check below is `-gt floor` (fail), so a deficit EQUAL to the floor (exactly the floor recall)
+# PASSES — matching the crate's inclusive `recall@10 >= floor` condition.
 floor_for() {
   case "$1" in
     hnsw_recall_at10) echo 50 ;;
@@ -59,6 +61,7 @@ floor_for() {
 # ---- 3. assert the DETERMINISTIC deficit column vs expected.tsv (exit 1 on any mismatch) ----
 fail=0
 seen=0
+seen_names=""
 while IFS=$'\t' read -r name count us; do
   [ -n "$name" ] || continue
   # The advisory build_s row has no expected.tsv entry — forward it but don't gate it.
@@ -82,19 +85,31 @@ while IFS=$'\t' read -r name count us; do
   esac
   # Floor headroom: every workload's deficit must stay below the crate gate-test floor — this is
   # the HARD gate for HNSW (it has no exact assert) and a second guard for diskann/pq.
+  # INCLUSIVE floor: the crate gate is recall@10 >= floor, and the deficit is round((1-recall)*1000),
+  # so a deficit EQUAL to the floor corresponds to EXACTLY the floor recall and must PASS — only a
+  # STRICTLY GREATER deficit (recall strictly below the floor) is a failure. (`-ge` here would make
+  # the gate one milli-deficit stricter than the documented `recall >= floor` condition.)
   floor="$(floor_for "$name")"
-  if [ -n "$floor" ] && [ "$count" -ge "$floor" ]; then
-    echo "[vector] ERROR: $name deficit=$count >= floor $floor (recall below the crate gate)" >&2; fail=1
+  if [ -n "$floor" ] && [ "$count" -gt "$floor" ]; then
+    echo "[vector] ERROR: $name deficit=$count > floor $floor (recall below the crate gate)" >&2; fail=1
   fi
   seen=$((seen+1))
+  seen_names="$seen_names$name"$'\n'
   # ---- 4. forward the 3-column hook contract on STDOUT (count = the asserted deficit) ----
   printf '%s\t%s\t%s\n' "$name" "$count" "$us"
 done < "$TMP/vector.tsv"
 
-# Every expected workload must have run (a vanished workload is itself a regression).
-exp_workloads=$(grep -cvE '^#|^$' "$EXP")
-if [ "$seen" != "$exp_workloads" ]; then
-  echo "[vector] ERROR: ran $seen recall workloads, expected $exp_workloads (a workload vanished)" >&2; fail=1
+# Every expected workload must have run. Compare the SET of DISTINCT workload names against the
+# expected set — NOT the line count: a count check is fooled by a vanished+duplicated pair (one
+# name missing, another repeated => same count). Sorting + uniq'ing both sides catches either a
+# missing name or an unexpected/duplicated one.
+exp_names="$(grep -vE '^#|^$' "$EXP" | cut -f1 | sort -u)"
+got_names="$(printf '%s' "$seen_names" | grep -vE '^$' | sort -u)"
+if [ "$exp_names" != "$got_names" ]; then
+  echo "[vector] ERROR: workload set mismatch vs expected.tsv (a workload vanished or was duplicated)" >&2
+  echo "[vector]   expected: $(printf '%s' "$exp_names" | tr '\n' ' ')" >&2
+  echo "[vector]   got:      $(printf '%s' "$got_names" | tr '\n' ' ')" >&2
+  fail=1
 fi
 
 if [ "$fail" = 0 ]; then
