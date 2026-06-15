@@ -79,8 +79,13 @@
   </footer>
 
   <!-- data FIRST (defines window.BENCHMARK_DATA), then Chart.js, then the dashboard. -->
+  <!-- [OPUS-4.8] sq-9xgq: Chart.js v2.9.2 is VENDORED under vendor/ (was cdn.jsdelivr.net) to
+       drop the runtime CDN dependency — supply-chain hardening + offline resilience, and a
+       prerequisite for the unified Pages cutover. To re-vendor a new version see vendor/README.md.
+       NOTE: for the PUBLISHED dev/bench/ copy, bench.yml's seed step must also be taught to copy
+       vendor/Chart.min.js (it currently copies only the flat files) — see vendor/README.md. -->
   <script src="data.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>
+  <script src="vendor/Chart.min.js"></script>
   <script src="dashboard.js"></script>
 </body>
 </html>
