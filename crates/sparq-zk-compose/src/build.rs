@@ -35,6 +35,16 @@ pub const FILTER_INT_D_VALUES: &[u32] = &[1, 2, 3, 4];
 /// ceiling (value `< 2^53`, exact `f64::from`), so larger counts have no member
 /// and `derive_filter_f64_id` returns `None` (clean error, never a wrong-D).
 pub const FILTER_F64_D_VALUES: &[u32] = &[1, 2, 3, 4];
+/// Compiled graph-size buckets (`n_a`/`n_b`) of the hidden-join `join_eq` family,
+/// ascending (sq-bwwl / sq-fi03). The `join_eq_na{N_A}_nb{N_B}` member re-commits
+/// each witnessed graph with `[[Field; 3]; N]` slots (the `join_eq_check<N_A,
+/// N_B>` const generics), so a graph holding `<= N` triples is provable by the
+/// smallest compiled bucket `>= N` — exactly the scan `n`-bucket discipline. v1
+/// compiles the single symmetric `join_eq_na16_nb16` member, so only the `16`
+/// bucket exists; an out-of-family size derives `None` (clean error). The
+/// verifier gate that consumes the derived id is step 4 (sq-sfsi).
+// [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): compiled join_eq graph-size buckets.
+pub const JOIN_EQ_N_BUCKETS: &[u32] = &[16];
 
 fn smallest_bucket(buckets: &[u32], need: u32) -> Option<u32> {
     buckets.iter().copied().find(|&b| b >= need)
@@ -93,6 +103,21 @@ pub fn derive_filter_f64_id(digits: u32) -> Option<CircuitId> {
     } else {
         None
     }
+}
+
+/// Derive the hidden-join `join_eq` circuit id for two graphs holding `n_a` /
+/// `n_b` triples (sq-bwwl / sq-fi03). Mirrors [`derive_scan_id`]'s `n`-bucket
+/// discipline: each side maps to the smallest compiled [`JOIN_EQ_N_BUCKETS`]
+/// bucket `>= size` (the member re-commits `[[Field; 3]; N]` slots per graph, so
+/// any graph with `<= N` triples fits the `N`-bucket member). `None` if either
+/// side exceeds every compiled bucket — a clean error, never a wrong-N member.
+/// Prover and verifier both derive the id this way so a `join_eq` proof can only
+/// verify against the member its witnesses fit (audit-#2 canonical-vk discipline).
+// [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): derive the join_eq member id.
+pub fn derive_join_eq_id(n_a: u32, n_b: u32) -> Option<CircuitId> {
+    let n_a = smallest_bucket(JOIN_EQ_N_BUCKETS, n_a.max(1))?;
+    let n_b = smallest_bucket(JOIN_EQ_N_BUCKETS, n_b.max(1))?;
+    Some(CircuitId::JoinEq { n_a, n_b })
 }
 
 /// A constant or variable slot of a BGP triple pattern.

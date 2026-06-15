@@ -103,7 +103,9 @@
 //! public-input reconstruction that binds the JSON statement (incl. attribution
 //! bits) and the verifier's nonce to the proofs.
 
-use crate::build::{derive_filter_f64_id, derive_filter_int_id, derive_scan_id};
+use crate::build::{
+    derive_filter_f64_id, derive_filter_int_id, derive_join_eq_id, derive_scan_id,
+};
 use crate::driver::{CircuitProver, DriverError};
 use crate::manifest::{
     BindingMode, CircuitId, EntailmentRegime, FieldHex, ProofInputs, ProofManifest,
@@ -1614,6 +1616,21 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
                 _ => return None,
             };
             derive_filter_f64_id(d)
+        }
+        // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN. The
+        // two graph sizes are PRIVATE (the witnessed graph contents are not public
+        // inputs — only the commitments are), so — exactly as scan trusts the
+        // declared `n` and filter the declared `d` — the verifier re-derives the
+        // member id from the declared `(n_a, n_b)` buckets carried in the inputs'
+        // id. The full CircuitId is what the step-4 (sq-sfsi) public-input
+        // reconstruction + canonical-vk recompute pin, so a wrong bucket cannot
+        // byte-match a real member's proof.
+        ProofInputs::JoinEq { .. } => {
+            let (n_a, n_b) = match inputs.circuit_id() {
+                CircuitId::JoinEq { n_a, n_b } => (*n_a, *n_b),
+                _ => return None,
+            };
+            derive_join_eq_id(n_a, n_b)
         }
     }
 }
@@ -3900,6 +3917,23 @@ fn reconstruct_public_inputs(
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, *b_bits);
             push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN
+        // public inputs, in the `join_eq` member's `main` declaration order:
+        // challenge (pushed above), commit_a, commit_b, join_commitment, slot_a,
+        // slot_b. Cross-reference `zk/compose/join_eq_na16_nb16/src/main.nr`. This
+        // is the pure public-input SERIALIZATION (the audit-#1 byte-layout) — it
+        // does NOT perform the `bind_joins` gate (commitment-equality to the scan
+        // proofs, the `UnboundJoin` query binding, the slot binding), which is
+        // step 4 (sq-sfsi). Reconstructing the vector here only lets a `join_eq`
+        // sub-proof's bb verification run; it bypasses no check, because no check
+        // beyond plain bb verification is wired for joins until sq-sfsi.
+        ProofInputs::JoinEq { commit_a, commit_b, join_commitment, slot_a, slot_b, .. } => {
+            push_field(&mut out, commit_a, proof, "commit_a")?;
+            push_field(&mut out, commit_b, proof, "commit_b")?;
+            push_field(&mut out, join_commitment, proof, "join_commitment")?;
+            push_uint(&mut out, u64::from(*slot_a));
+            push_uint(&mut out, u64::from(*slot_b));
         }
     }
     Ok(out)

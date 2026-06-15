@@ -9,6 +9,36 @@
 
 use crate::manifest::{CircuitId, FieldHex, ProofInputs};
 
+/// Error returned by [`prover_toml_for`] when a `Prover.toml` cannot be emitted
+/// for the given inputs.
+///
+/// [OPUS-4.8] sq-fi03 / PR #178: `prover_toml_for` is a public fn, so a premature
+/// call on a not-yet-wired arm must surface a recoverable error rather than panic
+/// (a `unimplemented!` in a public fn is a downstream-crash footgun).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProverTomlError {
+    /// The `join_eq` Prover.toml emitter is deferred to sq-sfsi (step 4); sq-fi03
+    /// adds the manifest schema only. The join member's private witnesses
+    /// (`enc_a`/`counts_a`/`enc_b`/`counts_b`/`row_a`/`row_b`/`blinding`) are not
+    /// yet plumbed through this function's parameters, so it cannot emit a witness.
+    JoinEqUnsupported,
+}
+
+impl std::fmt::Display for ProverTomlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProverTomlError::JoinEqUnsupported => write!(
+                f,
+                "join_eq Prover.toml generation is not yet implemented (deferred to \
+                 sq-sfsi, step 4); sq-fi03 adds the manifest schema only. The join \
+                 member's private witnesses are not plumbed through prover_toml_for."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProverTomlError {}
+
 /// Render the `Prover.toml` body for a scan proof.
 ///
 /// Order MUST match `scan_k{k}_n{n}_r{r}/src/main.nr`:
@@ -178,6 +208,11 @@ pub fn canonical_digits(value: u64) -> Vec<u8> {
 
 /// Render the witness-bearing `Prover.toml` for any `ProofInputs`, given the
 /// private witnesses the manifest does not carry. Returns the package id too.
+///
+/// Returns [`ProverTomlError::JoinEqUnsupported`] for [`ProofInputs::JoinEq`],
+/// whose prover path is deferred to sq-sfsi (step 4). This is a recoverable
+/// error so a downstream caller (or a CLI loading a manifest containing
+/// `join_eq`) gets a structured failure rather than a panic. [OPUS-4.8]
 pub fn prover_toml_for(
     inputs: &ProofInputs,
     challenge: &FieldHex,
@@ -187,8 +222,8 @@ pub fn prover_toml_for(
     scan_enc: &[Vec<[FieldHex; 3]>],
     // filter witness (ignored for scan): canonical decimal digits.
     filter_digits: &[u8],
-) -> (CircuitId, String) {
-    match inputs {
+) -> Result<(CircuitId, String), ProverTomlError> {
+    let out = match inputs {
         ProofInputs::Scan {
             id,
             commitments,
@@ -258,5 +293,17 @@ pub fn prover_toml_for(
             );
             (id.clone(), toml)
         }
-    }
+        // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN.
+        // SCHEMA ONLY — this bead adds the manifest types, NOT the prover path.
+        // Generating a `join_eq` Prover.toml needs the join member's PRIVATE
+        // witnesses (`enc_a`/`counts_a`/`enc_b`/`counts_b`/`row_a`/`row_b`/
+        // `blinding`), none of which this function's `scan_*`/`filter_digits`
+        // parameters can carry — so the prover wiring is deferred to step 4
+        // (sq-sfsi), which extends the signature. Until then this arm returns a
+        // recoverable `Err` (NOT a panic): a public fn must not crash a downstream
+        // caller that loads a manifest containing `join_eq`. It also never emits a
+        // bogus witness; sq-sfsi replaces it with the real join TOML emitter.
+        ProofInputs::JoinEq { .. } => return Err(ProverTomlError::JoinEqUnsupported),
+    };
+    Ok(out)
 }

@@ -176,6 +176,7 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -341,6 +342,7 @@ fn forge_attribution_under_declared_rejected() {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -494,7 +496,7 @@ fn honest_filter_d1(
 ) -> (ProofInputs, ProofArtifacts) {
     let operand_enc = encode_int_literal(value);
     let (filter, digits) = build_filter_int(operand_enc, value, op, bound, expected).unwrap();
-    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits);
+    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("filter proves");
     (filter, art)
@@ -512,7 +514,7 @@ fn honest_age_scan(challenge: &FieldHex, prover: &CircuitProver, tag: &str) -> (
         o: Slot::Var,
     };
     let scan = build_scan(std::slice::from_ref(&commit), &pattern).expect("scan builds");
-    let (id, toml) = prover_toml_for(&scan.inputs, challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+    let (id, toml) = prover_toml_for(&scan.inputs, challenge, &scan.witness.counts, &scan.witness.enc, &[]).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("scan proves");
     (scan.inputs, encode_artifacts(&art))
@@ -549,6 +551,7 @@ fn composed_manifest(
             SubProof { inputs: filter_inputs, proof_hex: filter_hex },
         ],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     }
@@ -689,6 +692,7 @@ fn k2_scan_only_manifest(
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan_inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     }
@@ -842,7 +846,7 @@ fn forge_scan_duplicate_commitment_circuit_rejected() {
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
-    );
+    ).unwrap();
     // The in-circuit `commitments[0] < commitments[1]` (= `c0 < c0`) is FALSE, so
     // the relation is unsatisfiable: nargo writes no witness => Err.
     let res = prover.gen_witness_tagged(&id, &toml, "fg_dup_commit");
@@ -879,7 +883,7 @@ fn honest_k2_distinct_scan_proves_and_verifies() {
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
-    );
+    ).unwrap();
     let out = scratch("honest_k2_distinct_prove");
     let art = prover
         .prove_in(&id, &toml, &out, "honest_k2_distinct")

@@ -199,6 +199,7 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -405,6 +406,7 @@ fn scan_plus_filter_manifest(
             SubProof { inputs: filter, proof_hex: String::new() },
         ],
         binding_edges: edge.into_iter().collect(),
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     }
@@ -581,6 +583,7 @@ fn finding_08_attribution_collapse_rejected() {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -643,6 +646,7 @@ fn finding_09_salt_reused_rejected() {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -818,7 +822,7 @@ fn honest_filter_d1(
 ) -> (ProofInputs, ProofArtifacts) {
     let operand_enc = encode_int_literal(value);
     let (filter, digits) = build_filter_int(operand_enc, value, op, bound, expected).unwrap();
-    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits);
+    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("filter proves");
     (filter, art)
@@ -836,7 +840,7 @@ fn honest_age_scan(challenge: &FieldHex, prover: &CircuitProver, tag: &str) -> (
     };
     let scan = build_scan(std::slice::from_ref(&commit), &pattern).expect("scan builds");
     let (id, toml) =
-        prover_toml_for(&scan.inputs, challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+        prover_toml_for(&scan.inputs, challenge, &scan.witness.counts, &scan.witness.enc, &[]).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("scan proves");
     (scan.inputs, encode_artifacts(&art))
@@ -872,6 +876,7 @@ fn composed_manifest(
             SubProof { inputs: filter_inputs, proof_hex: filter_hex },
         ],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     }
@@ -1026,7 +1031,7 @@ fn finding_11_n_relabel_bb_rejected() {
         "#11 bb: the >16-slot graph must derive the scan_k2_n64_r8 member"
     );
     let (id, toml) =
-        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]).unwrap();
     let out = scratch("f11bb");
     let art = prover.prove_in(&id, &toml, &out, "f11bb").expect("scan_k2_n64_r8 proves");
 
@@ -1053,6 +1058,7 @@ fn finding_11_n_relabel_bb_rejected() {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: forged, proof_hex: encode_artifacts(&art) }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
