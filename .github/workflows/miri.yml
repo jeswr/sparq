@@ -6,15 +6,19 @@
 # slice-bound PANICS / OOM on a hostile on-disk index, but they do NOT detect UNDEFINED
 # BEHAVIOUR — aliasing / pointer-provenance violations / data races. Miri does. This lane
 # interprets `cargo test -p sparq-core` under Miri so a regression that introduces UB in the
-# pure-Rust unsafe paths (the parallel dict-spill scatter writes, the POD↔bytes transmutes,
-# the `from_utf8_unchecked` over in-memory buffers, the `set_len`-after-`MaybeUninit` fill)
-# fails a standing check.
+# pure-Rust unsafe paths (the parallel dict-build scatter writes in `dict.rs`, the POD↔bytes
+# transmutes, the `from_utf8_unchecked` over in-memory buffers, the `set_len`-after-
+# `MaybeUninit` fill) fails a standing check. NOTE: the dict-spill scatter writes
+# (`dictspill.rs`) are NOT in scope here — that module is `#[cfg(feature = "dict-spill")]`,
+# which pulls in `mmap`, and neither feature is enabled in this lane (see below).
 #
 # WHAT MIRI COVERS vs CAN'T (measured — see the PR for sq-fo28):
-#   • COVERED (default features = `parallel`): the 14 pure-Rust unsafe sites — the rayon
-#     `par_iter_mut` dict-build + dict-spill raw-pointer scatter writes (dict.rs / dictspill.rs),
-#     the `&[POD]`↔`&[u8]` reinterprets over in-memory Vec/slice, `str::from_utf8_unchecked`
-#     over in-process buffers, and the parallel `MaybeUninit` + `set_len` remap. These RUN.
+#   • COVERED (default features = `parallel`): the pure-Rust unsafe sites reachable WITHOUT
+#     `mmap`/`dict-spill` — the rayon `par_iter_mut` dict-build raw-pointer scatter writes in
+#     `dict.rs` (NOT `dictspill.rs`, which is `#[cfg(feature = "dict-spill")]` and is not
+#     compiled here), the `&[POD]`↔`&[u8]` reinterprets over in-memory Vec/slice,
+#     `str::from_utf8_unchecked` over in-process buffers, and the parallel `MaybeUninit` +
+#     `set_len` remap. These RUN.
 #   • STRUCTURALLY CANNOT RUN under Miri: the 16 mmap-backed sites (every `memmap2::Mmap::map`
 #     / `MmapMut::map_mut` / `madvise`, the libc `sysconf`/`statvfs` FFI in dict-spill, and
 #     every slice reinterpret whose provenance is a live `Mmap`). Miri rejects file-backed
