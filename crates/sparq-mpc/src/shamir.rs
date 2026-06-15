@@ -524,6 +524,116 @@ impl ShamirDealer {
     pub fn reconstruct(&self, shares: &[Share]) -> Result<Fp, MpcError> {
         crate::robust::reconstruct_robust(shares, self.t)
     }
+
+    /// **Begin an IT-MAC authenticated-sharing session (sq-km34.1).** Mints ONE
+    /// session-global MAC key `α ∈ F_p` from this dealer's masking RNG (an
+    /// OS-seeded ChaCha20 CSPRNG in production, sq-1vt), secret-shares it as a
+    /// degree-`t` Shamir sharing `[α]`, and returns a [`MacSession`] that produces
+    /// authenticated sharings `[[x]] = ([x], [α·x])` under that single key.
+    ///
+    /// **`α` is never returned and never reconstructed.** The cleartext `α` is
+    /// drawn, immediately consumed to compute the MAC of each shared value, and
+    /// kept ONLY inside the returned [`MacSession`] (which exposes no opening path);
+    /// `[α]` lives behind the un-openable [`crate::authenticated::MacKey`]. This is
+    /// the foundation for honest-majority malicious-with-abort security (design
+    /// `research/mpc-malicious-security-design.md` §2.1–2.2); it is NOT yet
+    /// malicious-secure on its own — the MAC-carrying multiplication (sq-km34.2)
+    /// and the batched MAC-check at open time (sq-km34.4) are separate beads.
+    ///
+    /// Consumes a fresh `α` per session: call [`ShamirBackend::dealer`] +
+    /// `new_mac_session` once per protocol run so two sessions never reuse a key.
+    /// `[OPUS-4.8]`
+    pub fn new_mac_session(&mut self) -> MacSession<'_> {
+        // Draw the session-global MAC key α from the (CS)PRNG and share it. The
+        // value `alpha` is held only inside the MacSession (no opening accessor);
+        // `[α]` is wrapped in the un-openable MacKey.
+        let alpha = self.rng.next_fp();
+        let alpha_shares = self.share(alpha);
+        let key = crate::authenticated::MacKey::from_shares(alpha_shares, self.t);
+        MacSession {
+            dealer: self,
+            alpha,
+            key,
+        }
+    }
+}
+
+/// An **IT-MAC authenticated-sharing session** bound to a single session-global,
+/// secret-shared MAC key `[α]` (design §2.1). Created by
+/// [`ShamirDealer::new_mac_session`]; borrows the dealer so it can draw fresh
+/// degree-`t` masking polynomials for each value AND each value's MAC sharing from
+/// the same CSPRNG stream.
+///
+/// **`α` is structurally un-openable through this type.** The cleartext `α` is a
+/// PRIVATE field, used only to compute `α·x` before sharing the MAC; there is no
+/// public accessor that returns it or reconstructs `[α]`. The only key material a
+/// caller can reach is the [`crate::authenticated::MacKey`] from [`Self::mac_key`],
+/// which itself exposes no opening path (bead sq-km34.1 acceptance (2)).
+/// `[OPUS-4.8]`
+pub struct MacSession<'a> {
+    /// The borrowed dealer: source of the fresh masking randomness for every
+    /// value and MAC sharing produced in this session.
+    dealer: &'a mut ShamirDealer,
+    /// The session-global MAC key `α` in the clear — PRIVATE. Used only to compute
+    /// `α·x` before sharing; never returned by any public method (acceptance (2)).
+    alpha: Fp,
+    /// The secret-shared, un-openable `[α]` handed to callers via [`Self::mac_key`]
+    /// and consumed by the §2.3 add-constant MAC term.
+    key: crate::authenticated::MacKey,
+}
+
+impl std::fmt::Debug for MacSession<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the cleartext session MAC key α.
+        f.debug_struct("MacSession")
+            .field("dealer", &self.dealer)
+            .field("alpha", &"<secret session MAC key α>")
+            .field("key", &self.key)
+            .finish()
+    }
+}
+
+impl MacSession<'_> {
+    /// The session's MAC key sharing `[α]` (un-openable). Clones the wrapper, which
+    /// carries only the per-party shares of `α` — no cleartext key — so a caller
+    /// can use it for the §2.3 add-constant MAC term
+    /// ([`crate::authenticated::auth_add_constant`]) without any way to open `α`.
+    pub fn mac_key(&self) -> crate::authenticated::MacKey {
+        self.key.clone()
+    }
+
+    /// Produce an **authenticated sharing** `[[x]] = ([x], [α·x])` of `x` under
+    /// this session's key (design §2.2). Draws TWO fresh degree-`t` masking
+    /// polynomials (one for `[x]`, one for `[α·x]`) from the session RNG, so any
+    /// `≤ t` parties' views of EITHER sharing are independent of the secret.
+    /// `[OPUS-4.8]`
+    pub fn authenticated_share(&mut self, x: Fp) -> crate::authenticated::AuthenticatedShare {
+        let value = self.dealer.share(x);
+        // The MAC is α·x, shared on a FRESH independent degree-t polynomial.
+        let mac = self.dealer.share(self.alpha.mul(x));
+        // value and mac are both n-party canonical sharings (x = 1..=n), so the
+        // point-alignment invariant in `AuthenticatedShare::new` always holds.
+        crate::authenticated::AuthenticatedShare::new(value, mac)
+            .expect("share() emits matched canonical party points for value and MAC")
+    }
+
+    /// **Test-only.** The cleartext session MAC key `α`, so tests can verify the
+    /// MAC relation `reconstruct([α·x]) == α·x`. NOT part of the public API — the
+    /// `cfg` gate guarantees production code physically cannot read `α` (acceptance
+    /// (2): no `α`-opening path in normal builds).
+    #[cfg(test)]
+    pub(crate) fn alpha_for_test(&self) -> Fp {
+        self.alpha
+    }
+
+    /// **Test-only.** The raw `[α]` shares, so the independence test (acceptance
+    /// (3)) can exhibit a second key `α'` consistent with any `t` of them. NOT in
+    /// the public API (the production [`crate::authenticated::MacKey`] never
+    /// surfaces its shares for reconstruction).
+    #[cfg(test)]
+    pub(crate) fn alpha_shares_for_test(&self) -> Vec<Share> {
+        self.key.shares_for_test()
+    }
 }
 
 /// Evaluate a polynomial (coeffs low-to-high) at `x` by Horner's method.

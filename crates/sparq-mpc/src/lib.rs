@@ -90,6 +90,15 @@
 //! bundle carries zero MPC surface (mirrors how `sparq-zk` is isolated).
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
+// [OPUS-4.8] sq-km34.1: IT-MAC authenticated secret sharing — the FOUNDATION for
+// honest-majority malicious-with-abort security. `AuthenticatedShare = ([x],[α·x])`
+// layered over the degree-t Shamir sharing, plus the session-global secret-shared
+// MAC key `[α]` (no party knows α; never reconstructed) and the FREE linear ops
+// (add/scale/sub/add-constant applied to both [x] and [α·x]). Foundation only —
+// MAC-carrying multiplication (sq-km34.2), the batched MAC-check (sq-km34.4), and
+// the registry/per-operator wiring (sq-km34.7) are SEPARATE beads. See the module
+// docs and research/mpc-malicious-security-design.md §2.1–2.2.
+pub mod authenticated;
 pub mod backend;
 // [OPUS-4.8] sq-rrz4: secure secret-shared greater-than / threshold over Fp that
 // opens ONLY the boolean verdict bit, never the operands. Bit-decomposition
@@ -166,6 +175,10 @@ pub mod transport;
 #[cfg(test)]
 mod adversarial_tests;
 
+// [OPUS-4.8] sq-km34.1: the IT-MAC authenticated-sharing foundation surface.
+pub use authenticated::{
+    auth_add, auth_add_constant, auth_scale, auth_sub, AuthenticatedShare, MacKey,
+};
 pub use backend::{
     AbortKind, AdversaryModel, BackendInfo, BackendRegistry, CorruptionThreshold,
     MaliciousSecurity, MpcBackend, OperatorClass, OutputGuarantee, PublicVerifiability,
@@ -202,7 +215,9 @@ pub use oblivious_join::{
 };
 pub use rng::{MpcRng, SecureRng};
 pub use robust::reconstruct_robust;
-pub use shamir::{ShamirBackend, Share};
+// [OPUS-4.8] sq-km34.1: `MacSession` mints the session-global `[α]` and produces
+// authenticated sharings; `ShamirDealer::new_mac_session` is the entry point.
+pub use shamir::{MacSession, ShamirBackend, Share};
 // [OPUS-4.8] sq-tg6b: the network-tier surface — the real loopback transport
 // (Tier 2) and the tc/netem LAN/WAN profiles (Tier 3, privilege-gated).
 pub use netprofiles::NetemProfile;
