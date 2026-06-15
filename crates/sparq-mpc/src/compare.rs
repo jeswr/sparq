@@ -144,9 +144,12 @@ pub const COMPARE_MAX_EXCLUSIVE: u64 = 1u64 << COMPARE_BITS;
 /// opened `c = value + r` carries at most `2^{-κ}` statistical advantage about the
 /// value (standard statistical-masking argument; Damgård et al. TCC'06). `κ = 40`
 /// gives a `2^{-40}` distinguishing bound — the same order as the crate's other
-/// statistical claims. NOT cryptographic-strength (`2^{-80+`); see the module-level
-/// "magnitude bound" doc for why `p = 2^61−1` forces this trade-off and the
-/// follow-up bead for a wider-field / square-root-random-bit path.
+/// statistical claims. This is a *statistical* security level, **not** a
+/// cryptographic one: a conservative cryptographic bound would be `2^{-80}` or
+/// tighter, which this field cannot reach (see below). See the module-level
+/// "magnitude bound" doc for why `p = 2^61−1` forces this trade-off, and the
+/// follow-up bead for a wider-field / square-root-random-bit path that would
+/// restore a cryptographic-strength gap.
 pub const DECOMP_STAT_SECURITY_BITS: usize = 40;
 
 /// Bit-width of the random mask `[r]` in the masked-open bit-decomposition. The
@@ -194,14 +197,11 @@ fn check_in_range(label: &str, v: Fp) -> Result<(), MpcError> {
 /// recombination points exist). The honest-majority constructor already fixes
 /// `t = ⌊(n−1)/2⌋ ⇒ n >= 2t+1`, so this only fires on a mis-built backend; it
 /// fails with a descriptive error rather than letting `degree_reduce` panic later.
-fn check_party_count(dealer: &ShamirDealer) -> Result<(), MpcError> {
-    let t = dealer.threshold();
-    if dealer.parties() < 2 * t + 1 {
+fn check_party_count(n: usize, t: usize) -> Result<(), MpcError> {
+    if n < 2 * t + 1 {
         return Err(MpcError::Protocol(format!(
             "secure comparison needs n >= 2t+1 (each multiplication's degree reduction does); \
-             got n = {}, t = {}",
-            dealer.parties(),
-            t
+             got n = {n}, t = {t}"
         )));
     }
     Ok(())
@@ -359,8 +359,10 @@ fn greater_than_public_bits_with(
 /// the masked-open bit-decomposition needs (Damgård et al. TCC'06).
 ///
 /// `r` is **dealer-fresh masking randomness**, NOT any party's secret input: the
-/// dealer draws `L` independent uniform bits from its masking RNG (an OS-seeded
-/// ChaCha20 CSPRNG in production, sq-1vt) and deals each as a degree-`t` sharing,
+/// dealer draws `L` independent **exactly-unbiased** uniform bits via
+/// [`ShamirDealer::draw_bit`] (the LSB of a raw `next_u64()` from the masking RNG —
+/// an OS-seeded ChaCha20 CSPRNG in production, sq-1vt) and deals each as a
+/// degree-`t` sharing,
 /// exactly the kind of fresh randomness the dealer already mints for every Shamir
 /// coefficient and for the [`ShamirDealer::degree_reduce`] re-sharings. Crucially
 /// it is independent of the value being decomposed, so opening `value + r` later
@@ -378,9 +380,15 @@ fn deal_random_solved_bits(dealer: &mut ShamirDealer) -> (Vec<Share>, Vec<Vec<Sh
     let mut r_bits: Vec<Vec<Share>> = Vec::with_capacity(DECOMP_MASK_BITS);
     let mut r_value = const_sharing(n, Fp::zero());
     for k in 0..DECOMP_MASK_BITS {
-        // One fresh uniform bit. `next_u64() & 1` is a uniform 0/1 from the
-        // masking RNG; share it as a fresh degree-t sharing.
-        let bit = dealer.draw_fp().value() & 1;
+        // [OPUS-4.8] One fresh **exactly-unbiased** uniform bit. We take the LSB
+        // of a raw `next_u64()` draw via `ShamirDealer::draw_bit` — uniform
+        // because the CSPRNG word is uniform over all `2^64` values. We must NOT
+        // use `draw_fp().value() & 1`: `draw_fp()` is uniform over `[0, p)` with
+        // `p = 2^61−1` ODD, so it has one more even value than odd, leaving the
+        // LSB biased by `~2^{-61}` toward 0. That bias is tiny but it would
+        // weaken the uniform-`r` masking argument (the mask must be a sum of
+        // genuinely uniform bits); `draw_bit` removes it at the source.
+        let bit = dealer.draw_bit();
         let bit_sharing = dealer.share(Fp::new(bit));
         // Accumulate r = Σ r_k 2^k as a (free, local) linear combination of the
         // bit sharings, so [r] and the [r_k] are consistent by construction.
@@ -417,9 +425,14 @@ fn secret_or(dealer: &mut ShamirDealer, a: &[Share], b: &[Share]) -> Result<Vec<
 ///    PUBLIC bits of `c` and the SHARED bits of `r`, with a ripple borrow chain.
 ///    Because `a = c − r` exactly as integers (no field wrap: `c = a + r < 2^L +
 ///    2^{value} < p`, and `a, r ≥ 0`), the integer subtraction recovers `a`'s
-///    bits. Each borrow step is a handful of local affine ops plus one secure
-///    multiplication (the borrow-propagate term), so the whole circuit is a
-///    multiplication chain of depth `O(L)` through [`ShamirDealer::degree_reduce`].
+///    bits. Each borrow step costs **three secure multiplications** (each a
+///    [`secret_and`], i.e. one [`shamir::mul_shares_raw`] + one
+///    [`ShamirDealer::degree_reduce`]): `x ∧ borrow` for the result bit
+///    `a_k = x ⊕ borrow`, `borrow ∧ ¬x` for one borrow-propagate term, and the
+///    `∧` inside the [`secret_or`] that combines the two borrow terms. The rest
+///    of each step is local affine ops. So the whole circuit is a multiplication
+///    chain of `3·L` secure multiplications and depth `O(L)` rounds through
+///    [`ShamirDealer::degree_reduce`].
 ///
 /// ## Why this is sound (no sum leak)
 ///
@@ -429,11 +442,14 @@ fn secret_or(dealer: &mut ShamirDealer, a: &[Share], b: &[Share]) -> Result<Vec<
 /// reconstructed at any point. Contrast the removed shortcut, which called
 /// `reconstruct(sum_shares)` directly.
 ///
-/// ## Magnitude bound (fail-closed by the caller)
+/// ## Magnitude bound (caller precondition)
 ///
 /// Correct only while `a < 2^`[`DECOMP_VALUE_BITS`] so that `c = a + r < p` (no
-/// field wrap) AND the statistical gap holds. The caller
-/// ([`disclose_threshold_verdict`]) enforces this fail-closed.
+/// field wrap) AND the statistical gap holds. Because `a` is a SHARING, this bound
+/// **cannot** be checked here (or by the caller) without disclosing `a`; it is a
+/// **precondition** the caller ([`disclose_threshold_verdict`]) documents and the
+/// federation aggregate upstream must guarantee. If violated, the recovered bits
+/// are silently wrong — there is no fail-closed check on the secret operand.
 ///
 /// Returns the `L` LSB-first secret-shared bits of `a` (each a fresh degree-`t`
 /// sharing of a 0/1). Honest-majority, semi-honest.
@@ -510,7 +526,7 @@ pub fn secure_greater_than(
     a: Fp,
     b: Fp,
 ) -> Result<Vec<Share>, MpcError> {
-    check_party_count(dealer)?;
+    check_party_count(dealer.parties(), dealer.threshold())?;
     check_in_range("a", a)?;
     check_in_range("b", b)?;
     let a_bits = share_bits(dealer, a);
@@ -536,7 +552,7 @@ pub fn secure_threshold(
     secret: Fp,
     threshold: Fp,
 ) -> Result<Vec<Share>, MpcError> {
-    check_party_count(dealer)?;
+    check_party_count(dealer.parties(), dealer.threshold())?;
     check_in_range("secret", secret)?;
     check_in_range("threshold", threshold)?;
     let a_bits = share_bits(dealer, secret);
@@ -600,19 +616,36 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// malicious. The masked open is statistically (not info-theoretically) hiding
 /// because `p = 2^61−1` is too small for a perfect mask above the value width.
 ///
-/// ## Magnitude bound (fail-closed)
+/// ## Magnitude bound — sum is a CALLER PRECONDITION; threshold is fail-closed
 ///
-/// The SUM must be `< 2^`[`DECOMP_VALUE_BITS`]` = 2^20 = 1_048_576` (the
-/// statistically-safe no-wrap range — see [`DECOMP_VALUE_BITS`]). This is much
-/// smaller than the cleartext-operand [`COMPARE_BITS`] because the in-MPC path
+/// Both the SUM and `public_threshold` must be `< 2^`[`DECOMP_VALUE_BITS`]` = 2^20
+/// = 1_048_576` (the statistically-safe no-wrap range — see [`DECOMP_VALUE_BITS`]),
+/// much smaller than the cleartext-operand [`COMPARE_BITS`] because the in-MPC path
 /// masks the sum; it nonetheless covers the four-flatmates use case (£10^6 < 2^20).
-/// The `public_threshold` must be in the SAME range. Both are checked fail-closed.
+///
+/// These two bounds are enforced ASYMMETRICALLY, and the doc is precise about it:
+/// - **`public_threshold`** is a public `u64`, so it IS range-checked fail-closed
+///   here (returns [`MpcError::Protocol`] before any protocol work if it is
+///   `>= 2^DECOMP_VALUE_BITS`).
+/// - **The sum** is held only as a degree-`t` SHARING; its magnitude **cannot** be
+///   validated from shares without extra protocol work or a disclosure that would
+///   defeat the point. So the sum bound is a **caller precondition**, NOT an
+///   in-function check. If a caller passes a sum `>= 2^DECOMP_VALUE_BITS`, the
+///   masked open `c = sum + r` may wrap `p = 2^61−1` and/or break the statistical
+///   gap, and the verdict is then **undefined / silently wrong** (no error is
+///   raised). Callers MUST guarantee the bound upstream (the federation aggregate
+///   that produced `sum_shares` is responsible — e.g. bound each contribution and
+///   the party count so the total cannot exceed `2^20`). An in-protocol range
+///   proof on the shared sum is the residual follow-up (see module docs).
 pub fn disclose_threshold_verdict(
     backend: &ShamirBackend,
     sum_shares: &[Share],
     public_threshold: u64,
 ) -> Result<PartialResult, MpcError> {
-    check_party_count(&backend.dealer())?;
+    // [OPUS-4.8] Read party params from the backend's existing accessors — do NOT
+    // mint a throwaway dealer just to read n/t (that would OS-seed a CSPRNG on the
+    // error path for nothing; the real dealer is created below only if we proceed).
+    check_party_count(backend.parties(), backend.threshold())?;
     // [OPUS-4.8] Fail closed on the raw `u64` BEFORE `Fp::new` reduces mod p. A
     // `public_threshold` outside the safe range would either wrap the modulus
     // (>= p) or exceed the bit-decomposition's representable magnitude — both
@@ -1366,6 +1399,39 @@ mod tests {
                 )
             }
             other => panic!("expected Protocol party-count error, got {other:?}"),
+        }
+    }
+
+    /// [OPUS-4.8] sq-g7t5 — regression guard for the random-bit BIAS fix (Copilot
+    /// review #168). The mask bits feeding the masked-open bit-decomposition MUST be
+    /// uniform 0/1. The old code derived each bit from `draw_fp().value() & 1`,
+    /// which is biased toward 0 because `draw_fp()` is uniform over `[0, p)` with
+    /// `p = 2^61−1` ODD (one extra even value). The fix draws from
+    /// `ShamirDealer::draw_bit` (LSB of a raw `next_u64()`), which is exactly
+    /// unbiased. This test draws a large sample and asserts the empirical 1-rate is
+    /// within a tight band of 1/2.
+    #[test]
+    fn draw_bit_is_uniform() {
+        let backend = ShamirBackend::new_seeded(5, 0xB17_B1A5).unwrap();
+        let mut dealer = backend.dealer();
+        const N: usize = 100_000;
+        let ones: usize = (0..N).map(|_| dealer.draw_bit() as usize).sum();
+        let rate = ones as f64 / N as f64;
+        assert!(
+            (rate - 0.5).abs() < 0.02,
+            "draw_bit 1-rate {rate} deviated from 0.5 beyond the statistical band \
+             over {N} draws (expected ~uniform)"
+        );
+    }
+
+    /// [OPUS-4.8] sq-g7t5 — `draw_bit` only ever yields a literal 0 or 1.
+    #[test]
+    fn draw_bit_yields_only_zero_or_one() {
+        let backend = ShamirBackend::new_seeded(3, 0xB17).unwrap();
+        let mut dealer = backend.dealer();
+        for _ in 0..10_000 {
+            let b = dealer.draw_bit();
+            assert!(b == 0 || b == 1, "draw_bit returned non-bit {b}");
         }
     }
 }
