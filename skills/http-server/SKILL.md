@@ -443,6 +443,19 @@ and `update_in_place_with_budget`, and wrap calls in
   published). `apply_update` **blocks** (group-commit + O(graph) fork) — never call it on the
   async runtime directly; the HTTP handler (and the GSP write verbs) already use
   `spawn_blocking`.
+- **Multi-operation update bodies are accepted and applied ATOMICALLY (one request, one
+  commit).** A SPARQL 1.1 Update request is a sequence of `;`-separated operations, and the
+  endpoint takes the WHOLE body as ONE update (it is never split on `;`): e.g. a Solid PSS
+  `putDocument` body — `DROP SILENT GRAPH <r> ; INSERT DATA { GRAPH <r> … ; GRAPH <parent>
+  ldp:contains <r> }` — is one request → a single `204`, with the resource graph AND the parent
+  containment triple either BOTH applied or (on any operation failing) NEITHER. The sequenced
+  writer applies the body to a private fork and publishes only on full success, so a partial
+  body is never visible (in-memory all-or-nothing). On `--persist` the whole body's resolved
+  delta is committed as ONE fsync'd transaction-journal frame BEFORE the `204`, so a crash
+  mid-body can never leave the parent `ldp:contains` desynced from the child graph it points at
+  (the journal redoes the whole frame, or none of it, on `Graph::open`). (sq-ycle / gh-48; see
+  `crates/sparq-server/tests/persist.rs::pss_combined_multiop_body_accepted_and_atomic` and
+  `::invalid_second_op_leaves_no_partial_write`.)
 - **GSP write created-vs-replaced status is advisory.** PUT/POST sample graph existence from
   the current generation to choose `201` vs `204`/`200`; the write itself is atomic on the
   sequenced writer regardless. An existing-but-empty named graph reads as absent (the engine

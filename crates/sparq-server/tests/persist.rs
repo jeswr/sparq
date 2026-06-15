@@ -123,6 +123,21 @@ async fn count_rows(cl: &reqwest::Client, base: &str, query: &str) -> usize {
     body["results"]["bindings"].as_array().unwrap().len()
 }
 
+/// [OPUS-4.8] (sq-ycle) The boolean answer to an `ASK` query (the SPARQL JSON `boolean` field).
+async fn ask(cl: &reqwest::Client, base: &str, query: &str) -> bool {
+    let body: serde_json::Value = cl
+        .get(format!("{base}/sparql"))
+        .header("accept", "application/sparql-results+json")
+        .query(&[("query", query)])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["boolean"].as_bool().unwrap()
+}
+
 /// The `value` field of the single binding of variable `var` for a one-row `query` (asserts
 /// exactly one row). Used to read back a non-deterministically-generated literal.
 async fn single_value(cl: &reqwest::Client, base: &str, query: &str, var: &str) -> String {
@@ -269,6 +284,110 @@ async fn nondeterministic_update_persists_committed_value_not_a_reroll() {
         persisted, live,
         "the persisted STRUUID() value must equal the value the live server acked — \
          the durable mirror must NOT re-execute (and thus re-roll) the update"
+    );
+    s2.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-ycle, gh-48) PSS combined multi-op update body: accepted as ONE request
+// AND committed ATOMICALLY (all-or-nothing) on the durable `--persist` path.
+// ---------------------------------------------------------------------------
+
+/// gh-48 (a)+(b). PSS's `putDocument`/`deleteResource` send ONE request body of `;`-separated
+/// operations — `DROP SILENT GRAPH <r> ; INSERT DATA { GRAPH <r> … ; GRAPH <parent> ldp:contains
+/// <r> }` — that rewrites the resource graph AND the parent's `ldp:contains` containment in a
+/// single shot. PSS's reconciler does NOT repair index-internal containment desync, so this body
+/// MUST be (a) accepted as one update request and (b) applied atomically: a single 204, with the
+/// child graph AND the parent containment triple BOTH present afterwards (never one without the
+/// other). This test sends PSS's exact shape, asserts the single 204 + the fully-applied post-state,
+/// then RESTARTS the `--persist` server to prove the WHOLE body is durable as one atomic commit
+/// (the [`sparq_engine`] txn-journal commit point, sq-ycle) — a crash mid-body can never leave the
+/// parent containment pointing at a child graph that did not survive (or vice versa).
+#[tokio::test]
+async fn pss_combined_multiop_body_accepted_and_atomic() {
+    const LDP_CONTAINS: &str = "http://www.w3.org/ns/ldp#contains";
+    const R: &str = "http://ex/pod/resource1";
+    const PARENT: &str = "http://ex/pod/";
+
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+    let s1 = Server::start(persist_config(scratch.path())).await;
+
+    // The EXACT PSS combined body: DROP the resource graph, then in ONE INSERT DATA write the new
+    // resource content into GRAPH <r> AND the parent containment triple into GRAPH <parent>.
+    let body = format!(
+        "DROP SILENT GRAPH <{R}> ; \
+         INSERT DATA {{ \
+           GRAPH <{R}> {{ <{R}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/ldp#Resource> . \
+                          <{R}> <http://ex/title> \"hello\" }} \
+           GRAPH <{PARENT}> {{ <{PARENT}> <{LDP_CONTAINS}> <{R}> }} \
+         }}"
+    );
+
+    // (a) ACCEPTED: the `;`-separated multi-op body is one update request → a SINGLE 204.
+    assert_eq!(post_update(&cl, &s1.base, &body).await, 204, "the combined multi-op body must be accepted as ONE update (single 204)");
+
+    // (b) FULLY APPLIED: both halves of the body are present — the child graph content AND the
+    // parent containment triple. (No partial write: containment without the resource, or vice versa.)
+    let child = format!("SELECT * WHERE {{ GRAPH <{R}> {{ ?s ?p ?o }} }}");
+    let containment = format!("ASK WHERE {{ GRAPH <{PARENT}> {{ <{PARENT}> <{LDP_CONTAINS}> <{R}> }} }}");
+    assert_eq!(count_rows(&cl, &s1.base, &child).await, 2, "the child resource graph must be fully written");
+    assert!(ask(&cl, &s1.base, &containment).await, "the parent ldp:contains triple must be present");
+
+    // The whole body is ONE atomic durable commit: a restart re-opens both halves together.
+    s1.stop().await;
+    let s2 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(count_rows(&cl, &s2.base, &child).await, 2, "the child graph must survive the restart (durable)");
+    assert!(ask(&cl, &s2.base, &containment).await, "the parent containment must survive the restart, in lockstep with the child graph");
+
+    // A second putDocument-shaped body REPLACES the resource graph atomically and is durable too.
+    let body2 = format!(
+        "DROP SILENT GRAPH <{R}> ; \
+         INSERT DATA {{ \
+           GRAPH <{R}> {{ <{R}> <http://ex/title> \"updated\" }} \
+           GRAPH <{PARENT}> {{ <{PARENT}> <{LDP_CONTAINS}> <{R}> }} \
+         }}"
+    );
+    assert_eq!(post_update(&cl, &s2.base, &body2).await, 204);
+    assert_eq!(count_rows(&cl, &s2.base, &child).await, 1, "the DROP+re-INSERT replaced the resource graph atomically (old content gone)");
+    s2.stop().await;
+    let s3 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(count_rows(&cl, &s3.base, &child).await, 1, "the replacement survives a second restart");
+    assert!(ask(&cl, &s3.base, &containment).await);
+    s3.stop().await;
+}
+
+/// gh-48 all-or-nothing. A multi-op request whose LATER operation is invalid must leave NO
+/// partial write — the request fails (non-2xx) and the valid prefix is NOT committed (not in
+/// memory, and — on `--persist` — not on disk after a restart). This is the engine's
+/// request-level atomicity: the server writer applies the body to a private fork and seals
+/// (and durably commits) ONLY on full success, so a rejected body never publishes or persists
+/// a prefix. (A non-SILENT `LOAD` of an unfetchable source is the reliable mid-body failure.)
+#[tokio::test]
+async fn invalid_second_op_leaves_no_partial_write() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+    let s1 = Server::start(persist_config(scratch.path())).await;
+
+    // op 1 (valid INSERT DATA) ; op 2 (a non-SILENT LOAD that the engine refuses → request error).
+    let failing = "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> } ; LOAD <http://ex/nope.ttl>";
+    let status = post_update(&cl, &s1.base, failing).await;
+    assert!(!status.is_success(), "a multi-op body with an invalid op must be rejected (non-2xx), got {status}");
+
+    // The valid prefix must NOT have committed in memory (all-or-nothing).
+    assert_eq!(
+        count_rows(&cl, &s1.base, "SELECT * WHERE { <http://ex/a> ?p ?o }").await,
+        0,
+        "the valid INSERT DATA prefix must NOT be visible after a rejected multi-op request"
+    );
+
+    // …and nothing of it reached the durable store either: a restart shows an empty store.
+    s1.stop().await;
+    let s2 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(
+        count_rows(&cl, &s2.base, "SELECT * WHERE { ?s ?p ?o }").await,
+        0,
+        "a rejected multi-op request must persist NOTHING (no partial durable write)"
     );
     s2.stop().await;
 }
