@@ -20,21 +20,30 @@ depends on it.
 ## 🚀 Quickstart
 
 ```rust
+# use oxrdf::{NamedNode, Term};
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let ttl = "<http://ex/a> <http://www.w3.org/2000/01/rdf-schema#label> \"Alpha\" .";
+# let some_term: Term = NamedNode::new("http://ex/a")?.into();
+# // [OPUS-4.8] Unique temp path so this doctest leaves no artifact in the crate root and
+# // doesn't collide with parallel doctests; cleaned up below. (No tempfile dev-dep.)
+# let nanos = std::time::SystemTime::now()
+#     .duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+# let path = std::env::temp_dir()
+#     .join(format!("sparq-vectors-quickstart-{}-{}.spqv", std::process::id(), nanos));
 use sparq_core::Graph;
 use sparq_vectors::{embed_labels, HashEmbedder, VectorIndex, VectorStore};
 
 let graph = Graph::load_str(ttl, "turtle")?;
 let embedder = HashEmbedder::new(64);              // test-only; bring your own Embedder
-let mut store = VectorStore::create("graph.spqv", 64)?;
+let mut store = VectorStore::create(&path, 64)?;
 embed_labels(&graph, &mut store, &embedder)?;       // rdfs:label > skos:prefLabel > …
 store.finalize()?;                                  // handle becomes mmap-backed
 
 let index = VectorIndex::build(&store);             // HNSW
 let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
+# // [OPUS-4.8] drop the mmap handle before removing the backing file.
+# drop(index); drop(store); std::fs::remove_file(&path).ok();
 # Ok(()) }
-# const ttl: &str = "<http://ex/a> <http://www.w3.org/2000/01/rdf-schema#label> \"Alpha\" .";
-# use oxrdf::{NamedNode, Term}; let some_term: Term = NamedNode::new("http://ex/a").unwrap().into();
 ```
 
 ## ✨ Features

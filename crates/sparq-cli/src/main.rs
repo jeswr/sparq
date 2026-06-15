@@ -1,32 +1,4 @@
-//! sparq command-line interface.
-//!
-//!   sparq-cli query <data-file> <format> <sparql> [--format <out>] [--count] [--reason <p>]
-//!       load a file and run one query, printing its results:
-//!         SELECT             -> the solution bindings (default: a readable table)
-//!         ASK                -> a boolean (`true` / `false`)
-//!         CONSTRUCT/DESCRIBE -> the resulting triples as N-Triples
-//!       `--format <table|tsv|csv|xml|json|ntriples>` picks the SELECT/ASK serialisation
-//!       (CONSTRUCT/DESCRIBE always emit N-Triples); `--count` restores the old
-//!       count-only output (`<n> solutions in <ms>ms`). [OPUS-4.8] (sq-l4ki)
-//!
-//!   sparq-cli query-mmap <dir> <sparql> [--format <out>] [--count]
-//!       like `query`, but opens a saved/built dir with indexes MEMORY-MAPPED
-//!       (out-of-core) instead of loading into RAM. Output is at parity with `query`
-//!       (SELECT rows / ASK boolean / CONSTRUCT/DESCRIBE N-Triples / `--format` /
-//!       `--count`) — it shares the exact same emission core. [OPUS-4.8] (sq-iwyy)
-//!
-//!   sparq-cli bench <data-file> <format> <queries-dir> [iters] [mode]
-//!       load the file once, then run every `*.rq` file in <queries-dir>
-//!       (sorted by name) `iters` times each, printing one TSV line per query:
-//!           <name>\t<rows>\t<min_micros>
-//!       Load time + triple count go to stderr. Used by the QLever comparison.
-//!       mode: `count`       — compute only (no term materialisation)
-//!             `materialize` — full QueryResult of terms (default)
-//!             `json`        — materialise + serialise to SPARQL JSON (timed)
-//!
-//! `format`: turtle | ntriples | nquads | trig — plus hdt when built with the
-//! opt-in `hdt` cargo feature (`--features hdt`), which also auto-detects the
-//! `.hdt` / `.hdt.gz` file extensions regardless of the format argument.
+#![doc = include_str!("../README.md")]
 
 use std::io::Read;
 use std::time::Instant;

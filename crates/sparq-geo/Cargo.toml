@@ -11,6 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] docs.rs: build with ALL features (engine + reproject) so the full
+# API — including the `reproject` module — appears on the rendered front page,
+# and pass `--cfg docsrs` so any `#[doc(cfg(...))]` feature badges render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # Opt-in GeoSPARQL support (T24b). This is a SEPARATE crate so the core engine — and
 # in particular the wasm build — carries zero geometry code or dependencies; spatial
 # support is engaged only by depending on this crate.

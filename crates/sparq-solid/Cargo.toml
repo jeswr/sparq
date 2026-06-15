@@ -15,6 +15,11 @@ readme = "README.md"
 # core engine carries zero Solid/access-control code, deps, or runtime cost — it is
 # a dependency of NOTHING in the workspace. Design: research/solid-access-control-design.md.
 
+# [OPUS-4.8] docs.rs: build with all features + the `docsrs` cfg (for #[cfg_attr(docsrs, ...)] gating).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).

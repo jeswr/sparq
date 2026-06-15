@@ -9,7 +9,14 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-readme = "../../README.md"
+# [OPUS-4.8] crate-local README so crates.io (package.readme) matches the docs.rs front
+# page (lib.rs include_str!("../README.md")) — same content on both registries.
+readme = "README.md"
+
+# [OPUS-4.8] sq-emay: build docs.rs with all features so `explain`/`parallel` items render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 # Opt-in reasoning (RDFS / OWL-RL forward-chaining materialization; Notation3 later). This
 # is a SEPARATE crate so the core engine carries zero reasoning code, deps, or runtime cost

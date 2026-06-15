@@ -552,6 +552,25 @@ fn apply_slot_delta(
 /// association); named graphs are preserved across every operation. Fold the accumulated
 /// overlay back into the base periodically with [`Graph::compact`].
 pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
+    update_in_place_with_budget(graph, sparql, &crate::QueryBudget::unlimited())
+}
+
+/// [OPUS-4.8] (sq-ebii) [`update_in_place`] under a cooperative [`crate::QueryBudget`].
+///
+/// The budget is installed thread-locally for the whole update, so a `DELETE/INSERT … WHERE`
+/// whose WHERE pattern blows up is bounded EXACTLY as a budgeted query's `SELECT` is: the
+/// cross-product allocation is capped up-front (`budget::cap_alloc`) and the evaluation
+/// aborts at the deadline / row cap (`"query budget exceeded (timeout|max-rows)"`), instead
+/// of running the writer thread to an OOM. The non-WHERE operations (INSERT/DELETE DATA,
+/// CLEAR/DROP/CREATE/LOAD) do not consult the budget — they are bounded by their operand
+/// size, which the request body-size limit already caps — so an unlimited budget (the
+/// default, via [`update_in_place`]) is byte-for-byte the previous behaviour.
+pub fn update_in_place_with_budget(
+    graph: &mut Graph,
+    sparql: &str,
+    budget: &crate::QueryBudget,
+) -> Result<(), String> {
+    let _budget = crate::exec::budget::install(budget);
     let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
     for op in &upd.operations {
         match op {
