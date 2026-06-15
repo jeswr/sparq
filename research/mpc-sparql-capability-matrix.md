@@ -40,9 +40,14 @@ four CAPABILITY TIERS, never blurred:
 
 No fabricated performance numbers. Round/communication complexity is given as **qualitative
 classes** (free / O(1) rounds / O(log n) rounds / O(depth) rounds; O(n) / O(n log n) /
-O(n²) comm); concrete wall-clock would require the tier-2/3 harness that does **not exist
-yet** (the crate is still an in-process simulation — §1.2). Literature is cited by name +
-eprint, consolidated with the parent record's source list (§11).
+O(n²) comm). Concrete cost is now partly observable: the in-process **counting tier** emits
+*modelled* deterministic byte/round/multiplication counts, and the **loopback network tier**
+emits *measured* wall-clock + bytes-on-wire over a real TCP transport (both BUILT — §1.2);
+the *netem-shaped* LAN/WAN wall-clock is the only piece still gated (needs CAP_NET_ADMIN → a
+privileged host / the EC2 bead). The per-cell figures below remain qualitative classes
+because the harness has not yet been swept across the full operator × configuration grid, not
+because the harness is absent. Literature is cited by name + eprint, consolidated with the
+parent record's source list (§11).
 
 ---
 
@@ -74,23 +79,65 @@ sort and `MIN`/`MAX`/range-`FILTER` depend on — and that is blocked on **degre
 (sq-dvuc, OPEN)**. The leverage point has moved one layer down: *multiplication chaining*
 is now the keystone, not shuffle/sort.
 
-### 1.2 What is STILL true (the hard constraints this matrix lives inside)
+### 1.2 The benchmark harness — what is BUILT and what is still gated (corrected 2026-06-15)
 
-- **In-process simulation; no network.** No `transport.rs`, no `netprofiles.rs`, no
-  `metrics.rs`, no round/byte counter — every "party" is a function call in one process.
-  The dominant real-world MPC cost (rounds × RTT, bytes on wire) is therefore **not
-  observable in running code**. All round/comm classes here are *modelled from the
-  literature*, not measured. (The tier-1/2/3 harness in the parent §5 is unbuilt; bench
-  files do not exist.)
+> **CORRECTION (this supersedes an earlier draft of this section).** An earlier version of
+> this record claimed the crate was *"in-process simulation; no network — no `transport.rs`,
+> no `netprofiles.rs`, no `metrics.rs`, no round/byte counter … bench files do not exist."*
+> **That is FALSE.** The tier-1/2/3 benchmark harness the parent §5 specified has LANDED
+> (beads **sq-sxm** + **sq-tg6b**, both CLOSED). The files exist, are wired into `lib.rs`, and
+> are tested. The accurate current state:
+
+- **Tier-1 — in-process counting tier — BUILT.** `metrics.rs` (`CommCounter`) records the
+  *modelled* communication a real deployment would pay, derived deterministically from
+  `(n, t, sizes)`: `field_elements_opened` / `field_elements_shared`, `multiplications`,
+  `mult_rounds` / `open_rounds` (sequential upper bound) **and** `batched_rounds` (lower
+  bound when independent ops collapse into one network round), plus `bytes_per_party`
+  (8 bytes/field-element = `FIELD_BYTES`) and `total_bytes`. `bench.rs` is the matrix runner
+  that drives the representative operators across the `{2,3,5,7}` × query-class grid and reads
+  these counters off, emitting a stable JSON shape (`MatrixResults::to_json`, labelled
+  *"network cost MODELLED not measured"*) plus a human table; `examples/mpc_bench_matrix.rs`
+  prints both. Every cost cell co-runs the REAL primitive (`check_aggregate` /
+  `check_hidden_join` / `check_shuffle` / `check_sort`) so a fast-but-wrong cell is caught.
+  (Beads **sq-sxm** CLOSED.)
+- **Tier-2 — real loopback network transport — BUILT.** `transport.rs` is a genuine
+  multi-process transport: each party is its OWN OS process exchanging the actual protocol
+  messages over a `127.0.0.1` TCP socket (`examples/mpc_party.rs` is the party child binary;
+  `examples/mpc_net_bench.rs` is the coordinator/driver that spawns N child processes). It
+  ships a hand-written length-prefixed wire codec (`Message` / `StepCode`), a byte-counting
+  `Channel`, a star-topology `Coordinator`, and emits a `NetworkCell` carrying the
+  **MEASURED** wall-clock, **MEASURED** bytes-sent/recv on the wire, and the round count —
+  validated by the load-bearing test that the networked result equals the in-process result
+  (`run_cell_networked` for the aggregate + hidden-join cells). So real bytes-on-wire and real
+  round latency ARE observable in running code today (at LAN-ideal ~0 RTT on raw loopback).
+  (Bead **sq-tg6b** CLOSED.)
+- **Tier-3 — netem-shaped LAN/WAN — PROFILES BUILT, execution privilege-gated.**
+  `netprofiles.rs` defines the canonical literature profiles as data — `NetemProfile::lan()`
+  (1 Gbit/s, 2 ms RTT), `::wan()` (100 Mbit/s, 100 ms RTT, 5 ms jitter, 0.1 % loss),
+  `::loopback()` (unshaped) — plus the exact `tc qdisc … netem` command generator that
+  `scripts/mpc-netem.sh` applies. The *shaped* wall-clock is the ONLY genuinely-not-yet-here
+  piece: applying a netem qdisc needs `CAP_NET_ADMIN` (root), unavailable unprivileged on the
+  dev box, so the shaped runs are gated to a privileged host / the orphan-proof EC2 bench
+  (bead **sq-hoaj**, the heavy-ceiling run). The harness NEVER fakes a shaped number — a
+  Tier-3 figure only exists once `tc` actually ran. (Profiles part of **sq-tg6b** CLOSED;
+  scale-out execution **sq-hoaj** OPEN.)
+
+**What this means for the cost columns below:** the round/comm classes are still given
+qualitatively because the harness has not been *swept* across the whole operator ×
+configuration grid yet, not because no harness exists. The dominant real-world cost
+(rounds × RTT, bytes on wire) IS now observable for the representative aggregate + hidden-join
+cells on the loopback tier; the shaped LAN/WAN multiplier awaits the privileged/EC2 run.
 - **One protocol family only: Shamir/BGW, honest-majority,** `t = ⌊(n−1)/2⌋`
   (`shamir.rs`). No replicated 3PC, no SPDZ/MASCOT, no GMW, no garbled circuits, no FSS/DPF.
-- **No degree reduction.** `mul_shares_raw` yields a degree-`2t` product and the crate
-  **only ever opens it once** (the equality test). Any multiplication *chain* — secure
+- **No degree reduction (on `main`).** `mul_shares_raw` yields a degree-`2t` product and the
+  crate **only ever opens it once** (the equality test). Any multiplication *chain* — secure
   comparison, products of match bits, conjunctive hidden-pattern joins, segmented
-  group-agg scans, AVG — is **unbuilt** (`shamir.rs:455–469`; bead **sq-dvuc OPEN**). The
-  brief that commissioned this doc described a "NEW degree_reduce just added"; **that is
-  not in the tree** — `mul_shares_raw` is still single-product. This is the load-bearing
-  blocker for ~half the operator surface.
+  group-agg scans, AVG — is **unbuilt on `main`** (`shamir.rs:455–469`; bead **sq-dvuc OPEN**).
+  `degree_reduce` is **in-flight in PR #119, not yet merged**, so it is correctly absent from
+  the `main` tree at the time of writing — `mul_shares_raw` is still single-product here. This
+  is the load-bearing blocker for ~half the operator surface until #119 lands. *(This is the
+  one current-state claim from the earlier draft that was accurate — degree reduction genuinely
+  is not on `main` yet; only the transport/metrics/bench "do not exist" claims were wrong.)*
 - **The hidden equi-join is still all-pairs** `O(|L|·|R|)` `secure_equal` (`join.rs:411,
   443`). ORQ-style O(n log n) sort-merge is **OPEN** (bead **sq-ujz8**).
 - **No collaborative ZK proof; no in-circuit signature.** `proof.rs` is honest
@@ -240,7 +287,13 @@ leaks the boolean) or needs P5 to keep the sum itself secret (OPEN — see §4.2
 **Cost note (N, network):** all-pairs join is the **cost center** at every config (the parent
 record's ORQ anchor: even SOTA O(n log n) joins are minutes-to-tens-of-minutes on LAN, ×1.2–6.9
 on WAN). The all-pairs `O(\|L\|·\|R\|)` opens are also a **round-count explosion** on a real
-network (one open per pair) — fine in the in-process sim, catastrophic on WAN.
+network (one open per pair). The harness now *measures* this rather than only modelling it: the
+hidden-join cell runs over the real loopback transport (`transport.rs::run_cell_networked`,
+the `MulAndOpen` step) so the bytes/rounds are observed, and `CommCounter`'s
+`batched_rounds` lower bound records that the `\|L\|·\|R\|` equalities are mutually independent
+(they collapse into ~one network round if batched) — the difference between the sequential
+upper bound and the batched lower bound IS the round-count-explosion risk, made explicit. The
+shaped WAN slowdown awaits the netem/EC2 run (`netprofiles.rs::wan()` + sq-hoaj).
 
 #### UNION
 | Config | Tier | Most performant | sparq |
@@ -499,9 +552,17 @@ Ordered by leverage. Each gap names whether a bead already covers it.
    masks/correlated randomness are jointly generated — prerequisite for any real federation and
    for P4/P5 correlated randomness. Bead **sq-yyro (OPEN)** ✅ tracked.
 7. **Network transport + round/byte instrumentation (tier-1 modelled, tier-2/3 real).** Make
-   the round-count/comm cost — the dominant real-world cost, currently invisible — observable;
-   prerequisite for ANY per-config performance verdict. **Not beaded** (the parent §5 harness
-   is described but unbuilt; no `transport.rs`/`metrics.rs`). → **FILED below.**
+   the round-count/comm cost — the dominant real-world cost — observable; prerequisite for ANY
+   per-config performance verdict. **DONE (CLOSED):** tier-1 modelled counters
+   (`metrics.rs::CommCounter`) + the matrix runner (`bench.rs`) landed as **sq-sxm**, and the
+   real loopback multi-process transport (`transport.rs`) + the tc/netem LAN/WAN profiles
+   (`netprofiles.rs` + `scripts/mpc-netem.sh`) landed as **sq-tg6b** — both CLOSED. The only
+   remaining slice is *executing* the netem-shaped LAN/WAN runs at scale, which needs
+   CAP_NET_ADMIN → tracked as **sq-hoaj (OPEN, P3)** (the orphan-proof EC2 ceiling run). The
+   bead **sq-5gnv**, which re-filed "build transport + instrumentation", is therefore
+   **REDUNDANT** and was closed pointing at sq-sxm/sq-tg6b/sq-hoaj. *(The only network-tier
+   work genuinely not yet built is oblivious shuffle/sort OVER the transport — a noted
+   sq-tg6b follow-up — and the scale-out itself, sq-hoaj.)*
 8. **Bounded-length property-path operator** (unroll to fixed hop count → fixed BGP chain).
    The only tractable slice of property paths. **Not beaded.** → **FILED below.**
 9. **WAN-tier protocol selection (constant-round comparison; BMR for Boolean/regex).** The
@@ -517,7 +578,16 @@ Ordered by leverage. Each gap names whether a bead already covers it.
 
 Already-CLOSED (do not re-file): sq-18lk (shuffle/sort substrate), sq-mq8q (3-axis descriptor),
 sq-a6p1 (selection registry), sq-uu0u/sq-m34i/sq-7q9i (robust reconstruct), sq-jnkm (result-size
-protection standalone), sq-1vt (CSPRNG).
+protection standalone), sq-1vt (CSPRNG), **sq-sxm (tier-1 modelled counters + matrix runner —
+`metrics.rs`/`bench.rs`)**, **sq-tg6b (tier-2 loopback transport + tier-3 netem profiles —
+`transport.rs`/`netprofiles.rs`/`scripts/mpc-netem.sh`)**.
+
+Beads filed by this record for the genuinely-open sub-gaps (verified against source 2026-06-15):
+sq-y32f (#3 wire sq-jnkm into the join), sq-km34 (#5 IT-MAC degree-2t at minimal N), sq-py8h
+(#8 bounded property paths), sq-38zk (#9 WAN constant-round comparison + Boolean backend),
+sq-aaop (#10 composition/UC record), sq-4i39 (#11 `BackendInfo.requires_preprocessing` field).
+The earlier sq-5gnv (#7 "build transport + instrumentation") was filed on a mistaken premise
+and has been **CLOSED as redundant** — that work already shipped (sq-sxm + sq-tg6b).
 
 ---
 
@@ -582,11 +652,19 @@ coZK soundness pitfalls (CRYPTO'25, eprint 2025/1026); Canetti UC (FOCS'01); GOR
 (confidentiality-only graph traversal).
 
 **In-repo ground truth (verified 2026-06-15):** `crates/sparq-mpc/src/{backend,shamir,robust,
-join,oblivious,proof,holder,partial,field,rng}.rs` — specifically `backend.rs:111–340`
-(3-axis descriptor + Cleve invariant), `shamir.rs:216–252` (`operator_descriptor`),
-`shamir.rs:455–516` (`mul_shares_raw` single-product + `reconstruct_degree`),
-`oblivious.rs` (`WaksmanNetwork`/`shuffle` sound; `SortingNetwork`/`sort_with_keys`;
-`SimulatedSecretComparator` INSECURE cfg-gated), `join.rs:119,382,411,443`
-(`DisclosedKeyJoin` / `HiddenValueJoin` all-pairs). Beads: sq-pwr / sq-0jsc (epics),
-sq-dvuc / sq-rrz4 / sq-ujz8 / sq-shk5 / sq-yyro / sq-bwwl / sq-6d6g (OPEN gaps),
-sq-18lk / sq-mq8q / sq-a6p1 / sq-uu0u / sq-m34i / sq-7q9i / sq-jnkm / sq-1vt (CLOSED).
+join,oblivious,oblivious_join,proof,holder,partial,field,rng,metrics,bench,transport,
+netprofiles}.rs` + `crates/sparq-mpc/examples/{mpc_bench_matrix,mpc_net_bench,mpc_party}.rs`
++ `scripts/mpc-netem.sh` — specifically `backend.rs:111–340` (3-axis descriptor + Cleve
+invariant), `shamir.rs:216–252` (`operator_descriptor`), `shamir.rs:455–516`
+(`mul_shares_raw` single-product + `reconstruct_degree`; **no `degree_reduce` on `main` — it
+is in-flight in PR #119**), `oblivious.rs` (`WaksmanNetwork`/`shuffle` sound;
+`SortingNetwork`/`sort_with_keys`; `SimulatedSecretComparator` INSECURE cfg-gated),
+`join.rs:119,382,411,443` (`DisclosedKeyJoin` / `HiddenValueJoin` all-pairs).
+**Benchmark harness (the §1.2 correction):** `metrics.rs` (`CommCounter` — byte/round/mult
+counters, tier-1) + `bench.rs` (`run_matrix`/`MatrixResults`, the model×N×query matrix runner)
+landed via **sq-sxm**; `transport.rs` (real loopback multi-process TCP transport — `Message`/
+`Channel`/`Coordinator`/`NetworkCell`/`run_cell_networked`) + `netprofiles.rs`
+(`NetemProfile::lan/wan/loopback` + `tc` generator) landed via **sq-tg6b** (both CLOSED).
+Beads: sq-pwr / sq-0jsc (epics), sq-dvuc / sq-rrz4 / sq-ujz8 / sq-shk5 / sq-yyro / sq-bwwl /
+sq-6d6g (OPEN gaps), sq-18lk / sq-mq8q / sq-a6p1 / sq-uu0u / sq-m34i / sq-7q9i / sq-jnkm /
+sq-1vt / **sq-sxm / sq-tg6b** (CLOSED), sq-hoaj (OPEN — netem/EC2 scale-out).
