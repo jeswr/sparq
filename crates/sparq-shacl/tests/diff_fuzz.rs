@@ -190,7 +190,19 @@ fn ref_keys(report: &RefReport) -> std::collections::BTreeSet<Key> {
         .violations
         .iter()
         .map(|v| Key {
-            focus: v.focus.clone().unwrap_or_else(|| "_:bnode".to_string()),
+            // [OPUS-4.8] A genuinely-absent `focus` in the reference JSON is a
+            // distinct fact from a blank-node focus: collapsing both to "_:bnode"
+            // would let a report-shape bug (adapter dropping the focus field)
+            // silently compare equal to sparq emitting a blank-node focus, masking
+            // the disagreement. sparq's `norm_term` never yields this sentinel
+            // (a real blank node maps to "_:bnode", a named node to its IRI), so a
+            // missing-focus reference result can only ever match another
+            // missing-focus result — and will mismatch any sparq result, surfacing
+            // the adapter/engine shape bug instead of hiding it.
+            focus: v
+                .focus
+                .clone()
+                .unwrap_or_else(|| "<missing-focus>".to_string()),
             component: v
                 .component
                 .clone()
@@ -362,6 +374,42 @@ fn differential_shacl_fuzz() {
             mismatches.len()
         );
     }
+
+    // [OPUS-4.8] Guard against a VACUOUS pass. We only reach this point with the
+    // adapter RESOLVED (an absent pySHACL short-circuits via `resolve_pyshacl`
+    // returning `None` above), so the comparison is expected to actually run.
+    // `assess_run` makes "adapter present but compared zero cases" a hard error
+    // instead of a silent agreement; see its doc + the unit test below.
+    if let Err(why) = assess_run(agree, skipped) {
+        for ex in &skip_examples {
+            eprintln!("SKIP example: {ex}");
+        }
+        panic!("{why}");
+    }
+}
+
+/// Decide whether a *resolved-adapter* run produced a meaningful comparison.
+///
+/// [OPUS-4.8] `agree` is the number of cases that ran the full sparq-vs-reference
+/// comparison and matched; by the time the driver calls this, any mismatch has
+/// already panicked, so `agree == compared` (the count of cases that actually
+/// compared). If every case was instead `Skipped` — the adapter resolved yet
+/// errored on every seed (wrong venv, missing rdflib, adapter regression) —
+/// `compared` is 0 and the lane would otherwise "pass" while comparing nothing.
+/// That is a broken reference setup, not agreement, so we return `Err`.
+///
+/// This is intentionally separate from the "adapter intentionally absent" path,
+/// which the driver handles earlier by returning before any case runs.
+fn assess_run(agree: u64, skipped: u64) -> Result<(), String> {
+    let compared = agree;
+    if compared == 0 {
+        return Err(format!(
+            "SHACL diff fuzz compared ZERO cases (skipped={skipped}): the reference adapter \
+             was resolved yet errored on every seed — a broken reference setup/adapter, not \
+             agreement. Check pySHACL/rdflib in the configured interpreter."
+        ));
+    }
+    Ok(())
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -452,5 +500,53 @@ fn key_normalisation_is_consistent() {
         sk,
         ref_keys(&rr),
         "normalisation must agree on the same logical result"
+    );
+}
+
+/// [OPUS-4.8] Fast guard for the line-354 fix: a resolved adapter that errored on
+/// every seed (all `Skipped`, zero compared) must be a FAILURE, not a pass; a run
+/// that compared at least one case is OK. Runs in the per-PR fast lane (no
+/// reference engine needed), so the floor logic can't silently regress.
+#[test]
+fn all_skipped_run_is_a_failure_not_a_vacuous_pass() {
+    // Adapter resolved but errored on every one of 200 seeds.
+    assert!(
+        assess_run(0, 200).is_err(),
+        "an all-skipped run (compared==0) must fail — otherwise a broken reference \
+         adapter masquerades as agreement"
+    );
+    // At least one real comparison ran → not vacuous.
+    assert!(assess_run(1, 199).is_ok());
+    assert!(assess_run(200, 0).is_ok());
+}
+
+/// [OPUS-4.8] Fast guard for the line-199 fix: a reference violation with a
+/// genuinely-absent `focus` must NOT normalise to the same key as a blank-node
+/// focus, so a dropped-focus report-shape bug can't silently compare equal.
+#[test]
+fn missing_focus_is_distinct_from_blank_node_focus() {
+    let comp = "http://www.w3.org/ns/shacl#MinCountConstraintComponent".to_string();
+    let missing = ref_keys(&RefReport {
+        conforms: false,
+        violations: vec![RefViolation {
+            focus: None,
+            component: Some(comp.clone()),
+            path: None,
+        }],
+    });
+    // sparq never yields a missing focus; the closest is a blank-node focus,
+    // which `norm_term` maps to "_:bnode". The two keys must differ.
+    let blank = missing
+        .iter()
+        .next()
+        .map(|k| Key {
+            focus: "_:bnode".to_string(),
+            component: k.component.clone(),
+            path: k.path.clone(),
+        })
+        .unwrap();
+    assert!(
+        !missing.contains(&blank),
+        "missing focus collapsed into the blank-node sentinel — masks report-shape bugs"
     );
 }

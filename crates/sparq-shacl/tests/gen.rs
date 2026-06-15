@@ -106,7 +106,14 @@ impl Constraint {
     /// An object term (Turtle) that SATISFIES this component.
     fn conforming_value(&self, rng: &mut Rng) -> String {
         match self {
-            Constraint::Datatype(dt) => typed_literal(dt, rng, true),
+            // [OPUS-4.8] ~1-in-3 of the time draw a boundary-but-still-valid
+            // literal (0, negatives, empty string, …) to widen coverage; these
+            // are still lexically valid for the datatype, so they keep CONFORMING
+            // to a bare `sh:datatype` constraint while exercising edge values.
+            Constraint::Datatype(dt) => {
+                let valid = !rng.chance(1, 3);
+                typed_literal(dt, rng, valid)
+            }
             Constraint::NodeKind(nk) => match *nk {
                 "sh:IRI" => format!("<{EX}thing{}>", rng.below(5)),
                 "sh:Literal" => format!("\"lit{}\"", rng.below(5)),
@@ -169,14 +176,33 @@ impl Constraint {
     }
 }
 
-/// A typed literal of the given xsd local name. `valid=false` picks values still
-/// of the right lexical form but chosen to exercise boundaries.
-fn typed_literal(dt: &str, rng: &mut Rng, _valid: bool) -> String {
+/// A typed literal of the given xsd local name. Both `valid` modes produce a
+/// value that is lexically valid for the datatype (so it still conforms to a
+/// bare `sh:datatype` constraint — wrong-datatype violations are minted by
+/// `violating_value`). `valid=false` instead picks boundary values (zero,
+/// negatives, the empty string, …) to widen the fuzz coverage. [OPUS-4.8]
+fn typed_literal(dt: &str, rng: &mut Rng, valid: bool) -> String {
     match dt {
+        "integer" if !valid => {
+            // boundary integers: 0, and small negatives.
+            format!("{}", -(rng.below(3) as i64))
+        }
         "integer" => format!("{}", rng.below(100)),
+        "decimal" if !valid => "\"-0.0\"^^xsd:decimal".to_string(),
         "decimal" => format!("\"{}.5\"^^xsd:decimal", rng.below(100)),
+        "boolean" if !valid => {
+            // the lexical alternatives "0"/"1" for xsd:boolean.
+            if rng.chance(1, 2) {
+                "\"1\"^^xsd:boolean"
+            } else {
+                "\"0\"^^xsd:boolean"
+            }
+            .to_string()
+        }
         "boolean" => if rng.chance(1, 2) { "true" } else { "false" }.to_string(),
+        "string" if !valid => "\"\"".to_string(), // empty string is a valid xsd:string
         "string" => format!("\"s{}\"", rng.below(10)),
+        _ if !valid => "\"\"".to_string(),
         _ => format!("\"v{}\"", rng.below(10)),
     }
 }
@@ -327,9 +353,14 @@ impl Scenario {
     }
 }
 
-/// Picks a random in-scope value constraint. `support` accumulates any data-graph
-/// declarations the constraint needs (e.g. the class for sh:class).
-fn gen_constraint(rng: &mut Rng, support: &mut Vec<String>) -> Option<Constraint> {
+/// Picks a random in-scope value constraint.
+///
+/// [OPUS-4.8] `_support` is intentionally unused: every constraint we currently
+/// generate fills its data-graph support per-value later in `resolve_value`
+/// (e.g. `sh:class` mints its typed instance there), so nothing is accumulated
+/// up front. The parameter is kept so callers needn't change if a future
+/// constraint does need up-front support declarations.
+fn gen_constraint(rng: &mut Rng, _support: &mut Vec<String>) -> Option<Constraint> {
     // 1-in-6: a count-only property shape (no value constraint).
     if rng.chance(1, 6) {
         return None;
@@ -343,7 +374,6 @@ fn gen_constraint(rng: &mut Rng, support: &mut Vec<String>) -> Option<Constraint
             // `resolve_value` (so each conforming value points at its own typed
             // node); no class-level support declaration is needed up front.
             let cls = format!("{EX}Kind{}", rng.below(100));
-            let _ = support; // support filled per-value in resolve_value
             Constraint::Class(cls)
         }
         3 => Constraint::Pattern(rng.pick(&["^[a-z]+[0-9]+$", "^a.*$", "[0-9]"])),
