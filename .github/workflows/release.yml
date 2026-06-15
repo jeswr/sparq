@@ -168,6 +168,21 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
+      # [OPUS-4.8] sq-n6rv: SMOKE BEFORE PUSH. Build the image locally first, `docker run`
+      # it, and prove it serves /health + a query — so a container that exits immediately on
+      # boot (the sq-n6rv regression) can never reach ghcr.io. The build is cached to GHA, so
+      # the subsequent push step is a cache hit (it does not rebuild from scratch).
+      - name: Build image for smoke test (load locally)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: sparq-server:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test the image (docker run + /health + ASK query)
+        run: scripts/docker-smoke.sh sparq-server:smoke 3030
       - name: Build and push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:

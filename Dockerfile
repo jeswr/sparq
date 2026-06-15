@@ -11,7 +11,31 @@
 # Run:      docker run --rm -p 3030:3030 -v "$PWD/data:/data:ro" sparq-server \
 #             --format turtle /data/dataset.ttl
 #           (no data file => starts with an empty default graph)
-# Endpoint: http://localhost:3030/sparql
+# Endpoint: http://localhost:3030/sparql   Health: http://localhost:3030/health
+#
+# [OPUS-4.8] sq-n6rv — SECURITY POSTURE OF THIS IMAGE (read before exposing the port):
+#   This image sets ENV SPARQ_ALLOW_REMOTE=1 so it BOOTS on `docker run` out of the box:
+#   without a published port the server is useless, and inside the container the only
+#   reachable bind is the non-loopback 0.0.0.0 the ENTRYPOINT requests. Running the
+#   container is itself the operator's explicit choice to expose a network surface, so
+#   the bind is permitted — but the server has NO built-in auth in this default posture,
+#   i.e. anyone who can reach the published port can READ AND WRITE the whole dataset.
+#   The binary logs a loud no-auth WARNING at startup; do not ignore it.
+#
+#   For any non-trivial deployment, gate the surface with the Bearer token (#71) — the
+#   server reads SPARQ_AUTH_TOKEN / SPARQ_AUTH_TOKEN_READ from the ENVIRONMENT (see
+#   ServerConfig::from_env), so pass them straight through with `-e`, no flag wiring:
+#     # writes gated, reads open (QLever-style):
+#     docker run --rm -p 3030:3030 -e SPARQ_AUTH_TOKEN=$TOK sparq-server
+#     # whole surface gated (writes AND reads require the token):
+#     docker run --rm -p 3030:3030 -e SPARQ_AUTH_TOKEN=$TOK -e SPARQ_AUTH_TOKEN_READ=1 sparq-server
+#   Deliver the token over TLS (terminate at a reverse proxy); a bare Bearer token on
+#   plaintext HTTP is sniffable. For per-user authz, front it with a gateway / sparq-solid.
+#   See crates/sparq-server/README.md -> "Running the container image (ghcr.io)".
+#
+# A CI smoke test (docker run + curl /health + a basic query) gates this image on every
+# PR and before each release push, so a container that exits immediately can never ship —
+# see .github/workflows/ci.yml (docker-smoke) and release.yml.
 #
 # CI builds + pushes this to ghcr.io on version tags — see .github/workflows/release.yml.
 
@@ -47,6 +71,17 @@ COPY --from=builder /build/target/release/sparq-server /usr/local/bin/sparq-serv
 # Conventional mount point for read-only datasets.
 VOLUME ["/data"]
 EXPOSE 3030
+
+# [OPUS-4.8] sq-n6rv: permit the non-loopback bind the ENTRYPOINT requests.
+# After the fail-closed bind posture (sq-o4qf) landed, the server REFUSES a non-loopback
+# `--addr` (and exits non-zero) unless --allow-remote / SPARQ_ALLOW_REMOTE=1 is set. Inside
+# a container the ONLY useful bind is 0.0.0.0 (loopback is unreachable through Docker's port
+# mapping), and running the container is itself the operator's explicit choice to publish a
+# network surface — so we set it here so the image BOOTS out of the box. This does NOT add
+# auth: see the security note in the header and crates/sparq-server/README.md. Gate the
+# surface in production with `-e SPARQ_AUTH_TOKEN=...` (and `-e SPARQ_AUTH_TOKEN_READ=1` for
+# a fully-gated surface) — the server reads those from the environment.
+ENV SPARQ_ALLOW_REMOTE=1
 
 # Bind 0.0.0.0 inside the container (the binary's default 127.0.0.1 is unreachable through
 # Docker's port mapping). Flags repeat-override in sparq-server's arg parser, so callers can

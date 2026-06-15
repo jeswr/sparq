@@ -458,4 +458,33 @@ jobs:
         # set already covers the unsafe of interest (sparq-core). sparq-py is skipped
         # (pyo3 extension module — not a plain cargo-geiger target, like the other jobs).
         run: cargo geiger --workspace --exclude sparq-py >> "$GITHUB_STEP_SUMMARY"
+
+  docker-smoke:
+    # [OPUS-4.8] sq-n6rv: build the release container EXACTLY as release.yml ships it, then
+    # `docker run` it and prove over the network that it serves. This is the gate that makes
+    # a container which exits immediately on `docker run` un-shippable: sq-n6rv was precisely
+    # that (the fail-closed bind posture refused the ENTRYPOINT's 0.0.0.0 bind, so every
+    # released image died on boot) and NO test caught it because nothing ever ran the image.
+    # PR-triggered, so `ci-summary` auto-discovers and gates it; release.yml re-runs the same
+    # script against the tag's image before push. Builds with the SAME Dockerfile + buildx the
+    # release job uses, so the artifact under test matches the one that ships.
+    name: docker image smoke (run + curl /health + query)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build image (load into the local daemon)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          # Single-arch, loaded into the runner's docker daemon so `docker run` can use it.
+          load: true
+          push: false
+          tags: sparq-server:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test (docker run + /health + ASK query)
+        run: scripts/docker-smoke.sh sparq-server:smoke 3030
         continue-on-error: true
