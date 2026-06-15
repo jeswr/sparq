@@ -176,7 +176,10 @@ mod tests {
     //! method must fail with a clear, gate-naming [`MpcError::NotYetImplemented`]
     //! — never a panic, never a fake success.
     use super::*;
-    use crate::backend::{BackendInfo, MaliciousSecurity, MpcBackend, TrustModel};
+    use crate::backend::{
+        AbortKind, AdversaryModel, BackendInfo, CorruptionThreshold, MpcBackend, OutputGuarantee,
+        PublicVerifiability, SecurityDescriptor,
+    };
     use oxrdf::Variable;
 
     /// A do-nothing backend used ONLY to instantiate the generic trait surface
@@ -186,11 +189,20 @@ mod tests {
     impl MpcBackend for StubBackend {
         type Share = ();
         fn info(&self) -> BackendInfo {
-            BackendInfo {
-                name: "stub",
-                trust_model: TrustModel::HonestMajority,
-                malicious_security: MaliciousSecurity::SemiHonestOnly,
-            }
+            // [OPUS-4.8] sq-mq8q — honest-majority, semi-honest-only stub via the
+            // three-axis descriptor; `BackendInfo::new` derives the back-compat
+            // `trust_model = HonestMajority` / `malicious_security = SemiHonestOnly`
+            // projection (semi-honest adversary + no-detection selective abort).
+            BackendInfo::new(
+                "stub",
+                SecurityDescriptor {
+                    adversary: AdversaryModel::SemiHonest,
+                    output_guarantee: OutputGuarantee::Abort(AbortKind::Selective),
+                    threshold: CorruptionThreshold::HonestMajority { t: 1 },
+                    public_verifiability: PublicVerifiability(false),
+                },
+                0,
+            )
         }
         fn share_private_input(&self, _h: &crate::holder::Holder) -> Result<Vec<()>, MpcError> {
             Err(MpcError::not_yet("secret-share private input", "M3 + Q2"))

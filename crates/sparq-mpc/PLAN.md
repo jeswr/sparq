@@ -94,6 +94,23 @@ First concrete secret-sharing impl behind the trait + the hidden-value join,
 detect-and-abort / robust-correct on every reconstruction path, surfaced via the
 `MaliciousSecurity` enum. See the "Security model" bullet below and the
 "Deferred malicious-security seams" subsection for what remains beyond v1.
+- **Configurable security descriptor (sq-mq8q) ✅ DONE [OPUS-4.8].** The old
+  `TrustModel` (binary) + `MaliciousSecurity` (adversary-axis bundled with
+  output-guarantee-axis, "HonestMajority" soldered into variant names) are
+  replaced — *behind the unchanged `MpcBackend` trait* — by THREE orthogonal axes
+  in `backend.rs`: `AdversaryModel` (SemiHonest / Covert{ε} / Malicious),
+  `OutputGuarantee` (Abort(AbortKind) / Fairness / GuaranteedOutput), and
+  `CorruptionThreshold` (DishonestMajority / HonestMajority / SuperHonestMajority,
+  each carrying `t`), plus a `PublicVerifiability` marker, composed into a
+  `SecurityDescriptor`. **Cleve's impossibility is a type-level invariant**:
+  `Fairness`/`GuaranteedOutput` are constructible ONLY under an honest majority
+  (private-witness constructors that reject `DishonestMajority`). `TrustModel` /
+  `MaliciousSecurity` are KEPT as a back-compat projection
+  (`SecurityDescriptor::{trust_model,malicious_security}`), and guarantees are
+  reported PER-OPERATOR (`MpcBackend::operator_security` / `OperatorClass`) — the
+  degree-`t` aggregate is robust while the degree-`2t` equality open is
+  semi-honest-only at `n = 2t+1`. The fail-closed selection/negotiation registry
+  that consumes these axes is the follow-up **bead sq-a6p1** (depends on this).
 - **Q2 RESOLVED for v1: honest-majority trust model** (Jesse's decision:
   honest-majority now, configurable long-term). The four flatmates *cooperate*
   among themselves to prove an aggregate to an external landlord — the regime

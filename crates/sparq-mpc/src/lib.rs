@@ -99,7 +99,10 @@ pub mod shamir;
 #[cfg(test)]
 mod adversarial_tests;
 
-pub use backend::{BackendInfo, MaliciousSecurity, MpcBackend, TrustModel};
+pub use backend::{
+    AbortKind, AdversaryModel, BackendInfo, CorruptionThreshold, MaliciousSecurity, MpcBackend,
+    OperatorClass, OutputGuarantee, PublicVerifiability, SecurityDescriptor, TrustModel,
+};
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, JoinPlan};
@@ -107,4 +110,4 @@ pub use partial::{HolderId, MpcError, PartialResult};
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
 pub use rng::{MpcRng, SecureRng};
 pub use robust::reconstruct_robust;
-pub use shamir::{Share, ShamirBackend};
+pub use shamir::{ShamirBackend, Share};
