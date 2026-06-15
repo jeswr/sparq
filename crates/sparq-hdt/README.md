@@ -39,8 +39,11 @@ carries zero HDT code or dependencies. Native-only by design.
 - HDT term shapes covered: IRIs, blank nodes, plain / language-tagged / datatyped
   literals (lang tags normalized to lowercase, matching sparq's other loaders).
 - **GZipped containers** (`.hdt.gz`): detected by magic bytes — not file names —
-  in every entry point and decompressed on the fly (streaming, pure-Rust flate2
-  backend).
+  in every entry point and decompressed on the fly (streaming flate2). The default
+  flate2 backend is pure-Rust `miniz_oxide`; the opt-in, native-only `zlib-ng` cargo
+  feature (`cargo build -p sparq-hdt --features zlib-ng`) swaps in the faster zlib-ng
+  C backend for gzip inflate at zero code change. Off by default and never reaches the
+  wasm build (this crate is native-only and not in the wasm graph).
 - **Header access**: `header()` / `header_reader()` decode just the dataset
   metadata triples (the "H" in HDT) into a queryable `Graph` without touching
   the dictionary/triples sections.
