@@ -366,6 +366,71 @@ mod tamper {
              (MpcError::Tampered), not silently change the total; got {err:?}"
         );
     }
+
+    /// [OPUS-4.8] **END-TO-END guarantee (D) at the production API boundary
+    /// (sq-uu0u).** The tests above exercise the RS checker via `reconstruct` /
+    /// `reconstruct_degree`. This one drives the WHOLE public [`MpcBackend`]
+    /// pipeline a federation actually calls — `run_secure` then
+    /// `reconstruct_disclosed` (the disclosed-output trait method, NOT the helper)
+    /// — and proves guarantee (D) is wired all the way THROUGH that surface: a
+    /// tampered share in the result sharing is (a) RS-corrected back to the true
+    /// disclosed integer within the budget, and (b) detect-and-aborts with
+    /// [`MpcError::Tampered`] beyond it — never a silently wrong disclosed answer.
+    /// Honest runs still disclose the correct total (no behaviour change clean).
+    #[test]
+    fn tampered_share_at_reconstruct_disclosed_boundary_is_corrected_or_aborts() {
+        // n = 4, t = 1 → e_max = ⌊(4−1−1)/2⌋ = 1: one error is CORRECTABLE, two abort.
+        let backend = ShamirBackend::new_seeded(4, 0xD15C).unwrap();
+        let mut dealer = backend.dealer();
+        let inputs: Vec<Vec<Share>> = [30_000u64, 45_000, 28_000]
+            .iter()
+            .map(|&v| dealer.share(fp(v)))
+            .collect();
+        let plaintext_sum = 30_000u64 + 45_000 + 28_000;
+        let summed = backend.run_secure(&inputs).unwrap();
+
+        // Helper: pull the single disclosed integer out of the disclosed partial.
+        let disclosed_int = |p: &PartialResult| -> u64 {
+            assert_eq!(p.rows.len(), 1, "disclosed partial is exactly one row");
+            match &p.rows[0][0] {
+                Some(Term::Literal(l)) => l.value().parse::<u64>().unwrap(),
+                other => panic!("expected integer literal, got {other:?}"),
+            }
+        };
+
+        // HONEST: the disclosed-output method returns the true total.
+        let honest = backend.reconstruct_disclosed(&summed).unwrap();
+        assert_eq!(
+            disclosed_int(&honest),
+            plaintext_sum,
+            "sanity: honest disclosed output is the true sum"
+        );
+
+        // ONE tampered result share (within e_max=1) → disclosed output is
+        // RS-CORRECTED back to the true total at the public boundary.
+        let mut one_bad = summed.clone();
+        one_bad[0][1].y = one_bad[0][1].y.add(fp(13));
+        let corrected = backend.reconstruct_disclosed(&one_bad).unwrap();
+        assert_eq!(
+            disclosed_int(&corrected),
+            plaintext_sum,
+            "sq-uu0u: a single tampered result share is RS-corrected through \
+             reconstruct_disclosed — the relying party sees the TRUE total"
+        );
+
+        // TWO tampered result shares (> e_max=1) → reconstruct_disclosed ABORTS;
+        // the relying party gets a typed error, never a fabricated disclosed value.
+        let mut two_bad = summed;
+        two_bad[0][1].y = two_bad[0][1].y.add(fp(13));
+        two_bad[0][3].y = two_bad[0][3].y.add(fp(17));
+        let err = backend.reconstruct_disclosed(&two_bad).unwrap_err();
+        assert!(
+            matches!(err, MpcError::Tampered { .. }),
+            "sq-uu0u: tampering beyond the correctable budget must ABORT at the \
+             reconstruct_disclosed boundary (MpcError::Tampered), never disclose a \
+             silently-wrong total; got {err:?}"
+        );
+    }
 }
 
 // =====================================================================
