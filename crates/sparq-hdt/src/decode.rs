@@ -122,8 +122,29 @@ fn read_bitmap_words<R: BufRead>(reader: &mut R) -> Result<RawBitmap, Error> {
 
     // All but the last word are full 8-byte words; the last word is byte-aligned.
     let full_byte_amount = if num_bits == 0 { 0 } else { ((num_bits - 1) >> 6) * 8 };
-    let mut full_words = vec![0u8; full_byte_amount];
-    reader.read_exact(&mut full_words)?;
+    // [OPUS-4.8] sq-tzwa (OOM-DoS hardening): `num_bits` is a VByte read straight from an
+    // attacker-controlled `.hdt` file, and `full_byte_amount` is derived from it with NO check
+    // against the bytes remaining in the stream. The previous `vec![0u8; full_byte_amount]`
+    // ALLOCATED (and zeroed) the full declared size BEFORE the `read_exact` that would discover
+    // the bytes don't exist — so a hostile `num_bits ≈ 2^60` forces a multi-exabyte allocation
+    // → an uncatchable OOM abort (DoS). The reader is a generic streaming `BufRead`, so there is
+    // no cheap "remaining bytes" to bound against up front (sparq-core's slice-backed loaders
+    // can; this one can't). Instead read THROUGH a `take(full_byte_amount)` adaptor with
+    // `read_to_end`, which grows the buffer only as bytes ACTUALLY arrive (doubling, never a
+    // single declared-size pre-allocation), then verify the full count was delivered — failing
+    // closed exactly as the prior `read_exact` did, but without ever trusting the declared
+    // length enough to pre-allocate it. Same fail-closed intent as sq-f5jh's bounded reads in
+    // sparq-core (`read_str_bounded` / `load_pred_stats`).
+    let mut full_words: Vec<u8> = Vec::new();
+    let read = reader
+        .take(full_byte_amount as u64)
+        .read_to_end(&mut full_words)?;
+    if read != full_byte_amount {
+        return Err(Error::Io(IoError::new(
+            ErrorKind::UnexpectedEof,
+            format!("HDT bitmap body truncated: declared {full_byte_amount} bytes, got {read}"),
+        )));
+    }
 
     let crc32 = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
     let mut digest = crc32.digest();
@@ -243,8 +264,22 @@ fn decode_section(sect: &DictSectPFC) -> Result<(Dict, Vec<Id>), Error> {
     // repeatedly growing/rehashing while we intern. Some terms collapse to INLINE ids (never
     // stored in the arena), so `n` is an UPPER bound — `with_capacity` only reserves, it does
     // not over-allocate the stored set.
-    let mut dict = Dict::with_capacity(n);
-    let mut out: Vec<Id> = Vec::with_capacity(n);
+    //
+    // [OPUS-4.8] sq-tzwa (OOM-DoS hardening): `sect.num_strings` is a VByte read straight from
+    // an attacker-controlled `.hdt` file and is parsed INDEPENDENTLY of `packed_data`'s length
+    // by upstream `DictSectPFC::read` (num_strings and packed_length are separate VBytes whose
+    // CRC8 does not relate them). A hostile section can therefore declare `num_strings = 2^60`
+    // with a tiny `packed_data`, turning the unbounded `Dict::with_capacity(n)` /
+    // `Vec::with_capacity(n)` below into a multi-exabyte allocation → an OOM abort (DoS) BEFORE
+    // the decode loop ever touches `packed_data`. Cap the reservation against the bytes that
+    // actually exist: every decoded string occupies AT LEAST its 1-byte null terminator in
+    // `packed_data`, so a section can hold no more than `packed_data.len()` strings. This caps
+    // only the RESERVATION (the loop still honours `n` and a genuinely over-stated count fails
+    // closed when the lone bytes are exhausted). Mirrors sq-f5jh's bounded-read discipline in
+    // sparq-core (`read_str_bounded` / `load_pred_stats`).
+    let cap = n.min(data.len());
+    let mut dict = Dict::with_capacity(cap);
+    let mut out: Vec<Id> = Vec::with_capacity(cap);
 
     let mut produced = 0usize;
     let num_blocks = n.div_ceil(block_size);
@@ -473,7 +508,17 @@ pub fn graph_from_reader<R: BufRead>(mut reader: R) -> Result<Graph, Error> {
     let sequence_z = Sequence::read(&mut reader).map_err(|e| crc_mismatch(format!("sequence_z: {e}")))?;
 
     let num_triples = sequence_z.entries;
-    let mut triples: Vec<[Id; 3]> = Vec::with_capacity(num_triples);
+    // [OPUS-4.8] sq-tzwa (OOM-DoS hardening): `sequence_z.entries` is a count from the
+    // attacker-controlled file. By here `Sequence::read` has already CONSUMED + CRC-validated
+    // the sequence's backing words, so `entries` is bounded-by-construction against bytes that
+    // genuinely arrived — but cap the `Vec::with_capacity` reservation against that backing
+    // anyway so a malformed `entries` over-stating its own sequence can never drive an
+    // unbounded `[Id; 3]` (12 bytes/entry) pre-allocation. The tight upper bound is
+    // `data.len()` 64-bit words × 64 bits ÷ 1-bit-minimum-per-entry = `data.len() * 64`
+    // entries; capping there can never shrink a valid file's reservation. Mirrors sq-f5jh's
+    // `stats.reserve(n.min(max_records))` in sparq-core's `load_pred_stats`.
+    let cap_triples = num_triples.min(sequence_z.data.len().saturating_mul(64));
+    let mut triples: Vec<[Id; 3]> = Vec::with_capacity(cap_triples);
 
     // Sequential SPO walk, mirroring `SubjectIter::next` but with predicates from
     // `sequence_y` (H2) and end-of-run bits from raw bitmap reads (no wavelet, no
@@ -726,5 +771,172 @@ mod tests {
             pos_z += 1;
         }
         Ok(Graph::from_parts(dict, triples))
+    }
+
+    // ───────────────────── [OPUS-4.8] sq-tzwa OOM-DoS hardening oracles ─────────────────────
+    //
+    // CORRUPTION ORACLE for the unbounded pre-allocation guards. Each test crafts a section /
+    // bitmap header that declares a HUGE element count (the value an attacker plants in a
+    // hostile `.hdt` to weaponise `Vec::with_capacity(n)` / `vec![0u8; n]` into a multi-exabyte
+    // allocation → OOM abort) but supplies only a few real bytes, and asserts the loader fails
+    // CLOSED with an `Err` instead of attempting the allocation. A regression that removed the
+    // cap would NOT return `Err` here — it would OOM-abort the whole test process, the very DoS
+    // we are guarding against.
+
+    /// Encodes a `usize` as an HDT little-endian VByte with the upstream's deliberate off-by-one
+    /// (`shift += 7`, high bit `0x80` marks the LAST byte) — the exact inverse of [`read_vbyte`].
+    fn encode_vbyte_off_by_one(mut n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(byte | 0x80); // last byte: high bit set
+                break;
+            }
+            out.push(byte); // continuation: high bit clear
+        }
+        out
+    }
+
+    /// Site 2 (`read_bitmap_words`): a CRC8-valid bitmap header whose `num_bits` is enormous but
+    /// whose body is truncated. The old `vec![0u8; full_byte_amount]` would try to allocate
+    /// `num_bits/8 ≈ 2^57` zeroed bytes BEFORE `read_exact` could fail; the bounded
+    /// `take(..).read_to_end(..)` path must instead reach a clean `Err` with no giant allocation.
+    #[test]
+    fn read_bitmap_words_rejects_huge_num_bits_without_oom() {
+        let huge_num_bits: usize = 1usize << 60; // ⇒ full_byte_amount ≈ 2^57 bytes
+        let mut header: Vec<u8> = Vec::new();
+        header.push(1u8); // bitmap type (must be 1)
+        header.extend_from_slice(&encode_vbyte_off_by_one(huge_num_bits));
+        // CRC8 over (type byte ++ num_bits vbyte), exactly as the reader computes it.
+        let crc8 = crc::Crc::<u8>::new(&crc::CRC_8_SMBUS);
+        let mut digest = crc8.digest();
+        digest.update(&header);
+        header.push(digest.finalize());
+        header.extend_from_slice(&[0u8; 8]); // body: a handful of bytes, nowhere near declared
+
+        let mut r = std::io::Cursor::new(header);
+        assert!(
+            read_bitmap_words(&mut r).is_err(),
+            "a bitmap header declaring 2^60 bits with a truncated body must be a clean Err, \
+             never an OOM-abort or a giant pre-allocation"
+        );
+    }
+
+    /// Site 1 (`decode_section`): a `DictSectPFC` whose `num_strings` is enormous but whose
+    /// `packed_data` is a single byte. The old `Dict::with_capacity(num_strings)` /
+    /// `Vec::with_capacity(num_strings)` would attempt a multi-exabyte reservation before the
+    /// decode loop ran; the `n.min(packed_data.len())` cap holds the reservation at 1 and the
+    /// decode fails closed on the empty (null-only) term — never an OOM-abort.
+    #[test]
+    fn decode_section_rejects_huge_num_strings_without_oom() {
+        // `Sequence` / `DictSectPFC` are imported at module scope (via `super::*`). A single
+        // 8-bit entry at offset 0 (`get(0) == 0`); packed_data is one null byte.
+        let sequence = Sequence {
+            entries: 1,
+            bits_per_entry: 8,
+            data: vec![0usize],
+        };
+        let sect = DictSectPFC {
+            num_strings: 1usize << 60, // attacker-declared, vastly exceeds packed_data.len()
+            block_size: 8,
+            sequence,
+            packed_data: std::sync::Arc::<[u8]>::from(vec![0u8]),
+        };
+        assert!(
+            decode_section(&sect).is_err(),
+            "a dictionary section declaring 2^60 strings with 1 byte of packed data must be a \
+             clean Err, never an OOM-abort or a 2^60-capacity reservation"
+        );
+    }
+
+    /// End-to-end sibling: the public `load_reader` must reach a clean `Err` (not a panic, not
+    /// an OOM) on a structurally-valid archive whose dictionary section over-states its string
+    /// count — the realistic delivery vector for the Site 1 bug. Built by surgically inflating
+    /// the shared section's `num_strings` VByte in a real fixture and repairing the section CRC8
+    /// so the corrupted count actually reaches our decoder.
+    #[test]
+    fn load_reader_rejects_inflated_dict_count_without_oom() {
+        let Some(bytes) = fixture_bytes() else { return };
+        let Some(corrupt) = inflate_shared_num_strings(&bytes) else {
+            eprintln!("skipping: could not locate the shared section num_strings vbyte");
+            return;
+        };
+        let owned = corrupt.clone();
+        let res = std::panic::catch_unwind(move || crate::load_reader(std::io::Cursor::new(owned)));
+        match res {
+            Ok(Ok(_)) => panic!("an inflated dictionary string count must not load successfully"),
+            Ok(Err(_)) => {} // clean Err — the guarded, correct outcome
+            Err(_) => {
+                panic!("an inflated dictionary string count must be a clean Err, not a panic/abort")
+            }
+        }
+    }
+
+    /// Locates the SHARED `DictSectPFC`'s `num_strings` VByte in a valid archive, rewrites it to
+    /// a huge (but still in-`usize`) value, and repairs the section's CRC8 so the inflated count
+    /// survives the upstream meta-CRC and reaches our `decode_section`. `None` if the layout
+    /// can't be located (the test then skips). The dictionary section is found by its `0x02` PFC
+    /// preamble followed by a `(num_strings, packed_length, block_size, crc8)` meta whose CRC8
+    /// checks out (the shared section is the first such).
+    fn inflate_shared_num_strings(bytes: &[u8]) -> Option<Vec<u8>> {
+        let crc8 = crc::Crc::<u8>::new(&crc::CRC_8_SMBUS);
+        for start in 0..bytes.len() {
+            if bytes[start] != 0x02 {
+                continue;
+            }
+            let mut p = start + 1;
+            let (_, ns_bytes) = try_read_vbyte(bytes, &mut p)?;
+            try_read_vbyte(bytes, &mut p)?; // packed_length
+            try_read_vbyte(bytes, &mut p)?; // block_size
+            if p >= bytes.len() {
+                continue;
+            }
+            let meta_end = p; // crc byte position
+            let mut digest = crc8.digest();
+            digest.update(&[0x02]);
+            digest.update(&bytes[start + 1..meta_end]);
+            if digest.finalize() != bytes[meta_end] {
+                continue; // not a real section meta (or not the layout we expect)
+            }
+            // Found it. Rebuild with an inflated num_strings + repaired CRC8.
+            let ns_start = start + 1;
+            let ns_end = ns_start + ns_bytes.len();
+            let inflated = encode_vbyte_off_by_one(1usize << 60);
+            let mut out = Vec::with_capacity(bytes.len() + inflated.len());
+            out.extend_from_slice(&bytes[..ns_start]); // up to (not incl) the num_strings vbyte
+            out.extend_from_slice(&inflated); // inflated num_strings
+            out.extend_from_slice(&bytes[ns_end..meta_end]); // packed_length + block_size vbytes
+            let mut digest = crc8.digest();
+            digest.update(&[0x02]);
+            digest.update(&out[ns_start..out.len()]);
+            out.push(digest.finalize()); // repaired section CRC8
+            out.extend_from_slice(&bytes[meta_end + 1..]); // the rest of the archive verbatim
+            return Some(out);
+        }
+        None
+    }
+
+    /// Minimal off-by-one VByte reader over a byte slice (the inverse of
+    /// [`encode_vbyte_off_by_one`]); advances `*p` past the consumed bytes. Returns the value
+    /// and the raw bytes it spanned, or `None` on a truncated/oversized vbyte.
+    fn try_read_vbyte(b: &[u8], p: &mut usize) -> Option<(usize, Vec<u8>)> {
+        let start = *p;
+        let mut n: u128 = 0;
+        let mut shift = 0u32;
+        loop {
+            let byte = *b.get(*p)?;
+            *p += 1;
+            n |= ((byte & 0x7f) as u128) << shift;
+            if (byte & 0x80) != 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 128 {
+                return None;
+            }
+        }
+        Some((usize::try_from(n).ok()?, b[start..*p].to_vec()))
     }
 }
