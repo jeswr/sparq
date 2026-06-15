@@ -103,6 +103,24 @@ impl Fingerprint {
         }
     }
 
+    /// [OPUS-4.8] (sq-32i5) Parses a fingerprint from a current-format header block, returning
+    /// `None` for an **all-zero block**. A v2 artifact finalized *without* binding a graph (no
+    /// `with_fingerprint`) writes a zeroed block; decoding that to `Some(Fingerprint{0,0,0})` would
+    /// make [`check_against`] report a stale-graph *mismatch* (a "DIFFERENT graph" error) instead of
+    /// the accurate "carries no fingerprint / unverifiable" message the `store.rs`/`diskann.rs` docs
+    /// promise. Treating all-zero as `None` aligns the behaviour with those docs. (An all-zero block
+    /// is unreachable from a real [`Fingerprint::of`]: `content_hash` is the FxHash of at least the
+    /// two folded scalars, so a genuine empty graph still has a non-zero hash; even in the
+    /// astronomically unlikely event a real fingerprint hashed to all-zero, the only consequence is
+    /// that it is reported as "unverifiable" rather than checked — fail-safe, never a false match.)
+    pub fn from_bytes_opt(bytes: &[u8]) -> Option<Fingerprint> {
+        if bytes[0..FINGERPRINT_LEN].iter().all(|&b| b == 0) {
+            None
+        } else {
+            Some(Fingerprint::from_bytes(bytes))
+        }
+    }
+
     /// A human-readable one-line summary for error messages.
     fn describe(&self) -> String {
         format!(

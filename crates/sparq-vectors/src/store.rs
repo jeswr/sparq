@@ -225,8 +225,11 @@ impl VectorStore {
                 if map.len() < HEADER_LEN {
                     return Err(format!("{origin}: truncated version-2 header (fingerprint block)"));
                 }
-                let fp = Fingerprint::from_bytes(&map[HEADER_LEN_V1..HEADER_LEN]);
-                (HEADER_LEN, Some(fp))
+                // [OPUS-4.8] (sq-32i5) An all-zero block (a v2 store finalized without
+                // `with_fingerprint`) decodes to `None` ("unverifiable"), not a zero fingerprint
+                // that would surface as a spurious "DIFFERENT graph" mismatch.
+                let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
+                (HEADER_LEN, fp)
             }
             v => return Err(format!("{origin}: unsupported .spqv version {v}")),
         };
@@ -323,9 +326,9 @@ impl VectorStore {
         header[8..12].copy_from_slice(&(self.dim as u32).to_le_bytes());
         header[12..20].copy_from_slice(&(count as u64).to_le_bytes());
         // [OPUS-4.8] (sq-32i5) Embed the graph fingerprint (offset 32..56). A store finalized
-        // without one (no `with_fingerprint`) writes a zeroed block, which decodes to an
-        // all-zero fingerprint — distinct from any real graph's, so `check_graph` still rejects
-        // a stale match; prefer setting it explicitly.
+        // without one (no `with_fingerprint`) writes a zeroed block, which `open` decodes back to
+        // `None` (`Fingerprint::from_bytes_opt`) — reported by `check_graph` as "unverifiable",
+        // NOT as a spurious "DIFFERENT graph" mismatch; prefer setting it explicitly.
         if let Some(fp) = self.fingerprint {
             header[HEADER_LEN_V1..HEADER_LEN].copy_from_slice(&fp.to_bytes());
         }
@@ -784,8 +787,14 @@ mod fingerprint_tests {
         s.put(alice, &[1.0, 0.0, 0.0, 0.0]).unwrap();
         s.finalize().unwrap();
         let store = VectorStore::open(&path).unwrap();
-        // An all-zero fingerprint is Some(..) but cannot match a real graph.
-        assert!(store.check_graph(&ga).is_err());
+        // [OPUS-4.8] (sq-32i5) An all-zero fingerprint block decodes to `None`, so check_graph
+        // reports it as unverifiable ("carries no graph fingerprint") rather than a spurious
+        // "DIFFERENT graph" mismatch — and never silently certifies it.
+        assert_eq!(store.fingerprint(), None);
+        let err = store
+            .check_graph(&ga)
+            .expect_err("unbound store must not be certified");
+        assert!(err.contains("carries no graph fingerprint"), "err: {err}");
         std::fs::remove_file(&path).ok();
     }
 

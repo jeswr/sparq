@@ -524,7 +524,13 @@ impl DiskAnnIndex {
                 if map.len() < HEADER_LEN {
                     return Err(format!("{origin}: truncated version-2 header (fingerprint block)"));
                 }
-                (HEADER_LEN, Some(Fingerprint::from_bytes(&map[HEADER_LEN_V1..HEADER_LEN])))
+                // [OPUS-4.8] (sq-32i5) All-zero block (a v2 index built without a graph binding)
+                // → `None` ("unverifiable"), not a zero fingerprint that would surface as a
+                // spurious "DIFFERENT graph" mismatch.
+                (
+                    HEADER_LEN,
+                    Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]),
+                )
             }
             v => return Err(format!("{origin}: unsupported .spqg version {v}")),
         };
@@ -821,6 +827,33 @@ mod fingerprint_tests {
         // (3) Reopen the .spqg and confirm the stored fingerprint equals the live one.
         let reopened = DiskAnnIndex::open(&idx_path).unwrap();
         assert_eq!(reopened.fingerprint(), Some(Fingerprint::of(&ga)));
+        std::fs::remove_file(&store_path).ok();
+        std::fs::remove_file(&idx_path).ok();
+    }
+
+    #[test]
+    fn v2_index_built_without_graph_binding_is_unverifiable_not_mismatch() {
+        // [OPUS-4.8] (sq-32i5) A v2 `.spqg` built WITHOUT a graph binding writes an all-zero
+        // fingerprint block; on reopen it must decode to `None` (reported as "unverifiable"),
+        // NOT a zero fingerprint that would surface as a spurious "DIFFERENT graph" mismatch.
+        let ga = graph(A);
+        let store_path = tmp("nob", "spqv");
+        let store = build_store(&ga, &store_path);
+        let idx_path = tmp("nob", "spqg");
+        DiskAnnIndex::build(&store, &idx_path).unwrap(); // no graph binding
+        let idx = DiskAnnIndex::open(&idx_path).unwrap();
+        assert_eq!(
+            idx.fingerprint(),
+            None,
+            "all-zero block must decode to None"
+        );
+        let err = idx
+            .check_graph(&store, &ga)
+            .expect_err("an unbound index must not be certified");
+        assert!(
+            err.contains("carries no graph fingerprint"),
+            "err must say unverifiable, not mismatch: {err}"
+        );
         std::fs::remove_file(&store_path).ok();
         std::fs::remove_file(&idx_path).ok();
     }
