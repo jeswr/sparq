@@ -272,6 +272,17 @@ jobs:
           # /(root) the dashboard renders at https://jeswr.github.io/sparq/dev/bench (see header).
           gh-pages-branch: benchmark-data
           benchmark-data-dir-path: dev/bench
+          # [OPUS-4.8] sq-3g6q: CAP the retained history. github-action-benchmark accumulates EVERY
+          # commit's point with NO bound by default, so dev/bench/data.js grew unbounded (was 4.4 MB /
+          # ~160k lines → slow dashboard load). max-items-in-chart slices entries["sparq engine"] to the
+          # most-recent N COMMITS (one entry per commit; each entry carries ALL metrics, so N commits =
+          # N points per metric for the trend charts). N is deliberately modest because each entry is
+          # heavy: the suite now reports ~270 metrics/commit (~28 KB serialized), so the COMMIT COUNT —
+          # not a notional total-point count — is what drives file size. N=20 keeps a 20-commit trend
+          # window for every metric while holding data.js well under 1 MB (~0.74 MB). The dashboard
+          # (bench/dashboard/dashboard.js) renders the latest values + trend sparklines from exactly
+          # this bounded window. Matches the one-time prune of the existing benchmark-data history.
+          max-items-in-chart: 20
           # Comment + job-summary on EVERY run (incl. PRs) so the comparison table is always visible
           # pre-merge, not only when an alert fires. [OPUS-4.8]
           comment-always: true
