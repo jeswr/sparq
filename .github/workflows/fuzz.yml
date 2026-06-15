@@ -109,7 +109,12 @@ jobs:
       - name: Build fuzz targets
         working-directory: fuzz
         run: cargo +nightly-2026-06-11 fuzz build --target "$FUZZ_BUILD_TARGET"
-      - name: Run each target (bounded, fail on the first crash)
+      # Runs ALL targets even if an earlier one crashes (each crash is recorded in
+      # `status`), then fails the gate at the end if ANY target crashed. This is
+      # deliberately run-all-then-fail rather than break-on-first: one CI run then
+      # surfaces EVERY crashing target + uploads EVERY reproducer in one pass, instead
+      # of hiding later findings behind the first failure. [OPUS-4.8]
+      - name: Run each target (bounded; run all, fail at end if any crashed)
         working-directory: fuzz
         env:
           SECS: ${{ steps.budget.outputs.secs }}
@@ -125,7 +130,9 @@ jobs:
             # -max_total_time bounds wall-clock; -rss_limit_mb caps an allocator OOM so
             # a hostile-bytes mega-allocation is reported as a finding, not a runner
             # kill; -print_final_stats surfaces coverage/exec counts in the log. A
-            # nonzero exit (a crash/leak/timeout) is a genuine finding -> fail the gate.
+            # nonzero exit (a crash/leak/timeout) is a genuine finding: we RECORD it in
+            # `status` and keep going so the remaining targets still run, then fail the
+            # gate once at the end (`exit "$status"`). [OPUS-4.8]
             if ! cargo +nightly-2026-06-11 fuzz run --target "$FUZZ_BUILD_TARGET" "$t" -- \
                   -max_total_time="${SECS}" -rss_limit_mb=2048 -print_final_stats=1; then
               echo "::error::fuzz target '$t' reported a crash/leak/timeout — see the log + the saved reproducer artifact."
@@ -133,6 +140,7 @@ jobs:
             fi
             echo "::endgroup::"
           done
+          # Fail at the end iff ANY target above crashed (status was set to 1).
           exit "$status"
       # On a crash, libFuzzer writes the reproducing input to fuzz/artifacts/<target>/.
       # Upload it so the failing case can be replayed locally with `cargo fuzz run

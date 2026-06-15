@@ -31,8 +31,12 @@ fuzz_target!(|data: &[u8]| {
         _ => "trig",
     };
     let body = &data[1..];
-    // `load_reader_parallel` takes any `Read + Send`; a byte-slice cursor models a
-    // decompressed stream / socket exactly and is `Send`.
-    let reader = std::io::Cursor::new(body.to_vec());
+    // `load_reader_parallel` takes any `Read + Send`; a cursor over the BORROWED fuzz
+    // bytes models a decompressed stream / socket exactly and is `Send` (`&[u8]: Send`).
+    // We deliberately do NOT `to_vec()` here: a full-size harness-side copy of a large
+    // mutated input could OOM (or hit the CI `-rss_limit_mb` cap) *before* a single byte
+    // reaches the loader, which both wastes the budget and hides parser findings.
+    // `Cursor<&[u8]>` impls `Read` with zero extra allocation. [OPUS-4.8]
+    let reader = std::io::Cursor::new(body);
     let _ = sparq_core::Graph::load_reader_parallel(reader, format);
 });
