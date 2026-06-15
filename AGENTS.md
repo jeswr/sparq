@@ -82,7 +82,7 @@ After a batch of changes, re-run only the evaluations whose inputs changed — o
 
 | If the change touches… | Re-run |
 |---|---|
-| a parser (turtle/nt/nq/trig, `sparq-core` parse, `spargebra`) | W3C SPARQL + rdf-turtle conformance; the chunked-vs-serial parser oracle; `sparq-bench fuzz` |
+| a parser (turtle/nt/nq/trig, `sparq-core` parse, `spargebra`) | W3C SPARQL + rdf-turtle conformance; the chunked-vs-serial parser oracle; `sparq-bench fuzz` (differential oracle); the **`fuzz` lane** (`.github/workflows/fuzz.yml`) — coverage-guided cargo-fuzz/libFuzzer targets `parse_rdf_str` / `load_reader_parallel` / `parse_sparql` over hostile bytes (T-PARSE-FUZZ; nightly toolchain, bounded per-PR smoke). Locally: `cd fuzz && cargo +nightly fuzz run <target> -- -max_total_time=15` |
 | query execution / operators (`sparq-engine` exec/optimizer) | full conformance ratchet; the operator-coverage bench; per-builtin error table |
 | the reasoner (`sparq-reason`, rules, closure) | inference conformance ratchet; incremental==batch property tests; LUBM entailed tier |
 | a public API (`pub` item / CLI flag / HTTP route / Py/JS binding) | update the matching `skills/<surface>/SKILL.md` (REQUIRED, same change); the surface's tests |
@@ -90,7 +90,7 @@ After a batch of changes, re-run only the evaluations whose inputs changed — o
 | Cargo dependencies (`Cargo.toml`/`Cargo.lock`) | `cargo audit` + `cargo deny check` + regenerate the SBOM (supply-chain gate) |
 | the ZK verifier / circuits (`sparq-zk`, `sparq-zk-compose`) | `forge_gates` + `differential_fuzz`; the gate-count snapshot; re-open the soundness audit; the **`zk-toolchain` lane** (`.github/workflows/zk-toolchain.yml`) — runs the `#[ignore]`d real-`bb` forge/anchor suite under the pinned Noir toolchain (nightly + `workflow_dispatch` + on ZK-path PRs). If you change the public-input serialization (`verifier.rs::reconstruct_public_inputs`) re-capture the empirical bb anchors via the `probe_*_public_inputs_hex` e2e probes |
 | SHACL (`sparq-shacl`) | the W3C SHACL conformance ratchet (core ≥98, sparql ≥5) |
-| storage/encoding (`sparq-core` store/dict/compress, mmap, dict-spill) | the deterministic perf-gate metrics; byte-identity differentials; coverage with `--features dict-spill` |
+| storage/encoding (`sparq-core` store/dict/compress, mmap, dict-spill) | the deterministic perf-gate metrics; byte-identity differentials; coverage with `--features dict-spill`; the **`fuzz` lane**'s `graph_open` target (`.github/workflows/fuzz.yml`) — corrupts the on-disk store files (`perm*.bin` / `dict-meta.bin` / sidecars / `named.bin`) and asserts `Graph::open` returns `Err`, never a panic/OOM/UB (T-MMAP-FUZZ) |
 | anything merged | the per-crate coverage ratchet + test-presence gate (`scripts/coverage*.py`) |
 | this `AGENTS.md` / any "how we work" convention | ask whether it's portable to a sibling repo's charter — if so, file it there (see *Cross-pollinate the charter with sibling repos*) |
 
