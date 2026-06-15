@@ -25,9 +25,10 @@ use sparq_zk_compose::build::{
 };
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::manifest::{
-    AttestedStatusRef, BindingEdge, BindingMode, CircuitId, CommitmentAttestation, EntailmentRegime,
-    FieldHex, FilterOp, HiddenIndexRevocation, HiddenIssuerAttestation, ProofInputs, ProofManifest,
-    RevocationStatus, StatusListSnapshot, SubProof,
+    AttestedHolderBinding, AttestedStatusRef, BindingEdge, BindingMode, CircuitId,
+    CommitmentAttestation, EntailmentRegime, FieldHex, FilterOp, HiddenIndexRevocation,
+    HiddenIssuerAttestation, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot,
+    SubProof,
 };
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 use sparq_zk_compose::revocation::{merkle_root, merkle_witness, revoke_prover_toml};
@@ -38,10 +39,14 @@ use sparq_zk_compose::issuer::{
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
     encode_artifacts, verify_manifest, prefilter_manifest_structure, CheckError, EntailmentPolicy,
-    HolderRegistry, InMemorySeenNonces, KeySet, RevocationPolicy, VerifierNonce,
+    HolderBindingPolicy, HolderRegistry, InMemorySeenNonces, KeySet, RevocationPolicy, VerifierNonce,
 };
 use sparq_zk::field::Fr;
-use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
+// [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): holder-key digest + parse for the
+// clear-key holder-binding tests.
+use sparq_zk::sig::{
+    holder_key_digest, public_key_from_hex, public_key_to_hex, SecretKey, SignatureScheme,
+};
 
 // [OPUS-4.8] audit #12: revocation/freshness plumbing. The fixtures bind a
 // status-list reference (list `http://ex/status/1`, index 3, version 1) under the
@@ -735,6 +740,7 @@ fn full_manifest_prove_verify_scan() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -876,6 +882,7 @@ fn forge_positive_honest_filter_verifies() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -911,6 +918,7 @@ fn forge_reject_statement_substitution() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -946,6 +954,7 @@ fn forge_reject_verdict_substitution() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -983,6 +992,7 @@ fn forge_reject_challenge_rebind() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0xdead"),
         &InMemorySeenNonces::new(),
@@ -1042,6 +1052,7 @@ fn nonce_happy_path_fresh_nonce_verifies() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for(nonce_hex),
         &InMemorySeenNonces::new(),
@@ -1079,6 +1090,7 @@ fn nonce_replay_under_new_nonce_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0xbeef"),
         &InMemorySeenNonces::new(),
@@ -1116,6 +1128,7 @@ fn nonce_single_use_second_presentation_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
@@ -1129,6 +1142,7 @@ fn nonce_single_use_second_presentation_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
@@ -1211,6 +1225,7 @@ fn nonce_binding_mismatch_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
@@ -1231,6 +1246,7 @@ fn nonce_binding_mismatch_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce,
         &seen,
@@ -1317,6 +1333,7 @@ fn holder_pop_empty_registry_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(), // no authorised holders
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -1352,6 +1369,7 @@ fn holder_pop_untrusted_holder_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &registry,
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -1387,6 +1405,7 @@ fn holder_pop_invalid_signature_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &registry,
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -1419,12 +1438,356 @@ fn holder_pop_unknown_cryptosuite_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &registry,
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
     ) {
         Err(CheckError::HolderPopMalformed) => {}
         other => panic!("an unknown cryptosuite must be HolderPopMalformed, got {other:?}"),
+    }
+}
+
+// --- sq-z8s7 (HolderPoP T3 / B1): issuer-attested clear-key holder binding ----
+//
+// [OPUS-4.8] sq-z8s7 (T3 / B1). The sq-cwq HolderPop above binds the presenter to
+// the verifier's NONCE but NOT to the CREDENTIAL the issuer issued, so trusted
+// holder A could present trusted holder B's credential (the trusted-holder gap,
+// `research/zk-holder-pop-design.md` §0). B1 closes it at the clear-key tier:
+// `bind_holder_binding` cross-checks the PRESENTED holder key against the
+// issuer-attested `holder_pk_digest` the issuer folded into THIS credential's
+// `commitment_message_with_holder` (ZKSIG_C4) signature, verified under the
+// external trusted K, and fail-closes on mismatch / required-but-absent binding /
+// identity key. These tests fire at `bind_holder_pop` (BEFORE the bb sub-proof
+// loop), so the negative cases need no toolchain; the POSITIVE-binding cases pass
+// the holder gate and then stop at `MissingProof` (empty `proof_hex`), which proves
+// the holder binding was ACCEPTED (the full forge-and-verify suite is T4/sq-ncz0).
+
+/// A SALT-, STATUS- AND HOLDER-bound attestation (T3/sq-z8s7 B1): the issuer signs
+/// `commitment_message_with_holder(C(G), salt, status_ref, holder_pk_digest)` (the
+/// ZKSIG_C4 variant), binding the holder key `hpk` into THIS credential. The
+/// `status_ref` folds the fixture `(H(list), index, version)` exactly as the
+/// status-bound attestation does, so the verifier recomputes the same message from
+/// the disclosed `manifest.revocation`. `disclose_key` selects the clear-key tier
+/// (B1, `Some(holder_public_key)`); a hidden-tier binding would pass `false`.
+fn attest_with_holder(
+    commitment: Fr,
+    salt: Fr,
+    hpk: &sparq_zk::sig::PublicKey,
+    disclose_key: bool,
+    sk: &SecretKey,
+) -> CommitmentAttestation {
+    let list_id = sparq_zk::sig::status_list_id_to_field(FIXTURE_STATUS_LIST);
+    let status_ref =
+        sparq_zk::sig::status_ref_digest(&list_id, FIXTURE_STATUS_INDEX, FIXTURE_STATUS_VERSION);
+    let holder_digest = holder_key_digest(hpk).expect("non-identity holder key digests");
+    CommitmentAttestation {
+        commitment: FieldHex::from_field(&commitment),
+        issuer_public_key: public_key_to_hex(&sk.public_key()),
+        signature: sk.sign_commitment_with_holder(&commitment, &salt, &status_ref, &holder_digest),
+        cryptosuite: SignatureScheme::Poseidon2SchnorrV1
+            .cryptosuite_iri()
+            .to_string(),
+        salt: Some(FieldHex::from_field(&salt)),
+        status: Some(AttestedStatusRef {
+            index: Some(FIXTURE_STATUS_INDEX),
+            version: FIXTURE_STATUS_VERSION,
+            index_commitment: None,
+        }),
+        holder: Some(
+            AttestedHolderBinding::from_holder_key(hpk, disclose_key)
+                .expect("non-identity holder key binds"),
+        ),
+    }
+}
+
+/// Attach a HOLDER-bound issuer attestation for every scan commitment in `m` under
+/// the fixed test issuer key + the per-graph `salt`, binding `hpk` as the
+/// issuer-attested holder, and disclose the issuer key in K. The analogue of
+/// `attest_all` but for the holder-bound (ZKSIG_C4) message variant, so the
+/// manifest reaches the T3/B1 cross-check with a credential the issuer bound to
+/// `hpk`.
+fn attest_all_holder(
+    m: &mut ProofManifest,
+    sk: &SecretKey,
+    salt: Fr,
+    hpk: &sparq_zk::sig::PublicKey,
+    disclose_key: bool,
+) {
+    let pk_hex = public_key_to_hex(&sk.public_key());
+    let mut seen = std::collections::BTreeSet::new();
+    for c in scan_commitments(m) {
+        let key = sparq_zk::field::field_to_hex(&c);
+        if seen.insert(key) {
+            m.commitment_attestations
+                .push(attest_with_holder(c, salt, hpk, disclose_key, sk));
+        }
+    }
+    if !m.key_set.contains(&pk_hex) {
+        m.key_set.push(pk_hex);
+    }
+}
+
+/// Build a HolderPop-bound manifest whose credential is ISSUER-ATTESTED-HOLDER-bound
+/// to `attested_holder` (the issuer folds `holder_key_digest(attested_holder)` into
+/// the signature), while the PRESENTED holder key + PoP are `presented_holder`'s.
+/// When `presented_holder == attested_holder` the B1 cross-check passes; when they
+/// differ it is the A-presents-B forge. `disclose_key` controls whether the
+/// attestation carries the clear `hpk` (clear-key tier). `proof_hex` is empty so
+/// the holder gate fires before any bb call.
+fn holder_bound_manifest(
+    presented_holder: &SecretKey,
+    attested_holder: &sparq_zk::sig::PublicKey,
+    disclose_key: bool,
+) -> ProofManifest {
+    let salt = salt_from_bytes(&[9u8; 32]);
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
+    let presented_hex = public_key_to_hex(&presented_holder.public_key());
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::HolderPop {
+            challenge: FieldHex("0x2a".into()),
+            holder: presented_hex,
+            pop: holder_pop_over_2a(presented_holder),
+            cryptosuite: SignatureScheme::Poseidon2SchnorrV1
+                .cryptosuite_iri()
+                .to_string(),
+        },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![SubProof {
+            inputs: scan,
+            proof_hex: String::new(),
+        }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    attest_all_holder(
+        &mut m,
+        &test_issuer_sk(1),
+        salt,
+        attested_holder,
+        disclose_key,
+    );
+    m
+}
+
+/// sq-z8s7 (B1 POSITIVE): a correctly-bound presentation — the PRESENTED holder
+/// key digest == the issuer-attested digest (and the disclosed clear key matches) —
+/// PASSES the holder-binding gate. With an empty `proof_hex` the verifier then
+/// stops at `MissingProof` (the bb sub-proof loop), which is downstream of and
+/// distinct from any holder-binding rejection: the credential↔holder binding was
+/// ACCEPTED. No toolchain needed.
+#[test]
+fn holder_binding_correctly_bound_passes_binding_gate() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let registry = HolderRegistry::from_hex_keys([holder_hex]);
+    // Issuer bound THIS holder; the presenter IS that holder.
+    let m = holder_bound_manifest(&holder_sk, &holder_sk.public_key(), true);
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_binding_ok"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &HolderBindingPolicy::require_binding(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        // Passed the holder-binding gate; stops at the (absent) bb proof.
+        Err(CheckError::MissingProof { proof: 0 }) => {}
+        Ok(()) => panic!("unexpected Ok without a bb proof"),
+        other => panic!(
+            "a correctly-bound holder presentation must PASS the binding gate \
+             (reaching MissingProof), got {other:?}"
+        ),
+    }
+}
+
+/// sq-z8s7 (B1 — THE CORE TRUSTED-HOLDER-GAP CLOSURE): "A presents B's credential".
+/// The credential is issuer-attested-holder-bound to holder B, but the presentation
+/// is by trusted holder A (A's key, A's valid PoP). A is a member of the registry
+/// and A's PoP over the nonce verifies — exactly the gap sq-cwq left open — yet the
+/// presentation is REJECTED because A's `holder_key_digest` != B's issuer-attested
+/// digest (`HolderKeyMismatch`). This is the load-bearing test. No toolchain needed.
+#[test]
+fn holder_binding_a_presents_b_rejected() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_a = SecretKey::from_seed(777); // the presenter (trusted)
+    let holder_b = SecretKey::from_seed(888); // the credential's true subject
+    let a_hex = public_key_to_hex(&holder_a.public_key());
+    // BOTH A and B are authorised holders (registry membership is NOT the gap).
+    let registry =
+        HolderRegistry::from_hex_keys([a_hex, public_key_to_hex(&holder_b.public_key())]);
+    // Issuer bound B, but A presents (A's key + A's valid PoP over the nonce).
+    let m = holder_bound_manifest(&holder_a, &holder_b.public_key(), true);
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_binding_a_presents_b"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        // Even the back-compatible policy MUST reject: when a binding is PRESENT
+        // the cross-check always runs (the policy only governs the bearer-absent
+        // case).
+        &HolderBindingPolicy::allow_bearer(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderKeyMismatch) => {}
+        other => panic!(
+            "trusted holder A presenting trusted holder B's credential MUST be \
+             rejected HolderKeyMismatch (the trusted-holder gap), got {other:?}"
+        ),
+    }
+}
+
+/// The Baby-JubJub IDENTITY point in compressed hex (`public_key_to_hex` of the
+/// curve identity). `public_key_from_hex` REJECTS it fail-closed (the identity has
+/// no usable key / `holder_key_digest` errors with
+/// [`sparq_zk::sig::HolderKeyError::IdentityKey`]; verified in sparq-zk's own
+/// `identity_holder_key_digest_rejected`), so a `HolderPop` presenting it cannot be
+/// honoured. Hardcoded (the compressed encoding is a stable constant) to avoid
+/// pulling the raw ark curve types into this crate's deps.
+// [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): identity-key compressed encoding.
+const IDENTITY_HOLDER_HEX: &str =
+    "0100000000000000000000000000000000000000000000000000000000000000";
+
+/// sq-z8s7 (B1): the IDENTITY holder key is rejected fail-closed. The identity
+/// point has no affine coordinates, so `holder_key_digest` errors — the guard
+/// `bind_holder_binding` relies on so a degenerate key can never match an
+/// issuer-attested digest (design §4.1: the identity-key guard rules out the
+/// degenerate forgery). At the presentation boundary an identity holder key in the
+/// `HolderPop` binding never parses to a usable key (`public_key_from_hex` => None),
+/// so the Schnorr PoP cannot be checked under it and it is refused
+/// (`HolderPopMalformed`) before the B1 cross-check is even reached. There is NO
+/// path on which an identity holder key is honoured. No toolchain needed.
+#[test]
+fn holder_binding_identity_key_rejected() {
+    // Sanity: the identity hex really is the rejected identity key — it does NOT
+    // parse to a usable holder key, and a HolderRegistry REFUSES to store it (so it
+    // can never be a trusted/authorised holder, fail-closed at construction).
+    assert!(
+        public_key_from_hex(IDENTITY_HOLDER_HEX).is_none(),
+        "the identity key must NOT parse to a usable holder key (fail-closed)"
+    );
+    assert!(
+        HolderRegistry::from_hex_keys([IDENTITY_HOLDER_HEX.to_string()]).is_empty(),
+        "a HolderRegistry must drop the identity key (it can never be a real holder)"
+    );
+
+    let prover = CircuitProver::from_crate_root();
+    // A real, trusted holder + a holder-bound credential, then swap the PRESENTED
+    // key to the identity. The registry only trusts the real holder; the identity
+    // cannot even be added to it (dropped above), so the identity presentation is
+    // refused fail-closed.
+    let holder_sk = SecretKey::from_seed(777);
+    let registry = HolderRegistry::from_hex_keys([
+        public_key_to_hex(&holder_sk.public_key()),
+        IDENTITY_HOLDER_HEX.to_string(), // dropped — the identity is not storable
+    ]);
+    let mut m = holder_bound_manifest(&holder_sk, &holder_sk.public_key(), true);
+    if let BindingMode::HolderPop { holder, .. } = &mut m.binding {
+        *holder = IDENTITY_HOLDER_HEX.to_string();
+    }
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_binding_identity"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &HolderBindingPolicy::require_binding(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        // Refused fail-closed. The identity is never a trusted holder (the registry
+        // dropped it => HolderNotTrusted), never parses to a usable key for the PoP
+        // (=> HolderPopMalformed), and could never match an issuer-attested digest
+        // (=> HolderKeyMismatch in `bind_holder_binding`). ANY of these is a correct
+        // fail-closed rejection; there is NO path on which the identity is honoured.
+        Err(CheckError::HolderNotTrusted { .. })
+        | Err(CheckError::HolderPopMalformed)
+        | Err(CheckError::HolderKeyMismatch) => {}
+        other => panic!("an identity holder key must be rejected fail-closed, got {other:?}"),
+    }
+}
+
+/// sq-z8s7 (B1 bearer policy): a BEARER credential (no `AttestedHolderBinding` on
+/// any attestation) presented under HolderPop is REJECTED when the relying party
+/// mandates binding (`require_binding` => `HolderBindingMissing`), and ACCEPTED
+/// past the holder gate under the back-compatible default (`allow_bearer`, reaching
+/// `MissingProof`). The two directions of the design's "bearer must be rejectable"
+/// policy. No toolchain needed.
+#[test]
+fn holder_binding_bearer_policy_required_vs_allowed() {
+    let prover = CircuitProver::from_crate_root();
+    let holder_sk = SecretKey::from_seed(777);
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let registry = HolderRegistry::from_hex_keys([holder_hex.clone()]);
+    // A BEARER HolderPop manifest: `holder_pop_manifest` uses `attest_all` (status-
+    // bound, holder: None) — no issuer-attested holder binding.
+    let m = holder_pop_manifest(
+        &holder_hex,
+        &holder_pop_over_2a(&holder_sk),
+        SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+    );
+
+    // (a) require_binding: a bearer credential is rejected fail-closed.
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_binding_bearer_required"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &HolderBindingPolicy::require_binding(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderBindingMissing) => {}
+        other => panic!(
+            "a bearer credential under require_binding must be HolderBindingMissing, got {other:?}"
+        ),
+    }
+
+    // (b) allow_bearer (default): the bearer credential passes the holder gate
+    // (sq-cwq registry + nonce-PoP) and stops at the absent bb proof.
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_binding_bearer_allowed"),
+        &trusted_k(&test_issuer_sk(1)),
+        &fresh_policy(),
+        &registry,
+        &HolderBindingPolicy::allow_bearer(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::MissingProof { proof: 0 }) => {}
+        Ok(()) => panic!("unexpected Ok without a bb proof"),
+        other => panic!(
+            "a bearer credential under allow_bearer must PASS the holder gate \
+             (reaching MissingProof), got {other:?}"
+        ),
     }
 }
 
@@ -1495,6 +1858,7 @@ fn holder_pop_valid_verifies_end_to_end() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &registry,
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -1563,6 +1927,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             &trusted_k(&test_issuer_sk(1)),
             &fresh_policy(),
             &HolderRegistry::empty(),
+            &HolderBindingPolicy::allow_bearer(),
             &EntailmentPolicy::simple_only(),
             &nonce_for("0x2a"),
             &InMemorySeenNonces::new(),
@@ -1611,6 +1976,7 @@ fn forge_reject_noncanonical_vk() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -1647,6 +2013,7 @@ fn forge_artvk_is_ignored() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -3512,6 +3879,7 @@ fn revocation_full_prove_verify_non_revoked_verifies() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -3554,6 +3922,7 @@ fn revocation_full_prove_verify_revoked_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &revoked_policy(), // AUTHORITATIVE snapshot has bit 3 SET => REVOKED.
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -3852,6 +4221,7 @@ fn hidden_revocation_unrevoked_verifies_and_index_is_private() {
         &trusted_k(&test_issuer_sk(1)),
         &hidden_policy(false),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -3933,6 +4303,7 @@ fn hidden_revocation_forged_root_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &hidden_policy(false), // authoritative root derived from the real snapshot
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -4138,7 +4509,7 @@ fn hidden_issuer_in_set_verifies_and_key_is_private() {
     manifest.hidden_issuer_attestations = vec![hidden];
     verify_manifest(
         &manifest, &prover, &scratch("hi_verify_ok"),
-        &keyset, &fresh_policy(), &HolderRegistry::empty(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &keyset, &fresh_policy(), &HolderRegistry::empty(), &HolderBindingPolicy::allow_bearer(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     )
     .expect("in-set hidden-issuer attestation verifies end-to-end");
 }
@@ -4226,7 +4597,7 @@ fn hidden_issuer_only_verifies_with_clear_key_absent() {
     verify_manifest(
         &manifest, &prover, &scratch("hi_only_verify"),
         &keyset, &fresh_policy(),
-        &HolderRegistry::empty(), &EntailmentPolicy::simple_only(),
+        &HolderRegistry::empty(), &HolderBindingPolicy::allow_bearer(), &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     )
     .expect("hidden-only presentation (clear key absent) verifies end-to-end");
@@ -4370,7 +4741,7 @@ fn hidden_issuer_forged_root_rejected() {
     }];
     match verify_manifest(
         &manifest, &prover, &scratch("hi_verify_forge"),
-        &keyset, &fresh_policy(), &HolderRegistry::empty(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &keyset, &fresh_policy(), &HolderRegistry::empty(), &HolderBindingPolicy::allow_bearer(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     ) {
         Err(CheckError::HiddenIssuerRootMismatch) => {}
         other => panic!("a forged-root hidden-issuer proof must be HiddenIssuerRootMismatch, got {other:?}"),
@@ -4407,7 +4778,7 @@ fn hidden_issuer_not_enabled_rejected() {
     // the unit test in verifier.rs. We assert SOME rejection here (fail-closed).
     let res = verify_manifest(
         &m, &prover, &scratch("hi_notenabled"),
-        &k, &fresh_policy(), &HolderRegistry::empty(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
+        &k, &fresh_policy(), &HolderRegistry::empty(), &HolderBindingPolicy::allow_bearer(), &EntailmentPolicy::simple_only(), &nonce_for("0x2a"), &InMemorySeenNonces::new(),
     );
     assert!(res.is_err(), "a manifest with hidden-issuer attestation under a non-opted-in KeySet must be rejected");
 }
@@ -4586,6 +4957,7 @@ fn filter_f64_composes_end_to_end() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
@@ -4690,6 +5062,7 @@ fn run_entailment(m: &ProofManifest, policy: &EntailmentPolicy) -> Result<(), Ch
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         policy,
         &nonce_for("0x2a"),
         &InMemorySeenNonces::new(),
