@@ -15,7 +15,13 @@
 #                          Heavy. Caps dataset size, watches `df`, cleans /tmp.
 #
 # Engines: oxigraph (embedded Rust dep) | qlever (Docker) | eye (N3 binary).
-# Select with --only <id[,id...]>; default is all THREE in dry-run, but --run
+# Plus four SHARED reusable adapter KINDS (sq-eifd), dispatched off competitors.json
+# `kind` and backed by scripts/bench-adapters/:
+#   report-cli  : file-in/SHACL-report-out CLI (pySHACL, Jena `shacl validate`)
+#   js-lib      : in-process Node/RDF-JS SHACL (rdf-validate-shacl, sparq's own WASM)
+#   http-sparql : POST query -> parse SPARQL-JSON -> count (Fuseki, Virtuoso, QLever)
+#   vector-lib  : in-process Python ANN -> recall@k vs exact-kNN (FAISS, hnswlib)
+# Select with --only <id[,id...]>; default is all engines in dry-run, but --run
 # requires you to NAME the engines (no accidental "run everything heavy").
 #
 # Usage:
@@ -64,6 +70,10 @@ cd "$REPO_ROOT"
 
 REGISTRY="bench/competitors.json"
 RESULTS_DIR="bench/competitor-results"
+# [OPUS-4.8] sq-eifd: shared external-engine adapter KINDS live here. Each kind is
+# a small parser/harness reused across engines; dispatch is off competitors.json's
+# `kind` field (see the "adapter-kind dispatch" section below).
+ADAPTERS_DIR="scripts/bench-adapters"
 
 # --- defaults / knobs --------------------------------------------------------
 DO_RUN=0                 # 0 = dry-run (safe default); 1 = actually run
@@ -343,6 +353,149 @@ if want qlever; then
     write_result qlever "qlever-${SUITE}-${PASS}" "$Q_DIGEST" "$PAYLOAD"
     check_df
   fi
+fi
+
+# =============================================================================
+# adapter-kind dispatch (sq-eifd) — the SHARED reusable kinds, dispatched off the
+# competitors.json `kind` field instead of one bespoke recipe per engine.
+#
+#   report-cli   : file-in / SHACL-validation-report-out CLI (pySHACL, Jena
+#                  `shacl validate`, TopBraid). Shared report->count parser
+#                  (count sh:result, read sh:conforms) so #violations is directly
+#                  comparable to sparq's report.results.len().  [REQUIRED by sq-7iai]
+#   js-lib       : in-process Node/RDF-JS harness (rdf-validate-shacl, shacl-engine,
+#                  sparq's own @jeswr/sparq WASM SHACL) — same count semantics.
+#   http-sparql  : POST query -> parse SPARQL-JSON -> count (Fuseki/Virtuoso + the
+#                  QLever HTTP path). End-to-end gather-only (needs a live server);
+#                  parser fixture-verified here.
+#   vector-lib   : in-process Python ANN harness (FAISS/hnswlib) — recall@k vs an
+#                  exact-kNN oracle, recall-deficit TSV. End-to-end gather-only
+#                  (needs numpy/hnswlib); recall scorer fixture-verified here.
+#
+# Each new-kind registry entry carries an `adapter` object (the recipe). The gather
+# box installs the (gather-only, NOT committed) engine and supplies the data/shapes
+# (or endpoint/dataset) via the flags below. Per AGENTS.md the engines + the
+# resulting numbers stay OUT of git — this dispatch just runs the shared harness and
+# writes a git-ignored results file like the other kinds.
+#
+# Env inputs (per-kind; only consulted under --run):
+#   report-cli / js-lib : SHACL_DATA + SHACL_SHAPES (paths to the data+shapes graphs)
+#   http-sparql         : SPARQL_ENDPOINT + SPARQL_QUERY_FILE
+#   vector-lib          : VECTOR_NPZ (npz with {data,queries}) [hnswlib mode]
+# =============================================================================
+adapter_kind_of() { # adapter_kind_of <id> -> the engine's `kind` from the registry
+  have jq || { echo ""; return; }
+  # `first(...)` so we emit EXACTLY one line (the matching engine's kind), not one
+  # empty line per non-matching competitor.
+  jq -r --arg id "$1" 'first(.competitors[]|select(.id==$id)).kind // ""' "$REGISTRY"
+}
+adapter_recipe_of() { # the engine's `.adapter` recipe object as compact JSON
+  have jq || { echo "{}"; return; }
+  jq -c --arg id "$1" 'first(.competitors[]|select(.id==$id)).adapter // {}' "$REGISTRY"
+}
+
+run_report_cli_engine() { # <id>
+  local id="$1" recipe; recipe="$(adapter_recipe_of "$id")"
+  hdr "$id (report-cli)"
+  log "  shared report->count parser: $ADAPTERS_DIR/shacl_report_count.py (count sh:result, read sh:conforms)"
+  log "  recipe: $recipe"
+  if [ "$DO_RUN" -eq 1 ]; then
+    have python3 || die "python3 needed for the report-cli adapter"
+    python3 -c 'import rdflib' 2>/dev/null || die "report-cli adapter needs rdflib (pip install rdflib)"
+    { [ -n "${SHACL_DATA:-}" ] && [ -n "${SHACL_SHAPES:-}" ]; } || die "report-cli --run needs SHACL_DATA + SHACL_SHAPES"
+    # [OPUS-4.8] The adapter's --json sidecar (stderr) carries the RESOLVED engine
+    # version + the conforms bit; capture it (not /dev/null) so the results
+    # envelope records what the engine actually reported, per the script header
+    # and the adapter design — rather than the pinned_version placeholder.
+    local errf; errf="$(mktemp)"
+    OUT="$(python3 "$ADAPTERS_DIR/report_cli_adapter.py" --recipe "$recipe" \
+            --data "$SHACL_DATA" --shapes "$SHACL_SHAPES" --engine "$id" --iters "$ITERS" --json 2>"$errf")" \
+      || { rm -f "$errf"; die "report-cli adapter failed for $id"; }
+    PAYLOAD="$(tail -n1 "$errf" | jq -c '{engine,version,conforms,violations,validate_us}' 2>/dev/null)"
+    rm -f "$errf"
+    [ -n "$PAYLOAD" ] || PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,v,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"violations":int(v),"validate_us":int(u)}))')"
+    local rcver; rcver="$(printf '%s' "$PAYLOAD" | jq -r '.version // empty' 2>/dev/null)"
+    [ -n "$rcver" ] || rcver="$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")"
+    write_result "$id" "shacl-validate-bench" "$rcver" "$PAYLOAD"
+    check_df
+  fi
+}
+
+run_js_lib_engine() { # <id>
+  local id="$1" recipe; recipe="$(adapter_recipe_of "$id")"
+  local jsengine; jsengine="$(printf '%s' "$recipe" | jq -r '.js_engine // "rdf-validate-shacl"')"
+  hdr "$id (js-lib node-rdfjs)"
+  log "  node harness: $ADAPTERS_DIR/js_shacl_adapter.mjs (engine=$jsengine; same count semantics as report-cli)"
+  if [ "$DO_RUN" -eq 1 ]; then
+    have node || die "node needed for the js-lib adapter"
+    have jq || die "jq needed for the js-lib adapter (to build the result payload)"
+    { [ -n "${SHACL_DATA:-}" ] && [ -n "${SHACL_SHAPES:-}" ]; } || die "js-lib --run needs SHACL_DATA + SHACL_SHAPES"
+    local mdir; mdir="${JS_MODULES_DIR:-$PWD}"
+    # [OPUS-4.8] Build the payload from the adapter's --json sidecar (stderr,
+    # well-formed JSON) via jq — not a python3 TSV reparse (python3 was never
+    # required for js-lib) and not a printf %s of raw $OUT (whose unescaped
+    # trailing newline/tab would emit invalid JSON and fail write_result's
+    # validation under set -euo pipefail).
+    local errf; errf="$(mktemp)"
+    OUT="$(node "$ADAPTERS_DIR/js_shacl_adapter.mjs" --data "$SHACL_DATA" --shapes "$SHACL_SHAPES" \
+            --engine "$jsengine" --modules-dir "$mdir" --iters "$ITERS" --json 2>"$errf")" \
+      || { rm -f "$errf"; die "js-lib adapter failed for $id (npm i $jsengine in $mdir?)"; }
+    PAYLOAD="$(tail -n1 "$errf" | jq -c '{engine,conforms,violations,validate_us}' 2>/dev/null)"
+    rm -f "$errf"
+    [ -n "$PAYLOAD" ] || die "js-lib adapter produced no parseable --json sidecar for $id"
+    write_result "$id" "shacl-validate-bench" "$jsengine" "$PAYLOAD"
+    check_df
+  fi
+}
+
+run_http_sparql_engine() { # <id>
+  local id="$1"
+  hdr "$id (http-sparql)"
+  log "  adapter: $ADAPTERS_DIR/http_sparql_adapter.py (POST query -> parse SPARQL-JSON -> count)"
+  log "  PREP (gather box): start the engine's HTTP endpoint, then set SPARQL_ENDPOINT + SPARQL_QUERY_FILE"
+  if [ "$DO_RUN" -eq 1 ]; then
+    have python3 || die "python3 needed for the http-sparql adapter"
+    { [ -n "${SPARQL_ENDPOINT:-}" ] && [ -n "${SPARQL_QUERY_FILE:-}" ]; } || die "http-sparql --run needs SPARQL_ENDPOINT + SPARQL_QUERY_FILE"
+    OUT="$(python3 "$ADAPTERS_DIR/http_sparql_adapter.py" --endpoint "$SPARQL_ENDPOINT" \
+            --query-file "$SPARQL_QUERY_FILE" --engine "$id" --iters "$ITERS" --json 2>/dev/null)" \
+      || die "http-sparql adapter failed for $id (endpoint up?)"
+    PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,c,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"count":int(c),"query_us":int(u)}))')"
+    write_result "$id" "http-sparql" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    check_df
+  fi
+}
+
+run_vector_lib_engine() { # <id>
+  local id="$1"
+  hdr "$id (vector-lib)"
+  log "  adapter: $ADAPTERS_DIR/vector_lib_adapter.py (build index -> query -> recall@k vs exact-kNN oracle)"
+  log "  PREP (gather box): pip install numpy hnswlib; set VECTOR_NPZ to an npz with {data,queries}"
+  if [ "$DO_RUN" -eq 1 ]; then
+    have python3 || die "python3 needed for the vector-lib adapter"
+    python3 -c 'import numpy, hnswlib' 2>/dev/null || die "vector-lib adapter needs numpy + hnswlib (pip install numpy hnswlib)"
+    [ -n "${VECTOR_NPZ:-}" ] || die "vector-lib --run needs VECTOR_NPZ (npz with {data,queries})"
+    OUT="$(python3 "$ADAPTERS_DIR/vector_lib_adapter.py" --hnswlib --npz "$VECTOR_NPZ" --k "${VECTOR_K:-10}" --engine "$id" --json 2>/dev/null)" \
+      || die "vector-lib adapter failed for $id"
+    PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,d,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"recall_deficit_milli":int(d),"query_us":int(u)}))')"
+    write_result "$id" "vectors-recall" "$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")" "$PAYLOAD"
+    check_df
+  fi
+}
+
+# Walk every registry engine of a SHARED-ADAPTER kind (skipping the three bespoke
+# kinds handled above) and dispatch. Engines stay empty in git, so this is a no-op
+# until a maintainer adds report-cli/js-lib/http-sparql/vector-lib entries.
+if have jq; then
+  while IFS= read -r aid; do
+    [ -n "$aid" ] || continue
+    want "$aid" || continue
+    case "$(adapter_kind_of "$aid")" in
+      report-cli)  run_report_cli_engine  "$aid" ;;
+      js-lib)      run_js_lib_engine      "$aid" ;;
+      http-sparql) run_http_sparql_engine "$aid" ;;
+      vector-lib)  run_vector_lib_engine  "$aid" ;;
+    esac
+  done < <(jq -r '.competitors[] | select(.kind=="report-cli" or .kind=="js-lib" or .kind=="http-sparql" or .kind=="vector-lib") | .id' "$REGISTRY")
 fi
 
 hdr "done"
