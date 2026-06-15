@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="sparq icon">
+  <style>
+    .edge{stroke:#1c7f86;stroke-width:30;stroke-linecap:round;fill:none}
+    .node{fill:#1c7f86}
+    .tip{fill:#f5a623}
+    @media (prefers-color-scheme:dark){
+      .edge{stroke:#4cc4cc}
+      .node{fill:#4cc4cc}
+    }
+  </style>
+  <!-- standalone square icon: RDF node-graph forming a lowercase 'q' (query) -->
+  <g id="icon">
+    <g class="edge">
+      <line x1="232" y1="120" x2="356" y2="192"/>
+      <line x1="356" y1="192" x2="356" y2="320"/>
+      <line x1="356" y1="320" x2="232" y2="392"/>
+      <line x1="232" y1="392" x2="108" y2="320"/>
+      <line x1="108" y1="320" x2="108" y2="192"/>
+      <line x1="108" y1="192" x2="232" y2="120"/>
+      <line x1="356" y1="320" x2="420" y2="452"/>
+    </g>
+    <circle class="node" cx="232" cy="120" r="38"/>
+    <circle class="node" cx="356" cy="192" r="38"/>
+    <circle class="node" cx="356" cy="320" r="38"/>
+    <circle class="node" cx="232" cy="392" r="38"/>
+    <circle class="node" cx="108" cy="320" r="38"/>
+    <circle class="node" cx="108" cy="192" r="38"/>
+    <circle class="tip"  cx="420" cy="452" r="42"/>
+  </g>
+</svg>

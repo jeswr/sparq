@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512" role="img" aria-label="sparq">
+  <style>
+    .shield{fill:#1c7f86}
+    .accent{fill:#f5a623}
+    .ink{fill:#11343a}
+    @media (prefers-color-scheme:dark){
+      .shield{fill:#4cc4cc}
+      .ink{fill:#e6f4f4}
+    }
+  </style>
+
+  <!-- icon: a privacy/proof shield with an RDF graph knocked out as true negative
+       space (transparent), so it reads correctly on any background. -->
+  <defs>
+    <mask id="graphCut">
+      <!-- white = visible shield -->
+      <rect x="0" y="0" width="380" height="512" fill="#fff"/>
+      <!-- black = cut away (the graph: 3 edges + 2 lower nodes) -->
+      <g stroke="#000" stroke-width="22" stroke-linecap="round" fill="none">
+        <line x1="170" y1="158" x2="112" y2="316"/>
+        <line x1="170" y1="158" x2="228" y2="316"/>
+        <line x1="112" y1="316" x2="228" y2="316"/>
+      </g>
+      <circle cx="112" cy="316" r="30" fill="#000"/>
+      <circle cx="228" cy="316" r="30" fill="#000"/>
+      <!-- top focal node cut out too (amber disc shows through behind) -->
+      <circle cx="170" cy="158" r="36" fill="#000"/>
+    </mask>
+  </defs>
+
+  <g id="icon">
+    <!-- amber proof/verified disc sits behind the shield's top node cut-out -->
+    <circle class="accent" cx="170" cy="158" r="30"/>
+    <!-- solid escutcheon shield with the graph masked out -->
+    <path class="shield" mask="url(#graphCut)" d="
+      M170 52
+      C 236 90, 282 96, 296 100
+      C 300 184, 294 276, 256 332
+      C 224 380, 196 408, 170 432
+      C 144 408, 116 380, 84 332
+      C 46 276, 40 184, 44 100
+      C 58 96, 104 90, 170 52
+      Z"/>
+  </g>
+
+  <g id="wordmark">
+    <text class="ink" x="430" y="296"
+          font-family="ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace"
+          font-size="190" font-weight="700" letter-spacing="-6">sparq</text>
+  </g>
+</svg>

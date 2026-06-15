@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512" role="img" aria-label="sparq">
+  <style>
+    .node{fill:#1c7f86}
+    .edge{stroke:#1c7f86;stroke-width:16;stroke-linecap:round;fill:none}
+    .spark{fill:#f5a623}
+    .ink{fill:#11343a}
+    @media (prefers-color-scheme:dark){
+      .node{fill:#4cc4cc}
+      .edge{stroke:#4cc4cc}
+      .ink{fill:#e6f4f4}
+    }
+  </style>
+
+  <!-- icon: refined 3-node RDF graph; the apex node IS the spark -->
+  <g id="icon">
+    <!-- edges from the two base nodes up to the apex spark-node -->
+    <path class="edge" d="M120 332 L210 196"/>
+    <path class="edge" d="M300 332 L210 196"/>
+    <!-- base nodes: even radii, optically balanced shallow triangle -->
+    <circle class="node" cx="120" cy="332" r="34"/>
+    <circle class="node" cx="300" cy="332" r="34"/>
+    <!-- apex node = spark. amber lightning bolt seated in a teal node disc -->
+    <circle class="node" cx="210" cy="180" r="34"/>
+    <path class="spark" d="M222 156 L196 188 H210 L200 214 L228 180 H213 Z"/>
+  </g>
+
+  <!-- wordmark -->
+  <g id="wordmark">
+    <text x="396" y="296" class="ink"
+          font-family="ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace"
+          font-size="208" font-weight="700" letter-spacing="-6">sparq</text>
+  </g>
+</svg>

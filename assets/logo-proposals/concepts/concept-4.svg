@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512" role="img" aria-label="sparq">
+  <style>
+    .teal{fill:#1c7f86}
+    .ink{fill:#11343a}
+    .bolt{fill:#f5a623}
+    @media (prefers-color-scheme:dark){
+      .teal{fill:#4cc4cc}
+      .ink{fill:#e6f4f4}
+    }
+  </style>
+
+  <g id="icon">
+    <!-- Three nodes: top-left source, mid-right relay, bottom-left sink.
+         The connecting edge is a single solid lightning bolt traversing them:
+         a fast query racing through the triplestore. -->
+
+    <!-- Bolt-edge: solid filled zigzag from top node, through middle, to bottom node -->
+    <path class="bolt" d="
+      M 118 138
+      L 232 196
+      L 178 236
+      L 296 300
+      L 196 332
+      L 252 380
+      L 150 360
+      L 210 312
+      L 96 250
+      L 168 214
+      Z" />
+
+    <!-- Nodes (drawn over the bolt ends so the edge reads as connecting them) -->
+    <circle class="teal" cx="118" cy="138" r="40" />
+    <circle class="teal" cx="296" cy="300" r="34" />
+    <circle class="teal" cx="150" cy="360" r="40" />
+  </g>
+
+  <g id="wordmark">
+    <text class="ink" x="430" y="296"
+          font-family="ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace"
+          font-weight="700" font-size="190" letter-spacing="-6">sparq</text>
+  </g>
+</svg>

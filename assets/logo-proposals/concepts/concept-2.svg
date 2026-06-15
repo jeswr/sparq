@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512" role="img" aria-label="sparq">
+  <style>
+    .edge{stroke:#1c7f86;stroke-width:20;stroke-linecap:round;fill:none}
+    .node{fill:#1c7f86}
+    .tip{fill:#f5a623}
+    .ink{fill:#11343a}
+    @media (prefers-color-scheme:dark){
+      .edge{stroke:#4cc4cc}
+      .node{fill:#4cc4cc}
+      .ink{fill:#e6f4f4}
+    }
+  </style>
+
+  <!-- icon: an RDF node-graph whose ring of nodes forms the bowl of a lowercase 'q',
+       with one edge descending down-right as the q's tail, tipped by a focal node -->
+  <g id="icon">
+    <!-- bowl of the q: hexagonal ring of nodes + closing edges; centre ~ (176,210) -->
+    <g class="edge">
+      <line x1="176" y1="108" x2="264" y2="159"/>
+      <line x1="264" y1="159" x2="264" y2="261"/>
+      <line x1="264" y1="261" x2="176" y2="312"/>
+      <line x1="176" y1="312" x2="88"  y2="261"/>
+      <line x1="88"  y1="261" x2="88"  y2="159"/>
+      <line x1="88"  y1="159" x2="176" y2="108"/>
+      <!-- the tail: descends down-right from the lower-right node -->
+      <line x1="264" y1="261" x2="324" y2="392"/>
+    </g>
+
+    <!-- loop nodes (bowl of the q) -->
+    <circle class="node" cx="176" cy="108" r="28"/>
+    <circle class="node" cx="264" cy="159" r="28"/>
+    <circle class="node" cx="264" cy="261" r="28"/>
+    <circle class="node" cx="176" cy="312" r="28"/>
+    <circle class="node" cx="88"  cy="261" r="28"/>
+    <circle class="node" cx="88"  cy="159" r="28"/>
+
+    <!-- focal node at the tip of the tail (the query terminus) -->
+    <circle class="tip" cx="324" cy="392" r="30"/>
+  </g>
+
+  <!-- wordmark -->
+  <g id="wordmark">
+    <text class="ink" x="430" y="296"
+          font-family="ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace"
+          font-size="190" font-weight="700" letter-spacing="-6">sparq</text>
+  </g>
+</svg>

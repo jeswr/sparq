@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="sparq icon">
+  <style>
+    .shield{fill:#1c7f86}
+    .accent{fill:#f5a623}
+    @media (prefers-color-scheme:dark){
+      .shield{fill:#4cc4cc}
+    }
+  </style>
+  <!-- standalone square icon: privacy/proof shield with RDF graph as negative space -->
+  <defs>
+    <mask id="graphCut2">
+      <rect x="0" y="0" width="512" height="512" fill="#fff"/>
+      <g stroke="#000" stroke-width="30" stroke-linecap="round" fill="none">
+        <line x1="256" y1="186" x2="172" y2="356"/>
+        <line x1="256" y1="186" x2="340" y2="356"/>
+        <line x1="172" y1="356" x2="340" y2="356"/>
+      </g>
+      <circle cx="172" cy="356" r="40" fill="#000"/>
+      <circle cx="340" cy="356" r="40" fill="#000"/>
+      <circle cx="256" cy="186" r="48" fill="#000"/>
+    </mask>
+  </defs>
+  <g id="icon">
+    <circle class="accent" cx="256" cy="186" r="40"/>
+    <path class="shield" mask="url(#graphCut2)" d="
+      M256 56
+      C 348 102, 412 110, 432 116
+      C 438 232, 428 352, 374 432
+      C 328 500, 286 480, 256 470
+      C 226 480, 184 500, 138 432
+      C 84 352, 74 232, 80 116
+      C 100 110, 164 102, 256 56
+      Z"/>
+  </g>
+</svg>

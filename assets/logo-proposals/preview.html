@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sparq logo — proposals</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 2rem;
+    transition: background-color 0.3s, color 0.3s;
+    line-height: 1.5;
+  }
+  body.light { background: #f5f5f5; color: #222; }
+  body.dark  { background: #0d1b1e; color: #e6f4f4; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: .5rem; }
+  h1 { font-size: 1.6rem; font-weight: 700; }
+  h2 { font-size: 1.15rem; font-weight: 600; margin: 2.5rem 0 1rem; }
+  .sub { opacity: .7; margin-bottom: 1.5rem; max-width: 70ch; }
+  .toggle {
+    padding: .5rem 1rem; border: 1px solid currentColor; border-radius: 6px;
+    background: transparent; color: inherit; cursor: pointer; font-size: .875rem;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 1.5rem; }
+  .card { border: 1px solid rgba(128,128,128,.3); border-radius: 12px; overflow: hidden; }
+  .card-img { display:flex; align-items:center; justify-content:center; padding: 1.75rem; min-height: 180px; }
+  body.light .card-img { background:#fff; }
+  body.dark  .card-img { background:#16282c; }
+  .card-img img { max-width: 100%; max-height: 150px; }
+  .card-label { padding: .75rem 1rem; font-size: .9rem; }
+  .card-label b { font-weight: 600; }
+  .card-label span { opacity:.7; display:block; margin-top:.25rem; font-size:.82rem; }
+  body.light .card-label { background:#fafafa; border-top:1px solid rgba(128,128,128,.3); }
+  body.dark  .card-label { background:#11242a; border-top:1px solid rgba(128,128,128,.3); }
+  .sizes { display:flex; gap:2rem; flex-wrap:wrap; align-items:flex-end; padding:1.5rem; border:1px solid rgba(128,128,128,.3); border-radius:12px; }
+  body.light .sizes { background:#fff; }
+  body.dark  .sizes { background:#16282c; }
+  .sizecol { display:flex; flex-direction:column; align-items:center; gap:.4rem; }
+  .sizecol .lab { font-size:.8rem; font-weight:600; }
+  .sizerow { display:flex; gap:1rem; align-items:flex-end; }
+  .sizerow .s { display:flex; flex-direction:column; align-items:center; }
+  .sizerow .s small { font-size:.7rem; opacity:.6; margin-top:.25rem; }
+  .note { font-size:.85rem; opacity:.75; margin:.75rem 0 0; max-width:75ch; }
+  .rec { border-left:4px solid #1c7f86; padding:.75rem 1rem; margin-top:1rem; border-radius:0 8px 8px 0; }
+  body.light .rec { background:#e8f3f4; }
+  body.dark  .rec { background:#16282c; }
+</style>
+</head>
+<body class="light">
+  <div class="header">
+    <h1>sparq logo — proposals</h1>
+    <button class="toggle" onclick="document.body.classList.toggle('dark');document.body.classList.toggle('light');this.textContent=document.body.classList.contains('dark')?'☀️ Light':'🌙 Dark';">🌙 Dark</button>
+  </div>
+  <p class="sub">Five distinct minimal/geometric combination marks for sparq, on the privacy-first teal brand
+  (light <code>#1c7f86</code> / dark <code>#4cc4cc</code>) with an amber energy accent. Each SVG is
+  light/dark aware via <code>prefers-color-scheme</code> — toggle the button to preview dark mode. The current
+  <code>assets/logo.svg</code> is unchanged; these are proposals.</p>
+
+  <div class="rec">
+    <b>Recommended:</b> Concept&nbsp;2 (graph-as-&ldquo;q&rdquo;) as the primary combination mark, with the
+    Concept&nbsp;3 shield as the favicon / app-icon where a bold silhouette matters most at 16&ndash;32&nbsp;px.
+  </div>
+
+  <h2>Combination marks (icon + wordmark)</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="card-img"><img src="concepts/concept-1.svg" alt="concept 1"></div>
+      <div class="card-label"><b>1 — Refined graph + spark</b>
+        <span>Evolves the current logo: even nodes, the apex node <i>is</i> the amber spark (no longer floating). Safest, most familiar.</span></div>
+    </div>
+    <div class="card">
+      <div class="card-img"><img src="concepts/concept-2.svg" alt="concept 2"></div>
+      <div class="card-label"><b>2 — Graph forms a &ldquo;q&rdquo; (query)</b>
+        <span>A ring of nodes is the bowl of a lowercase q; one edge drops to an amber terminus node as the tail. Distinctive, on-brand for SPAR<b>Q</b>.</span></div>
+    </div>
+    <div class="card">
+      <div class="card-img"><img src="concepts/concept-3.svg" alt="concept 3"></div>
+      <div class="card-label"><b>3 — Privacy / proof shield</b>
+        <span>RDF triple knocked out of an escutcheon shield; amber = the verified node. Signals the ZK / MPC differentiator. Best bold silhouette.</span></div>
+    </div>
+    <div class="card">
+      <div class="card-img"><img src="concepts/concept-4.svg" alt="concept 4"></div>
+      <div class="card-label"><b>4 — Spark <i>is</i> the edge (speed)</b>
+        <span>The amber lightning bolt becomes the connecting edge traversing three nodes — a fast query racing through the store.</span></div>
+    </div>
+    <div class="card">
+      <div class="card-img"><img src="concepts/concept-5.svg" alt="concept 5"></div>
+      <div class="card-label"><b>5 — Abstract triple</b>
+        <span>Subject (amber circle) → predicate (edges) → object (diamond): the atomic RDF triple as a confident standalone mark.</span></div>
+    </div>
+  </div>
+
+  <h2>Standalone square icons (favicon / app-icon)</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="card-img"><img src="icons/icon-q.svg" alt="q icon" style="max-height:150px"></div>
+      <div class="card-label"><b>icon-q</b> <span>Square icon for Concept 2.</span></div>
+    </div>
+    <div class="card">
+      <div class="card-img"><img src="icons/icon-shield.svg" alt="shield icon" style="max-height:150px"></div>
+      <div class="card-label"><b>icon-shield</b> <span>Square icon for Concept 3.</span></div>
+    </div>
+  </div>
+
+  <h2>Favicon size check (square icons at 48 / 32 / 24 / 16 px)</h2>
+  <div class="sizes">
+    <div class="sizecol">
+      <div class="lab">icon-q</div>
+      <div class="sizerow">
+        <div class="s"><img src="icons/icon-q.svg" width="48" height="48"><small>48</small></div>
+        <div class="s"><img src="icons/icon-q.svg" width="32" height="32"><small>32</small></div>
+        <div class="s"><img src="icons/icon-q.svg" width="24" height="24"><small>24</small></div>
+        <div class="s"><img src="icons/icon-q.svg" width="16" height="16"><small>16</small></div>
+      </div>
+    </div>
+    <div class="sizecol">
+      <div class="lab">icon-shield</div>
+      <div class="sizerow">
+        <div class="s"><img src="icons/icon-shield.svg" width="48" height="48"><small>48</small></div>
+        <div class="s"><img src="icons/icon-shield.svg" width="32" height="32"><small>32</small></div>
+        <div class="s"><img src="icons/icon-shield.svg" width="24" height="24"><small>24</small></div>
+        <div class="s"><img src="icons/icon-shield.svg" width="16" height="16"><small>16</small></div>
+      </div>
+    </div>
+  </div>
+  <p class="note">The shield holds its silhouette best at 16&nbsp;px; the q-graph reads as a node cluster
+  at 16&nbsp;px and resolves into a clear &ldquo;q&rdquo; from ~24&nbsp;px up. PNG exports of the lead concept
+  live in <code>export/</code> (light mode only — the raster tool used does not honour
+  <code>prefers-color-scheme</code>; dark mode renders correctly in this browser preview).</p>
+
+  <h2>Lockup at sizes (Concept 2)</h2>
+  <div class="sizes">
+    <div class="sizecol">
+      <div class="lab">full lockup</div>
+      <div class="sizerow" style="align-items:center">
+        <div class="s"><img src="concepts/concept-2.svg" style="width:320px"><small>320w</small></div>
+        <div class="s"><img src="concepts/concept-2.svg" style="width:200px"><small>200w</small></div>
+        <div class="s"><img src="concepts/concept-2.svg" style="width:120px"><small>120w</small></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

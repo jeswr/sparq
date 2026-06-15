@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512" role="img" aria-label="sparq">
+  <style>
+    .teal{fill:#1c7f86}
+    .ink{fill:#11343a}
+    .amber{fill:#f5a623}
+    .edge{stroke:#1c7f86;stroke-width:26;fill:none;stroke-linecap:round}
+    @media (prefers-color-scheme:dark){
+      .teal{fill:#4cc4cc}
+      .ink{fill:#e6f4f4}
+      .edge{stroke:#4cc4cc}
+    }
+  </style>
+
+  <!-- ICON: abstract triple  subject -> predicate -> object -->
+  <!-- region ~340px square, centred vertically (y 86..426), x 40..380 -->
+  <g id="icon">
+    <!-- predicate edges: subject -> object -> (loop) forming the directed triple -->
+    <path class="edge" d="M 132 168 L 288 256"/>
+    <path class="edge" d="M 288 256 L 132 344"/>
+
+    <!-- object node: square/diamond (distinct geometric form) -->
+    <rect class="teal" x="240" y="208" width="96" height="96" rx="18"
+          transform="rotate(45 288 256)"/>
+
+    <!-- subject node: circle, marked with amber as the directional origin -->
+    <circle class="amber" cx="132" cy="168" r="56"/>
+
+    <!-- third node closing the triple: circle (object/secondary subject) -->
+    <circle class="teal" cx="132" cy="344" r="56"/>
+  </g>
+
+  <!-- WORDMARK -->
+  <g id="wordmark">
+    <text class="ink" x="430" y="296"
+          font-family="ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace"
+          font-weight="700" font-size="190" letter-spacing="-6">sparq</text>
+  </g>
+</svg>
