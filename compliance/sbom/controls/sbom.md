@@ -20,16 +20,18 @@ SBOM that `scripts/gen-sbom-vex.sh` produces per released binary.
 
 | # | NTIA element | Status | Evidence | Owner |
 |---|---|---|---|---|
-| N1 | **Supplier name** (of each component) | **Gap (partial)** — see GS-1 | `cargo-cyclonedx` (v0.5.9) does **not** populate per-component `supplier`/`author` from crates.io metadata; probe of `sparq-server.cdx.json` shows `supplier/author` absent on all 166 components. The *top-level* supplier IS present in the VEX (`supply-chain/vex.cdx.json` → `metadata.supplier` = "Jesse Wright"). The component **`name`** + crates.io **`purl`** transitively identify the supplier-of-record (crates.io), but the literal NTIA "Supplier Name" field is empty per component. | SPARQ |
+| N1 | **Supplier name** (of each component) | **Gap (partial)** — see GS-1 | `cargo-cyclonedx` (v0.5.9) does **not** populate the per-component `supplier`/`publisher` slot from crates.io metadata; probe of `sparq-server.cdx.json` (re-run 2026-06-15) shows `supplier`/`publisher` empty on **all 166** components. The component **`author`** field — the 1.3-era carrier of originator identity, closest to NTIA "Supplier Name" — *is* populated on **144/166** components from each crate's `authors` metadata (the 22 without it are `sparq-core`/`sparq-engine`/`sparq-serve` + 19 deps such as `axum`/`crossbeam-*`/`rayon`). The *top-level* supplier IS present in the VEX (`supply-chain/vex.cdx.json` → `metadata.supplier` = "Jesse Wright"). The component **`name`** + crates.io **`purl`** transitively identify the supplier-of-record (crates.io). So the literal NTIA "Supplier Name" *slot* (`supplier`/`publisher`) is empty per component, while component-author identity is present on the majority — a **partial** gap, not a total absence. | SPARQ |
 | N2 | **Component name** | **Implemented & verified** | Every component carries `components[].name` (probe: 166/166). `scripts/gen-sbom-vex.sh#L37` (`cargo cyclonedx --all`). | SPARQ |
 | N3 | **Version of the component** | **Implemented & verified** | `components[].version` populated for all (probe: 166/166, e.g. `sparq-core@0.1.0`). | SPARQ |
 | N4 | **Other unique identifiers** (PURL) | **Implemented & verified** | `components[].purl` = `pkg:cargo/<name>@<version>` for every component (probe: 166/166). | SPARQ |
 | N5 | **Dependency relationship** | **Implemented & verified** | `dependencies[]` graph emitted (probe: 167 nodes incl. root). CycloneDX `dependencies` block links each `ref` to its `dependsOn` set. | SPARQ |
 | N6 | **Author of the SBOM data** | **Implemented & verified (tooling-attested)** | `metadata.tools` = `{vendor: CycloneDX, name: cargo-cyclonedx, version: 0.5.9}` identifies the SBOM author/tool. The *human/org* author is the supplier in the VEX + the `release.yml#sbom` workflow identity (Sigstore attestation binds it to the org's GitHub workflow). Note: per-NTIA this field is "author of the SBOM data" (the tool/identity that produced it), which IS present — distinct from N1 (supplier of each component). | SPARQ |
-| N7 | **Timestamp** | **Implemented & verified** | `metadata.timestamp` populated at generation (probe: `2026-06-15T23:34:25Z`); re-stamped per release in the VEX by `scripts/gen-sbom-vex.sh#L58`. | SPARQ |
+| N7 | **Timestamp** | **Implemented & verified** | `metadata.timestamp` populated at generation (probe: an RFC-3339 instant, varies per run, e.g. `2026-06-15T23:49Z`); re-stamped per release in the VEX by `scripts/gen-sbom-vex.sh#L58`. | SPARQ |
 
-**NTIA verdict:** 5 of 7 elements fully met; **N1 (per-component supplier name)** is the one genuine
-NTIA-completeness gap (GS-1) and N6 is met at tool-author granularity (the NTIA-intended reading).
+**NTIA verdict:** **6 of 7 elements met** (N2,N3,N4,N5,N6,N7); the single weakened element is
+**N1 (per-component Supplier Name)**, which is **partial** — the dedicated `supplier`/`publisher`
+slot is empty (0/166) but component-`author` identity is present on 144/166. This is the one genuine
+NTIA-completeness gap (GS-1). N6 is met at tool-author granularity (the NTIA-intended reading).
 
 ## B. CycloneDX completeness
 
@@ -47,24 +49,37 @@ NTIA-completeness gap (GS-1) and N6 is met at tool-author granularity (the NTIA-
 | VEX-1 | A VEX document exists | **Implemented & verified** | `supply-chain/vex.cdx.json` (CycloneDX 1.5, 2 vulnerabilities). | SPARQ |
 | VEX-2 | VEX states exploitability for **every** ignored advisory | **Implemented & verified** | VEX covers `RUSTSEC-2024-0436` + `RUSTSEC-2025-0134`, each with `analysis.state=not_affected` + a CycloneDX `justification` (`code_not_reachable` / `vulnerable_code_not_in_execute_path`) + detail. | SPARQ |
 | VEX-3 | VEX kept **1:1 in sync** with the dependency-policy ignore list | **Implemented & verified** | `deny.toml` `[advisories].ignore` = exactly the same two RUSTSEC IDs (`deny.toml:L31,L35`); the VEX `_comment` mandates the 1:1 invariant. Verified by inspection this branch (both lists = {2024-0436, 2025-0134}). **Drift-check automation is a P2 gap — GS-5.** | SPARQ |
-| VEX-4 | Per-release VEX published with the version stamped | **Implemented & verified** | `scripts/gen-sbom-vex.sh#L49-67` stamps the released version + timestamp into `sparq-<version>.vex.cdx.json`; attached to the Release by `release.yml#release`. | SPARQ |
+| VEX-4 | Per-release VEX published with the version stamped | **Audit-ready** (config-verified; operating-verification pending first release) | `scripts/gen-sbom-vex.sh#L49-67` stamps the released version + timestamp into `sparq-<version>.vex.cdx.json`; attached to the Release by `release.yml#release`. The script + wiring are reviewed and the **checked-in** VEX is verified, but **no per-release VEX has been published yet** (0 releases, 2026-06-15). | SPARQ |
 
 ## D. Signed / attested SBOM
 
+> **Operating-effectiveness caveat (release-gated rows SIG-1/2/3):** these controls fire only on
+> `push: tags: v*`, and **no `v*` tag, GitHub Release, or Sigstore attestation exists yet** (verified
+> 2026-06-15: `git tag -l 'v*'` → 0, `gh release list` → empty, `gh api .../attestations/...` → 404).
+> They are therefore **config-verified** (workflow wiring reviewed and correct), **not
+> operating-verified** — no attested SBOM/VEX artifact has yet been produced. Status reads
+> **"Audit-ready"** for the operating dimension; re-verify after the first `v*` release with the
+> `gh attestation verify` / cosign commands cited.
+
 | ID | Control | Status | Evidence | Owner |
 |---|---|---|---|---|
-| SIG-1 | SBOM + VEX are **SLSA build-provenance attested** (Sigstore-signed) | **Implemented & verified** | `release.yml#sbom` → `actions/attest-build-provenance` (SHA-pinned `a2bbfa2…`) over `sbom/*.sbom.cdx.json` + `sbom/*.vex.cdx.json`. Verify: `gh attestation verify <file> --repo jeswr/sparq`. | SPARQ |
-| SIG-2 | SBOM + VEX covered by a release checksum manifest | **Implemented & verified** | `release.yml#release` "Generate SHA256SUMS" runs `sha256sum -- *` over **all** assets incl. SBOM+VEX; release notes: `shasum -a 256 -c SHA256SUMS`. | SPARQ |
-| SIG-3 | Container image carries an **embedded SBOM + SLSA provenance** | **Implemented & verified** | `release.yml#docker` buildkit `provenance: mode=max` + `sbom: true` (release.yml:L250-251) → SBOM + max-mode provenance attached to the ghcr.io image; verifiable via cosign / `gh`. | SPARQ |
+| SIG-1 | SBOM + VEX are **SLSA build-provenance attested** (Sigstore-signed) | **Audit-ready** (config-verified; operating-verification pending first release) | `release.yml#sbom` → `actions/attest-build-provenance` (SHA-pinned `a2bbfa2…`) over `sbom/*.sbom.cdx.json` + `sbom/*.vex.cdx.json` — wiring reviewed. **Not yet executed** (0 releases/tags/attestations, 2026-06-15). Verify after first release: `gh attestation verify <file> --repo jeswr/sparq`. | SPARQ |
+| SIG-2 | SBOM + VEX covered by a release checksum manifest | **Audit-ready** (config-verified; operating-verification pending first release) | `release.yml#release` "Generate SHA256SUMS" runs `sha256sum -- *` over **all** assets incl. SBOM+VEX; release notes: `shasum -a 256 -c SHA256SUMS`. Wiring reviewed; **no release has produced a SHA256SUMS yet**. | SPARQ |
+| SIG-3 | Container image carries an **embedded SBOM + SLSA provenance** | **Audit-ready** (config-verified; operating-verification pending first release) | `release.yml#docker` buildkit `provenance: mode=max` + `sbom: true` (release.yml:L250-251) → SBOM + max-mode provenance attached to the ghcr.io image; verifiable via cosign / `gh`. Wiring reviewed; **no image has been built/pushed by a release yet**. | SPARQ |
 
 ## E. Per-release publication
 
+> **Operating-effectiveness caveat (release-gated rows PUB-1/PUB-2):** as in section D, these fire on
+> `v*` tags and have **never executed** (no releases yet, 2026-06-15) — config-verified, not
+> operating-verified. PUB-3 (checked-in VEX) and PUB-4 (per-push CI SBOM) are **not** release-gated:
+> they run on every push/PR and are fully operating-verified.
+
 | ID | Control | Status | Evidence | Owner |
 |---|---|---|---|---|
-| PUB-1 | An SBOM is generated on **every** release | **Implemented & verified** | `release.yml#sbom` runs `scripts/gen-sbom-vex.sh` on tag `v*` (one SBOM per released binary). | SPARQ |
-| PUB-2 | SBOM + VEX **attached as release assets** | **Implemented & verified** | `release.yml#release` (`softprops/action-gh-release`, SHA-pinned) attaches `*.sbom.cdx.json` + `*.vex.cdx.json`; release-notes template documents the asset names. | SPARQ |
+| PUB-1 | An SBOM is generated on **every** release | **Audit-ready** (config-verified; operating-verification pending first release) | `release.yml#sbom` runs `scripts/gen-sbom-vex.sh` on tag `v*` (one SBOM per released binary). Wiring reviewed; **no release has produced one yet** (the per-push CI SBOM under PUB-4 *is* operating-verified). | SPARQ |
+| PUB-2 | SBOM + VEX **attached as release assets** | **Audit-ready** (config-verified; operating-verification pending first release) | `release.yml#release` (`softprops/action-gh-release`, SHA-pinned) attaches `*.sbom.cdx.json` + `*.vex.cdx.json`; release-notes template documents the asset names. Wiring reviewed; **no release assets exist yet**. | SPARQ |
 | PUB-3 | A checked-in **source-of-truth** for the VEX (not only a CI artifact) | **Implemented & verified** | `supply-chain/vex.cdx.json` is committed; the release stamps a per-version copy. (The SBOM itself is generated per release, not checked in — correct, since it is version-specific.) | SPARQ |
-| PUB-4 | CI also emits an SBOM artifact on every push/PR (continuous transparency) | **Implemented & verified** | `supply-chain.yml#sbom` ("generate CycloneDX SBOM") uploads `**/*.cdx.json` as artifact `sbom-cyclonedx`, `if-no-files-found: error`. | SPARQ |
+| PUB-4 | CI also emits an SBOM artifact on every push/PR (continuous transparency) | **Implemented & verified** | `supply-chain.yml#sbom` ("generate CycloneDX SBOM") uploads `**/*.cdx.json` as artifact `sbom-cyclonedx`, `if-no-files-found: error`. Runs on every push/PR — operating-verified. | SPARQ |
 
 ## F. Dependency transparency & gating
 
@@ -73,8 +88,8 @@ NTIA-completeness gap (GS-1) and N6 is met at tool-author granularity (the NTIA-
 | DEP-1 | **No known-vulnerable / yanked** dependency at PR time | **Implemented & verified** | `supply-chain.yml#audit` "cargo-deny check (advisories) — GATING"; `deny.toml` `yanked="deny"` + advisories v2 fail-closed. GX-1 (degraded gate) is **resolved** (sq-toze.2 CLOSED). Defence-in-depth: `dependency-monitoring.yml` daily watchdog (cron `13 5 * * *`) opens a single `security:dependency-vuln` tracking issue. | SPARQ |
 | DEP-2 | **No banned / duplicate-version** crate | **Implemented & verified** | `supply-chain.yml#audit` "cargo-deny check (bans + sources + licenses) — GATING"; `deny.toml` `[bans]`. | SPARQ |
 | DEP-3 | Crates come **only from crates.io** (no rogue git/registry) | **Implemented & verified** | `deny.toml` `[sources]` `unknown-registry="deny"`, `unknown-git="deny"`; the vendored `spargebra` is a `[patch.crates-io]` PATH source (not a registry/git source). Gated in `supply-chain.yml#audit`. | SPARQ |
-| DEP-4 | Every dependency carries a **human audit attestation** (cargo-vet) | **Implemented & verified** | `supply-chain.yml#vet` "cargo-vet … — GATING" runs `cargo vet --locked`; trusted import sets in `supply-chain/config.toml` `[imports.*]` (Mozilla, Google, Bytecode Alliance, ISRG, Embark); ratchet blocks unaudited new deps. (GX-7 / sq-toze.8 — bead OPEN but control is **wired**; see GS-2 note in gap-register.) | SPARQ |
-| DEP-5 | Shipped binaries **embed their dependency manifest** (cargo-auditable) | **Implemented & verified** | `release.yml#package` `cargo auditable build` (release.yml:L87); `Dockerfile:L70` `cargo auditable build` for the server image. Verify: `cargo audit bin <binary>`. (GX-7 — wired; bead sq-toze.8 OPEN to close-out.) | SPARQ |
+| DEP-4 | Every dependency carries a **human audit attestation** (cargo-vet) | **Implemented & verified** | `supply-chain.yml#vet` "cargo-vet … — GATING" runs `cargo vet --locked` on every push/PR; trusted import sets in `supply-chain/config.toml` `[imports.*]` (Mozilla, Google, Bytecode Alliance, ISRG, Embark); ratchet blocks unaudited new deps. (GX-7 / **sq-toze.8 CLOSED**; control is **wired** + operating-verified on PR.) | SPARQ |
+| DEP-5 | Shipped binaries **embed their dependency manifest** (cargo-auditable) | **Implemented & verified** (build step) — release-asset `cargo audit bin` verification pending first release | `release.yml#package` `cargo auditable build` (release.yml:L87) and `Dockerfile:L70` `cargo auditable build` are wired (GX-7 / **sq-toze.8 CLOSED**). The Docker image build path is exercised in CI; the **release-binary** `cargo audit bin <binary>` round-trip cannot be observed until the first `v*` release (0 releases, 2026-06-15). | SPARQ |
 | DEP-6 | Permissive-license-only policy (license transparency) | **Implemented & verified** | `deny.toml` `[licenses]` allowlist + per-crate scoped exceptions; gated `supply-chain.yml#audit`. | SPARQ |
 
 ## G. SBOM-to-artifact integrity (binding the SBOM to what actually shipped)
@@ -87,7 +102,30 @@ NTIA-completeness gap (GS-1) and N6 is met at tool-author granularity (the NTIA-
 
 ## Summary counts
 
-- **Implemented & verified:** 22 controls (N2–N7, CDX-1/2/4, all VEX, all SIG, all PUB, DEP-1..6, INT-1/2).
-- **Gap (recorded + beaded):** N1/GS-1 (per-component supplier), INT-3/GS-2 (reproducible build, GX-8),
-  CDX-3/GS-4 (spec version), VEX-3-automation/GS-5 (drift check), GS-3 (JS-lockfile SBOM).
-- **Overclaim audit:** none. Every "verified" row cites a file path, CI job, or a recorded probe.
+**31 control rows**, classified by the honesty-contract status legend:
+
+- **Implemented & verified — 22:** N2–N7, CDX-1/2/4, VEX-1/2/3, PUB-3/4, DEP-1..6, INT-1/2.
+  Each runs on every push/PR (or is a checked-in artifact) and cites a file path, CI job, or a
+  recorded probe.
+- **Audit-ready (config-verified; operating-verification pending first `v*` release) — 6:**
+  SIG-1/2/3, PUB-1/2, VEX-4. These are release-gated (`push: tags: v*`); the workflow wiring is
+  reviewed and correct, but **no release/tag/attestation exists yet** (verified 2026-06-15), so no
+  attested artifact has been produced. DEP-5 is a hybrid — the `cargo auditable build` step is wired
+  + the Docker path is CI-exercised, but the release-binary `cargo audit bin` round-trip awaits the
+  first release (it is counted under Implemented & verified for its build step, with the qualifier in
+  its row).
+- **Gap (recorded + beaded) — 3 control rows:** N1/GS-1 (per-component supplier slot, partial — see
+  the corrected probe), CDX-3/GS-4 (spec version 1.3 vs 1.5/1.6), INT-3/GS-2 (reproducible build,
+  GX-8, bead sq-toze.9).
+
+**Tracked open gap *items* (gap-register.md) — 5 (GS-1..5):** GS-1 (N1 supplier, bead sq-toze.26),
+GS-2/GX-8 (reproducible build, bead sq-toze.9 — maps to control row INT-3), GS-3 (JS-lockfile SBOM,
+bead sq-toze.27 — a *scope* item with **no control row**), GS-4 (spec version, bead sq-toze.28 — maps
+to CDX-3), GS-5 (VEX↔deny drift automation, bead sq-toze.29 — a P2 sub-gap *behind* control VEX-3,
+which is otherwise Implemented & verified). Plus **GS-6 / sq-toze.30** (F-6: SBOM root `bom-ref`
+leaks the absolute build path — optional sanitisation; no control regression). So the 5 gap *items*
+≠ the 3 gap *rows*: GS-3 has no row, and GS-5 sits behind an otherwise-met control.
+
+- **Overclaim audit:** none. Every "Implemented & verified" row cites a file path, CI job, or a
+  recorded probe; the release-gated rows are downgraded to **Audit-ready** rather than overclaiming
+  operating effectiveness on a repo with zero releases.

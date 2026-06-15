@@ -40,13 +40,13 @@ cargo cyclonedx --all --format json
 ```
 
 Recorded result for `crates/sparq-server/sparq-server.cdx.json` (cargo-cyclonedx 0.5.9, default
-features, this branch):
+features, this branch — re-run **2026-06-15** to verify the `author`/`supplier` counts below):
 
 | Field | Observed value | NTIA / CDX control |
 |---|---|---|
 | `bomFormat` / `specVersion` | `CycloneDX` / `1.3` | CDX-1 (valid); CDX-3 (spec version — see GS-4) |
 | `serialNumber` | present | CDX-1 |
-| `metadata.timestamp` | `2026-06-15T23:34:25Z` | N7 ✅ |
+| `metadata.timestamp` | `2026-06-15T23:49Z` (varies per run) | N7 ✅ |
 | `metadata.tools` | `{vendor: CycloneDX, name: cargo-cyclonedx, version: 0.5.9}` | N6 ✅ (SBOM-author = tool) |
 | `metadata.authors` / `metadata.supplier` | **absent** | contributes to GS-1 |
 | components count | **166** | — |
@@ -55,12 +55,27 @@ features, this branch):
 | `components[].purl` | present 166/166 (`pkg:cargo/<name>@<ver>`) | N4 ✅ |
 | `components[].licenses` | present 166/166 | CDX-2 ✅ |
 | `components[].externalReferences` | present | CDX-4 ✅ |
-| `components[].supplier` / `.author` | **absent on all 166** | **GS-1** (N1 per-component supplier gap) |
+| `components[].author` | **present 144/166** (e.g. `spargebra → "Tpt <thomas@pellissier-tanon.fr>"`, `aho-corasick → "Andrew Gallant <jamslam@gmail.com>"`); the 22 without it are the 3 first-party workspace crates `sparq-core`/`sparq-engine`/`sparq-serve` + 19 deps (`axum`, `axum-core`, `crossbeam-*`, `rayon`, `rayon-core`, `hashbrown`, `futures-*`, `either`, `equivalent`, `typenum`, `quick-xml`, `pin-project-lite`, `find-msvc-tools`) | N6/N1 — component-author identity present on the majority |
+| `components[].supplier` / `.publisher` | **absent on all 166 (0/166)** | **GS-1** (N1 per-component *Supplier Name* slot empty) |
 | `dependencies[]` graph | present, 167 nodes (incl. root) | N5 ✅ |
 
-**Honest reading:** cargo-cyclonedx 0.5.9 emits 5/7 NTIA elements fully (N2,N3,N4,N5,N7), N6 at
-tool-author granularity, and leaves **N1 (per-component supplier name)** empty — the one genuine
-NTIA-completeness gap. The generated SBOM is `specVersion 1.3` while the VEX is `1.5`.
+**Honest reading (corrected per the 2026-06-15 re-run):** cargo-cyclonedx 0.5.9 emits 6/7 NTIA
+elements (N2,N3,N4,N5,N6,N7). The CycloneDX `author` field — the 1.3-era carrier of
+component-originator identity and the closest field to NTIA *Supplier Name* — is populated on
+**144/166** components from each crate's `authors` metadata; only the dedicated `supplier`/`publisher`
+slot is empty (**0/166**). So **one** NTIA element — *Supplier Name* (`supplier`/`publisher`) — is
+left **partial** (author-granularity present, supplier-granularity empty); this is the one genuine
+NTIA-completeness gap (**N1/GS-1**). The generated SBOM is `specVersion 1.3` while the VEX is `1.5`.
+
+> **Root/component refs are local-path refs (expected, not tampering — F-6/GS-6, bead sq-toze.30):**
+> the root `metadata.component.bom-ref` is `path+file:///<abs-path>/crates/sparq-server#0.1.0`, the
+> root `purl` is `pkg:cargo/sparq-server@0.1.0?download_url=file://.`, and workspace-member dependency
+> nodes likewise carry `path+file://<abs-path>` refs — inherent to cargo-cyclonedx 0.5.9 resolving
+> path-based workspace members rather than registry purls. `release.yml#sbom` runs the same
+> `cargo cyclonedx --all`, so a published SBOM would carry the **CI runner's absolute path** in those
+> refs. An integrator verifying SBOM→artifact binding should expect local-path refs for workspace
+> members. Optional sanitisation (strip/normalise the abs-path post-generation in
+> `scripts/gen-sbom-vex.sh`) is tracked under **sq-toze.30** (GS-6).
 
 > The probe files (`**/*.cdx.json`) are **not committed** — `scripts/gen-sbom-vex.sh#L47` and the
 > probe both delete them to keep the worktree clean. They are regenerable with the command above.
@@ -88,3 +103,14 @@ cosign verify-attestation ghcr.io/jeswr/sparq@<digest> ...              # image 
 
 These are the consumer-facing verification steps a downstream high-security integrator runs; they
 correspond to SIG-1/SIG-2, DEP-5, and SIG-3 respectively.
+
+> **Operating-effectiveness status (release-gated controls):** all four commands above are
+> **unrunnable today** — `release.yml` triggers only on `push: tags: v*`, and the repo has **no
+> `v*` tags, no GitHub Releases, and no Sigstore attestations yet** (verified `git tag -l 'v*'` → 0,
+> `gh release list` → empty, `gh api repos/jeswr/sparq/attestations/...` → 404, 2026-06-15). The
+> SIG-*/PUB-*/VEX-4/DEP-5 controls are therefore **verified at the configuration level (workflow
+> wiring reviewed and correct), not at the operating level** — no attested SBOM/VEX artifact has ever
+> been produced. An external auditor must re-verify these by cutting (or observing) the first `v*`
+> release and re-running the commands above against its assets. The control rows in
+> `controls/sbom.md` are labelled **"Audit-ready (config-verified; operating-verification pending
+> first release)"** accordingly.
