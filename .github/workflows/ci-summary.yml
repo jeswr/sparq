@@ -14,9 +14,14 @@
 #
 # SEMANTICS: success / skipped / neutral are non-failing; failure / cancelled /
 # timed_out / action_required / stale fail the gate. The gate EXCLUDES ITSELF (no
-# self-deadlock). It waits until the discovered set of sibling check names has
-# stabilised AND every one of them is terminal, bounded by the job timeout. A
-# stable-empty set passes (e.g. a docs-only change that triggers no other workflow).
+# self-deadlock). It waits until EVERY discovered sibling check-run is terminal
+# (pending == 0) AND the set of sibling check NAMES has held unchanged for a short
+# settle window, bounded below by a startup-race floor and above by the job timeout.
+# This converges FAST once the last sibling finishes — including a `build + test`
+# MATRIX whose shards register/complete at staggered times — instead of repeatedly
+# re-waiting a long unchanged-name window per late arrival (the thrash @jeswr saw
+# after the test job was split into shards). A stable-empty set passes (e.g. a
+# docs-only change that triggers no other workflow). [OPUS-4.8]
 #
 # ADVISORY/INFORMATIONAL checks are NON-GATING (bead sq-wjth). [OPUS-4.8] A check
 # whose NAME contains the WHOLE WORD "advisory" or "informational" (case-insensitive,
@@ -92,14 +97,43 @@ jobs:
           SELF_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          # STABILITY WINDOW (handles the startup race + late-registering workflows):
-          # a fixed settle can't eliminate the race — a sibling check-run can register
-          # late, after we've read a partial set. So we require the DISCOVERED SET OF
-          # CHECK NAMES to stay unchanged across STABLE_POLLS consecutive polls before
-          # we trust it. Any new check-run appearing resets the counter, so a slow-to-
-          # register workflow is always folded in. Only once the set is stable AND
-          # nothing is pending do we render a verdict; a stable-empty set passes.
-          STABLE_POLLS=4          # set must hold for 4 × 20s = 80s of quiet
+          # CONVERGENCE (handles the startup race + late-registering workflows WITHOUT
+          # thrashing on a matrix). [OPUS-4.8] sq — @jeswr reported the gate wasn't
+          # converging promptly once `build + test` was split into a 4-shard matrix.
+          #
+          # The convergence condition is: every DISCOVERED sibling check-run is TERMINAL
+          # (`pending == 0`) AND the discovered NAME set has been unchanged for a SHORT
+          # settle of SETTLE_POLLS consecutive polls — bounded below by a MIN_POLLS
+          # startup floor and above by the loop/job timeout.
+          #
+          # WHY NOT a long unchanged-name window: the previous design required the name
+          # set to hold unchanged for 4 polls (80s) and reset that counter on ANY name
+          # change. With a matrix, the N shard check-runs register at DIFFERENT times, so
+          # every late arrival reset the 4-poll window — convergence crawled (≈7 min on
+          # the first 4-shard PR, worst case toward the cap), and the identical logic
+          # WILL also run on `merge_group` once a merge queue is enabled (this workflow
+          # currently triggers only on `pull_request` + `push`), so the MERGE QUEUE's
+          # gate would be slow/fragile too.
+          #
+          # WHY pending==0 is the right primary signal: a check-run that is still
+          # registering/running is NOT `completed`, so it counts in `pending`. We only
+          # render a verdict once EVERY discovered sibling is terminal — so all N matrix
+          # shards (which complete at different times) are waited-for and folded in. The
+          # busy registration phase is naturally covered: while shards keep arriving and
+          # running, pending>0 holds the gate; the SETTLE window then runs AFTER the last
+          # sibling finishes (when the name set is already stable), so it converges in
+          # ~SETTLE_POLLS polls instead of re-waiting a full window per late arrival.
+          #
+          # LATE-REGISTERING workflows are still folded in: a genuinely-late workflow's
+          # check-run appears as queued/in_progress (pending>0) AND grows the name set,
+          # which resets the short settle — so we wait for it and re-judge. The MIN_POLLS
+          # floor additionally guards the startup race where the FIRST sibling finishes
+          # so fast that a slightly-later-registering workflow hasn't appeared yet: no
+          # verdict is rendered before MIN_POLLS polls have elapsed, giving slow workflows
+          # time to register before an all-terminal partial set could pass prematurely.
+          # A stable-empty set still passes (docs-only change with no siblings).
+          SETTLE_POLLS=2          # name set must hold unchanged for 2 × 20s = 40s once terminal
+          MIN_POLLS=3             # never render a verdict before 3 × 20s = 60s (startup-race floor)
           INTERVAL=20
           prev_names=""
           stable=0
@@ -123,9 +157,22 @@ jobs:
             names=$(printf '%s\n' "$runs" | jq -rs '[.[].name] | unique | join("\n")')
             pending=$(printf '%s\n' "$runs" | jq -rs '[.[] | select(.status != "completed")] | length')
             total=$(printf '%s\n' "$runs" | jq -rs 'length')
-            if [ "$names" = "$prev_names" ]; then stable=$((stable + 1)); else stable=1; prev_names="$names"; fi
-            echo "attempt $attempt: $total check-run(s), $pending running, set stable for $stable/$STABLE_POLLS poll(s)"
-            if [ "$stable" -ge "$STABLE_POLLS" ] && [ "$pending" -eq 0 ]; then
+            # The settle window must be a POST-TERMINAL window: only advance `stable`
+            # while pending==0 AND the name set is unchanged. If anything is still
+            # pending — OR the name set just changed — reset to 0 so the SETTLE_POLLS
+            # window genuinely runs AFTER the last sibling finishes (otherwise `stable`
+            # would already be >= SETTLE_POLLS from the busy phase and the gate could
+            # render a verdict on the very first pending==0 poll, with no settle).
+            if [ "$names" != "$prev_names" ]; then prev_names="$names"; stable=0;
+            elif [ "$pending" -eq 0 ]; then stable=$((stable + 1));
+            else stable=0; fi
+            echo "attempt $attempt: $total check-run(s), $pending running, name-set stable for $stable/$SETTLE_POLLS poll(s)"
+            # Converge once every discovered sibling is terminal (pending == 0) AND the
+            # name set has held unchanged for the short settle — but never before the
+            # MIN_POLLS startup floor, so a slightly-late-registering workflow has time
+            # to appear (and re-arm the settle via pending>0) before an all-terminal
+            # PARTIAL set could pass prematurely.
+            if [ "$attempt" -ge "$MIN_POLLS" ] && [ "$pending" -eq 0 ] && [ "$stable" -ge "$SETTLE_POLLS" ]; then
               # Set has settled and everything is terminal — render the verdict.
               if [ "$total" -eq 0 ]; then
                 echo "ci-summary: no sibling checks to aggregate (stable empty set) — passing." \
@@ -171,5 +218,5 @@ jobs:
             fi
             sleep "$INTERVAL"
           done
-          echo "::error::ci-summary timed out waiting for the sibling check-run set to stabilise and complete."
+          echo "::error::ci-summary timed out — sibling check-runs never reached a settled, all-terminal state (some check stayed pending or the set kept changing) within the loop budget."
           exit 1
