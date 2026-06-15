@@ -1,0 +1,9 @@
+# [OPUS-4.8] Deep Taxonomy probe query (sq-1hgz). Counts every class the single instance :i is a
+# member of in the MATERIALIZED N3 closure. On the raw data :i is only `a :n0`; after the
+# transitivity meta-rule closes the depth-deep :sc chain, :i is a member of EVERY class :n0..:nN,
+# so this returns exactly DEPTH+1 rows (deterministic — see expected.tsv). It both exercises the
+# closure (a full type scan over the entailed triples) AND yields a deterministic row count the
+# self-asserting gate checks alongside the closure triple-count.
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX : <http://ex/>
+SELECT ?c WHERE { :i a ?c }

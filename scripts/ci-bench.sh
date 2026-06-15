@@ -84,6 +84,16 @@ BSBM_PC="${BSBM_PC:-300}"
 # below just invokes run.sh (the self-asserting path) and harvests its count-mode TSV lines into
 # `lubm_<query>_count_us`. Registry: bench/benchmarks.toml (lubm); details: bench/lubm/README.md.
 LUBM_RUN=bench/lubm/run.sh
+# [OPUS-4.8] Deep Taxonomy (DeepTaxonomy, sq-1hgz; parent sq-i0nm "design D") — the rule-heavy N3
+# REASONING suite. Like LUBM, its run.sh is the self-asserting entry point: it reuses the existing
+# generator (bench/inference/gen_deeptaxonomy.py via bench/deep-taxonomy/gen.sh), materializes the
+# N3 forward closure per depth tier with `sparq-cli reason … n3`, runs query.rq over the closure,
+# and asserts BOTH the closure triple-count AND the query row-count vs expected.tsv internally
+# (exit 1 on any mismatch). So the hook below just invokes run.sh and harvests its metric TSV into
+# `deeptax_d<DEPTH>_{closure_s,query_us,closure_triples}`. Registry: bench/benchmarks.toml
+# (deep-taxonomy); details: bench/deep-taxonomy/README.md. (sq-1hgz)
+DEEPTAX_RUN=bench/deep-taxonomy/run.sh
+DEEPTAX_DEPTHS="${DEEPTAX_DEPTHS:-1000 10000}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -368,6 +378,36 @@ if command -v javac >/dev/null 2>&1 && command -v rapper >/dev/null 2>&1 && [ -x
   fi
 else
   echo "note: lubm skipped (javac/rapper not on PATH)" >&2
+fi
+
+# [OPUS-4.8] Deep Taxonomy reasoning suite per-commit (sq-1hgz). Like the LUBM hook above, this
+# suite's run.sh is the self-asserting entry point: it reuses bench/inference/gen_deeptaxonomy.py
+# (via gen.sh) to build the DT N3 corpus at each depth tier, materializes the N3 forward closure
+# with `sparq-cli reason … n3`, runs query.rq over the closure, and asserts EVERY closure
+# triple-count + query row-count vs expected.tsv internally (exit 1 on any mismatch). So we invoke
+# run.sh and harvest its metric TSV (it prints `<metric>\t<value>\t<unit>` lines on stdout) into
+# `deeptax_d<DEPTH>_{closure_s,query_us,closure_triples}` (trend-only, NOT in scripts/perf-gate.py;
+# closure_triples is a deterministic structural metric, never an alert source). UNLIKE
+# watdiv/bsbm/lubm this suite needs NO heavyweight toolchain — only python3 (always present) + the
+# built sparq-cli — so it runs on the per-commit tier by default at a SMALL depth pair (dt1k+dt10k;
+# closures 2,001 / 20,001 triples, ~0.1 s total). dt100k is opt-in via DEEPTAX_DEPTHS for the
+# EC2/nightly tier. Guarded on python3 + run.sh present, mirroring the LUBM guard shape: if python3
+# is somehow absent it is skipped gracefully so ci-bench still emits valid JSON. run.sh failing (a
+# reasoner OR engine correctness regression) fails the whole ci-bench run.
+if command -v python3 >/dev/null 2>&1 && [ -x "$DEEPTAX_RUN" ]; then
+  if CLI="$CLI" ITERS=3 DEEPTAX_DEPTHS="$DEEPTAX_DEPTHS" bash "$DEEPTAX_RUN" > "$TMP/deeptax.tsv" 2>"$TMP/deeptax.err"; then
+    while IFS=$'\t' read -r name value unit; do
+      [ -n "${name:-}" ] && [ -n "${value:-}" ] && add "$name" "${unit:-}" "$value"
+    done < "$TMP/deeptax.tsv"
+  else
+    # run.sh exits non-zero ONLY on a hard correctness mismatch (the python3 guard above ensures
+    # the toolchain is present), so surface its diagnostics and fail the run.
+    echo "ERROR: deep-taxonomy run.sh failed (closure-size regression or reasoner/engine error)" >&2
+    cat "$TMP/deeptax.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: deep-taxonomy skipped (python3 not on PATH)" >&2
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.
