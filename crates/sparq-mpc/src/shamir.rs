@@ -167,6 +167,22 @@ impl ShamirBackend {
         Ok(ShamirBackend { n, t, rng_source })
     }
 
+    /// **Test-only escape hatch** that builds a backend with an EXPLICIT threshold
+    /// `t`, bypassing the honest-majority `t = ⌊(n−1)/2⌋` rule, so deficient
+    /// configurations (`n < 2t+1`, which the public constructors can never build)
+    /// can be handed to the fail-closed precondition checks (e.g. the secure
+    /// comparison's `n >= 2t+1` guard, sq-rrz4). It uses the seedable insecure RNG.
+    /// NEVER a production path — it deliberately violates the security invariant the
+    /// real constructors enforce. `[OPUS-4.8]`
+    #[cfg(test)]
+    pub(crate) fn with_unchecked_threshold(n: usize, t: usize) -> Self {
+        ShamirBackend {
+            n,
+            t,
+            rng_source: RngSource::InsecureSeed(0xDEAD_BEEF),
+        }
+    }
+
     /// Number of compute parties.
     pub fn parties(&self) -> usize {
         self.n
@@ -241,12 +257,20 @@ impl ShamirBackend {
                 None => SecurityDescriptor::semi_honest_only(self.n, self.t),
                 Some(e) => SecurityDescriptor::shamir_degree_recon(self.n, self.t, e),
             },
-            // Comparison (`<`,`≤`,`>`) is not realized in-crypto in the crate
-            // (disclosed operands are recomputed by the verifier outside the
-            // crypto). Report the honest "no in-crypto guarantee" baseline so a
-            // federation sees the gap rather than an over-claim. (Realizing it
-            // in-crypto is tracked separately — see the operator matrix in
-            // research/mpc-security-models-and-benchmarks.md §3.)
+            // Comparison (`<`,`≤`,`>`, threshold) IS realized in-crypto now
+            // (sq-rrz4, [`crate::compare`]): bit-decomposition MSB-first comparison
+            // that chains multiplications through `degree_reduce` and opens ONLY the
+            // verdict bit. Its security is honest-majority **semi-honest-only**, NOT
+            // malicious: each step's degree reduction re-shares with no in-protocol
+            // check that a deviating party re-shared honestly (the same boundary as
+            // the degree-`2t` equality open / `degree_reduce` itself). The final
+            // verdict opens at degree `t` (so the WI-1 RS checker still detects a
+            // tampered FINAL open where `n > t+1`), but a cheat INSIDE a re-sharing
+            // round is undetected — so we report the honest semi-honest-only
+            // baseline for the WHOLE chain rather than over-claim the degree-`t`
+            // open's detection. Malicious hardening (IT-MACs / verifiable resharing)
+            // is the same deferred seam as the rest of the backend
+            // (research/mpc-security-models-and-benchmarks.md §3, §8 steps 5–6).
             OperatorClass::Comparison => SecurityDescriptor::semi_honest_only(self.n, self.t),
         }
     }
