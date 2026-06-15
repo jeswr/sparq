@@ -12,9 +12,10 @@
 //! let graph = sparq_hdt::load("dataset.hdt").unwrap();
 //! ```
 //!
-//! Writing back out (`Graph` -> `.hdt`) is opt-in behind the `write` cargo feature
-//! (it currently round-trips through a temp N-Triples file via the wrapped crate's
-//! builder — see [`save`] and the crate's `UPSTREAM.md`):
+//! Writing back out (`Graph` -> `.hdt`) is opt-in behind the `write` cargo feature.
+//! It encodes the FourSectDict (Plain Front Coding) + BitmapTriples sections
+//! DIRECTLY from sparq's in-memory dictionary + triples (the inverse of the decoder)
+//! — no temporary N-Triples round-trip — see [`save`] and `src/encode.rs`:
 //!
 //! ```no_run
 //! # #[cfg(feature = "write")]
@@ -52,10 +53,14 @@ use std::path::Path;
 mod decode;
 pub use decode::graph_from_reader;
 
-// [OPUS-4.8] sq-2te: HDT write support (sparq `Graph` -> `.hdt`). Opt-in via the
-// `write` feature (it pulls the wrapped crate's `sophia` feature for the builder/
-// writer). The current path is a temp N-Triples round-trip — see `write.rs` for the
-// cost and `UPSTREAM.md` for the queued in-memory-builder contribution.
+// [OPUS-4.8] sq-2te / sq-ashy: HDT write support (sparq `Graph` -> `.hdt`). Opt-in
+// via the `write` feature (it pulls the wrapped crate's `sophia` feature for the
+// section builders/writers). `save` (write.rs) encodes the FourSectDict PFC +
+// BitmapTriples sections DIRECTLY from sparq's in-memory dict + triples via
+// `encode::write_hdt` (the inverse of `decode`) — skipping the previous temporary
+// N-Triples round-trip entirely.
+#[cfg(feature = "write")]
+mod encode;
 #[cfg(feature = "write")]
 mod write;
 #[cfg(feature = "write")]
@@ -191,8 +196,7 @@ fn with_hdt_stream<T>(
         Container::Zstd => {
             // `zstd::stream::read::Decoder::with_buffer` takes a `BufRead` source
             // directly (no inner re-buffer); its output is wrapped once.
-            let dec = zstd::stream::read::Decoder::with_buffer(stream)
-                .map_err(Error::Io)?;
+            let dec = zstd::stream::read::Decoder::with_buffer(stream).map_err(Error::Io)?;
             let mut d = std::io::BufReader::new(dec);
             f(&mut d)
         }
@@ -335,7 +339,10 @@ pub fn graph_from_hdt(hdt: &Hdt) -> Result<Graph, Error> {
 
 /// Decompresses one HDT dictionary entry and interns it into the sparq dictionary.
 fn translate(dict: &mut Dict, hdt: &Hdt, id: usize, kind: IdKind) -> Result<Id, Error> {
-    let s = hdt.dict.id_to_string(id, kind).map_err(|e| Error::Term(e.to_string()))?;
+    let s = hdt
+        .dict
+        .id_to_string(id, kind)
+        .map_err(|e| Error::Term(e.to_string()))?;
     intern_hdt_term(dict, &s)
 }
 
@@ -354,7 +361,9 @@ pub(crate) fn intern_hdt_term(dict: &mut Dict, s: &str) -> Result<Id, Error> {
         // Literal. The lexical form may itself contain '"', so split at the LAST
         // quote (the lang tag / datatype suffix cannot contain one) — same rule as
         // the reference readers.
-        let end = rest.rfind('"').ok_or_else(|| Error::Term(format!("unterminated literal: {s}")))?;
+        let end = rest
+            .rfind('"')
+            .ok_or_else(|| Error::Term(format!("unterminated literal: {s}")))?;
         let lex = &rest[..end];
         let suffix = &rest[end + 1..];
         if suffix.is_empty() {
@@ -369,7 +378,10 @@ pub(crate) fn intern_hdt_term(dict: &mut Dict, s: &str) -> Result<Id, Error> {
         if let Some(dt) = suffix.strip_prefix("^^") {
             // hdt-cpp / hdt-java / the hdt crate store the datatype as <iri>;
             // tolerate a bare IRI too.
-            let dt = dt.strip_prefix('<').and_then(|d| d.strip_suffix('>')).unwrap_or(dt);
+            let dt = dt
+                .strip_prefix('<')
+                .and_then(|d| d.strip_suffix('>'))
+                .unwrap_or(dt);
             if dt.is_empty() {
                 return Err(Error::Term(format!("empty datatype in literal: {s}")));
             }
@@ -399,7 +411,10 @@ mod tests {
             ("http://e.org/s", "<http://e.org/s>"),
             ("\"plain\"", "\"plain\""),
             ("\"hallo\"@de-DE", "\"hallo\"@de-de"),
-            ("\"3.14\"^^<http://www.w3.org/2001/XMLSchema#double>", "\"3.14\"^^<http://www.w3.org/2001/XMLSchema#double>"),
+            (
+                "\"3.14\"^^<http://www.w3.org/2001/XMLSchema#double>",
+                "\"3.14\"^^<http://www.w3.org/2001/XMLSchema#double>",
+            ),
             ("_:b1", "_:b1"),
         ] {
             let id = intern_hdt_term(&mut dict, hdt_str).unwrap();
@@ -461,7 +476,10 @@ mod tests {
             (vec![0x42, 0x5a, 0x68, 0x39], Container::Bzip2),
             (b"$HDT".to_vec(), Container::None),
         ] {
-            let mut r = OneByteAtATime { data: &bytes, pos: 0 };
+            let mut r = OneByteAtATime {
+                data: &bytes,
+                pos: 0,
+            };
             let (prefix, got) = sniff_prefix(&mut r).unwrap();
             assert_eq!(got, want, "classification for {bytes:02x?}");
             // The whole 4-byte prefix is preserved (none dropped or duplicated).
@@ -474,7 +492,10 @@ mod tests {
         // A bare-HDT stream delivered 1 byte at a time must round-trip BYTE-FOR-BYTE
         // through `with_hdt_stream` (the prefix is re-prepended, not lost).
         let payload = b"$HDT then some more dictionary/triples bytes here".to_vec();
-        let r = OneByteAtATime { data: &payload, pos: 0 };
+        let r = OneByteAtATime {
+            data: &payload,
+            pos: 0,
+        };
         let round_tripped = with_hdt_stream(r, |reader| {
             let mut v = Vec::new();
             std::io::Read::read_to_end(reader, &mut v).map_err(Error::Io)?;
@@ -488,7 +509,10 @@ mod tests {
     fn short_stream_below_prefix_len_classifies_as_none() {
         // A stream shorter than the magic prefix must not hang or misclassify.
         for bytes in [vec![], vec![0x24], vec![0x24, 0x48], vec![0x24, 0x48, 0x44]] {
-            let mut r = OneByteAtATime { data: &bytes, pos: 0 };
+            let mut r = OneByteAtATime {
+                data: &bytes,
+                pos: 0,
+            };
             let (prefix, got) = sniff_prefix(&mut r).unwrap();
             assert_eq!(got, Container::None);
             assert_eq!(prefix, bytes);

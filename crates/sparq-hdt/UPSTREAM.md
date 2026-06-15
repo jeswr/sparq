@@ -1,38 +1,41 @@
 <!-- [OPUS-4.8] sq-2te — upstream contributions queued against KonradHoeffner/hdt. -->
 # Upstream contributions to `KonradHoeffner/hdt`
 
-This crate WRAPS [`hdt`](https://github.com/KonradHoeffner/hdt) (MIT). Two API
-gaps in the wrapped crate (as of `hdt` 0.4) make our `save` / `load` paths pay a
-cost they should not have to. Both are tractable upstream additions; the text
-below is ready to file. If accepted, we can drop the corresponding local
-work-arounds (the temp-N-Triples round-trip in `write.rs`; the vendored decoder in
-`decode.rs`).
+This crate WRAPS [`hdt`](https://github.com/KonradHoeffner/hdt) (MIT). One API
+gap in the wrapped crate (as of `hdt` 0.4) makes our `save` / `load` paths pull a
+dependency they should not have to. It is a tractable upstream addition; the text
+below is ready to file.
+
+> **Update (sq-ashy):** the temp-N-Triples round-trip in `write.rs` is GONE. `save`
+> now encodes the FourSectDict PFC + BitmapTriples sections DIRECTLY from sparq's
+> in-memory dict + triples (`src/encode.rs`, the inverse of `decode.rs`) by feeding
+> the wrapped crate's **public** section builders (`DictSectPFC::compress`,
+> `TriplesBitmap::from_triples`) and replaying `Hdt::write`'s section order with the
+> public section writers. So we no longer NEED an upstream in-memory builder; the
+> only residual cost is that those builders are reachable solely via the `sophia`
+> feature (see below).
 
 ---
 
-## Issue / PR 1 — sq-2te: an in-memory / iterator builder (no N-Triples text round-trip)
+## Issue / PR 1 — sq-ashy: feature-gate the section builders off `sophia`
 
-**Title:** Expose an in-memory builder: `Hdt::from_triples(iter)` (and feature-gate
-the builder off `sophia`)
+**Title:** Make the in-memory section builders usable without the `sophia` feature
 
 **Body:**
 
-Today the only way to BUILD an `Hdt` is `Hdt::read_nt(path: &Path)`, which:
+The pieces needed to BUILD an archive in memory — `DictSectPFC::compress`,
+`FourSectDict { … }`, `TriplesBitmap::from_triples`, and the `*::write` methods —
+are already `pub`. A consumer that holds triples in memory can build + write a
+spec-conformant `.hdt` directly from them (we do exactly this in
+`sparq-hdt/src/encode.rs`), with NO N-Triples text round-trip.
 
-1. requires the triples to already be **serialised as N-Triples text in a file**
-   (the `read_nt(reader)` variant is commented out in `src/hdt.rs`), and
-2. is gated behind the `sophia` feature, which pulls the whole sophia adapter
-   dependency tree.
+The remaining friction is the FEATURE GATE: the only documented build entry point,
+`Hdt::read_nt`, lives behind `sophia`, and enabling it pulls the whole sophia
+adapter dependency tree (oxttl + the sophia term model) even for a consumer that
+never touches a sophia term — it only wants `compress` / `from_triples` / `write`.
 
-For a consumer that already holds triples in memory as `(subject, predicate,
-object)` strings (or as integer ids into its own dictionary), this forces a full
-serialise-to-text → re-parse → re-intern round trip through a temp file. In our
-case (`sparq-hdt`, an RDF engine) we hold the graph in a compact id-based store;
-saving it to `.hdt` means writing every term back out as N-Triples text to a temp
-file and having `read_nt` parse and re-intern all of it — work we already did once
-on ingest, plus a full-graph text materialisation on disk.
-
-**Request.** A builder entry point that takes triples directly, e.g.
+**Request.** Expose an in-memory builder (and/or move the existing section builders)
+behind a lighter, sophia-free feature, e.g.
 
 ```rust
 impl Hdt {
@@ -48,15 +51,12 @@ impl Hdt {
 
 This is essentially what `read_nt` does AFTER it has parsed the file:
 `FourSectDict::read_nt` builds the dictionary and the encoded triples, then
-`TriplesBitmap::from_triples` builds the bitmaps — both already exist; the only
-missing piece is an entry point that feeds them from an in-memory iterator instead
-of an oxttl parse of a file. Such a builder also need not depend on `sophia`/oxttl
-at all, so it could live behind a lighter `build` feature (or no feature),
-decoupling "I want to WRITE HDT" from "I want the sophia term adapter".
+`TriplesBitmap::from_triples` builds the bitmaps — both already exist. A builder /
+feature that does not depend on `sophia`/oxttl would decouple "I want to WRITE HDT"
+from "I want the sophia term adapter".
 
-We're happy to open the PR. Reference reverse-direction implementation
-(PFC + BitmapTriples DECODE) for cross-checking the on-disk layout:
-`sparq-hdt/src/decode.rs`.
+We're happy to open the PR. Reference implementations for cross-checking the
+on-disk layout: ENCODE — `sparq-hdt/src/encode.rs`; DECODE — `sparq-hdt/src/decode.rs`.
 
 ---
 

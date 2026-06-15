@@ -63,7 +63,12 @@ carries zero HDT code or dependencies. Native-only by design.
 reloaded with `load` must equal the original term set — over the term zoo, a
 multi-block graph, the empty graph, all three compression containers, and the
 upstream-oracle load path (so the bytes `save` writes are spec-conformant, not just
-something our own decoder accepts).
+something our own decoder accepts). One test goes further still: the direct
+encoder's **FourSectDict PFC bytes and BitmapTriples payload are byte-for-byte
+identical** to the upstream builder's output (`Hdt::read_nt` + `Hdt::write`) for the
+same graph (only the triples control-info preamble's property order differs — an
+upstream `HashMap` ordering both encoders share). The direct path also writes no
+temporary scratch file.
 
 ## Load throughput
 
@@ -86,19 +91,21 @@ which is the format's main draw alongside no-text-parse loading.
 `.hdt.gz` / `.hdt.zst` / `.hdt.bz2`, chosen by the output extension). HDT carries a
 single default graph, so named graphs are ignored.
 
-**Cost.** The current path round-trips through a **temporary N-Triples file**: it
-renders the graph to N-Triples text, hands it to the wrapped crate's builder
-(`Hdt::read_nt`, which re-parses and re-interns it), then `Hdt::write`s the result.
-That is correct and interoperable, but it re-serialises and re-parses the whole
-graph — work sparq already did on ingest. A direct in-memory builder that skips the
-text round-trip (the inverse of `src/decode.rs`) is the faster path; it is queued
-as an upstream contribution — see [`UPSTREAM.md`](./UPSTREAM.md). Enable with
-`--features write`.
+**How.** `save` encodes the HDT sections **directly** from sparq's in-memory
+dictionary + triple ids (`src/encode.rs`, the inverse of `src/decode.rs`) — **no
+temporary N-Triples file, no text re-parse**. It feeds the wrapped crate's public
+section builders/writers (`DictSectPFC::compress` for the four PFC sections,
+`TriplesBitmap::from_triples` for the SPO BitmapTriples) and replays
+`Hdt::write`'s section order (global control info → header → `FourSectDict` →
+`TriplesBitmap`). The bytes are interoperable standard HDT v1.0; the PFC dictionary
+and the BitmapTriples payload are byte-for-byte identical to the upstream builder's
+output (proven in `tests/write_roundtrip.rs`). Enable with `--features write`.
+
+A graph containing an RDF 1.2 quoted-triple term cannot be written (standard HDT
+has no representation for it); `save` returns `Error::Term` in that case.
 
 ## Not (yet) supported
 
-See the open beads for this crate (`bd list -l area:sparq-hdt`): the faster
-direct-builder write path (`save` works today via the temp-N-Triples round-trip
-above; the in-memory builder is queued upstream, `UPSTREAM.md`) and a decode-only
+See the open beads for this crate (`bd list -l area:sparq-hdt`): the decode-only
 ingest fast path (we already roll our own in `decode.rs`; upstream builds
-pattern-query indexes ingest never uses — also queued in `UPSTREAM.md`).
+pattern-query indexes ingest never uses — queued in `UPSTREAM.md`).

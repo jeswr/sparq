@@ -21,7 +21,11 @@ fn triple_set(g: &Graph) -> BTreeSet<[String; 3]> {
         .iter()
         .map(|r| {
             let [s, p, o] = scan.to_spo(r);
-            [g.dict.term(s).to_string(), g.dict.term(p).to_string(), g.dict.term(o).to_string()]
+            [
+                g.dict.term(s).to_string(),
+                g.dict.term(p).to_string(),
+                g.dict.term(o).to_string(),
+            ]
         })
         .collect()
 }
@@ -64,9 +68,17 @@ fn save_then_load_round_trips_the_term_zoo() {
         triple_set(&original),
         "save -> load must preserve the term set exactly",
     );
-    assert_eq!(reloaded.store.len(), original.store.len(), "same stored triple count");
+    assert_eq!(
+        reloaded.store.len(),
+        original.store.len(),
+        "same stored triple count"
+    );
     assert_eq!(reloaded.store.len(), 11);
-    assert_eq!(reloaded.dict.len(), original.dict.len(), "same number of distinct terms");
+    assert_eq!(
+        reloaded.dict.len(),
+        original.dict.len(),
+        "same number of distinct terms"
+    );
 }
 
 /// The saved archive is the standard layout: it must also load through the
@@ -104,7 +116,10 @@ fn save_honours_compression_containers() {
 
         // The file really is wrapped in the requested container.
         let head = std::fs::read(&path).unwrap();
-        assert!(head.starts_with(magic), "[{name}] expected container magic bytes");
+        assert!(
+            head.starts_with(magic),
+            "[{name}] expected container magic bytes"
+        );
 
         // …and the reader transparently sniffs it back to the same triples.
         let g = sparq_hdt::load(&path).unwrap_or_else(|e| panic!("[{name}] load: {e}"));
@@ -115,7 +130,11 @@ fn save_honours_compression_containers() {
     let bare = scratch("zoo-bare.hdt");
     sparq_hdt::save(&original, &bare).unwrap();
     let head = std::fs::read(&bare).unwrap();
-    assert_eq!(&head[..4], b"$HDT", "bare .hdt must start with the $HDT cookie");
+    assert_eq!(
+        &head[..4],
+        b"$HDT",
+        "bare .hdt must start with the $HDT cookie"
+    );
 }
 
 /// A larger, multi-block, shared-section-heavy graph (entities used as both subject
@@ -129,7 +148,12 @@ fn save_round_trips_multiblock_graph() {
     let knows = "<http://xmlns.com/foaf/0.1/knows>";
     let label = "<http://www.w3.org/2000/01/rdf-schema#label>";
     for i in 0..N {
-        writeln!(nt, "<http://example.org/e{i}> {knows} <http://example.org/e{}> .", i + 1).unwrap();
+        writeln!(
+            nt,
+            "<http://example.org/e{i}> {knows} <http://example.org/e{}> .",
+            i + 1
+        )
+        .unwrap();
         writeln!(nt, "<http://example.org/e{i}> {label} \"name {i}\"@en .").unwrap();
     }
     let original = Graph::load_str(&nt, "ntriples").unwrap();
@@ -168,30 +192,29 @@ fn save_is_idempotent_on_content() {
     assert_eq!(triple_set(&g2), triple_set(&original));
 }
 
-/// The temp N-Triples scratch file is cleaned up (RAII guard): the residual count
-/// of `sparq-hdt-save-*.nt` scratch files MUST NOT scale with the number of saves
-/// this test performs. A leak would leave one file per save (≥ `SAVES`); the guard
-/// removes each on drop, so the residual is bounded by whatever transient files
-/// SIBLING tests (run on parallel threads in this same process — they share the pid
-/// prefix) happen to hold mid-flight, which is independent of `SAVES`. We therefore
-/// assert the count stays well below `SAVES`, which a real leak could not.
+/// [OPUS-4.8] sq-ashy: the DIRECT encoder writes NO temporary N-Triples scratch
+/// file at all (the old path round-tripped through one; this one encodes the HDT
+/// sections straight from sparq's in-memory dict + triples). Many saves must leave
+/// ZERO `sparq-hdt-save-*.nt` files behind — there is no temp-file step to leak.
 #[test]
-fn save_leaves_no_temp_files() {
+fn direct_encoder_writes_no_temp_files() {
     const SAVES: usize = 30;
     let original = Graph::load_str(ZOO, "ntriples").unwrap();
+    let before = count_scratch_nt();
     for i in 0..SAVES {
         sparq_hdt::save(&original, scratch(&format!("cleanup-{i}.hdt"))).unwrap();
     }
-    // If `save` leaked, ~SAVES `.nt` files would remain. Sibling tests can hold at
-    // most a handful in flight, so a count near/over SAVES means OUR saves leaked.
-    let residual = count_scratch_nt();
+    let after = count_scratch_nt();
+    // The direct encoder creates none, so the count cannot grow with `SAVES`.
     assert!(
-        residual < SAVES,
-        "save leaked temp N-Triples files: {residual} residual after {SAVES} saves \
-         (expected ~0; sibling-test noise only)",
+        after <= before,
+        "direct encoder created temp N-Triples files: {before} -> {after} over {SAVES} saves \
+         (expected no growth; the direct path has no temp-file step)",
     );
 }
 
+/// Counts residual `sparq-hdt-save-*.nt` scratch files for this process (the name the
+/// retired temp-file path used) — the direct encoder must never produce one.
 fn count_scratch_nt() -> usize {
     let prefix = format!("sparq-hdt-save-{}-", std::process::id());
     std::fs::read_dir(std::env::temp_dir())
@@ -201,4 +224,119 @@ fn count_scratch_nt() -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+/// [OPUS-4.8] sq-ashy: the direct encoder's bytes equal what the upstream `hdt`
+/// crate's own builder + writer (`Hdt::read_nt` over the equivalent N-Triples, then
+/// `Hdt::write`) produces — proving the direct PFC + BitmapTriples encode is the
+/// SAME standard archive, not merely something our own reader happens to accept.
+///
+/// Two pieces are compared byte-for-byte: (1) the WHOLE FourSectDict section (the PFC
+/// dictionary — control info + four sections + every CRC), and (2) the BitmapTriples
+/// PAYLOAD (`bitmap_y` / `bitmap_z` / `sequence_y` / `sequence_z`). The global preamble
+/// and header are skipped (ours is file-path-independent; `read_nt`'s embeds a
+/// canonical `file://` IRI + size metadata). The triples CONTROL-INFO preamble is
+/// compared field-wise rather than byte-wise because the upstream
+/// `ControlInfo::bitmap_triples` stores its `order` / `numTriples` properties in a
+/// `HashMap` whose serialisation order — and therefore the preamble bytes + its
+/// CRC16 — is run-to-run non-deterministic on BOTH encoders (they share that writer).
+#[test]
+fn direct_encode_matches_upstream_builder() {
+    let original = Graph::load_str(ZOO, "ntriples").unwrap();
+
+    // Ours: the direct in-memory encoder.
+    let direct_path = scratch("equiv-direct.hdt");
+    sparq_hdt::save(&original, &direct_path).unwrap();
+    let direct_bytes = std::fs::read(&direct_path).unwrap();
+
+    // Oracle: render the SAME graph to N-Triples, build via the upstream crate's
+    // `read_nt`, write via `Hdt::write` (the retired round-trip path's machinery).
+    let nt_path = scratch("equiv-oracle.nt");
+    {
+        use std::io::Write as _;
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&nt_path).unwrap());
+        let scan = original.store.scan(&[None, None, None]);
+        for row in scan.rows.iter() {
+            let [s, p, o] = scan.to_spo(row);
+            writeln!(
+                f,
+                "{} {} {} .",
+                original.dict.term(s),
+                original.dict.term(p),
+                original.dict.term(o)
+            )
+            .unwrap();
+        }
+        f.flush().unwrap();
+    }
+    let oracle = hdt::Hdt::read_nt(&nt_path).expect("upstream read_nt");
+    let mut oracle_bytes = Vec::new();
+    oracle
+        .write(&mut oracle_bytes)
+        .expect("upstream Hdt::write");
+
+    // (1) The dictionary section (from its `$HDT`\x03 control info up to the triples
+    // `$HDT`\x04 control info) must be byte-for-byte identical.
+    let d_dict = section(&direct_bytes, 3, 4);
+    let o_dict = section(&oracle_bytes, 3, 4);
+    assert_eq!(
+        d_dict, o_dict,
+        "FourSectDict PFC bytes must match the upstream builder's exactly"
+    );
+
+    // (2) The triples PAYLOAD — everything after the (non-deterministically ordered)
+    // triples control-info preamble — must be byte-for-byte identical.
+    let d_tp = triples_payload(&direct_bytes);
+    let o_tp = triples_payload(&oracle_bytes);
+    assert_eq!(
+        d_tp, o_tp,
+        "BitmapTriples payload bytes must match the upstream builder's exactly"
+    );
+}
+
+/// The bytes of the section whose control-info type is `start_type`, up to (but not
+/// including) the next `$HDT` cookie carrying control-info type `end_type`. Control
+/// types: 1 global, 2 header, 3 dictionary, 4 triples.
+fn section(bytes: &[u8], start_type: u8, end_type: u8) -> &[u8] {
+    let start = cookie_of_type(bytes, start_type, 0).expect("start control info");
+    let end = cookie_of_type(bytes, end_type, start + 4).expect("end control info");
+    &bytes[start..end]
+}
+
+/// The BitmapTriples PAYLOAD: the bytes AFTER the triples (`$HDT`\x04) control-info
+/// preamble, which ends at the SECOND null terminator following the cookie (the
+/// `format` string's, then the properties string's). The preamble's property order is
+/// non-deterministic, but the payload (`bitmap_y` / `bitmap_z` / `sequence_y` /
+/// `sequence_z` + their CRCs) is fully determined by the sorted triple ids.
+fn triples_payload(bytes: &[u8]) -> &[u8] {
+    let start = cookie_of_type(bytes, 4, 0).expect("triples control info");
+    // Skip cookie (4) + type (1), then the two null-terminated strings (format, props).
+    let mut p = start + 5;
+    let mut nulls = 0;
+    while p < bytes.len() && nulls < 2 {
+        if bytes[p] == 0 {
+            nulls += 1;
+        }
+        p += 1;
+    }
+    // After the second null comes the CRC16 (2 bytes) of the control info; skip it too.
+    &bytes[p + 2..]
+}
+
+/// Position of the `$HDT` cookie at/after `from` whose following control-type byte is
+/// `ty`.
+fn cookie_of_type(bytes: &[u8], ty: u8, from: usize) -> Option<usize> {
+    let mut at = from;
+    while let Some(i) = find_subslice(bytes, b"$HDT", at) {
+        if bytes.get(i + 4) == Some(&ty) {
+            return Some(i);
+        }
+        at = i + 4;
+    }
+    None
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    (from..=haystack.len().saturating_sub(needle.len()))
+        .find(|&i| &haystack[i..i + needle.len()] == needle)
 }
