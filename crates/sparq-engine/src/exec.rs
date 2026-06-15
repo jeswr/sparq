@@ -1510,6 +1510,65 @@ fn eval_graph_named(
     name: &NamedNodePattern,
     inner: &GraphPattern,
 ) -> Result<Bindings, String> {
+    eval_graph_named_pref(graph, local, name, inner, None)
+}
+
+/// [OPUS-4.8] (sq-zz8z, gh-51) Extracts a SOUND graph-IRI prefix from a FILTER expression scoping
+/// the graph variable `gv`, when the filter is — or AND-contains — `STRSTARTS(STR(?gv), "lit")`
+/// with a SIMPLE / `xsd:string` constant `"lit"`. Returns the prefix the named-graph enumeration
+/// can range-scan on; `None` if no such conjunct exists (the engine then falls back to the full
+/// scan, so this is purely an optimisation hint and never affects correctness).
+///
+/// SOUNDNESS: the range scan keeps exactly the graphs whose `STR(?g)` starts with `"lit"`, which
+/// is precisely what `STRSTARTS(STR(?g), "lit")` keeps — AND the original FILTER still runs
+/// afterwards, so even if this recogniser were over-eager the result would be unchanged. We only
+/// recognise a constant SIMPLE/`xsd:string` second argument (a lang-tagged or typed non-string
+/// literal would make `STRSTARTS` itself a type error, so no prefix is meaningful there) and only
+/// pull a prefix out of a top-level conjunction (`a && b`), never a disjunction/negation.
+fn recognise_graph_prefix(expr: &Expression, gv: &Variable) -> Option<String> {
+    use spargebra::algebra::Function;
+    match expr {
+        // STRSTARTS(STR(?gv), "lit")
+        Expression::FunctionCall(Function::StrStarts, args) if args.len() == 2 => {
+            // arg0 must be STR(?gv)
+            let is_str_of_gv = matches!(
+                &args[0],
+                Expression::FunctionCall(Function::Str, inner)
+                    if inner.len() == 1 && matches!(&inner[0], Expression::Variable(v) if v == gv)
+            );
+            if !is_str_of_gv {
+                return None;
+            }
+            // arg1 must be a constant simple / xsd:string literal.
+            match &args[1] {
+                Expression::Literal(l) if l.language().is_none() && l.datatype() == oxrdf::vocab::xsd::STRING => {
+                    Some(l.value().to_string())
+                }
+                _ => None,
+            }
+        }
+        // A top-level conjunction: a prefix from EITHER side is sound (the other conjunct is
+        // still enforced by the surviving FILTER). Prefer the left, else the right.
+        Expression::And(l, r) => recognise_graph_prefix(l, gv).or_else(|| recognise_graph_prefix(r, gv)),
+        _ => None,
+    }
+}
+
+/// [OPUS-4.8] (sq-zz8z, gh-51) `eval_graph_named` with an optional graph-IRI PREFIX restriction
+/// for the `GRAPH ?g` (variable) case: when `Some(prefix)`, only named graphs whose `STR(?g)`
+/// starts with `prefix` are enumerated — via the sorted prefix index's RANGE SCAN
+/// ([`Graph::for_named_graphs_with_prefix`]) rather than a full O(graphs) scan. This is purely an
+/// enumeration restriction equivalent to a `FILTER(STRSTARTS(STR(?g), prefix))` applied to the
+/// result (the caller's residual filter, if any, still runs and is then a no-op on the same rows),
+/// so results are IDENTICAL to the unindexed path; the prefix only shrinks how many graphs are
+/// visited. `None` (and the concrete-IRI case) keeps the original full enumeration.
+fn eval_graph_named_pref(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    name: &NamedNodePattern,
+    inner: &GraphPattern,
+    prefix: Option<&str>,
+) -> Result<Bindings, String> {
     fn eval_translated(
         graph: &Graph,
         local: &mut LocalVocab,
@@ -1582,15 +1641,18 @@ fn eval_graph_named(
             }
         }
         NamedNodePattern::Variable(v) => {
-            let mut acc: Option<Bindings> = None;
-            for (gname, sub) in &graph.named {
-                if !view::allows(gname) {
-                    continue; // not visible under the installed dataset view (L1)
-                }
-                // zk-trace: each iteration of `GRAPH ?g` tags the enclosed
-                // scans/filters with the iteration's named graph — the scope
-                // is installed INSIDE eval_translated (one place), so the
-                // operator boundary stream is not double-nested.
+            // [OPUS-4.8] (sq-zz8z) Accumulate the per-graph relations into ONE flat row buffer in
+            // a stable column schema (`?g` first, then the inner pattern's columns) rather than
+            // folding with `union_bindings` once per graph. The old fold re-copied the WHOLE
+            // accumulated relation on every graph, making `GRAPH ?g` over G graphs O(G²); a single
+            // shared schema makes it O(total rows). The `?g`-first schema matches the old
+            // `None`-branch insert order, so projected results are unchanged.
+            let mut out_vars: Option<Vec<Variable>> = None;
+            let mut out_rows: Vec<Row> = Vec::new();
+            let mut per_graph = |graph: &Graph, local: &mut LocalVocab, gname: &Term, sub: &Graph| -> Result<(), String> {
+                // zk-trace: each iteration of `GRAPH ?g` tags the enclosed scans/filters with the
+                // iteration's named graph — the scope is installed INSIDE eval_translated (one
+                // place), so the operator boundary stream is not double-nested.
                 let mut b = eval_translated(
                     graph,
                     local,
@@ -1600,6 +1662,18 @@ fn eval_graph_named(
                     inner,
                 )?;
                 let gid = value_to_id(graph, local, &Value::Term(gname.clone()));
+                // Resolve this graph's columns into the shared `?g`-first schema (set on the first
+                // graph; every named sub-graph yields the same `inner` schema, so it is stable).
+                let schema = out_vars.get_or_insert_with(|| {
+                    let mut s = Vec::with_capacity(b.vars.len() + 1);
+                    s.push(v.clone());
+                    for var in &b.vars {
+                        if var != v {
+                            s.push(var.clone());
+                        }
+                    }
+                    s
+                });
                 match b.col(v) {
                     // The inner pattern itself binds the graph variable (e.g.
                     // `GRAPH ?g { ?g :p ?o }` or a VALUES/OPTIONAL inside): JOIN with
@@ -1614,7 +1688,6 @@ fn eval_graph_named(
                                 row[c] == gid
                             }
                         });
-                        b.sorted_by = None;
                     }
                     None => {
                         b.vars.insert(0, v.clone());
@@ -1623,12 +1696,47 @@ fn eval_graph_named(
                         }
                     }
                 }
-                acc = Some(match acc {
-                    None => b,
-                    Some(a) => union_bindings(a, b),
-                });
+                // Map each row into the shared schema (column positions can differ per graph only
+                // if the inner schema ever reordered — it does not — so this is a cheap permute).
+                for row in &b.rows {
+                    out_rows.push(
+                        schema
+                            .iter()
+                            .map(|var| b.vars.iter().position(|x| x == var).map(|i| row[i]).unwrap_or(NO_ID))
+                            .collect(),
+                    );
+                }
+                Ok(())
+            };
+            match prefix {
+                // Indexed range scan over only the prefix-matching graphs (O(log G + matches)).
+                // The view-visibility (L1) check stays — a non-visible graph is still skipped.
+                Some(pref) => {
+                    let mut err: Option<String> = None;
+                    graph.for_named_graphs_with_prefix(pref, |gname, sub| {
+                        if err.is_some() || !view::allows(gname) {
+                            return;
+                        }
+                        if let Err(e) = per_graph(graph, local, gname, sub) {
+                            err = Some(e);
+                        }
+                    });
+                    if let Some(e) = err {
+                        return Err(e);
+                    }
+                }
+                // Full enumeration (no prefix restriction).
+                None => {
+                    for (gname, sub) in &graph.named {
+                        if !view::allows(gname) {
+                            continue; // not visible under the installed dataset view (L1)
+                        }
+                        per_graph(graph, local, gname, sub)?;
+                    }
+                }
             }
-            Ok(acc.unwrap_or_else(|| Bindings::unsorted(vec![v.clone()], Vec::new())))
+            let vars = out_vars.unwrap_or_else(|| vec![v.clone()]);
+            Ok(Bindings::unsorted(vars, out_rows))
         }
     }
 }
@@ -1722,6 +1830,26 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
     match p {
         GraphPattern::Bgp { patterns } => eval_bgp(graph, patterns),
         GraphPattern::Filter { expr, inner } => {
+            // [OPUS-4.8] (sq-zz8z, gh-51) Prefix-scoped-aggregate fast path: a
+            // `GRAPH ?g { … } FILTER(STRSTARTS(STR(?g), "prefix"))` (the PSS multi-tenant
+            // `usage(prefix)` shape) only needs the named graphs whose IRI starts with `prefix`.
+            // Push the prefix into the graph enumeration so it RANGE-SCANS the sorted graph-IRI
+            // index (O(log G + matches)) instead of enumerating all G graphs. The FILTER below
+            // STILL runs and is exact, so the result is unchanged — the pushdown only restricts
+            // which graphs are visited.
+            if let GraphPattern::Graph { name: NamedNodePattern::Variable(gv), inner: ginner } = inner.as_ref() {
+                if let Some(prefix) = recognise_graph_prefix(expr, gv) {
+                    let mut b = eval_graph_named_pref(
+                        graph,
+                        local,
+                        &NamedNodePattern::Variable(gv.clone()),
+                        ginner,
+                        Some(&prefix),
+                    )?;
+                    apply_filter(graph, local, &mut b, expr)?;
+                    return Ok(b);
+                }
+            }
             let mut b = eval_graph_pattern(graph, local, inner)?;
             apply_filter(graph, local, &mut b, expr)?;
             Ok(b)
@@ -8492,6 +8620,160 @@ mod path_tests {
         assert_eq!(n("SELECT * WHERE { GRAPH <http://ex/absent> { ?s ?p ?o } }"), 0);
         // Result ids are translated to the outer dict, so a join across GRAPH works.
         assert_eq!(n("SELECT ?o WHERE { GRAPH ?g { <http://ex/b> <http://ex/p> ?o } }"), 1);
+    }
+
+    /// [OPUS-4.8] (sq-zz8z, gh-51) The graph-IRI prefix range-scan index must return EXACTLY the
+    /// graphs a full scan + `STRSTARTS(STR(?g), prefix)` keeps. We assert this two ways: (1) the
+    /// indexed query result equals a hand-computed oracle over the known graph set, and (2) it
+    /// equals the core range-scan API — across the edge cases the bead calls out (empty prefix,
+    /// no-match, exact-match, prefix-is-a-substring of another graph's IRI, percent-encoding).
+    mod graph_prefix_index {
+        use super::*;
+        use std::collections::BTreeSet;
+
+        // Graphs across three tenants + a couple of adversarial IRIs:
+        //   tenantA/g/0, tenantA/g/1, tenantA/g/10   (note: "tenantA/g/1" is a PREFIX of ".../10")
+        //   tenantB/g/0
+        //   tenantAB/g/0                              ("tenantA" is a PREFIX of "tenantAB")
+        //   has%20space/g/0                           (percent-encoding edge case)
+        const ALL: [&str; 6] = [
+            "http://ex/tenantA/g/0",
+            "http://ex/tenantA/g/1",
+            "http://ex/tenantA/g/10",
+            "http://ex/tenantB/g/0",
+            "http://ex/tenantAB/g/0",
+            "http://ex/has%20space/g/0",
+        ];
+
+        fn ds() -> Graph {
+            let mut nq = String::new();
+            for (i, g) in ALL.iter().enumerate() {
+                // each graph carries one :size triple so SUM(?size)/COUNT are non-trivial
+                nq.push_str(&format!(
+                    "<http://ex/s{i}> <http://ex/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> <{g}> .\n",
+                    (i + 1) * 10
+                ));
+            }
+            Graph::load_dataset(&nq, "nquads").unwrap()
+        }
+
+        // The set of graph IRIs the indexed `GRAPH ?g … FILTER(STRSTARTS(STR(?g),prefix))` returns.
+        fn indexed_graphs(g: &Graph, prefix: &str) -> BTreeSet<String> {
+            let q = format!(
+                "SELECT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o }} FILTER(STRSTARTS(STR(?g), \"{prefix}\")) }}"
+            );
+            let r = crate::query(g, &q).unwrap();
+            let mut s = BTreeSet::new();
+            for row in &r.rows {
+                if let Some(Term::NamedNode(n)) = row.first().and_then(|c| c.as_ref()) {
+                    s.insert(n.as_str().to_string());
+                }
+            }
+            s
+        }
+
+        // Oracle: STRSTARTS over the literal IRI set, computed in plain Rust.
+        fn oracle(prefix: &str) -> BTreeSet<String> {
+            ALL.iter().filter(|g| g.starts_with(prefix)).map(|s| s.to_string()).collect()
+        }
+
+        // Core API range scan, directly: the set the index yields for a prefix.
+        fn core_index_graphs(g: &Graph, prefix: &str) -> BTreeSet<String> {
+            let mut s = BTreeSet::new();
+            g.for_named_graphs_with_prefix(prefix, |name, _| {
+                if let Term::NamedNode(n) = name {
+                    s.insert(n.as_str().to_string());
+                }
+            });
+            s
+        }
+
+        #[test]
+        fn indexed_matches_oracle_across_edge_cases() {
+            let g = ds();
+            let prefixes = [
+                "",                          // empty: matches every graph
+                "http://ex/tenantA",         // matches tenantA/* AND tenantAB/* (prefix of prefix)
+                "http://ex/tenantA/",        // matches only tenantA/* (the slash excludes tenantAB)
+                "http://ex/tenantA/g/1",     // exact-prefix that is itself a substring of .../10
+                "http://ex/tenantA/g/10",    // exact match of one graph IRI
+                "http://ex/tenantB/",        // single tenant
+                "http://ex/tenantC/",        // NO match
+                "http://ex/has%20space/",    // percent-encoded IRI
+                "zzz-nonexistent",           // no match, sorts after everything
+                "http://ex/",                // common ancestor: all six
+            ];
+            for p in prefixes {
+                let idx = indexed_graphs(&g, p);
+                let orc = oracle(p);
+                assert_eq!(idx, orc, "indexed result != oracle for prefix {p:?}");
+                // The core range-scan API agrees with the oracle too (the index itself, not just
+                // the engine wiring).
+                assert_eq!(core_index_graphs(&g, p), orc, "core index != oracle for prefix {p:?}");
+            }
+        }
+
+        #[test]
+        fn aggregate_sum_count_is_prefix_scoped() {
+            // The PSS `usage(prefix)` shape: SUM(?size) + COUNT(DISTINCT ?g), prefix-scoped.
+            let g = ds();
+            let usage = |prefix: &str| -> (i64, usize) {
+                let q = format!(
+                    "SELECT (SUM(?size) AS ?bytes) (COUNT(DISTINCT ?g) AS ?n) WHERE {{ \
+                     GRAPH ?g {{ ?s <http://ex/size> ?size }} FILTER(STRSTARTS(STR(?g), \"{prefix}\")) }}"
+                );
+                let r = crate::query(&g, &q).unwrap();
+                let row = &r.rows[0];
+                let bytes = match row[0].as_ref() {
+                    Some(Term::Literal(l)) => l.value().parse::<i64>().unwrap(),
+                    _ => 0,
+                };
+                let n = match row[1].as_ref() {
+                    Some(Term::Literal(l)) => l.value().parse::<usize>().unwrap(),
+                    _ => 0,
+                };
+                (bytes, n)
+            };
+            // tenantA/* = graphs at indices 0,1,2 with sizes 10,20,30 = 60, count 3.
+            assert_eq!(usage("http://ex/tenantA/"), (60, 3));
+            // tenantA (no slash) also catches tenantAB (index 4, size 50) -> 110, count 4.
+            assert_eq!(usage("http://ex/tenantA"), (110, 4));
+            // tenantB/* = index 3, size 40 -> (40, 1).
+            assert_eq!(usage("http://ex/tenantB/"), (40, 1));
+            // no match -> COUNT of empty group is 0.
+            let r = crate::query(
+                &g,
+                "SELECT (COUNT(DISTINCT ?g) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \"http://ex/tenantC/\")) }",
+            )
+            .unwrap();
+            let n = match r.rows[0][0].as_ref() {
+                Some(Term::Literal(l)) => l.value().parse::<usize>().unwrap(),
+                _ => 0,
+            };
+            assert_eq!(n, 0);
+        }
+
+        #[test]
+        fn index_stays_correct_after_mutation_changes_graph_set() {
+            // `update` returns a NEW graph (fresh prefix-index cache); the mutated set must scan
+            // correctly even though the count changed twice. (Same-object cache coherence is
+            // covered by the sparq-core test `graph_prefix_range_scan_and_cache_coherence`.)
+            let g = ds();
+            assert_eq!(indexed_graphs(&g, "http://ex/tenantA/").len(), 3);
+            // Drop tenantA/g/10, add tenantA/g/2 -> still a tenantA/* set, but a different one.
+            let g = crate::update::update(&g, "DROP GRAPH <http://ex/tenantA/g/10>").unwrap();
+            let g = crate::update::update(
+                &g,
+                "INSERT DATA { GRAPH <http://ex/tenantA/g/2> { <http://ex/x> <http://ex/p> <http://ex/y> } }",
+            )
+            .unwrap();
+            let got = indexed_graphs(&g, "http://ex/tenantA/");
+            let want: BTreeSet<String> = ["http://ex/tenantA/g/0", "http://ex/tenantA/g/1", "http://ex/tenantA/g/2"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert_eq!(got, want);
+        }
     }
 
     /// [OPUS-4.8] sq-wij: GRAPH-scoped zero-length property paths (`*` / `?`) must
