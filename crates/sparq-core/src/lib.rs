@@ -741,13 +741,38 @@ impl Graph {
     /// main graph; each named graph becomes a [`named`](Self::named) entry. Formats without named
     /// graphs defer to [`load_str`](Self::load_str). In-memory only (the mmap path is triple-only).
     pub fn load_dataset(text: &str, format: &str) -> Result<Graph, String> {
-        use oxrdf::GraphName;
-        use std::collections::HashMap;
         if !matches!(format, "nquads" | "n-quads" | "trig" | "application/trig") {
             return Self::load_str(text, format);
         }
+        // [OPUS-4.8] (sq-25r3) N-Quads is newline-delimited, so a byte-range chunk-parallel parse
+        // is correct: the quad's 4th (graph) field just routes its triple to a per-graph bucket,
+        // and each graph's buckets merge through the SAME dataset-scoped sharded/serial dict merge
+        // the N-Triples fast path uses (one dict PER graph, mirroring the serial loader). TriG is
+        // NOT line-oriented (it nests `GRAPH g { … }` blocks with Turtle's prefix/blank-node
+        // scope), so it stays on the serial oxttl path here — the chunk-parallel TriG path is
+        // tracked separately (bead sq-ev37); see `load_dataset_serial`.
+        #[cfg(feature = "parallel")]
+        {
+            if matches!(format, "nquads" | "n-quads") {
+                return Self::load_nquads_parallel(text.as_bytes());
+            }
+        }
+        Self::load_dataset_serial(text, format)
+    }
+
+    /// [OPUS-4.8] (sq-25r3) Serial dataset loader (the correctness reference + the non-`parallel`
+    /// and TriG fallback). Routes each quad to a per-graph bucket and builds one sub-graph per
+    /// graph, with the default graph as the main graph. Named graphs are emitted in
+    /// FIRST-OCCURRENCE document order (deterministic — the old `HashMap` iteration order was not),
+    /// so the parallel path can be a byte-identical drop-in.
+    fn load_dataset_serial(text: &str, format: &str) -> Result<Graph, String> {
+        use oxrdf::GraphName;
+        use std::collections::HashMap;
         let bytes = text.as_bytes();
-        let mut groups: HashMap<Option<Term>, Vec<[Term; 3]>> = HashMap::new();
+        // `groups` is in first-occurrence order of graph keys; `index` maps a key to its slot so
+        // repeated references to the same graph append to one bucket without re-ordering.
+        let mut groups: Vec<(Option<Term>, Vec<[Term; 3]>)> = Vec::new();
+        let mut index: HashMap<Option<Term>, usize> = HashMap::new();
         macro_rules! group {
             ($parser:expr) => {
                 for q in $parser.for_slice(bytes) {
@@ -757,9 +782,12 @@ impl Graph {
                         GraphName::NamedNode(n) => Some(Term::NamedNode(n)),
                         GraphName::BlankNode(b) => Some(Term::BlankNode(b)),
                     };
-                    groups
-                        .entry(g)
-                        .or_default()
+                    let slot = *index.entry(g.clone()).or_insert_with(|| {
+                        groups.push((g.clone(), Vec::new()));
+                        groups.len() - 1
+                    });
+                    groups[slot]
+                        .1
                         .push([subject_term(&q.subject), Term::NamedNode(q.predicate), q.object]);
                 }
             };
@@ -774,13 +802,75 @@ impl Graph {
                 triples.iter().map(|[s, p, o]| [dict.intern(s), dict.intern(p), dict.intern(o)]).collect();
             Self::build(dict, ids)
         };
-        let default = groups.remove(&None).unwrap_or_default();
-        let mut g = build_terms(&default);
-        for (name, triples) in groups {
-            if let Some(name) = name {
-                g.named.push((name, build_terms(&triples)));
+        let mut g: Option<Graph> = None;
+        let mut named: Vec<(Term, Graph)> = Vec::new();
+        for (name, triples) in &groups {
+            match name {
+                None => g = Some(build_terms(triples)),
+                Some(name) => named.push((name.clone(), build_terms(triples))),
             }
         }
+        let mut g = g.unwrap_or_else(|| build_terms(&[]));
+        g.named = named;
+        Ok(g)
+    }
+
+    /// [OPUS-4.8] (sq-25r3) Chunk-parallel N-Quads dataset loader. Splits the buffer at newline
+    /// boundaries, parses each range into per-graph partial dicts + local-id triples (no shared
+    /// state), then — PER GRAPH — merges the partials through the same dict-merge the N-Triples
+    /// fast path uses (sharded on ≥2 threads, serial `merge_remap` otherwise / when triple terms
+    /// are present). Graphs are emitted in first-occurrence document order, byte-identical to
+    /// [`load_dataset_serial`]. Cross-chunk blank-node identity (S/P/O AND graph names) survives:
+    /// labels are kept verbatim and unify by label in each graph's dict merge, exactly as the
+    /// serial dataset-scoped parse does.
+    #[cfg(feature = "parallel")]
+    fn load_nquads_parallel(bytes: &[u8]) -> Result<Graph, String> {
+        let threads = rayon::current_num_threads().max(1);
+        let target = (threads * 4).min(bytes.len() / 4096 + 1).max(1);
+        Self::load_nquads_chunked(bytes, target)
+    }
+
+    /// [`load_nquads_parallel`] with an explicit chunk-count `target` — separated so the
+    /// differential tests can force small documents to fan out across many ranges.
+    #[cfg(feature = "parallel")]
+    fn load_nquads_chunked(bytes: &[u8], target: usize) -> Result<Graph, String> {
+        use rayon::prelude::*;
+        use std::collections::HashMap;
+        // Split into newline-aligned ranges and parse each into per-graph buckets in parallel.
+        let bounds = newline_chunk_bounds(bytes, target);
+        type ChunkBuckets = Vec<(Option<nt::GraphKey>, Dict, Vec<[Id; 3]>)>;
+        let per_chunk: Vec<ChunkBuckets> = bounds
+            .par_iter()
+            .map(|&(s, e)| nt::parse_quads_chunk(&bytes[s..e]))
+            .collect::<Result<Vec<_>, String>>()?;
+        // Regroup the per-chunk buckets BY GRAPH, in first-occurrence document order (chunks are in
+        // document order, and within a chunk buckets are already first-occurrence). For each graph
+        // we accumulate its (Dict, triples) partials across all chunks — the exact input shape the
+        // N-Triples sharded/serial merge consumes.
+        let mut index: HashMap<Option<nt::GraphKey>, usize> = HashMap::new();
+        let mut per_graph: Vec<(Option<nt::GraphKey>, ChunkPartials)> = Vec::new();
+        for chunk in per_chunk {
+            for (key, dict, triples) in chunk {
+                let slot = *index.entry(key.clone()).or_insert_with(|| {
+                    per_graph.push((key.clone(), Vec::new()));
+                    per_graph.len() - 1
+                });
+                per_graph[slot].1.push((dict, triples));
+            }
+        }
+        // Merge each graph's partials into one (Dict, triples) and build its sub-graph.
+        let mut main: Option<Graph> = None;
+        let mut named: Vec<(Term, Graph)> = Vec::new();
+        for (key, partials) in per_graph {
+            let (dict, ids) = merge_partials(partials);
+            let sub = Self::build(dict, ids);
+            match key {
+                None => main = Some(sub),
+                Some(k) => named.push((k.to_term(), sub)),
+            }
+        }
+        let mut g = main.unwrap_or_else(|| Self::build(Dict::new(), Vec::new()));
+        g.named = named;
         Ok(g)
     }
 
@@ -2558,7 +2648,18 @@ pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
 
 #[cfg(feature = "parallel")]
 fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
-    let partials = parse_block(bytes)?;
+    Ok(merge_partials(parse_block(bytes)?))
+}
+
+/// [OPUS-4.8] (sq-25r3) Consolidates a set of per-chunk partial dicts + local-id triples into one
+/// global `Dict` + remapped triples — the merge stage shared by the in-memory N-Triples loader
+/// ([`parse_ntriples_parallel`]) and the per-graph N-Quads loader ([`Graph::load_nquads_parallel`],
+/// which calls this once per graph). Sharded on ≥2 threads (the parallel dict consolidation that
+/// breaks the measured serial-`merge_remap` ceiling); serial `merge_remap` on one thread or when
+/// any partial carries an RDF 1.2 triple term (the sharded interner cannot represent those — see
+/// `ShardedDict::intern_partials`).
+#[cfg(feature = "parallel")]
+fn merge_partials(partials: ChunkPartials) -> (Dict, Vec<[Id; 3]>) {
     let total: usize = partials.iter().map(|(_, t)| t.len()).sum();
     // [OPUS-4.8] (sq-hxgb) The SHARDED merge cannot consolidate RDF 1.2 triple terms
     // (a triple term's components are hash-routed to a shard AND referenced structurally
@@ -2582,14 +2683,14 @@ fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String>
             // their value and pass through unchanged. Prefetches the gather (remap_extend).
             remap_extend(&mut all, ptriples, &remap);
         }
-        return Ok((global, all));
+        return (global, all);
     }
     // ≥2 threads: SHARDED parallel dict consolidation (the measured serial `merge_remap`
     // ceiling — load plateaued at ~1.8× on 4 identical cores — was exactly this stage).
     let mut sd = dict::ShardedDict::new(default_shards());
     let mut all: Vec<[Id; 3]> = Vec::with_capacity(total);
     sharded_extend(&mut sd, &partials, &mut all);
-    Ok(finish_sharded(sd, all))
+    finish_sharded(sd, all)
 }
 
 /// The shard count for the parallel in-memory/streaming dict consolidation (2 shards per
@@ -3871,6 +3972,195 @@ mod tests {
             }
         }
         differential(&commented, 16, true);
+    }
+
+    /// [OPUS-4.8] (sq-25r3) Canonical, comparable dump of a whole DATASET (default graph +
+    /// every named graph) for the chunk-parallel-vs-serial N-Quads differential. Per graph the
+    /// triples are decoded to VERBATIM term strings and SORTED. N-Quads has no anonymous-bnode
+    /// syntax (`[...]`/`(...)`) — every blank node is a WRITTEN label that both the serial and the
+    /// chunked parse preserve byte-for-byte — so a verbatim-label comparison is EXACT (no
+    /// first-occurrence renumbering is needed, and using one would be wrong here: it would depend
+    /// on the store's id-sorted iteration order, which differs between the two intern orders). The
+    /// returned map is `graph-name → sorted triples`, default graph under the empty key, so a
+    /// re-ordering of the `named` vec is also caught.
+    #[cfg(feature = "parallel")]
+    fn canon_dataset(g: &Graph) -> std::collections::BTreeMap<String, Vec<[String; 3]>> {
+        fn canon_graph(g: &Graph) -> Vec<[String; 3]> {
+            let mut out: Vec<[String; 3]> = g
+                .iter_ids()
+                .map(|[s, p, o]| [g.dict.term(s).to_string(), g.dict.term(p).to_string(), g.dict.term(o).to_string()])
+                .collect();
+            out.sort();
+            out
+        }
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(String::new(), canon_graph(g));
+        for (name, sub) in &g.named {
+            map.insert(name.to_string(), canon_graph(sub));
+        }
+        map
+    }
+
+    /// [OPUS-4.8] (sq-25r3) DIFFERENTIAL: the chunk-parallel N-Quads loader
+    /// ([`Graph::load_nquads_chunked`]) must produce a dataset IDENTICAL (default graph, the set
+    /// AND order of named graphs, and every graph's triples + dict) to the serial reference
+    /// ([`Graph::load_dataset_serial`]) — the risk areas being per-graph routing of the 4th field
+    /// and blank-node label scoping across chunk boundaries. Each case forces a fan-out across many
+    /// ranges (small `target`) so chunk boundaries fall between quads of different graphs and split
+    /// runs of a shared bnode label.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_nquads_matches_serial() {
+        let differential = |nq: &str, target: usize| {
+            // Force >1 newline-aligned range so the per-graph routing is genuinely cross-chunk.
+            let bounds = newline_chunk_bounds(nq.as_bytes(), target);
+            assert!(bounds.len() > 1, "doc must split into multiple ranges (len {})", nq.len());
+            let par = Graph::load_nquads_chunked(nq.as_bytes(), target).unwrap();
+            let ser = Graph::load_dataset_serial(nq, "nquads").unwrap();
+            // Same default-graph length + same named-graph names IN ORDER (the deterministic
+            // first-occurrence order both paths now use).
+            assert_eq!(par.len(), ser.len(), "default-graph triple count differs");
+            let par_names: Vec<String> = par.named.iter().map(|(n, _)| n.to_string()).collect();
+            let ser_names: Vec<String> = ser.named.iter().map(|(n, _)| n.to_string()).collect();
+            assert_eq!(par_names, ser_names, "named-graph set/order differs");
+            assert_eq!(canon_dataset(&par), canon_dataset(&ser), "chunked dataset must equal serial");
+        };
+
+        // 1. Multiple named graphs interleaved with the default graph, ground terms only — the
+        //    core per-graph routing across chunk boundaries. The same predicate/object recur in
+        //    different graphs (each graph has its OWN dict, exactly as the serial path builds).
+        let mut multi = String::new();
+        for i in 0..600 {
+            let g = i % 4; // 0 -> default, 1..3 -> named graphs g1..g3
+            if g == 0 {
+                multi.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+            } else {
+                multi.push_str(&format!(
+                    "<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> <http://ex/g{g}> .\n"
+                ));
+            }
+        }
+        differential(&multi, 16);
+
+        // 2. Blank nodes SHARED across chunk boundaries within a graph: the same label `_:b{k}`
+        //    appears in the default graph at the very start and the very end, and labels are
+        //    chained between adjacent quads, so the per-graph dict merge must unify each label to
+        //    one node — the cross-chunk bnode-scope risk.
+        let mut bn = String::from("_:shared <http://ex/starts> <http://ex/here> .\n");
+        for i in 0..500 {
+            bn.push_str(&format!(
+                "_:n{} <http://ex/next> _:n{} .\n<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> <http://ex/g1> .\n",
+                i / 3,
+                i / 3 + 1
+            ));
+        }
+        bn.push_str("_:shared <http://ex/ends> <http://ex/here> .\n");
+        differential(&bn, 16);
+
+        // 3. A BLANK-NODE-named graph plus bnode subjects/objects routed into it AND into the
+        //    default graph: the graph name `_:g` is a routing key (never interned into a graph's
+        //    dict), while a SAME-labelled `_:g` used as a subject in the default graph is a normal
+        //    bnode there — the two must not be conflated.
+        let mut bgraph = String::new();
+        for i in 0..400 {
+            if i % 2 == 0 {
+                bgraph.push_str(&format!("_:x{i} <http://ex/p> \"v{i}\" _:g .\n"));
+            } else {
+                bgraph.push_str(&format!("<http://ex/s{i}> <http://ex/q> _:x{i} .\n"));
+            }
+        }
+        differential(&bgraph, 16);
+
+        // 4. Literals with datatypes, language tags (incl. `--dir`), escapes, and a `.`-bearing
+        //    IRI/literal — the byte parser's literal/IRI grammar must agree with oxttl's per graph.
+        let mut lits = String::new();
+        for i in 0..400 {
+            let g = if i % 3 == 0 { String::new() } else { format!(" <http://g.x/{}.n>", i % 3) };
+            lits.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> \"val.{i} \\\"q\\\" x\"@en-us{g} .\n\
+                 <http://ex/s{i}> <http://ex/n> \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer>{g} .\n"
+            ));
+        }
+        differential(&lits, 16);
+
+        // 5. RDF 1.2 triple-term objects in a named graph (forces the serial `merge_remap` branch
+        //    of the per-graph merge, since the sharded merge cannot represent triple terms).
+        let mut tt = String::new();
+        for i in 0..300 {
+            tt.push_str(&format!(
+                "<http://ex/r{i}> <http://ex/reifies> <<( <http://ex/a{i}> <http://ex/age> \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer> )>> <http://ex/meta> .\n\
+                 <http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"
+            ));
+        }
+        differential(&tt, 16);
+
+        // 6. Empty + whitespace + comment-only lines interleaved (the parser must skip them
+        //    identically to oxttl, and a chunk boundary may land on a blank line).
+        let mut sparse = String::new();
+        for i in 0..400 {
+            sparse.push_str("# a comment . with a dot\n\n");
+            let g = if i % 2 == 0 { " <http://ex/g7>" } else { "" };
+            sparse.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}>{g} .\n"));
+        }
+        differential(&sparse, 16);
+
+        // 7. [OPUS-4.8] (sq-25r3) Blank-node labels with INTERIOR dots in EVERY position —
+        //    subject, object, AND the graph name — which the byte parser must scan exactly as
+        //    oxttl (a `.` is part of the label only when not the final char). The SAME dotted
+        //    label `_:n.{k}` is shared across chunk boundaries (chained between adjacent quads
+        //    and reused as a graph name), so the per-graph merge must unify the dotted labels too;
+        //    a dotted graph name `_:g.{k}` must not be conflated with a same-spelled S/O bnode.
+        let mut dotted = String::from("_:sh.ared <http://ex/starts> _:o.0 .\n");
+        for i in 0..500 {
+            dotted.push_str(&format!(
+                "_:n.{} <http://ex/next> _:n.{} _:g.{} .\n\
+                 <http://ex/s{i}> <http://ex/p> _:n.{} .\n",
+                i / 3,
+                i / 3 + 1,
+                i % 2,
+                i / 3
+            ));
+        }
+        dotted.push_str("_:sh.ared <http://ex/ends> _:o.0 _:g.0 .\n");
+        differential(&dotted, 16);
+    }
+
+    /// [OPUS-4.8] (sq-25r3) The public `Graph::load_dataset("…","nquads")` entry point (which
+    /// dispatches to the parallel path under the `parallel` feature) must agree with the serial
+    /// reference on a dataset with default + named graphs and a cross-chunk blank node — the
+    /// end-to-end witness that the dispatch + build are wired correctly, not just the internals.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn load_dataset_nquads_public_entry_matches_serial() {
+        let mut nq = String::from("_:shared <http://ex/a> <http://ex/b> .\n");
+        for i in 0..2000 {
+            let g = if i % 3 == 0 { "" } else { " <http://ex/g1>" };
+            nq.push_str(&format!("<http://ex/s{i}> <http://ex/p> _:n{i}{g} .\n"));
+        }
+        nq.push_str("_:shared <http://ex/c> <http://ex/d> <http://ex/g1> .\n");
+        let pub_g = Graph::load_dataset(&nq, "nquads").unwrap();
+        let ser = Graph::load_dataset_serial(&nq, "nquads").unwrap();
+        assert_eq!(pub_g.len(), ser.len());
+        assert_eq!(pub_g.named.len(), ser.named.len(), "named graph count");
+        assert_eq!(canon_dataset(&pub_g), canon_dataset(&ser), "public load_dataset must equal serial");
+    }
+
+    /// [OPUS-4.8] (sq-25r3) TriG is DEFERRED to the serial oxttl path (bead sq-ev37)
+    /// — the parallel N-Quads work must not break it. Loading a TriG dataset through the public
+    /// `load_dataset` (which routes TriG to `load_dataset_serial`) must still split the default and
+    /// named graphs correctly.
+    #[test]
+    fn load_dataset_trig_still_serial_and_correct() {
+        let trig = "@prefix : <http://ex/> .\n\
+                    :a :p :b .\n\
+                    :g1 { :x :q :y . :x :q :z . }\n\
+                    :g2 { :m :n :o . }\n";
+        let g = Graph::load_dataset(trig, "trig").unwrap();
+        assert_eq!(g.len(), 1, "default graph triple");
+        let names: Vec<String> = g.named.iter().map(|(n, _)| n.to_string()).collect();
+        assert_eq!(names, vec!["<http://ex/g1>".to_string(), "<http://ex/g2>".to_string()], "named graphs in document order");
+        assert_eq!(g.named[0].1.len(), 2, "g1 has 2 triples");
+        assert_eq!(g.named[1].1.len(), 1, "g2 has 1 triple");
     }
 
     /// [OPUS-4.8] (T2/T3 rejection parity) Malformed Turtle must still be REJECTED — the
