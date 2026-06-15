@@ -19,11 +19,17 @@
 //! on the loopback (or a veth) interface. The canonical literature profiles
 //! (design record §5.3):
 //!
-//! - **LAN:** 1 Gbit/s, 1 ms RTT (0.5 ms each way), negligible jitter/loss — the
-//!   datacenter / same-rack condition MP-SPDZ and Secrecy use.
-//! - **WAN:** 100 Mbit/s, 50 ms RTT (25 ms each way), small jitter + 0.1 % loss —
-//!   the cross-region condition; ORQ reports a 1.2–6.9× WAN-over-LAN slowdown for
-//!   the same workload, which the network tier emits as a ratio once both run.
+//! [OPUS-4.8] PR #96 — `delay_ms` is the netem **one-way** delay and
+//! [`NetemProfile::rtt_ms`] returns `2 × delay_ms`, so the labels/docs below
+//! state the emulated **RTT** consistently with that (and with the `rtt_ms()`
+//! tests and `scripts/mpc-netem.sh`):
+//!
+//! - **LAN:** 1 Gbit/s, 2 ms RTT (1 ms each way — `delay_ms = 1`), negligible
+//!   jitter/loss — the datacenter / same-rack condition MP-SPDZ and Secrecy use.
+//! - **WAN:** 100 Mbit/s, 100 ms RTT (50 ms each way — `delay_ms = 50`), small
+//!   jitter + 0.1 % loss — the cross-region condition; ORQ reports a 1.2–6.9×
+//!   WAN-over-LAN slowdown for the same workload, which the network tier emits as
+//!   a ratio once both run.
 //!
 //! ## The privilege gate
 //!
@@ -64,27 +70,31 @@ pub struct NetemProfile {
 }
 
 impl NetemProfile {
-    /// **LAN** — 1 Gbit/s, 1 ms RTT, no jitter/loss. The datacenter / same-rack
-    /// condition (design record §5.3; MP-SPDZ / Secrecy LAN setup).
+    /// **LAN** — 1 Gbit/s, 2 ms RTT (1 ms one-way), no jitter/loss. The
+    /// datacenter / same-rack condition (design record §5.3; MP-SPDZ / Secrecy
+    /// LAN setup). [OPUS-4.8] PR #96: label states the emulated RTT (`2 ×
+    /// delay_ms`), not the one-way `delay_ms`, so it matches [`Self::rtt_ms`].
     pub const fn lan() -> Self {
         NetemProfile {
             id: "lan",
-            label: "LAN (1 Gbit/s, 1 ms RTT)",
-            delay_ms: 1, // ~1 ms RTT applied on the shared loopback
+            label: "LAN (1 Gbit/s, 2 ms RTT)",
+            delay_ms: 1, // 1 ms one-way ⇒ 2 ms RTT (see rtt_ms())
             jitter_ms: 0,
             rate_kbit: 1_000_000, // 1 Gbit/s
             loss_pct: 0.0,
         }
     }
 
-    /// **WAN** — 100 Mbit/s, 50 ms RTT, 5 ms jitter, 0.1 % loss. The cross-region
-    /// federation condition (design record §5.3; the 100–200 Mbit/s, 20–100 ms
-    /// band the cited systems use; ORQ's WAN setup).
+    /// **WAN** — 100 Mbit/s, 100 ms RTT (50 ms one-way), 5 ms jitter, 0.1 % loss.
+    /// The cross-region federation condition (design record §5.3; the 100–200
+    /// Mbit/s, 20–100 ms band the cited systems use; ORQ's WAN setup). [OPUS-4.8]
+    /// PR #96: label states the emulated RTT (`2 × delay_ms`), not the one-way
+    /// `delay_ms`, so it matches [`Self::rtt_ms`].
     pub const fn wan() -> Self {
         NetemProfile {
             id: "wan",
-            label: "WAN (100 Mbit/s, 50 ms RTT, 0.1% loss)",
-            delay_ms: 50,
+            label: "WAN (100 Mbit/s, 100 ms RTT, 0.1% loss)",
+            delay_ms: 50, // 50 ms one-way ⇒ 100 ms RTT (see rtt_ms())
             jitter_ms: 5,
             rate_kbit: 100_000, // 100 Mbit/s
             loss_pct: 0.1,

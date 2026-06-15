@@ -13,10 +13,12 @@
 # repo checkout. If you change a profile, change it in BOTH (the Rust test
 # `netem_args_render_the_literature_profiles` pins the canonical strings).
 #
-# Profiles (design record §5.3 — MP-SPDZ / Secrecy / ORQ canonical values):
-#   loopback : unshaped, ~0 RTT          (Tier 2 — no tc, no privilege)
-#   lan      : delay 1ms  rate 1000000kbit                       (1 Gbit/s, 1ms RTT)
-#   wan      : delay 50ms 5ms rate 100000kbit loss 0.1%   (100 Mbit/s, 100ms RTT, 0.1% loss)
+# Profiles (design record §5.3 — MP-SPDZ / Secrecy / ORQ canonical values).
+# [OPUS-4.8] PR #96: the `tc` `delay` value is ONE-WAY; the emulated RTT is twice
+# it (matching NetemProfile::rtt_ms() == 2 × delay_ms). Labels state the RTT.
+#   loopback : unshaped, ~0 RTT                                 (Tier 2 — no tc, no privilege)
+#   lan      : delay 1ms  rate 1000000kbit                      (1 Gbit/s,  1ms one-way ⇒ 2ms RTT)
+#   wan      : delay 50ms 5ms rate 100000kbit loss 0.1%         (100 Mbit/s, 50ms one-way ⇒ 100ms RTT, 0.1% loss)
 #
 # Usage:
 #   sudo scripts/mpc-netem.sh apply  <lan|wan> [iface=lo]      # apply shaping
@@ -86,12 +88,24 @@ run_cell() {
     apply_profile "$profile" "$iface"
     applied=1
   fi
-  # Always clear the qdisc on exit so a crashed run never leaves the box shaped.
+  # [OPUS-4.8] PR #96: crash-safety via an EXIT trap, NOT RETURN. Under `set -e` a
+  # failing `cargo run` aborts the whole script, so a RETURN trap (which only fires
+  # on normal function return) would never run and the host would stay shaped. An
+  # EXIT trap fires on any termination — including the `set -e` abort and Ctrl-C.
+  # We ALSO clear explicitly right after the run so a matrix sweep does not keep
+  # one cell's shaping applied while the next cell runs (the EXIT trap is purely
+  # the safety net for the crash path).
   if [[ "$applied" == 1 ]]; then
-    trap 'clear_profile "$iface"' RETURN
+    trap 'clear_profile "$iface"' EXIT
   fi
   ( cd "$REPO_ROOT" && cargo run -q -p sparq-mpc --features "$FEATURES" \
       --example mpc_net_bench -- --query "$query" --parties "$parties" --scale "$scale" --json )
+  # Explicit clear on the success path + drop the safety-net trap so a subsequent
+  # matrix cell registers its own (and we never double-clear at script exit).
+  if [[ "$applied" == 1 ]]; then
+    clear_profile "$iface"
+    trap - EXIT
+  fi
 }
 
 # Full sweep: both representative cells across N, under loopback/lan/wan, emitting

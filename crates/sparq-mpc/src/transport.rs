@@ -76,7 +76,14 @@ use crate::shamir::{self, ShamirBackend, ShamirDealer, Share};
 /// Field elements travel as their canonical `u64` representative in big-endian
 /// (8 bytes each — [`FIELD_BYTES`]), so the measured bytes-on-wire equals the
 /// modelled `bytes_per_party` of the in-process tier up to the small fixed frame
-/// header (the harness reports both raw and field-element-only byte counts).
+/// header.
+///
+/// [OPUS-4.8] PR #96: the harness reports a single RAW byte count
+/// ([`NetworkCell::bytes_sent`] / [`NetworkCell::bytes_recv`]) — total bytes on
+/// the wire, which includes the per-frame length+tag header and the 8-byte `x`
+/// coordinate of every share, NOT a field-payload-only figure. When comparing to
+/// the modelled `FIELD_BYTES` accounting, account for that fixed overhead rather
+/// than expecting an exact field-only match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     /// Coordinator → party: "here are your share-points for this batch of
@@ -309,7 +316,27 @@ pub fn run_party<S: Read + Write>(chan: &mut Channel<S>) -> Result<(), MpcError>
                 };
                 // Local, non-interactive sum of all share-points (the aggregate's
                 // free linear step). All shares are at this party's single point.
-                let x = shares.first().map(|s| s.x).unwrap_or(0);
+                // [OPUS-4.8] PR #96: an empty batch is a protocol error, NOT an
+                // `x=0` placeholder share — interpolating a manufactured `x=0`
+                // point (or any duplicate x) is undefined for Shamir and panics in
+                // `Fp::inv(0)` during reconstruction. Fail closed, mirroring the
+                // in-process `ShamirBackend::run_secure` ("no shared inputs").
+                let x = match shares.first() {
+                    Some(s) => s.x,
+                    None => {
+                        return Err(MpcError::Protocol(
+                            "SumAndOpen: empty share batch (no shared inputs)".into(),
+                        ))
+                    }
+                };
+                // All share-points in this batch must share this party's single
+                // evaluation point `x`; a mixed batch is a framing/protocol fault.
+                if let Some(bad) = shares.iter().find(|s| s.x != x) {
+                    return Err(MpcError::Protocol(format!(
+                        "SumAndOpen: mixed evaluation points in batch (expected x={x}, saw x={})",
+                        bad.x
+                    )));
+                }
                 let mut acc = Fp::zero();
                 for s in &shares {
                     acc = acc.add(s.y);
@@ -434,6 +461,16 @@ impl<S: Read + Write> Coordinator<S> {
         values: &[u64],
     ) -> Result<u64, MpcError> {
         let n = self.channels.len();
+        // [OPUS-4.8] PR #96: fail closed on an empty input set, exactly as the
+        // in-process `ShamirBackend::run_secure` does ("run_secure: no shared
+        // inputs"). An empty deal would otherwise ship empty share columns to the
+        // parties, which manufacture an `x=0` open-share and panic in
+        // reconstruction (`Fp::inv(0)`). Reject before any frame crosses the wire.
+        if values.is_empty() {
+            return Err(MpcError::Protocol(
+                "aggregate: no shared inputs (empty values)".into(),
+            ));
+        }
         // Deal: each value → a full sharing; party `p` gets share at point `p+1`.
         // We build, per party, the column of all its share-points.
         let sharings: Vec<Vec<Share>> = values.iter().map(|&v| dealer.share(Fp::new(v))).collect();
@@ -756,10 +793,12 @@ mod tests {
     }
 
     #[test]
-    fn networked_join_rejects_too_few_parties_relative_to_degree() {
-        // n=2 ⇒ t=0 ⇒ 2t+1 = 1 ≤ 2, so it is actually allowed; assert the join
-        // runs at n=2 (degenerate t=0) and still matches. This pins that the
-        // guard mirrors the in-process one rather than being stricter.
+    fn networked_join_allows_n2_degenerate_t0() {
+        // [OPUS-4.8] PR #96: renamed — this test asserts the join is ALLOWED at
+        // n=2, not rejected. n=2 ⇒ t=0 ⇒ 2t+1 = 1 ≤ 2, so the `n >= 2t+1` guard
+        // passes; assert the join runs at n=2 (degenerate t=0) and still matches.
+        // This pins that the guard mirrors the in-process one rather than being
+        // stricter.
         let backend = ShamirBackend::new_seeded(2, 0xC0FFEE).unwrap();
         let mut dealer = backend.dealer();
         let cell = run_cell_networked(
@@ -783,5 +822,29 @@ mod tests {
         let err = run_cell_networked(QueryClass::ObliviousShuffle, &backend, &mut dealer, &[], 8)
             .unwrap_err();
         assert!(matches!(err, MpcError::NotYetImplemented { .. }));
+    }
+
+    // [OPUS-4.8] PR #96: an empty aggregate input must FAIL CLOSED on the network
+    // tier exactly as the in-process `ShamirBackend::run_secure` does, never
+    // manufacture an `x=0` open-share that would panic in reconstruction.
+    #[test]
+    fn networked_aggregate_rejects_empty_inputs() {
+        let backend = ShamirBackend::new_seeded(3, 0xDEAD).unwrap();
+        let mut dealer = backend.dealer();
+        let err = run_cell_networked(
+            QueryClass::CumulativeSumAggregate,
+            &backend,
+            &mut dealer,
+            &[],
+            1,
+        )
+        .unwrap_err();
+        match err {
+            MpcError::Protocol(msg) => assert!(
+                msg.contains("no shared inputs"),
+                "expected a 'no shared inputs' protocol error, got: {msg}"
+            ),
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
     }
 }
