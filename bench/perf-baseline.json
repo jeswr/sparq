@@ -57,6 +57,11 @@
       "floor": 371,
       "threshold": 0.02,
       "mode": "auto"
+    },
+    "geo_compliance_deficit": {
+      "floor": 0,
+      "threshold": 0.02,
+      "mode": "auto"
     }
   }
 }

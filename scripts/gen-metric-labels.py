@@ -227,6 +227,17 @@ SHACL_DESC = {
     "sparql_constraint": "sh:sparql (SHACL §5.2) routed through sparq-engine",
 }
 
+# [OPUS-4.8] (sq-tf8n) GeoSPARQL workloads -> human descriptions. The ci-bench hook emits
+# `geo_<name>_us` for each bench_geo workload (advisory) + the HARD-gated geo_compliance_deficit.
+GEO_DESC = {
+    "within10km": "#entities within 10 km great-circle of (0, 51) (geof:within result-set size)",
+    "within50km": "#entities within 50 km great-circle of (0, 51)",
+    "nearest_k10": "k=10 nearest entities to (0, 51) (nearest-k; count invariant = k)",
+    "nearest_k100": "k=100 nearest entities to (0, 51)",
+    "geof_within": "#corpus points satisfying geof:sfWithin(point, 1°x1° box) — the geof: filter path",
+    "geo_compliance_pass": "#OGC topology fixtures (sf/eh/rcc8) matching the spec truth value",
+}
+
 # [OPUS-4.8] (sq-ustq) Full-text-search workloads -> human descriptions. These are FIXED
 # workload names emitted by examples/bench_text (the FTS corpus is synthetic, generated
 # in-process — there are no *.rq / *.ttl input files to glob), driving the ADVISORY metric
@@ -449,6 +460,31 @@ def build():
         "suite": "Full-Text", "dataset": FTS_DATASET,
         "query": "deterministic index heap_bytes()/len() (mode:auto ratchet gate)",
         "mode": "bytes", "unit": "bytes",
+    }
+
+    # 12) GeoSPARQL suite (sq-tf8n, design §3.5). The ci-bench hook emits `geo_<name>_us`
+    # (ADVISORY trend timing) per bench_geo workload — the dashboard strips `_us` for the
+    # label key. The deterministic gates (result-set sizes) live in bench/geo/run.sh's
+    # self-assertion; the compliance ratchet is the HARD-gated DEFICIT geo_compliance_deficit
+    # (= 25 - passed, mode:auto in bench/perf-baseline.json), labelled separately below.
+    GEO_DATASET = "fixed CRS84 point corpus, ~100k seeded POINT literals (8°x8° window)"
+    # [OPUS-4.8] (sq-tf8n) These geo_<name> dashboard series are the ADVISORY per-workload QUERY
+    # TIMES (harvested from geo_<name>_us, stripped of the _us suffix), NOT counts — the result-set
+    # SIZES are the deterministic gate in bench/geo/run.sh's self-assertion, never plotted here. So
+    # the mode/unit/label must read as a TIME (mode "query", unit µs, ", query" suffix), exactly like
+    # the FTS text_<workload> labels — the `desc` still says WHAT the query computes (a count), but
+    # the plotted value is its latency. (Earlier `mode:count` contradicted the µs unit.)
+    for name, desc in GEO_DESC.items():
+        labels["geo_%s" % name] = {
+            "label": "GeoSPARQL %s — %s, query" % (name, desc),
+            "suite": "GeoSPARQL", "dataset": GEO_DATASET,
+            "query": desc, "mode": "query", "unit": "µs",
+        }
+    labels["geo_compliance_deficit"] = {
+        "label": "GeoSPARQL compliance deficit — (25 OGC fixtures − passing); smaller is better",
+        "suite": "GeoSPARQL", "dataset": "OGC GeoSPARQL topology fixtures (sf/eh/rcc8)",
+        "query": "deterministic compliance ratchet (mode:auto; coverage only tightens)",
+        "mode": "deficit", "unit": "fixtures",
     }
 
     return labels
