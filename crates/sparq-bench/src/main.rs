@@ -251,6 +251,9 @@ fn measure_mem_subprocess(engine: &str, scale: u32) -> usize {
 }
 
 fn peak_rss_bytes() -> usize {
+    // SAFETY: `rusage` is a plain C struct that is sound to zero-initialise, and
+    // `getrusage(RUSAGE_SELF, &mut ru)` writes only into the valid `&mut ru`
+    // out-param; the return is checked before any field is read. [OPUS-4.8]
     unsafe {
         let mut ru: libc::rusage = std::mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &mut ru) != 0 {

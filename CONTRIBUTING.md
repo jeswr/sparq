@@ -41,6 +41,24 @@ spec-justified* reason, record the rationale in the report alongside the diverge
 (don't just drop the count). Raising a floor when coverage genuinely improves is
 encouraged.
 
+### Every `unsafe` block needs a `// SAFETY:` comment and a register row
+
+`sparq`'s `unsafe` is confined to five crates (mmap loaders, the zero-copy dictionary,
+SIMD/FFI); the other twenty are `#![forbid(unsafe_code)]`. If you add an `unsafe` block,
+`fn`, `impl`, `trait`, or `extern`, you **must** in the same change:
+
+1. Put a **`// SAFETY:`** comment immediately above it stating the invariant it relies on
+   and why that invariant holds (clippy's `undocumented_unsafe_blocks` is the local check).
+2. Add a row to [`compliance/memsafety/unsafe-register.md`](./compliance/memsafety/unsafe-register.md)
+   (the GX-5 justification register) — file:line, the invariant, why it is sound, how it is
+   tested/bounded. If you cannot give a sound argument, mark the row `NEEDS-REVIEW` and open
+   a bead rather than fabricating one.
+3. Re-seed the count snapshot: `scripts/unsafe-gate.py --seed`.
+
+The **`unsafe-register (count ratchet)`** CI lane (a required gating check) fails the PR
+until all three are done — it counts first-party `unsafe` per crate and rejects any rise
+above `bench/unsafe-snapshot.json`. Run `scripts/unsafe-gate.py --check` locally first.
+
 ### Changing a public API → update the matching skill
 
 If you change any **public API** (a `pub` item, a CLI flag, an HTTP route, or a Python/JS
