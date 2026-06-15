@@ -487,4 +487,3 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Smoke test (docker run + /health + ASK query)
         run: scripts/docker-smoke.sh sparq-server:smoke 3030
-        continue-on-error: true

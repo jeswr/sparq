@@ -41,9 +41,12 @@
 
 # -------- builder --------
 # Pin a toolchain >= the workspace's rust-version (1.85). Bump deliberately.
-# [OPUS-4.8] SHA-pinned for supply-chain integrity (Scorecard PinnedDependencies); the
-# trailing comment keeps the human-readable tag legible for future bumps.
-FROM rust:1.87-slim-bookworm@sha256:437507c3e719e4f968033b88d851ffa9f5aceeb2dcc2482cc6cb7647811a55eb AS builder # rust:1.87-slim-bookworm
+# [OPUS-4.8] SHA-pinned for supply-chain integrity (Scorecard PinnedDependencies). The
+# human-readable tag is kept on its OWN comment line above the FROM, NOT as a trailing
+# inline comment: Docker only treats `#` as a comment at the start of a line, so an inline
+# `# tag` on a FROM is parsed as extra arguments and fails with "FROM requires either one
+# or three arguments". Tag: rust:1.87-slim-bookworm
+FROM rust:1.87-slim-bookworm@sha256:437507c3e719e4f968033b88d851ffa9f5aceeb2dcc2482cc6cb7647811a55eb AS builder
 
 ARG CARGO_FLAGS=""
 WORKDIR /build
@@ -57,8 +60,10 @@ COPY . .
 RUN cargo build --release --locked -p sparq-server ${CARGO_FLAGS}
 
 # -------- runtime --------
-# [OPUS-4.8] SHA-pinned (Scorecard PinnedDependencies); tag kept as a trailing comment.
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985 # gcr.io/distroless/cc-debian12:nonroot
+# [OPUS-4.8] SHA-pinned (Scorecard PinnedDependencies). Tag kept on its own comment line
+# above the FROM (an inline trailing `# tag` breaks FROM's arg parser — see builder above).
+# Tag: gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985
 
 LABEL org.opencontainers.image.title="sparq-server" \
       org.opencontainers.image.description="W3C SPARQL 1.1 Protocol server for the sparq RDF triplestore (dictionary-encoded, six permutation indexes, parallel execution)" \
