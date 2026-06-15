@@ -1,23 +1,28 @@
 // [OPUS-4.8] written while Fable 5 unavailable — re-review when Fable returns.
 //! sq-1gir: the STANDING forge-and-verify REGRESSION MAP — one permanent test
-//! per historical audit CRITICAL (#1–#12), each constructing the SPECIFIC
+//! per historical audit finding (#1–#12), each constructing the SPECIFIC
 //! forgery that finding described and asserting the verifier REJECTS it with the
 //! mapped error / reject-path.
+//!
+//! The findings span mixed severities (per `research/zk-verifier-reaudit.md`:
+//! CRITICAL = #1–#5 and #8; HIGH = #6, #7, #9, #10, #11; MEDIUM = #12) — each
+//! section header below carries its own severity. The map covers the whole #1–#12
+//! set, not only the CRITICALs.
 //!
 //! This is the 1:1 companion to `research/zk-verifier-reaudit.md`: the re-audit
 //! FINDS that each finding is closed; THIS file PINS it closed, so a future
 //! refactor of the reconstruction / vk / attribution / query-binding path cannot
-//! silently re-open a remediated CRITICAL without a red test. `forge_gates.rs`
+//! silently re-open a remediated finding without a red test. `forge_gates.rs`
 //! organises the same gates by BINDING (one canonical forge per binding); this
 //! file re-organises them by FINDING NUMBER and is the gate on the
-//! epic-close claim — every CRITICAL #1–#12 has exactly one named test here.
+//! epic-close claim — every finding #1–#12 has exactly one named test here.
 //!
 //! ## The 1:1 finding → reject map (from `research/zk-verifier-reaudit.md` §385)
 //!
 //! | Finding | Forge | Reject path / error | Lane |
 //! |---|---|---|---|
 //! | #1  | honest proof over a different statement      | `PublicInputMismatch`                              | toolchain (`#[ignore]`) |
-//! | #2  | prover-supplied / trivial-circuit vk         | bb verify fails vs canonical vk (`ProofRejected`) | toolchain (`#[ignore]`) |
+//! | #2  | prover-supplied / trivial-circuit vk         | positive control: an honest proof verifies via the verifier-recomputed canonical vk (the prover-supplied vk is dead weight). The negative — a proof against a *different* circuit's vk — is the #11 bb relabel (`ProofRejected`). | toolchain (`#[ignore]`) |
 //! | #3  | unsigned / untrusted-key commitment          | `UnattestedCommitment` / `IssuerKeyNotInKeySet`   | default |
 //! | #4  | replay / JSON-challenge rebind               | `NonceReplay` / `NonceBindingMismatch`            | default |
 //! | #5  | `17>=17` proven for a `>=18` query           | `UnboundFilter` (bound mismatch)                  | default |
