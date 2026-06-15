@@ -127,6 +127,26 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
+  skill-frontmatter:
+    # [OPUS-4.8] HARD gate (bead sq-56im): every skills/**/SKILL.md must have YAML
+    # frontmatter that actually parses (yaml.safe_load) and carries non-empty string
+    # `name` + `description`. Catches the GitHub "mapping values are not allowed in
+    # this context" render error caused by an UNQUOTED colon in a description value
+    # (reported on full-text-search/SKILL.md). Deterministic, no network → gates.
+    name: skill-frontmatter (Agent-Skills YAML)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: pip install pyyaml
+      - name: Validate SKILL.md frontmatter
+        run: python3 scripts/check-skill-frontmatter.py
+
   # ----------------------------- ADVISORY -----------------------------
   markdownlint-advisory:
     name: markdownlint-advisory (whole repo)
