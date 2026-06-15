@@ -14,11 +14,15 @@ mkdir -p "$OUTPUT_DIR"
 # Copy SVG to output
 cp "$INPUT_SVG" "$OUTPUT_DIR/$BASENAME.svg"
 
-# Detect available tool
+# Detect available tool.
+# [OPUS-4.8] sparq vendoring note: the `npx --yes @aspect-build/resvg` path can DOWNLOAD and
+# EXECUTE a remote package, so we never probe it as a tool-detection side effect (a silent
+# network/supply-chain action). It is opt-in only: set ALLOW_NPX_RESVG=1 to enable it.
 TOOL=""
 if command -v resvg &>/dev/null; then
   TOOL="resvg"
-elif npx --yes @aspect-build/resvg --help &>/dev/null 2>&1; then
+elif [ "${ALLOW_NPX_RESVG:-0}" = "1" ] && command -v npx &>/dev/null && \
+     npx --yes @aspect-build/resvg --help &>/dev/null 2>&1; then
   TOOL="npx-resvg"
 elif command -v node &>/dev/null && node -e "require('sharp')" &>/dev/null 2>&1; then
   TOOL="sharp"
@@ -33,6 +37,9 @@ else
   echo "  npm install -g @aspect-build/resvg     (recommended)"
   echo "  brew install inkscape"
   echo "  brew install librsvg"
+  echo ""
+  echo "Or set ALLOW_NPX_RESVG=1 to allow this script to fetch+run @aspect-build/resvg via npx"
+  echo "(downloads and executes a package from the npm registry)."
   exit 1
 fi
 
@@ -49,15 +56,20 @@ for SIZE in "${SIZES[@]}"; do
       npx --yes @aspect-build/resvg "$INPUT_SVG" "$OUTPUT" --width "$SIZE"
       ;;
     sharp)
-      node -e "
-        const sharp = require('sharp');
-        sharp('$INPUT_SVG')
-          .resize($SIZE, $SIZE, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      # [OPUS-4.8] Pass paths as argv (process.argv), NOT interpolated into the JS source:
+      # interpolation breaks on paths containing a quote and would allow JS injection from an
+      # attacker-controlled path. Resize by width only (height auto) to preserve aspect ratio,
+      # matching the other backends (which all scale by --width).
+      node -e '
+        const sharp = require("sharp");
+        const [input, output, width] = [process.argv[1], process.argv[2], parseInt(process.argv[3], 10)];
+        sharp(input)
+          .resize({ width })
           .png()
-          .toFile('$OUTPUT')
+          .toFile(output)
           .then(() => process.exit(0))
           .catch(e => { console.error(e); process.exit(1); });
-      "
+      ' "$INPUT_SVG" "$OUTPUT" "$SIZE"
       ;;
     inkscape)
       inkscape "$INPUT_SVG" --export-type=png --export-filename="$OUTPUT" --export-width="$SIZE"
@@ -66,7 +78,9 @@ for SIZE in "${SIZES[@]}"; do
       rsvg-convert -w "$SIZE" -o "$OUTPUT" "$INPUT_SVG"
       ;;
   esac
-  echo "  Exported: ${BASENAME}-${SIZE}.png (${SIZE}x${SIZE})"
+  # Backends set the output WIDTH and preserve aspect ratio, so height may differ from width
+  # for non-square SVGs — report the width only rather than a misleading SIZExSIZE.
+  echo "  Exported: ${BASENAME}-${SIZE}.png (width ${SIZE}px)"
 done
 
 echo ""
