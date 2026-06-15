@@ -29,7 +29,7 @@ the **only tractable family of property paths under MPC over a secret graph**.
 - [`mpc-security-models-and-benchmarks.md`](./mpc-security-models-and-benchmarks.md) — the
   3-axis security taxonomy, the seven-channel leakage taxonomy, the honest-envelope framing. §4
   here uses its vocabulary verbatim.
-- [`sparql-formal-semantics`] skill / W3C SPARQL 1.1 §9 — the property-path algebra
+- `sparql-formal-semantics` skill / W3C SPARQL 1.1 §9 — the property-path algebra
   (`ArbitraryLengthPath`, `ZeroOrMorePath`, `OneOrMorePath`, `ZeroOrOnePath`, `seq`, `alt`,
   `NegatedPropertySet`) this record scopes against.
 
@@ -267,7 +267,7 @@ new crypto. Every primitive below is on `main`.
 
 | Step in the construction | Existing primitive reused | Location (on `main`) | Status |
 |---|---|---|---|
-| Disclosed-key chain (cheap regime) | `DisclosedKeyJoin` fold; the 3-holder chain test IS a 3-pattern unroll | [`join.rs:119`](../crates/sparq-mpc/src/join.rs); test `differential_three_holder_chain_equals_union` (`join.rs` ~656) | **BUILT** |
+| Disclosed-key chain (cheap regime) | `DisclosedKeyJoin` fold; the 3-holder chain test IS a 3-pattern unroll | [`join.rs:119`](../crates/sparq-mpc/src/join.rs); test `differential_three_holder_chain_equals_union` ([`join.rs:656`](../crates/sparq-mpc/src/join.rs)) | **BUILT** |
 | Per-hop secret-shared equi-join + match bit | `HiddenValueJoin` / `secure_equal` (`d=a−b`, mask `m=d·r`) | [`join.rs:411`](../crates/sparq-mpc/src/join.rs) (`secure_equal`); inputs `HiddenKeyedRows` [`join.rs:326`](../crates/sparq-mpc/src/join.rs) | **BUILT** (semi-honest) |
 | The difference `d = key_i − key_j` (local, free) | `sub_shares` (degree-`t` linear) | [`shamir.rs:634`](../crates/sparq-mpc/src/shamir.rs) | **BUILT** |
 | One hop's match multiplication `m = d·r` | `mul_shares_raw` (degree-`2t` product) | [`shamir.rs:670`](../crates/sparq-mpc/src/shamir.rs) | **BUILT** |
