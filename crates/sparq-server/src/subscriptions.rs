@@ -51,6 +51,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::{json, Value};
 
@@ -189,7 +190,7 @@ impl Subscription {
                 ReevalStep::Notify(msg)
             }
             Err(e) => ReevalStep::Terminate(error_msg(
-                &format!("re-evaluation failed, subscription terminated: {e}"),
+                &format!("re-evaluation failed, subscription terminated: {}", e.message),
                 Some(id),
                 self.alias.as_deref(),
             )),
@@ -284,6 +285,28 @@ pub(crate) struct NewSubscription {
     pub(crate) initial: Value,
 }
 
+/// [OPUS-4.8] sq-bxog (Copilot #120): a subscription-registration refusal, carrying BOTH the
+/// `error` JSON to emit AND the HTTP status the SSE transport must surface — classified at the
+/// point of refusal so the SSE path is consistent with the `/sparql` endpoint's status
+/// semantics ([`crate::http::engine_error_response`]):
+///
+///   * malformed / non-SELECT query → **400** (the client's request is wrong);
+///   * the initial evaluation overflowing `--max-results` / `--max-query-rows` (the row cap)
+///     → **413** PAYLOAD_TOO_LARGE — EXACTLY as `/sparql` maps `query budget exceeded
+///     (max-rows)`, instead of the previous blanket 503;
+///   * the initial evaluation timing out, OR subscription-slot exhaustion (per-connection /
+///     server-wide cap) → **503** SERVICE_UNAVAILABLE — genuine capacity / overload, mirroring
+///     `/sparql`'s timeout 503;
+///   * any other engine error (e.g. a denied SERVICE) → **500**, mirroring `/sparql`'s
+///     `execution_error`.
+///
+/// The WebSocket transport ignores `status` (it has no HTTP response, only the `error` frame);
+/// only the SSE GET, which must set a real status BEFORE the stream opens, consults it.
+pub(crate) struct Refusal {
+    pub(crate) error: Value,
+    pub(crate) status: StatusCode,
+}
+
 /// [OPUS-4.8] sq-bxog: the transport-agnostic "register a subscription" core, shared by the
 /// WebSocket `subscribe` frame and the SSE `GET /subscriptions/sse` handler. Validates the
 /// query (SELECT-only), enforces the per-connection then the global cap (acquiring one slot
@@ -296,34 +319,40 @@ pub(crate) async fn subscribe_init(
     current_conn_subs: usize,
     query: &str,
     alias: Option<String>,
-) -> Result<NewSubscription, Value> {
-    let refuse = |msg: String| error_msg(&msg, None, alias.as_deref());
+) -> Result<NewSubscription, Refusal> {
+    // [OPUS-4.8] sq-bxog (Copilot #120): carry the HTTP status alongside the `error` JSON so the
+    // SSE transport surfaces the SAME status `/sparql` would (400 client / 413 row-cap / 503
+    // capacity-or-timeout / 500 other) — see [`Refusal`].
+    let refuse = |msg: String, status: StatusCode| Refusal { error: error_msg(&msg, None, alias.as_deref()), status };
 
-    // Only SELECT is subscribable: the diff is defined over solution bindings.
+    // Only SELECT is subscribable: the diff is defined over solution bindings. A wrong-form or
+    // malformed query is the client's error → 400, exactly like a `/sparql` parse error.
     match prepare(query) {
         Ok(p) if p.form == QueryForm::Select => {}
-        Ok(_) => return Err(refuse("only SELECT queries can be subscribed".into())),
-        Err(PrepareError::Malformed(e)) => return Err(refuse(format!("malformed query: {e}"))),
+        Ok(_) => return Err(refuse("only SELECT queries can be subscribed".into(), StatusCode::BAD_REQUEST)),
+        Err(PrepareError::Malformed(e)) => return Err(refuse(format!("malformed query: {e}"), StatusCode::BAD_REQUEST)),
     }
 
-    // Limits: per-connection first (cheap), then the global slot.
+    // Limits: per-connection first (cheap), then the global slot. Both are genuine
+    // capacity/overload (subscription-slot exhaustion) → 503, NOT a payload refusal.
     let config = state.config();
     if current_conn_subs >= config.max_subscriptions_per_conn {
         let max = config.max_subscriptions_per_conn;
-        return Err(refuse(format!("subscription limit reached for this connection ({max}); unsubscribe first or raise --max-subscriptions-per-conn")));
+        return Err(refuse(format!("subscription limit reached for this connection ({max}); unsubscribe first or raise --max-subscriptions-per-conn"), StatusCode::SERVICE_UNAVAILABLE));
     }
     if !slots.try_acquire(config.max_subscriptions) {
         let max = config.max_subscriptions;
-        return Err(refuse(format!("server-wide subscription limit reached ({max}); retry later or raise --max-subscriptions")));
+        return Err(refuse(format!("server-wide subscription limit reached ({max}); retry later or raise --max-subscriptions"), StatusCode::SERVICE_UNAVAILABLE));
     }
 
-    // Initial evaluation. Failure (parse-at-engine, timeout, max-rows overflow) refuses
-    // the subscription — mirroring the HTTP endpoint's 400/503/413 semantics.
+    // Initial evaluation. Failure refuses the subscription with the SAME status `/sparql` would
+    // give the equivalent engine error: a row-cap overflow (`--max-results` / `--max-query-rows`)
+    // is a 413 (mirroring `crate::http::engine_error_response`), a timeout is a 503, else a 500.
     let (vars, rows) = match evaluate(state, query.to_string()).await {
         Ok(r) => r,
         Err(e) => {
             slots.release_one();
-            return Err(refuse(format!("initial evaluation failed: {e}")));
+            return Err(refuse(format!("initial evaluation failed: {}", e.message), e.status()));
         }
     };
 
@@ -352,7 +381,9 @@ async fn handle_subscribe(
 
     let new = match subscribe_init(state, slots, subs.len(), query, alias).await {
         Ok(n) => n,
-        Err(refusal) => return send(socket, &refusal).await.is_ok(),
+        // [OPUS-4.8] sq-bxog (Copilot #120): the WS transport has no HTTP status — it just emits
+        // the `error` frame (the refusal's `status` is for the SSE GET only).
+        Err(refusal) => return send(socket, &refusal.error).await.is_ok(),
     };
 
     if send(socket, &new.subscribed).await.is_err() {
@@ -423,10 +454,43 @@ async fn reevaluate_all(
 // Evaluation + diff primitives
 // ---------------------------------------------------------------------------
 
+/// [OPUS-4.8] sq-bxog (Copilot #120): a categorised initial-evaluation failure — the
+/// human-readable `message` (named after the same limits a `/sparql` 413/503 would name) plus a
+/// [`RefuseKind`] so the refusal status mirrors the HTTP surface
+/// ([`crate::http::engine_error_response`]) instead of collapsing everything into 503.
+struct EvalError {
+    message: String,
+    kind: RefuseKind,
+}
+
+/// [OPUS-4.8] sq-bxog (Copilot #120): the cause of an initial-evaluation failure, classified from
+/// the engine's budget-violation string EXACTLY as [`crate::http::engine_error_response`] does, so
+/// the SSE status is consistent with `/sparql`.
+enum RefuseKind {
+    /// `query budget exceeded (timeout)` → 503 (genuine overload), matching `/sparql`'s timeout.
+    Timeout,
+    /// `query budget exceeded (max-rows)` → 413 (the result is too large, NOT a capacity problem).
+    RowCap,
+    /// Any other engine error (a denied SERVICE, a worker panic) → 500, like `execution_error`.
+    Other,
+}
+
+impl EvalError {
+    /// The HTTP status the SSE transport surfaces for this failure — the SAME mapping
+    /// [`crate::http::engine_error_response`] applies on `/sparql`.
+    fn status(&self) -> StatusCode {
+        match self.kind {
+            RefuseKind::Timeout => StatusCode::SERVICE_UNAVAILABLE,
+            RefuseKind::RowCap => StatusCode::PAYLOAD_TOO_LARGE,
+            RefuseKind::Other => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
 /// Runs the SELECT on the blocking pool under the server budget (deadline + row cap),
 /// with the same hard await-cap as the HTTP path. Returns the head vars and the result
 /// keyed by canonical row encoding.
-async fn evaluate(state: &AppState, query: String) -> Result<(Vec<String>, HashMap<String, Value>), String> {
+async fn evaluate(state: &AppState, query: String) -> Result<(Vec<String>, HashMap<String, Value>), EvalError> {
     let config = state.config().clone();
     let budget = make_budget(&config, true);
     // Pin the current generation for this evaluation (lock-free; never blocked by the
@@ -445,22 +509,24 @@ async fn evaluate(state: &AppState, query: String) -> Result<(Vec<String>, HashM
     match joined {
         Ok(Ok(r)) => Ok(r),
         Ok(Err(e)) => Err(budget_error(&e, &config)),
-        Err(_) => Err("query worker panicked".into()),
+        Err(_) => Err(EvalError { message: "query worker panicked".into(), kind: RefuseKind::Other }),
     }
 }
 
-/// Maps the engine's budget-violation strings onto the messages the HTTP layer uses
-/// (so a refused subscription names the same limits as a 503/413 would).
-fn budget_error(e: &str, config: &ServerConfig) -> String {
+/// Maps the engine's budget-violation strings onto the messages the HTTP layer uses (so a refused
+/// subscription names the same limits as a 503/413 would) AND classifies the cause ([`RefuseKind`])
+/// so the SSE status matches `/sparql` ([`crate::http::engine_error_response`]): timeout → 503,
+/// row cap → 413, else → 500.
+fn budget_error(e: &str, config: &ServerConfig) -> EvalError {
     if e.contains("query budget exceeded (timeout)") {
         let secs = config.query_timeout.map(|t| t.as_secs()).unwrap_or(0);
-        return format!("query timed out (server limit: {secs}s)");
+        return EvalError { message: format!("query timed out (server limit: {secs}s)"), kind: RefuseKind::Timeout };
     }
     if e.contains("query budget exceeded (max-rows)") {
         let max = config.max_results.unwrap_or(0);
-        return format!("result exceeds the server's max-results limit ({max} rows)");
+        return EvalError { message: format!("result exceeds the server's max-results limit ({max} rows)"), kind: RefuseKind::RowCap };
     }
-    e.to_string()
+    EvalError { message: e.to_string(), kind: RefuseKind::Other }
 }
 
 /// Evaluates the SELECT and canonicalises each solution row to its SPARQL-JSON binding
@@ -645,12 +711,14 @@ pub mod sse {
     /// auth-gated today — gating the subscription transports behind the read token is
     /// tracked under bead `sq-cxk5`. When that lands, both transports must gate together.
     ///
-    /// A registration refusal (missing/non-SELECT/malformed query → 400; initial
-    /// evaluation over the row cap / past the timeout → 503/413-style) is returned as a
-    /// normal JSON HTTP error BEFORE the event-stream opens — SSE cannot set a status once
-    /// the stream is flowing, so refusals surface with a real status code. On success the
-    /// response is `text/event-stream` and the first two frames are the `subscribed` ack
-    /// and the full initial result.
+    /// A registration refusal is returned as a normal JSON HTTP error BEFORE the event-stream
+    /// opens — SSE cannot set a status once the stream is flowing — classified to match the
+    /// `/sparql` endpoint ([`crate::http::engine_error_response`]): missing/non-SELECT/malformed
+    /// query → **400**; the initial evaluation over the row cap (`--max-results` /
+    /// `--max-query-rows`) → **413**; the initial evaluation timing out, or subscription-slot
+    /// exhaustion → **503**; any other engine error → **500**. The status is carried on the
+    /// [`super::Refusal`]. On success the response is `text/event-stream` and the first two
+    /// frames are the `subscribed` ack and the full initial result.
     pub async fn sse_endpoint(State(state): State<AppState>, Query(params): Query<HashMap<String, String>>) -> Response {
         let Some(query) = params.get("query") else {
             return crate::http::json_error(
@@ -665,15 +733,11 @@ pub mod sse {
         let new = match subscribe_init(&state, &mut slots, 0, query, alias).await {
             Ok(n) => n,
             Err(refusal) => {
-                // Map the refusal onto an HTTP status: a malformed/non-SELECT query is a
-                // 400; a limit/eval refusal is a 503 (server-side capacity / budget).
-                let msg = refusal["error"]["message"].as_str().unwrap_or("subscription refused").to_string();
-                let status = if msg.starts_with("malformed query") || msg.starts_with("only SELECT") {
-                    axum::http::StatusCode::BAD_REQUEST
-                } else {
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE
-                };
-                return crate::http::json_error(status, &msg);
+                // [OPUS-4.8] sq-bxog (Copilot #120): the refusal already carries the HTTP status,
+                // classified at the point of refusal to match the `/sparql` endpoint (400 client /
+                // 413 row-cap / 503 capacity-or-timeout / 500 other) — see [`super::Refusal`].
+                let msg = refusal.error["error"]["message"].as_str().unwrap_or("subscription refused").to_string();
+                return crate::http::json_error(refusal.status, &msg);
             }
         };
 

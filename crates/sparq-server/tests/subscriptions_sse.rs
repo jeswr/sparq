@@ -11,7 +11,8 @@
 //! Coverage: (1) register → `subscribed` + initial-result frames; (2) a committed UPDATE
 //! triggers a `notification` diff frame; (3) a non-matching UPDATE produces no frame;
 //! (4) dropping the stream releases the global slot (no leak); (5) bad-query refusals
-//! surface as real HTTP error statuses BEFORE the stream opens.
+//! surface as real HTTP error statuses BEFORE the stream opens; (6) [OPUS-4.8] sq-bxog
+//! (Copilot #120) an initial result over the row cap is a 413 (matching `/sparql`), NOT a 503.
 
 use std::time::Duration;
 
@@ -376,4 +377,66 @@ async fn sse_malformed_query_is_400() {
         body["error"].as_str().unwrap().contains("malformed"),
         "{body}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (6) [OPUS-4.8] sq-bxog (Copilot #120): an initial result over the max-results / row cap is
+//     refused with 413 PAYLOAD_TOO_LARGE — the SAME status `/sparql` gives a row-cap overflow
+//     (`engine_error_response`), NOT the blanket 503 the SSE path used before. 503 is reserved
+//     for genuine capacity/overload (subscription-slot exhaustion — see test (4)).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sse_initial_result_over_max_results_is_413() {
+    // `AGES` selects BOTH ages (2 rows) from `DATA`; cap the result at 1 row so the INITIAL
+    // evaluation overflows the budget and the registration is refused before the stream opens.
+    let addr = spawn_with(ServerConfig {
+        max_results: Some(1),
+        ..ServerConfig::default()
+    })
+    .await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/subscriptions/sse"))
+        .query(&[("query", AGES)])
+        .send()
+        .await
+        .unwrap();
+
+    // 413 PAYLOAD_TOO_LARGE — consistent with the `/sparql` endpoint's row-cap refusal, not 503.
+    assert_eq!(
+        resp.status(),
+        413,
+        "an initial result over the row cap must be a 413, not a 503"
+    );
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/json"),
+        "refusal is a JSON error, not an event-stream: {ct}"
+    );
+    let body: Value = resp.json().await.unwrap();
+    let msg = body["error"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("max-results") && msg.contains("initial evaluation"),
+        "413 body names the cap that was exceeded: {body}"
+    );
+}
+
+#[tokio::test]
+async fn sse_initial_result_within_max_results_still_opens() {
+    // Sanity counterpart to the 413 test: a cap the initial result does NOT exceed (2 rows,
+    // cap 2) must still open the stream normally — the 413 is for a genuine overflow only.
+    let addr = spawn_with(ServerConfig {
+        max_results: Some(2),
+        ..ServerConfig::default()
+    })
+    .await;
+    let resp = open_sse(&addr, AGES, None).await;
+    let mut reader = SseReader::new(resp);
+    let (_id, initial) = read_open(&mut reader).await;
+    assert_eq!(bindings(&initial.json(), "addedResults").len(), 2);
 }
