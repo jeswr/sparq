@@ -34,14 +34,19 @@ repo-relative. "Gating" means the artifact is a required CI check folded into
 | `ci.yml#coverage` | per-crate coverage + test-presence ratchet | PO.4.1 |
 | `ci.yml#unsafe-register` | unsafe-count ratchet (`scripts/unsafe-gate.py`, `bench/unsafe-snapshot.json`) | PO.3.2, PO.4.1, RV.3.4 |
 | `codeql.yml` | CodeQL `security-and-quality` SAST | PO.3.2, PW.7.1, PW.7.2 |
-| `supply-chain.yml#audit` | `cargo deny check bans sources licenses` **and** `advisories` (all gating) | PO.3.2, PW.4.1, PW.4.4, RV.1.4 |
+| `supply-chain.yml#audit` | `cargo deny check bans sources licenses` **and** `advisories` (all gating) | PO.3.2, PW.4.1, PW.4.4, RV.1.3 (sparq-local `RV.1.4`) |
 | `supply-chain.yml#vet` | `cargo vet --locked` (per-dependency audit attestations, gating) | PW.4.1 |
 | `supply-chain.yml#sbom` | CycloneDX SBOM artifact (`**/*.cdx.json`) | PO.3.3, PS.3.2 |
 | `miri.yml#miri` | UB lane over `sparq-core` unsafe surface (nightly) | PW.8.2 |
 | `fuzz.yml#fuzz` | coverage-guided fuzz (parsers + mmap loader) | PW.8.2, RV.3.4 |
 | `scorecard.yml#analysis` | OpenSSF Scorecard → SARIF + public dashboard | PO.3.3 |
-| `dependency-monitoring.yml` | daily advisory watchdog → tracking issue | RV.1.4 |
+| `dependency-monitoring.yml` | daily advisory watchdog → tracking issue | RV.1.3 (sparq-local `RV.1.4`) |
 | `ci-summary.yml#gate` | the single required aggregator (merge gate) | PO.2.1, PO.4.2, PO.3.3 |
+
+> **`RV.1.4` is a sparq-local sub-task, not a standard SP 800-218 v1.1 task id.** RV.1 defines
+> only RV.1.1 / RV.1.2 / RV.1.3; the continuous-monitoring obligation lives in RV.1.3's text.
+> The watchdog/advisories-gate/Dependabot evidence above is mapped to standard **RV.1.3** and
+> carries the `RV.1.4` label only for local traceability — see the footnote in `controls.md`.
 
 ## 3. Release & provenance artifacts (PS, PW.6)
 
@@ -53,7 +58,7 @@ repo-relative. "Gating" means the artifact is a required CI check folded into
 | `cargo auditable` embedded dependency manifest in `sparq-cli` | `release.yml` (`cargo auditable build --release --locked`) | PS.3.2, PW.6.1 |
 | Container SLSA provenance + embedded SBOM (`provenance: mode=max`, `sbom: true`) | `release.yml#container`, `Dockerfile` | PS.2.1, PS.3.2, PW.6.1 |
 | Committed `Cargo.lock` (exact resolved tree) | `Cargo.lock` | PS.3.1, PW.6.1 |
-| Dependency update automation (4 ecosystems) | `.github/dependabot.yml` | PO.1.3, PW.4.1, RV.1.4 |
+| Dependency update automation (4 ecosystems) | `.github/dependabot.yml` | PO.1.3, PW.4.1, RV.1.3 (sparq-local `RV.1.4`) |
 
 ## 4. How to reproduce the evidence locally
 

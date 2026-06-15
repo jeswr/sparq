@@ -11,8 +11,8 @@ codebase/CI evidence — controls that are met are in [`controls.md`](./controls
 gaps and are not listed here.
 
 SSDF coverage is high because it is largely a **mapping** of sparq's existing gate stack
-(see `controls.md` coverage summary: 27 implemented & verified / 13 audit-ready / **1
-gap**). The cross-cutting supply-chain/secure-coding gaps that other frameworks share
+(see `controls.md` coverage summary: 28 implemented & verified / 13 audit-ready / **1
+gap**, across 42 task rows). The cross-cutting supply-chain/secure-coding gaps that other frameworks share
 (GX-1 advisories PR-gate, GX-5 unsafe register, GX-6 secure-coding section, GX-7
 cargo-auditable/vet) have **already landed** in the codebase and are cited as evidence in
 `controls.md` — they are *not* re-listed as SSDF gaps.

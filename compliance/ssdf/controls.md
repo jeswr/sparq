@@ -91,7 +91,7 @@ operator's own SSDF programme (their deployment, monitoring, IR) is out of sparq
 | **RV.1.1** | Gather information from acquirers/users/sources on potential vulnerabilities. | Implemented & verified | `SECURITY.md` (private GHSA + email channels, response SLAs) + `.well-known/security.txt` (RFC 9116 machine-discoverable pointer); `.github/ISSUE_TEMPLATE/security.yml` + `config.yml` redirect public reports to the private channels. | @jeswr |
 | **RV.1.2** | Review, analyze & confirm reported potential vulnerabilities (triage). | Audit-ready | `SECURITY.md` documents the triage workflow + targets (acknowledge ≤5 business days, initial assessment ≤10). Continuous operation of triage is asserted by the maintainer (best-effort volunteer project); no external attestation applies. | @jeswr |
 | **RV.1.3** | Have a vulnerability-disclosure programme & process to intake reports. | Implemented & verified | GitHub Security Advisories ("Report a vulnerability") + `jesse@jeswr.org` + `.well-known/security.txt` (`Contact`/`Policy`/`Canonical`); coordinated-disclosure language in `SECURITY.md`; `CONTRIBUTING.md` redirects discoverers to the private channels. | @jeswr |
-| **RV.1.4** | Continuously monitor known-vulnerability sources for the software's components. | Implemented & verified | Daily advisory watchdog (`dependency-monitoring.yml` — cargo-deny advisories → single idempotent `security:dependency-vuln` tracking issue) **plus** PR-time `cargo deny check advisories` gating (`supply-chain.yml#audit`) + Dependabot security updates (`.github/dependabot.yml`). | @jeswr |
+| **RV.1.4** ⚑ | Continuously monitor known-vulnerability sources for the software's components. **(sparq-local sub-task — NOT a standard SP 800-218 v1.1 task id; see footnote ⚑.)** | Implemented & verified | Daily advisory watchdog (`dependency-monitoring.yml` — cargo-deny advisories → single idempotent `security:dependency-vuln` tracking issue) **plus** PR-time `cargo deny check advisories` gating (`supply-chain.yml#audit`) + Dependabot security updates (`.github/dependabot.yml`). | @jeswr |
 | **RV.2.1** | Analyze each vulnerability to gather enough information to plan its remediation. | Audit-ready | `SECURITY.md` "initial assessment" step (severity, reproduce, remediation path); the per-release **VEX** (`release.yml`) is the documented exploitability-analysis artifact for flagged advisories. Per-report analysis records are produced per-incident. | @jeswr |
 | **RV.2.2** | Develop & implement remediation plans for each vulnerability. | Implemented & verified | Fixes land on `main` and ship in the next release (`SECURITY.md` "Supported versions"); remediation work is tracked as `bd` beads (the ZK-soundness remediation beads anchored on `research/zk-soundness-audit.md`; the gap-fix beads under `sq-toze`); the VEX records non-applicable advisories with justification. | @jeswr |
 | **RV.3.1** | Analyze identified vulnerabilities to determine root cause. | Audit-ready | `research/zk-soundness-audit.md` is a worked root-cause analysis (the v1 verifier soundness gaps traced to the missing binding layer); the threat model + register capture systemic causes. Per-incident RCA is produced per report. | @jeswr |
@@ -99,17 +99,33 @@ operator's own SSDF programme (their deployment, monitoring, IR) is out of sparq
 | **RV.3.3** | Review the SDLC to see if the root cause could be avoided in future (feed back). | Implemented & verified | The "never lower a ratchet — fix the regression" rule (`CONTRIBUTING.md`), the unsafe register's `NEEDS-REVIEW`+bead discipline, and the gating-tool additions (advisories PR-gate, cargo-vet, unsafe ratchet) are concrete SDLC feedback from prior root causes; each `deny.toml` exception carries a bead so it is revisited. | @jeswr |
 | **RV.3.4** | Review the SDLC to detect classes of the vulnerability proactively (e.g. add a check). | Implemented & verified | New gating checks added in direct response to risk classes: the fuzz lane (parse/mmap crash classes), the Miri lane (UB classes on the unsafe surface), the unsafe-count ratchet (unsafe-creep class), CodeQL (SAST class). Each is a proactive class-detection control. | @jeswr |
 
+> ⚑ **`RV.1.4` is a sparq-local sub-task, not a standard SP 800-218 v1.1 task id.** The
+> publication defines RV.1 with exactly three tasks — **RV.1.1 / RV.1.2 / RV.1.3** — and the
+> "continuously monitor known-vulnerability sources" obligation is part of RV.1's existing text
+> (gather/monitor information about potential vulnerabilities) rather than a separate numbered
+> task. We retain `RV.1.4` as an explicitly-flagged sparq-local row because the underlying
+> control (the daily advisory watchdog + the PR-time advisories gate + Dependabot) is a real,
+> well-evidenced extension of RV.1.3's continuous-monitoring intent; it is **never** asserted as
+> a standard framework control number. An assessor mapping IDs back to the publication should
+> read this row as evidence *supporting RV.1.3*, sub-labelled `RV.1.4` for local traceability.
+
 ---
 
 ## Coverage summary
 
 | Practice group | Tasks | Implemented & verified | Audit-ready | Gap |
 |---|---|---|---|---|
-| **PO** (Prepare the Organization) | 12 | 7 | 5 | 0 |
+| **PO** (Prepare the Organization) | 13 | 7 | 6 | 0 |
 | **PS** (Protect the Software) | 4 | 4 | 0 | 0 |
-| **PW** (Produce Well-Secured Software) | 14 | 10 | 3 | 1 |
-| **RV** (Respond to Vulnerabilities) | 11 | 6 | 5 | 0 |
-| **Total** | **41** | **27** | **13** | **1** |
+| **PW** (Produce Well-Secured Software) | 15 | 11 | 3 | 1 |
+| **RV** (Respond to Vulnerabilities) | 10 | 6 | 4 | 0 |
+| **Total** | **42** | **28** | **13** | **1** |
+
+These totals are re-derived mechanically from the rows above and cross-foot exactly: the
+**Tasks** column sums to 42 (13 + 4 + 15 + 10) and equals the status columns (28 + 13 + 1); each
+group's row count equals its own status split. (The RV count includes the sparq-local `RV.1.4`
+sub-task flagged above; it is evidence supporting standard task RV.1.3, not a separate framework
+task — see footnote ⚑.)
 
 The single technical **gap** is **PW.6.2 reproducible-build evidence** (GX-8 / bead
 sq-toze.9). The **audit-ready** rows are the practices that are documented + automated but

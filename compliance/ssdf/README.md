@@ -22,7 +22,7 @@ deploying organization can lift into its own attestation — not a pending exter
 
 | File | Purpose |
 |---|---|
-| [`controls.md`](./controls.md) | The spine: every SSDF task (PO/PS/PW/RV, 41 tasks) → status → repo evidence (file / test / CI job) → owner. |
+| [`controls.md`](./controls.md) | The spine: every SSDF task (PO/PS/PW/RV, 42 task rows) → status → repo evidence (file / test / CI job) → owner. |
 | [`evidence.md`](./evidence.md) | By-artifact index resolving each control claim to a concrete, checkable location + how to reproduce it locally. |
 | [`gap-register.md`](./gap-register.md) | Open gaps (severity, remediation, target, `bd` bead). |
 
@@ -51,8 +51,10 @@ deploying organization can lift into its own attestation — not a pending exter
 
 ## Honesty posture
 
-The coverage summary in `controls.md` reports **27 implemented & verified / 13 audit-ready
-/ 1 gap** across the 41 SSDF tasks. The single technical gap is **PW.6.2 reproducible-build
+The coverage summary in `controls.md` reports **28 implemented & verified / 13 audit-ready
+/ 1 gap** across the 42 SSDF task rows (one of which, `RV.1.4`, is an explicitly-flagged
+sparq-local sub-task supporting standard task RV.1.3 — see the footnote in `controls.md`).
+The single technical gap is **PW.6.2 reproducible-build
 evidence** (GX-8, bead **sq-toze.9**). No row presents the `sparq-zk*` / `sparq-mpc`
 research scaffold as a met security control — its documented **"v1 verifier is NOT sound"**
 verdict (`SECURITY.md`, `research/zk-soundness-audit.md`) is a correctly-disclosed
