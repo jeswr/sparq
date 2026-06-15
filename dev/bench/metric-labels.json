@@ -764,6 +764,62 @@
       "mode": "bytes",
       "unit": "bytes"
     },
+    "geo_compliance_deficit": {
+      "label": "GeoSPARQL compliance deficit — (25 OGC fixtures − passing); smaller is better",
+      "suite": "GeoSPARQL",
+      "dataset": "OGC GeoSPARQL topology fixtures (sf/eh/rcc8)",
+      "query": "deterministic compliance ratchet (mode:auto; coverage only tightens)",
+      "mode": "deficit",
+      "unit": "fixtures"
+    },
+    "geo_geo_compliance_pass": {
+      "label": "GeoSPARQL geo_compliance_pass — #OGC topology fixtures (sf/eh/rcc8) matching the spec truth value, query",
+      "suite": "GeoSPARQL",
+      "dataset": "fixed CRS84 point corpus, ~100k seeded POINT literals (8°x8° window)",
+      "query": "#OGC topology fixtures (sf/eh/rcc8) matching the spec truth value",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "geo_geof_within": {
+      "label": "GeoSPARQL geof_within — #corpus points satisfying geof:sfWithin(point, 1°x1° box) — the geof: filter path, query",
+      "suite": "GeoSPARQL",
+      "dataset": "fixed CRS84 point corpus, ~100k seeded POINT literals (8°x8° window)",
+      "query": "#corpus points satisfying geof:sfWithin(point, 1°x1° box) — the geof: filter path",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "geo_nearest_k10": {
+      "label": "GeoSPARQL nearest_k10 — k=10 nearest entities to (0, 51) (nearest-k; count invariant = k), query",
+      "suite": "GeoSPARQL",
+      "dataset": "fixed CRS84 point corpus, ~100k seeded POINT literals (8°x8° window)",
+      "query": "k=10 nearest entities to (0, 51) (nearest-k; count invariant = k)",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "geo_nearest_k100": {
+      "label": "GeoSPARQL nearest_k100 — k=100 nearest entities to (0, 51), query",
+      "suite": "GeoSPARQL",
+      "dataset": "fixed CRS84 point corpus, ~100k seeded POINT literals (8°x8° window)",
+      "query": "k=100 nearest entities to (0, 51)",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "geo_within10km": {
+      "label": "GeoSPARQL within10km — #entities within 10 km great-circle of (0, 51) (geof:within result-set size), query",
+      "suite": "GeoSPARQL",
+      "dataset": "fixed CRS84 point corpus, ~100k seeded POINT literals (8°x8° window)",
+      "query": "#entities within 10 km great-circle of (0, 51) (geof:within result-set size)",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "geo_within50km": {
+      "label": "GeoSPARQL within50km — #entities within 50 km great-circle of (0, 51), query",
+      "suite": "GeoSPARQL",
+      "dataset": "fixed CRS84 point corpus, ~100k seeded POINT literals (8°x8° window)",
+      "query": "#entities within 50 km great-circle of (0, 51)",
+      "mode": "query",
+      "unit": "µs"
+    },
     "load_s": {
       "label": "Load — parse + index build (synthetic)",
       "suite": "Pipeline",
