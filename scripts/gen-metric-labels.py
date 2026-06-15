@@ -468,11 +468,17 @@ def build():
     # self-assertion; the compliance ratchet is the HARD-gated DEFICIT geo_compliance_deficit
     # (= 25 - passed, mode:auto in bench/perf-baseline.json), labelled separately below.
     GEO_DATASET = "fixed CRS84 point corpus, ~100k seeded POINT literals (8°x8° window)"
+    # [OPUS-4.8] (sq-tf8n) These geo_<name> dashboard series are the ADVISORY per-workload QUERY
+    # TIMES (harvested from geo_<name>_us, stripped of the _us suffix), NOT counts — the result-set
+    # SIZES are the deterministic gate in bench/geo/run.sh's self-assertion, never plotted here. So
+    # the mode/unit/label must read as a TIME (mode "query", unit µs, ", query" suffix), exactly like
+    # the FTS text_<workload> labels — the `desc` still says WHAT the query computes (a count), but
+    # the plotted value is its latency. (Earlier `mode:count` contradicted the µs unit.)
     for name, desc in GEO_DESC.items():
         labels["geo_%s" % name] = {
-            "label": "GeoSPARQL %s — %s" % (name, desc),
+            "label": "GeoSPARQL %s — %s, query" % (name, desc),
             "suite": "GeoSPARQL", "dataset": GEO_DATASET,
-            "query": desc, "mode": "count", "unit": "µs",
+            "query": desc, "mode": "query", "unit": "µs",
         }
     labels["geo_compliance_deficit"] = {
         "label": "GeoSPARQL compliance deficit — (25 OGC fixtures − passing); smaller is better",

@@ -485,7 +485,15 @@ fi
 # whole ci-bench run, exactly like LUBM/SHACL. Skipped gracefully when cargo is absent.
 GEO_BIN=target/release/examples/bench_geo
 GEO_COMPLIANCE_MAX=25
-if command -v cargo >/dev/null 2>&1 && [ -x "$GEO_RUN" ]; then
+# PR-tier skip: run only on main (or locally, where GITHUB_REF is unset) — mirrors the
+# main-only-toolchain skip the LUBM/SHACL hooks get for free (javac/rapper are installed only on
+# main), keeping the sparq-geo example build + ~100k-point corpus gen/load OFF the per-PR path.
+# Same pattern as the FTS block below (sq-ustq, #186). On a LOCAL run GITHUB_REF is unset so
+# devs / bench/geo/run.sh still work; on a PR build GITHUB_REF is the PR ref so we skip.
+GEO_REF="${GITHUB_REF:-}"
+if [ -n "$GEO_REF" ] && [ "$GEO_REF" != "refs/heads/main" ]; then
+  echo "note: geo skipped (PR tier — sparq-geo example build/run is main-only, like the javac/rapper suites)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$GEO_RUN" ]; then
   # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE
   # bench_geo. Let cargo's staleness detection decide (a no-op rebuild is cheap); do NOT
   # swallow the build error — a real compile failure must fail the gate, not silently skip.
@@ -509,7 +517,9 @@ if command -v cargo >/dev/null 2>&1 && [ -x "$GEO_RUN" ]; then
     exit 1
   fi
 else
-  echo "note: geo skipped (cargo not on PATH)" >&2
+  # Reached only on the MAIN/local tier (the PR tier is handled by the skip branch above) when
+  # cargo or the run.sh entry point is missing.
+  echo "note: geo skipped (cargo not on PATH or $GEO_RUN missing)" >&2
 fi
 
 # [OPUS-4.8] FULL-TEXT-SEARCH suite per-commit (sq-ustq). The corpus is SYNTHETIC (generated
