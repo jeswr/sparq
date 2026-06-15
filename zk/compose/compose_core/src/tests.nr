@@ -135,8 +135,9 @@ global ATTR_BOTH: [bool; 2] = [true, true];
 fn scan_accepts_complete_match_set() {
     let (enc, counts, commitments) = test_graphs();
     // Pattern ?s P ?o matches (S2,P,O2) in graph 0 and (S1,P,O1) in graph 1
-    // (canonical ascending-commitment order, see test_graphs).
-    let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
+    // (canonical ascending-commitment order, see test_graphs). Disclosed rows are
+    // listed in that same graph order: graph-0 row first, then graph-1.
+    let rows: [[Field; 3]; 2] = [[S2, P, O2], [S1, P, O1]];
     scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, ATTR_BOTH, counts, enc);
 }
 
