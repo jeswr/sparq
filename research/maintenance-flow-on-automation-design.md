@@ -410,8 +410,8 @@ initial list.
   sanctioned `bench/*/README.md` + `research/`).
 
 **D. Bench suites missing a dashboard row** (`FEATURED_SUITES` in
-`bench/dashboard/dashboard.js:270` lists 12: LUBM, WatDiv, SP2Bench, Deep
-Taxonomy, SHACL, FTS, Geo, Vector/ANN, BSBM, DBPSB, Synthetic)
+`bench/dashboard/dashboard.js:270` lists 11: LUBM, WatDiv, SP2Bench, Deep
+Taxonomy, SHACL, Full-Text, GeoSPARQL, Vector/ANN, BSBM, DBPSB, Synthetic)
 - **The entire ZK family is unfeatured** — `bench/zk` (`zk-commit-throughput`),
   `bench/zk-trace` (`zk-trace-overhead`), `bench/zk-compose`
   (`zk-compose-gates`, `zk-compose-prove-verify`): 4 registered ZK benches, **no
