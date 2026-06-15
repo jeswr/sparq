@@ -40,22 +40,42 @@
   var COMPETITORS_DATA = {
     schema_version: 1,
     gathered_at_utc: '2026-06-15',
-    gathered_by: 'static curation from in-repo sources (no live gather); see `source` on each engine/reference',
+    gathered_by: 'in-repo references (qlever/eye) + a LIVE ephemeral-EC2 gather of the SHACL engines (sq-8dp3): ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), quiet_box=true, commit fd219ba, against the committed bench/shacl suite (LUBM(1) ABox x 5 shape graphs). EPHEMERAL GATHER POINT for cross-engine ordering, NOT the pinned gh-runner CI band.',
     engines: [
       { id: 'qlever', label: 'QLever', version: '0.5.47',
         env: '2020 MacBook Air M1, 16GB, native', source: 'bench/qlever-baselines.md' },
       { id: 'oxigraph', label: 'Oxigraph', version: '0.5.8',
-        env: 'embedded Rust dev-dep (Cargo.lock); no committed dashboard-scale numbers',
+        env: 'embedded Rust dev-dep; gathered live on ephemeral c7g.xlarge but on the in-process sparq-bench synthetic graph (different dataset/regime from any dashboard metric) — no same-row value cell',
         source: 'crates/sparq-bench Cargo.toml + Cargo.lock' },
       { id: 'eye', label: 'EYE', version: 'v11.24.4 (2026-05-12), SWI-Prolog 10.0.2',
         env: 'Apple M1 (fanless), macOS 25.4.0', source: 'bench/inference/eye-comparison.md' },
       { id: 'rdfox', label: 'RDFox',
         version: 'not gathered (vendor/paper figures only — Oxford Semantic; AAAI-2014/ISWC-2015)',
-        env: 'n/a — no head-to-head run in-repo', source: 'research/inference-sota.md §1.1' }
+        env: 'n/a — no head-to-head run in-repo', source: 'research/inference-sota.md §1.1' },
+      { id: 'pyshacl', label: 'pySHACL', version: '0.31.0',
+        env: 'ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, quiet_box=true, commit fd219ba; gathered 2026-06-15 (sq-8dp3)',
+        source: 'live gather — scripts/gather-ec2.sh + report_cli_adapter.py' },
+      { id: 'jena-shacl', label: 'Apache Jena SHACL', version: '5.2.0',
+        env: 'ephemeral AWS c7g.xlarge (4 vCPU arm64 Graviton), Ubuntu 24.04, OpenJDK, quiet_box=true, commit fd219ba; gathered 2026-06-15 (sq-8dp3)',
+        source: 'live gather — scripts/gather-ec2.sh + report_cli_adapter.py' }
     ],
-    // EMPTY BY DESIGN — see the comment above + competitors.json HONESTY note. Every per-metric
-    // competitor cell renders "n/a (not gathered)" until a same-scale quiet-box gather fills it.
-    values: {},
+    // [OPUS-4.8] sq-8dp3: SHACL per-workload validate latency (µs) from the live ephemeral-EC2 gather,
+    // against the SAME data x shapes as the dashboard SHACL suite. Keyed by metric STEM (name minus
+    // _us; competitorsFor matches that). Unit µs (matches shacl_*_validate_us). #violations were
+    // cross-checked per workload before timing: sparq/jena/pyshacl AGREE on cardinality/class_nodekind/
+    // datatype_range/sparql_constraint; on node_paths sparq+jena=1802 (per-occurrence) while pyshacl=3604
+    // (different sh:node decomposition — a SEMANTIC count diff, see bench/shacl/expected.tsv), so
+    // pyshacl's node_paths timing is for a DIFFERENT result count. Absolute µs are 4-vCPU Graviton, NOT
+    // the gh-runner band — for cross-engine ORDERING, not an absolute reference. (Keep byte-for-meaning
+    // in sync with bench/dashboard/competitors.json.) oxigraph gathered too but on a different
+    // dataset/regime -> no same-row cell (see competitors.json oxigraph_compare_note).
+    values: {
+      'shacl_cardinality_validate':       { pyshacl: 2796571, 'jena-shacl': 1510265 },
+      'shacl_class_nodekind_validate':    { pyshacl: 2802497, 'jena-shacl': 1543484 },
+      'shacl_datatype_range_validate':    { pyshacl: 3625929, 'jena-shacl': 1719801 },
+      'shacl_node_paths_validate':        { pyshacl: 4463087, 'jena-shacl': 1808440 },
+      'shacl_sparql_constraint_validate': { pyshacl: 27811546, 'jena-shacl': 2292133 }
+    },
     references: [
       { suite: 'Synthetic (qlever-style)', engine: 'qlever', version: '0.5.47',
         env: '2020 MacBook Air M1, 16GB, native', scale: '10M synthetic (1.25M entities × 8)',
