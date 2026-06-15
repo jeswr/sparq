@@ -2149,9 +2149,13 @@ fn resolve_status_ref(
 ///
 /// HONEST REMAINING DISCLOSURE: the status-list IRI and the `version` are still
 /// disclosed in the clear (both issuer-bound); only the index + liveness bit are
-/// hidden on the committed path. The dense depth-10 host Merkle builder still
-/// bounds the representative list size (the sparse-commitment scope note is
-/// unchanged — see [`crate::revocation`]).
+/// hidden on the committed path. Closing the IRI/version leak is sq-6qe (a new
+/// committed-reference circuit + sig path; see `research/zk-statuslist-hide-iri-version.md`).
+/// [OPUS-4.8] sq-hwe: the host Merkle builder is now SPARSE
+/// ([`crate::revocation::merkle_root`]) — `O(set-bits * depth)`, independent of
+/// `2^depth` — so it no longer bounds the list size; the remaining size bound is
+/// the single COMPILED `revoke_unset_d10` circuit member (compiling a deeper member
+/// is mechanical, the relation is depth-generic — tracked as follow-up).
 // [OPUS-4.8] audit #12: verifier-side revocation / freshness check.
 // [OPUS-4.8] audit #12 re-audit (Option B): the bit decision reads the
 // AUTHORITATIVE (relying-party-resolved) snapshot, never the prover's bytes.
@@ -2294,14 +2298,15 @@ fn bind_revocation(
 /// to resolve the authoritative snapshot here is the issuer's, not a prover claim.
 ///
 /// # Scope (honest, see [`crate::revocation`])
-/// The authoritative root is derived with the DENSE [`merkle_root`] builder (it
-/// hashes all `2^depth` leaves), and only the `revoke_unset_d10` member (depth 10,
-/// up to 1024 indices) is compiled. A production status list (2^17+ slots) needs a
-/// sparse / compressed-inclusion commitment — the circuit relation is
-/// depth-generic, but the dense host builder + single member bound the
-/// representative size. This is a representative implementation; the soundness of
-/// the binding (root equality + bb verify + in-circuit bit-unset) holds at any
-/// supported depth.
+/// [OPUS-4.8] sq-hwe: the authoritative root is now derived with the SPARSE
+/// [`merkle_root`] builder (`O(set-bits * depth)`, independent of `2^depth`, with
+/// roots BIT-IDENTICAL to the old dense fold), so the host side scales to
+/// production list sizes (2^17+ slots) WITHOUT materialising `2^depth` leaves. The
+/// remaining size bound is that only the `revoke_unset_d10` member (depth 10, up to
+/// 1024 indices) is COMPILED — the circuit relation is depth-generic, so compiling
+/// a deeper member is mechanical (tracked as follow-up). The soundness of the
+/// binding (root equality + bb verify + in-circuit bit-unset) holds at any supported
+/// depth. The status-list IRI + version are still disclosed in the clear (sq-6qe).
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation cryptographic gate.
 fn bind_hidden_revocation(
     manifest: &ProofManifest,

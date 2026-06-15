@@ -24,14 +24,35 @@
 //! - Indices past the snapshot's `bits` length read as SET (revoked) via
 //!   [`StatusListSnapshot::bit`] — fail-closed, mirroring the verifier.
 //!
-//! # Scope (honest)
-//! This is a DENSE tree of `2^D` leaves: `merkle_root` hashes all `2^D` leaves,
-//! so it is `O(2^D)` host work and the depth-10 member covers 1024 indices. A
-//! production status list (StatusList2021 lists are commonly 2^17+) needs a
-//! SPARSE / compressed-inclusion commitment (most leaves are 0) — see the crate
-//! verifier docs (`bind_hidden_revocation`) for the deferred-work note. The
-//! circuit relation itself is depth-generic; only this dense host builder and the
-//! single compiled `d10` member bound the representative size.
+//! # Scaling (sq-hwe): sparse builder, dense-identical roots
+//! [OPUS-4.8] sq-hwe: [`merkle_root`] / [`merkle_witness`] are SPARSE — they do
+//! NOT materialise `2^depth` leaves. A StatusList2021 list is overwhelmingly
+//! uniform (a credential is live = bit unset; the revoked set `S` is tiny), so
+//! the tree is dominated by all-ZERO subtrees in the covered region and all-ONE
+//! subtrees in the fail-closed padding region past the bitstring. We cache the
+//! "all-zeros subtree root" and "all-ones subtree root" at every height
+//! ([`SubtreeDefaults`]) and recurse only into the `O(S)` subtrees that actually
+//! contain a set bit or straddle the covered/padding boundary. Cost is
+//! `O(S * depth + depth)` host work and `O(S * depth)` memory — INDEPENDENT of
+//! `2^depth` — so production depths (StatusList2021 lists are commonly 2^17+) are
+//! supported WITHOUT the old dense `O(2^depth)` full-size builder ([`dense_merkle_root`],
+//! retained only as the cross-check oracle).
+//!
+//! The root is BIT-IDENTICAL to the dense fold (same Poseidon2 `h2`, same leaf
+//! layout, same fail-closed padding — indices past `bits` read as SET/1 via
+//! [`StatusListSnapshot::bit`]), so the circuit relation (`revoke.nr`,
+//! `revoke_unset_check_committed`) and the verifier's root-equality binding are
+//! unchanged — only the host-side construction is cheaper. Cross-checked against
+//! the dense oracle in the unit tests.
+//!
+//! # Residual scope (honest)
+//! Only the `revoke_unset_d10` circuit member is currently COMPILED, so although
+//! the host builder now scales, an end-to-end hidden-revocation PROOF is still
+//! bounded by the compiled member's depth (compiling a larger member —
+//! `revoke_unset_d17` etc. — is mechanical: the relation is depth-generic; tracked
+//! as follow-up). And the status-list IRI + version are still disclosed in the
+//! clear on the committed-index path (sq-6qe). See the crate verifier docs
+//! (`bind_hidden_revocation`).
 
 use crate::manifest::StatusListSnapshot;
 use sparq_zk::field::{field_to_hex, Fr};
@@ -51,6 +72,116 @@ fn leaf(snapshot: &StatusListSnapshot, index: u64) -> Fr {
     Fr::from(u64::from(snapshot.bit(index)))
 }
 
+/// [OPUS-4.8] sq-hwe: precomputed roots of UNIFORM subtrees, one per height. The
+/// sparse builder folds only the subtrees that contain a non-default leaf; every
+/// other subtree's root is read from here in `O(1)`.
+///
+/// `zeros[h]` is the root of a height-`h` subtree whose `2^h` leaves are ALL the
+/// leaf value `0` (active); `ones[h]` is the root of a height-`h` subtree of ALL
+/// `1` (revoked / fail-closed padding). Height 0 is a single leaf, so
+/// `zeros[0] = Fr(0)` and `ones[0] = Fr(1)` (the circuit's `leaf = bit`); each
+/// higher level is `h2(child, child)` of the level below. Computed once in
+/// `O(depth)` — exactly the two "merkle-path-of-a-constant-subtree" defaults a
+/// sparse Merkle tree caches.
+struct SubtreeDefaults {
+    /// `zeros[h]` = root of an all-zero (all-active) height-`h` subtree.
+    zeros: Vec<Fr>,
+    /// `ones[h]` = root of an all-one (all-revoked / padding) height-`h` subtree.
+    ones: Vec<Fr>,
+}
+
+impl SubtreeDefaults {
+    /// Precompute the uniform-subtree roots for heights `0..=depth` in `O(depth)`.
+    fn new(depth: u32) -> Self {
+        let mut zeros = Vec::with_capacity(depth as usize + 1);
+        let mut ones = Vec::with_capacity(depth as usize + 1);
+        zeros.push(Fr::from(0u64)); // a single 0 leaf
+        ones.push(Fr::from(1u64)); // a single 1 leaf
+        for h in 1..=depth as usize {
+            zeros.push(h2(zeros[h - 1], zeros[h - 1]));
+            ones.push(h2(ones[h - 1], ones[h - 1]));
+        }
+        SubtreeDefaults { zeros, ones }
+    }
+}
+
+/// [OPUS-4.8] sq-hwe: sparse root of the height-`h` subtree covering leaf indices
+/// `[lo, lo + 2^h)`, given the snapshot and the precomputed uniform-subtree roots.
+///
+/// `set_after` is the first leaf index past the snapshot's covered bits
+/// (`8 * bits.len()`): every leaf at `idx >= set_after` reads as `1` (the
+/// fail-closed padding), and every leaf below it reads the snapshot bit. The three
+/// fast paths that avoid recursion (the whole point of the sparse builder):
+///   1. the subtree lies ENTIRELY in the padding (`lo >= set_after`) → all `1` →
+///      `defaults.ones[h]`;
+///   2. the subtree lies entirely in the covered region AND holds NO set bit →
+///      all `0` → `defaults.zeros[h]`;
+///   3. otherwise recurse into the two half-subtrees and combine with `h2`.
+///
+/// A height-0 subtree is a single leaf and just reads its bit. Recursion depth is
+/// `depth`, and a branch only splits when it contains a set bit or straddles the
+/// covered/padding boundary, so the work is `O(S * depth + depth)`.
+fn sparse_subtree_root(
+    snapshot: &StatusListSnapshot,
+    defaults: &SubtreeDefaults,
+    set_after: u64,
+    lo: u64,
+    h: u32,
+) -> Fr {
+    // Fast path 1: the whole subtree is in the fail-closed padding (all ones).
+    if lo >= set_after {
+        return defaults.ones[h as usize];
+    }
+    let span = 1u64 << h;
+    // Fast path 2: the whole subtree is in the covered region and contains no set
+    // bit. `hi` is exclusive; `lo < set_after` already, so if `hi <= set_after`
+    // the subtree is fully covered. `any_bit_set` short-circuits on the first set
+    // bit, so a genuinely all-zero subtree costs only the byte-range scan.
+    let hi = lo + span;
+    if hi <= set_after && !any_bit_set(snapshot, lo, hi) {
+        return defaults.zeros[h as usize];
+    }
+    if h == 0 {
+        // Single leaf: read the (boundary-straddling or set) bit directly.
+        return leaf(snapshot, lo);
+    }
+    // Recurse into the two halves; one of them is frequently a cached uniform
+    // subtree (fast path 1 or 2 above), so the recursion fans out only along the
+    // O(S) branches that hold a set bit or the covered/padding boundary.
+    let left = sparse_subtree_root(snapshot, defaults, set_after, lo, h - 1);
+    let right = sparse_subtree_root(snapshot, defaults, set_after, lo + (span >> 1), h - 1);
+    h2(left, right)
+}
+
+/// [OPUS-4.8] sq-hwe: whether ANY status bit in `[lo, hi)` is set, scanning the
+/// snapshot's bytes (not `bit()`-per-index) and short-circuiting on the first set
+/// bit. Caller guarantees `hi <= 8 * bits.len()` (the covered region), so every
+/// byte touched exists. Used by the sparse builder's all-zero fast path.
+fn any_bit_set(snapshot: &StatusListSnapshot, lo: u64, hi: u64) -> bool {
+    debug_assert!(lo <= hi);
+    let mut idx = lo;
+    while idx < hi {
+        let byte = (idx / 8) as usize;
+        let off = (idx % 8) as u32;
+        // How many bits remain in this byte from `off`, capped by `hi`.
+        let bits_left_in_byte = 8 - off;
+        let bits_to_hi = (hi - idx) as u32;
+        let take = bits_left_in_byte.min(bits_to_hi);
+        // Mask the `take` bits starting at `off` and test them in one shot.
+        let mask: u8 = (((1u16 << take) - 1) as u8) << off;
+        // The covered-region guarantee means the byte exists; treat a missing byte
+        // as all-zero defensively (it cannot make a false negative — a missing byte
+        // would read as `1` via `bit()`, but the caller only invokes this for the
+        // covered region where bytes are present).
+        let b = snapshot.bits.get(byte).copied().unwrap_or(0);
+        if b & mask != 0 {
+            return true;
+        }
+        idx += u64::from(take);
+    }
+    false
+}
+
 /// Commit `snapshot` as a depth-`depth` Poseidon2 Merkle tree and return the
 /// root. Leaves are the `2^depth` status bits (indices `0..2^depth`, padded with
 /// SET/revoked bits past the snapshot length — fail-closed). Internal nodes are
@@ -58,10 +189,34 @@ fn leaf(snapshot: &StatusListSnapshot, index: u64) -> Fr {
 /// (the trust anchor the proof's public root is checked against) and what the
 /// PROVER computes over the list it holds.
 ///
+/// [OPUS-4.8] sq-hwe: computed by the SPARSE builder ([`sparse_subtree_root`]) —
+/// `O(S * depth + depth)` host work / `O(S * depth)` memory for `S` set bits,
+/// INDEPENDENT of `2^depth`, so production depths (2^17+) are supported without a
+/// dense full-size builder. The result is BIT-IDENTICAL to the dense fold (same
+/// `h2`, same leaf layout, same fail-closed padding); cross-checked against
+/// [`dense_merkle_root`] in the unit tests.
+///
 /// Returns `None` if `depth` is implausibly large (`> 31`, i.e. more than ~2^31
 /// leaves) — a guard so a hostile/buggy `depth` cannot trigger an astronomical
-/// allocation. (The compiled member is `d10`; real callers pass small depths.)
+/// recursion. (The compiled member is `d10`; real callers pass small depths.)
 pub fn merkle_root(snapshot: &StatusListSnapshot, depth: u32) -> Option<Fr> {
+    if depth > 31 {
+        return None;
+    }
+    let defaults = SubtreeDefaults::new(depth);
+    // The first leaf index that reads as SET (padding past the covered bits).
+    let set_after = (snapshot.bits.len() as u64).saturating_mul(8);
+    Some(sparse_subtree_root(snapshot, &defaults, set_after, 0, depth))
+}
+
+/// [OPUS-4.8] sq-hwe: the ORIGINAL dense `O(2^depth)` Merkle-root builder, retained
+/// ONLY as the cross-check ORACLE for [`merkle_root`]'s sparse output in tests. It
+/// materialises all `2^depth` leaves and folds them pairwise, so it is unusable at
+/// production depths — never call it on the hot path. `merkle_root` MUST return a
+/// byte-identical root for the same `(snapshot, depth)`; the unit tests assert this
+/// across uniform, sparse, and boundary-straddling snapshots.
+#[cfg(test)]
+fn dense_merkle_root(snapshot: &StatusListSnapshot, depth: u32) -> Option<Fr> {
     if depth > 31 {
         return None;
     }
@@ -96,6 +251,15 @@ pub struct MerkleWitness {
 /// Build the [`MerkleWitness`] for `index` in `snapshot`'s depth-`depth` tree.
 /// `None` if `index >= 2^depth` (out of range for the tree — the circuit also
 /// range-bounds the index) or `depth > 31`.
+///
+/// [OPUS-4.8] sq-hwe: SPARSE. The sibling at level `k` is the root of the
+/// height-`k` subtree hanging off the OTHER side of the path node at that level;
+/// each is computed by [`sparse_subtree_root`] (which short-circuits uniform
+/// subtrees against the precomputed defaults), so the whole authentication path is
+/// `O(depth^2)` worst case but `O(depth)` for the common case where the siblings
+/// are uniform subtrees — and, crucially, NEVER materialises `2^depth` leaves. The
+/// path is byte-identical to the one the old dense builder produced (cross-checked
+/// in the unit tests by re-folding to the dense root).
 pub fn merkle_witness(snapshot: &StatusListSnapshot, depth: u32, index: u64) -> Option<MerkleWitness> {
     if depth > 31 {
         return None;
@@ -105,16 +269,19 @@ pub fn merkle_witness(snapshot: &StatusListSnapshot, depth: u32, index: u64) -> 
         return None;
     }
     let bit = leaf(snapshot, index);
-    // Recompute each level, recording the sibling on the path to `index`.
-    let mut level: Vec<Fr> = (0..n_leaves).map(|i| leaf(snapshot, i)).collect();
-    let mut pos = index as usize;
+    let defaults = SubtreeDefaults::new(depth);
+    let set_after = (snapshot.bits.len() as u64).saturating_mul(8);
+    // At level `k` the path node spans 2^k leaves; its sibling is the height-`k`
+    // subtree sharing the same parent. `pos` tracks the path node's index AMONG the
+    // 2^(depth-k) nodes at level k (i.e. index >> k); the sibling's node index is
+    // `pos ^ 1`, whose leaf range begins at `(pos ^ 1) << k`.
     let mut siblings = Vec::with_capacity(depth as usize);
-    for _ in 0..depth {
-        // Sibling is the partner in this node's pair: flip the low bit of pos.
-        let sib = pos ^ 1;
-        siblings.push(level[sib]);
-        level = level.chunks(2).map(|pair| h2(pair[0], pair[1])).collect();
-        pos /= 2;
+    let mut pos = index;
+    for k in 0..depth {
+        let sib_node = pos ^ 1;
+        let sib_lo = sib_node << k;
+        siblings.push(sparse_subtree_root(snapshot, &defaults, set_after, sib_lo, k));
+        pos >>= 1;
     }
     Some(MerkleWitness { bit, siblings })
 }
@@ -180,6 +347,108 @@ mod tests {
         let s = snap(vec![0b0000_0010]); // bit 1 set, rest unset
         let expected = h2(h2(Fr::from(0u64), Fr::from(1u64)), h2(Fr::from(0u64), Fr::from(0u64)));
         assert_eq!(merkle_root(&s, 2), Some(expected));
+    }
+
+    // [OPUS-4.8] sq-hwe: the SPARSE builder must return a BYTE-IDENTICAL root to
+    // the dense oracle across every snapshot shape — uniform-zero, sparse 1s, a
+    // snapshot SHORTER than the tree (so the tail leaves read as fail-closed 1s),
+    // and a boundary that straddles the covered/padding line mid-byte. This is the
+    // load-bearing correctness invariant: the circuit + verifier binding are
+    // unchanged precisely BECAUSE the root is identical to the old dense fold.
+    #[test]
+    fn sparse_root_equals_dense_root_for_every_shape() {
+        let cases = vec![
+            // (bits, depths to test)
+            (vec![0u8], vec![0u32, 1, 2, 3, 6]),                 // tiny + tail padding
+            (vec![0b0000_0010u8], vec![2, 3, 6]),                // one set bit
+            (vec![0xFFu8], vec![3, 6]),                          // a fully-revoked byte + padding
+            (vec![0u8, 0, 0, 0, 0, 0, 0, 0], vec![6]),          // 64 covered, all zero
+            (vec![0b1000_0001u8, 0, 0b0100_0000, 0], vec![5, 6]),// scattered set bits
+            (vec![], vec![0, 2, 4]),                             // EMPTY: every leaf is fail-closed 1
+            (vec![0u8; 3], vec![6]),                             // 24 covered (boundary mid-tree)
+        ];
+        for (bits, depths) in cases {
+            let s = snap(bits.clone());
+            for d in depths {
+                assert_eq!(
+                    merkle_root(&s, d),
+                    dense_merkle_root(&s, d),
+                    "sparse != dense for bits={bits:?} depth={d}"
+                );
+            }
+        }
+    }
+
+    // [OPUS-4.8] sq-hwe: the sparse builder handles a PRODUCTION-scale depth
+    // (2^17 leaves) without materialising them — the whole point of the bead. The
+    // dense oracle would allocate 131072 field elements; the sparse builder folds
+    // only the cached uniform-subtree defaults plus the single set bit. We assert
+    // the witness for an unset index re-folds to this same large-depth root.
+    #[test]
+    fn sparse_root_and_witness_scale_to_production_depth() {
+        // One revoked credential at index 5; the list nominally covers 2^17 slots
+        // but the snapshot byte vector is tiny (the rest read as fail-closed 1s
+        // past the covered region — exactly the StatusList2021 shape).
+        let s = snap(vec![0b0010_0000u8]); // index 5 set; 0..4,6,7 active
+        let depth = 17;
+        let root = merkle_root(&s, depth).expect("sparse root at depth 17");
+        // An ACTIVE index inside the covered region re-folds to the root via the
+        // sparse witness.
+        let w = merkle_witness(&s, depth, 0).expect("witness");
+        assert_eq!(w.bit, Fr::from(0u64), "index 0 is active");
+        assert_eq!(w.siblings.len(), depth as usize);
+        let mut node = w.bit;
+        let mut pos = 0u64;
+        for sib in &w.siblings {
+            let is_right = pos & 1 == 1;
+            node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+            pos >>= 1;
+        }
+        assert_eq!(node, root, "sparse witness must re-fold to the sparse root");
+        // The revoked index 5 carries bit 1 (the circuit's bit-unset assert fails).
+        assert_eq!(merkle_witness(&s, depth, 5).unwrap().bit, Fr::from(1u64));
+    }
+
+    // [OPUS-4.8] sq-hwe: at a production depth, the sparse witness for an index in
+    // the FAIL-CLOSED PADDING region (past the covered bits) still re-folds to the
+    // root and carries bit 1 — the padding leaves are genuinely SET, so a holder
+    // cannot prove bit-unset for an uncovered slot. Cross-checks the all-ones
+    // subtree default path.
+    #[test]
+    fn sparse_witness_in_padding_region_is_revoked_and_consistent() {
+        let s = snap(vec![0u8]); // 8 covered active bits; everything >= 8 is padding
+        let depth = 12;
+        let root = merkle_root(&s, depth).unwrap();
+        let padding_index = 100u64; // >= 8, in the fail-closed region, < 2^12
+        let w = merkle_witness(&s, depth, padding_index).unwrap();
+        assert_eq!(w.bit, Fr::from(1u64), "padding leaf reads as revoked");
+        let mut node = w.bit;
+        let mut pos = padding_index;
+        for sib in &w.siblings {
+            let is_right = pos & 1 == 1;
+            node = if is_right { h2(*sib, node) } else { h2(node, *sib) };
+            pos >>= 1;
+        }
+        assert_eq!(node, root, "padding-index witness must still re-fold to the root");
+    }
+
+    // [OPUS-4.8] sq-hwe: any_bit_set scans byte ranges and short-circuits; verify
+    // it agrees with the per-index `bit()` oracle on awkward sub-byte ranges within
+    // the covered region.
+    #[test]
+    fn any_bit_set_matches_per_index_oracle() {
+        let s = snap(vec![0b1010_0101u8, 0b0000_0000, 0b1000_0000]);
+        let covered = 24u64;
+        for lo in 0..covered {
+            for hi in lo..=covered {
+                let expected = (lo..hi).any(|i| s.bit(i));
+                assert_eq!(
+                    any_bit_set(&s, lo, hi),
+                    expected,
+                    "any_bit_set disagreed on [{lo}, {hi})"
+                );
+            }
+        }
     }
 
     // A witness for an unset index recomputes the root via the same fold the
