@@ -34,12 +34,31 @@ surface** (PSS gh-46), with an **optional read gate**:
   The token is compared in **constant time**. Scheme casing is tolerated (`Bearer`/`bearer`).
   When unset, there is **no write auth** (today's behaviour preserved exactly).
 - **`--auth-token-read`** (env `SPARQ_AUTH_TOKEN_READ=1`) — ALSO gate **reads** (SPARQL query,
-  GSP `GET`/`HEAD`) with the same token. Off by default (QLever-style: writes gated, reads
-  open). Has no effect unless a token is also configured.
+  GSP `GET`/`HEAD`, AND the subscription read surfaces — see below) with the same token. Off by
+  default (QLever-style: writes gated, reads open). Has no effect unless a token is also configured.
 - The 401 is **identical for a missing vs a wrong token**, so an attacker cannot learn whether
   a token was presented.
-- The `/subscriptions` WebSocket (live SELECT diffs, a read surface) is **not** gated by this
-  token — keep it behind a proxy if it must be restricted (bead `sq-cxk5` tracks gating it).
+- The subscription transports — the **`/subscriptions` WebSocket** and the
+  **`/subscriptions/sse`** Server-Sent-Events stream (both stream live SELECT diffs, a *read*
+  surface) — are gated by `--auth-token-read` exactly like the other reads (bead `sq-cxk5`,
+  closing the prior read-auth bypass). The **SSE** GET takes the `Authorization: Bearer <TOKEN>`
+  header like any GET. The **WebSocket** upgrade accepts the token from either channel — see
+  the next paragraph. With no read gate configured, both are open (back-compatible).
+
+#### Authenticating a WebSocket subscription from a browser
+
+A browser's `WebSocket` API **cannot set arbitrary headers** on the handshake, so it cannot send
+`Authorization: Bearer`. The `/subscriptions` upgrade therefore accepts the read token from
+**either** channel and validates it against `--auth-token` (constant-time) when `--auth-token-read`
+is on:
+
+- **`Authorization: Bearer <TOKEN>`** header — for non-browser clients (a CLI WS client, a proxy).
+- **`Sec-WebSocket-Protocol: bearer.<TOKEN>`** subprotocol — the browser channel:
+  `new WebSocket("ws://host/subscriptions", ["bearer." + token])`. The server picks the
+  *first* offered subprotocol whose value starts with `bearer.`, takes the substring after the
+  `bearer.` prefix as the token, and (per RFC 6455) echoes that exact subprotocol back as the
+  selected one so the handshake completes. The token is **validated, not merely echoed** — a
+  wrong/absent token is refused with the same `401` the HTTP surface uses, *before* the upgrade.
 
 This is a complement to, not a replacement for, a real authorization layer (a reverse proxy /
 gateway, or [`sparq-solid`](../sparq-solid)) — the gate is a single shared secret with no

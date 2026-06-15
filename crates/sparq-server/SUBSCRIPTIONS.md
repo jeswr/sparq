@@ -26,7 +26,7 @@ Divergences (deliberate, for v1 simplicity):
 | --- | --- |
 | Dedicated `sparql-se:` URI scheme + a separate subscribe HTTP endpoint | A plain WebSocket at `ws://host:port/subscriptions`; updates arrive through the ordinary `POST /sparql` (`application/sparql-update`) endpoint |
 | `spuid` string subscription ids | Numeric `id`s, unique for the server's lifetime |
-| Secure variant (OAuth, `wss`-only profile) | None — deploy behind your own TLS/auth layer |
+| Secure variant (OAuth, `wss`-only profile) | An optional shared-secret **Bearer read gate** (`--auth-token` + `--auth-token-read`, bead `sq-cxk5`) — see "Authentication" below; deploy behind your own TLS for per-user authz |
 | Subscriptions to any query form | **SELECT only** (the diff is defined over solution bindings) |
 | Bag (multiset) result semantics | Diffs are over **distinct** bindings (set semantics; duplicate rows collapse) |
 
@@ -37,6 +37,25 @@ Divergences (deliberate, for v1 simplicity):
   answered with an `error` message. Pings are answered automatically.
 * Incoming frames are capped at the server's `--max-body-bytes` (default 1 MiB), the same
   guard as HTTP request bodies.
+
+## Authentication (bead `sq-cxk5`)
+
+Subscriptions are a **read** surface (live SELECT diffs). When the server is started with
+`--auth-token <TOKEN>` AND `--auth-token-read` (env `SPARQ_AUTH_TOKEN` + `SPARQ_AUTH_TOKEN_READ=1`),
+both subscription transports are gated behind that read token exactly like a `/sparql` GET —
+refused with `401` + `WWW-Authenticate: Bearer` before the stream/socket opens. With no read
+token configured, both are open (back-compatible — the historical behaviour).
+
+* **WebSocket** (`GET /subscriptions` upgrade): the token is accepted from **either**
+  * the `Authorization: Bearer <TOKEN>` header (non-browser clients), OR
+  * a `Sec-WebSocket-Protocol: bearer.<TOKEN>` subprotocol — the browser channel, since a
+    browser cannot set arbitrary headers on a WS handshake:
+    `new WebSocket("ws://host/subscriptions", ["bearer." + token])`. The server takes the
+    substring after the `bearer.` prefix as the token, validates it (constant-time), and echoes
+    that subprotocol back as the selected one (RFC 6455) so the handshake completes. The token
+    is **validated, not merely echoed**.
+* **SSE** (`GET /subscriptions/sse`): a plain GET, so the `Authorization: Bearer <TOKEN>`
+  header is the only auth channel; the `401` is returned before the `text/event-stream` opens.
 * One socket can hold **multiple subscriptions** (up to `--max-subscriptions-per-conn`).
 
 ## Client → server messages

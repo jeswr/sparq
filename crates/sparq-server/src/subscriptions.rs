@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use serde_json::{json, Value};
 
@@ -134,7 +134,32 @@ impl Drop for ConnSlots {
 
 /// `GET /subscriptions` — upgrades to the subscription WebSocket. Incoming text frames
 /// are capped at the server's `--max-body-bytes` (same guard as HTTP request bodies).
-pub async fn subscriptions_endpoint(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+///
+/// [OPUS-4.8] sq-cxk5: this is a READ surface (live SELECT diffs), so when `--auth-token-read`
+/// is configured the UPGRADE is gated behind the read token EXACTLY like a `/sparql` GET —
+/// rejected with the same 401 BEFORE the socket is upgraded. Because a browser cannot set an
+/// `Authorization` header on a WS handshake, the token is accepted from EITHER the
+/// `Authorization: Bearer <token>` header (non-browser clients) OR a
+/// `Sec-WebSocket-Protocol: bearer.<token>` subprotocol (browsers) — see
+/// [`crate::http::ws_auth_gate`]. When a `bearer.<token>` subprotocol is present and accepted, it
+/// is echoed back as the selected subprotocol (RFC 6455 requires the server to confirm one of the
+/// client's offered subprotocols, or a browser rejects the handshake). When no read token is
+/// configured the upgrade is unchanged (open access) — back-compatible.
+pub async fn subscriptions_endpoint(State(state): State<AppState>, headers: HeaderMap, mut ws: WebSocketUpgrade) -> Response {
+    // Gate the upgrade behind the read token (fail-closed when required + absent/wrong).
+    if let Some(resp) = crate::http::ws_auth_gate(state.config(), &headers, crate::http::Operation::Read) {
+        return resp;
+    }
+    // RFC 6455: if the client offered a `bearer.<token>` subprotocol (the browser auth channel),
+    // the server MUST confirm exactly one offered subprotocol or the browser rejects the
+    // handshake. We confirm the matched `bearer.<token>` value (its token was already validated
+    // above — confirming it is NOT a second auth check). Non-`bearer.` subprotocols are not part
+    // of this protocol, so none is selected for them.
+    if let Some((proto, _tok)) = crate::http::subprotocol_bearer_token(&headers) {
+        if let Ok(value) = axum::http::HeaderValue::from_str(proto) {
+            ws.set_selected_protocol(value);
+        }
+    }
     let max_msg = state.config().max_body_bytes;
     ws.max_message_size(max_msg).on_upgrade(move |socket| handle_socket(socket, state))
 }
@@ -707,9 +732,13 @@ pub mod sse {
     /// `GET /subscriptions/sse?query=<SELECT>[&alias=<x>]` — registers ONE SPARQL update
     /// subscription and streams notifications as Server-Sent Events.
     ///
-    /// Auth: this mirrors the WebSocket `/subscriptions` path, which is itself NOT
-    /// auth-gated today — gating the subscription transports behind the read token is
-    /// tracked under bead `sq-cxk5`. When that lands, both transports must gate together.
+    /// Auth ([OPUS-4.8] sq-cxk5): this is a READ surface (live SELECT diffs), so it mirrors the
+    /// WebSocket `/subscriptions` path AND the other `/sparql` GET routes — when
+    /// `--auth-token-read` is configured the GET is gated behind the read token via
+    /// [`crate::http::auth_gate`] ([`crate::http::Operation::Read`]) and refused with the SAME
+    /// 401 BEFORE the event-stream opens. As a plain GET, the `Authorization: Bearer <token>`
+    /// header is the only auth channel here (no WS subprotocol). When no read token is configured
+    /// the GET is unchanged (open access) — back-compatible.
     ///
     /// A registration refusal is returned as a normal JSON HTTP error BEFORE the event-stream
     /// opens — SSE cannot set a status once the stream is flowing — classified to match the
@@ -719,7 +748,12 @@ pub mod sse {
     /// exhaustion → **503**; any other engine error → **500**. The status is carried on the
     /// [`super::Refusal`]. On success the response is `text/event-stream` and the first two
     /// frames are the `subscribed` ack and the full initial result.
-    pub async fn sse_endpoint(State(state): State<AppState>, Query(params): Query<HashMap<String, String>>) -> Response {
+    pub async fn sse_endpoint(State(state): State<AppState>, headers: axum::http::HeaderMap, Query(params): Query<HashMap<String, String>>) -> Response {
+        // [OPUS-4.8] sq-cxk5: gate the read surface behind the read token (fail-closed when
+        // required + absent/wrong), BEFORE opening the stream — exactly like a `/sparql` GET.
+        if let Some(resp) = crate::http::auth_gate(state.config(), &headers, crate::http::Operation::Read) {
+            return resp;
+        }
         let Some(query) = params.get("query") else {
             return crate::http::json_error(
                 axum::http::StatusCode::BAD_REQUEST,
