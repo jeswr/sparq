@@ -178,7 +178,19 @@ pub trait ApplyUpdates: Send + 'static {
     fn apply(&mut self, working: &mut Self::Working, update: &Self::Update) -> Result<(), String>;
 
     /// Finalizes the working copy into a publishable snapshot.
-    fn seal(&mut self, working: Self::Working) -> Self::Snapshot;
+    ///
+    /// [OPUS-4.8] (sq-vpx4) Fallible so an applier with a DURABLE side (e.g. the
+    /// server's `--persist` mirror) can refuse a batch whose durable commit failed
+    /// WITHOUT tearing down the writer thread. `Err(msg)` means "this batch did not
+    /// durably commit": the writer publishes NOTHING for it and fails every pending
+    /// submitter with [`WriteError::Unavailable`] — the fail-closed contract (never
+    /// ack/publish a write that didn't durably commit) is preserved, but a transient
+    /// I/O error (e.g. a brief `ENOSPC` that later clears) becomes a refused request
+    /// the client can retry rather than a process-killing panic. The writer thread
+    /// survives, so reads keep being served from the last published snapshot and a
+    /// later write succeeds once durability recovers. Purely in-memory appliers never
+    /// fail here (return `Ok`).
+    fn seal(&mut self, working: Self::Working) -> Result<Self::Snapshot, String>;
 
     /// The update's conservative write footprint, used only under
     /// [`CommitGranularity::CommuteGroup`] to form commuting runs. The default
@@ -201,6 +213,14 @@ pub enum WriteError {
     /// The writer has shut down (or its thread panicked); the update was not
     /// applied.
     Shutdown,
+    /// [OPUS-4.8] (sq-vpx4) The update applied cleanly in memory but its batch
+    /// could NOT be made durable ([`ApplyUpdates::seal`] returned `Err`, e.g. a
+    /// transient `ENOSPC`/I/O error on the `--persist` mirror). Nothing was
+    /// published and nothing was acked — the write is REFUSED, not silently lost,
+    /// and is safe to RETRY (a 503-class outcome). The writer thread stays alive,
+    /// so reads keep being served and a later write succeeds once durability
+    /// recovers. Carries the durability error.
+    Unavailable(String),
 }
 
 impl std::fmt::Display for WriteError {
@@ -208,6 +228,7 @@ impl std::fmt::Display for WriteError {
         match self {
             WriteError::Rejected(e) => write!(f, "update rejected: {e}"),
             WriteError::Shutdown => f.write_str("writer has shut down"),
+            WriteError::Unavailable(e) => write!(f, "update not durably committed (retryable): {e}"),
         }
     }
 }
@@ -447,7 +468,25 @@ fn commit<A: ApplyUpdates>(
         return;
     }
 
-    let snapshot = applier.seal(working);
+    // [OPUS-4.8] (sq-vpx4) Seal is the durable-commit point for an applier with a
+    // `--persist` mirror. On `Err` the batch did NOT durably commit: publish NOTHING
+    // (so no reader ever sees it) and ack NOTHING with success. We then `return` — the
+    // writer thread survives the failure, so reads keep flowing from the last published
+    // generation and a subsequent batch is tried once durability recovers. This turns a
+    // transient durable-write error from a process-killing panic into a refused-but-honest
+    // write, WITHOUT weakening fail-closed: a write that didn't durably commit is still
+    // never acked 2xx nor published.
+    //
+    // Failure semantics are per-submitter, NOT batch-wide: only submitters whose writes
+    // were actually pending durable commit (they applied cleanly — `errs[i] == None`) get
+    // the retryable `Unavailable` (503-class). Submitters already rejected during `apply`
+    // (`errs[i] == Some(_)`, e.g. a malformed/unauthorized update) keep their original
+    // `Rejected` reason — a deterministic 400-class error must NOT be masked as a retryable
+    // 503 just because an unrelated peer in the same batch failed to seal.
+    let snapshot = match applier.seal(working) {
+        Ok(s) => s,
+        Err(e) => return fail_batch_after_seal_error(batch, errs, &e),
+    };
     let touched = applied.iter().flat_map(|&i| batch[i].touched.iter().cloned());
     let number = ring.publish(snapshot, touched).number();
     for (i, msg) in batch.into_iter().enumerate() {
@@ -494,6 +533,29 @@ fn fail_all<U>(batch: Vec<Msg<U>>, reason: &str) {
     for msg in batch {
         if let Some(ack) = msg.ack {
             let _ = ack.send(Err(WriteError::Rejected(reason.to_string())));
+        }
+    }
+}
+
+/// [OPUS-4.8] (sq-vpx4) Resolves a batch when [`ApplyUpdates::seal`] could not make it
+/// durable. Failure semantics are per-submitter, preserving the rejected-vs-pending
+/// distinction:
+///   * a submitter rejected during `apply` (`errs[i] == Some(reason)`) keeps that
+///     original `Rejected` reason — a deterministic 400-class error is NOT laundered into
+///     a retryable 503 just because an unrelated peer failed to seal;
+///   * a submitter that applied cleanly (`errs[i] == None`) was pending durable commit, so
+///     it gets [`WriteError::Unavailable`] (a retryable 503-class refusal of an otherwise
+///     valid write).
+///
+/// Crucially the writer thread does NOT exit, so reads stay served and later writes can
+/// recover, and fail-closed is preserved: nothing was published or acked 2xx.
+fn fail_batch_after_seal_error<U>(batch: Vec<Msg<U>>, mut errs: Vec<Option<String>>, reason: &str) {
+    for (i, msg) in batch.into_iter().enumerate() {
+        if let Some(ack) = msg.ack {
+            let _ = ack.send(match errs[i].take() {
+                Some(rejected) => Err(WriteError::Rejected(rejected)),
+                None => Err(WriteError::Unavailable(reason.to_string())),
+            });
         }
     }
 }

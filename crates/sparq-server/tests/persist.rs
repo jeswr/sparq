@@ -470,3 +470,125 @@ async fn existing_store_wins_over_seed() {
     // discarding the join result (which would silently mask a server-side failure).
     task.await.expect("server serve task panicked / failed");
 }
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] (sq-vpx4) GRACEFUL DEGRADATION on a TRANSIENT durable-write I/O error.
+//
+// Before sq-vpx4 a durable-write failure in `ServerApplier::seal` PANICKED the writer
+// thread (fail-closed but server-killing). These tests prove the new contract end-to-end
+// over HTTP: a durable-write error REFUSES the in-flight write with HTTP 503 (retryable)
+// WITHOUT tearing down the writer / the server, the refused write is NEVER published or
+// acked (fail-closed preserved — byte-identical store), reads keep being served from the
+// last published snapshot, and a SUBSEQUENT write after recovery succeeds (204) + is
+// durable across a restart.
+//
+// The failure is injected via the `test-seams`-only seam
+// (`AppState::with_config_inject_durable_failure`) — production code is unchanged.
+// ---------------------------------------------------------------------------
+
+/// Boots a `--persist` server whose seal path fails its first `n_fail` durable commits
+/// (then succeeds), modelling a transient `ENOSPC` that clears. `test-seams` only.
+#[cfg(feature = "test-seams")]
+async fn start_with_transient_failures(config: ServerConfig, n_fail: usize) -> Server {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    let graph = Graph::load_str("", "turtle").unwrap();
+    let remaining = Arc::new(AtomicUsize::new(n_fail));
+    let hook: Box<dyn FnMut() -> Option<String> + Send> = Box::new(move || {
+        if remaining.load(Ordering::SeqCst) > 0 {
+            remaining.fetch_sub(1, Ordering::SeqCst);
+            Some("injected transient durable-write error (ENOSPC)".to_string())
+        } else {
+            None
+        }
+    });
+    let state = AppState::with_config_inject_durable_failure(graph, config, hook)
+        .expect("durable open with injected failure seam");
+    let app = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    Server { base: format!("http://{addr}"), shutdown: Some(tx), task: Some(task) }
+}
+
+/// A TRANSIENT durable-write error → the in-flight write gets HTTP 503, the writer thread
+/// SURVIVES (no panic, server still serving), reads keep working, and a SUBSEQUENT write
+/// after recovery succeeds (204) + publishes + is durable across a restart.
+#[cfg(feature = "test-seams")]
+#[tokio::test]
+async fn transient_durable_write_error_503_then_recovers() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+
+    // First seal fails once, then durability is healthy.
+    let s = start_with_transient_failures(persist_config(scratch.path()), 1).await;
+
+    // The FIRST update hits the injected failure → 503 (the write is refused).
+    let refused = post_update(&cl, &s.base, "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/v> }").await;
+    assert_eq!(
+        refused, 503,
+        "a transient durable-write error must refuse the in-flight write with 503 (retryable)",
+    );
+
+    // FAIL-CLOSED: the refused write was NOT published — it must be absent.
+    assert_eq!(
+        count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await,
+        0,
+        "a refused (non-durable) write must NOT be published / queryable",
+    );
+
+    // The writer SURVIVED: reads still work (server alive), and the SAME write retried now
+    // succeeds (durability recovered) — 204 + queryable.
+    let retried = post_update(&cl, &s.base, "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/v> }").await;
+    assert_eq!(retried, 204, "after recovery the retried write must succeed (writer survived)");
+    assert_eq!(count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await, 1);
+
+    // The recovered write is genuinely DURABLE: restart on the same dir and it's still there.
+    s.stop().await;
+    let s2 = Server::start(persist_config(scratch.path())).await;
+    assert_eq!(
+        count_rows(&cl, &s2.base, "SELECT * WHERE { ?s ?p ?o }").await,
+        1,
+        "the post-recovery write must survive a restart (it really was made durable)",
+    );
+    s2.stop().await;
+}
+
+/// A PERSISTENT durable-write error → every write is refused 503 (no panic), the writer
+/// stays alive, and reads keep being served from the last published snapshot the whole time
+/// (degraded read-only mode).
+#[cfg(feature = "test-seams")]
+#[tokio::test]
+async fn persistent_durable_write_error_repeated_503_reads_survive() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+
+    // Jam durability from the start (a large failure budget) and assert the (empty) last
+    // published snapshot keeps serving reads under repeated refusals.
+    let s = start_with_transient_failures(persist_config(scratch.path()), 1_000).await;
+
+    for n in 0..4 {
+        let status = post_update(
+            &cl,
+            &s.base,
+            &format!("INSERT DATA {{ <http://ex/x{n}> <http://ex/p> <http://ex/v> }}"),
+        )
+        .await;
+        assert_eq!(status, 503, "write #{n} under persistent durability failure must be 503");
+        // Reads keep being served (the server is alive, degraded read-only).
+        assert_eq!(
+            count_rows(&cl, &s.base, "SELECT * WHERE { ?s ?p ?o }").await,
+            0,
+            "reads must keep being served from the (empty) last published snapshot during the outage",
+        );
+    }
+    s.stop().await;
+}

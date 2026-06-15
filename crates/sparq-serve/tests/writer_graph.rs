@@ -136,7 +136,7 @@ fn fork_cost_measurement() {
         let first = applier.fork(&g).unwrap();
         let first_cost = t.elapsed();
         assert_eq!(first.len(), n);
-        let frozen = applier.seal(first);
+        let frozen = applier.seal(first).unwrap(); // [OPUS-4.8] (sq-vpx4) fallible seal; in-memory never Err
 
         // Steady-state fork off the frozen lineage (no pending delta).
         let mut best = Duration::MAX;
@@ -165,7 +165,7 @@ fn fork_cost_measurement() {
                     .join(" ")
             );
             applier.apply(&mut w, &upd).unwrap();
-            base = applier.seal(w);
+            base = applier.seal(w).unwrap();
         }
         let total = t.elapsed();
         assert_eq!(base.len(), n + commits as usize * 10);
@@ -194,7 +194,7 @@ fn pending_delta_stays_bounded_under_sustained_updates() {
              <http://ex/b{c}> <http://ex/r> <http://ex/t{c}> }}"
         );
         applier.apply(&mut w, &upd).unwrap();
-        let sealed = applier.seal(w);
+        let sealed = applier.seal(w).unwrap();
         let pending = sealed.pending_delta_len();
         max_pending = max_pending.max(pending);
         if pending == 0 && c > 0 {

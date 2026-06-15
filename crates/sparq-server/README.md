@@ -148,11 +148,17 @@ Semantics:
   so a non-deterministic or side-effecting update (`NOW()`/`RAND()`/`UUID()`/`BNODE()`,
   `LOAD <remote>`) persists the EXACT value that was acked — never a re-rolled one — so a restart
   surfaces precisely what the client saw.
-- **Deferred hardening (beaded, not yet wired):** byte-accounted durability metrics, graceful
-  degradation on a *transient* disk-I/O error (today a durability failure is fatal — the write
-  is refused rather than silently lost), online compaction tuning under sustained write load,
-  and WAL-durable `CLEAR`/`DROP GRAPH <g>` of an *existing* named graph (today those operations
-  are applied in memory and persisted only at the next compaction).
+- **Graceful degradation on a durable-write error (sq-vpx4).** A durable-write failure (e.g. a
+  transient `ENOSPC` / I/O error on the `--persist` mirror) no longer kills the server: the
+  in-flight write is **refused with `503` (retryable)** — never acked `2xx`, never published —
+  and the writer thread stays alive. Reads keep being served from the last published snapshot
+  (degraded read-only), and a subsequent write succeeds once durability recovers; a persistent
+  error simply yields repeated `503`s. The fail-closed invariant is unchanged: a write that did
+  not durably commit is never observed by any reader.
+- **Deferred hardening (beaded, not yet wired):** byte-accounted durability metrics, online
+  compaction tuning under sustained write load, and WAL-durable `CLEAR`/`DROP GRAPH <g>` of an
+  *existing* named graph (today those operations are applied in memory and persisted only at the
+  next compaction).
 
 ## 🐳 Running the container image (ghcr.io)
 
