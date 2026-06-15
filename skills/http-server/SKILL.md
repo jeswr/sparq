@@ -34,9 +34,12 @@ cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriple
 > `query`/`update` body that parses as an update — and the GSP `PUT`/`POST`/`DELETE`
 > methods); otherwise `401` with `WWW-Authenticate: Bearer` (constant-time compared; mirrors
 > QLever's `-a <token>`). Add `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO
-> gate reads. The subscription transports (`/subscriptions` WebSocket and `/subscriptions/sse`
-> SSE) are a read surface and are NOT gated by this token (bead `sq-cxk5` — both transports
-> must gate together when it lands). The server binds **loopback by default** and **refuses a non-loopback
+> gate reads. The subscription transports — the `/subscriptions` WebSocket and the
+> `/subscriptions/sse` SSE stream (both a *read* surface) — are gated by `--auth-token-read`
+> too (bead `sq-cxk5`, closing the prior read-auth bypass): the SSE GET takes the
+> `Authorization: Bearer` header; the WS upgrade accepts that header OR (for browsers, which
+> cannot set headers on a WS handshake) a `Sec-WebSocket-Protocol: bearer.<token>` subprotocol.
+> With no read gate, both are open (back-compatible). The server binds **loopback by default** and **refuses a non-loopback
 > bind** (e.g. `0.0.0.0`) unless you set `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`) OR the
 > whole surface is authenticated (`--auth-token` AND `--auth-token-read`) — a write-token
 > alone still leaves reads open. Deliver the token over TLS (terminate it at a proxy). For
@@ -202,6 +205,14 @@ server:  {"unsubscribed": {"id": 1}}
 `addedResults`/`removedResults` are each full SPARQL-JSON results objects. Refusals and
 failed re-evaluations come back as `{"error": {"message": …, "id"?: n}}`.
 
+[OPUS-4.8] sq-cxk5: when `--auth-token-read` is set, the upgrade is gated behind the read
+token (`401` before upgrade otherwise). A non-browser client sends `Authorization: Bearer
+<TOKEN>` on the handshake; a **browser** (which cannot set WS handshake headers) passes it as
+a subprotocol: `new WebSocket("ws://host/subscriptions", ["bearer." + token])`. The server
+takes the substring after the `bearer.` prefix as the token, validates it (constant-time),
+and echoes the subprotocol back per RFC 6455. With no read token configured, the upgrade is
+open (back-compatible).
+
 **4b. SSE subscriptions (`text/event-stream`).** [OPUS-4.8] sq-bxog: the SAME subscription
 engine over Server-Sent Events, for clients that prefer a plain HTTP GET stream to a
 WebSocket. `GET /subscriptions/sse?query=<SELECT>[&alias=<x>]` opens one subscription per
@@ -227,7 +238,10 @@ event: notification
 id: 1
 data: {"notification":{"id":1,"sequence":1,"alias":"ages","addedResults":{…},"removedResults":{…}}}
 ```
-A registration refusal (missing/non-SELECT/malformed `query` → `400`; capacity/budget →
+[OPUS-4.8] sq-cxk5: like the WS path, when `--auth-token-read` is set this GET is gated
+behind the read token via the `Authorization: Bearer <TOKEN>` header (it is a plain GET, so
+the header is the only auth channel — no WS subprotocol) — `401` before the stream opens
+otherwise. A registration refusal (missing/non-SELECT/malformed `query` → `400`; capacity/budget →
 `503`) is returned as a normal `{"error":"…"}` JSON HTTP response BEFORE the stream opens —
 SSE cannot set a status once the stream is flowing. A later re-evaluation failure ends the
 stream with a final `event: error` frame. Both transports share one registry + change
@@ -393,8 +407,10 @@ and `update_in_place_with_budget`, and wrap calls in
   compared; QLever's `-a <token>`; missing-vs-wrong are indistinguishable). The classification
   keys on whether the request **mutates**, not the route — an Update smuggled through the
   query path is gated too. Add `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO
-  gate reads. The subscription transports (`/subscriptions` WS + `/subscriptions/sse` SSE)
-  are a read surface and are NOT gated by this token (bead `sq-cxk5`). The binary binds
+  gate reads — INCLUDING the subscription transports (`/subscriptions` WS + `/subscriptions/sse`
+  SSE, both a read surface), closing the prior read-auth bypass (bead `sq-cxk5`): the SSE GET
+  takes the `Authorization: Bearer` header; the WS upgrade accepts that header OR (for browsers)
+  a `Sec-WebSocket-Protocol: bearer.<token>` subprotocol. The binary binds
   `127.0.0.1:3030` by default and **refuses** a non-loopback
   `--addr` (incl. `0.0.0.0`/`::`) unless `--allow-remote` / `SPARQ_ALLOW_REMOTE=1` OR the
   whole surface is authenticated (`--auth-token` AND `--auth-token-read`); even then it warns.

@@ -36,8 +36,13 @@
 //! update; classification keys on whether the request MUTATES, not the route — plus the GSP
 //! `PUT`/`POST`/`DELETE` methods); otherwise `401` with `WWW-Authenticate: Bearer`
 //! (constant-time compared, scheme-casing tolerant; mirrors QLever's `-a <token>`). Add
-//! `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO gate reads. The
-//! `/subscriptions` WebSocket (a read surface) is NOT gated by this token.
+//! `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO gate reads. [OPUS-4.8] sq-cxk5:
+//! the subscription read surfaces — the `/subscriptions` WebSocket AND the
+//! `/subscriptions/sse` Server-Sent-Events stream — are gated by `--auth-token-read` too. The
+//! SSE GET takes the `Authorization: Bearer` header like any GET; the WS upgrade accepts the
+//! token from that header OR (for browsers, which cannot set headers on a WS handshake) a
+//! `Sec-WebSocket-Protocol: bearer.<token>` subprotocol. With no read token configured both
+//! are open (back-compatible).
 //!
 //! SECURITY (bind): `--addr` defaults to loopback (127.0.0.1:3030), reachable only from this
 //! host. A NON-loopback bind (e.g. `0.0.0.0`) is REFUSED unless `--allow-remote` (env
@@ -332,12 +337,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         AuthPosture::WriteOnly => eprintln!(
             "auth: --auth-token set — WRITES require 'Authorization: Bearer <token>'; READS \
              remain OPEN (add --auth-token-read to gate reads too). The /subscriptions \
-             WebSocket is a read surface and is NOT gated by this token."
+             WebSocket and /subscriptions/sse stream are read surfaces and are NOT gated \
+             without --auth-token-read."
         ),
+        // [OPUS-4.8] sq-cxk5: with --auth-token-read the subscription read surfaces (the
+        // /subscriptions WebSocket and the /subscriptions/sse stream) are gated by the read
+        // token too — no longer an open read bypass.
         AuthPosture::ReadAndWrite => eprintln!(
-            "auth: --auth-token + --auth-token-read set — the whole surface (reads AND writes) \
-             requires 'Authorization: Bearer <token>'. Note: the /subscriptions WebSocket is \
-             NOT gated by this token; deliver the token over TLS."
+            "auth: --auth-token + --auth-token-read set — the whole surface (reads AND writes), \
+             including the /subscriptions WebSocket and /subscriptions/sse stream, requires the \
+             Bearer token. WS browser clients pass it as a 'Sec-WebSocket-Protocol: bearer.<token>' \
+             subprotocol (no 'Authorization' header on a WS handshake); deliver the token over TLS."
         ),
     }
 

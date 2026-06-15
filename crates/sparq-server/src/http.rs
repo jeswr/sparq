@@ -207,6 +207,14 @@ pub struct ServerConfig {
     /// open). Has no effect unless `auth_token` is also set. When on, the whole surface is
     /// authenticated, which the bind posture ([`AuthPosture`]) treats as "auth present" for
     /// allowing a non-loopback bind without `--allow-remote`.
+    ///
+    /// [OPUS-4.8] sq-cxk5: the subscription READ surfaces — the `/subscriptions` WebSocket and
+    /// the `/subscriptions/sse` Server-Sent-Events stream (both stream live SELECT diffs) — are
+    /// gated by this flag too, closing the read-auth bypass that existed when they were always
+    /// open. The SSE GET reads the `Authorization: Bearer` header like any other GET; the WS
+    /// UPGRADE accepts the token from that header OR (for browsers, which cannot set headers on a
+    /// WS handshake) a `Sec-WebSocket-Protocol: bearer.<token>` subprotocol — see
+    /// [`crate::subscriptions::subscriptions_endpoint`] and [`ws_auth_gate`].
     pub auth_token_read: bool,
     /// [OPUS-4.8] (sq-4w18) SERVICE federation egress allowlist. SPARQL `SERVICE <iri>`
     /// makes attacker-controlled query text trigger an outbound HTTP request from the
@@ -421,8 +429,10 @@ pub fn bind_posture(addr: &SocketAddr, allow_remote: bool, auth: AuthPosture) ->
                  is not open to anonymous access. NOTE: the token is a single shared secret \
                  (not per-user authz) — deliver it over TLS (terminate at a proxy), and front \
                  it with a real authorization layer (a reverse proxy / gateway or sparq-solid) \
-                 for per-user access control. The /subscriptions WebSocket is a read surface \
-                 NOT gated by this token."
+                 for per-user access control. [OPUS-4.8] sq-cxk5: the /subscriptions WebSocket \
+                 AND /subscriptions/sse stream (read surfaces) are gated by --auth-token-read \
+                 too — browser WS clients pass the token as a 'Sec-WebSocket-Protocol: \
+                 bearer.<token>' subprotocol."
             ),
         };
     }
@@ -560,13 +570,39 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     }
 }
 
-/// [OPUS-4.8] sq-zcby: the per-request auth gate. Returns `None` to proceed, or `Some(401)` to
-/// refuse. A request is gated when its [`Operation`] is covered by the configured posture:
-/// a `Write` whenever a token is set; a `Read` only additionally when `--auth-token-read` is on.
-/// An ungated operation (or no token at all) always proceeds. A gated request must present the
-/// exact token (constant-time compared, scheme casing tolerant); the 401 is byte-identical for a
-/// missing vs a wrong token, so it never leaks which.
-fn auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Operation) -> Option<Response> {
+/// [OPUS-4.8] sq-cxk5: the WebSocket subprotocol-token prefix. A browser cannot set an
+/// `Authorization` header on a WebSocket handshake, so it carries the Bearer token as a
+/// `Sec-WebSocket-Protocol: bearer.<token>` subprotocol instead. See [`subprotocol_bearer_token`]
+/// and `crates/sparq-server/README.md` → "Authenticating a WebSocket subscription from a browser".
+pub(crate) const WS_BEARER_SUBPROTOCOL_PREFIX: &str = "bearer.";
+
+/// [OPUS-4.8] sq-cxk5: extracts a Bearer token offered as a `Sec-WebSocket-Protocol`
+/// subprotocol of the form `bearer.<token>` (the browser-compatible channel — browsers CANNOT
+/// set an `Authorization` header on a WS handshake, but `new WebSocket(url, [proto])` sets
+/// `Sec-WebSocket-Protocol`). The header may list several comma-separated subprotocols; the FIRST
+/// entry whose value starts with `bearer.` wins, and the substring AFTER the prefix is the token
+/// (no trimming of the token body — a subprotocol token is exact). Returns the FULL matched
+/// subprotocol string too (caller echoes it back per RFC 6455). `None` when no offered subprotocol
+/// carries the prefix.
+pub(crate) fn subprotocol_bearer_token(headers: &HeaderMap) -> Option<(&str, &str)> {
+    // A client may send multiple `Sec-WebSocket-Protocol` header lines, each itself a
+    // comma-separated list; scan every entry across all lines.
+    headers.get_all(header::SEC_WEBSOCKET_PROTOCOL).iter().find_map(|v| {
+        let raw = v.to_str().ok()?;
+        raw.split(',').map(str::trim).find_map(|proto| proto.strip_prefix(WS_BEARER_SUBPROTOCOL_PREFIX).map(|tok| (proto, tok)))
+    })
+}
+
+/// [OPUS-4.8] sq-zcby / sq-cxk5: the per-request auth decision core. Returns `None` to proceed,
+/// or `Some(401)` to refuse. A request is gated when its [`Operation`] is covered by the
+/// configured posture: a `Write` whenever a token is set; a `Read` only additionally when
+/// `--auth-token-read` is on. An ungated operation (or no token configured at all) always
+/// proceeds. A gated request must present the exact token (constant-time compared); `presented`
+/// is the candidate token already extracted from whichever channel the transport allows (the
+/// `Authorization: Bearer` header on plain HTTP, or ALSO the `bearer.<token>` WebSocket
+/// subprotocol — sq-cxk5). The 401 is byte-identical for a missing vs a wrong token, so it never
+/// leaks which.
+pub(crate) fn auth_check(config: &ServerConfig, op: Operation, presented: Option<&str>) -> Option<Response> {
     let token = config.auth_token.as_deref()?; // no token configured => never gated
     let gated = match op {
         Operation::Write => true,
@@ -575,7 +611,7 @@ fn auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Operation) -> Optio
     if !gated {
         return None;
     }
-    let ok = bearer_token(headers).is_some_and(|presented| constant_time_eq(token.as_bytes(), presented.as_bytes()));
+    let ok = presented.is_some_and(|p| constant_time_eq(token.as_bytes(), p.as_bytes()));
     if ok {
         None
     } else {
@@ -583,10 +619,32 @@ fn auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Operation) -> Optio
     }
 }
 
+/// [OPUS-4.8] sq-zcby: the per-request auth gate for the plain-HTTP surface — validates the
+/// `Authorization: Bearer <token>` header against the configured posture. See [`auth_check`].
+/// The SSE subscription GET (`/subscriptions/sse`) uses this exactly like the other GET routes
+/// (sq-cxk5): it is a plain GET, so the Bearer header is the only channel.
+pub(crate) fn auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Operation) -> Option<Response> {
+    auth_check(config, op, bearer_token(headers))
+}
+
+/// [OPUS-4.8] sq-cxk5: the auth gate for the `/subscriptions` WebSocket UPGRADE. A browser cannot
+/// set an `Authorization` header on a WS handshake, so this accepts the token from EITHER channel:
+/// the `Authorization: Bearer <token>` header (non-browser clients) OR a `Sec-WebSocket-Protocol:
+/// bearer.<token>` subprotocol (browsers). The token is validated against the read token
+/// (constant-time, [`auth_check`] with [`Operation::Read`]) — a subprotocol token is VALIDATED,
+/// never merely echoed. When `--auth-token-read` is not set (or no token is configured) the
+/// upgrade is unchanged (open) — back-compatible. The `Authorization` header is preferred when
+/// present; the subprotocol is the fallback so a browser is not penalised for offering an
+/// unrelated subprotocol alongside `bearer.<token>`.
+pub(crate) fn ws_auth_gate(config: &ServerConfig, headers: &HeaderMap, op: Operation) -> Option<Response> {
+    let presented = bearer_token(headers).or_else(|| subprotocol_bearer_token(headers).map(|(_, tok)| tok));
+    auth_check(config, op, presented)
+}
+
 /// [OPUS-4.8] sq-zcby: the 401 a gated request without a valid token gets — `WWW-Authenticate:
 /// Bearer` plus the server's standard JSON error body. Identical for a missing vs a wrong
 /// token (the body carries no hint either way), so it never leaks which.
-fn unauthorized() -> Response {
+pub(crate) fn unauthorized() -> Response {
     let mut resp = json_error(StatusCode::UNAUTHORIZED, "authentication required: present a valid Bearer token");
     resp.headers_mut().insert(header::WWW_AUTHENTICATE, header::HeaderValue::from_static("Bearer"));
     resp
@@ -2786,8 +2844,9 @@ mod bind_posture_tests {
     }
 
     /// A FULLY authenticated surface (token gates reads AND writes) is allowed to bind a
-    /// non-loopback address WITHOUT --allow-remote — there is no open endpoint left. It still
-    /// warns (single shared secret, deliver over TLS, /subscriptions not gated).
+    /// non-loopback address WITHOUT --allow-remote — there is no open endpoint left (sq-cxk5:
+    /// the /subscriptions WS + SSE read surfaces are gated by --auth-token-read too). It still
+    /// warns (single shared secret, deliver over TLS).
     #[test]
     fn full_auth_allows_remote_bind_without_optin() {
         match bind_posture(&addr("0.0.0.0:3030"), false, AuthPosture::ReadAndWrite) {
@@ -2946,6 +3005,63 @@ mod auth_tests {
             resp.headers().get(header::WWW_AUTHENTICATE).and_then(|v| v.to_str().ok()),
             Some("Bearer")
         );
+    }
+
+    // [OPUS-4.8] sq-cxk5: the WebSocket subprotocol-token channel + the WS auth gate.
+
+    fn headers_with_subprotocol(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    #[test]
+    fn subprotocol_bearer_token_extracts_the_bearer_subprotocol() {
+        // The matched subprotocol AND the token after the `bearer.` prefix are returned.
+        assert_eq!(subprotocol_bearer_token(&headers_with_subprotocol("bearer.t0k")), Some(("bearer.t0k", "t0k")));
+        // First bearer.* entry wins, even alongside other offered subprotocols.
+        assert_eq!(
+            subprotocol_bearer_token(&headers_with_subprotocol("graphql-ws, bearer.t0k, other")),
+            Some(("bearer.t0k", "t0k"))
+        );
+        // The token body is exact (no trimming) — a subprotocol value carries no spaces anyway.
+        assert_eq!(subprotocol_bearer_token(&headers_with_subprotocol("bearer.")), Some(("bearer.", "")));
+    }
+
+    #[test]
+    fn subprotocol_bearer_token_absent_without_the_prefix() {
+        assert_eq!(subprotocol_bearer_token(&headers_with_subprotocol("graphql-ws, chat")), None);
+        assert_eq!(subprotocol_bearer_token(&HeaderMap::new()), None);
+        // A scheme other than the `bearer.` subprotocol prefix is not a match.
+        assert_eq!(subprotocol_bearer_token(&headers_with_subprotocol("token.t0k")), None);
+    }
+
+    #[test]
+    fn ws_auth_gate_no_token_never_gates() {
+        let cfg = ServerConfig::default();
+        assert!(ws_auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_none());
+        // Even an offered bearer subprotocol proceeds when nothing is configured.
+        assert!(ws_auth_gate(&cfg, &headers_with_subprotocol("bearer.anything"), Operation::Read).is_none());
+    }
+
+    #[test]
+    fn ws_auth_gate_read_gate_accepts_header_or_subprotocol() {
+        let cfg = ServerConfig { auth_token: Some("secret".into()), auth_token_read: true, ..ServerConfig::default() };
+        // Neither channel => 401.
+        assert!(ws_auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_some(), "no credentials => 401");
+        // The Authorization: Bearer header is accepted (non-browser clients).
+        assert!(ws_auth_gate(&cfg, &headers_with_auth("Bearer secret"), Operation::Read).is_none(), "header token => proceed");
+        // The Sec-WebSocket-Protocol bearer.<token> subprotocol is accepted (browsers).
+        assert!(ws_auth_gate(&cfg, &headers_with_subprotocol("bearer.secret"), Operation::Read).is_none(), "subprotocol token => proceed");
+        // A WRONG subprotocol token is VALIDATED, not echoed — 401.
+        assert!(ws_auth_gate(&cfg, &headers_with_subprotocol("bearer.wrong"), Operation::Read).is_some(), "wrong subprotocol token => 401");
+    }
+
+    #[test]
+    fn ws_auth_gate_write_only_leaves_ws_read_open() {
+        // A write-only token (no --auth-token-read) does not gate the WS read upgrade.
+        let cfg = ServerConfig { auth_token: Some("secret".into()), ..ServerConfig::default() };
+        assert!(ws_auth_gate(&cfg, &HeaderMap::new(), Operation::Read).is_none(), "WS read open in write-only mode");
     }
 }
 
