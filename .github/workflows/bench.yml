@@ -100,27 +100,27 @@ jobs:
       # generator scripts so a generator/pinning change busts the cache. PRs skip the toolchain install
       # above, so a cache miss on a PR is harmless (the hook skips); on main it just rebuilds once.
       - name: Cache sp2b generator + corpus
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: /tmp/sp2b
           key: bench-sp2b-${{ runner.os }}-${{ hashFiles('bench/sp2b/gen.sh') }}
       - name: Cache watdiv generator + corpus
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: /tmp/watdiv
           key: bench-watdiv-${{ runner.os }}-${{ hashFiles('bench/watdiv/gen.sh', 'bench/watdiv/files/words.txt') }}
       - name: Cache bsbm generator + corpus
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: /tmp/bsbm
           key: bench-bsbm-${{ runner.os }}-${{ hashFiles('bench/bsbm/gen.sh') }}
       - name: Cache lubm generator + corpus
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: /tmp/lubm
           key: bench-lubm-${{ runner.os }}-${{ hashFiles('bench/lubm/gen.sh') }}
       - name: Cache dbpsb pinned slice + cut
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: /tmp/dbpsb
           key: bench-dbpsb-${{ runner.os }}-${{ hashFiles('bench/dbpsb/fetch.sh') }}
