@@ -124,6 +124,20 @@ Notes on a few that need care:
   `shacl_<workload>_validate_us` (trend-only, advisory). Heavy tiers: `univ=5`/`univ=10`. The
   cleanest competitor surface — Jena-SHACL / pySHACL / rdf-validate-shacl run the *identical*
   `(data, shapes)` pair (see the competitor map below + `scripts/bench-adapters/`).
+- **`text-index-bench` is the FULL-TEXT-SEARCH suite** — see
+  [`bench/fts/README.md`](./fts/README.md). It exercises `sparq-text` (BM25 inverted index +
+  `text:` magic predicates) over a **synthetic** corpus generated **in-process** (no external
+  generator — no `javac`/`rapper`): N seeded 8-word literals over a ~10k-term Zipf vocab. `run.sh`
+  is self-asserting: it runs the `bench_text` example and asserts each workload's **total hit
+  count** (`and_terms` / `or_terms` / `prefix4` / `phrase` / `near_slop2`, summed over a FIXED
+  200-query set drawn from an independent seed) and the integer **index bytes-per-doc** vs
+  `expected.tsv` (deterministic at the pinned `N=100000 seed=0` corpus; exit 1 on drift).
+  `fts_bytes_per_doc` also has a `mode:auto` ratchet in `bench/perf-baseline.json`. CI emits
+  `text_<workload>_us` + `text_build_s` (trend-only, advisory). Heavy/latency tier: `N=1000000`.
+  An IR-quality BEIR axis (Recall@100 / nDCG@10) is gather-only and not yet wired (follow-up bead).
+  Competitor honesty: **Solr/ES are NOT SPARQL competitors and stay off the dashboard**; the
+  surface peer is Fuseki + `jena-text` (`http-sparql`), the kernel ref is Lucene/Anserini (labelled
+  *sub-component, not an RDF benchmark*).
 - **`deep-taxonomy` (DeepTaxonomy) is the rule-heavy N3 REASONING suite** — see
   [`bench/deep-taxonomy/README.md`](./deep-taxonomy/README.md). `run.sh` is self-asserting and
   REUSES the existing generator `bench/inference/gen_deeptaxonomy.py` (1 instance + a depth-deep
@@ -188,6 +202,7 @@ bench/watdiv/run.sh 1                 # WatDiv SF=1 (g++ + Boost): gen + count/m
 bench/bsbm/run.sh                     # BSBM Explore -pc 300 (JRE + unzip): gen + materialize + row diff
 bench/lubm/run.sh                     # LUBM(1) (javac + rapper): gen + OWL-RL closure + both tiers + row diff
 bench/shacl/run.sh                    # SHACL (javac + rapper): LUBM ABox x 5 shapes + violations/conforms/focus_nodes diff
+cargo build --release -p sparq-text --example bench_text && bench/fts/run.sh   # Full-text (no external tool): synthetic BM25 corpus + hit-count/bytes-per-doc diff
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
 
 # --- selective bind-join + u64 value-id probes ---

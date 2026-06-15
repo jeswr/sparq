@@ -47,7 +47,7 @@ use sparq_zk::commit::{commit_triples, GraphCommitment};
 use sparq_zk::encode::salt_from_bytes;
 use sparq_zk::field::Fr;
 use sparq_zk::sig::{public_key_to_hex, SecretKey, SignatureScheme};
-use sparq_zk_compose::build::{build_scan, Pattern, Slot};
+use sparq_zk_compose::build::{build_join, build_scan, Pattern, Slot};
 use sparq_zk_compose::manifest::{
     AttestedStatusRef, BindingMode, CircuitId, CommitmentAttestation, EntailmentRegime, FieldHex,
     JoinEdge, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
@@ -482,6 +482,136 @@ fn drop_edge_falls_back_to_disclosed_path() {
     );
 }
 
+// === N-WAY CHAIN: shared-commitment composition (design §2.4) ================
+//
+// [OPUS-4.8] sq-r2s8: a query variable joined across MORE THAN TWO patterns is
+// composed from several pairwise `join_eq` sub-proofs. The composition is sound
+// only if every pairwise proof binds the SAME hiding `join_commitment` (one
+// blinder), so `a_val == b_val` per hop + the shared commitment compose into a
+// transitive N-way equality. `bind_joins` now enforces this: edges joining the
+// SAME query variable must carry byte-equal `join_commitment`s.
+
+// Graph C: `<ex/p> <ex/city> <ex/london>` — a THIRD credential sharing `<ex/p>` at
+// the SUBJECT (slot 0). Joins `?p` across a third pattern, forming a 3-way chain.
+fn graph_c() -> GraphCommitment {
+    let g = vec![Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/p")),
+        iri("http://ex/city"),
+        Term::NamedNode(iri("http://ex/london")),
+    )];
+    commit_triples(&g, salt_from_bytes(&[34u8; 32])).unwrap()
+}
+
+const CHAIN_QUERY: &str = "SELECT ?a ?p ?o ?c WHERE { \
+    ?a <http://ex/knows> ?p . ?p <http://ex/age> ?o . ?p <http://ex/city> ?c }";
+const SLOT_C: u32 = 0; // ?p is the SUBJECT of `?p <ex/city> ?c`
+
+/// The scan over pattern C (`?p <ex/city> ?c`).
+fn scan_c_inputs(c: &GraphCommitment) -> ProofInputs {
+    scan_inputs(c, Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/city"))),
+        o: Slot::Var,
+    })
+}
+
+/// A 3-way join manifest over `?p` shared across patterns A, B, C. Two hidden join
+/// edges: (scan_a, scan_b) and (scan_b, scan_c), BOTH joining `?p`. With
+/// `shared_commitment = true` both join_eq sub-proofs carry the SAME
+/// `join_commitment` (the honest N-way construction); with `false` the second hop
+/// carries a DIFFERENT commitment (the chain-forge). sub_proofs =
+/// [scan_a, scan_b, scan_c, join_ab, join_bc].
+fn chain_manifest(shared_commitment: bool) -> ProofManifest {
+    let (ga, gb, gc) = (graph_a(), graph_b(), graph_c());
+    let scan_a = scan_a_inputs(&ga);
+    let scan_b = scan_b_inputs(&gb);
+    let scan_c = scan_c_inputs(&gc);
+    let commit_a = commitment_hex(&scan_a);
+    let commit_b = commitment_hex(&scan_b);
+    let commit_c = commitment_hex(&scan_c);
+
+    // Hop 1: A.object(2) == B.subject(0). Hop 2: B.subject(0) == C.subject(0).
+    let mut join_ab = join_eq_inputs(commit_a, commit_b.clone(), SLOT_A, SLOT_B);
+    let mut join_bc = join_eq_inputs(commit_b, commit_c, SLOT_B, SLOT_C);
+    // Honest N-way: both hops bind the SAME hiding commitment. Forge: hop 2 differs.
+    let shared = FieldHex("0x0c".to_string());
+    if let ProofInputs::JoinEq { join_commitment, .. } = &mut join_ab {
+        *join_commitment = shared.clone();
+    }
+    if let ProofInputs::JoinEq { join_commitment, .. } = &mut join_bc {
+        *join_commitment = if shared_commitment {
+            shared.clone()
+        } else {
+            // Valid but DIFFERENT field element from `shared` (0x0c): the
+            // rejection is specifically due to divergent commitments, not a
+            // malformed-hex parse failure.
+            FieldHex("0xdeadbeef".to_string())
+        };
+    }
+
+    let sk = test_issuer_sk(1);
+    ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: CHAIN_QUERY.into(),
+        issuers: vec![],
+        key_set: vec![public_key_to_hex(&sk.public_key())],
+        commitment_attestations: vec![
+            attest_full(ga.commitment, ga.salt, &sk),
+            attest_full(gb.commitment, gb.salt, &sk),
+            attest_full(gc.commitment, gc.salt, &sk),
+        ],
+        attributions: vec![vec![0], vec![0], vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot()],
+        sub_proofs: vec![
+            SubProof { inputs: scan_a, proof_hex: String::new() },
+            SubProof { inputs: scan_b, proof_hex: String::new() },
+            SubProof { inputs: scan_c, proof_hex: String::new() },
+            SubProof { inputs: join_ab, proof_hex: String::new() },
+            SubProof { inputs: join_bc, proof_hex: String::new() },
+        ],
+        binding_edges: vec![],
+        join_edges: vec![
+            JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 3 },
+            JoinEdge { scan_a: 1, graph_a: 0, scan_b: 2, graph_b: 0, join_proof: 4 },
+        ],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    }
+}
+
+/// A 3-way join chain over `?p` whose two pairwise join_eq sub-proofs bind the SAME
+/// hiding commitment passes the structural `bind_joins` gate — the honest N-way
+/// composition (design §2.4). [OPUS-4.8] sq-r2s8.
+#[test]
+fn nway_chain_shared_commitment_passes() {
+    let m = chain_manifest(true);
+    prefilter(&m).expect(
+        "an N-way join chain whose pairwise hops bind the SAME join_commitment must pass bind_joins",
+    );
+}
+
+/// A 3-way join chain over `?p` whose second hop binds a DIFFERENT `join_commitment`
+/// is REJECTED (`JoinCommitmentChainMismatch`): the hops may have proved equalities
+/// over different values, so the claimed N-way join is unproven. This is the
+/// soundness obligation N-way composition adds over independent pairwise joins.
+/// [OPUS-4.8] sq-r2s8.
+#[test]
+fn nway_chain_divergent_commitment_rejected() {
+    let m = chain_manifest(false);
+    match prefilter(&m) {
+        Err(CheckError::JoinCommitmentChainMismatch { edge: 1 }) => {}
+        other => panic!(
+            "an N-way chain with a divergent join_commitment must be \
+             JoinCommitmentChainMismatch on edge 1, got {other:?}"
+        ),
+    }
+}
+
 // === REJECT 3: spurious / wrong-slot hidden join (anti-spurious, §4.4) =======
 
 /// Forge: the JoinEdge binds the right scans but its join_eq's slots don't match
@@ -552,18 +682,188 @@ fn forge_join_scan_a_not_scan_rejected() {
     }
 }
 
-// === ACCEPT (FULL bb path) — deferred join_eq proving ========================
+// === ACCEPT (FULL bb path) — REAL join_eq proof end-to-end ===================
+//
+// [OPUS-4.8] sq-r2s8: the join_eq PROVING path (`build_join` + `prover_toml_for`'s
+// JoinEq arm) now produces a real bb proof, so this test — previously
+// `#[ignore]`'d as `full_bb_join_accept_deferred` because no real join_eq proof
+// could be generated — now generates one and asserts it VERIFIES end-to-end
+// through `verify_manifest`: public-input reconstruction (audit #1), CANONICAL VK
+// by `CircuitId::JoinEq` (audit #2, enforcement point 2 — proved end-to-end with a
+// genuine proof), bb verify, the nonce binding (audit #4), AND the `bind_joins`
+// structural gate. The two scan sub-proofs ALSO carry real bb proofs (verify_manifest
+// verifies every sub-proof), so this is a faithful 3-proof composed manifest.
+//
+// TIER: this is the heavy toolchain/nightly lane — THREE real bb proves (two scans +
+// the join). It is `#[ignore]`'d so it does NOT run on the per-PR fast path, exactly
+// like `full_manifest_prove_verify_scan` in `e2e.rs`. It RUNS in the zk-toolchain /
+// nightly lane via `cargo nextest run -p sparq-zk-compose --run-ignored all`
+// (or `cargo test -- --ignored`) on a box with `nargo`+`bb`. The SECURITY-CRITICAL
+// reject paths above run WITHOUT the toolchain on every PR.
 
-/// Canonical-VK / public-input / nonce binding ACCEPT over a REAL `join_eq` bb
-/// proof. DEFERRED: `prover_toml_for`'s JoinEq arm returns `Err` (sq-fi03 left the
-/// join_eq proving path out of scope), so this suite cannot produce a real join_eq
-/// proof in-test. Enforcement point 2 (canonical VK) is therefore not exercised
-/// end-to-end here. Marked `#[ignore]` until the join_eq proving path lands; the
-/// reject paths above (the security-critical direction) are fully exercised
-/// without it. Tracked: sq-r2s8 (join_eq proving path + this full-bb accept).
+use sparq_zk::field::field_from_hex_str;
+use sparq_zk_compose::driver::CircuitProver;
+use sparq_zk_compose::toml::prover_toml_for;
+use sparq_zk_compose::verifier::{
+    verify_manifest, encode_artifacts, EntailmentPolicy, HolderBindingPolicy, HolderRegistry,
+    InMemorySeenNonces, VerifierNonce,
+};
+
+fn toolchain_available() -> bool {
+    fn on_path(tool: &str) -> bool {
+        std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    on_path("nargo") && on_path("bb")
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("sparq_zk_compose_join_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn nonce_for(hex: &str) -> VerifierNonce {
+    VerifierNonce::from_hex(hex).expect("parseable nonce")
+}
+
+/// REAL full-bb ACCEPT: a genuine `join_eq` proof (plus the two genuine scan
+/// proofs) verifies end-to-end through `verify_manifest`. Replaces the previously
+/// `#[ignore]`d-EMPTY `full_bb_join_accept_deferred` with an actual proof. Proves
+/// enforcement point 2 (canonical VK, audit #2) end-to-end for the join member.
 #[test]
-#[ignore = "join_eq proving path deferred (sq-fi03 prover_toml_for JoinEq => Err); sq-r2s8 implements build_join/prover_toml_for + un-ignores this for a real bb accept"]
-fn full_bb_join_accept_deferred() {
-    // Intentionally empty: documents the missing accept-proof capability honestly
-    // rather than asserting a property we cannot exercise.
+#[ignore = "heavy toolchain/nightly lane: THREE real bb proves (two scans + the join_eq). \
+            Runs via `cargo nextest run -p sparq-zk-compose --run-ignored all` (or \
+            `cargo test -- --ignored`) on a box with nargo+bb; sq-r2s8."]
+fn full_bb_join_accept_real_proof() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping full-bb join accept");
+        return;
+    }
+
+    let challenge = FieldHex(CHALLENGE_HEX.into());
+    let prover = CircuitProver::from_crate_root();
+
+    // The two committed credentials (same fixtures the structural suite uses): A
+    // holds `<ex/a> <ex/knows> <ex/p>` (join key at OBJECT, slot 2); B holds
+    // `<ex/p> <ex/age> "30"` (join key at SUBJECT, slot 0).
+    let ga = graph_a();
+    let gb = graph_b();
+
+    // --- scan A (real proof) ---
+    let pattern_a = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/knows"))),
+        o: Slot::Var,
+    };
+    let scan_a = build_scan(std::slice::from_ref(&ga), &pattern_a).expect("scan A builds");
+    let (sa_id, sa_toml) = prover_toml_for(
+        &scan_a.inputs,
+        &challenge,
+        &scan_a.witness.counts,
+        &scan_a.witness.enc,
+        &[],
+        None,
+    )
+    .expect("scan A toml");
+    let sa_art = prover
+        .prove_in(&sa_id, &sa_toml, &scratch("scan_a"), "join_scan_a")
+        .expect("scan A proves");
+
+    // --- scan B (real proof) ---
+    let pattern_b = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan_b = build_scan(std::slice::from_ref(&gb), &pattern_b).expect("scan B builds");
+    let (sb_id, sb_toml) = prover_toml_for(
+        &scan_b.inputs,
+        &challenge,
+        &scan_b.witness.counts,
+        &scan_b.witness.enc,
+        &[],
+        None,
+    )
+    .expect("scan B toml");
+    let sb_art = prover
+        .prove_in(&sb_id, &sb_toml, &scratch("scan_b"), "join_scan_b")
+        .expect("scan B proves");
+
+    // --- join_eq (real proof) — the headline path under test. ---
+    // A fixed (test-only) blinder; production draws it per-presentation.
+    let blinding = field_from_hex_str("0x1234abcd").expect("blinder parses");
+    let built_join =
+        build_join(&ga, SLOT_A, &gb, SLOT_B, blinding).expect("honest join builds (shared <ex/p>)");
+    let (j_id, j_toml) = prover_toml_for(
+        &built_join.inputs,
+        &challenge,
+        &[],
+        &[],
+        &[],
+        Some(&built_join.witness),
+    )
+    .expect("join toml emits with the witness");
+    assert_eq!(j_id, CircuitId::JoinEq { n_a: 16, n_b: 16 });
+    let j_art = prover
+        .prove_in(&j_id, &j_toml, &scratch("join_eq"), "join_eq")
+        .expect("join_eq proves (the relation is satisfiable for a real join)");
+    assert!(!j_art.proof.is_empty(), "join_eq produced a non-empty proof");
+
+    // The join's public commit_a/commit_b MUST equal the two scans' commitments
+    // (the bind_joins anti-A2 binding) — they do, because build_join read them from
+    // the SAME GraphCommitments build_scan committed.
+    assert_eq!(commitment_hex(&scan_a.inputs), match &built_join.inputs {
+        ProofInputs::JoinEq { commit_a, .. } => commit_a.clone(),
+        _ => unreachable!(),
+    });
+
+    // --- assemble the full manifest with REAL proofs on every sub-proof. ---
+    let sk = test_issuer_sk(1);
+    let manifest = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: JOIN_QUERY.into(),
+        issuers: vec![],
+        key_set: vec![public_key_to_hex(&sk.public_key())],
+        commitment_attestations: vec![
+            attest_full(ga.commitment, ga.salt, &sk),
+            attest_full(gb.commitment, gb.salt, &sk),
+        ],
+        attributions: vec![vec![0], vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: challenge.clone() },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot()],
+        sub_proofs: vec![
+            SubProof { inputs: scan_a.inputs, proof_hex: encode_artifacts(&sa_art) },
+            SubProof { inputs: scan_b.inputs, proof_hex: encode_artifacts(&sb_art) },
+            SubProof { inputs: built_join.inputs, proof_hex: encode_artifacts(&j_art) },
+        ],
+        binding_edges: vec![],
+        join_edges: vec![JoinEdge { scan_a: 0, graph_a: 0, scan_b: 1, graph_b: 0, join_proof: 2 }],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    };
+    // The verifier nonce that all three proofs committed (CHALLENGE_HEX) is bound
+    // as field 0 of every sub-proof by the audit-#1 reconstruction.
+    verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("verify"),
+        &trusted_k(&sk),
+        &fresh_policy(),
+        &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for(CHALLENGE_HEX),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("a real join_eq proof (canonical VK + pubinput + bb verify + bind_joins) must verify");
 }
