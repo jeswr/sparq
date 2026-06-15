@@ -538,14 +538,41 @@ pub fn commitment_message_with_status(commitment: &Fr, salt: &Fr, status_ref: &F
     ])
 }
 
+/// A holder key that cannot be digested into a binding (sq-y464, HolderPoP T1).
+/// Fails closed — mirrors the [`verify`] / [`public_key_from_hex`] discipline that
+/// the curve identity is never an admissible key.
+// [OPUS-4.8] sq-y464 (HolderPoP T1): holder-key digest error (fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HolderKeyError {
+    /// The holder public key is the curve IDENTITY (neutral element): it has no
+    /// affine coordinates, so it is not a valid Baby-JubJub binding key. Because
+    /// [`PublicKey`]'s tuple field is `pub`, an identity key can be constructed
+    /// externally; digesting it would silently fold `(0, 0)`, masking accidental
+    /// or malicious identity-key use — so it is rejected rather than digested.
+    IdentityKey,
+}
+
+impl std::fmt::Display for HolderKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HolderKeyError::IdentityKey => write!(
+                f,
+                "holder public key is the curve identity (no affine coordinates); not a valid binding key"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HolderKeyError {}
+
 /// A domain-separated digest of a HOLDER's public key (sq-y464, HolderPoP T1):
 /// `Poseidon2([ZKSIG_HK, hpk.x, hpk.y])` over the holder key's Baby-JubJub affine
 /// coordinates (= base-field [`Fr`] = Noir `Field`). This is the value the issuer
 /// folds into [`commitment_message_with_holder`], so a credential's bound holder
 /// key is ISSUER-ATTESTED rather than a free relying-party allow-list entry. A
-/// distinct domain tag (`ZKSIG_HK`, NOT the [`key_set_leaf`] `Poseidon2([x, y])`
-/// shape) so a holder-key digest can never be confused with the issuer key-set
-/// Merkle leaf computed over the same coordinates.
+/// distinct domain tag ([`SIG_DOMAIN_HOLDER_KEY`] = `ZKSIG_HK`, NOT the
+/// [`key_set_leaf`] `Poseidon2([x, y])` shape) so a holder-key digest can never be
+/// confused with the issuer key-set Merkle leaf computed over the same coordinates.
 ///
 /// # Mirrors the in-circuit digest (single source of truth)
 /// The B2 in-circuit holder PoK (deferred — T3/sq-z8s7) recomputes the SAME
@@ -555,26 +582,37 @@ pub fn commitment_message_with_status(commitment: &Fr, salt: &Fr, status_ref: &F
 /// drift could not make a wrong holder key verify (the established
 /// issuer/verifier/circuit single-source discipline).
 ///
-/// # Identity key (fail-closed, defensively)
-/// The identity point has no affine coordinates and is rejected at parse/verify
-/// ([`public_key_from_hex`], [`verify`]) so it can never be a usable holder key.
-/// Mirroring [`challenge`]'s defensive `unwrap_or`, this folds `(0, 0)` for the
-/// (unreachable) identity rather than panicking; an identity holder key never
-/// yields a valid issuer signature it could attack anyway.
+/// # Identity key (fail-closed)
+/// The identity point has no affine coordinates and is not a valid binding key
+/// (it is rejected at parse/verify too — see [`public_key_from_hex`], [`verify`]).
+/// Because [`PublicKey`]'s field is `pub`, an identity key can be constructed
+/// EXTERNALLY and reach this PUBLIC helper directly; rather than silently folding
+/// `(0, 0)` (which would mask accidental/malicious identity-key use), this returns
+/// [`HolderKeyError::IdentityKey`]. This is the SINGLE point where a holder
+/// [`PublicKey`] becomes a digest, so rejecting it here is sufficient:
+/// [`commitment_message_with_holder`] and [`SecretKey::sign_commitment_with_holder`]
+/// take the already-validated `&Fr` digest, so the whole holder-binding path is
+/// fail-closed on an identity key without any infallible `(0, 0)` back-door.
 // [OPUS-4.8] sq-y464 (HolderPoP T1): domain-separated holder-public-key digest.
 const SIG_DOMAIN_HOLDER_KEY: u64 = 0x5a4b_5349_475f_484b; // "ZKSIG_HK"
-pub fn holder_key_digest(hpk: &PublicKey) -> Fr {
-    let (x, y) = hpk.coords().unwrap_or((Fr::from(0u64), Fr::from(0u64)));
-    poseidon2::hash(&[Fr::from(SIG_DOMAIN_HOLDER_KEY), x, y])
+pub fn holder_key_digest(hpk: &PublicKey) -> Result<Fr, HolderKeyError> {
+    // Reject the curve identity (no affine coordinates). Do NOT fold (0, 0): an
+    // identity holder key is not a valid binding key, and silently digesting it
+    // would conceal accidental/malicious use of an externally-constructed identity
+    // PublicKey (its tuple field is `pub`). Fail closed.
+    let (x, y) = hpk.coords().ok_or(HolderKeyError::IdentityKey)?;
+    Ok(poseidon2::hash(&[Fr::from(SIG_DOMAIN_HOLDER_KEY), x, y]))
 }
 
 /// The signed message for a per-graph commitment that binds the per-graph RDFC10
 /// salt (audit #9), the credential's status-list reference (audit #12), AND a
 /// HOLDER-public-key digest (sq-y464, HolderPoP T1). The issuer signs
 /// `(C(G), salt_G, status_ref, holder_pk_digest)` under a NEW domain tag
-/// `ZKSIG_C4` (distinct from `ZKSIG_C1/C2/C3` at :57, :283, :504), so the holder
-/// key a credential is bound to becomes ISSUER-ATTESTED for that specific
-/// credential. `holder_pk_digest` is [`holder_key_digest`]`(hpk)`.
+/// `ZKSIG_C4` ([`SIG_DOMAIN_COMMITMENT_HOLDER`], distinct from the existing
+/// [`SIG_DOMAIN_COMMITMENT`] `ZKSIG_C1`, [`SIG_DOMAIN_COMMITMENT_SALT`] `ZKSIG_C2`,
+/// and [`SIG_DOMAIN_COMMITMENT_STATUS`] `ZKSIG_C3` tags), so the holder key a
+/// credential is bound to becomes ISSUER-ATTESTED for that specific credential.
+/// `holder_pk_digest` is [`holder_key_digest`]`(hpk)`.
 ///
 /// # The trusted-holder gap this closes (design §1/§2.B)
 /// The audit-#12 [`commitment_message_with_status`] signed object never includes
@@ -1332,7 +1370,7 @@ mod tests {
         let list_id = status_list_id_to_field("https://dmv.example/status/3");
         let sref = status_ref_digest(&list_id, 94, 7);
         let hpk = SecretKey::from_seed(201).public_key();
-        let hdig = holder_key_digest(&hpk);
+        let hdig = holder_key_digest(&hpk).expect("non-identity holder key digests");
 
         // Deterministic: same inputs => byte-identical message.
         let m1 = commitment_message_with_holder(&c, &salt, &sref, &hdig);
@@ -1352,7 +1390,7 @@ mod tests {
         // Binds the holder digest: a DIFFERENT holder key (=> different digest) =>
         // a different signed message.
         let hpk_other = SecretKey::from_seed(202).public_key();
-        let hdig_other = holder_key_digest(&hpk_other);
+        let hdig_other = holder_key_digest(&hpk_other).expect("non-identity holder key digests");
         assert_ne!(hdig, hdig_other, "distinct holder keys digest distinctly");
         let m_other = commitment_message_with_holder(&c, &salt, &sref, &hdig_other);
         assert_ne!(
@@ -1370,23 +1408,21 @@ mod tests {
         let (_sk_a, pk_a) = keypair(211);
         let (_sk_b, pk_b) = keypair(212);
 
+        let dig_a = holder_key_digest(&pk_a).expect("non-identity holder key digests");
+        let dig_b = holder_key_digest(&pk_b).expect("non-identity holder key digests");
         // Deterministic.
         assert_eq!(
-            holder_key_digest(&pk_a),
-            holder_key_digest(&pk_a),
+            dig_a,
+            holder_key_digest(&pk_a).expect("non-identity holder key digests"),
             "holder_key_digest must be deterministic"
         );
         // Distinguishes distinct keys.
-        assert_ne!(
-            holder_key_digest(&pk_a),
-            holder_key_digest(&pk_b),
-            "distinct holder keys must digest distinctly"
-        );
+        assert_ne!(dig_a, dig_b, "distinct holder keys must digest distinctly");
         // Domain-separated from the key-set Merkle leaf (h2(x, y)) over the SAME
         // coordinates: the ZKSIG_HK tag prevents holder-digest / key-set-leaf
         // confusion.
         assert_ne!(
-            holder_key_digest(&pk_a),
+            dig_a,
             key_set_leaf(&pk_a).expect("non-identity key has a leaf"),
             "holder_key_digest (ZKSIG_HK) must differ from the key-set leaf (h2(x,y))"
         );
@@ -1408,7 +1444,7 @@ mod tests {
         let list_id = status_list_id_to_field("https://dmv.example/status/3");
         let sref = status_ref_digest(&list_id, 94, 7);
         let hpk = SecretKey::from_seed(222).public_key();
-        let hdig = holder_key_digest(&hpk);
+        let hdig = holder_key_digest(&hpk).expect("non-identity holder key digests");
 
         // Round-trip: issuer signs the holder-bound message, existing verify accepts.
         let hex = sk.sign_commitment_with_holder(&c, &salt, &sref, &hdig);
@@ -1430,7 +1466,8 @@ mod tests {
 
         // And a DIFFERENT holder digest => different message => fails (a presenter
         // cannot substitute its own key for the issuer-bound one).
-        let hdig_other = holder_key_digest(&SecretKey::from_seed(223).public_key());
+        let hdig_other = holder_key_digest(&SecretKey::from_seed(223).public_key())
+            .expect("non-identity holder key digests");
         let msg_other = commitment_message_with_holder(&c, &salt, &sref, &hdig_other);
         assert!(
             !verify(&pk, &msg_other, &sig),
@@ -1449,6 +1486,39 @@ mod tests {
         assert!(
             !verify(&pk, &holder_msg, &status_sig),
             "a status-only sig must NOT verify against the holder-bound message (no upgrade-by-substitution)"
+        );
+    }
+
+    /// [OPUS-4.8] sq-y464 (HolderPoP T1) — Copilot review on #124: the IDENTITY /
+    /// neutral holder key MUST be rejected by `holder_key_digest`, not silently
+    /// digested as `(0, 0)`. `PublicKey`'s tuple field is `pub`, so an identity key
+    /// is externally constructible and could reach this PUBLIC helper directly; a
+    /// holder key that is the curve identity is not a valid binding key, and
+    /// digesting it would mask accidental/malicious identity-key use. It must fail
+    /// closed with [`HolderKeyError::IdentityKey`] (matching the [`verify`] /
+    /// [`public_key_from_hex`] identity-rejection discipline). `coords()` returning
+    /// `None` is exactly the identity case.
+    #[test]
+    fn identity_holder_key_digest_rejected() {
+        let id_pk = PublicKey(Affine::<EdwardsConfig>::zero());
+        assert!(id_pk.0.is_zero(), "constructed the identity point");
+        assert!(
+            id_pk.coords().is_none(),
+            "identity key has no affine coordinates (the None case)"
+        );
+        // It must NOT be silently digested as (0, 0): fail closed with a descriptive
+        // error instead of returning Poseidon2([ZKSIG_HK, 0, 0]).
+        assert_eq!(
+            holder_key_digest(&id_pk),
+            Err(HolderKeyError::IdentityKey),
+            "an identity/None holder key must be rejected, not digested as (0, 0)"
+        );
+        // Sanity: a real (non-identity) key still digests Ok — the rejection is
+        // specific to the identity, not a blanket failure.
+        let real = SecretKey::from_seed(231).public_key();
+        assert!(
+            holder_key_digest(&real).is_ok(),
+            "a non-identity holder key must still digest successfully"
         );
     }
 }
