@@ -67,6 +67,13 @@ bzip2 = "0.4"
 # crate (and the same CRC params) the wrapped `hdt` reader uses for the bitmap /
 # sequence sections, so the direct path validates byte-for-byte identically.
 crc = "3"
+# [OPUS-4.8] sq-s506 (lever H6): decode the four PFC dictionary sections
+# (shared / subjects / objects / predicates) concurrently on the rayon pool. Native
+# only — sparq-hdt is never in the sparq-wasm graph (`cargo tree -p sparq-wasm` shows
+# no sparq-hdt), so this can never reach the wasm bundle. Always-on (not feature
+# gated): the read path here already spawns threads in the wrapped reader and the use
+# case is bulk ingest, so unlike sparq-core there is no single-threaded build to keep.
+rayon = { workspace = true }
 
 [dev-dependencies]
 # The `sophia` feature provides hdt's (experimental) N-Triples -> HDT writer
