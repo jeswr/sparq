@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 96" role="img" aria-label="sparq">
-  <style>.ink{fill:currentColor}.edge{stroke:currentColor;stroke-width:5;fill:none}.spark{fill:#f5a623}</style>
+  <style>.ink{fill:#1a1a1a}.edge{stroke:#1a1a1a;stroke-width:5;fill:none}@media (prefers-color-scheme:dark){.ink{fill:#e8e8e8}.edge{stroke:#e8e8e8}}.spark{fill:#f5a623}</style>
   <g transform="translate(20,24)">
     <line class="edge" x1="12" y1="36" x2="44" y2="12"/><line class="edge" x1="44" y1="12" x2="76" y2="36"/>
     <circle class="ink" cx="12" cy="36" r="9"/><circle class="ink" cx="44" cy="12" r="9"/><circle class="ink" cx="76" cy="36" r="9"/>
