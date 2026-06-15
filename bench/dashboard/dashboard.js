@@ -418,11 +418,16 @@
     for (var i = 0; i < FAMILIES.length; i++) {
       if (FAMILIES[i].suites.indexOf(suite) !== -1) return FAMILIES[i];
     }
-    // structural prefix fallback (capability families before sparql so e.g. `geo` wins over a
-    // stray `q`-prefixed token; FAMILIES order already lists core+sparql first, so iterate the
-    // capability families explicitly first to avoid a generic `op`/`q` swallowing them).
+    // structural prefix fallback. We must check CAPABILITY families (shacl/geo/fts/vector/
+    // reasoning) BEFORE core+sparql so a capability metric is never mis-bucketed into SPARQL by a
+    // generic `op`/`q` prefix. FAMILIES is declared in DISPLAY order (core, sparql, then the
+    // capability families), so a single forward pass would hit sparql first; do an explicit
+    // two-pass scan — capability families first (kind === 'capability'), then the rest.
     for (var j = 0; j < FAMILIES.length; j++) {
-      if (FAMILIES[j].prefixes.indexOf(token) !== -1) return FAMILIES[j];
+      if (FAMILIES[j].kind === 'capability' && FAMILIES[j].prefixes.indexOf(token) !== -1) return FAMILIES[j];
+    }
+    for (var k = 0; k < FAMILIES.length; k++) {
+      if (FAMILIES[k].kind !== 'capability' && FAMILIES[k].prefixes.indexOf(token) !== -1) return FAMILIES[k];
     }
     // last resort: query-shaped -> SPARQL, else core.
     if (/^(q\d+|op)_/.test((name || '').toLowerCase())) return FAMILIES[1];
@@ -435,10 +440,12 @@
   // nav + "not yet reported" section make coverage visible. Pure + node-testable — this is what the
   // synchronous summary-first first-paint renders (NO charts, NO label fetch needed). sq-rltn.
   function buildFamilies(entries) {
-    var latest = entries[entries.length - 1];
     var byKey = {};
     FAMILIES.forEach(function (f) { byKey[f.key] = { family: f, rows: [], suites: {} }; });
-    latest.benches.forEach(function (b) {
+    // [OPUS-4.8] Empty/absent series: keep the docstring promise (every family kept, zero-count)
+    // instead of throwing on entries[-1]. Return the same shape with empty rows.
+    var latest = (entries && entries.length) ? entries[entries.length - 1] : null;
+    (latest ? latest.benches : []).forEach(function (b) {
       var f = familyOf(b.name);
       var best = bestOf(entries, b.name);
       var suite = suiteFor(b.name);
@@ -844,7 +851,10 @@
     if (!host) return;
     host.innerHTML = '';
 
-    // family nav: a chip per family with its metric count; clicking scrolls to + opens the section.
+    // family nav: a chip per family with its metric count. The chip is an anchor (href="#fam-…") so
+    // it scrolls to the section AND a click handler OPENS that family's <details> trends disclosure
+    // (so the chip both jumps to and reveals the trends, the intended UX). The anchor href keeps it
+    // keyboard/middle-click friendly; the handler is purely additive enhancement.
     var nav = el('nav', { 'class': 'family-nav', 'aria-label': 'benchmark families' });
     familyView.forEach(function (fam) {
       var chip = el('a', { 'class': 'family-chip' + (fam.count ? '' : ' family-chip-empty'),
@@ -853,6 +863,12 @@
         el('span', { 'class': 'family-chip-name', text: fam.title }),
         el('span', { 'class': 'family-chip-count', text: fam.count ? String(fam.count) : '—' })
       ]);
+      chip.addEventListener('click', function () {
+        // open the target section's <details> Trends disclosure so the chip reveals, not just jumps.
+        var sec = document.getElementById('fam-' + fam.key);
+        var det = sec && typeof sec.querySelector === 'function' && sec.querySelector('details.family-trends');
+        if (det) det.open = true;
+      });
       nav.appendChild(chip);
     });
     host.appendChild(nav);
@@ -930,10 +946,22 @@
     var sumHost = document.getElementById('families') || document.getElementById('summary');
     if (!data || !data.entries || !data.entries[SERIES] || !data.entries[SERIES].length) {
       if (sumHost) sumHost.textContent =
-        'No benchmark data yet — the chart populates after the first push to main.';
+        'No benchmark data yet — the capability-family summary populates after the first push to main.';
       return null;
     }
     var entries = data.entries[SERIES];
+    // [OPUS-4.8] Preserve user state across a REPAINT (e.g. when metric-labels.json resolves and we
+    // re-run to swap in readable labels). renderFamilies() does host.innerHTML = '' which wipes any
+    // expanded <details> + scroll. Capture which family sections were open BEFORE the rebuild so we
+    // can restore them AFTER, so a relabel doesn't collapse what the user opened.
+    var openFams = {};
+    if (sumHost && typeof sumHost.querySelectorAll === 'function') {
+      var openDetails = sumHost.querySelectorAll('section.family-section[id] > details.family-trends[open]');
+      for (var oi = 0; oi < openDetails.length; oi++) {
+        var parentSec = openDetails[oi].parentNode;
+        if (parentSec && parentSec.id) openFams[parentSec.id] = true;
+      }
+    }
     var updated = document.getElementById('updated');
     if (updated) updated.textContent =
       'last updated ' + new Date(data.lastUpdate).toLocaleString() + ' · ' + entries.length + ' commits';
@@ -941,6 +969,16 @@
     if (repoHost && !repoHost.firstChild) repoHost.appendChild(
       el('a', { href: data.repoUrl, target: '_blank', text: data.repoUrl.replace(/^https?:\/\//, '') }));
     renderFamilies(buildFamilies(entries), entries);   // <-- summary-first, lazy charts
+    // [OPUS-4.8] Restore the <details> the user had expanded before this repaint (state preserved
+    // across the relabel repaint). Setting .open fires the `toggle` listener, which lazily builds
+    // that section's trend chart grid — so re-opened sections re-mount their charts too.
+    if (sumHost && typeof sumHost.querySelector === 'function') {
+      Object.keys(openFams).forEach(function (secId) {
+        var sec = document.getElementById(secId);
+        var det = sec && typeof sec.querySelector === 'function' && sec.querySelector('details.family-trends');
+        if (det) det.open = true;
+      });
+    }
     return entries;
   }
 
@@ -990,6 +1028,13 @@
         window.COMPETITORS = competitors;
         paintFeaturedAndScaling(entries, competitors);
       });
+  }
+
+  // [OPUS-4.8] Copilot #200: test-only hook so the node smoke-test can drive the REAL relabel
+  // repaint (paintSummary re-run) and assert user state (expanded <details>) survives — exercising
+  // the actual code path, not a copy. Guarded by an explicit flag, so it is inert in production.
+  if (typeof window !== 'undefined' && window.__SPARQ_DASHBOARD_TEST__) {
+    window.__sparqDashboardTest = { paintSummary: paintSummary };
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

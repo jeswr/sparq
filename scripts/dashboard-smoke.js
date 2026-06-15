@@ -337,6 +337,22 @@ famByKey.sparql.rows.forEach(function (r) {
 });
 ok(sawFamWatdiv, 'watdiv row present in the SPARQL family view');
 
+// [OPUS-4.8] Copilot #200: buildFamilies must NOT throw on an empty/absent entries list — it does
+// entries[entries.length - 1], which would blow up on []. The docstring promises empty families
+// are kept, so an empty input returns one zero-count entry per family (the same shape).
+let emptyFamView = null;
+let emptyThrew = false;
+try { emptyFamView = D.buildFamilies([]); } catch (e) { emptyThrew = true; }
+ok(!emptyThrew, 'buildFamilies([]) does not throw on an empty entries list (Copilot #200)');
+ok(Array.isArray(emptyFamView) && emptyFamView.length === D.FAMILIES.length,
+   'buildFamilies([]) still returns one entry per family');
+ok(emptyFamView && emptyFamView.every(function (f) { return f.count === 0 && f.rows.length === 0; }),
+   'buildFamilies([]) returns every family with count 0 / no rows');
+// also tolerate undefined / no entries at all (defensive, same guard).
+let undefThrew = false;
+try { D.buildFamilies(undefined); } catch (e) { undefThrew = true; }
+ok(!undefThrew, 'buildFamilies(undefined) does not throw either');
+
 // ============================================================================================
 // [OPUS-4.8] BROWSER-DOM SIMULATION — confirm the featured section + scaling charts actually
 // build DOM (sq-xvow #featured / sq-viby #scaling), like sq-ocuf's renderSummary smoke would. A
@@ -345,18 +361,68 @@ ok(sawFamWatdiv, 'watdiv row present in the SPARQL family view');
 // ============================================================================================
 (function domSimulation() {
   // --- minimal DOM shim: just enough for el()/renderFeatured()/renderSummary()/render(). -------
+  // [OPUS-4.8] Copilot #200: the shim now models enough of the DOM that the state-preservation
+  // logic (querySelector/querySelectorAll over .family-section / details.family-trends[open],
+  // parentNode, id, and a real toggle event on `open`) actually exercises in node — so the
+  // relabel-preserves-open-state assertion below is a true behavioural check, not a no-op skip.
+  function classList(node) { return (node.attributes['class'] || '').split(/\s+/).filter(Boolean); }
+  // Tiny CSS-ish matcher supporting the exact selectors dashboard.js uses:
+  //   "details.family-trends", "details.family-trends[open]",
+  //   "section.family-section[id] > details.family-trends[open]"
+  function matchSimple(node, sel) {
+    sel = sel.trim();
+    if (sel === '*') return true;
+    var m = sel.match(/^([a-z]+)?((?:\.[a-z0-9-]+)*)((?:\[[a-z]+\])*)$/i);
+    if (!m) return false;
+    if (m[1] && node.tagName !== m[1]) return false;
+    var cls = (m[2].match(/\.[a-z0-9-]+/gi) || []).map(function (c) { return c.slice(1); });
+    var have = classList(node);
+    for (var i = 0; i < cls.length; i++) if (have.indexOf(cls[i]) === -1) return false;
+    var attrs = m[3].match(/\[([a-z]+)\]/gi) || [];
+    for (var j = 0; j < attrs.length; j++) {
+      var name = attrs[j].slice(1, -1);
+      if (name === 'open') { if (!node.open) return false; }
+      else if (!(name in node.attributes) && node[name] == null) return false;
+    }
+    return true;
+  }
+  function descendants(node, out) {
+    node.children.forEach(function (c) { out.push(c); descendants(c, out); });
+    return out;
+  }
   function makeNode(tag) {
     return {
       tagName: tag, children: [], attributes: {}, _text: '', _html: '',
-      style: {}, open: false,
+      style: {}, _open: false, parentNode: null, _listeners: {},
+      get id() { return this.attributes.id; },
       set textContent(v) { this._text = String(v); }, get textContent() { return this._text; },
       set innerHTML(v) { this._html = String(v); if (v === '') this.children = []; },
       get innerHTML() { return this._html; },
+      get open() { return this._open; },
+      set open(v) {
+        var was = this._open; this._open = !!v;
+        if (was !== this._open) (this._listeners.toggle || []).forEach(function (fn) { fn({ type: 'toggle' }); });
+      },
       get lastChild() { return this.children[this.children.length - 1]; },
       get firstChild() { return this.children[0]; },
       setAttribute: function (k, v) { this.attributes[k] = String(v); },
-      appendChild: function (c) { this.children.push(c); return c; },
-      addEventListener: function () {},
+      appendChild: function (c) { c.parentNode = this; this.children.push(c); return c; },
+      addEventListener: function (ev, fn) { (this._listeners[ev] = this._listeners[ev] || []).push(fn); },
+      dispatch: function (ev) { (this._listeners[ev] || []).forEach(function (fn) { fn({ type: ev }); }); },
+      querySelector: function (sel) { return this.querySelectorAll(sel)[0] || null; },
+      querySelectorAll: function (sel) {
+        var self = this;
+        if (sel.indexOf('>') !== -1) {
+          var parts = sel.split('>').map(function (s) { return s.trim(); });
+          var parent = parts[0], child = parts[1];
+          var res = [];
+          descendants(self, []).forEach(function (n) {
+            if (matchSimple(n, parent)) n.children.forEach(function (c) { if (matchSimple(c, child)) res.push(c); });
+          });
+          return res;
+        }
+        return descendants(self, []).filter(function (n) { return matchSimple(n, sel); });
+      },
       getContext: function () { return {}; }
     };
   }
@@ -367,11 +433,21 @@ ok(sawFamWatdiv, 'watdiv row present in the SPARQL family view');
   global.document = {
     readyState: 'complete',
     createElement: makeNode,
-    getElementById: function (id) { return hosts[id] || makeNode('div'); },
+    getElementById: function (id) {
+      if (hosts[id]) return hosts[id];
+      // [OPUS-4.8] also resolve dynamically-created ids (e.g. the fam-<key> sections appended into
+      // #families) so the relabel state-preservation path can re-find a section by id.
+      for (var k in hosts) {
+        var found = hosts[k].querySelectorAll('*').filter(function (n) { return n.attributes.id === id; })[0];
+        if (found) return found;
+      }
+      return makeNode('div');
+    },
     addEventListener: function () {}
   };
   global.window = {
     matchMedia: function () { return { matches: false }; },
+    __SPARQ_DASHBOARD_TEST__: true,   // [OPUS-4.8] expose paintSummary so we can drive a real relabel
     BENCHMARK_DATA: {
       lastUpdate: Date.now(), repoUrl: 'https://github.com/jeswr/sparq',
       entries: { 'sparq engine': [{
@@ -460,6 +536,41 @@ ok(sawFamWatdiv, 'watdiv row present in the SPARQL family view');
   // scaling host should contain a chart-grid with at least one scaling card.
   ok(hosts.scaling.children[0] && hosts.scaling.children[0].attributes['class'] === 'chart-grid',
      'DOM: scaling host holds a chart-grid');
+
+  // ---- Copilot #200: a RELABEL repaint must PRESERVE expanded <details> + re-mount their charts --
+  // The user expands the SPARQL family's Trends disclosure; then metric-labels.json resolves and
+  // paintSummary() re-runs (the relabel repaint). Before the fix, host.innerHTML='' wiped the open
+  // state. After the fix, paintSummary captures open sections and restores them.
+  (function relabelPreservesState() {
+    const hook = global.window.__sparqDashboardTest;
+    ok(hook && typeof hook.paintSummary === 'function', 'DOM: test hook exposes paintSummary for relabel test');
+    if (!hook) return;
+    // open the SPARQL family <details> (simulate the user expanding it). Setting .open fires toggle,
+    // which lazily builds that section's chart grid.
+    const sparqlSection = hosts.families.querySelectorAll('section.family-section')
+      .filter(function (s) { return s.attributes.id === 'fam-sparql'; })[0];
+    const det = sparqlSection && sparqlSection.querySelector('details.family-trends');
+    ok(det, 'DOM: found SPARQL family <details> to expand');
+    det.open = true;
+    const gridBefore = det.querySelector('div.chart-grid');
+    ok(gridBefore && gridBefore.children.length > 0, 'DOM: expanding mounts the trend chart cards (lazy build ran)');
+    // now drive the REAL relabel repaint (paintSummary re-run).
+    hook.paintSummary();
+    // the SPARQL section is rebuilt; its <details> must be OPEN again (state preserved).
+    const sparqlAfter = hosts.families.querySelectorAll('section.family-section')
+      .filter(function (s) { return s.attributes.id === 'fam-sparql'; })[0];
+    const detAfter = sparqlAfter && sparqlAfter.querySelector('details.family-trends');
+    ok(detAfter && detAfter.open === true,
+       'DOM: relabel repaint PRESERVES the expanded SPARQL <details> (Copilot #200 state-preservation)');
+    // a family the user did NOT open stays closed (we only restore what was open).
+    const coreAfter = hosts.families.querySelectorAll('section.family-section')
+      .filter(function (s) { return s.attributes.id === 'fam-core'; })[0];
+    const coreDet = coreAfter && coreAfter.querySelector('details.family-trends');
+    ok(coreDet && coreDet.open === false, 'DOM: an un-opened family stays closed after repaint (no over-restore)');
+    // re-opened section re-mounted its charts (toggle fired on restore).
+    const gridAfter = detAfter && detAfter.querySelector('div.chart-grid');
+    ok(gridAfter && gridAfter.children.length > 0, 'DOM: restored <details> re-mounts its trend charts');
+  })();
 
   delete global.document; delete global.window; delete global.Chart; delete global.IntersectionObserver;
 })();
