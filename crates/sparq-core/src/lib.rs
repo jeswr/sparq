@@ -1783,6 +1783,163 @@ impl Graph {
         Ok(())
     }
 
+    /// [OPUS-4.8] (sq-5atq) EXTERNAL-MEMORY build for a DATASET WITH NAMED GRAPHS — the
+    /// out-of-core twin of an in-RAM dataset `load_dataset` + [`save`](Self::save). Streams an
+    /// N-Quads (`"nquads"`/`"n-quads"`) or TriG (`"trig"`) document and writes the SAME
+    /// on-disk layout [`save_named`](Self::save_named) emits — the default graph in `dir`
+    /// itself plus each named graph under `dir/named/<i>/`, committed by the `dir/named.bin`
+    /// manifest — so [`open`](Self::open) reads the whole dataset back LOSSLESSLY (mmap).
+    ///
+    /// BOUNDED MEMORY THROUGHOUT. We do NOT build the dataset in RAM. Instead the quad
+    /// stream is read ONCE and PARTITIONED BY GRAPH NAME into per-graph on-disk N-Triples
+    /// spill files (only the parser's buffer + small per-graph write buffers are resident);
+    /// then each graph's spill is built INDEPENDENTLY through the existing single-graph
+    /// external pipeline ([`build_external`](Self::build_external) → external SPO sort,
+    /// disk-backed runs, k-way merge), each into its own directory with its own dictionary —
+    /// exactly the per-sub-graph `save()` that `save_named` produces. Peak RAM is therefore
+    /// bounded by the per-graph external build's `chunk`, not by the dataset size.
+    ///
+    /// Re-serialising each quad's triple to canonical N-Triples for the spill is LOSSLESS:
+    /// the same escaping the parser accepts, blank-node labels preserved verbatim (and
+    /// blank-node scope is per-graph in N-Quads/TriG, so a relabel-free round-trip through a
+    /// single per-graph file preserves identity exactly as the in-RAM dataset loader does).
+    ///
+    /// Graph names are kept in FIRST-OCCURRENCE document order — the same order the in-RAM
+    /// dataset loaders populate [`named`](Self::named) and that `save_named` then writes — so
+    /// the on-disk `named/<i>/` indices + manifest match the in-RAM `save_named` path. The
+    /// default-graph-only case writes no `named/` subtree and no manifest (byte-identical to
+    /// [`build_external`](Self::build_external)), and an empty default graph still produces a
+    /// valid (empty) store in `dir`.
+    ///
+    /// `chunk` is the per-graph external-build run size (see [`build_external`]).
+    #[cfg(feature = "mmap")]
+    pub fn build_external_quads<R: std::io::Read>(
+        reader: R,
+        format: &str,
+        dir: &std::path::Path,
+        chunk: usize,
+    ) -> Result<(), String> {
+        use oxrdf::{GraphName, TripleRef};
+        use std::io::{BufWriter, Write};
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        // Stale-state hygiene mirroring `save_named`: a re-build into the same directory must
+        // not inherit a previous build's named subtree/manifest.
+        std::fs::remove_dir_all(dir.join(NAMED_SUBDIR)).ok();
+        std::fs::remove_file(dir.join(NAMED_MANIFEST)).ok();
+
+        // Per-graph N-Triples spill directory (deleted at the end). Each graph gets one file
+        // of canonical N-Triples lines; the default graph is the special slot.
+        let spill_dir = dir.join("quads-spill");
+        std::fs::remove_dir_all(&spill_dir).ok();
+        std::fs::create_dir_all(&spill_dir).map_err(|e| e.to_string())?;
+
+        // First-occurrence order of named-graph names, and a writer per graph. The default
+        // graph is `default.nt`; named graph `i` (in first-occurrence order) is `g<i>.nt`.
+        let mut names: Vec<Term> = Vec::new();
+        let mut index: std::collections::HashMap<Term, usize> = std::collections::HashMap::new();
+        let mut default_w: Option<BufWriter<std::fs::File>> = None;
+        let mut named_w: Vec<BufWriter<std::fs::File>> = Vec::new();
+        // The N-Triples low-level serializer is STATELESS (it just writes one canonical line
+        // per triple to the writer it is handed), so a single instance serves every graph.
+        let mut ser = oxttl::NTriplesSerializer::new().low_level();
+
+        macro_rules! route {
+            ($q:expr) => {{
+                let q = $q.map_err(|e| e.to_string())?;
+                let triple =
+                    TripleRef::new(&q.subject, q.predicate.as_ref(), q.object.as_ref());
+                match q.graph_name {
+                    GraphName::DefaultGraph => {
+                        let w = match default_w.as_mut() {
+                            Some(w) => w,
+                            None => {
+                                let f = std::fs::File::create(spill_dir.join("default.nt"))
+                                    .map_err(|e| e.to_string())?;
+                                default_w = Some(BufWriter::new(f));
+                                default_w.as_mut().expect("just set")
+                            }
+                        };
+                        ser.serialize_triple(triple, &mut *w).map_err(|e| e.to_string())?;
+                    }
+                    other => {
+                        let name = match other {
+                            GraphName::NamedNode(n) => Term::NamedNode(n),
+                            GraphName::BlankNode(b) => Term::BlankNode(b),
+                            GraphName::DefaultGraph => unreachable!("matched above"),
+                        };
+                        let slot = match index.get(&name) {
+                            Some(&i) => i,
+                            None => {
+                                let i = names.len();
+                                let f = std::fs::File::create(spill_dir.join(format!("g{i}.nt")))
+                                    .map_err(|e| e.to_string())?;
+                                named_w.push(BufWriter::new(f));
+                                index.insert(name.clone(), i);
+                                names.push(name);
+                                i
+                            }
+                        };
+                        ser.serialize_triple(triple, &mut named_w[slot]).map_err(|e| e.to_string())?;
+                    }
+                }
+            }};
+        }
+
+        match format {
+            "nquads" | "n-quads" => {
+                for q in NQuadsParser::new().for_reader(reader) {
+                    route!(q);
+                }
+            }
+            "trig" | "application/trig" => {
+                for q in TriGParser::new().for_reader(reader) {
+                    route!(q);
+                }
+            }
+            other => {
+                return Err(format!(
+                    "build_external_quads: unsupported quad format {other:?} (expected nquads or trig)"
+                ));
+            }
+        }
+
+        // Flush every spill writer so the per-graph files are complete before we build them.
+        if let Some(mut w) = default_w.take() {
+            w.flush().map_err(|e| e.to_string())?;
+        }
+        for mut w in named_w {
+            w.flush().map_err(|e| e.to_string())?;
+        }
+
+        // Build the DEFAULT graph in `dir` itself (even when empty — an empty `default.nt`
+        // streams to a valid empty store, matching a default-graph-only `save`).
+        let default_path = spill_dir.join("default.nt");
+        let default_file = std::fs::File::open(&default_path).or_else(|_| {
+            std::fs::File::create(&default_path)?;
+            std::fs::File::open(&default_path)
+        });
+        match default_file {
+            Ok(f) => Self::build_external(f, "ntriples", dir, chunk)?,
+            Err(e) => return Err(e.to_string()),
+        }
+
+        // Build each NAMED graph into `dir/named/<i>/` (first-occurrence order = manifest
+        // order), then commit the manifest LAST — the same ordering + commit point as
+        // `save_named`, so `open`/`open_named` read the dataset back identically.
+        if !names.is_empty() {
+            let named_dir = dir.join(NAMED_SUBDIR);
+            std::fs::create_dir_all(&named_dir).map_err(|e| e.to_string())?;
+            for i in 0..names.len() {
+                let f = std::fs::File::open(spill_dir.join(format!("g{i}.nt"))).map_err(|e| e.to_string())?;
+                Self::build_external(f, "ntriples", &named_dir.join(i.to_string()), chunk)?;
+            }
+            write_named_manifest(dir, &names).map_err(|e| e.to_string())?;
+        }
+
+        std::fs::remove_dir_all(&spill_dir).ok();
+        Ok(())
+    }
+
     /// External-memory build with the SPILLED term dictionary (`dict-spill` feature):
     /// peak RSS is bounded by `cfg.mem_budget` (dictionary included) instead of growing
     /// with the distinct-term count — terms spill to disk and are externally
@@ -5680,6 +5837,189 @@ mod tests {
             v
         };
         assert_eq!(dump(&mem), dump(&ext), "external-built store differs");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (sq-5atq) Dumps a whole DATASET (default graph + every named graph) as a
+    /// sorted set of `(graph, s, p, o)` string tuples — the lossless per-graph quad set used
+    /// to compare two opened stores. The default graph's name is the empty string `""`.
+    #[cfg(feature = "mmap")]
+    fn dump_quads(g: &Graph) -> Vec<(String, String, String, String)> {
+        fn dump_graph(g: &Graph, gname: &str, out: &mut Vec<(String, String, String, String)>) {
+            let scan = g.store.scan(&[None, None, None]);
+            for r in scan.rows.iter() {
+                let spo = scan.to_spo(r);
+                out.push((
+                    gname.to_string(),
+                    g.dict.term(spo[0]).to_string(),
+                    g.dict.term(spo[1]).to_string(),
+                    g.dict.term(spo[2]).to_string(),
+                ));
+            }
+        }
+        let mut v = Vec::new();
+        dump_graph(g, "", &mut v);
+        for (name, sub) in &g.named {
+            dump_graph(sub, &name.to_string(), &mut v);
+        }
+        v.sort();
+        v
+    }
+
+    /// [OPUS-4.8] (sq-5atq) An N-Quads dataset with several named graphs builds via the
+    /// OUT-OF-CORE quad path (`build_external_quads`) and `open`s LOSSLESSLY — the opened
+    /// store's per-graph quad set equals the input quad set. A TINY chunk forces the per-graph
+    /// external SPO sort to spill across many runs + k-way merge (the genuine bounded-memory
+    /// path), so the corpus is large enough that several graphs each overflow the chunk.
+    /// Covers the edge cases the brief names: a graph with ONE quad, a DEFAULT graph mixed
+    /// with named graphs in the same stream, and DUPLICATE quads across graphs (the same
+    /// triple in two graphs is two distinct dataset quads; a duplicate within one graph
+    /// dedups to one).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn build_external_quads_lossless_open() {
+        let mut nq = String::new();
+        // Three named graphs each large enough to overflow a tiny chunk, plus default-graph
+        // quads interleaved in the same stream.
+        for i in 0..2000u32 {
+            let g = i % 3;
+            nq.push_str(&format!(
+                "<http://ex/s{}> <http://ex/p{}> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> <http://ex/g{}> .\n",
+                i % 137, i % 11, i % 90, g
+            ));
+            if i % 5 == 0 {
+                // Default-graph quad interleaved (no 4th term).
+                nq.push_str(&format!(
+                    "<http://ex/s{}> <http://ex/d{}> \"{}\" .\n",
+                    i % 137, i % 7, i % 90
+                ));
+            }
+        }
+        // A graph with exactly ONE quad.
+        nq.push_str("<http://ex/only> <http://ex/p> <http://ex/o> <http://ex/single> .\n");
+        // A blank-node-subject quad in a named graph (round-trips losslessly per graph).
+        nq.push_str("_:b0 <http://ex/p> _:b1 <http://ex/g0> .\n");
+        // DUPLICATE quad within one graph (dedups) + the SAME triple in another graph (kept).
+        nq.push_str("<http://ex/dup> <http://ex/p> <http://ex/o> <http://ex/g0> .\n");
+        nq.push_str("<http://ex/dup> <http://ex/p> <http://ex/o> <http://ex/g0> .\n");
+        nq.push_str("<http://ex/dup> <http://ex/p> <http://ex/o> <http://ex/g1> .\n");
+
+        let base = std::env::temp_dir().join(format!("sparq_extq_{}", std::process::id()));
+        let ext_dir = base.join("ext");
+
+        // Build out-of-core with a TINY chunk (genuinely exercises the per-graph spill path).
+        Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64).unwrap();
+        let ext = Graph::open(&ext_dir).unwrap();
+
+        // Reference: the in-RAM dataset load (its quad set is the ground truth).
+        let mem_g = Graph::load_dataset(&nq, "nquads").unwrap();
+        assert_eq!(
+            dump_quads(&mem_g),
+            dump_quads(&ext),
+            "out-of-core quad build is not lossless vs the in-RAM dataset load"
+        );
+        // The manifest must exist (there ARE named graphs) and the named-graph set must match.
+        assert!(ext_dir.join("named.bin").exists(), "named manifest not written by quad build");
+        assert_eq!(ext.named.len(), mem_g.named.len(), "named-graph count differs");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (sq-5atq) DIFFERENTIAL: the out-of-core `build_external_quads` opened store
+    /// equals the in-RAM dataset load + `save` (`save_named`) opened store — same on-disk
+    /// layout family, same per-graph quad set, same named-graph ordering. This pins the
+    /// out-of-core path to the existing in-RAM persistence as its reference.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn build_external_quads_differential_vs_save_named() {
+        let mut nq = String::new();
+        for i in 0..1500u32 {
+            nq.push_str(&format!(
+                "<http://ex/s{}> <http://ex/p{}> <http://ex/o{}> <http://ex/graph/{}> .\n",
+                i % 97, i % 5, i % 60, i % 4
+            ));
+        }
+        nq.push_str("<http://ex/x> <http://ex/y> \"z\"@en .\n"); // default-graph quad
+        nq.push_str("<http://ex/lone> <http://ex/p> <http://ex/o> <http://ex/graph/lonely> .\n");
+
+        let base = std::env::temp_dir().join(format!("sparq_extq_diff_{}", std::process::id()));
+        let mem_dir = base.join("mem");
+        let ext_dir = base.join("ext");
+
+        // In-RAM dataset load → save (the reference on-disk layout), vs out-of-core build.
+        let mem_g = Graph::load_dataset(&nq, "nquads").unwrap();
+        mem_g.save(&mem_dir).unwrap();
+        Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 128).unwrap();
+
+        let mem = Graph::open(&mem_dir).unwrap();
+        let ext = Graph::open(&ext_dir).unwrap();
+        assert_eq!(
+            dump_quads(&mem),
+            dump_quads(&ext),
+            "out-of-core quad build differs from in-RAM save_named"
+        );
+        // Named-graph ordering (manifest order = first-occurrence) must match.
+        let mem_names: Vec<String> = mem.named.iter().map(|(n, _)| n.to_string()).collect();
+        let ext_names: Vec<String> = ext.named.iter().map(|(n, _)| n.to_string()).collect();
+        assert_eq!(mem_names, ext_names, "named-graph manifest ordering differs");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (sq-5atq) Edge case: a DEFAULT-GRAPH-ONLY N-Quads stream (no named graphs)
+    /// must build a clean default-only directory — NO `named/` subtree, NO `named.bin` —
+    /// and open losslessly, matching the N-Triples `build_external` default-only layout.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn build_external_quads_default_only_no_manifest() {
+        let nq = "<http://ex/a> <http://ex/b> <http://ex/c> .\n\
+                  <http://ex/a> <http://ex/b> \"lit\" .\n";
+        let base = std::env::temp_dir().join(format!("sparq_extq_def_{}", std::process::id()));
+        let ext_dir = base.join("ext");
+        Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64).unwrap();
+        assert!(!ext_dir.join("named.bin").exists(), "default-only quad build must not write a manifest");
+        assert!(!ext_dir.join("named").exists(), "default-only quad build must not write a named subtree");
+        let ext = Graph::open(&ext_dir).unwrap();
+        let mem = Graph::load_dataset(nq, "nquads").unwrap();
+        assert_eq!(dump_quads(&mem), dump_quads(&ext), "default-only quad build not lossless");
+        assert!(ext.named.is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (sq-5atq) Edge case: an EMPTY default graph that still has named graphs —
+    /// every quad carries a graph name, so the default graph has zero triples. The default
+    /// store in `dir` must be a valid empty store and the named graphs must round-trip.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn build_external_quads_empty_default_graph() {
+        let nq = "<http://ex/a> <http://ex/b> <http://ex/c> <http://ex/g1> .\n\
+                  <http://ex/d> <http://ex/e> <http://ex/f> <http://ex/g2> .\n";
+        let base = std::env::temp_dir().join(format!("sparq_extq_emptydef_{}", std::process::id()));
+        let ext_dir = base.join("ext");
+        Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64).unwrap();
+        let ext = Graph::open(&ext_dir).unwrap();
+        assert_eq!(ext.len(), 0, "default graph must be empty");
+        assert_eq!(ext.named.len(), 2, "two named graphs expected");
+        let mem = Graph::load_dataset(nq, "nquads").unwrap();
+        assert_eq!(dump_quads(&mem), dump_quads(&ext), "empty-default quad build not lossless");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (sq-5atq) The TriG out-of-core path mirrors N-Quads: a small TriG dataset
+    /// builds via `build_external_quads` and opens losslessly vs the in-RAM TriG load. (TriG
+    /// reuses the exact same partition-by-graph + per-graph external build as N-Quads — only
+    /// the parser differs — so this is a smoke test of the format wiring, not a separate path.)
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn build_external_quads_trig_lossless_open() {
+        let trig = "@prefix ex: <http://ex/> .\n\
+                    ex:s ex:p ex:o .\n\
+                    ex:g1 { ex:a ex:b ex:c . ex:a ex:b ex:d . }\n\
+                    ex:g2 { ex:x ex:y ex:z . }\n";
+        let base = std::env::temp_dir().join(format!("sparq_extq_trig_{}", std::process::id()));
+        let ext_dir = base.join("ext");
+        Graph::build_external_quads(trig.as_bytes(), "trig", &ext_dir, 64).unwrap();
+        let ext = Graph::open(&ext_dir).unwrap();
+        let mem = Graph::load_dataset(trig, "trig").unwrap();
+        assert_eq!(dump_quads(&mem), dump_quads(&ext), "TriG out-of-core build not lossless");
         std::fs::remove_dir_all(&base).ok();
     }
 

@@ -357,6 +357,39 @@ fn build_external_then_query_mmap_round_trip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// [OPUS-4.8] (sq-5atq) The CLI `build` of an N-Quads dataset goes through the OUT-OF-CORE
+/// quad path (`build_external_quads`), so its NAMED GRAPHS must survive end-to-end: a
+/// `GRAPH <g> { ?s ?p ?o }` query over the opened index returns that graph's quads, not a
+/// flattened default graph. Before the quad-aware `build` wiring, every quad was silently
+/// folded into the default graph and this query returned nothing.
+#[test]
+fn build_external_nquads_named_graph_round_trip() {
+    let dir = scratch("build-nquads-roundtrip");
+    let nq = "\
+<http://ex/alice> <http://ex/knows> <http://ex/bob> <http://ex/g1> .
+<http://ex/bob> <http://ex/age> \"25\" <http://ex/g1> .
+<http://ex/x> <http://ex/y> <http://ex/z> <http://ex/g2> .
+<http://ex/default> <http://ex/p> <http://ex/o> .
+";
+    let data = write(&dir, "data.nq", nq);
+    let idx = dir.join("nqidx");
+
+    let (bc, _bo, be) = run3(&["build", s(&data), "nquads", s(&idx)]);
+    assert_eq!(bc, 0, "build stderr: {be}");
+    assert!(idx.join("named.bin").is_file(), "named manifest not written by quad build");
+
+    // g1 has two quads; the GRAPH query must see exactly them (not a flattened default graph).
+    let (qc, qo, qe) = run3(&[
+        "query-mmap",
+        s(&idx),
+        "SELECT ?s ?p ?o WHERE { GRAPH <http://ex/g1> { ?s ?p ?o } }",
+        "--count",
+    ]);
+    assert_eq!(qc, 0, "query-mmap stderr: {qe}");
+    assert!(qo.contains("2 solutions"), "GRAPH g1 query stdout: {qo}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn recompress_raw_index_then_query() {
     let dir = scratch("recompress");

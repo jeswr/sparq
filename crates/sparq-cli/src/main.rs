@@ -383,11 +383,21 @@ fn cmd_build(args: &[String]) {
     let reader = std::io::BufReader::with_capacity(1 << 22, decoded);
 
     let t = Instant::now();
-    sparq_core::Graph::build_external(reader, format, std::path::Path::new(dir), chunk)
-        .unwrap_or_else(|e| {
-            eprintln!("build error: {e}");
-            std::process::exit(1);
-        });
+    // [OPUS-4.8] (sq-5atq) Quad formats (N-Quads / TriG) build OUT-OF-CORE *with* their named
+    // graphs via `build_external_quads` (partition-by-graph + per-graph external sort, same
+    // on-disk layout `save_named` emits) — a default-graph-only `build_external` would silently
+    // FLATTEN every quad into the default graph, losing the dataset's named graphs (the PSS
+    // shape). Triple formats keep the existing single-graph external path unchanged.
+    let build_result = match format {
+        "nquads" | "n-quads" | "trig" | "application/trig" => {
+            sparq_core::Graph::build_external_quads(reader, format, std::path::Path::new(dir), chunk)
+        }
+        _ => sparq_core::Graph::build_external(reader, format, std::path::Path::new(dir), chunk),
+    };
+    build_result.unwrap_or_else(|e| {
+        eprintln!("build error: {e}");
+        std::process::exit(1);
+    });
     eprintln!(
         "built on-disk indexes in {dir} in {:.1}s (external-memory, {}M-triple runs)",
         t.elapsed().as_secs_f64(),
