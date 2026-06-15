@@ -1,0 +1,19 @@
+<!doctype html>
+<!-- [OPUS-4.8] sparq Pages root redirect. The benchmark dashboard is served from the
+     benchmark-data branch under dev/bench/, so the bare Pages root (https://jeswr.github.io/sparq/)
+     would otherwise 404 and read as "the dashboard is dark". bench.yml's seed step copies this file
+     to the benchmark-data branch ROOT as index.html so the bare URL bounces to dev/bench/.
+     Kept tiny + dependency-free: a meta refresh does the redirect, a canonical link points search
+     engines at the dashboard, and a manual <a> is the no-JS/no-meta fallback. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="refresh" content="0; url=dev/bench/" />
+  <link rel="canonical" href="dev/bench/" />
+  <title>sparq · benchmark dashboard</title>
+</head>
+<body>
+  <p>Redirecting to the sparq benchmark dashboard… If you are not redirected, <a href="dev/bench/">open the dashboard</a>.</p>
+</body>
+</html>
