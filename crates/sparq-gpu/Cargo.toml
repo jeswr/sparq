@@ -28,7 +28,7 @@ publish = false
 [dependencies]
 # wgpu 22: the exact version the research/hardware/wgpu-spike prototype proved to
 # build and run unmodified on Metal (M1); same source targets Vulkan/DX12/WebGPU.
-wgpu = "22"
+wgpu = "29"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 
