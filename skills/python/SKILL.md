@@ -1,11 +1,11 @@
 ---
 name: python
-description: Use the sparq RDF + SPARQL engine from Python (PyPI: sparq). Reach for this when an agent or developer needs to load RDF (Turtle/N-Triples/N-Quads/TriG), run SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE, apply SPARQL Update, do opt-in RDFS/OWL-RL/Notation3 reasoning + OWL inconsistency checks, run BM25 full-text search (text: magic predicates), or persist/memory-map a triplestore — all via the pyo3 sparq.Graph class.
+description: Use the sparq RDF + SPARQL engine from Python (PyPI distribution `sparq-rdf`; `import sparq`). Reach for this when an agent or developer needs to load RDF (Turtle/N-Triples/N-Quads/TriG), run SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE, apply SPARQL Update, do opt-in RDFS/OWL-RL/Notation3 reasoning + OWL inconsistency checks, run BM25 full-text search (text: magic predicates), or persist/memory-map a triplestore — all via the pyo3 sparq.Graph class.
 ---
 
 # sparq (Python)
 
-Python bindings (pyo3 + maturin, PyPI package name `sparq`) for the sparq RDF+SPARQL engine: a dictionary-encoded triplestore with SPARQL 1.1 query/update over the full dataset (named graphs included), opt-in RDFS / OWL-RL / Notation3 reasoning with OWL inconsistency reporting, and opt-in BM25 full-text search. Everything is reached through one class, `sparq.Graph`.
+Python bindings (pyo3 + maturin) for the sparq RDF+SPARQL engine: a dictionary-encoded triplestore with SPARQL 1.1 query/update over the full dataset (named graphs included), opt-in RDFS / OWL-RL / Notation3 reasoning with OWL inconsistency reporting, and opt-in BM25 full-text search. Everything is reached through one class, `sparq.Graph`. The PyPI **distribution** name is `sparq-rdf` (`pip install sparq-rdf`), but the **import** name is `sparq` (`import sparq`) — the two intentionally differ because the bare `sparq` distribution name is taken on PyPI by an unrelated package.
 
 ## Quickstart
 

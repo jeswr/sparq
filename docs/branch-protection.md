@@ -70,7 +70,7 @@ From the binding/packaging workflows (when those surfaces are exercised):
 
 | Job name | Workflow | What it gates |
 |---|---|---|
-| `maturin build + pytest` | `.github/workflows/python.yml` | The `sparq` PyPI binding build + pytest parity suite. |
+| `maturin build + pytest` | `.github/workflows/python.yml` | The `sparq-rdf` PyPI binding (`import sparq`) build + pytest parity suite. |
 | (js binding job) | `.github/workflows/js.yml` | The `@jeswr/sparq` npm build/tests. |
 
 > Heavy benchmarks (`bench.yml`, `bench-ec2.yml`) and release/dist workflows are **not**

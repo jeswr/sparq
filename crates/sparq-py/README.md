@@ -1,5 +1,10 @@
 # sparq (Python bindings)
 
+> **PyPI distribution `sparq-rdf`, import name `sparq`.** Install with
+> `pip install sparq-rdf`, then `import sparq` in your code. The distribution and
+> import names differ because the bare `sparq` name is taken on PyPI by an unrelated
+> package; the importable module is unaffected.
+
 Python bindings for the [sparq](https://github.com/jeswr/sparq) RDF + SPARQL engine:
 a dictionary-encoded triplestore with six permutation indexes, a SPARQL 1.1 query
 engine (SELECT / ASK / CONSTRUCT / DESCRIBE), SPARQL Update over the full dataset

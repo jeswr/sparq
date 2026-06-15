@@ -12,7 +12,9 @@ here for the runbook:
   satisfies crates.io, but the release archives and the Docker/ghcr page should carry the
   actual text; `release.yml` copies `LICENSE` into every archive *if present*.
 - See **§0a crate-name availability** below — checked; all crates.io names are clear, the
-  npm scope `@jeswr/sparq` is clear, but the PyPI name `sparq` is taken (rename needed).
+  npm scope `@jeswr/sparq` is clear, and the PyPI **distribution** name `sparq` is taken, so
+  the Python wheel publishes as **`sparq-rdf`** (owner-approved; the import name stays
+  `sparq` — done, see the Python wheels section).
 - `cargo owner` / crates.io API token configured locally (`cargo login`).
 
 ## 0a. Crate-name availability
@@ -43,11 +45,14 @@ first publish — registries change.
 | `sparq-nlq` | crates.io | available |
 | `@jeswr/sparq` | npm | available |
 | `sparq` | PyPI | **taken** — unrelated `shiventi/sparq` (SJSU degree-planning API client, latest 0.2.6) |
+| `sparq-rdf` | PyPI | chosen distribution name (owner-approved; `pip install sparq-rdf`, `import sparq`) |
 
 **Conclusion:** all crates.io names and the npm scope are clear to publish as-is. The PyPI
-name `sparq` is taken by a real, unrelated, actively-maintained package — **the Python
-wheels surface needs a rename before its first PyPI publish** (tracked as a bead; see the
-Python wheels section below). No crates.io rename is required.
+**distribution** name `sparq` is taken by a real, unrelated, actively-maintained package, so
+the Python wheel ships as **`sparq-rdf`** (owner-approved; `sq-8slf`). This is the only name
+that changed — the **import** name stays `sparq` (`import sparq`), and no crates.io / npm
+name is affected. Done in `crates/sparq-py/pyproject.toml` (`[project] name = "sparq-rdf"` +
+`[tool.maturin] module-name = "sparq"`); see the Python wheels section below.
 
 ## 1. Version bump
 
@@ -196,23 +201,24 @@ Users get `sparq-cli` plus a `sparq` symlink on PATH.
 - Bump `[workspace.package] version` to the next `-dev` cycle if desired, and start a new
   `## [Unreleased]` section in `CHANGELOG.md`.
 
-<!-- [OPUS-4.8] release publishing tracked: bead sq-7re (wheels matrix), sq-ed5 (PyPI name). -->
-## Python wheels (PyPI) — release publishing not yet wired (beads `sq-7re`, `sq-ed5`)
+<!-- [OPUS-4.8] release publishing tracked: bead sq-7re (wheels matrix). PyPI name resolved by sq-8slf (was sq-ed5). -->
+## Python wheels (PyPI) — release publishing not yet wired (bead `sq-7re`)
 
-`crates/sparq-py` packages the engine as the Python package **`sparq`** (pyo3 +
-maturin, `abi3-py39` so one wheel per platform covers CPython ≥ 3.9). CI builds and
-tests it informationally on pushes to main (`.github/workflows/python.yml`); release
-publishing is **not** wired. To ship wheels with a release later:
+`crates/sparq-py` packages the engine as the PyPI distribution **`sparq-rdf`** with the
+import name **`sparq`** (`pip install sparq-rdf`, then `import sparq`) — pyo3 + maturin,
+`abi3-py39` so one wheel per platform covers CPython ≥ 3.9. CI builds and tests it
+informationally on pushes to main (`.github/workflows/python.yml`); release publishing is
+**not** wired. To ship wheels with a release later:
 
-1. Resolve the PyPI **distribution** name only: the `[project] name` in
-   `crates/sparq-py/pyproject.toml` — i.e. the **PyPI project / distribution** name, the
-   `pip install <dist>` name — is currently `sparq`, which is **taken** by an unrelated
-   package (see §0a). Pick a distinct distribution name (e.g. `sparq-rdf`) before the first
-   PyPI publish. This is the **only** name that must change. Keep the Python
-   **import/module** name as `sparq` (it comes from the cdylib `[lib] name` + the
-   `#[pymodule] fn sparq`); since the distribution and module names would then differ, add
-   `[tool.maturin] module-name = "sparq"` to pin it. Net: users `pip install sparq-rdf` but
-   still `import sparq`. (Only the PyPI distribution name is contested — not the import
+1. PyPI **distribution** name — **done** (`sq-8slf`, owner-approved). The bare `sparq`
+   distribution name is **taken** by an unrelated package (see §0a), so the
+   `[project] name` in `crates/sparq-py/pyproject.toml` — i.e. the **PyPI project /
+   distribution** name, the `pip install <dist>` name — is **`sparq-rdf`**. The
+   **import/module** name is kept as `sparq` (it comes from the cdylib `[lib] name` + the
+   `#[pymodule] fn sparq`); because the distribution and module names differ,
+   `[tool.maturin] module-name = "sparq"` pins the import name (otherwise maturin would
+   normalise the distribution name to `sparq_rdf`). Net: users `pip install sparq-rdf` but
+   still `import sparq`. (Only the PyPI distribution name was contested — not the import
    module, not any crate name.)
 2. Add a wheels job to `release.yml` using `PyO3/maturin-action` with a platform
    matrix (manylinux x86_64/aarch64, macOS arm64/x64, Windows x64), each step:

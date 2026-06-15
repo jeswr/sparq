@@ -52,8 +52,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The CLI, HTTP server, Python (`sparq` on PyPI), and JS/WASM (`@jeswr/sparq`) mirror the same
-surface. Per-surface how-tos live in the [usage skills](skills/SKILL.md).
+The CLI, HTTP server, Python (`sparq-rdf` on PyPI — `import sparq`), and JS/WASM
+(`@jeswr/sparq`) mirror the same surface. Per-surface how-tos live in the
+[usage skills](skills/SKILL.md).
 
 ## ✨ Features
 
