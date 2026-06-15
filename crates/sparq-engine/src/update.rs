@@ -886,22 +886,39 @@ fn resolve_effect_records(graph: &Graph, effects: &[UpdateEffect]) -> Vec<(bool,
     // only track membership. We model each slot as a `TripleSet` and emit retractions for exactly
     // the members present at the point the CLEAR/DROP runs. Slot insertion order is preserved so a
     // CLEAR NAMED / DROP ALL visits slots in a stable order.
+    //
+    // [OPUS-4.8] (sq-aalh, review #189) PERF: the running view is decoded LAZILY, per slot, ONLY when
+    // an op actually touches that slot — `decode_triples` is the expensive part (a full scan of the
+    // slot's store), and the common path is delta-only updates that never CLEAR/DROP. The previous
+    // version eagerly decoded the default slot AND every named slot up-front, forcing a full-dataset
+    // scan on every multi-op body even when no slot's pre-body contents are ever read. With lazy
+    // seeding a delta-only body decodes nothing (a Delta seeds its slot then never reads pre-body
+    // members back out for journalling); only CLEAR/DROP/Delta of a slot pays for that slot's decode.
+    // CLEAR/DROP NAMED ALL still visits EVERY existing named graph (via `graph.named`) plus any slot
+    // created intra-body — the same retraction set as before — but each is decoded on demand.
     let mut running: Vec<(GraphSlot, TripleSet)> = Vec::new();
-    // Seed the default slot, then every existing named slot (preserving order).
-    running.push((None, decode_triples(graph)));
-    for (name, sub) in &graph.named {
-        running.push((Some(name.clone()), decode_triples(sub)));
-    }
 
-    // Find (or create) the running view of a slot.
+    // Find the running view of a slot, SEEDING it on first access from the slot's CURRENT (pre-body)
+    // decoded contents so a later CLEAR/DROP retracts pre-body triples too — not just intra-body
+    // inserts. Decoding happens at most once per slot, the first time it is touched.
     fn slot_mut<'a>(
+        graph: &Graph,
         running: &'a mut Vec<(GraphSlot, TripleSet)>,
         slot: &GraphSlot,
     ) -> &'a mut TripleSet {
         match running.iter().position(|(s, _)| s == slot) {
             Some(i) => &mut running[i].1,
             None => {
-                running.push((slot.clone(), TripleSet::default()));
+                let seed = match slot {
+                    None => decode_triples(graph),
+                    Some(name) => graph
+                        .named
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .map(|(_, sub)| decode_triples(sub))
+                        .unwrap_or_default(),
+                };
+                running.push((slot.clone(), seed));
                 let i = running.len() - 1;
                 &mut running[i].1
             }
@@ -911,20 +928,36 @@ fn resolve_effect_records(graph: &Graph, effects: &[UpdateEffect]) -> Vec<(bool,
     // Retract every triple currently in the running view of `slot`, then empty it — so a later op
     // in the same body sees the emptied slot.
     fn clear_slot(
+        graph: &Graph,
         records: &mut Vec<(bool, GraphSlot, TripleTerms)>,
         running: &mut Vec<(GraphSlot, TripleSet)>,
         slot: &GraphSlot,
     ) {
-        let view = slot_mut(running, slot);
+        let view = slot_mut(graph, running, slot);
         for t in view.drain() {
             records.push((false, slot.clone(), t));
         }
     }
 
+    // Every NAMED slot a `NamedGraphs`/`AllGraphs` CLEAR/DROP must retract: every named graph that
+    // exists pre-body, UNION every named slot already created/touched intra-body, in a stable order
+    // (pre-body graphs first, then any new intra-body slots in touch order). Decoding stays lazy —
+    // this only collects the slot NAMES; `clear_slot` decodes each as it visits it.
+    fn named_slots(graph: &Graph, running: &[(GraphSlot, TripleSet)]) -> Vec<GraphSlot> {
+        let mut names: Vec<GraphSlot> =
+            graph.named.iter().map(|(n, _)| Some(n.clone())).collect();
+        for (slot, _) in running {
+            if slot.is_some() && !names.contains(slot) {
+                names.push(slot.clone());
+            }
+        }
+        names
+    }
+
     for effect in effects {
         match effect {
             UpdateEffect::Delta { slot, inserts, deletes } => {
-                let view = slot_mut(&mut running, slot);
+                let view = slot_mut(graph, &mut running, slot);
                 for t in deletes {
                     records.push((false, slot.clone(), t.clone()));
                     view.remove(t);
@@ -939,30 +972,26 @@ fn resolve_effect_records(graph: &Graph, effects: &[UpdateEffect]) -> Vec<(bool,
             // concern, not a journalled DATA change. So both resolve to the present-triple retractions
             // — computed against the RUNNING view so intra-body inserts are correctly retracted.
             UpdateEffect::Clear(target) | UpdateEffect::Drop(target) => match target {
-                GraphTarget::DefaultGraph => clear_slot(&mut records, &mut running, &None),
+                GraphTarget::DefaultGraph => clear_slot(graph, &mut records, &mut running, &None),
                 GraphTarget::NamedNode(n) => {
-                    clear_slot(&mut records, &mut running, &Some(Term::NamedNode(n.clone())))
+                    clear_slot(graph, &mut records, &mut running, &Some(Term::NamedNode(n.clone())))
                 }
                 GraphTarget::NamedGraphs => {
-                    let names: Vec<GraphSlot> =
-                        running.iter().filter(|(s, _)| s.is_some()).map(|(s, _)| s.clone()).collect();
-                    for name in &names {
-                        clear_slot(&mut records, &mut running, name);
+                    for name in named_slots(graph, &running) {
+                        clear_slot(graph, &mut records, &mut running, &name);
                     }
                 }
                 GraphTarget::AllGraphs => {
-                    clear_slot(&mut records, &mut running, &None);
-                    let names: Vec<GraphSlot> =
-                        running.iter().filter(|(s, _)| s.is_some()).map(|(s, _)| s.clone()).collect();
-                    for name in &names {
-                        clear_slot(&mut records, &mut running, name);
+                    clear_slot(graph, &mut records, &mut running, &None);
+                    for name in named_slots(graph, &running) {
+                        clear_slot(graph, &mut records, &mut running, &name);
                     }
                 }
             },
             // CREATE adds an empty graph — no triples to journal — but it makes the slot exist so a
             // later CLEAR NAMED / DROP ALL in the same body sees it (as an empty, no-op target).
             UpdateEffect::Create(name) => {
-                slot_mut(&mut running, &Some(name.clone()));
+                slot_mut(graph, &mut running, &Some(name.clone()));
             }
         }
     }
@@ -1116,7 +1145,7 @@ mod tests {
     /// END-TO-END crash-recovery: build the resolved frame, COMMIT it to a durable store's redo
     /// journal with NO materialisation, drop the handle (= crash right after the commit fsync), then
     /// REOPEN — the journal redo must reconstruct the FINAL state (X empty), not resurrect the
-    /// inserted-then-cleared quad. This is the failure the bead describes; it FAILS pre-fix.
+    /// inserted-then-cleared quad. This is the failure the bug describes; it FAILS pre-fix.
     #[cfg(feature = "parallel")] // mmap comes from the sparq-core dev-dep
     #[test]
     fn crash_recovery_intra_body_insert_then_clear_leaves_x_empty() {
@@ -1140,7 +1169,10 @@ mod tests {
         }
         // Reopen: the journal redo reconstructs the committed frame. X must be EMPTY.
         let g = Graph::open(&dir).unwrap();
-        let x = g.named.iter().find(|(n, _)| n.to_string().contains("/x"));
+        // Match the EXACT graph IRI (not a brittle `contains("/x")`, which would also match `/xyz`
+        // and depends on `Term` string formatting).
+        let x_name = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/x"));
+        let x = g.named.iter().find(|(n, _)| *n == x_name);
         let x_rows = x.map(|(_, sub)| sub.store.scan(&[None, None, None]).rows.len()).unwrap_or(0);
         assert_eq!(
             x_rows, 0,
@@ -1168,24 +1200,28 @@ mod tests {
             apply_effects(&mut durable, &effects).unwrap();
         }
         let g = Graph::open(&dir).unwrap();
+        // Match the EXACT graph IRIs (not a brittle `contains("/x")`/`contains("/y")`, which can
+        // match other IRIs like `/xyz` and depends on `Term` string formatting).
+        let x_name = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/x"));
+        let y_name = Term::NamedNode(oxrdf::NamedNode::new_unchecked("http://ex/y"));
         let x_rows = g
             .named
             .iter()
-            .find(|(n, _)| n.to_string().contains("/x"))
+            .find(|(n, _)| *n == x_name)
             .map(|(_, s)| s.store.scan(&[None, None, None]).rows.len())
             .unwrap_or(0);
         let y_rows = g
             .named
             .iter()
-            .find(|(n, _)| n.to_string().contains("/y"))
+            .find(|(n, _)| *n == y_name)
             .map(|(_, s)| s.store.scan(&[None, None, None]).rows.len())
             .unwrap_or(0);
         assert_eq!((x_rows, y_rows), (0, 1), "after reload: X empty, Y intact");
 
         // In-memory parity: `update` (rebuild path) must reach the identical final state.
         let mem = update(&Graph::load_str("", "ntriples").unwrap(), sparql).unwrap();
-        let mx = mem.named.iter().find(|(n, _)| n.to_string().contains("/x")).map(|(_, s)| count(s)).unwrap_or(0);
-        let my = mem.named.iter().find(|(n, _)| n.to_string().contains("/y")).map(|(_, s)| count(s)).unwrap_or(0);
+        let mx = mem.named.iter().find(|(n, _)| *n == x_name).map(|(_, s)| count(s)).unwrap_or(0);
+        let my = mem.named.iter().find(|(n, _)| *n == y_name).map(|(_, s)| count(s)).unwrap_or(0);
         assert_eq!((mx, my), (0, 1), "in-memory final state matches the reloaded durable state");
         std::fs::remove_dir_all(&dir).ok();
     }
