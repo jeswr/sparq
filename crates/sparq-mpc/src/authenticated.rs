@@ -217,12 +217,39 @@ impl MacKey {
 /// [`ShamirBackend::reconstruct`](crate::shamir::ShamirBackend::reconstruct); the
 /// MAC `[α·x]` reconstructs the same way and equals `α · x` — the relation a
 /// later batched check (sq-km34.4) verifies WITHOUT opening `α`. `[OPUS-4.8]`
-#[derive(Debug, Clone)]
+///
+/// **Does NOT derive [`Debug`].** A derived `Debug` would print the private `mac`
+/// field — the `[α·x]` shares. For `authenticated_share(1)` those are shares of `α`
+/// itself, and *any* `t+1` of them reconstruct `α`; for general `x`, `α = (α·x)/x`
+/// whenever `x` is known and invertible. So a stray `{:?}` (a log line, a panic
+/// message, an `assert_eq!` failure) would exfiltrate the MAC shares and back-door
+/// the `pub(crate)` restriction on [`Self::mac_shares`], undermining the "α is never
+/// reconstructable" guarantee. Instead [`AuthenticatedShare`] has a MANUAL [`Debug`]
+/// that surfaces the openable value sharing `[x]` (already public via
+/// [`Self::value_shares`]) but REDACTS the MAC shares. `[OPUS-4.8]`
+#[derive(Clone)]
 pub struct AuthenticatedShare {
     /// `[x]` — the degree-`t` Shamir sharing of the value.
     value: ShareVec,
     /// `[α·x]` — the degree-`t` Shamir sharing of the IT-MAC `m_x = α·x`.
     mac: ShareVec,
+}
+
+// [OPUS-4.8] Manual `Debug` that REDACTS the MAC shares. The `mac` vector is the
+// `[α·x]` sharing; for `authenticated_share(1)` it is a sharing of `α` itself, and
+// any `t+1` of those shares reconstruct `α` — so a derived `Debug` would leak the
+// MAC key through a back door round the `pub(crate)` `mac_shares()` accessor. We
+// print the openable value sharing `[x]` (already public via `value_shares()`) and
+// an explicit `<redacted>` for the MAC shares, keeping the struct printable for
+// diagnostics without ever exposing `[α·x]`.
+impl std::fmt::Debug for AuthenticatedShare {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticatedShare")
+            .field("value", &self.value)
+            .field("mac", &"<redacted>")
+            .field("parties", &self.value.len())
+            .finish()
+    }
 }
 
 impl AuthenticatedShare {
@@ -328,13 +355,13 @@ pub fn auth_sub(
 /// local. (This is scaling by a *public* scalar — NOT secret×secret multiplication,
 /// which is sq-km34.2 and needs real work.) `[OPUS-4.8]`
 pub fn auth_scale(a: &AuthenticatedShare, c: Fp) -> AuthenticatedShare {
-    // Both components stay on the same party points, so `new` cannot fail; but
-    // route through it to keep the value/MAC point-alignment invariant in one
-    // place rather than re-asserting it here.
-    AuthenticatedShare {
-        value: scale(&a.value, c),
-        mac: scale(&a.mac, c),
-    }
+    // [OPUS-4.8] Route through `new` so the value/MAC point-alignment invariant is
+    // enforced in exactly one place rather than re-asserted (or silently assumed)
+    // here. `scale` is point-preserving and `a` is already a valid alignment, so
+    // `new` cannot fail — but we go through it rather than building the struct
+    // directly, matching what this comment claims.
+    AuthenticatedShare::new(scale(&a.value, c), scale(&a.mac, c))
+        .expect("auth_scale: scaling preserves value/MAC point alignment")
 }
 
 /// Add a PUBLIC field constant `c` to an authenticated sharing:
@@ -532,6 +559,38 @@ mod tests {
             assert!(
                 !dbg.contains(&share.y.value().to_string()),
                 "MacKey Debug leaked an α share value {}: {dbg}",
+                share.y.value()
+            );
+        }
+    }
+
+    /// ACCEPTANCE (2), Debug redaction (continued): an `AuthenticatedShare`'s `{:?}`
+    /// must NEVER print its `mac` (`[α·x]`) shares. For `authenticated_share(1)` the
+    /// MAC is a sharing of `α`, so a derived `Debug` would leak the key through a
+    /// back door round the `pub(crate)` `mac_shares()` accessor. The manual [`Debug`]
+    /// prints `<redacted>` for the MAC and keeps the openable value sharing `[x]`. We
+    /// assert the redaction marker is present and that NO MAC share's `y` value
+    /// appears in the output. `[OPUS-4.8]`
+    #[test]
+    fn authenticated_share_debug_redacts_mac_shares() {
+        let backend = ShamirBackend::new_seeded(5, 0xBEEF).unwrap();
+        let mut dealer = backend.dealer();
+        let mut session = dealer.new_mac_session();
+
+        // The worst case: x = 1, so the MAC shares ARE shares of α.
+        let auth_one = session.authenticated_share(Fp::one());
+        let dbg = format!("{auth_one:?}");
+
+        assert!(
+            dbg.contains("<redacted>"),
+            "AuthenticatedShare Debug must redact the MAC (α·x) shares: {dbg}"
+        );
+        // No MAC share's secret `y` value may leak into the Debug string — those are
+        // shares of α for x = 1, and any t+1 of them reconstruct α.
+        for share in auth_one.mac_shares() {
+            assert!(
+                !dbg.contains(&share.y.value().to_string()),
+                "AuthenticatedShare Debug leaked a MAC share value {}: {dbg}",
                 share.y.value()
             );
         }
