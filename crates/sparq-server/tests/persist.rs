@@ -83,12 +83,17 @@ impl Server {
 
     /// Signals graceful shutdown and waits for the serve task to finish, so the `AppState`
     /// (and the writer thread it owns) is dropped — modelling a clean process restart.
+    ///
+    /// [OPUS-4.8] (Copilot PR#80) We `expect()` the join result rather than discarding it: if
+    /// the serve task PANICKED (e.g. the durable writer thread fail-closed and the panic
+    /// propagated, or `axum::serve(...).await.unwrap()` hit a serve error), `task.await` returns
+    /// `Err(JoinError)`, and swallowing it would let the test pass while masking a real failure.
     async fn stop(mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
         if let Some(task) = self.task.take() {
-            let _ = task.await;
+            task.await.expect("server serve task panicked / failed");
         }
     }
 }
@@ -116,6 +121,24 @@ async fn count_rows(cl: &reqwest::Client, base: &str, query: &str) -> usize {
         .await
         .unwrap();
     body["results"]["bindings"].as_array().unwrap().len()
+}
+
+/// The `value` field of the single binding of variable `var` for a one-row `query` (asserts
+/// exactly one row). Used to read back a non-deterministically-generated literal.
+async fn single_value(cl: &reqwest::Client, base: &str, query: &str, var: &str) -> String {
+    let body: serde_json::Value = cl
+        .get(format!("{base}/sparql"))
+        .header("accept", "application/sparql-results+json")
+        .query(&[("query", query)])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bindings = body["results"]["bindings"].as_array().unwrap();
+    assert_eq!(bindings.len(), 1, "expected exactly one binding for ?{var}");
+    bindings[0][var]["value"].as_str().unwrap().to_string()
 }
 
 fn persist_config(dir: &Path) -> ServerConfig {
@@ -200,6 +223,57 @@ async fn restart_preserves_all_updates_no_rebuild() {
 }
 
 // ---------------------------------------------------------------------------
+// [OPUS-4.8] (Copilot PR#80) Non-deterministic update: the durable graph must persist the
+// EXACT value the in-memory side committed and acked — NOT a re-rolled one.
+// ---------------------------------------------------------------------------
+
+/// REGRESSION for the durability-divergence finding (Copilot PR#80). A `DELETE/INSERT … WHERE`
+/// that binds a non-deterministic value (`STRUUID()`) commits one resolved literal in memory and
+/// 204-acks it. The durable mirror must persist *that* literal, not a second, independently-rolled
+/// one — otherwise a restart would surface a value the client never saw, breaking "204 ⇒ durable".
+///
+/// With the old "re-execute the update string against the durable graph" mirror this FAILED: the
+/// second execution re-rolled `STRUUID()`, so after a restart the persisted value differed from the
+/// value the live server returned. We assert byte-equality of the value before and after the restart.
+#[tokio::test]
+async fn nondeterministic_update_persists_committed_value_not_a_reroll() {
+    let scratch = ScratchDir::new();
+    let cl = reqwest::Client::new();
+
+    let s1 = Server::start(persist_config(scratch.path())).await;
+    // Seed a subject, then tag it with a freshly-generated STRUUID via DELETE/INSERT … WHERE.
+    assert_eq!(
+        post_update(&cl, &s1.base, "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }").await,
+        204
+    );
+    assert_eq!(
+        post_update(
+            &cl,
+            &s1.base,
+            "INSERT { <http://ex/s> <http://ex/tag> ?u } WHERE { <http://ex/s> <http://ex/p> ?o . BIND(STRUUID() AS ?u) }",
+        )
+        .await,
+        204
+    );
+
+    // The value the LIVE (in-memory, already-acked) server holds.
+    let live = single_value(&cl, &s1.base, "SELECT ?u WHERE { <http://ex/s> <http://ex/tag> ?u }", "u").await;
+    assert!(!live.is_empty(), "STRUUID() must have produced a value");
+
+    // RESTART and read the persisted value: it MUST be the identical literal (not a re-roll).
+    s1.stop().await;
+    let s2 = Server::start(persist_config(scratch.path())).await;
+    let persisted =
+        single_value(&cl, &s2.base, "SELECT ?u WHERE { <http://ex/s> <http://ex/tag> ?u }", "u").await;
+    assert_eq!(
+        persisted, live,
+        "the persisted STRUUID() value must equal the value the live server acked — \
+         the durable mirror must NOT re-execute (and thus re-roll) the update"
+    );
+    s2.stop().await;
+}
+
+// ---------------------------------------------------------------------------
 // Back-compat: no persist dir => in-memory => a fresh server does NOT see prior updates.
 // ---------------------------------------------------------------------------
 
@@ -273,5 +347,7 @@ async fn existing_store_wins_over_seed() {
     );
 
     let _ = tx.send(());
-    let _ = task.await;
+    // [OPUS-4.8] (Copilot PR#80) Fail the test on a panicked/failed serve task rather than
+    // discarding the join result (which would silently mask a server-side failure).
+    task.await.expect("server serve task panicked / failed");
 }

@@ -52,7 +52,10 @@ pub use construct::{
 #[cfg(feature = "cs-planner")]
 pub use cs::{with_cs_table, CsSet, CsTable};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
-pub use update::{update, update_in_place, update_in_place_with_budget, with_load_base};
+pub use update::{
+    apply_effects, update, update_in_place, update_in_place_capturing, update_in_place_with_budget,
+    with_load_base, UpdateEffect,
+};
 
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;

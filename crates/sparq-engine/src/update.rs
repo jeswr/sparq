@@ -546,6 +546,55 @@ fn apply_slot_delta(
     }
 }
 
+// --- durable-mirror effect capture (sq-7cxr, gh-44; Copilot PR#80 fix) -------------------------
+
+/// [OPUS-4.8] (sq-7cxr, Copilot PR#80) A **resolved**, deterministic record of what one
+/// `update_in_place` actually did, captured during the single in-memory application so a
+/// durable mirror can reproduce EXACTLY that state without re-executing the update string.
+///
+/// Re-running the update *text* against a second (durable) graph is unsound for any update
+/// whose effect is not a pure function of the text: `NOW()`/`RAND()`/`UUID()`/`STRUUID()` and
+/// fresh `BNODE()`s re-roll to different values, and `LOAD <remote>` can fetch different
+/// content — so the durable graph would diverge from the already-acked in-memory state,
+/// breaking the "204 ⇒ durable" guarantee after a restart. Capturing the resolved per-slot
+/// triple delta (and replaying THAT) makes the second phase deterministic by construction:
+/// the durable graph receives the identical resolved triples the in-memory side committed.
+///
+/// Structural operations (CLEAR/DROP/CREATE) ARE pure functions of the text, so they are
+/// recorded as the operation itself and re-applied through the same in-place machinery — there
+/// is no value to re-roll. Only the data-bearing operations (INSERT/DELETE DATA, LOAD, and
+/// DELETE/INSERT … WHERE) carry resolved triples.
+#[derive(Debug, Clone)]
+pub enum UpdateEffect {
+    /// A resolved per-slot insert/delete batch — the deterministic delta the in-memory
+    /// application produced for one graph slot (`None` = default graph, `Some` = named graph).
+    /// Deletes are applied before inserts, mirroring the in-memory order.
+    Delta { slot: GraphSlot, inserts: Vec<TripleTerms>, deletes: Vec<TripleTerms> },
+    /// `CLEAR <target>` — deterministic; replayed verbatim.
+    Clear(GraphTarget),
+    /// `DROP <target>` — deterministic; replayed verbatim.
+    Drop(GraphTarget),
+    /// `CREATE GRAPH <name>` — deterministic; replayed verbatim (a durable empty named graph).
+    Create(Term),
+}
+
+/// [OPUS-4.8] (sq-7cxr, Copilot PR#80) Optional sink for [`UpdateEffect`]s, threaded through
+/// the in-place apply so capture is zero-cost (`None`) when no durable mirror is configured.
+type EffectSink<'a> = Option<&'a mut Vec<UpdateEffect>>;
+
+/// Records a resolved delta effect (only when a sink is present and the batch is non-empty).
+fn record_delta(sink: &mut EffectSink, slot: &GraphSlot, inserts: &[TripleTerms], deletes: &[TripleTerms]) {
+    if let Some(s) = sink {
+        if !inserts.is_empty() || !deletes.is_empty() {
+            s.push(UpdateEffect::Delta {
+                slot: slot.clone(),
+                inserts: inserts.to_vec(),
+                deletes: deletes.to_vec(),
+            });
+        }
+    }
+}
+
 /// Applies a SPARQL Update IN PLACE through the store's DELTA-OVERLAY (roadmap T17): the data
 /// operations route to [`Graph::apply_delta`] per target graph — O(batch) per operation instead
 /// of the O(n) decode-everything-and-rebuild that [`update`] performs — and, for a
@@ -573,6 +622,37 @@ pub fn update_in_place_with_budget(
     sparql: &str,
     budget: &crate::QueryBudget,
 ) -> Result<(), String> {
+    // No effect sink: capture is fully elided, so this is byte-for-byte the previous behaviour.
+    update_in_place_core(graph, sparql, budget, None)
+}
+
+/// [OPUS-4.8] (sq-7cxr, Copilot PR#80) [`update_in_place_with_budget`] that ALSO returns the
+/// ordered, *resolved* [`UpdateEffect`] log of what it applied — for a durable mirror that must
+/// reproduce the committed state WITHOUT re-executing the (possibly non-deterministic /
+/// side-effecting) update text. See [`UpdateEffect`] and [`apply_effects`].
+///
+/// On error the in-memory `graph` is left in whatever partially-applied state the update
+/// reached (identical to [`update_in_place_with_budget`]); the returned effect log is only
+/// produced on success, so a caller never mirrors a half-applied update.
+pub fn update_in_place_capturing(
+    graph: &mut Graph,
+    sparql: &str,
+    budget: &crate::QueryBudget,
+) -> Result<Vec<UpdateEffect>, String> {
+    let mut effects = Vec::new();
+    update_in_place_core(graph, sparql, budget, Some(&mut effects))?;
+    Ok(effects)
+}
+
+/// The shared in-place apply core. When `sink` is `Some`, every operation's RESOLVED effect is
+/// recorded into it so a durable mirror can replay the exact committed delta (see
+/// [`update_in_place_capturing`]); when `None`, capture is fully elided.
+fn update_in_place_core(
+    graph: &mut Graph,
+    sparql: &str,
+    budget: &crate::QueryBudget,
+    mut sink: EffectSink,
+) -> Result<(), String> {
     let _budget = crate::exec::budget::install(budget);
     let upd = SparqlParser::new().parse_update(sparql).map_err(|e| e.to_string())?;
     for op in &upd.operations {
@@ -583,57 +663,77 @@ pub fn update_in_place_with_budget(
                 let triples: Vec<_> = data.iter().map(|q| quad_to_triple_fresh(q, &mut fresh)).collect();
                 for (slot, ins) in group_by_slot(triples) {
                     apply_slot_delta(graph, &slot, &ins, &[])?;
+                    record_delta(&mut sink, &slot, &ins, &[]);
                 }
             }
             GraphUpdateOperation::DeleteData { data } => {
                 for (slot, del) in group_by_slot(data.iter().map(ground_quad_to_triple).collect()) {
                     apply_slot_delta(graph, &slot, &[], &del)?;
+                    record_delta(&mut sink, &slot, &[], &del);
                 }
             }
-            GraphUpdateOperation::Clear { graph: target, .. } => match target {
-                GraphTarget::DefaultGraph => replace_default(graph)?,
-                GraphTarget::NamedNode(n) => {
-                    let name = Term::NamedNode(n.clone());
-                    if let Some(i) = graph.named.iter().position(|(g, _)| *g == name) {
-                        graph.named[i].1 = empty_graph();
+            GraphUpdateOperation::Clear { graph: target, .. } => {
+                match target {
+                    GraphTarget::DefaultGraph => replace_default(graph)?,
+                    GraphTarget::NamedNode(n) => {
+                        let name = Term::NamedNode(n.clone());
+                        if let Some(i) = graph.named.iter().position(|(g, _)| *g == name) {
+                            graph.named[i].1 = empty_graph();
+                        }
+                    }
+                    GraphTarget::NamedGraphs => {
+                        for entry in &mut graph.named {
+                            entry.1 = empty_graph();
+                        }
+                    }
+                    GraphTarget::AllGraphs => {
+                        replace_default(graph)?;
+                        for entry in &mut graph.named {
+                            entry.1 = empty_graph();
+                        }
                     }
                 }
-                GraphTarget::NamedGraphs => {
-                    for entry in &mut graph.named {
-                        entry.1 = empty_graph();
+                if let Some(s) = &mut sink {
+                    s.push(UpdateEffect::Clear(target.clone()));
+                }
+            }
+            GraphUpdateOperation::Drop { graph: target, .. } => {
+                match target {
+                    GraphTarget::DefaultGraph => replace_default(graph)?,
+                    GraphTarget::NamedNode(n) => {
+                        let name = Term::NamedNode(n.clone());
+                        graph.named.retain(|(g, _)| *g != name);
+                    }
+                    GraphTarget::NamedGraphs => graph.named.clear(),
+                    GraphTarget::AllGraphs => {
+                        replace_default(graph)?;
+                        graph.named.clear();
                     }
                 }
-                GraphTarget::AllGraphs => {
-                    replace_default(graph)?;
-                    for entry in &mut graph.named {
-                        entry.1 = empty_graph();
-                    }
+                if let Some(s) = &mut sink {
+                    s.push(UpdateEffect::Drop(target.clone()));
                 }
-            },
-            GraphUpdateOperation::Drop { graph: target, .. } => match target {
-                GraphTarget::DefaultGraph => replace_default(graph)?,
-                GraphTarget::NamedNode(n) => {
-                    let name = Term::NamedNode(n.clone());
-                    graph.named.retain(|(g, _)| *g != name);
-                }
-                GraphTarget::NamedGraphs => graph.named.clear(),
-                GraphTarget::AllGraphs => {
-                    replace_default(graph)?;
-                    graph.named.clear();
-                }
-            },
+            }
             GraphUpdateOperation::Create { graph: name, .. } => {
                 // [OPUS-4.8] (sq-7cxr, gh-44) `ensure_named` makes the new graph DURABLE on a
                 // directory-backed parent (empty graphs are persisted via the manifest, so an
                 // empty CREATE survives a restart) and is a no-op when it already exists.
                 let name = Term::NamedNode(name.clone());
                 graph.ensure_named(&name)?;
+                if let Some(s) = &mut sink {
+                    s.push(UpdateEffect::Create(name));
+                }
             }
             GraphUpdateOperation::Load { silent, source, destination } => {
                 match load_document(source.as_str()) {
                     Ok(triples) => {
+                        let slot = graph_name_slot(destination);
                         let ins: Vec<TripleTerms> = triples.into_iter().collect();
-                        apply_slot_delta(graph, &graph_name_slot(destination), &ins, &[])?;
+                        apply_slot_delta(graph, &slot, &ins, &[])?;
+                        // Capture the RESOLVED loaded triples: a re-LOAD on the durable graph
+                        // could fetch different remote content, so we mirror what was actually
+                        // committed in memory, not a second fetch.
+                        record_delta(&mut sink, &slot, &ins, &[]);
                     }
                     Err(e) => {
                         if !silent {
@@ -657,10 +757,71 @@ pub fn update_in_place_with_budget(
                 // All deletes first, then all inserts (SPARQL semantics), per graph slot.
                 for (slot, del) in group_by_slot(dels) {
                     apply_slot_delta(graph, &slot, &[], &del)?;
+                    record_delta(&mut sink, &slot, &[], &del);
                 }
                 for (slot, ins) in group_by_slot(inss) {
                     apply_slot_delta(graph, &slot, &ins, &[])?;
+                    record_delta(&mut sink, &slot, &ins, &[]);
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [OPUS-4.8] (sq-7cxr, Copilot PR#80) Replays a captured [`UpdateEffect`] log onto `graph`,
+/// reproducing the exact committed state a [`update_in_place_capturing`] call applied to its
+/// (identically-seeded) in-memory working copy — WITHOUT re-parsing or re-evaluating the
+/// original update text. This is the durable mirror's apply path: each [`UpdateEffect::Delta`]
+/// goes through [`Graph::apply_delta`] (WAL-appended + fsync'd BEFORE it is applied on a
+/// directory-backed graph), and the structural ops go through the same deterministic in-place
+/// machinery the data path uses, so the durable graph is byte-equivalent to the in-memory one.
+///
+/// Effects are applied in capture order, which is the order the in-memory side committed them
+/// (deletes before inserts within a DELETE/INSERT … WHERE), so order-sensitive sequences
+/// reproduce faithfully.
+pub fn apply_effects(graph: &mut Graph, effects: &[UpdateEffect]) -> Result<(), String> {
+    for effect in effects {
+        match effect {
+            UpdateEffect::Delta { slot, inserts, deletes } => {
+                // Deletes first, then inserts — the same per-slot order the in-memory side used.
+                apply_slot_delta(graph, slot, &[], deletes)?;
+                apply_slot_delta(graph, slot, inserts, &[])?;
+            }
+            UpdateEffect::Clear(target) => match target {
+                GraphTarget::DefaultGraph => replace_default(graph)?,
+                GraphTarget::NamedNode(n) => {
+                    let name = Term::NamedNode(n.clone());
+                    if let Some(i) = graph.named.iter().position(|(g, _)| *g == name) {
+                        graph.named[i].1 = empty_graph();
+                    }
+                }
+                GraphTarget::NamedGraphs => {
+                    for entry in &mut graph.named {
+                        entry.1 = empty_graph();
+                    }
+                }
+                GraphTarget::AllGraphs => {
+                    replace_default(graph)?;
+                    for entry in &mut graph.named {
+                        entry.1 = empty_graph();
+                    }
+                }
+            },
+            UpdateEffect::Drop(target) => match target {
+                GraphTarget::DefaultGraph => replace_default(graph)?,
+                GraphTarget::NamedNode(n) => {
+                    let name = Term::NamedNode(n.clone());
+                    graph.named.retain(|(g, _)| *g != name);
+                }
+                GraphTarget::NamedGraphs => graph.named.clear(),
+                GraphTarget::AllGraphs => {
+                    replace_default(graph)?;
+                    graph.named.clear();
+                }
+            },
+            UpdateEffect::Create(name) => {
+                graph.ensure_named(name)?;
             }
         }
     }

@@ -125,7 +125,11 @@ Semantics:
 - **Back-compat.** Without `--persist` the behaviour is unchanged: in-memory, lost on restart.
 - **Atomicity.** Persistence rides on the existing generation-ring + sequenced-writer model —
   a rejected update is never persisted (it is never published either), and the durable store
-  stays in lockstep with the published snapshot chain.
+  stays in lockstep with the published snapshot chain. The durable graph is written from the
+  **resolved delta** captured during the in-memory commit (not by re-executing the update text),
+  so a non-deterministic or side-effecting update (`NOW()`/`RAND()`/`UUID()`/`BNODE()`,
+  `LOAD <remote>`) persists the EXACT value that was acked — never a re-rolled one — so a restart
+  surfaces precisely what the client saw.
 - **Deferred hardening (beaded, not yet wired):** byte-accounted durability metrics, graceful
   degradation on a *transient* disk-I/O error (today a durability failure is fatal — the write
   is refused rather than silently lost), online compaction tuning under sustained write load,

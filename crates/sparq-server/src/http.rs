@@ -813,18 +813,26 @@ struct ServerApplier {
 }
 
 /// [OPUS-4.8] (sq-7cxr, gh-44) The writer-thread-owned durable store: the on-disk [`Graph`]
-/// plus the buffer of update strings accumulated for the batch currently being committed.
+/// plus the buffer of RESOLVED update effects accumulated for the batch currently being committed.
 ///
 /// The writer drives `fork → apply* → seal` per batch (and re-`fork`s + replays the
 /// already-successful prefix on a mid-batch failure). We mirror that exactly: [`fork`] clears
-/// `batch` (a fresh attempt starts), [`apply`] appends an update only AFTER it applied cleanly
-/// to the in-memory working copy, and [`seal`] flushes `batch` to `graph` WAL-durably. So at
-/// seal time `batch` is precisely the set of updates that will be published — applied once,
-/// in order, to the durable graph. Because all three run on the single writer thread, no lock
-/// is needed and the durable graph never diverges from the published lineage.
+/// `batch` (a fresh attempt starts), [`apply`] appends the effects of an update only AFTER it
+/// applied cleanly to the in-memory working copy, and [`seal`] flushes `batch` to `graph`
+/// WAL-durably. So at seal time `batch` is precisely the resolved delta of the updates that will
+/// be published — applied once, in order, to the durable graph. Because all three run on the
+/// single writer thread, no lock is needed and the durable graph never diverges from the
+/// published lineage.
+///
+/// [OPUS-4.8] (Copilot PR#80) We buffer the *resolved* [`sparq_engine::UpdateEffect`] log
+/// captured during the in-memory application — NOT the update text. Re-executing the text against
+/// the durable graph would re-roll non-deterministic functions (`NOW()`/`RAND()`/`UUID()`/fresh
+/// `BNODE()`) and could re-fetch different `LOAD <remote>` content, so the durable state could
+/// diverge from the already-acked in-memory state. Replaying the captured delta makes the durable
+/// phase deterministic by construction — the durable graph receives the identical resolved triples.
 struct DurableStore {
     graph: Graph,
-    batch: Vec<String>,
+    batch: Vec<sparq_engine::UpdateEffect>,
 }
 
 impl ServerApplier {
@@ -869,11 +877,19 @@ impl ApplyUpdates for ServerApplier {
         // separately hard-caps the client's await (see `await_update_worker`). With both
         // limits off (the default) this is the unlimited budget — identical to before.
         let budget = update_budget(&self.config);
-        with_engine_scope(&self.config, || sparq_engine::update_in_place_with_budget(working, update, &budget))?;
-        // [OPUS-4.8] (sq-7cxr) Record the update for the durable mirror ONLY after it applied
-        // cleanly in memory — a rejected update is never persisted (it is not published either).
+        // [OPUS-4.8] (Copilot PR#80) When mirroring durably, CAPTURE the resolved effect log of
+        // the in-memory application so the durable graph can replay the EXACT committed delta —
+        // never re-executing the (possibly non-deterministic / side-effecting) update text. With
+        // no durable mirror this is `update_in_place_with_budget` exactly as before (no capture).
         if let Some(d) = &mut self.durable {
-            d.batch.push(update.clone());
+            let effects = with_engine_scope(&self.config, || {
+                sparq_engine::update_in_place_capturing(working, update, &budget)
+            })?;
+            // Record for the durable mirror ONLY after it applied cleanly in memory — a rejected
+            // update is never persisted (it is not published either).
+            d.batch.extend(effects);
+        } else {
+            with_engine_scope(&self.config, || sparq_engine::update_in_place_with_budget(working, update, &budget))?;
         }
         Ok(())
     }
@@ -882,9 +898,14 @@ impl ApplyUpdates for ServerApplier {
         // [OPUS-4.8] (sq-7cxr, gh-44) Persist the committed batch to the durable graph BEFORE
         // returning — `seal` runs on the writer thread immediately before `publish`, so the
         // batch is WAL-durable (fsync'd by `Graph::apply_delta`) before the generation is
-        // published and thus before any client ack. Re-applying the SAME update strings to the
-        // durable graph reproduces the published state because the durable graph and the ring
-        // lineage start from one seed and apply the same committed batches in the same order.
+        // published and thus before any client ack.
+        //
+        // [OPUS-4.8] (Copilot PR#80) The batch is the RESOLVED effect log captured from the
+        // in-memory application (see `apply`), replayed via `apply_effects` rather than by
+        // re-executing the update text. This is what makes the durable graph BYTE-EQUIVALENT to
+        // the published in-memory state even for non-deterministic / side-effecting updates
+        // (`NOW()`/`RAND()`/`UUID()`/`BNODE()`, `LOAD <remote>`): both apply the identical
+        // resolved triples, in the same order, starting from one shared seed.
         //
         // FAIL-CLOSED: a durable-write error (disk full, I/O error) panics the writer thread.
         // `seal` runs before `publish`, so unwinding here means the generation is NOT published
@@ -895,13 +916,8 @@ impl ApplyUpdates for ServerApplier {
         // store.)
         if let Some(d) = &mut self.durable {
             let batch = std::mem::take(&mut d.batch);
-            let budget = update_budget(&self.config);
-            for update in &batch {
-                with_engine_scope(&self.config, || {
-                    sparq_engine::update_in_place_with_budget(&mut d.graph, update, &budget)
-                })
+            sparq_engine::apply_effects(&mut d.graph, &batch)
                 .unwrap_or_else(|e| panic!("durable persist failed (sq-7cxr); refusing to ack the write: {e}"));
-            }
         }
         self.inner.seal(working)
     }
