@@ -13,7 +13,10 @@
 //! graph, CREATE of an existing one) are no-ops here — a graph store that auto-creates graphs
 //! is explicitly allowed to succeed on them — so `SILENT` only matters for LOAD.
 
-use crate::dataset::{build, decode_triples, empty_graph, TripleSet, TripleTerms};
+// [OPUS-4.8] (sq-glw2) `empty_graph` is now only needed by the tests — the named-graph
+// CLEAR/DROP arms route through the durable `Graph` methods instead of swapping in a fresh
+// in-memory graph — so it is imported locally in the test module rather than crate-wide.
+use crate::dataset::{build, decode_triples, TripleSet, TripleTerms};
 use oxrdf::{BlankNode, NamedOrBlankNode, Term, Variable};
 use rustc_hash::FxHashMap;
 use sparq_core::Graph;
@@ -598,11 +601,13 @@ fn record_delta(sink: &mut EffectSink, slot: &GraphSlot, inserts: &[TripleTerms]
 /// Applies a SPARQL Update IN PLACE through the store's DELTA-OVERLAY (roadmap T17): the data
 /// operations route to [`Graph::apply_delta`] per target graph — O(batch) per operation instead
 /// of the O(n) decode-everything-and-rebuild that [`update`] performs — and, for a
-/// directory-backed graph, each default-graph batch is WAL-logged (fsync'd) before it is
-/// applied, so updates are durable across a crash. `CLEAR`/`DROP` of the default graph still
-/// REPLACE it with an empty rebuild (this drops a directory-backed graph's WAL/directory
-/// association); named graphs are preserved across every operation. Fold the accumulated
-/// overlay back into the base periodically with [`Graph::compact`].
+/// directory-backed graph, each batch is WAL-logged (fsync'd) before it is applied, so updates
+/// are durable across a crash. [OPUS-4.8] (sq-glw2) `CLEAR`/`DROP` are durable BEFORE the ack on
+/// a directory-backed graph too: default-graph CLEAR/DROP retract via [`Graph::clear_default_durable`];
+/// named-graph CLEAR empties the slot via [`Graph::clear_named_durable`] (WAL-logged retraction,
+/// slot preserved) and named-graph DROP removes the sub-dir + manifest entry via
+/// [`Graph::drop_named_durable`]. Fold the accumulated overlay back into the base periodically
+/// with [`Graph::compact`].
 pub fn update_in_place(graph: &mut Graph, sparql: &str) -> Result<(), String> {
     update_in_place_with_budget(graph, sparql, &crate::QueryBudget::unlimited())
 }
@@ -672,42 +677,44 @@ fn update_in_place_core(
                     record_delta(&mut sink, &slot, &[], &del);
                 }
             }
+            // [OPUS-4.8] (sq-glw2) CLEAR keeps the named-graph SLOT but empties it. On a
+            // directory-backed parent, retract the existing graph's contents through its own WAL
+            // (`Graph::clear_named_durable`) so the emptied state is fsync'd BEFORE the ack — the
+            // old `entry.1 = empty_graph()` dropped the sub-graph's WAL/dir association, so the
+            // clear was durable only at the next compaction. Absent graph: a no-op; in-memory
+            // parent: a plain store clear (unchanged).
             GraphUpdateOperation::Clear { graph: target, .. } => {
                 match target {
                     GraphTarget::DefaultGraph => replace_default(graph)?,
                     GraphTarget::NamedNode(n) => {
-                        let name = Term::NamedNode(n.clone());
-                        if let Some(i) = graph.named.iter().position(|(g, _)| *g == name) {
-                            graph.named[i].1 = empty_graph();
-                        }
+                        graph.clear_named_durable(&Term::NamedNode(n.clone()))?;
                     }
-                    GraphTarget::NamedGraphs => {
-                        for entry in &mut graph.named {
-                            entry.1 = empty_graph();
-                        }
-                    }
+                    GraphTarget::NamedGraphs => clear_all_named_durable(graph)?,
                     GraphTarget::AllGraphs => {
                         replace_default(graph)?;
-                        for entry in &mut graph.named {
-                            entry.1 = empty_graph();
-                        }
+                        clear_all_named_durable(graph)?;
                     }
                 }
                 if let Some(s) = &mut sink {
                     s.push(UpdateEffect::Clear(target.clone()));
                 }
             }
+            // [OPUS-4.8] (sq-glw2) DROP makes the named graph cease to exist. On a directory-
+            // backed parent, `Graph::drop_named_durable` removes the sub-dir + manifest entry
+            // durably (fsync'd) so the removal survives a reopen immediately — the old
+            // `graph.named.retain(...)` dropped only the in-memory entry, leaving the on-disk
+            // sub-dir + manifest entry so a reopen RESTORED the dropped graph. Absent graph: a
+            // no-op; in-memory parent: a plain entry removal (unchanged).
             GraphUpdateOperation::Drop { graph: target, .. } => {
                 match target {
                     GraphTarget::DefaultGraph => replace_default(graph)?,
                     GraphTarget::NamedNode(n) => {
-                        let name = Term::NamedNode(n.clone());
-                        graph.named.retain(|(g, _)| *g != name);
+                        graph.drop_named_durable(&Term::NamedNode(n.clone()))?;
                     }
-                    GraphTarget::NamedGraphs => graph.named.clear(),
+                    GraphTarget::NamedGraphs => drop_all_named_durable(graph)?,
                     GraphTarget::AllGraphs => {
                         replace_default(graph)?;
-                        graph.named.clear();
+                        drop_all_named_durable(graph)?;
                     }
                 }
                 if let Some(s) = &mut sink {
@@ -788,36 +795,31 @@ pub fn apply_effects(graph: &mut Graph, effects: &[UpdateEffect]) -> Result<(), 
                 apply_slot_delta(graph, slot, &[], deletes)?;
                 apply_slot_delta(graph, slot, inserts, &[])?;
             }
+            // [OPUS-4.8] (sq-glw2) The durable mirror replays CLEAR/DROP through the SAME durable
+            // helpers the live path uses (`clear_named_durable` / `drop_named_durable`), so the
+            // mirror's named-graph clear/drop is WAL/manifest-durable before its ack too — not
+            // just at the next compaction (the old `empty_graph()`/`retain` swap dropped the
+            // sub-graph WAL / left the on-disk sub-dir, so the mirror would resurrect the data).
             UpdateEffect::Clear(target) => match target {
                 GraphTarget::DefaultGraph => replace_default(graph)?,
                 GraphTarget::NamedNode(n) => {
-                    let name = Term::NamedNode(n.clone());
-                    if let Some(i) = graph.named.iter().position(|(g, _)| *g == name) {
-                        graph.named[i].1 = empty_graph();
-                    }
+                    graph.clear_named_durable(&Term::NamedNode(n.clone()))?;
                 }
-                GraphTarget::NamedGraphs => {
-                    for entry in &mut graph.named {
-                        entry.1 = empty_graph();
-                    }
-                }
+                GraphTarget::NamedGraphs => clear_all_named_durable(graph)?,
                 GraphTarget::AllGraphs => {
                     replace_default(graph)?;
-                    for entry in &mut graph.named {
-                        entry.1 = empty_graph();
-                    }
+                    clear_all_named_durable(graph)?;
                 }
             },
             UpdateEffect::Drop(target) => match target {
                 GraphTarget::DefaultGraph => replace_default(graph)?,
                 GraphTarget::NamedNode(n) => {
-                    let name = Term::NamedNode(n.clone());
-                    graph.named.retain(|(g, _)| *g != name);
+                    graph.drop_named_durable(&Term::NamedNode(n.clone()))?;
                 }
-                GraphTarget::NamedGraphs => graph.named.clear(),
+                GraphTarget::NamedGraphs => drop_all_named_durable(graph)?,
                 GraphTarget::AllGraphs => {
                     replace_default(graph)?;
-                    graph.named.clear();
+                    drop_all_named_durable(graph)?;
                 }
             },
             UpdateEffect::Create(name) => {
@@ -837,9 +839,33 @@ fn replace_default(graph: &mut Graph) -> Result<(), String> {
     graph.clear_default_durable()
 }
 
+/// [OPUS-4.8] (sq-glw2) DURABLY empties EVERY named graph (CLEAR NAMED / the named part of
+/// CLEAR ALL), preserving each slot — mirrors a per-graph CLEAR GRAPH across the whole set. On a
+/// directory-backed parent each sub-graph's contents are WAL-logged + fsync'd before the ack.
+fn clear_all_named_durable(graph: &mut Graph) -> Result<(), String> {
+    let names: Vec<Term> = graph.named.iter().map(|(n, _)| n.clone()).collect();
+    for name in &names {
+        graph.clear_named_durable(name)?;
+    }
+    Ok(())
+}
+
+/// [OPUS-4.8] (sq-glw2) DURABLY removes EVERY named graph (DROP NAMED / the named part of DROP
+/// ALL). Each [`Graph::drop_named_durable`] renumbers the surviving sub-tree, so dropping by
+/// the head name each iteration is robust to the index shifts; on a directory-backed parent
+/// every removal's manifest update is fsync'd before the ack.
+fn drop_all_named_durable(graph: &mut Graph) -> Result<(), String> {
+    while let Some((name, _)) = graph.named.first() {
+        let name = name.clone();
+        graph.drop_named_durable(&name)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataset::empty_graph; // [OPUS-4.8] (sq-glw2) test-only now (see top-of-file note)
     use sparq_core::store::Pattern as IdPattern;
 
     fn count(g: &Graph) -> usize {
