@@ -21,7 +21,6 @@ remediation lives in the supply-chain / slsa frameworks.
 
 | ID | Gap (as it touches OpenSSF) | Owning slice | Bead |
 |---|---|---|---|
-| **GX-1** | PR-time **advisory** gating is degraded (cargo-deny CVSS-4.0 parse bug); the daily watchdog is the real advisory gate. Touches Scorecard `Vulnerabilities` / Badge `vulnerabilities_*`. **Stated honestly** in `controls/openssf.md` §A — not hidden. | sbom / ssdf / cra | **sq-q8de** |
 | **GX-8** | **No reproducible-build attestation.** Touches Badge `build_reproducible` (answered **Unmet** honestly in `evidence.md`; it is SUGGESTED-not-required at the passing level, so it does not block the bronze badge). | slsa / cra | (slsa gap-register; gap-fix under sq-toze) |
 
 ## Closed gaps (cite as evidence, do not re-open)
@@ -31,6 +30,7 @@ remediation lives in the supply-chain / slsa frameworks.
 | **GX-3** | No `.well-known/security.txt` (RFC 9116) machine-discoverable disclosure pointer. | **CLOSED** | [`.well-known/security.txt`](../../.well-known/security.txt) (bead **sq-toze.4**, closed). Strengthens Scorecard `Security-Policy` + Badge `vulnerability_report_private`. |
 | **GX-6** | No documented secure-coding standard. | **CLOSED** | [`CONTRIBUTING.md`](../../CONTRIBUTING.md) "Secure coding" (bead **sq-toze.7**). Strengthens Badge `contribution_requirements`. |
 | **GX-5** | No per-site unsafe justification register. | **CLOSED** | [`compliance/memsafety/unsafe-register.md`](../memsafety/unsafe-register.md) (bead **sq-toze.6**). Strengthens Badge `dynamic_analysis_unsafe`. |
+| **GX-1** | PR-time **advisory** gating was degraded (cargo-deny CVSS-4.0 parse blocker, sq-q8de). | **CLOSED** | [`supply-chain.yml`](../../.github/workflows/supply-chain.yml) `audit` job now runs `cargo deny check advisories` as a **real PR/push/merge_group gate** (no `continue-on-error`) over a fail-closed [`deny.toml`](../../deny.toml); closed by **#210** (bead **sq-toze.2**, closed; the CVSS-4.0 blocker sq-q8de is resolved). The daily watchdog ([`dependency-monitoring.yml`](../../.github/workflows/dependency-monitoring.yml)) is now defence-in-depth. Touches Scorecard `Vulnerabilities` / Badge `vulnerabilities_*`. |
 
 ## Honest bottom line
 
@@ -40,5 +40,7 @@ asserted from the codebase/CI is **implemented & verified**, and the Best-Practi
 and fuzz+Miri analysis). The **only blocking gap to a displayed badge / full Scorecard
 posture is the external badge filing (GX-4)** — a human-owned step the agent cannot perform.
 The two remaining gaps (GX-OSSF-2 registry-publish signing, GX-OSSF-3 solo-maintainer review
-score) are maturity nudges, not posture failures. No control is overclaimed; the degraded
-advisory PR-gate and the unattested registry publishes are recorded, not laundered.
+score) are maturity nudges, not posture failures. No control is overclaimed; the advisory
+PR-gate is **un-degraded** (GX-1 closed by #210 / sq-toze.2 — now two gating `cargo deny`
+steps over a fail-closed `deny.toml`), and the unattested registry publishes are recorded,
+not laundered.

@@ -36,7 +36,7 @@ flag where sparq also satisfies **silver/gold**.
 - **`sites_https`** — Met — GitHub-hosted (HTTPS).
 - **`discussion`** — Met — GitHub Discussions/Issues.
 - **`english`** — Met — all docs in English; `Preferred-Languages: en` in `security.txt`.
-- **`maintained`** — Met — active commit cadence on `main`; `SECURITY.md` declares the posture. *(Silver: declare a maintenance/EOL policy — `SECURITY.md` "Supported versions" partially covers; note pre-1.0.)*
+- **`maintained`** — Met w/justification (live signal) — based on active commit/PR cadence on `main` + `SECURITY.md`'s declared posture. This is the **same live signal** Scorecard's `Maintained` check reads at scan time, where it is labelled **AR** in [`controls/openssf.md`](./controls/openssf.md) §A; the badge self-cert and the Scorecard view therefore carry the *same* confidence (the answer is true only while the cadence holds, not assertable purely from a file). *(Silver: declare a maintenance/EOL policy — `SECURITY.md` "Supported versions" partially covers; note pre-1.0.)*
 
 ### Change Control
 - **`repo_public`** — Met — public GitHub repo `jeswr/sparq`.
@@ -72,7 +72,7 @@ flag where sparq also satisfies **silver/gold**.
 - **`tests_documented_added`** — Met — PR template checklist ties changes to the post-batch re-evaluation table; ratchets enforce non-regression.
 - **`warnings`** — Met — clippy lints enabled.
 - **`warnings_fixed`** — Met — clippy `-D warnings` is a **hard gate** (`ci.yml`), so no warnings can land.
-- **`warnings_strict`** — Met — `cargo clippy --workspace --all-targets -- -D warnings` (full-workspace, all-targets) + `cargo fmt --check`. *(This is the gold-level strict-warnings posture.)*
+- **`warnings_strict`** — Met — `cargo clippy --workspace --all-targets -- -D warnings` (full-workspace, all-targets) is the **hard gate** ([`ci.yml`](../../.github/workflows/ci.yml) `clippy (gate) + fmt (non-blocking)` job). *(This is the gold-level strict-warnings posture; the criterion rests on the clippy hard-gate. `cargo fmt --all --check` runs **informationally**, not gating — pending the deferred one-time `cargo fmt --all` reformat, per `ci.yml` header — so it is not cited as enforcing the criterion.)*
 
 ### Security
 - **`crypto_published`** — Met w/scope — sparq's *delivery* crypto is Sigstore/SLSA build-provenance (a published, standard scheme) over release assets ([`release.yml`](../../.github/workflows/release.yml)). **No claim is made about the `sparq-zk*`/`sparq-mpc` research scaffolds** (NOT sound — `SECURITY.md`).
@@ -83,7 +83,7 @@ flag where sparq also satisfies **silver/gold**.
 - **`delivery_mitm`** — Met — `SHA256SUMS` + Sigstore-signed SLSA **build-provenance attestation** over every release asset; verify `gh attestation verify <file> --repo jeswr/sparq` ([`release.yml`](../../.github/workflows/release.yml)).
 - **`delivery_unsigned`** — Met — releases are signed (provenance attestation, above). *(Gold-relevant.)*
 - **`vulnerabilities_fixed_60_days`** — Met — `SECURITY.md` response targets + the daily advisory watchdog ([`dependency-monitoring.yml`](../../.github/workflows/dependency-monitoring.yml)) surface advisories promptly; fixes ship in the next release.
-- **`vulnerabilities_critical_fixed`** — Met — no known unfixed critical vulns; the cargo-deny `bans/sources/licenses` gate + watchdog track the tree. *(Honest nuance: PR-time advisory gating is degraded by the cargo-deny CVSS-4.0 bug, GX-1 / sq-q8de — the watchdog is the gate.)*
+- **`vulnerabilities_critical_fixed`** — Met — no known unfixed critical vulns; the cargo-deny gate runs **two GATING steps** (`bans/sources/licenses` *and* `advisories`) on PR/push/merge_group with a fail-closed [`deny.toml`](../../deny.toml) (`yanked = "deny"`, two justified `unmaintained` ignores — neither a vuln). The daily watchdog ([`dependency-monitoring.yml`](../../.github/workflows/dependency-monitoring.yml)) is defence-in-depth. *(PR-time advisory gating is **un-degraded** — GX-1 closed by #210 / sq-toze.2; the CVSS-4.0 parse blocker sq-q8de is resolved.)*
 - **`no_leaked_credentials`** — Met — no secrets in tree; CodeQL + Scorecard scan; workflows use `${{ secrets }}`/OIDC only.
 
 ### Analysis
@@ -124,7 +124,7 @@ flag where sparq also satisfies **silver/gold**.
 - **CI-Tests** — [`ci.yml`](../../.github/workflows/ci.yml) on every PR, aggregated by `ci-summary`.
 - **License** — [`LICENSE`](../../LICENSE) (MIT).
 - **Binary-Artifacts** — none committed.
-- **Vulnerabilities** — [`supply-chain.yml`](../../.github/workflows/supply-chain.yml) + [`dependency-monitoring.yml`](../../.github/workflows/dependency-monitoring.yml) (honest: PR-time advisory gating degraded — GX-1).
+- **Vulnerabilities** — [`supply-chain.yml`](../../.github/workflows/supply-chain.yml) `audit` job — `cargo deny check bans sources licenses` *and* `cargo deny check advisories`, **both gating** (no `continue-on-error`; fail-closed [`deny.toml`](../../deny.toml)) + [`dependency-monitoring.yml`](../../.github/workflows/dependency-monitoring.yml) watchdog as defence-in-depth (advisory PR-gate un-degraded — GX-1 closed by #210 / sq-toze.2).
 - **CII-Best-Practices** — **gap** until the badge is filed (GX-4).
 
 ### Verifying the Scorecard score (reviewer instructions)
