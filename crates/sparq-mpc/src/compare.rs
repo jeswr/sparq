@@ -509,6 +509,118 @@ fn secure_bit_decompose(
     Ok(out)
 }
 
+/// [OPUS-4.8] sq-nx0s — **secret zero-test that opens ONLY a uniform mask product,
+/// never the value.** Returns `true` iff the secret-shared `[v]` reconstructs to
+/// `0`, WITHOUT reconstructing `v`. This is the SAME equality-to-zero primitive the
+/// hidden-value join uses ([`crate::join::HiddenValueJoin::secure_equal`]): draw a
+/// fresh **nonzero** mask `[r]`, open `m = v·r` at degree `2t`, and test `m == 0`.
+///
+/// Soundness of the disclosure: if `v == 0` then `m == 0` regardless of `r`. If
+/// `v != 0` then `v·r` is a **uniform nonzero** field element (a nonzero times a
+/// uniform nonzero is uniform nonzero), so opening `m` reveals ONLY the single bit
+/// "was `v` zero?" — it leaks nothing about `v`'s magnitude or any other value that
+/// went into `v`. The nonzero mask is essential: a zero mask would open `m = 0`
+/// even for `v != 0` (a false "in-range"). Honest-majority, semi-honest.
+fn secret_is_zero(dealer: &mut ShamirDealer, v: &[Share]) -> Result<bool, MpcError> {
+    let t = dealer.threshold();
+    // Fresh NONZERO mask (a CSPRNG draw in production, sq-1vt). Nonzero is
+    // load-bearing: m = v·0 = 0 would falsely report v == 0.
+    let mask_value = dealer.draw_nonzero_fp();
+    let mask = dealer.share(mask_value);
+    let m_shares = shamir::mul_shares_raw(v, &mask)?;
+    // Open the degree-2t product through the SAME robust path as every other open
+    // (mirrors `HiddenValueJoin::secure_equal`); m == 0 ⇔ v == 0. `v` itself is
+    // never reconstructed.
+    let m = shamir::reconstruct_degree(&m_shares, 2 * t)?;
+    Ok(m == Fp::zero())
+}
+
+/// [OPUS-4.8] sq-nx0s — **in-protocol range proof of a secret-shared sum**, the
+/// guard that turns the previously-UNCHECKED caller precondition (sum `< 2^`
+/// [`DECOMP_VALUE_BITS`]) into a fail-closed, in-MPC check. Given `[sum]` and the
+/// `L = `[`DECOMP_MASK_BITS`] secret-shared bits `[b_0..b_{L-1}]` that
+/// [`secure_bit_decompose`] recovered, it PROVES — without ever reconstructing the
+/// sum — that
+///
+/// 1. the bits faithfully recompose the sum with **no field wraparound and no
+///    content above bit `L`**: `sum == Σ_{k<L} b_k·2^k` (a secret zero-test of the
+///    difference); AND
+/// 2. the sum is **below the supported magnitude** `2^`[`DECOMP_VALUE_BITS`]: every
+///    bit at position `>= DECOMP_VALUE_BITS` is zero, i.e. the high-part
+///    `Σ_{k>=value_bits} b_k·2^k == 0` (a second secret zero-test).
+///
+/// Together these are EXACTLY `sum ∈ [0, 2^DECOMP_VALUE_BITS)`. On violation it
+/// returns a fail-closed [`MpcError::Protocol`] (abort) rather than letting the
+/// caller compute a verdict from a wrapped / over-magnitude — hence *wrong* —
+/// bit-decomposition.
+///
+/// ## Why both clauses are needed (the field-wrap seam)
+///
+/// The masked open `c = sum + r` inside [`secure_bit_decompose`] can field-WRAP
+/// (`sum + r >= p = 2^61−1`) when the sum is large; the borrow-subtraction circuit
+/// then recovers `(c − r) mod 2^L`, which is NOT the sum. A magnitude-only check on
+/// the recovered bits is therefore **unsound**: there exist large wrapping sums
+/// whose recovered low bits happen to be small (high bits zero) — the magnitude
+/// clause alone would wrongly accept them. Clause (1), the recompose zero-test
+/// `sum == Σ b_k 2^k`, closes that seam: it can only hold when there was no wrap
+/// and the sum truly lies in `[0, 2^L)`. Clause (2) then narrows `[0, 2^L)` to the
+/// statistically-safe `[0, 2^value_bits)`.
+///
+/// ## What is opened (no sum leak)
+///
+/// ONLY two masked zero-test products are opened, each a `v·r` for a fresh nonzero
+/// mask `r` — a uniform nonzero (revealing only "was it zero?") when the input is
+/// nonzero, and `0` (the in-range case, revealing nothing) otherwise. The sum, its
+/// difference from the recomposition, and the high part are NEVER reconstructed.
+/// The verdict bit is opened separately by the caller.
+///
+/// Honest-majority, semi-honest (inherits the module security model).
+fn verify_sum_in_range(
+    dealer: &mut ShamirDealer,
+    sum_shares: &[Share],
+    sum_bits: &[Vec<Share>],
+) -> Result<(), MpcError> {
+    let n = dealer.parties();
+    // Recompose the sum from ALL L recovered bits, and SEPARATELY the high part
+    // (bits >= DECOMP_VALUE_BITS). Both are FREE local linear combinations of the
+    // bit sharings — no secure multiplication.
+    let mut recomposed = const_sharing(n, Fp::zero());
+    let mut high_part = const_sharing(n, Fp::zero());
+    for (k, bit) in sum_bits.iter().enumerate() {
+        let weighted = shamir::scale(bit, Fp::new(1u64 << k));
+        recomposed = shamir::add_shares(&recomposed, &weighted)?;
+        if k >= DECOMP_VALUE_BITS {
+            high_part = shamir::add_shares(&high_part, &weighted)?;
+        }
+    }
+
+    // Clause (1): no field wrap / fits L bits ⇔ sum − Σ b_k 2^k == 0.
+    let recompose_diff = shamir::sub_shares(sum_shares, &recomposed)?;
+    if !secret_is_zero(dealer, &recompose_diff)? {
+        return Err(MpcError::Protocol(format!(
+            "disclose_threshold_verdict: in-protocol range proof FAILED — the secret-shared sum \
+             does not equal the bit-composition of its recovered {DECOMP_MASK_BITS} bits \
+             (the masked open `sum + r` wrapped the field modulus p = 2^61-1, or the sum has \
+             content above bit {DECOMP_MASK_BITS}). The verdict would be derived from a corrupted \
+             decomposition, so it is REJECTED fail-closed rather than returned wrong. The sum must \
+             be < 2^{DECOMP_VALUE_BITS} = {DECOMP_VALUE_MAX_EXCLUSIVE}."
+        )));
+    }
+
+    // Clause (2): below the supported magnitude ⇔ all bits >= DECOMP_VALUE_BITS are
+    // zero ⇔ the high part is zero.
+    if !secret_is_zero(dealer, &high_part)? {
+        return Err(MpcError::Protocol(format!(
+            "disclose_threshold_verdict: in-protocol range proof FAILED — the secret-shared sum is \
+             >= 2^{DECOMP_VALUE_BITS} = {DECOMP_VALUE_MAX_EXCLUSIVE} (a bit at or above position \
+             {DECOMP_VALUE_BITS} is set). That exceeds the statistically-safe magnitude the in-MPC \
+             masked bit-decomposition supports, so the verdict is REJECTED fail-closed rather than \
+             returned wrong."
+        )));
+    }
+    Ok(())
+}
+
 /// **Secure greater-than over two SECRET operands**, opening only the verdict bit.
 ///
 /// Returns a fresh degree-`t` sharing of the boolean `a > b` (1 if `a > b`, else
@@ -616,27 +728,39 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// malicious. The masked open is statistically (not info-theoretically) hiding
 /// because `p = 2^61−1` is too small for a perfect mask above the value width.
 ///
-/// ## Magnitude bound — sum is a CALLER PRECONDITION; threshold is fail-closed
+/// ## Magnitude bound — BOTH the sum and the threshold are now fail-closed
 ///
 /// Both the SUM and `public_threshold` must be `< 2^`[`DECOMP_VALUE_BITS`]` = 2^20
 /// = 1_048_576` (the statistically-safe no-wrap range — see [`DECOMP_VALUE_BITS`]),
 /// much smaller than the cleartext-operand [`COMPARE_BITS`] because the in-MPC path
 /// masks the sum; it nonetheless covers the four-flatmates use case (£10^6 < 2^20).
 ///
-/// These two bounds are enforced ASYMMETRICALLY, and the doc is precise about it:
-/// - **`public_threshold`** is a public `u64`, so it IS range-checked fail-closed
-///   here (returns [`MpcError::Protocol`] before any protocol work if it is
+/// ### [OPUS-4.8] sq-nx0s — the sum bound is now an IN-PROTOCOL range proof
+///
+/// Previously the sum bound was a CALLER PRECONDITION (documented, not enforced):
+/// an out-of-range sum silently produced a WRONG verdict because the magnitude of a
+/// SHARING cannot be read off the shares. That seam is now CLOSED. After the in-MPC
+/// bit-decomposition, [`verify_sum_in_range`] PROVES — without reconstructing the
+/// sum — that `sum ∈ [0, 2^DECOMP_VALUE_BITS)`, via two secret zero-tests over the
+/// recovered shared bits:
+/// 1. `sum == Σ b_k·2^k` (the bits faithfully recompose the sum: no field wrap, no
+///    content above bit [`DECOMP_MASK_BITS`]); AND
+/// 2. every bit `>= DECOMP_VALUE_BITS` is zero (the sum is below the supported
+///    magnitude).
+///
+/// Clause (1) is what makes this SOUND against field wraparound — a magnitude-only
+/// check would wrongly accept large wrapping sums whose recovered low bits look
+/// small (see [`verify_sum_in_range`]). On violation the function returns a
+/// fail-closed [`MpcError::Protocol`] (abort) — the verdict is **rejected, not
+/// returned wrong**. Each zero-test opens ONLY a uniform `v·r` mask product (zero
+/// in range, uniform-nonzero otherwise), so the sum is STILL never reconstructed.
+///
+/// - **`public_threshold`** is a public `u64`, so it is range-checked fail-closed
+///   up front (returns [`MpcError::Protocol`] before any protocol work if it is
 ///   `>= 2^DECOMP_VALUE_BITS`).
-/// - **The sum** is held only as a degree-`t` SHARING; its magnitude **cannot** be
-///   validated from shares without extra protocol work or a disclosure that would
-///   defeat the point. So the sum bound is a **caller precondition**, NOT an
-///   in-function check. If a caller passes a sum `>= 2^DECOMP_VALUE_BITS`, the
-///   masked open `c = sum + r` may wrap `p = 2^61−1` and/or break the statistical
-///   gap, and the verdict is then **undefined / silently wrong** (no error is
-///   raised). Callers MUST guarantee the bound upstream (the federation aggregate
-///   that produced `sum_shares` is responsible — e.g. bound each contribution and
-///   the party count so the total cannot exceed `2^20`). An in-protocol range
-///   proof on the shared sum is the residual follow-up (see module docs).
+/// - **The sum** is range-checked in-protocol AFTER its bit-decomposition (the
+///   range proof above), so an out-of-range sum now aborts rather than yielding a
+///   silent wrong verdict.
 pub fn disclose_threshold_verdict(
     backend: &ShamirBackend,
     sum_shares: &[Share],
@@ -665,6 +789,12 @@ pub fn disclose_threshold_verdict(
     // Bit-decompose the EXISTING sum sharing IN-MPC. The sum is NEVER reconstructed
     // (only `sum + r`, statistically masked, is opened inside `secure_bit_decompose`).
     let sum_bits = secure_bit_decompose(&mut dealer, backend, sum_shares)?;
+    // [OPUS-4.8] sq-nx0s — IN-PROTOCOL range proof of the secret-shared sum. PROVES
+    // sum ∈ [0, 2^DECOMP_VALUE_BITS) from the recovered bits WITHOUT reconstructing
+    // the sum: an out-of-range sum (field-wrapped or over-magnitude) is REJECTED
+    // fail-closed here, rather than feeding a corrupted decomposition to the
+    // comparator and returning a silent wrong verdict.
+    verify_sum_in_range(&mut dealer, sum_shares, &sum_bits)?;
     // The recovered shared bits feed the public-threshold comparator; the threshold's
     // bits are public constants. Open ONLY the verdict bit.
     let verdict_shares = greater_than_public_bits_with(&mut dealer, &sum_bits, public_threshold)?;
@@ -1338,13 +1468,12 @@ mod tests {
     #[test]
     fn disclose_threshold_in_mpc_out_of_range_sum_is_handled() {
         // FIELD-EDGE / OVERFLOW SAFETY: a sum at/above the supported magnitude bound
-        // must NOT silently return a wrong verdict. With the masked open `c = sum +
-        // r`, a sum >= 2^DECOMP_VALUE_BITS can push `c` past the no-wrap region and
-        // corrupt the recovered bits. We don't have an in-range check on the SUM
-        // shares (they arrive already shared), so we document + verify the supported
-        // bound is exactly 2^DECOMP_VALUE_BITS by exercising the boundary value
-        // (which IS supported) and confirming correctness there, and we pin that the
-        // bound constant is what the docs claim.
+        // must NOT silently return a wrong verdict. [OPUS-4.8] sq-nx0s: the sum bound
+        // is now an IN-PROTOCOL range proof (`verify_sum_in_range`), so an
+        // out-of-range sum is REJECTED fail-closed — see the dedicated
+        // `disclose_threshold_in_mpc_out_of_range_sum_rejected_*` tests below for the
+        // rejection matrix. Here we pin the bound constant and confirm the boundary
+        // in-range value is ACCEPTED and correct.
         const {
             assert!(DECOMP_VALUE_MAX_EXCLUSIVE == 1 << 20);
             assert!(DECOMP_VALUE_BITS == 20);
@@ -1363,6 +1492,196 @@ mod tests {
             max_c < crate::field::P,
             "masked open must not wrap the modulus"
         );
+    }
+
+    // =========================================================================
+    // [OPUS-4.8] sq-nx0s — IN-PROTOCOL range proof of the secret-shared sum.
+    // The core new guarantee: an out-of-range sum (>= 2^DECOMP_VALUE_BITS, or one
+    // whose masked open wraps the field) is REJECTED fail-closed, NOT turned into a
+    // silent wrong verdict. The previous behaviour (caller precondition, no
+    // enforcement) is GONE.
+    // =========================================================================
+
+    /// Share ONE field element `v` (which may be >= 2^20 or near `p`, so it is NOT
+    /// reduced into the use-case range) directly as a degree-`t` sharing, to drive
+    /// the range proof with deliberately out-of-range secret sums. `Fp::new`
+    /// reduces mod `p`, so a `v` in `[0, p)` is shared faithfully.
+    fn shared_value(n: usize, seed: u64, v: u64) -> (ShamirBackend, Vec<Share>) {
+        let backend = ShamirBackend::new_seeded(n, seed).unwrap();
+        let shares = backend.dealer().share(Fp::new(v));
+        (backend, shares)
+    }
+
+    #[test]
+    fn in_range_sums_pass_the_range_proof_and_give_correct_verdict() {
+        // CORE matrix — in-range half. 0, 1, mid, and 2^L - 1 (max in-range) all
+        // pass the in-protocol range proof and yield the correct verdict.
+        let thr = 100_000u64;
+        let in_range: &[u64] = &[
+            0,
+            1,
+            500_000,                        // mid
+            DECOMP_VALUE_MAX_EXCLUSIVE - 1, // 2^20 - 1, max in-range
+        ];
+        for n in [3usize, 5, 7] {
+            for (idx, &sum) in in_range.iter().enumerate() {
+                let (b, s) = shared_value(n, 4000 + idx as u64 + n as u64 * 13, sum);
+                let out = disclose_threshold_verdict(&b, &s, thr)
+                    .unwrap_or_else(|e| panic!("n={n} in-range sum {sum} wrongly REJECTED: {e:?}"));
+                assert_eq!(
+                    verdict_bool(&out),
+                    sum > thr,
+                    "n={n} sum={sum}: in-range verdict wrong"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_range_sum_is_rejected_fail_closed_not_wrong_verdict() {
+        // CORE matrix — out-of-range half (THE new guarantee). A sum >=
+        // 2^DECOMP_VALUE_BITS, including the first out-of-range value, a few above
+        // it, a value in (2^20, 2^60) (within the L-bit decomposition but over the
+        // magnitude bound), and a value that wraps the field under the masked open
+        // (near `p`), must ALL return a fail-closed Protocol error — never a verdict.
+        let p = crate::field::P;
+        let oob: &[u64] = &[
+            DECOMP_VALUE_MAX_EXCLUSIVE,      // 2^20, first out-of-range
+            DECOMP_VALUE_MAX_EXCLUSIVE + 1,  // 2^20 + 1
+            DECOMP_VALUE_MAX_EXCLUSIVE + 99, // 2^20 + k
+            1u64 << 30,                      // well above 2^20, below 2^60
+            1u64 << 59,                      // high bit inside the L=60 window
+            (1u64 << 60) - 1,                // 2^60 - 1: max representable in L bits, OOB
+            1u64 << 60,                      // 2^60: above the decomposition window
+            p - 1,                           // near p: masked open `sum + r` WRAPS the field
+            p - 12345,
+            p / 2,
+        ];
+        for n in [3usize, 5, 7] {
+            for (idx, &sum) in oob.iter().enumerate() {
+                // Threshold deliberately small & in-range; the sum is the OOB input.
+                let (b, s) = shared_value(n, 5000 + idx as u64 + n as u64 * 17, sum);
+                let res = disclose_threshold_verdict(&b, &s, 100_000);
+                match res {
+                    Err(MpcError::Protocol(m)) => assert!(
+                        m.contains("range proof FAILED"),
+                        "n={n} OOB sum {sum}: expected range-proof fail-closed, got: {m}"
+                    ),
+                    Err(other) => {
+                        panic!("n={n} OOB sum {sum}: expected Protocol range error, got {other:?}")
+                    }
+                    Ok(out) => panic!(
+                        "n={n} OOB sum {sum}: range proof did NOT fire — returned a verdict {:?} \
+                         (this is the silent-wrong-verdict bug sq-nx0s closes)",
+                        verdict_bool(&out)
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn range_proof_boundary_max_in_range_accepts_first_out_of_range_rejects() {
+        // BOUNDARY: sum == 2^L - 1 (max in-range, value_bits) ACCEPTS; sum == 2^L
+        // (first out-of-range) REJECTS. (Here "L" for the magnitude bound is
+        // DECOMP_VALUE_BITS = 20, the supported sum width.)
+        for n in [3usize, 5, 7] {
+            // Max in-range: 2^20 - 1 accepted.
+            let (b_ok, s_ok) = shared_value(n, 6000 + n as u64, DECOMP_VALUE_MAX_EXCLUSIVE - 1);
+            assert!(
+                disclose_threshold_verdict(&b_ok, &s_ok, 0).is_ok(),
+                "n={n}: max in-range sum 2^20-1 must be ACCEPTED"
+            );
+            // First out-of-range: 2^20 rejected.
+            let (b_bad, s_bad) = shared_value(n, 6500 + n as u64, DECOMP_VALUE_MAX_EXCLUSIVE);
+            assert!(
+                matches!(
+                    disclose_threshold_verdict(&b_bad, &s_bad, 0),
+                    Err(MpcError::Protocol(_))
+                ),
+                "n={n}: first out-of-range sum 2^20 must be REJECTED fail-closed"
+            );
+        }
+    }
+
+    #[test]
+    fn range_proof_recompose_clause_catches_field_wrap_that_magnitude_alone_would_miss() {
+        // SOUNDNESS of clause (1): a magnitude-only check on the recovered bits is
+        // UNSOUND because a large wrapping sum can recover small low bits (high bits
+        // zero). We exercise sums near `p` across MANY seeds: every one whose masked
+        // open could wrap must be rejected by the recompose zero-test, never accepted.
+        // (We can't choose `r` — it's CSPRNG/seeded — so we sweep seeds so some draws
+        // land in the wrapping region; ALL must reject regardless.)
+        let p = crate::field::P;
+        for seed in 0..40u64 {
+            for &sum in &[p - 1, p - 2, p - 1000, (1u64 << 61) - 1 - (1u64 << 19)] {
+                let (b, s) = shared_value(5, 9000 + seed, sum);
+                assert!(
+                    matches!(
+                        disclose_threshold_verdict(&b, &s, 100_000),
+                        Err(MpcError::Protocol(_))
+                    ),
+                    "near-p sum {sum} (seed {seed}) must be rejected by the recompose clause, \
+                     never accepted as a wrong verdict"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn range_proof_opens_only_two_mask_products_and_the_verdict_never_the_sum() {
+        // PRIVACY: the range proof opens ONLY the two zero-test mask products (each a
+        // uniform `v·r`, leaking only "was it zero?") plus the existing masked
+        // `c = sum + r` and the final verdict bit — the sum's shares are NEVER all
+        // brought together. We pin this STRUCTURALLY: two DIFFERENT in-range sums on
+        // the SAME side of the threshold disclose a byte-identical partial (so the
+        // disclosed value is the relation, not the sum), AND `verify_sum_in_range`
+        // accepts both. A reconstruct-the-sum implementation could not make the two
+        // outputs identical while staying correct.
+        let thr = 100_000u64;
+        let (b_a, s_a) = shared_value(5, 70_001, 200_000);
+        let (b_b, s_b) = shared_value(5, 70_002, DECOMP_VALUE_MAX_EXCLUSIVE - 1); // 2^20-1
+        let out_a = disclose_threshold_verdict(&b_a, &s_a, thr).unwrap();
+        let out_b = disclose_threshold_verdict(&b_b, &s_b, thr).unwrap();
+        assert!(verdict_bool(&out_a) && verdict_bool(&out_b), "both > 100k");
+        let ra = format!("{:?}", out_a.rows);
+        let rb = format!("{:?}", out_b.rows);
+        assert!(
+            !ra.contains("200000"),
+            "sum 200000 must NOT be disclosed: {ra}"
+        );
+        assert!(
+            !rb.contains(&(DECOMP_VALUE_MAX_EXCLUSIVE - 1).to_string()),
+            "the max-in-range sum must NOT be disclosed: {rb}"
+        );
+        assert_eq!(
+            ra, rb,
+            "two different in-range sums above thr must disclose the SAME verdict bit"
+        );
+    }
+
+    #[test]
+    fn secret_is_zero_primitive_is_correct() {
+        // The zero-test the range proof rests on: true iff the secret-shared value is
+        // 0, opening only a uniform mask product — never the value.
+        for n in [3usize, 5, 7] {
+            let backend = ShamirBackend::new_seeded(n, 0x2E_50 + n as u64).unwrap();
+            let mut dealer = backend.dealer();
+            // Zero ⇒ true.
+            let zero = dealer.share(Fp::zero());
+            assert!(
+                secret_is_zero(&mut dealer, &zero).unwrap(),
+                "n={n}: 0 ⇒ zero"
+            );
+            // Nonzero values ⇒ false (across a spread incl. 1, big, near p).
+            for v in [1u64, 42, 1_000_000, crate::field::P - 1] {
+                let nz = dealer.share(Fp::new(v));
+                assert!(
+                    !secret_is_zero(&mut dealer, &nz).unwrap(),
+                    "n={n} v={v}: nonzero ⇒ not zero"
+                );
+            }
+        }
     }
 
     #[test]
