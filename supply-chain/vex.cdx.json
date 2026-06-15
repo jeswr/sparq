@@ -1,0 +1,70 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "name": "sparq",
+      "bom-ref": "pkg:cargo/sparq",
+      "description": "sparq — SOTA Rust RDF + SPARQL engine. This is the checked-in VEX (Vulnerability Exploitability eXchange) source of truth; the release workflow stamps the released version into a per-release copy attached to the GitHub Release alongside the CycloneDX SBOM."
+    },
+    "supplier": {
+      "name": "Jesse Wright",
+      "url": ["https://github.com/jeswr/sparq"]
+    }
+  },
+  "_comment": [
+    "[OPUS-4.8] sq-toze.3 (GX-2): VEX justifying the advisories that cargo-deny is configured",
+    "to ignore in deny.toml. KEEP THIS IN SYNC WITH deny.toml [advisories].ignore — each entry",
+    "here corresponds 1:1 to an ignore there, with the same justification. Both are `unmaintained`",
+    "informational advisories on TRANSITIVE deps with no available code-execution / vulnerability",
+    "vector and no safe upgrade today; the VEX `analysis.state` is `not_affected` because an",
+    "unmaintained-crate notice is not an exploitable weakness in sparq's product. Re-audit when an",
+    "upgrade path appears (drop the deny.toml ignore AND the matching entry here). The CycloneDX",
+    "`vulnerabilities[].analysis.justification` values are from the CycloneDX impact-analysis",
+    "justification enum (e.g. `code_not_reachable`)."
+  ],
+  "vulnerabilities": [
+    {
+      "id": "RUSTSEC-2024-0436",
+      "source": {
+        "name": "RustSec",
+        "url": "https://rustsec.org/advisories/RUSTSEC-2024-0436"
+      },
+      "ratings": [
+        { "source": { "name": "RustSec" }, "severity": "none" }
+      ],
+      "description": "The `paste` proc-macro crate is no longer maintained (archived by its author). This is an `unmaintained` informational advisory, not a vulnerability — no known CVE, CVSS, or exploit.",
+      "detail": "Pulled in transitively via the GPU stack (sparq-gpu -> wgpu -> wgpu-hal -> metal -> paste). There is no drop-in successor packaged today and no safe upgrade path; tracked in bead sq-l8bv to migrate off when one appears.",
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_reachable",
+        "detail": "`paste` is a compile-time proc-macro with no runtime code path and no security vulnerability; an `unmaintained` notice does not make sparq exploitable. It is reachable only through the optional `sparq-gpu` crate (not in the default CLI/server build). not_affected; re-audit on an available upgrade. Mirrors the deny.toml [advisories].ignore entry (same reason)."
+      },
+      "affects": [
+        { "ref": "pkg:cargo/sparq" }
+      ]
+    },
+    {
+      "id": "RUSTSEC-2025-0134",
+      "source": {
+        "name": "RustSec",
+        "url": "https://rustsec.org/advisories/RUSTSEC-2025-0134"
+      },
+      "ratings": [
+        { "source": { "name": "RustSec" }, "severity": "none" }
+      ],
+      "description": "The `rustls-pemfile` crate is archived; its functionality has been folded into `rustls-pki-types`. This is an `unmaintained` informational advisory, not a vulnerability — no known CVE, CVSS, or exploit.",
+      "detail": "Pulled in transitively via ureq -> rustls-native-certs -> rustls-pemfile. Per the advisory, no safe upgrade is available without an upstream ureq / rustls-native-certs bump; tracked in bead sq-g2xs.",
+      "analysis": {
+        "state": "not_affected",
+        "justification": "vulnerable_code_not_in_execute_path",
+        "detail": "`rustls-pemfile` parses PEM at TLS-client startup; the archived status carries no known vulnerability and there is no available upgrade. not_affected; re-audit when the upstream ureq/rustls-native-certs path moves to rustls-pki-types. Mirrors the deny.toml [advisories].ignore entry (same reason)."
+      },
+      "affects": [
+        { "ref": "pkg:cargo/sparq" }
+      ]
+    }
+  ]
+}

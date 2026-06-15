@@ -56,10 +56,18 @@ WORKDIR /build
 # .dockerignore keeps the context to the workspace sources (no target/, bench data, .git).
 COPY . .
 
+# [OPUS-4.8] sq-toze.8 (GX-7): cargo-auditable embeds the dependency manifest into the
+# server binary so the shipped image is self-describing for post-build audit
+# (`cargo audit bin /usr/local/bin/sparq-server`). `--locked` here uses cargo-auditable's
+# OWN crates.io lockfile (a reproducible tool install) — it does NOT pin to this workspace's
+# Cargo.lock; the server binary itself is pinned by the `--locked` on the build step below.
+RUN cargo install --locked cargo-auditable
+
 # --locked: build exactly the committed Cargo.lock. The workspace release profile is
 # fat-LTO + codegen-units=1 (the shipped-binary configuration), so this step is slow
-# but produces the same binary the benchmarks measured.
-RUN cargo build --release --locked -p sparq-server ${CARGO_FLAGS}
+# but produces the same binary the benchmarks measured. `cargo auditable build` is a
+# drop-in for `cargo build` that embeds the dependency manifest (GX-7).
+RUN cargo auditable build --release --locked -p sparq-server ${CARGO_FLAGS}
 
 # -------- runtime --------
 # [OPUS-4.8] SHA-pinned (Scorecard PinnedDependencies). Tag kept on its own comment line
