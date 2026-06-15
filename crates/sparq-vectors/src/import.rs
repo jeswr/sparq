@@ -36,12 +36,26 @@
 //!
 //! # Fail-closed validation
 //!
-//! Every length/shape/dtype field is validated **before** any allocation proportional to it, mirroring
-//! the bounded-read hardening in [`crate::store`] / sparq-hdt (sq-tzwa): a declared `.npy` shape is
-//! checked against the actual file length (`data_offset + rows·dim·elem_size`) so a hostile header
-//! cannot trigger a multi-gigabyte pre-allocation, and a dtype/shape/order/dim/row-count mismatch is an
-//! `Err`, never a silent reinterpretation. The header length itself is bounded (≤ a few KiB) so a
-//! malformed/oversized `HEADER_LEN` is rejected up front.
+//! Every length/shape/dtype field is validated **before** the proportional *decode* allocation (the
+//! flat `Vec<f32>` rows), mirroring the bounded-read hardening in [`crate::store`] / sparq-hdt
+//! (sq-tzwa): a declared `.npy` shape is checked against the actual file length (`data_offset +
+//! rows·dim·elem_size`) so a hostile header cannot trigger a multi-gigabyte decode pre-allocation, and
+//! a dtype/shape/order/dim/row-count mismatch is an `Err`, never a silent reinterpretation. The header
+//! length itself is bounded to [`MAX_NPY_HEADER_LEN`] (64 KiB) so a malformed/oversized `HEADER_LEN` is
+//! rejected up front. Note that the raw file bytes themselves are read fully into memory up front (via
+//! `std::fs::read`); the validation above precedes the *decode* `Vec<f32>` allocation, not the file
+//! read — see the peak-memory note below. [OPUS-4.8]
+//!
+//! # Peak memory
+//!
+//! These import paths are **not** streaming. `import_npy` / `import_numeric_dump` read the entire input
+//! file into a `Vec<u8>` (`std::fs::read`) and then decode it into a flat `Vec<f32>`; `write_store`
+//! ([`VectorStore::create`] + [`put`](VectorStore::put)) in turn buffers the whole dense payload in RAM
+//! before [`finalize`](VectorStore::finalize). So peak resident memory is roughly *input file size +
+//! decoded matrix* — on the order of **~2× the embedding matrix** (a little more for `f8` input, which
+//! is read at 8 B/elem and narrowed to 4 B/elem). This is fine for typical embedding sets, but large
+//! imports are memory-bound; a streaming import path that avoids holding the whole file + matrix at
+//! once is tracked as a follow-up (sq-xsq9). [OPUS-4.8]
 //!
 //! # Graph binding
 //!
@@ -55,11 +69,11 @@ use crate::store::VectorStore;
 use sparq_core::dict::Id;
 use sparq_core::Graph;
 
-/// The largest `.npy` header length this importer will accept, in bytes. The NumPy header is a tiny
-/// ASCII dict (`{'descr': '<f4', 'fortran_order': False, 'shape': (N, D), }` plus padding to a 64-byte
-/// boundary); a few KiB is already far larger than any real header. Bounding it keeps a malformed or
-/// hostile declared `HEADER_LEN` from forcing a large pre-allocation before we have even seen the body
-/// (the sq-tzwa fail-closed discipline). [OPUS-4.8]
+/// The largest `.npy` header length this importer will accept, in bytes: **64 KiB** (`64 * 1024`). The
+/// NumPy header is a tiny ASCII dict (`{'descr': '<f4', 'fortran_order': False, 'shape': (N, D), }` plus
+/// padding to a 64-byte boundary); 64 KiB is already far larger than any real header. Bounding it keeps
+/// a malformed or hostile declared `HEADER_LEN` from forcing a large pre-allocation before we have even
+/// seen the body (the sq-tzwa fail-closed discipline). [OPUS-4.8]
 pub const MAX_NPY_HEADER_LEN: usize = 64 * 1024;
 
 /// [OPUS-4.8] (sq-xsq9) How to bind a bulk-imported store to its source graph.
@@ -313,6 +327,12 @@ fn decode_npy_body(header: &NpyHeader, body: &[u8]) -> Result<Vec<f32>, String> 
 
 /// Build the `.spqv` from already-decoded row-major `f32` rows (`rows × dim`) and the parallel ids,
 /// reusing the standard store writer. Shared by both import formats.
+///
+/// [OPUS-4.8] This buffers the entire dense payload in RAM: [`VectorStore::create`] +
+/// [`put`](VectorStore::put) accumulate all rows, then [`finalize`](VectorStore::finalize) writes them
+/// out. Combined with the caller already holding the decoded `flat` matrix (and the import paths the
+/// whole input file), peak resident memory is ~2× the embedding matrix — see the [module peak-memory
+/// note](self#peak-memory).
 fn write_store<P: Into<std::path::PathBuf>>(
     spqv_path: P,
     dim: usize,
@@ -351,8 +371,13 @@ impl VectorStore {
     /// `spec.ids[i]` is the dict id for row `i` of the matrix (the row → dict-id contract). The file
     /// must be a **2-D, C-order, little-endian `f4`/`f8`** array whose `shape == (spec.ids.len(),
     /// spec.dim)`; any other dtype, byte-order, dimensionality, fortran-order or shape mismatch is a
-    /// fail-closed `Err`. The declared header length and shape are validated against the actual file
-    /// length before any body allocation (sq-tzwa hardening). `f8` rows are narrowed to `f32`.
+    /// fail-closed `Err`. The whole file is read into memory up front (`std::fs::read`); the declared
+    /// header length and shape are then validated against the actual file length **before the decode
+    /// allocation** — i.e. before the flat `Vec<f32>` is allocated, so a hostile header cannot force a
+    /// multi-gigabyte decode buffer (sq-tzwa hardening). Note the file-byte read itself is *not* gated
+    /// by this check, and `write_store` buffers the whole dense payload before finalize, so peak RAM is
+    /// roughly the file size + the decoded matrix (~2× the matrix) — see the [module peak-memory
+    /// note](self#peak-memory). `f8` rows are narrowed to `f32`. [OPUS-4.8]
     ///
     /// Returns the finalized, memory-mapped store (same handle [`VectorStore::open`] would yield).
     ///
@@ -409,6 +434,12 @@ impl VectorStore {
     /// fail-closed `Err` (so a truncated or padded file cannot be silently mis-sliced). This is the
     /// format `numpy.ndarray.astype('<f4').tofile(path)` writes, or raw `Vec<f32>` bytes from any
     /// language.
+    ///
+    /// The expected length is checked from `metadata` *before* the file is read, so a wrong-size file
+    /// is rejected without a large read; but a correctly-sized file is then read fully into memory
+    /// (`std::fs::read`) and decoded into a flat `Vec<f32>`, and `write_store` buffers the whole dense
+    /// payload before finalize — peak RAM is roughly the file size + the decoded matrix (~2× the
+    /// matrix). See the [module peak-memory note](self#peak-memory). [OPUS-4.8]
     ///
     /// Returns the finalized, memory-mapped store.
     #[cfg(not(target_arch = "wasm32"))]
