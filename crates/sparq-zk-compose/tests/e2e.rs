@@ -403,6 +403,7 @@ fn sample_manifest() -> ProofManifest {
             from_slot: 2,
             to_proof: 1,
         }],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -727,6 +728,7 @@ fn full_manifest_prove_verify_scan() {
             proof_hex: encode_artifacts(&art),
         }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -848,6 +850,7 @@ fn filter_manifest(
             SubProof { inputs, proof_hex },
         ],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -1202,6 +1205,7 @@ fn nonce_binding_mismatch_rejected() {
             status_snapshots: vec![fixture_snapshot(false)],
             sub_proofs: vec![SubProof { inputs: scan.clone(), proof_hex: String::new() }],
             binding_edges: vec![],
+            join_edges: vec![],
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
         };
@@ -1299,6 +1303,7 @@ fn holder_pop_manifest(holder_hex: &str, pop_hex: &str, cryptosuite: &str) -> Pr
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -1568,6 +1573,7 @@ fn holder_bound_manifest(
             proof_hex: String::new(),
         }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -1943,6 +1949,7 @@ fn holder_pop_valid_verifies_end_to_end() {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: encode_artifacts(&art) }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -1997,6 +2004,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
             status_snapshots: vec![fixture_snapshot(false)],
             sub_proofs: vec![SubProof { inputs: scan.clone(), proof_hex: proof_hex.into() }],
             binding_edges: vec![],
+            join_edges: vec![],
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
         };
@@ -2263,6 +2271,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2293,6 +2302,7 @@ fn filter_reject_filter_add_on_scan_only() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2323,6 +2333,7 @@ fn filter_reject_constant_swap_age_as_salary() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2373,6 +2384,7 @@ fn filter_reject_operand_slot_substitution() {
         ],
         // Edge points at proof 0 (salary scan) slot 2 — the WRONG column for ?age.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 2 }],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2417,6 +2429,7 @@ fn filter_reject_false_verdict_row() {
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2447,6 +2460,7 @@ fn filter_reject_unbindable_filter_fragment() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2490,6 +2504,7 @@ fn filter_binding_happy_path_structure() {
             SubProof { inputs: filt, proof_hex: String::new() },
         ],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2555,6 +2570,7 @@ fn filter_reject_unproven_failing_row() {
         ],
         // Edge only for row 0 — row 1 has no true-verdict filter proof.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2609,6 +2625,7 @@ fn filter_two_rows_both_gated_verifies() {
             BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 },
             BindingEdge { from_proof: 0, from_row: 1, from_slot: 2, to_proof: 2 },
         ],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2667,6 +2684,7 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -2809,6 +2827,7 @@ fn issuer_reject_drop_triple_recommit_suppression() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -3128,6 +3147,7 @@ fn cross_graph_manifest(
             SubProof { inputs: scan_role.inputs, proof_hex: String::new() },
         ],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -3741,6 +3761,7 @@ fn revocation_stale_status_list_rejected() {
         }],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -3934,6 +3955,7 @@ fn revocation_within_window_verifies() {
         }],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -4113,6 +4135,7 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
             proof_hex: encode_artifacts(&art),
         }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -4194,6 +4217,7 @@ fn committed_index_without_hidden_revocation_rejected() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None, // <- MISSING; committed-index requires it
         hidden_issuer_attestations: vec![],
         derivation_steps: vec![],
@@ -4240,6 +4264,7 @@ fn committed_index_disclosed_commitment_mismatch_rejected() {
         status_snapshots: vec![],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
         derivation_steps: vec![],
@@ -4472,6 +4497,7 @@ fn hi_scan_manifest(prover: &CircuitProver, signer_sk: &SecretKey, tag: &str) ->
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: encode_artifacts(&art) }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -4645,6 +4671,7 @@ fn hi_scan_manifest_no_clear_attestation(
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: encode_artifacts(&art) }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
         derivation_steps: vec![],
@@ -5042,6 +5069,7 @@ fn filter_f64_composes_end_to_end() {
         ],
         // Binding edge: scan proof 0, row 0, object slot (2) -> float filter proof 1.
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -5142,6 +5170,7 @@ fn entailment_manifest(regime: EntailmentRegime, steps: Vec<DerivationStep>) -> 
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };

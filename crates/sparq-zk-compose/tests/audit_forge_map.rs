@@ -199,6 +199,7 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -405,6 +406,7 @@ fn scan_plus_filter_manifest(
             SubProof { inputs: filter, proof_hex: String::new() },
         ],
         binding_edges: edge.into_iter().collect(),
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     }
@@ -581,6 +583,7 @@ fn finding_08_attribution_collapse_rejected() {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -643,6 +646,7 @@ fn finding_09_salt_reused_rejected() {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -872,6 +876,7 @@ fn composed_manifest(
             SubProof { inputs: filter_inputs, proof_hex: filter_hex },
         ],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     }
@@ -1053,6 +1058,7 @@ fn finding_11_n_relabel_bb_rejected() {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: forged, proof_hex: encode_artifacts(&art) }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };

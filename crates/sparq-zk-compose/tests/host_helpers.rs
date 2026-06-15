@@ -372,6 +372,7 @@ fn proof_manifest_json_round_trips_and_defaults_type() {
             proof_hex: String::new(),
         }],
         binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };

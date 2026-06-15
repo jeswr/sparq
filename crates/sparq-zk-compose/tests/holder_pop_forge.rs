@@ -270,6 +270,7 @@ fn holder_manifest(
             proof_hex: String::new(),
         }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     }

@@ -258,5 +258,23 @@ pub fn prover_toml_for(
             );
             (id.clone(), toml)
         }
+        // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN.
+        // SCHEMA ONLY — this bead adds the manifest types, NOT the prover path.
+        // Generating a `join_eq` Prover.toml needs the join member's PRIVATE
+        // witnesses (`enc_a`/`counts_a`/`enc_b`/`counts_b`/`row_a`/`row_b`/
+        // `blinding`), none of which this function's `scan_*`/`filter_digits`
+        // parameters can carry — so the prover wiring is deferred to step 4
+        // (sq-sfsi), which extends the signature. This arm is UNREACHABLE in this
+        // bead: nothing constructs a `ProofInputs::JoinEq` for proving until
+        // sq-sfsi adds the join build path. It is `unimplemented!` (not a silent
+        // wrong stub) so a premature call fails loudly rather than emitting a
+        // bogus witness; sq-sfsi replaces it with the real join TOML emitter.
+        ProofInputs::JoinEq { .. } => {
+            unimplemented!(
+                "join_eq Prover.toml generation is sq-sfsi (step 4); sq-fi03 adds \
+                 the manifest schema only. The join member's private witnesses are \
+                 not yet plumbed through prover_toml_for."
+            )
+        }
     }
 }

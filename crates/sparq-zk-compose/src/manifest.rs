@@ -566,6 +566,22 @@ pub enum CircuitId {
     /// is `bind_holder_pok` (T6/sq-i1dt), SEPARATE from this member registration.
     // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK circuit member.
     HolderPok,
+    /// `join_eq_na{n_a}_nb{n_b}` — hidden cross-credential JOIN
+    /// (sq-bwwl / sq-fi03, `research/zk-hidden-join-design.md` §2.2/§3.1). Proves
+    /// two scan rows share a value at chosen slots — `row_a[slot_a] ==
+    /// row_b[slot_b]` — WITHOUT disclosing the joined term encoding. The two graph
+    /// size buckets `n_a`/`n_b` select the compiled member (the `N_A`/`N_B` const
+    /// generics of `join_eq_check`), exactly as `Scan { k, n, r }` selects a scan
+    /// member, so a proof verifies only against the member its witnesses fit. The
+    /// proof's PUBLIC inputs are `[challenge, commit_a, commit_b, join_commitment,
+    /// slot_a, slot_b]` (see [`ProofInputs::JoinEq`]); the join VALUE, both graphs'
+    /// contents, the two joined rows, and the blinder are PRIVATE.
+    ///
+    /// This is SCHEMA ONLY (sq-fi03, step 3). The verifier gate `bind_joins`
+    /// (public-input reconstruction + canonical-vk + the `UnboundJoin` query
+    /// binding) is step 4 (sq-sfsi) and is NOT wired here.
+    // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN member.
+    JoinEq { n_a: u32, n_b: u32 },
 }
 
 impl CircuitId {
@@ -579,6 +595,9 @@ impl CircuitId {
             CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
             // [OPUS-4.8] sq-xqfg (HolderPoP T5): depth-free single member.
             CircuitId::HolderPok => "holder_pok".to_string(),
+            // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): the `n_a`/`n_b` graph-size
+            // buckets name the compiled join member, e.g. `join_eq_na16_nb16`.
+            CircuitId::JoinEq { n_a, n_b } => format!("join_eq_na{n_a}_nb{n_b}"),
         }
     }
 }
@@ -646,6 +665,48 @@ pub enum ProofInputs {
         /// The disclosed verdict.
         expected: bool,
     },
+    /// `join_eq_na{n_a}_nb{n_b}`: hidden cross-credential JOIN
+    /// (sq-bwwl / sq-fi03, `research/zk-hidden-join-design.md` §2.2/§3.2). These
+    /// fields are EXACTLY the `pub` parameters of the `join_eq` member `main`, in
+    /// declaration order AFTER the prepended `challenge` (which `binding` carries,
+    /// like every member). The verifier's public-input reconstruction (step 4,
+    /// sq-sfsi) MUST emit them in this order:
+    ///
+    /// ```text
+    /// [challenge, commit_a, commit_b, join_commitment, slot_a, slot_b]
+    /// ```
+    ///
+    /// Cross-reference — the Noir source this layout MUST match (do not reorder;
+    /// the verifier rebuilds the vector in declaration order, audit-#1 discipline):
+    /// `zk/compose/join_eq_na16_nb16/src/main.nr` `fn main(challenge, commit_a,
+    /// commit_b, join_commitment, slot_a, slot_b, /* private */ …)`.
+    ///
+    /// The join VALUE is PRIVATE (never a public input — the headline privacy win);
+    /// only the two graph commitments, the HIDING `join_commitment`, and the two
+    /// query-bound join slots are public. The slots are public BY DESIGN (§4.4):
+    /// the query already reveals which column a shared variable occupies, so
+    /// disclosing the slot is not new leakage — only the join term stays hidden.
+    // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN inputs.
+    #[serde(rename = "join_eq")]
+    JoinEq {
+        id: CircuitId,
+        /// Graph-A commitment `C(G_a)`. Byte-bound (step 4, sq-sfsi) to equal the
+        /// scan-A sub-proof's `commitments[g_a]` — the anti-row-swap binding (A2).
+        commit_a: FieldHex,
+        /// Graph-B commitment `C(G_b)`. Byte-bound to scan-B's `commitments[g_b]`.
+        commit_b: FieldHex,
+        /// The HIDING commitment to the join value: `h3(SIG_DOMAIN_JOIN, value,
+        /// blinding)` (`sparq_zk::sig::join_value_commitment`). Per-presentation
+        /// blinded, so two presentations of the same join value are unlinkable and
+        /// a low-entropy key is not dictionary-attackable (design §1.4 R4 / §2.4).
+        join_commitment: FieldHex,
+        /// Graph-A join slot in `{0,1,2}` (s/p/o). PUBLIC and query-bound: the
+        /// verifier (step 4) requires it to equal the query-derived slot the shared
+        /// variable occupies in pattern A (§4.4 slot binding).
+        slot_a: u32,
+        /// Graph-B join slot in `{0,1,2}` — query-bound to pattern B's slot.
+        slot_b: u32,
+    },
 }
 
 impl ProofInputs {
@@ -654,6 +715,8 @@ impl ProofInputs {
             ProofInputs::Scan { id, .. } => id,
             ProofInputs::FilterInt { id, .. } => id,
             ProofInputs::FilterF64 { id, .. } => id,
+            // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN.
+            ProofInputs::JoinEq { id, .. } => id,
         }
     }
 }
@@ -686,6 +749,44 @@ pub struct BindingEdge {
     pub from_slot: usize,
     /// Index into `sub_proofs` of the consuming filter proof.
     pub to_proof: usize,
+}
+
+/// A hidden cross-credential JOIN edge (sq-bwwl / sq-fi03,
+/// `research/zk-hidden-join-design.md` §3.2): the hidden-key analogue of
+/// [`BindingEdge`]. Where a `BindingEdge` ties a **disclosed** scan slot to a
+/// filter operand, a `JoinEdge` ties **two scan sub-proofs' graph commitments**
+/// to a `join_eq` sub-proof — disclosing the *graph linkage* (which two
+/// credentials are joined, at which slots) but NOT the joined term value.
+///
+/// The edge names the two scan sub-proofs and which committed graph index within
+/// each (`commitments[graph_a]` / `commitments[graph_b]`) the join binds, plus
+/// the index of the `join_eq` sub-proof. The verifier gate `bind_joins` (step 4,
+/// sq-sfsi) resolves these, requires the `join_eq` proof's public
+/// `commit_a`/`commit_b` to byte-equal the two scans' `commitments[graph_*]` (the
+/// anti-A2 binding), and requires the proof's public `slot_a`/`slot_b` to equal
+/// the query-derived slots for the shared variable (the §4.4 slot binding). The
+/// manifest canonicalises by sorting on `(scan_a, graph_a, slot_a)` (the
+/// `BindingEdge` ordering convention, §2.5) — `join_eq` itself is unordered since
+/// the equality is symmetric.
+///
+/// SCHEMA ONLY (sq-fi03, step 3); the `bind_joins` gate that consumes this is
+/// step 4 (sq-sfsi).
+// [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinEdge {
+    /// Index into [`ProofManifest::sub_proofs`] of the scan sub-proof for graph A.
+    pub scan_a: usize,
+    /// Which committed graph of `scan_a` (index into its `commitments`) the join
+    /// binds — the `commitments[graph_a]` whose value must equal the `join_eq`
+    /// proof's public `commit_a`.
+    pub graph_a: usize,
+    /// Index into `sub_proofs` of the scan sub-proof for graph B.
+    pub scan_b: usize,
+    /// Which committed graph of `scan_b` the join binds (`commitments[graph_b]`).
+    pub graph_b: usize,
+    /// Index into `sub_proofs` of the `join_eq` sub-proof
+    /// ([`ProofInputs::JoinEq`]) that proves the hidden equality.
+    pub join_proof: usize,
 }
 
 /// The full query-result proof manifest.
@@ -771,6 +872,15 @@ pub struct ProofManifest {
     /// Binding-consistency edges between sub-proofs.
     #[serde(default)]
     pub binding_edges: Vec<BindingEdge>,
+    /// Hidden cross-credential JOIN edges (sq-bwwl / sq-fi03): each ties two scan
+    /// sub-proofs' graph commitments to a `join_eq` sub-proof that proves the two
+    /// rows share a value at the named slots WITHOUT disclosing it. Empty for a
+    /// manifest with no hidden joins (defaults so legacy manifests parse). The
+    /// `bind_joins` verifier gate that enforces these is step 4 (sq-sfsi); this
+    /// field is the schema it consumes.
+    // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN edges.
+    #[serde(default)]
+    pub join_edges: Vec<JoinEdge>,
     /// OPTIONAL hidden-index revocation proof (sq-3e5 / sq-h2v): a zero-knowledge
     /// proof that the credential's status bit at its (HIDDEN) index in the
     /// committed status list is UNSET, disclosing neither the index nor the other
@@ -1060,6 +1170,7 @@ mod holder_binding_tests {
             status_snapshots: vec![],
             sub_proofs: vec![],
             binding_edges: vec![],
+            join_edges: vec![],
             hidden_revocation: None,
             hidden_issuer_attestations: vec![],
         };
@@ -1153,6 +1264,149 @@ mod holder_binding_tests {
         assert!(
             matches!(parsed.binding, BindingMode::Challenge { .. }),
             "legacy bearer/challenge binding remains valid"
+        );
+    }
+}
+
+/// [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): schema tests for the hidden
+/// cross-credential JOIN manifest types — `CircuitId::JoinEq`,
+/// `ProofInputs::JoinEq`, and `JoinEdge`. SCHEMA ONLY: the `bind_joins` verifier
+/// gate (commitment binding + `UnboundJoin` query binding) is step 4 (sq-sfsi).
+#[cfg(test)]
+mod join_schema_tests {
+    use super::*;
+
+    /// The PUBLIC-input field ordering the `join_eq` circuit's `main` declares,
+    /// AFTER the prepended `challenge` (which `binding` carries for every member).
+    /// This MUST stay byte-for-byte in step with
+    /// `zk/compose/join_eq_na16_nb16/src/main.nr` — the verifier's
+    /// `reconstruct_public_inputs` (audit-#1) emits the vector in exactly this
+    /// declaration order. If the Noir `main` reorders, this constant and the
+    /// reconstruction arm must move together.
+    const JOIN_EQ_PUBLIC_INPUT_LAYOUT: &[&str] = &[
+        "challenge",        // field 0 — every member's first `pub` (verifier nonce)
+        "commit_a",         // graph-A commitment C(G_a)
+        "commit_b",         // graph-B commitment C(G_b)
+        "join_commitment",  // HIDING commitment to the join value (design §2.4)
+        "slot_a",           // graph-A join slot in {0,1,2} (query-bound)
+        "slot_b",           // graph-B join slot in {0,1,2} (query-bound)
+    ];
+
+    fn join_inputs() -> ProofInputs {
+        ProofInputs::JoinEq {
+            id: CircuitId::JoinEq { n_a: 16, n_b: 16 },
+            commit_a: FieldHex("0x0a".to_string()),
+            commit_b: FieldHex("0x0b".to_string()),
+            join_commitment: FieldHex("0x0c".to_string()),
+            slot_a: 0,
+            slot_b: 2,
+        }
+    }
+
+    /// `CircuitId::JoinEq` enumerates and names its compiled member exactly like
+    /// the other members (`scan_k…`, `filter_int_d…`): the `(n_a, n_b)` buckets
+    /// drive the package directory `join_eq_na{n_a}_nb{n_b}`.
+    #[test]
+    fn circuit_id_join_eq_packages_like_other_members() {
+        assert_eq!(
+            CircuitId::JoinEq { n_a: 16, n_b: 16 }.package(),
+            "join_eq_na16_nb16",
+            "matches the landed Noir member directory (PR #170)"
+        );
+        // Asymmetric buckets name distinctly (forward-looking; v1 compiles 16x16).
+        assert_eq!(
+            CircuitId::JoinEq { n_a: 16, n_b: 64 }.package(),
+            "join_eq_na16_nb64"
+        );
+        // The id round-trips through serde with its `kind` tag like every variant.
+        let id = CircuitId::JoinEq { n_a: 16, n_b: 16 };
+        let json = serde_json::to_string(&id).expect("serializes");
+        assert!(json.contains("join_eq"), "snake_case `kind` tag is `join_eq`");
+        let back: CircuitId = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, id, "CircuitId::JoinEq round-trips");
+    }
+
+    /// `ProofInputs::JoinEq` round-trips through serde and exposes its id via the
+    /// `circuit_id()` accessor (the new exhaustive-match arm).
+    #[test]
+    fn proof_inputs_join_eq_round_trips_and_exposes_id() {
+        let inputs = join_inputs();
+        assert_eq!(
+            inputs.circuit_id(),
+            &CircuitId::JoinEq { n_a: 16, n_b: 16 },
+            "circuit_id() returns the JoinEq id"
+        );
+        let json = serde_json::to_string(&inputs).expect("serializes");
+        // The serde `circuit` tag (mirrors scan/filter) is `join_eq`.
+        assert!(json.contains("\"circuit\":\"join_eq\""), "tagged `join_eq`");
+        // The HIDDEN join value never appears as a field — only the public inputs.
+        assert!(
+            !json.contains("\"value\"") && !json.contains("\"blinding\""),
+            "join value + blinder are PRIVATE — never serialized in ProofInputs"
+        );
+        let back: ProofInputs = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, inputs, "ProofInputs::JoinEq round-trips");
+    }
+
+    /// `JoinEdge` round-trips through serde, and an empty `join_edges` default
+    /// keeps legacy (pre-join) manifests parseable (additive schema).
+    #[test]
+    fn join_edge_round_trips_and_is_additive() {
+        let edge = JoinEdge {
+            scan_a: 0,
+            graph_a: 0,
+            scan_b: 1,
+            graph_b: 0,
+            join_proof: 2,
+        };
+        let json = serde_json::to_string(&edge).expect("serializes");
+        let back: JoinEdge = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, edge, "JoinEdge round-trips");
+
+        // A manifest JSON with NO `join_edges` key parses (serde default), so the
+        // schema addition does not break existing manifests.
+        let no_joins = r#"{
+            "query": "SELECT * WHERE { ?s ?p ?o }",
+            "attributions": [[0]],
+            "entailment_regime": "simple",
+            "binding": { "mode": "challenge", "challenge": "0x1" },
+            "sub_proofs": []
+        }"#;
+        let m: ProofManifest = serde_json::from_str(no_joins).expect("legacy parses");
+        assert!(m.join_edges.is_empty(), "join_edges defaults to empty");
+
+        // And a manifest carrying join_edges round-trips through the full type.
+        let mut m2 = m.clone();
+        m2.join_edges = vec![edge.clone()];
+        let json = serde_json::to_string(&m2).expect("serializes");
+        let back: ProofManifest = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back.join_edges, vec![edge], "manifest join_edges round-trip");
+    }
+
+    /// The `ProofInputs::JoinEq` field set is EXACTLY the public inputs the Noir
+    /// member exposes (minus the `binding`-carried `challenge`), in the same
+    /// order. Pins the schema↔circuit contract: if a field is added/removed/
+    /// reordered on either side without updating the other, this fails.
+    #[test]
+    fn join_eq_field_ordering_matches_circuit_layout() {
+        // The struct fields, in declaration order, that are PUBLIC inputs.
+        let struct_pub_fields = ["commit_a", "commit_b", "join_commitment", "slot_a", "slot_b"];
+        // The circuit layout minus field 0 (`challenge`, carried by `binding`).
+        let circuit_after_challenge = &JOIN_EQ_PUBLIC_INPUT_LAYOUT[1..];
+        assert_eq!(
+            struct_pub_fields.as_slice(),
+            circuit_after_challenge,
+            "ProofInputs::JoinEq public fields match join_eq main's order \
+             (zk/compose/join_eq_na16_nb16/src/main.nr)"
+        );
+        assert_eq!(
+            JOIN_EQ_PUBLIC_INPUT_LAYOUT[0], "challenge",
+            "field 0 is the verifier nonce, as every member"
+        );
+        assert_eq!(
+            JOIN_EQ_PUBLIC_INPUT_LAYOUT.len(),
+            6,
+            "join_eq exposes exactly 6 public inputs"
         );
     }
 }

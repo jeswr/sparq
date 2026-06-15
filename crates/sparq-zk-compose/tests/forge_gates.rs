@@ -176,6 +176,7 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -341,6 +342,7 @@ fn forge_attribution_under_declared_rejected() {
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     };
@@ -549,6 +551,7 @@ fn composed_manifest(
             SubProof { inputs: filter_inputs, proof_hex: filter_hex },
         ],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     }
@@ -689,6 +692,7 @@ fn k2_scan_only_manifest(
         status_snapshots: vec![fixture_snapshot(false)],
         sub_proofs: vec![SubProof { inputs: scan_inputs, proof_hex: String::new() }],
         binding_edges: vec![],
+        join_edges: vec![],
         hidden_revocation: None,
         hidden_issuer_attestations: vec![],
     }
