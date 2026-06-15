@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "[OPUS-4.8] Versioned STATIC competitor-comparison data for the perf dashboard (bead sq-i0nm;",
+    "the featured-suites section sq-xvow + scaling charts sq-viby are its DONE children sq-ocuf/sq-viby).",
+    "Authored by Opus 4.8 (Fable unavailable; flag for re-review when Fable returns).",
+    "",
+    "WHAT THIS FILE IS. The dashboard (bench/dashboard/dashboard.js) reads competitor numbers from",
+    "window.COMPETITORS to draw external-engine reference COLUMNS next to sparq in the featured-suites",
+    "table, and per-suite external-reference baseline rows. The numbers are GATHERED ONCE / STATIC —",
+    "NOT measured per-CI — and pinned to an explicit tool VERSION + machine + source for transparency.",
+    "This is the human-reviewable source-of-record; dashboard.js embeds a BYTE-IDENTICAL copy of the",
+    "`engines`/`values`/`references` keys below as COMPETITORS_DATA so the page renders on GitHub",
+    "Pages (the bench.yml seed step copies only index.html/dashboard.js/dashboard.css/metric-labels.json,",
+    "so a separate JSON is NOT served — the embedded copy is what the live page uses; THIS file is the",
+    "canonical mirror reviewers diff). Keep the two in sync: the `engines`/`values`/`references` data",
+    "rows here must equal COMPETITORS_DATA in dashboard.js (only this `_comment` is file-only).",
+    "",
+    "HONESTY (per parent sq-i0nm design + the empirical-honesty rule). Competitor numbers are shown",
+    "ONLY where a real, cited measurement exists ON A COMPARABLE BENCHMARK. The per-commit dashboard",
+    "metrics run at CI scale (~200k-entity synthetic, real-DBpedia 750k cut, SP2Bench 250k, WatDiv",
+    "SF=1, LUBM(1)) on a GitHub-hosted runner. NO in-repo competitor number was measured on that exact",
+    "same dataset-scale + machine + regime, so EVERY per-metric competitor cell is \"n/a (not gathered)\"",
+    "rather than a fabricated apples-to-oranges figure (a 10M-scale QLever ms placed next to a 200k µs",
+    "would mislead). The numbers we DO have (QLever 0.5.47 on a 2020 MacBook Air M1 16GB native at the",
+    "10M/100M synthetic scale, bench/qlever-baselines.md; EYE v11.24.4 DeepTaxonomy forward closures on",
+    "the same M1, bench/inference/eye-comparison.md) are surfaced as clearly-captioned EXTERNAL-REFERENCE",
+    "baselines that state their own scale/machine/source — NEVER aligned into a same-row comparison with",
+    "a mismatched sparq metric. Oxigraph 0.5.8 is an embedded Rust dev-dep (Cargo.lock-resolved) with NO",
+    "committed dashboard-scale numbers; RDFox has only vendor/paper figures (research/inference-sota.md",
+    "§1.1), no in-repo head-to-head — both are listed with their version but every cell is n/a. To FILL",
+    "the per-metric `values` cells, gather competitors on a quiet box at the SAME scale as the dashboard",
+    "run (scripts/gather-competitors.sh --run --only <id>; see the bench/competitors.json registry +",
+    "bench/CATALOG.md) and commit the snapshot here + into COMPETITORS_DATA. Follow-up tracked as a bead",
+    "(see the PR body for sq-i0nm).",
+    "",
+    "SHAPE (verified against dashboard.js buildFeatured/competitorsFor/competitorEngines):",
+    "  engines: [{ id, label, version, env, source }]    -> one competitor COLUMN each (header shows",
+    "                                                        label + version inline; env+source on hover).",
+    "  values:  { \"<metric name or stem>\": { \"<engineId>\": <number-in-the-metric's-unit> } }",
+    "           -> a per-metric competitor cell; matched by raw metric NAME first then stem (name minus",
+    "              _us). A MISSING key renders \"n/a\". EMPTY here BY DESIGN (see HONESTY).",
+    "  references: [{ suite, engine, version, env, scale, metric, value, unit, regime, source, caveat }]",
+    "           -> the dashboard's per-suite \"external reference baselines\" note: real cited numbers",
+    "              with their OWN scale/machine, shown SEPARATELY from the same-scale comparison cells.",
+    "              `suite` matches a featured-suite key in dashboard.js (e.g. \"Synthetic (qlever-style)\",",
+    "              \"Deep Taxonomy\"). A null `value` renders \"n/a (not gathered)\"."
+  ],
+
+  "schema_version": 1,
+  "gathered_at_utc": "2026-06-15",
+  "gathered_by": "static curation from in-repo sources (no live gather); see `source` on each engine/reference",
+
+  "engines": [
+    { "id": "qlever", "label": "QLever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "source": "bench/qlever-baselines.md" },
+    { "id": "oxigraph", "label": "Oxigraph", "version": "0.5.8", "env": "embedded Rust dev-dep (Cargo.lock); no committed dashboard-scale numbers", "source": "crates/sparq-bench Cargo.toml + Cargo.lock" },
+    { "id": "eye", "label": "EYE", "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2", "env": "Apple M1 (fanless), macOS 25.4.0", "source": "bench/inference/eye-comparison.md" },
+    { "id": "rdfox", "label": "RDFox", "version": "not gathered (vendor/paper figures only — Oxford Semantic; AAAI-2014/ISWC-2015)", "env": "n/a — no head-to-head run in-repo", "source": "research/inference-sota.md §1.1" }
+  ],
+
+  "values": {},
+
+  "references": [
+    { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "10M synthetic (1.25M entities × 8)", "metric": "q03_star3 (3-pattern star join), count", "value": 73, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only", "source": "bench/qlever-baselines.md", "caveat": "10M-scale on an M1 — NOT the dashboard CI scale; reference only." },
+    { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "10M synthetic (1.25M entities × 8)", "metric": "q04_follows_name (2-pattern chain), count", "value": 56, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only", "source": "bench/qlever-baselines.md", "caveat": "10M-scale on an M1, not the dashboard CI scale — reference only." },
+    { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "10M synthetic (1.25M entities × 8)", "metric": "q10_optional_age (OPTIONAL left-join), count", "value": 60, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only", "source": "bench/qlever-baselines.md", "caveat": "10M-scale on an M1, not the dashboard CI scale — reference only." },
+    { "suite": "Synthetic (qlever-style)", "engine": "qlever", "version": "0.5.47", "env": "2020 MacBook Air M1, 16GB, native", "scale": "100M synthetic (12.5M entities × 8)", "metric": "q03_star3 (3-pattern star join), count", "value": 900, "unit": "ms", "regime": "min-of-N cold, COUNT(*)-wrapped, compute-only (observed 829–1195)", "source": "bench/qlever-baselines.md", "caveat": "100M-scale on an M1, not the dashboard CI scale — reference only." },
+    { "suite": "Deep Taxonomy", "engine": "eye", "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2", "env": "Apple M1 (fanless), macOS 25.4.0, idle", "scale": "dt1k — 1000-deep :sc chain", "metric": "forward closure (parse → fixpoint → serialize), wall-clock", "value": 4.19, "unit": "s", "regime": "least-contended run; same pipeline as `sparq-cli reason … n3`", "source": "bench/inference/eye-comparison.md (idle-machine table)", "caveat": "REASONING-CLOSURE task on an M1 — different task/machine/unit from any dashboard metric. Reference only." },
+    { "suite": "Deep Taxonomy", "engine": "eye", "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2", "env": "Apple M1 (fanless), macOS 25.4.0, idle", "scale": "dt10k — 10000-deep :sc chain", "metric": "forward closure, wall-clock", "value": 377.9, "unit": "s", "regime": "single run", "source": "bench/inference/eye-comparison.md (idle-machine table)", "caveat": "Reasoning closure on an M1; different task/machine/unit. Reference only." },
+    { "suite": "Deep Taxonomy", "engine": "eye", "version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2", "env": "Apple M1 (fanless), macOS 25.4.0, idle", "scale": "dt100k — 100000-deep :sc chain", "metric": "forward closure, wall-clock", "value": null, "unit": "s", "regime": "not run (extrapolated ≈9h at EYE’s observed ≈N^1.95 DT scaling)", "source": "bench/inference/eye-comparison.md", "caveat": "n/a (not gathered) — EYE was not run at dt100k. NOT fabricated." }
+  ]
+}

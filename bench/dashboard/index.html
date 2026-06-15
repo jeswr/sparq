@@ -28,17 +28,25 @@
   </header>
 
   <main class="wrap">
-    <!-- [OPUS-4.8] sq-xvow: featured well-known suites at the TOP. dashboard.js fills #featured
-         with one table per recognised public suite (LUBM / WatDiv / SP2Bench / Deep Taxonomy /
-         BSBM / DBPSB). The "sparq" column is the latest-commit value; the COMPETITOR COLUMNS are a
-         seam for sq-t0c3 (bench/competitors.json -> window.COMPETITORS) and render "—" until it
-         lands. This is a promotion of existing labelled metrics — it does not change sq-ocuf's
+    <!-- [OPUS-4.8] sq-xvow + sq-i0nm: featured well-known suites at the TOP. dashboard.js fills
+         #featured with one table per recognised public suite (LUBM / WatDiv / SP2Bench / Deep
+         Taxonomy / BSBM / DBPSB / Synthetic-qlever-style). The "sparq" column is the latest-commit
+         value; COMPETITOR COLUMNS (QLever / Oxigraph / EYE / RDFox) show the pinned VERSION inline
+         and read from versioned STATIC data — embedded in dashboard.js (COMPETITORS_DATA), mirrored
+         in bench/dashboard/competitors.json — gathered ONCE, NOT per-CI. Per-metric cells show
+         "n/a" where no number was gathered at this scale (never a fabricated figure); real cited
+         numbers at their own scale/machine appear as per-suite EXTERNAL-REFERENCE baselines below
+         each table. This is a promotion of existing labelled metrics — it does not change sq-ocuf's
          labels or grouping below. -->
     <section class="card" id="featured-card">
       <h2>Featured suites</h2>
       <p class="hint">Recognised public benchmark suites, latest commit. The <strong>sparq</strong>
-         column is this run; competitor columns are populated by the competitor harness
-         (<code>bench/competitors.json</code>) and show <code>—</code> until gathered.</p>
+         column is this run; competitor columns (<strong>QLever / Oxigraph / EYE / RDFox</strong>,
+         with pinned versions) are <em>versioned static</em> data gathered once — not measured per
+         commit — from <code>bench/dashboard/competitors.json</code>. A cell shows <code>n/a</code>
+         where no competitor number was gathered at this scale (no fabricated numbers); real cited
+         numbers at their own scale/machine appear as <em>external reference baselines</em> beneath
+         each suite.</p>
       <div id="featured">loading…</div>
     </section>
 

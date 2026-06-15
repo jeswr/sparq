@@ -22,6 +22,79 @@
 
   var SERIES = 'sparq engine';
 
+  // ---- competitor reference data (sq-i0nm parent) --------------------------
+  // [OPUS-4.8] Versioned STATIC competitor data, EMBEDDED so the live GitHub Pages page renders it
+  // (bench.yml's seed step copies only index.html/dashboard.js/dashboard.css/metric-labels.json — a
+  // separate JSON is NOT served, so the seam cannot rely on a fetch in production). This object is a
+  // byte-for-meaning MIRROR of the canonical, reviewable bench/dashboard/competitors.json; keep the
+  // two in sync (the file carries the full rationale + HONESTY note). render() loads it into
+  // window.COMPETITORS unless one was already injected externally (a future competitors.js/fetch can
+  // still override). The featured table reads `engines`/`values` (the sq-xvow seam); `references`
+  // drives a per-suite external-reference baseline note. NO fabricated numbers: `values` is EMPTY by
+  // design (no in-repo competitor was measured at the dashboard's CI scale+machine+regime, so every
+  // per-metric cell shows "n/a (not gathered)"); `references` carries the real cited numbers that DO
+  // exist (QLever synthetic on a 2020 M1; EYE DeepTaxonomy closures on an M1) with their OWN
+  // scale/machine/source, shown SEPARATELY so a mismatched figure is never aligned into a same-row
+  // comparison. Sources: bench/qlever-baselines.md, bench/inference/eye-comparison.md, Cargo.lock
+  // (oxigraph 0.5.8), research/inference-sota.md (RDFox citations only). Gathered: 2026-06-15.
+  var COMPETITORS_DATA = {
+    schema_version: 1,
+    gathered_at_utc: '2026-06-15',
+    engines: [
+      { id: 'qlever', label: 'QLever', version: '0.5.47',
+        env: '2020 MacBook Air M1, 16GB, native', source: 'bench/qlever-baselines.md' },
+      { id: 'oxigraph', label: 'Oxigraph', version: '0.5.8',
+        env: 'embedded Rust dev-dep (Cargo.lock); no committed dashboard-scale numbers',
+        source: 'crates/sparq-bench Cargo.toml + Cargo.lock' },
+      { id: 'eye', label: 'EYE', version: 'v11.24.4 (2026-05-12), SWI-Prolog 10.0.2',
+        env: 'Apple M1 (fanless), macOS 25.4.0', source: 'bench/inference/eye-comparison.md' },
+      { id: 'rdfox', label: 'RDFox',
+        version: 'not gathered (vendor/paper figures only — Oxford Semantic; AAAI-2014/ISWC-2015)',
+        env: 'n/a — no head-to-head run in-repo', source: 'research/inference-sota.md §1.1' }
+    ],
+    // EMPTY BY DESIGN — see the comment above + competitors.json HONESTY note. Every per-metric
+    // competitor cell renders "n/a (not gathered)" until a same-scale quiet-box gather fills it.
+    values: {},
+    references: [
+      { suite: 'Synthetic (qlever-style)', engine: 'qlever', version: '0.5.47',
+        env: '2020 MacBook Air M1, 16GB, native', scale: '10M synthetic (1.25M entities × 8)',
+        metric: 'q03_star3 (3-pattern star join), count', value: 73, unit: 'ms',
+        regime: 'min-of-N cold, COUNT(*)-wrapped, compute-only', source: 'bench/qlever-baselines.md',
+        caveat: '10M-scale on an M1 — NOT the dashboard CI scale; reference only.' },
+      { suite: 'Synthetic (qlever-style)', engine: 'qlever', version: '0.5.47',
+        env: '2020 MacBook Air M1, 16GB, native', scale: '10M synthetic (1.25M entities × 8)',
+        metric: 'q04_follows_name (2-pattern chain), count', value: 56, unit: 'ms',
+        regime: 'min-of-N cold, COUNT(*)-wrapped, compute-only', source: 'bench/qlever-baselines.md',
+        caveat: '10M-scale on an M1, not the dashboard CI scale — reference only.' },
+      { suite: 'Synthetic (qlever-style)', engine: 'qlever', version: '0.5.47',
+        env: '2020 MacBook Air M1, 16GB, native', scale: '10M synthetic (1.25M entities × 8)',
+        metric: 'q10_optional_age (OPTIONAL left-join), count', value: 60, unit: 'ms',
+        regime: 'min-of-N cold, COUNT(*)-wrapped, compute-only', source: 'bench/qlever-baselines.md',
+        caveat: '10M-scale on an M1, not the dashboard CI scale — reference only.' },
+      { suite: 'Synthetic (qlever-style)', engine: 'qlever', version: '0.5.47',
+        env: '2020 MacBook Air M1, 16GB, native', scale: '100M synthetic (12.5M entities × 8)',
+        metric: 'q03_star3 (3-pattern star join), count', value: 900, unit: 'ms',
+        regime: 'min-of-N cold, COUNT(*)-wrapped, compute-only (observed 829–1195)',
+        source: 'bench/qlever-baselines.md', caveat: '100M-scale on an M1, not the dashboard CI scale — reference only.' },
+      { suite: 'Deep Taxonomy', engine: 'eye', version: 'v11.24.4 (2026-05-12), SWI-Prolog 10.0.2',
+        env: 'Apple M1 (fanless), macOS 25.4.0, idle', scale: 'dt1k — 1000-deep :sc chain',
+        metric: 'forward closure (parse → fixpoint → serialize), wall-clock', value: 4.19, unit: 's',
+        regime: 'least-contended run; same pipeline as `sparq-cli reason … n3`',
+        source: 'bench/inference/eye-comparison.md (idle-machine table)',
+        caveat: 'REASONING-CLOSURE task on an M1 — different task/machine/unit from any dashboard metric. Reference only.' },
+      { suite: 'Deep Taxonomy', engine: 'eye', version: 'v11.24.4 (2026-05-12), SWI-Prolog 10.0.2',
+        env: 'Apple M1 (fanless), macOS 25.4.0, idle', scale: 'dt10k — 10000-deep :sc chain',
+        metric: 'forward closure, wall-clock', value: 377.9, unit: 's', regime: 'single run',
+        source: 'bench/inference/eye-comparison.md (idle-machine table)',
+        caveat: 'Reasoning closure on an M1; different task/machine/unit. Reference only.' },
+      { suite: 'Deep Taxonomy', engine: 'eye', version: 'v11.24.4 (2026-05-12), SWI-Prolog 10.0.2',
+        env: 'Apple M1 (fanless), macOS 25.4.0, idle', scale: 'dt100k — 100000-deep :sc chain',
+        metric: 'forward closure, wall-clock', value: null, unit: 's',
+        regime: 'not run (extrapolated ≈9h at EYE’s observed ≈N^1.95 DT scaling)',
+        source: 'bench/inference/eye-comparison.md', caveat: 'n/a (not gathered) — EYE was not run at dt100k. NOT fabricated.' }
+    ]
+  };
+
   // ---- metric-label registry (sq-ocuf) -------------------------------------
 
   // metric-labels.json is { labels: { "<stem>": {label,suite,...} }, ... }; boot() fetches it into
@@ -199,7 +272,12 @@
     { key: 'SP2Bench',      title: 'SP2Bench',      aliases: ['sp2bench', 'sp2b'] },
     { key: 'Deep Taxonomy', title: 'Deep Taxonomy', aliases: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy'] },
     { key: 'BSBM',          title: 'BSBM',          aliases: ['bsbm'] },
-    { key: 'DBPSB',         title: 'DBPSB',         aliases: ['dbpsb', 'dbpedia sparql benchmark'] }
+    { key: 'DBPSB',         title: 'DBPSB',         aliases: ['dbpsb', 'dbpedia sparql benchmark'] },
+    // [OPUS-4.8] sq-i0nm: the synthetic qlever-style suite carries the one in-repo competitor
+    // REFERENCE (QLever 0.5.47 on a 2020 M1, bench/qlever-baselines.md), so feature it too — its
+    // external-reference baselines render under the table. The suiteFor() label is the canonical key.
+    { key: 'Synthetic (qlever-style)', title: 'Synthetic (qlever-style)',
+      aliases: ['synthetic (qlever-style)', 'synthetic'] }
   ];
 
   // Which featured suite (if any) a metric belongs to. Consults suiteFor() FIRST (label-map driven,
@@ -253,7 +331,12 @@
     });
     var groups = [];
     FEATURED_SUITES.forEach(function (f) {
-      if (bySuite[f.key]) groups.push({ suite: f.key, title: f.title, rows: sortRows(bySuite[f.key].rows) });
+      // [OPUS-4.8] sq-i0nm: attach this suite's EXTERNAL-REFERENCE baselines (cited competitor
+      // numbers at their OWN scale/machine) so the renderer can show them as a captioned note BELOW
+      // the comparison table — never aligned into a same-row competitor cell (those stay n/a unless a
+      // same-scale gather fills `values`). A suite with rows but no references just omits the note.
+      if (bySuite[f.key]) groups.push({ suite: f.key, title: f.title,
+        rows: sortRows(bySuite[f.key].rows), references: referencesForSuite(competitors, f.key) });
     });
     return { commit: latest.commit, date: latest.date, groups: groups,
              competitorEngines: competitorEngines(competitors) };
@@ -270,6 +353,15 @@
   // extra columns; [] when the competitor file is absent — the featured table then shows only sparq.
   function competitorEngines(competitors) {
     return (competitors && Array.isArray(competitors.engines)) ? competitors.engines : [];
+  }
+
+  // [OPUS-4.8] sq-i0nm: the external-reference baselines that belong to one featured suite — the
+  // cited competitor numbers (`references` array on the competitor data) whose `suite` matches. Pure
+  // + node-testable; returns [] when none. These carry their OWN scale/machine/source so the reader
+  // sees a real number WITHOUT a misleading same-scale comparison.
+  function referencesForSuite(competitors, suiteKey) {
+    if (!competitors || !Array.isArray(competitors.references)) return [];
+    return competitors.references.filter(function (r) { return r.suite === suiteKey; });
   }
 
   // ---- scaling comparison charts (sq-viby) ---------------------------------
@@ -363,6 +455,8 @@
                        FEATURED_SUITES: FEATURED_SUITES, featuredSuiteOf: featuredSuiteOf,
                        buildFeatured: buildFeatured, competitorsFor: competitorsFor,
                        competitorEngines: competitorEngines,
+                       // sq-i0nm (embedded versioned competitor data + per-suite references)
+                       COMPETITORS_DATA: COMPETITORS_DATA, referencesForSuite: referencesForSuite,
                        // sq-viby (scaling comparison)
                        sizeAxisOf: sizeAxisOf, buildScalingFamilies: buildScalingFamilies };
     return;
@@ -487,11 +581,14 @@
     });
   }
 
-  // ---- featured well-known suites: DOM (sq-xvow) ---------------------------
+  // ---- featured well-known suites: DOM (sq-xvow / sq-i0nm) -----------------
   // Renders the #featured host (a card at the TOP). One table per recognised suite, with the
-  // sparq latest value + Δ-pill, and ONE COLUMN PER competitor engine (the sq-t0c3 seam). When no
-  // competitor file is present, only the sparq column shows. Competitor cells with no number for a
-  // given metric render "—" (na). Reuses pill()/fmtNum()/labelFor tooltips — no new label logic.
+  // sparq latest value + Δ-pill, and ONE COLUMN PER competitor engine. The engine header shows the
+  // pinned VERSION inline (transparency, sq-i0nm) with the env on hover. Per-metric competitor cells
+  // render "n/a" when no number was gathered at the dashboard's scale (the honest default — see
+  // competitors.json). Below each suite, any EXTERNAL-REFERENCE baselines (cited competitor numbers
+  // at their OWN scale/machine) render as a captioned note — real numbers, never a misleading
+  // same-row comparison. Reuses pill()/fmtNum()/labelFor tooltips — no new label logic.
   function renderFeatured(featured) {
     var host = document.getElementById('featured');
     if (!host) return;
@@ -516,11 +613,16 @@
         el('th', { text: 'Unit' }),
         el('th', { 'class': 'num', text: 'Δ vs best' })
       ];
-      // Competitor columns (seam): one per engine, header shows id + version when supplied.
+      // Competitor columns (seam): one per engine. [OPUS-4.8] sq-i0nm — the VERSION shows inline
+      // (a second muted line) for transparency, not just on hover; the env + source stay on hover.
       engines.forEach(function (e) {
-        headCells.push(el('th', { 'class': 'num competitor-col',
-          text: e.label || e.id,
-          title: (e.version ? e.id + ' ' + e.version : e.id) + (e.env ? ' · ' + e.env : '') }));
+        var th = el('th', { 'class': 'num competitor-col',
+          title: (e.version ? (e.label || e.id) + ' ' + e.version : (e.label || e.id)) +
+                 (e.env ? ' · ' + e.env : '') + (e.source ? ' · src: ' + e.source : '') }, [
+          el('span', { 'class': 'competitor-name', text: e.label || e.id })
+        ]);
+        if (e.version) th.appendChild(el('code', { 'class': 'competitor-version', text: e.version }));
+        headCells.push(th);
       });
       table.appendChild(el('thead', null, [el('tr', null, headCells)]));
       var tbody = el('tbody');
@@ -536,17 +638,47 @@
           el('td', { 'class': 'num delta' })
         ];
         cells[3].appendChild(pill(r.delta));
-        // Competitor cells (seam): render the number if present, else "—" (n/a).
+        // Competitor cells: render the number if present, else "n/a" (not gathered). [OPUS-4.8]
+        // sq-i0nm — honest default: no in-repo competitor was measured at the dashboard's scale, so
+        // these are n/a, not fabricated. A same-scale quiet-box gather fills competitors.values.
         engines.forEach(function (e) {
           var v = r.competitors && r.competitors[e.id];
           cells.push(el('td', { 'class': 'num competitor-col' + (v == null ? ' competitor-na' : ''),
-            text: v == null ? '—' : fmtNum(v),
-            title: v == null ? 'no competitor number gathered (sq-t0c3)' : '' }));
+            text: v == null ? 'n/a' : fmtNum(v),
+            title: v == null
+              ? 'n/a — not gathered at the dashboard’s CI scale (no fabricated number); '
+                + 'gather on a quiet box to fill (see bench/dashboard/competitors.json)'
+              : '' }));
         });
         tbody.appendChild(el('tr', null, cells));
       });
       table.appendChild(tbody);
       section.appendChild(table);
+      // [OPUS-4.8] sq-i0nm: per-suite EXTERNAL-REFERENCE baselines — real cited competitor numbers at
+      // their OWN scale/machine, shown SEPARATELY from the comparison table so a mismatched figure is
+      // never aligned into a same-row cell. Each line states engine+version, scale, value+unit, and
+      // links its source on hover. A null value renders "n/a (not gathered)".
+      if (g.references && g.references.length) {
+        var refBox = el('div', { 'class': 'featured-refs' }, [
+          el('div', { 'class': 'featured-refs-head',
+            text: 'External reference baselines (gathered once; different scale/machine — not a same-scale comparison)' })
+        ]);
+        var refList = el('ul', { 'class': 'featured-refs-list' });
+        g.references.forEach(function (ref) {
+          var eng = (engines.filter(function (e) { return e.id === ref.engine; })[0]) || { label: ref.engine };
+          var val = ref.value == null ? 'n/a (not gathered)' : fmtNum(ref.value) + ' ' + (ref.unit || '');
+          var label = (eng.label || ref.engine) + (ref.version ? ' ' + ref.version : '') +
+                      ' — ' + ref.metric + ' @ ' + ref.scale + ': ' + val;
+          var li = el('li', { 'class': 'featured-ref',
+            title: [ref.regime ? 'regime: ' + ref.regime : '', ref.env ? 'env: ' + ref.env : '',
+                     ref.caveat ? 'caveat: ' + ref.caveat : '', ref.source ? 'source: ' + ref.source : '']
+                    .filter(Boolean).join('\n'),
+            text: label });
+          refList.appendChild(li);
+        });
+        refBox.appendChild(refList);
+        section.appendChild(refBox);
+      }
       host.appendChild(section);
     });
   }
@@ -630,10 +762,14 @@
     }
     var entries = data.entries[SERIES];
     var summary = buildSummary(entries);
-    // sq-t0c3 SEAM: competitor numbers live in window.COMPETITORS (loaded from bench/competitors.json
-    // by sq-t0c3). Absent today -> featured table shows only the sparq column and "—" everywhere a
-    // competitor cell would go. We never gather them here.
-    var competitors = (typeof window !== 'undefined' && window.COMPETITORS) || null;
+    // [OPUS-4.8] sq-i0nm: competitor data comes from window.COMPETITORS. Prefer an EXTERNALLY
+    // injected object (a future competitors.js/fetch can override), else fall back to the EMBEDDED
+    // versioned COMPETITORS_DATA (the byte-for-meaning mirror of bench/dashboard/competitors.json) —
+    // embedded because the Pages seed step doesn't serve a separate JSON. This populates the
+    // competitor reference COLUMNS (with explicit versions) + per-suite external-reference baselines;
+    // per-metric cells stay "n/a (not gathered)" until a same-scale gather fills `values`.
+    var competitors = (typeof window !== 'undefined' && window.COMPETITORS) || COMPETITORS_DATA;
+    if (typeof window !== 'undefined' && !window.COMPETITORS) window.COMPETITORS = competitors;
     var featured = buildFeatured(entries, competitors);
     var families = buildScalingFamilies(entries);
     document.getElementById('updated').textContent =
