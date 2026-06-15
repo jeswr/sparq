@@ -133,6 +133,17 @@ pub mod oblivious;
 // secret keys WITHOUT opening it is honestly gated on secure-compare
 // (sq-rrz4/sq-dvuc). See the module docs for the residual-leakage statement.
 pub mod oblivious_join;
+// [OPUS-4.8] sq-tg6b: the NETWORK tier of the MPC benchmark matrix. `transport`
+// is the REAL multi-process loopback transport (Tier 2) — each party is its own
+// PROCESS exchanging the actual protocol messages over a socket, so wall-clock
+// latency becomes a meaningful MPC cost (vs the in-process counting tier's
+// MODELLED communication in `bench`/`metrics`). `netprofiles` is the tc/netem
+// LAN/WAN shaping (Tier 3), gated to a privileged host or the EC2 bench bead
+// (sq-hoaj) because `tc qdisc` needs CAP_NET_ADMIN — NOT available unprivileged.
+// Native-only (sockets + child processes have no browser story); the
+// wasm-exclusion invariant is preserved (only std::net / std::io / std::process).
+pub mod netprofiles;
+pub mod transport;
 
 // [OPUS-4.8] sq-nuok: adversarial-share negative suite + 'no fake crypto' stub
 // gate. Test-only; compiled only under `cfg(test)` so it can drive the seedable
@@ -169,3 +180,7 @@ pub use oblivious_join::{
 pub use rng::{MpcRng, SecureRng};
 pub use robust::reconstruct_robust;
 pub use shamir::{ShamirBackend, Share};
+// [OPUS-4.8] sq-tg6b: the network-tier surface — the real loopback transport
+// (Tier 2) and the tc/netem LAN/WAN profiles (Tier 3, privilege-gated).
+pub use netprofiles::NetemProfile;
+pub use transport::{run_cell_networked, Channel, Coordinator, Message, NetworkCell, StepCode};
