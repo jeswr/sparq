@@ -29,6 +29,11 @@ mmap = ["sparq-core/mmap"]
 # runtime via SPARQ_DICT_SPILL — default behavior is unchanged when the vars are unset).
 dict-spill = ["sparq-core/dict-spill"]
 mimalloc = ["dep:mimalloc"]
+# [OPUS-4.8] (sq-678h) `dump <file> <in-format> <out-format>` — load an RDF document and
+# re-serialize it as Turtle / TriG / N-Quads (the writer matrix). OFF by default so the
+# default CLI build carries zero serializer code; forwards sparq-engine's opt-in
+# `serialize-rdf` feature (no new dependencies). Enable with `--features serialize-rdf`.
+serialize-rdf = ["sparq-engine/serialize-rdf"]
 # HDT ingestion (`<file>.hdt[.gz]` / format "hdt") via the opt-in sparq-hdt crate.
 # OFF by default for two deliberate reasons: (1) sparq-hdt's MSRV is 1.87 (the
 # wrapped hdt crate) vs this crate's workspace floor of 1.85 — a default dep

@@ -10,9 +10,10 @@ How to get RDF *into* a sparq `Graph` and how to snapshot one cheaply. Text form
 loaders live in `sparq-core`; the binary HDT archive format (including content-sniffed
 `.hdt.gz` / `.hdt.zst` / `.hdt.bz2`) lives in the opt-in `sparq-hdt` crate.
 
-> Direction note: these crates **parse RDF in**. sparq-core ships no RDF *text serializer*
-> — to write RDF out, iterate `Graph::iter_ids()`, materialize terms with `Dict::term`,
-> and feed them to an `oxttl` serializer (oxttl is already a dependency). See the recipe.
+> Direction note: these crates **parse RDF in**. To write RDF *out*, sparq-engine ships the
+> **RDF writer matrix** behind its opt-in `serialize-rdf` feature — Turtle / TriG / N-Quads
+> writers (`sparq_engine::serialize::*`); the N-Triples writer (`triples_to_ntriples`) is
+> always on. See recipe 6. (JSON-LD is not yet written — tracked in bead sq-e3pj.)
 
 ## Quickstart
 
@@ -162,19 +163,33 @@ assert_eq!(snap.len(), original_len);  // snapshot frozen at snapshot time
 let mutable_copy = master.snapshot().into_graph();  // a snapshot you can then mutate
 ```
 
-**6. Serialize a graph back out to N-Triples (no built-in serializer — use oxttl).**
+**6. Serialize a graph back out (the RDF writer matrix).** The Turtle / TriG / N-Quads
+writers live in `sparq-engine` behind the opt-in **`serialize-rdf`** feature (it pulls in
+ZERO new dependencies — the default dep graph is unchanged when off). The N-Triples writer
+(`triples_to_ntriples`) is always on. Enable with
+`sparq-engine = { version = "0.1", features = ["serialize-rdf"] }`.
 
 ```rust
-use oxrdf::{Triple, Subject, NamedOrBlankNode};
-use oxttl::NTriplesSerializer;
-let mut out = Vec::new();
-let mut w = NTriplesSerializer::new().for_writer(&mut out);
-for [s, p, o] in g.iter_ids() {                 // dictionary-id triples, S,P,O order
-    let (st, pt, ot) = (g.dict.term(s), g.dict.term(p), g.dict.term(o));
-    // reconstruct an oxrdf::Triple from the terms (match on NamedNode/BlankNode/Literal)
-    // then: w.serialize_triple(&triple)?;
-}
-w.finish()?;
+use sparq_engine::serialize::{graph_to_turtle, graph_to_trig, graph_to_nquads};
+
+let g = sparq_core::Graph::load_dataset(trig_src, "trig")?;
+let ttl = graph_to_turtle(&g);   // Turtle: @prefix header, `a` for rdf:type, predicate-object
+                                 //   lists; DEFAULT graph only.
+let tg  = graph_to_trig(&g);     // TriG: default graph + `GRAPH <g> { … }` blocks (whole dataset).
+let nq  = graph_to_nquads(&g);   // N-Quads: default graph (3 cols) + named graphs (4th column).
+```
+
+Lower-level entry points take `&[oxrdf::Triple]` (e.g. CONSTRUCT output) directly:
+`write_turtle(triples, &prefixes)`, `write_trig(&named_graphs, &prefixes)`,
+`write_nquads(&named_graphs)`; `default_prefixes()` supplies the common namespaces, or pass
+your own `Prefixes` (a `BTreeMap<String, String>`) — only prefixes actually used are emitted
+in the header. Round-trip (parse → serialize → re-parse) is isomorphic.
+
+From the CLI (opt-in `serialize-rdf` feature) — re-serialize a loaded document to stdout:
+
+```bash
+cargo build -p sparq-cli --features serialize-rdf
+./target/.../sparq-cli dump data.trig trig nquads   # out-format: turtle|trig|nquads|ntriples
 ```
 
 ## Gotchas / feature flags / prerequisites
