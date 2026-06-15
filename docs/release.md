@@ -11,10 +11,43 @@ here for the runbook:
 - **Add a `LICENSE` file** (MIT text) at the repo root. `license = "MIT"` in Cargo.toml
   satisfies crates.io, but the release archives and the Docker/ghcr page should carry the
   actual text; `release.yml` copies `LICENSE` into every archive *if present*.
-- **Check crate-name availability** on crates.io for `sparq-core`, `sparq-engine`,
-  `sparq-reason`, `sparq-cli`, `sparq-server` (https://crates.io/crates/<name>). Squatted
-  names mean renaming before anything else.
+- See **§0a crate-name availability** below — checked; all crates.io names are clear, the
+  npm scope `@jeswr/sparq` is clear, but the PyPI name `sparq` is taken (rename needed).
 - `cargo owner` / crates.io API token configured locally (`cargo login`).
+
+## 0a. Crate-name availability
+
+Availability snapshot as of **2026-06-14** (crates.io API: a 404 / "does not exist" =
+available; a 200 = taken). All 16 publishable crates plus the top-level `sparq` name were
+checked; the npm and PyPI surface names are included for completeness. Re-run before the
+first publish — registries change.
+
+| Name | Registry | Status |
+|---|---|---|
+| `sparq` | crates.io | available |
+| `sparq-core` | crates.io | available |
+| `sparq-engine` | crates.io | available |
+| `sparq-cli` | crates.io | available |
+| `sparq-server` | crates.io | available |
+| `sparq-reason` | crates.io | available |
+| `sparq-introspect` | crates.io | available |
+| `sparq-hdt` | crates.io | available |
+| `sparq-shacl` | crates.io | available |
+| `sparq-sim` | crates.io | available |
+| `sparq-vectors` | crates.io | available |
+| `sparq-geo` | crates.io | available |
+| `sparq-serve` | crates.io | available |
+| `sparq-text` | crates.io | available |
+| `sparq-rsp` | crates.io | available |
+| `sparq-solid` | crates.io | available |
+| `sparq-nlq` | crates.io | available |
+| `@jeswr/sparq` | npm | available |
+| `sparq` | PyPI | **taken** — unrelated `shiventi/sparq` (SJSU degree-planning API client, latest 0.2.6) |
+
+**Conclusion:** all crates.io names and the npm scope are clear to publish as-is. The PyPI
+name `sparq` is taken by a real, unrelated, actively-maintained package — **the Python
+wheels surface needs a rename before its first PyPI publish** (tracked as a bead; see the
+Python wheels section below). No crates.io rename is required.
 
 ## 1. Version bump
 
@@ -171,7 +204,16 @@ maturin, `abi3-py39` so one wheel per platform covers CPython ≥ 3.9). CI build
 tests it informationally on pushes to main (`.github/workflows/python.yml`); release
 publishing is **not** wired. To ship wheels with a release later:
 
-1. Check the name `sparq` is available on PyPI (same caveat as the crates.io names in §0).
+1. Resolve the PyPI **distribution** name only: the `[project] name` in
+   `crates/sparq-py/pyproject.toml` — i.e. the **PyPI project / distribution** name, the
+   `pip install <dist>` name — is currently `sparq`, which is **taken** by an unrelated
+   package (see §0a). Pick a distinct distribution name (e.g. `sparq-rdf`) before the first
+   PyPI publish. This is the **only** name that must change. Keep the Python
+   **import/module** name as `sparq` (it comes from the cdylib `[lib] name` + the
+   `#[pymodule] fn sparq`); since the distribution and module names would then differ, add
+   `[tool.maturin] module-name = "sparq"` to pin it. Net: users `pip install sparq-rdf` but
+   still `import sparq`. (Only the PyPI distribution name is contested — not the import
+   module, not any crate name.)
 2. Add a wheels job to `release.yml` using `PyO3/maturin-action` with a platform
    matrix (manylinux x86_64/aarch64, macOS arm64/x64, Windows x64), each step:
    `command: build`, `args: --manifest-path crates/sparq-py/Cargo.toml --profile
