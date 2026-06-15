@@ -53,8 +53,8 @@ function call, no real network):
   bounded by `≈ 1/p ≈ 2^-61` per MAC (see §2.5 — this is the one genuine *parameter* choice).
 - **Shamir.** `t`-of-`n`, honest-majority `t = ⌊(n−1)/2⌋` (`shamir.rs:160–168`). Linear ops
   (`add_shares`, `sub_shares`, `scale`, `add_constant`) are **local / free** (`shamir.rs`
-  ~405–453). The cumulative-SUM aggregate `run_secure` is zero-round local addition
-  (`shamir.rs:591–600`).
+  ~586–650). The cumulative-SUM aggregate `run_secure` is zero-round local addition
+  (`shamir.rs:794–803`).
 - **Multiplication.** `mul_shares_raw` (`shamir.rs:670`) is the *component-wise* product →
   a **degree-`2t`** sharing of `a·b`, NO degree reduction in itself. The BGW/DN
   reshare-and-recombine **degree-reduction round** now EXISTS (`degree_reduce`,
@@ -84,7 +84,7 @@ function call, no real network):
   Cleve-gated), `CorruptionThreshold` (`Dishonest | Honest | SuperHonest`), composed into
   `SecurityDescriptor` (`backend.rs:374–386`), reported backend-level via `BackendInfo`
   (`backend.rs:617–641`) and **per-operator** via `operator_security` (`backend.rs:712`,
-  `shamir.rs:557`). Today **every** Shamir operator reports `adversary: SemiHonest`
+  `shamir.rs:760–762`). Today **every** Shamir operator reports `adversary: SemiHonest`
   (`backend.rs:430`, `:443`) — the active-security hardening that *does* exist (RS detect/
   correct) is surfaced on the *output-guarantee* axis, NOT the adversary axis. This is the
   honest framing: RS redundancy hardens the *open*, but the parties are still trusted to feed
@@ -118,7 +118,7 @@ forgery is **information-theoretically undetectable** and **silently flips a joi
 verdict** (a non-match becomes a match or vice-versa). Worse, per coZK eprint 2025/1026, opening
 a value computed on an *inconsistent witness* can **leak honest inputs** — so this is a
 **confidentiality** hole, not only a correctness one. Cited as the deferred MAC seam in
-`robust.rs:47–53`, `shamir.rs:503–510`-style docs, and `backend.rs:514–518`
+`robust.rs:47–53`, the `reconstruct_degree` docs (`shamir.rs:692–713`), and `backend.rs:514–518`
 (`OperatorClass::EqualityJoin` reports `SemiHonestOnly` at `n=2t+1`). **This is the one cell
 sq-km34 exists to close.**
 
@@ -196,7 +196,7 @@ degree-`t` Shamir sharing `[α]` — **no party knows `α`**. (SPDZ uses additiv
 the honest-majority Shamir analogue is a degree-`t` Shamir sharing of `α`, consistent with the
 rest of the backend. One global `α` for the whole session is the standard, cheapest choice;
 per-value keys are not needed.) In the in-process simulation, the dealer (`ShamirDealer`,
-`shamir.rs:290`) draws `α` once per session from the masking RNG (OS-seeded ChaCha20 in
+`shamir.rs:294`) draws `α` once per session from the masking RNG (OS-seeded ChaCha20 in
 production, `rng.rs`) and shares it; **we simulate the MAC key and the checks across the
 simulated parties** exactly as we simulate the shares today — no new transport is required for
 Tier-1 correctness (the *cost* is what Tier-2/3 measures, §5). In a real federation `α` is
@@ -230,10 +230,10 @@ c · [[x]]      = ( c·[x]   , c·[m_x] )                since α·(c·x) = c·(
                                                        [α] is shared, so c·[α] is local
 ```
 
-This maps directly onto the existing free local ops `add_shares` (`shamir.rs:405`), `scale`
-(`shamir.rs:434`), `sub_shares` (`shamir.rs:440`), `add_constant` (`shamir.rs:427`): each is
+This maps directly onto the existing free local ops `add_shares` (`shamir.rs:586`), `scale`
+(`shamir.rs:623`), `sub_shares` (`shamir.rs:634`), `add_constant` (`shamir.rs:611`): each is
 applied **twice** (once to `[x]`, once to `[m_x]`), with the public-constant MAC term using the
-shared `[α]`. So the **zero-round cumulative-SUM aggregate** (`run_secure`, `shamir.rs:591`)
+shared `[α]`. So the **zero-round cumulative-SUM aggregate** (`run_secure`, `shamir.rs:794`)
 stays zero-round; it just also maintains the MAC sharing. No new interaction. This is the
 "malicious comes free in honest majority" property for linear circuits.
 
@@ -323,7 +323,7 @@ this design at the honest-majority default `t = ⌊(n−1)/2⌋`:
 
 | Operator (`OperatorClass`) | Today (`origin/main`) | With IT-MACs | Residual limit |
 |---|---|---|---|
-| **LinearAggregate** (SUM/COUNT, `run_secure` `shamir.rs:591`) | SemiHonest adversary; RS detect/robust on the degree-`t` open (already has redundancy) | **Malicious, abort** at *every* valid `(n,t)` incl. `n=2t+1`: MAC-check before the single open. The "near-frontier" aggregate becomes malicious-secure end-to-end. | abort (a cheater forces abort); no GOD-vs-malicious unless Goyal–Song–Liu added |
+| **LinearAggregate** (SUM/COUNT, `run_secure` `shamir.rs:794`) | SemiHonest adversary; RS detect/robust on the degree-`t` open (already has redundancy) | **Malicious, abort** at *every* valid `(n,t)` incl. `n=2t+1`: MAC-check before the single open. The "near-frontier" aggregate becomes malicious-secure end-to-end. | abort (a cheater forces abort); no GOD-vs-malicious unless Goyal–Song–Liu added |
 | **EqualityJoin** (`secure_equal`/`HiddenValueJoin` `join.rs:411`) | SemiHonest at `n=2t+1` (Hole 1, the headline); RS detect/abort only at `n>2t+1` | **Malicious, abort** at *minimal* `n=2t+1`: the masked product `m` is authenticated and MAC-checked before open; forged product share / wrong reduce / inconsistent input all caught. **This is sq-km34's core promotion: `SemiHonestOnly → Abort` at minimal N.** | per-pair match-bit leak (L2) is a *confidentiality* axis, orthogonal — fixed by sq-jnkm, not by MACs; abort only |
 | **Comparison** (sq-rrz4, currently `semi_honest_only` `shamir.rs:250`) | not in-crypto (insecure test stand-in `oblivious.rs:962`) | **Malicious, abort** *when built on authenticated mul/reduce*: every gate in the bit-decomp chain authenticated, boolean verdict MAC-checked before open. | depends on sq-rrz4 landing first; abort only; round-per-depth (WAN-wrong, sq-38zk) |
 | **Hidden join (set-returning)** | semi-honest, all-pairs | **Malicious, abort** for *correctness of the match bits*; combine with sq-jnkm (oblivious result-size + match-bit aggregation) for the confidentiality side | obliviousness (L1/L2) is a separate axis; abort only |
@@ -467,7 +467,7 @@ sq-pwr — ids recorded in the report:
    Acceptance: authenticated round-trip; `[α]` never reconstructed; any `≤ t` views independent
    of `α`. (Foundation; everything depends on it.)
 2. **MAC-carrying add / scale / sub / add-constant.** Apply each existing local linear op
-   (`shamir.rs:405–453`) to value *and* MAC, with the public-constant term using `[α]`.
+   (`shamir.rs:586–650`) to value *and* MAC, with the public-constant term using `[α]`.
    Acceptance: authenticated SUM aggregate round-trips; MAC stays consistent; zero extra rounds.
    Depends on (1).
 3. **MAC-carrying multiplication + authenticated degree-reduce.** Route (a): after
