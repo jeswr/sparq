@@ -3,12 +3,15 @@
 # sq-ncvq.4 + sq-ncvq.5, epic sq-ncvq). Authored by Opus 4.8 (Fable unavailable;
 # flag for re-review when Fable returns).
 #
-# Fully hermetic: imports scripts/gate-new-crate.py + scripts/gate-api-skill.py
-# and drives their pure evaluate()/main() entry points against FIXTURE diff
-# listings. NO live git — the fact lookups that would hit disk/git (crate stub
-# status, bench registration, `pub`-diff heuristic) are injected via the
-# *_overrides kwargs, and main() is driven with --changed-files fixtures written
-# to a temp dir + --dry-run so it never shells out.
+# Hermetic w.r.t. git/network: imports scripts/gate-new-crate.py +
+# scripts/gate-api-skill.py and drives their pure evaluate()/main() entry points
+# against FIXTURE diff listings. NO live git and NO subprocess — the
+# evaluate()-level tests inject every git/subprocess fact (crate stub status,
+# bench registration, `pub`-diff heuristic) via the *_overrides kwargs, and
+# main() is driven with --changed-files fixtures + --dry-run so it never shells
+# out. [OPUS-4.8] (Caveat: the main() smoke tests call main() WITHOUT overrides,
+# so they may still consult the in-repo bench/benchmarks.toml on disk — that is a
+# committed file, not git/network state, so the runs stay deterministic.)
 #
 # Run:  python3 scripts/tests/test_gates.py
 # (stdlib only; no pytest required — also discoverable by `pytest`.)
@@ -124,6 +127,16 @@ class G1Test(unittest.TestCase):
         self.assertEqual(g1.added_crates(added), [])
         self.assertEqual(g1.evaluate(changed, added), [])
 
+    def test_copied_crate_counts_as_added(self):
+        # [OPUS-4.8] `git diff -C` reports a newly-introduced path as a copy
+        # (`C`/`C100`, "C<score>\t<old>\t<new>"); the destination must still be
+        # treated as added so a copy can't evade new-crate detection.
+        changed, added = g1.parse_status_lines(
+            ["C100\tcrates/sparq-old/Cargo.toml\tcrates/sparq-new/Cargo.toml"]
+        )
+        self.assertIn("crates/sparq-new/Cargo.toml", added)
+        self.assertEqual(g1.added_crates(added), ["sparq-new"])
+
 
 # --------------------------------------------------------------------------- #
 # G2 — public-api → skill
@@ -142,6 +155,27 @@ class G2Test(unittest.TestCase):
         ]
         ok, _ = g2.evaluate(changed, labels=[], base="main")
         self.assertTrue(ok)
+
+    def test_pub_diff_regex_excludes_restricted_visibility(self):
+        # [OPUS-4.8] The pub-diff heuristic must match exported items
+        # (`pub fn`/`pub use`/…) but NOT restricted visibilities
+        # (`pub(crate)`/`pub(super)`/`pub(in …)`), which are private surface.
+        # Guard: this pattern literal MUST mirror pub_api_changed's `pub_re`
+        # in scripts/gate-api-skill.py — assert that the source still uses it.
+        import inspect
+        import re
+
+        src = inspect.getsource(g2.pub_api_changed)
+        self.assertIn(r'r"^[+-]\s*pub\s"', src, "pub_re drifted from this test")
+        pub_re = re.compile(r"^[+-]\s*pub\s")
+        for exported in ("+pub fn foo()", "-pub use crate::X;", "+    pub struct S"):
+            self.assertTrue(pub_re.match(exported), exported)
+        for restricted in (
+            "+pub(crate) fn foo()",
+            "-pub(super) struct S",
+            "+    pub(in crate::a) const X: u8 = 0;",
+        ):
+            self.assertFalse(pub_re.match(restricted), restricted)
 
     def test_cli_change_suppressed_by_skill_not_needed_label(self):
         changed = ["crates/sparq-cli/src/main.rs"]

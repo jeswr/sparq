@@ -142,7 +142,14 @@ def pub_api_changed(path: str, base: str) -> bool:
 
     A `pub fn/struct/enum/trait/const/...` (or `pub use`) line being added or
     removed signals a public-API surface change. Reads the per-file unified diff
-    from git; on any error returns False (conservative — never a CI-only crash)."""
+    from git; on any error returns False (conservative — never a CI-only crash).
+
+    [OPUS-4.8] RESTRICTED visibilities — `pub(crate)`, `pub(super)`,
+    `pub(in …)` — are NOT part of the crate's public surface (AGENTS.md: public
+    API == exported items), so they must NOT trip the gate. They are always
+    written `pub(` with no space, so requiring whitespace after `pub`
+    (`pub\\s`) matches exactly the exported forms (`pub fn`, `pub use`,
+    `pub struct`, …) while excluding the restricted ones."""
     ref = _normalize_base(base)
     try:
         out = subprocess.run(
@@ -154,7 +161,7 @@ def pub_api_changed(path: str, base: str) -> bool:
         ).stdout
     except subprocess.CalledProcessError:  # pragma: no cover - CI-only
         return False
-    pub_re = re.compile(r"^[+-]\s*pub(\s|\()")
+    pub_re = re.compile(r"^[+-]\s*pub\s")
     for line in out.splitlines():
         if line.startswith("+++") or line.startswith("---"):
             continue

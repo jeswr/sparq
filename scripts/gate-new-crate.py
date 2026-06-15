@@ -81,7 +81,12 @@ def parse_status_lines(lines: list[str]) -> tuple[list[str], list[str]]:
             # For renames/copies the destination path is the last tab field.
             path = rest.split("\t")[-1]
             changed.append(path)
-            if status == "A":
+            # [OPUS-4.8] `A` (added) and `C` (copied) both materialise a NEW
+            # destination path. Git only emits `C` with copy-detection enabled
+            # (-C/--find-copies), but if a crate directory is introduced via a
+            # copy the gate must still treat it as added, or new-crate detection
+            # could be evaded (accidentally or deliberately).
+            if status in ("A", "C"):
                 added.append(path)
         else:
             # Bare path (e.g. `git diff --name-only`): a change, not provably added.

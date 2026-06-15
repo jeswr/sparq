@@ -32,9 +32,11 @@ on:
   # identical sibling set there (mirrors ci-summary.yml's merge_group handling).
   merge_group:
 
-# Read-only: the gates only read the diff against the base ref.
+# Least privilege: the gates read the diff against the base ref (contents) and
+# the PR's labels for the skill-not-needed escape hatch (pull-requests). [OPUS-4.8]
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: flow-on-gates-${{ github.event.pull_request.number || github.ref }}
@@ -75,14 +77,29 @@ jobs:
           python-version: "3.12"
       - name: Read PR labels (for the skill-not-needed escape hatch)
         id: labels
-        if: ${{ github.event_name == 'pull_request' }}
+        # [OPUS-4.8] Run on BOTH pull_request AND merge_group so the escape-hatch
+        # label is honoured in the merge queue too (otherwise a PR that legitimately
+        # carried `skill-not-needed` would pass the PR gate but fail the identical
+        # merge_group gate, blocking the queue). On merge_group the PR number is not
+        # in the event payload, so resolve it from the head commit's associated PR.
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGE_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          gh pr view "${{ github.event.pull_request.number }}" \
-            --repo "${{ github.repository }}" \
-            --json labels --jq '.labels[].name' > pr-labels.txt || : > pr-labels.txt
+          : > pr-labels.txt
+          num="${PR_NUMBER:-}"
+          if [ -z "$num" ] && [ -n "${MERGE_SHA:-}" ]; then
+            # Resolve the PR associated with the merge-queue head commit.
+            num="$(gh api "repos/${{ github.repository }}/commits/${MERGE_SHA}/pulls" \
+                     --jq '.[0].number' 2>/dev/null || true)"
+          fi
+          if [ -n "$num" ]; then
+            gh pr view "$num" \
+              --repo "${{ github.repository }}" \
+              --json labels --jq '.labels[].name' > pr-labels.txt || : > pr-labels.txt
+          fi
           echo "have_labels=1" >> "$GITHUB_OUTPUT"
       - name: G2 — public-surface change requires a SKILL.md edit
         env:
