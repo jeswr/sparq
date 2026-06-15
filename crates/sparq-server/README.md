@@ -14,8 +14,8 @@ on restart) or, with **`--persist <DIR>`**, **durable** (write-ahead-logged + fs
 on-disk index that survives a restart with no rebuild — see "Durable persistence"). Adds
 `Accept`-driven content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph
 Store N-Triples/Turtle/RDF-XML), EXPLAIN, Prometheus `/metrics`, WebSocket subscriptions, and
-an opt-in time-travel feature. Reads and writes never share a lock (a generation-ring snapshot
-chain + a single sequenced group-commit writer), so queries never wait on the writer.
+an opt-in time-travel feature. Reads and writes never share a lock, so queries never wait on
+the writer (the concurrency model is in the design doc linked below).
 
 ## Security posture (read before exposing)
 
@@ -123,9 +123,8 @@ Semantics:
   index. If `DIR` is empty/absent, the `DATA_FILE` seed (or an empty graph) is written there
   and opened.
 - **Back-compat.** Without `--persist` the behaviour is unchanged: in-memory, lost on restart.
-- **Atomicity.** Persistence rides on the existing generation-ring + sequenced-writer model —
-  a rejected update is never persisted (it is never published either), and the durable store
-  stays in lockstep with the published snapshot chain. The durable graph is written from the
+- **Atomicity.** A rejected update is never persisted (it is never published either), and the
+  durable store stays in lockstep with the published in-memory state. The durable graph is written from the
   **resolved delta** captured during the in-memory commit (not by re-executing the update text),
   so a non-deterministic or side-effecting update (`NOW()`/`RAND()`/`UUID()`/`BNODE()`,
   `LOAD <remote>`) persists the EXACT value that was acked — never a re-rolled one — so a restart

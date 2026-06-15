@@ -32,8 +32,8 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
 
 - **`query`** — load a file and run one query; SELECT/ASK output as table / tsv / csv / xml /
   json (`--format`), CONSTRUCT/DESCRIBE as N-Triples.
-- **`build` / `query-mmap`** — persist the six permutation indexes to disk, then query them
-  memory-mapped without loading the dataset into RAM.
+- **`build` / `query-mmap`** — build an on-disk index once, then query it memory-mapped
+  without loading the dataset into RAM.
 - **`bench`** — run a directory of `*.rq` queries N times each, one TSV timing line per query.
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
 - **Transparent decompression** — `.gz` / `.bz2` / `.zst` inputs detected by content.

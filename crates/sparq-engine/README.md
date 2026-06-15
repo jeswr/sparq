@@ -6,14 +6,12 @@
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-The **SPARQL 1.1/1.2 query engine** over [`sparq-core`](../sparq-core) `Graph`s.
+The [SPARQL 1.1](https://www.w3.org/TR/sparql11-query/) / [1.2](https://www.w3.org/TR/sparql12-query/)
+query engine over [`sparq-core`](../sparq-core) `Graph`s.
 
-It parses SPARQL to algebra (via `spargebra`), compiles the algebra to a physical plan with
-cardinality-based join ordering, and executes it in parallel over the permutation indexes —
-sort-merge, hash and worst-case-optimal joins. It runs SELECT / ASK / CONSTRUCT / DESCRIBE,
-the full FILTER built-in set, OPTIONAL / UNION / MINUS / VALUES / BIND, aggregation, all
-property-path operators, and named-graph dataset clauses, with EXPLAIN / EXPLAIN ANALYZE for
-plan introspection.
+Run conformant SPARQL over an in-memory or out-of-core graph, with `EXPLAIN` / `EXPLAIN ANALYZE`
+for plan introspection and a hook for registering your own functions. How it plans and executes
+queries is described in the design docs linked below.
 
 ## 🚀 Quickstart
 
@@ -32,15 +30,16 @@ let json = sparq_engine::query_json(&g, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?
 
 ## ✨ Features
 
-- **SPARQL 1.1/1.2 query** — SELECT / ASK / CONSTRUCT / DESCRIBE, OPTIONAL / UNION / MINUS /
-  VALUES / BIND, sub-SELECT, aggregation + GROUP BY / HAVING, ORDER BY, DISTINCT, LIMIT/OFFSET.
-- **All 8 property-path operators** and full FILTER built-ins with XSD-aware comparisons.
-- **Cardinality-based planning** — greedy join ordering with sort-merge / hash / bind /
-  worst-case-optimal join selection; `EXPLAIN` and `EXPLAIN ANALYZE`.
-- **Named graphs** — `GRAPH`, FROM / FROM NAMED active-dataset scoping; zero-copy dataset views.
-- **RDF 1.2 / RDF-star** — quoted triple-term patterns (including variables inside them).
-- **Custom functions** — register Rust closures under function IRIs (SPARQL 17.6 extension
-  mechanism); see [`docs/extension-functions.md`](../../docs/extension-functions.md).
+- **SPARQL query** — run [SPARQL 1.1](https://www.w3.org/TR/sparql11-query/) and
+  [1.2](https://www.w3.org/TR/sparql12-query/) over your data; conformance is tracked by the
+  CI ratchets (see the root [`README.md`](../../README.md)).
+- **Named graphs** — query across an active dataset with `GRAPH` and `FROM` / `FROM NAMED`.
+- **RDF 1.2 / RDF-star** — match [quoted triple terms](https://www.w3.org/TR/rdf12-concepts/),
+  including variables inside them.
+- **Query plan introspection** — `EXPLAIN` and `EXPLAIN ANALYZE`.
+- **Custom functions** — register Rust closures under function IRIs (the
+  [SPARQL extension mechanism](https://www.w3.org/TR/sparql11-query/#extensionFunctions));
+  see [`docs/extension-functions.md`](../../docs/extension-functions.md).
 - **`forbid(unsafe_code)`** — the crate contains zero `unsafe`.
 
 ## 📚 Learn more
