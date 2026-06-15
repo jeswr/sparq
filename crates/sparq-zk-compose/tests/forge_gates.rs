@@ -617,3 +617,273 @@ fn forge_pubinput_verdict_substitution_rejected() {
         other => panic!("verdict substitution must be PublicInputMismatch, got {other:?}"),
     }
 }
+
+// === BINDING 7: distinct-graph strict ordering (duplicate-inclusion / COUNT) ===
+//
+// [OPUS-4.8] sq-vxq8 / plan S2.5. `scan_check` step 1b enforces
+// `commitments[0] < commitments[1] < ...` (strict, on the field representative) so
+// the K committed graphs are pairwise DISTINCT. This closes the
+// duplicate-inclusion / COUNT-forgery class: including the SAME credential twice
+// (its commitment repeated at two block indices) to forge a COUNT-style "I hold
+// >=2 tickets" claim. Aggregates are out of the v1 fragment so the class is latent
+// today, but the guard lands before any aggregate/COUNT support. Two layers gate
+// it: (a) the host-side STRUCTURAL mirror in `prefilter_manifest_structure`
+// (rejects a non-increasing commitment vector before any bb proof — runs without
+// the toolchain), and (b) the in-circuit `<` itself (the authoritative gate — a
+// duplicate-commitment witness is UNSATISFIABLE, so no proof can exist; gated
+// behind the toolchain + `#[ignore]`).
+
+/// Two DISTINCT named-graph credentials over a shared predicate `<ex/p>`, each
+/// issuer-attested salt+status-bound, so a k=2 scan over `<ex/p>` builds and
+/// (with honest distinct graphs) verifies. Each graph carries THREE `<ex/p>`
+/// triples (distinct subjects => distinct commitments), so the k=2 scan discloses
+/// 6 matched rows => derives the COMPILED `scan_k2_n16_r8` member (n=16, r=8).
+/// Returns the two `GraphCommitment`s + their salts.
+fn two_distinct_p_graphs(
+) -> (sparq_zk::commit::GraphCommitment, Fr, sparq_zk::commit::GraphCommitment, Fr) {
+    let g0 = vec![
+        Triple::new(NamedOrBlankNode::NamedNode(iri("http://ex/a0")), iri("http://ex/p"), int_lit(1)),
+        Triple::new(NamedOrBlankNode::NamedNode(iri("http://ex/a1")), iri("http://ex/p"), int_lit(2)),
+        Triple::new(NamedOrBlankNode::NamedNode(iri("http://ex/a2")), iri("http://ex/p"), int_lit(3)),
+    ];
+    let g1 = vec![
+        Triple::new(NamedOrBlankNode::NamedNode(iri("http://ex/b0")), iri("http://ex/p"), int_lit(4)),
+        Triple::new(NamedOrBlankNode::NamedNode(iri("http://ex/b1")), iri("http://ex/p"), int_lit(5)),
+        Triple::new(NamedOrBlankNode::NamedNode(iri("http://ex/b2")), iri("http://ex/p"), int_lit(6)),
+    ];
+    let salt0 = salt_from_bytes(&[21u8; 32]);
+    let salt1 = salt_from_bytes(&[22u8; 32]);
+    let c0 = commit_triples(&g0, salt0).unwrap();
+    let c1 = commit_triples(&g1, salt1).unwrap();
+    (c0, salt0, c1, salt1)
+}
+
+/// Build a k=2 scan-only manifest over `{ ?s <ex/p> ?o }` from scan inputs + their
+/// attestations. Passes every structural gate except whatever the caller forged
+/// (or, when honest, reaches MissingProof with no bb proof). `attributions` is
+/// `[[0,1]]` (both graphs contribute — the honest truth the in-circuit attribution
+/// proves).
+fn k2_scan_only_manifest(
+    scan_inputs: ProofInputs,
+    attests: Vec<CommitmentAttestation>,
+) -> ProofManifest {
+    let sk = test_issuer_sk(1);
+    ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![public_key_to_hex(&sk.public_key())],
+        commitment_attestations: attests,
+        attributions: vec![vec![0, 1]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![SubProof { inputs: scan_inputs, proof_hex: String::new() }],
+        binding_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    }
+}
+
+/// Structural forge (NO bb): a k=2 scan whose two per-graph commitments are EQUAL
+/// (the same credential's commitment included twice — the duplicate-inclusion
+/// forge). The strict-ordering structural mirror must REJECT
+/// (`ScanCommitmentsNotStrictlyIncreasing`) BEFORE any bb proof. Reaches the gate
+/// through the SOUND `verify_manifest` entry point.
+#[test]
+fn forge_scan_duplicate_commitment_structural_rejected() {
+    let (c0, salt0, c1b, salt1b) = two_distinct_p_graphs();
+    let sk = test_issuer_sk(1);
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/p"))),
+        o: Slot::Var,
+    };
+    let mut scan = build_scan(&[c0.clone(), c1b.clone()], &pattern).expect("k=2 scan builds");
+    if let ProofInputs::Scan { commitments, .. } = &mut scan.inputs {
+        // FORGE: both slots carry c0's commitment (equal => not strictly increasing).
+        let dup = FieldHex::from_field(&c0.commitment);
+        commitments[0] = dup.clone();
+        commitments[1] = dup;
+    } else {
+        unreachable!("scan inputs");
+    }
+    // Attest the (single distinct) commitment value so the forge reaches the
+    // ordering gate, not the attestation gate.
+    let attests = vec![attest_full(c0.commitment, salt0, &sk)];
+    let _ = (salt1b, c1b);
+    let m = k2_scan_only_manifest(scan.inputs, attests);
+    match verify_full(&m, "forge_dup_commit_struct") {
+        Err(CheckError::ScanCommitmentsNotStrictlyIncreasing { proof: 0, at: 1 }) => {}
+        other => panic!(
+            "duplicate (equal) commitments must be ScanCommitmentsNotStrictlyIncreasing, got {other:?}"
+        ),
+    }
+}
+
+/// Structural forge (NO bb): a k=2 scan whose commitments are DESCENDING
+/// (out-of-order, distinct values). Strict ordering must REJECT
+/// (`ScanCommitmentsNotStrictlyIncreasing`) — only the canonical ascending order
+/// is accepted, so a prover cannot reorder graphs to dodge the gate.
+#[test]
+fn forge_scan_out_of_order_commitment_structural_rejected() {
+    let (c0, salt0, c1, salt1) = two_distinct_p_graphs();
+    let sk = test_issuer_sk(1);
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/p"))),
+        o: Slot::Var,
+    };
+    let mut scan = build_scan(&[c0.clone(), c1.clone()], &pattern).expect("k=2 scan builds");
+    // build_scan emits ASCENDING; FORGE by swapping to descending order.
+    if let ProofInputs::Scan { commitments, attribution, .. } = &mut scan.inputs {
+        commitments.reverse();
+        attribution.reverse();
+    } else {
+        unreachable!("scan inputs");
+    }
+    let attests = vec![
+        attest_full(c0.commitment, salt0, &sk),
+        attest_full(c1.commitment, salt1, &sk),
+    ];
+    let m = k2_scan_only_manifest(scan.inputs, attests);
+    match verify_full(&m, "forge_ooo_commit_struct") {
+        Err(CheckError::ScanCommitmentsNotStrictlyIncreasing { proof: 0, at: 1 }) => {}
+        other => panic!(
+            "descending commitments must be ScanCommitmentsNotStrictlyIncreasing, got {other:?}"
+        ),
+    }
+}
+
+/// Positive control (sanity): the honest builder canonicalises graph order
+/// ascending, so an honest k=2 scan-only manifest passes the strict-ordering
+/// structural gate (and every other structural gate), reaching MissingProof
+/// (witness-only). Proves the gate does not reject honest distinct graphs.
+#[test]
+fn honest_k2_scan_passes_strict_ordering_structural() {
+    let (c0, salt0, c1, salt1) = two_distinct_p_graphs();
+    let sk = test_issuer_sk(1);
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/p"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[c0.clone(), c1.clone()], &pattern).expect("k=2 scan builds");
+    // build_scan emits commitments ascending; confirm that here so the test
+    // documents the canonicalisation contract the gate depends on.
+    if let ProofInputs::Scan { commitments, .. } = &scan.inputs {
+        let a = commitments[0].to_field().unwrap();
+        let b = commitments[1].to_field().unwrap();
+        assert!(
+            sparq_zk::field::field_to_be_bytes_32(&a) < sparq_zk::field::field_to_be_bytes_32(&b),
+            "build_scan must emit strictly-increasing commitments"
+        );
+    } else {
+        unreachable!("scan inputs");
+    }
+    let attests = vec![
+        attest_full(c0.commitment, salt0, &sk),
+        attest_full(c1.commitment, salt1, &sk),
+    ];
+    let m = k2_scan_only_manifest(scan.inputs, attests);
+    match verify_full(&m, "honest_k2_strict_struct") {
+        // Structural stage (incl. strict ordering) passed; only the bb proof is absent.
+        Err(CheckError::MissingProof { proof: 0 }) => {}
+        other => panic!(
+            "honest k=2 scan should pass strict-ordering then hit MissingProof, got {other:?}"
+        ),
+    }
+}
+
+/// CIRCUIT-LEVEL forge (FULL toolchain): a k=2 scan witness whose two per-graph
+/// commitments are EQUAL is UNSATISFIABLE under the in-circuit strict-ordering
+/// `<` — `nargo execute` produces NO witness, so no proof can exist. This is the
+/// AUTHORITATIVE gate (the structural mirror above is defence in depth). Uses the
+/// fast witness-generation path (`gen_witness_tagged`); no `bb prove` needed to
+/// demonstrate unsatisfiability.
+#[test]
+#[ignore = "slow/toolchain: real nargo witness-gen of a k=2 scan (sq-vxq8 strict-ordering circuit forge)"]
+fn forge_scan_duplicate_commitment_circuit_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping");
+        return;
+    }
+    let challenge = FieldHex(CHALLENGE_HEX.into());
+    let prover = CircuitProver::from_crate_root();
+    let (c0, _s0, _c1, _s1) = two_distinct_p_graphs();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/p"))),
+        o: Slot::Var,
+    };
+    // Build a k=2 scan over the SAME graph twice — the duplicate-inclusion forge.
+    // Both graphs' encodings derive c0, so the commitment-recompute (step 1) holds
+    // for both, and the ONLY violated constraint is the strict ordering
+    // `commitments[0] < commitments[1]` (= `c0 < c0`, false). This isolates step
+    // 1b: the witness is well-formed except for the duplicate the gate forbids.
+    let scan = build_scan(&[c0.clone(), c0.clone()], &pattern).expect("k=2 dup scan builds");
+    if let ProofInputs::Scan { commitments, .. } = &scan.inputs {
+        assert_eq!(commitments[0], commitments[1], "forged duplicate commitments");
+    } else {
+        unreachable!("scan inputs");
+    }
+    let (id, toml) = prover_toml_for(
+        &scan.inputs,
+        &challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+    );
+    // The in-circuit `commitments[0] < commitments[1]` (= `c0 < c0`) is FALSE, so
+    // the relation is unsatisfiable: nargo writes no witness => Err.
+    let res = prover.gen_witness_tagged(&id, &toml, "fg_dup_commit");
+    assert!(
+        res.is_err(),
+        "a duplicate-commitment k=2 scan witness must be UNSATISFIABLE (strict-ordering gate), but nargo produced a witness"
+    );
+}
+
+/// CIRCUIT-LEVEL positive control (FULL toolchain): an HONEST k=2 scan over two
+/// DISTINCT graphs (ascending commitments, as build_scan emits) is SATISFIABLE
+/// and PROVES + VERIFIES through the full `verify_manifest` path. Proves the
+/// strict-ordering gate did NOT break honest k=2 proofs (the gate's completeness).
+#[test]
+#[ignore = "slow/toolchain: real bb prove+verify of an honest k=2 scan (sq-vxq8 strict-ordering positive control)"]
+fn honest_k2_distinct_scan_proves_and_verifies() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping");
+        return;
+    }
+    let challenge = FieldHex(CHALLENGE_HEX.into());
+    let prover = CircuitProver::from_crate_root();
+    let (c0, salt0, c1, salt1) = two_distinct_p_graphs();
+    let sk = test_issuer_sk(1);
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/p"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[c0.clone(), c1.clone()], &pattern).expect("k=2 scan builds");
+    let (id, toml) = prover_toml_for(
+        &scan.inputs,
+        &challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[],
+    );
+    let out = scratch("honest_k2_distinct_prove");
+    let art = prover
+        .prove_in(&id, &toml, &out, "honest_k2_distinct")
+        .expect("honest distinct k=2 scan PROVES (strict ordering holds)");
+    let attests = vec![
+        attest_full(c0.commitment, salt0, &sk),
+        attest_full(c1.commitment, salt1, &sk),
+    ];
+    let mut m = k2_scan_only_manifest(scan.inputs, attests);
+    m.sub_proofs[0].proof_hex = encode_artifacts(&art);
+    verify_full(&m, "honest_k2_distinct_verify")
+        .expect("honest distinct k=2 scan VERIFIES through verify_manifest");
+}

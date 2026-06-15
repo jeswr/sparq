@@ -6,7 +6,15 @@
 //!    `sparq_zk::verify::recheck` — the bnode cross-graph join guard (Q6) plus
 //!    attribution arity. Re-derive each sub-proof's circuit id from its public
 //!    inputs and confirm it equals the declared id (a proof cannot be replayed
-//!    against a different family member).
+//!    against a different family member). For each scan sub-proof, also require
+//!    the per-graph `attribution` to be exactly `CircuitId.k` bits AND the
+//!    per-graph `commitments` to be STRICTLY INCREASING on the field
+//!    representative ([OPUS-4.8] sq-vxq8 / plan S2.5): the latter is the host-side
+//!    mirror of `scan_check` step 1b, rejecting a duplicate/out-of-order
+//!    commitment (the duplicate-inclusion / COUNT-forgery class) before any bb
+//!    proof. The in-circuit `<` is the authoritative gate; this structural check
+//!    is defence in depth so a witness-only manifest cannot smuggle a duplicate
+//!    past the fast stage.
 //! 2. **Binding-consistency edges**: each declared edge's scan-proof row/slot
 //!    encoding must equal the consuming filter proof's `operand_enc` (a plain
 //!    field equality over public inputs — the modular composition seam).
@@ -959,6 +967,20 @@ pub enum CheckError {
     /// `CircuitId.k` bits (no default/pad-to-false). `expected` = k.
     // [OPUS-4.8] codex 2221 MEDIUM: attribution must be present + exactly k bits.
     AttributionMalformed { proof: usize, expected: usize, got: usize },
+    /// A scan sub-proof's per-graph `commitments` are NOT strictly increasing on
+    /// the field representative (plan S2.5, [OPUS-4.8]): two adjacent commitments
+    /// are equal or out of order. `scan_check` step 1b enforces
+    /// `commitments[0] < commitments[1] < ...` in-circuit to force the committed
+    /// graphs pairwise DISTINCT — closing the duplicate-inclusion / COUNT-forgery
+    /// class (the same credential committed twice repeats a commitment). This is
+    /// the host-side, structural mirror of that gate: it rejects a non-increasing
+    /// commitment vector BEFORE any bb proof (defence in depth), so a witness-only
+    /// manifest cannot smuggle a duplicate past the structural stage either. The
+    /// honest builder ([`crate::build::build_scan`]) emits commitments ascending,
+    /// so a consistent honest manifest never trips this. `at` is the index `g`
+    /// whose `commitments[g] <= commitments[g-1]`.
+    // [OPUS-4.8] sq-vxq8: distinct-graph strict-ordering (duplicate-inclusion closure).
+    ScanCommitmentsNotStrictlyIncreasing { proof: usize, at: usize },
     /// The verifier-issued nonce has already been seen by the single-use store
     /// (audit #4): a captured (nonce, manifest) pair re-presented to the SAME
     /// verifier session. Rejected before the cryptographic gate so a bearer proof
@@ -1275,6 +1297,11 @@ impl std::fmt::Display for CheckError {
                 f,
                 "scan sub-proof {proof}: attribution must be present and exactly {expected} bits (CircuitId.k), got {got} (audit #8 / codex 2221 MEDIUM: an omitted/short attribution makes the cross-graph under-declaration check vacuous)"
             ),
+            CheckError::ScanCommitmentsNotStrictlyIncreasing { proof, at } => write!(
+                f,
+                "scan sub-proof {proof}: per-graph commitments are not strictly increasing at index {at} (commitments[{at}] <= commitments[{at_prev}]) (plan S2.5 / sq-vxq8: distinct-graph strict ordering — a duplicate or out-of-order commitment is the duplicate-inclusion / COUNT forgery, e.g. the same credential included twice to claim 'I hold >=2 tickets')",
+                at_prev = at - 1
+            ),
             CheckError::NonceReplay => write!(
                 f,
                 "verifier nonce already seen (audit #4: single-use — a captured (nonce, manifest) pair may not be replayed)"
@@ -1558,7 +1585,7 @@ pub fn prefilter_manifest_structure(
         // reconstruction byte-binds — with NO default and NO pad-to-false. A
         // missing/empty/short/long attribution is rejected here, before any gate
         // can silently skip the omitted graphs.
-        if let ProofInputs::Scan { attribution, .. } = &sp.inputs {
+        if let ProofInputs::Scan { attribution, commitments, .. } = &sp.inputs {
             let k = match &declared {
                 CircuitId::Scan { k, .. } => *k as usize,
                 _ => unreachable!("Scan inputs always carry a Scan circuit id"),
@@ -1569,6 +1596,29 @@ pub fn prefilter_manifest_structure(
                     expected: k,
                     got: attribution.len(),
                 });
+            }
+            // [OPUS-4.8] sq-vxq8 / plan S2.5: distinct-graph strict ordering.
+            // `scan_check` step 1b enforces `commitments[0] < commitments[1] < ...`
+            // in-circuit to force the K committed graphs pairwise distinct (closing
+            // the duplicate-inclusion / COUNT-forgery class). Mirror it structurally
+            // here so a witness-only manifest with a duplicate/out-of-order
+            // commitment is rejected BEFORE any bb proof (defence in depth). Compare
+            // on the SAME canonical big-endian bytes the circuit's `Field::lt` and
+            // the audit-#1 public-input reconstruction use, so the host and circuit
+            // orders agree exactly. A malformed commitment hex is left to the
+            // reconstruction stage (`MalformedField`); skip it here.
+            for g in 1..commitments.len() {
+                let (Some(prev), Some(cur)) =
+                    (commitments[g - 1].to_field(), commitments[g].to_field())
+                else {
+                    continue;
+                };
+                if field_to_be_bytes_32(&cur) <= field_to_be_bytes_32(&prev) {
+                    return Err(CheckError::ScanCommitmentsNotStrictlyIncreasing {
+                        proof: i,
+                        at: g,
+                    });
+                }
             }
         }
     }

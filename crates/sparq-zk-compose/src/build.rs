@@ -10,7 +10,7 @@
 use crate::manifest::{CircuitId, FieldHex, FilterOp, ProofInputs};
 use sparq_zk::commit::GraphCommitment;
 use sparq_zk::encode::encode_term;
-use sparq_zk::field::{field_to_hex, Fr};
+use sparq_zk::field::{field_to_be_bytes_32, field_to_hex, Fr};
 use oxrdf::{NamedNode, Term};
 
 /// Compiled slot buckets (`n`) of the scan family, ascending.
@@ -149,16 +149,40 @@ fn encode_slot(slot: &Slot, salt: &Fr) -> (bool, FieldHex, Option<Fr>) {
 /// terms. We re-encode each canonical triple's terms (the circuit checks
 /// `h3(enc) == leaf`), so this re-derivation is sound by construction: a wrong
 /// encoding would fail the in-circuit commitment recompute.
+///
+/// # Strict-ordering canonicalisation (plan S2.5, [OPUS-4.8])
+/// `scan_check` enforces `commitments[0] < commitments[1] < ...` (strict, on the
+/// canonical field representative) to force the committed graphs pairwise
+/// distinct and close the duplicate-inclusion / COUNT-forgery class. So this
+/// builder emits the commitments -- and, in lock-step, every per-graph witness
+/// (`counts`, `enc`) and the public `attribution` vector -- sorted ASCENDING by
+/// the canonical big-endian commitment bytes (the exact order the in-circuit
+/// `Field::lt` / the bb public-input word use). Sorting here (rather than
+/// trusting caller order) means an honest k>=2 scan always satisfies the gate
+/// regardless of the order the caller supplied its graphs in. If the caller
+/// supplies two graphs with the SAME commitment (a genuine duplicate), the sort
+/// places them adjacent and the in-circuit `<` then rejects -- the gate's intent.
 pub fn build_scan(
     commitments: &[GraphCommitment],
     pattern: &Pattern,
 ) -> Option<BuiltScan> {
     let k = commitments.len() as u32;
+    // S2.5: canonicalise graph order ascending by the commitment's field
+    // representative so the strict-ordering gate (`scan_check` step 1b) is
+    // satisfied for any honest input order. Sort the SAME canonical big-endian
+    // bytes the circuit compares (`field_to_be_bytes_32`), so the host order
+    // and the in-circuit `Field::lt` order agree exactly.
+    let mut order: Vec<usize> = (0..commitments.len()).collect();
+    order.sort_by(|&a, &b| {
+        field_to_be_bytes_32(&commitments[a].commitment)
+            .cmp(&field_to_be_bytes_32(&commitments[b].commitment))
+    });
+    let commitments: Vec<&GraphCommitment> = order.iter().map(|&i| &commitments[i]).collect();
     // Per-graph term encodings of every canonical triple.
     let mut enc: Vec<Vec<[FieldHex; 3]>> = Vec::with_capacity(commitments.len());
     let mut enc_fr: Vec<Vec<[Fr; 3]>> = Vec::with_capacity(commitments.len());
     let mut counts = Vec::with_capacity(commitments.len());
-    for c in commitments {
+    for c in &commitments {
         let salt = c.salt;
         let mut graph_hex = Vec::new();
         let mut graph_fr = Vec::new();

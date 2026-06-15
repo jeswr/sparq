@@ -8,6 +8,22 @@
 //! 1. **Commitment recompute**: for every graph `g`, the witnessed per-slot
 //!    term encodings `enc[g]` re-hash (leaf `h3`, then `commit_fold` over the
 //!    first `counts[g]` leaves) to the PUBLIC commitment `commitments[g]`.
+//! 1b. **Distinct-graph strict ordering** (plan S2.5, [OPUS-4.8]): the public
+//!    per-graph commitment representatives are constrained STRICTLY INCREASING,
+//!    `C(G_0) < C(G_1) < ... < C(G_{K-1})` (numeric `<` on the field
+//!    representative). This forces the `K` committed graphs to be pairwise
+//!    distinct and closes the DUPLICATE-INCLUSION / COUNT-forgery class: without
+//!    it a prover could pass the SAME commitment twice (`[C(G), C(G)]`, or any
+//!    out-of-order/equal pair) to forge a COUNT-style "I hold >=2 tickets" claim
+//!    by including one credential twice at two block indices. The aggregate
+//!    fragment that would consume such a claim is out of v1 scope, so the class
+//!    is latent today, but the guard is ~free (one full-width `Field` comparison
+//!    per adjacent pair -- zero for K=1) and lands BEFORE any aggregate/COUNT
+//!    support so the class is never reachable. The host builder canonicalises the
+//!    commitment order (and the matching per-graph witnesses) ascending; the
+//!    verifier additionally rejects non-increasing commitments structurally
+//!    (defence in depth, before any bb proof) so a witness-only manifest cannot
+//!    smuggle a duplicate past this gate either.
 //! 2. **Row soundness**: each of the `row_count` disclosed rows (term-encoding
 //!    triples) matches the pattern's constant slots and occurs in some active
 //!    slot of some graph.
@@ -60,6 +76,12 @@ pub struct PatternSpec {
 /// it MUST equal "graph `g` holds an active slot matching the pattern", which
 /// the relation enforces (step 4). The verifier byte-binds it (audit #1) and
 /// checks `manifest.attributions[pattern]` is consistent with it.
+///
+/// `commitments` (PUBLIC) MUST be strictly increasing on the field
+/// representative (`commitments[0] < commitments[1] < ...`, plan S2.5 step 1b):
+/// the relation enforces it, forcing the `K` committed graphs pairwise distinct
+/// and closing the duplicate-inclusion / COUNT-forgery class. The host builder
+/// emits commitments (and the matching per-graph witnesses) in ascending order.
 pub fn scan_check<let K: u32, let N: u32, let R: u32>(
     commitments: [Field; K],
     pattern: PatternSpec,
@@ -82,6 +104,22 @@ pub fn scan_check<let K: u32, let N: u32, let R: u32>(
             commit_fold(leaves, counts[g]),
             commitments[g],
             "graph commitment mismatch",
+        );
+    }
+
+    // 1b. Distinct-graph strict ordering (plan S2.5, [OPUS-4.8]): each successive
+    // per-graph commitment representative must be STRICTLY GREATER than the
+    // previous, `C(G_{g-1}) < C(G_g)`. Strictness (not `<=`) makes the K graphs
+    // pairwise DISTINCT, closing the duplicate-inclusion / COUNT-forgery class
+    // (the same credential committed twice would repeat a commitment, which the
+    // `<` rejects). `Field::lt` is the full-width BN254 comparison (commitments
+    // are full field elements, not small typed values), so this is a real
+    // ordering over the whole representative; ~one comparison per adjacent pair
+    // (none for K=1 -- the loop body is empty).
+    for g in 1..K {
+        assert(
+            commitments[g - 1].lt(commitments[g]),
+            "per-graph commitments not strictly increasing (duplicate-inclusion / COUNT forgery)",
         );
     }
 

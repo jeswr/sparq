@@ -69,6 +69,11 @@ fn check_error_display_covers_structural_reject_reasons() {
         &CheckError::PublicInputMismatch { proof: 9 },
         &["9", "public inputs"],
     );
+    // [OPUS-4.8] sq-vxq8: distinct-graph strict-ordering reject (duplicate-inclusion).
+    assert_display_carries(
+        &CheckError::ScanCommitmentsNotStrictlyIncreasing { proof: 0, at: 1 },
+        &["strictly increasing", "S2.5"],
+    );
 }
 
 #[test]
