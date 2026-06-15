@@ -505,7 +505,7 @@ fn witness_gen_filter_int_satisfiable() {
         &[],
         &[],
         &digits,
-    );
+    ).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
     prover
@@ -526,7 +526,7 @@ fn witness_gen_filter_int_rejects_false_verdict() {
     let (filter, digits) =
         build_filter_int(operand_enc, 17, FilterOp::Ge, 18, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).unwrap();
     assert!(
@@ -550,7 +550,7 @@ fn witness_gen_filter_int_ne_satisfiable() {
     let (filter, digits) =
         build_filter_int(operand_enc, 30, FilterOp::Ne, 18, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
     prover
@@ -572,7 +572,7 @@ fn witness_gen_filter_int_ne_rejects_false_verdict() {
     let (filter, digits) =
         build_filter_int(operand_enc, 18, FilterOp::Ne, 18, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).unwrap();
     assert!(
@@ -601,7 +601,7 @@ fn witness_gen_scan_satisfiable() {
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
-    );
+    ).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
     // [OPUS-4.8] tag-isolated witness gen.
@@ -623,7 +623,7 @@ fn full_prove_verify_filter_int_d1() {
     let (filter, digits) =
         build_filter_int(operand_enc, 5, FilterOp::Lt, 10, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits).unwrap();
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
 
     let prover = CircuitProver::from_crate_root();
@@ -660,7 +660,7 @@ fn full_prove_verify_filter_int_ne_d1() {
     let (filter, digits) =
         build_filter_int(operand_enc, 5, FilterOp::Ne, 9, true).unwrap();
     let (id, toml) =
-        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits);
+        prover_toml_for(&filter, &FieldHex("0x2a".into()), &[], &[], &digits).unwrap();
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
 
     let prover = CircuitProver::from_crate_root();
@@ -703,7 +703,7 @@ fn full_manifest_prove_verify_scan() {
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
-    );
+    ).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("manifest_scan");
     // [OPUS-4.8] tag-isolated prove.
@@ -776,7 +776,7 @@ fn honest_filter_d1(
     let operand_enc = encode_int_literal(value);
     let (filter, digits) =
         build_filter_int(operand_enc, value, op, bound, expected).unwrap();
-    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits);
+    let (id, toml) = prover_toml_for(&filter, challenge, &[], &[], &digits).unwrap();
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
     let out = scratch(tag);
     // [OPUS-4.8] tag-isolated prove: every forge test targets filter_int_d1, so
@@ -813,7 +813,7 @@ fn honest_age_scan(
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
-    );
+    ).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).expect("scan prove succeeds");
     (scan.inputs, encode_artifacts(&art))
@@ -1920,7 +1920,7 @@ fn holder_pop_valid_verifies_end_to_end() {
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
-    );
+    ).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("holder_pop_scan");
     let art = prover.prove_in(&id, &toml, &out, "holder_pop_scan").unwrap();
@@ -3483,7 +3483,7 @@ fn probe_scan_public_inputs_hex() {
     let scan = build_scan(&[commit], &pattern).unwrap();
     let challenge = FieldHex("0x2a".into());
     let (id, toml) =
-        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("probe_scan_pi");
     let art = prover.prove_in(&id, &toml, &out, "probe_scan_pi").unwrap();
@@ -3515,7 +3515,7 @@ fn probe_filter_f64_public_inputs_hex() {
         build_filter_f64(operand_enc, value, FilterOp::Ge, 18.0_f64, true).expect("d2 builds");
     assert_eq!(*inputs.circuit_id(), CircuitId::FilterF64 { d: 2 });
     let challenge = FieldHex("0x2a".into());
-    let (id, toml) = prover_toml_for(&inputs, &challenge, &[], &[], &digits);
+    let (id, toml) = prover_toml_for(&inputs, &challenge, &[], &[], &digits).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("probe_filter_f64_pi");
     let art = prover.prove_in(&id, &toml, &out, "probe_filter_f64_pi").unwrap();
@@ -3567,7 +3567,7 @@ fn probe_scan_k2_public_inputs_hex() {
     );
     let challenge = FieldHex("0x2a".into());
     let (id, toml) =
-        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]).unwrap();
     let prover = CircuitProver::from_crate_root();
     let out = scratch("probe_scan_k2_pi");
     let art = prover.prove_in(&id, &toml, &out, "probe_scan_k2_pi").unwrap();
@@ -4111,7 +4111,7 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
-    );
+    ).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
     let mut manifest = ProofManifest {
@@ -4479,7 +4479,7 @@ fn hi_scan_manifest(prover: &CircuitProver, signer_sk: &SecretKey, tag: &str) ->
     };
     let scan = build_scan(&[commit], &pattern).unwrap();
     let challenge = FieldHex("0x2a".into());
-    let (id, toml) = prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+    let (id, toml) = prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
     let mut manifest = ProofManifest {
@@ -4654,7 +4654,7 @@ fn hi_scan_manifest_no_clear_attestation(
     let scan = build_scan(&[commit], &pattern).unwrap();
     let challenge = FieldHex("0x2a".into());
     let (id, toml) =
-        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]).unwrap();
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
     let manifest = ProofManifest {
@@ -4951,7 +4951,7 @@ fn filter_f64_witness_honest_proves_lie_rejected() {
         build_filter_f64(operand_enc.clone(), value, FilterOp::Ge, bound, true)
             .expect("25.0 >= 18.0 builds (d=2 member)");
     assert_eq!(*inputs.circuit_id(), CircuitId::FilterF64 { d: 2 });
-    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits);
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("filter_f64_d2 compiles");
     prover
@@ -4961,7 +4961,7 @@ fn filter_f64_witness_honest_proves_lie_rejected() {
     // The FLIPPED verdict (false) must be UNprovable — soundness.
     let (lie_inputs, lie_digits) =
         build_filter_f64(operand_enc, value, FilterOp::Ge, bound, false).expect("builds");
-    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits);
+    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits).unwrap();
     let lie = prover.gen_witness_tagged(&lid, &ltoml, "f64_lie");
     assert!(
         lie.is_err(),
@@ -4989,7 +4989,7 @@ fn filter_f64_operand_binding_rejects_substituted_value() {
     // Force the operand_enc to the committed 25's encoding while the digits witness
     // says 99 (build_filter_f64 already set operand_enc to the passed value; here we
     // pass operand_enc_25 but value=99 so the digit witness is "99").
-    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], b"99");
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], b"99").unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("compiles");
     let res = prover.gen_witness_tagged(&id, &toml, "f64_subst");
@@ -5032,7 +5032,7 @@ fn filter_f64_composes_end_to_end() {
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
-    );
+    ).unwrap();
     let scan_out = scratch("f64_compose_scan");
     let scan_art = prover.prove_in(&scan_id, &scan_toml, &scan_out, "f64_compose_scan").unwrap();
 
@@ -5046,7 +5046,7 @@ fn filter_f64_composes_end_to_end() {
     // Prove the composable float-FILTER sub-proof: ?score >= 18.0 (true).
     let (filter_inputs, fdigits) =
         build_filter_f64(operand_enc, score, FilterOp::Ge, 18.0, true).expect("filter builds");
-    let (fid, ftoml) = prover_toml_for(&filter_inputs, &challenge, &[], &[], &fdigits);
+    let (fid, ftoml) = prover_toml_for(&filter_inputs, &challenge, &[], &[], &fdigits).unwrap();
     let f_out = scratch("f64_compose_filter");
     let filter_art = prover.prove_in(&fid, &ftoml, &f_out, "f64_compose_filter").unwrap();
 

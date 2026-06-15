@@ -24,7 +24,7 @@ use sparq_zk_compose::manifest::{
 };
 use sparq_zk_compose::toml::{
     canonical_digits, filter_f64_prover_toml, filter_int_prover_toml, pad_hex, pad_rows,
-    prover_toml_for, scan_prover_toml,
+    prover_toml_for, scan_prover_toml, ProverTomlError,
 };
 
 // --------------------------------------------------------------------------
@@ -159,6 +159,28 @@ fn canonical_digits_are_ascii_byte_codes() {
     }
 }
 
+// [OPUS-4.8] sq-fi03 / PR #178: `prover_toml_for` is a public fn whose `join_eq`
+// arm is deferred to sq-sfsi. It must return a recoverable `Err` (NOT panic via
+// `unimplemented!`) so a downstream caller loading a manifest with `join_eq` gets
+// a structured failure rather than a crash.
+#[test]
+fn prover_toml_for_join_eq_returns_err_not_panic() {
+    let inputs = ProofInputs::JoinEq {
+        id: CircuitId::JoinEq { n_a: 16, n_b: 16 },
+        commit_a: fh("0x0a"),
+        commit_b: fh("0x0b"),
+        join_commitment: fh("0x0c"),
+        slot_a: 0,
+        slot_b: 2,
+    };
+    let res = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], &[]);
+    assert_eq!(
+        res,
+        Err(ProverTomlError::JoinEqUnsupported),
+        "join_eq prover toml is deferred (sq-sfsi) and must fail gracefully"
+    );
+}
+
 #[test]
 fn prover_toml_for_filter_int_uses_op_code_and_digits() {
     let inputs = ProofInputs::FilterInt {
@@ -168,7 +190,7 @@ fn prover_toml_for_filter_int_uses_op_code_and_digits() {
         bound: 7,
         expected: false,
     };
-    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], b"7");
+    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], b"7").unwrap();
     assert_eq!(id, CircuitId::FilterInt { d: 1 });
     assert!(toml.contains("op = \"5\"\n"), "FilterOp::Ne code is 5");
     assert!(toml.contains("bound = \"7\"\n"));
@@ -186,7 +208,7 @@ fn prover_toml_for_filter_f64_uses_b_bits() {
         b_bits: bits,
         expected: true,
     };
-    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], b"18");
+    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[], &[], b"18").unwrap();
     assert_eq!(id, CircuitId::FilterF64 { d: 2 });
     assert!(toml.contains(&format!("b_bits = \"{bits}\"\n")));
     assert!(toml.contains("op = \"1\"\n"), "FilterOp::Le code is 1");
@@ -210,7 +232,7 @@ fn prover_toml_for_scan_pads_rows_and_enc_to_circuit_dimensions() {
         [fh("0xe00"), fh("0xe01"), fh("0xe02")],
         [fh("0xe10"), fh("0xe11"), fh("0xe12")],
     ]];
-    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[2], &scan_enc, &[]);
+    let (id, toml) = prover_toml_for(&inputs, &fh("0xchal"), &[2], &scan_enc, &[]).unwrap();
     assert_eq!(id, CircuitId::Scan { k: 1, n: 3, r: 2 });
     // rows padded from 1 -> 2 (the second row is the zero row).
     assert!(

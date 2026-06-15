@@ -328,7 +328,7 @@ fn run_differential(iters: u64, full_prove: bool) -> u64 {
             &scan.witness.counts,
             &scan.witness.enc,
             &[],
-        );
+        ).unwrap();
         let tag = format!("fuzz_scan_{i}");
         prover.compile(&scan_id).expect("scan compiles");
         prover
@@ -357,7 +357,7 @@ fn run_differential(iters: u64, full_prove: bool) -> u64 {
                     continue;
                 };
                 let (fid, ftoml) =
-                    prover_toml_for(&filter_inputs, &challenge, &[], &[], &digits);
+                    prover_toml_for(&filter_inputs, &challenge, &[], &[], &digits).unwrap();
                 let ftag = format!("fuzz_filter_{i}");
                 prover.compile(&fid).expect("filter compiles");
 
@@ -380,7 +380,7 @@ fn run_differential(iters: u64, full_prove: bool) -> u64 {
                     continue;
                 };
                 let (lid, ltoml) =
-                    prover_toml_for(&lie_inputs, &challenge, &[], &[], &lie_digits);
+                    prover_toml_for(&lie_inputs, &challenge, &[], &[], &lie_digits).unwrap();
                 let ltag = format!("fuzz_filter_lie_{i}");
                 let lie_witness = prover.gen_witness_tagged(&lid, &ltoml, &ltag);
                 assert!(
@@ -499,7 +499,7 @@ fn sq_wto_three_digit_operand_proves_not_silently_unprovable() {
     let (inputs, digits) = build_filter_int(operand_enc.clone(), value, op, bound, expected)
         .expect("3-digit FILTER must be in-family (sq-wto: d=3 member exists)");
     assert_eq!(*inputs.circuit_id(), CircuitId::FilterInt { d: 3 });
-    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits);
+    let (id, toml) = prover_toml_for(&inputs, &FieldHex("0x2a".into()), &[], &[], &digits).unwrap();
     let prover = CircuitProver::from_crate_root();
     prover.compile(&id).expect("filter_int_d3 compiles");
     prover
@@ -512,7 +512,7 @@ fn sq_wto_three_digit_operand_proves_not_silently_unprovable() {
     // 2) Soundness preserved: the FLIPPED verdict must be UNprovable.
     let (lie_inputs, lie_digits) =
         build_filter_int(operand_enc, value, op, bound, !expected).expect("builds");
-    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits);
+    let (lid, ltoml) = prover_toml_for(&lie_inputs, &FieldHex("0x2a".into()), &[], &[], &lie_digits).unwrap();
     let lie = prover.gen_witness_tagged(&lid, &ltoml, "wto_d3_lie");
     assert!(
         lie.is_err(),

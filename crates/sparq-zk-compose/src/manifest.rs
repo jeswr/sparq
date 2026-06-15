@@ -764,10 +764,16 @@ pub struct BindingEdge {
 /// sq-sfsi) resolves these, requires the `join_eq` proof's public
 /// `commit_a`/`commit_b` to byte-equal the two scans' `commitments[graph_*]` (the
 /// anti-A2 binding), and requires the proof's public `slot_a`/`slot_b` to equal
-/// the query-derived slots for the shared variable (the §4.4 slot binding). The
-/// manifest canonicalises by sorting on `(scan_a, graph_a, slot_a)` (the
-/// `BindingEdge` ordering convention, §2.5) — `join_eq` itself is unordered since
-/// the equality is symmetric.
+/// the query-derived slots for the shared variable (the §4.4 slot binding). Those
+/// slots live on the `join_eq` proof's public inputs, NOT on this edge.
+///
+/// # Ordering
+/// `join_edges` is currently stored in declaration order — the manifest does NOT
+/// yet canonicalise it. Canonical-order sorting (mirroring the `BindingEdge` §2.5
+/// convention, keyed on `(scan_a, graph_a, scan_b, graph_b)`) is deferred together
+/// with the equivalent `binding_edges` work (neither vector is sorted today); see
+/// the tracking bead. `join_eq` itself is value-symmetric, so the equality holds
+/// regardless of edge order.
 ///
 /// SCHEMA ONLY (sq-fi03, step 3); the `bind_joins` gate that consumes this is
 /// step 4 (sq-sfsi).
