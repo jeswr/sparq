@@ -10,6 +10,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # [OPUS-4.8] Merge queue: re-run the identical PR check-set on the queue's
+  # merge_group ref so the required ci-summary gate finds the same siblings it finds
+  # on a PR. The per-commit `coverage` job (if: event_name != 'schedule') runs here;
+  # the nightly tier (if: event_name == 'schedule' || 'workflow_dispatch') stays off.
+  merge_group:
   workflow_dispatch: # [OPUS-4.8] manual trigger forces the nightly tier regardless of the freshness gate
   # [OPUS-4.8] Nightly schedule drives the heavy coverage tier (sq-hbg7): the
   # `coverage-nightly` job runs the sparq-vectors 50k recall/diskann accuracy

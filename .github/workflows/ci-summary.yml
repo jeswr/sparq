@@ -42,6 +42,13 @@ name: ci-summary
 
 on:
   pull_request:
+  # [OPUS-4.8] Merge queue: GitHub runs the required check(s) on a temporary
+  # `merge_group` ref before merging. ci-summary is the SINGLE required check, so it
+  # MUST run here to produce the `ci-summary / gate` check on that ref — and every
+  # sibling workflow it aggregates (ci/bench/codeql/docs-quality/supply-chain) also
+  # triggers on merge_group, so the discovery below finds the identical check-set it
+  # finds on a PR. Without this the queue would hang forever waiting for the check.
+  merge_group:
   push:
     branches: [main]
 
@@ -70,7 +77,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          # On pull_request the head commit is the PR head; on push it's github.sha.
+          # On pull_request the head commit is the PR head; on push AND on merge_group
+          # it's github.sha (the merge_group ref's commit) — github.event.pull_request
+          # is undefined there, so the fallback selects the right SHA automatically and
+          # the check-run discovery reads the merge_group commit's siblings. [OPUS-4.8]
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           # This workflow RUN's id — unique to THIS gate run. Every check-run's
           # details_url embeds the run id of the workflow run that produced it

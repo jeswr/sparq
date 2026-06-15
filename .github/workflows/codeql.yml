@@ -20,6 +20,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # [OPUS-4.8] Merge queue: CodeQL surfaces a check on PRs, so it must also run on the
+  # queue's merge_group ref or the required ci-summary would wait for a sibling that
+  # never appears on that ref and time out. (Bare `merge_group` — it fires on every
+  # enqueue against the base branch.)
+  merge_group:
   # Weekly cadence so the latest CodeQL query packs are re-run against an otherwise
   # quiet default branch (catches newly-published queries on unchanged code).
   schedule:

@@ -13,6 +13,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # [OPUS-4.8] Merge queue: supply-chain (cargo-deny etc.) surfaces a check on PRs, so
+  # it must also run on the queue's merge_group ref or the required ci-summary would
+  # wait for a sibling that never appears there and time out.
+  merge_group:
   workflow_dispatch:
 
 permissions:

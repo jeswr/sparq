@@ -46,6 +46,27 @@ on:
       - "crates/sparq-zk-compose/**"
       - "zk/**"
       - ".github/workflows/zk-toolchain.yml"
+  # [OPUS-4.8] Merge queue: zk-toolchain surfaces a check on zk-touching PRs, so it
+  # must also run on the queue's merge_group ref or the required ci-summary would wait
+  # for a sibling that never appears there. NOTE: the `merge_group` event does NOT
+  # honour `paths` filters (GitHub ignores paths/paths-ignore for merge_group), so a
+  # BARE trigger would run the full ~60min forge suite on EVERY enqueue, not only
+  # zk-touching ones — making the serialized queue unusably slow.
+  #
+  # [OPUS-4.8] sq-9jnj — CHANGED-FILES GATE (in `forge-suite` below): on merge_group the
+  # job ALWAYS runs (so the `zk forge + anchor suite (nargo/bb)` check-run always appears
+  # on the merge_group ref and ci-summary never hangs waiting for an absent sibling), but
+  # a cheap leading `detect zk changes` step diffs the queued batch's
+  # github.event.merge_group.base_sha..head_sha and decides whether any ZK-relevant path
+  # (the SAME set the pull_request paths filter uses) changed. The heavy toolchain-install
+  # + real-bb-proving steps are gated `if: steps.changes.outputs.zk == 'true'`, so:
+  #   • zk paths changed in the batch  → full forge suite runs and GATES (soundness kept),
+  #   • no zk paths changed            → heavy steps skip; the job completes a FAST GREEN
+  #     check-run with the identical name, matching the paths-gated PR posture.
+  # For every NON-merge_group event the detect step short-circuits to zk=true, so the
+  # paths-filtered pull_request / push / schedule / dispatch behaviour is UNCHANGED (the
+  # workflow only triggers on those events when zk paths changed in the first place).
+  merge_group:
   push:
     branches: [main]
     paths:
@@ -103,10 +124,80 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
+      # [OPUS-4.8] sq-9jnj — changed-files gate for the merge queue. The `merge_group`
+      # event ignores `paths` filters, so without this the ~60min forge suite would run
+      # on EVERY queue enqueue. This cheap step decides whether the queued batch touched
+      # any ZK-relevant path; the heavy steps below are gated on its `zk` output.
+      #
+      # The path set MUST stay in lock-step with the `pull_request`/`push` paths filter
+      # above (crates/sparq-zk/**, crates/sparq-zk-compose/**, zk/**, this workflow file).
+      #
+      # SAFE-BY-DEFAULT: zk defaults to "true". Only the `merge_group` branch can flip it
+      # to "false", and only after a SUCCESSFUL diff that found no ZK paths. So:
+      #   • every non-merge_group event (pull_request / push / schedule / dispatch) →
+      #     zk=true → full suite, behaviour UNCHANGED (those events are already
+      #     paths-gated, so the workflow only triggers when zk paths changed anyway);
+      #   • merge_group + zk paths changed → zk=true → full suite GATES (soundness kept);
+      #   • merge_group + no zk paths     → zk=false → heavy steps skip → fast green check;
+      #   • merge_group + any diff failure → falls through to zk=true → full suite (fail
+      #     SAFE: we never silently skip the gate because the diff couldn't be computed).
+      #
+      # NOTE: this step ALWAYS runs and the job ALWAYS runs, so the
+      # `zk forge + anchor suite (nargo/bb)` check-run ALWAYS appears on the merge_group
+      # ref and goes green quickly on the skip path — ci-summary (which waits for the
+      # discovered, named check-set to stabilise + complete) sees it complete fast and
+      # never hangs on an absent sibling.
+      - name: Detect zk changes (merge_group changed-files gate)
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          # Default: run the full suite (fail-safe — see step comment).
+          zk=true
+          if [ "${EVENT_NAME}" = "merge_group" ]; then
+            zk=false
+            # Fetch both ends of the queued batch (the default checkout is shallow, so
+            # the base may be absent). Best-effort: on any fetch/diff error we leave
+            # zk=true via the `||` fallbacks below so the gate fails SAFE.
+            ok=true
+            git fetch --no-tags --quiet origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
+              || git fetch --no-tags --quiet origin "${MG_BASE_SHA}" 2>/dev/null \
+              || ok=false
+            git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
+            git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
+            if [ "${ok}" = "true" ]; then
+              changed="$(git diff --name-only "${MG_BASE_SHA}" "${MG_HEAD_SHA}")"
+              echo "Changed files in queued batch (${MG_BASE_SHA}..${MG_HEAD_SHA}):"
+              printf '%s\n' "${changed}"
+              # ZK-relevant paths — SAME set as the pull_request/push paths filter.
+              if printf '%s\n' "${changed}" | grep -Eq \
+                '^(crates/sparq-zk/|crates/sparq-zk-compose/|zk/|\.github/workflows/zk-toolchain\.yml$)'; then
+                zk=true
+              else
+                zk=false
+              fi
+            else
+              echo "::warning::could not resolve merge_group base/head SHAs for the diff — running the full forge suite (fail-safe)."
+              zk=true
+            fi
+          fi
+          echo "zk=${zk}" >> "$GITHUB_OUTPUT"
+          if [ "${zk}" = "true" ]; then
+            echo "ZK-relevant paths changed (or non-merge_group / fail-safe) — running the full forge suite."
+          else
+            echo "No ZK-relevant paths in this merge_group batch — fast-passing (forge suite skipped, check stays green)." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install Rust (stable)
+        if: steps.changes.outputs.zk == 'true'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache cargo + target
+        if: steps.changes.outputs.zk == 'true'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # Distinct cache key: this lane builds sparq-zk* with the toolchain present.
@@ -118,6 +209,7 @@ jobs:
       # target that defeats the pin — Copilot review, sq-f9tl). `noirup --version` then
       # installs the EXACT nargo. Two-level pinning: pinned noirup release + pinned nargo.
       - name: Install nargo (Noir) — pinned
+        if: steps.changes.outputs.zk == 'true'
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.nargo/bin"
@@ -139,6 +231,7 @@ jobs:
       # pinned bb version. (The bbup script accepts `-v|--version <ver>`; `--version <ver>`
       # binds `<ver>` as its argument.)
       - name: Install bb (Barretenberg) — pinned
+        if: steps.changes.outputs.zk == 'true'
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.bb"
@@ -152,6 +245,7 @@ jobs:
           bb --version
 
       - name: Toolchain versions (record for the run log)
+        if: steps.changes.outputs.zk == 'true'
         run: |
           echo "nargo: $(nargo --version | head -1)"
           echo "bb:    $(bb --version)"
@@ -159,6 +253,7 @@ jobs:
       # Build the ZK crates' test targets first so a compile failure is distinct from a
       # proving failure in the logs.
       - name: Build sparq-zk* test targets
+        if: steps.changes.outputs.zk == 'true'
         run: cargo build -p sparq-zk -p sparq-zk-compose --all-targets
 
       # The load-bearing step: run EVERY `#[ignore]`d test in the ZK crates. With the
@@ -169,5 +264,6 @@ jobs:
       # serialized, toolchain-bound cases (the retry/process-isolation nextest buys us on
       # the fast lane is not what this lane needs).
       - name: Run the ignored ZK forge + anchor + e2e suite (real bb)
+        if: steps.changes.outputs.zk == 'true'
         run: |
           cargo test -p sparq-zk-compose -p sparq-zk -- --ignored --test-threads=1
