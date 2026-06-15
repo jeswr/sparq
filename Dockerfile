@@ -17,7 +17,9 @@
 
 # -------- builder --------
 # Pin a toolchain >= the workspace's rust-version (1.85). Bump deliberately.
-FROM rust:1.87-slim-bookworm AS builder
+# [OPUS-4.8] SHA-pinned for supply-chain integrity (Scorecard PinnedDependencies); the
+# trailing comment keeps the human-readable tag legible for future bumps.
+FROM rust:1.87-slim-bookworm@sha256:437507c3e719e4f968033b88d851ffa9f5aceeb2dcc2482cc6cb7647811a55eb AS builder # rust:1.87-slim-bookworm
 
 ARG CARGO_FLAGS=""
 WORKDIR /build
@@ -31,7 +33,8 @@ COPY . .
 RUN cargo build --release --locked -p sparq-server ${CARGO_FLAGS}
 
 # -------- runtime --------
-FROM gcr.io/distroless/cc-debian12:nonroot
+# [OPUS-4.8] SHA-pinned (Scorecard PinnedDependencies); tag kept as a trailing comment.
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985 # gcr.io/distroless/cc-debian12:nonroot
 
 LABEL org.opencontainers.image.title="sparq-server" \
       org.opencontainers.image.description="W3C SPARQL 1.1 Protocol server for the sparq RDF triplestore (dictionary-encoded, six permutation indexes, parallel execution)" \

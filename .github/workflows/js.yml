@@ -7,6 +7,11 @@ on:
   push:
     branches: [main]
 
+# [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions): this informational
+# build/test job only reads the repo; grant nothing more. Jobs needing writes opt in per-job.
+permissions:
+  contents: read
+
 jobs:
   js:
     runs-on: ubuntu-latest

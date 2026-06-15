@@ -7,6 +7,13 @@
 #
 #   scripts/ci-bench.sh [scale_entities=200000] [out.json=bench-results.json]
 #
+# [OPUS-4.8] (sq-dzfu) CHEAP TIMING RE-MEASURE MODE for the perf-gate's best-of-N flake fix:
+#   scripts/ci-bench.sh --parse-only [out.json=bench-results.json]
+# emits ONLY the TIMING metric (parse_ns_per_byte) over the fixed corpus — NO wasm build, NO big-scale
+# corpus, NO well-known suites — so the perf-gate (scripts/perf-gate.py --remeasure-cmd) can re-measure
+# just the noisy wall-clock metric quickly when it trips the band, take the BEST reading, and only fail
+# on a real (every-reading) regression. Reuses the exact same min-of-N parse measurement as the full run.
+#
 # GitHub-hosted runners are small + noisy, so absolute numbers drift; the value is the cross-commit
 # TREND and large-regression alerting (the workflow sets a generous threshold + fail-on-alert=false).
 #
@@ -18,8 +25,19 @@
 # trend-only on free runners.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-SCALE="${1:-200000}"
-OUT="${2:-bench-results.json}"
+# [OPUS-4.8] (sq-dzfu) --parse-only: cheap TIMING re-measure for the perf-gate best-of-N flake fix.
+# When present as the first arg, ONLY the parse_ns_per_byte metric is (re-)measured (see measure_parse
+# below) and written out — no big corpus, no wasm build, no well-known suites.
+PARSE_ONLY=0
+if [ "${1:-}" = "--parse-only" ]; then
+  PARSE_ONLY=1
+  shift
+  OUT="${1:-bench-results.json}"
+  SCALE=0
+else
+  SCALE="${1:-200000}"
+  OUT="${2:-bench-results.json}"
+fi
 CLI=target/release/sparq-cli
 GEN=target/release/sparq-bench
 Q=bench/qlever-synthetic/queries
@@ -70,6 +88,50 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
 
+emit_json() {
+  python3 - "$RES" <<'PY'
+import sys, json
+rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1]) if l.strip()]
+print(json.dumps([{"name": n, "unit": u, "value": float(v)} for n, u, v in rows], indent=2))
+PY
+}
+
+# [OPUS-4.8] (sq-dzfu) measure_parse — the TIMING metric (parse_ns_per_byte) over the FIXED corpus.
+# Factored out so BOTH the full run and the cheap `--parse-only` re-measure path use the IDENTICAL
+# measurement (min-of-5 parse timing on the deterministic byte count). Leaves $TMP/fe populated so the
+# full run can still extract store_bytes_per_triple_small from the same load summary afterwards.
+# PARSE_FIX is intentionally small so the min-of-N parse timing is the least-preempted (= most
+# reproducible) wall-clock signal we can get without pulling the heavy bench/parse crate into CI.
+measure_parse() {
+  local PARSE_FIX="${PARSE_FIX:-50000}"
+  "$GEN" dump "$PARSE_FIX" "$TMP/fix.nt" >/dev/null 2>&1
+  local FIX_BYTES; FIX_BYTES=$(wc -c < "$TMP/fix.nt" | tr -d ' ')
+  # parse throughput on the fixed corpus. github-action-benchmark's customSmallerIsBetter treats ALL
+  # metrics as smaller-is-better, so we emit parse COST as nanoseconds-per-byte (= 1000 / MB/s): a
+  # parse SLOWDOWN raises it and correctly trips the alert, whereas a raw MB/s metric would alert on
+  # improvements and miss regressions. min-of-5 over the deterministic byte count.
+  : > "$TMP/fixloads"
+  for _ in 1 2 3 4 5; do
+    "$CLI" bench "$TMP/fix.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/fe" || true
+    grep -oE 'in [0-9.]+s' "$TMP/fe" | head -1 | grep -oE '[0-9.]+' | head -1 >> "$TMP/fixloads" || true
+  done
+  local fixbest; fixbest=$(sort -n "$TMP/fixloads" | head -1)
+  if [ -n "${fixbest:-}" ] && [ "${FIX_BYTES:-0}" -gt 0 ]; then
+    local nspb; nspb=$(python3 -c "import sys;print(round(float(sys.argv[1])*1e9/float(sys.argv[2]),4))" "$fixbest" "$FIX_BYTES")
+    add parse_ns_per_byte ns/byte "$nspb"
+  fi
+}
+
+# [OPUS-4.8] (sq-dzfu) --parse-only: measure ONLY the TIMING metric and emit it, then exit. This is the
+# cheap re-measure path the perf-gate shells out to (best-of-N) — it deliberately skips the big corpus,
+# the wasm build, and every well-known suite so a re-measure of the noisy parse metric is fast.
+if [ "$PARSE_ONLY" = "1" ]; then
+  measure_parse
+  emit_json > "$OUT"
+  echo "wrote $OUT (--parse-only):"; cat "$OUT"
+  exit 0
+fi
+
 "$GEN" dump "$SCALE" "$TMP/data.nt" >/dev/null 2>&1
 
 # load (seconds, smaller better) — the "loaded … in Xs" line goes to stderr; min over 3 runs.
@@ -95,27 +157,12 @@ bterm=$(grep -oE '[0-9]+ B/term' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -
 # and a parse-cost metric on a FIXED byte count tracks raw ingest throughput. The corpus comes
 # from the DETERMINISTIC synthetic generator (same bytes every run, independent of $SCALE), so
 # its size + memory layout are reproducible — these are the load-bearing gates on noisy runners
-# (the wall-clock query latencies above are trend-only). PARSE_FIX is intentionally small so the
-# min-of-N parse timing is the least-preempted (= most reproducible) wall-clock signal we can get
-# without pulling the heavy standalone bench/parse crate into per-commit CI.
-PARSE_FIX="${PARSE_FIX:-50000}"
-"$GEN" dump "$PARSE_FIX" "$TMP/fix.nt" >/dev/null 2>&1
-FIX_BYTES=$(wc -c < "$TMP/fix.nt" | tr -d ' ')
-
-# parse throughput on the fixed corpus. github-action-benchmark's customSmallerIsBetter treats
-# ALL metrics as smaller-is-better, so we emit parse COST as nanoseconds-per-byte (= 1000 / MB/s):
-# a parse SLOWDOWN raises it and correctly trips the alert, whereas a raw MB/s metric would alert
-# on improvements and miss regressions. min-of-5 over the deterministic byte count.
-: > "$TMP/fixloads"
-for _ in 1 2 3 4 5; do
-  "$CLI" bench "$TMP/fix.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/fe" || true
-  grep -oE 'in [0-9.]+s' "$TMP/fe" | head -1 | grep -oE '[0-9.]+' | head -1 >> "$TMP/fixloads" || true
-done
-fixbest=$(sort -n "$TMP/fixloads" | head -1)
-if [ -n "${fixbest:-}" ] && [ "${FIX_BYTES:-0}" -gt 0 ]; then
-  nspb=$(python3 -c "import sys;print(round(float(sys.argv[1])*1e9/float(sys.argv[2]),4))" "$fixbest" "$FIX_BYTES")
-  add parse_ns_per_byte ns/byte "$nspb"
-fi
+# (the wall-clock query latencies above are trend-only).
+#
+# The parse_ns_per_byte (TIMING) measurement is factored into measure_parse() above so the perf-gate's
+# best-of-N re-measure path (--parse-only) uses the IDENTICAL min-of-5 loop. It leaves $TMP/fe populated
+# with the load summary so the deterministic store_bytes_per_triple_small can be extracted right after.
+measure_parse
 
 # store bytes-per-triple at the SECOND (fixed) scale — fully deterministic memory layout.
 btriple2=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/fe" | head -1 | grep -oE '[0-9]+' | head -1)
@@ -342,9 +389,5 @@ if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; 
   fi
 fi
 
-python3 - "$RES" > "$OUT" <<'PY'
-import sys, json
-rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1]) if l.strip()]
-print(json.dumps([{"name": n, "unit": u, "value": float(v)} for n, u, v in rows], indent=2))
-PY
+emit_json > "$OUT"
 echo "wrote $OUT:"; cat "$OUT"

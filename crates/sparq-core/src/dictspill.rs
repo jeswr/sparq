@@ -76,23 +76,40 @@ impl SpillConfig {
     /// keeps the in-RAM consolidation), `SPARQ_DICT_SPILL_BUDGET_MB` /
     /// `SPARQ_DICT_SPILL_DISK_FLOOR_MB` override the detected defaults.
     pub fn from_env() -> Option<SpillConfig> {
-        match std::env::var("SPARQ_DICT_SPILL").as_deref() {
-            Ok("1") | Ok("on") | Ok("auto") => {}
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// [OPUS-4.8] sq-x4jy: the PURE gate/override logic of [`Self::from_env`], with the
+    /// environment read through an injectable `lookup` closure instead of the
+    /// process-global `std::env`. Production calls it with `std::env::var`; the tests call
+    /// it with an in-memory map so they NEVER mutate the process-global environment.
+    ///
+    /// WHY this exists: the previous test set/removed `SPARQ_DICT_SPILL*` via
+    /// `std::env::set_var`/`remove_var`, which mutate the single process-wide `environ`
+    /// block. `cargo test` runs a binary's tests on parallel THREADS by default, so that
+    /// mutation raced every concurrent `std::env::var` reader in the same process — both
+    /// this crate's other tests and the `Graph::build_external` production path one of them
+    /// drives. Concurrent `setenv`/`getenv` is a libc-level data race (undefined behaviour;
+    /// it reallocates the `environ` array), which can corrupt the environment block and
+    /// abort the whole test binary — surfacing in CI as `build + test` exit 101 with no
+    /// FAILED line, and (under llvm-cov) as the binary writing no profraw, undercounting
+    /// `sparq-core` coverage. Threading the lookup through a closure removes the global
+    /// mutation entirely, so the test is hermetic and the race cannot happen.
+    fn from_lookup<F: Fn(&str) -> Option<String>>(lookup: F) -> Option<SpillConfig> {
+        match lookup("SPARQ_DICT_SPILL").as_deref() {
+            Some("1") | Some("on") | Some("auto") => {}
             _ => return None,
         }
         let mut cfg = SpillConfig::detected();
-        if let Some(mb) = env_u64("SPARQ_DICT_SPILL_BUDGET_MB") {
+        if let Some(mb) = lookup("SPARQ_DICT_SPILL_BUDGET_MB").and_then(|v| v.parse::<u64>().ok()) {
             cfg.mem_budget = (mb as usize).saturating_mul(1 << 20).max(1 << 20);
         }
-        if let Some(mb) = env_u64("SPARQ_DICT_SPILL_DISK_FLOOR_MB") {
+        if let Some(mb) = lookup("SPARQ_DICT_SPILL_DISK_FLOOR_MB").and_then(|v| v.parse::<u64>().ok())
+        {
             cfg.disk_floor = mb.saturating_mul(1 << 20);
         }
         Some(cfg)
     }
-}
-
-fn env_u64(name: &str) -> Option<u64> {
-    std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok())
 }
 
 /// Physical RAM in bytes (unix `sysconf`; `None` where undetectable).
@@ -1247,50 +1264,41 @@ mod tests {
 
     #[test]
     fn spill_config_from_env_gate_and_overrides() {
-        // The env gate is process-global. Restore the original values via an RAII guard so
-        // they're put back even if an assertion panics mid-test — a manual restore at the
-        // end would leak mutated vars into other tests that read SpillConfig::from_env when
-        // a panic short-circuits it. (roborev/Copilot 2026-06-14)
-        struct EnvRestore {
-            saved: Vec<(&'static str, Option<String>)>,
-        }
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                for (k, v) in &self.saved {
-                    match v {
-                        Some(s) => std::env::set_var(k, s),
-                        None => std::env::remove_var(k),
-                    }
-                }
-            }
-        }
-        let keys = ["SPARQ_DICT_SPILL", "SPARQ_DICT_SPILL_BUDGET_MB", "SPARQ_DICT_SPILL_DISK_FLOOR_MB"];
-        let _guard = EnvRestore {
-            saved: keys.iter().map(|k| (*k, std::env::var(k).ok())).collect(),
+        // [OPUS-4.8] sq-x4jy: HERMETIC. Exercise the gate/override logic through
+        // `from_lookup` with an in-memory map instead of mutating the process-global
+        // environment. The previous form set/removed real env vars (`std::env::set_var`),
+        // which races every concurrent `std::env::var` reader in the parallel-threaded test
+        // binary — a libc `setenv`/`getenv` data race that can abort the whole binary
+        // (CI `build + test` exit 101, no profraw -> coverage undercount). With an injected
+        // lookup there is no global state to race, so no RAII restore guard is needed.
+        use std::collections::HashMap;
+        let env = |pairs: &[(&str, &str)]| {
+            let m: HashMap<String, String> =
+                pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            move |name: &str| m.get(name).cloned()
         };
 
         // Disabled / unset -> None.
-        std::env::set_var("SPARQ_DICT_SPILL", "off");
-        assert!(SpillConfig::from_env().is_none(), "off => disabled");
-        std::env::remove_var("SPARQ_DICT_SPILL");
-        assert!(SpillConfig::from_env().is_none(), "unset => disabled");
+        assert!(SpillConfig::from_lookup(env(&[("SPARQ_DICT_SPILL", "off")])).is_none(), "off => disabled");
+        assert!(SpillConfig::from_lookup(env(&[])).is_none(), "unset => disabled");
 
         // Enabled with explicit budget + floor overrides.
-        std::env::set_var("SPARQ_DICT_SPILL", "1");
-        std::env::set_var("SPARQ_DICT_SPILL_BUDGET_MB", "7");
-        std::env::set_var("SPARQ_DICT_SPILL_DISK_FLOOR_MB", "3");
-        let c = SpillConfig::from_env().expect("=1 enables");
+        let c = SpillConfig::from_lookup(env(&[
+            ("SPARQ_DICT_SPILL", "1"),
+            ("SPARQ_DICT_SPILL_BUDGET_MB", "7"),
+            ("SPARQ_DICT_SPILL_DISK_FLOOR_MB", "3"),
+        ]))
+        .expect("=1 enables");
         assert_eq!(c.mem_budget, 7 * (1 << 20));
         assert_eq!(c.disk_floor, 3 * (1 << 20));
 
         // "auto" + a 0-MB budget clamps to the 1 MiB minimum.
-        std::env::set_var("SPARQ_DICT_SPILL", "auto");
-        std::env::set_var("SPARQ_DICT_SPILL_BUDGET_MB", "0");
-        std::env::remove_var("SPARQ_DICT_SPILL_DISK_FLOOR_MB");
-        let c = SpillConfig::from_env().expect("auto enables");
+        let c = SpillConfig::from_lookup(env(&[
+            ("SPARQ_DICT_SPILL", "auto"),
+            ("SPARQ_DICT_SPILL_BUDGET_MB", "0"),
+        ]))
+        .expect("auto enables");
         assert_eq!(c.mem_budget, 1 << 20, "0 MB budget clamps to the 1 MiB minimum");
-
-        // _guard restores the original env on drop (including on a panic above).
     }
 
     #[test]

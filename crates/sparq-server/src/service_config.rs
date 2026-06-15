@@ -156,9 +156,28 @@ impl ServiceAllowlist {
     /// `--service-allow-file` path (if any). The env var is read here so a single
     /// call assembles the full effective allowlist.
     pub fn from_sources(cli: &[String], file: Option<&str>) -> Result<Self, String> {
+        Self::from_sources_with_env(cli, file, std::env::var("SPARQ_SERVICE_ALLOW").ok())
+    }
+
+    /// [OPUS-4.8] sq-x4jy: the env-baseline-injected core of [`Self::from_sources`].
+    /// Production passes the real `SPARQ_SERVICE_ALLOW` value; tests pass an explicit
+    /// `Some`/`None` instead of mutating the process-global environment.
+    ///
+    /// WHY: the prior tests set/removed `SPARQ_SERVICE_ALLOW` via `std::env::set_var`/
+    /// `remove_var`. `cargo test` runs a binary's tests on parallel THREADS, so that
+    /// mutation raced every concurrent `std::env::var` reader in the same process — a
+    /// libc `setenv`/`getenv` data race (UB; it reallocates `environ`) that can abort the
+    /// whole test binary, surfacing as CI `build + test` exit 101 with no FAILED line (the
+    /// recurring flake in sq-x4jy). Injecting the value removes the global mutation, so the
+    /// tests are hermetic and cannot race.
+    fn from_sources_with_env(
+        cli: &[String],
+        file: Option<&str>,
+        env: Option<String>,
+    ) -> Result<Self, String> {
         let mut out = Self::default();
         // 1. Env baseline.
-        if let Ok(v) = std::env::var("SPARQ_SERVICE_ALLOW") {
+        if let Some(v) = env {
             out.add_many(&v)?;
         }
         // 2. File (one entry per line; '#' comments and blanks ignored).
@@ -209,29 +228,11 @@ impl ServiceAllowlist {
 mod tests {
     use super::*;
 
-    /// [OPUS-4.8] sq-4w18: RAII guard that restores `SPARQ_SERVICE_ALLOW` to its
-    /// pre-test value on drop — INCLUDING on a panic mid-test. `from_sources` reads
-    /// this process-global var, so a test that set/removed it and then panicked would
-    /// otherwise leak the mutated value into sibling tests (and other crates' tests in
-    /// the same process). Mirrors the `EnvRestore` pattern in
-    /// `sparq-core::dictspill` tests. (roborev/Copilot 2026-06-14)
-    struct EnvRestore {
-        key: &'static str,
-        saved: Option<String>,
-    }
-    impl EnvRestore {
-        fn new(key: &'static str) -> Self {
-            EnvRestore { key, saved: std::env::var(key).ok() }
-        }
-    }
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            match &self.saved {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
+    // [OPUS-4.8] sq-x4jy: tests that exercise the env baseline now call
+    // `from_sources_with_env` with an explicit value rather than mutating the
+    // process-global `SPARQ_SERVICE_ALLOW`. That removes the `setenv`/`getenv` data race
+    // (parallel test threads + concurrent readers) that could abort the test binary
+    // (CI `build + test` exit 101), so no RAII restore guard is needed any more.
 
     #[test]
     fn empty_is_deny_all() {
@@ -312,12 +313,11 @@ mod tests {
 
     #[test]
     fn from_sources_unions_cli_file_env() {
-        // [OPUS-4.8] sq-4w18: restore SPARQ_SERVICE_ALLOW on drop (incl. on panic).
-        let _env = EnvRestore::new("SPARQ_SERVICE_ALLOW");
-        std::env::set_var("SPARQ_SERVICE_ALLOW", "env.example.org, *.env.example.org");
-        let a = ServiceAllowlist::from_sources(
+        // [OPUS-4.8] sq-x4jy: inject the env baseline (hermetic — no process-global mutation).
+        let a = ServiceAllowlist::from_sources_with_env(
             &["cli.example.org".to_string(), "*.cli.example.org".to_string()],
             None,
+            Some("env.example.org, *.env.example.org".to_string()),
         )
         .unwrap();
         assert!(a.engine_entries().contains(&"env.example.org".to_string()));
@@ -329,8 +329,7 @@ mod tests {
 
     #[test]
     fn from_sources_reads_file_with_comments_and_blanks() {
-        // [OPUS-4.8] sq-4w18: restore SPARQ_SERVICE_ALLOW on drop (incl. on panic).
-        let _env = EnvRestore::new("SPARQ_SERVICE_ALLOW");
+        // [OPUS-4.8] sq-x4jy: hermetic — no env baseline, unique temp file keyed by PID.
         let dir = std::env::temp_dir();
         let path = dir.join(format!("sparq-svc-allow-{}.txt", std::process::id()));
         std::fs::write(
@@ -338,8 +337,7 @@ mod tests {
             "# a comment\nfile.example.org\n\n  *.file.example.org   # trailing comment\n",
         )
         .unwrap();
-        std::env::remove_var("SPARQ_SERVICE_ALLOW");
-        let a = ServiceAllowlist::from_sources(&[], Some(path.to_str().unwrap())).unwrap();
+        let a = ServiceAllowlist::from_sources_with_env(&[], Some(path.to_str().unwrap()), None).unwrap();
         std::fs::remove_file(&path).ok();
         assert_eq!(a.len(), 2);
         assert!(a.engine_entries().contains(&"file.example.org".to_string()));
@@ -348,10 +346,9 @@ mod tests {
 
     #[test]
     fn from_sources_missing_file_errors() {
-        // [OPUS-4.8] sq-4w18: restore SPARQ_SERVICE_ALLOW on drop (incl. on panic).
-        let _env = EnvRestore::new("SPARQ_SERVICE_ALLOW");
-        std::env::remove_var("SPARQ_SERVICE_ALLOW");
-        let err = ServiceAllowlist::from_sources(&[], Some("/no/such/sparq-allow-file")).unwrap_err();
+        // [OPUS-4.8] sq-x4jy: hermetic — no env baseline.
+        let err = ServiceAllowlist::from_sources_with_env(&[], Some("/no/such/sparq-allow-file"), None)
+            .unwrap_err();
         assert!(err.contains("service-allow-file"));
     }
 }
