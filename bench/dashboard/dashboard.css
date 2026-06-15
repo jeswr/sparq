@@ -113,6 +113,21 @@ table.summary-table { width: 100%; border-collapse: collapse; font-size: 0.92rem
    visually anchored. */
 .featured-table thead th:nth-child(2) { color: var(--fg); }
 .featured-table td.competitor-na { color: var(--muted); opacity: 0.7; }
+/* [OPUS-4.8] sq-i0nm: competitor column header shows the engine name + the pinned VERSION inline
+   (muted, smaller) so versions are visible for transparency, not just on hover. */
+.featured-table th.competitor-col .competitor-name { display: block; }
+.featured-table th.competitor-col .competitor-version {
+  display: block; font-size: 0.66rem; font-weight: 400; color: var(--muted); opacity: 0.8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+/* [OPUS-4.8] sq-i0nm: per-suite EXTERNAL-REFERENCE baselines — real cited competitor numbers at
+   their own scale/machine, shown beneath the comparison table (NOT a same-scale comparison). */
+.featured-refs { margin: 8px 0 4px; }
+.featured-refs-head {
+  font-size: 0.72rem; color: var(--muted); font-style: italic; margin-bottom: 4px;
+}
+.featured-refs-list { margin: 0; padding-left: 16px; }
+.featured-ref { font-size: 0.74rem; color: var(--muted); line-height: 1.5; cursor: help; }
 
 /* [OPUS-4.8] sq-viby: scaling charts at the bottom. Same chart-card shell as the trend charts; a
    muted note appears for single-point families until more sizes are reported. */
