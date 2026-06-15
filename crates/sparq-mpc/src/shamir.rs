@@ -381,7 +381,12 @@ impl ShamirDealer {
     /// `t = ⌊(n−1)/2⌋`, so every backend `Self` builds satisfies this; the check is
     /// here to fail with a descriptive [`MpcError::Protocol`] rather than panic if a
     /// short / mis-built share vector is ever passed. The input must be the full
-    /// `n`-party degree-`2t` sharing on the canonical points `x = 1..n`.
+    /// `n`-party degree-`2t` sharing on the canonical points `x = 1..n`, **in
+    /// order** — this is now ENFORCED (sq-dvuc / Copilot #119): the reduction is a
+    /// FIXED public linear map that pairs the recombination weights and the fresh
+    /// sub-sharings with the input shares *by position*, so a permuted or
+    /// non-canonical input is rejected with [`MpcError::Protocol`] (fail-closed in
+    /// BOTH debug and release builds) rather than silently mis-reduced. `[OPUS-4.8]`
     ///
     /// **Security model — UNCHANGED honest-majority / semi-honest (do not
     /// over-claim).** The reduction is the BGW reduction step under the SAME trust
@@ -417,10 +422,31 @@ impl ShamirDealer {
                 shares_2t.len()
             )));
         }
+        // `[OPUS-4.8]` Strict canonical-point check (Copilot #119, sq-dvuc). The
+        // whole reduction is a FIXED public linear map that ASSUMES the input is
+        // the full n-party degree-2t sharing on the canonical points `x = 1..=n`
+        // *in order*: the recombination λ-weights below are derived from the first
+        // 2t+1 x-coords and then paired BY POSITION with the fresh sub-sharings
+        // (which `share()` always emits on `x = 1..=n` in order). A permuted or
+        // non-canonical input would silently produce a WRONG reduced sharing, so we
+        // fail closed here rather than mis-reduce. (We choose the strict-canonical
+        // contract — matching the docs — over deriving weights from arbitrary x:
+        // it is simplest and the only ordering any in-process backend ever builds.)
+        for (i, s) in shares_2t.iter().enumerate() {
+            let expected_x = i as u64 + 1;
+            if s.x != expected_x {
+                return Err(MpcError::Protocol(format!(
+                    "degree_reduce: input must be the canonical n-party sharing on x = 1..={}, \
+                     in order; share[{i}] is on x = {} (expected {expected_x})",
+                    self.n, s.x
+                )));
+            }
+        }
 
         // Public recombination vector: the Lagrange-at-0 weights for the first
         // 2t+1 evaluation points. H(0) = Σ_{i=1}^{2t+1} λ_i · H(x_i), a FIXED
         // public linear map (depends only on the party points, never on secrets).
+        // After the canonical-point check above, these are exactly `x = 1..=2t+1`.
         let recomb_points: Vec<u64> = shares_2t[..2 * self.t + 1].iter().map(|s| s.x).collect();
         let lambdas = lagrange_zero_weights(&recomb_points);
 
@@ -445,7 +471,24 @@ impl ShamirDealer {
         for (i, sub) in resharings.iter().enumerate() {
             let lambda = lambdas[i];
             for (out, sub_share) in reduced.iter_mut().zip(sub.iter()) {
-                debug_assert_eq!(out.x, sub_share.x, "resharing must use canonical points");
+                // `[OPUS-4.8]` Real fail-closed x-alignment check (Copilot #119,
+                // sq-dvuc). The accumulation pairs each output party with the
+                // sub-share at the SAME position, which is only correct when both
+                // run over the canonical points `x = 1..=n` in order. This was a
+                // `debug_assert_eq!`, which is COMPILED OUT in release — so a
+                // position/point mismatch could silently mis-accumulate in release
+                // builds. A real `if` guarantees it in both profiles. (Given the
+                // canonical-point check above and that `share()` always emits
+                // `x = 1..=n`, this is unreachable in practice; it is a defence-in-
+                // depth invariant, not a redundant assertion.)
+                if out.x != sub_share.x {
+                    return Err(MpcError::Protocol(format!(
+                        "degree_reduce: resharing point misalignment — output party x = {} \
+                         paired with sub-share x = {} (resharings must use the canonical \
+                         points x = 1..={} in order)",
+                        out.x, sub_share.x, self.n
+                    )));
+                }
                 out.y = out.y.add(lambda.mul(sub_share.y));
             }
         }
@@ -1100,6 +1143,57 @@ mod tests {
         });
         let err2 = dealer.degree_reduce(&wrong_n).unwrap_err();
         assert!(matches!(err2, MpcError::Protocol(_)), "got {err2:?}");
+    }
+
+    #[test]
+    fn degree_reduce_rejects_permuted_or_noncanonical_input() {
+        // `[OPUS-4.8]` Copilot #119 (sq-dvuc): the canonical-point precondition is
+        // enforced by a REAL runtime check (a fail-closed `if`, NOT a
+        // `debug_assert!` that compiles out). The reduction is a fixed public
+        // linear map that pairs recombination weights / fresh sub-sharings with the
+        // input BY POSITION, so a permuted-but-otherwise-valid sharing — or one on
+        // non-canonical x-coords — would silently mis-reduce if accepted. Assert it
+        // is rejected with `MpcError::Protocol`. Because the guard is a runtime
+        // `if`, this test holds identically in debug AND release (`--release`),
+        // which is the whole point of the fix.
+        let b = ShamirBackend::new_seeded(5, 0x9E2B).unwrap();
+        let t = b.threshold();
+        assert_eq!(t, 2); // n = 5, needs the full canonical x = 1..=5 in order
+        let mut dealer = b.dealer();
+        let prod_2t =
+            mul_shares_raw(&dealer.share(Fp::new(11)), &dealer.share(Fp::new(13))).unwrap();
+        // Sanity: the genuine canonical sharing still reduces correctly.
+        let expected = Fp::new(11).mul(Fp::new(13));
+        let ok = dealer.degree_reduce(&prod_2t).unwrap();
+        assert_eq!(b.reconstruct(&ok).unwrap(), expected);
+
+        // (a) PERMUTED: same shares, swapped order (x no longer 1,2,3,4,5).
+        let mut permuted = prod_2t.clone();
+        permuted.swap(0, 4); // x = 5,2,3,4,1
+        let err_perm = dealer.degree_reduce(&permuted).unwrap_err();
+        assert!(
+            matches!(err_perm, MpcError::Protocol(_)),
+            "permuted input must be a protocol error, got {err_perm:?}"
+        );
+
+        // (b) NON-CANONICAL x: full count, in order, but one point shifted off the
+        // canonical 1..=n lattice (here party 5 relabelled to x = 6).
+        let mut noncanon = prod_2t.clone();
+        noncanon[4].x = 6; // x = 1,2,3,4,6
+        let err_nc = dealer.degree_reduce(&noncanon).unwrap_err();
+        assert!(
+            matches!(err_nc, MpcError::Protocol(_)),
+            "non-canonical x must be a protocol error, got {err_nc:?}"
+        );
+
+        // (c) Off-by-one start (x = 0 reserved for the secret, never a party).
+        let mut zero_start = prod_2t;
+        zero_start[0].x = 0; // x = 0,2,3,4,5
+        let err_zs = dealer.degree_reduce(&zero_start).unwrap_err();
+        assert!(
+            matches!(err_zs, MpcError::Protocol(_)),
+            "x starting at 0 must be a protocol error, got {err_zs:?}"
+        );
     }
 
     #[test]
