@@ -126,8 +126,8 @@ fuse_rrf(lists: &[&[(T, f64)]], k: f64 /*RRF_K=60.0*/, top_k) -> Vec<(T, f64)>
 fuse_rrf_weighted(lists: &[(&[(T, f64)], f64)], k, top_k) -> Vec<(T, f64)>      // weight 0.0 mutes a list entirely
 fuse_scores(a: &[(T,f64)], b: &[(T,f64)], alpha /*1.0=a only*/, top_k) -> Vec<(T, f64)>
 // one-call hybrid: run N retriever closures on one query, fuse by item via RRF, dedup
-hybrid_search(query: &Q, top_k, k /*RRF_K*/, &mut [Retriever<Q,T>]) -> Vec<(T, f64)>
-//   Retriever<'_, Q, T> = &mut dyn FnMut(&Q) -> Vec<(T, f64)>  (e.g. nearest_term / most_similar closures)
+hybrid_search(query: &Q, top_k, k /*RRF_K*/, &mut [Retriever<'_, Q, T>]) -> Vec<(T, f64)>   // [OPUS-4.8] lifetime on alias use
+//   Retriever<'r, Q, T> = &'r mut dyn FnMut(&Q) -> Vec<(T, f64)>  (e.g. nearest_term / most_similar closures)
 ```
 
 ## Common recipes
@@ -252,7 +252,7 @@ use sparq_vectors::{hybrid_search, RRF_K};
 let fused = hybrid_search(&query, 10, RRF_K, &mut [
     &mut |t: &oxrdf::Term| index.nearest_term(t, &graph, &store, 50)
         .into_iter().map(|(t, s)| (t, s as f64)).collect(),   // ANN (cosine)
-    &mut |t: &oxrdf::Term| Sim::new(&graph).most_similar(t, 50),  // structural (Jaccard)
+    &mut |t: &oxrdf::Term| sparq_sim::Sim::new(&graph).most_similar(t, 50),  // structural (Jaccard) [OPUS-4.8] FQ path: block has no `use Sim`
 ]);
 ```
 
