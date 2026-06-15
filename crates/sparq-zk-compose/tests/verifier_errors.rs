@@ -69,6 +69,20 @@ fn check_error_display_covers_structural_reject_reasons() {
         &CheckError::PublicInputMismatch { proof: 9 },
         &["9", "public inputs"],
     );
+    // [OPUS-4.8] sq-vxq8: distinct-graph strict-ordering reject (duplicate-inclusion).
+    assert_display_carries(
+        &CheckError::ScanCommitmentsNotStrictlyIncreasing { proof: 0, at: 1 },
+        &["strictly increasing", "S2.5"],
+    );
+    // [OPUS-4.8] Copilot PR #95: Display must be panic-free for EVERY constructible
+    // value, including the `at == 0` boundary (the prior `at - 1` would underflow:
+    // debug panic / release wrap). `saturating_sub(1)` keeps it total. The current
+    // constructor never emits `at == 0`, but Display correctness is independent of
+    // that and the assertion documents the contract.
+    assert_display_carries(
+        &CheckError::ScanCommitmentsNotStrictlyIncreasing { proof: 0, at: 0 },
+        &["strictly increasing", "S2.5"],
+    );
 }
 
 #[test]

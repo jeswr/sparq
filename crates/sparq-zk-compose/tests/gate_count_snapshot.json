@@ -5,9 +5,9 @@
   "nargo_version_baselined": "1.0.0-beta.21",
   "tolerance_pct": 3.0,
   "members": {
-    "scan_k1_n16_r4": 5958,
-    "scan_k2_n16_r8": 11011,
-    "scan_k2_n64_r8": 34379,
+    "scan_k1_n16_r4": 5991,
+    "scan_k2_n16_r8": 11261,
+    "scan_k2_n64_r8": 34821,
     "filter_int_d1": 17416,
     "filter_int_d2": 17416,
     "filter_int_d3": 17416,
