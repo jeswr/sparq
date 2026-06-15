@@ -323,16 +323,25 @@ jobs:
               changed=1
             fi
           done
+          # [OPUS-4.8] root redirect (sq-pages-root): the bare Pages root would 404 because the
+          # dashboard lives under dev/bench/. Seed bench/dashboard/root-redirect.html to the
+          # benchmark-data branch ROOT as index.html so https://jeswr.github.io/sparq/ bounces to
+          # dev/bench/. github-action-benchmark only writes data.js + dev/bench/index.html (never a
+          # root index.html), so this coexists with its data and is preserved across runs.
+          if [ ! -f "$tmp/index.html" ] || ! cmp -s "$src/root-redirect.html" "$tmp/index.html"; then
+            cp "$src/root-redirect.html" "$tmp/index.html"
+            changed=1
+          fi
           if [ "$changed" = "0" ]; then
             echo "dev/bench dashboard already up to date — nothing to seed."
             exit 0
           fi
           git -C "$tmp" -c user.name='github-actions[bot]' \
                         -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-                        add dev/bench/index.html dev/bench/dashboard.js dev/bench/dashboard.css \
+                        add index.html dev/bench/index.html dev/bench/dashboard.js dev/bench/dashboard.css \
                             dev/bench/metric-labels.json dev/bench/vendor/Chart.min.js
           git -C "$tmp" -c user.name='github-actions[bot]' \
                         -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-                        commit -q -m "chore(bench): seed/update Pages dashboard under dev/bench [skip ci]"
+                        commit -q -m "chore(bench): seed/update Pages dashboard (dev/bench + root redirect) [skip ci]"
           git -C "$tmp" push -q origin benchmark-data:benchmark-data
           echo "Seeded/updated the custom Pages dashboard on benchmark-data."
