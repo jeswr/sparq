@@ -1,0 +1,85 @@
+<!-- [OPUS-4.8] sq-tf8n — GeoSPARQL benchmark suite. Design: research/capability-benchmark-program.md §3.5. -->
+# GeoSPARQL suite
+
+The GeoSPARQL analogue of the LUBM/SHACL template: an **overview** dashboard row, a
+**self-asserting deterministic gate** (regression alerts), and a **competitor** comparison
+surface. The gate is **COUNTS-NOT-COORDINATES**: floating-point geometry is not bit-stable, so it
+asserts only result-set **sizes** and the OGC compliance **pass count** — never a coordinate value.
+
+## Data substrate
+
+A **FIXED CRS84 point corpus**: 100 000 seeded random `POINT(lon lat)` `geo:wktLiteral`s over an
+~8°×8° France-ish window (`seed 20260615`, longitude `[-4, 4)`, latitude `[47, 55)`). The corpus is
+generated **deterministically** by `bench/geo/gen.sh`, which shells out to the
+`crates/sparq-geo/examples/bench_geo.rs` `gen` subcommand — so the committed `expected.tsv` counts
+and `bench_geo`'s in-process fallback corpus are **byte-identical** (no f64-formatting drift between
+Rust and shell). The corpus is gitignored + regenerable (`/tmp/geo`); there is **no external
+download or toolchain** (pure Rust — no `javac`/`rapper`/Docker).
+
+## Workloads
+
+| Workload | What it counts | Engine surface |
+|---|---|---|
+| `within10km` | #entities within 10 km great-circle of `(0, 51)` | `GeoIndex::within_distance` (`geof:`/within) |
+| `within50km` | #entities within 50 km great-circle of `(0, 51)` | `GeoIndex::within_distance` |
+| `nearest_k10` | k=10 nearest entities to `(0, 51)` (invariant: count == k) | `GeoIndex::nearest` |
+| `nearest_k100` | k=100 nearest entities to `(0, 51)` | `GeoIndex::nearest` |
+| `geof_within` | #corpus points satisfying `geof:sfWithin(point, 1°×1° box)` | `geof::lex::sf_within` (the filter-function path) |
+| `geo_compliance_pass` | #OGC topology fixtures (sf/eh/rcc8) matching the spec truth value | `geof::lex::{sf,eh,rcc8}*` |
+
+`queries/*.rq` render the within/`geof:` workloads as GeoSPARQL `SELECT (COUNT(?e) …)` queries —
+the EXACT-SEMANTICS form an external GeoSPARQL endpoint executes, so the result-set **size**
+cross-checks against `sparq-geo` before any timing is trusted. (The `geof_within` planar-degree-space
+`sfWithin` count differs from the great-circle `within*` counts — different operation + unit.)
+
+## Deterministic gate (HARD) vs timing (ADVISORY)
+
+`run.sh` is the self-asserting entry point (the LUBM pattern). It runs `bench_geo bench` over the
+fixed corpus and **asserts, per workload, vs `expected.tsv`, exit 1 on any drift**:
+
+- **result-set SIZE** of each within / nearest / `geof:` query (the primary gate — counts only,
+  derived by running, never coordinate values).
+- **`geo_compliance_pass`** — the OGC GeoSPARQL topology fixture pass count, which may only
+  **tighten** (a pass count below the pinned value is a coverage regression).
+
+The compliance ratchet is gated cross-commit as the **deficit** `geo_compliance_deficit`
+(= `GEO_COMPLIANCE_MAX − passing`, currently `25 − 25 = 0`) — a smaller-is-better integer with
+`mode:"auto"` in `bench/perf-baseline.json`, so coverage can only ratchet **down** (gap G4 of the
+design: a larger-is-better score expressed as a deficit, zero `perf-gate.py` change). A broader
+hand-curated topology ratchet lives in `crates/sparq-geo/tests/ogc_compliance_ratchet.rs`
+(`OGC_RATCHET_FLOOR`, asserted by `cargo test`).
+
+**Timing is ADVISORY** (trend-only, **never hard-gated** — and this dev box is non-canonical, so its
+timings are advisory only): the ci-bench hook harvests `geo_<name>_us` (best-of-iters query time)
+into the dashboard; it is **not** in `scripts/perf-gate.py`. The only hard `perf-gate` metric is the
+integer, runner-immune `geo_compliance_deficit`.
+
+## Running it
+
+```sh
+cargo build --release -p sparq-geo --example bench_geo
+bench/geo/run.sh                         # self-asserting: exit 1 on any count drift
+```
+
+`bench_geo bench <corpus.nt> [iters]` emits, per workload, the `name<TAB>count<TAB>us` contract the
+ci-bench hook consumes; `run.sh` asserts the deterministic `count` columns and forwards the contract.
+(`sparq-geo` is the *isolated* geo crate — not a `sparq-cli` dependency — so the runner is a crate
+`--example`, not a CLI subcommand.) `bench_geo` with no args runs the human-readable latency report
+(the `geo-index-bench` registry entry, numbers for the crate README).
+
+## Competitors
+
+| Engine | Lang | License | Adapter kind | Role |
+|---|---|---|---|---|
+| **GeoSPARQL-Jena / Fuseki-geosparql** | JVM | Apache-2.0 | `http-sparql` | **Compliance bar** — the only triplestore with full **GML + WKT**; since sparq-geo does both, the right like-for-like for *coverage*. POST the `queries/*.rq` → parse SPARQL-JSON → count. |
+| **PostGIS** | C | GPL-2.0 (server) | — (bespoke) | **LOOSE lower bound only** — relational R-tree (`rstar`-style) sub-component, **NOT** a `geof:`/SPARQL-graph-join competitor. Must match CRS/operation semantics (sparq-geo great-circle vs PostGIS geodesic/projected) or omit. |
+
+Registered in `bench/competitors.json` (with the `engines`/`values` dashboard seam **empty** in git
+per AGENTS.md — no hard-coded perf). A real `scripts/gather-competitors.sh --run --only geosparql-jena`
+writes git-ignored `bench/competitor-results/`. Docker-based competitors are inherently gather-only on
+a Docker EC2 box (no Docker on the dev box), so they add zero recurring CI cost.
+
+**Honest caveat:** sparq-geo's `within*` queries use a **great-circle** metric in CRS84 long/lat
+degree space; an external endpoint must use the same metric (and `geof:distance` semantics) for the
+**count** to agree, and the **count** must agree before any timing is meaningful. PostGIS geodesic vs
+projected distance is a different operation — it is a sub-component lower bound, not a SPARQL peer.

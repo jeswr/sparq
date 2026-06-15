@@ -1,0 +1,12 @@
+# [OPUS-4.8] (sq-tf8n) geo workload `geof_within` as a GeoSPARQL filter query (http-sparql
+# competitor). Features whose point satisfies geof:sfWithin(point, 1°x1° box centred on (0,51)).
+# This is the geof: filter-function path (planar degree-space sfWithin), distinct from the
+# great-circle within* queries. The endpoint's COUNT must agree with sparq-geo's geof:sfWithin
+# result-set size over the SAME corpus (counts-not-coords).
+PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+SELECT (COUNT(?e) AS ?n) WHERE {
+  ?e geo:asWKT ?wkt .
+  FILTER (geof:sfWithin(?wkt,
+    "POLYGON((-0.5 50.5, 0.5 50.5, 0.5 51.5, -0.5 51.5, -0.5 50.5))"^^geo:wktLiteral))
+}

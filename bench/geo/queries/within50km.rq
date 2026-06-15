@@ -1,0 +1,10 @@
+# [OPUS-4.8] (sq-tf8n) geo workload `within50km` as a GeoSPARQL filter query (http-sparql
+# competitor). Features whose point lies within 50 km great-circle of (0, 51). The external
+# endpoint's COUNT must agree with sparq-geo's within_distance result-set size (counts-not-coords).
+PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT (COUNT(?e) AS ?n) WHERE {
+  ?e geo:asWKT ?wkt .
+  FILTER (geof:distance(?wkt, "POINT(0 51)"^^geo:wktLiteral, uom:metre) <= 50000)
+}

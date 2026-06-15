@@ -1,0 +1,13 @@
+# [OPUS-4.8] (sq-tf8n) geo workload `within10km` as a GeoSPARQL filter query, for the
+# http-sparql competitor (GeoSPARQL-Jena/Fuseki) — the like-for-like compliance bar.
+# Counts features whose point lies within 10 km great-circle of the query centre (0, 51).
+# sparq-geo evaluates this via GeoIndex::within_distance (the engine surface bench_geo runs);
+# this .rq is the EXACT-SEMANTICS rendering an external GeoSPARQL endpoint executes so the
+# result-set SIZE can be cross-checked (counts-not-coords) before any timing is trusted.
+PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT (COUNT(?e) AS ?n) WHERE {
+  ?e geo:asWKT ?wkt .
+  FILTER (geof:distance(?wkt, "POINT(0 51)"^^geo:wktLiteral, uom:metre) <= 10000)
+}

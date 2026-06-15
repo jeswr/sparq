@@ -385,6 +385,31 @@ impl ShamirDealer {
             .collect()
     }
 
+    /// [OPUS-4.8] sq-dwb5 — **batched / vector secret sharing.** Share a whole
+    /// `Vec<Fp>` element-wise: each `values[i]` gets its OWN fresh, INDEPENDENT
+    /// degree-`t` masking polynomial, yielding one sharing (`ShareVec`) per
+    /// element. The returned `Vec<ShareVec>` is *positionally* row-bound: output
+    /// index `i` is the sharing of `values[i]` — the documented row-binding
+    /// contract (see [`crate::batched::BatchedShares`]).
+    ///
+    /// **Why one fresh polynomial per element (NOT one polynomial carrying all
+    /// values).** A single masking polynomial whose *coefficients* are the secrets
+    /// would couple the elements: opening one element's evaluation would constrain
+    /// the others, and `≤ t` parties' views would no longer be independent of the
+    /// vector. Independent per-element polynomials preserve the exact single-scalar
+    /// privacy guarantee for EVERY element simultaneously — any `≤ t` parties'
+    /// shares of the whole batch are jointly independent of all the values (each
+    /// element's masking coefficients are fresh, so the joint view is a product of
+    /// independent uniform sharings). This is the standard batched-Shamir layout;
+    /// it trades share count (`n·k`) for the unchanged per-element security.
+    ///
+    /// Linear ops ([`add_shares`] / [`scale`] / …) compose element-wise across two
+    /// equally-sized batches, so a per-row secure aggregate is the element-wise
+    /// fold of the per-holder batches — still zero communication rounds.
+    pub fn share_batch(&mut self, values: &[Fp]) -> Vec<ShareVec> {
+        values.iter().map(|&v| self.share(v)).collect()
+    }
+
     /// **BGW/GRR degree-reduction round (sq-dvuc).** Reduce a degree-`2t` product
     /// sharing back to a fresh degree-`t` sharing of the SAME secret, so that
     /// secret-shared multiplications can **chain** (`a·b·c`, secure comparison /
@@ -627,6 +652,29 @@ impl MacSession<'_> {
         // point-alignment invariant in `AuthenticatedShare::new` always holds.
         crate::authenticated::AuthenticatedShare::new(value, mac)
             .expect("share() emits matched canonical party points for value and MAC")
+    }
+
+    /// [OPUS-4.8] sq-dwb5 — **batched / vector AUTHENTICATED sharing.** Produce one
+    /// [`crate::authenticated::AuthenticatedShare`] `[[values[i]]] = ([values[i]],
+    /// [α·values[i]])` per element, ALL under THIS session's single MAC key `α`.
+    /// The returned vector is *positionally* row-bound: index `i` is the
+    /// authenticated sharing of `values[i]` (see
+    /// [`crate::batched::BatchedAuthShares`]).
+    ///
+    /// Every element draws TWO fresh independent degree-`t` masking polynomials
+    /// (value + MAC), so any `≤ t` parties' views of the whole batch are jointly
+    /// independent of all the values AND of `α`. Sharing the WHOLE batch under one
+    /// `α` is exactly what makes the later batched MAC-check (sq-km34.4) able to
+    /// authenticate a vector with a single random linear combination — the
+    /// vectorised analogue of the single-scalar MAC. `α` is never reconstructed.
+    pub fn authenticated_share_batch(
+        &mut self,
+        values: &[Fp],
+    ) -> Vec<crate::authenticated::AuthenticatedShare> {
+        values
+            .iter()
+            .map(|&v| self.authenticated_share(v))
+            .collect()
     }
 
     /// **Test-only.** The cleartext session MAC key `α`, so tests can verify the
@@ -932,6 +980,40 @@ impl MpcBackend for ShamirBackend {
         Ok(vec![dealer.share(Fp::new(v))])
     }
 
+    /// [OPUS-4.8] sq-dwb5 — **batched / vector** secret-sharing of a holder's
+    /// private contribution. The holder evaluates `fragment` (which MUST project
+    /// exactly one integer-valued column) over its OWN data and we share EVERY row
+    /// it returns — generalising [`Self::share_private_input`] (the single-row
+    /// special case using the fixed [`PRIVATE_SALARY_FRAGMENT`]) to a per-row
+    /// hidden-value / salary vector / per-graph commitment column.
+    ///
+    /// **Row-binding (POSITIONAL, value-sorted).** The values are extracted and
+    /// then sorted ascending ([`extract_integer_vector`] returns them in the
+    /// holder's local row order; we sort here) so two holders running the same
+    /// fragment produce batches whose index `i` refers to the same logical row
+    /// position regardless of each holder's local row ordering — exactly the
+    /// contract a per-row secure aggregate / hidden join relies on. The cleartext
+    /// values NEVER leave; only their `n·k` shares do, and any `≤ t` parties'
+    /// shares of the whole batch are jointly independent of all the values.
+    ///
+    /// One fresh dealer (fresh OS-seeded CSPRNG in production, sq-1vt) shares the
+    /// whole batch, so every row gets an independent masking polynomial without
+    /// reusing a keystream across rows.
+    fn share_private_inputs(
+        &self,
+        holder: &Holder,
+        fragment: &str,
+    ) -> Result<Vec<Self::Share>, MpcError> {
+        let private = holder.evaluate_local(fragment)?;
+        let mut values = extract_integer_vector(&private)?;
+        // Positional row-binding: a deterministic order so two holders' batches
+        // line up by index regardless of local row order (the documented contract).
+        values.sort_unstable();
+        let fps: Vec<Fp> = values.into_iter().map(Fp::new).collect();
+        let mut dealer = self.dealer();
+        Ok(dealer.share_batch(&fps))
+    }
+
     /// Run the secure computation over the shared inputs. For the v1 aggregate
     /// this is the **cumulative sum** of the holders' private values: a pure
     /// linear function, so it is the local component-wise addition of the
@@ -1006,6 +1088,47 @@ fn extract_single_integer(p: &PartialResult) -> Result<u64, MpcError> {
             "private input must be an integer literal, got {other:?}"
         ))),
     }
+}
+
+/// [OPUS-4.8] sq-dwb5 — pull a VECTOR of non-negative integers out of a
+/// single-column (any number of rows) partial — the batched generalisation of
+/// [`extract_single_integer`]. Each row must bind exactly one integer literal in
+/// the one projected column; an empty result is a valid empty vector (a holder
+/// with no private rows contributes nothing). A multi-column partial, a missing
+/// binding, or a non-integer literal is a protocol error — we never guess.
+/// Values are returned in the holder's local row order; the caller imposes the
+/// row-binding order (see [`ShamirBackend::share_private_inputs`]).
+fn extract_integer_vector(p: &PartialResult) -> Result<Vec<u64>, MpcError> {
+    if p.vars.len() != 1 {
+        return Err(MpcError::Protocol(format!(
+            "batched private input must project exactly one column, got {}",
+            p.vars.len()
+        )));
+    }
+    p.rows
+        .iter()
+        .map(|row| {
+            // Fail closed on a malformed row shape: the column COUNT is checked
+            // once via `p.vars.len()`, but a hand-built / adversarial
+            // `PartialResult` can desync the per-row arity from `vars`. Require
+            // each row to carry exactly one cell so a multi-column row can't
+            // silently mis-extract by ignoring the trailing columns.
+            if row.len() != 1 {
+                return Err(MpcError::Protocol(format!(
+                    "batched private input row must have exactly one column, got {}",
+                    row.len()
+                )));
+            }
+            match row.first() {
+                Some(Some(oxrdf::Term::Literal(l))) => l.value().parse::<u64>().map_err(|e| {
+                    MpcError::Protocol(format!("batched private input not a u64 integer: {e}"))
+                }),
+                other => Err(MpcError::Protocol(format!(
+                    "batched private input must be an integer literal in each row, got {other:?}"
+                ))),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1406,5 +1529,119 @@ mod tests {
         let summed = backend.run_secure(&sa).unwrap();
         let got = backend.reconstruct(&summed[0]).unwrap();
         assert_eq!(got, Fp::new(75_000));
+    }
+
+    /// [OPUS-4.8] sq-dwb5 — BACKWARD-COMPAT: the single-scalar `share_private_input`
+    /// path is unchanged, AND the default `share_private_inputs` over the fixed
+    /// single-salary fragment yields the SAME length-1 batch (the k=1 special case
+    /// the generalisation must preserve).
+    #[test]
+    fn share_private_inputs_subsumes_single_scalar_path() {
+        const PFX: &str =
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n";
+        let alice = Holder::from_rdf(
+            "alice",
+            &format!("{PFX} ex:alice ex:salary \"30000\"^^xsd:integer ."),
+            "turtle",
+        )
+        .unwrap();
+        let backend = ShamirBackend::new(2).unwrap();
+        // The original single path still works.
+        let single = backend.share_private_input(&alice).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(backend.reconstruct(&single[0]).unwrap(), Fp::new(30_000));
+        // The batched path over the SAME single-salary fragment yields one row.
+        let batched = backend
+            .share_private_inputs(&alice, PRIVATE_SALARY_FRAGMENT)
+            .unwrap();
+        assert_eq!(batched.len(), 1, "k=1 special case is a length-1 batch");
+        assert_eq!(backend.reconstruct(&batched[0]).unwrap(), Fp::new(30_000));
+    }
+
+    /// [OPUS-4.8] sq-dwb5 — ROW-BINDING end-to-end: two holders each have a
+    /// MULTI-ROW private salary column; the batched share + the multi-row secure
+    /// aggregate (`batched::per_row_sum`) over their positional batches equals the
+    /// plaintext per-row sum. The value-sort row-binding makes the two holders'
+    /// rows line up by position regardless of local triple order. This is the
+    /// multi-row path the single-scalar `share_private_input` could not express.
+    #[test]
+    fn batched_multi_row_per_holder_aggregate_matches_plaintext() {
+        use crate::batched::{per_row_sum, BatchedShares, RowBinding};
+        const PFX: &str =
+            "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n";
+        // Each holder has a 3-row salary column (e.g. monthly payslips). The triples
+        // are written in DIFFERENT orders per holder to exercise the value-sort.
+        let alice = Holder::from_rdf(
+            "alice",
+            &format!(
+                "{PFX} ex:a1 ex:salary \"3000\"^^xsd:integer . \
+                 ex:a2 ex:salary \"1000\"^^xsd:integer . \
+                 ex:a3 ex:salary \"2000\"^^xsd:integer ."
+            ),
+            "turtle",
+        )
+        .unwrap();
+        let bob = Holder::from_rdf(
+            "bob",
+            &format!(
+                "{PFX} ex:b1 ex:salary \"500\"^^xsd:integer . \
+                 ex:b2 ex:salary \"1500\"^^xsd:integer . \
+                 ex:b3 ex:salary \"2500\"^^xsd:integer ."
+            ),
+            "turtle",
+        )
+        .unwrap();
+
+        let frag = PRIVATE_SALARY_FRAGMENT; // SELECT ?salary WHERE { ?p ex:salary ?salary }
+        let backend = ShamirBackend::new_seeded(5, 0xBA7C).unwrap();
+        let a = BatchedShares::new(
+            backend.share_private_inputs(&alice, frag).unwrap(),
+            RowBinding::Positional,
+        )
+        .unwrap();
+        let b = BatchedShares::new(
+            backend.share_private_inputs(&bob, frag).unwrap(),
+            RowBinding::Positional,
+        )
+        .unwrap();
+        assert_eq!(a.len(), 3);
+        assert_eq!(b.len(), 3);
+
+        let summed = per_row_sum(&[a, b]).unwrap();
+        let got = summed.reconstruct(&backend).unwrap();
+        // Value-sorted: alice = [1000,2000,3000], bob = [500,1500,2500] → per-row
+        // sums [1500, 3500, 5500].
+        assert_eq!(got, vec![Fp::new(1500), Fp::new(3500), Fp::new(5500)]);
+    }
+
+    /// [OPUS-4.8] sq-dwb5 — `extract_integer_vector` must fail CLOSED on a row
+    /// whose arity desyncs from `vars`: a malformed/adversarial `PartialResult`
+    /// can claim one column in `vars` yet carry rows with extra cells. We must
+    /// reject (not silently use the first column and drop the rest).
+    #[test]
+    fn extract_integer_vector_rejects_multi_column_row() {
+        use crate::partial::PartialResult;
+        use oxrdf::{Literal, Term, Variable};
+        let int = |n: u64| Some(Term::Literal(Literal::from(n as i64)));
+        let p = PartialResult {
+            holder: crate::partial::HolderId::new("mallory"),
+            // `vars` claims a single column...
+            vars: vec![Variable::new("salary").unwrap()],
+            // ...but a row sneaks in a second cell.
+            rows: vec![vec![int(1000)], vec![int(2000), int(9999)]],
+        };
+        let err = extract_integer_vector(&p).unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m) if m.contains("exactly one column")),
+            "expected per-row arity rejection, got {err:?}"
+        );
+
+        // A well-formed single-column partial still extracts in row order.
+        let ok = PartialResult {
+            holder: crate::partial::HolderId::new("alice"),
+            vars: vec![Variable::new("salary").unwrap()],
+            rows: vec![vec![int(1000)], vec![int(2000)]],
+        };
+        assert_eq!(extract_integer_vector(&ok).unwrap(), vec![1000, 2000]);
     }
 }
