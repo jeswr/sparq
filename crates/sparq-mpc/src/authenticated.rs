@@ -86,11 +86,14 @@
 //! accessor (`MacKey::scaled_constant_mac`, crate-private) returns a *derived*
 //! sharing of `α·c` for a PUBLIC `c` (the §2.3 add-constant MAC term), never
 //! `[α]` itself.
-//! The session `α` value is consumed by the dealer the instant it is shared and
-//! is never returned to any caller (see
+//! The cleartext session `α` is RETAINED (secret, in-process) inside the
+//! [`MacSession`](crate::shamir::MacSession) for the session's lifetime — it must
+//! be, to mint each value's MAC `α·x` — but it is never returned to, nor opened by,
+//! any caller (see
 //! [`ShamirDealer::new_mac_session`](crate::shamir::ShamirDealer::new_mac_session)).
+//! What is never reconstructed is the *shared* `[α]` and the MAC shares `[α·x]`.
 //! A test (`mac_key_is_never_reconstructed_*`) pins that no `α`-opening path
-//! exists.
+//! exists. `[OPUS-4.8]`
 
 use crate::field::Fp;
 use crate::partial::MpcError;
@@ -102,9 +105,13 @@ use crate::shamir::{add_constant, add_shares, scale, sub_shares, Share, ShareVec
 /// Minted ONCE per session by
 /// [`ShamirDealer::new_mac_session`](crate::shamir::ShamirDealer::new_mac_session),
 /// which draws `α` from the masking RNG (an OS-seeded ChaCha20 CSPRNG in
-/// production, sq-1vt), shares it, and immediately drops the cleartext `α` — it is
-/// never returned to any caller. The same `[α]` then authenticates every value in
-/// the session via [`AuthenticatedShare`].
+/// production, sq-1vt) and shares it. The cleartext `α` is **retained, secret and
+/// in-process, for the session's lifetime** inside the returned
+/// [`MacSession`](crate::shamir::MacSession) — it is needed there to mint each
+/// value's MAC `α·x`. What is never reconstructed is the *shared* `[α]` (this type)
+/// and the MAC shares `[α·x]`: `α` itself is never returned to, nor opened by, any
+/// caller (no public accessor exposes it). The same `[α]` then authenticates every
+/// value in the session via [`AuthenticatedShare`]. `[OPUS-4.8]`
 ///
 /// **`α` is structurally un-openable.** This type stores `[α]` only as its private
 /// per-party share vector and exposes NO method that reconstructs it. The only
@@ -112,7 +119,15 @@ use crate::shamir::{add_constant, add_shares, scale, sub_shares, Share, ShareVec
 /// sharing of `α·c` for a PUBLIC constant `c` (the add-constant MAC term of §2.3)
 /// — a derived sharing, never `[α]` itself. This is the structural realisation of
 /// the bead's acceptance criterion (2): no code path opens `α`. `[OPUS-4.8]`
-#[derive(Debug, Clone)]
+///
+/// **Does NOT derive [`Debug`].** The per-party share vector `[α]` is secret key
+/// material; a derived `Debug` would print every share, and *any* `t+1` of them
+/// reconstruct `α` — so a stray `{:?}` (a log line, a panic message, an
+/// `assert_eq!` failure) would leak the very key the whole construction protects.
+/// Instead [`MacKey`] has a MANUAL [`Debug`] that REDACTS the shares
+/// (`MacKey { alpha: <redacted>, .. }`), so it stays printable for diagnostics
+/// without ever exposing `[α]`. `[OPUS-4.8]`
+#[derive(Clone)]
 pub struct MacKey {
     /// The degree-`t` Shamir sharing `[α]` (one [`Share`] per party). Private so
     /// the only way to USE it is the public-constant MAC term [`Self::scaled_constant_mac`];
@@ -124,12 +139,28 @@ pub struct MacKey {
     t: usize,
 }
 
+// [OPUS-4.8] Manual `Debug` that REDACTS the `[α]` shares. The `shares` vector is
+// the secret-shared MAC key; printing it (any `t+1` shares reconstruct `α`) would
+// defeat the "α is never reconstructable" guarantee through a back door. We surface
+// only the non-secret shape (party count + threshold) and an explicit `<redacted>`
+// for the key material.
+impl std::fmt::Debug for MacKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MacKey")
+            .field("alpha", &"<redacted>")
+            .field("parties", &self.shares.len())
+            .field("t", &self.t)
+            .finish()
+    }
+}
+
 impl MacKey {
     /// Construct a [`MacKey`] from the dealer's freshly-minted `[α]` sharing.
-    /// `pub(crate)` so ONLY the dealer (which alone saw — and has already dropped —
-    /// the cleartext `α`) can build one; external code cannot supply its own
-    /// `[α]`. The threshold `t` is recorded so authenticated sharings are checked
-    /// to match it. `[OPUS-4.8]`
+    /// `pub(crate)` so ONLY the dealer (which alone saw `α`, and keeps the cleartext
+    /// `α` retained — secret, in-process — inside its
+    /// [`MacSession`](crate::shamir::MacSession) to mint MACs) can build one;
+    /// external code cannot supply its own `[α]`. The threshold `t` is recorded so
+    /// authenticated sharings are checked to match it. `[OPUS-4.8]`
     pub(crate) fn from_shares(shares: ShareVec, t: usize) -> Self {
         MacKey { shares, t }
     }
@@ -224,10 +255,28 @@ impl AuthenticatedShare {
         &self.value
     }
 
-    /// The MAC sharing `[α·x]` (degree-`t`). Reconstructs to `α · x`. (Opening this
-    /// reveals `α·x`, not `α` — and the later batched check (sq-km34.4) does not
-    /// open it directly at all; it forms a random linear combination first.)
-    pub fn mac_shares(&self) -> &[Share] {
+    /// The MAC sharing `[α·x]` (degree-`t`). **`pub(crate)` — deliberately NOT
+    /// public.** Reconstructed, it yields `α·x`; in SPDZ-style authenticated
+    /// sharing a single MAC is NEVER opened on its own — `α·x` is only ever consumed
+    /// INSIDE the (future) batched MAC-check (sq-km34.4) as a random linear
+    /// combination, never individually. A public, individually-reconstructable MAC
+    /// accessor is a back door round the "α is never reconstructed" guarantee: a
+    /// caller could mint `authenticated_share(1)` (so `α·x = α·1 = α`), open its MAC
+    /// via the public `reconstruct`, and recover `α` directly. Keeping this
+    /// crate-private means the ONLY in-crate consumers are the MAC-check machinery
+    /// (km34.2/.4, not yet built) — there is no public surface that returns the MAC
+    /// shares, so the `x = 1` extraction is closed. (`value_shares()` stays public:
+    /// it opens `[x]`, the value, never `α`.) `[OPUS-4.8]`
+    //
+    // `allow(dead_code)`: the only non-test in-crate consumers are the batched
+    // MAC-check machinery (sq-km34.2/.4), which is NOT built yet — so in a plain
+    // (non-test) library build this `pub(crate)` accessor has no caller. It is
+    // exercised by this module's tests today and is the API the MAC-check will use;
+    // keeping it `pub(crate)` (not `pub`) is the security fix, so we suppress the
+    // dead-code lint rather than widen visibility. Remove the allow once km34.2/.4
+    // land. `[OPUS-4.8]`
+    #[allow(dead_code)]
+    pub(crate) fn mac_shares(&self) -> &[Share] {
         &self.mac
     }
 
@@ -292,8 +341,12 @@ pub fn auth_scale(a: &AuthenticatedShare, c: Fp) -> AuthenticatedShare {
 /// `[[x]] + c = ([x]+c, [α·x] + c·[α])` (design §2.3). The value gets the usual
 /// local add-constant; the MAC gains `α·c`, computed from the *shared* `[α]` as
 /// `c·[α]` (`MacKey::scaled_constant_mac`) — still a FREE local op, no round.
-/// The [`MacKey`] must be the same session key the sharing was authenticated under
-/// (same party set and threshold); a mismatch is a protocol error. `[OPUS-4.8]`
+/// The [`MacKey`] must be the same session key the sharing was authenticated under.
+/// What is actually CHECKED is the **party set** (`a.parties() == key.parties()`):
+/// [`AuthenticatedShare`] does not carry its own threshold, so the threshold is not
+/// re-verified here (the dealer mints the key and the sharing at the same `t`, so a
+/// matching party set on the same session implies a matching `t`). A party-set
+/// mismatch is a protocol error. `[OPUS-4.8]`
 pub fn auth_add_constant(
     a: &AuthenticatedShare,
     c: Fp,
@@ -403,6 +456,85 @@ mod tests {
             alpha.mul(c),
             "scaled_constant_mac opens to α·c (public c), not α"
         );
+    }
+
+    /// ACCEPTANCE (2), the `x = 1` trick: a caller MUST NOT be able to recover `α`
+    /// through the PUBLIC API by minting `authenticated_share(1)` (whose MAC is
+    /// `α·1 = α`) and reconstructing that MAC. This pins the load-bearing fix:
+    /// [`AuthenticatedShare::mac_shares`] is `pub(crate)`, so there is NO public path
+    /// that returns the MAC sharing for reconstruction — the public surface of an
+    /// authenticated share is `value_shares()` (opens `[x]` → the value, here `1`,
+    /// NEVER `α`) and `parties()`. The MAC is only reachable in-crate (by the future
+    /// MAC-check machinery, km34.2/.4). This test asserts: (a) the public path opens
+    /// the VALUE `1`, not `α`; and (b) the MAC accessor — reachable here only because
+    /// the test is in-crate — WOULD yield `α` if it were public, which is exactly
+    /// why it is `pub(crate)`. If `mac_shares` were ever made `pub` again, this test
+    /// (and the crate's public-API contract) would be the thing documenting the leak.
+    #[test]
+    fn x_equals_one_cannot_extract_alpha_via_public_api() {
+        let backend = ShamirBackend::new_seeded(5, 0x1234).unwrap();
+        let mut dealer = backend.dealer();
+        let mut session = dealer.new_mac_session();
+
+        // The x = 1 trick: mint an authenticated sharing of 1. Its MAC is α·1 = α.
+        let auth_one = session.authenticated_share(Fp::one());
+
+        // (a) The PUBLIC path: the only share accessor a caller outside the crate has
+        // on an AuthenticatedShare is `value_shares()`. Reconstructing it gives the
+        // VALUE (1) — never α. This is the whole of what the x = 1 trick can reach
+        // through the public surface.
+        let public_value = backend.reconstruct(auth_one.value_shares()).unwrap();
+        assert_eq!(
+            public_value,
+            Fp::one(),
+            "public x=1 path opens the value 1, never α"
+        );
+
+        // (b) The MAC sharing reconstructs to α·1 = α — which is EXACTLY why
+        // `mac_shares()` is crate-private (`pub(crate)`): if it were public, this
+        // single line would be a public α-extraction. We can only call it here
+        // because this test compiles inside the crate; an external caller cannot.
+        let alpha = session.alpha_for_test();
+        let mac_of_one = backend.reconstruct(auth_one.mac_shares()).unwrap();
+        assert_eq!(
+            mac_of_one, alpha,
+            "the MAC of x=1 is α — so the MAC accessor MUST stay pub(crate)"
+        );
+
+        // Compile-time guarantee that closes the hole: `mac_shares` is `pub(crate)`.
+        // The following line type-checks (we are in-crate); the SAME line in any
+        // downstream crate would be a privacy error `E0624`, so the public API has
+        // no way to obtain the MAC shares and thus no x=1 path to α.
+        let _: &[Share] = auth_one.mac_shares();
+    }
+
+    /// ACCEPTANCE (2), Debug redaction: a `MacKey`'s `{:?}` must NEVER print the
+    /// `[α]` share vector — a derived `Debug` would, and any `t+1` of those shares
+    /// reconstruct `α`. The manual [`Debug`] prints `<redacted>` for the key
+    /// material and only the non-secret shape (party count + threshold). We assert
+    /// the redaction marker is present and that NO share's `y` value appears in the
+    /// output. `MacSession`'s `Debug` delegates to this one, so the session is
+    /// covered too. `[OPUS-4.8]`
+    #[test]
+    fn mac_key_debug_redacts_alpha_shares() {
+        let backend = ShamirBackend::new_seeded(5, 0xD00D).unwrap();
+        let mut dealer = backend.dealer();
+        let session = dealer.new_mac_session();
+        let key = session.mac_key();
+
+        let dbg = format!("{key:?}");
+        assert!(
+            dbg.contains("<redacted>"),
+            "MacKey Debug must redact the α shares: {dbg}"
+        );
+        // No share's secret `y` value may leak into the Debug string.
+        for share in session.alpha_shares_for_test() {
+            assert!(
+                !dbg.contains(&share.y.value().to_string()),
+                "MacKey Debug leaked an α share value {}: {dbg}",
+                share.y.value()
+            );
+        }
     }
 
     /// ACCEPTANCE (3): any `<= t` party views are INDEPENDENT of `α` — the standard
