@@ -581,11 +581,14 @@ fn bb_join_value_absent_from_public_inputs() {
     let out = scratch("join_privacy");
     let art = prover.prove_in(&id, &toml, &out, "join_privacy").expect("prove succeeds");
     // The 32-byte big-endian word of the join value must not appear in the public
-    // inputs blob. (bb serialises each public field as a 32-byte BE word.)
+    // inputs blob. (bb serialises each public field as a 32-byte BE word.) We scan
+    // on ALIGNED 32-byte word boundaries — not a sliding `windows(32)` — so a match
+    // means the value occupies a genuine public-input WORD, never a spurious hit
+    // straddling two adjacent words.
     let value_word = field_to_be_bytes_32(&join_value_enc());
     let present = art
         .public_inputs
-        .windows(32)
+        .chunks_exact(32)
         .any(|w32| w32 == value_word.as_slice());
     assert!(
         !present,
