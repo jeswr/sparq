@@ -756,6 +756,14 @@
       "query": "term-dictionary memory layout footprint",
       "unit": "bytes"
     },
+    "fts_bytes_per_doc": {
+      "label": "Full-Text — index bytes per document",
+      "suite": "Full-Text",
+      "dataset": "synthetic FTS corpus — 100k 8-word literals, ~10k-term Zipf vocab, BM25 positions-enabled index (bench/fts/gen.sh)",
+      "query": "deterministic index heap_bytes()/len() (mode:auto ratchet gate)",
+      "mode": "bytes",
+      "unit": "bytes"
+    },
     "load_s": {
       "label": "Load — parse + index build (synthetic)",
       "suite": "Pipeline",
@@ -2180,6 +2188,54 @@
       "dataset": "synthetic, fixed 50k-entity corpus (deterministic)",
       "query": "per-triple overhead on a second, fixed scale",
       "unit": "bytes"
+    },
+    "text_and_terms": {
+      "label": "Full-Text and_terms — text:matches — docs containing BOTH terms (AND), query",
+      "suite": "Full-Text",
+      "dataset": "synthetic FTS corpus — 100k 8-word literals, ~10k-term Zipf vocab, BM25 positions-enabled index (bench/fts/gen.sh)",
+      "query": "text:matches — docs containing BOTH terms (AND)",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "text_build_s": {
+      "label": "Full-Text — BM25 index build time",
+      "suite": "Full-Text",
+      "dataset": "synthetic FTS corpus — 100k 8-word literals, ~10k-term Zipf vocab, BM25 positions-enabled index (bench/fts/gen.sh)",
+      "query": "build the positions-enabled BM25 inverted index over the corpus",
+      "mode": "build",
+      "unit": "s"
+    },
+    "text_near_slop2": {
+      "label": "Full-Text near_slop2 — text:near (slop 2) — two in-order terms within gap 2, query",
+      "suite": "Full-Text",
+      "dataset": "synthetic FTS corpus — 100k 8-word literals, ~10k-term Zipf vocab, BM25 positions-enabled index (bench/fts/gen.sh)",
+      "query": "text:near (slop 2) — two in-order terms within gap 2",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "text_or_terms": {
+      "label": "Full-Text or_terms — text:matchesAny — docs containing at least one term (OR), query",
+      "suite": "Full-Text",
+      "dataset": "synthetic FTS corpus — 100k 8-word literals, ~10k-term Zipf vocab, BM25 positions-enabled index (bench/fts/gen.sh)",
+      "query": "text:matchesAny — docs containing at least one term (OR)",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "text_phrase": {
+      "label": "Full-Text phrase — text:phrase — two adjacent in-order terms, query",
+      "suite": "Full-Text",
+      "dataset": "synthetic FTS corpus — 100k 8-word literals, ~10k-term Zipf vocab, BM25 positions-enabled index (bench/fts/gen.sh)",
+      "query": "text:phrase — two adjacent in-order terms",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "text_prefix4": {
+      "label": "Full-Text prefix4 — text:matches 'abcd*' — 4-char prefix (autocomplete), query",
+      "suite": "Full-Text",
+      "dataset": "synthetic FTS corpus — 100k 8-word literals, ~10k-term Zipf vocab, BM25 positions-enabled index (bench/fts/gen.sh)",
+      "query": "text:matches 'abcd*' — 4-char prefix (autocomplete)",
+      "mode": "query",
+      "unit": "µs"
     },
     "wasm_bundle_bytes": {
       "label": "WASM bundle size",
