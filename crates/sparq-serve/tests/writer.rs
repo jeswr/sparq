@@ -25,11 +25,41 @@ struct MockApplier {
     /// Artificial per-fork cost, for the reader-stall stress (simulates the
     /// O(graph) fork of the production applier).
     fork_delay: Duration,
+    /// [OPUS-4.8] (sq-vpx4) Injected durable-write failures: when > 0, `seal`
+    /// fails (returns `Err`) and decrements — modelling a transient `ENOSPC`/I/O
+    /// error on a `--persist` mirror that later clears. Lets a test drive the
+    /// "writer survives a seal failure, the batch is refused, a later batch after
+    /// recovery succeeds" path against the mock.
+    seal_fails: Arc<AtomicUsize>,
+    /// Counts the seals the writer actually attempted (success or failure), so a
+    /// test can assert the writer kept running and re-attempted after a refusal.
+    seals: Arc<AtomicUsize>,
 }
 
 impl MockApplier {
     fn new(forks: &Arc<AtomicUsize>) -> Self {
-        MockApplier { forks: forks.clone(), fork_delay: Duration::ZERO }
+        MockApplier {
+            forks: forks.clone(),
+            fork_delay: Duration::ZERO,
+            seal_fails: Arc::new(AtomicUsize::new(0)),
+            seals: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// [OPUS-4.8] (sq-vpx4) Build a mock sharing the seal-failure and seal-count
+    /// handles with the test, so the test can arm transient durable-write failures
+    /// and observe that the writer survived them and re-attempted later.
+    fn with_seal_control(
+        forks: &Arc<AtomicUsize>,
+        seal_fails: &Arc<AtomicUsize>,
+        seals: &Arc<AtomicUsize>,
+    ) -> Self {
+        MockApplier {
+            forks: forks.clone(),
+            fork_delay: Duration::ZERO,
+            seal_fails: seal_fails.clone(),
+            seals: seals.clone(),
+        }
     }
 }
 
@@ -58,8 +88,16 @@ impl ApplyUpdates for MockApplier {
         Ok(())
     }
 
-    fn seal(&mut self, working: Log) -> Log {
-        working
+    fn seal(&mut self, working: Log) -> Result<Log, String> {
+        self.seals.fetch_add(1, Ordering::SeqCst);
+        // [OPUS-4.8] (sq-vpx4) Transient durable-write failure injection: consume one
+        // armed failure (if any) and refuse the batch. The writer must NOT publish and
+        // must NOT panic — it fails the submitters with `Unavailable` and keeps running.
+        if self.seal_fails.load(Ordering::SeqCst) > 0 {
+            self.seal_fails.fetch_sub(1, Ordering::SeqCst);
+            return Err("injected transient durable-write error (ENOSPC)".into());
+        }
+        Ok(working)
     }
 }
 
@@ -301,7 +339,12 @@ fn readers_never_stall_while_writer_commits() {
     let ring = Arc::new(GenerationRing::new(Log::new()));
     let writer = Arc::new(Writer::spawn(
         ring.clone(),
-        MockApplier { forks: forks.clone(), fork_delay: Duration::from_millis(2) },
+        MockApplier {
+            forks: forks.clone(),
+            fork_delay: Duration::from_millis(2),
+            seal_fails: Arc::new(AtomicUsize::new(0)),
+            seals: Arc::new(AtomicUsize::new(0)),
+        },
         WriterConfig { window: Duration::from_millis(1), max_batch: 64, ..WriterConfig::default() },
     ));
 
@@ -358,4 +401,93 @@ fn readers_never_stall_while_writer_commits() {
         // writer's batch application would blow straight past this.
         assert!(p99 < 1_000_000, "reader p99 = {p99} ns — a read blocked on the write path");
     }
+}
+
+/// [OPUS-4.8] (sq-vpx4) A TRANSIENT durable-write error (one armed seal failure that
+/// then clears) must REFUSE the in-flight write with `WriteError::Unavailable` (a
+/// retryable 503-class outcome) WITHOUT killing the writer thread, WITHOUT publishing,
+/// and WITHOUT acking 2xx — and a SUBSEQUENT write after recovery must succeed and
+/// publish. This is the core graceful-degradation contract.
+#[test]
+fn transient_seal_failure_refuses_then_recovers() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let seal_fails = Arc::new(AtomicUsize::new(0));
+    let seals = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::new(Log::new()));
+    let writer = Writer::spawn(
+        ring.clone(),
+        MockApplier::with_seal_control(&forks, &seal_fails, &seals),
+        // One update per window so each is its own batch / generation attempt.
+        WriterConfig { window: Duration::from_millis(5), max_batch: 1, ..WriterConfig::default() },
+    );
+
+    // Baseline: a normal write publishes generation 1.
+    let g1 = writer.submit("ok-1".to_string(), pods(&["pod:a"])).unwrap();
+    assert_eq!(g1, 1, "happy-path write must publish");
+    assert_eq!(ring.current().number(), 1);
+
+    // Arm ONE transient durable-write failure, then submit. The seal fails once.
+    seal_fails.store(1, Ordering::SeqCst);
+    let refused = writer.submit("will-be-refused".to_string(), pods(&["pod:a"]));
+    assert!(
+        matches!(refused, Err(WriteError::Unavailable(_))),
+        "transient durable-write error must be a retryable Unavailable refusal, got {refused:?}",
+    );
+
+    // FAIL-CLOSED: nothing was published — the ring is byte-identical to before
+    // (still generation 1, the refused update's effect absent).
+    assert_eq!(
+        ring.current().number(),
+        1,
+        "a refused (non-durable) write must NOT publish a new generation",
+    );
+    assert_eq!(
+        ring.current().snapshot(),
+        &vec!["ok-1".to_string()],
+        "the refused write must leave the published snapshot byte-identical",
+    );
+
+    // The writer thread SURVIVED: a subsequent write after recovery succeeds + publishes.
+    let g2 = writer.submit("ok-2".to_string(), pods(&["pod:a"])).unwrap();
+    assert_eq!(g2, 2, "writer must keep running and publish after a transient failure");
+    assert_eq!(ring.current().snapshot(), &vec!["ok-1".to_string(), "ok-2".to_string()]);
+
+    // Sanity: the writer actually re-attempted the seal after the refusal.
+    assert!(seals.load(Ordering::SeqCst) >= 3, "writer must have re-attempted seal after refusal");
+}
+
+/// [OPUS-4.8] (sq-vpx4) A PERSISTENT durable-write error → every write is refused with
+/// `Unavailable` (no panic, no publish), the writer stays alive across all of them, and
+/// reads keep being served from the last published snapshot the whole time (degraded
+/// read-only mode). When durability finally recovers, writes resume.
+#[test]
+fn persistent_seal_failure_refuses_repeatedly_reads_survive() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let seal_fails = Arc::new(AtomicUsize::new(0));
+    let seals = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::new(Log::new()));
+    let writer = Writer::spawn(
+        ring.clone(),
+        MockApplier::with_seal_control(&forks, &seal_fails, &seals),
+        WriterConfig { window: Duration::from_millis(5), max_batch: 1, ..WriterConfig::default() },
+    );
+
+    // Establish a published snapshot, then jam durability "persistently".
+    writer.submit("ok-1".to_string(), pods(&["pod:a"])).unwrap();
+    seal_fails.store(5, Ordering::SeqCst);
+
+    for n in 0..5 {
+        let r = writer.submit(format!("refused-{n}"), pods(&["pod:a"]));
+        assert!(
+            matches!(r, Err(WriteError::Unavailable(_))),
+            "write #{n} under persistent durability failure must be Unavailable, got {r:?}",
+        );
+        // Reads still served from the last good snapshot throughout the outage.
+        assert_eq!(ring.current().number(), 1, "reads must keep serving generation 1 during the outage");
+        assert_eq!(ring.current().snapshot(), &vec!["ok-1".to_string()]);
+    }
+
+    // Durability recovered (all armed failures consumed): writes resume.
+    let g = writer.submit("ok-2".to_string(), pods(&["pod:a"])).unwrap();
+    assert_eq!(g, 2, "writes must resume once durability recovers");
 }

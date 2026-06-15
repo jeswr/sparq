@@ -104,13 +104,14 @@ impl ApplyUpdates for GraphApplier {
     /// reaches the threshold, so overlay merge-on-read cost and per-fork delta
     /// copies stay bounded while the O(graph) fold runs only once per
     /// ~threshold/batch commits.
-    fn seal(&mut self, mut working: Graph) -> Graph {
+    fn seal(&mut self, mut working: Graph) -> Result<Graph, String> {
         if working.pending_delta_len() >= self.compact_threshold {
             // In-memory compaction cannot fail; a (directory-backed) failure
             // publishes the correct-but-uncompacted copy and retries next seal.
             let _ = working.compact();
         }
-        working
+        // [OPUS-4.8] (sq-vpx4) This applier has no durable side, so seal never fails.
+        Ok(working)
     }
 
     /// Conservative graph-level write footprint parsed from the update text
