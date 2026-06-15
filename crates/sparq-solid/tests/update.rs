@@ -400,14 +400,17 @@ fn store_snapshot(store: &PodStore) -> StoreSnapshot {
                 )
             })
             .collect();
-        v.sort();
+        // Equality comparison only needs a deterministic order, not a stable one;
+        // sort_unstable is faster for large snapshots. [OPUS-4.8]
+        v.sort_unstable();
         v
     }
     let mut out: StoreSnapshot = vec![(String::new(), dump_graph(&store.graph))];
     for (name, sub) in &store.graph.named {
         out.push((name.to_string(), dump_graph(sub)));
     }
-    out.sort();
+    // Snapshot is only compared for equality; an unstable sort is faster. [OPUS-4.8]
+    out.sort_unstable();
     out
 }
 
