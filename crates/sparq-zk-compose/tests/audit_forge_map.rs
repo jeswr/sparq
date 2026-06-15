@@ -144,6 +144,7 @@ fn attest_full(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestatio
             version: STATUS_VERSION,
             index_commitment: None,
         }),
+        holder: None, // [OPUS-4.8] sq-h8rg (HolderPoP T2): non-holder-bound (bearer)
     }
 }
 
