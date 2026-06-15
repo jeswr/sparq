@@ -203,6 +203,44 @@
       "version_env_metadata": "gather records the Anserini + Lucene versions, the BEIR cut + qrels checksum, java -version, and the host env block.",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": null
+    },
+    {
+      "id": "ann-benchmarks",
+      "name": "ann-benchmarks kernel peers (hnswlib / FAISS / ScaNN / DiskANN-ref)",
+      "kind": "python-lib",
+      "role": "[OPUS-4.8 sq-v02y] The STRONGEST honest-competition surface: recall@k vs exact-kNN is a fair, standard, deterministic comparator. The harness is ann-benchmarks-STYLE — it reports the recall-QPS PARETO at MATCHED recall, NEVER a single latency number (a faster engine at lower recall is not 'faster'). Kernel peers, all MIT/Apache/BSD -> publishable: hnswlib (primary, canonical in-RAM HNSW; the sparq-vectors HNSW peer), FAISS (quantizer/GPU + brute-force ground-truth oracle), ScaNN (the SOTA recall-QPS bar), DiskANN reference impl (the oracle for sparq's Vamana .spqg). Adapter kind `python-lib` via scripts/bench-adapters/vector_lib_adapter.py (in-process, cross-language; build index -> query -> recall@k vs an exact-kNN numpy oracle, emitting the SAME recall_deficit_milli the suite gates on — design G4). UNCONTESTED surface value: NO competitor does ANN-INSIDE-SPARQL over dict-encoded entity ids (sparq's ANN is keyed by the store's dictionary term ids, joinable directly into a SPARQL plan; these kernels are standalone index structures).",
+      "pinned_version": "hnswlib / faiss-cpu / scann / DiskANN (pin each library's exact PyPI/release version at gather time)",
+      "version_source": "each library's version (hnswlib.__version__ / faiss / scann / DiskANN release), recorded in the gather results file.",
+      "install_recipe": "pip install numpy hnswlib faiss-cpu scann (+ build DiskANN reference) at gather time, plus a published ANN dataset (SIFT1M or GloVe-100-angular). gather-only — NOT committed (engines stay out of git per AGENTS.md); the big corpora are NOT redistributable in-repo (see the SIFT1M/GloVe recall-QPS follow-up bead).",
+      "run_recipe": "scripts/gather-competitors.sh --run --only ann-benchmarks dispatches scripts/bench-adapters/vector_lib_adapter.py: build the engine's index over the dataset, query top-k, compute exact-kNN ground truth (numpy), emit `<engine>\\t<recall_deficit_milli>\\t<query_us>` at a sweep of build/search params -> the recall-QPS Pareto. The per-commit suite uses the synthetic 50k corpus; the big SIFT1M/GloVe Pareto is gather-tier.",
+      "adapter": {
+        "kind_note": "python-lib (vector_lib_adapter.py) + exact-kNN numpy oracle (G4). Report the recall-QPS PARETO at MATCHED recall, never a single latency. Scope to what sparq-vectors implements (cosine/L2 top-k; HNSW + Vamana + PQ) or it is unfair."
+      },
+      "comparable_suites": [
+        { "sparq_suite": "vector-ann-bench", "note": "same dataset + exact-kNN ground truth; cross-check recall@10 (the recall_deficit_milli) at MATCHED recall before comparing QPS. hnswlib is the dashboard peer for the HNSW row; FAISS/ScaNN/DiskANN-ref are kernel references. NEVER compare a single latency — only the recall-QPS Pareto. No competitor does ANN-inside-SPARQL over dict-encoded ids (uncontested)." }
+      ],
+      "version_env_metadata": "gather records each library version, the dataset name + checksum, the param sweep, python/numpy versions, and the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "hnswlib"
+    },
+    {
+      "id": "vector-dbs",
+      "name": "Qdrant / Milvus / Weaviate (full vector DBs) — loose-only",
+      "kind": "http-sparql",
+      "role": "[OPUS-4.8 sq-v02y] LOOSE-ONLY reference: full vector DATABASES (server + persistence + filtering + replication) are MORE than sparq-vectors (an embedded index over an RDF store's dict ids) — apples-to-oranges in the OPPOSITE direction from the Lucene/Solr asymmetry (there the server is more than the embedded lib; here the DB is more than the embedded index). They are NOT a like-for-like kernel peer and are kept as a loose lower-bound context note, NOT a dashboard column. The fair, standard comparison is the ann-benchmarks kernel peers (recall-QPS Pareto), not a full-DB head-to-head.",
+      "pinned_version": "qdrant / milvus / weaviate (pin the Docker image DIGEST at gather time)",
+      "version_source": "the Docker image digest per DB, recorded in the gather results file.",
+      "install_recipe": "Docker images (Apache-2.0 / BSD-3) — gather-only on a Docker EC2 box (no Docker on the dev box; zero recurring CI cost). NOT committed.",
+      "run_recipe": "loose context only — if gathered, load the same vectors and report recall-QPS, but flag the full-DB overhead asymmetry; do NOT align into a same-row dashboard cell.",
+      "adapter": {
+        "kind_note": "loose-only; not a like-for-like kernel peer. Documented for honesty, off the dashboard."
+      },
+      "comparable_suites": [
+        { "sparq_suite": "vector-ann-bench", "note": "LOOSE-ONLY: full vector DBs are more than an embedded index; apples-to-oranges. Context note, not a dashboard column. Use the ann-benchmarks kernel peers for the fair recall-QPS comparison." }
+      ],
+      "version_env_metadata": "gather records each DB image digest + the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": null
     }
   ],
 

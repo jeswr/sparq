@@ -25,7 +25,15 @@
     "not drift in the code). 4.9721 is the documented basis ('median of recent published points'); with",
     "the +12% band that is 5.5688, which comfortably covers the series max (5.4346) while still failing a",
     "real slowdown. A separate parse-path code fix (skip the redundant triple-term serial pass on plain",
-    "N-Triples that PR #91 added) lands alongside, lowering the true cost on every runner."
+    "N-Triples that PR #91 added) lands alongside, lowering the true cost on every runner.",
+    "[OPUS-4.8] (sq-v02y) 2026-06-15: Vector/ANN recall-DEFICIT ratchets. vectors_diskann_recall_at10",
+    "and vectors_pq_recall_at10 are recall@10 vs nearest_exact emitted as recall_deficit_milli =",
+    "round((1-recall)*1000) (design G4) — smaller-is-better, so they slot into the mode:auto ratchet",
+    "with ZERO perf-gate.py change. Both are byte-DETERMINISTIC (single-threaded fixed-seed builds:",
+    "src/diskann.rs Vamana, src/quant.rs PQ k-means), floors DERIVED BY RUNNING examples/bench_vectors",
+    "on the pinned N=50000 seed=0 corpus (NOT guessed). hnsw_recall_at10 is INTENTIONALLY ABSENT here:",
+    "the instant-distance HNSW build is rayon-parallel (+/-1 deficit float-reduction jitter), so it is",
+    "floor-gated in bench/vector/run.sh only, never cross-commit ratcheted (a flaky ratchet is dishonest)."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -55,6 +63,16 @@
     },
     "fts_bytes_per_doc": {
       "floor": 371,
+      "threshold": 0.02,
+      "mode": "auto"
+    },
+    "vectors_diskann_recall_at10": {
+      "floor": 34,
+      "threshold": 0.02,
+      "mode": "auto"
+    },
+    "vectors_pq_recall_at10": {
+      "floor": 22,
       "threshold": 0.02,
       "mode": "auto"
     }

@@ -58,7 +58,7 @@ conventions first, then a per-category map that points at the registry, then a
 
 | category | what it covers | registry ids |
 |---|---|---|
-| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
+| **query** | engine compute + differential correctness; aux-index harnesses; well-known suites | `sparq-bench-compare`, `sparq-bench-fuzz`, `sparq-bench-diff`, `cli-bench-suite`, `cli-bench-mmap`, `operator-coverage`, `sp2b`, `dbpsb`, `watdiv`, `bsbm`, `lubm`, `shacl-validate-bench`, `selective-bindjoin`, `u64-valueids`, `qlever-olympics`, `qlever-synthetic-10m`, `qlever-synthetic-100m`, `text-index-bench`, `vector-ann-bench`, `geo-index-bench`, `rsp-throughput`, `vectors-throughput`, `gpu-bench`, `sim-olympics-eval`, `introspect-olympics` |
 | **parse** | text-format parse throughput (MB/s) | `parse-baseline` |
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
@@ -138,6 +138,25 @@ Notes on a few that need care:
   Competitor honesty: **Solr/ES are NOT SPARQL competitors and stay off the dashboard**; the
   surface peer is Fuseki + `jena-text` (`http-sparql`), the kernel ref is Lucene/Anserini (labelled
   *sub-component, not an RDF benchmark*).
+- **`vector-ann-bench` is the VECTOR / ANN suite** — see
+  [`bench/vector/README.md`](./vector/README.md). It exercises `sparq-vectors` (mmap'd `.spqv`
+  vector store + HNSW / Vamana / PQ ANN) over a **synthetic** corpus generated **in-process** (no
+  external generator): N seeded 32-d vectors. `run.sh` is self-asserting: it runs the
+  `bench_vectors` example and gates each searcher's **recall@10 vs the `nearest_exact` brute-force
+  ground truth**, emitted as a **DEFICIT** (`recall_deficit_milli = round((1-recall)*1000)`, design
+  G4 — smaller-is-better, so it slots into the `mode:auto` ratchet with zero `perf-gate.py`
+  change). `diskann`/`pq` deficits are **EXACT-gated** vs `expected.tsv` (single-threaded
+  fixed-seed builds ⇒ byte-deterministic) and additionally `mode:auto`-ratcheted
+  (`vectors_diskann_recall_at10` / `vectors_pq_recall_at10` in `bench/perf-baseline.json`); `hnsw`
+  is **FLOOR-gated only** (its `instant-distance` build is rayon-parallel ⇒ ±1 deficit jitter, so
+  exact equality would flake). CI emits `vectors_<searcher>_recall_at10` (deficit) +
+  `vectors_<searcher>_query_us` + `vectors_build_s` (trend-only). Pinned `N=50000 seed=0` (the same
+  50k×32 set the crate recall gate tests use). Competitor honesty: the **strongest** honest-comparison
+  surface — the **ann-benchmarks** harness reports the **recall-QPS Pareto at MATCHED recall** (never
+  a single latency); kernel peers hnswlib/FAISS/ScaNN/DiskANN-ref (`python-lib` +
+  `scripts/bench-adapters/vector_lib_adapter.py` + exact-kNN oracle); Qdrant/Milvus/Weaviate
+  loose-only. **No competitor does ANN-inside-SPARQL over dict-encoded ids** (uncontested surface).
+  The big SIFT1M/GloVe recall-QPS Pareto is gather-tier (follow-up bead).
 - **`deep-taxonomy` (DeepTaxonomy) is the rule-heavy N3 REASONING suite** — see
   [`bench/deep-taxonomy/README.md`](./deep-taxonomy/README.md). `run.sh` is self-asserting and
   REUSES the existing generator `bench/inference/gen_deeptaxonomy.py` (1 instance + a depth-deep
@@ -203,6 +222,7 @@ bench/bsbm/run.sh                     # BSBM Explore -pc 300 (JRE + unzip): gen 
 bench/lubm/run.sh                     # LUBM(1) (javac + rapper): gen + OWL-RL closure + both tiers + row diff
 bench/shacl/run.sh                    # SHACL (javac + rapper): LUBM ABox x 5 shapes + violations/conforms/focus_nodes diff
 cargo build --release -p sparq-text --example bench_text && bench/fts/run.sh   # Full-text (no external tool): synthetic BM25 corpus + hit-count/bytes-per-doc diff
+cargo build --release -p sparq-vectors --example bench_vectors && bench/vector/run.sh   # Vector/ANN (no external tool): synthetic corpus + recall@10-deficit gate (HNSW/Vamana/PQ)
 bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
 
 # --- selective bind-join + u64 value-id probes ---

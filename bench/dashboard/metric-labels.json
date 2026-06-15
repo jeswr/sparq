@@ -2237,6 +2237,62 @@
       "mode": "query",
       "unit": "µs"
     },
+    "vectors_build_s": {
+      "label": "Vector / ANN — HNSW index build time",
+      "suite": "Vector / ANN",
+      "dataset": "synthetic ANN corpus — 50k 32-d vectors from a seeded splitmix64 PRNG (PQ on a fixed 10k clustered set); recall@10 vs nearest_exact (bench/vector/gen.sh)",
+      "query": "build the in-RAM HNSW index over the corpus (advisory)",
+      "mode": "build",
+      "unit": "s"
+    },
+    "vectors_diskann_query": {
+      "label": "Vector / ANN diskann — query latency",
+      "suite": "Vector / ANN",
+      "dataset": "synthetic ANN corpus — 50k 32-d vectors from a seeded splitmix64 PRNG (PQ on a fixed 10k clustered set); recall@10 vs nearest_exact (bench/vector/gen.sh)",
+      "query": "on-disk Vamana (DiskANN) kNN",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "vectors_diskann_recall_at10": {
+      "label": "Vector / ANN diskann — recall@10 deficit, gate",
+      "suite": "Vector / ANN",
+      "dataset": "synthetic ANN corpus — 50k 32-d vectors from a seeded splitmix64 PRNG (PQ on a fixed 10k clustered set); recall@10 vs nearest_exact (bench/vector/gen.sh)",
+      "query": "on-disk Vamana (.spqg), recall@10 floor 0.90 (exact-gated + ratchet)",
+      "mode": "recall_deficit",
+      "unit": "milli"
+    },
+    "vectors_hnsw_query": {
+      "label": "Vector / ANN hnsw — query latency",
+      "suite": "Vector / ANN",
+      "dataset": "synthetic ANN corpus — 50k 32-d vectors from a seeded splitmix64 PRNG (PQ on a fixed 10k clustered set); recall@10 vs nearest_exact (bench/vector/gen.sh)",
+      "query": "in-RAM HNSW approximate kNN",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "vectors_hnsw_recall_at10": {
+      "label": "Vector / ANN hnsw — recall@10 deficit, gate",
+      "suite": "Vector / ANN",
+      "dataset": "synthetic ANN corpus — 50k 32-d vectors from a seeded splitmix64 PRNG (PQ on a fixed 10k clustered set); recall@10 vs nearest_exact (bench/vector/gen.sh)",
+      "query": "in-RAM HNSW (instant-distance), recall@10 floor 0.95 (floor-gated)",
+      "mode": "recall_deficit",
+      "unit": "milli"
+    },
+    "vectors_pq_query": {
+      "label": "Vector / ANN pq — query latency",
+      "suite": "Vector / ANN",
+      "dataset": "synthetic ANN corpus — 50k 32-d vectors from a seeded splitmix64 PRNG (PQ on a fixed 10k clustered set); recall@10 vs nearest_exact (bench/vector/gen.sh)",
+      "query": "product-quantized kNN + re-rank",
+      "mode": "query",
+      "unit": "µs"
+    },
+    "vectors_pq_recall_at10": {
+      "label": "Vector / ANN pq — recall@10 deficit, gate",
+      "suite": "Vector / ANN",
+      "dataset": "synthetic ANN corpus — 50k 32-d vectors from a seeded splitmix64 PRNG (PQ on a fixed 10k clustered set); recall@10 vs nearest_exact (bench/vector/gen.sh)",
+      "query": "PQ codes + full-precision re-rank, recall@10 floor 0.95 (exact-gated + ratchet)",
+      "mode": "recall_deficit",
+      "unit": "milli"
+    },
     "wasm_bundle_bytes": {
       "label": "WASM bundle size",
       "suite": "Memory / Size",
