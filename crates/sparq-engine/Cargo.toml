@@ -56,6 +56,14 @@ zk = []
 # feature were turned on for a wasm target. When off, zero federation/HTTP code
 # compiles. [OPUS-4.8]
 service = ["dep:serde_json", "dep:ureq"]
+# [OPUS-4.8] (sq-678h) RDF serializer matrix: Turtle / TriG / N-Quads writers
+# (`serialize` module). The base build can already *parse* every format but only
+# *write* N-Triples (`triples_to_ntriples`, always on). This feature adds the missing
+# writers. OPT-IN and OFF by default so a consumer that only needs N-Triples pays
+# nothing — the writers reuse the existing oxrdf term/IRI/literal infrastructure and
+# pull in ZERO new dependencies (oxrdf is already a direct dep), so the default build's
+# dependency graph is byte-for-byte unchanged when this is off.
+serialize-rdf = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
