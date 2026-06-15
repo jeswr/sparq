@@ -43,6 +43,19 @@ impl GraphKey {
     }
 }
 
+/// [OPUS-4.8] (sq-25r3) Relabels an error raised by the SHARED N-Triples term parsers (`term`,
+/// `object_term`, `scan_delim`, `decode`, …) so it reads `N-Quads:` when surfaced from the
+/// N-Quads fast path — the shared code emits the `N-Triples:` prefix, which is misleading to a
+/// caller that handed in N-Quads. Only the leading prefix is rewritten; the byte offset and the
+/// rest of the message are preserved.
+#[cfg(feature = "parallel")]
+fn as_nquads_err(e: String) -> String {
+    match e.strip_prefix("N-Triples:") {
+        Some(rest) => format!("N-Quads:{rest}"),
+        None => e,
+    }
+}
+
 /// [OPUS-4.8] (sq-25r3) Parses a slice of complete N-QUADS lines, ROUTING each quad's triple to a
 /// per-graph partial bucket keyed by its 4th (graph) field — the byte-level analogue of
 /// [`parse_chunk`] for datasets. N-Quads is one statement per line, so a byte buffer can be split
@@ -109,9 +122,13 @@ pub fn parse_quads_chunk(bytes: &[u8]) -> Result<Vec<(Option<GraphKey>, Dict, Ve
             buckets.len() - 1
         });
         let (_, dict, triples) = &mut buckets[slot];
-        let (s, _) = term(bytes, s_start, dict)?;
-        let (p, _) = term(bytes, p_start, dict)?;
-        let (o, _) = object_term(bytes, o_start, dict)?;
+        // S/P/O were already span-validated above; the only errors the shared (re-scanning)
+        // intern path can still raise here are escape/UTF-8 decode failures, which carry the
+        // N-Triples prefix from the shared term parser. Relabel them to N-Quads so a caller of
+        // the N-Quads fast path never sees a misleading `N-Triples:` message (sq-25r3).
+        let (s, _) = term(bytes, s_start, dict).map_err(as_nquads_err)?;
+        let (p, _) = term(bytes, p_start, dict).map_err(as_nquads_err)?;
+        let (o, _) = object_term(bytes, o_start, dict).map_err(as_nquads_err)?;
         triples.push([s, p, o]);
     }
     Ok(buckets)
@@ -124,18 +141,15 @@ pub fn parse_quads_chunk(bytes: &[u8]) -> Result<Vec<(Option<GraphKey>, Dict, Ve
 fn graph_key(b: &[u8], i: usize) -> Result<GraphKey, String> {
     match b.get(i) {
         Some(b'<') => {
-            let (start, end, esc, _next) = scan_delim(b, i, b'>')?;
-            Ok(GraphKey::Iri(decode(&b[start..end], esc)?.into_owned()))
+            let (start, end, esc, _next) = scan_delim(b, i, b'>').map_err(as_nquads_err)?;
+            Ok(GraphKey::Iri(decode(&b[start..end], esc).map_err(as_nquads_err)?.into_owned()))
         }
         Some(b'_') => {
             if b.get(i + 1) != Some(&b':') {
                 return Err(format!("N-Quads: bad blank node graph at byte {i}"));
             }
             let start = i + 2;
-            let mut j = start;
-            while j < b.len() && !matches!(b[j], b' ' | b'\t' | b'\r' | b'\n' | b'.') {
-                j += 1;
-            }
+            let j = blank_label_end(b, start);
             Ok(GraphKey::Blank(str_of(&b[start..j])?.to_owned()))
         }
         _ => Err(format!("N-Quads: graph name must be an IRI or blank node at byte {i}")),
@@ -156,12 +170,7 @@ fn span_term(b: &[u8], i: usize) -> Result<usize, String> {
             if b.get(i + 1) != Some(&b':') {
                 return Err(format!("N-Quads: bad blank node at byte {i}"));
             }
-            let start = i + 2;
-            let mut j = start;
-            while j < b.len() && !matches!(b[j], b' ' | b'\t' | b'\r' | b'\n' | b'.') {
-                j += 1;
-            }
-            Ok(j)
+            Ok(blank_label_end(b, i + 2))
         }
         Some(b'"') => span_literal(b, i),
         _ => Err(format!("N-Quads: unexpected term start at byte {i}")),
@@ -352,15 +361,31 @@ fn iri(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     Ok((dict.intern_iri(&s), next))
 }
 
+/// [OPUS-4.8] (sq-25r3) End index (exclusive) of a `BLANK_NODE_LABEL` body starting at `start`
+/// (the byte after `_:`). Per the N-Triples/N-Quads grammar a label may contain INTERIOR `.`
+/// (`(PN_CHARS | '.')* PN_CHARS`) but must not END in `.`, so the scan runs to the next
+/// whitespace and then backs the cursor over any trailing `.` bytes — which are the statement
+/// terminator, not part of the label. This matches the serial oxttl reference exactly
+/// (`_:a.b` → label `a.b`; `_:abc.` → label `abc`, `.` is the terminator) and is the SINGLE
+/// source of truth shared by [`blank`] (interning), [`span_term`] (no-intern span), and
+/// [`graph_key`] (graph field) so the three never diverge on dotted labels.
+fn blank_label_end(b: &[u8], start: usize) -> usize {
+    let mut j = start;
+    while j < b.len() && !matches!(b[j], b' ' | b'\t' | b'\r' | b'\n') {
+        j += 1;
+    }
+    while j > start && b[j - 1] == b'.' {
+        j -= 1;
+    }
+    j
+}
+
 fn blank(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     if b.get(i + 1) != Some(&b':') {
         return Err(format!("N-Triples: bad blank node at byte {i}"));
     }
     let start = i + 2;
-    let mut j = start;
-    while j < b.len() && !matches!(b[j], b' ' | b'\t' | b'\r' | b'\n' | b'.') {
-        j += 1;
-    }
+    let j = blank_label_end(b, start);
     Ok((dict.intern_blank(str_of(&b[start..j])?), j))
 }
 

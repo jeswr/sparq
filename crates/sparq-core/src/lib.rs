@@ -4103,6 +4103,26 @@ mod tests {
             sparse.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}>{g} .\n"));
         }
         differential(&sparse, 16);
+
+        // 7. [OPUS-4.8] (sq-25r3) Blank-node labels with INTERIOR dots in EVERY position —
+        //    subject, object, AND the graph name — which the byte parser must scan exactly as
+        //    oxttl (a `.` is part of the label only when not the final char). The SAME dotted
+        //    label `_:n.{k}` is shared across chunk boundaries (chained between adjacent quads
+        //    and reused as a graph name), so the per-graph merge must unify the dotted labels too;
+        //    a dotted graph name `_:g.{k}` must not be conflated with a same-spelled S/O bnode.
+        let mut dotted = String::from("_:sh.ared <http://ex/starts> _:o.0 .\n");
+        for i in 0..500 {
+            dotted.push_str(&format!(
+                "_:n.{} <http://ex/next> _:n.{} _:g.{} .\n\
+                 <http://ex/s{i}> <http://ex/p> _:n.{} .\n",
+                i / 3,
+                i / 3 + 1,
+                i % 2,
+                i / 3
+            ));
+        }
+        dotted.push_str("_:sh.ared <http://ex/ends> _:o.0 _:g.0 .\n");
+        differential(&dotted, 16);
     }
 
     /// [OPUS-4.8] (sq-25r3) The public `Graph::load_dataset("…","nquads")` entry point (which
