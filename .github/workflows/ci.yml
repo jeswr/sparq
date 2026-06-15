@@ -178,6 +178,26 @@ jobs:
       #     partition runs over the filtered (not-heavy) set, so the three bulk shards
       #     cover every non-heavy test exactly once.
       # --retries 2 preserved per shard (transient binary-race self-heal, sq-x4jy).
+      #
+      # [OPUS-4.8] `--extract-to . --extract-overwrite` is LOAD-BEARING — it is the fix
+      # for the bulk-shard failures #159 originally shipped with. WHY: sparq-cli's
+      # integration tests (crates/sparq-cli/tests/cli_contract.rs) SPAWN the `sparq-cli`
+      # binary via the COMPILE-TIME macro `env!("CARGO_BIN_EXE_sparq-cli")`. `env!` bakes
+      # the build machine's ABSOLUTE path (`<workspace>/target/debug/sparq-cli`) into the
+      # test binary at `nextest archive` time; it does NOT read the env var at runtime, so
+      # nextest's runtime CARGO_BIN_EXE override (the relocatable `NEXTEST_BIN_EXE_*` form
+      # the test would have to opt into) can't help. By DEFAULT nextest extracts the
+      # archive to a TEMP dir, so on the test runner that baked absolute path does not
+      # exist -> `spawning sparq-cli: NotFound` and the bulk shards die immediately (the
+      # heavy shards passed only because the recall tests spawn no binary). GitHub-hosted
+      # runners check BOTH jobs out to the SAME absolute path (/home/runner/work/<r>/<r>),
+      # so extracting the archive's `target/` INTO this checkout (CWD == workspace root)
+      # reconstructs `<workspace>/target/debug/sparq-cli` at exactly the baked path, and
+      # the spawn resolves. `--extract-overwrite` is required because the checkout already
+      # holds the source tree (+ the downloaded nextest.tar.zst). Reproduced + fix verified
+      # locally (nextest 0.9.137): clean checkout + extract-to . -> all 4 CLI-spawn tests
+      # PASS; without it they reproduce the exact NotFound panic. (Touching ONLY this
+      # run-step keeps it on the build-once archive path — sq-vyxy stays closed.)
       - name: Test (nextest, shard ${{ matrix.name }})
         run: |
           set -euo pipefail
@@ -187,10 +207,12 @@ jobs:
             # test is ever renamed in only one place, the shard runs empty rather than
             # silently re-including it in bulk).
             cargo nextest run --archive-file nextest.tar.zst --workspace-remap . \
+              --extract-to . --extract-overwrite \
               --retries 2 -E '( ${{ env.HEAVY }} ) & ( ${{ matrix.filter }} )'
           else
             # Bulk shard: everything that is NOT a known-heavy test, count-partitioned.
             cargo nextest run --archive-file nextest.tar.zst --workspace-remap . \
+              --extract-to . --extract-overwrite \
               --retries 2 --partition ${{ matrix.partition }} -E 'not ( ${{ env.HEAVY }} )'
           fi
 
