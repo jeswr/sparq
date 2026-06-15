@@ -3041,9 +3041,12 @@ fn probe_filter_f64_public_inputs_hex() {
 
 /// [OPUS-4.8] sq-f9tl (NEW-1): PROBE (ignored) that dumps the real bb
 /// `public_inputs` for a k=2 scan member (`scan_k2_n16_r8`), the other family the
-/// re-audit (NEW-1) flagged as un-anchored. Two single-triple credential graphs
-/// matching the same pattern => k=2, two true attribution bits, r padded to 8.
-/// Run with `--ignored` when the toolchain is present; paste into the unit test.
+/// re-audit (NEW-1) flagged as un-anchored. Two named-graph credentials (k=2), each
+/// carrying 3 matching `ex:age` triples (see `multi_age` / `0..3` below) => 6 active
+/// rows, which overflows the r=4 bucket and so reaches the only compiled k=2 member
+/// (r=8), with both credentials contributing (two true attribution bits) and the 6
+/// rows padded out to r=8. Run with `--ignored` when the toolchain is present; paste
+/// into the unit test.
 #[test]
 #[ignore = "probe: prints real bb public_inputs hex for the scan_k2 reconstruct unit test"]
 fn probe_scan_k2_public_inputs_hex() {

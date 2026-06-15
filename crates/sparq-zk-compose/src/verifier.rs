@@ -3712,8 +3712,11 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001",
         ))
         .unwrap();
+        // [OPUS-4.8] sq-f9tl (Copilot review): each closure is named for the (s,p,o)
+        // COLUMN it fills, so the anchor rows read in triple order — `subj` is the
+        // subject (ex:alice), `age` the predicate (ex:age), `z` a zero field.
         let z = || fh("0x0");
-        let p = || fh("0x067d8d75b405117a4cce58d59db1cbe420dabf0ff8d4c0fa50d80ccf0ed4a713");
+        let subj = || fh("0x067d8d75b405117a4cce58d59db1cbe420dabf0ff8d4c0fa50d80ccf0ed4a713");
         let age = || fh("0x057914fc592ade7b970f92e4992958ea8a6a265caeb012b5b63903257eef5b61");
         let inputs = ProofInputs::Scan {
             id: CircuitId::Scan { k: 2, n: 16, r: 8 },
@@ -3724,12 +3727,12 @@ mod tests {
             pattern_is_const: [false, true, false],
             pattern_const_enc: [z(), age(), z()],
             rows: vec![
-                [p(), age(), fh("0x08a387a1d4e98da1fcf28c25bc413f88d5ff771682c18f432f0f03971fad9602")],
-                [p(), age(), fh("0x1aff50a8f430c8288c8a386adefff02a20c75db111a6ef0dcb71e3d63c36e39e")],
-                [p(), age(), fh("0x1e76b7d5b462137832e8c482bf0e84cd27acff5af29ab19f584b7e4e5279c3c6")],
-                [p(), age(), fh("0x132fa587351bf3f12fd3cbed64d5526f28791099d1d40870f94595873c78fa72")],
-                [p(), age(), fh("0x30202cbdd89765b9370d4790b6f7f073a95ef2ffbd731b53ce49cd2eb86614f0")],
-                [p(), age(), fh("0x16cd94467389dbde075372360eadb589f417d9e8c79507a34293ef3478b2d68b")],
+                [subj(), age(), fh("0x08a387a1d4e98da1fcf28c25bc413f88d5ff771682c18f432f0f03971fad9602")],
+                [subj(), age(), fh("0x1aff50a8f430c8288c8a386adefff02a20c75db111a6ef0dcb71e3d63c36e39e")],
+                [subj(), age(), fh("0x1e76b7d5b462137832e8c482bf0e84cd27acff5af29ab19f584b7e4e5279c3c6")],
+                [subj(), age(), fh("0x132fa587351bf3f12fd3cbed64d5526f28791099d1d40870f94595873c78fa72")],
+                [subj(), age(), fh("0x30202cbdd89765b9370d4790b6f7f073a95ef2ffbd731b53ce49cd2eb86614f0")],
+                [subj(), age(), fh("0x16cd94467389dbde075372360eadb589f417d9e8c79507a34293ef3478b2d68b")],
             ],
             row_count: 6,
             attribution: vec![true, true],

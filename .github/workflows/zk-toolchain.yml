@@ -23,12 +23,15 @@
 #     wait on it; it stays a nightly safety net, not a per-PR tax).
 #
 # TOOLCHAIN PINNING (supply-chain): the Noir/Barretenberg toolchain is version-managed
-# by `noirup` / `bbup` (there is no published GitHub Action for it). The installer
-# scripts are fetched from a SHA-PINNED ref of the noir-lang/barretenberg repos, and the
-# tool versions themselves are pinned to the exact versions this repo's circuits were
-# authored + anchored against (NARGO_VERSION / BB_VERSION below) — matching the box that
-# captured the empirical bb anchors in verifier.rs. A toolchain bump is therefore an
-# explicit edit here (and re-captures the anchors), never a silent floating "latest".
+# by `noirup` / `bbup` (there is no published GitHub Action for it). The bootstrappers
+# themselves are fetched from a pinned source — the `noirup` binary from a TAGGED release
+# and the `bbup` script from a SHA-PINNED ref — NOT via the upstream `install` helpers,
+# which re-fetch the actual tool from a floating "latest"/`next` (see the env: block for
+# why that silently defeats a pin). The tool versions are then pinned to the exact versions
+# this repo's circuits were authored + anchored against (NARGO_VERSION / BB_VERSION below)
+# — matching the box that captured the empirical bb anchors in verifier.rs. A toolchain
+# bump is therefore an explicit edit here (and re-captures the anchors), never a silent
+# floating "latest".
 name: zk-toolchain
 
 on:
@@ -68,14 +71,28 @@ env:
   # the anchors) — never float to "latest".
   NARGO_VERSION: "1.0.0-beta.21"
   BB_VERSION: "5.0.0-nightly.20260324"
-  # SHA-pinned installer-script refs (supply-chain: avoid an unpinned `curl | bash` of a
-  # moving branch). The noirup / bbup *installers* are version-managers, not the tools —
-  # they bootstrap the `noirup` / `bbup` binaries, which then install the EXACT pinned
-  # NARGO_VERSION / BB_VERSION below. We pin the installer fetch to a specific commit so
-  # the bootstrap script itself can't change under us; the trailing comment records the
-  # repo + branch the SHA was taken from, for legible Dependabot-style bumps.
-  NOIRUP_REF: "324a51fca2c410d2477400316efc5ce0d743a5b3" # noir-lang/noirup @ main
-  BBUP_REF: "e80a3ada0bdc5501ff74fb2df7c9c99a19167049"   # AztecProtocol/aztec-packages @ next
+  # Pinned bootstrap sources (supply-chain: avoid an unpinned `curl | bash` of a moving
+  # branch). The noirup / bbup *bootstrappers* are version-managers, not the tools — they
+  # then install the EXACT pinned NARGO_VERSION / BB_VERSION below.
+  #
+  # [OPUS-4.8] sq-f9tl (Copilot review): we deliberately do NOT run the upstream `install`
+  # *helper* scripts, because each re-fetches the actual tool from a FLOATING source even
+  # when the helper itself is pinned by SHA — silently defeating the pin:
+  #   • noirup's `install` curls the `noirup` binary from `releases/latest/download/noirup`
+  #     (a moving "latest"), and
+  #   • bbup's `barretenberg/bbup/install` hard-codes
+  #     `BBUP_URL=…/AztecProtocol/aztec-packages/next/barretenberg/bbup/bbup`, re-downloading
+  #     the `bbup` script from the moving `next` branch.
+  # Instead we fetch the *actual* tool from a pinned source directly:
+  #   • the `noirup` binary from a TAGGED release (NOIRUP_BIN_URL @ NOIRUP_RELEASE), and
+  #   • the `bbup` script from the SHA-pinned ref (BBUP_REF) — the real tool, not the helper
+  #     that re-fetches it from `next`.
+  # The two-level pin is now genuine end-to-end: pinned bootstrapper + pinned tool version.
+  # (bbup then downloads the bb binary tarball from a release URL keyed by the exact
+  # BB_VERSION, so the backend binary is version-pinned too.)
+  NOIRUP_RELEASE: "v0.1.4" # noir-lang/noirup release tag (pins the noirup binary itself)
+  NOIRUP_BIN_URL: "https://github.com/noir-lang/noirup/releases/download/v0.1.4/noirup"
+  BBUP_REF: "e80a3ada0bdc5501ff74fb2df7c9c99a19167049" # AztecProtocol/aztec-packages @ next (the bbup script is pinned to this SHA)
 
 jobs:
   forge-suite:
@@ -95,32 +112,40 @@ jobs:
           # Distinct cache key: this lane builds sparq-zk* with the toolchain present.
           key: zk-toolchain
 
-      # Install nargo via noirup, pinned to NARGO_VERSION. Step 1 fetches the noirup
-      # bootstrap script from a SHA-pinned raw ref (NOIRUP_REF) and runs it to drop the
-      # `noirup` binary into ~/.nargo/bin; step 2 runs `noirup --version` to install the
-      # EXACT nargo. Two-level pinning: installer ref + installed-tool version.
+      # Install nargo via noirup, pinned to NARGO_VERSION. We fetch the `noirup` binary
+      # DIRECTLY from a tagged release (NOIRUP_BIN_URL) rather than running upstream's
+      # `install` helper, because that helper curls noirup from `releases/latest` (a moving
+      # target that defeats the pin — Copilot review, sq-f9tl). `noirup --version` then
+      # installs the EXACT nargo. Two-level pinning: pinned noirup release + pinned nargo.
       - name: Install nargo (Noir) — pinned
         run: |
           set -euo pipefail
+          mkdir -p "$HOME/.nargo/bin"
           curl -fsSL --proto '=https' --tlsv1.2 \
-            "https://raw.githubusercontent.com/noir-lang/noirup/${NOIRUP_REF}/install" \
-            -o /tmp/noirup-install.sh
-          bash /tmp/noirup-install.sh
+            "${NOIRUP_BIN_URL}" \
+            -o "$HOME/.nargo/bin/noirup"
+          chmod +x "$HOME/.nargo/bin/noirup"
           echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.nargo/bin:$PATH"
           noirup --version "${NARGO_VERSION}"
           nargo --version
 
-      # Install Barretenberg (bb) via bbup, pinned to BB_VERSION. Same two-level pinning:
-      # SHA-pinned bbup installer ref + exact bb --version. The bbup installer lives in the
-      # AztecProtocol/aztec-packages monorepo (barretenberg/bbup/install).
+      # Install Barretenberg (bb) via bbup, pinned to BB_VERSION. We fetch the `bbup` SCRIPT
+      # DIRECTLY from the SHA-pinned ref (BBUP_REF) rather than running upstream's `install`
+      # helper, because that helper re-downloads bbup from the moving `next` branch and so
+      # defeats the SHA pin (Copilot review, sq-f9tl). `bbup --version "${BB_VERSION}"` then
+      # downloads the bb binary tarball from a release URL keyed by that exact version, so
+      # the backend binary is version-pinned. Two-level pinning: pinned bbup @ BBUP_REF +
+      # pinned bb version. (The bbup script accepts `-v|--version <ver>`; `--version <ver>`
+      # binds `<ver>` as its argument.)
       - name: Install bb (Barretenberg) — pinned
         run: |
           set -euo pipefail
+          mkdir -p "$HOME/.bb"
           curl -fsSL --proto '=https' --tlsv1.2 \
-            "https://raw.githubusercontent.com/AztecProtocol/aztec-packages/${BBUP_REF}/barretenberg/bbup/install" \
-            -o /tmp/bbup-install.sh
-          bash /tmp/bbup-install.sh
+            "https://raw.githubusercontent.com/AztecProtocol/aztec-packages/${BBUP_REF}/barretenberg/bbup/bbup" \
+            -o "$HOME/.bb/bbup"
+          chmod +x "$HOME/.bb/bbup"
           echo "$HOME/.bb" >> "$GITHUB_PATH"
           export PATH="$HOME/.bb:$PATH"
           bbup --version "${BB_VERSION}"
