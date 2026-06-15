@@ -78,6 +78,13 @@ Top-level re-exports (`use sparq_mpc::...`):
   - `secure_threshold(dealer, secret: Fp, threshold: Fp) -> Result<Vec<Share>, MpcError>` — the £100k path: threshold is PUBLIC (its bits are constants, no extra mult round), returns the sharing of `secret > threshold`.
   - `open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, MpcError>` — opens ONLY the verdict bit (refuses a non-0/1 reconstruction).
   - `disclose_threshold_verdict(backend, sum_shares: &[Share], public_threshold: u64) -> Result<PartialResult, MpcError>` — the four-flatmates path end-to-end: from a secret-shared sum, discloses a one-cell `?over_threshold` **boolean** partial — the exact sum is never in the output.
+- **End-to-end federated pipeline driver (sq-6y92, `pipeline` module)** — the GLUE that composes `holder` → secret-share → disclosed-key `join` → secure-threshold → reconstruct → `ProofStatement` into ONE worked four-flatmates federated response (architecture §4.3 steps 1–6). Composes the EXISTING primitives only — invents no crypto; `proof.prove` stays the honest `NotYetImplemented` stub.
+  - `run_federated(backend: &ShamirBackend, flatmates: &[Flatmate], query: &FederatedQuery) -> Result<FederatedResponse, MpcError>` — runs all six steps. **Precondition:** `backend.parties() == flatmates.len()` (each flatmate is one honest-majority compute party) and a non-empty federation, both fail-closed `Protocol` errors.
+  - `Flatmate { holder: Holder, disclosed_fragment: &str, issuer_key: String }` — one participant: its wallet, the SELECT fragment it discloses locally (projecting the global-IRI join key; the PRIVATE salary is NOT in it), and the issuer key collected into the statement's key-set `K`.
+  - `FederatedQuery { join_var: oxrdf::Variable, federated_query: &str, threshold: u64 }` — the global-IRI join key, the full federated query (used verbatim as the union-store differential query + `ProofStatement.query`), and the public threshold for the secure comparison.
+  - `FederatedResponse { disclosed_result: PartialResult, over_threshold: bool, verdict_partial: PartialResult, routing: Vec<OperatorRouting>, statement: ProofStatement }` — the disclosed join result (byte-equal to the plaintext union-store eval), the `> threshold` verdict bit (only the bit is opened; the exact sum is never reconstructed across the boundary), the explicit per-operator routing, and the assembled `ProofStatement` (real `disclosed_result`, no proof). `.verdict() -> bool`.
+  - `OperatorRouting { operator: String, routing: Routing }` + `Routing::{ Disclosed, Hidden(OperatorClass) }` — the explicit per-operator disclosed-vs-hidden decision (RQ2a): the membership join is `Disclosed` (crypto-free), the salary aggregate is `Hidden(LinearAggregate)`, the threshold is `Hidden(Comparison)`.
+  - `federation_holder_id() -> HolderId` — the synthetic `federation` id the disclosed result is attributed to.
 - `Fp` — field element over `F_p`, `p = 2^61 - 1`. `Fp::new(u64)`, `Fp::value() -> u64`, `Fp::zero()`, `Fp::one()`.
 - `Share { x: u64, y: Fp }`; field/share helpers in `sparq_mpc::shamir` (`add_shares`, `sub_shares`, `mul_shares_raw`, `add_constant`, `scale`, `reconstruct_degree`). `ShamirDealer::degree_reduce(&[Share])` reduces a degree-`2t` product back to degree-`t` so multiplications chain (depth>1).
 - `MpcError::{ LocalEval { holder, message }, Protocol(String), NotYetImplemented { what, gated_on }, Tampered { detail, cheaters }, NoBackendSatisfies { requirement, considered } }` — the honest error channels: `NotYetImplemented` for deferred crypto, `Tampered` for a detected active deviation on a redundant reconstruction, and `NoBackendSatisfies` for a fail-closed selection refusal.
@@ -121,6 +128,41 @@ let out = disclose_threshold_verdict(&backend, &summed[0], 100_000)?;
 ```
 
 > **Honesty — real protocol vs in-process simulation (`disclose_threshold_verdict`).** In the REAL multi-party protocol the sum stays secret-shared end-to-end: the parties bit-decompose the *existing* sum sharing **in-MPC** (a known secret bit-decomposition sub-protocol, e.g. edaBits) so no single party ever sees the total, and only the verdict bit is opened. In THIS in-process SIMULATION, `disclose_threshold_verdict` does a *local* `backend.reconstruct(sum_shares)` to recover the sum and re-deal its bits — legitimate ONLY because one process holds **all** shares (exactly as the dealer holds cleartext to *share* inputs). That local open is a simulation artefact, not a disclosure: it never crosses the API boundary, and the returned partial still carries the boolean verdict alone. The follow-up that removes even this simulation-local open — in-MPC bit-decomposition of the secret-shared sum — is tracked as a bead (see *Gotchas*); until it lands, do not read this path as "the sum is never reconstructed anywhere", only as "the sum is never an OUTPUT".
+
+### 2b. End-to-end federated response — the four flatmates, all six §4.3 steps in one call
+`run_federated` composes holder → secret-share → disclosed-key join → secure-threshold → reconstruct → `ProofStatement`. Each flatmate discloses a DISTINCT public fact about the shared flat (joined on the global IRI `?flat`) and secret-shares a PRIVATE salary; the response carries the disclosed join result, the `> £100k` verdict bit (the exact sum is never reconstructed), the explicit per-operator routing, and a `ProofStatement` whose `disclosed_result` equals the plaintext union-store eval. `proof.prove` stays the honest stub.
+
+```rust
+use sparq_mpc::{run_federated, Flatmate, FederatedQuery, Holder, ShamirBackend, Routing, OperatorClass};
+use oxrdf::Variable;
+
+const PFX: &str = "@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n";
+// Each flatmate: a distinct disclosed flat attribute on ex:flat (joined on ?flat) + a PRIVATE salary.
+let mk = |m: &str, fact: &str, salary: u64, frag: &'static str, key: &str| -> Flatmate<'static> {
+    let doc = format!("{PFX} {fact} . ex:resident ex:salary \"{salary}\"^^xsd:integer .");
+    Flatmate { holder: Holder::from_rdf(m, &doc, "turtle").unwrap(), disclosed_fragment: frag, issuer_key: key.into() }
+};
+let flatmates = vec![
+    mk("alice", "ex:flat ex:rent \"1200\"",            30_000, "PREFIX ex: <http://ex/> SELECT ?flat ?rent WHERE { ?flat ex:rent ?rent }", "did:ex:hr#k1"),
+    mk("bob",   "ex:flat ex:city \"Leeds\"",           28_000, "PREFIX ex: <http://ex/> SELECT ?flat ?city WHERE { ?flat ex:city ?city }", "did:ex:hr#k2"),
+    mk("carol", "ex:flat ex:landlord \"Acme\"",        26_000, "PREFIX ex: <http://ex/> SELECT ?flat ?landlord WHERE { ?flat ex:landlord ?landlord }", "did:ex:hr#k3"),
+    mk("dave",  "ex:flat ex:postcode \"LS1\"",         24_000, "PREFIX ex: <http://ex/> SELECT ?flat ?postcode WHERE { ?flat ex:postcode ?postcode }", "did:ex:hr#k4"),
+];
+let backend = ShamirBackend::new(4)?;     // n = 4 compute parties == flatmate count (fail-closed if mismatched)
+let q = FederatedQuery {
+    join_var: Variable::new_unchecked("flat"),
+    federated_query: "PREFIX ex: <http://ex/> SELECT ?flat ?rent ?city ?landlord ?postcode WHERE { \
+        ?flat ex:rent ?rent . ?flat ex:city ?city . ?flat ex:landlord ?landlord . ?flat ex:postcode ?postcode }",
+    threshold: 100_000,
+};
+let resp = run_federated(&backend, &flatmates, &q)?;
+assert!(resp.over_threshold);                                            // 108k > 100k — only the BIT is opened
+assert_eq!(resp.routing[0].routing, Routing::Disclosed);                 // membership join in the clear
+assert_eq!(resp.routing[2].routing, Routing::Hidden(OperatorClass::Comparison)); // threshold in MPC
+// resp.statement.disclosed_result == plaintext union-store eval of q.federated_query (the correctness anchor).
+# Ok::<(), sparq_mpc::MpcError>(())
+```
+> Honest-majority, semi-honest (the `ShamirBackend` tier, unchanged). `proof.prove` stays `NotYetImplemented` — the driver assembles the statement STRUCTURE with the real disclosed result, it does NOT fake a proof.
 
 ### 3. Hidden-value join on a private key (circuit-PSI core)
 Join two holders on a key WITHOUT revealing the key — only the matched payload columns are disclosed.
