@@ -256,6 +256,22 @@ jobs:
         if: steps.changes.outputs.zk == 'true'
         run: cargo build -p sparq-zk -p sparq-zk-compose --all-targets
 
+      # [OPUS-4.8] sq-kep2 — recurrence guard for the STANDALONE family_curve harness.
+      # `bench/zk-compose/family_curve` is a detached cargo project (own `[workspace]`,
+      # `lto = "fat"` release profile) deliberately kept OUT of the root workspace so it
+      # never taxes the fast `cargo build --workspace`/clippy/wasm gate. That isolation
+      # means it is NOT covered by ci.yml — so when a `CircuitId`/`ProofInputs`/
+      # `prover_toml_for` signature changes in sparq-zk-compose (e.g. FilterF64 going
+      # unit→struct in sq-q7e/sq-tat), family_curve breaks SILENTLY. This zk-touching
+      # lane already rebuilds on every sparq-zk-compose change and the deps are already
+      # compiled above, so a plain `cargo build` of the harness here is near-free and
+      # makes that schema drift a visible RED check on the PR that introduces it. (Build
+      # only — no `cargo run`: catching the compile/API break needs no real bb proving.)
+      - name: Build the standalone family_curve harness (schema-drift guard)
+        if: steps.changes.outputs.zk == 'true'
+        working-directory: bench/zk-compose/family_curve
+        run: cargo build
+
       # The load-bearing step: run EVERY `#[ignore]`d test in the ZK crates. With the
       # toolchain on PATH the forge tests do a REAL bb prove and assert every forgery is
       # REJECTED (and the positive controls verify); the empirical bb anchors re-validate

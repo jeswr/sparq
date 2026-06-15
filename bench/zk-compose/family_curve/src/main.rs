@@ -23,7 +23,10 @@ use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use sparq_zk::commit::commit_triples;
 use sparq_zk::encode::salt_from_bytes;
 use sparq_zk::field::Fr;
-use sparq_zk_compose::build::{build_filter_int, build_scan, encode_int_literal, Pattern, Slot};
+use sparq_zk_compose::build::{
+    build_filter_f64, build_filter_int, build_scan, encode_double_literal, encode_int_literal,
+    Pattern, Slot,
+};
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::manifest::{CircuitId, FieldHex, FilterOp};
 use sparq_zk_compose::toml::prover_toml_for;
@@ -148,7 +151,9 @@ fn bench_scan(prover: &CircuitProver, k: u32, graph_triples: usize, matches: usi
         &scan.witness.counts,
         &scan.witness.enc,
         &[],
-    );
+        None,
+    )
+    .expect("scan prover toml");
     assert_eq!(cid, id);
     let (prove_secs, verify_secs, proof_bytes, vk_bytes) = time_member(prover, &cid, &toml, tag);
     Row {
@@ -172,26 +177,34 @@ fn bench_filter_int(prover: &CircuitProver, value: u64, tag: &str) -> Row {
         CircuitId::FilterInt { d } => *d,
         _ => unreachable!(),
     };
-    let (cid, toml) = prover_toml_for(&filter, &FieldHex(CHALLENGE.into()), &[], &[], &digits);
+    let (cid, toml) =
+        prover_toml_for(&filter, &FieldHex(CHALLENGE.into()), &[], &[], &digits, None)
+            .expect("filter_int prover toml");
     let (prove_secs, verify_secs, proof_bytes, vk_bytes) = time_member(prover, &cid, &toml, tag);
     Row { member: cid.package(), k: 0, n: 0, r: 0, d, prove_secs, verify_secs, proof_bytes, vk_bytes }
 }
 
-/// Time the filter_f64 building block via a hand-written Prover.toml (it is not
-/// manifest-composable, so it has no ProofInputs path — we drive nargo/bb
-/// directly through the public driver against a raw Prover.toml).
-fn bench_filter_f64(prover: &CircuitProver, tag: &str) -> Row {
-    // 1.0 < 2.0 = true. f64::to_bits for the operands.
-    let a_bits = 1.0f64.to_bits();
-    let b_bits = 2.0f64.to_bits();
-    let toml = format!(
-        "challenge = \"{CHALLENGE}\"\nop = \"0\"\nb_bits = \"{b_bits}\"\nexpected = true\na_bits = \"{a_bits}\"\n"
-    );
-    // filter_f64 is a raw member: build its CircuitId by package name. The driver
-    // keys on CircuitId::package(); FilterF64 maps to "filter_f64".
-    let id = CircuitId::FilterF64;
-    let (prove_secs, verify_secs, proof_bytes, vk_bytes) = time_member(prover, &id, &toml, tag);
-    Row { member: id.package(), k: 0, n: 0, r: 0, d: 0, prove_secs, verify_secs, proof_bytes, vk_bytes }
+/// Build + time a MANIFEST-COMPOSABLE filter_f64 member for a `d`-digit
+/// integer-valued xsd:double operand ([OPUS-4.8] sq-q7e / sq-tat / sq-kep2).
+/// Mirrors [`bench_filter_int`]: `filter_f64` is now manifest-composable (it
+/// carries `d` in its `CircuitId`, has a real `ProofInputs::FilterF64`, and
+/// renders its Prover.toml via [`prover_toml_for`] from the canonical decimal
+/// digit witness) rather than the old raw hand-written-Prover.toml building
+/// block. Proves `value < value + 1` (true) over the integer-valued double.
+fn bench_filter_f64(prover: &CircuitProver, value: u64, tag: &str) -> Row {
+    let operand_enc = encode_double_literal(value);
+    let bound = (value + 1) as f64;
+    let (filter, digits) = build_filter_f64(operand_enc, value, FilterOp::Lt, bound, true)
+        .expect("filter_f64 in family");
+    let d = match filter.circuit_id() {
+        CircuitId::FilterF64 { d } => *d,
+        _ => unreachable!(),
+    };
+    let (cid, toml) =
+        prover_toml_for(&filter, &FieldHex(CHALLENGE.into()), &[], &[], &digits, None)
+            .expect("filter_f64 prover toml");
+    let (prove_secs, verify_secs, proof_bytes, vk_bytes) = time_member(prover, &cid, &toml, tag);
+    Row { member: cid.package(), k: 0, n: 0, r: 0, d, prove_secs, verify_secs, proof_bytes, vk_bytes }
 }
 
 fn main() {
@@ -211,7 +224,8 @@ fn main() {
     // collected into the curve. Scan sizes are chosen to land on each compiled
     // member: scan_k1_n16_r4 (k=1, graph<=16, matches<=4), scan_k2_n16_r8 (k=2,
     // graph<=16, matches<=8), scan_k2_n64_r8 (k=2, graph in (16,64], matches<=8).
-    // The filter_int sweep covers d in {1,2,4}; filter_f64 is the building block.
+    // The filter_int sweep covers d in {1,2,4}; the composable filter_f64 sweep
+    // mirrors it over the same d in {1,2,4} ([OPUS-4.8] sq-kep2).
     let rows = vec![
         bench_scan(&prover, 1, 8, 2, "scan_k1"),
         bench_scan(&prover, 2, 12, 4, "scan_k2_n16"),
@@ -219,7 +233,9 @@ fn main() {
         bench_filter_int(&prover, 5, "fi_d1"),    // 1 digit
         bench_filter_int(&prover, 42, "fi_d2"),   // 2 digits
         bench_filter_int(&prover, 7000, "fi_d4"), // 4 digits
-        bench_filter_f64(&prover, "ff64"),
+        bench_filter_f64(&prover, 5, "ff64_d1"),    // 1 digit
+        bench_filter_f64(&prover, 42, "ff64_d2"),   // 2 digits
+        bench_filter_f64(&prover, 7000, "ff64_d4"), // 4 digits
     ];
 
     // Human-readable table to stderr.
