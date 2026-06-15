@@ -72,7 +72,7 @@ fn serial_result(updates: &[(&str, &str)]) -> usize {
     for (upd, _) in updates {
         let mut w = applier.fork(&g).unwrap();
         applier.apply(&mut w, &(*upd).to_string()).unwrap();
-        g = applier.seal(w);
+        g = applier.seal(w).unwrap(); // [OPUS-4.8] (sq-vpx4) seal is now fallible (in-memory: never Err)
     }
     total_quads(&g)
 }

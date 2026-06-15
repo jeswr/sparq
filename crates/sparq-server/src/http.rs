@@ -857,6 +857,14 @@ fn open_or_create_durable(dir: &std::path::Path, seed: Graph) -> Result<Graph, S
     Graph::open(dir).map_err(|e| format!("opening freshly-initialised persist dir {}: {e}", dir.display()))
 }
 
+/// [OPUS-4.8] (sq-vpx4) Internal marker prefixed onto the error string of a
+/// [`WriteError::Unavailable`] (durable-write refusal) as it crosses from
+/// [`AppState::apply_update`] to the HTTP response mapper, so
+/// [`update_rejection_response`] can route it to HTTP 503 (retryable) rather than the
+/// default 400 (client error). Never leaves the process — stripped before the message
+/// reaches the client.
+const DURABLE_UNAVAILABLE_PREFIX: &str = "\u{1}durable-unavailable\u{1}";
+
 struct ServerApplier {
     inner: GraphApplier,
     /// The config the writer thread enforces around every engine call (carries the
@@ -891,6 +899,41 @@ struct ServerApplier {
 struct DurableStore {
     graph: Graph,
     batch: Vec<sparq_engine::UpdateEffect>,
+    /// [OPUS-4.8] (sq-vpx4) TEST SEAM for injecting durable-write I/O failures into the
+    /// seal path. In production this is `None` and the real [`sparq_engine::apply_effects`]
+    /// runs. A test can install a hook that fails the durable commit (e.g. once with a
+    /// simulated `ENOSPC`, then clears) WITHOUT touching the production code path — the
+    /// hook decides per-call whether to fail. Boxed `FnMut` so it can hold per-call state
+    /// (a "fail the next N seals" counter). Production behaviour is unchanged: `None` ⇒
+    /// exactly the prior `apply_effects` call.
+    #[cfg(any(test, feature = "test-seams"))]
+    fail_seal: Option<Box<dyn FnMut() -> Option<String> + Send>>,
+}
+
+impl DurableStore {
+    fn new(graph: Graph) -> Self {
+        DurableStore {
+            graph,
+            batch: Vec::new(),
+            #[cfg(any(test, feature = "test-seams"))]
+            fail_seal: None,
+        }
+    }
+
+    /// [OPUS-4.8] (sq-vpx4) Commit the buffered batch durably. Returns `Err` on a
+    /// durable-write failure (real I/O error, or an injected one via the test seam) —
+    /// the caller ([`ServerApplier::seal`]) propagates this WITHOUT publishing or
+    /// acking, so a write that didn't durably commit is never observed.
+    fn commit_batch(&mut self) -> Result<(), String> {
+        let batch = std::mem::take(&mut self.batch);
+        #[cfg(any(test, feature = "test-seams"))]
+        if let Some(hook) = self.fail_seal.as_mut() {
+            if let Some(e) = hook() {
+                return Err(e);
+            }
+        }
+        sparq_engine::apply_effects(&mut self.graph, &batch)
+    }
 }
 
 impl ServerApplier {
@@ -905,7 +948,7 @@ impl ServerApplier {
         Self {
             inner: GraphApplier::default(),
             config,
-            durable: Some(DurableStore { graph, batch: Vec::new() }),
+            durable: Some(DurableStore::new(graph)),
         }
     }
 }
@@ -952,7 +995,7 @@ impl ApplyUpdates for ServerApplier {
         Ok(())
     }
 
-    fn seal(&mut self, working: Graph) -> Graph {
+    fn seal(&mut self, working: Graph) -> Result<Graph, String> {
         // [OPUS-4.8] (sq-7cxr, gh-44) Persist the committed batch to the durable graph BEFORE
         // returning — `seal` runs on the writer thread immediately before `publish`, so the
         // batch is WAL-durable (fsync'd by `Graph::apply_delta`) before the generation is
@@ -965,17 +1008,22 @@ impl ApplyUpdates for ServerApplier {
         // (`NOW()`/`RAND()`/`UUID()`/`BNODE()`, `LOAD <remote>`): both apply the identical
         // resolved triples, in the same order, starting from one shared seed.
         //
-        // FAIL-CLOSED: a durable-write error (disk full, I/O error) panics the writer thread.
-        // `seal` runs before `publish`, so unwinding here means the generation is NOT published
-        // and every pending submitter's ack channel drops → they get `WriteError::Shutdown`, NOT
-        // a false success. A server that can no longer make writes durable must not keep silently
-        // accepting them. (Graceful degradation on a TRANSIENT I/O error is deferred hardening —
-        // bead; today a durability failure is treated as fatal, which is honest for a persisted
-        // store.)
+        // [OPUS-4.8] FAIL-CLOSED, GRACEFULLY (sq-vpx4, was sq-7cxr fatal-panic): a durable-write
+        // error (disk full, I/O error) is propagated as `Err` rather than panicking the writer
+        // thread. `seal` runs BEFORE `publish`, so returning `Err` here means the generation is
+        // NEVER published and the in-flight batch's submitters are failed with
+        // `WriteError::Unavailable` (HTTP 503, retryable) — NOT a false 2xx success. The
+        // fail-closed correctness invariant is unchanged (a write that didn't durably commit is
+        // never acked nor published); what changes is that a TRANSIENT error (e.g. a brief
+        // `ENOSPC` that later clears) no longer kills the writer thread / the whole server. The
+        // writer stays alive (degraded), so reads keep being served from the last published
+        // snapshot and a subsequent write succeeds once durability recovers. A PERSISTENT error
+        // simply yields repeated 503s. The in-memory `working` is dropped on `Err` (never
+        // published), so the durable store and the published lineage cannot diverge.
         if let Some(d) = &mut self.durable {
-            let batch = std::mem::take(&mut d.batch);
-            sparq_engine::apply_effects(&mut d.graph, &batch)
-                .unwrap_or_else(|e| panic!("durable persist failed (sq-7cxr); refusing to ack the write: {e}"));
+            d.commit_batch().map_err(|e| {
+                format!("durable persist failed (sq-vpx4); write refused (not acked, not published): {e}")
+            })?;
         }
         self.inner.seal(working)
     }
@@ -1044,6 +1092,37 @@ impl AppState {
     /// [`ServerApplier::seal`]). With `persist_dir == None` this is exactly the historical
     /// in-memory path (the ring is seeded from `graph`; no durable mirror; never errors).
     pub fn try_with_config(graph: Graph, config: ServerConfig) -> Result<Self, String> {
+        Self::try_with_config_inner(
+            graph,
+            config,
+            #[cfg(any(test, feature = "test-seams"))]
+            None,
+        )
+    }
+
+    /// [OPUS-4.8] (sq-vpx4) Like [`try_with_config`](Self::try_with_config) but installs a
+    /// durable-write failure-injection hook on the `--persist` seal path. The hook is called
+    /// once per seal; returning `Some(msg)` makes that seal fail (modelling a transient/persistent
+    /// I/O error), `None` lets the real durable commit run. For the graceful-degradation
+    /// integration test ONLY — gated behind the `test-seams` feature so it cannot exist in a
+    /// production build. Requires `config.persist_dir` to be set (else the hook has nothing to
+    /// gate).
+    #[cfg(feature = "test-seams")]
+    pub fn with_config_inject_durable_failure(
+        graph: Graph,
+        config: ServerConfig,
+        fail_seal: Box<dyn FnMut() -> Option<String> + Send>,
+    ) -> Result<Self, String> {
+        Self::try_with_config_inner(graph, config, Some(fail_seal))
+    }
+
+    fn try_with_config_inner(
+        graph: Graph,
+        config: ServerConfig,
+        #[cfg(any(test, feature = "test-seams"))] fail_seal: Option<
+            Box<dyn FnMut() -> Option<String> + Send>,
+        >,
+    ) -> Result<Self, String> {
         // [OPUS-4.8] sq-7cxr: resolve the durable graph (open existing / create fresh) when a
         // persistence dir is configured. `seed` is what the ring starts from; `durable` is the
         // on-disk graph the writer mirrors committed batches to.
@@ -1078,7 +1157,17 @@ impl AppState {
         // [OPUS-4.8] sq-7cxr: a durable-mirroring applier when persistence is on, else the
         // historical in-memory applier.
         let applier = match durable {
-            Some(g) => ServerApplier::with_durable(config.clone(), g),
+            Some(g) => {
+                #[allow(unused_mut)]
+                let mut a = ServerApplier::with_durable(config.clone(), g);
+                // [OPUS-4.8] (sq-vpx4) Install the durable-write failure-injection hook, if any
+                // (test-seams only). A no-op in production (the field/parameter do not exist).
+                #[cfg(any(test, feature = "test-seams"))]
+                if let (Some(d), Some(hook)) = (a.durable.as_mut(), fail_seal) {
+                    d.fail_seal = Some(hook);
+                }
+                a
+            }
             None => ServerApplier::new(config.clone()),
         };
         let writer = Arc::new(Writer::spawn(ring.clone(), applier, WriterConfig::default()));
@@ -1149,6 +1238,13 @@ impl AppState {
             }
             Err(WriteError::Rejected(e)) => Err(e),
             Err(WriteError::Shutdown) => Err("update writer has shut down".to_string()),
+            // [OPUS-4.8] (sq-vpx4) Durable-write failure (e.g. transient ENOSPC on the
+            // `--persist` mirror): the write was REFUSED — not durably committed, not
+            // published, not acked. It is retryable, so it maps to HTTP 503 (see
+            // `update_rejection_response`'s `DURABLE_UNAVAILABLE_PREFIX` sniff), NOT a
+            // 400 (the update itself was valid) and NOT a 500 (the server is healthy
+            // and still serving reads). The writer thread is alive; the client may retry.
+            Err(WriteError::Unavailable(e)) => Err(format!("{DURABLE_UNAVAILABLE_PREFIX}{e}")),
         }
     }
 
@@ -1871,6 +1967,16 @@ fn engine_error_response(e: &str, config: &ServerConfig, apply_max_results: bool
 /// hit (the memory cap / deadline tripped inside a `DELETE/INSERT … WHERE`) is a 413 / 503,
 /// exactly like a query; any other rejection (parse / semantic error) is the client's 400.
 fn update_rejection_response(e: &str, config: &ServerConfig) -> Response {
+    // [OPUS-4.8] (sq-vpx4) A durable-write refusal is a retryable 503, NOT a 400. The write
+    // was valid but could not be made durable (transient ENOSPC/I/O on the `--persist` mirror);
+    // nothing was published or acked, the server is still serving reads, and the client should
+    // retry. Sniffed before the budget/parse mapping so it always wins.
+    if let Some(detail) = e.strip_prefix(DURABLE_UNAVAILABLE_PREFIX) {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("update not durably committed (transient durable-write error); the write was refused and NOT applied — retry: {detail}"),
+        );
+    }
     if e.contains("query budget exceeded") {
         // Updates budget from `--max-query-rows` alone (`update_budget`, no `--max-results`),
         // so the 413 message must not consider `--max-results` → `apply_max_results = false`.
@@ -3177,5 +3283,57 @@ mod service_allow_config_tests {
         e.sort();
         // Exact host verbatim; the wildcard in the engine's leading-dot form.
         assert_eq!(e, vec![".internal".to_string(), "sparql.example.org".to_string()]);
+    }
+}
+
+/// [OPUS-4.8] (sq-vpx4) The HTTP status CONTRACT for a durable-write refusal: a
+/// `WriteError::Unavailable` (carried across `apply_update` with the internal
+/// `DURABLE_UNAVAILABLE_PREFIX`) maps to HTTP 503 (retryable) — NOT the default 400 for a
+/// rejected update, and NOT a 500. The internal marker must never leak to the client.
+#[cfg(test)]
+mod durable_degrade_tests {
+    use super::{update_rejection_response, ServerConfig, DURABLE_UNAVAILABLE_PREFIX};
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn durable_unavailable_maps_to_503_and_hides_marker() {
+        let cfg = ServerConfig::default();
+        let tagged = format!("{DURABLE_UNAVAILABLE_PREFIX}injected ENOSPC");
+        let resp = update_rejection_response(&tagged, &cfg);
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a durable-write refusal must be a retryable 503, not a 400/500",
+        );
+
+        // The internal marker must NEVER reach the client: assert it is absent from the
+        // BODY (not just that the status is right). A future leak of the prefix into the
+        // client-facing JSON — raw OR JSON-escaped (`json_error` escapes the U+0001 control
+        // chars to ``) — is caught here. The human-readable detail after the marker
+        // is expected to survive; only the marker bytes must be stripped.
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !body.contains(DURABLE_UNAVAILABLE_PREFIX),
+            "raw internal marker leaked into the client-facing body: {body:?}",
+        );
+        // The JSON-escaped form of the marker's control bytes (U+0001 -> ).
+        assert!(
+            !body.contains("\\u0001"),
+            "JSON-escaped internal marker leaked into the client-facing body: {body:?}",
+        );
+        assert!(
+            body.contains("injected ENOSPC"),
+            "the human-readable detail must still be reported to the client: {body:?}",
+        );
+    }
+
+    #[test]
+    fn ordinary_update_rejection_still_400() {
+        // A plain application error (parse/semantic) keeps its 400 — the 503 sniff must not
+        // hijack the normal rejection path.
+        let cfg = ServerConfig::default();
+        let resp = update_rejection_response("some parse error", &cfg);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

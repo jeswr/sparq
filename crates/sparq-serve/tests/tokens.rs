@@ -38,8 +38,8 @@ impl ApplyUpdates for LogApplier {
         working.push(update.clone());
         Ok(())
     }
-    fn seal(&mut self, working: Log) -> Log {
-        working
+    fn seal(&mut self, working: Log) -> Result<Log, String> {
+        Ok(working) // [OPUS-4.8] (sq-vpx4) no durable side: seal is infallible
     }
 }
 
