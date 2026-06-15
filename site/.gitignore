@@ -1,0 +1,9 @@
+/node_modules
+/.next
+/out
+*.tsbuildinfo
+next-env.d.ts
+
+# Generated wasm bundle — built from crates/sparq-wasm via `js/`'s wasm-pack step
+# (see scripts/sync-wasm.mjs and the pages deploy workflow). Not a source artifact.
+/public/wasm/

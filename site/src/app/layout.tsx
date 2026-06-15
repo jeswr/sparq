@@ -1,0 +1,53 @@
+import type { Metadata, Viewport } from "next";
+import { Inter } from "next/font/google";
+import { Toaster } from "sonner";
+
+import "./globals.css";
+import { ThemeProvider } from "@/components/theme-provider";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { AppShell } from "@/components/layout/app-shell";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
+});
+
+export const metadata: Metadata = {
+  title: {
+    default: "sparq — a SOTA RDF + SPARQL engine, live in your tab",
+    template: "%s · sparq",
+  },
+  description:
+    "sparq is a state-of-the-art Rust RDF + SPARQL engine with a browser WASM port. This showcase runs real sparq — SPARQL, ZK proofs, MPC, Solid — live in your tab, honestly labelled where it cannot.",
+  icons: { icon: "/sparq/logo.svg" },
+};
+
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f7fbfc" },
+    { media: "(prefers-color-scheme: dark)", color: "#13181c" },
+  ],
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${inter.variable} font-sans antialiased`}>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <TooltipProvider>
+            <AppShell>{children}</AppShell>
+          </TooltipProvider>
+          <Toaster richColors position="bottom-right" />
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}
