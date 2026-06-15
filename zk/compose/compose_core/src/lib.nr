@@ -20,5 +20,7 @@ pub mod revoke;
 pub mod issuer;
 // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder Proof-of-Possession (B2).
 pub mod holder;
+// [OPUS-4.8] sq-bwwl (hidden-join sq-8mwz): in-circuit hidden cross-credential JOIN.
+pub mod join;
 
 mod tests;

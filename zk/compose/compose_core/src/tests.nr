@@ -13,6 +13,7 @@
 use crate::filter_int::{filter_int_check, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_NE};
 use crate::filter_float::filter_f64_check;
 use crate::hashes::{commit_fold, h2, h3, TYPE_CODE_LITERAL};
+use crate::join::{join_eq_check, join_value_commitment, JOIN_DOMAIN};
 use crate::revoke::{revoke_unset_check, revoke_unset_check_committed, SIG_DOMAIN_STATUS_IDX_COMMIT};
 use crate::scan::{scan_check, PatternSpec};
 
@@ -717,4 +718,190 @@ fn holder_pok_rejects_off_curve_key() {
     // (1, 1) is not on Baby-JubJub (1 + 1 != 1 + d).
     let off = Point { x: 1, y: 1 };
     holder_pok(holder_digest(off), HSK, off);
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-bwwl / sq-8mwz: join_eq -- hidden cross-credential JOIN.
+// accept + each adversarial reject + the public-input-hiding pin. Tiny (N_A=4,
+// N_B=4) monomorphisations; the equality structure is what matters.
+// ---------------------------------------------------------------------------
+//
+// Universe: two credentials sharing the join key JK (a global IRI encoding) at
+// graph-A object slot 2 and graph-B object slot 2 (the `?p` join column).
+//   Graph A: { (S1, P, JK) }                  -- ?p in slot 2 (object)
+//   Graph B: { (JK, P_OTHER, O2) }            -- ?p in slot 0 (subject)
+// So a true join is row_a[2] == row_b[0] == JK, slot_a = 2, slot_b = 0.
+global JK: Field = 0xabc123; // the (hidden) shared join-key encoding
+global JB: Field = 0xb11d; // the per-presentation blinder
+
+// Build a single-triple graph's commitment over an N=4 bucket (the same
+// commit_fold the join relation re-derives from witnessed contents).
+fn commit_one(triple: [Field; 3]) -> Field {
+    let leaves: [Field; 4] = [h3(triple[0], triple[1], triple[2]), 0, 0, 0];
+    commit_fold(leaves, 1)
+}
+
+// (J0) Cross-vector: the in-circuit join-value commitment matches the host
+// `sparq_zk::sig::join_value_commitment` (single source of truth). The host
+// half is pinned in `crates/sparq-zk/src/sig.rs::join_value_commitment_is_*`;
+// JOIN_DOMAIN here == SIG_DOMAIN_JOIN there ("ZKSIG_JN" = 0x5a4b5349475f4a4e).
+#[test]
+fn join_value_commitment_matches_host() {
+    assert_eq(JOIN_DOMAIN, 0x5a4b5349475f4a4e);
+    // h3(JOIN_DOMAIN, value, blinding) -- the exact preimage the host computes.
+    assert_eq(join_value_commitment(JK, JB), h3(JOIN_DOMAIN, JK, JB));
+}
+
+// (J1) ACCEPT: two credentials genuinely share JK at the bound slots; the
+// equality proves and the hiding commitment binds the join value.
+#[test]
+fn join_eq_genuine_join_accepts() {
+    let row_a = [101, 7, JK]; // (S1, P, JK)
+    let row_b = [JK, 8, 202]; // (JK, P_OTHER, O2)
+    let enc_a = [row_a, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let enc_b = [row_b, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let commit_a = commit_one(row_a);
+    let commit_b = commit_one(row_b);
+    let jc = join_value_commitment(JK, JB);
+    join_eq_check::<4, 4>(commit_a, commit_b, jc, 2, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+}
+
+// (J2 / A1) REJECT forged equality: the two slots hold DIFFERENT terms. A prover
+// claiming a join of unequal terms has no satisfying witness -- the in-circuit
+// equality fails. (Graph B's subject is a DIFFERENT key JK2 != JK.)
+#[test(should_fail_with = "join slots are not equal")]
+fn join_eq_unequal_slots_rejected() {
+    let jk2: Field = 0xdead; // a DIFFERENT join key
+    let row_a = [101, 7, JK];
+    let row_b = [jk2, 8, 202];
+    let enc_a = [row_a, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let enc_b = [row_b, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let commit_a = commit_one(row_a);
+    let commit_b = commit_one(row_b);
+    // Prover claims equality (and commits to JK), but row_b[0] = jk2 != JK.
+    let jc = join_value_commitment(JK, JB);
+    join_eq_check::<4, 4>(commit_a, commit_b, jc, 2, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+}
+
+// (J3 / A2) REJECT row-swap / forged graph: the prover supplies graph-A contents
+// that do NOT recommit to the PUBLIC commit_a (it tries to pass a fabricated
+// graph the scan proof never attested). The commitment recompute (step 1)
+// catches it before any equality is even reached.
+#[test(should_fail_with = "graph-A commitment mismatch")]
+fn join_eq_forged_graph_a_rejected() {
+    let row_a = [101, 7, JK];
+    let row_b = [JK, 8, 202];
+    let enc_a = [row_a, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let enc_b = [row_b, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let commit_b = commit_one(row_b);
+    let jc = join_value_commitment(JK, JB);
+    // commit_a is for a DIFFERENT graph (a row the prover does not actually
+    // hold) -- it cannot match the re-commit of enc_a.
+    let bogus_commit_a = commit_one([999, 999, 999]);
+    join_eq_check::<4, 4>(bogus_commit_a, commit_b, jc, 2, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+}
+
+// (J4 / A2) REJECT join over a row NOT present in the (correctly committed)
+// graph: enc_a/commit_a are consistent, but row_a is a triple the graph does not
+// contain (it shares JK in slot 2, so the equality WOULD pass, but the
+// present-in-graph check fails -- the join must attach to a real credential row).
+#[test(should_fail_with = "join row A not present in committed graph A")]
+fn join_eq_row_not_in_graph_rejected() {
+    let real_a = [101, 7, JK]; // the row actually in graph A
+    let row_b = [JK, 8, 202];
+    let enc_a = [real_a, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let enc_b = [row_b, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let commit_a = commit_one(real_a);
+    let commit_b = commit_one(row_b);
+    let jc = join_value_commitment(JK, JB);
+    // A fabricated row_a that shares JK in slot 2 but is NOT a row of graph A.
+    let phantom_a = [555, 555, JK];
+    join_eq_check::<4, 4>(commit_a, commit_b, jc, 2, 0, enc_a, 1, enc_b, 1, phantom_a, row_b, JB);
+}
+
+// (J5) REJECT a join commitment that does NOT bind the proven join value (the
+// prover proves equality on JK but commits to a DIFFERENT value -- equivocation
+// guard, design S4.3).
+#[test(should_fail_with = "join commitment does not bind the proven join value")]
+fn join_eq_wrong_commitment_rejected() {
+    let row_a = [101, 7, JK];
+    let row_b = [JK, 8, 202];
+    let enc_a = [row_a, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let enc_b = [row_b, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let commit_a = commit_one(row_a);
+    let commit_b = commit_one(row_b);
+    // Commitment to a DIFFERENT value than the join value JK that was proven.
+    let wrong_jc = join_value_commitment(0xfeed, JB);
+    join_eq_check::<4, 4>(commit_a, commit_b, wrong_jc, 2, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+}
+
+// (J6) REJECT an out-of-range join slot (must be subject/predicate/object).
+#[test(should_fail_with = "join slot out of range (must be subject/predicate/object)")]
+fn join_eq_out_of_range_slot_rejected() {
+    let row_a = [101, 7, JK];
+    let row_b = [JK, 8, 202];
+    let enc_a = [row_a, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let enc_b = [row_b, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let commit_a = commit_one(row_a);
+    let commit_b = commit_one(row_b);
+    let jc = join_value_commitment(JK, JB);
+    join_eq_check::<4, 4>(commit_a, commit_b, jc, 3, 0, enc_a, 1, enc_b, 1, row_a, row_b, JB);
+}
+
+// (J7) PUBLIC-INPUT HIDING PIN (the headline privacy property). The relation's
+// PUBLIC interface is exactly [challenge, commit_a, commit_b, join_commitment,
+// slot_a, slot_b] (see `join_eq_na16_nb16/src/main.nr`). This test pins that the
+// joined term encoding JK is ABSENT from every one of those public artefacts:
+//   - commit_a / commit_b are commitments over the WHOLE graph (JK is one of
+//     many absorbed leaves -- not recoverable without the full preimage);
+//   - join_commitment is HIDING (Poseidon2 over JK *and a secret blinder*), so
+//     it differs under a different blinder and is not a bare Enc(JK);
+//   - slot_a / slot_b are positions, not values.
+// A verifier reading the public inputs never sees JK. (The accept path J1 proves
+// the same witnesses verify; here we assert the join VALUE does not equal any
+// public field, and that the hiding commitment is blinder-dependent.)
+#[test]
+fn join_eq_value_absent_from_public_inputs() {
+    let row_a = [101, 7, JK];
+    let row_b = [JK, 8, 202];
+    let commit_a = commit_one(row_a);
+    let commit_b = commit_one(row_b);
+    let jc = join_value_commitment(JK, JB);
+    let slot_a: Field = 2;
+    let slot_b: Field = 0;
+    // The hidden join value is not literally any public input.
+    assert(JK != commit_a);
+    assert(JK != commit_b);
+    assert(JK != jc);
+    assert(JK != slot_a);
+    assert(JK != slot_b);
+    // The public join artefact is HIDING: the SAME join value under a DIFFERENT
+    // blinder yields a different commitment, so the verifier cannot dictionary
+    // -attack JK by recomputing a bare encoding (design S1.4 R4).
+    let jc_other_blinder = join_value_commitment(JK, JB + 1);
+    assert(jc != jc_other_blinder);
+    // And the commitment is NOT the bare encoding of the value (which a verifier
+    // *could* recompute from a guessed JK) -- the blinder is load-bearing.
+    assert(jc != JK);
+}
+
+// (J8) ACCEPT a join where the shared key sits at DIFFERENT slots in each
+// credential and one graph has MORE than one triple (the join row is selected
+// from among several present rows). Exercises select_slot at slot 1 and the
+// multi-row present-in-graph sweep.
+#[test]
+fn join_eq_mixed_slots_multi_row_accepts() {
+    // Graph A holds two triples; the join key JK is in slot 1 (predicate-position
+    // join, e.g. a reified statement) of the SECOND triple.
+    let a0 = [11, 22, 33];
+    let a1 = [44, JK, 66];
+    let enc_a = [a0, a1, [0, 0, 0], [0, 0, 0]];
+    // Graph B holds JK in slot 2 (object).
+    let row_b = [77, 88, JK];
+    let enc_b = [row_b, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let commit_a = commit_fold([h3(a0[0], a0[1], a0[2]), h3(a1[0], a1[1], a1[2]), 0, 0], 2);
+    let commit_b = commit_one(row_b);
+    let jc = join_value_commitment(JK, JB);
+    // slot_a = 1 (predicate of a1), slot_b = 2 (object of row_b); join on a1.
+    join_eq_check::<4, 4>(commit_a, commit_b, jc, 1, 2, enc_a, 2, enc_b, 1, a1, row_b, JB);
 }

@@ -16,4 +16,5 @@ members = [
     "revoke_unset_d10",
     "hidden_issuer_d4",
     "holder_pok",
+    "join_eq_na16_nb16",
 ]
