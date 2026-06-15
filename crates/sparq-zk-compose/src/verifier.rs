@@ -1335,6 +1335,17 @@ pub enum CheckError {
     /// that proved the equality over the wrong column (the salary-slot-for-age
     /// analogue, audit #6) is rejected fail-closed.
     JoinSlotMismatch { edge: usize },
+    /// [OPUS-4.8] sq-r2s8 (hidden JOIN, N-way chain — design §2.4): two declared
+    /// `JoinEdge`s join the SAME query variable (a multi-hop / N-way join chain),
+    /// but their `join_eq` sub-proofs carry DIFFERENT `join_commitment`s. The N-way
+    /// composition is sound only when every pairwise `join_eq` over the chained
+    /// variable binds the SAME hiding commitment (the prover uses one blinder), so
+    /// equality of the join VALUE composes transitively across the chain
+    /// (`a_val == b_val` per hop + a shared commitment). Distinct commitments mean
+    /// the hops proved equalities over potentially DIFFERENT values, so the claimed
+    /// N-way join is unproven — rejected fail-closed. `edge` is the first chained
+    /// edge whose commitment diverges from the chain's first edge.
+    JoinCommitmentChainMismatch { edge: usize },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -1595,6 +1606,10 @@ impl std::fmt::Display for CheckError {
             CheckError::JoinSlotMismatch { edge } => write!(
                 f,
                 "join edge {edge}: the join_eq proof's public slot_a/slot_b do not equal the query-derived slots the shared join variable occupies (sq-sfsi §4.4 slot binding: the equality was proved over the wrong column — fail-closed)"
+            ),
+            CheckError::JoinCommitmentChainMismatch { edge } => write!(
+                f,
+                "join edge {edge}: an N-way join chain over a shared variable carries differing join_commitments across its pairwise join_eq proofs (sq-r2s8 §2.4: every hop of a multi-way join must bind the SAME hiding commitment so the join value composes transitively — distinct commitments leave the N-way join unproven, fail-closed)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -3179,6 +3194,13 @@ fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
             .is_some_and(|(c, sp)| scan_matches_pattern(&sp.inputs, c))
     };
 
+    // For the N-way chain check (design §2.4): record, per edge that passes the
+    // slot binding, the SHARED join VARIABLE it binds and the join_eq proof's
+    // `join_commitment`. Two edges that join the SAME query variable form a multi-
+    // hop chain and MUST carry byte-equal commitments (enforced after the loop).
+    // [OPUS-4.8] sq-r2s8.
+    let mut chain: Vec<(String, FieldHex, usize)> = Vec::new();
+
     // --- (1)+(3a): per-edge commitment-matching + slot binding. ---
     for (e, edge) in manifest.join_edges.iter().enumerate() {
         // Resolve the three referenced sub-proofs (dangling => reject).
@@ -3208,9 +3230,9 @@ fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
                 .ok_or(CheckError::JoinDanglingEdge { edge: e })?,
             _ => return Err(CheckError::JoinEdgeKindMismatch { edge: e }),
         };
-        let (commit_a_join, commit_b_join, slot_a, slot_b) = match &join.inputs {
-            ProofInputs::JoinEq { commit_a, commit_b, slot_a, slot_b, .. } => {
-                (commit_a, commit_b, *slot_a, *slot_b)
+        let (commit_a_join, commit_b_join, join_commitment, slot_a, slot_b) = match &join.inputs {
+            ProofInputs::JoinEq { commit_a, commit_b, join_commitment, slot_a, slot_b, .. } => {
+                (commit_a, commit_b, join_commitment, *slot_a, *slot_b)
             }
             _ => return Err(CheckError::JoinEdgeKindMismatch { edge: e }),
         };
@@ -3237,24 +3259,47 @@ fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
         // multi-scan-safe: with two scans answering one pattern, the binding
         // validates against whichever scan the edge actually names, so it can
         // neither be spuriously rejected nor bound to the wrong scan.
-        let bound = patterns.iter().enumerate().any(|(pi, _)| {
+        // The shared variable the edge binds, if the slot binding holds (its NAME
+        // identifies the N-way chain this edge belongs to — design §2.4).
+        let join_var = patterns.iter().enumerate().find_map(|(pi, _)| {
             // pattern pi is answered by THE REFERENCED scan_a, slot_a is a var.
             if !pattern_answered_by_scan(pi, edge.scan_a) {
-                return false;
+                return None;
             }
-            let Some(var_a) = var_at(&var_slots, pi, slot_a as usize) else {
-                return false;
-            };
+            let var_a = var_at(&var_slots, pi, slot_a as usize)?;
             // The SAME variable occupies slot_b in some pattern answered by the
             // REFERENCED scan_b.
-            patterns.iter().enumerate().any(|(pj, _)| {
+            let shared = patterns.iter().enumerate().any(|(pj, _)| {
                 pj != pi
                     && pattern_answered_by_scan(pj, edge.scan_b)
                     && var_at(&var_slots, pj, slot_b as usize).as_deref() == Some(var_a.as_str())
-            })
+            });
+            shared.then_some(var_a)
         });
-        if !bound {
+        let Some(join_var) = join_var else {
             return Err(CheckError::JoinSlotMismatch { edge: e });
+        };
+        chain.push((join_var, join_commitment.clone(), e));
+    }
+
+    // --- (4) N-way chain commitment-equality (design §2.4). ---
+    // A query variable joined across MORE THAN TWO patterns is composed from
+    // several pairwise `join_eq` sub-proofs. The composition is sound only if every
+    // pairwise proof binds the SAME hiding `join_commitment` (the prover uses one
+    // blinder), so `a_val == b_val` per hop + the shared commitment compose into a
+    // transitive N-way equality WITHOUT disclosing the value. We group the bound
+    // edges by their join VARIABLE and require all `join_commitment`s in a group to
+    // byte-equal the group's first; a divergence means the hops proved equalities
+    // over potentially different values, so the N-way join is unproven. A single
+    // edge per variable (the 2-way case) trivially passes. [OPUS-4.8] sq-r2s8.
+    for (i, (var_i, commit_i, _)) in chain.iter().enumerate() {
+        // Compare against the FIRST edge sharing this variable (the chain anchor).
+        if let Some((_, anchor_commit, _)) =
+            chain.iter().take(i).find(|(v, _, _)| v == var_i)
+        {
+            if !field_hex_eq(commit_i, anchor_commit) {
+                return Err(CheckError::JoinCommitmentChainMismatch { edge: chain[i].2 });
+            }
         }
     }
 
