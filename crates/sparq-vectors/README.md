@@ -57,9 +57,45 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
 - **Verbalization** — `verbalize` / `embed_entities` render `<label>. a <type>. <description>`
   per entity (multilingual, char-budgeted); `embed_labels` is the label-only special case.
 - **Quantization** — `ScalarQuantizer` (4×) and `ProductQuantizer` (asymmetric distance) for
-  large stores; `Embedder` is provider-agnostic (the crate never opens a socket).
+  large stores; `Embedder` is provider-agnostic.
+- **Live embeddings (opt-in)** — the default build is **socket-free** (no HTTP client). The
+  non-default `provider` feature carries the OpenAI-compatible `/v1/embeddings` API shape with
+  a caller-supplied `Transport`; the non-default **`embeddings`** feature additionally ships a
+  concrete reqwest blocking `Transport` and `RemoteEmbedder::from_env(dim)`, so `embed_entities`
+  works against a real endpoint with **no caller glue** (see below). Mirrors `sparq-nlq`'s
+  `live` feature; never enters the wasm bundle.
 - **Hybrid fusion** — `fuse_rrf` / `fuse_rrf_weighted` / `fuse_scores` combine text vectors
   with another ranked signal (e.g. [`sparq-sim`](../sparq-sim) structural similarity).
+
+## 🔌 Live embeddings (opt-in `embeddings` feature)
+
+The default build opens no sockets. To embed against a real OpenAI-compatible
+`/v1/embeddings` endpoint without writing any HTTP glue, enable the **non-default**
+`embeddings` feature (it pulls in a blocking [`reqwest`] client; the default build does not):
+
+```toml
+sparq-vectors = { path = "../sparq-vectors", features = ["embeddings"] }
+```
+
+```rust,ignore
+use sparq_core::Graph;
+use sparq_vectors::{embed_entities, EntityTextConfig, VectorStore};
+use sparq_vectors::embed::provider::RemoteEmbedder;
+
+// SPARQ_EMBEDDINGS_API_KEY (required) → Authorization: Bearer …
+// SPARQ_EMBEDDINGS_BASE_URL (optional) → endpoint, default https://api.openai.com/v1/embeddings
+// SPARQ_EMBEDDINGS_MODEL    (optional) → model,    default text-embedding-3-small
+let embedder = RemoteEmbedder::from_env(1536)?;     // dim must match the store
+let mut store = VectorStore::create("graph.spqv", 1536)?;
+embed_entities(&graph, &mut store, &embedder, &EntityTextConfig::default())?;
+store.finalize()?;
+```
+
+`from_env` reads the key/base-url/model from the environment (mirroring `sparq-nlq`'s live
+client); requests carry a hard timeout. Point `SPARQ_EMBEDDINGS_BASE_URL` at any
+OpenAI-compatible server (a self-hosted model, a proxy). The crate still **never opens a
+socket in the default build** — only with `--features embeddings`, and it is excluded from the
+wasm build (nothing in the workspace depends on this crate).
 
 ## 📚 Learn more
 
