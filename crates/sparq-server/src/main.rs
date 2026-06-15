@@ -3,6 +3,7 @@
 //!
 //! Usage:
 //!   sparq-server [--addr 127.0.0.1:3030] [--allow-remote] [--format turtle]
+//!                [--auth-token TOKEN] [--auth-token-read]
 //!                [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
 //!                [--max-results N] [--max-query-rows N] [--max-decompress-ratio N]
 //!                [--max-subscriptions N] [--max-subscriptions-per-conn N]
@@ -16,14 +17,24 @@
 //! `SERVICE` clause turns attacker-controlled query text into an outbound request from this
 //! host. See crates/sparq-server/README.md -> "SERVICE federation (egress allowlist)". [OPUS-4.8]
 //!
-//! SECURITY: the server has NO built-in authentication on any endpoint (query, the
-//! `application/sparql-update` mutation path, the `/subscriptions` WebSocket). `--addr`
-//! defaults to loopback (127.0.0.1:3030), reachable only from this host. A NON-loopback
-//! bind (e.g. `0.0.0.0`) exposes the full dataset for READ AND WRITE to the network and is
-//! REFUSED unless `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`) is set — and even then it
-//! logs a warning. Run behind a reverse proxy / API gateway (or sparq-solid) that enforces
-//! auth before exposing it to an untrusted network. See crates/sparq-server/README.md
-//! → "Security posture".
+//! SECURITY (auth): by default the server has NO authentication on any endpoint (query, the
+//! `application/sparql-update` mutation path, the `/subscriptions` WebSocket). [OPUS-4.8]
+//! sq-zcby (PSS gh-46): set `--auth-token TOKEN` (env `SPARQ_AUTH_TOKEN`) to require
+//! `Authorization: Bearer TOKEN` on every WRITE (a SPARQL Update on `/sparql` — by
+//! `application/sparql-update` Content-Type OR a `query`/`update` body that parses as an
+//! update; classification keys on whether the request MUTATES, not the route — plus the GSP
+//! `PUT`/`POST`/`DELETE` methods); otherwise `401` with `WWW-Authenticate: Bearer`
+//! (constant-time compared, scheme-casing tolerant; mirrors QLever's `-a <token>`). Add
+//! `--auth-token-read` (env `SPARQ_AUTH_TOKEN_READ=1`) to ALSO gate reads. The
+//! `/subscriptions` WebSocket (a read surface) is NOT gated by this token.
+//!
+//! SECURITY (bind): `--addr` defaults to loopback (127.0.0.1:3030), reachable only from this
+//! host. A NON-loopback bind (e.g. `0.0.0.0`) is REFUSED unless `--allow-remote` (env
+//! `SPARQ_ALLOW_REMOTE=1`) is set OR the whole surface is authenticated (`--auth-token` AND
+//! `--auth-token-read`) — a write-token alone still leaves reads open, so it is not
+//! sufficient by itself. Even an allowed remote bind logs a warning. Deliver the token over
+//! TLS (terminate at a proxy); for per-user authz front it with a reverse proxy / gateway
+//! (or sparq-solid). See crates/sparq-server/README.md → "Security posture".
 //!
 //! With no DATA_FILE the server starts with an empty default graph (still answers queries —
 //! they just return no rows). The format defaults to `turtle`; pass `--format ntriples |
@@ -62,8 +73,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use sparq_core::Graph;
-// [OPUS-4.8] sq-o4qf: bind_posture / BindPosture gate the non-loopback bind under the no-auth posture.
-use sparq_server::{bind_posture, router, AppState, BindPosture, ServerConfig};
+// [OPUS-4.8] sq-o4qf: bind_posture / BindPosture gate the non-loopback bind; sq-zcby:
+// AuthPosture folds the --auth-token Bearer gate into that bind decision.
+use sparq_server::{bind_posture, router, AppState, AuthPosture, BindPosture, ServerConfig};
 
 // Same allocator as the CLI (T1.0a, measured ~1.29x on the parallel join): the system allocator's
 // arena locks contend under rayon's per-row allocation, and the server is the long-running,
@@ -132,10 +144,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.time_travel_max_age = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--verbose" => config.verbose = true,
-            // [OPUS-4.8] sq-o4qf: opt in to binding a non-loopback address despite the no-auth
-            // posture. Without this (and without SPARQ_ALLOW_REMOTE), a non-loopback --addr is
-            // refused — see bind_posture below.
+            // [OPUS-4.8] sq-o4qf: opt in to binding a non-loopback address. Without this (and
+            // without SPARQ_ALLOW_REMOTE), a non-loopback --addr is refused unless the whole
+            // surface is authenticated (--auth-token AND --auth-token-read) — see bind_posture.
             "--allow-remote" => config.allow_remote = true,
+            // [OPUS-4.8] sq-zcby (PSS gh-46): require a Bearer token on the WRITE surface.
+            // An empty token is rejected (an empty shared secret is a footgun, never valid).
+            "--auth-token" => {
+                let tok = args.next().ok_or("--auth-token requires a token value")?;
+                if tok.is_empty() {
+                    return Err("--auth-token must not be empty".into());
+                }
+                config.auth_token = Some(tok);
+            }
+            // [OPUS-4.8] sq-zcby: ALSO gate reads with the same token (QLever-style; only
+            // meaningful alongside --auth-token).
+            "--auth-token-read" => config.auth_token_read = true,
             // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).
@@ -157,15 +181,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ""
                 };
                 eprintln!(
-                    "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--format FMT] \
+                    "usage: sparq-server [--addr HOST:PORT] [--allow-remote] \
+                     [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
                      [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
                      [--max-subscriptions-per-conn N]{time_travel}{service} [--verbose] [DATA_FILE]\n\n  \
-                     SECURITY: no built-in auth. --addr defaults to loopback (127.0.0.1); a \
-                     non-loopback bind (e.g. 0.0.0.0) is REFUSED unless --allow-remote (or \
-                     SPARQ_ALLOW_REMOTE=1) is set, because it would expose READ+WRITE to the \
-                     network. Put it behind a reverse proxy / gateway that enforces auth.\n  \
+                     AUTH: --auth-token TOKEN (env SPARQ_AUTH_TOKEN) requires \
+                     'Authorization: Bearer TOKEN' on every WRITE (SPARQL Update + GSP \
+                     PUT/POST/DELETE) -> 401 + 'WWW-Authenticate: Bearer' otherwise \
+                     (constant-time compared; QLever's -a). Add --auth-token-read (env \
+                     SPARQ_AUTH_TOKEN_READ=1) to ALSO gate reads. Unset = no auth.\n  \
+                     SECURITY (bind): --addr defaults to loopback (127.0.0.1); a non-loopback \
+                     bind (e.g. 0.0.0.0) is REFUSED unless --allow-remote (or \
+                     SPARQ_ALLOW_REMOTE=1) is set OR the whole surface is authenticated \
+                     (--auth-token AND --auth-token-read) — a write-token alone still leaves \
+                     reads open. Put it behind a reverse proxy / gateway that enforces auth.\n  \
                      SERVICE federation (the `service` build feature) is DENY-ALL by default: \
                      SERVICE <iri> reaches NOTHING unless the host is allowlisted via \
                      --service-allow / --service-allow-file / SPARQ_SERVICE_ALLOW \
@@ -240,11 +271,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.time_travel_max_age.map_or("off".into(), |t| format!("{}s", t.as_secs())),
     );
 
+    // [OPUS-4.8] sq-zcby: surface the auth posture at startup. A write-only token (no
+    // --auth-token-read) leaves reads OPEN — warn so the operator is not surprised; a fully
+    // gated surface is reported too. No token = silent (the bind posture already warns on a
+    // non-loopback bind without auth).
+    let auth = AuthPosture::from_config(&config);
+    match auth {
+        AuthPosture::None => {}
+        AuthPosture::WriteOnly => eprintln!(
+            "auth: --auth-token set — WRITES require 'Authorization: Bearer <token>'; READS \
+             remain OPEN (add --auth-token-read to gate reads too). The /subscriptions \
+             WebSocket is a read surface and is NOT gated by this token."
+        ),
+        AuthPosture::ReadAndWrite => eprintln!(
+            "auth: --auth-token + --auth-token-read set — the whole surface (reads AND writes) \
+             requires 'Authorization: Bearer <token>'. Note: the /subscriptions WebSocket is \
+             NOT gated by this token; deliver the token over TLS."
+        ),
+    }
+
     let addr: SocketAddr = addr.parse()?;
-    // [OPUS-4.8] sq-o4qf: enforce the no-auth bind posture BEFORE binding. A non-loopback
-    // address is refused unless explicitly opted into (--allow-remote / SPARQ_ALLOW_REMOTE),
-    // because the server exposes READ+WRITE with no authentication.
-    match bind_posture(&addr, config.allow_remote) {
+    // [OPUS-4.8] sq-o4qf / sq-zcby: enforce the bind posture BEFORE binding. A non-loopback
+    // address is refused unless explicitly opted into (--allow-remote / SPARQ_ALLOW_REMOTE)
+    // OR the whole surface is authenticated (--auth-token AND --auth-token-read). A
+    // write-token alone still leaves reads open, so it still requires --allow-remote.
+    match bind_posture(&addr, config.allow_remote, auth) {
         BindPosture::Loopback => {}
         BindPosture::RemoteAllowed { warning } => eprintln!("{warning}"),
         BindPosture::RemoteRefused { message } => return Err(message.into()),

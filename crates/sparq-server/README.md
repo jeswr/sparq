@@ -15,15 +15,57 @@ N-Triples/Turtle/RDF-XML), EXPLAIN, Prometheus `/metrics`, WebSocket subscriptio
 opt-in time-travel feature. Reads and writes never share a lock (a generation-ring snapshot
 chain + a single sequenced group-commit writer), so queries never wait on the writer.
 
-## Security posture — no built-in auth (read before exposing)
+## Security posture (read before exposing)
 
-**`sparq-server` has NO authentication on any endpoint** — including the mutating
-`application/sparql-update` path and the `/subscriptions` WebSocket. Anyone who can reach the
-port can read AND write the whole dataset. Authorization belongs to a layer in front (a
-reverse proxy / gateway, or [`sparq-solid`](../sparq-solid)). Therefore:
+### Authentication — optional Bearer-token write gate (mirrors QLever's `-a`)
 
-- The server **binds loopback by default** (`127.0.0.1:3030`); a non-loopback bind is
-  **refused** unless you opt in with `--allow-remote` (env `SPARQ_ALLOW_REMOTE=1`).
+By default `sparq-server` has **no authentication** — anyone who can reach the port can read
+AND write the whole dataset. You can turn on a **required Bearer-token gate on the write
+surface** (PSS gh-46), with an **optional read gate**:
+
+- **`--auth-token <TOKEN>`** (env `SPARQ_AUTH_TOKEN`) — gates **writes**. Every request that
+  MUTATES the dataset must present `Authorization: Bearer <TOKEN>` or it is refused `401`
+  (with `WWW-Authenticate: Bearer`). The write surface is: a SPARQL **UPDATE** on `/sparql`
+  (`Content-Type: application/sparql-update`, OR a `query`/`update` body that *parses as an
+  update* — classification keys on "does this mutate", not the route), and the **Graph-Store
+  Protocol write methods** (`PUT`/`POST`/`DELETE`) on `/sparql/graph` and `/graphs/{*path}`.
+  The token is compared in **constant time**. Scheme casing is tolerated (`Bearer`/`bearer`).
+  When unset, there is **no write auth** (today's behaviour preserved exactly).
+- **`--auth-token-read`** (env `SPARQ_AUTH_TOKEN_READ=1`) — ALSO gate **reads** (SPARQL query,
+  GSP `GET`/`HEAD`) with the same token. Off by default (QLever-style: writes gated, reads
+  open). Has no effect unless a token is also configured.
+- The 401 is **identical for a missing vs a wrong token**, so an attacker cannot learn whether
+  a token was presented.
+- The `/subscriptions` WebSocket (live SELECT diffs, a read surface) is **not** gated by this
+  token — keep it behind a proxy if it must be restricted (bead `sq-cxk5` tracks gating it).
+
+This is a complement to, not a replacement for, a real authorization layer (a reverse proxy /
+gateway, or [`sparq-solid`](../sparq-solid)) — the gate is a single shared secret with no
+per-user identity, scopes, or TLS of its own. **Deliver the token over TLS** (terminate it at a
+proxy); a bare `Bearer` token on plaintext HTTP is sniffable.
+
+### Bind posture — loopback by default; the auth × bind matrix
+
+The server **binds loopback by default** (`127.0.0.1:3030`, reachable only from this host). A
+**non-loopback** bind (e.g. `0.0.0.0`) exposes the surface to the network, so the binary
+refuses it unless the posture makes it safe. The full matrix:
+
+| `--auth-token`? | `--auth-token-read`? | `--allow-remote`? | non-loopback bind |
+| --- | --- | --- | --- |
+| no  | —   | no  | **refused** — read+write fully open |
+| no  | —   | yes | allowed, **warns** read+write exposed |
+| yes | no  | no  | **refused** — writes gated but **reads still open** |
+| yes | no  | yes | allowed, **warns** reads remain open |
+| yes | yes | no  | **allowed** — whole surface authenticated (still warns) |
+| yes | yes | yes | **allowed** (still warns) |
+
+The rule: a configured write-token counts as "auth present" for the bind decision **only when
+reads are also gated** (`--auth-token-read`) — because a write-token alone still leaves an open
+read endpoint on a remote bind. When only writes are gated, `--allow-remote` is still required
+and the server warns that reads remain open. Loopback binds are always allowed.
+
+### SERVICE federation + DoS guards
+
 - SPARQL `SERVICE` federation is **OFF in the default build** (the `service` cargo feature).
   Built with `--features service` it is **default-DENY-all**: a `SERVICE <iri>` reaches
   nothing unless its host is on the egress allowlist (`--service-allow` / `--service-allow-file`
@@ -56,6 +98,9 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   (`?graph=`/`?default`) and direct (request-URI) graph identification.
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE
   and GSP read in N-Triples / prefix-Turtle / RDF/XML; streamed SELECT bodies.
+- **Authentication** — optional `--auth-token <TOKEN>` Bearer gate on the write surface
+  (constant-time compared; mirrors QLever's `-a`), with an optional `--auth-token-read` gate
+  for reads. Off by default (back-compat). See "Security posture".
 - **Hardening flags** — `--query-timeout` / `--max-body-bytes` / `--max-concurrent` /
   `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-decompress-ratio`
   (zip-bomb guard) / `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*`, each

@@ -18,9 +18,10 @@ on:
     - cron: '0 6 * * 1'      # Mondays 06:00 UTC
   workflow_dispatch:
 
+# [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions): top-level read-only;
+# the single ec2-bench job opts into the writes it genuinely needs (per-job below).
 permissions:
-  id-token: write            # for OIDC role assumption
-  contents: write            # github-action-benchmark pushes to the benchmark-data branch
+  contents: read
 
 concurrency:
   group: bench-ec2
@@ -31,6 +32,13 @@ jobs:
     name: heavy benchmark on EC2 (spot)
     if: github.repository == 'jeswr/sparq'
     runs-on: ubuntu-latest
+    # [OPUS-4.8] Job-scoped writes (least privilege):
+    #   id-token: write — assume the short-lived, tag-scoped IAM role via OIDC
+    #   contents: write — github-action-benchmark pushes to the benchmark-data branch (and
+    #                     the bootstrap step creates that orphan branch if absent)
+    permissions:
+      id-token: write
+      contents: write
     timeout-minutes: 45        # hard wall-clock cap (backstop to the script's own cleanup)
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

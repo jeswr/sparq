@@ -311,25 +311,37 @@ query, and `application/sparql-update` mutation), `/sparql/graph` &
 `/graphs/*` (Graph Store Protocol; writes return 501), `/subscriptions`
 (WebSocket), `/health`, `/metrics`.
 
-**T-HTTP-EoP — Elevation of privilege / Information disclosure (no auth; open
-read+write).**
-*Mechanism:* **no authentication on any endpoint** — including the mutating
-`application/sparql-update` path and the `/subscriptions` WebSocket (a grep of
-`sparq-server/src` for auth/bearer/token/api-key finds nothing; `router()`
-applies only the `harden` middleware). Anyone who can reach the port can **read
-and mutate the entire dataset** (breaching dataset confidentiality *and*
-integrity). The binary defaults to `127.0.0.1:3030` but `--addr 0.0.0.0`
-(`main.rs:50`) exposes that surface **with no warning**.
-*Existing mitigation:* loopback-by-default bind is the only guard. Update *write*
-via `LOAD` is constrained separately (only `file://`, and even that is
-default-disabled unless `with_load_base` installs an allowlisted, canonicalized,
-containment-checked base dir — `crates/sparq-engine/src/update.rs:330-401`; the
-server never calls `with_load_base`, so `file://` LOAD always fails), so SSRF via
-`LOAD` is *not* reachable.
-*GAP:* no auth, no warning on non-loopback bind. **Bead sq-o4qf** (new): warn on
-non-loopback bind without auth; offer an optional auth hook; document the
-deploy-behind-a-gateway expectation in `skills/http-server/SKILL.md`. (Overlaps
-sq-ebii's policy doc; sq-o4qf is the auth+bind posture specifically.)
+**T-HTTP-EoP — Elevation of privilege / Information disclosure (open read+write
+without auth).**
+*Mechanism:* by default there is **no authentication on any endpoint** —
+including the mutating `application/sparql-update` path and the `/subscriptions`
+WebSocket. With no token configured, anyone who can reach the port can **read and
+mutate the entire dataset** (breaching dataset confidentiality *and* integrity).
+The binary defaults to `127.0.0.1:3030`.
+*Existing mitigation (sq-zcby — RESOLVED for the write surface):* a **required
+Bearer-token gate on the write surface** — `--auth-token <TOKEN>` (env
+`SPARQ_AUTH_TOKEN`) requires `Authorization: Bearer <TOKEN>` on every request that
+MUTATES the dataset (the `application/sparql-update` path, an update smuggled
+through the query path — classification keys on whether the request mutates, not
+the route — and the GSP `PUT`/`POST`/`DELETE` methods), `401` otherwise (token
+compared in constant time; mirrors QLever's `-a`). `--auth-token-read` additionally
+gates reads. Implemented in `crates/sparq-server/src/http.rs` (`auth_gate` /
+`constant_time_eq` / `payload_mutates`) and wired into the `router` handlers, so
+embedders get the gate too. The bind posture (sq-o4qf) now refuses a non-loopback
+bind unless `--allow-remote` is set OR the whole surface is authenticated
+(`--auth-token` AND `--auth-token-read`) — a write-token alone still leaves reads
+open, so it is not sufficient on its own; even an allowed remote bind warns. Update
+*write* via `LOAD` is constrained separately (only `file://`, default-disabled
+unless `with_load_base` installs an allowlisted, canonicalized, containment-checked
+base dir — `crates/sparq-engine/src/update.rs`; the server never calls
+`with_load_base`, so `file://` LOAD always fails), so SSRF via `LOAD` is *not*
+reachable.
+*RESIDUAL GAP:* the gate is a single shared secret (no per-user identity / scopes
+/ TLS of its own — deliver it over TLS via a proxy, and use a real authz layer
+such as `sparq-solid` for per-user authz), and the `/subscriptions` WebSocket
+(a read surface) is **not** gated by the token yet — **bead sq-cxk5** tracks
+gating it. Beads: **sq-zcby** (write gate, done), **sq-o4qf** (bind posture),
+**sq-cxk5** (subscriptions gate, open), **sq-ebii** (deploy-policy doc).
 
 **T-HTTP-DoS — Denial of service (request flood / pathological query).**
 *Mechanism:* expensive queries, large bodies, connection floods.
@@ -434,7 +446,7 @@ Ordered by severity. Every gap maps to a bead (existing or new).
 | 2 | mmap loader unfuzzed against hostile/truncated files (the whole B5 surface incl. dict-spill & raw-perm sortedness, plus parser-robustness) | **High** | B5 / B1 | Add a fuzz target: corrupt/truncated/hostile store + hostile RDF/SPARQL bytes → must error, never UB/panic-loop; run under `--features dict-spill` | **sq-ky2a** (exists, P2) |
 | 3 | Compressed-perm header arithmetic overflow + unchecked block offsets/varints → panic / OOB-read | **High** | B5 | `checked_mul`/`checked_add` header math; bounds-check directory offsets and varint reads | **sq-ed2i** (new, P2) |
 | 4 | SPARQL parser stack-overflow on deeply-nested query → process abort | **High** | B2 | Recursion-depth / input-size cap (or `stacker`) at parse entry; contribute upstream | **sq-v5dg** (new, P2) |
-| 5 | Server: no auth + `0.0.0.0` bind with no warning; `max-results` unlimited; no rate limit; no query-complexity bound | **High** | B3 / B2 | Warn on non-loopback bind w/o auth; optional auth hook; default-on rate limit + sensible `max-results`; document gateway expectation | **sq-o4qf** (new, P2) + **sq-ebii** (exists, P2) |
+| 5 | Server auth: write surface now has a Bearer-token gate (`--auth-token`, sq-zcby) + bind-posture refusal (sq-o4qf); RESIDUAL — `/subscriptions` WS not yet token-gated, no per-user authz, `max-results` unlimited, no rate limit / query-complexity bound | **Medium** (was High) | B3 / B2 | Gate the subscriptions WS (sq-cxk5); default-on rate limit + sensible `max-results`; document gateway expectation | **sq-zcby** (write gate, done) + **sq-o4qf** (bind, done) + **sq-cxk5** (WS, new) + **sq-ebii** (exists, P2) |
 | 6 | No documented/enforced server timeout-memory-decompression-SSRF policy; minor 500-error engine-internal disclosure; reason/SHACL materialization budgets | **Medium** | B3 / B1 | Write+enforce the DoS/SSRF policy doc; redact `{:?}` algebra from 500s; add reasoning/validation budgets when exposed to untrusted input | **sq-ebii** (exists, P2) |
 | 7 | SERVICE federation has zero SSRF egress filtering **if** the `service` feature is enabled | **Medium** (gated off by default) | B4 | Default-deny loopback/RFC1918/link-local/metadata; config allowlist; document the sharp edge | **sq-2v6f** (new, P2) |
 | 8 | Decompression bomb on CLI/operator ingest (not network-reachable in the shipped server) | **Medium** | B1 | Decompression-ratio + output-size cap on the fused-decompress ingest | **sq-ebii** (exists, P2) |
