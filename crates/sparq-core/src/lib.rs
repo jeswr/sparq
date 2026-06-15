@@ -43,7 +43,22 @@ pub struct Graph {
     /// Named graphs (each a self-contained `Graph`), keyed by their name term. Empty for the
     /// usual single-default-graph load; populated by [`load_dataset`](Self::load_dataset) from
     /// N-Quads / TriG so the engine can evaluate `GRAPH <iri> { … }` / `GRAPH ?g { … }`.
+    ///
+    /// This Vec is POSITIONAL — the on-disk named sub-tree (`named/<i>/`) and the manifest are
+    /// indexed by position, so it must NEVER be reordered. A prefix/range index over the graph
+    /// IRIs is therefore a SEPARATE sorted side structure
+    /// ([`for_named_graphs_with_prefix`](Self::for_named_graphs_with_prefix)), never a reordering
+    /// of this Vec.
     pub named: Vec<(Term, Graph)>,
+    /// [OPUS-4.8] (sq-zz8z, gh-51) Lazily-built sorted permutation of `named` indices, ordered by
+    /// the UTF-8 bytes of each graph's IRI string, enabling a binary-search RANGE SCAN for a
+    /// prefix-scoped `GRAPH ?g … FILTER(STRSTARTS(STR(?g), prefix))` instead of an O(graphs) full
+    /// scan (PSS multi-tenant `usage(prefix)`). Cached and keyed by `named.len()`: adding or
+    /// removing a named graph changes the length (the only operations that change the SET of graph
+    /// IRIs — an in-place `apply_delta` to an EXISTING graph changes neither its name nor the
+    /// length), so a stale cache is detected and rebuilt. Interior-mutable so a shared `&Graph`
+    /// can populate it; never observable in results (pure acceleration).
+    graph_prefix_index: std::sync::Mutex<Option<(usize, Vec<u32>)>>,
     /// The write-ahead log for a DIRECTORY-BACKED graph (opened via [`open`](Self::open)):
     /// every [`apply_delta`](Self::apply_delta) batch is appended + fsync'd here BEFORE it
     /// is applied, and replayed into the delta-overlay on the next `open` — durability for
@@ -890,6 +905,86 @@ impl Graph {
         Self::build(dict, triples)
     }
 
+    /// [OPUS-4.8] (sq-zz8z, gh-51) The sort key the prefix index orders graph names by: the
+    /// string returned by SPARQL `STR(?g)`. For a named-node graph (the only kind a dataset's
+    /// `GRAPH ?g` ever binds) that is the IRI itself; defined for any `Term` so the index is
+    /// total. Keeping this ONE function makes the index's ordering and a query's
+    /// `STRSTARTS(STR(?g), …)` use the SAME notion of the graph's string — they cannot diverge.
+    fn graph_name_str(t: &Term) -> &str {
+        match t {
+            Term::NamedNode(n) => n.as_str(),
+            Term::BlankNode(b) => b.as_str(),
+            Term::Literal(l) => l.value(),
+            #[allow(unreachable_patterns)]
+            _ => "",
+        }
+    }
+
+    /// [OPUS-4.8] (sq-zz8z, gh-51) Invokes `f` once for every named graph whose `STR(name)` starts
+    /// with `prefix`, IN UNSPECIFIED ORDER, via a binary-search RANGE SCAN over a cached sorted
+    /// index of the graph IRIs — O(log G + matches) instead of the O(G) full scan that a
+    /// `GRAPH ?g … FILTER(STRSTARTS(STR(?g), prefix))` would otherwise perform over ALL named
+    /// graphs (the PSS multi-tenant `usage(prefix)` cost cliff, gh-51).
+    ///
+    /// The result is EXACTLY the set of graphs a full scan + `STRSTARTS(STR(?g), prefix)` filter
+    /// would keep (an empty prefix matches every graph; a no-match prefix yields nothing), so the
+    /// indexed path is observationally identical to the unindexed one — see the equivalence tests.
+    /// The index is built lazily on first use and cached, keyed by `named.len()` (the only thing
+    /// that changes when the SET of graph IRIs changes); a length change rebuilds it.
+    pub fn for_named_graphs_with_prefix<F: FnMut(&Term, &Graph)>(&self, prefix: &str, mut f: F) {
+        let n = self.named.len();
+        if n == 0 {
+            return;
+        }
+        // Empty prefix matches everything — no point building/consulting the index.
+        if prefix.is_empty() {
+            for (name, sub) in &self.named {
+                f(name, sub);
+            }
+            return;
+        }
+        // Collect the matching `named` indices UNDER the lock, then drop the guard BEFORE
+        // invoking the caller-provided `f`. Holding the mutex across `f` would needlessly
+        // serialize concurrent readers and could deadlock if `f` (directly or indirectly)
+        // re-entered a path that locks the same mutex. The snapshot of matches is taken
+        // while the lock is held, so correctness is preserved.
+        let matches: Vec<u32> = {
+            let mut guard = self.graph_prefix_index.lock().unwrap_or_else(|e| e.into_inner());
+            let order: &Vec<u32> = match guard.as_ref() {
+                Some((len, idx)) if *len == n => idx,
+                _ => {
+                    // (Re)build: a permutation of `named` indices sorted by `STR(name)` bytes.
+                    let mut idx: Vec<u32> = (0..n as u32).collect();
+                    idx.sort_by(|&a, &b| {
+                        Self::graph_name_str(&self.named[a as usize].0)
+                            .cmp(Self::graph_name_str(&self.named[b as usize].0))
+                    });
+                    *guard = Some((n, idx));
+                    &guard.as_ref().unwrap().1
+                }
+            };
+            // Range scan: STRSTARTS(s, prefix) holds for a CONTIGUOUS block of the sorted order
+            // (all strings >= prefix and < the prefix's successor). `partition_point` gives the
+            // lower bound; we then walk while the name still starts with `prefix`.
+            let key = |i: u32| Self::graph_name_str(&self.named[i as usize].0);
+            let lo = order.partition_point(|&i| key(i) < prefix);
+            let mut matches = Vec::new();
+            for &i in &order[lo..] {
+                let s = key(i);
+                if !s.starts_with(prefix) {
+                    break; // sorted: once a name no longer starts with prefix, none after it does
+                }
+                matches.push(i);
+            }
+            matches
+            // `guard` dropped here, before `f` is invoked below.
+        };
+        for i in matches {
+            let (name, sub) = &self.named[i as usize];
+            f(name, sub);
+        }
+    }
+
     /// Streaming loader: parses an RDF document incrementally from a reader (so a
     /// gzip / bzip2 decompression stream can be ingested without holding the whole
     /// document in memory). Same formats as [`load_str`](Self::load_str). The
@@ -1069,6 +1164,7 @@ impl Graph {
             numerics,
             temporals,
             named: Vec::new(),
+            graph_prefix_index: std::sync::Mutex::new(None),
             #[cfg(feature = "mmap")]
             wal: None,
             // [OPUS-4.8] (sq-ycle) In-memory graph: no parent-level redo journal.
@@ -1103,6 +1199,7 @@ impl Graph {
             numerics: self.numerics.into_sparse_if_worthwhile(),
             temporals: self.temporals.into_sparse_if_worthwhile(),
             named: self.named,
+            graph_prefix_index: std::sync::Mutex::new(None),
             #[cfg(feature = "mmap")]
             wal: self.wal,
             // [OPUS-4.8] (sq-ycle) Re-encoding keeps the directory association — carry the redo
@@ -1356,7 +1453,16 @@ impl Graph {
         // with its own per-graph WAL) so a save→open round-trip is lossless for the whole
         // dataset. Empty for a default-graph-only / pre-named-graph directory.
         let named = Self::open_named(dir)?;
-        let mut g = Graph { dict, store, numerics, temporals, named, wal: None, txn: None };
+        let mut g = Graph {
+            dict,
+            store,
+            numerics,
+            temporals,
+            named,
+            graph_prefix_index: std::sync::Mutex::new(None),
+            wal: None,
+            txn: None,
+        };
         // Replay any write-ahead log into the delta-overlay (recovery after a crash or a
         // plain not-yet-compacted close), stopping cleanly at the first torn record and
         // truncating the log there — then keep the log open for further appends.
@@ -1915,6 +2021,8 @@ impl Graph {
             numerics: self.numerics.fork(),
             temporals: self.temporals.fork(),
             named: self.named.iter().map(|(name, g)| (name.clone(), g.fork())).collect(),
+            // A fork is a fresh logical copy; rebuild the prefix index lazily on first use.
+            graph_prefix_index: std::sync::Mutex::new(None),
             #[cfg(feature = "mmap")]
             wal: None,
             // [OPUS-4.8] (sq-ycle) A fork/snapshot is a logically-independent in-memory copy with
@@ -4205,6 +4313,48 @@ mod build_timing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [OPUS-4.8] (sq-zz8z, gh-51) The graph-IRI prefix RANGE SCAN returns EXACTLY the named graphs
+    /// whose `STR(name)` starts with the prefix, and its lazily-built cache stays coherent across
+    /// add/remove (which change `named.len()`, the cache key) on the SAME graph object. Adjacent
+    /// IRIs where one is a prefix of another exercise the `partition_point` lower bound + the
+    /// `starts_with` upper bound.
+    #[test]
+    fn graph_prefix_range_scan_and_cache_coherence() {
+        let nq = "<http://ex/s0> <http://ex/p> <http://ex/o> <http://ex/a/1> .\n\
+                  <http://ex/s1> <http://ex/p> <http://ex/o> <http://ex/a/10> .\n\
+                  <http://ex/s2> <http://ex/p> <http://ex/o> <http://ex/a/2> .\n\
+                  <http://ex/s3> <http://ex/p> <http://ex/o> <http://ex/b/1> .\n";
+        let mut g = Graph::load_dataset(nq, "nquads").unwrap();
+        let collect = |g: &Graph, prefix: &str| -> Vec<String> {
+            let mut v = Vec::new();
+            g.for_named_graphs_with_prefix(prefix, |name, _| {
+                if let Term::NamedNode(n) = name {
+                    v.push(n.as_str().to_string());
+                }
+            });
+            v.sort();
+            v
+        };
+        // a/* = a/1, a/10, a/2 (note a/1 is a prefix of a/10 — both kept).
+        assert_eq!(collect(&g, "http://ex/a/"), ["http://ex/a/1", "http://ex/a/10", "http://ex/a/2"]);
+        // exact-prefix that is a substring of another IRI: "a/1" matches a/1 AND a/10.
+        assert_eq!(collect(&g, "http://ex/a/1"), ["http://ex/a/1", "http://ex/a/10"]);
+        // empty prefix matches every graph.
+        assert_eq!(collect(&g, "").len(), 4);
+        // no match.
+        assert!(collect(&g, "http://ex/zzz").is_empty());
+        // single match.
+        assert_eq!(collect(&g, "http://ex/b/"), ["http://ex/b/1"]);
+
+        // The cache is now populated (built during the queries above). MUTATE the graph set on the
+        // SAME object: add a/3 (len changes -> cache must rebuild) and the new graph must appear.
+        g.ensure_named(&Term::NamedNode(NamedNode::new("http://ex/a/3").unwrap())).unwrap();
+        assert_eq!(
+            collect(&g, "http://ex/a/"),
+            ["http://ex/a/1", "http://ex/a/10", "http://ex/a/2", "http://ex/a/3"]
+        );
+    }
 
     #[cfg(feature = "parallel")]
     #[test]
