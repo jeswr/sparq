@@ -85,10 +85,15 @@ different workflows:
 
 `bench/dashboard/index.html` loads Chart.js from the jsDelivr CDN
 (`<script src="https://cdn.jsdelivr.net/npm/chart.js@.../dist/Chart.min.js">`).
-This is fine for the branch-served snapshot, but it is a hard-rule problem for an
-Actions-built site (supply-chain / Scorecard / offline reproducibility): the
-producer must **vendor** Chart.js locally rather than pull it from a CDN at page
-load.
+This is fine for the branch-served snapshot, but for an Actions-built site the
+**recommendation** is to vendor Chart.js locally rather than pull it from a CDN at
+page load — for **supply-chain hygiene and availability** (the dashboard keeps
+working offline / if the CDN is down, and the bytes are reviewable and
+reproducible). This is a recommendation, not a check the repo's tooling enforces:
+the repo's Scorecard posture covers pinning **GitHub Actions / Docker
+dependencies** (`PinnedDependencies`) and **workflow token scopes**
+(`TokenPermissions`) — it does not analyse runtime JS loaded by the Pages site, so
+no existing gate would flag a CDN `<script>`. Vendoring is good hygiene regardless.
 
 ## Safe cutover sequence
 
@@ -123,9 +128,13 @@ build them.
    `dev/bench*` subtrees into the artifact, so the historical series is **not
    lost** at cutover. The benchmark series lives on that branch, not in `main`;
    the producer that builds the Actions artifact has to bring it across.
-4. **Vendor Chart.js off the CDN.** The dashboard's Chart.js dependency must be
-   vendored locally and referenced with a relative path, not loaded from a CDN at
-   page load (supply-chain / Scorecard / offline-build rule).
+4. **Vendor Chart.js off the CDN (recommended).** The dashboard's Chart.js
+   dependency should be vendored locally and referenced with a relative path,
+   rather than loaded from a CDN at page load — for supply-chain hygiene and
+   availability (offline / CDN-outage resilience, reviewable reproducible bytes).
+   This is a recommendation, not a tooling-enforced gate: the repo's Scorecard
+   posture pins Actions/Docker dependencies and workflow token scopes, not runtime
+   JS served by Pages (see [Chart.js is loaded from a CDN](#chartjs-is-loaded-from-a-cdn)).
 5. **Post-deploy smoke check.** A producer step (or a follow-up check) must assert
    the deployed site is intact: `dev/bench/{index.html, data.js (non-empty),
    dashboard.js}` **and** `dev/bench-ec2/index.html` all return `200` (per
