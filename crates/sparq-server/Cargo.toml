@@ -9,7 +9,16 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-readme = "../../README.md"
+# [OPUS-4.8] crate-local README so crates.io (package.readme) matches the docs.rs front
+# page (lib.rs include_str!("../README.md")) — same content on both registries.
+readme = "README.md"
+
+# [OPUS-4.8] docs.rs builds the crate's library root (lib.rs) as the front page; build
+# with every feature so the full server/time-travel/service/geo surface is documented,
+# and pass --cfg docsrs so #[cfg_attr(docsrs, doc(cfg(...)))] feature badges can render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 # rlib so the protocol/serializer logic can be unit-tested and reused by the binary.
@@ -27,7 +36,7 @@ required-features = ["server"]
 # are never part of the bundle. Kept behind a feature so a consumer can depend on the
 # pure serializer library (XML/CSV/TSV) without dragging in the runtime.
 default = ["server"]
-server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json"]
+server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2"]
 # `time-travel` (default OFF — opt-in is the contract, user-approved) lets a query pin
 # a RETAINED generation: `?generation=N` on /sparql serves the store as of generation N
 # (410 Gone once it ages out of the retention window), every /sparql response carries
@@ -102,6 +111,11 @@ futures-util = { version = "0.3", optional = true, default-features = false }
 # Subscription protocol messages + result diffs (T23) — already in axum's dependency
 # graph (its `json` feature), so this adds no new transitive code.
 serde_json = { version = "1", optional = true }
+# [OPUS-4.8] (sq-ebii) Bounded gzip inflate for `Content-Encoding: gzip` request bodies
+# (the GSP write / RDF-load path) under the decompression-ratio cap (zip-bomb guard). Same
+# `flate2 = "1"` the CLI / parse / hdt crates already use, so the workspace gains no new
+# transitive code. Server-feature only (the decode lives on the async HTTP body path).
+flate2 = { version = "1", optional = true }
 
 mimalloc = "0.1"
 
@@ -123,3 +137,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tokio-tungstenite = "0.24"
 # `StreamExt::next` / `SinkExt::send` on the test client's WebSocket stream.
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# [OPUS-4.8] (sq-ebii) The decompression-ratio-cap test gzips a request body (a high-ratio
+# "zip bomb" and a benign small body) to assert the 413 guard fires before / not on each.
+flate2 = "1"

@@ -128,10 +128,11 @@ jobs:
         run: cargo build --release -p sparq-cli -p sparq-bench
       - name: Run benchmarks
         run: bash scripts/ci-bench.sh 200000 bench-results.json
-      # [OPUS-4.8] HARD regression RATCHET on ONLY the DETERMINISTIC metrics (store/dict bytes-per-{triple,term},
-      # store_bytes_per_triple_small, parse_ns_per_byte, wasm_bundle_bytes). github-action-benchmark's
-      # fail-on-alert is a single GLOBAL switch that would also trip on the noisy wall-clock latencies, so it
-      # stays false (alert-comment only, below). This step is the TRUE gate.
+      # [OPUS-4.8] HARD regression RATCHET on the gated metrics (store/dict bytes-per-{triple,term},
+      # store_bytes_per_triple_small, wasm_bundle_bytes = DETERMINISTIC byte counts; parse_ns_per_byte =
+      # TIMING, made noise-robust via best-of-N re-measure — see the Hard gate step below).
+      # github-action-benchmark's fail-on-alert is a single GLOBAL switch that would also trip on the noisy
+      # wall-clock latencies, so it stays false (alert-comment only, below). This step is the TRUE gate.
       #
       # sq-52e: the gate now compares each metric against its COMMITTED best-ever FLOOR in
       # bench/perf-baseline.json (the source-of-record ratchet, reviewed in diffs like the conformance
@@ -165,13 +166,23 @@ jobs:
           else
             echo "benchmark-data branch not present yet (first run)."
           fi
-      - name: Hard gate — deterministic perf regression (best-ever ratchet)
+      # [OPUS-4.8] (sq-dzfu) The DETERMINISTIC byte-count metrics are hard-gated strictly. The TIMING
+      # metric (parse_ns_per_byte) is made robust to GitHub-runner noise via BEST-OF-N re-measure: if it
+      # trips the band, the gate re-runs the CHEAP `ci-bench.sh --parse-only` path (no wasm build, no big
+      # corpus, no well-known suites — ~sub-second using the binaries already built above) up to K times
+      # and keeps the BEST (min) reading, only FAILING if the best of N still exceeds the band. Runner
+      # noise only ever inflates a wall-clock reading, so a one-off spike is squeezed out while a real
+      # parse regression (slow on EVERY reading) still fails. Mirrors PR #62's coverage re-measure fix.
+      - name: Hard gate — perf regression (deterministic strict; timing best-of-N robust)
         env:
           # Deliberate-bump escape hatch: comma-separated metric names allowed to regress THIS run.
           # Leave empty normally; set to e.g. 'wasm_bundle_bytes' on a commit/run that intentionally
           # grows the bundle. The allowed metric passes here AND is re-floored by the auto-ratchet step.
           PERF_GATE_ALLOW: ${{ vars.PERF_GATE_ALLOW }}
-        run: python3 scripts/perf-gate.py bench-results.json bench/perf-baseline.json
+        run: |
+          python3 scripts/perf-gate.py bench-results.json bench/perf-baseline.json \
+            --remeasure-cmd 'bash scripts/ci-bench.sh --parse-only /tmp/perf-remeasure.json >/dev/null 2>&1 && cat /tmp/perf-remeasure.json' \
+            --remeasure-k 4
       # [OPUS-4.8] AUTO-RATCHET-DOWN (sq-52e): on push to main, AFTER the gate passes, lower any floor a
       # genuine improvement beat (auto metrics: current < floor; noise metric: only on a SUSTAINED
       # improvement — the median of recent published points below the floor, never a one-off noise-low),
@@ -261,11 +272,12 @@ jobs:
           summary-always: true
           # GitHub-hosted runners are noisy, so this action's gate only flags a *large* regression and
           # never hard-fails: fail-on-alert stays false because this single GLOBAL switch would otherwise
-          # trip on the noisy wall-clock latencies. The TRUE hard gate on the DETERMINISTIC metrics
-          # (store/dict bytes-per-{triple,term}, store_bytes_per_triple_small, parse_ns_per_byte,
-          # wasm_bundle_bytes) is the dedicated "Hard gate" step ABOVE (scripts/perf-gate.py), which fails
-          # CI on a real regression of those alone. This action keeps the trend chart + alert comment for
-          # ALL metrics (including the latency trends) for human review. [OPUS-4.8]
+          # trip on the noisy wall-clock latencies. The TRUE hard gate is the dedicated "Hard gate" step
+          # ABOVE (scripts/perf-gate.py): the DETERMINISTIC byte counts (store/dict bytes-per-{triple,term},
+          # store_bytes_per_triple_small, wasm_bundle_bytes) are gated strictly, and the TIMING metric
+          # parse_ns_per_byte is made robust to runner noise via best-of-N re-measure (real regressions
+          # still fail). This action keeps the trend chart + alert comment for ALL metrics (including the
+          # latency trends) for human review. [OPUS-4.8]
           alert-threshold: '150%'
           comment-on-alert: true
           fail-on-alert: false

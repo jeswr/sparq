@@ -1,47 +1,4 @@
-//! sparq-vectors: **opt-in embedding storage + nearest-neighbour search** for the sparq
-//! RDF engine (GenAI phase 4 — see `research/genai-design.md`).
-//!
-//! - [`VectorStore`]: one f32 embedding per dictionary term id in a flat, memory-mapped
-//!   `.spqv` file, designed for **sparse coverage** (only entities get embeddings, not
-//!   every literal) — see [`store`] for the format. [`StreamingWriter`] builds stores
-//!   bigger than RAM (vectors append straight to disk, the id index spills to a
-//!   sidecar); [`VectorStore::open_from_bytes`] reads a store held in memory
-//!   (filesystem-less environments).
-//! - [`nearest_exact`] / [`VectorIndex`]: exact brute-force cosine top-`k` (the
-//!   baseline and the recall ground truth) and an HNSW approximate index
-//!   (`instant-distance`, pure Rust), both returning `(Id, cosine)` pairs;
-//!   [`VectorIndex::nearest_term`] / [`nearest_term_exact`] query by [`oxrdf::Term`],
-//!   resolving through a [`Graph`](sparq_core::Graph)'s dictionary.
-//! - [`DiskAnnIndex`]: a **persistent on-disk Vamana / DiskANN-style ANN graph** (`.spqg`) —
-//!   build once, then [`open`](DiskAnnIndex::open) on later runs with **no rebuild** (mmap +
-//!   header check). Cosine-identical to [`VectorIndex`]; the out-of-core counterpart for
-//!   stores that should survive process restart (see [`diskann`] for the format and the
-//!   honest scope vs. full PQ-backed DiskANN).
-//! - [`Embedder`]: provider-agnostic embedding trait. Embeddings are produced
-//!   **outside** the engine (design decision: out-of-process); [`HashEmbedder`] is the
-//!   deterministic, offline, **test-only** implementation, and the non-default
-//!   `provider` feature carries the API shape for a live OpenAI-compatible endpoint
-//!   (caller-supplied HTTP transport — this crate never opens a socket).
-//! - [`verbalize`] / [`embed_entities`]: the **entity verbalization layer** — renders
-//!   each entity's text passage from its literal properties (label + type +
-//!   description + extra prefixed literals, multilingual-aware, char-budgeted) per
-//!   [`EntityTextConfig`], the way production KG/vector systems do (see
-//!   `research/genai-text-embedding-practices.md`), and embeds it.
-//!   [`embed_labels`] (configurable via [`LabelConfig`]) is the label-only
-//!   back-compat wrapper.
-//! - [`ScalarQuantizer`] / [`ProductQuantizer`] (`quant`): **vector quantization** for large
-//!   stores ([OPUS-4.8] sq-nq5) — scalar (`f32 → u8`, 4×) and product (`M`-byte codes, 8–32×)
-//!   encoders with reconstruct for re-ranking and asymmetric distance ([`DistanceTable`]) for
-//!   ranking on codes alone. The PQ-compressed in-RAM candidate cache ([`EncodedStore`]) that
-//!   closes [`DiskAnnIndex`]'s gap to *full* DiskANN; cosine-identical to the other searchers.
-//! - [`fuse_rrf`] / [`fuse_rrf_weighted`] / [`fuse_scores`]: rank/score **fusion for
-//!   hybrid retrieval** — combine the text-vector ranking with another ranked signal
-//!   (e.g. `sparq-sim`'s structural similarity) without a dependency between the
-//!   crates; the weighted variant down-weights a noisier list Elasticsearch-style.
-//!
-//! Everything reads `sparq-core` through its public API only; the crate is opt-in and
-//! nothing in the workspace depends on it — the default engine build does not even
-//! compile it.
+#![doc = include_str!("../README.md")]
 
 pub mod ann;
 pub mod diskann;

@@ -9,7 +9,15 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-readme = "../../README.md"
+# [OPUS-4.8] crate-local README so crates.io (package.readme) matches the docs.rs front
+# page (main.rs include_str!("../README.md")) — same content on both registries.
+readme = "README.md"
+
+# [OPUS-4.8] Build the README-as-front-page docs on docs.rs with all features
+# enabled, and pass `--cfg docsrs` so any `#[cfg(docsrs)]`-gated doc attrs apply.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 # Out-of-core querying (memory-mapped on-disk indexes) — on by default for the CLI.
