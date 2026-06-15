@@ -47,6 +47,87 @@ If you change any **public API** (a `pub` item, a CLI flag, an HTTP route, or a 
 binding), update the corresponding `skills/<surface>/SKILL.md` **in the same change**.
 This is a required, enforced convention — see the MAINTENANCE RULE in `AGENTS.md`.
 
+## Secure coding
+
+<!-- [OPUS-4.8] Secure-coding standard (bead sq-toze.7 / gap GX-6). Maps the cert
+     expectations (SSDF PW, ASVS V1/V5) onto sparq's ACTUAL gates. Points to AGENTS.md
+     and the workflows rather than duplicating them. -->
+
+`sparq` processes untrusted input (RDF text, SPARQL queries, HTTP requests). This section
+is the contributor-facing secure-coding standard; it maps to the secure-SDLC (NIST SSDF)
+and ASVS expectations and is grounded in the gates CI already enforces. The detail of each
+gate lives in [`AGENTS.md`](./AGENTS.md) and the workflows under
+[`.github/workflows/`](./.github/workflows/) — this is the index, not a duplicate.
+
+### `unsafe` policy
+
+- **Prefer safe Rust.** Do not add `unsafe` to a crate that has none. The `unsafe` we keep
+  is concentrated in `sparq-core` (mmap, the zero-copy dictionary, SIMD).
+- **Justify every `unsafe` site.** A new `unsafe` block needs an inline `// SAFETY:` comment
+  stating the invariant you rely on and why it holds. Adding `unsafe` is visible in CI: the
+  `unsafe report (cargo-geiger, informational)` step in [`ci.yml`](./.github/workflows/ci.yml)
+  surfaces the count in the run summary. (A consolidated per-site justification register is a
+  tracked gap, GX-5, not yet a file in the repo — until it lands, the inline `// SAFETY:`
+  comment at the site is the register of record.)
+- **Run it under the UB lanes.** Pure-Rust `unsafe` in `sparq-core` is exercised by the
+  `miri` lane ([`miri.yml`](./.github/workflows/miri.yml)) and the parser/loader fuzzers
+  ([`fuzz.yml`](./.github/workflows/fuzz.yml)). The mmap sites that Miri cannot reach are
+  covered by an oracle + fuzz matrix — extend that coverage when you touch them.
+
+### Input validation and the hardened surfaces
+
+- The parser, query engine, and HTTP server (`sparq-core`, `sparq-engine`, `sparq-server`)
+  are the surfaces most likely to see untrusted input. Validate at the boundary, prefer
+  total functions, and **never let untrusted input drive an `unwrap`/`expect`/`panic!` or an
+  unbounded allocation** — a reachable panic or OOM is an in-scope DoS bug (see
+  [`SECURITY.md`](./SECURITY.md)).
+- Keep error and log output clean: do not leak RDF/SPARQL content, internal paths, or stack
+  detail into HTTP error responses or logs (ASVS V7).
+- The `sparq-zk*` and `sparq-mpc` crates are research scaffolds with **no security
+  guarantee** — do not present their output as a cryptographic assurance. See `SECURITY.md`.
+
+### Supply chain
+
+- If your change touches `Cargo.toml`/`Cargo.lock`, the supply-chain gate applies:
+  `cargo deny check bans sources licenses` gates on every PR
+  ([`supply-chain.yml`](./.github/workflows/supply-chain.yml)), the daily advisory watchdog
+  ([`dependency-monitoring.yml`](./.github/workflows/dependency-monitoring.yml)) flags new
+  RustSec advisories, and a CycloneDX SBOM is generated per build. The policy lives in
+  [`deny.toml`](./deny.toml).
+- Add the **smallest** dependency that does the job, from a maintained source, and record any
+  tolerated advisory with a justification in `deny.toml` (each `ignore` entry carries a
+  reason and a tracking bead).
+
+### The gates a change must pass
+
+A contribution lands only when the gate in **"The gate"** above is green: `cargo build` /
+`cargo test`, `cargo clippy --workspace --all-targets -- -D warnings` (a hard gate),
+and the W3C conformance + performance/coverage ratchets (never lowered). `cargo fmt --all
+--check` also runs in CI but is currently **informational** (`continue-on-error: true`),
+to be flipped to a hard gate once the one-time `cargo fmt --all` reformat lands; format your
+code anyway.
+Security-specific lanes also run: **CodeQL** SAST
+([`codeql.yml`](./.github/workflows/codeql.yml), `security-and-quality` queries), **miri**,
+**fuzz**, **supply-chain**, and the **OpenSSF Scorecard** analysis
+([`scorecard.yml`](./.github/workflows/scorecard.yml)). The aggregate `ci-summary` check
+gates the merge.
+
+### Reporting a vulnerability you find while contributing
+
+If you discover a security issue, **do not open a public issue or PR** — use the private
+channels in [`SECURITY.md`](./SECURITY.md) (GitHub Security Advisories or
+jesse@jeswr.org). The machine-readable pointer is
+[`.well-known/security.txt`](./.well-known/security.txt).
+
+### Secure-SDLC (SSDF) touchpoints
+
+The above maps onto the NIST SSDF practices: a documented secure-coding standard and threat
+model (PW.1 — this section plus [`SECURITY.md`](./SECURITY.md) and the threat model),
+review and analysis before merge (PW.7/PW.8 — code review, CodeQL, clippy, miri, fuzz),
+supply-chain provenance (PW.4/PS.3 — cargo-deny, SBOM), and coordinated vulnerability
+handling (RV — the disclosure policy and `security.txt`). Follow the PR conventions in
+`AGENTS.md` (small, reviewed, all review comments resolved before merge).
+
 ## Tasks and TODOs live in beads, not markdown
 
 This repo tracks work in **beads** (`bd`, a git-native dependency-graph issue tracker).
