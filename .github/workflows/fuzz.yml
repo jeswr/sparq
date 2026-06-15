@@ -49,6 +49,11 @@ env:
   SMOKE_SECS: "30"
   MAIN_SECS: "120"
   NIGHTLY_SECS: "600"
+  # Build the fuzz targets for the GNU triple. On x86_64 Linux cargo-fuzz defaults to
+  # the MUSL target (static libc), which the address sanitizer rejects; the gnu target
+  # links libc dynamically and is sanitizer-compatible. (On the runner this is the host
+  # triple, so it is also the cheapest to build.)
+  FUZZ_BUILD_TARGET: x86_64-unknown-linux-gnu
 
 jobs:
   fuzz:
@@ -72,6 +77,12 @@ jobs:
         with:
           toolchain: nightly-2026-06-11
           components: rust-src
+          # We build for the GNU triple explicitly (see FUZZ_BUILD_TARGET below): on an
+          # x86_64 Linux runner cargo-fuzz DEFAULTS to `*-linux-musl`, whose statically
+          # linked libc is incompatible with the sanitizer ("sanitizer is incompatible
+          # with statically linked libc") and whose std is not installed — so we pin the
+          # gnu target and ensure its std/core is present.
+          targets: x86_64-unknown-linux-gnu
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -97,7 +108,7 @@ jobs:
       # from a fuzzing crash, and the per-target runs below reuse the artifacts.
       - name: Build fuzz targets
         working-directory: fuzz
-        run: cargo +nightly-2026-06-11 fuzz build
+        run: cargo +nightly-2026-06-11 fuzz build --target "$FUZZ_BUILD_TARGET"
       - name: Run each target (bounded, fail on the first crash)
         working-directory: fuzz
         env:
@@ -115,7 +126,7 @@ jobs:
             # a hostile-bytes mega-allocation is reported as a finding, not a runner
             # kill; -print_final_stats surfaces coverage/exec counts in the log. A
             # nonzero exit (a crash/leak/timeout) is a genuine finding -> fail the gate.
-            if ! cargo +nightly-2026-06-11 fuzz run "$t" -- \
+            if ! cargo +nightly-2026-06-11 fuzz run --target "$FUZZ_BUILD_TARGET" "$t" -- \
                   -max_total_time="${SECS}" -rss_limit_mb=2048 -print_final_stats=1; then
               echo "::error::fuzz target '$t' reported a crash/leak/timeout — see the log + the saved reproducer artifact."
               status=1
