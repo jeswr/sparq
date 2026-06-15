@@ -6,15 +6,12 @@
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-The **dictionary-encoded RDF triplestore** at the heart of [sparq](../../README.md): a
-`Graph` is a term dictionary plus six sorted permutation indexes.
+The **[RDF](https://www.w3.org/TR/rdf12-concepts/) triplestore** at the heart of
+[sparq](../../README.md) — the storage substrate every other sparq crate builds on.
 
-It is the storage substrate every other sparq crate builds on. Terms are interned to
-integer ids once; the six permutations (SPO/SOP/PSO/POS/OSP/OPS) make every triple-pattern
-shape an index range scan. Loaders are parallel and streaming, read the RDF text formats from
-a `&str` or any `Read` (wrap a `.gz` / `.bz2` / `.zst` decompressor to stream compressed input
-straight into the parse), and an out-of-core, memory-mapped store with optional
-block-compressed permutations queries datasets larger than RAM.
+Load [RDF 1.2](https://www.w3.org/TR/rdf12-concepts/) (named graphs and quoted triple terms
+included) from the text formats, in memory or out-of-core for datasets larger than RAM, and
+scan triple patterns. How the store is laid out and why is in the design docs linked below.
 
 ## 🚀 Quickstart
 
@@ -25,7 +22,6 @@ use sparq_core::Graph;
 let turtle = r#"<http://example.org/alice> a <http://schema.org/Person> ."#;
 let g = Graph::load_str(turtle, "turtle")?;
 
-// Range-scan a triple pattern over the permutation indexes.
 let count = g.len();
 assert_eq!(count, 1);
 # Ok(()) }
@@ -33,16 +29,17 @@ assert_eq!(count, 1);
 
 ## ✨ Features
 
-- **Dictionary encoding** — every term interned to a `u32` id once; storage and joins
-  operate on fixed-width integers, not strings.
-- **Six permutation indexes** — every BGP triple pattern is an index range scan; no
-  full-graph filtering.
-- **Parallel + streaming loaders** — Turtle / N-Triples / N-Quads / TriG from a `&str` or any
-  `Read`; a caller-supplied `.gz` / `.bz2` / `.zst` decompressor streams straight into the parse.
-- **Incremental updates** — delta-overlay inserts/deletes with an optional write-ahead log.
-- **Out-of-core store** — memory-mapped permutations (optional block compression) for
-  datasets larger than RAM, with near-zero resident heap.
-- **Named graphs & RDF 1.2** — full quad storage and structurally stored quoted triple terms.
+- **RDF parsing & ingest** — load Turtle, N-Triples, N-Quads, and TriG from a `&str` or any
+  `Read`. `load_reader*` accepts any `Read`, so you can wrap a `gzip` / `bzip2` / `zstd`
+  decoder around your file and stream it in — sparq does not content-sniff or auto-decompress
+  ([guide](../../skills/data-formats/SKILL.md)).
+- **Triple-pattern scans** — look up any triple pattern over the loaded graph.
+- **Incremental updates** — insert and delete triples in place, with an optional
+  write-ahead log.
+- **Out-of-core store** — query datasets larger than RAM from a memory-mapped on-disk store,
+  with optional block compression and near-zero resident heap.
+- **Named graphs & RDF 1.2** — full quad storage and
+  [quoted triple terms](https://www.w3.org/TR/rdf12-concepts/).
 
 ## 📚 Learn more
 
