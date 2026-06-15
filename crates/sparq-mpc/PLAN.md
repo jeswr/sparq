@@ -89,7 +89,11 @@ Join holders' partials on GLOBAL IRIs (architecture §2 #6, §4.3 step 4).
   the dedicated type, not faked into the disclosed-key one.
 
 ### M3 — `MpcBackend` (honest-majority Shamir) + hidden-value join  ✅ DONE [OPUS-4.8]
-First concrete secret-sharing impl behind the trait + the hidden-value join.
+First concrete secret-sharing impl behind the trait + the hidden-value join,
+**plus the RS tampered-share-detection hardening (guarantee (D), sq-uu0u)** —
+detect-and-abort / robust-correct on every reconstruction path, surfaced via the
+`MaliciousSecurity` enum. See the "Security model" bullet below and the
+"Deferred malicious-security seams" subsection for what remains beyond v1.
 - **Q2 RESOLVED for v1: honest-majority, semi-honest** (Jesse's decision:
   honest-majority now, configurable long-term). The four flatmates *cooperate*
   among themselves (honest-but-curious) to prove an aggregate to an external
@@ -110,26 +114,53 @@ First concrete secret-sharing impl behind the trait + the hidden-value join.
     `m=d·r`; `m==0 ⇔ a==b`, leaking ONLY the match bit. Keys never reconstructed.
   - `HiddenValueJoin`: all-pairs oblivious join on a PRIVATE key driven by the
     equality test, disclosing only the matching payload columns.
-- **Tested (`cargo test -p sparq-mpc --release`, 32 pass):** DIFFERENTIAL —
+- **Tested (`cargo test -p sparq-mpc`):** DIFFERENTIAL —
   (a) secure cumulative sum == plaintext sum; (b) hidden-value join == plaintext
   inner join over the union (overlap, no-overlap, multi-match fan-out, empty
   side). Plus: field arithmetic vs reference modulo; share/reconstruct round-
   trip; the threshold actually hides (a <=t-share set is consistent with a
   DIFFERENT secret — information-theoretic hiding witness); reconstruction below
-  t+1 errors; the equality primitive in isolation (n=5,t=2). Native-only
-  invariant re-verified: `cargo tree -p sparq-wasm` excludes `sparq-mpc`.
-- **Security model (stated, not papered over):** honest-majority **semi-honest**.
-  Privacy holds while `< t+1` parties pool shares; each party learns only its
-  shares + the disclosed output. **NOT malicious-secure** (guarantee D) — a
-  malicious party feeding inconsistent shares is out of scope for v1. Malicious
-  honest-majority (VSS / IT-MACs, ≈2×) is future hardening behind the SAME trait.
+  t+1 errors; the equality primitive in isolation (n=5,t=2). The adversarial
+  suite (`adversarial_tests.rs`) pins guarantee (D): tampered-share detection /
+  RS correction across the `(n, t, e)` regimes and at the end-to-end
+  `reconstruct_disclosed` API boundary, the non-detection boundaries (exact `t+1`
+  and the degree-`2t` `n=2t+1` equality open), and the "no fake crypto" stub
+  table. Native-only invariant re-verified: `cargo tree -p sparq-wasm` excludes
+  `sparq-mpc`.
+- **Security model (stated, not papered over):** honest-majority. Privacy holds
+  while `< t+1` parties pool shares; each party learns only its shares + the
+  disclosed output (confidentiality, guarantee (A)). **Tampered-share detection
+  (guarantee (D)) IS now provided at the Shamir reconstruction layer** (sq-uu0u
+  WI-1/WI-2/WI-3, merged) — *not* the old semi-honest-only stance:
+  - Shamir shares are an `[n, t+1]` Reed–Solomon codeword over the same `F_p`, so
+    `robust.rs::reconstruct_robust` (Berlekamp–Welch via Gaussian elimination,
+    **zero new deps** — no DLOG group, no SPDZ preprocessing) DETECTS any
+    tampering and CORRECTS up to `e = ⌊(n−t−1)/2⌋` cheaters, else ABORTS with the
+    typed `MpcError::Tampered`. Every production reconstruction routes through it
+    (`ShamirBackend::reconstruct` / `reconstruct_disclosed`, and the degree-`2t`
+    equality open via `reconstruct_degree`). The guarantee a given `(n, t)`
+    delivers is surfaced through `BackendInfo` as the `MaliciousSecurity` enum
+    (`SemiHonestOnly` / `HonestMajorityAbort` / `HonestMajorityRobust{max_cheaters}`).
+  - **Honest boundaries where RS cannot help (pinned by tests, not papered over):**
+    at exactly `t+1` shares (no redundancy) tampering is information-theoretically
+    undetectable; and the degree-`2t` equality/mult open has zero redundancy at
+    the honest-majority minimum `n = 2t+1` (odd `n`), so a forged product share is
+    undetectable there. A true fix at those no-redundancy points needs an
+    information-theoretic MAC (the deferred SPDZ-style seam below, bead sq-6d6g),
+    not RS redundancy. **Cheater *attribution* in the abort message is best-effort
+    (heuristic) when correction is impossible — detection is sound; sharpening
+    blame is bead sq-6u6b.**
+  - Robust *with guaranteed output* still assumes an honest majority; a
+    dishonest-majority malicious backend (SPDZ/MASCOT IT-MACs, ≈2×) remains future
+    hardening behind the SAME trait (deferred seam below).
 - **Honest scope / what is scaffolded (not faked):** the join is `O(|L|·|R|)`
   all-pairs (real circuit-PSI uses cuckoo bins — that ~linear optimisation is
   **Q3 / RQ2b, NOT done**); the key→`Fp` encoding is the holder's responsibility
   and needs a collision-resistant hash whose correctness is proven in-circuit in
-  production (here controlled so the differential is exact); the simulation RNG
-  is a deterministic SplitMix64 — **production needs a CSPRNG** for the dealer's
-  masking coefficients (flagged in `shamir.rs`, not hidden).
+  production (here controlled so the differential is exact). The dealer's masking
+  randomness is a **CSPRNG** (OS-seeded ChaCha20, `rng.rs`, sq-1vt) — a
+  deterministic SplitMix64 is reachable only behind a test-only feature gate, so
+  the real protocol's masks are unpredictable.
 - **Configurability (Jesse's requirement):** the trust model is a property of
   the chosen `MpcBackend` value (`BackendInfo::trust_model`), never hardcoded in
   the join/proof layer. A dishonest-majority (SPDZ/MASCOT) backend slots in
@@ -144,6 +175,48 @@ First concrete secret-sharing impl behind the trait + the hidden-value join.
   obliviousness forces worst-case padding"). Viable regime only: honest-majority,
   LAN, ≤10³–10⁴ rows/holder. Do NOT extrapolate to WAN / dishonest-majority
   (zero published data points).
+
+#### Deferred malicious-security seams (sq-uu0u WI-4, bead sq-6d6g) [OPUS-4.8]
+The RS detect-and-abort / robust path (WI-1/2/3) closes guarantee (D) **in the
+honest-majority, redundancy-present regime** (`reconstruct` at degree `t`; the
+degree-`2t` equality open when `n > 2t+1`). Two gaps are explicitly NOT covered
+by RS redundancy and are deferred to dedicated future backends behind the SAME
+`MpcBackend` trait — recorded here so the boundary is a documented design seam,
+not a silent hole (architecture §4.2 guarantee (D), §5.2 Q2; sq-uu0u DESIGN
+"REJECTED for now"):
+
+1. **SPDZ-style information-theoretic-MAC backend (dishonest-majority + the
+   no-redundancy points).** An additive-share + per-share MAC scheme
+   (SPDZ/MASCOT/Overdrive) is the only family that gives malicious security
+   *without* reconstruction redundancy, and the only one that extends to a
+   **dishonest majority** (up to `n−1` corrupt). It is the principled fix for the
+   two RS blind spots: (a) reconstruction at exactly `t+1` shares, and (b) the
+   degree-`2t` equality/mult open at the honest-majority minimum `n = 2t+1`
+   (`join::secure_equal` / `shamir::reconstruct_degree`) — both have zero RS
+   redundancy, so a MAC-check before opening (abort on a failed tag) is required,
+   not Berlekamp–Welch. Cost: input-independent preprocessing (Beaver triples +
+   MACs) and ≈`2^-61` soundness over `F_p = 2^61−1`. It slots in as a new backend
+   reporting `TrustModel::DishonestMajority` + a non-`SemiHonestOnly`
+   `MaliciousSecurity`, changing only `type Share` (value + MAC tag) and adding a
+   MAC-check in `reconstruct_disclosed` — the `share_private_input` / `run_secure`
+   / `reconstruct_disclosed` SIGNATURES and all callers stay put (`backend.rs`).
+   REJECTED for *this* increment: it needs preprocessing + a fresh soundness
+   argument and is a whole backend, not a Shamir-layer change.
+
+2. **Poseidon2 / Schnorr share-commitments for the M4 attestation layer.**
+   Binding a *reconstructed* (or shared) value to an issuer-signed commitment
+   inside the collaborative proof (guarantees (B) correctness end-to-end and (C)
+   attested-source) needs a commitment in a circuit-friendly group — Poseidon2
+   over a SNARK field (BN254 `Fr`), with Schnorr/EdDSA opening — NOT the lean
+   `F_p = 2^61−1` arithmetic this crate carries. That deliberately keeps arkworks
+   /DLOG out of `sparq-mpc`; it lives in the M4 proof/attestation seam (`proof.rs`,
+   gated on Q1 + the ZK-foundation remediation), which is a separate milestone.
+   REJECTED for this increment: wrong field, would drag a heavy dependency into a
+   crate that is intentionally dependency-light and wasm-excluded.
+
+Neither seam is on the v1 critical path: v1 is honest-majority, and the RS path
+already delivers (D) there. Both are tracked as beads (sq-6d6g) and named at
+their call sites so the deferral is auditable.
 
 ### M4 — Collaborative proof + distributed attestation  ⚠️ THE HARD PROBLEM (SPIKE)
 The contribution AND the principal research risk (architecture §5.2 Q1, §3.4).
@@ -188,6 +261,13 @@ regime that has zero published data points.
   **the principal thing that remains.** Unsolved in the literature; SPIKE.
 - **Q2** ✅ DECIDED at **M3**: honest-majority Shamir for v1 (configurable behind
   the trait long-term). Done.
+- **Guarantee (D), malicious security** ✅ DELIVERED at **M3** for the honest-
+  majority, redundancy-present regime (sq-uu0u WI-1/2/3): RS / Berlekamp–Welch
+  detect-and-abort / robust-correct on every reconstruction path, surfaced via
+  the `MaliciousSecurity` enum. Remaining seams (no-redundancy points + dishonest
+  majority via an IT-MAC backend; M4 attestation commitments) are deferred and
+  documented under M3 "Deferred malicious-security seams" (bead sq-6d6g);
+  attribution sharpening is bead sq-6u6b.
 - **Q3** (BGP-join obliviousness cost / RQ2b) — surfaced concretely at **M3**:
   the hidden-value join is `O(|L|·|R|)` all-pairs; the ~linear cuckoo-bin /
   oblivious-hashing optimisation and the fragment it applies to is **still open**
