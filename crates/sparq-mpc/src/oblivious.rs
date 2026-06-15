@@ -49,11 +49,19 @@
 //!   secret (in the simulation the routing layer holds them; in a real deployment
 //!   they are jointly generated via PRSS — eprint 2021/1223 — and never opened).
 //!
-//! Crucially a switch over two *sharings* is a **swap of two share-vectors** —
-//! pure local relabeling, **zero multiplications, stays degree `t`, needs no
-//! degree reduction**. That is exactly why the shuffle is buildable today on the
+//! Crucially, with **cleartext** control bits — which is what THIS in-process
+//! simulation uses (the routing layer / dealer holds the sampled permutation) —
+//! a switch over two *sharings* is a **swap of two share-vectors**: pure local
+//! relabeling, **zero multiplications, stays degree `t`, needs no degree
+//! reduction**. That is exactly why the shuffle is buildable today on the
 //! current Shamir machinery (which has only a single non-reducing product —
 //! [`crate::shamir::mul_shares_raw`]) whereas a generic secure comparator is not.
+//! (A deployed shuffle keeps the control bits **secret**, replacing each local
+//! swap by the arithmetic conditional swap `x' = x + b·(y − x)` — 1 multiplication
+//! per switch — at the SAME obliviousness; that modelled cost is [`ShuffleCost`].
+//! "Zero multiplications" here is the simulation's cleartext-routing cost, not a
+//! claim that the deployed protocol is multiplication-free — see the
+//! communication-complexity note below and [`WaksmanNetwork::apply`].)
 //! This is the standard oblivious shuffle (Waks-On/Waks-Off CCS'23, eprint
 //! 2023/1236; we use the **full-support Waksman/Beneš network — NOT a network
 //! that biases the realizable permutation distribution** (the "Benes — biased"
@@ -105,10 +113,21 @@
 //! latency; only these counts are load-bearing:
 //!
 //! - **Shuffle (Waksman/Beneš, `n` items):** `O(n log n)` conditional swaps;
-//!   network **depth** `2·⌈log₂ n⌉ − 1` layers → that many communication rounds when
-//!   control bits are secret-shared (a swap of two *cleartext-control* sharings is
-//!   local — 0 rounds — but a real shuffle uses secret control bits, 1 mult per
-//!   switch). Comm scales with the share width crossing the party boundary.
+//!   network **depth** `2·⌈log₂ n⌉ − 1` layers → that many communication rounds
+//!   when control bits are secret-shared. **Two distinct cost regimes — do not
+//!   conflate them:**
+//!   - *This in-process SIMULATION* routes via **cleartext** control bits (the
+//!     dealer holds the sampled permutation), so [`WaksmanNetwork::apply`] does a
+//!     local relabel/swap of two whole sharings — **0 multiplications, 0 rounds**.
+//!     That is the only reason the shuffle is buildable on the single-product
+//!     backend, and what "0 multiplications" elsewhere refers to.
+//!   - *The DEPLOYED protocol* uses **secret** control bits (PRSS-generated, never
+//!     revealed), so each switch is the arithmetic conditional swap
+//!     `x' = x + b·(y − x)` — **1 multiplication per switch**, the cost
+//!     [`ShuffleCost`] models. The obliviousness is identical; only the
+//!     simulation's bookkeeping of the routing differs.
+//!
+//!   Comm scales with the share width crossing the party boundary.
 //! - **Sort (Batcher odd-even mergesort, `n` items):** `O(n log² n)`
 //!   compare-exchange gates in `O(log² n)` layers (rounds), each gate one secure
 //!   comparison + one conditional swap.
@@ -616,7 +635,7 @@ pub fn shuffle(
     if n <= 1 {
         return Ok((col, ShuffleCost::model(n, net.switch_count())));
     }
-    let perm = random_permutation(dealer, n);
+    let perm = random_permutation(dealer, n)?;
     let bits = net.route(&perm)?;
     net.apply(&mut col, &bits)?;
     Ok((col, ShuffleCost::model(n, net.switch_count())))
@@ -625,30 +644,60 @@ pub fn shuffle(
 /// Draw a uniformly-random permutation of `0..n` via Fisher–Yates over the
 /// dealer's masking RNG (CSPRNG in production). Unbiased: each index is chosen
 /// uniformly from the remaining range with rejection sampling to kill modulo bias.
-fn random_permutation(dealer: &mut ShamirDealer, n: usize) -> Vec<usize> {
+///
+/// **Fails closed for oversized `n`.** The unbiased sampler can only draw a
+/// uniform integer below the field modulus `P = 2^61 − 1` (it rejection-samples
+/// field elements), so a column whose length exceeds `P` is rejected with a typed
+/// [`MpcError`] rather than producing a biased permutation or hanging
+/// ([`uniform_below`]). `n` is a row count, so `n > P` is unreachable in any real
+/// deployment; this guards the boundary explicitly anyway. `[OPUS-4.8]`
+fn random_permutation(dealer: &mut ShamirDealer, n: usize) -> Result<Vec<usize>, MpcError> {
+    // Reject up front so the `as u64` cast below cannot lose information and the
+    // sampler is never asked for a `bound > P` it cannot serve unbiasedly.
+    let p = crate::field::P;
+    if n as u128 > p as u128 {
+        return Err(MpcError::Protocol(format!(
+            "random_permutation: column length {n} exceeds field modulus P = {p}; \
+             cannot sample an unbiased permutation"
+        )));
+    }
     let mut perm: Vec<usize> = (0..n).collect();
     for i in (1..n).rev() {
-        let j = uniform_below(dealer, (i + 1) as u64) as usize; // j in [0, i]
+        // `i + 1 <= n <= P` (checked above), so `(i + 1) as u64` is exact and
+        // `uniform_below` always terminates.
+        let j = uniform_below(dealer, (i + 1) as u64)? as usize; // j in [0, i]
         perm.swap(i, j);
     }
-    perm
+    Ok(perm)
 }
 
 /// Uniform integer in `[0, bound)` from the dealer's masking RNG, rejection-
-/// sampled to remove modulo bias. `bound >= 1`.
-fn uniform_below(dealer: &mut ShamirDealer, bound: u64) -> u64 {
+/// sampled to remove modulo bias. Requires `1 <= bound <= P` (the field modulus):
+/// the sampler draws uniform field elements in `[0, P)`, so a `bound > P` cannot
+/// be served — the rejection `limit = P − (P % bound)` would be `0` and the loop
+/// would never terminate. Such a `bound` is rejected with a typed [`MpcError`]
+/// instead of hanging. `[OPUS-4.8]`
+fn uniform_below(dealer: &mut ShamirDealer, bound: u64) -> Result<u64, MpcError> {
     debug_assert!(bound >= 1);
+    let p = crate::field::P;
+    if bound > p {
+        return Err(MpcError::Protocol(format!(
+            "uniform_below: bound {bound} exceeds field modulus P = {p}; \
+             cannot rejection-sample without bias"
+        )));
+    }
     if bound == 1 {
-        return 0;
+        return Ok(0);
     }
     // Draw uniform field elements (already uniform in [0, P)) and reject the tail
-    // so the modular reduction is unbiased.
-    let p = crate::field::P;
+    // so the modular reduction is unbiased. `bound <= P` guarantees `limit >= 1`
+    // (the constant-term residue `P % bound < bound <= P`), so the loop makes
+    // progress and terminates with probability 1.
     let limit = p - (p % bound);
     loop {
         let v = dealer.draw_fp().value();
         if v < limit {
-            return v % bound;
+            return Ok(v % bound);
         }
     }
 }
@@ -1272,5 +1321,47 @@ mod tests {
         let mut dealer = backend.dealer();
         let col = share_col(&mut dealer, &[1, 2, 3]);
         assert!(sort_with_keys(col, vec![Fp::new(1)]).is_err());
+    }
+
+    // FAIL-CLOSED: `uniform_below` must reject a `bound > P` with a typed error
+    // instead of spinning forever (the `limit = P − (P % bound) = 0` non-
+    // termination Copilot flagged). For `1 <= bound <= P` it must terminate and
+    // return a value in range. `[OPUS-4.8]` (Copilot review #88).
+    #[test]
+    fn uniform_below_rejects_bound_above_modulus_and_terminates_below() {
+        let backend = ShamirBackend::new_seeded(5, 0xBEEF).unwrap();
+        let mut dealer = backend.dealer();
+        let p = crate::field::P;
+        // bound > P → typed error, NOT a hang.
+        assert!(uniform_below(&mut dealer, p + 1).is_err());
+        assert!(uniform_below(&mut dealer, u64::MAX).is_err());
+        // bound == P is the largest serviceable bound: terminates, in range.
+        let v = uniform_below(&mut dealer, p).expect("bound == P is serviceable");
+        assert!(v < p);
+        // Small bounds terminate and stay in range.
+        for bound in [1u64, 2, 3, 7, 1000] {
+            let v = uniform_below(&mut dealer, bound).expect("small bound terminates");
+            assert!(v < bound, "uniform_below({bound}) = {v} out of range");
+        }
+    }
+
+    // FAIL-CLOSED: `random_permutation` rejects a column length > P (would force
+    // an unserviceable `uniform_below` bound). Reachable sizes produce a valid
+    // permutation of `0..n`. `[OPUS-4.8]` (Copilot review #88).
+    #[test]
+    fn random_permutation_rejects_oversized_and_is_valid_below() {
+        let backend = ShamirBackend::new_seeded(5, 0x1234).unwrap();
+        let mut dealer = backend.dealer();
+        let p = crate::field::P as usize;
+        // Length > P → typed error (cannot construct such a Vec, but the guard is
+        // checked from the count before any allocation of indices beyond it).
+        assert!(random_permutation(&mut dealer, p.saturating_add(1)).is_err());
+        // Reachable n → a valid permutation of 0..n.
+        for n in [0usize, 1, 2, 5, 16] {
+            let perm = random_permutation(&mut dealer, n).expect("valid n");
+            let mut sorted = perm.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..n).collect::<Vec<_>>(), "n={n}: not a permutation");
+        }
     }
 }

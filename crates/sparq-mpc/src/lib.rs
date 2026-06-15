@@ -61,8 +61,13 @@
 //!   remains the default where the key is a public global IRI, convention #4.)
 //! - [`oblivious`] — **(§3 the substrate gap; §4.1 L2; §8 step 1) — sq-18lk, the
 //!   keystone hidden-regime primitive.** Oblivious **shuffle** (Waksman/Beneš
-//!   permutation network over secret-shared columns — sound today, zero
-//!   multiplications) + oblivious **sort** (Batcher odd-even mergesort network
+//!   permutation network over secret-shared columns — sound today; the in-process
+//!   simulation routes via cleartext control bits held by the dealer, so each
+//!   switch is a local swap costing **0 multiplications**, while the *deployed*
+//!   protocol uses **secret** control bits and pays **1 multiplication per
+//!   switch** for the arithmetic conditional swap — surfaced via
+//!   [`oblivious::ShuffleCost`]) + oblivious **sort** (Batcher odd-even mergesort
+//!   network
 //!   whose compare-exchange access pattern is data-independent — the obliviousness
 //!   substrate). DISTINCT / ORDER BY / GROUP BY-over-hidden / MIN-MAX /
 //!   OPTIONAL-MINUS / the set-returning oblivious-join output path / ~linear joins
