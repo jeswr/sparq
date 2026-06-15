@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# [OPUS-4.8] HARD regression RATCHET on the DETERMINISTIC (runner-noise-immune) perf metrics.
+# [OPUS-4.8] HARD regression RATCHET on the DETERMINISTIC (runner-noise-immune) perf metrics; the TIMING
+# (wall-clock) metric is ADVISORY/NON-BLOCKING — measured + reported + tracked, but never merge-blocking.
 #
 # WHY THIS EXISTS  (sq-i1d created the gate; sq-52e turned it into a true ratchet)
 # -------------------------------------------------------------------------------
@@ -31,43 +32,52 @@
 #   store_bytes_per_triple_small  2%   auto   second (fixed) scale, catches per-triple-overhead regs
 #   dict_bytes_per_term           2%   auto   integer dictionary memory-layout metric
 #   wasm_bundle_bytes             2%   auto   browser bundle size — grows only DELIBERATELY (see RAISE)
-#   parse_ns_per_byte            12%   noise  wall-clock-derived (~3% run-to-run on the published
-#                                             series); wide NOISE band + best-of-N re-measure (below).
+#   parse_ns_per_byte            12%   noise  wall-clock-derived; ADVISORY / NON-BLOCKING (a regression
+#                                             WARNS but never fails the gate — shared-runner variance
+#                                             exceeds the band even with best-of-N; see below).
 # The 2% byte metrics are integer-exact at the current scale, so 2% is "integer-exact plus a hair".
 #
 # auto  = the floor AUTO-RATCHETS DOWN on a genuine improvement (current < floor) and NEVER auto-raises.
 # noise = the floor only ratchets DOWN on a SUSTAINED improvement (a supplied median/percentile of
 #         recent points is below the floor), so a single noise-low can never tighten it.
 #
-# DETERMINISTIC vs TIMING — the metric classification that drives flake-robustness  [OPUS-4.8] (sq-dzfu)
-# -----------------------------------------------------------------------------------------------------
+# DETERMINISTIC = HARD-GATED, TIMING = ADVISORY/NON-BLOCKING — the split that drives the exit code  [OPUS-4.8]
+# -----------------------------------------------------------------------------------------------------------
 # The classification is DATA-DRIVEN from each metric's `mode` (it is NOT a hard-coded name list):
 #   * DETERMINISTIC (mode == "auto"): integer byte-count / memory-layout metrics. These are immune to
 #     runner noise (the same input always yields the same bytes), so they are HARD-GATED strictly: any
-#     value above floor*(1+threshold) FAILS, no re-measure. The byte-count ratchet must stay strict.
-#   * TIMING (mode == "noise"): wall-clock-derived metrics (parse_ns_per_byte). On a shared GitHub
-#     runner the measurement only ever INFLATES from preemption/contention — it never reads faster than
-#     the true cost. So a single high reading is noise, not a regression.
+#     value above floor*(1+threshold) FAILS (exit 2), no re-measure. The byte-count ratchet stays strict.
+#   * TIMING (mode == "noise"): wall-clock-derived metrics (parse_ns_per_byte). These are ADVISORY /
+#     NON-BLOCKING — measured + reported (the reading, the band, a loud WARNING on a regression) and
+#     still tracked/published, but a timing-only regression contributes EXIT 0, never exit 2. It can
+#     NEVER block a merge on its own. See the next block for WHY.
 # is_timing(cfg) / is_deterministic(cfg) below are the single source of truth for this split.
 #
-# THE FLAKE THIS FIXES — runner noise hard-failing an unrelated PR  (sq-dzfu)
-# --------------------------------------------------------------------------
-# parse_ns_per_byte intermittently exceeded even its wide 12% band purely from runner contention (e.g.
-# 5.5888 vs floor 4.895 = +14.17%) on a PR that changed ZERO parsing code, hard-failing the merge train
-# via the ci-summary aggregator. The fix is BEST-OF-N RE-MEASURE for TIMING metrics, exactly analogous
-# to PR #62's coverage fix (an undercount → re-run the measurement → take the better value):
+# WHY TIMING IS ADVISORY — shared-runner wall-clock variance exceeds any useful band  (sq-perf)
+# --------------------------------------------------------------------------------------------
+# parse_ns_per_byte FLAPPED the merge train REPEATEDLY despite a wide 12% band AND a best-of-5 re-measure
+# AND a median-floor correction, because shared GitHub-runner wall-clock variance EXCEEDS any band tight
+# enough to be useful. The published series ranges ~3.85–5.43 (min 3.854, max 5.435 over 80 points = a
+# ~41% spread). Timeline: it tripped on main (5.743 vs floor 4.895, +17%); PR #133 "fixed" it by raising
+# the floor to the series median 4.9721 (band +12% = 5.5688); it then FLAPPED AGAIN on unrelated PRs —
+# e.g. #130, an MPC-only change that touches ZERO parsing code and cannot affect parse perf. A gate that
+# flaps on noise is WORSE than no gate: it blocks legitimately-green PRs and trains everyone to ignore it.
+# So a TIMING regression is now demoted to a loud `WARNING (advisory, non-blocking)` and DOES NOT fail the
+# gate. We are removing the false-positive MERGE-BLOCK, not the VISIBILITY: the metric is still measured,
+# still warned-on, and still tracked/published on the dashboard for human review. The DETERMINISTIC
+# byte-counts (which are integer-exact and runner-immune) remain HARD-gated exactly as before.
 #
-# BEST-OF-N RE-MEASURE (timing metrics only) — `--remeasure-cmd` + `--remeasure-k`
-# --------------------------------------------------------------------------------
+# BEST-OF-N RE-MEASURE (timing metrics only) — `--remeasure-cmd` + `--remeasure-k`  (sq-dzfu)
+# ------------------------------------------------------------------------------------------
 # When a TIMING metric exceeds its band AND a re-measure command is supplied, the gate re-runs that
 # command up to K times (default 4) and takes the BEST (min — smaller is better) value across the
-# original + all re-measures. It only FAILS if the BEST of all readings still exceeds the band. Because
-# timing noise only inflates, best-of-N converges to the true value, so a real parse regression (slow on
-# EVERY reading) still fails while a one-off noise spike is squeezed out. DETERMINISTIC metrics are
-# NEVER re-measured (re-running can't change an integer byte count) — they hard-fail on the first read.
-# The re-measure command must re-emit the SAME customSmallerIsBetter JSON (a {name,unit,value} list);
-# the gate reads back the timing metric(s) from it. With NO --remeasure-cmd the gate degrades to the
-# wide-band-only behaviour (still robust, just without the extra squeeze) — used by --self-test, which
+# original + all re-measures. This still runs because it SQUEEZES the TRACKED number toward the true cost
+# (a one-off contention spike is dropped), so the published series is the truest reading — but its outcome
+# is now ADVISORY: even a best-of-N that still exceeds the band only emits the WARNING, it never fails the
+# gate. DETERMINISTIC metrics are NEVER re-measured (re-running can't change an integer byte count) — they
+# hard-fail on the first read. The re-measure command must re-emit the SAME customSmallerIsBetter JSON (a
+# {name,unit,value} list); the gate reads back the timing metric(s) from it. With NO --remeasure-cmd the
+# gate degrades to the wide-band-only behaviour (still measures + warns) — used by --self-test, which
 # injects a synthetic re-measure callback instead of shelling out.
 #
 # AUTO-RATCHET-DOWN (the floor only tightens by itself) — see bench.yml "Auto-ratchet" step
@@ -93,12 +103,15 @@
 #   perf-gate.py --update-baseline <current-bench-results.json> [baseline.json] [--recent a,b,c]
 #                                   # recompute + rewrite floors; exit 0 if changed, 3 if unchanged
 #   perf-gate.py --self-test        # unit-test the ratchet logic (no files needed)
-# EXIT CODES: 0 = pass / baseline changed, 2 = regression (hard fail), 1 = usage / parse error,
-#             3 = --update-baseline made no change (nothing to commit).
+# EXIT CODES: 0 = pass (incl. a TIMING-only advisory regression — warned, not blocked), 2 = DETERMINISTIC
+#             regression (hard fail), 1 = usage / parse error, 3 = --update-baseline made no change.
+#             A mixed run (deterministic + timing both regressed) exits 2 — the deterministic fail
+#             dominates; the timing regression is still reported as an advisory WARNING alongside it.
 #
-# This ratchet is STRICT-on-regression / SILENT-on-improvement for the DETERMINISTIC metrics, and is
-# robust to runner noise on the TIMING metrics (wide band + best-of-N re-measure), so it is safe to run
-# on noisy GitHub-hosted runners — runner jitter never blocks a merge, real regressions still fail.
+# This ratchet is STRICT-on-regression / SILENT-on-improvement for the DETERMINISTIC metrics, and ADVISORY
+# (warn-only, never merge-blocking) for the TIMING metric, so it is safe to run on noisy GitHub-hosted
+# runners — runner jitter never blocks a merge (a timing warning is informational), real DETERMINISTIC
+# regressions still hard-fail.
 
 import json
 import os
@@ -421,11 +434,14 @@ def gate_with_remeasure(current, baseline, allow=frozenset(), remeasure_fn=None,
             lines.append(f"  [remeasure] timing metric(s) cleared the band after {attempt} re-measure(s).")
             lines.extend(eval_lines)
             return regressions, lines, effective
-    # Best of K still over band -> a genuine (sustained-across-all-readings) timing regression.
+    # Best of K still over band -> the TIMING reading is sustained-high across all readings. NOTE: this is
+    # reported as an ADVISORY WARNING by main() (TIMING metrics are non-blocking — shared-runner variance
+    # exceeds the band even after best-of-N), so it never fails the gate; the best-of-N still ran to
+    # squeeze the TRACKED number toward the true cost. (DETERMINISTIC regressions, by contrast, hard-fail.)
     regressions, eval_lines = evaluate(effective, baseline, allow=allow)
     lines.append(
-        f"  [remeasure] best of {k + 1} readings still exceeds the band — TIMING regression is REAL "
-        f"(not runner noise) and FAILS."
+        f"  [remeasure] best of {k + 1} readings still exceeds the band — TIMING metric flagged ADVISORY "
+        f"(non-blocking; reported as a WARNING, does not fail the gate)."
     )
     lines.extend(eval_lines)
     return regressions, lines, effective
@@ -639,9 +655,9 @@ def self_test():
         return {"parse_ns_per_byte": 6.0 + 0.1 * bad_calls["n"]}  # all readings far over band
 
     regsC, linesC, _ = gate_with_remeasure(bad_reading, baseT, remeasure_fn=remeasure_bad, k=4)
-    assert [r[0] for r in regsC] == ["parse_ns_per_byte"], regsC   # real regression still FAILS
-    assert bad_calls["n"] == 4, "a real regression should exhaust all K re-measures before failing"
-    assert any("REAL" in ln for ln in linesC), linesC
+    assert [r[0] for r in regsC] == ["parse_ns_per_byte"], regsC   # still flagged (advisory at main())
+    assert bad_calls["n"] == 4, "a sustained-high timing reading should exhaust all K re-measures"
+    assert any("ADVISORY" in ln for ln in linesC), linesC
 
     # 12) a DETERMINISTIC regression is NEVER re-measured (re-running can't change a byte count): it
     #     fails strictly on the first read, and a timing re-measure is not even attempted when a
@@ -715,6 +731,61 @@ def self_test():
             '[{"name":"parse_ns_per_byte","unit":"ns/byte","value":4.95}]', {"parse_ns_per_byte"}), k=4)
     assert regsG == [], regsG                            # good re-measure cleared the band -> PASS
     assert effG["parse_ns_per_byte"] == 4.95, effG       # ...and improved the metric to the true value
+
+    # ============================================================================================
+    # 15) [OPUS-4.8] (sq-perf) ADVISORY-DEMOTION EXIT-CODE CONTRACT — the load-bearing fix. The TIMING
+    #     metric (mode=noise) is NON-BLOCKING: a timing-only regression exits 0 (advisory WARNING), a
+    #     DETERMINISTIC regression still exits 2 (hard fail), and a MIXED run exits 2 (deterministic
+    #     dominates) while STILL emitting the timing advisory. This exercises main()'s real exit path
+    #     (writing temp baseline + current JSON), with NO --remeasure-cmd (the wide-band-only path) so a
+    #     timing band-trip is reported but never re-measured away — proving the demotion, not the squeeze,
+    #     is what unblocks the merge. stdout is captured so the assertions can check the WARNING text.
+    # --------------------------------------------------------------------------------------------
+    import io
+    import tempfile
+    from contextlib import redirect_stdout
+
+    def _run_main(metrics_cfg, current_metrics):
+        """Write a baseline + current-results JSON to temp files and run main() (no remeasure).
+        Returns (exit_code, captured_stdout)."""
+        with tempfile.TemporaryDirectory() as td:
+            base_path = os.path.join(td, "baseline.json")
+            cur_path = os.path.join(td, "current.json")
+            with open(base_path, "w") as fh:
+                json.dump({"metrics": metrics_cfg}, fh)
+            with open(cur_path, "w") as fh:
+                json.dump([{"name": n, "unit": "x", "value": v} for n, v in current_metrics.items()], fh)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = main(["perf-gate.py", cur_path, base_path])
+            return rc, buf.getvalue()
+
+    cfg_mixed = {
+        "store_bytes_per_triple": {"floor": 92, "threshold": 0.02, "mode": "auto"},
+        "parse_ns_per_byte": {"floor": 4.9721, "threshold": 0.12, "mode": "noise"},
+    }
+    # (a) TIMING-ONLY regression (parse +14% > 12% band; store within band) -> EXIT 0 (advisory WARNING).
+    rc_t, out_t = _run_main(cfg_mixed, {"store_bytes_per_triple": 92, "parse_ns_per_byte": 4.9721 * 1.14})
+    assert rc_t == 0, f"a timing-only regression must EXIT 0 (advisory), got {rc_t}\n{out_t}"
+    assert "WARNING (advisory, non-blocking)" in out_t, out_t
+    assert "parse_ns_per_byte [TIMING]" in out_t, out_t
+    assert "HARD FAIL" not in out_t, out_t  # a timing-only trip must NOT print a hard fail
+    # (b) DETERMINISTIC-only regression (store +8.7% > 2%; parse within band) -> EXIT 2 (hard fail).
+    rc_d, out_d = _run_main(cfg_mixed, {"store_bytes_per_triple": 100, "parse_ns_per_byte": 4.9721})
+    assert rc_d == 2, f"a deterministic regression must EXIT 2 (hard fail), got {rc_d}\n{out_d}"
+    assert "HARD FAIL" in out_d and "store_bytes_per_triple [DETERMINISTIC]" in out_d, out_d
+    # (c) MIXED regression (both regress) -> EXIT 2 (deterministic dominates) AND the timing advisory shows.
+    rc_m, out_m = _run_main(cfg_mixed, {"store_bytes_per_triple": 100, "parse_ns_per_byte": 4.9721 * 1.14})
+    assert rc_m == 2, f"a mixed regression must EXIT 2 (deterministic dominates), got {rc_m}\n{out_m}"
+    assert "HARD FAIL" in out_m, out_m                                    # deterministic still hard-fails
+    assert "WARNING (advisory, non-blocking)" in out_m, out_m            # ...and the timing advisory shows
+    assert "store_bytes_per_triple [DETERMINISTIC]" in out_m, out_m
+    # (d) clean run (both within band) -> EXIT 0, no warning, no fail.
+    rc_ok, out_ok = _run_main(cfg_mixed, {"store_bytes_per_triple": 92, "parse_ns_per_byte": 4.9721})
+    assert rc_ok == 0, f"a clean run must EXIT 0, got {rc_ok}\n{out_ok}"
+    assert "WARNING" not in out_ok and "HARD FAIL" not in out_ok, out_ok
+    print("  [advisory] timing-only -> exit 0 (WARNING); deterministic -> exit 2; mixed -> exit 2 "
+          "(deterministic dominates, timing advisory shown) — parse_ns_per_byte can no longer block a merge")
 
     print("perf-gate self-test: ALL ASSERTIONS PASSED")
     return 0
@@ -830,23 +901,36 @@ def main(argv):
     regressions, lines, _eff = gate_with_remeasure(
         current, baseline, allow=allow, remeasure_fn=remeasure_fn, k=remeasure_k)
     print("perf-gate: metric comparison against best-ever FLOOR (smaller is better; "
-          "DETERMINISTIC byte counts hard-gated, TIMING metrics best-of-N robust):")
+          "DETERMINISTIC byte counts hard-gated, TIMING metrics advisory/non-blocking):")
     for ln in lines:
         print(ln)
 
-    if regressions:
-        has_timing = any(is_timing(baseline.get(r[0], {})) for r in regressions)
-        kind = "perf" if has_timing else "deterministic perf"
-        print(f"\nperf-gate: HARD FAIL — {kind} regression(s) above the best-ever ratchet floor:")
-        for name, floor, cur, delta, thr in regressions:
-            klass = "TIMING" if is_timing(baseline.get(name, {})) else "DETERMINISTIC"
-            print(f"  * {name} [{klass}]: floor {floor:g} -> {cur:g} ({delta:+.2f}%, threshold +{thr*100:.0f}%)")
-        if has_timing:
-            print(
-                "\nA TIMING metric above is a REAL regression: it stayed over the band across the original\n"
-                "reading AND every best-of-N re-measure, so it is NOT runner noise (noise only inflates a\n"
-                "single reading; the best of N drowns it out)."
-            )
+    # [OPUS-4.8] (sq-perf) Split the regressions by classification: DETERMINISTIC ones HARD-FAIL the gate
+    # (exit 2); TIMING ones are ADVISORY — reported as a loud WARNING but contributing EXIT 0. The split is
+    # the same data-driven `mode` classification used everywhere else (is_timing). A mixed run exits 2 (the
+    # deterministic fail dominates) while STILL printing the timing advisory alongside it.
+    det_regs = [r for r in regressions if is_deterministic(baseline.get(r[0], {}))]
+    timing_regs = [r for r in regressions if is_timing(baseline.get(r[0], {}))]
+
+    if timing_regs:
+        # ADVISORY: still measured + reported (loudly) + tracked/published, but NOT merge-blocking. The
+        # best-of-N re-measure has already squeezed the value toward the true cost; if it is STILL over
+        # the band, that is reported here for human review — it does not fail CI (shared-runner wall-clock
+        # variance exceeds any useful band, so a timing trip is not a reliable regression signal). See header.
+        print("\nperf-gate: WARNING (advisory, non-blocking) — TIMING metric(s) above the best-ever band:")
+        for name, floor, cur, delta, thr in timing_regs:
+            print(f"  * {name} [TIMING]: floor {floor:g} -> {cur:g} ({delta:+.2f}%, threshold +{thr*100:.0f}%)")
+        print(
+            "This TIMING reading is recorded + published, but does NOT block the merge: shared GitHub-runner\n"
+            "wall-clock variance exceeds any useful band even after the best-of-N re-measure (the published\n"
+            "series spans ~3.85–5.43 ns/byte), so a timing trip is informational, not a regression signal.\n"
+            "If parse perf truly worries you, inspect the dashboard trend rather than this single reading."
+        )
+
+    if det_regs:
+        print("\nperf-gate: HARD FAIL — DETERMINISTIC perf regression(s) above the best-ever ratchet floor:")
+        for name, floor, cur, delta, thr in det_regs:
+            print(f"  * {name} [DETERMINISTIC]: floor {floor:g} -> {cur:g} ({delta:+.2f}%, threshold +{thr*100:.0f}%)")
         print(
             "\nThis is gated against the COMMITTED best-ever floor (bench/perf-baseline.json), so a\n"
             "sub-threshold creep every commit can no longer slow-drift past it. If this increase is\n"
@@ -855,8 +939,12 @@ def main(argv):
             "— the allowed metric then passes AND its floor is re-set to the new value. See header."
         )
         return 2
+
+    if timing_regs:
+        print("\nperf-gate: PASS — no DETERMINISTIC regression (the TIMING warning above is advisory only).")
+        return 0
     print("\nperf-gate: PASS — no perf regression above the best-ever floor "
-          "(deterministic metrics strict; timing metrics robust to runner noise).")
+          "(deterministic metrics strict; timing metrics advisory).")
     return 0
 
 
