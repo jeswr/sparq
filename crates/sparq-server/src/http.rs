@@ -1348,7 +1348,16 @@ fn request_base(headers: &HeaderMap) -> String {
         .map(str::trim)
         .filter(|h| !h.is_empty())
         .unwrap_or("localhost");
-    format!("http://{host}")
+    let base = format!("http://{host}");
+    // The Host header is attacker-controlled; a value that makes `http://{host}` an
+    // invalid IRI (spaces, control chars, `<`/`>`, …) would otherwise propagate into the
+    // descriptor IRIs and yield malformed RDF → a 500. Validate here and fall back to a
+    // fixed safe base so the descriptor is always well-formed RDF, as the doc promises.
+    if oxrdf::NamedNode::new(&base).is_ok() {
+        base
+    } else {
+        "http://localhost".to_string()
+    }
 }
 
 /// [OPUS-4.8] sq-d3d8: `GET /.well-known/void` — the W3C VoID dataset description (read-only).

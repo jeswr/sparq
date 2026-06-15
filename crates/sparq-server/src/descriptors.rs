@@ -87,11 +87,24 @@ pub struct Descriptor {
 /// should land on Turtle.
 fn negotiate_descriptor(accept: Option<&str>) -> GraphFormat {
     match accept {
-        // Empty / absent / pure-wildcard Accept → Turtle (the readable default for a
-        // human or a generic discovery client hitting the well-known URL).
-        Some(a) if !a.trim().is_empty() && a.trim() != "*/*" => negotiate_graph(Some(a)),
+        // A non-empty Accept that names at least one concrete media type → honour the
+        // client's preference via the shared graph negotiation.
+        Some(a) if !a.trim().is_empty() && !is_wildcard_only(a) => negotiate_graph(Some(a)),
+        // Empty / absent / wildcard-only Accept → Turtle (the readable default for a human
+        // or a generic discovery client hitting the well-known URL).
         _ => GraphFormat::Turtle,
     }
+}
+
+/// `true` when every media range in the `Accept` header is the `*/*` catch-all (so the
+/// client expressed no concrete preference). Handles q-values and multiple ranges, e.g.
+/// `*/*`, `*/*;q=0.8`, `*/* , */*;q=0.1` — all wildcard-only. A single concrete type
+/// anywhere (e.g. `text/turtle, */*`) makes it non-wildcard so the client preference wins.
+fn is_wildcard_only(accept: &str) -> bool {
+    accept.split(',').filter(|r| !r.trim().is_empty()).all(|range| {
+        // Strip parameters (`;q=…`, `;charset=…`) and compare the media range itself.
+        range.split(';').next().unwrap_or("").trim() == "*/*"
+    })
 }
 
 /// Serialises a triple list in the negotiated [`GraphFormat`], reusing the crate's graph
@@ -170,8 +183,18 @@ pub fn service_description(
 fn sd_ntriples(service_iri: &str, endpoint_iri: &str, dataset_iri: &str) -> String {
     use std::fmt::Write as _;
     let sd = |local: &str| format!("{SD_NS}{local}");
-    // oxrdf NamedNode Display is N-Triples-safe (escapes/brackets correctly).
-    let iri = |s: &str| oxrdf::NamedNode::new_unchecked(s).to_string();
+    // oxrdf NamedNode Display is N-Triples-safe (escapes/brackets correctly). Use the
+    // CHECKED constructor: `service_iri`/`endpoint_iri`/`dataset_iri` are ultimately
+    // derived from the request `Host` header, and although the HTTP layer now validates
+    // the base IRI, we defend in depth here so an invalid IRI can never emit malformed
+    // N-Triples (which would fail re-parse → a 500). An invalid value falls back to a
+    // fixed safe IRI rather than corrupting the document.
+    const SAFE_IRI: &str = "http://localhost/invalid-iri";
+    let iri = |s: &str| {
+        oxrdf::NamedNode::new(s)
+            .unwrap_or_else(|_| oxrdf::NamedNode::new_unchecked(SAFE_IRI))
+            .to_string()
+    };
 
     let svc = iri(service_iri);
     let mut out = String::new();
@@ -243,14 +266,45 @@ mod tests {
 
     #[test]
     fn void_default_is_turtle() {
-        // No Accept (None) and pure-wildcard both default to Turtle.
-        for accept in [None, Some("*/*"), Some("")] {
+        // No Accept (None), empty, and any WILDCARD-ONLY Accept (incl. q-values and
+        // multiple wildcard ranges) all default to Turtle — not just the literal "*/*".
+        for accept in [
+            None,
+            Some("*/*"),
+            Some(""),
+            Some("*/*;q=0.8"),
+            Some(" */* , */*;q=0.1 "),
+        ] {
             let d = void_descriptor(&graph(), "http://host/ds", accept).unwrap();
             assert_eq!(
                 d.content_type, "text/turtle; charset=utf-8",
                 "accept={accept:?}"
             );
         }
+        // A concrete type alongside a wildcard still honours the concrete preference.
+        let d = void_descriptor(&graph(), "http://host/ds", Some("application/n-triples, */*"))
+            .unwrap();
+        assert_eq!(d.content_type, "application/n-triples; charset=utf-8");
+    }
+
+    #[test]
+    fn sd_invalid_iri_falls_back_not_500() {
+        // A bad (header-derived) IRI must not produce malformed N-Triples that fail the
+        // re-parse → a 500. The checked constructor swaps it for a safe IRI instead, so
+        // the descriptor still builds and re-parses cleanly.
+        let d = service_description(
+            "http://bad host/sparql", // space ⇒ invalid IRI
+            "http://bad host/sparql",
+            "http://host/ds",
+            Some("application/n-triples"),
+        )
+        .expect("invalid Host-derived IRI must fall back, not error/500");
+        assert_eq!(d.content_type, "application/n-triples; charset=utf-8");
+        assert!(
+            d.body.contains("/invalid-iri"),
+            "invalid IRI should be replaced by the safe fallback: {}",
+            d.body
+        );
     }
 
     #[test]
