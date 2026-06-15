@@ -139,15 +139,30 @@ bb proof bytes), and the binding edges. JSON via serde; round-trips.
   assumed). So `Rdfs`/`Owl` is accepted only for disclosed-base derivations under
   an explicit opt-in policy.
 - **HolderPoP binding** — IMPLEMENTED ([OPUS-4.8] sq-cwq): the `HolderPop`
-  binding now carries a holder key + a challenge-bound Schnorr proof-of-possession
+  binding carries a holder key + a challenge-bound Schnorr proof-of-possession
   (`pop`), and the verifier checks it FAIL-CLOSED against an external
   `HolderRegistry` (an empty registry, an untrusted holder, or a
   malformed/invalid/replayed PoP all REJECT — no silent-accept of an absent PoP,
-  which was the prior placeholder behaviour). DEFERRED: binding the holder key to
-  a SPECIFIC credential (an issuer-attested credential↔holder binding) — until
-  then the registry narrows "who may present" to authorised holders but a trusted
-  holder is not yet tied to a particular credential. See
-  `verifier::bind_holder_pop`.
+  which was the prior placeholder behaviour).
+- **Credential↔holder binding (clear-key tier, B1)** — IMPLEMENTED ([OPUS-4.8]
+  sq-z8s7, `research/zk-holder-pop-design.md` §3.3 B1): the verifier now binds the
+  presenter to the SPECIFIC credential the issuer issued, closing the
+  trusted-holder gap (sq-cwq's nonce-only PoP let trusted holder A present trusted
+  holder B's credential). When a credential's `CommitmentAttestation` carries an
+  issuer-attested `AttestedHolderBinding` (the issuer folded
+  `holder_key_digest(hpk)` into the signature via the `ZKSIG_C4`
+  `commitment_message_with_holder` message), the verifier cross-checks that the
+  PRESENTED holder key (the one the PoP was signed under) hashes to the
+  issuer-attested `holder_pk_digest` and FAILS CLOSED on any mismatch
+  (`HolderKeyMismatch`). A bearer credential (no holder binding) presented under
+  `HolderPop` is rejected (`HolderBindingMissing`) when the relying party's
+  `HolderBindingPolicy::require_binding()` mandates binding; the back-compatible
+  `HolderBindingPolicy::allow_bearer()` default keeps the sq-cwq registry+PoP
+  behaviour for bearer credentials. The issuer-attested digest is anchored in the
+  issuer signature (verified under the external trusted `KeySet K`), never a free
+  prover JSON field. See `verifier::bind_holder_pop` / `verifier::bind_holder_binding`.
+  DEFERRED: the in-circuit HIDDEN-key PoK (B2, sq-i1dt) where only the digest is
+  public (no holder-key linkability) — the clear-key tier discloses `hpk`.
 
 ## sparq-zk API gaps noted
 

@@ -41,7 +41,7 @@ use sparq_zk_compose::manifest::{
 };
 use sparq_zk_compose::toml::prover_toml_for;
 use sparq_zk_compose::verifier::{
-    encode_artifacts, verify_manifest, CheckError, EntailmentPolicy, HolderRegistry,
+    encode_artifacts, verify_manifest, CheckError, EntailmentPolicy, HolderBindingPolicy, HolderRegistry,
     InMemorySeenNonces, KeySet, RevocationPolicy, VerifierNonce,
 };
 
@@ -194,6 +194,7 @@ fn verify_full(m: &ProofManifest, name: &str) -> Result<(), CheckError> {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for(CHALLENGE_HEX),
         &InMemorySeenNonces::new(),
@@ -367,6 +368,7 @@ fn forge_revocation_revoked_bit_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &revoked_policy(), // authoritative bit SET
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for(CHALLENGE_HEX),
         &InMemorySeenNonces::new(),
@@ -396,6 +398,7 @@ fn forge_revocation_stale_version_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &policy,
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for(CHALLENGE_HEX),
         &InMemorySeenNonces::new(),
@@ -422,6 +425,7 @@ fn forge_nonce_binding_mismatch_rejected() {
         &trusted_k(&test_issuer_sk(1)),
         &fresh_policy(),
         &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
         &EntailmentPolicy::simple_only(),
         &nonce_for("0x99"),
         &InMemorySeenNonces::new(),
@@ -450,6 +454,7 @@ fn forge_nonce_replay_rejected() {
             &trusted_k(&test_issuer_sk(1)),
             &fresh_policy(),
             &HolderRegistry::empty(),
+            &HolderBindingPolicy::allow_bearer(),
             &EntailmentPolicy::simple_only(),
             &nonce,
             &seen,

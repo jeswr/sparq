@@ -121,10 +121,13 @@ use sparq_zk::field::{field_from_hex_str, field_to_be_bytes_32, field_to_hex, Fr
 // [OPUS-4.8] audit #12: the STATUS-BOUND `commitment_message_with_status` is the
 // scan-verify path's signed message — a scan-covering attestation must bind the
 // status reference (status_ref_digest over the disclosed list/index/version).
+// [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): the HOLDER-BOUND `commitment_message_with_holder`
+// (ZKSIG_C4) is the signed message for a holder-bound attestation, and `holder_key_digest`
+// recomputes the presented holder key's digest for the clear-key cross-check.
 use sparq_zk::sig::{
-    commitment_message_with_status, holder_pop_message, public_key_from_hex, signature_from_hex,
-    status_list_id_to_field, status_ref_commit_digest, status_ref_digest, verify as sig_verify,
-    SignatureScheme,
+    commitment_message_with_holder, commitment_message_with_status, holder_key_digest,
+    holder_pop_message, public_key_from_hex, signature_from_hex, status_list_id_to_field,
+    status_ref_commit_digest, status_ref_digest, verify as sig_verify, PublicKey, SignatureScheme,
 };
 use sparq_zk::verify::{
     fragment_filters, fragment_pattern_consts, fragment_patterns, recheck, variable_slots,
@@ -326,6 +329,78 @@ impl HolderRegistry {
     /// Whether `holder_hex` (any case, optional `0x`) is an authorised holder.
     fn contains_hex(&self, holder_hex: &str) -> bool {
         self.holders.contains(&normalize_hex(holder_hex))
+    }
+}
+
+/// The relying party's HOLDER-BINDING policy (T3/sq-z8s7 B1): whether a
+/// `HolderPop` presentation MUST carry an issuer-attested per-credential holder
+/// binding ([`crate::manifest::AttestedHolderBinding`]), or whether a BEARER
+/// credential (no holder binding) is still acceptable under `HolderPop` (the
+/// back-compatible sq-cwq behaviour: registry membership + a fresh nonce-PoP
+/// only).
+///
+/// # The trusted-holder gap this closes
+/// The sq-cwq `HolderPop` check binds the presenter to the verifier's fresh
+/// NONCE (proof of possession of *a* registry-trusted key) but NOT to the
+/// CREDENTIAL the issuer issued. So trusted holder A could present trusted holder
+/// B's credential: A holds *a* trusted key and can sign the nonce with it, while
+/// the scan/filter sub-proofs attest B's credential. B1 closes this by
+/// cross-checking the PRESENTED holder key against the issuer-attested
+/// `holder_pk_digest` the issuer folded into THIS credential's signature (the
+/// `ZKSIG_C4` [`sparq_zk::sig::commitment_message_with_holder`] message). When a
+/// holder binding is present, the cross-check ALWAYS runs (fail-closed —
+/// regardless of this policy). This policy governs only the BEARER case: whether
+/// the ABSENCE of a binding is itself rejected.
+///
+/// # Default = back-compatible (binding NOT required)
+/// [`HolderBindingPolicy::default`] / [`HolderBindingPolicy::allow_bearer`] does
+/// NOT require a binding: a `HolderPop` over a bearer credential keeps its sq-cwq
+/// behaviour (registry + nonce-PoP). This is the conservative default so existing
+/// callers/tests are unaffected. A relying party that mandates per-credential
+/// binding opts in with [`HolderBindingPolicy::require_binding`], after which a
+/// bearer `HolderPop` presentation is rejected fail-closed
+/// ([`CheckError::HolderBindingMissing`]) — the design's "bearer must be
+/// rejectable" requirement (`research/zk-holder-pop-design.md` §1 honest scope /
+/// §4.3 obligation 3).
+///
+/// # Honest scope (clear-key tier only)
+/// This is the B1 clear-key tier: the presented holder key is DISCLOSED and the
+/// verifier recomputes its digest host-side. The hidden-key in-circuit PoK (B2,
+/// sq-i1dt) — where only the digest is public — is a separate deliverable and is
+/// NOT enforced here.
+// [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): holder-binding policy (external,
+// fail-closed bearer rejection; default back-compatible). Mirrors RevocationPolicy
+// / EntailmentPolicy as a relying-party-supplied external policy object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HolderBindingPolicy {
+    require_binding: bool,
+}
+
+impl HolderBindingPolicy {
+    /// The back-compatible default: a `HolderPop` over a BEARER credential (no
+    /// issuer-attested holder binding) is accepted on the sq-cwq registry +
+    /// nonce-PoP path. A holder binding, if PRESENT, is still cross-checked
+    /// fail-closed (B1) — this only governs the bearer-absent case.
+    pub fn allow_bearer() -> Self {
+        HolderBindingPolicy {
+            require_binding: false,
+        }
+    }
+
+    /// REQUIRE an issuer-attested per-credential holder binding for every
+    /// `HolderPop` presentation: a bearer credential (no
+    /// [`crate::manifest::AttestedHolderBinding`]) is then rejected fail-closed
+    /// ([`CheckError::HolderBindingMissing`]). This is the design's mandated-binding
+    /// posture that fully closes the trusted-holder gap (no bearer fallback).
+    pub fn require_binding() -> Self {
+        HolderBindingPolicy {
+            require_binding: true,
+        }
+    }
+
+    /// Whether the relying party requires a holder binding (rejects bearer).
+    fn requires_binding(&self) -> bool {
+        self.require_binding
     }
 }
 
@@ -1179,6 +1254,29 @@ pub enum CheckError {
     /// Rejected.
     // [OPUS-4.8] sq-cwq.
     HolderPopInvalid { holder: String },
+    /// The relying party REQUIRES an issuer-attested holder binding (T3/sq-z8s7
+    /// B1, [`HolderBindingPolicy::require_binding`]) but the `HolderPop`
+    /// presentation's credential carries NO [`crate::manifest::AttestedHolderBinding`]
+    /// — i.e. a BEARER credential (no `holder` field on any
+    /// [`crate::manifest::CommitmentAttestation`]) presented where a per-credential
+    /// holder binding is mandated. Rejected fail-closed — there is NO silent bearer
+    /// fallback (design `research/zk-holder-pop-design.md` §4.3 obligation 3, the
+    /// audit-#12 `status:None ⇒ reject` precedent). Closes the trusted-holder gap's
+    /// "present a bearer credential and skip the binding" bypass.
+    // [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): fail-closed bearer rejection.
+    HolderBindingMissing,
+    /// The PRESENTED holder key (the `HolderPop` binding's disclosed key, also the
+    /// key the freshness PoP was signed under) does NOT hash (via
+    /// [`sparq_zk::sig::holder_key_digest`]) to the issuer-attested
+    /// [`crate::manifest::AttestedHolderBinding::holder_pk_digest`] (T3/sq-z8s7 B1):
+    /// the presenter is binding a DIFFERENT key than the issuer signed into THIS
+    /// credential. This is the load-bearing trusted-holder-gap closure — it rejects
+    /// "trusted holder A presents trusted holder B's credential" (A's key digest ≠
+    /// B's attested digest). Also covers the identity holder key (no usable digest,
+    /// [`sparq_zk::sig::HolderKeyError::IdentityKey`]) and a clear holder key in the
+    /// attestation that disagrees with the presented key. Rejected fail-closed.
+    // [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): presented-key vs attested-digest gate.
+    HolderKeyMismatch,
     /// The manifest's `entailment_regime` is NOT accepted by the relying party's
     /// [`EntailmentPolicy`] (sq-314): e.g. an `Rdfs`/`Owl` manifest under a
     /// `Simple`-only policy. Rejected fail-closed — the regime is enforced, not
@@ -1425,6 +1523,14 @@ impl std::fmt::Display for CheckError {
             CheckError::HolderPopInvalid { holder } => write!(
                 f,
                 "HolderPop binding pop signature does not verify under holder key {holder} over the challenge-bound message (sq-cwq: the presenter did not prove possession of the holder secret)"
+            ),
+            CheckError::HolderBindingMissing => write!(
+                f,
+                "HolderPop presentation requires an issuer-attested holder binding but the credential carries none — a BEARER credential presented where a per-credential holder binding is mandated (sq-z8s7 B1: fail-closed, no silent bearer fallback — closes the trusted-holder gap)"
+            ),
+            CheckError::HolderKeyMismatch => write!(
+                f,
+                "HolderPop presentation's holder key does not match the issuer-attested holder binding (sq-z8s7 B1: the presented key's holder_key_digest != the issuer-signed holder_pk_digest, the identity key, or a clear attested key disagreeing with the presented key — rejects trusted holder A presenting trusted holder B's credential)"
             ),
             CheckError::EntailmentRegimeNotAccepted { regime } => write!(
                 f,
@@ -1933,8 +2039,35 @@ fn bind_issuer_attestations(
             let list_id_fr = status_list_id_to_field(&rev.status_list);
             let (status_ref, _mode) =
                 resolve_status_ref(rev, att_status, &list_id_fr, &c.0)?;
-            let message =
-                commitment_message_with_status(&commitment_fr, &salt_fr, &status_ref);
+            // [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): select the signed-message
+            // variant from the attestation's OPTIONAL fields. A HOLDER-BOUND
+            // attestation (the issuer folded a holder-key digest into the signature,
+            // the distinct ZKSIG_C4 tag) signs `commitment_message_with_holder(C(G),
+            // salt, status_ref, holder_pk_digest)`; a non-holder-bound one signs the
+            // status-only `commitment_message_with_status` (ZKSIG_C3). Selecting the
+            // right variant HERE is what makes a holder-bound credential pass the
+            // main attestation gate AND anchors the attested `holder_pk_digest` in
+            // the issuer signature (design §3.3 / §4.3 obligation 1) — the digest the
+            // T3 cross-check (`bind_holder_binding`) compares the presented key
+            // against is the one the ISSUER signed, never a free prover JSON field. A
+            // holder-bound attestation whose `holder_pk_digest` hex is malformed has
+            // no reconstructable message => InvalidIssuerSignature (fail-closed).
+            let message = match att.holder.as_ref() {
+                Some(binding) => {
+                    let Some(holder_digest) = binding.digest() else {
+                        return Err(CheckError::InvalidIssuerSignature {
+                            commitment: c.0.clone(),
+                        });
+                    };
+                    commitment_message_with_holder(
+                        &commitment_fr,
+                        &salt_fr,
+                        &status_ref,
+                        &holder_digest,
+                    )
+                }
+                None => commitment_message_with_status(&commitment_fr, &salt_fr, &status_ref),
+            };
             let ok = SignatureScheme::from_cryptosuite_iri(&att.cryptosuite).is_some()
                 && match (
                     public_key_from_hex(&att.issuer_public_key),
@@ -2962,21 +3095,32 @@ fn filter_edge_true(
 /// `challenge` (exactly like a bare `Challenge`), silently waiving (1)-(4) — an
 /// absent/forged PoP passed. That silent-accept path is removed.
 ///
-/// # Scope (honest deferral)
-/// This proves the presenter possesses a holder key the relying party trusts AND
-/// signed the verifier's fresh nonce with it. It does NOT bind that key to the
-/// SPECIFIC credential the scan/filter sub-proofs attest — an issuer-attested
-/// holder binding (the issuer signing the holder key into the credential, e.g. a
-/// `holderBinding` field folded into the commitment message) is DEFERRED. Without
-/// it, a trusted holder A could present a trusted holder B's credential. The
-/// holder registry narrows "who may present at all" to authorised holders, which
-/// is the meaningful interim guarantee; the per-credential binding is the
-/// documented next step. This is NOT a silent gap: the registry is fail-closed and
-/// the deferral is recorded here and in the manifest/README docs.
+/// # T3/sq-z8s7 B1: issuer-attested credential↔holder binding (the gap closed)
+/// The sq-cwq checks above prove the presenter possesses a holder key the relying
+/// party trusts AND signed the verifier's fresh nonce with it — but they do NOT
+/// bind that key to the SPECIFIC credential the scan/filter sub-proofs attest. So
+/// trusted holder A could present trusted holder B's credential (A holds *a*
+/// trusted key, signs the nonce, while the proofs attest B's credential). B1
+/// closes this: after the registry+PoP checks, [`bind_holder_binding`]
+/// cross-checks the PRESENTED holder key against the issuer-attested
+/// `holder_pk_digest` the issuer folded into THIS credential's signature (the
+/// `ZKSIG_C4` [`sparq_zk::sig::commitment_message_with_holder`] message, recovered
+/// from the credential's [`crate::manifest::CommitmentAttestation`] and verified
+/// under the EXTERNAL trusted `K`). On any mismatch / required-but-absent binding
+/// / identity key it fails closed (`HolderKeyMismatch` / `HolderBindingMissing`).
+///
+/// # Scope (B2 deferred)
+/// This is the CLEAR-KEY tier: the presented holder key is disclosed and the
+/// verifier recomputes its digest host-side. The in-circuit HIDDEN-key PoK (B2,
+/// sq-i1dt), where only the digest is public, is a separate deliverable — NOT
+/// enforced here. See `research/zk-holder-pop-design.md` §2.B / §3.3.
 // [OPUS-4.8] sq-cwq: holder PoP implemented (challenge-bound Schnorr) + fail-closed.
+// [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): + issuer-attested credential↔holder binding.
 fn bind_holder_pop(
     manifest: &ProofManifest,
     holder_registry: &HolderRegistry,
+    trusted_key_set: &KeySet,
+    holder_binding_policy: &HolderBindingPolicy,
     challenge: &FieldHex,
 ) -> Result<(), CheckError> {
     let (holder, pop, cryptosuite) = match &manifest.binding {
@@ -3013,6 +3157,272 @@ fn bind_holder_pop(
     let message = holder_pop_message(&challenge_fr);
     if !sig_verify(&pk, &message, &sig) {
         return Err(CheckError::HolderPopInvalid { holder: holder.clone() });
+    }
+
+    // (5) [OPUS-4.8] sq-z8s7 (T3 / B1): bind THIS presented holder key to the
+    // ISSUER-ATTESTED holder binding of THIS credential. `pk` is the SAME key the
+    // PoP (4) was verified under, so the digest cross-check + the nonce-PoP
+    // together bind THIS holder to THIS credential (closing the trusted-holder
+    // gap: A's key digest != B's attested digest). Fail-closed.
+    bind_holder_binding(manifest, trusted_key_set, holder_binding_policy, &pk)?;
+
+    Ok(())
+}
+
+/// T3/sq-z8s7 B1 (clear-key tier): cross-check the PRESENTED holder key against
+/// the credential's ISSUER-ATTESTED holder binding, closing the trusted-holder gap
+/// `bind_holder_pop`'s nonce-only PoP left open. `presented_pk` is the holder key
+/// the `HolderPop` PoP was verified under (so the digest check below + the existing
+/// nonce-PoP together bind THIS holder to THIS credential).
+///
+/// # What it checks (design `research/zk-holder-pop-design.md` §3.3 B1 / §4.1)
+/// 1. **Scope to the COVERING attestation, never any attestation (sq-z8s7 Copilot
+///    scoping fix).** The binding is checked on the attestation that COVERS a
+///    SCAN-REFERENCED commitment — i.e. the credential the presentation actually
+///    uses — reusing the EXACT attestation→commitment mapping
+///    [`bind_issuer_attestations`] uses (`a.commitment.to_field() == c_field` over
+///    the per-graph `commitments` of every scan sub-proof). The earlier "ANY
+///    `manifest.commitment_attestations` entry has `holder: Some(_)`" shortcut was
+///    a SECURITY hole: a holder binding on an UNRELATED attestation (one covering
+///    no scan-referenced commitment) could satisfy the check while the credential
+///    genuinely presented was bearer/mismatched — the A-presents-B closure this
+///    function exists to enforce would silently lapse. We now iterate the
+///    scan-referenced commitments and look up THEIR covering attestation. (If
+///    several scans reference the same commitment, it is checked once; a credential
+///    has at most one covering attestation per commitment.)
+/// 2. **Bearer policy (fail-closed, no silent fallback), per covering attestation.**
+///    A scan-referenced commitment whose COVERING attestation carries no holder
+///    binding (or that has no clear covering attestation at all — hidden-issuer or
+///    unattested) is BEARER for this credential. Under
+///    [`HolderBindingPolicy::require_binding`] that is rejected
+///    ([`CheckError::HolderBindingMissing`] — bearer-where-binding-required);
+///    under the back-compatible default it is accepted (the sq-cwq registry +
+///    nonce-PoP guarantee stands). When NO holder binding covers ANY presented
+///    credential the whole presentation is bearer (same policy split).
+/// 3. **Anchor the digest in the issuer signature (NEVER the manifest alone).**
+///    For a holder-bound attestation, the issuer signed
+///    [`sparq_zk::sig::commitment_message_with_holder`]`(C(G), salt, status_ref, holder_pk_digest)`
+///    (the distinct `ZKSIG_C4` tag). The verifier RECOMPUTES that message from the
+///    disclosed `(C(G), salt, status_ref)` + the attested `holder_pk_digest` and
+///    requires the issuer signature to verify under a key in the EXTERNAL trusted
+///    `K` — so the digest the verifier cross-checks is the one the ISSUER bound,
+///    not a free prover JSON field (design §4.3 obligation 1). A holder-bound
+///    attestation whose signature does not so verify is rejected
+///    ([`CheckError::InvalidIssuerSignature`]) — A cannot swap in its own digest
+///    without invalidating the issuer's EUF-CMA signature.
+/// 4. **Presented-key digest == attested digest.** `holder_key_digest(presented_pk)`
+///    (T1, Poseidon2-collision-resistant) MUST equal the attested
+///    `holder_pk_digest`. A's key digest != B's attested digest =>
+///    [`CheckError::HolderKeyMismatch`] (the core trusted-holder-gap closure). The
+///    identity holder key has no usable digest ([`sparq_zk::sig::HolderKeyError`])
+///    => `HolderKeyMismatch`.
+/// 5. **Clear attested key (if disclosed) == presented key.** When the attestation
+///    discloses the clear `holder_public_key`, it MUST equal `presented_pk` (a
+///    belt-and-braces check: the digest equality already implies key equality under
+///    collision-resistance, but a disclosed clear key that disagrees is a malformed
+///    binding => `HolderKeyMismatch`).
+// [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): verifier-side issuer-attested clear-key
+// holder binding, fail-closed. B2 (hidden-key in-circuit PoK) is sq-i1dt.
+fn bind_holder_binding(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+    holder_binding_policy: &HolderBindingPolicy,
+    presented_pk: &PublicKey,
+) -> Result<(), CheckError> {
+    // (1) [OPUS-4.8] sq-z8s7 (Copilot scoping fix): collect the attestations that
+    // COVER a SCAN-REFERENCED commitment — the credential(s) the presentation
+    // actually uses — using the EXACT attestation→commitment mapping
+    // `bind_issuer_attestations` uses (`a.commitment.to_field() == c_field` over
+    // the per-graph `commitments` of every scan sub-proof). This REPLACES the
+    // earlier "ANY attestation has `holder: Some(_)`" shortcut, which was a
+    // SECURITY hole: a holder binding on an UNRELATED attestation could satisfy the
+    // check while the genuinely-presented credential was bearer/mismatched. We
+    // build the covering set so a credential's bearer/holder-bound status is judged
+    // on ITS OWN attestation, not on a stray sibling. Keyed by canonical commitment
+    // hex so a commitment referenced by several scans is checked once; the value is
+    // whether THAT commitment's covering attestation carries a holder binding (and,
+    // if so, the binding itself for the cross-check below).
+    let mut covering: std::collections::BTreeMap<
+        String,
+        Option<&crate::manifest::CommitmentAttestation>,
+    > = std::collections::BTreeMap::new();
+    for sp in &manifest.sub_proofs {
+        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
+            continue;
+        };
+        for c in commitments {
+            let Some(c_field) = c.to_field() else {
+                // A non-field commitment can carry no valid attestation. It is
+                // already rejected upstream by `bind_issuer_attestations`
+                // (`bind_holder_binding` runs after the issuer gate via
+                // `verify_manifest`); skip it here so a malformed commitment cannot
+                // mask a real scoping decision.
+                continue;
+            };
+            // The covering attestation = the same lookup `bind_issuer_attestations`
+            // uses (compare as field elements so 0x-padding cannot slip a mismatch).
+            let att = manifest.commitment_attestations.iter().find(|a| {
+                a.commitment.to_field().is_some() && a.commitment.to_field() == Some(c_field)
+            });
+            covering.insert(field_to_hex(&c_field), att);
+        }
+    }
+
+    // The set of covering attestations that DO carry a holder binding — the only
+    // attestations whose binding this credential's presentation must satisfy.
+    let bound: Vec<&crate::manifest::CommitmentAttestation> = covering
+        .values()
+        .filter_map(|a| a.filter(|att| att.holder.is_some()))
+        .collect();
+
+    // (2) Bearer policy, scoped to the COVERING attestations. A presentation is
+    // bearer iff NO scan-referenced commitment's covering attestation carries a
+    // holder binding (a holder binding on an unrelated attestation no longer
+    // counts). Under `require_binding` that is rejected fail-closed
+    // (`HolderBindingMissing` — bearer-where-binding-required); under the
+    // back-compatible default it is accepted (sq-cwq registry + nonce-PoP stands).
+    if bound.is_empty() {
+        if holder_binding_policy.requires_binding() {
+            return Err(CheckError::HolderBindingMissing);
+        }
+        return Ok(());
+    }
+
+    // [OPUS-4.8] sq-z8s7 (Copilot scoping fix): under `require_binding`, EVERY
+    // presented credential must be holder-bound — a scan-referenced commitment whose
+    // covering attestation lacks a binding (or has no clear covering attestation at
+    // all) is bearer-where-binding-required, rejected even though a SIBLING
+    // commitment is bound. (Under the back-compatible default a mix is allowed: the
+    // bound credentials are still cross-checked below; the bearer ones rely on the
+    // registry + nonce-PoP.)
+    if holder_binding_policy.requires_binding()
+        && covering
+            .values()
+            .any(|a| a.is_none_or(|att| att.holder.is_none()))
+    {
+        return Err(CheckError::HolderBindingMissing);
+    }
+
+    // The presented key's digest (T1). The identity key has no usable digest and is
+    // rejected fail-closed (it can never equal a real issuer-attested digest).
+    let Ok(presented_digest) = holder_key_digest(presented_pk) else {
+        return Err(CheckError::HolderKeyMismatch);
+    };
+
+    for att in bound {
+        let binding = att
+            .holder
+            .as_ref()
+            .expect("filtered for Some(holder) above");
+
+        // (3) Anchor the attested digest in the ISSUER signature: recompute the
+        // holder-bound (ZKSIG_C4) message and require the issuer signature to
+        // verify under a key in the EXTERNAL trusted K. This is what makes the
+        // attested `holder_pk_digest` trustworthy (design §4.3 obligation 1) —
+        // without it the digest would be an unauthenticated prover JSON field.
+        verify_holder_attestation_signature(manifest, trusted_key_set, att)?;
+
+        // The attested digest as a field element (fail-closed on malformed hex).
+        let Some(attested_digest) = binding.digest() else {
+            return Err(CheckError::HolderKeyMismatch);
+        };
+
+        // (4) The presented key MUST hash to the issuer-attested digest. This is
+        // the load-bearing trusted-holder-gap closure: trusted holder A presenting
+        // trusted holder B's credential has A's digest != B's attested digest.
+        if presented_digest != attested_digest {
+            return Err(CheckError::HolderKeyMismatch);
+        }
+
+        // (5) If the attestation ALSO discloses the clear holder key (clear-key
+        // tier), it must equal the presented key. Digest equality already implies
+        // this under collision-resistance; a disclosed clear key that disagrees is
+        // a malformed binding, rejected fail-closed.
+        if let Some(clear) = binding.holder_key() {
+            if clear != *presented_pk {
+                return Err(CheckError::HolderKeyMismatch);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify that the issuer signature on a HOLDER-BOUND attestation verifies over
+/// the `ZKSIG_C4` [`sparq_zk::sig::commitment_message_with_holder`] message under
+/// a key in the EXTERNAL trusted `K` (T3/sq-z8s7 B1). This anchors the attested
+/// `holder_pk_digest` in the issuer signature: the message folds
+/// `(C(G), salt, status_ref, holder_pk_digest)`, so a forged/swapped digest yields
+/// a different message and no valid signature (EUF-CMA). Mirrors the salt/status
+/// recompute in [`bind_issuer_attestations`], but over the holder-bound message
+/// variant (the status path verifies the status-only `ZKSIG_C3` message, which a
+/// holder-bound attestation does NOT use).
+///
+/// Fail-closed: an issuer key not in `K` => [`CheckError::IssuerKeyNotInKeySet`];
+/// an unknown cryptosuite / unparseable key or signature / malformed salt or
+/// commitment / a missing or non-verifying signature => [`CheckError::InvalidIssuerSignature`];
+/// an absent revocation reference (needed to recompute `status_ref`) =>
+/// [`CheckError::RevocationReferenceMissing`].
+// [OPUS-4.8] sq-z8s7 (HolderPoP T3 / B1): issuer-signature anchor for the holder digest.
+fn verify_holder_attestation_signature(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+    att: &crate::manifest::CommitmentAttestation,
+) -> Result<(), CheckError> {
+    let commitment_hex = att.commitment.0.clone();
+    // The issuer key MUST be in the EXTERNAL trusted K (never a prover-chosen key —
+    // the audit-#3 codex-#1 anchor; reported BEFORE the signature check so an
+    // untrusted issuer is the stated reason).
+    if !trusted_key_set.contains_hex(&att.issuer_public_key) {
+        return Err(CheckError::IssuerKeyNotInKeySet {
+            commitment: commitment_hex,
+        });
+    }
+
+    let binding = att
+        .holder
+        .as_ref()
+        .expect("caller passes a holder-bound attestation");
+    let (Some(commitment_fr), Some(holder_digest)) = (att.commitment.to_field(), binding.digest())
+    else {
+        return Err(CheckError::InvalidIssuerSignature {
+            commitment: commitment_hex,
+        });
+    };
+    // A holder-bound (scan-covering) attestation carries a salt exactly as a
+    // status-bound one does; an absent/malformed salt fails closed.
+    let Some(salt_fr) = att.salt.as_ref().and_then(|s| s.to_field()) else {
+        return Err(CheckError::InvalidIssuerSignature {
+            commitment: commitment_hex,
+        });
+    };
+    // Recompute the issuer-signed status reference from the disclosed revocation
+    // reference (same source `bind_issuer_attestations` uses) — it is folded into
+    // the ZKSIG_C4 message alongside the holder digest.
+    let Some(rev) = &manifest.revocation else {
+        return Err(CheckError::RevocationReferenceMissing { proof: 0 });
+    };
+    let list_id_fr = status_list_id_to_field(&rev.status_list);
+    let Some(status_ref) = status_ref_from_revocation(rev, &list_id_fr) else {
+        return Err(CheckError::InvalidIssuerSignature {
+            commitment: commitment_hex,
+        });
+    };
+
+    let message =
+        commitment_message_with_holder(&commitment_fr, &salt_fr, &status_ref, &holder_digest);
+    let ok = SignatureScheme::from_cryptosuite_iri(&att.cryptosuite).is_some()
+        && match (
+            public_key_from_hex(&att.issuer_public_key),
+            signature_from_hex(&att.signature),
+        ) {
+            (Some(pk), Some(sig)) => sig_verify(&pk, &message, &sig),
+            _ => false,
+        };
+    if !ok {
+        return Err(CheckError::InvalidIssuerSignature {
+            commitment: commitment_hex,
+        });
     }
     Ok(())
 }
@@ -3199,6 +3609,8 @@ fn bind_entailment(
 // key-set K, revocation policy, holder registry, fresh nonce, single-use store) —
 // deliberately separate, not bundled, to keep each anchor explicit at the call
 // site; the count exceeds clippy's default heuristic but every arg is load-bearing.
+// [OPUS-4.8] sq-z8s7 (T3 / B1): + holder_binding_policy (external; whether a bearer
+// credential is rejected under HolderPop — `HolderBindingPolicy::require_binding()`).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_manifest(
     manifest: &ProofManifest,
@@ -3207,6 +3619,7 @@ pub fn verify_manifest(
     trusted_key_set: &KeySet,
     revocation_policy: &RevocationPolicy,
     holder_registry: &HolderRegistry,
+    holder_binding_policy: &HolderBindingPolicy,
     entailment_policy: &EntailmentPolicy,
     nonce: &VerifierNonce,
     seen: &dyn SeenNonces,
@@ -3275,7 +3688,20 @@ pub fn verify_manifest(
     // A `Challenge` binding requires no PoP (this returns Ok immediately). The
     // nonce is recorded single-use BEFORE this, so a rejected PoP still burns the
     // nonce (consistent with the burn-on-mismatch policy above).
-    bind_holder_pop(manifest, holder_registry, &challenge)?;
+    //
+    // [OPUS-4.8] sq-z8s7 (T3 / B1): this ALSO cross-checks the presented holder key
+    // against the credential's ISSUER-ATTESTED holder binding (the digest the issuer
+    // folded into commitment_message_with_holder, verified under the external K),
+    // and — under `holder_binding_policy.require_binding()` — rejects a bearer
+    // credential presented under HolderPop. The trusted-holder gap is closed at the
+    // clear-key tier here.
+    bind_holder_pop(
+        manifest,
+        holder_registry,
+        trusted_key_set,
+        holder_binding_policy,
+        &challenge,
+    )?;
 
     for (i, sp) in manifest.sub_proofs.iter().enumerate() {
         if sp.proof_hex.is_empty() {
