@@ -739,7 +739,18 @@ pub struct SubProof {
 /// must equal the `operand_enc` of `to_proof` (a numeric FILTER applied to a
 /// scanned column). Verifier checks this as a field equality over the
 /// already-verified public inputs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Canonical ordering ([OPUS-4.8] sq-y2wy)
+/// `binding_edges` is canonicalised by [`ProofManifest::canonicalize`] (applied
+/// before hashing/serialisation) to ascending `(from_proof, from_row, from_slot,
+/// to_proof)` — the field-declaration tuple, which is a TOTAL order over edges.
+/// Each edge is SELF-CONTAINED (it carries its own scan/row/slot/filter indices),
+/// so reordering the edge VECTOR never invalidates those references: the verifier
+/// resolves every edge against `sub_proofs` by the edge's own indices, not by the
+/// edge's position. So two manifests that differ only in binding-edge order
+/// canonicalise to the same vector, hence the same serialisation/hash. The
+/// `#[derive(Ord)]` tuple ordering is exactly that field tuple (declaration order).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BindingEdge {
     /// Index into `ProofManifest::sub_proofs` of the scan proof.
     pub from_proof: usize,
@@ -767,18 +778,23 @@ pub struct BindingEdge {
 /// the query-derived slots for the shared variable (the §4.4 slot binding). Those
 /// slots live on the `join_eq` proof's public inputs, NOT on this edge.
 ///
-/// # Ordering
-/// `join_edges` is currently stored in declaration order — the manifest does NOT
-/// yet canonicalise it. Canonical-order sorting (mirroring the `BindingEdge` §2.5
-/// convention, keyed on `(scan_a, graph_a, scan_b, graph_b)`) is deferred together
-/// with the equivalent `binding_edges` work (neither vector is sorted today); see
-/// the tracking bead. `join_eq` itself is value-symmetric, so the equality holds
-/// regardless of edge order.
+/// # Canonical ordering ([OPUS-4.8] sq-y2wy — was deferred at sq-fi03)
+/// `join_edges` is canonicalised by [`ProofManifest::canonicalize`] (applied
+/// before hashing/serialisation) to ascending `(scan_a, graph_a, scan_b, graph_b,
+/// join_proof)` — the field-declaration tuple, a TOTAL order over edges (it
+/// extends the previously-proposed `(scan_a, graph_a, scan_b, graph_b)` key with
+/// `join_proof` for a strict total order even when two edges share all four scan
+/// refs). Each edge is SELF-CONTAINED (it carries its own scan/graph/join-proof
+/// indices), so sorting the edge VECTOR never invalidates those references: the
+/// `bind_joins` gate resolves every edge against `sub_proofs` by the edge's own
+/// indices, not by its position. So two manifests that differ only in join-edge
+/// order canonicalise to the same vector, hence the same serialisation/hash. The
+/// `#[derive(Ord)]` tuple ordering is exactly that field tuple. `join_eq` itself
+/// is value-symmetric, so the proven equality holds regardless of edge order.
 ///
-/// SCHEMA ONLY (sq-fi03, step 3); the `bind_joins` gate that consumes this is
-/// step 4 (sq-sfsi).
+/// The `bind_joins` gate that consumes this is step 4 (sq-sfsi).
 // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN edge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct JoinEdge {
     /// Index into [`ProofManifest::sub_proofs`] of the scan sub-proof for graph A.
     pub scan_a: usize,
@@ -1022,8 +1038,44 @@ fn default_type() -> String {
 }
 
 impl ProofManifest {
+    /// Canonicalise the edge vectors to a deterministic order ([OPUS-4.8]
+    /// sq-y2wy). Sorts `binding_edges` ascending by `(from_proof, from_row,
+    /// from_slot, to_proof)` and `join_edges` ascending by `(scan_a, graph_a,
+    /// scan_b, graph_b, join_proof)` — each the struct's field-declaration tuple
+    /// (the derived [`Ord`]), which is a TOTAL order over edges, so the result is
+    /// independent of insertion order.
+    ///
+    /// # Reference validity is preserved
+    /// Each edge is SELF-CONTAINED: it carries its own `sub_proofs` indices
+    /// (`from_proof`/`to_proof`; `scan_a`/`scan_b`/`join_proof`). The verifier
+    /// (`binding_edges` stage 2 / `bind_joins` stage 2g) resolves every edge by
+    /// THOSE indices, never by the edge's position in the vector — so reordering
+    /// the vector cannot invalidate any reference, and verification still accepts
+    /// a canonicalised manifest.
+    ///
+    /// # Determinism contract
+    /// Two manifests that differ ONLY in edge order produce IDENTICAL canonical
+    /// forms — hence the same `to_json` bytes and the same hash. [`Self::to_json`]
+    /// canonicalises before serialising, so a manifest's on-the-wire/hashable form
+    /// is always canonical regardless of construction order. Call this directly
+    /// when a canonical in-memory manifest is needed (e.g. before equality checks
+    /// on the struct itself).
+    // [OPUS-4.8] sq-y2wy: canonical edge ordering for binding_edges + join_edges.
+    pub fn canonicalize(&mut self) {
+        self.binding_edges.sort();
+        self.join_edges.sort();
+    }
+
+    /// Serialise to canonical pretty JSON. The edge vectors are canonicalised
+    /// ([`Self::canonicalize`]) on a CLONE first, so the serialised form is
+    /// deterministic in edge order WITHOUT mutating `self`: two manifests that
+    /// differ only in edge order produce byte-identical JSON (and thus the same
+    /// hash over those bytes).
+    // [OPUS-4.8] sq-y2wy: canonicalise edge order before serialisation.
     pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).expect("manifest is serializable")
+        let mut canonical = self.clone();
+        canonical.canonicalize();
+        serde_json::to_string_pretty(&canonical).expect("manifest is serializable")
     }
 
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
@@ -1413,6 +1465,177 @@ mod join_schema_tests {
             JOIN_EQ_PUBLIC_INPUT_LAYOUT.len(),
             6,
             "join_eq exposes exactly 6 public inputs"
+        );
+    }
+}
+
+/// [OPUS-4.8] sq-y2wy: canonical edge-ordering tests for `binding_edges` +
+/// `join_edges`. PR #178 (sq-fi03) documented (then corrected to "deferred")
+/// edge canonicalisation; this module pins the now-real implementation —
+/// `ProofManifest::canonicalize` / `to_json` sort both edge vectors to a total,
+/// deterministic order so manifests differing only in edge order are identical.
+#[cfg(test)]
+mod canonical_edge_tests {
+    use super::*;
+
+    /// A minimal manifest with the two edge vectors set to the given contents.
+    /// Everything else is the smallest legal shape (no sub-proofs — the edges'
+    /// references are NOT resolved by `canonicalize`/`to_json`, only sorted; the
+    /// verification-still-accepts path is exercised by the bind_joins / binding
+    /// tests in `verifier.rs`, which already build resolvable sub-proofs).
+    fn manifest_with_edges(binding: Vec<BindingEdge>, joins: Vec<JoinEdge>) -> ProofManifest {
+        ProofManifest {
+            r#type: default_type(),
+            query: "SELECT * WHERE { ?s ?p ?o }".to_string(),
+            issuers: vec![],
+            key_set: vec![],
+            commitment_attestations: vec![],
+            attributions: vec![],
+            join_obligations: vec![],
+            entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
+            binding: BindingMode::Challenge {
+                challenge: FieldHex::from_field(&Fr::from(1u64)),
+            },
+            revocation: None,
+            status_snapshots: vec![],
+            sub_proofs: vec![],
+            binding_edges: binding,
+            join_edges: joins,
+            hidden_revocation: None,
+            hidden_issuer_attestations: vec![],
+        }
+    }
+
+    fn binding_edge(from_proof: usize, from_row: usize, from_slot: usize, to_proof: usize) -> BindingEdge {
+        BindingEdge { from_proof, from_row, from_slot, to_proof }
+    }
+
+    fn join_edge(scan_a: usize, graph_a: usize, scan_b: usize, graph_b: usize, join_proof: usize) -> JoinEdge {
+        JoinEdge { scan_a, graph_a, scan_b, graph_b, join_proof }
+    }
+
+    /// `canonicalize` sorts `binding_edges` to ascending
+    /// `(from_proof, from_row, from_slot, to_proof)` regardless of insertion order,
+    /// and is idempotent.
+    #[test]
+    fn binding_edges_canonicalise_to_total_order() {
+        // Edges chosen so EACH tuple component is the tie-breaker for some pair
+        // (so the test would fail if any component were dropped from the key).
+        let order_x = vec![
+            binding_edge(2, 0, 0, 9),
+            binding_edge(0, 1, 0, 4),
+            binding_edge(0, 0, 2, 5),
+            binding_edge(0, 0, 1, 7),
+            binding_edge(0, 0, 1, 3),
+        ];
+        // The SAME set, shuffled.
+        let order_y = vec![
+            binding_edge(0, 0, 1, 7),
+            binding_edge(0, 0, 2, 5),
+            binding_edge(2, 0, 0, 9),
+            binding_edge(0, 0, 1, 3),
+            binding_edge(0, 1, 0, 4),
+        ];
+
+        let expected = vec![
+            binding_edge(0, 0, 1, 3),
+            binding_edge(0, 0, 1, 7),
+            binding_edge(0, 0, 2, 5),
+            binding_edge(0, 1, 0, 4),
+            binding_edge(2, 0, 0, 9),
+        ];
+
+        let mut a = manifest_with_edges(order_x, vec![]);
+        let mut b = manifest_with_edges(order_y, vec![]);
+        a.canonicalize();
+        b.canonicalize();
+        assert_eq!(a.binding_edges, expected, "binding_edges sort to the tuple order");
+        assert_eq!(a.binding_edges, b.binding_edges, "order-independent canonical form");
+
+        // Idempotent: a second canonicalise is a no-op.
+        let once = a.binding_edges.clone();
+        a.canonicalize();
+        assert_eq!(a.binding_edges, once, "canonicalize is idempotent");
+    }
+
+    /// `canonicalize` sorts `join_edges` to ascending
+    /// `(scan_a, graph_a, scan_b, graph_b, join_proof)` regardless of insertion
+    /// order — including using `join_proof` as the final tie-breaker.
+    #[test]
+    fn join_edges_canonicalise_to_total_order() {
+        let order_x = vec![
+            join_edge(1, 0, 2, 0, 5),
+            join_edge(0, 0, 1, 0, 4),
+            join_edge(0, 0, 1, 0, 3), // ties first 4 with the previous; join_proof breaks it
+            join_edge(0, 1, 1, 0, 6),
+        ];
+        let order_y = vec![
+            join_edge(0, 1, 1, 0, 6),
+            join_edge(0, 0, 1, 0, 3),
+            join_edge(1, 0, 2, 0, 5),
+            join_edge(0, 0, 1, 0, 4),
+        ];
+
+        let expected = vec![
+            join_edge(0, 0, 1, 0, 3),
+            join_edge(0, 0, 1, 0, 4),
+            join_edge(0, 1, 1, 0, 6),
+            join_edge(1, 0, 2, 0, 5),
+        ];
+
+        let mut a = manifest_with_edges(vec![], order_x);
+        let mut b = manifest_with_edges(vec![], order_y);
+        a.canonicalize();
+        b.canonicalize();
+        assert_eq!(a.join_edges, expected, "join_edges sort to the tuple order");
+        assert_eq!(a.join_edges, b.join_edges, "order-independent canonical form");
+    }
+
+    /// `to_json` canonicalises BOTH edge vectors before serialising, WITHOUT
+    /// mutating `self`: a multi-edge manifest built with edges in order X and one
+    /// with the same edges in order Y produce byte-identical JSON (and thus the
+    /// same hash over those bytes).
+    #[test]
+    fn to_json_is_byte_identical_regardless_of_edge_insertion_order() {
+        let binding_x = vec![
+            binding_edge(1, 0, 0, 5),
+            binding_edge(0, 0, 0, 3),
+        ];
+        let joins_x = vec![
+            join_edge(1, 0, 2, 0, 6),
+            join_edge(0, 0, 1, 0, 4),
+        ];
+        // Reverse BOTH vectors.
+        let binding_y: Vec<_> = binding_x.iter().rev().cloned().collect();
+        let joins_y: Vec<_> = joins_x.iter().rev().cloned().collect();
+
+        let m_x = manifest_with_edges(binding_x, joins_x);
+        let m_y = manifest_with_edges(binding_y, joins_y);
+
+        let json_x = m_x.to_json();
+        let json_y = m_y.to_json();
+        assert_eq!(json_x, json_y, "edge-order-only difference => identical canonical JSON");
+
+        // to_json does NOT mutate self (canonicalises a clone): the in-memory
+        // manifest keeps its original (unsorted) edge order.
+        assert_eq!(
+            m_x.binding_edges,
+            vec![binding_edge(1, 0, 0, 5), binding_edge(0, 0, 0, 3)],
+            "to_json leaves self's binding_edges untouched"
+        );
+
+        // The canonical JSON round-trips back to a manifest whose edges ARE sorted.
+        let back = ProofManifest::from_json(&json_x).expect("canonical JSON parses");
+        assert_eq!(
+            back.binding_edges,
+            vec![binding_edge(0, 0, 0, 3), binding_edge(1, 0, 0, 5)],
+            "parsed canonical manifest carries sorted binding_edges"
+        );
+        assert_eq!(
+            back.join_edges,
+            vec![join_edge(0, 0, 1, 0, 4), join_edge(1, 0, 2, 0, 6)],
+            "parsed canonical manifest carries sorted join_edges"
         );
     }
 }
