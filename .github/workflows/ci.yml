@@ -104,7 +104,15 @@ jobs:
   # panics — needed by the panic-surface test). No duplicate job here. [OPUS-4.8]
 
   lint:
-    name: clippy (gate) + fmt (informational)
+    # [OPUS-4.8] sq-wjth: the display name must NOT contain the words "informational"
+    # or "advisory" — the ci-summary gate treats any check whose NAME contains either
+    # (case-insensitive) as NON-GATING. clippy here GATES (it's the `-D warnings` hard
+    # gate); only the fmt step is non-blocking. So name it "fmt (non-blocking)" to keep
+    # the meaning while staying out of the advisory exclusion set. (The collision: the
+    # former name "clippy (gate) + fmt (informational)" was wrongly matched by that rule
+    # and would have stopped the clippy gate from gating — verified by hand-tracing the
+    # jq filter against every check name.)
+    name: clippy (gate) + fmt (non-blocking)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -453,9 +461,19 @@ jobs:
         with:
           tool: cargo-geiger
         continue-on-error: true
-      - name: Report unsafe usage across the workspace
-        # `--all-features` would drag in device/heavy optional deps; the default feature
-        # set already covers the unsafe of interest (sparq-core). sparq-py is skipped
-        # (pyo3 extension module — not a plain cargo-geiger target, like the other jobs).
-        run: cargo geiger --workspace --exclude sparq-py >> "$GITHUB_STEP_SUMMARY"
+      - name: Report unsafe usage (sparq-core, where the unsafe lives)
+        # [OPUS-4.8] sq-wjth: cargo-geiger CANNOT run against the workspace's VIRTUAL
+        # root manifest — `cargo geiger --workspace` deterministically errors with
+        # "manifest path `Cargo.toml` is a virtual manifest, but this command requires
+        # running against an actual package" (geiger, unlike cargo, demands a real
+        # package + its dep tree). So target a REAL package via --manifest-path:
+        # sparq-core, which by this job's own comment holds the unsafe of interest
+        # (mmap, the zero-copy dictionary, SIMD) and pulls the rest of the workspace
+        # in as path-deps, so the report still covers what matters. `--all-features`
+        # is intentionally omitted (it would drag in device/heavy optional deps; the
+        # default set already covers sparq-core's unsafe). The `|| true` makes the step
+        # conclude SUCCESS even if geiger errors on some other dep-graph shape — this
+        # report is informational and must never break CI. (The ci-summary gate also
+        # treats this "…, informational" check as non-gating regardless — sq-wjth.)
+        run: cargo geiger --manifest-path crates/sparq-core/Cargo.toml >> "$GITHUB_STEP_SUMMARY" || true
         continue-on-error: true

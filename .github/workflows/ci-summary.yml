@@ -17,6 +17,24 @@
 # self-deadlock). It waits until the discovered set of sibling check names has
 # stabilised AND every one of them is terminal, bounded by the job timeout. A
 # stable-empty set passes (e.g. a docs-only change that triggers no other workflow).
+#
+# ADVISORY/INFORMATIONAL checks are NON-GATING (bead sq-wjth). [OPUS-4.8] A check
+# whose NAME contains "advisory" or "informational" (case-insensitive) is excluded
+# from the gating set entirely — its conclusion (even `failure`) can never fail the
+# gate. This is a rule, not a hard-coded name list, so it adapts as advisory jobs are
+# added/renamed. It currently covers, by name:
+#   • "unsafe report (cargo-geiger, informational)"   (ci.yml `geiger`)
+#   • "markdownlint-advisory (whole repo)"            (docs-quality.yml)
+#   • "external-links (lychee online, advisory)"      (docs-quality.yml)
+#   • "vale (prose, advisory)"                        (docs-quality.yml)
+#   • "custom-checks (… advisory)"                    (docs-quality.yml)
+# REQUIRED checks (gate / build+test / clippy / coverage / the conformance + perf
+# ratchets / wasm / MSRV / supply-chain / …) do NOT contain those words, so they
+# still gate normally. Rationale: an advisory job that concludes `failure` (e.g.
+# cargo-geiger erroring on the virtual workspace manifest) must never block a merge —
+# the step-level `continue-on-error`/`|| true` in those jobs is a best-effort first
+# line, and THIS name-rule is the load-bearing backstop that makes advisory failures
+# strictly non-gating regardless of how the job concludes.
 name: ci-summary
 
 on:
@@ -101,7 +119,14 @@ jobs:
                   | tee -a "$GITHUB_STEP_SUMMARY"
                 exit 0
               fi
+              # [OPUS-4.8] sq-wjth: a non-passing conclusion gates ONLY for a check
+              # that is NOT advisory/informational. The (.name|ascii_downcase) test
+              # drops any check whose name contains "advisory" or "informational"
+              # (case-insensitive) from the gating set — its failure can never block
+              # the merge. See the ADVISORY/INFORMATIONAL note in the header for the
+              # exact names this covers and why required checks are unaffected.
               failed=$(printf '%s\n' "$runs" | jq -rs '[.[]
+                | select((.name | ascii_downcase | test("advisory|informational")) | not)
                 | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")]')
               n=$(printf '%s' "$failed" | jq 'length')
               if [ "$n" -gt 0 ]; then

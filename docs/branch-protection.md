@@ -35,12 +35,22 @@ required status check — the aggregator:
 The gate covers **every** check-run on the head commit. As of this writing those are the
 jobs below; this table is a map for reviewers, **not** a list of required checks.
 
+> **Advisory/informational checks are non-gating by NAME (sq-wjth).** `ci-summary`
+> excludes any check whose name contains the word `advisory` or `informational`
+> (case-insensitive) from the gating set — its conclusion, even `failure`, never blocks
+> a merge. So a job that should GATE must **not** put either word in its display name
+> (e.g. the clippy gate is named `clippy (gate) + fmt (non-blocking)`, *not*
+> `… (informational)`), and a new advisory/visibility-only job **should** carry one of
+> those words so the aggregator treats it as non-gating automatically. Note "advisories"
+> (plural, as in `cargo-deny (advisories + …)`) does **not** match `advisory`, so that
+> supply-chain check still gates correctly.
+
 From the **CI** workflow (`.github/workflows/ci.yml`):
 
 | Job name | What it gates |
 |---|---|
 | `build + test (workspace)` | `cargo build --workspace --all-targets` + `cargo test --workspace`. |
-| `clippy (gate) + fmt (informational)` | `cargo clippy --workspace --all-targets -- -D warnings` (the clippy gate; fmt is informational until the one-time reformat lands). |
+| `clippy (gate) + fmt (non-blocking)` | `cargo clippy --workspace --all-targets -- -D warnings` (the clippy gate; fmt is non-blocking until the one-time reformat lands). |
 | `MSRV check (Rust 1.88, declared floor)` | `cargo check` on the pinned MSRV toolchain. |
 | `W3C SPARQL conformance (ratchet >= 1229 pass+divergence)` | The W3C SPARQL conformance ratchet (never lower). |
 | `W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)` | The W3C SHACL core + SHACL-SPARQL ratchets. |
