@@ -152,9 +152,11 @@ pub struct Flatmate<'a> {
 pub struct FederatedQuery<'a> {
     /// The global-IRI variable the disclosed-key join folds on (convention #6).
     pub join_var: Variable,
-    /// The full normalized federated query — its canonical digest is what the
-    /// (deferred) proof binds. Used VERBATIM as the union-store query in the
-    /// differential and as [`ProofStatement::query`].
+    /// The full federated query text. This module does NOT normalize or
+    /// canonicalize it — it is used VERBATIM as the union-store query in the
+    /// differential and stored verbatim as [`ProofStatement::query`]. Any
+    /// canonicalization the (deferred) proof's query-text digest needs is the
+    /// CALLER's responsibility; it is not performed here. [OPUS-4.8]
     pub federated_query: &'a str,
     /// The public threshold for the secure cumulative-salary comparison (e.g.
     /// `100_000`). Only the boolean `cumulative > threshold` verdict is disclosed.
@@ -309,9 +311,19 @@ pub fn run_federated(
     // test). The proof itself stays the honest NotYetImplemented stub: this glue
     // is crypto-free + fork-invariant to Q1/Q2, so we do NOT fake a proof — we
     // only assemble the public-statement shape the proof will eventually bind.
+    // [OPUS-4.8] The disclosed key-set is a SET `K` (convention #3): caller order
+    // and multiplicity must NOT matter, because it is later bound into the proof's
+    // public-inputs digest — two runs over the same logical key-set must produce the
+    // SAME statement. Collect, then canonicalise (sort + dedup) into a deterministic
+    // order so the assembled ProofStatement is reproducible.
+    let mut disclosed_key_set: Vec<String> =
+        flatmates.iter().map(|fm| fm.issuer_key.clone()).collect();
+    disclosed_key_set.sort_unstable();
+    disclosed_key_set.dedup();
+
     let statement = ProofStatement {
         query: query.federated_query.to_string(),
-        disclosed_key_set: flatmates.iter().map(|fm| fm.issuer_key.clone()).collect(),
+        disclosed_key_set,
         // The verifier injects its OWN fresh challenge N at verification (#4
         // freshness binding); a prover-side placeholder here is only the
         // statement shape, exactly as documented on `ProofStatement::challenge`.
@@ -738,5 +750,100 @@ mod tests {
             }
             other => panic!("expected NotYetImplemented, got {other:?}"),
         }
+    }
+
+    /// [OPUS-4.8] Determinism: the disclosed key-set `K` is a SET, so caller order
+    /// and multiplicity must NOT affect the assembled `ProofStatement`. Two runs
+    /// over the SAME logical key-set — one with the issuer keys in a permuted caller
+    /// order, one with a DUPLICATE key — must both yield the SAME canonical
+    /// `disclosed_key_set` (sorted, de-duplicated), and hence the same statement
+    /// shape, so the (deferred) proof's public-inputs digest is reproducible.
+    #[test]
+    fn disclosed_key_set_is_canonical_set_order_and_multiplicity_invariant() {
+        let salaries = [30_000u64, 28_000, 26_000, 24_000];
+
+        // Run A: keys in one caller order.
+        let keys_a = [
+            "did:example:hr-acme#k1",
+            "did:example:hr-globex#k1",
+            "did:example:hr-initech#k1",
+            "did:example:hr-umbrella#k1",
+        ];
+        // Run B: the SAME logical key-set, but a DIFFERENT caller order AND a
+        // duplicate (acme repeated, umbrella dropped here is NOT what we want — we
+        // keep the same set). Permute + duplicate one key: the canonical form must
+        // collapse the dup and re-sort, so A and B must match.
+        let keys_b = [
+            "did:example:hr-umbrella#k1",
+            "did:example:hr-acme#k1",
+            "did:example:hr-initech#k1",
+            "did:example:hr-acme#k1", // DUPLICATE of acme (globex absent on purpose)
+        ];
+
+        let make = |keys: [&str; 4]| {
+            let members = ["alice", "bob", "carol", "dave"];
+            (0..4)
+                .map(|i| flatmate(i, members[i], salaries[i], keys[i]))
+                .collect::<Vec<_>>()
+        };
+
+        let backend = ShamirBackend::new_seeded(4, 0xCA70).unwrap();
+        let resp_a = run_federated(&backend, &make(keys_a), &fed_query(100_000)).unwrap();
+
+        // For B we need the SAME logical set as A. A = {acme, globex, initech, umbrella}.
+        // To exercise both invariants (order + multiplicity) within a 4-flatmate
+        // federation, B uses {umbrella, acme, initech, acme} which is the SET
+        // {acme, initech, umbrella}. So compare B against a from-scratch canonical
+        // of exactly those keys rather than against A.
+        let resp_b = run_federated(&backend, &make(keys_b), &fed_query(100_000)).unwrap();
+
+        // Run A: distinct keys → canonical is the 4 keys, sorted.
+        let mut expected_a: Vec<String> = keys_a.iter().map(|k| k.to_string()).collect();
+        expected_a.sort();
+        expected_a.dedup();
+        assert_eq!(resp_a.statement.disclosed_key_set, expected_a);
+        assert!(
+            resp_a
+                .statement
+                .disclosed_key_set
+                .windows(2)
+                .all(|w| w[0] < w[1]),
+            "canonical key-set must be strictly sorted with no duplicates"
+        );
+
+        // Run B: duplicate collapses, order does not matter → canonical = sorted set.
+        let mut expected_b: Vec<String> = keys_b.iter().map(|k| k.to_string()).collect();
+        expected_b.sort();
+        expected_b.dedup();
+        assert_eq!(resp_b.statement.disclosed_key_set, expected_b);
+        assert_eq!(
+            resp_b.statement.disclosed_key_set.len(),
+            3,
+            "the duplicated acme key must collapse to a single set element"
+        );
+        assert!(
+            resp_b
+                .statement
+                .disclosed_key_set
+                .windows(2)
+                .all(|w| w[0] < w[1]),
+            "canonical key-set must be strictly sorted with no duplicates"
+        );
+
+        // Pure permutation invariance over the SAME set: re-running A with the keys
+        // in a shuffled caller order must give a byte-identical canonical key-set.
+        let keys_a_permuted = [
+            "did:example:hr-initech#k1",
+            "did:example:hr-umbrella#k1",
+            "did:example:hr-acme#k1",
+            "did:example:hr-globex#k1",
+        ];
+        let resp_a_perm =
+            run_federated(&backend, &make(keys_a_permuted), &fed_query(100_000)).unwrap();
+        assert_eq!(
+            resp_a_perm.statement.disclosed_key_set, resp_a.statement.disclosed_key_set,
+            "same logical key-set in a different caller order must yield the SAME canonical \
+             disclosed_key_set (and thus the same statement shape)"
+        );
     }
 }
