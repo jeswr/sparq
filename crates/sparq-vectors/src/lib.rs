@@ -5,6 +5,7 @@ pub mod diskann;
 pub mod embed;
 pub mod fingerprint;
 pub mod fuse;
+pub mod import;
 pub mod labels;
 pub mod quant;
 pub mod store;
@@ -17,6 +18,7 @@ pub use diskann::{sibling_graph_path, DiskAnnIndex, VamanaConfig, SPQG_MAGIC, SP
 pub use embed::{Embedder, HashEmbedder};
 pub use fingerprint::{check_against, Artifact, CheckResult, Fingerprint, FINGERPRINT_LEN};
 pub use fuse::{fuse_rrf, fuse_rrf_weighted, fuse_scores, RRF_K};
+pub use import::{ImportBinding, ImportSpec, MAX_NPY_HEADER_LEN};
 pub use labels::{embed_labels, embed_labels_with, LabelConfig};
 pub use quant::{
     cosine_from_sq_dist, DistanceTable, EncodedStore, PqConfig, ProductQuantizer, ScalarQuantizer,

@@ -68,6 +68,13 @@ impl VectorStore {
 }
 StreamingWriter::create(path, dim);  fn put(&mut self, id, &[f32]); fn finalize(self) -> Result<VectorStore, String>  // O(1) build RAM, byte-identical output
 
+// --- bulk import of externally-computed embeddings (src/import.rs) --- bring-your-own vectors; reuses the store writer
+ImportSpec { spqv_path, dim, ids: &[Id], binding: ImportBinding }   // ids[i] keys row i (row -> dict-id contract); ids.len() = rows
+ImportBinding::Unbound | ImportBinding::Graph(&Graph)              // graph binding for the fingerprint header (Unbound = unverifiable)
+VectorStore::import_npy(ImportSpec, npy_path) -> Result<VectorStore, String>          // 2-D C-order little-endian f4/f8 .npy; f8 narrowed to f32
+VectorStore::import_numeric_dump(ImportSpec, dump_path) -> Result<VectorStore, String> // header-less flat rows*dim*4 LE f32 (row-major)
+// both: fail-closed on dim/row-count/dtype/order/length mismatch; .npy header bounded (sq-tzwa) before any body alloc; NOT on wasm (std::fs)
+
 // --- embedders (src/embed.rs) ---
 trait Embedder { fn dim(&self) -> usize; fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String>; }
 HashEmbedder::new(dim) / ::with_seed(dim, seed)                                 // TEST-ONLY lexical hashing, NO semantics
@@ -244,6 +251,39 @@ let store = w.finalize()?;                                   // a normal, valida
 let bytes = std::fs::read("/tmp/big.spqv").unwrap();         // or fetched/embedded
 let store2 = VectorStore::open_from_bytes(bytes)?;           // identical validation, no filesystem
 ```
+
+### 7. Bulk-import embeddings computed ELSEWHERE (NumPy `.npy` / flat dump)
+
+When vectors come from an external pipeline (Python/sentence-transformers, a vendor batch job)
+rather than an in-process `Embedder`, load the matrix straight into a `.spqv`. The matrix carries
+no term identity, so you supply a **parallel slice of dict ids** — row `i` is stored for `ids[i]`
+(the **row → dict-id contract**). Emit `(id, text)` pairs from the same scan, embed the texts
+out-of-process, then import the matrix with the ids in the same order.
+
+```rust
+use sparq_vectors::{ImportBinding, ImportSpec, VectorStore};
+
+// row i of vecs.npy lines up with ids[i]; resolve each id with graph.id_of(&term).
+let ids: Vec<u32> = vec![/* alice */ 10, /* bob */ 20, /* carol */ 30];
+
+// (a) NumPy: numpy.save("vecs.npy", arr.astype(np.float32))  -> 2-D C-order <f4/<f8
+let store = VectorStore::import_npy(
+    ImportSpec { spqv_path: "graph.spqv", dim: 384, ids: &ids, binding: ImportBinding::Graph(&graph) },
+    "vecs.npy",
+)?;                       // finalized, mmap-backed; binding=Graph embeds the fingerprint
+
+// (b) header-less dump: arr.astype("<f4").tofile("vecs.f32")  -> exactly rows*dim*4 LE bytes
+let store = VectorStore::import_numeric_dump(
+    ImportSpec { spqv_path: "graph.spqv", dim: 384, ids: &ids, binding: ImportBinding::Unbound },
+    "vecs.f32",
+)?;
+```
+
+Fail-closed: a dtype/byte-order/fortran-order/dimensionality mismatch, a `shape[1] != dim`, a
+`shape[0] != ids.len()`, a wrong dump length, a duplicate/zero/non-finite row, or a
+malformed/oversized `.npy` header is an `Err` — never a silent reinterpretation. The `.npy` header
+length and declared shape are bounded against the actual file size before any body allocation
+(sq-tzwa hardening). `import_*` need `std::fs` and are compiled off the wasm target.
 
 ## Gotchas / feature flags / prerequisites
 
