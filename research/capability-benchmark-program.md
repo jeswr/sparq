@@ -16,7 +16,7 @@ scripts plus one small per-surface runner, with two genuinely new pieces of shar
 (external-engine adapters; an approximate/recall gate variant) called out explicitly.
 
 Tasks discovered here are captured as **beads** (`bd`), not as TODOs in this file (repo hygiene
-policy). The bead ids are recorded at the end.
+policy); query the tracker (`bd list`) for the live ids and status rather than a static list here.
 
 ---
 
@@ -24,9 +24,13 @@ policy). The bead ids are recorded at the end.
 
 A few names in the original brief don't match the tree; the **verified** layout is:
 
-- **Competitor registry: [`bench/competitors.json`](../bench/competitors.json)** — *not*
-  `bench/dashboard/competitors.json` (that path does not exist). The dashboard reads it as
-  `window.COMPETITORS`.
+- **Competitor registry: [`bench/competitors.json`](../bench/competitors.json)** — the gather
+  registry (`competitors` array) + injected-value seam; source-of-record for
+  `scripts/gather-competitors.sh`. The dashboard's *static* competitor snapshot is a **separate**
+  file, [`bench/dashboard/competitors.json`](../bench/dashboard/competitors.json), mirrored into
+  `bench/dashboard/dashboard.js` as `COMPETITORS_DATA` and read as `window.COMPETITORS`. Register a
+  new engine in `bench/competitors.json`; update the dashboard's static numbers in
+  `bench/dashboard/competitors.json`.
 - **There is no `bench/deep-taxonomy/` dir.** "Deep Taxonomy" lives inside the **inference/EYE**
   suite: [`bench/inference/`](../bench/inference/) (`gen_deeptaxonomy.py`, `eye-comparison.sh`,
   `owl-bench.sh`). Deep Taxonomy is *featured + EYE-compared* but is **not yet a per-commit
@@ -279,8 +283,12 @@ bench/shacl/
   gen.sh            # reuse bench/lubm/gen.sh for the data graph; emit/copy per-workload shapes
   shapes/<workload>.ttl       # 5 committed shape graphs
   expected.tsv      # <workload>\t<conforms>\t<violations>\t<focus_nodes>  (per-engine note)
-  run.sh            # SELF-ASSERTING: validate, assert cols 2–4 vs expected.tsv, exit 1; print
-                    #   <workload>\t<conforms>\t<violations>\t<focus_nodes>\t<validate_us>\t<load_us>
+  run.sh            # SELF-ASSERTING (LUBM pattern): validate, assert conforms/violations/focus_nodes
+                    #   vs expected.tsv internally, exit 1 on mismatch; emit on STDOUT the same
+                    #   3-column name\tcount\tus contract the ci-bench hook consumes (§2 G1) — i.e.
+                    #   <workload>\t<violations>\t<validate_us> (count = the asserted #violations,
+                    #   us = validate time). Correctness lives in expected.tsv, NOT in extra stdout
+                    #   columns — exactly like bench/lubm/run.sh, whose stdout is q\trows\tus.
   README.md         # workloads, tiers, cited datasets, competitor refs (no perf numbers)
 ```
 Plus: G1 runner (`sparq-cli shacl` arm or `bench_shacl.rs`); `ci-bench.sh` hook (reuse the
