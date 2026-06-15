@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781485606312,
+  "lastUpdate": 1781485814027,
   "repoUrl": "https://github.com/jeswr/sparq",
   "entries": {
     "sparq engine": [
@@ -62717,6 +62717,1260 @@ window.BENCHMARK_DATA = {
           {
             "name": "rdfs_infer_s",
             "value": 0.144,
+            "unit": "s"
+          },
+          {
+            "name": "wasm_bundle_bytes",
+            "value": 1582733,
+            "unit": "bytes"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "63333554+jeswr@users.noreply.github.com",
+            "name": "Jesse Wright",
+            "username": "jeswr"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "74a9201553127be158ef1a0db0a259e646d28336",
+          "message": "feat(sparq-zk): scale + harden committed-index revocation privacy (sq-hwe + sq-6qe) (#77)\n\n* feat(sparq-zk-compose): sparse status-list Merkle builder (sq-hwe)\n\n[OPUS-4.8] Replace the dense O(2^depth) host Merkle-root/witness builder for\nthe committed-index hidden-revocation circuit with a SPARSE one that caches the\nall-zeros and all-ones uniform-subtree root at each height and recurses only into\nthe O(set-bits) subtrees that actually hold a revoked bit or straddle the\ncovered/fail-closed-padding boundary. Cost is O(S*depth + depth) host work /\nO(S*depth) memory, independent of 2^depth, so production StatusList2021 sizes\n(2^17+) are supported without a dense full-size builder.\n\nRoots and authentication paths are BIT-IDENTICAL to the old dense fold (same\nPoseidon2 h2, same leaf layout, same fail-closed padding), so the circuit\nrelation (revoke.nr) and the verifier's root-equality binding are unchanged. The\noriginal dense builder is retained as dense_merkle_root, the #[cfg(test)] oracle,\nand the new tests cross-check sparse==dense across uniform/sparse/boundary\nshapes and exercise a 2^17-depth root + witness. Updates the verifier scope docs:\nthe host builder no longer bounds list size; the residual bound is the single\ncompiled revoke_unset_d10 circuit member (depth-generic relation, deeper member\nmechanical). IRI/version disclosure (sq-6qe) noted as still open.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n\n* feat(sparq-zk): sq-6qe primitives — hide status-list IRI + version (foundation)\n\n[OPUS-4.8] sq-6qe: add the domain-separated cryptographic primitives for the\nfully-hidden committed-index revocation path, where the status-list IRI and the\nversion (still clear on the sq-ayv path) are also hidden:\n\n- status_ref_commitment(list_id, version, ref_blinding): a hiding Poseidon2\n  commitment to (list, version).\n- status_ref_fully_committed_digest(ref_commitment, index_commitment): the\n  issuer-signed digest folding both commitments, distinct-domain from the\n  clear-index and committed-index-clear-list digests (no mode substitution).\n- accepted_status_leaf(list_id, version, status_list_root): the relying party's\n  accepted-set Merkle leaf (design sub-option A — binds the status_list_root\n  inside the leaf so the verifier never learns which list/version/root).\n\nUnit-tested for hiding, binding, atomic-triple binding, and domain separation\nfrom the other two disclosure modes. These are off-circuit Rust whose field\noutputs the deferred Noir member will recompute in-circuit (single source of\ntruth), mirroring how the sq-ayv index-commitment primitives landed before that\npath's circuit.\n\nThe full circuit + verifier + manifest path (ref-open + accepted-set membership\n+ in-zk version>=min_version freshness + bit-unset against the privately-bound\nroot) is too large for one clean PR; design recorded in\nresearch/zk-statuslist-hide-iri-version.md and tracked as follow-up bead sq-kndw.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n\n* fix(sparq-zk-compose): make any_bit_set missing-byte fallback fail-closed\n\nAddress Copilot review on PR #77 (revocation.rs). any_bit_set used\nunwrap_or(0) for a missing byte, which is NOT fail-closed: if the helper\nwere ever called on a range touching a byte beyond `bits`, it would read\nthat region as all-zero and let `sparse_subtree_root` misclassify an\nunknown/padding region as an all-zero subtree. But out-of-range bits are\ndefined as 1 (revoked) by `StatusListSnapshot::bit` / `leaf`.\n\nChange the fallback to unwrap_or(0xFF) (missing byte = all revoked bits)\nso a missing region reports as set (`true`), consistent with the crate's\nfail-closed convention. The real call site still only touches the covered\nregion (`hi <= 8 * bits.len()`), so this fallback is unreachable in\npractice — it is hardening, not a behaviour change on any live path.\n\nAdd `any_bit_set_is_fail_closed_on_missing_bytes` pinning the fallback\n(padding-only and straddling ranges read as set; covered all-active reads\nas not-set; missing-byte reads agree with the `bit()` oracle). [OPUS-4.8]\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Jesse Wright <jesse@jeswr.org>\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-15T02:05:45+01:00",
+          "tree_id": "559e23c6bc5e2ae3943d400c88569a6e366051ac",
+          "url": "https://github.com/jeswr/sparq/commit/74a9201553127be158ef1a0db0a259e646d28336"
+        },
+        "date": 1781485813563,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "load_s",
+            "value": 0.54,
+            "unit": "s"
+          },
+          {
+            "name": "store_bytes_per_triple",
+            "value": 92,
+            "unit": "bytes"
+          },
+          {
+            "name": "dict_bytes_per_term",
+            "value": 53,
+            "unit": "bytes"
+          },
+          {
+            "name": "parse_ns_per_byte",
+            "value": 4.9721,
+            "unit": "ns/byte"
+          },
+          {
+            "name": "store_bytes_per_triple_small",
+            "value": 88,
+            "unit": "bytes"
+          },
+          {
+            "name": "q02_type_person_count_us",
+            "value": 4,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_count_us",
+            "value": 3281.1,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_count_us",
+            "value": 4927.8,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_count_us",
+            "value": 5,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_count_us",
+            "value": 4.8,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_count_us",
+            "value": 836.4,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_materialize_us",
+            "value": 13019,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_materialize_us",
+            "value": 59184.3,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_materialize_us",
+            "value": 159228,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_materialize_us",
+            "value": 2546.1,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_materialize_us",
+            "value": 4.6,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_materialize_us",
+            "value": 41959.1,
+            "unit": "us"
+          },
+          {
+            "name": "q02_type_person_json_us",
+            "value": 7211.7,
+            "unit": "us"
+          },
+          {
+            "name": "q03_star3_json_us",
+            "value": 58011,
+            "unit": "us"
+          },
+          {
+            "name": "q04_follows_name_json_us",
+            "value": 151942.9,
+            "unit": "us"
+          },
+          {
+            "name": "q06_filter_age_json_us",
+            "value": 2885.2,
+            "unit": "us"
+          },
+          {
+            "name": "q09_count_edges_json_us",
+            "value": 5.6,
+            "unit": "us"
+          },
+          {
+            "name": "q10_optional_age_json_us",
+            "value": 39370.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q01_bgp_count_us",
+            "value": 4.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q02_star3_count_us",
+            "value": 29945.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q03_chain_count_us",
+            "value": 16.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q04_triangle_count_us",
+            "value": 1862730.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q05_union_count_us",
+            "value": 9.8,
+            "unit": "us"
+          },
+          {
+            "name": "op_q06_optional_count_us",
+            "value": 6667.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q07_optional_notbound_count_us",
+            "value": 3739.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q08_minus_count_us",
+            "value": 3617.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q09_filter_numeric_count_us",
+            "value": 7176.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q10_filter_string_count_us",
+            "value": 478534.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q11_filter_in_count_us",
+            "value": 13064.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q12_filter_exists_count_us",
+            "value": 31951.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q13_bind_count_us",
+            "value": 53870.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q14_values_count_us",
+            "value": 3826.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q15_agg_group_having_count_us",
+            "value": 22881.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q16_distinct_count_us",
+            "value": 11.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q17_orderby_limit_offset_count_us",
+            "value": 146568.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q18_path_plus_count_us",
+            "value": 103416.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q19_path_star_count_us",
+            "value": 176303.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q20_path_opt_count_us",
+            "value": 8.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q21_path_seq_count_us",
+            "value": 11.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q22_path_alt_count_us",
+            "value": 6.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q23_path_inverse_count_us",
+            "value": 8.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q24_path_negated_pset_count_us",
+            "value": 7.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q25_subquery_count_us",
+            "value": 35763.8,
+            "unit": "us"
+          },
+          {
+            "name": "op_q26_ask_count_us",
+            "value": 7268.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q27_construct_count_us",
+            "value": 13281.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q28_describe_count_us",
+            "value": 10.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q01_bgp_materialize_us",
+            "value": 4.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q02_star3_materialize_us",
+            "value": 29950.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q03_chain_materialize_us",
+            "value": 18,
+            "unit": "us"
+          },
+          {
+            "name": "op_q04_triangle_materialize_us",
+            "value": 1852940.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q05_union_materialize_us",
+            "value": 9.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q06_optional_materialize_us",
+            "value": 6412.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q07_optional_notbound_materialize_us",
+            "value": 3744.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q08_minus_materialize_us",
+            "value": 3506.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q09_filter_numeric_materialize_us",
+            "value": 8800.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q10_filter_string_materialize_us",
+            "value": 478503.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q11_filter_in_materialize_us",
+            "value": 12948.8,
+            "unit": "us"
+          },
+          {
+            "name": "op_q12_filter_exists_materialize_us",
+            "value": 32034.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q13_bind_materialize_us",
+            "value": 54725,
+            "unit": "us"
+          },
+          {
+            "name": "op_q14_values_materialize_us",
+            "value": 3783.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q15_agg_group_having_materialize_us",
+            "value": 22395.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q16_distinct_materialize_us",
+            "value": 13.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q17_orderby_limit_offset_materialize_us",
+            "value": 149276,
+            "unit": "us"
+          },
+          {
+            "name": "op_q18_path_plus_materialize_us",
+            "value": 105963.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q19_path_star_materialize_us",
+            "value": 180537,
+            "unit": "us"
+          },
+          {
+            "name": "op_q20_path_opt_materialize_us",
+            "value": 10.2,
+            "unit": "us"
+          },
+          {
+            "name": "op_q21_path_seq_materialize_us",
+            "value": 11.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q22_path_alt_materialize_us",
+            "value": 8.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q23_path_inverse_materialize_us",
+            "value": 8.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q24_path_negated_pset_materialize_us",
+            "value": 7.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q25_subquery_materialize_us",
+            "value": 37175.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q26_ask_materialize_us",
+            "value": 7286.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q27_construct_materialize_us",
+            "value": 13312.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q28_describe_materialize_us",
+            "value": 10.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q01_bgp_json_us",
+            "value": 4.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q02_star3_json_us",
+            "value": 30211.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q03_chain_json_us",
+            "value": 18.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q04_triangle_json_us",
+            "value": 1522661,
+            "unit": "us"
+          },
+          {
+            "name": "op_q05_union_json_us",
+            "value": 8.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q06_optional_json_us",
+            "value": 6514.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q07_optional_notbound_json_us",
+            "value": 3834,
+            "unit": "us"
+          },
+          {
+            "name": "op_q08_minus_json_us",
+            "value": 3563.7,
+            "unit": "us"
+          },
+          {
+            "name": "op_q09_filter_numeric_json_us",
+            "value": 8382.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q10_filter_string_json_us",
+            "value": 477120.5,
+            "unit": "us"
+          },
+          {
+            "name": "op_q11_filter_in_json_us",
+            "value": 13446.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q12_filter_exists_json_us",
+            "value": 32111.8,
+            "unit": "us"
+          },
+          {
+            "name": "op_q13_bind_json_us",
+            "value": 53947.3,
+            "unit": "us"
+          },
+          {
+            "name": "op_q14_values_json_us",
+            "value": 3820.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q15_agg_group_having_json_us",
+            "value": 22483.8,
+            "unit": "us"
+          },
+          {
+            "name": "op_q16_distinct_json_us",
+            "value": 12.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q17_orderby_limit_offset_json_us",
+            "value": 150997.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q18_path_plus_json_us",
+            "value": 110654,
+            "unit": "us"
+          },
+          {
+            "name": "op_q19_path_star_json_us",
+            "value": 182221.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q20_path_opt_json_us",
+            "value": 10.8,
+            "unit": "us"
+          },
+          {
+            "name": "op_q21_path_seq_json_us",
+            "value": 12.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q22_path_alt_json_us",
+            "value": 7.6,
+            "unit": "us"
+          },
+          {
+            "name": "op_q23_path_inverse_json_us",
+            "value": 8,
+            "unit": "us"
+          },
+          {
+            "name": "op_q24_path_negated_pset_json_us",
+            "value": 8.4,
+            "unit": "us"
+          },
+          {
+            "name": "op_q25_subquery_json_us",
+            "value": 36749.9,
+            "unit": "us"
+          },
+          {
+            "name": "op_q26_ask_json_us",
+            "value": 7192.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q27_construct_json_us",
+            "value": 13321.1,
+            "unit": "us"
+          },
+          {
+            "name": "op_q28_describe_json_us",
+            "value": 9.4,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q01_count_us",
+            "value": 10.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q02_count_us",
+            "value": 6757.1,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03a_count_us",
+            "value": 16839.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03b_count_us",
+            "value": 16484.8,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03c_count_us",
+            "value": 16425.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q04_count_us",
+            "value": 456265.1,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q05b_count_us",
+            "value": 17243.1,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q07_count_us",
+            "value": 23929,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q08_count_us",
+            "value": 290312.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q09_count_us",
+            "value": 22492.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q10_count_us",
+            "value": 3.7,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q11_count_us",
+            "value": 22821.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12b_count_us",
+            "value": 292901.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12c_count_us",
+            "value": 5.8,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q01_materialize_us",
+            "value": 14.9,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q02_materialize_us",
+            "value": 9122.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03a_materialize_us",
+            "value": 18580.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03b_materialize_us",
+            "value": 16383.4,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03c_materialize_us",
+            "value": 16298.8,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q04_materialize_us",
+            "value": 503800,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q05b_materialize_us",
+            "value": 18822.9,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q07_materialize_us",
+            "value": 24106.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q08_materialize_us",
+            "value": 292524.9,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q09_materialize_us",
+            "value": 22568.7,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q10_materialize_us",
+            "value": 58.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q11_materialize_us",
+            "value": 22339.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12b_materialize_us",
+            "value": 298863.2,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12c_materialize_us",
+            "value": 6.2,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q01_json_us",
+            "value": 16.7,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q02_json_us",
+            "value": 13347.9,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03a_json_us",
+            "value": 20245.4,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03b_json_us",
+            "value": 16540,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q03c_json_us",
+            "value": 16386.3,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q04_json_us",
+            "value": 489347.1,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q05b_json_us",
+            "value": 19148.1,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q07_json_us",
+            "value": 24485.5,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q08_json_us",
+            "value": 301748.4,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q09_json_us",
+            "value": 22517,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q10_json_us",
+            "value": 91.6,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q11_json_us",
+            "value": 22357.8,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12b_json_us",
+            "value": 298989.7,
+            "unit": "us"
+          },
+          {
+            "name": "sp2b_q12c_json_us",
+            "value": 6.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_C3_count_us",
+            "value": 72.2,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_F2_count_us",
+            "value": 33.5,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_F3_count_us",
+            "value": 28.2,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_F5_count_us",
+            "value": 103,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L1_count_us",
+            "value": 18.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L2_count_us",
+            "value": 17.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L3_count_us",
+            "value": 9.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L4_count_us",
+            "value": 6.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L5_count_us",
+            "value": 11.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S1_count_us",
+            "value": 36.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S2_count_us",
+            "value": 13,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S3_count_us",
+            "value": 12.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S4_count_us",
+            "value": 12.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S5_count_us",
+            "value": 12.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S6_count_us",
+            "value": 10.7,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S7_count_us",
+            "value": 10.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_C3_materialize_us",
+            "value": 949.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_F2_materialize_us",
+            "value": 25.2,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_F3_materialize_us",
+            "value": 27.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_F5_materialize_us",
+            "value": 105.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L1_materialize_us",
+            "value": 19.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L2_materialize_us",
+            "value": 16.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L3_materialize_us",
+            "value": 14.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L4_materialize_us",
+            "value": 8.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L5_materialize_us",
+            "value": 10.5,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S1_materialize_us",
+            "value": 125.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S2_materialize_us",
+            "value": 31.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S3_materialize_us",
+            "value": 17.5,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S4_materialize_us",
+            "value": 15.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S5_materialize_us",
+            "value": 23.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S6_materialize_us",
+            "value": 10.8,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S7_materialize_us",
+            "value": 10.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_C3_json_us",
+            "value": 1309.5,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_F2_json_us",
+            "value": 28.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_F3_json_us",
+            "value": 28.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_F5_json_us",
+            "value": 121.3,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L1_json_us",
+            "value": 20.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L2_json_us",
+            "value": 17.6,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L3_json_us",
+            "value": 18.9,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L4_json_us",
+            "value": 9.8,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_L5_json_us",
+            "value": 10.8,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S1_json_us",
+            "value": 112.7,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S2_json_us",
+            "value": 33.1,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S3_json_us",
+            "value": 20.8,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S4_json_us",
+            "value": 16.4,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S5_json_us",
+            "value": 27,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S6_json_us",
+            "value": 11.8,
+            "unit": "us"
+          },
+          {
+            "name": "watdiv_S7_json_us",
+            "value": 12,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query01_count_us",
+            "value": 54.7,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query02_count_us",
+            "value": 66.8,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query03_count_us",
+            "value": 76.5,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query04_count_us",
+            "value": 101.3,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query05_count_us",
+            "value": 504,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query07_count_us",
+            "value": 176,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query08_count_us",
+            "value": 287.8,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query09_count_us",
+            "value": 7.1,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query10_count_us",
+            "value": 603.2,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query11_count_us",
+            "value": 8.7,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query12_count_us",
+            "value": 46.1,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query01_materialize_us",
+            "value": 53.6,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query02_materialize_us",
+            "value": 78,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query03_materialize_us",
+            "value": 81,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query04_materialize_us",
+            "value": 103.3,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query05_materialize_us",
+            "value": 510.9,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query07_materialize_us",
+            "value": 186.2,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query08_materialize_us",
+            "value": 292.1,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query09_materialize_us",
+            "value": 6.9,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query10_materialize_us",
+            "value": 599.6,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query11_materialize_us",
+            "value": 10.1,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query12_materialize_us",
+            "value": 45.7,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query01_json_us",
+            "value": 57.8,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query02_json_us",
+            "value": 144.2,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query03_json_us",
+            "value": 74.5,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query04_json_us",
+            "value": 118.1,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query05_json_us",
+            "value": 494.6,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query07_json_us",
+            "value": 194.9,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query08_json_us",
+            "value": 320.6,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query09_json_us",
+            "value": 7.1,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query10_json_us",
+            "value": 610.9,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query11_json_us",
+            "value": 12.3,
+            "unit": "us"
+          },
+          {
+            "name": "bsbm_query12_json_us",
+            "value": 46.3,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q01_count_us",
+            "value": 10.5,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q02_count_us",
+            "value": 630.2,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q03_count_us",
+            "value": 15.3,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q14_count_us",
+            "value": 5.1,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q04_count_us",
+            "value": 69,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q05_count_us",
+            "value": 29.8,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q06_count_us",
+            "value": 5.8,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q07_count_us",
+            "value": 37.8,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q08_count_us",
+            "value": 2960.6,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q09_count_us",
+            "value": 4041.6,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q10_count_us",
+            "value": 18.1,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q11_count_us",
+            "value": 10,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q12_count_us",
+            "value": 23.8,
+            "unit": "us"
+          },
+          {
+            "name": "lubm_q13_count_us",
+            "value": 19,
+            "unit": "us"
+          },
+          {
+            "name": "rdfs_infer_s",
+            "value": 0.143,
             "unit": "s"
           },
           {
