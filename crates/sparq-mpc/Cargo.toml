@@ -63,4 +63,4 @@ oxrdf = { workspace = true }
 # dependency surface minimal and the native-only / wasm-exclusion invariant
 # intact. Pinned to the workspace's existing 0.9 line (sparq-geo/sparq-text).
 rand = { version = "0.9", default-features = false }
-rand_chacha = "0.9"
+rand_chacha = "0.10"
