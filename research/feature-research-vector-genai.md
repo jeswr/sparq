@@ -102,15 +102,19 @@ Grounded in `crates/sparq-vectors` (+ `-sim`, `-introspect`, `-nlq`, `-text`) an
 
 - **Hybrid dense+sparse (BM25/SPLADE + vectors, RRF/fusion).** SPLADE learned-sparse + dense (Contriever)
   fused by score-normalised average / RRF **consistently beats either alone on BEIR/MS-MARCO**
-  `[established]` <https://en.wikipedia.org/wiki/Learned_sparse_retrieval>,
+  `[established]` SPLADE (Formal et al., SIGIR 2021, arXiv:2107.05720), BEIR (Thakur et al., NeurIPS 2021
+  D&B, arXiv:2104.08663), RRF (Cormack et al., SIGIR 2009, 10.1145/1571941.1572114); *secondary:*
+  <https://en.wikipedia.org/wiki/Learned_sparse_retrieval>,
   <https://www.emergentmind.com/topics/dense-sparse-hybrid-retrieval>. RRF k=60 is the de-facto default
   (Azure/Elastic/ParadeDB). **sparq already has both signals** (`sparq-text` BM25 + `sparq-vectors`
   cosine) and the fuse helpers — but fusion is **library-only, not exposed in SPARQL** (see G1).
 
 - **Cross-encoder / reranking (two-stage).** Retrieve N∈[50,200] cheaply, rerank with a query-aware
   cross-encoder: +up-to-10 nDCG over bi-encoders on MS-MARCO; the standard production pipeline
-  `[established]` <https://towardsdatascience.com/advanced-rag-retrieval-cross-encoders-reranking/>,
-  <https://arxiv.org/pdf/2510.04757>. sparq's RRF over-fetch is stage-1; a reranker seam is the missing
+  `[established]` Nogueira & Cho, "Passage Re-ranking with BERT" (arXiv:1901.04085), and
+  <https://arxiv.org/pdf/2510.04757>; *secondary:*
+  <https://towardsdatascience.com/advanced-rag-retrieval-cross-encoders-reranking/>.
+  sparq's RRF over-fetch is stage-1; a reranker seam is the missing
   stage-2 (model out-of-process, like embeddings).
 
 - **Index families / streaming.** HNSW (in-RAM recall champ) vs IVF-PQ (memory-minimal) vs DiskANN/Vamana
@@ -170,7 +174,7 @@ consistent with the architecture) · `ambiguous-ask-user`. Impact 1–5 (5 = pro
 |---|---|---|--:|:--:|---|
 | **V1** | **`vec:` magic predicate — vector KNN inside SPARQL** (`?e vec:nearest (?seed 10)`, `vec:textNearest ("query" 20)`, `vec:score ?s`), rewritten to `VALUES` like `text:`; candidates feed the **exact** engine | **clear-fit:sparq-vectors (+`text:`-style rewriter; new `sparq-vectors`↔engine seam)** | **5** | **M** | The single biggest gap (G1). `text:` already proves the pattern (`sparq-text/src/rewrite.rs`). Every competitor exposes vectors in SPARQL — GraphDB `similarity:`, Stardog, Neo4j; sparq is the only one without. Closes the headline "vectors aren't a SPARQL citizen" gap. `[established]` GraphDB docs; in-repo `genai-kg-embeddings-vectorindex.md` §4.3/5.2 |
 | **V2** | **Filtered-ANN over dict-ids** — predicate-constrained KNN ("nearest `foaf:Person` to X"); compute the exact allowed-id set from permutation indexes, use it as an ACORN/NaviX visit-mask in HNSW/Vamana | **clear-fit:sparq-vectors (`ann.rs`/`diskann.rs`)** | **5** | **M** | RDF-native differentiator (G2). The "scalar filter" in ACORN/NaviX **is** an RDF triple pattern; sparq computes it exactly from its own indexes — a bolt-on vector DB must mirror metadata and can't. The natural way to combine `vec:` with a BGP. `[established]` ACORN SIGMOD'24 (arXiv:2403.04871); NaviX 2025; survey arXiv:2505.06501 |
-| **V3** | **KGE-for-cardinality (GNCE) planner hook** — answer-safe learned cardinality from colocated KGE/CS features feeding `cs-planner` | **clear-fit:sparq-introspect + sparq-engine `cs-planner` (opt-in)** | **5** | **L** | RDF-native differentiator (G3). Improves the **core engine** (join ordering), not just GenAI; provably answer-safe (planner-only). `cs-planner`/`CsTable` is the existing seam. GNCE q-error 1.2–4.2 vs CSET blow-up. `[established]` GNCE arXiv:2303.01140; in-repo data-structures.md §S7 |
+| **V3** | **KGE-for-cardinality (GNCE) planner hook** — answer-safe learned cardinality from colocated KGE/CS features feeding `cs-planner` | **clear-fit:sparq-introspect + sparq-engine `cs-planner` (opt-in)** | **5** | **L** | RDF-native differentiator (G3). Improves the **core engine** (join ordering), not just GenAI; provably answer-safe (planner-only). `cs-planner`/`CsTable` is the existing seam. GNCE q-error 1.2–4.2 vs CSET blow-up. `[established]` GNCE arXiv:2303.01140; in-repo `research/data-structures.md` §S7 |
 | **V4** | **In-query hybrid + RRF in SPARQL** — fuse `text:` BM25 + `vec:` cosine (+ `sparq-sim`) at the query layer (`vec:hybrid`/weighted-RRF), not just the Rust library | clear-fit:sparq-vectors `fuse.rs` + the V1 rewriter | 4 | M | Dense+sparse hybrid beats either alone on BEIR/MS-MARCO `[established]`; sparq already has **both signals + the fuse helpers** — only the SPARQL exposure is missing. Weaviate/Qdrant make this a first-class query. <https://en.wikipedia.org/wiki/Learned_sparse_retrieval>; in-repo `genai-text-embedding-practices.md` §4 |
 | **V5** | **RaBitQ binary quantization tier** — 1-bit + popcount with the unbiased estimator; multi-bit 4/5/7 levels; replaces/augments the binary path next to SQ/PQ | clear-fit:sparq-vectors `quant.rs` | 4 | M | Modern binary tier sparq lacks; AND+popcount is single-cycle, 768-d recall >94% at 1-bit, theoretical error bound. Closes the quantization frontier vs Milvus `IVF_RABITQ`. `[established]` RaBitQ SIGMOD'24 (10.1145/3654970) |
 | **V6** | **Cross-encoder rerank seam (stage-2)** — over-fetch N via ANN/RRF, rerank by an out-of-process reranker behind a trait (mirrors the `Embedder`/`Llm` seam) | clear-fit:sparq-vectors (new `rerank` trait) | 3 | S | Standard two-stage RAG; +up-to-10 nDCG over bi-encoders, K∈[50,200] `[established]`. Cheap, model out-of-process, matches sparq's "model lives outside the engine" discipline. <https://arxiv.org/pdf/2510.04757> |
