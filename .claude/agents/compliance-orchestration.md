@@ -13,7 +13,9 @@ evidence are largely independent. This file is the lead's runbook for sparq's ce
 
 ## Why parallel
 
-Sequential would take many days for the ~11-framework set. Each framework produces its own
+Sequential would take many days for the 12-framework set (asvs, cis, sbom, ssdf, slsa, openssf,
+memsafety, iso27001, cra, privacy, cryptoreview, cdmc — matching the `git worktree add` list below).
+Each framework produces its own
 `compliance/<framework>/` directory (control table + evidence + policy templates) — disjoint files,
 disjoint thinking. The auditor pass per framework is independent. Only **consolidation + the final CDMC
 re-score** is sequential. Per the MEMORY orchestration discipline: keep many agents parallel, never
@@ -22,7 +24,8 @@ idle the orchestrator on CI, dispatch with `run_in_background`, act on completio
 ## The shared-tree constraint (real — hit it in PSS)
 
 Background agents in this environment all open the **same working directory**. Spawn N agents into one
-checkout and they fight over branch checkout, `git add -A` sweeps each other's files, pushes race. They
+checkout and they fight over branch checkout, `git add -A` sweeps each other's files, and their pushes
+race each other. They
 must be **physically isolated by worktree**.
 
 The Agent tool's `isolation: "worktree"` param has historically failed at the harness level here
