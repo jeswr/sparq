@@ -49,6 +49,9 @@ class RuleLoadingTest(unittest.TestCase):
             "changed-public-feature-docs",
             "new-bench-dashboard-row",
             "competitor-feature-gather",
+            # [OPUS-4.8] ZK circuit gate-count follow-on (a PR-description
+            # deliverable, present in the rules file) — enforce the contract.
+            "new-zk-circuit-gatecount",
         ):
             self.assertIn(required, ids)
         # Every rule has a trigger + at least one create template.
@@ -217,6 +220,34 @@ class DryRunTest(unittest.TestCase):
                 )
             out = buf.getvalue()
         self.assertEqual(rc, 0)
+        self.assertIn("no rules triggered", out)
+
+    def test_hermetic_without_added_files_does_not_fire_new_path_rules(self):
+        # [OPUS-4.8] Regression: when --added-files is omitted, `added` must
+        # default to EMPTY, not to all changed files — otherwise a MODIFIED
+        # crate Cargo.toml would falsely fire the new-crate (when_new_paths)
+        # rule. Here Cargo.toml is changed-but-not-added.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            changed = Path(td) / "changed.txt"
+            changed.write_text("crates/sparq-foo/Cargo.toml\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = flow_on.main(
+                    [
+                        "--pr",
+                        "7",
+                        "--dry-run",
+                        "--changed-files",
+                        str(changed),
+                        "--title",
+                        "tweak sparq-foo manifest",
+                    ]
+                )
+            out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("new-crate-bench-sparq-foo", out)
         self.assertIn("no rules triggered", out)
 
 

@@ -281,6 +281,13 @@ def _added_files_via_diff(pr: int) -> list[str]:
 
 def open_issue_exists(dedup_key: str) -> bool:
     marker = key_marker(dedup_key)
+    # [OPUS-4.8] Search by the stable, punctuation-light substring
+    # `flow-on-key: <key>` rather than the full HTML-comment marker — GitHub's
+    # search tokeniser handles `<!--`/`-->` unreliably, which could miss an
+    # existing issue and break idempotency (create a duplicate). The full marker
+    # is still verified against each returned body below, so the dedup decision
+    # stays exact; the looser query only widens the candidate set.
+    search = f"flow-on-key: {dedup_key}"
     out = _gh(
         [
             "issue",
@@ -290,7 +297,7 @@ def open_issue_exists(dedup_key: str) -> bool:
             "--label",
             "flow-on",
             "--search",
-            marker,
+            search,
             "--json",
             "number,body",
             "--limit",
@@ -303,9 +310,34 @@ def open_issue_exists(dedup_key: str) -> bool:
     return False
 
 
+# Labels we have already ensured exist this run (avoid redundant gh calls).
+_ENSURED_LABELS: set[str] = set()
+
+
+def ensure_label(label: str) -> None:
+    """[OPUS-4.8] Idempotently ensure `label` exists before it is applied.
+
+    `gh issue create --label X` ERRORS if label X does not yet exist, so on a
+    fresh repo (where none of the per-rule labels — bench/docs/zk/… — nor
+    `flow-on`/`auto` exist yet) no follow-on issue would ever be created. We
+    create-if-missing with `gh label create --force` (upsert; needs only the
+    `issues: write` token the workflow already grants). Failures are swallowed:
+    if the label can't be created (e.g. it already exists from a concurrent run)
+    the subsequent create still succeeds, and a genuinely un-creatable label
+    surfaces as the create's own error rather than masking it here."""
+    if label in _ENSURED_LABELS:
+        return
+    try:
+        _gh(["label", "create", label, "--force"])
+    except Exception:  # noqa: BLE001 - best-effort upsert; create_issue reports real failures
+        pass
+    _ENSURED_LABELS.add(label)
+
+
 def create_issue(fo: FollowOn) -> str:
     args = ["issue", "create", "--title", fo.title, "--body", fo.body]
     for lbl in fo.labels:
+        ensure_label(lbl)
         args += ["--label", lbl]
     return _gh(args).strip()
 
@@ -334,7 +366,13 @@ def main(argv: list[str] | None = None) -> int:
     hermetic = args.changed_files is not None and args.title is not None
     if hermetic:
         changed = _read_lines(args.changed_files)
-        added = _read_lines(args.added_files) if args.added_files else list(changed)
+        # [OPUS-4.8] Default `added` to EMPTY, not `list(changed)`: a changed
+        # file is not provably newly-added (mirrors the real `gh` path, which
+        # derives `added` from "new file mode" diff hunks). Defaulting to all
+        # changed files made `when_new_paths` rules fire on every modified path,
+        # producing false follow-ons in hermetic/CI dry-runs. Pass --added-files
+        # to exercise new-path rules.
+        added = _read_lines(args.added_files) if args.added_files else []
         labels = _read_lines(args.labels_file) if args.labels_file else []
         title = args.title
     else:
