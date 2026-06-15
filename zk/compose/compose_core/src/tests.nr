@@ -727,7 +727,7 @@ fn holder_pok_rejects_off_curve_key() {
 // ---------------------------------------------------------------------------
 //
 // Universe: two credentials sharing the join key JK (a global IRI encoding) at
-// graph-A object slot 2 and graph-B object slot 2 (the `?p` join column).
+// graph-A object slot 2 and graph-B subject slot 0 (the `?p` join column).
 //   Graph A: { (S1, P, JK) }                  -- ?p in slot 2 (object)
 //   Graph B: { (JK, P_OTHER, O2) }            -- ?p in slot 0 (subject)
 // So a true join is row_a[2] == row_b[0] == JK, slot_a = 2, slot_b = 0.

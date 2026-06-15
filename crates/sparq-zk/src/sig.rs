@@ -367,10 +367,12 @@ pub fn status_index_commitment(index: u64, blinding: &Fr) -> Fr {
     ])
 }
 
-/// `JOIN_DOMAIN` — domain-separation tag for the hidden cross-credential join
-/// value commitment (`research/zk-hidden-join-design.md` §2.4). Distinct from
-/// every other `SIG_DOMAIN_*` tag so a join commitment can never be
-/// cross-substituted for a status/index/holder/credential commitment.
+/// `SIG_DOMAIN_JOIN` — domain-separation tag for the hidden cross-credential
+/// join value commitment (`research/zk-hidden-join-design.md` §2.4). Distinct
+/// from every other `SIG_DOMAIN_*` tag so a join commitment can never be
+/// cross-substituted for a status/index/holder/credential commitment. (The
+/// Noir-side circuit exposes the identical byte tag under the name
+/// `JOIN_DOMAIN`.)
 // [OPUS-4.8] sq-bwwl / sq-sco0: hidden-join value-commitment domain tag.
 pub const SIG_DOMAIN_JOIN: u64 = 0x5a4b_5349_475f_4a4e; // "ZKSIG_JN"
 
