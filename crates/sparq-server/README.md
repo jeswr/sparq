@@ -90,6 +90,46 @@ cargo run -p sparq-server -- --format turtle data.ttl
 curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o } LIMIT 5'
 ```
 
+## 🐳 Running the container image (ghcr.io)
+
+A container image is published to `ghcr.io/jeswr/sparq-server` on every release tag (built
+from the repo `Dockerfile`; a CI smoke test runs the built image and curls `/health` + a
+query before it ships). The runtime stage is distroless (no shell, no package manager).
+
+```sh
+# boots out of the box, empty default graph, no auth (see the warning it prints):
+docker run --rm -p 3030:3030 ghcr.io/jeswr/sparq-server
+
+# serve a dataset (mount it read-only):
+docker run --rm -p 3030:3030 -v "$PWD/data:/data:ro" \
+  ghcr.io/jeswr/sparq-server --format turtle /data/dataset.ttl
+
+curl http://127.0.0.1:3030/health   # -> ok
+curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=ASK {}'
+```
+
+**Why it binds `0.0.0.0`.** Inside a container the only useful bind is the non-loopback
+`0.0.0.0` (loopback is unreachable through Docker's port mapping). The fail-closed bind
+posture above refuses a non-loopback bind unless opted in, so the image sets
+`SPARQ_ALLOW_REMOTE=1` to boot — running the container is itself the operator's explicit
+choice to publish a network surface. **This default posture has no auth**: anyone who can
+reach the published port can READ AND WRITE the dataset (the server logs a loud no-auth
+WARNING on startup — heed it).
+
+**Securing it (recommended for anything beyond local use).** Every `SPARQ_*` var is read
+from the *environment*, so turn on the Bearer gate with `-e` — no flag wiring needed:
+
+```sh
+# fully gated — writes AND reads require the token (drop the second -e for QLever-style
+# writes-gated/reads-open). Deliver $TOK over TLS — terminate at a reverse proxy:
+docker run --rm -p 3030:3030 \
+  -e SPARQ_AUTH_TOKEN="$TOK" -e SPARQ_AUTH_TOKEN_READ=1 ghcr.io/jeswr/sparq-server
+```
+
+For per-user authz, front it with a gateway or `sparq-solid`. The other `SPARQ_*` hardening
+vars (timeout, body cap, concurrency, …) work the same way through `-e`. See the auth × bind
+matrix under "Security posture".
+
 ## ✨ Features
 
 - **SPARQL 1.1 Protocol** — `query` (GET / POST direct / POST url-encoded / HEAD) and

@@ -67,6 +67,7 @@ conventions first, then a per-category map that points at the registry, then a
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
 | **serve** | concurrent-serving + memory-tiering research spikes | `serve-spikes`, `memtier-spikes` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance` |
+| **competitors** | versioned external-engine comparison (Oxigraph / QLever / eye) + version+env capture | `competitor-gather` (registry: [`competitors.json`](./competitors.json)) |
 
 Notes on a few that need care:
 
@@ -122,6 +123,26 @@ Notes on a few that need care:
   the heavier version weekly on spot (NOT live until `AWS_BENCH_ROLE_ARN` is set
   — fails harmlessly at OIDC, no cost). Both push to the orphan **`benchmark-data`**
   branch via github-action-benchmark.
+- **`competitor-gather` is the versioned external-engine comparison** — see the
+  registry [`competitors.json`](./competitors.json) (Oxigraph embedded Rust dep /
+  QLever Docker image / eye N3 binary: pinned version, install+run recipe, and the
+  per-engine map of which sparq suites each is comparable on) and the orchestrator
+  [`scripts/gather-competitors.sh`](../scripts/gather-competitors.sh). It is
+  **safe-by-default**: a bare invocation DRY-RUNS (prints what it would do + a
+  tool/version/env report, runs no benchmark, pulls no image). A real gather is
+  guarded behind `--run --only <id>`; it caps the synthetic `--scale`, runs a `df`
+  watchdog, cleans `/tmp` scratch, and writes a results file per engine recording
+  the competitor's **version + host env** into git-ignored `bench/competitor-results/`.
+  The script never edits the tracked JSON; a maintainer maps a reviewed result into
+  the dashboard SEAM (`engines`/`values` in `competitors.json`) deliberately — and
+  per the *No hard-coded performance numbers* rule, no figures are baked into git.
+  Comparable-suite map (registry-driven): **Oxigraph** ↔ `sparq-bench-compare`,
+  `sp2b`, `watdiv`, `bsbm`, `dbpsb`, `lubm` (extensional only); **QLever** ↔
+  `qlever-olympics`, `qlever-synthetic-10m/100m`, `watdiv`, `bsbm`, `lubm`
+  (extensional); **eye** ↔ `inference-eye-comparison` (DeepTaxonomy/anc500/grid30).
+  HONESTY NOTE (per parent `sq-i0nm`): a gh-runner gather is noisy and not
+  comparable to the EC2/quiet-box reference band — the recorded `env.quiet_box`
+  flag lets the dashboard label it distinctly (see the QUIET-BOX convention above).
 
 ## Replicate everything — quickstart
 
@@ -173,6 +194,11 @@ scripts/fetch-inference-suites.sh && cargo run -p sparq-conformance --bin sparq-
 
 # --- vs QLever (needs QLever installed; see each dir's README) ---
 ( cd bench/qlever-olympics && ../../.qlever-venv/bin/python compare.py 5 compute )
+
+# --- versioned competitor comparison (Oxigraph / QLever / eye) — registry: bench/competitors.json ---
+scripts/gather-competitors.sh                       # dry-run: tool+version+env report (runs nothing)
+scripts/gather-competitors.sh --list                # show the pinned registry + comparable-suite map
+scripts/gather-competitors.sh --run --only oxigraph --scale 50000 --iters 4   # real gather (records version+env)
 
 # --- CI emitter locally / per-platform hardware sweep ---
 bash scripts/ci-bench.sh 200000 /tmp/bench-results.json
