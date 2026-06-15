@@ -16,11 +16,10 @@
 # instance profile.) An ephemeral keypair + a locked-down SG (port 22 from THIS host
 # only) are created per run and deleted in cleanup.
 #
-# ORPHAN-PROOFING (agent-death-independent, triple backstop, 3h hard cap):
-#   --instance-initiated-shutdown-behavior terminate
-#   + detached  (sleep 10800; shutdown -h now)
-#   + systemd-run --on-active=10800 shutdown -h now
-#   + at now + 3h  (best-effort)
+# ORPHAN-PROOFING (agent-death-independent, 3h hard cap; ≥2 independent mechanisms):
+#   --instance-initiated-shutdown-behavior terminate  (any in-box shutdown -> terminate)
+#   + detached  (sleep 10800; shutdown -h now)         (no deps, arms immediately)
+#   + systemd-run --on-active=10800 shutdown -h now    (survives shell exit)
 # The gather user-data writes results + a /root/GATHER_DONE sentinel, then STOPS (it
 # does NOT shut down) — only the watchdog auto-terminates if the orchestrator dies.
 # Tag purpose=sparq-bench.
@@ -89,16 +88,22 @@ USERDATA=$(cat <<UD
 #!/bin/bash
 set -x
 exec > >(tee /var/log/gather.log) 2>&1
-# --- triple orphan-proof backstop (agent-death-independent, 3h hard cap) ---
+# [OPUS-4.8] sq-8dp3: orphan-proof self-terminate — TWO independent 3h hard caps,
+# each from a DIFFERENT subsystem so a single failure can't leave the box running:
+#   (1) detached "sleep" subshell — works immediately, no package deps, but dies if
+#       the user-data shell's process group is reaped.
+#   (2) systemd-run transient timer — survives the shell exiting; pre-installed on
+#       the AMI so it arms before apt-get runs.
+# ("at" is NOT used as a backstop here: it isn't installed until the apt-get below,
+# so arming it before install is a silent no-op — that was the redundant/misleading
+# duplicate the review flagged. The two mechanisms above are independent and both
+# arm before any package install, so orphan-proofing is preserved.)
 ( sleep 10800; shutdown -h now ) &
 systemd-run --on-active=10800 /sbin/shutdown -h now || true
-command -v at >/dev/null 2>&1 && echo "/sbin/shutdown -h now" | at now + 3 hours || true
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq build-essential pkg-config git curl jq python3 python3-venv python3-pip nodejs npm default-jdk-headless raptor2-utils unzip at
-( sleep 10800; shutdown -h now ) &
-command -v at >/dev/null 2>&1 && echo "/sbin/shutdown -h now" | at now + 3 hours || true
+apt-get install -y -qq build-essential pkg-config git curl jq python3 python3-venv python3-pip nodejs npm default-jdk-headless raptor2-utils unzip
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 # rustup -y is synchronous, but the cargo SHIM symlink can lag a moment behind the
 # env file; export PATH AND wait for the binary so the build can't race past it.
@@ -183,7 +188,13 @@ log "launched INSTANCE_ID=$INSTANCE_ID"
 aws ec2 wait instance-running --region "$REGION" --instance-ids "$INSTANCE_ID"
 IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
 log "public IP=$IP; waiting for sshd"
-for i in $(seq 1 40); do ssh $SSHO "ubuntu@$IP" true 2>/dev/null && { log "ssh up"; break; }; sleep 10; done
+# [OPUS-4.8] sq-8dp3: if sshd NEVER comes up (wrong SG/VPC, transient EC2 fault) the
+# poll/pull phase below would just spin ~45 min hammering an unreachable host. Track
+# reachability and ABORT on failure — exit 1 fires the EXIT trap, which terminates the
+# instance (orphan-proof) instead of proceeding against a box we can't reach.
+SSH_UP=0
+for i in $(seq 1 40); do ssh $SSHO "ubuntu@$IP" true 2>/dev/null && { log "ssh up"; SSH_UP=1; break; }; sleep 10; done
+[ "$SSH_UP" = 1 ] || { log "ERROR: sshd never became reachable on $IP after 40 attempts — aborting (cleanup trap will terminate $INSTANCE_ID)"; exit 1; }
 
 mkdir -p "$RESULTS_DIR"
 # ---- poll (via SSH) for the GATHER_DONE sentinel; pull results while the box is ALIVE ----
