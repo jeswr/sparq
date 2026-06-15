@@ -3007,6 +3007,88 @@ fn probe_scan_public_inputs_hex() {
     eprintln!("SCAN_INPUTS_JSON={}", serde_json::to_string(&scan.inputs).unwrap());
 }
 
+/// [OPUS-4.8] sq-f9tl (NEW-1): PROBE (ignored) that dumps the real bb
+/// `public_inputs` for a `filter_f64_d{d}` member, so the
+/// `reconstruct_filter_f64_matches_real_bb_public_inputs` unit-test constant in
+/// `verifier.rs` is an EMPIRICAL anchor (not self-referential layout reasoning).
+/// The re-audit (NEW-1) flagged that only `filter_int_d1` + `scan_k1_n16_r4` had
+/// captured golden vectors; this closes the f64 family. Run with `--ignored`
+/// when the toolchain is present; paste the printed hex into the unit test.
+#[test]
+#[ignore = "probe: prints real bb public_inputs hex for the filter_f64 reconstruct unit test"]
+fn probe_filter_f64_public_inputs_hex() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping probe");
+        return;
+    }
+    // operand = 25.0 (xsd:double), FILTER(?o >= 18.0) -> true. value has 2
+    // digits => filter_f64_d2 member.
+    let value: u64 = 25;
+    let operand_enc = encode_double_literal(value);
+    let (inputs, digits) =
+        build_filter_f64(operand_enc, value, FilterOp::Ge, 18.0_f64, true).expect("d2 builds");
+    assert_eq!(*inputs.circuit_id(), CircuitId::FilterF64 { d: 2 });
+    let challenge = FieldHex("0x2a".into());
+    let (id, toml) = prover_toml_for(&inputs, &challenge, &[], &[], &digits);
+    let prover = CircuitProver::from_crate_root();
+    let out = scratch("probe_filter_f64_pi");
+    let art = prover.prove_in(&id, &toml, &out, "probe_filter_f64_pi").unwrap();
+    let hex: String = art.public_inputs.iter().map(|b| format!("{b:02x}")).collect();
+    eprintln!("FILTER_F64_PUBLIC_INPUTS_LEN={}", art.public_inputs.len());
+    eprintln!("FILTER_F64_PUBLIC_INPUTS_HEX={hex}");
+    eprintln!("FILTER_F64_INPUTS_JSON={}", serde_json::to_string(&inputs).unwrap());
+}
+
+/// [OPUS-4.8] sq-f9tl (NEW-1): PROBE (ignored) that dumps the real bb
+/// `public_inputs` for a k=2 scan member (`scan_k2_n16_r8`), the other family the
+/// re-audit (NEW-1) flagged as un-anchored. Two single-triple credential graphs
+/// matching the same pattern => k=2, two true attribution bits, r padded to 8.
+/// Run with `--ignored` when the toolchain is present; paste into the unit test.
+#[test]
+#[ignore = "probe: prints real bb public_inputs hex for the scan_k2 reconstruct unit test"]
+fn probe_scan_k2_public_inputs_hex() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping probe");
+        return;
+    }
+    // Two distinct named-graph credentials, each committed under its OWN salt
+    // (mirrors real ingest), each carrying SEVERAL `ex:age` triples so the union
+    // of matched rows exceeds the r=4 bucket and the build derives the r=8 member
+    // (`scan_k2_n16_r8` is the only compiled k=2 member: r buckets are {4,8} but
+    // no k2_r4 member is compiled — a >4-row match is what reaches a real member).
+    let multi_age = |base: u64| -> Vec<Triple> {
+        let subj = NamedOrBlankNode::NamedNode(iri("http://ex/alice"));
+        (0..3)
+            .map(|i| Triple::new(subj.clone(), iri("http://ex/age"), int_lit(base + i)))
+            .collect()
+    };
+    let salt_a = salt_from_bytes(&[7u8; 32]);
+    let salt_b = salt_from_bytes(&[9u8; 32]);
+    let commit_a = commit_triples(&multi_age(20), salt_a).unwrap();
+    let commit_b = commit_triples(&multi_age(30), salt_b).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit_a, commit_b], &pattern).unwrap();
+    assert!(
+        matches!(scan.inputs.circuit_id(), CircuitId::Scan { k: 2, r: 8, .. }),
+        "two multi-age commitments must derive the compiled k=2, r=8 scan member"
+    );
+    let challenge = FieldHex("0x2a".into());
+    let (id, toml) =
+        prover_toml_for(&scan.inputs, &challenge, &scan.witness.counts, &scan.witness.enc, &[]);
+    let prover = CircuitProver::from_crate_root();
+    let out = scratch("probe_scan_k2_pi");
+    let art = prover.prove_in(&id, &toml, &out, "probe_scan_k2_pi").unwrap();
+    let hex: String = art.public_inputs.iter().map(|b| format!("{b:02x}")).collect();
+    eprintln!("SCAN_K2_ID={:?}", scan.inputs.circuit_id());
+    eprintln!("SCAN_K2_PUBLIC_INPUTS_LEN={}", art.public_inputs.len());
+    eprintln!("SCAN_K2_PUBLIC_INPUTS_HEX={hex}");
+    eprintln!("SCAN_K2_INPUTS_JSON={}", serde_json::to_string(&scan.inputs).unwrap());
+}
+
 // ===========================================================================
 // [OPUS-4.8] audit #12: revocation / freshness (forge-and-verify).
 // ===========================================================================

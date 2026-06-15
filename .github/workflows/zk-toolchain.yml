@@ -1,0 +1,148 @@
+# zk-toolchain — toolchain-gated lane for the ZK forge/anchor suite (sq-f9tl, re-audit NEW-1).
+# [OPUS-4.8] authored while Fable 5 unavailable — re-review when Fable returns.
+#
+# WHY: the repo's STRONGEST correctness claim is ZK *verifier soundness* — the
+# forge-and-verify negative suite (forge_pubinput_* in forge_gates.rs, the real
+# bb prove/verify e2e cases) that proves a forged proof/manifest is REJECTED. Those
+# tests need a real `nargo execute` + `bb prove`/`verify`, so they are `#[ignore]`d
+# and DO NOT run in the default `cargo test` lane (ci.yml). That left the soundness
+# claim with NO standing CI coverage: a regression in the hand-serialized public-input
+# reconstruction (`verifier.rs::reconstruct_public_inputs`) — a field-order / endianness
+# / arity slip — could re-open the whole estate without a single red check. This lane
+# installs the PINNED Noir toolchain and runs those `#[ignore]`d tests, so a forge that
+# verifies (or a serialization drift that breaks an empirical bb anchor) fails visibly.
+#
+# TRIGGER (deliberately OFF the fast per-PR critical path — the toolchain install +
+# real proving is slow):
+#   • schedule (nightly 04:23 UTC)  — the standing safety net.
+#   • workflow_dispatch             — on demand.
+#   • pull_request / push to main RESTRICTED by a path filter to ZK-touching paths
+#     (crates/sparq-zk*/**, zk/**, this workflow) — so a ZK change DOES get the forge
+#     suite run (and gates that PR via ci-summary, which is correct), while a non-ZK PR
+#     never triggers this workflow at all (no check-run created => ci-summary doesn't
+#     wait on it; it stays a nightly safety net, not a per-PR tax).
+#
+# TOOLCHAIN PINNING (supply-chain): the Noir/Barretenberg toolchain is version-managed
+# by `noirup` / `bbup` (there is no published GitHub Action for it). The installer
+# scripts are fetched from a SHA-PINNED ref of the noir-lang/barretenberg repos, and the
+# tool versions themselves are pinned to the exact versions this repo's circuits were
+# authored + anchored against (NARGO_VERSION / BB_VERSION below) — matching the box that
+# captured the empirical bb anchors in verifier.rs. A toolchain bump is therefore an
+# explicit edit here (and re-captures the anchors), never a silent floating "latest".
+name: zk-toolchain
+
+on:
+  schedule:
+    # Nightly safety net at 04:23 UTC (offset from ci.yml's 03:17 coverage tier so
+    # the two heavy nightly lanes don't contend for the same runner window).
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/sparq-zk/**"
+      - "crates/sparq-zk-compose/**"
+      - "zk/**"
+      - ".github/workflows/zk-toolchain.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/sparq-zk/**"
+      - "crates/sparq-zk-compose/**"
+      - "zk/**"
+      - ".github/workflows/zk-toolchain.yml"
+
+# Least-privilege: this lane only reads the repo + runs tests.
+permissions:
+  contents: read
+
+concurrency:
+  group: zk-toolchain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Pinned Noir toolchain — the versions the circuits were authored against and the
+  # empirical bb public-input anchors in verifier.rs were captured from. Bump these
+  # deliberately (and re-run the e2e `probe_*_public_inputs_hex` tests to re-capture
+  # the anchors) — never float to "latest".
+  NARGO_VERSION: "1.0.0-beta.21"
+  BB_VERSION: "5.0.0-nightly.20260324"
+  # SHA-pinned installer-script refs (supply-chain: avoid an unpinned `curl | bash` of a
+  # moving branch). The noirup / bbup *installers* are version-managers, not the tools —
+  # they bootstrap the `noirup` / `bbup` binaries, which then install the EXACT pinned
+  # NARGO_VERSION / BB_VERSION below. We pin the installer fetch to a specific commit so
+  # the bootstrap script itself can't change under us; the trailing comment records the
+  # repo + branch the SHA was taken from, for legible Dependabot-style bumps.
+  NOIRUP_REF: "324a51fca2c410d2477400316efc5ce0d743a5b3" # noir-lang/noirup @ main
+  BBUP_REF: "e80a3ada0bdc5501ff74fb2df7c9c99a19167049"   # AztecProtocol/aztec-packages @ next
+
+jobs:
+  forge-suite:
+    name: zk forge + anchor suite (nargo/bb)
+    runs-on: ubuntu-latest
+    # Toolchain install + real bb proving is the long pole; generous headroom.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Distinct cache key: this lane builds sparq-zk* with the toolchain present.
+          key: zk-toolchain
+
+      # Install nargo via noirup, pinned to NARGO_VERSION. Step 1 fetches the noirup
+      # bootstrap script from a SHA-pinned raw ref (NOIRUP_REF) and runs it to drop the
+      # `noirup` binary into ~/.nargo/bin; step 2 runs `noirup --version` to install the
+      # EXACT nargo. Two-level pinning: installer ref + installed-tool version.
+      - name: Install nargo (Noir) — pinned
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://raw.githubusercontent.com/noir-lang/noirup/${NOIRUP_REF}/install" \
+            -o /tmp/noirup-install.sh
+          bash /tmp/noirup-install.sh
+          echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.nargo/bin:$PATH"
+          noirup --version "${NARGO_VERSION}"
+          nargo --version
+
+      # Install Barretenberg (bb) via bbup, pinned to BB_VERSION. Same two-level pinning:
+      # SHA-pinned bbup installer ref + exact bb --version. The bbup installer lives in the
+      # AztecProtocol/aztec-packages monorepo (barretenberg/bbup/install).
+      - name: Install bb (Barretenberg) — pinned
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://raw.githubusercontent.com/AztecProtocol/aztec-packages/${BBUP_REF}/barretenberg/bbup/install" \
+            -o /tmp/bbup-install.sh
+          bash /tmp/bbup-install.sh
+          echo "$HOME/.bb" >> "$GITHUB_PATH"
+          export PATH="$HOME/.bb:$PATH"
+          bbup --version "${BB_VERSION}"
+          bb --version
+
+      - name: Toolchain versions (record for the run log)
+        run: |
+          echo "nargo: $(nargo --version | head -1)"
+          echo "bb:    $(bb --version)"
+
+      # Build the ZK crates' test targets first so a compile failure is distinct from a
+      # proving failure in the logs.
+      - name: Build sparq-zk* test targets
+        run: cargo build -p sparq-zk -p sparq-zk-compose --all-targets
+
+      # The load-bearing step: run EVERY `#[ignore]`d test in the ZK crates. With the
+      # toolchain on PATH the forge tests do a REAL bb prove and assert every forgery is
+      # REJECTED (and the positive controls verify); the empirical bb anchors re-validate
+      # the public-input serialization. --test-threads=1 keeps concurrent bb subprocesses
+      # from contending for the runner; nextest is NOT used here because these are slow,
+      # serialized, toolchain-bound cases (the retry/process-isolation nextest buys us on
+      # the fast lane is not what this lane needs).
+      - name: Run the ignored ZK forge + anchor + e2e suite (real bb)
+        run: |
+          cargo test -p sparq-zk-compose -p sparq-zk -- --ignored --test-threads=1
