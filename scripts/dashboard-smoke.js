@@ -266,6 +266,72 @@ eq(D.sizeAxisOf('deeptax_d1_count_us').base, D.sizeAxisOf('deeptax_d10_count_us'
    'normalized base is still shared across sizes (family grouping intact)');
 
 // ============================================================================================
+// [OPUS-4.8] sq-rltn — capability FAMILIES: the summary-first taxonomy that makes the dashboard
+// visibly cover ALL query types (not SPARQL-only). familyOf() routes a metric to a top-level
+// family; buildFamilies() builds the per-family view (latest value per metric) for first paint.
+// ============================================================================================
+ok(Array.isArray(D.FAMILIES) && D.FAMILIES.length >= 7, 'dashboard.js exports FAMILIES taxonomy');
+ok(typeof D.familyOf === 'function', 'dashboard.js exports familyOf');
+ok(typeof D.buildFamilies === 'function', 'dashboard.js exports buildFamilies');
+
+// every required capability family is present in the taxonomy, in coverage order.
+['core', 'sparql', 'shacl', 'geo', 'fts', 'vector', 'reasoning'].forEach(function (k) {
+  ok(D.FAMILIES.some(function (f) { return f.key === k; }), 'FAMILIES includes the ' + k + ' family');
+});
+
+// familyOf: each query type lands in its OWN family (SPARQL volume must not swallow capabilities).
+eq(D.familyOf('watdiv_S1_count_us').key, 'sparql', 'watdiv -> SPARQL family');
+eq(D.familyOf('sp2b_q1_count_us').key, 'sparql', 'sp2b -> SPARQL family');
+eq(D.familyOf('lubm_q06_count_us').key, 'sparql', 'lubm -> SPARQL family');
+eq(D.familyOf('op_q01_bgp_count_us').key, 'sparql', 'operators -> SPARQL family');
+eq(D.familyOf('shacl_cardinality_validate_us').key, 'shacl', 'shacl -> SHACL family');
+eq(D.familyOf('geo_within10km_us').key, 'geo', 'geo -> GeoSPARQL family');
+eq(D.familyOf('geo_compliance_deficit').key, 'geo', 'geo non-_us metric -> GeoSPARQL family');
+eq(D.familyOf('text_phrase_us').key, 'fts', 'text -> Full-Text family');
+eq(D.familyOf('fts_bytes_per_doc').key, 'fts', 'fts non-_us metric -> Full-Text family');
+eq(D.familyOf('deeptax_d10_count_us').key, 'reasoning', 'deeptax -> Reasoning family');
+eq(D.familyOf('load_s').key, 'core', 'load_s -> Core family');
+eq(D.familyOf('store_triples_bytes').key, 'core', 'store bytes -> Core family');
+// a not-yet-labelled vector metric routes to the Vector/ANN family via the prefix fallback.
+eq(D.familyOf('vectors_recall_at10_us').key, 'vector', 'unlabelled vector metric -> Vector/ANN family');
+eq(D.familyOf('ann_query_us').key, 'vector', 'unlabelled ann metric -> Vector/ANN family');
+
+// buildFamilies: one entry per family in order; families with no data are KEPT (count 0) so the
+// nav + "not yet reported" section keep coverage honest.
+const famEntries = [{
+  commit: { id: 'fam', message: 'fam', url: '#' }, date: Date.now(),
+  benches: [
+    { name: 'load_s', value: 1.2, unit: 's' },
+    { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },
+    { name: 'shacl_cardinality_validate_us', value: 40, unit: 'µs' },
+    { name: 'geo_within10km_us', value: 55, unit: 'µs' },
+    { name: 'text_phrase_us', value: 22, unit: 'µs' }
+    // NB: no vector, no reasoning metric -> those families render with count 0.
+  ]
+}];
+const famView = D.buildFamilies(famEntries);
+eq(famView.length, D.FAMILIES.length, 'buildFamilies returns one entry per family');
+eq(famView.map(function (f) { return f.key; }).join(','),
+   D.FAMILIES.map(function (f) { return f.key; }).join(','),
+   'buildFamilies preserves FAMILIES coverage order');
+const famByKey = {}; famView.forEach(function (f) { famByKey[f.key] = f; });
+ok(famByKey.sparql.count >= 1, 'SPARQL family has rows');
+ok(famByKey.shacl.count === 1, 'SHACL family has its one metric');
+ok(famByKey.geo.count === 1 && famByKey.fts.count === 1, 'Geo + Full-Text families populated');
+ok(famByKey.vector.count === 0, 'Vector/ANN family has count 0 (kept for honest coverage)');
+ok(famByKey.reasoning.count === 0, 'Reasoning family has count 0 in this fixture (kept)');
+// each row carries the readable label + latest value (the summary first-paint payload).
+let sawFamWatdiv = false;
+famByKey.sparql.rows.forEach(function (r) {
+  if (r.name === 'watdiv_S1_count_us') {
+    sawFamWatdiv = true;
+    eq(r.value, 30, 'family row carries the latest value');
+    ok(r.label === 'WatDiv S1 — star query, count', 'family row uses the readable label');
+  }
+});
+ok(sawFamWatdiv, 'watdiv row present in the SPARQL family view');
+
+// ============================================================================================
 // [OPUS-4.8] BROWSER-DOM SIMULATION — confirm the featured section + scaling charts actually
 // build DOM (sq-xvow #featured / sq-viby #scaling), like sq-ocuf's renderSummary smoke would. A
 // tiny stub document/window/Chart lets the (browser-only) render fns run under node: we import
@@ -276,7 +342,7 @@ eq(D.sizeAxisOf('deeptax_d1_count_us').base, D.sizeAxisOf('deeptax_d10_count_us'
   function makeNode(tag) {
     return {
       tagName: tag, children: [], attributes: {}, _text: '', _html: '',
-      style: {},
+      style: {}, open: false,
       set textContent(v) { this._text = String(v); }, get textContent() { return this._text; },
       set innerHTML(v) { this._html = String(v); if (v === '') this.children = []; },
       get innerHTML() { return this._html; },
@@ -284,11 +350,12 @@ eq(D.sizeAxisOf('deeptax_d1_count_us').base, D.sizeAxisOf('deeptax_d10_count_us'
       get firstChild() { return this.children[0]; },
       setAttribute: function (k, v) { this.attributes[k] = String(v); },
       appendChild: function (c) { this.children.push(c); return c; },
+      addEventListener: function () {},
       getContext: function () { return {}; }
     };
   }
   const hosts = {};
-  ['updated', 'repo', 'summary', 'charts', 'featured', 'scaling'].forEach(function (id) {
+  ['updated', 'repo', 'summary', 'charts', 'featured', 'scaling', 'families'].forEach(function (id) {
     hosts[id] = makeNode('div');
   });
   global.document = {
@@ -304,10 +371,13 @@ eq(D.sizeAxisOf('deeptax_d1_count_us').base, D.sizeAxisOf('deeptax_d10_count_us'
       entries: { 'sparq engine': [{
         commit: { id: 'deadbeefcafe', message: 'dom sim', url: '#' }, date: Date.now(),
         benches: [
-          { name: 'load_s', value: 1.2, unit: 's' },
-          { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },
-          { name: 'lubm_q06_count_us', value: 99, unit: 'µs' },
-          // size-parametrised family (sq-viby): two depths -> a real scaling curve.
+          { name: 'load_s', value: 1.2, unit: 's' },                        // Core family
+          { name: 'watdiv_S1_count_us', value: 30, unit: 'µs' },            // SPARQL family
+          { name: 'lubm_q06_count_us', value: 99, unit: 'µs' },             // SPARQL family
+          { name: 'shacl_cardinality_validate_us', value: 40, unit: 'µs' }, // SHACL family
+          { name: 'geo_within10km_us', value: 55, unit: 'µs' },             // GeoSPARQL family
+          { name: 'text_phrase_us', value: 22, unit: 'µs' },                // Full-Text family
+          // size-parametrised family (sq-viby): two depths -> a real scaling curve. (Reasoning)
           { name: 'deeptax_d1_count_us', value: 10, unit: 'µs' },
           { name: 'deeptax_d10_count_us', value: 120, unit: 'µs' }
         ]
@@ -317,6 +387,10 @@ eq(D.sizeAxisOf('deeptax_d1_count_us').base, D.sizeAxisOf('deeptax_d10_count_us'
   };
   // a no-op Chart constructor so renderCharts doesn't blow up.
   global.Chart = function () { return {}; };
+  // a no-op IntersectionObserver so the lazy-chart path (sq-rltn) runs under node.
+  global.IntersectionObserver = function () {
+    return { observe: function () {}, unobserve: function () {}, disconnect: function () {} };
+  };
 
   // re-import dashboard.js with its module.exports branch suppressed so the DOM half runs. The
   // dashboard's IIFE takes the node-export early-return when `module.exports` is truthy; inside this
@@ -328,7 +402,41 @@ eq(D.sizeAxisOf('deeptax_d1_count_us').base, D.sizeAxisOf('deeptax_d10_count_us'
 
   ok(hosts.featured.children.length > 0, 'DOM: #featured populated (sq-xvow rendered)');
   ok(hosts.scaling.children.length > 0, 'DOM: #scaling populated (sq-viby rendered)');
-  ok(hosts.summary.children.length > 0, 'DOM: #summary still populated (existing path intact)');
+
+  // ---- sq-rltn: summary-first FAMILIES render — first paint covers ALL query types -------------
+  ok(hosts.families.children.length > 0, 'DOM: #families populated (sq-rltn summary-first render)');
+  // a family NAV chip row + one section per family, in FAMILIES order.
+  const famNav = hosts.families.children.filter(function (c) { return c.tagName === 'nav'; })[0];
+  ok(famNav && famNav.children.length === D.FAMILIES.length,
+     'DOM: family nav has a chip per family (' + D.FAMILIES.length + ')');
+  const famSections = hosts.families.children.filter(function (c) {
+    return c.tagName === 'section' && /^fam-/.test(c.attributes.id || '');
+  });
+  ok(famSections.length === D.FAMILIES.length,
+     'DOM: one section per family rendered (got ' + famSections.length + ')');
+  // each REQUIRED capability family must be present as its own section (covers all query types).
+  ['core', 'sparql', 'shacl', 'geo', 'fts', 'vector', 'reasoning'].forEach(function (key) {
+    ok(famSections.some(function (s) { return s.attributes.id === 'fam-' + key; }),
+       'DOM: family section #fam-' + key + ' present');
+  });
+  // the SPARQL family section holds a summary TABLE at first paint (no chart instantiated yet).
+  const sparqlSec = famSections.filter(function (s) { return s.attributes.id === 'fam-sparql'; })[0];
+  const sparqlTable = sparqlSec && sparqlSec.children.filter(function (c) { return c.tagName === 'table'; })[0];
+  ok(sparqlTable, 'DOM: SPARQL family renders a summary table synchronously (first paint)');
+  // first paint must NOT have built any chart: the trend grid lives inside a <details> and is empty
+  // until expanded. Confirm the details/summary disclosure exists with an EMPTY chart-grid.
+  const sparqlDetails = sparqlSec && sparqlSec.children.filter(function (c) { return c.tagName === 'details'; })[0];
+  ok(sparqlDetails, 'DOM: SPARQL family has a lazy <details> Trends disclosure');
+  const sparqlGrid = sparqlDetails && sparqlDetails.children.filter(function (c) {
+    return (c.attributes['class'] || '') === 'chart-grid';
+  })[0];
+  ok(sparqlGrid && sparqlGrid.children.length === 0,
+     'DOM: trend chart grid is EMPTY at first paint — charts are lazy (not built upfront)');
+  // a family with NO data (vector — none in this fixture) renders a "not yet reported" section.
+  const vecSec = famSections.filter(function (s) { return s.attributes.id === 'fam-vector'; })[0];
+  ok(vecSec && vecSec.children.some(function (c) {
+    return (c.attributes['class'] || '').indexOf('family-empty') !== -1;
+  }), 'DOM: an empty family (Vector/ANN) renders a "not yet reported" placeholder (honest coverage)');
   // featured host should contain at least one suite section with a table.
   const featuredSection = hosts.featured.children[0];
   ok(featuredSection && featuredSection.tagName === 'section', 'DOM: featured host holds suite sections');
@@ -347,7 +455,7 @@ eq(D.sizeAxisOf('deeptax_d1_count_us').base, D.sizeAxisOf('deeptax_d10_count_us'
   ok(hosts.scaling.children[0] && hosts.scaling.children[0].attributes['class'] === 'chart-grid',
      'DOM: scaling host holds a chart-grid');
 
-  delete global.document; delete global.window; delete global.Chart;
+  delete global.document; delete global.window; delete global.Chart; delete global.IntersectionObserver;
 })();
 
 if (failures) {
