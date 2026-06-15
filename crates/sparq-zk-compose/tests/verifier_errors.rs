@@ -83,6 +83,17 @@ fn check_error_display_covers_structural_reject_reasons() {
         &CheckError::ScanCommitmentsNotStrictlyIncreasing { proof: 0, at: 0 },
         &["strictly increasing", "S2.5"],
     );
+    // [OPUS-4.8] sq-sfsi: hidden cross-credential JOIN bind_joins reject reasons.
+    assert_display_carries(&CheckError::JoinDanglingEdge { edge: 2 }, &["join edge", "2"]);
+    assert_display_carries(&CheckError::JoinEdgeKindMismatch { edge: 3 }, &["join edge", "3"]);
+    assert_display_carries(
+        &CheckError::JoinCommitmentMismatch { edge: 4 },
+        &["join edge", "4", "commit_a"],
+    );
+    assert_display_carries(
+        &CheckError::JoinSlotMismatch { edge: 5 },
+        &["join edge", "5", "slot"],
+    );
 }
 
 #[test]
