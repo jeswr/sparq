@@ -27,7 +27,13 @@ required-features = ["server"]
 # are never part of the bundle. Kept behind a feature so a consumer can depend on the
 # pure serializer library (XML/CSV/TSV) without dragging in the runtime.
 default = ["server"]
-server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2"]
+# [OPUS-4.8] (sq-7cxr, gh-44) `server` turns on `sparq-core/mmap` so the binary can use the
+# engine's durable directory-backed `Graph` (`Graph::open`/`save` + the per-graph write-ahead
+# log + named-graph persistence) behind the `--persist <DIR>` flag — the QLever `--persist-updates`
+# equivalent. Feature unification means the `sparq-core` `sparq-engine` resolves also gains `mmap`,
+# so the WAL-durable `apply_delta` path is live on the shared graph. Without `--persist` the server
+# is in-memory exactly as before (the flag, not the feature, selects durability).
+server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
 # `time-travel` (default OFF — opt-in is the contract, user-approved) lets a query pin
 # a RETAINED generation: `?generation=N` on /sparql serves the store as of generation N
 # (410 Gone once it ages out of the retention window), every /sparql response carries
