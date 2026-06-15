@@ -100,8 +100,12 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
 - **Smoke-before-push (defence-in-depth):** `release.yml#docker` builds + `docker run`s the
   image (`scripts/docker-smoke.sh`) *before* the push step, so a broken image never reaches
   the registry.
-- **Verify:** `gh attestation verify oci://ghcr.io/jeswr/sparq-server:<tag> --repo jeswr/sparq`
-  or `cosign verify-attestation …`.
+- **Verify:** the buildkit `provenance: mode=max` output is a **cosign-style registry
+  attestation** (attached to the image in the OCI registry), so verify it with
+  `cosign verify-attestation --type slsaprovenance ghcr.io/jeswr/sparq-server:<tag> …` (or the
+  registry attestation API). Note: `gh attestation verify` is the verifier for the
+  `actions/attest-build-provenance`-signed **archives + SBOM/VEX** (§1, §3); it is not the
+  primary tool for the buildkit image attestation here.
 
 ## 5. Pinned + locked build materials (SL-B3-c, SL-S-e)
 
