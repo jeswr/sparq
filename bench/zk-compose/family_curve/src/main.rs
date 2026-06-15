@@ -193,7 +193,16 @@ fn bench_filter_int(prover: &CircuitProver, value: u64, tag: &str) -> Row {
 /// block. Proves `value < value + 1` (true) over the integer-valued double.
 fn bench_filter_f64(prover: &CircuitProver, value: u64, tag: &str) -> Row {
     let operand_enc = encode_double_literal(value);
-    let bound = (value + 1) as f64;
+    // [OPUS-4.8] sq-kep2: `value + 1` would wrap silently in release builds at
+    // u64::MAX, so widen before adding. f64 is only exact for integers up to
+    // 2^53; assert the bound stays inside that range so any out-of-family input
+    // fails loudly and deterministically rather than silently losing precision.
+    let bound_u = u128::from(value) + 1;
+    debug_assert!(
+        bound_u <= (1u128 << 53),
+        "filter_f64 bound {bound_u} exceeds the 2^53 f64-exactness limit"
+    );
+    let bound = bound_u as f64;
     let (filter, digits) = build_filter_f64(operand_enc, value, FilterOp::Lt, bound, true)
         .expect("filter_f64 in family");
     let d = match filter.circuit_id() {

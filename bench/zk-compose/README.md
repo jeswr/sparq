@@ -34,10 +34,11 @@ returns). Numbers below were measured by Opus 4.8.
 `family_curve/` is a STANDALONE cargo project (own `[workspace]`, same isolation
 pattern as `bench/zk`) that drives the `sparq-zk-compose` prover (nargo + bb
 subprocesses) once per circuit-family member and emits the full **(k, n, r, d)
-cost curve** — prove time, verify time, proof size, vk size. It is **NOT gated
-in CI** (each row is a real `bb prove`, ~1-2 s) and is a plain timing harness,
-not criterion (criterion's repeated sampling over ~1-2 s proofs would take
-hours).
+cost curve** — prove time, verify time, proof size, vk size. CI **builds** the
+harness (a `--locked` compile-only schema-drift guard, see the blockquote below)
+but never **runs** it: each row is a real `bb prove` (~1-2 s) so the curve is
+generated manually, not in CI. It is a plain timing harness, not criterion
+(criterion's repeated sampling over ~1-2 s proofs would take hours).
 
 `k` = committed graphs (disclosed-attribution width), `n` = slot bucket, `r` =
 disclosed-row bucket (the scan family); `d` = digit count (the filter families).

@@ -267,10 +267,13 @@ jobs:
       # compiled above, so a plain `cargo build` of the harness here is near-free and
       # makes that schema drift a visible RED check on the PR that introduces it. (Build
       # only — no `cargo run`: catching the compile/API break needs no real bb proving.)
+      # `--locked` so the build honours family_curve's OWN committed Cargo.lock and
+      # FAILS if it has drifted from Cargo.toml (rather than silently rewriting it),
+      # keeping the schema-drift guard reproducible. [OPUS-4.8] sq-kep2
       - name: Build the standalone family_curve harness (schema-drift guard)
         if: steps.changes.outputs.zk == 'true'
         working-directory: bench/zk-compose/family_curve
-        run: cargo build
+        run: cargo build --locked
 
       # The load-bearing step: run EVERY `#[ignore]`d test in the ZK crates. With the
       # toolchain on PATH the forge tests do a REAL bb prove and assert every forgery is
