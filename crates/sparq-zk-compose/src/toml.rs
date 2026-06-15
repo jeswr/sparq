@@ -7,6 +7,7 @@
 //! Private witnesses (graph encodings, filter digits) are supplied by the
 //! prover driver, never present in the manifest.
 
+use crate::build::JoinWitness;
 use crate::manifest::{CircuitId, FieldHex, ProofInputs};
 
 /// Error returned by [`prover_toml_for`] when a `Prover.toml` cannot be emitted
@@ -17,21 +18,26 @@ use crate::manifest::{CircuitId, FieldHex, ProofInputs};
 /// (a `unimplemented!` in a public fn is a downstream-crash footgun).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProverTomlError {
-    /// The `join_eq` Prover.toml emitter is deferred to sq-sfsi (step 4); sq-fi03
-    /// adds the manifest schema only. The join member's private witnesses
-    /// (`enc_a`/`counts_a`/`enc_b`/`counts_b`/`row_a`/`row_b`/`blinding`) are not
-    /// yet plumbed through this function's parameters, so it cannot emit a witness.
-    JoinEqUnsupported,
+    /// A [`ProofInputs::JoinEq`] was passed without its private [`JoinWitness`]:
+    /// the `join_eq` member's private inputs
+    /// (`enc_a`/`counts_a`/`enc_b`/`counts_b`/`row_a`/`row_b`/`blinding`) live in
+    /// the witness, not the manifest, so a join Prover.toml cannot be emitted
+    /// without it. The caller obtains the witness from [`crate::build::build_join`]
+    /// and threads it through `prover_toml_for`'s `join_witness` parameter.
+    // [OPUS-4.8] sq-r2s8: the join proving path is now implemented; this error is
+    // the "witness omitted for a JoinEq input" recoverable failure (no panic in a
+    // public fn).
+    JoinEqMissingWitness,
 }
 
 impl std::fmt::Display for ProverTomlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProverTomlError::JoinEqUnsupported => write!(
+            ProverTomlError::JoinEqMissingWitness => write!(
                 f,
-                "join_eq Prover.toml generation is not yet implemented (deferred to \
-                 sq-sfsi, step 4); sq-fi03 adds the manifest schema only. The join \
-                 member's private witnesses are not plumbed through prover_toml_for."
+                "join_eq Prover.toml generation requires the private JoinWitness \
+                 (enc_a/counts_a/enc_b/counts_b/row_a/row_b/blinding) — obtain it \
+                 from build_join and pass it via prover_toml_for's join_witness arg"
             ),
         }
     }
@@ -158,6 +164,50 @@ pub fn filter_f64_prover_toml(
     s
 }
 
+/// Render the `Prover.toml` body for a hidden cross-credential `join_eq` proof
+/// ([OPUS-4.8] sq-r2s8). Order MUST match `join_eq_na{n_a}_nb{n_b}/src/main.nr`:
+/// PUBLIC `challenge, commit_a, commit_b, join_commitment, slot_a, slot_b` then
+/// PRIVATE `enc_a, counts_a, enc_b, counts_b, row_a, row_b, blinding`. `enc_a`/
+/// `enc_b` are padded to `n_a`/`n_b` slots by the caller (mirrors the scan arm).
+#[allow(clippy::too_many_arguments)]
+pub fn join_prover_toml(
+    challenge: &FieldHex,
+    commit_a: &FieldHex,
+    commit_b: &FieldHex,
+    join_commitment: &FieldHex,
+    slot_a: u32,
+    slot_b: u32,
+    enc_a: &[[FieldHex; 3]],
+    counts_a: u32,
+    enc_b: &[[FieldHex; 3]],
+    counts_b: u32,
+    row_a: &[FieldHex; 3],
+    row_b: &[FieldHex; 3],
+    blinding: &FieldHex,
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("challenge = \"{}\"\n", challenge.0));
+    s.push_str(&format!("commit_a = \"{}\"\n", commit_a.0));
+    s.push_str(&format!("commit_b = \"{}\"\n", commit_b.0));
+    s.push_str(&format!("join_commitment = \"{}\"\n", join_commitment.0));
+    s.push_str(&format!("slot_a = \"{slot_a}\"\n"));
+    s.push_str(&format!("slot_b = \"{slot_b}\"\n"));
+    s.push_str(&format!("enc_a = {}\n", rows_array(enc_a)));
+    s.push_str(&format!("counts_a = \"{counts_a}\"\n"));
+    s.push_str(&format!("enc_b = {}\n", rows_array(enc_b)));
+    s.push_str(&format!("counts_b = \"{counts_b}\"\n"));
+    s.push_str(&format!(
+        "row_a = [\"{}\", \"{}\", \"{}\"]\n",
+        row_a[0].0, row_a[1].0, row_a[2].0
+    ));
+    s.push_str(&format!(
+        "row_b = [\"{}\", \"{}\", \"{}\"]\n",
+        row_b[0].0, row_b[1].0, row_b[2].0
+    ));
+    s.push_str(&format!("blinding = \"{}\"\n", blinding.0));
+    s
+}
+
 fn hex_array(items: &[FieldHex]) -> String {
     format!(
         "[{}]",
@@ -209,10 +259,13 @@ pub fn canonical_digits(value: u64) -> Vec<u8> {
 /// Render the witness-bearing `Prover.toml` for any `ProofInputs`, given the
 /// private witnesses the manifest does not carry. Returns the package id too.
 ///
-/// Returns [`ProverTomlError::JoinEqUnsupported`] for [`ProofInputs::JoinEq`],
-/// whose prover path is deferred to sq-sfsi (step 4). This is a recoverable
-/// error so a downstream caller (or a CLI loading a manifest containing
-/// `join_eq`) gets a structured failure rather than a panic. [OPUS-4.8]
+/// For [`ProofInputs::JoinEq`] the private [`JoinWitness`] MUST be supplied via
+/// `join_witness` (obtained from [`crate::build::build_join`]); omitting it returns
+/// [`ProverTomlError::JoinEqMissingWitness`] — a recoverable error, never a panic
+/// (a public fn must not crash a downstream caller). The `join_witness` argument is
+/// ignored for every non-join input, exactly as `scan_*` is ignored for filters.
+/// [OPUS-4.8] sq-r2s8: the join_eq proving path is now implemented.
+#[allow(clippy::too_many_arguments)]
 pub fn prover_toml_for(
     inputs: &ProofInputs,
     challenge: &FieldHex,
@@ -222,6 +275,9 @@ pub fn prover_toml_for(
     scan_enc: &[Vec<[FieldHex; 3]>],
     // filter witness (ignored for scan): canonical decimal digits.
     filter_digits: &[u8],
+    // join witness (ignored for scan/filter): the join_eq member's private inputs
+    // (enc_a/counts_a/enc_b/counts_b/row_a/row_b/blinding). [OPUS-4.8] sq-r2s8.
+    join_witness: Option<&JoinWitness>,
 ) -> Result<(CircuitId, String), ProverTomlError> {
     let out = match inputs {
         ProofInputs::Scan {
@@ -293,17 +349,44 @@ pub fn prover_toml_for(
             );
             (id.clone(), toml)
         }
-        // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN.
-        // SCHEMA ONLY — this bead adds the manifest types, NOT the prover path.
-        // Generating a `join_eq` Prover.toml needs the join member's PRIVATE
-        // witnesses (`enc_a`/`counts_a`/`enc_b`/`counts_b`/`row_a`/`row_b`/
-        // `blinding`), none of which this function's `scan_*`/`filter_digits`
-        // parameters can carry — so the prover wiring is deferred to step 4
-        // (sq-sfsi), which extends the signature. Until then this arm returns a
-        // recoverable `Err` (NOT a panic): a public fn must not crash a downstream
-        // caller that loads a manifest containing `join_eq`. It also never emits a
-        // bogus witness; sq-sfsi replaces it with the real join TOML emitter.
-        ProofInputs::JoinEq { .. } => return Err(ProverTomlError::JoinEqUnsupported),
+        // [OPUS-4.8] sq-bwwl / sq-r2s8 (step 4 proving path): hidden cross-credential
+        // JOIN. The public inputs (commit_a/commit_b/join_commitment/slot_a/slot_b)
+        // come from `inputs`; the PRIVATE witnesses
+        // (enc_a/counts_a/enc_b/counts_b/row_a/row_b/blinding) come from the
+        // `join_witness` the caller built with `build_join`. Omitting it is a
+        // recoverable `Err` (no panic in a public fn). `enc_a`/`enc_b` are padded to
+        // the member's `n_a`/`n_b` buckets, exactly as the scan arm pads `enc`.
+        ProofInputs::JoinEq {
+            id,
+            commit_a,
+            commit_b,
+            join_commitment,
+            slot_a,
+            slot_b,
+        } => {
+            let CircuitId::JoinEq { n_a, n_b } = id else {
+                unreachable!("join_eq inputs carry a join_eq id")
+            };
+            let w = join_witness.ok_or(ProverTomlError::JoinEqMissingWitness)?;
+            let enc_a = pad_rows(w.enc_a.clone(), *n_a as usize);
+            let enc_b = pad_rows(w.enc_b.clone(), *n_b as usize);
+            let toml = join_prover_toml(
+                challenge,
+                commit_a,
+                commit_b,
+                join_commitment,
+                *slot_a,
+                *slot_b,
+                &enc_a,
+                w.counts_a,
+                &enc_b,
+                w.counts_b,
+                &w.row_a,
+                &w.row_b,
+                &w.blinding,
+            );
+            (id.clone(), toml)
+        }
     };
     Ok(out)
 }
