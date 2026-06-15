@@ -145,16 +145,23 @@ impl CommCounter {
     /// So this adds `k` multiplications / opens / deals to the on-wire totals; the
     /// sequential round counters grow by `k` (the upper bound), while
     /// `batchable_ops` grows by `k` so [`Self::batched_rounds`] can report the
-    /// round LOWER bound. `[OPUS-4.8]`
+    /// round LOWER bound.
+    ///
+    /// Every counter is LINEAR in `k`, so this is computed in CLOSED FORM (`O(1)`),
+    /// not by looping `record_deal`/`record_mult`/`record_open` `k` times — the
+    /// loop would make the *instrument* `O(k)` and let it dominate the harness at
+    /// the larger `|L|·|R|` join scales. The totals are identical to `k`
+    /// applications of those primitives. `[OPUS-4.8]`
     pub fn record_independent_equalities(&mut self, k: u64) {
-        // Per equality: deal key_L, key_R, mask r → 3 deals; 1 mult; 1 open.
-        for _ in 0..k {
-            self.record_deal();
-            self.record_deal();
-            self.record_deal();
-            self.record_mult();
-            self.record_open();
-        }
+        // Per equality: 3 deals (key_L, key_R, mask r) + 1 mult + 1 open. Each
+        // deal sends `parties` shares; opens/mults are 1 logical op each. Fold the
+        // whole batch in arithmetically (== `k` × the per-op increments above).
+        self.field_elements_shared += 3 * k * self.parties as u64;
+        self.multiplications += k;
+        self.mult_rounds += k;
+        self.batchable_ops += k;
+        self.field_elements_opened += k;
+        self.open_rounds += k;
     }
 
     /// Fold in the modelled cost of one oblivious **shuffle** (from the crate's own
@@ -202,28 +209,46 @@ impl CommCounter {
         non_batchable + 2
     }
 
+    /// Total field elements that cross the abstract party boundary on the wire.
+    ///
+    /// An OPEN broadcasts `n` shares (every party sends its one share to
+    /// recombine), so each opened *value* is `parties` wire field elements — the
+    /// same `n`-fan-out a deal already pays (`record_deal` adds `parties` to
+    /// `field_elements_shared`, so that counter is ALREADY in wire units). Keeping
+    /// `field_elements_opened` as the logical count (1 per opened value — what the
+    /// JSON/table report and the round counters use) and applying the `× parties`
+    /// fan-out only here keeps the on-wire model symmetric with deals and makes
+    /// `total_bytes` scale with `N` (design record §5.2: "8 bytes/party per open"
+    /// over `n` broadcasters ⇒ `8·n` total bytes per open). `[OPUS-4.8]`
+    fn wire_field_elements(&self) -> u64 {
+        self.field_elements_opened * self.parties as u64 + self.field_elements_shared
+    }
+
     /// **Modelled bytes per party.** Each party broadcasts its one share (8 bytes)
     /// to recombine an open, and receives its one share (8 bytes) per deal. We
     /// total the field elements that cross the boundary and divide by the party
     /// count to get a symmetric per-party figure — the cross-`N`-comparable cost.
     ///
-    /// `(opened + shared) × FIELD_BYTES` is the total field-element traffic; the
+    /// The on-wire traffic is [`Self::wire_field_elements`]`× FIELD_BYTES`; the
     /// per-party share is that divided by `parties` (each party sends/receives an
-    /// equal slice in a symmetric protocol). Returns `0` when no party count is
-    /// set (nothing recorded). `[OPUS-4.8]`
+    /// equal slice in a symmetric protocol). For one open at `n` parties this is
+    /// `(1·n)·8 / n = 8` — the per-open-per-party figure the design record fixes
+    /// (§5.2), no longer undercounted. Returns `0` when no party count is set
+    /// (nothing recorded). `[OPUS-4.8]`
     pub fn bytes_per_party(&self) -> u64 {
         if self.parties == 0 {
             return 0;
         }
-        let total_field_elems = self.field_elements_opened + self.field_elements_shared;
-        let total_bytes = total_field_elems * FIELD_BYTES as u64;
+        let total_bytes = self.wire_field_elements() * FIELD_BYTES as u64;
         total_bytes / self.parties as u64
     }
 
     /// Total modelled bytes across ALL parties (the aggregate on-wire volume),
     /// before the per-party division — useful for an O(N) vs O(N²) scaling check.
+    /// Both opens (`n` broadcast shares each) and deals (`n` shares each) scale
+    /// with `N`, so this aggregate grows with the party count as intended.
     pub fn total_bytes(&self) -> u64 {
-        (self.field_elements_opened + self.field_elements_shared) * FIELD_BYTES as u64
+        self.wire_field_elements() * FIELD_BYTES as u64
     }
 }
 
@@ -299,9 +324,24 @@ mod tests {
     fn bytes_per_party_scales_with_opens() {
         let mut c = CommCounter::new(3);
         c.record_open();
-        // 1 open = 1 field element opened = 8 total bytes / 3 parties (floor).
-        assert_eq!(c.total_bytes(), 8);
-        assert_eq!(c.bytes_per_party(), 8 / 3);
+        // 1 open broadcasts n=3 shares (each party sends its 8-byte share to
+        // recombine) ⇒ 3 wire field elements = 24 total bytes; per party = 8 bytes,
+        // the "8 bytes/party per open" figure the design record fixes (§5.2).
+        assert_eq!(c.total_bytes(), 3 * 8);
+        assert_eq!(c.bytes_per_party(), 8);
+    }
+
+    #[test]
+    fn open_bytes_scale_with_party_count() {
+        // total_bytes for a single open grows with N (an open is an n-broadcast),
+        // and bytes_per_party stays a flat 8 (one 8-byte share per party). This is
+        // the symmetry with deals the byte model must preserve.
+        for n in [2usize, 3, 5, 7] {
+            let mut c = CommCounter::new(n);
+            c.record_open();
+            assert_eq!(c.total_bytes(), (n as u64) * FIELD_BYTES as u64);
+            assert_eq!(c.bytes_per_party(), FIELD_BYTES as u64);
+        }
     }
 
     #[test]

@@ -559,8 +559,10 @@ pub fn cell(query_class: QueryClass, n: usize, scale: usize) -> Result<MatrixCel
 /// scale-out is the EC2 bead sq-hoaj). The hidden join uses `scale²` equalities,
 /// so its scale is deliberately the smallest.
 ///
-/// `aggregate_scale` is unused for the aggregate (where `N` is the scale, recorded
-/// as scale `1`); `join_scale` / `shuffle_scale` cap the join and oblivious cells.
+/// The aggregate takes NO scale parameter — `N` itself is its scale dimension
+/// (each party deals one secret), so it is always recorded at `scale = 1`.
+/// `join_scale` caps the hidden-value join's rows/holder and `shuffle_scale` caps
+/// the oblivious shuffle/sort cells.
 pub fn run_matrix(
     party_counts: &[usize],
     join_scale: usize,
@@ -665,9 +667,10 @@ mod tests {
 
     #[test]
     fn aggregate_bytes_per_party_grows_with_n() {
-        // The aggregate's total shared field elements = n² (n deals × n parties),
-        // so bytes-per-party = n²·8 / n = n·8 — grows LINEARLY with N, exactly as
-        // the protocol predicts (each added holder deals one more secret).
+        // The aggregate's wire field elements = n² shared (n deals × n parties) +
+        // the single open broadcast as n shares = n² + n, so bytes-per-party =
+        // (n² + n)·8 / n = (n + 1)·8 — grows LINEARLY with N, exactly as the
+        // protocol predicts (each added holder deals one more secret).
         let mut prev = 0u64;
         for &n in DEFAULT_PARTIES {
             let c = cell(QueryClass::CumulativeSumAggregate, n, 1).unwrap();
@@ -676,7 +679,8 @@ mod tests {
                 bpp > prev,
                 "n={n}: bytes/party must grow with N (got {bpp}, prev {prev})"
             );
-            // bytes/party = n·FIELD_BYTES (n² shared / n parties × 8, +1 open/n).
+            // bytes/party = (n + 1)·FIELD_BYTES: (n² shared + n open) / n parties × 8.
+            assert_eq!(bpp, (n as u64 + 1) * crate::metrics::FIELD_BYTES as u64);
             prev = bpp;
         }
     }
