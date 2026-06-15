@@ -48,7 +48,7 @@ clear in both proofs' public inputs.** The relying party reads it directly.
 1. **The fundamental leak — the join is implicit in disclosed rows.** The shared
    variable's encoding appears in the PUBLIC `rows` of *both* scans. The
    verifier's `recheck` (`verify.rs`, driven from
-   `prefilter_manifest_structure`, `verifier.rs:1517-1536`) and the eventual
+   `prefilter_manifest_structure`, `verifier.rs:1548-1567`) and the eventual
    plaintext re-join over disclosed rows operate over those public encodings. **No
    binding edge is even required for the leak:** the join key is disclosed by the
    scan proofs themselves. This is the headline privacy gap — the
@@ -59,24 +59,25 @@ clear in both proofs' public inputs.** The relying party reads it directly.
    one place a *cross-proof slot equality* is currently enforced is the
    binding-consistency loop:
 
-   - `crates/sparq-zk-compose/src/verifier.rs:1577-1605` — for each
+   - `crates/sparq-zk-compose/src/verifier.rs:1630-1659` — for each
      `BindingEdge`, the verifier reads the scanned slot from the PUBLIC rows
-     (`verifier.rs:1587-1590`, `rows.get(edge.from_row).get(edge.from_slot)`) and
+     (`verifier.rs:1640-1644`, `rows.get(edge.from_row).get(edge.from_slot)`) and
      compares it as a **plaintext `FieldHex` string equality** to the consuming
-     proof's `operand_enc` (`verifier.rs:1602`, `if scanned != operand { …
+     proof's `operand_enc` (`verifier.rs:1656-1658`, `if scanned != operand { …
      BindingInconsistent }`).
 
    The `BindingEdge` type (`manifest.rs:513-523`) only ever connects a **scan →
    filter** (`from_proof = scan`, `to_proof = filter`); the `to` side must be a
    `FilterInt`/`FilterF64` or the verifier returns `EdgeKindMismatch`
-   (`verifier.rs:1597-1601`). **There is no scan↔scan join edge, and no
+   (`verifier.rs:1645` for the scanned-slot arm, `verifier.rs:1654` for the
+   operand arm). **There is no scan↔scan join edge, and no
    `join_eq` circuit member** — only `scan` / `filter_int` / `filter_f64` /
    `revoke_unset` / `hidden_issuer` members exist (`manifest.rs:366-405`,
    `CircuitId`). So even the equality the estate *does* enforce is (a) over
    disclosed plaintext and (b) not available for cross-credential joins.
 
 **The leak, precisely (the one to cite):**
-`crates/sparq-zk-compose/src/verifier.rs:1587-1602` reads the join value from the
+`crates/sparq-zk-compose/src/verifier.rs:1640-1658` reads the join value from the
 PUBLIC scan `rows` (`manifest.rs:438-439`, `scan_k2_n16_r8/src/main.nr:14`) and
 checks equality over the **disclosed** term encoding. The joined entity's encoding
 is a public input of the scan proofs; it is never hidden. There is no in-circuit
@@ -94,7 +95,7 @@ The **single-prover** trust model — the load-bearing distinction from `sq-t21`
 - **One prover (holder)** legitimately holds **both** credentials (e.g. an
   employment VC from issuer X and a payroll VC from issuer Y), each a committed
   named graph with an issuer Schnorr attestation over its commitment
-  (`bind_issuer_attestations`, `verifier.rs:1709`). The prover sees both
+  (`bind_issuer_attestations`, `verifier.rs:1763`). The prover sees both
   plaintexts; there is **no secret to hide *from the prover*** — only from the
   **verifier**. (Contrast `sq-t21`, where two *mutually distrusting* holders each
   hide their side from the *other*; that requires MPC, not single-prover ZK.)
@@ -176,9 +177,9 @@ right scan proofs* while keeping them private, and making the public artefact
 *hiding* so R4 does not reopen the disclosure.
 
 The scan circuit already commits every slot value: each row's term encodings are
-absorbed into the per-graph Poseidon2 commitment (`scan.nr:74-86`,
+absorbed into the per-graph Poseidon2 commitment (`scan.nr:96-108`,
 `commit_fold` over `h3(enc[g][i][0..2])`), and the disclosed `rows` are
-constrained to be present in some active slot (`scan.nr:88-112`). So a slot value
+constrained to be present in some active slot (`scan.nr:126-150`). So a slot value
 is *already cryptographically committed* — but as a **public** row element today.
 The construction makes the join value **private** and re-binds it to the same
 commitment.
@@ -186,11 +187,16 @@ commitment.
 ### 2.2 RECOMMENDED construction — `join_eq` over per-scan committed slot values
 
 The recommended single-prover construction is a **new `join_eq` circuit member**
-that takes the **two graph commitments as public inputs** (the same
-`commitments[g]` values the two scan proofs already expose and that the audit-#1
-reconstruction byte-binds), re-derives the two joined slot values **privately
-in-circuit from the witnessed graph contents**, asserts they are equal, and exposes
-a **hiding commitment to the join value** as the only public join artefact.
+that takes the **two graph commitments and the two join-slot indices as public
+inputs** (the `commitments[g]` values the two scan proofs already expose and that
+the audit-#1 reconstruction byte-binds, plus `slot_a`/`slot_b` — which the query
+text already reveals, see §4.4), re-derives the two joined slot **values**
+**privately in-circuit from the witnessed graph contents**, asserts they are equal,
+and exposes a **hiding commitment to the join value** as the only public join
+artefact. **The join VALUE is hidden; the join SLOTS are public** — this is the
+soundness choice §4.4 concludes (the slot the shared variable occupies is not a
+secret, only the joined term is), and the public-input sketch below is consistent
+with it.
 
 **Public inputs of `join_eq` (declaration order = the audit-#1 reconstruction
 order):**
@@ -200,6 +206,8 @@ challenge:        pub Field         // verifier nonce (replay binding S2.5) — 
 commit_a:         pub Field         // graph-A commitment  C(G_a)  == scan-A.commitments[g_a]
 commit_b:         pub Field         // graph-B commitment  C(G_b)  == scan-B.commitments[g_b]
 join_commitment:  pub Field         // HIDING commitment to the join value (see §2.4)
+slot_a:           pub u32           // graph-A join slot in {0,1,2} (== query-derived s_a, §4.4)
+slot_b:           pub u32           // graph-B join slot in {0,1,2} (== query-derived s_b, §4.4)
 ```
 
 **Private witnesses:**
@@ -207,26 +215,31 @@ join_commitment:  pub Field         // HIDING commitment to the join value (see 
 ```
 enc_a:    [[Field;3]; N_a]   counts_a: u32   // graph-A contents + size (same shape as scan-A)
 enc_b:    [[Field;3]; N_b]   counts_b: u32   // graph-B contents + size
-row_a:    [Field; 3]   i: u32              // the joined row of A and its join slot
-row_b:    [Field; 3]   j: u32              // the joined row of B and its join slot
-blinding: Field                            // per-presentation blinder for join_commitment
+row_a:    [Field; 3]                         // the joined row of A
+row_b:    [Field; 3]                         // the joined row of B
+blinding: Field                              // per-presentation blinder for join_commitment
 ```
+
+(The join slots are **not** private witnesses — they are the PUBLIC `slot_a` /
+`slot_b` above, byte-bound to the query-derived positions, §4.4.)
 
 **The relation (sketch — mirrors `scan.nr`'s present-in-graph discipline):**
 
 ```
 // 1. Re-commit both graphs to their PUBLIC commitments (binds the witnessed
 //    contents to the SAME C(G) the scan proofs expose — §2.3 anti-row-swap).
-assert_eq(commit_fold(map(h3, enc_a), counts_a), commit_a);   // == scan.nr:74-86
+assert_eq(commit_fold(map(h3, enc_a), counts_a), commit_a);   // == scan.nr:96-108
 assert_eq(commit_fold(map(h3, enc_b), counts_b), commit_b);
 
 // 2. row_a / row_b are genuinely rows of their committed graphs (active slot).
-assert(row_present_in(enc_a, counts_a, row_a));               // == scan.nr:100-111
+assert(row_present_in(enc_a, counts_a, row_a));               // == scan.nr:139-149
 assert(row_present_in(enc_b, counts_b, row_b));
 
-// 3. The join slots are in range, selected privately.
-let a_val = select_slot(row_a, i);    // i in {0,1,2}
-let b_val = select_slot(row_b, j);    // j in {0,1,2}
+// 3. Select the join slots at the PUBLIC, query-bound positions slot_a / slot_b
+//    (in range {0,1,2}); the verifier equates these to the query-derived s_a/s_b
+//    (§4.4 slot binding), so the prover cannot pick a convenient column.
+let a_val = select_slot(row_a, slot_a);    // slot_a in {0,1,2}, public
+let b_val = select_slot(row_b, slot_b);    // slot_b in {0,1,2}, public
 
 // 4. THE JOIN — trivial equality over the two hidden values.
 assert(a_val == b_val, "join slots are not equal");
@@ -238,7 +251,7 @@ assert(join_commitment == h3(JOIN_DOMAIN, a_val, blinding));  // §2.4
 Step 1 is **the load-bearing binding**: because the prover must reproduce the
 *exact* graph commitments the two scan proofs published (and those are byte-bound
 into the scan proofs' public inputs and ultimately into the issuer signatures over
-them — `verifier.rs:3350-3352`, `bind_issuer_attestations`), the prover cannot
+them — `verifier.rs:3409-3410`, `bind_issuer_attestations`), the prover cannot
 feed `join_eq` a graph other than the one the scan attests. Step 2 forces `row_a`
 to be a real row of that graph. The equality (step 4) is then over values that
 provably come from the two attested credentials.
@@ -253,10 +266,10 @@ both already audit-#1 byte-bound into their proofs. So:
 - The prover cannot point `join_eq` at a graph the scan proofs do not attest (the
   commitment would not match a scan's bound `commitments[g]`).
 - The prover cannot present a `row_a` that is not in `G_a` (step 2 re-checks
-  presence against the re-committed contents — the same `scan.nr:100-111`
+  presence against the re-committed contents — the same `scan.nr:139-149`
   constraint, so the re-commit in step 1 is what makes presence meaningful).
 - Because both scans already prove **completeness** (every matching active slot is
-  disclosed, `scan.nr:114-138`) and the issuer signed `C(G)` (audit #3), the join
+  disclosed, `scan.nr:152-176`) and the issuer signed `C(G)` (audit #3), the join
   is over genuine, attested, complete credential content.
 
 > **Design note — why re-commit instead of "reuse the scan's `rows`".** The
@@ -307,11 +320,16 @@ from each pairwise `assert(a_val == b_val)` plus the shared-commitment check.)
   exact N up to R by zero-padding). The **recommended default is one instance per
   pair** (simplest, composes with the existing per-sub-proof verifier loop);
   the fixed-R member is the cardinality-hiding tier (§5).
-- **Duplicate join values.** Two different `?p` values that happen to *encode* the
-  same field element cannot occur: `encode_term` is injective over the term domain
-  by construction (type-code prefix + Poseidon2 of the value, `encode.rs:46-59`;
-  bnodes salted, IRIs/literals salt-independent). So `a_val == b_val` ⟺ the terms
-  are equal. Within ONE credential, a bnode is salted per-graph (`encode.rs:56-59`)
+- **Duplicate join values.** Two different `?p` values colliding to the *same*
+  field encoding is ruled out **only up to the standard collision-resistance
+  assumption**, not as a mathematical guarantee: `encode_term` is a hash-based
+  encoding (Blake3 + Poseidon2 over the type-code-prefixed value, `encode.rs:46-59`;
+  bnodes salted, IRIs/literals salt-independent), so distinct terms map to distinct
+  field elements with all but negligible probability. Under that assumption
+  `a_val == b_val` ⟺ the terms are equal (a collision would let a prover join two
+  *different* entities — the same negligible-probability caveat the rest of the
+  estate's encoding soundness rests on). [OPUS-4.8] Within ONE credential, a bnode
+  is salted per-graph (`encode.rs:56-59`)
   — a **bnode is never a valid cross-credential join key** (its encoding differs
   across graphs by salt, by design — the audit-#9 separation), so the verifier
   must REJECT a `join_eq` whose join slot is provably a bnode-typed term across
@@ -333,7 +351,7 @@ from each pairwise `assert(a_val == b_val)` plus the shared-commitment check.)
   micro `join_eq` prove `c_a == c_b` (commitment equality) + open both to the same
   value. *Pro:* no graph re-commit in `join_eq` (cheapest join member). *Con:*
   changes the scan public-input layout → re-touches the audit-#1 reconstruction,
-  the empirical bb anchors (`verifier.rs:3556-3616`), and every `scan_k…` member;
+  the empirical bb anchors (`verifier.rs:3582-3614`), and every `scan_k…` member;
   higher blast radius, higher re-audit cost. **Better as a v2 once `join_eq`
   exists**, because it makes joins free but is a breaking layout change.
 - **(Alt-B) Set-membership / circuit-PSI inside one prover.** Prove the join value
@@ -364,7 +382,7 @@ from each pairwise `assert(a_val == b_val)` plus the shared-commitment check.)
   cardinality-hiding tier, `join_eq_rN`), with the relation in a new
   `zk/compose/compose_core/src/join.nr` (sibling of `scan.nr`/`issuer.nr`),
   reusing `commit_fold`/`h3`/`h2` from `hashes.nr` **verbatim** (the re-commit in
-  §2.2 step 1 is literally `scan.nr:74-86`). Parameter order in `main` IS the
+  §2.2 step 1 is literally `scan.nr:96-108`). Parameter order in `main` IS the
   public-input layout the verifier reconstructs (audit-#1 discipline,
   `scan_k2_n16_r8/src/main.nr:4-5` "Do not reorder `main`'s parameters").
 - **New `CircuitId::JoinEq`** in `manifest.rs:366-405`, e.g.
@@ -376,9 +394,10 @@ from each pairwise `assert(a_val == b_val)` plus the shared-commitment check.)
 ### 3.2 New `ProofInputs` + manifest edge
 
 - **New `ProofInputs::JoinEq`** (`manifest.rs:427-483`) carrying
-  `{ id, commit_a, commit_b, join_commitment }` (all `FieldHex`) — exactly the
-  member's `pub` params after `challenge`. `ProofInputs::circuit_id()`
-  (`manifest.rs:485-493`) gains the arm.
+  `{ id, commit_a, commit_b, join_commitment }` (all `FieldHex`) plus the PUBLIC
+  join slots `{ slot_a, slot_b }` (`u32`) — exactly the member's `pub` params after
+  `challenge` (§2.2 / §4.4). `ProofInputs::circuit_id()` (`manifest.rs:485-493`)
+  gains the arm.
 - **New `JoinEdge`-style manifest edge** OR (cleaner) a dedicated
   `join_edges: Vec<JoinEdge>` on `ProofManifest` (`manifest.rs:604-607`, alongside
   `binding_edges`):
@@ -406,29 +425,32 @@ a deployment not using hidden joins stays on the disclosed-row path. For each
 `JoinEdge`:
 
 1. Resolve `scan_a`/`scan_b` sub-proofs and read their public `commitments[graph_a]`
-   / `commitments[graph_b]` (byte-bound by audit-#1, `verifier.rs:3350-3352`).
+   / `commitments[graph_b]` (byte-bound by audit-#1, `verifier.rs:3409-3410`).
 2. Read the `join_eq` sub-proof's public `commit_a`/`commit_b` and require
    **byte-equality** with the scans' commitments (`JoinCommitmentMismatch` if not).
    *This is the anti-A2 check — the join is bound to the right credentials.*
 3. Require both `graph_a`/`graph_b` commitments carry a valid in-`K` issuer
    attestation (already enforced by `bind_issuer_attestations`,
-   `verifier.rs:1709`) — i.e. the joined credentials are attested.
+   `verifier.rs:1763`) — i.e. the joined credentials are attested.
 4. The `join_eq` proof itself is verified in the bb stage exactly like every other
    sub-proof: `reconstruct_public_inputs` rebuilds `[challenge, commit_a, commit_b,
-   join_commitment]` (verifier nonce as field 0), `canonical_vk` by re-derived
-   `CircuitId::JoinEq`, `bb verify` (`verifier.rs:3247-3263` loop). *This is the
-   anti-A1 check — the equality is cryptographically proved, not JSON-asserted.*
+   join_commitment, slot_a, slot_b]` (verifier nonce as field 0), `canonical_vk` by
+   re-derived `CircuitId::JoinEq`, `bb verify` (`verifier.rs:3280-3312` loop).
+   *This is the anti-A1 check — the equality is cryptographically proved, not
+   JSON-asserted.*
 5. **Query binding (audit-#5/#10 discipline).** `bind_query_correctness`
-   (`verifier.rs:2727`) gains: a query whose BGP shares a variable across two
+   (`verifier.rs:2781`) gains: a query whose BGP shares a variable across two
    patterns answered by two *different* scans REQUIRES a `JoinEdge` whose
    `(scan_a, graph_a, slot)`/`(scan_b, graph_b, slot)` map to that shared variable's
    slots (`variable_slots`, `verify.rs`), else `UnboundJoin` (fail-closed — a join
    the query demands but the manifest does not prove is rejected, exactly as
-   `UnboundFilter`/`UnboundPattern` are). The slot indices `i`/`j` are PRIVATE in
-   the circuit, so the verifier binds the *slot the variable occupies* via the
-   query parse, and the circuit's `select_slot(row, i)` is constrained to that slot
-   by… — see §4.4 (the slot-binding obligation, the one genuinely new soundness
-   subtlety).
+   `UnboundFilter`/`UnboundPattern` are). The slot indices are the PUBLIC
+   `slot_a`/`slot_b` inputs (§2.2, §4.4 — the slot is not secret, only the value
+   is), so the verifier binds them with a plain public-input equality: it requires
+   `slot_a`/`slot_b` to equal the *slot the variable occupies* from the query parse,
+   and the circuit's `select_slot(row, slot_a)`/`select_slot(row, slot_b)` is taken
+   at exactly that public position — see §4.4 (the slot-binding obligation, the one
+   genuinely new soundness subtlety, discharged by making the slots public).
 
 ### 3.4 Composition with filter / revoke / issuer / HolderPoP
 
@@ -443,8 +465,8 @@ a deployment not using hidden joins stays on the disclosed-row path. For each
 - **With revoke / issuer / HolderPoP.** Orthogonal: `join_eq` consumes only the
   two scan commitments (which are already issuer-attested and revocation-checked
   per the existing gates). The hidden-revocation (`bind_hidden_revocation`,
-  `verifier.rs:2306`) and hidden-issuer (`bind_hidden_issuer_attestations`,
-  `verifier.rs:2469`) proofs cover the *same* commitments `join_eq` references, so
+  `verifier.rs:2365`) and hidden-issuer (`bind_hidden_issuer_attestations`,
+  `verifier.rs:2528`) proofs cover the *same* commitments `join_eq` references, so
   a hidden join over two fully-hidden credentials composes — the join adds no new
   disclosure beyond R1/R2. The whole thing rides the same single-use nonce
   (audit-#4) and canonical-vk discipline.
@@ -453,9 +475,11 @@ a deployment not using hidden joins stays on the disclosed-row path. For each
 
 ```
 prover:   for each cross-credential shared variable in the query plan:
-            witness (row_a, i), (row_b, j) from the two graphs it holds;
+            witness row_a, row_b from the two graphs it holds; take the PUBLIC
+            join slots slot_a/slot_b from the query (the shared variable's positions);
             draw blinding; compute join_commitment = h3(JOIN_DOMAIN, a_val, blinding);
-            prove join_eq{commit_a, commit_b, join_commitment} (challenge = verifier nonce);
+            prove join_eq{commit_a, commit_b, join_commitment, slot_a, slot_b}
+              (challenge = verifier nonce);
             append a SubProof + a JoinEdge to the manifest.
 
 verifier (verify_manifest):
@@ -465,6 +489,7 @@ verifier (verify_manifest):
                 for edge in join_edges:
                   assert join_eq.commit_a == scan[edge.scan_a].commitments[graph_a]   // anti-A2
                   assert join_eq.commit_b == scan[edge.scan_b].commitments[graph_b]
+                  assert join_eq.slot_a/slot_b == query-derived s_a/s_b (variable_slots) // §4.4 slot bind
                   (query-correctness: a demanded cross-scan join has a JoinEdge)       // audit-#10
    stage 3    for each sub_proof (incl join_eq):                                   [existing loop]
                 reconstruct_public_inputs (nonce as field 0) + byte-compare          // anti-A1
@@ -489,10 +514,11 @@ soundness of the proof system, a valid `join_eq` proof exists only if a witness
 satisfying *all* constraints exists — including `a_val == b_val`. The verifier runs
 `bb verify` against the **canonical vk** for `CircuitId::JoinEq` (recomputed
 verifier-side, audit-#2, `driver.rs::canonical_vk:240-255`) over the
-**reconstructed** public inputs (audit-#1, `verifier.rs:3247-3263`), so a forged
+**reconstructed** public inputs (audit-#1, `verifier.rs:3280-3312`), so a forged
 proof / attacker vk / mismatched public inputs all reject. A prover with
-`row_a[i] ≠ row_b[j]` simply has no satisfying witness — **reject**. (Contrast the
-*today* check at `verifier.rs:1602`, which is a JSON string equality the prover
+`row_a[slot_a] ≠ row_b[slot_b]` simply has no satisfying witness — **reject**.
+(Contrast the *today* check at `verifier.rs:1656-1658`, which is a JSON string
+equality the prover
 chooses; the new member moves the equality under the proof.)
 
 ### 4.2 Why the prover cannot bind to unbound / swapped rows (A2)
@@ -501,16 +527,16 @@ chooses; the new member moves the equality under the proof.)
   *re-derives the graph from* (step 1, `assert_eq(commit_fold(...), commit_a)`),
   and the verifier requires them **byte-equal to the two scan proofs' published
   `commitments[g]`** (`bind_joins`, §3.3 step 2). Those scan commitments are (i)
-  byte-bound into the scan proofs (audit-#1, `verifier.rs:3350-3352`) and (ii)
+  byte-bound into the scan proofs (audit-#1, `verifier.rs:3409-3410`) and (ii)
   issuer-signed (audit-#3, `bind_issuer_attestations`). So a prover cannot feed
   `join_eq` any graph other than the two attested credentials — the commitment
   would not match.
 - **Row presence.** `row_a`/`row_b` are constrained present in their re-committed
-  graphs (step 2, the `scan.nr:100-111` discipline). A row not in `G_a` has no
+  graphs (step 2, the `scan.nr:139-149` discipline). A row not in `G_a` has no
   witness.
 - **Net.** The join is provably over two genuine, attested, present rows of the two
   presented credentials — A2 is closed by the *commitment-equality* binding, the
-  same mechanism the binding-edge fix used (audit-#7, `verifier.rs:1586-1604`),
+  same mechanism the binding-edge fix used (audit-#7, `verifier.rs:1640-1658`),
   but now over *commitments* rather than disclosed rows.
 
 ### 4.3 Why the hiding artefact does not create a forgery channel
@@ -526,29 +552,34 @@ cannot commit to a *different* value than the one it proved equal.
 
 ### 4.4 The one genuinely new soundness obligation — slot binding
 
-The join slots `i`/`j` are PRIVATE (so the verifier does not learn which column is
-the join key beyond what the query reveals). This creates a **new obligation** the
-verifier must discharge, analogous to audit-#6 (the salary-slot-for-age forge):
+If the join slots were left private, the verifier would not learn which column is
+the join key — but it would also be unable to pin the equality to the *right*
+column. This is a **new obligation** the construction must discharge, analogous to
+audit-#6 (the salary-slot-for-age forge):
 
 > The query says `?p` is shared at pattern-A slot `s_a` and pattern-B slot `s_b`.
 > The circuit must prove the equality is over **those** slots, not whichever slots
 > the prover finds convenient.
 
-Two honest ways to discharge it:
+The two ways to discharge it, and why the recommended one wins:
 
-- **(Recommended) Make `i`/`j` PUBLIC.** Expose `slot_a: pub u32`, `slot_b: pub
-  u32` as public inputs of `join_eq`; `bind_query_correctness` requires them to
-  equal the query-derived `(s_a, s_b)` for the shared variable (`variable_slots`,
-  `verify.rs`). This discloses *which column* is the join key — but the query
-  *already* reveals that (the shared variable's position is in the query text the
-  verifier reads), so it is **not new leakage**. It closes the forge with a plain
-  public-input equality (audit-#1 byte-bound). **This is the recommended choice:
-  the slot is not secret; only the *value* is.**
-- (Alternative) Keep `i`/`j` private and prove the join column matches a
-  query-bound constant pattern — heavier, no privacy gain. Rejected.
+- **(Recommended, and the choice §2.2 takes) Make the slots PUBLIC.** Expose
+  `slot_a: pub u32`, `slot_b: pub u32` as public inputs of `join_eq` (as in the
+  §2.2 public-input sketch); the circuit selects with `select_slot(row, slot_a)` /
+  `select_slot(row, slot_b)`, and `bind_query_correctness` requires
+  `slot_a`/`slot_b` to equal the query-derived `(s_a, s_b)` for the shared variable
+  (`variable_slots`, `verify.rs`). This discloses *which column* is the join key —
+  but the query *already* reveals that (the shared variable's position is in the
+  query text the verifier reads), so it is **not new leakage**. It closes the forge
+  with a plain public-input equality (audit-#1 byte-bound). **This is the chosen
+  construction: the slot is not secret; only the *value* is.**
+- (Alternative, rejected) Keep the slots private and prove the join column matches a
+  query-bound constant pattern — heavier, no privacy gain (the query reveals the
+  column anyway). Rejected.
 
 So: **the join VALUE is hidden; the join SLOTS are public (already implied by the
-query).** This is the precise, honest privacy boundary.
+query).** This is the precise, honest privacy boundary — and §2.2's public-input
+sketch, witnesses, and relation are all stated consistently with it.
 
 ### 4.5 New verifier obligations (tie-back to the audit discipline)
 
