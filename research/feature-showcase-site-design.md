@@ -148,7 +148,9 @@ surface is a page; the three flagships are top-billed "Showcase" pages.
 
 Core engine
   /try                    The live SPARQL REPL (the shared engine component)
-  /surface/sparql         SPARQL 1.1/1.2 — SELECT/ASK/CONSTRUCT/UPDATE, paths, RDF-star, EXPLAIN
+  /surface/sparql         SPARQL 1.1/1.2 — SELECT/ASK/CONSTRUCT/UPDATE, paths, RDF-star
+                          (EXPLAIN exists as `sparq_engine::explain*` but is NOT yet a wasm
+                           export → needs a new binding (tier-b) before it is in-tab live)
   /surface/data-formats   Turtle / N-Triples / N-Quads / TriG + compressed ingest
   /surface/javascript-wasm  The @jeswr/sparq browser/Node API (streaming, match, applyDelta)
 
@@ -195,7 +197,7 @@ Legend: **(a)** existing wasm · **(b)** new wasm bundle · **(c)** bb.js · **(
 | Surface | Verdict | How / what runs | Honest caveat |
 |---|---|---|---|
 | **sparql-query** | **(a) LIVE** | The shipped wasm Store: SELECT/ASK/CONSTRUCT/UPDATE, BGP+WCOJ, FILTER, OPTIONAL, UNION, MINUS, BIND, VALUES, aggregates, paths, sub-SELECT, RDF-star. | REGEX/REPLACE are compiled out of the lean bundle; QueryBudget deadline is native-only (row-cap only in wasm). |
-| **data-formats** | **(a) LIVE** | `load`/`loadDataset`/`loadCompressed` over the 4 text formats + gzip/zstd. | HDT, mmap/external-memory, parallel fast paths are native-only → walkthrough for those. |
+| **data-formats** | **(a) LIVE** | `load`/`loadDataset` over the 4 text formats; gzip/zstd-compressed RDF ingest via `SparqStore.fromCompressed()` (JS-side decompress → `fromString`). (`loadCompressed` is unrelated — it stores the *index* block-compressed, not a gzip/zstd input decoder.) | HDT, mmap/external-memory, parallel fast paths are native-only → walkthrough for those. |
 | **javascript-wasm** | **(a) LIVE** | This *is* the engine; the page documents the `@jeswr/sparq` API (streaming cursors, `match()`, `count`, `applyDelta`) by calling it. | — |
 | **inference** | **(b) NEW wasm bundle** | `sparq-reason` is pure-Rust forward-chaining; a `sparq-reason-wasm` bundle (RDFS/OWL2RL/N3 closure + `why()` proof tree) is portable. Pulls `regex` → larger bundle, lazy-loaded on this page only. | If the regex/rule-engine wasm size is unacceptable, fall back to **(e)** hosted/walkthrough. Confirm wasm-portability as a build spike. |
 | **shacl** | **(b) NEW wasm bundle** | `sparq-shacl` is pure-Rust over `sparq-engine` (already wasm-portable); a `sparq-shacl-wasm` bundle validates data+shapes → W3C report in-tab. | SHACL-SPARQL constraints need the engine's REGEX (compiled out of lean bundle) — include it in this bundle or note the gap. |
@@ -219,7 +221,9 @@ optional UX upgrade, not a requirement.**
   Today proving is **subprocess-only** in `crates/sparq-zk-compose`; the one engineering item
   is wiring the proving step to the **bb.js WASM** path for the browser. The manifest/verify
   data model is already pure Rust/serde and portable.
-- **Gate counts vs the ceiling:** bb.js WASM has a hard **2^19 = 524,288 gate** ceiling. The
+- **Gate counts vs the ceiling:** bb.js WASM has a practical/device-dependent ceiling around
+  **~2^19 (≈524,288) gates** (the repo elsewhere frames the browser limit as ~2^19–2^20
+  constraints, not a strict spec cap — see `research/zkp-performance-landscape.md`). The
   entire sparq circuit family is **5,991–34,821 gates** (measured `bb gates` snapshot in
   `crates/sparq-zk-compose/tests/gate_count_snapshot.json`): `scan_k2_n64_r8` 34,821 (largest,
   ~15× under the ceiling), `filter_int/f64_d*` 17,416, `hidden_issuer_d4` 16,932, `holder_pok`
