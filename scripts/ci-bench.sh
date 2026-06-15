@@ -430,22 +430,24 @@ fi
 # run, exactly like LUBM. Skipped gracefully when javac/rapper are absent (PRs install no toolchain).
 SHACL_BIN=target/release/examples/bench_shacl
 if command -v javac >/dev/null 2>&1 && command -v rapper >/dev/null 2>&1 && [ -x "$SHACL_RUN" ]; then
-  if [ ! -x "$SHACL_BIN" ]; then
-    cargo build --release -q -p sparq-shacl --example bench_shacl 2>/dev/null || true
+  # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE
+  # bench_shacl. Let cargo's own staleness detection decide (a no-op rebuild is cheap), and do
+  # NOT swallow the build error (`|| true`) — a real compile failure must fail the gate, not
+  # silently skip the SHACL correctness check on main. Mirrors how the other suites assume a
+  # freshly-built binary.
+  if ! cargo build --release -q -p sparq-shacl --example bench_shacl; then
+    echo "ERROR: bench_shacl example failed to build" >&2
+    exit 1
   fi
-  if [ -x "$SHACL_BIN" ]; then
-    if BENCH_SHACL="$SHACL_BIN" ITERS=3 bash "$SHACL_RUN" > "$TMP/shacl.tsv" 2>"$TMP/shacl.err"; then
-      while IFS=$'\t' read -r name violations us; do
-        [ "${violations:-}" = "ERROR" ] && continue
-        [ -n "${us:-}" ] && add "shacl_${name}_validate_us" us "$us"
-      done < "$TMP/shacl.tsv"
-    else
-      echo "ERROR: shacl run.sh failed (correctness regression)" >&2
-      cat "$TMP/shacl.err" >&2 || true
-      exit 1
-    fi
+  if BENCH_SHACL="$SHACL_BIN" ITERS=3 bash "$SHACL_RUN" > "$TMP/shacl.tsv" 2>"$TMP/shacl.err"; then
+    while IFS=$'\t' read -r name violations us; do
+      [ "${violations:-}" = "ERROR" ] && continue
+      [ -n "${us:-}" ] && add "shacl_${name}_validate_us" us "$us"
+    done < "$TMP/shacl.tsv"
   else
-    echo "note: shacl skipped (bench_shacl example failed to build)" >&2
+    echo "ERROR: shacl run.sh failed (correctness regression)" >&2
+    cat "$TMP/shacl.err" >&2 || true
+    exit 1
   fi
 else
   echo "note: shacl skipped (javac/rapper not on PATH)" >&2

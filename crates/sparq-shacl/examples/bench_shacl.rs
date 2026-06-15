@@ -40,6 +40,13 @@ fn main() {
         }
     };
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
+    // Reject iters=0 explicitly: 0 makes both `0..iters` loops skip, leaving load_us/validate_us
+    // at INFINITY and tripping `data.expect("iters >= 1")` — a non-deterministic footgun. The
+    // gate contract requires finite `name\tcount\tus`, so demand a real sample count up front.
+    if iters == 0 {
+        eprintln!("error: iters must be >= 1 (got 0); need at least one sample for finite timings");
+        std::process::exit(2);
+    }
 
     // ---- load the data graph once (timed: the ADVISORY load metric) -------------------
     let data_text = std::fs::read_to_string(data_path)
