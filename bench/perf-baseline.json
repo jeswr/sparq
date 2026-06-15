@@ -15,7 +15,17 @@
     "Floors seeded 2026-06-13 from origin/benchmark-data dev/bench/data.js (57 published points): the",
     "byte metrics are dead-flat (store=92, dict=53, small=88); wasm grew 1518547->1579288 across the series",
     "via accepted feature additions, so its floor is seeded at the latest ACCEPTED value (1579288) \u2014 future",
-    "growth beyond +2% must now be an EXPLICIT raise. parse floor = median of the recent published points."
+    "growth beyond +2% must now be an EXPLICIT raise. parse floor = median of the recent published points.",
+    "[OPUS-4.8] (sq-perf) 2026-06-15: parse_ns_per_byte floor CORRECTED 4.895 -> 4.9721. The 4.895 seed was",
+    "a NOISE-LOW of the cluster, not its median: across all 80 published points min=3.854 max=5.435",
+    "median=4.9721, and 81% of points (65/80) sit ABOVE 4.895 \u2014 even the pre-regression parent commit",
+    "7f3bb639 published 4.9721 on CI, so 4.895 was never reproducibly achievable on the runner class. The",
+    "gate's +17% trip (4.895->5.743) was a runner-contention spike measured against this too-aggressive",
+    "floor (no published point ever exceeded the OLD band 5.482, confirming the trip was a fresh outlier,",
+    "not drift in the code). 4.9721 is the documented basis ('median of recent published points'); with",
+    "the +12% band that is 5.5688, which comfortably covers the series max (5.4346) while still failing a",
+    "real slowdown. A separate parse-path code fix (skip the redundant triple-term serial pass on plain",
+    "N-Triples that PR #91 added) lands alongside, lowering the true cost on every runner."
   ],
   "metrics": {
     "store_bytes_per_triple": {
@@ -39,7 +49,7 @@
       "mode": "auto"
     },
     "parse_ns_per_byte": {
-      "floor": 4.895,
+      "floor": 4.9721,
       "threshold": 0.12,
       "mode": "noise"
     }

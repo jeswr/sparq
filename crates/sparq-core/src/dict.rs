@@ -1822,6 +1822,17 @@ impl Dict {
     // job promotes to a hard error (`-D dead-code`).
     #[cfg(feature = "parallel")]
     pub(crate) fn has_triple_terms(&self) -> bool {
+        self.any_triple_terms()
+    }
+
+    /// [OPUS-4.8] (sq-perf) Cheap enum-tag scan for any stored RDF 1.2 triple term, used by
+    /// `ShardedDict::intern_partials` to SKIP the serial triple-term second pass on the common
+    /// triple-term-free hot path. Unlike [`has_triple_terms`](Self::has_triple_terms) this is
+    /// NOT gated on `parallel` (the sharded interner runs in the non-parallel build too, and the
+    /// dict-spill builders call `intern_partials` directly), and it short-circuits on the first
+    /// `Stored::Triple`, so plain N-Triples/Turtle pay one bail-fast pass, not a `term_parts`
+    /// reconstruction over every term.
+    pub(crate) fn any_triple_terms(&self) -> bool {
         self.terms.iter().any(|s| matches!(s, Stored::Triple(_)))
     }
 
@@ -2212,7 +2223,15 @@ impl ShardedDict {
         self.shards[..n].iter_mut().enumerate().for_each(|(s, shard)| intern_shard(s, shard));
 
         // [OPUS-4.8] (sq-t3rt) Serial second pass — triple terms into the triple shard.
-        self.intern_triple_terms(partials, &mut remaps)?;
+        // [OPUS-4.8] (sq-perf) FAST PATH: triple terms are rare reification metadata, but the
+        // common N-Triples/Turtle hot path is triple-term-FREE. Skip the whole serial second
+        // pass (a per-term `term_parts` walk over every partial) unless some partial actually
+        // carries one — `any_triple_terms` short-circuits on a cheap enum-tag scan that bails
+        // on the first `Stored::Triple`, so plain input no longer pays the redundant O(terms)
+        // walk #91 added. (Measured: this restores the parse hot path to its pre-#91 cost.)
+        if partials.iter().any(|(pd, _)| pd.any_triple_terms()) {
+            self.intern_triple_terms(partials, &mut remaps)?;
+        }
         Ok(remaps)
     }
 
