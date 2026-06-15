@@ -223,7 +223,10 @@ pub use compare::{
 };
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
-pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, JoinPlan};
+pub use join::{
+    BatchedHiddenInput, BatchedJoinOutput, DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows,
+    HiddenValueJoin, JoinPlan,
+};
 pub use metrics::{CommCounter, FIELD_BYTES};
 pub use oblivious::{
     shuffle, sort_by, sort_with_keys, AccessPattern, Comparator, SecretColumn, ShuffleCost,
