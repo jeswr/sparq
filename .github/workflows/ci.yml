@@ -36,8 +36,19 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  test:
-    name: build + test (workspace)
+  # [OPUS-4.8] BUILD-ONCE for the sharded test suite (sq-vyxy folded in). The old
+  # design had every shard run `cargo build --workspace --all-targets` itself — the
+  # 131s build FLOOR that rust-cache makes cheap for *deps* but cannot remove for
+  # sparq's OWN crates (they recompile per runner). This job builds the workspace
+  # test binaries exactly ONCE via `cargo nextest archive`, packages them into a
+  # self-contained `nextest.tar.zst`, and uploads it as an artifact; each `test`
+  # shard below DOWNLOADS that archive and runs `cargo nextest run --archive-file …`
+  # with NO rebuild. So the 131s build is paid once (here), not N times, and the
+  # longest test shard is just its test-exec time (~108s diskann) instead of
+  # 131+108. Doctests — which nextest neither archives nor runs — are executed HERE,
+  # once, off the warm build this job already has (was a guarded shard-1 step before).
+  build-archive:
+    name: build + archive test binaries (+ doctests once)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -45,24 +56,182 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # [OPUS-4.8] sq-x4jy: run the unit/integration suite under cargo-nextest with
-      # --retries 2. nextest runs each test in its OWN process (so a stray abort can't
-      # take the whole binary down), reports a test BINARY that "was never executed" as a
-      # DETERMINISTIC failure (instead of a bare exit-101 with no FAILED line — the exact
-      # flake this bead tracks), and the retries let any residual transient binary race on
-      # the shared runner self-heal. SHA-pinned install action (reuses a pin already vetted
-      # elsewhere in this workflow). NOTE: nextest does NOT run doctests, so a separate
-      # `cargo test --doc` step below preserves the doctest coverage `cargo test` gave us.
+        with:
+          # [OPUS-4.8] Dep cache for THIS build-once job. The `test` shards no longer
+          # restore a rust-cache entry at all — they download the prebuilt
+          # `nextest.tar.zst` artifact and run it with `--archive-file`, so there is no
+          # shared cache key with them (the earlier per-shard build that did share this
+          # key is removed). A stable `shared-key` is still worth keeping so this job's
+          # dep cache survives across this branch's runs.
+          shared-key: "test-workspace"
+      # [OPUS-4.8] sq-x4jy: cargo-nextest is the test runner — each test in its OWN
+      # process (a stray abort can't take the whole binary down), a never-executed
+      # BINARY reported as a DETERMINISTIC failure, and --retries 2 (set on the run
+      # side) lets a residual transient binary race self-heal. SHA-pinned install
+      # action (a pin already vetted elsewhere in this workflow).
       - name: Install cargo-nextest
         uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: nextest
-      - name: Build
-        run: cargo build --workspace --all-targets
-      - name: Test (nextest, retry transient binary races)
-        run: cargo nextest run --workspace --retries 2
-      - name: Doctests (nextest does not run these)
+      # [OPUS-4.8] Build + ARCHIVE the whole workspace test set once. `--all-targets`
+      # mirrors the old `cargo build --workspace --all-targets` (unit + integration +
+      # bin test targets), so the archived set == what the un-sharded run built. The
+      # .tar.zst is self-contained (binaries + the metadata nextest needs to run them
+      # on another runner with `--archive-file`), so the shards never recompile.
+      - name: Build + archive test binaries (nextest archive)
+        run: cargo nextest archive --workspace --all-targets --archive-file nextest.tar.zst
+      # [OPUS-4.8] Upload the archive immediately after the build, BEFORE doctests, so
+      # the shards' input artifact is produced even if the doctest step later fails.
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nextest-archive
+          path: nextest.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+      # [OPUS-4.8] Doctests run ONCE here (nextest neither executes nor archives them,
+      # and --partition does not apply to them), off the warm archive build for ~12s at
+      # ZERO extra build cost — the whole point of build-once (sq-vyxy). Tradeoff (raised
+      # in #159 review): the shards `need: build-archive`, so a doctest failure here reds
+      # this job and SKIPS the shards, costing the cross-shard "full failure picture" for
+      # that run. We accept it deliberately: the only alternatives are (a) a separate
+      # doctest job, which re-pays the ~131s workspace build this PR exists to amortise,
+      # or (b) `if: always()` on the shards to decouple them, which muddies the gate
+      # (shards then must distinguish "build failed, no artifact" from "doctests failed,
+      # artifact present"). A doctest failure is rare and itself a hard, independent
+      # blocking signal; archive-then-doctest above at least guarantees the artifact
+      # exists. Re-open this if doctest flakiness ever makes the masked picture costly.
+      - name: Doctests (nextest does not run these; run once, off the warm build)
         run: cargo test --workspace --doc
+
+  test:
+    # [OPUS-4.8] LOAD-AWARE sharded test matrix (merge-queue-drain speed — @jeswr).
+    # The test-time distribution is SEVERELY skewed, so a runtime-BLIND
+    # `--partition count:K/N` (the prior design) wastes the parallelism: it splits by
+    # test COUNT, and MEASURED two tests dominate — sparq-vectors'
+    #   diskann_recall_at_10_vs_brute_force_on_50k  ≈ 108.7s
+    #   hnsw_recall_at_10_vs_brute_force_on_50k     ≈  61.2s
+    # = ~170s, ~43% of the ~392s total; the OTHER ~1827 tests are ≈0.01s each
+    # (~222s combined). A count split can land BOTH heavies on one shard, making that
+    # shard ~225s of test-exec while its siblings finish in ~55s — the shards do NOT
+    # finish together and the 4-way split saves almost nothing.
+    #
+    # FIX — ISOLATE THE HEAVY TAIL, then evenly count-partition the uniform rest:
+    #   • shard `heavy-diskann`: ONLY the 108.7s diskann recall test.
+    #   • shard `heavy-hnsw`:    ONLY the 61.2s hnsw recall test (split APART from
+    #     diskann — piling them together would recreate the ~170s long pole).
+    #   • shards `bulk 1/3 … 3/3`: everything that is NOT a known-heavy test,
+    #     `--partition count:K/3` over that filtered set — the ~222s uniform
+    #     remainder split evenly 3 ways (~74s each).
+    # Every test lands in exactly ONE shard: the two heavy filters + their negation
+    # over the bulk are a PARTITION of the suite (proof: heavy-diskann ∪ heavy-hnsw =
+    # the 2 heavies; bulk = `not (heavy)` = the other 1827; count:1/3+2/3+3/3 over the
+    # bulk == the whole bulk, disjoint). COVERAGE IS UNCHANGED — no test dropped, the
+    # suite is just distributed by LOAD, not count. Doctests run once in build-archive.
+    #
+    # ESTIMATED per-shard test-exec (build is paid once in build-archive, NOT here):
+    #   heavy-diskann ≈ 108.7s  (the long pole; everything else finishes under it)
+    #   heavy-hnsw    ≈  61.2s
+    #   bulk 1..3/3   ≈  74s each
+    # so the longest shard ≈ the 108.7s diskann FLOOR — exactly the target. The build
+    # job (~131s) runs first, so wall-clock ≈ 131s + ~109s, but with FAR less compute
+    # than the prior 5×(131s build) and with the shards genuinely finishing together.
+    #
+    # GENERALISING (so a NEW heavy test cannot silently re-skew this): the known-heavy
+    # set is the single `HEAVY` filterset env below. When nextest's run output flags a
+    # NEW test SLOW (the `SLOW [> Ns]` markers), add `| test(=its_name)` to HEAVY and,
+    # if it is comparable to the existing heavies, give it its own matrix shard; the
+    # bulk filter is the negation of HEAVY, so it stays correct automatically. This is
+    # the pragmatic known-heavy-list + count-partition-the-rest design — deliberately
+    # NOT a timing database (over-engineered for a 2-heavy tail).
+    #
+    # fail-fast: false so one shard's failure does not cancel the others (we want the
+    # full failure picture across the suite, not just the first shard to break).
+    name: test (load-aware shard ${{ matrix.name }})
+    needs: build-archive
+    runs-on: ubuntu-latest
+    env:
+      # [OPUS-4.8] THE single source of truth for the known-heavy tests. `test(=NAME)`
+      # is an EXACT-match nextest filterset atom (the leading `=` avoids substring
+      # matches). Add future SLOW-flagged heavies here as `| test(=name)` — the bulk
+      # shards (which run `not ( $HEAVY )`) then exclude them automatically.
+      HEAVY: "test(=diskann_recall_at_10_vs_brute_force_on_50k) | test(=hnsw_recall_at_10_vs_brute_force_on_50k)"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Dedicated shard for the 108.7s diskann recall test (the long pole).
+          - name: heavy-diskann
+            filter: "test(=diskann_recall_at_10_vs_brute_force_on_50k)"
+          # Dedicated shard for the 61.2s hnsw recall test — SPLIT from diskann.
+          - name: heavy-hnsw
+            filter: "test(=hnsw_recall_at_10_vs_brute_force_on_50k)"
+          # The uniform remainder (~222s), evenly count-partitioned 3 ways.
+          - name: bulk 1/3
+            partition: "count:1/3"
+          - name: bulk 2/3
+            partition: "count:2/3"
+          - name: bulk 3/3
+            partition: "count:3/3"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: nextest
+      - name: Download nextest archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nextest-archive
+      # [OPUS-4.8] No build step: each shard RUNS the pre-built archive
+      # (--archive-file) and skips the 131s rebuild. `--workspace-remap .` points the
+      # archived (build-time) source paths at THIS runner's checkout (same commit), so
+      # tests that read fixtures relative to the workspace root resolve correctly.
+      #   • heavy shards: `-E "$HEAVY ∧ <that one test>"` — i.e. exactly that test.
+      #   • bulk shards:  `-E "not ( $HEAVY )"` + `--partition count:K/3` — the
+      #     uniform remainder, split evenly. Filter is applied FIRST, then the count
+      #     partition runs over the filtered (not-heavy) set, so the three bulk shards
+      #     cover every non-heavy test exactly once.
+      # --retries 2 preserved per shard (transient binary-race self-heal, sq-x4jy).
+      #
+      # [OPUS-4.8] `--extract-to . --extract-overwrite` is LOAD-BEARING — it is the fix
+      # for the bulk-shard failures #159 originally shipped with. WHY: sparq-cli's
+      # integration tests (crates/sparq-cli/tests/cli_contract.rs) SPAWN the `sparq-cli`
+      # binary via the COMPILE-TIME macro `env!("CARGO_BIN_EXE_sparq-cli")`. `env!` bakes
+      # the build machine's ABSOLUTE path (`<workspace>/target/debug/sparq-cli`) into the
+      # test binary at `nextest archive` time; it does NOT read the env var at runtime, so
+      # nextest's runtime CARGO_BIN_EXE override (the relocatable `NEXTEST_BIN_EXE_*` form
+      # the test would have to opt into) can't help. By DEFAULT nextest extracts the
+      # archive to a TEMP dir, so on the test runner that baked absolute path does not
+      # exist -> `spawning sparq-cli: NotFound` and the bulk shards die immediately (the
+      # heavy shards passed only because the recall tests spawn no binary). GitHub-hosted
+      # runners check BOTH jobs out to the SAME absolute path (/home/runner/work/<r>/<r>),
+      # so extracting the archive's `target/` INTO this checkout (CWD == workspace root)
+      # reconstructs `<workspace>/target/debug/sparq-cli` at exactly the baked path, and
+      # the spawn resolves. `--extract-overwrite` is required because the checkout already
+      # holds the source tree (+ the downloaded nextest.tar.zst). Reproduced + fix verified
+      # locally (nextest 0.9.137): clean checkout + extract-to . -> all 4 CLI-spawn tests
+      # PASS; without it they reproduce the exact NotFound panic. (Touching ONLY this
+      # run-step keeps it on the build-once archive path — sq-vyxy stays closed.)
+      - name: Test (nextest, shard ${{ matrix.name }})
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.filter }}" ]; then
+            # Dedicated heavy shard: intersect HEAVY with this shard's single test so
+            # the shard's set is provably a SUBSET of HEAVY (belt-and-braces: if the
+            # test is ever renamed in only one place, the shard runs empty rather than
+            # silently re-including it in bulk).
+            cargo nextest run --archive-file nextest.tar.zst --workspace-remap . \
+              --extract-to . --extract-overwrite \
+              --retries 2 -E '( ${{ env.HEAVY }} ) & ( ${{ matrix.filter }} )'
+          else
+            # Bulk shard: everything that is NOT a known-heavy test, count-partitioned.
+            cargo nextest run --archive-file nextest.tar.zst --workspace-remap . \
+              --extract-to . --extract-overwrite \
+              --retries 2 --partition ${{ matrix.partition }} -E 'not ( ${{ env.HEAVY }} )'
+          fi
 
   wasm:
     name: wasm build (sparq-wasm)

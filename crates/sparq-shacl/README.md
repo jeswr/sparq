@@ -35,6 +35,40 @@ crates/sparq-shacl/fetch-shacl-tests.sh
 cargo test -p sparq-shacl --test w3c_core -- --nocapture
 ```
 
+## Differential fuzzing against reference engines
+
+Beyond the fixed W3C suite, a **differential fuzzer** (`tests/diff_fuzz.rs` +
+`tests/gen.rs`) generates random-but-valid SHACL shapes + data graphs from a
+seed, validates each through `sparq-shacl` **and** through a reference SHACL
+engine, and asserts the reports agree on the `sh:conforms` bit and the
+per-focus-node violated-constraint set (deduplicated; blank-node and
+complex-path tolerant — see the comparison policy in the test's module docs).
+The generator is a deterministic SplitMix64 loop (the same idiom as
+`sparq-bench`'s engine-vs-Oxigraph differential), so any disagreement reproduces
+from its printed seed.
+
+The reference side is a pluggable "report-cli" adapter (bead sq-eifd): a
+subprocess reading `{data, shapes}` Turtle and emitting a normalised JSON
+report. The first wired reference is **pySHACL**
+(`tests/diff_fuzz/pyshacl_adapter.py`); other engines (rdf-validate-shacl /
+shacl-engine via Node, Jena-SHACL via a jar) are tracked as follow-up beads and
+slot in as alternative adapters producing the same JSON shape.
+
+It is `#[ignore]`d (off the per-PR fast path) and runs as a **nightly** CI lane
+(`.github/workflows/shacl-diff-fuzz.yml`). Run it locally against a Python that
+has pySHACL + rdflib installed:
+
+```sh
+python3 -m venv /tmp/shacl-ref-venv && /tmp/shacl-ref-venv/bin/pip install pyshacl
+SHACL_DIFF_PYTHON=/tmp/shacl-ref-venv/bin/python SHACL_DIFF_COUNT=2000 \
+  cargo test -p sparq-shacl --test diff_fuzz -- --ignored --nocapture
+```
+
+When no reference engine resolves, the test skips cleanly (so a fresh checkout
+stays green). Two fast, reference-free self-tests of the generator
+(well-formedness + outcome mix, and key-normalisation consistency) DO run in the
+per-PR path.
+
 ## Supported constraint components
 
 `sh:class`, `sh:datatype` (with XSD lexical-space ill-formedness checks),

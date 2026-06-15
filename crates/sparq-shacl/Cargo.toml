@@ -32,3 +32,11 @@ spargebra.workspace = true
 rustc-hash.workspace = true
 # sh:pattern / sh:flags. Native-only crate — never in the wasm graph.
 regex = "1"
+
+[dev-dependencies]
+# [OPUS-4.8] sq-55c1: the differential-fuzz harness (tests/diff_fuzz.rs) talks to
+# the pluggable reference-engine adapter over JSON (request out, normalised report
+# in). serde derive on the report structs; serde_json for (de)serialisation — the
+# same `serde_json = "1"` direct-dep convention sparq-bench / sparq-conformance use.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
