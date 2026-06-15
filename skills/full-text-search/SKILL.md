@@ -1,6 +1,6 @@
 ---
 name: full-text-search
-description: Full-text search over RDF string literals in sparq via the sparq-text crate: build a BM25 inverted index (TextIndex) and run text: magic predicates (text:matches / text:matchesAny / text:phrase / text:near / text:slop / text:score) inside plain SPARQL. Use when an agent needs keyword/prefix/phrase/proximity search, BM25 or proximity relevance ranking, or autocomplete over literals in a sparq Graph.
+description: "Full-text search over RDF string literals in sparq via the sparq-text crate: build a BM25 inverted index (TextIndex) and run text: magic predicates (text:matches / text:matchesAny / text:phrase / text:near / text:slop / text:score) inside plain SPARQL. Use when an agent needs keyword/prefix/phrase/proximity search, BM25 or proximity relevance ranking, or autocomplete over literals in a sparq Graph."
 ---
 
 # sparq full-text search (sparq-text)

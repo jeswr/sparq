@@ -1,6 +1,6 @@
 ---
 name: vector-search
-description: Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, and fuse with another ranked signal (RRF / score blend) for hybrid retrieval. Use when adding embedding/semantic-search/nearest-neighbour over a sparq Graph in the sparq-vectors crate.
+description: "Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, and fuse with another ranked signal (RRF / score blend) for hybrid retrieval. Use when adding embedding/semantic-search/nearest-neighbour over a sparq Graph in the sparq-vectors crate."
 ---
 
 # sparq-vector-search
