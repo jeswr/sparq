@@ -36,26 +36,27 @@
 //!
 //! # Fail-closed validation
 //!
-//! Every length/shape/dtype field is validated **before** the proportional *decode* allocation (the
-//! flat `Vec<f32>` rows), mirroring the bounded-read hardening in [`crate::store`] / sparq-hdt
-//! (sq-tzwa): a declared `.npy` shape is checked against the actual file length (`data_offset +
-//! rows·dim·elem_size`) so a hostile header cannot trigger a multi-gigabyte decode pre-allocation, and
-//! a dtype/shape/order/dim/row-count mismatch is an `Err`, never a silent reinterpretation. The header
-//! length itself is bounded to [`MAX_NPY_HEADER_LEN`] (64 KiB) so a malformed/oversized `HEADER_LEN` is
-//! rejected up front. Note that the raw file bytes themselves are read fully into memory up front (via
-//! `std::fs::read`); the validation above precedes the *decode* `Vec<f32>` allocation, not the file
-//! read — see the peak-memory note below. [OPUS-4.8]
+//! Every length/shape/dtype field is validated **before** any proportional allocation or streaming
+//! read, mirroring the bounded-read hardening in [`crate::store`] / sparq-hdt (sq-tzwa): a declared
+//! `.npy` shape is checked against the actual file length (`data_offset + rows·dim·elem_size`) so a
+//! hostile header cannot drive an out-of-bounds read, and a dtype/shape/order/dim/row-count mismatch is
+//! an `Err`, never a silent reinterpretation. The header length itself is bounded to
+//! [`MAX_NPY_HEADER_LEN`] (64 KiB) so a malformed/oversized `HEADER_LEN` is rejected up front, and only
+//! the header prefix (≤ that cap plus the fixed magic/version/len bytes) is ever read into memory to
+//! parse it — never the array body. [OPUS-4.8]
 //!
 //! # Peak memory
 //!
-//! These import paths are **not** streaming. `import_npy` / `import_numeric_dump` read the entire input
-//! file into a `Vec<u8>` (`std::fs::read`) and then decode it into a flat `Vec<f32>`; `write_store`
-//! ([`VectorStore::create`] + [`put`](VectorStore::put)) in turn buffers the whole dense payload in RAM
-//! before [`finalize`](VectorStore::finalize). So peak resident memory is roughly *input file size +
-//! decoded matrix* — on the order of **~2× the embedding matrix** (a little more for `f8` input, which
-//! is read at 8 B/elem and narrowed to 4 B/elem). This is fine for typical embedding sets, but large
-//! imports are memory-bound; a streaming import path that avoids holding the whole file + matrix at
-//! once is tracked as a follow-up (sq-xsq9). [OPUS-4.8]
+//! These import paths are **streaming** (sq-3jc8). After the tiny header prefix is parsed and validated,
+//! the array body is read and fed into the store **one row at a time** through [`StreamingWriter`]: the
+//! file is never read whole into a `Vec<u8>`, no full owned `Vec<f32>` copy of the matrix is ever
+//! materialized, and the writer appends each row straight to the on-disk data section rather than
+//! buffering the dense payload. Per-row working memory is bounded by two small reusable buffers
+//! (`dim·elem_size` raw bytes + `dim` decoded `f32`), so peak resident memory is `O(dim + index)` —
+//! the transient `8·rows`-byte id→slot index that [`StreamingWriter::finalize`] sorts is the only
+//! row-count-proportional allocation, a `dim·4 / 8` reduction versus the dense matrix (e.g. 192× for
+//! 384-d). This replaces the old whole-file-then-decode path whose peak was **~2× the embedding
+//! matrix**. The resulting `.spqv` is byte-identical to the non-streaming writer's output. [OPUS-4.8]
 //!
 //! # Graph binding
 //!
@@ -65,7 +66,7 @@
 //! hand) the store is left unbound (an all-zero fingerprint block, reported as "unverifiable" rather
 //! than a spurious mismatch).
 
-use crate::store::VectorStore;
+use crate::store::{StreamingWriter, VectorStore};
 use sparq_core::dict::Id;
 use sparq_core::Graph;
 
@@ -290,57 +291,30 @@ fn parse_shape(dict: &str) -> Result<(usize, usize), String> {
     }
 }
 
-/// [OPUS-4.8] (sq-xsq9) Decode the array body of a validated `.npy` into row-major `f32` rows. The
-/// header has already bounded `rows·dim` against the file length, so the `with_capacity` here is safe.
-fn decode_npy_body(header: &NpyHeader, body: &[u8]) -> Result<Vec<f32>, String> {
-    let elem = header.dtype.elem_size();
-    let want = header
-        .rows
-        .checked_mul(header.dim)
-        .and_then(|n| n.checked_mul(elem))
-        .ok_or("npy: rows*dim*elem_size overflows")?;
-    if body.len() != want {
-        return Err(format!(
-            "npy: array body is {} bytes, expected {want} for shape ({}, {}) dtype {:?}",
-            body.len(),
-            header.rows,
-            header.dim,
-            header.dtype
-        ));
-    }
-    let count = header.rows * header.dim;
-    let mut out = Vec::with_capacity(count);
-    match header.dtype {
-        NpyDtype::F32 => {
-            for chunk in body.chunks_exact(4) {
-                out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
-            }
-        }
-        NpyDtype::F64 => {
-            for chunk in body.chunks_exact(8) {
-                out.push(f64::from_le_bytes(chunk.try_into().unwrap()) as f32);
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Build the `.spqv` from already-decoded row-major `f32` rows (`rows × dim`) and the parallel ids,
-/// reusing the standard store writer. Shared by both import formats.
+/// [OPUS-4.8] (sq-3jc8) Stream `rows` matrix rows into a freshly-created `.spqv`, feeding each row to
+/// the store as it is produced rather than buffering the whole payload. Shared by both import formats.
 ///
-/// [OPUS-4.8] This buffers the entire dense payload in RAM: [`VectorStore::create`] +
-/// [`put`](VectorStore::put) accumulate all rows, then [`finalize`](VectorStore::finalize) writes them
-/// out. Combined with the caller already holding the decoded `flat` matrix (and the import paths the
-/// whole input file), peak resident memory is ~2× the embedding matrix — see the [module peak-memory
-/// note](self#peak-memory).
-fn write_store<P: Into<std::path::PathBuf>>(
+/// `next_row(buf)` is called `rows` times, in order; it must fill `buf` (a reusable `dim`-element
+/// scratch vector) with row `i`'s `f32` components, decoding straight from the input file's next
+/// `dim·elem_size` bytes. `buf` is reused across rows, so the only row-count-proportional allocation is
+/// the transient id→slot index that [`StreamingWriter::finalize`] sorts — peak heap is `O(dim + index)`,
+/// not `O(rows·dim)` (see the [module peak-memory note](self#peak-memory)).
+///
+/// Validation mirrors the old buffered path: zero `dim`, an id/row-count mismatch, and the per-row
+/// dim/finite/non-zero/duplicate-id rules ([`StreamingWriter::put`] / `finalize`) all fail closed. The
+/// finished store is byte-identical to the non-streaming writer's output.
+fn stream_store<P, F>(
     spqv_path: P,
     dim: usize,
     ids: &[Id],
     rows: usize,
-    flat: &[f32],
     binding: ImportBinding<'_>,
-) -> Result<VectorStore, String> {
+    mut next_row: F,
+) -> Result<VectorStore, String>
+where
+    P: Into<std::path::PathBuf>,
+    F: FnMut(&mut Vec<f32>) -> Result<(), String>,
+{
     if dim == 0 {
         return Err("import: zero dimension".into());
     }
@@ -350,18 +324,21 @@ fn write_store<P: Into<std::path::PathBuf>>(
             ids.len()
         ));
     }
-    debug_assert_eq!(flat.len(), rows * dim);
-    let mut store = match binding {
-        ImportBinding::Unbound => VectorStore::create(spqv_path, dim)?,
-        ImportBinding::Graph(g) => VectorStore::create(spqv_path, dim)?.with_fingerprint(g),
+    let mut writer = match binding {
+        ImportBinding::Unbound => StreamingWriter::create(spqv_path, dim)?,
+        ImportBinding::Graph(g) => StreamingWriter::create_with_fingerprint(spqv_path, dim, g)?,
     };
-    for (row, &id) in ids.iter().enumerate() {
-        let v = &flat[row * dim..(row + 1) * dim];
-        // `put` enforces dim/finite/non-zero/duplicate-id — fail closed on any bad row.
-        store.put(id, v)?;
+    // Reusable per-row scratch: filled by `next_row`, fed to `put`, cleared. Never grows past `dim`.
+    let mut row_buf: Vec<f32> = Vec::with_capacity(dim);
+    for &id in ids {
+        row_buf.clear();
+        next_row(&mut row_buf)?;
+        debug_assert_eq!(row_buf.len(), dim);
+        // `put` enforces dim/finite/non-zero — fail closed on any bad row. (`StreamingWriter`
+        // defers the duplicate-id check to `finalize`, where it is still fail-closed.)
+        writer.put(id, &row_buf)?;
     }
-    store.finalize()?;
-    Ok(store)
+    writer.finalize()
 }
 
 impl VectorStore {
@@ -371,15 +348,15 @@ impl VectorStore {
     /// `spec.ids[i]` is the dict id for row `i` of the matrix (the row → dict-id contract). The file
     /// must be a **2-D, C-order, little-endian `f4`/`f8`** array whose `shape == (spec.ids.len(),
     /// spec.dim)`; any other dtype, byte-order, dimensionality, fortran-order or shape mismatch is a
-    /// fail-closed `Err`. The whole file is read into memory up front (`std::fs::read`); the declared
-    /// header length and shape are then validated against the actual file length **before the decode
-    /// allocation** — i.e. before the flat `Vec<f32>` is allocated, so a hostile header cannot force a
-    /// multi-gigabyte decode buffer (sq-tzwa hardening). Note the file-byte read itself is *not* gated
-    /// by this check, and `write_store` buffers the whole dense payload before finalize, so peak RAM is
-    /// roughly the file size + the decoded matrix (~2× the matrix) — see the [module peak-memory
-    /// note](self#peak-memory). `f8` rows are narrowed to `f32`. [OPUS-4.8]
+    /// fail-closed `Err`. [OPUS-4.8] (sq-3jc8) Only the header **prefix** is read into memory (a bounded
+    /// `≤ MAX_NPY_HEADER_LEN + 12` bytes); the declared header length and shape are validated against the
+    /// actual file length before any body read, then the array body is streamed **row by row** through
+    /// [`StreamingWriter`] — the whole file is never read into a `Vec<u8>` and no full owned `Vec<f32>`
+    /// copy of the matrix is materialized, so peak RAM is `O(dim + index)` rather than ~2× the matrix
+    /// (see the [module peak-memory note](self#peak-memory)). `f8` rows are narrowed to `f32`. [OPUS-4.8]
     ///
-    /// Returns the finalized, memory-mapped store (same handle [`VectorStore::open`] would yield).
+    /// Returns the finalized, memory-mapped store (same handle [`VectorStore::open`] would yield); the
+    /// `.spqv` is byte-identical to what the non-streaming writer produced for the same input.
     ///
     /// ```no_run
     /// use sparq_vectors::{ImportBinding, ImportSpec, VectorStore};
@@ -397,10 +374,34 @@ impl VectorStore {
         P: Into<std::path::PathBuf>,
         Q: AsRef<std::path::Path>,
     {
+        use std::io::{BufReader, Read, Seek, SeekFrom};
+
         let npy_path = npy_path.as_ref();
-        let bytes =
-            std::fs::read(npy_path).map_err(|e| format!("read {}: {e}", npy_path.display()))?;
-        let header = parse_npy_header(&bytes, bytes.len())?;
+        let file = std::fs::File::open(npy_path)
+            .map_err(|e| format!("open {}: {e}", npy_path.display()))?;
+        let file_len: usize = file
+            .metadata()
+            .map_err(|e| format!("stat {}: {e}", npy_path.display()))?
+            .len()
+            .try_into()
+            .map_err(|_| {
+                format!(
+                    "npy: {} is larger than the address space",
+                    npy_path.display()
+                )
+            })?;
+        let mut reader = BufReader::new(file);
+
+        // Read only a bounded header prefix (never the body) to parse the .npy header. The data offset
+        // is `prefix_len + header_len` and header_len ≤ MAX_NPY_HEADER_LEN, so this cap always covers it.
+        let prefix_cap = MAX_NPY_HEADER_LEN.saturating_add(12).min(file_len);
+        let mut prefix = vec![0u8; prefix_cap];
+        reader
+            .read_exact(&mut prefix)
+            .map_err(|e| format!("read {}: {e}", npy_path.display()))?;
+        let header = parse_npy_header(&prefix, file_len)?;
+        drop(prefix);
+
         if header.dim != spec.dim {
             return Err(format!(
                 "npy: array dim {} != store dim {} (shape ({}, {}))",
@@ -414,14 +415,61 @@ impl VectorStore {
                 spec.ids.len()
             ));
         }
-        let flat = decode_npy_body(&header, &bytes[header.data_offset..])?;
-        write_store(
+        // Cross-check the declared body length against the file before streaming (fail closed: a body
+        // shorter than the shape would otherwise surface only as a mid-stream read error).
+        let elem = header.dtype.elem_size();
+        let want_body = header
+            .rows
+            .checked_mul(header.dim)
+            .and_then(|n| n.checked_mul(elem))
+            .ok_or("npy: rows*dim*elem_size overflows")?;
+        let have_body = file_len.saturating_sub(header.data_offset);
+        if have_body != want_body {
+            return Err(format!(
+                "npy: array body is {have_body} bytes, expected {want_body} for shape ({}, {}) dtype {:?}",
+                header.rows, header.dim, header.dtype
+            ));
+        }
+
+        // Seek to the body and stream it row by row. `BufReader` keeps actual disk reads chunked even
+        // though we ask for exactly one row's worth of bytes at a time.
+        reader
+            .seek(SeekFrom::Start(header.data_offset as u64))
+            .map_err(|e| format!("seek {}: {e}", npy_path.display()))?;
+        // Checked: validate the per-row buffer size BEFORE allocating it. `want_body` above only
+        // bounds `rows*dim*elem`; with `rows == 0` an absurd `dim` would never have been multiplied
+        // in, so guard `dim*elem` directly so a malicious header can't overflow or force a huge
+        // allocation here. Fail closed. [OPUS-4.8] sq-3jc8
+        let row_bytes = header
+            .dim
+            .checked_mul(elem)
+            .ok_or("npy: dim*elem_size overflows usize")?;
+        let mut raw = vec![0u8; row_bytes];
+        let npy_path_owned = npy_path.to_path_buf();
+        stream_store(
             spec.spqv_path,
             spec.dim,
             spec.ids,
             header.rows,
-            &flat,
             spec.binding,
+            move |out| {
+                reader
+                    .read_exact(&mut raw)
+                    .map_err(|e| format!("read {}: {e}", npy_path_owned.display()))?;
+                match header.dtype {
+                    NpyDtype::F32 => {
+                        for chunk in raw.chunks_exact(4) {
+                            out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+                        }
+                    }
+                    NpyDtype::F64 => {
+                        for chunk in raw.chunks_exact(8) {
+                            out.push(f64::from_le_bytes(chunk.try_into().unwrap()) as f32);
+                        }
+                    }
+                }
+                Ok(())
+            },
         )
     }
 
@@ -436,10 +484,11 @@ impl VectorStore {
     /// language.
     ///
     /// The expected length is checked from `metadata` *before* the file is read, so a wrong-size file
-    /// is rejected without a large read; but a correctly-sized file is then read fully into memory
-    /// (`std::fs::read`) and decoded into a flat `Vec<f32>`, and `write_store` buffers the whole dense
-    /// payload before finalize — peak RAM is roughly the file size + the decoded matrix (~2× the
-    /// matrix). See the [module peak-memory note](self#peak-memory). [OPUS-4.8]
+    /// is rejected without any large read. [OPUS-4.8] (sq-3jc8) A correctly-sized file is then streamed
+    /// **row by row** through [`StreamingWriter`] — never read fully into a `Vec<u8>` and never decoded
+    /// into a flat owned `Vec<f32>` — so peak RAM is `O(dim + index)` rather than ~2× the matrix. See the
+    /// [module peak-memory note](self#peak-memory). The resulting `.spqv` is byte-identical to what the
+    /// non-streaming writer produced. [OPUS-4.8]
     ///
     /// Returns the finalized, memory-mapped store.
     #[cfg(not(target_arch = "wasm32"))]
@@ -451,14 +500,15 @@ impl VectorStore {
         P: Into<std::path::PathBuf>,
         Q: AsRef<std::path::Path>,
     {
+        use std::io::{BufReader, Read};
+
         if spec.dim == 0 {
             return Err("import: zero dimension".into());
         }
         let dump_path = dump_path.as_ref();
         let rows = spec.ids.len();
-        // The expected file length is fully determined by ids.len() and dim — check it BEFORE reading
-        // the whole file into the decode buffer (fail closed on a wrong size; no trust in file bytes
-        // to size an allocation). [OPUS-4.8] sq-tzwa discipline.
+        // The expected file length is fully determined by ids.len() and dim — check it BEFORE opening
+        // the stream (fail closed on a wrong size; no trust in file bytes). [OPUS-4.8] sq-tzwa discipline.
         let expect = rows
             .checked_mul(spec.dim)
             .and_then(|n| n.checked_mul(4))
@@ -478,27 +528,58 @@ impl VectorStore {
                 spec.dim
             ));
         }
-        let bytes =
-            std::fs::read(dump_path).map_err(|e| format!("read {}: {e}", dump_path.display()))?;
-        // metadata→read race: re-check the length we actually got.
-        if bytes.len() != expect {
-            return Err(format!(
-                "dump: {} changed size during read ({} bytes, expected {expect})",
-                dump_path.display(),
-                bytes.len()
-            ));
-        }
-        let mut flat = Vec::with_capacity(rows * spec.dim);
-        for chunk in bytes.chunks_exact(4) {
-            flat.push(f32::from_le_bytes(chunk.try_into().unwrap()));
-        }
-        write_store(
+        let file = std::fs::File::open(dump_path)
+            .map_err(|e| format!("open {}: {e}", dump_path.display()))?;
+        let mut reader = BufReader::new(file);
+        // Checked: validate the per-row buffer size BEFORE allocating it. `expect` above only bounds
+        // `rows*dim*4`; with `rows == 0` an absurd `dim` would never have been multiplied in, so guard
+        // `dim*4` directly so it can't overflow or force a huge allocation here. Fail closed. sq-3jc8
+        let row_bytes = spec
+            .dim
+            .checked_mul(4)
+            .ok_or("dump: dim*4 overflows usize")?;
+        let mut raw = vec![0u8; row_bytes];
+        let dump_path_owned = dump_path.to_path_buf();
+        // Detect a metadata→read GROW race: bytes appended after the length check would otherwise be
+        // silently ignored (we stop after `rows` rows). On the LAST row, confirm the reader is at EOF
+        // so trailing bytes are rejected — restoring the pre-streaming `bytes.len() != expect`
+        // fail-closed semantics for growth (shrink is already caught by the `read_exact` below). sq-3jc8
+        let mut rows_read = 0usize;
+        stream_store(
             spec.spqv_path,
             spec.dim,
             spec.ids,
             rows,
-            &flat,
             spec.binding,
+            move |out| {
+                // A `read_exact` failure here also catches a metadata→read shrink race (the file lost
+                // bytes after the length check): it surfaces as a mid-stream read error, fail closed.
+                reader
+                    .read_exact(&mut raw)
+                    .map_err(|e| format!("read {}: {e}", dump_path_owned.display()))?;
+                for chunk in raw.chunks_exact(4) {
+                    out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+                }
+                rows_read += 1;
+                if rows_read == rows {
+                    // After the final declared row there must be nothing left; a non-empty read means
+                    // the file grew (trailing bytes) since the length check — fail closed.
+                    let mut extra = [0u8; 1];
+                    match reader.read(&mut extra) {
+                        Ok(0) => {}
+                        Ok(_) => {
+                            return Err(format!(
+                                "dump: {} grew past its declared {expect} bytes (trailing data) after the size check",
+                                dump_path_owned.display()
+                            ))
+                        }
+                        Err(e) => {
+                            return Err(format!("read {}: {e}", dump_path_owned.display()))
+                        }
+                    }
+                }
+                Ok(())
+            },
         )
     }
 }
@@ -601,22 +682,5 @@ mod tests {
         assert!(parse_npy_header(b"not numpy at all here", 21)
             .unwrap_err()
             .contains("magic"));
-    }
-
-    #[test]
-    fn decode_body_rejects_wrong_length() {
-        let header = NpyHeader {
-            dtype: NpyDtype::F32,
-            rows: 2,
-            dim: 3,
-            data_offset: 0,
-        };
-        // 2*3*4 = 24 bytes expected.
-        assert!(decode_npy_body(&header, &[0u8; 23])
-            .unwrap_err()
-            .contains("expected 24"));
-        let body: Vec<u8> = (0..24).map(|_| 0u8).collect();
-        // all-zero decodes fine at this layer (put() is what rejects zero vectors).
-        assert_eq!(decode_npy_body(&header, &body).unwrap().len(), 6);
     }
 }
