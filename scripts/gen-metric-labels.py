@@ -217,13 +217,26 @@ LUBM_DESC = {
     "q13": ("entailed", "Alumni of University0 (owl:inverseOf)"),
 }
 
+# [OPUS-4.8] (sq-7iai) SHACL validation workloads -> per-shape-graph human descriptions. The
+# shape-file stems under bench/shacl/shapes/*.ttl drive the metric names shacl_<workload>_validate.
+SHACL_DESC = {
+    "cardinality": "sh:minCount/sh:maxCount over ub:FullProfessor (focus enumeration + path counting)",
+    "datatype_range": "sh:datatype/sh:pattern over ub:GraduateStudent literals (XSD lexical)",
+    "class_nodekind": "sh:class (subclass-closure target) + sh:nodeKind over ub:worksFor",
+    "node_paths": "sh:node + sequence/inverse paths over ub:GraduateStudent (inter-shape recursion)",
+    "sparql_constraint": "sh:sparql (SHACL §5.2) routed through sparq-engine",
+}
 
-def stems(subdir):
-    """Sorted *.rq file stems under bench/<subdir> (matches sparq-cli `bench` ordering)."""
+
+def stems(subdir, ext=".rq"):
+    """Sorted file stems under bench/<subdir> with the given extension (default *.rq, matching
+    sparq-cli `bench` ordering). [OPUS-4.8] (sq-7iai, gap G2) `ext` is parameterised so non-query
+    suites can enumerate their inputs — SHACL's shape graphs are `*.ttl`, not `*.rq`."""
     d = os.path.join(BENCH, subdir)
     if not os.path.isdir(d):
         return []
-    return sorted(f[:-3] for f in os.listdir(d) if f.endswith(".rq"))
+    n = len(ext)
+    return sorted(f[:-n] for f in os.listdir(d) if f.endswith(ext))
 
 
 def deeptax_depths():
@@ -382,6 +395,20 @@ def build():
             "query": "deterministic closure triple-count (self-asserting gate; = 2·depth+1 = %d)"
                      % (2 * depth + 1),
             "mode": "closure", "unit": "triples",
+        }
+
+    # 10) SHACL validation suite (sq-7iai, gap G2 — ext=".ttl") -> one ADVISORY validate-time
+    # metric per committed shape graph. The hook emits `shacl_<workload>_validate_us`; the
+    # dashboard strips the `_us` for the label key (like LUBM's `lubm_<q>_count`). The deterministic
+    # gates (violations/conforms/focus_nodes) live in bench/shacl/run.sh's self-assertion + the
+    # W3C `BASELINE_PASS` ratchet (crates/sparq-shacl/tests/w3c_core.rs), not on the dashboard.
+    for s in stems("shacl/shapes", ext=".ttl"):
+        desc = SHACL_DESC.get(s, s.replace("_", " "))
+        labels["shacl_%s_validate" % s] = {
+            "label": "SHACL %s — %s, validate" % (s, desc),
+            "suite": "SHACL validation",
+            "dataset": "LUBM(1) ABox, ~103k triples x hand-authored shape graph",
+            "query": desc, "mode": "validate", "unit": "µs",
         }
 
     return labels

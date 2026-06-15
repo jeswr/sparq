@@ -1,0 +1,26 @@
+# [OPUS-4.8] (sq-7iai) SHACL benchmark workload 1: CARDINALITY.
+# sh:minCount / sh:maxCount over the LUBM(1) ABox. Stresses focus-node enumeration
+# (every ub:FullProfessor) + path-value counting. The LUBM generator gives every
+# FullProfessor between 2 and 4 ub:teacherOf edges (deterministic at -univ 1 -seed 0),
+# so these constraints have FIXED violation counts at the pinned corpus:
+#   - maxCount 1 on teacherOf: violated by EVERY professor (all have >= 2).
+#   - minCount 3 on teacherOf: violated by exactly the professors with only 2 edges.
+# The expected constants live in bench/shacl/expected.tsv (derived by RUNNING sparq-shacl,
+# not guessed) and run.sh asserts them, exit 1 on drift.
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix ub:  <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:  <http://example.org/shacl-bench/> .
+
+ex:ProfessorCardinalityShape a sh:NodeShape ;
+    sh:targetClass ub:FullProfessor ;
+    # Every professor teaches >= 2 courses, so maxCount 1 is violated by ALL of them.
+    sh:property [
+        sh:path ub:teacherOf ;
+        sh:maxCount 1 ;
+    ] ;
+    # Professors with only 2 ub:teacherOf edges violate minCount 3.
+    sh:property [
+        sh:path ub:teacherOf ;
+        sh:minCount 3 ;
+    ] .

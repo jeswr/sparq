@@ -127,6 +127,28 @@
       "dashboard_engine_id": "pyshacl"
     },
     {
+      "id": "jena-shacl",
+      "name": "Apache Jena SHACL",
+      "kind": "report-cli",
+      "role": "[OPUS-4.8 sq-7iai] Tier-1 SHACL correctness oracle + mainstream JVM baseline (the SHACL analogue of Fuseki). Apache-2.0. Adapter kind `report-cli` (file-in / validation-report-out), reusing scripts/bench-adapters/shacl_report_count.py (count sh:result, read sh:conforms) so #violations is directly comparable to sparq's report.results.len(). Add first among the SHACL competitors.",
+      "pinned_version": "apache-jena (shacl validate; pin the exact Jena distribution/Docker digest at gather time)",
+      "version_source": "the Jena distribution version (bin/shacl is part of apache-jena-<ver>) or the `stain/jena` Docker image DIGEST, recorded in the gather results file.",
+      "install_recipe": "download apache-jena-<ver>.tar.gz (Apache-2.0) and put bin/ on PATH, OR use the `stain/jena` Docker image (Docker-based -> gather-only on a Docker EC2 box, like QLever; zero recurring CI cost). gather-only — NOT a committed dependency (engines stay out of git per AGENTS.md).",
+      "run_recipe": "scripts/gather-competitors.sh --run --only jena-shacl  with SHACL_DATA=<data.ttl> SHACL_SHAPES=<shapes.ttl> set; the dispatch calls scripts/bench-adapters/report_cli_adapter.py with the `adapter` recipe below (Jena writes the sh:ValidationReport to stdout in Turtle).",
+      "adapter": {
+        "cmd": ["shacl", "validate", "--data", "{data}", "--shapes", "{shapes}"],
+        "report_format": "turtle",
+        "report_to": "stdout",
+        "version_cmd": ["shacl", "--version"]
+      },
+      "comparable_suites": [
+        { "sparq_suite": "shacl-validate-bench", "note": "same data x shapes; cross-check #violations/conforms (per-engine expected counts — engines that dedup results differ from sparq, which does not) before trusting any timing. sh:sparql coverage differs across engines — scope perf to constraints all Tier-1 implement." }
+      ],
+      "version_env_metadata": "gather records the Jena version (or Docker image digest) + java -version + the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "jena-shacl"
+    },
+    {
       "id": "rdf-validate-shacl",
       "name": "Zazuko rdf-validate-shacl",
       "kind": "js-lib",
