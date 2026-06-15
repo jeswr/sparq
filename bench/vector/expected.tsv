@@ -23,7 +23,7 @@
 #                          seeded (HnswConfig::seed) and reproducible, but parallel float-sum
 #                          reduction order can flip a single boundary neighbour (recall 0.999 vs
 #                          1.000 = +/-1 in the deficit). So HNSW is gated on its FLOOR (deficit
-#                          < 50 == recall@10 >= 0.95, the tests/recall.rs floor), NOT exact
+#                          <= 50 == recall@10 >= 0.95, the tests/recall.rs floor), NOT exact
 #                          equality — exact-equality would be a flaky gate, which is dishonest.
 #
 # These are DERIVED by RUNNING examples/bench_vectors on the pinned corpus (not guessed);
@@ -31,10 +31,12 @@
 # also emits is ADVISORY (wall-clock query latency; non-canonical dev box) and is NEVER asserted.
 # The advisory build_s row is forwarded by run.sh but has no expected.tsv entry (sentinel-0 count).
 #
-# Floor headroom (must always hold, all three workloads, independent of the exact deficit):
-#   hnsw_recall_at10    < 50   (HNSW recall@10 >= 0.95, the tests/recall.rs floor)
-#   diskann_recall_at10 < 100  (DiskANN recall@10 >= 0.90, the tests/diskann.rs floor)
-#   pq_recall_at10      < 50   (PQ+re-rank recall@10 >= 0.95, the tests/quant.rs re-rank floor)
+# Floor headroom (must always hold, all three workloads, independent of the exact deficit).
+# The gate is INCLUSIVE: run.sh fails only on `deficit > floor`, so `deficit == floor` (exactly the
+# floor recall) PASSES — matching the crate's `recall@10 >= floor` condition. Hence `<=` below:
+#   hnsw_recall_at10    <= 50   (HNSW recall@10 >= 0.95, the tests/recall.rs floor)
+#   diskann_recall_at10 <= 100  (DiskANN recall@10 >= 0.90, the tests/diskann.rs floor)
+#   pq_recall_at10      <= 50   (PQ+re-rank recall@10 >= 0.95, the tests/quant.rs re-rank floor)
 hnsw_recall_at10	1
 diskann_recall_at10	34
 pq_recall_at10	22

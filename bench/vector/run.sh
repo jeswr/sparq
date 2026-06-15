@@ -35,9 +35,20 @@ if [ ! -x "$BIN" ]; then
 fi
 
 # ---- 1. resolve the pinned corpus parameters (gen.sh emits two lines: N then seed) ----------
+# Guard explicitly: under `set -u` a failed/short gen.sh would otherwise crash with an opaque
+# "unbound variable" on ${PARAMS[0]}/[1]. Check it produced the expected >=2 lines and fail clearly.
 mapfile -t PARAMS < <("$GEN" "${VEC_N:-}" "${VEC_SEED:-}" 2>/dev/null || "$GEN")
+if [ "${#PARAMS[@]}" -lt 2 ]; then
+  echo "[vector] ERROR: gen.sh did not produce the expected 2 lines (N + seed); got ${#PARAMS[@]}" >&2
+  echo "[vector]   gen.sh: $GEN — check it runs and emits N then seed on separate lines" >&2
+  exit 1
+fi
 N="${PARAMS[0]}"
 SEED="${PARAMS[1]}"
+if [ -z "$N" ] || [ -z "$SEED" ]; then
+  echo "[vector] ERROR: gen.sh produced an empty N ('$N') or seed ('$SEED')" >&2
+  exit 1
+fi
 echo "[vector] corpus: N=$N seed=$SEED iters=$ITERS" >&2
 
 # ---- 2. run bench_vectors (TSV: name deficit us) --------------------------------------------
@@ -103,8 +114,11 @@ done < "$TMP/vector.tsv"
 # expected set — NOT the line count: a count check is fooled by a vanished+duplicated pair (one
 # name missing, another repeated => same count). Sorting + uniq'ing both sides catches either a
 # missing name or an unexpected/duplicated one.
-exp_names="$(grep -vE '^#|^$' "$EXP" | cut -f1 | sort -u)"
-got_names="$(printf '%s' "$seen_names" | grep -vE '^$' | sort -u)"
+# `grep -vE` exits 1 when it filters out EVERY line (e.g. seen_names empty because the runner
+# produced no recall rows) — under `set -euo pipefail` that would abort before we can report the
+# missing-workload case. `|| true` keeps an empty result empty (still != exp_names => caught below).
+exp_names="$(grep -vE '^#|^$' "$EXP" | cut -f1 | sort -u || true)"
+got_names="$(printf '%s' "$seen_names" | grep -vE '^$' | sort -u || true)"
 if [ "$exp_names" != "$got_names" ]; then
   echo "[vector] ERROR: workload set mismatch vs expected.tsv (a workload vanished or was duplicated)" >&2
   echo "[vector]   expected: $(printf '%s' "$exp_names" | tr '\n' ' ')" >&2

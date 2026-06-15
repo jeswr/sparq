@@ -57,7 +57,9 @@ pinned corpus and gates each workload's recall deficit (exit 1 on any drift):
   **rayon-parallel**: the graph is seeded (`HnswConfig::seed`) and reproducible, but parallel
   float-sum reduction order can flip a single boundary neighbour (recall 0.999 vs 1.000 = ±1 in the
   deficit). Pinning HNSW to an exact deficit would be a **flaky** gate, which is dishonest — so it
-  is gated on its floor (deficit < 50 ⇔ recall@10 ≥ 0.95, the `tests/recall.rs` floor) instead.
+  is gated on its floor (deficit ≤ 50 ⇔ recall@10 ≥ 0.95, the `tests/recall.rs` floor) instead.
+  The floor gate is **INCLUSIVE**: `run.sh` fails only on `deficit > floor`, so a deficit of
+  exactly 50 (exactly recall@10 = 0.95) PASSES — matching the crate's `recall@10 >= 0.95` condition.
 
 The constants in `expected.tsv` were **derived by running `bench_vectors`** on the pinned corpus
 (not guessed). The deterministic deficits (`vectors_*_recall_at10`) also have `mode:"auto"` entries

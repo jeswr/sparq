@@ -215,6 +215,9 @@ fn main() {
         let recall = hits as f64 / (QUERIES * K) as f64;
         eprintln!("[vector] DiskANN recall@{K} = {recall:.4} (deficit {})", recall_deficit_milli(recall));
         rows.push(("diskann_recall_at10".into(), recall_deficit_milli(recall), us));
+        // Drop the index (which may hold the on-disk .spqg open) BEFORE unlinking it, so the
+        // remove succeeds on platforms with mandatory file locks (e.g. Windows). No-op on Linux.
+        drop(disk);
         let _ = std::fs::remove_file(&graph_path);
     }
 
@@ -264,6 +267,11 @@ fn main() {
         let recall = hits as f64 / (QUERIES * K) as f64;
         eprintln!("[vector] PQ+re-rank recall@{K} = {recall:.4} (deficit {})", recall_deficit_milli(recall));
         rows.push(("pq_recall_at10".into(), recall_deficit_milli(recall), us));
+        // Drop the encoded set + PQ + the file-backed store (which may hold `pq_path` open)
+        // BEFORE unlinking, so the remove succeeds under mandatory file locks. No-op on Linux.
+        drop(enc);
+        drop(pq);
+        drop(pq_store);
         let _ = std::fs::remove_file(&pq_path);
     }
 
@@ -275,5 +283,9 @@ fn main() {
     // deterministic gate; the row only forwards the advisory `vectors_build_s` timing).
     println!("build_s\t0\t{build_us:.1}");
 
+    // Drop the index + the file-backed store (which may hold `store_path` open) BEFORE unlinking,
+    // so the remove succeeds under mandatory file locks (e.g. Windows). No-op on Linux.
+    drop(index);
+    drop(store);
     let _ = std::fs::remove_file(&store_path);
 }
