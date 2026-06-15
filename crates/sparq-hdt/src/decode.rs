@@ -238,7 +238,12 @@ fn decode_section(sect: &DictSectPFC) -> Result<(Dict, Vec<Id>), Error> {
     let n = sect.num_strings;
     let block_size = sect.block_size.max(1);
     let mut buf: Vec<u8> = Vec::with_capacity(64);
-    let mut dict = Dict::new();
+    // [OPUS-4.8] sq-s506: pre-size the partial dict from the known section term count
+    // (`sect.num_strings`) so its term arena + lookup table are reserved up front instead of
+    // repeatedly growing/rehashing while we intern. Some terms collapse to INLINE ids (never
+    // stored in the arena), so `n` is an UPPER bound — `with_capacity` only reserves, it does
+    // not over-allocate the stored set.
+    let mut dict = Dict::with_capacity(n);
     let mut out: Vec<Id> = Vec::with_capacity(n);
 
     let mut produced = 0usize;
@@ -314,7 +319,8 @@ struct DictDecode {
 /// Decodes a `FourSectDict` into one sparq `Dict` plus per-section id vectors.
 ///
 /// [OPUS-4.8] sq-s506 (lever H6): the four INDEPENDENT PFC blobs are decoded
-/// CONCURRENTLY on the rayon pool, each into its OWN partial dict (no shared state),
+/// CONCURRENTLY on the rayon pool (or straight-line via the single-thread fast path when the
+/// pool has `<= 1` thread), each into its OWN partial dict (no shared state),
 /// then merged into the final dict in the FIXED section order (shared, subjects, objects,
 /// predicates). `merge_remap` re-interns each partial's terms in arena (= first-seen)
 /// order, so feeding the partials in this order reproduces the old sequential single-dict
@@ -328,17 +334,61 @@ fn decode_dict(dict_hdt: &FourSectDict) -> Result<DictDecode, Error> {
         &dict_hdt.objects,
         &dict_hdt.predicates,
     );
-    // Two nested `join`s fan the four CPU-bound section decodes across the pool; each
-    // returns its `Result<(Dict, Vec<Id>), Error>` so any malformed section is surfaced
-    // (handled with `?` below), never swallowed.
-    let ((shared_res, subj_res), (obj_res, pred_res)) = rayon::join(
-        || rayon::join(|| decode_section(sh), || decode_section(su)),
-        || rayon::join(|| decode_section(ob), || decode_section(pr)),
-    );
-    let (shared_partial, mut shared) = shared_res?;
-    let (subj_partial, mut subj_only) = subj_res?;
-    let (obj_partial, mut obj_only) = obj_res?;
-    let (pred_partial, mut pred) = pred_res?;
+    // [OPUS-4.8] sq-s506: when the rayon pool is effectively single-threaded
+    // (`current_num_threads() <= 1`, e.g. `RAYON_NUM_THREADS=1`) the two nested `join`s buy
+    // no parallelism — only join/closure overhead — so decode the four sections straight-line
+    // instead. The rayon path is kept for genuinely multi-threaded pools. BOTH paths decode
+    // the SAME four sections into their OWN partial dicts and feed them to the identical
+    // section-order merge below, so the id layout is bit-for-bit identical either way (guarded
+    // by the `parallel_matches_sequential_reference` / `shared_section_so_id_layout` tests).
+    let (
+        shared_partial,
+        mut shared,
+        subj_partial,
+        mut subj_only,
+        obj_partial,
+        mut obj_only,
+        pred_partial,
+        mut pred,
+    ) = if rayon::current_num_threads() <= 1 {
+        // Single-threaded fast path: no join overhead, same section order.
+        let (shared_partial, shared) = decode_section(sh)?;
+        let (subj_partial, subj_only) = decode_section(su)?;
+        let (obj_partial, obj_only) = decode_section(ob)?;
+        let (pred_partial, pred) = decode_section(pr)?;
+        (
+            shared_partial,
+            shared,
+            subj_partial,
+            subj_only,
+            obj_partial,
+            obj_only,
+            pred_partial,
+            pred,
+        )
+    } else {
+        // Two nested `join`s fan the four CPU-bound section decodes across the pool; each
+        // returns its `Result<(Dict, Vec<Id>), Error>` so any malformed section is surfaced
+        // (handled with `?` below), never swallowed.
+        let ((shared_res, subj_res), (obj_res, pred_res)) = rayon::join(
+            || rayon::join(|| decode_section(sh), || decode_section(su)),
+            || rayon::join(|| decode_section(ob), || decode_section(pr)),
+        );
+        let (shared_partial, shared) = shared_res?;
+        let (subj_partial, subj_only) = subj_res?;
+        let (obj_partial, obj_only) = obj_res?;
+        let (pred_partial, pred) = pred_res?;
+        (
+            shared_partial,
+            shared,
+            subj_partial,
+            subj_only,
+            obj_partial,
+            obj_only,
+            pred_partial,
+            pred,
+        )
+    };
     debug_assert_eq!(shared.len(), dict_hdt.shared.num_strings);
     debug_assert_eq!(subj_only.len(), dict_hdt.subjects.num_strings);
     debug_assert_eq!(obj_only.len(), dict_hdt.objects.num_strings);
