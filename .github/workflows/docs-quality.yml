@@ -41,6 +41,13 @@ name: docs-quality
 
 on:
   pull_request:
+  # [OPUS-4.8] Merge queue: docs-quality surfaces checks on PRs (some gating, some
+  # advisory/informational which ci-summary excludes), so it must also run on the
+  # queue's merge_group ref or the required ci-summary would wait for siblings that
+  # never appear there. The concurrency group below uses
+  # `github.event.pull_request.number || github.ref`, which falls back to the unique
+  # merge_group ref — no cross-event collision.
+  merge_group:
   push:
     branches: [main]
 

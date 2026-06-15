@@ -46,6 +46,17 @@ on:
       - "crates/sparq-zk-compose/**"
       - "zk/**"
       - ".github/workflows/zk-toolchain.yml"
+  # [OPUS-4.8] Merge queue: zk-toolchain surfaces a check on zk-touching PRs, so it
+  # must also run on the queue's merge_group ref or the required ci-summary would wait
+  # for a sibling that never appears there. NOTE: the `merge_group` event does NOT
+  # honour `paths` filters (GitHub ignores paths/paths-ignore for merge_group), so this
+  # bare trigger runs the forge suite on EVERY enqueue, not only zk-touching ones — a
+  # deliberate cost trade-off: the merge queue is a serialized, low-frequency lane and
+  # running the full zk gate on the exact to-be-merged tree is the safest pre-merge
+  # posture. ci-summary discovers the present check-set per-ref, so this never hangs.
+  # If queue runtime becomes a concern, gate `forge-suite` with a changed-files step
+  # keyed on github.event.merge_group.base_sha (tracked as a bead).
+  merge_group:
   push:
     branches: [main]
     paths:

@@ -28,6 +28,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # [OPUS-4.8] Merge queue: fuzz surfaces a check on PRs, so it must also run on the
+  # queue's merge_group ref or the required ci-summary would wait for a sibling that
+  # never appears there. The budget step below maps merge_group to the fast SMOKE
+  # budget (same as pull_request) — a pre-merge gate wants quick coverage, not the
+  # nightly soak. github.ref in the concurrency group is the unique merge_group ref.
+  merge_group:
   workflow_dispatch:
   # Daily heavy tier. 04:23 UTC (offset from ci.yml's 03:17 coverage cron so the two
   # heavy nightly lanes do not contend for the same runner window).
@@ -98,9 +104,11 @@ jobs:
         run: |
           set -euo pipefail
           case "${{ github.event_name }}" in
-            schedule)          secs="$NIGHTLY_SECS" ;;
-            pull_request)      secs="$SMOKE_SECS" ;;
-            push|workflow_dispatch|*) secs="$MAIN_SECS" ;;
+            schedule)                     secs="$NIGHTLY_SECS" ;;
+            # [OPUS-4.8] merge_group (the merge queue) takes the same fast SMOKE budget
+            # as a PR — a pre-merge gate wants quick coverage, not the nightly soak.
+            pull_request|merge_group)     secs="$SMOKE_SECS" ;;
+            push|workflow_dispatch|*)     secs="$MAIN_SECS" ;;
           esac
           echo "secs=$secs" >> "$GITHUB_OUTPUT"
           echo "Per-target fuzz budget for '${{ github.event_name }}': ${secs}s"

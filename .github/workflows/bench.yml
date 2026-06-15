@@ -27,6 +27,12 @@ on:
     paths-ignore:
       - 'bench/perf-baseline.json'
   pull_request:
+  # [OPUS-4.8] Merge queue: the perf gate must run on the queue's merge_group ref so
+  # the required ci-summary aggregates the benchmark check. The auto-push / baseline-
+  # commit / benchmark-data steps are all gated `if: github.ref == 'refs/heads/main'`
+  # — on merge_group github.ref is refs/heads/gh-readonly-queue/main/…, so (exactly as
+  # on a PR) they SKIP and only the perf gate computes + enforces the floor.
+  merge_group:
   workflow_dispatch:
 
 # [OPUS-4.8] Least-privilege default (Scorecard TokenPermissions): top-level is read-only
