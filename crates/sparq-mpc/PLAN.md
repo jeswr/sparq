@@ -273,10 +273,25 @@ join/aggregation reasoning out of the cryptographic core wherever values are
 disclosed (architecture §4.3 step 3).
 
 ### M6 — Performance + benchmarks
-Measure the *viable* regime only (honest-majority, LAN, small data). Per
-disk-space + empirical-honesty discipline: check `df` during runs, cap dataset
-size, clean `/tmp` scratch, bench data git-ignored. Report real envelopes —
-minutes, not "seconds" — and never extrapolate to the WAN/dishonest-majority
+**Tier-1 (in-process counting) DELIVERED (sq-sxm):** the
+(security model × N × query class) benchmark matrix is built — `src/metrics.rs`
+(the deterministic communication / round / multiplication counter `CommCounter`)
++ `src/bench.rs` (the matrix harness: query classes × N ∈ {2,3,5,7} × the ACTUAL
+per-operator security read off `ShamirBackend::operator_descriptor`) + the
+runnable `examples/mpc_bench_matrix.rs`. Because the crate is an in-process
+simulation, the load-bearing metric is the **deterministic modelled
+communication** (bytes/party, rounds, multiplications) — NOT a single-process
+wall-clock, which is not an MPC latency. Each cost cell co-runs the real
+primitive so correctness gates cost. The harness emits the numbers (a structured
+JSON schema + a table); per the no-hard-coded-perf rule they are not baked into
+any doc.
+
+**Network tiers (still open, beaded):** the real multi-process transport +
+`tc`/`netem` LAN/WAN emulation (Tier 2/3) is **bead sq-tg6b**; the EC2 scale-out
+(heavy data scales, real inter-AZ/region) is **bead sq-hoaj**. Those tiers obey
+the disk-space + empirical-honesty discipline: check `df` during runs, cap
+dataset size, clean `/tmp` scratch, bench data git-ignored. Report real envelopes
+— minutes, not "seconds" — and never extrapolate to the WAN/dishonest-majority
 regime that has zero published data points.
 
 ---
