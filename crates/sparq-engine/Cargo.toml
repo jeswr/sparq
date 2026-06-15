@@ -9,7 +9,17 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-readme = "../../README.md"
+# [OPUS-4.8] crate-local README so crates.io (package.readme) matches the docs.rs front
+# page (lib.rs include_str!("../README.md")) — same content on both registries.
+readme = "README.md"
+
+# [OPUS-4.8] Render this crate's README as the docs.rs front page (see src/lib.rs
+# `#![doc = include_str!("../README.md")]`) and build the docs with all features so
+# the optional service/zk/cs-planner items appear. `--cfg docsrs` enables any
+# doc-cfg feature gating in the rendered output.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 # Forwards sparq-core's parallel index build. Default on for native; the wasm

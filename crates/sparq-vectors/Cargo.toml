@@ -11,6 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# [OPUS-4.8] Render README.md as the docs.rs front page (lib.rs uses include_str!),
+# build with all features so the `provider` API surface is documented, and expose the
+# `docsrs` cfg for any `#[cfg_attr(docsrs, doc(cfg(...)))]` feature gating.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # Opt-in embedding storage + ANN (T7, GenAI phase 4 — see research/genai-design.md).
 # This is a SEPARATE crate so the core engine carries zero vector code; it consumes only
 # sparq-core's PUBLIC read API (dict lookups, permutation-index scans). Embeddings are

@@ -9,7 +9,16 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-readme = "../../README.md"
+# [OPUS-4.8] crate-local README so crates.io (package.readme) matches the docs.rs front
+# page (lib.rs include_str!("../README.md")) — same content on both registries.
+readme = "README.md"
+
+# [OPUS-4.8] docs.rs builds the crate's library root (lib.rs) as the front page; build
+# with every feature so the full server/time-travel/service/geo surface is documented,
+# and pass --cfg docsrs so #[cfg_attr(docsrs, doc(cfg(...)))] feature badges can render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 # rlib so the protocol/serializer logic can be unit-tested and reused by the binary.

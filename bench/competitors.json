@@ -1,0 +1,112 @@
+{
+  "_comment": [
+    "[OPUS-4.8] Competitor-comparison registry + dashboard seam (sq-t0c3). Authored by Opus 4.8",
+    "(Fable unavailable; flag for re-review when Fable returns).",
+    "",
+    "TWO ROLES, one file:",
+    "  1. REGISTRY (the `competitors` array): the versioned, pinned recipe for each external engine we",
+    "     compare against — name, kind, pinned version, install/run recipe, which sparq suites it is",
+    "     comparable on, and where its version+env metadata is recorded. This is the source-of-record",
+    "     for `scripts/gather-competitors.sh` and for any human reproducing a comparison.",
+    "  2. DASHBOARD SEAM (the top-level `engines` + `values` keys): the shape the perf dashboard",
+    "     (bench/dashboard/dashboard.js, buildFeatured/competitorsFor/competitorEngines) reads to draw",
+    "     competitor reference COLUMNS next to sparq in the featured-suites table. Shape (verified",
+    "     against dashboard.js): { engines:[{id,label,version,env}], values:{ \"<metric stem or name>\":",
+    "     { \"<engineId>\": <number> } } }. The dashboard matches on the raw metric NAME first, then the",
+    "     stem (name minus _us); a missing key renders as \"—\"/\"n/a\". We NEVER bake numbers in here by",
+    "     hand — `values` ships EMPTY in git and is populated only by a real measured gather run (which",
+    "     writes a sibling results file; see `results_layout`). Hard-coded perf numbers in a tracked",
+    "     file are forbidden by AGENTS.md (No hard-coded performance numbers).",
+    "",
+    "HONESTY NOTE (per parent sq-i0nm design C): competitor numbers gathered on a GitHub-hosted CI",
+    "runner are NOISY and not comparable to the pinned EC2/quiet-box reference band. Every gathered",
+    "datapoint records its `env` (host class, cpu, os, quiet_box flag) so the dashboard can label a",
+    "noisy gh-runner point distinctly from an EC2 reference line. See `bench/CATALOG.md` QUIET-BOX note."
+  ],
+
+  "schema_version": 1,
+
+  "results_layout": {
+    "_comment": [
+      "Where gathered numbers + version/env metadata LAND. `scripts/gather-competitors.sh` writes a",
+      "results file (git-ignored, regenerable) per the conventions in bench/CATALOG.md — it does NOT",
+      "edit the `engines`/`values` below in git. A maintainer (or a scheduled job) reviews the results",
+      "file and, only if intended, commits a dashboard snapshot into `engines`/`values`."
+    ],
+    "gather_output": "bench/competitor-results/<engine>-<suite>-<UTC-timestamp>.json",
+    "gather_output_gitignored": true,
+    "env_recorded_per_run": ["host_class", "cpu_model", "nproc", "os", "kernel", "quiet_box", "gathered_at_utc", "git_commit"],
+    "dashboard_snapshot": "the top-level `engines` + `values` keys of THIS file (committed only deliberately, reviewed in-diff like bench/perf-baseline.json)"
+  },
+
+  "sparq_suite_catalog": "bench/benchmarks.toml (machine-readable) + bench/CATALOG.md (human guide). Competitor `comparable_suites` below reference suite ids/dirs from that catalog.",
+
+  "competitors": [
+    {
+      "id": "oxigraph",
+      "name": "Oxigraph",
+      "kind": "embedded-rust-dep",
+      "role": "Differential-correctness oracle + mature-Rust-engine perf reference. Already a dev/bench dependency of this repo.",
+      "pinned_version": "0.5",
+      "version_source": "crates/sparq-bench/Cargo.toml (oxigraph = { version = \"0.5\", default-features = false, features = [\"rdf-12\"] }); resolved exact version pinned in Cargo.lock",
+      "install_recipe": "none — built into the workspace via the `sparq-bench` crate; `cargo build -p sparq-bench --release`",
+      "run_recipe": "cargo run -p sparq-bench --release -- --scale <entities> --iters <K>  (compare path: sparq vs Oxigraph on the in-process synthetic social graph, solution-count cross-check + per-query warm latency)",
+      "comparable_suites": [
+        { "sparq_suite": "sparq-bench-compare", "note": "head-to-head warm latency + solution-count agreement on the synthetic social graph" },
+        { "sparq_suite": "sparq-bench-fuzz",    "note": "correctness only (no perf): differential fuzz vs Oxigraph" },
+        { "sparq_suite": "sp2b",                 "note": "comparable in count mode on the SP2Bench corpus (load .nt into oxigraph::store::Store, run queries/)" },
+        { "sparq_suite": "watdiv",               "note": "comparable in count mode on the WatDiv SF=1 corpus" },
+        { "sparq_suite": "bsbm",                 "note": "comparable on the BSBM Explore corpus (CONSTRUCT/DESCRIBE forms compare produced-triple counts)" },
+        { "sparq_suite": "dbpsb",                "note": "comparable on the DBPSB/FEASIBLE DBpedia cut" },
+        { "sparq_suite": "lubm",                 "note": "comparable on the LUBM extensional tier (Oxigraph has no OWL-RL reasoner — entailed tier is NOT comparable)" }
+      ],
+      "version_env_metadata": "captured at gather time from Cargo.lock (exact resolved oxigraph version) + host env block; the sparq-bench compare path already prints both engines' load/query timings and peak RSS to stdout.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "oxigraph"
+    },
+    {
+      "id": "qlever",
+      "name": "QLever",
+      "kind": "docker-image",
+      "role": "External on-disk engine reference (scales to billions; compressed on-disk index). Compared COLD, cache cleared each run; COUNT VALUES + result SIZES cross-checked, not just row==row.",
+      "pinned_version": "docker.io/adfreiburg/qlever@<DIGEST>",
+      "version_source": "bench/qlever-*/Qleverfile (IMAGE = docker.io/adfreiburg/qlever:latest). NOTE: `:latest` is NOT a pin — the gather script resolves and records the image DIGEST at run time (the digest IS the version identifier; compare.py reports no server build string); record that digest here when you fix a reference.",
+      "version_pin_followup": "replace `:latest` with a sha256 digest pin in the Qleverfiles once a reference image is chosen — tracked as bead sq-l9yt.",
+      "install_recipe": "docker pull docker.io/adfreiburg/qlever:latest  (or the qlever-control CLI: pipx install qlever; `qlever` reads a Qleverfile). Docker is NOT installed on the dev box — this competitor is gather-only on a box that has Docker.",
+      "run_recipe": "in a bench/qlever-* dir: `qlever get-data && qlever index && qlever start`, then `python3 compare.py <iters> <endtoend|compute>` (drives sparq-cli AND the QLever HTTP endpoint; min-of-N cold).",
+      "comparable_suites": [
+        { "sparq_suite": "qlever-olympics",        "note": "real skewed DBpedia/Wallscope olympics (~1.78M); compare.py compute|endtoend" },
+        { "sparq_suite": "qlever-synthetic-10m",   "note": "10M synthetic social graph (bench/qlever-synthetic)" },
+        { "sparq_suite": "qlever-synthetic-100m",  "note": "100M synthetic social graph (bench/qlever-100m); EC2/heavy tier" },
+        { "sparq_suite": "watdiv",                 "note": "WatDiv corpus via a Qleverfile (skewed-data tuning target — QLever's home turf)" },
+        { "sparq_suite": "bsbm",                   "note": "BSBM Explore corpus via a Qleverfile" },
+        { "sparq_suite": "lubm",                   "note": "LUBM extensional tier (QLever does not materialize OWL-RL — entailed tier not comparable)" }
+      ],
+      "version_env_metadata": "the gather script records (a) the resolved image DIGEST (`docker inspect --format '{{index .RepoDigests 0}}'`) — this digest IS the recorded version identifier — and (b) the host env block. compare.py reports only timings + correctness, no server build string, so there is no separate 'server-reported version' to capture; `--run` refuses a live qlever gather when the digest cannot be resolved (no Docker / image not pulled) rather than writing an unversioned result. Stored QLever reference numbers + machine spec live in bench/qlever-baselines.md.",
+      "stored_baselines": "bench/qlever-baselines.md (we do NOT re-run QLever every sparq iteration — re-measure only when its version or the dataset changes; record date + version there).",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "qlever"
+    },
+    {
+      "id": "eye",
+      "name": "EYE (Euler Yet another proof Engine)",
+      "kind": "binary",
+      "role": "N3 reasoner reference: parse -> forward closure -> serialize. The sparq-reason inference suites are compared against EYE's closure (same pipeline).",
+      "pinned_version": "v11.24.4 (2026-05-12), SWI-Prolog 10.0.2; install commit e909c5b22d4edf7b86d366b08274eea31a6f82e5",
+      "version_source": "bench/inference/eye-comparison.md (records the EYE version + SWI-Prolog version + install commit). `eye --version` at run time is the authoritative reported version.",
+      "install_recipe": "no Homebrew formula; install from eyereasoner/eye install.sh at the pinned commit (saved-state .pvm via SWI-Prolog). EYE is NOT installed on the dev box — gather-only where `eye` is on PATH. Set EYE=/path/to/eye.",
+      "run_recipe": "EYE=$HOME/.local/bin/eye SPARQ_CLI=target/release/sparq-cli bench/inference/eye-comparison.sh  (min-of-N wall seconds; emits the sparq-vs-EYE table). EYE on dt100k is ~hours — gated behind EYE_DT100K=1.",
+      "comparable_suites": [
+        { "sparq_suite": "inference-eye-comparison", "note": "socrates / DeepTaxonomy (dt1k,dt10k,dt100k) / anc500 / grid30 N3 closures" },
+        { "sparq_suite": "lubm",                     "note": "OWL-RL reasoning tier conceptually comparable, but EYE consumes N3 rules not OWL-RL builtins directly — not wired; tracked as bead sq-bzr7" }
+      ],
+      "version_env_metadata": "gather records `eye --version`, the SWI-Prolog version, and the host env block; the cited third-party EYE measurements + machine spec live in bench/inference/eye-comparison.md.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "eye"
+    }
+  ],
+
+  "engines": [],
+
+  "values": {}
+}
