@@ -34,7 +34,7 @@
 //! off-by-one, CRC8/CRC32 layout — is handled identically. CRCs are still
 //! verified.
 //!
-//! ## Dictionary (H3 + H4)
+//! ## Dictionary (H3 + H4 + H6)
 //!
 //! Each PFC section is decoded **block-sequentially into one reusable buffer**
 //! (`decode_section`): front-coding is inherently sequential, so we walk a whole
@@ -44,13 +44,29 @@
 //! borrowed `&str` view of that buffer (H4), so the only allocation per distinct
 //! term is the dict's own `Box<str>` (unavoidable — that is its storage); the
 //! intermediate owned `String` per id is gone.
+//!
+//! [OPUS-4.8] sq-s506 (lever H6): a `FourSectDict` holds four INDEPENDENT PFC blobs
+//! (shared / subjects / objects / predicates). Decoding+interning is purely CPU after
+//! the (sequential) read, and the four sections share no state, so we decode all four
+//! **concurrently on the rayon pool** — each into its OWN partial `Dict` (front-coding
+//! within a section stays sequential; only the four sections run in parallel) — then
+//! merge the partials into the final dict via [`Dict::merge_remap`] in the FIXED
+//! section order (shared, subjects, objects, predicates). Because `merge_remap` walks a
+//! partial's term arena in first-seen (= id) order and re-interns into the target, and
+//! the target is fed the four partials in that exact order, the final dict's term arena
+//! — and therefore every assigned sparq `Id` and every downstream byte — is BIT-FOR-BIT
+//! identical to the old sequential `decode_section`-into-one-dict path. CRITICAL: the
+//! `shared` section feeds BOTH the subject (S) and object (O) id spaces; merging it
+//! FIRST (before subjects/objects) reproduces HDT's mandated id layout (shared ids
+//! first, then section-local ids), so an HDT id resolves to the same sparq `Id` whether
+//! it is referenced as S or O.
 
 use crate::{intern_hdt_term, Error};
 use hdt::containers::{ControlInfo, ControlType, Sequence};
 use hdt::dict_sect_pfc::DictSectPFC;
 use hdt::four_sect_dict::FourSectDict;
 use hdt::header::Header;
-use sparq_core::dict::{Dict, Id};
+use sparq_core::dict::{is_inline, Dict, Id};
 use sparq_core::Graph;
 use std::io::{BufRead, Read};
 
@@ -198,21 +214,32 @@ fn strlen(data: &[u8], offset: usize) -> usize {
     p - offset
 }
 
-/// Decodes EVERY string in a PFC section once, block-sequentially, interning each
-/// into `dict` and pushing its sparq [`Id`] into `out` in id order (id 1 first).
-/// Reuses a single `buf` across the whole section — the structural win of H3+H4
-/// over the upstream per-id `extract` (which re-walks each block and allocates a
-/// fresh `String` per id).
+/// Decodes EVERY string in a PFC section once, block-sequentially, into a FRESH
+/// partial [`Dict`], returning that partial dict plus a per-HDT-id vector of the
+/// term's PARTIAL-LOCAL sparq [`Id`] in id order (id 1 first). Reuses a single `buf`
+/// across the whole section — the structural win of H3+H4 over the upstream per-id
+/// `extract` (which re-walks each block and allocates a fresh `String` per id).
+///
+/// [OPUS-4.8] sq-s506 (H6): decoding into a SELF-CONTAINED partial dict (rather than a
+/// shared `&mut Dict`) is what lets the four sections run concurrently — they touch no
+/// shared state. The caller merges the partials into the final dict in the fixed
+/// section order via [`Dict::merge_remap`] and composes the returned local ids with
+/// that merge's remap, reproducing the sequential id assignment exactly (see the module
+/// docs). The returned local ids may be INLINE ids (e.g. canonical small `xsd:integer`
+/// literals, which are never stored in the partial arena); the caller passes those
+/// through `merge_remap` unchanged.
 ///
 /// PFC layout (per block of `block_size` strings): the first string of the block
 /// is stored whole and null-terminated; each later string is
 /// `vbyte(common_prefix_len) ++ suffix_bytes ++ 0x00`. Block `b` starts at byte
 /// offset `sequence.get(b)`.
-fn decode_section(dict: &mut Dict, sect: &DictSectPFC, out: &mut Vec<Id>) -> Result<(), Error> {
+fn decode_section(sect: &DictSectPFC) -> Result<(Dict, Vec<Id>), Error> {
     let data: &[u8] = &sect.packed_data;
     let n = sect.num_strings;
     let block_size = sect.block_size.max(1);
     let mut buf: Vec<u8> = Vec::with_capacity(64);
+    let mut dict = Dict::new();
+    let mut out: Vec<Id> = Vec::with_capacity(n);
 
     let mut produced = 0usize;
     let num_blocks = n.div_ceil(block_size);
@@ -223,7 +250,7 @@ fn decode_section(dict: &mut Dict, sect: &DictSectPFC, out: &mut Vec<Id>) -> Res
         buf.clear();
         buf.extend_from_slice(&data[pos..pos + slen]);
         pos += slen + 1; // skip the null terminator
-        out.push(intern_buf(dict, &buf)?);
+        out.push(intern_buf(&mut dict, &buf)?);
         produced += 1;
         if produced == n {
             break;
@@ -237,14 +264,31 @@ fn decode_section(dict: &mut Dict, sect: &DictSectPFC, out: &mut Vec<Id>) -> Res
             buf.truncate(delta);
             buf.extend_from_slice(&data[pos..pos + slen]);
             pos += slen + 1;
-            out.push(intern_buf(dict, &buf)?);
+            out.push(intern_buf(&mut dict, &buf)?);
         }
         produced += in_block;
         if produced >= n {
             break;
         }
     }
-    Ok(())
+    Ok((dict, out))
+}
+
+/// Merges a section's partial dict into the final `dict` (in the caller's fixed
+/// section order) and rewrites its per-HDT-id local ids to FINAL sparq ids in place.
+///
+/// [OPUS-4.8] sq-s506: `merge_remap` walks `partial`'s term arena in first-seen (= id)
+/// order and re-interns each into `dict`, so calling it on the four partials in section
+/// order reproduces the sequential single-dict interning byte-for-byte. The remap it
+/// returns is indexed by the partial's NON-inline ids; inline local ids (which never
+/// entered the arena) are global and pass through unchanged.
+fn merge_section(dict: &mut Dict, partial: &Dict, local_ids: &mut [Id]) {
+    let remap = dict.merge_remap(partial);
+    for id in local_ids.iter_mut() {
+        if !is_inline(*id) {
+            *id = remap[(*id - 1) as usize];
+        }
+    }
 }
 
 /// Interns one decoded term, given as raw (front-coded-reconstructed) UTF-8 bytes.
@@ -255,7 +299,69 @@ fn intern_buf(dict: &mut Dict, buf: &[u8]) -> Result<Id, Error> {
     intern_hdt_term(dict, s)
 }
 
-/// Direct HDT -> sparq [`Graph`] decode (H1–H4). Reads control info + header +
+/// The sparq `Dict` plus the per-HDT-id sparq [`Id`] for each of the four sections —
+/// the result of decoding a `FourSectDict`. `shared` is indexed by `(hdt_id - 1)` and is
+/// shared by the S and O id spaces; `subj_only` / `obj_only` are indexed by
+/// `(hdt_id - n_shared - 1)`; `pred` by `(hdt_id - 1)`.
+struct DictDecode {
+    dict: Dict,
+    shared: Vec<Id>,
+    subj_only: Vec<Id>,
+    obj_only: Vec<Id>,
+    pred: Vec<Id>,
+}
+
+/// Decodes a `FourSectDict` into one sparq `Dict` plus per-section id vectors.
+///
+/// [OPUS-4.8] sq-s506 (lever H6): the four INDEPENDENT PFC blobs are decoded
+/// CONCURRENTLY on the rayon pool, each into its OWN partial dict (no shared state),
+/// then merged into the final dict in the FIXED section order (shared, subjects, objects,
+/// predicates). `merge_remap` re-interns each partial's terms in arena (= first-seen)
+/// order, so feeding the partials in this order reproduces the old sequential single-dict
+/// interning BIT-FOR-BIT — and, in particular, the `shared` section is merged FIRST so
+/// its terms keep the lowest ids and an HDT id resolves to the same sparq Id whether it
+/// is referenced as a subject or as an object.
+fn decode_dict(dict_hdt: &FourSectDict) -> Result<DictDecode, Error> {
+    let (sh, su, ob, pr) = (
+        &dict_hdt.shared,
+        &dict_hdt.subjects,
+        &dict_hdt.objects,
+        &dict_hdt.predicates,
+    );
+    // Two nested `join`s fan the four CPU-bound section decodes across the pool; each
+    // returns its `Result<(Dict, Vec<Id>), Error>` so any malformed section is surfaced
+    // (handled with `?` below), never swallowed.
+    let ((shared_res, subj_res), (obj_res, pred_res)) = rayon::join(
+        || rayon::join(|| decode_section(sh), || decode_section(su)),
+        || rayon::join(|| decode_section(ob), || decode_section(pr)),
+    );
+    let (shared_partial, mut shared) = shared_res?;
+    let (subj_partial, mut subj_only) = subj_res?;
+    let (obj_partial, mut obj_only) = obj_res?;
+    let (pred_partial, mut pred) = pred_res?;
+    debug_assert_eq!(shared.len(), dict_hdt.shared.num_strings);
+    debug_assert_eq!(subj_only.len(), dict_hdt.subjects.num_strings);
+    debug_assert_eq!(obj_only.len(), dict_hdt.objects.num_strings);
+    debug_assert_eq!(pred.len(), dict_hdt.predicates.num_strings);
+
+    // Merge the partials into the final dict IN SECTION ORDER (shared, subjects, objects,
+    // predicates) — identical to the sequential decode's interning order — and rewrite
+    // each section's local ids to final ids.
+    let mut dict = Dict::new();
+    merge_section(&mut dict, &shared_partial, &mut shared);
+    merge_section(&mut dict, &subj_partial, &mut subj_only);
+    merge_section(&mut dict, &obj_partial, &mut obj_only);
+    merge_section(&mut dict, &pred_partial, &mut pred);
+    Ok(DictDecode {
+        dict,
+        shared,
+        subj_only,
+        obj_only,
+        pred,
+    })
+}
+
+/// Direct HDT -> sparq [`Graph`] decode (H1–H4 + H6). Reads control info + header +
 /// the four-section PFC dictionary (CRC-validated via the upstream reader), then
 /// decodes the triples section's bitmaps/sequences directly and emits SPO
 /// id-triples — never constructing the upstream wavelet matrix / OP-index.
@@ -266,32 +372,20 @@ pub fn graph_from_reader<R: BufRead>(mut reader: R) -> Result<Graph, Error> {
 
     // Four-section dictionary: reuse the upstream reader (keeps packed PFC bytes +
     // the offset sequence and validates every section's CRC), then decode + intern
-    // block-sequentially ourselves.
+    // ourselves (the four PFC sections concurrently — see `decode_dict`).
     let dict_hdt: FourSectDict = FourSectDict::read(&mut reader)
         .map_err(hdt::hdt::Error::from)?
         .validate()
         .map_err(hdt::hdt::Error::from)?;
 
     let n_shared = dict_hdt.shared.num_strings;
-    let n_subj_only = dict_hdt.subjects.num_strings;
-    let n_obj_only = dict_hdt.objects.num_strings;
-    let n_pred = dict_hdt.predicates.num_strings;
-
-    let mut dict = Dict::new();
-
-    // sparq Id for each HDT id, decoded once per distinct term, in id order.
-    //  shared[k]    -> shared_ids[k]            (k = id - 1, used by both S and O)
-    //  subject only -> subj_only_ids[k]         (k = id - n_shared - 1)
-    //  object only  -> obj_only_ids[k]          (k = id - n_shared - 1)
-    //  predicate    -> pred_ids[k]              (k = id - 1)
-    let mut shared_ids: Vec<Id> = Vec::with_capacity(n_shared);
-    decode_section(&mut dict, &dict_hdt.shared, &mut shared_ids)?;
-    let mut subj_only_ids: Vec<Id> = Vec::with_capacity(n_subj_only);
-    decode_section(&mut dict, &dict_hdt.subjects, &mut subj_only_ids)?;
-    let mut obj_only_ids: Vec<Id> = Vec::with_capacity(n_obj_only);
-    decode_section(&mut dict, &dict_hdt.objects, &mut obj_only_ids)?;
-    let mut pred_ids: Vec<Id> = Vec::with_capacity(n_pred);
-    decode_section(&mut dict, &dict_hdt.predicates, &mut pred_ids)?;
+    let DictDecode {
+        dict,
+        shared: shared_ids,
+        subj_only: subj_only_ids,
+        obj_only: obj_only_ids,
+        pred: pred_ids,
+    } = decode_dict(&dict_hdt)?;
 
     // Map an HDT subject/object id (1-based, shared section first) to its sparq Id.
     let map_so = |id: usize, shared: &[Id], only: &[Id]| -> Id {
@@ -361,4 +455,226 @@ pub fn graph_from_reader<R: BufRead>(mut reader: R) -> Result<Graph, Error> {
     }
 
     Ok(Graph::from_parts(dict, triples))
+}
+
+#[cfg(test)]
+mod tests {
+    //! [OPUS-4.8] sq-s506 (H6) decode-equivalence + shared-section id-layout tests.
+    //!
+    //! These guard the one thing the parallel-decode refactor could silently break: the
+    //! HDT id layout. The `shared` section feeds BOTH the S and O id spaces and must keep
+    //! the LOWEST ids; subject-only / object-only terms must get ids OFFSET past the
+    //! shared block. If the parallel merge ever stopped merging `shared` first (or merged
+    //! a section out of order), a SHARED term would resolve to different sparq ids as S vs
+    //! O and every triple would mis-resolve — so we assert that invariant directly, plus a
+    //! full triple-for-triple equivalence against an independent SEQUENTIAL reference
+    //! decode of the same archive.
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    }
+
+    /// Reads the fixture's `FourSectDict` (the upstream reader; ground truth for the
+    /// section boundaries and the term each HDT id denotes).
+    fn read_fixture_dict(bytes: &[u8]) -> Option<FourSectDict> {
+        let mut r = std::io::Cursor::new(bytes);
+        ControlInfo::read(&mut r).ok()?;
+        Header::read(&mut r).ok()?;
+        FourSectDict::read(&mut r).ok()?.validate().ok()
+    }
+
+    fn fixture_bytes() -> Option<Vec<u8>> {
+        match std::fs::read(fixture("snikmeta.hdt")) {
+            Ok(b) => Some(b),
+            Err(_) => {
+                eprintln!("skipping: fixture snikmeta.hdt absent");
+                None
+            }
+        }
+    }
+
+    /// An INDEPENDENT, deliberately simple SEQUENTIAL reference: decode the four PFC
+    /// sections one-after-another into a SINGLE shared dict (the pre-sq-s506 algorithm),
+    /// reproducing the id layout the format mandates. Cross-checks that the parallel
+    /// `decode_dict` / `graph_from_reader` assigns the identical sparq ids.
+    fn seq_ref_section(dict: &mut Dict, sect: &DictSectPFC, out: &mut Vec<Id>) {
+        // Decode the section in isolation, then `merge_remap` it into the shared dict —
+        // strictly serially and one section at a time.
+        let (partial, mut local) = decode_section(sect).expect("reference decode");
+        let remap = dict.merge_remap(&partial);
+        for id in local.iter_mut() {
+            if !is_inline(*id) {
+                *id = remap[(*id - 1) as usize];
+            }
+        }
+        out.extend_from_slice(&local);
+    }
+
+    /// Render a graph's triples to a sorted set of string triples — the resolved-term
+    /// view, so any id-layout bug shows up as a wrong term.
+    fn term_triple_set(g: &Graph) -> BTreeSet<[String; 3]> {
+        g.iter_ids()
+            .map(|spo| {
+                [
+                    g.dict.term(spo[0]).to_string(),
+                    g.dict.term(spo[1]).to_string(),
+                    g.dict.term(spo[2]).to_string(),
+                ]
+            })
+            .collect()
+    }
+
+    /// The term `intern_hdt_term` produces for an upstream term string, rendered back to
+    /// its N-Triples form (handles inline ids: we read back the RETURNED id, not id 1).
+    fn rendered_term(s: &str) -> String {
+        let mut probe = Dict::new();
+        let id = intern_hdt_term(&mut probe, s).expect("upstream term must parse");
+        probe.term(id).to_string()
+    }
+
+    /// The shared-section S/O offset invariant — the one thing this refactor could break.
+    ///
+    /// Decode the dictionary via the (parallel) `decode_dict` and assert, against the
+    /// upstream reader as ground truth, that:
+    ///  * the SHARED block is laid out FIRST — every shared HDT id `k` maps (via the S id
+    ///    space) to the SAME sparq id as it does via the O id space, and that sparq id is
+    ///    exactly `shared[k - 1]` for both;
+    ///  * subject-only and object-only HDT ids take the OFFSET path past the shared block
+    ///    (`only[id - n_shared - 1]`) and resolve to the term the upstream reader gives
+    ///    for that id — i.e. they are NOT mis-read as shared ids.
+    #[test]
+    fn shared_section_so_id_layout() {
+        let Some(bytes) = fixture_bytes() else { return };
+        let dict_hdt = read_fixture_dict(&bytes).expect("fixture FourSectDict must parse");
+        let n_shared = dict_hdt.shared.num_strings;
+        let n_subj_only = dict_hdt.subjects.num_strings;
+        let n_obj_only = dict_hdt.objects.num_strings;
+        assert!(n_shared > 0, "fixture must exercise the shared section");
+        assert!(n_subj_only > 0 || n_obj_only > 0, "fixture must exercise an offset section");
+
+        let dd = decode_dict(&dict_hdt).expect("parallel dict decode");
+
+        // The S-view map and the O-view map BOTH start with the shared block.
+        let map_s = |id: usize| {
+            if id <= n_shared {
+                dd.shared[id - 1]
+            } else {
+                dd.subj_only[id - n_shared - 1]
+            }
+        };
+        let map_o = |id: usize| {
+            if id <= n_shared {
+                dd.shared[id - 1]
+            } else {
+                dd.obj_only[id - n_shared - 1]
+            }
+        };
+
+        // Shared ids: identical sparq id whether referenced as S or O, and it IS the
+        // shared-block entry (the lowest-id block). This is the bug the brief warns about.
+        for k in 1..=n_shared {
+            assert_eq!(map_s(k), map_o(k), "shared HDT id {k}: S and O views must agree");
+            assert_eq!(map_s(k), dd.shared[k - 1], "shared HDT id {k}: must use the shared block");
+            let as_subj = dict_hdt.id_to_string(k, hdt::IdKind::Subject).unwrap();
+            let as_obj = dict_hdt.id_to_string(k, hdt::IdKind::Object).unwrap();
+            assert_eq!(as_subj, as_obj, "shared HDT id {k}: HDT S/O views must be one term");
+        }
+
+        // Subject-only ids take the offset path and resolve to the upstream subject term.
+        for off in 0..n_subj_only {
+            let hdt_id = n_shared + 1 + off; // first subject-only id is n_shared + 1
+            let sparq_id = map_s(hdt_id);
+            assert_eq!(sparq_id, dd.subj_only[off], "subject-only id {hdt_id}: offset path");
+            let want = dict_hdt.id_to_string(hdt_id, hdt::IdKind::Subject).unwrap();
+            assert_eq!(dd.dict.term(sparq_id).to_string(), rendered_term(&want), "subj-only {hdt_id} term");
+        }
+
+        // Object-only ids likewise take the offset path against the OBJECT id space.
+        for off in 0..n_obj_only {
+            let hdt_id = n_shared + 1 + off;
+            let sparq_id = map_o(hdt_id);
+            assert_eq!(sparq_id, dd.obj_only[off], "object-only id {hdt_id}: offset path");
+            let want = dict_hdt.id_to_string(hdt_id, hdt::IdKind::Object).unwrap();
+            assert_eq!(dd.dict.term(sparq_id).to_string(), rendered_term(&want), "obj-only {hdt_id} term");
+        }
+    }
+
+    /// Full equivalence: the parallel `graph_from_reader` must produce the identical
+    /// resolved-triple set as the independent sequential reference decode — a single
+    /// shared-section offset bug would change which terms triples resolve to and fail here.
+    #[test]
+    fn parallel_matches_sequential_reference() {
+        let Some(bytes) = fixture_bytes() else { return };
+
+        let parallel = graph_from_reader(std::io::Cursor::new(&bytes)).expect("parallel decode");
+        let sequential = seq_ref_graph(&bytes).expect("sequential reference decode");
+
+        assert_eq!(parallel.len(), sequential.len(), "triple counts must match");
+        assert_eq!(
+            term_triple_set(&parallel),
+            term_triple_set(&sequential),
+            "parallel and sequential decode must resolve to the identical triple set"
+        );
+    }
+
+    /// Sequential reference decoder: the dict half done serially (shared, subjects,
+    /// objects, predicates into one dict), with the production triples walk re-derived
+    /// here so it is a fully independent oracle (it shares no code with the parallel path
+    /// beyond the byte-level section readers).
+    fn seq_ref_graph(bytes: &[u8]) -> Result<Graph, Error> {
+        let mut r = std::io::Cursor::new(bytes);
+        ControlInfo::read(&mut r).map_err(hdt::hdt::Error::from)?;
+        Header::read(&mut r).map_err(hdt::hdt::Error::from)?;
+        let dict_hdt = FourSectDict::read(&mut r)
+            .map_err(hdt::hdt::Error::from)?
+            .validate()
+            .map_err(hdt::hdt::Error::from)?;
+        let n_shared = dict_hdt.shared.num_strings;
+        let mut dict = Dict::new();
+        let mut shared_ids = Vec::new();
+        seq_ref_section(&mut dict, &dict_hdt.shared, &mut shared_ids);
+        let mut subj_ids = Vec::new();
+        seq_ref_section(&mut dict, &dict_hdt.subjects, &mut subj_ids);
+        let mut obj_ids = Vec::new();
+        seq_ref_section(&mut dict, &dict_hdt.objects, &mut obj_ids);
+        let mut pred_ids = Vec::new();
+        seq_ref_section(&mut dict, &dict_hdt.predicates, &mut pred_ids);
+
+        let map_so = |id: usize, shared: &[Id], only: &[Id]| -> Id {
+            if id <= n_shared {
+                shared[id - 1]
+            } else {
+                only[id - n_shared - 1]
+            }
+        };
+
+        let triples_ci = ControlInfo::read(&mut r).map_err(hdt::hdt::Error::from)?;
+        assert_eq!(triples_ci.control_type, ControlType::Triples);
+        let bitmap_y = read_bitmap_words(&mut r)?;
+        let bitmap_z = read_bitmap_words(&mut r)?;
+        let sequence_y = Sequence::read(&mut r).map_err(|e| crc_mismatch(format!("sequence_y: {e}")))?;
+        let sequence_z = Sequence::read(&mut r).map_err(|e| crc_mismatch(format!("sequence_z: {e}")))?;
+        let mut triples = Vec::new();
+        let (max_y, max_z) = (sequence_y.entries, sequence_z.entries);
+        let (mut x, mut pos_y, mut pos_z) = (1usize, 0usize, 0usize);
+        while pos_y < max_y && pos_z < max_z {
+            let p = sequence_y.get(pos_y);
+            let o = sequence_z.get(pos_z);
+            let sid = map_so(x, &shared_ids, &subj_ids);
+            let pid = pred_ids[p - 1];
+            let oid = map_so(o, &shared_ids, &obj_ids);
+            triples.push([sid, pid, oid]);
+            if bitmap_z.bit(pos_z) {
+                if bitmap_y.bit(pos_y) {
+                    x += 1;
+                }
+                pos_y += 1;
+            }
+            pos_z += 1;
+        }
+        Ok(Graph::from_parts(dict, triples))
+    }
 }

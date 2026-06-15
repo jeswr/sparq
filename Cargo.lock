@@ -3321,6 +3321,7 @@ dependencies = [
  "crc",
  "flate2",
  "hdt",
+ "rayon",
  "sparq-core",
  "zstd",
 ]
