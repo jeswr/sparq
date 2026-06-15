@@ -6,10 +6,12 @@ description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint 
 # sparq-http-server
 
 `sparq-server` is a W3C-conformant HTTP server (axum/tokio) that exposes the sparq
-query engine over an in-memory `sparq_core::Graph`. It implements the **SPARQL 1.1
-Protocol** (`query` + `update` at `/sparql`) and the **Graph Store HTTP Protocol**
-(read + write), with `Accept`-driven content negotiation, hardening guards, Prometheus
-`/metrics`, WebSocket subscriptions, and opt-in time-travel + GeoSPARQL.
+query engine over a `sparq_core::Graph` — in-memory by default, or **durable on disk**
+with `--persist DIR` (updates WAL-fsync'd, survive a restart with no rebuild; see the
+"Durability" gotcha). It implements the **SPARQL 1.1 Protocol** (`query` + `update` at
+`/sparql`) and the **Graph Store HTTP Protocol** (read + write), with `Accept`-driven
+content negotiation, hardening guards, Prometheus `/metrics`, WebSocket subscriptions,
+and opt-in time-travel + GeoSPARQL.
 
 ## Quickstart
 
@@ -411,7 +413,19 @@ and `update_in_place_with_budget`, and wrap calls in
   sequenced writer regardless. An existing-but-empty named graph reads as absent (the engine
   has no separate "empty graph exists" bit outside an in-flight update), so it may report
   `201` on a write — this never affects correctness of the data, only the status code.
-- **In-memory only / no durability.** Updates are not persisted across restart.
+- **Durability — opt-in via `--persist DIR` (default in-memory).** With NO `--persist` the
+  server is in-memory and updates are **lost on restart** (the back-compat default). Pass
+  `--persist <DIR>` (env `SPARQ_PERSIST_DIR`) to make the on-disk index at `DIR` the durable,
+  rebuildable source of truth (QLever's `--persist-updates`): every committed UPDATE — default
+  graph AND named graphs — is write-ahead-logged + **fsync'd before the group-commit ack** (the
+  `204`), so a process restart on the same `DIR` restores **all** prior updates with **no
+  rebuild** (`Graph::open` replays the WAL). On startup an existing store at `DIR` is opened (its
+  WAL replayed; any `DATA_FILE` seed ignored — the persisted store wins); an empty `DIR` is
+  seeded from `DATA_FILE`. Library callers set `ServerConfig::persist_dir` and build with
+  `AppState::try_with_config` (returns the durable-open error). Deferred hardening (beaded):
+  byte-accounted durability metrics, graceful degradation on a *transient* disk error (today a
+  durability failure refuses the write rather than losing it), and WAL-durable `CLEAR`/`DROP
+  GRAPH <g>` of an existing named graph. (sq-7cxr / gh-44.)
 - **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
   (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.
 - **Error bodies.** Every error is structured JSON `{"error": "..."}` with

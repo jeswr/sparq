@@ -9,10 +9,12 @@
 A **W3C-conformant HTTP server** exposing the [sparq](../../README.md) query engine.
 
 Implements the **SPARQL 1.1 Protocol** (`query` + `update` at `/sparql`) and the **Graph
-Store HTTP Protocol** (read + write) over an in-memory `Graph`, with `Accept`-driven content
-negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store
-N-Triples/Turtle/RDF-XML), EXPLAIN, Prometheus `/metrics`, WebSocket subscriptions, and an
-opt-in time-travel feature. Reads and writes never share a lock (a generation-ring snapshot
+Store HTTP Protocol** (read + write) over a `Graph` — **in-memory by default** (updates lost
+on restart) or, with **`--persist <DIR>`**, **durable** (write-ahead-logged + fsync'd to an
+on-disk index that survives a restart with no rebuild — see "Durable persistence"). Adds
+`Accept`-driven content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph
+Store N-Triples/Turtle/RDF-XML), EXPLAIN, Prometheus `/metrics`, WebSocket subscriptions, and
+an opt-in time-travel feature. Reads and writes never share a lock (a generation-ring snapshot
 chain + a single sequenced group-commit writer), so queries never wait on the writer.
 
 ## Security posture (read before exposing)
@@ -90,6 +92,50 @@ cargo run -p sparq-server -- --format turtle data.ttl
 curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o } LIMIT 5'
 ```
 
+## Durable persistence (`--persist DIR` — QLever's `--persist-updates`)
+
+By default the server is **in-memory**: updates apply to a `Graph` held only in RAM, so they
+are **lost on restart**. Pass **`--persist <DIR>`** (env `SPARQ_PERSIST_DIR`) to treat the
+on-disk index at `DIR` as the **durable, rebuildable source of truth** — the equivalent of
+running QLever on an on-disk index with `--persist-updates`:
+
+```sh
+# first run: seed the durable store at ./store from data.ttl, then serve
+cargo run -p sparq-server -- --persist ./store --format turtle data.ttl
+
+# apply an update (the 204 returns only after it is fsync'd to ./store)
+curl -X POST http://127.0.0.1:3030/sparql -H 'content-type: application/sparql-update' \
+  --data 'INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }'
+
+# restart on the SAME dir — every prior update is present, with NO rebuild
+cargo run -p sparq-server -- --persist ./store
+curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }'
+```
+
+Semantics:
+
+- **Durability point.** Every committed SPARQL Update (the default graph **and** named graphs)
+  is appended to a per-graph write-ahead log and **fsync'd before the group-commit ack** (the
+  `204`). So once a write returns success it is on disk; a crash or restart re-opens the store
+  and **replays the WAL** — no rebuild, no re-load.
+- **Startup.** If `DIR` already holds a store it is **opened** (its WAL replayed) and any
+  `DATA_FILE` seed is **ignored** — the persisted store wins, exactly like QLever's persisted
+  index. If `DIR` is empty/absent, the `DATA_FILE` seed (or an empty graph) is written there
+  and opened.
+- **Back-compat.** Without `--persist` the behaviour is unchanged: in-memory, lost on restart.
+- **Atomicity.** Persistence rides on the existing generation-ring + sequenced-writer model —
+  a rejected update is never persisted (it is never published either), and the durable store
+  stays in lockstep with the published snapshot chain. The durable graph is written from the
+  **resolved delta** captured during the in-memory commit (not by re-executing the update text),
+  so a non-deterministic or side-effecting update (`NOW()`/`RAND()`/`UUID()`/`BNODE()`,
+  `LOAD <remote>`) persists the EXACT value that was acked — never a re-rolled one — so a restart
+  surfaces precisely what the client saw.
+- **Deferred hardening (beaded, not yet wired):** byte-accounted durability metrics, graceful
+  degradation on a *transient* disk-I/O error (today a durability failure is fatal — the write
+  is refused rather than silently lost), online compaction tuning under sustained write load,
+  and WAL-durable `CLEAR`/`DROP GRAPH <g>` of an *existing* named graph (today those operations
+  are applied in memory and persisted only at the next compaction).
+
 ## 🐳 Running the container image (ghcr.io)
 
 A container image is published to `ghcr.io/jeswr/sparq-server` on every release tag (built
@@ -134,6 +180,9 @@ matrix under "Security posture".
 
 - **SPARQL 1.1 Protocol** — `query` (GET / POST direct / POST url-encoded / HEAD) and
   `update` (`application/sparql-update` → `204`, atomic).
+- **Durable persistence** — `--persist <DIR>` (env `SPARQ_PERSIST_DIR`) makes the on-disk index
+  the source of truth: updates are WAL-fsync'd before ack and survive a restart with **no
+  rebuild** (QLever's `--persist-updates`). Off by default (in-memory). See "Durable persistence".
 - **Graph Store HTTP Protocol** — `GET`/`HEAD` read and `PUT`/`POST`/`DELETE` write, indirect
   (`?graph=`/`?default`) and direct (request-URI) graph identification.
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE

@@ -3,12 +3,23 @@
 //!
 //! Usage:
 //!   sparq-server [--addr 127.0.0.1:3030] [--allow-remote] [--format turtle]
+//!                [--persist DIR]
 //!                [--auth-token TOKEN] [--auth-token-read]
 //!                [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
 //!                [--max-results N] [--max-query-rows N] [--max-decompress-ratio N]
 //!                [--max-subscriptions N] [--max-subscriptions-per-conn N]
 //!                [--service-allow HOST|*.SUFFIX]... [--service-allow-file PATH]
 //!                [--verbose] [DATA_FILE]
+//!
+//! DURABLE PERSISTENCE (`--persist DIR`, env `SPARQ_PERSIST_DIR`; QLever's `--persist-updates`
+//! equivalent — sq-7cxr / gh-44): treat the on-disk index at DIR as the durable, rebuildable
+//! source of truth. Every committed SPARQL Update (default graph AND named graphs) is appended
+//! to a write-ahead log and fsync'd BEFORE the group-commit ack, so a process RESTART preserves
+//! ALL updates with NO rebuild. On startup: if DIR already holds a store it is OPENED (its WAL
+//! replayed; the DATA_FILE seed is then IGNORED — the persisted store wins, like QLever's index);
+//! if DIR is empty/absent the DATA_FILE seed (or empty graph) is written there and opened. Without
+//! `--persist` the server is purely in-memory and updates are LOST on restart (the historical
+//! behaviour). See crates/sparq-server/README.md -> "Durable persistence". [OPUS-4.8]
 //!
 //! SERVICE federation (`service` build feature) is DENY-ALL by default: a `SERVICE <iri>`
 //! clause reaches NOTHING unless its host is allowlisted via `--service-allow` (repeatable;
@@ -144,6 +155,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.time_travel_max_age = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--verbose" => config.verbose = true,
+            // [OPUS-4.8] sq-7cxr (PSS gh-44): durable persistence directory (QLever
+            // --persist-updates). Updates are WAL-durable to DIR before ack; a restart on the
+            // same DIR restores all of them with no rebuild. Overrides SPARQ_PERSIST_DIR.
+            "--persist" => {
+                let dir = args.next().ok_or("--persist requires a directory path")?;
+                if dir.is_empty() {
+                    return Err("--persist must not be empty".into());
+                }
+                config.persist_dir = Some(std::path::PathBuf::from(dir));
+            }
             // [OPUS-4.8] sq-o4qf: opt in to binding a non-loopback address. Without this (and
             // without SPARQ_ALLOW_REMOTE), a non-loopback --addr is refused unless the whole
             // surface is authenticated (--auth-token AND --auth-token-read) — see bind_posture.
@@ -181,12 +202,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ""
                 };
                 eprintln!(
-                    "usage: sparq-server [--addr HOST:PORT] [--allow-remote] \
+                    "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
                      [--query-timeout SECS] [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
                      [--max-subscriptions-per-conn N]{time_travel}{service} [--verbose] [DATA_FILE]\n\n  \
+                     PERSIST: --persist DIR (env SPARQ_PERSIST_DIR) makes the on-disk index at \
+                     DIR the durable source of truth (QLever --persist-updates): every committed \
+                     UPDATE is WAL-fsync'd before ack, so a RESTART on the same DIR restores ALL \
+                     updates with no rebuild. An existing DIR is opened (DATA_FILE ignored); an \
+                     empty DIR is seeded from DATA_FILE. Without it the server is in-memory \
+                     (updates lost on restart).\n  \
                      AUTH: --auth-token TOKEN (env SPARQ_AUTH_TOKEN) requires \
                      'Authorization: Bearer TOKEN' on every WRITE (SPARQL Update + GSP \
                      PUT/POST/DELETE) -> 401 + 'WWW-Authenticate: Bearer' otherwise \
@@ -233,13 +260,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .init();
     }
 
-    let graph = match &data_file {
-        Some(path) => {
+    // [OPUS-4.8] sq-7cxr: when --persist points at a directory that ALREADY holds a store,
+    // the on-disk index is the source of truth and the DATA_FILE seed is ignored — so don't
+    // even read it (loading a large file only to discard it is wasteful and surprising). The
+    // seed graph is then empty; `AppState::try_with_config` opens the existing store regardless.
+    let persist_has_store = config
+        .persist_dir
+        .as_ref()
+        .is_some_and(|d| d.join("dict-meta.bin").exists() || d.join("dict.bin").exists());
+    let graph = match (&data_file, persist_has_store) {
+        (_, true) => {
+            let dir = config.persist_dir.as_ref().expect("persist_has_store implies a dir");
+            eprintln!(
+                "--persist {}: opening existing durable store (replaying WAL; DATA_FILE, if any, ignored)",
+                dir.display()
+            );
+            Graph::load_str("", "turtle").map_err(|e| format!("init: {e}"))?
+        }
+        (Some(path), false) => {
             let text = std::fs::read_to_string(path)?;
             eprintln!("loading {path} ({format}) ...");
             Graph::load_str(&text, &format).map_err(|e| format!("failed to load {path}: {e}"))?
         }
-        None => {
+        (None, false) => {
             eprintln!("no data file given — starting with an empty default graph");
             Graph::load_str("", "turtle").map_err(|e| format!("init: {e}"))?
         }
@@ -259,6 +302,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.max_subscriptions,
         config.max_subscriptions_per_conn,
     );
+    // [OPUS-4.8] sq-7cxr: surface the durable-persistence posture at startup.
+    match &config.persist_dir {
+        Some(dir) => eprintln!(
+            "persistence: ON — durable store at {} (updates WAL-fsync'd before ack; survive restart, QLever --persist-updates)",
+            dir.display()
+        ),
+        None => eprintln!("persistence: OFF — in-memory only (updates are LOST on restart; pass --persist DIR to enable)"),
+    }
     // [OPUS-4.8] sq-4w18: surface the SERVICE egress posture at startup so an operator
     // sees whether (and where) federation can reach. Only meaningful with the `service`
     // build feature; without it a SERVICE clause errors at execution regardless.
@@ -301,7 +352,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         BindPosture::RemoteRefused { message } => return Err(message.into()),
     }
 
-    let state = AppState::with_config(graph, config);
+    // [OPUS-4.8] sq-7cxr: `try_with_config` surfaces a durable-open error (corrupt persist dir,
+    // unwritable path) as a clean startup error + non-zero exit, rather than panicking.
+    let state = AppState::try_with_config(graph, config)?;
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

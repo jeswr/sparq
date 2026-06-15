@@ -222,6 +222,15 @@ pub struct ServerConfig {
     /// this field is still present (so the config shape is stable) but inert: no
     /// federation code is compiled and a SERVICE clause errors at execution as before.
     pub service_allow: crate::service_config::ServiceAllowlist,
+    /// [OPUS-4.8] (sq-7cxr, gh-44) DURABLE PERSISTENCE directory — the QLever `--persist-updates`
+    /// equivalent. When `Some(dir)`, the server treats the on-disk index at `dir` as the durable,
+    /// rebuildable source of truth: at startup it opens the existing store there (replaying its
+    /// write-ahead log so prior updates are present with **no rebuild**), or creates it from the
+    /// seed graph; and every committed SPARQL Update is WAL-appended + fsync'd to `dir` (default
+    /// graph and named graphs alike) BEFORE the group-commit ack, so a process restart preserves
+    /// ALL updates. `None` (the default) is the historical purely in-memory server — updates are
+    /// lost on restart. Set by the binary's `--persist <DIR>` flag / `SPARQ_PERSIST_DIR` env.
+    pub persist_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -250,6 +259,8 @@ impl Default for ServerConfig {
             auth_token_read: false,
             // [OPUS-4.8] sq-4w18: safe default — empty allowlist = deny ALL SERVICE.
             service_allow: crate::service_config::ServiceAllowlist::default(),
+            // [OPUS-4.8] sq-7cxr: safe default — no persistence dir = in-memory (back-compat).
+            persist_dir: None,
         }
     }
 }
@@ -336,6 +347,11 @@ impl ServerConfig {
             cfg.service_allow
                 .add_many(&v)
                 .map_err(|e| format!("SPARQ_SERVICE_ALLOW: {e}"))?;
+        }
+        // [OPUS-4.8] sq-7cxr: SPARQ_PERSIST_DIR enables durable persistence at the given
+        // directory (the binary's --persist flag overrides it). An empty value is "unset".
+        if let Ok(v) = std::env::var("SPARQ_PERSIST_DIR") {
+            cfg.persist_dir = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
         }
         Ok(cfg)
     }
@@ -760,16 +776,79 @@ impl TouchedPods {
 /// exactly as they do to queries — an `INSERT … WHERE { SERVICE <iri> { … } }` update
 /// federates under the same default-deny allowlist as a read. The trait is sparq-serve's
 /// documented seam for exactly this wrapper. [OPUS-4.8]
+/// [OPUS-4.8] (sq-7cxr, gh-44) Resolves the durable directory-backed [`Graph`] for
+/// `--persist <DIR>`: OPEN an existing on-disk store (replaying its WAL — prior updates
+/// present with NO rebuild — and ignoring `seed`), or CREATE a fresh store by saving `seed`
+/// there and re-opening it so it carries a WAL.
+///
+/// "Existing store" is keyed on the dictionary file the engine's [`Graph::open`] requires
+/// (`dict-meta.bin`, or the legacy `dict.bin`). A directory that exists but is empty (or holds
+/// only an unrelated file) is treated as fresh — we create the store from `seed`. A directory
+/// that holds a store but fails to open (corruption) surfaces the open error rather than
+/// silently clobbering it.
+fn open_or_create_durable(dir: &std::path::Path, seed: Graph) -> Result<Graph, String> {
+    let has_store = dir.join("dict-meta.bin").exists() || dir.join("dict.bin").exists();
+    if has_store {
+        // Existing durable store IS the source of truth: open + WAL-replay, no rebuild.
+        return Graph::open(dir).map_err(|e| format!("opening persist dir {}: {e}", dir.display()));
+    }
+    // Fresh: persist the seed, then open it so the returned graph is directory-backed
+    // (carries its own WAL) and ready for WAL-durable updates.
+    std::fs::create_dir_all(dir).map_err(|e| format!("creating persist dir {}: {e}", dir.display()))?;
+    seed.save(dir).map_err(|e| format!("initialising persist dir {}: {e}", dir.display()))?;
+    Graph::open(dir).map_err(|e| format!("opening freshly-initialised persist dir {}: {e}", dir.display()))
+}
+
 struct ServerApplier {
     inner: GraphApplier,
     /// The config the writer thread enforces around every engine call (carries the
     /// SERVICE egress allowlist; the writer has no per-request config, so it owns its own).
     config: Arc<ServerConfig>,
+    /// [OPUS-4.8] (sq-7cxr, gh-44) The optional DURABLE mirror of the published lineage.
+    /// `Some` exactly when `--persist <DIR>` is set: a directory-backed [`Graph`] (its own
+    /// WAL + named-graph persistence) that the writer thread keeps in lockstep with the ring
+    /// by re-applying each committed batch to it, WAL-durably, BEFORE the generation is
+    /// published (and hence before the client ack). `None` is today's purely in-memory server.
+    durable: Option<DurableStore>,
+}
+
+/// [OPUS-4.8] (sq-7cxr, gh-44) The writer-thread-owned durable store: the on-disk [`Graph`]
+/// plus the buffer of RESOLVED update effects accumulated for the batch currently being committed.
+///
+/// The writer drives `fork → apply* → seal` per batch (and re-`fork`s + replays the
+/// already-successful prefix on a mid-batch failure). We mirror that exactly: [`fork`] clears
+/// `batch` (a fresh attempt starts), [`apply`] appends the effects of an update only AFTER it
+/// applied cleanly to the in-memory working copy, and [`seal`] flushes `batch` to `graph`
+/// WAL-durably. So at seal time `batch` is precisely the resolved delta of the updates that will
+/// be published — applied once, in order, to the durable graph. Because all three run on the
+/// single writer thread, no lock is needed and the durable graph never diverges from the
+/// published lineage.
+///
+/// [OPUS-4.8] (Copilot PR#80) We buffer the *resolved* [`sparq_engine::UpdateEffect`] log
+/// captured during the in-memory application — NOT the update text. Re-executing the text against
+/// the durable graph would re-roll non-deterministic functions (`NOW()`/`RAND()`/`UUID()`/fresh
+/// `BNODE()`) and could re-fetch different `LOAD <remote>` content, so the durable state could
+/// diverge from the already-acked in-memory state. Replaying the captured delta makes the durable
+/// phase deterministic by construction — the durable graph receives the identical resolved triples.
+struct DurableStore {
+    graph: Graph,
+    batch: Vec<sparq_engine::UpdateEffect>,
 }
 
 impl ServerApplier {
     fn new(config: Arc<ServerConfig>) -> Self {
-        Self { inner: GraphApplier::default(), config }
+        Self { inner: GraphApplier::default(), config, durable: None }
+    }
+
+    /// [OPUS-4.8] (sq-7cxr, gh-44) An applier whose committed batches are also mirrored to
+    /// `graph` — a directory-backed [`Graph`] opened/created at `--persist <DIR>`. Every
+    /// committed batch is re-applied to it WAL-durably in [`seal`] before publish.
+    fn with_durable(config: Arc<ServerConfig>, graph: Graph) -> Self {
+        Self {
+            inner: GraphApplier::default(),
+            config,
+            durable: Some(DurableStore { graph, batch: Vec::new() }),
+        }
     }
 }
 
@@ -779,6 +858,12 @@ impl ApplyUpdates for ServerApplier {
     type Update = String;
 
     fn fork(&mut self, base: &Graph) -> Result<Graph, String> {
+        // [OPUS-4.8] (sq-7cxr) A fresh attempt (first fork of a batch OR a re-fork during the
+        // writer's failure replay) restarts the durable batch buffer; only the updates that go
+        // on to apply cleanly are re-accumulated, so `seal` mirrors exactly the published set.
+        if let Some(d) = &mut self.durable {
+            d.batch.clear();
+        }
         with_engine_scope(&self.config, || self.inner.fork(base))
     }
 
@@ -792,10 +877,48 @@ impl ApplyUpdates for ServerApplier {
         // separately hard-caps the client's await (see `await_update_worker`). With both
         // limits off (the default) this is the unlimited budget — identical to before.
         let budget = update_budget(&self.config);
-        with_engine_scope(&self.config, || sparq_engine::update_in_place_with_budget(working, update, &budget))
+        // [OPUS-4.8] (Copilot PR#80) When mirroring durably, CAPTURE the resolved effect log of
+        // the in-memory application so the durable graph can replay the EXACT committed delta —
+        // never re-executing the (possibly non-deterministic / side-effecting) update text. With
+        // no durable mirror this is `update_in_place_with_budget` exactly as before (no capture).
+        if let Some(d) = &mut self.durable {
+            let effects = with_engine_scope(&self.config, || {
+                sparq_engine::update_in_place_capturing(working, update, &budget)
+            })?;
+            // Record for the durable mirror ONLY after it applied cleanly in memory — a rejected
+            // update is never persisted (it is not published either).
+            d.batch.extend(effects);
+        } else {
+            with_engine_scope(&self.config, || sparq_engine::update_in_place_with_budget(working, update, &budget))?;
+        }
+        Ok(())
     }
 
     fn seal(&mut self, working: Graph) -> Graph {
+        // [OPUS-4.8] (sq-7cxr, gh-44) Persist the committed batch to the durable graph BEFORE
+        // returning — `seal` runs on the writer thread immediately before `publish`, so the
+        // batch is WAL-durable (fsync'd by `Graph::apply_delta`) before the generation is
+        // published and thus before any client ack.
+        //
+        // [OPUS-4.8] (Copilot PR#80) The batch is the RESOLVED effect log captured from the
+        // in-memory application (see `apply`), replayed via `apply_effects` rather than by
+        // re-executing the update text. This is what makes the durable graph BYTE-EQUIVALENT to
+        // the published in-memory state even for non-deterministic / side-effecting updates
+        // (`NOW()`/`RAND()`/`UUID()`/`BNODE()`, `LOAD <remote>`): both apply the identical
+        // resolved triples, in the same order, starting from one shared seed.
+        //
+        // FAIL-CLOSED: a durable-write error (disk full, I/O error) panics the writer thread.
+        // `seal` runs before `publish`, so unwinding here means the generation is NOT published
+        // and every pending submitter's ack channel drops → they get `WriteError::Shutdown`, NOT
+        // a false success. A server that can no longer make writes durable must not keep silently
+        // accepting them. (Graceful degradation on a TRANSIENT I/O error is deferred hardening —
+        // bead; today a durability failure is treated as fatal, which is honest for a persisted
+        // store.)
+        if let Some(d) = &mut self.durable {
+            let batch = std::mem::take(&mut d.batch);
+            sparq_engine::apply_effects(&mut d.graph, &batch)
+                .unwrap_or_else(|e| panic!("durable persist failed (sq-7cxr); refusing to ack the write: {e}"));
+        }
         self.inner.seal(working)
     }
 }
@@ -841,7 +964,42 @@ impl AppState {
         Self::with_config(graph, ServerConfig::default())
     }
 
+    /// Builds the state, panicking on a durable-persistence open error. Back-compat for the
+    /// in-memory callers (which never set [`ServerConfig::persist_dir`], so it never fails);
+    /// the binary and the persistence tests use [`try_with_config`](Self::try_with_config),
+    /// which surfaces the open error cleanly.
     pub fn with_config(graph: Graph, config: ServerConfig) -> Self {
+        Self::try_with_config(graph, config).expect("AppState::with_config: durable open failed")
+    }
+
+    /// [OPUS-4.8] (sq-7cxr, gh-44) Builds the state, returning the durable-persistence open
+    /// error (rather than panicking) so the binary can print a clean message and exit non-zero.
+    ///
+    /// PERSISTENCE (`config.persist_dir == Some(dir)`): the on-disk index at `dir` is the
+    /// durable source of truth. If `dir` already holds a store, it is OPENED — replaying its
+    /// write-ahead log so prior updates are present with **no rebuild** — and the passed-in
+    /// `graph` seed is IGNORED (re-loading a data file over an existing durable store would be
+    /// destructive; the store, like QLever's persisted index, wins). If `dir` is empty/absent,
+    /// the `graph` seed is SAVED there and then re-opened so it carries a WAL. The ring is then
+    /// seeded from the durable graph's snapshot, and the writer's applier mirrors every
+    /// committed batch back to the durable graph (WAL-durable before publish — see
+    /// [`ServerApplier::seal`]). With `persist_dir == None` this is exactly the historical
+    /// in-memory path (the ring is seeded from `graph`; no durable mirror; never errors).
+    pub fn try_with_config(graph: Graph, config: ServerConfig) -> Result<Self, String> {
+        // [OPUS-4.8] sq-7cxr: resolve the durable graph (open existing / create fresh) when a
+        // persistence dir is configured. `seed` is what the ring starts from; `durable` is the
+        // on-disk graph the writer mirrors committed batches to.
+        let (seed, durable) = match &config.persist_dir {
+            Some(dir) => {
+                let g = open_or_create_durable(dir, graph)?;
+                // Seed the ring from an independent snapshot so the ring's lineage and the
+                // durable graph are distinct objects (the durable graph keeps its WAL; the
+                // ring's published snapshots are pure in-memory forks queried concurrently).
+                (g.snapshot().into_graph(), Some(g))
+            }
+            None => (graph, None),
+        };
+
         // Default ring (concurrency retention only); the opt-in `time-travel`
         // feature extends retention so `?generation=N` has history to serve.
         #[cfg(not(feature = "time-travel"))]
@@ -854,24 +1012,26 @@ impl AppState {
             }),
             ..sparq_serve::RingConfig::default()
         };
-        let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
+        let ring = Arc::new(GenerationRing::with_config(seed, ring_config));
         // [OPUS-4.8] sq-4w18: share the config Arc with the writer so its update path
         // enforces the same SERVICE egress allowlist (a federated `INSERT … WHERE` is
         // gated like a read).
         let config = Arc::new(config);
-        let writer = Arc::new(Writer::spawn(
-            ring.clone(),
-            ServerApplier::new(config.clone()),
-            WriterConfig::default(),
-        ));
-        Self {
+        // [OPUS-4.8] sq-7cxr: a durable-mirroring applier when persistence is on, else the
+        // historical in-memory applier.
+        let applier = match durable {
+            Some(g) => ServerApplier::with_durable(config.clone(), g),
+            None => ServerApplier::new(config.clone()),
+        };
+        let writer = Arc::new(Writer::spawn(ring.clone(), applier, WriterConfig::default()));
+        Ok(Self {
             ring,
             writer,
             config,
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
             metrics: Arc::new(crate::metrics::Metrics::default()),
-        }
+        })
     }
 
     /// The server's Prometheus metrics (T22).

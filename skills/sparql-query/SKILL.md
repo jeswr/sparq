@@ -81,6 +81,11 @@ Update (data lives in the default + named graphs):
 - `update(&Graph, &str) -> Result<Graph, String>` — returns a NEW graph (O(n) rebuild).
 - `update_in_place(&mut Graph, &str) -> Result<(), String>` — incremental delta-overlay, O(batch);
   WAL-durable for directory-backed graphs.
+- `update_in_place_capturing(&mut Graph, &str, &QueryBudget) -> Result<Vec<UpdateEffect>, String>`
+  + `apply_effects(&mut Graph, &[UpdateEffect])` — apply once, capturing the RESOLVED delta, then
+  replay it onto a second (e.g. durable mirror) graph WITHOUT re-executing the text. Use this when
+  mirroring a sequence of updates so non-deterministic functions (`NOW()`/`RAND()`/`UUID()`/`BNODE()`)
+  and `LOAD <remote>` are not re-rolled on the second graph (the server's `--persist` path uses it).
 
 Prepared (parse/plan once, execute many):
 
