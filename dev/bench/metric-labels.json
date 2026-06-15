@@ -1719,6 +1719,46 @@
       "query": "materialize the RDFS closure (rdfs:subClassOf)",
       "unit": "s"
     },
+    "shacl_cardinality_validate": {
+      "label": "SHACL cardinality — sh:minCount/sh:maxCount over ub:FullProfessor (focus enumeration + path counting), validate",
+      "suite": "SHACL validation",
+      "dataset": "LUBM(1) ABox, ~103k triples x hand-authored shape graph",
+      "query": "sh:minCount/sh:maxCount over ub:FullProfessor (focus enumeration + path counting)",
+      "mode": "validate",
+      "unit": "µs"
+    },
+    "shacl_class_nodekind_validate": {
+      "label": "SHACL class_nodekind — sh:class (subclass-closure target) + sh:nodeKind over ub:worksFor, validate",
+      "suite": "SHACL validation",
+      "dataset": "LUBM(1) ABox, ~103k triples x hand-authored shape graph",
+      "query": "sh:class (subclass-closure target) + sh:nodeKind over ub:worksFor",
+      "mode": "validate",
+      "unit": "µs"
+    },
+    "shacl_datatype_range_validate": {
+      "label": "SHACL datatype_range — sh:datatype/sh:pattern over ub:GraduateStudent literals (XSD lexical), validate",
+      "suite": "SHACL validation",
+      "dataset": "LUBM(1) ABox, ~103k triples x hand-authored shape graph",
+      "query": "sh:datatype/sh:pattern over ub:GraduateStudent literals (XSD lexical)",
+      "mode": "validate",
+      "unit": "µs"
+    },
+    "shacl_node_paths_validate": {
+      "label": "SHACL node_paths — sh:node + sequence/inverse paths over ub:GraduateStudent (inter-shape recursion), validate",
+      "suite": "SHACL validation",
+      "dataset": "LUBM(1) ABox, ~103k triples x hand-authored shape graph",
+      "query": "sh:node + sequence/inverse paths over ub:GraduateStudent (inter-shape recursion)",
+      "mode": "validate",
+      "unit": "µs"
+    },
+    "shacl_sparql_constraint_validate": {
+      "label": "SHACL sparql_constraint — sh:sparql (SHACL §5.2) routed through sparq-engine, validate",
+      "suite": "SHACL validation",
+      "dataset": "LUBM(1) ABox, ~103k triples x hand-authored shape graph",
+      "query": "sh:sparql (SHACL §5.2) routed through sparq-engine",
+      "mode": "validate",
+      "unit": "µs"
+    },
     "sp2b_q01_count": {
       "label": "SP2Bench q01 — single journal's issue year (selective lookup), count",
       "suite": "SP2Bench",
