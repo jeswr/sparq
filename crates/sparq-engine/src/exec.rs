@@ -1698,11 +1698,18 @@ fn eval_graph_named_pref(
                 }
                 // Map each row into the shared schema (column positions can differ per graph only
                 // if the inner schema ever reordered — it does not — so this is a cheap permute).
+                // Precompute schema-column -> position-in-`b.vars` ONCE per binding-set (instead of
+                // an O(vars) linear `position(..)` search per (row, var) cell — an O(rows·vars²)
+                // hotspot on large `GRAPH ?g` scans), then map each row with O(1) indexed lookups.
+                let col_map: Vec<Option<usize>> = schema
+                    .iter()
+                    .map(|var| b.vars.iter().position(|x| x == var))
+                    .collect();
                 for row in &b.rows {
                     out_rows.push(
-                        schema
+                        col_map
                             .iter()
-                            .map(|var| b.vars.iter().position(|x| x == var).map(|i| row[i]).unwrap_or(NO_ID))
+                            .map(|&pos| pos.map(|i| row[i]).unwrap_or(NO_ID))
                             .collect(),
                     );
                 }

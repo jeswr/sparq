@@ -943,30 +943,43 @@ impl Graph {
             }
             return;
         }
-        let mut guard = self.graph_prefix_index.lock().unwrap_or_else(|e| e.into_inner());
-        let order: &Vec<u32> = match guard.as_ref() {
-            Some((len, idx)) if *len == n => idx,
-            _ => {
-                // (Re)build: a permutation of `named` indices sorted by `STR(name)` bytes.
-                let mut idx: Vec<u32> = (0..n as u32).collect();
-                idx.sort_by(|&a, &b| {
-                    Self::graph_name_str(&self.named[a as usize].0)
-                        .cmp(Self::graph_name_str(&self.named[b as usize].0))
-                });
-                *guard = Some((n, idx));
-                &guard.as_ref().unwrap().1
+        // Collect the matching `named` indices UNDER the lock, then drop the guard BEFORE
+        // invoking the caller-provided `f`. Holding the mutex across `f` would needlessly
+        // serialize concurrent readers and could deadlock if `f` (directly or indirectly)
+        // re-entered a path that locks the same mutex. The snapshot of matches is taken
+        // while the lock is held, so correctness is preserved.
+        let matches: Vec<u32> = {
+            let mut guard = self.graph_prefix_index.lock().unwrap_or_else(|e| e.into_inner());
+            let order: &Vec<u32> = match guard.as_ref() {
+                Some((len, idx)) if *len == n => idx,
+                _ => {
+                    // (Re)build: a permutation of `named` indices sorted by `STR(name)` bytes.
+                    let mut idx: Vec<u32> = (0..n as u32).collect();
+                    idx.sort_by(|&a, &b| {
+                        Self::graph_name_str(&self.named[a as usize].0)
+                            .cmp(Self::graph_name_str(&self.named[b as usize].0))
+                    });
+                    *guard = Some((n, idx));
+                    &guard.as_ref().unwrap().1
+                }
+            };
+            // Range scan: STRSTARTS(s, prefix) holds for a CONTIGUOUS block of the sorted order
+            // (all strings >= prefix and < the prefix's successor). `partition_point` gives the
+            // lower bound; we then walk while the name still starts with `prefix`.
+            let key = |i: u32| Self::graph_name_str(&self.named[i as usize].0);
+            let lo = order.partition_point(|&i| key(i) < prefix);
+            let mut matches = Vec::new();
+            for &i in &order[lo..] {
+                let s = key(i);
+                if !s.starts_with(prefix) {
+                    break; // sorted: once a name no longer starts with prefix, none after it does
+                }
+                matches.push(i);
             }
+            matches
+            // `guard` dropped here, before `f` is invoked below.
         };
-        // Range scan: STRSTARTS(s, prefix) holds for a CONTIGUOUS block of the sorted order
-        // (all strings >= prefix and < the prefix's successor). `partition_point` gives the
-        // lower bound; we then walk while the name still starts with `prefix`.
-        let key = |i: u32| Self::graph_name_str(&self.named[i as usize].0);
-        let lo = order.partition_point(|&i| key(i) < prefix);
-        for &i in &order[lo..] {
-            let s = key(i);
-            if !s.starts_with(prefix) {
-                break; // sorted: once a name no longer starts with prefix, none after it does
-            }
+        for i in matches {
             let (name, sub) = &self.named[i as usize];
             f(name, sub);
         }
