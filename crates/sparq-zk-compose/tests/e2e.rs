@@ -155,6 +155,7 @@ fn attest(commitment: Fr, sk: &SecretKey) -> CommitmentAttestation {
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
         salt: None, // [OPUS-4.8] audit #9: salt-unbound legacy attestation
         status: None, // [OPUS-4.8] audit #12: status-unbound legacy attestation
+        holder: None, // [OPUS-4.8] sq-h8rg (HolderPoP T2): non-holder-bound (bearer)
     }
 }
 
@@ -198,6 +199,7 @@ fn attest_with_status(
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef { index: Some(index), version, index_commitment: None }),
+        holder: None, // [OPUS-4.8] sq-h8rg (HolderPoP T2): non-holder-bound (bearer)
     }
 }
 
@@ -268,6 +270,7 @@ fn attest_with_status_commit(
             version,
             index_commitment: Some(FieldHex::from_field(index_commitment)),
         }),
+        holder: None, // [OPUS-4.8] sq-h8rg (HolderPoP T2): non-holder-bound (bearer)
     }
 }
 
