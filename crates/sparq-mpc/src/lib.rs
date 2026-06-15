@@ -113,6 +113,15 @@ pub mod shamir;
 // data-independent access pattern (the substrate) are sound, with the secret-key
 // comparator honestly gated on degree reduction. See the module docs.
 pub mod oblivious;
+// [OPUS-4.8] sq-jnkm: oblivious result-size protection + match-bit aggregation
+// output path for SET-returning hidden joins, built on the sq-18lk shuffle
+// substrate. Closes leaks L1 (true result cardinality, padded to a public bound)
+// and L2 (the per-pair match graph / key fan-out, destroyed by the oblivious
+// shuffle) that HiddenValueJoin's per-pair open exposes. The output TRANSFORM +
+// the disclosed-key path are sound today; deriving the secret match bit from
+// secret keys WITHOUT opening it is honestly gated on secure-compare
+// (sq-rrz4/sq-dvuc). See the module docs for the residual-leakage statement.
+pub mod oblivious_join;
 
 // [OPUS-4.8] sq-nuok: adversarial-share negative suite + 'no fake crypto' stub
 // gate. Test-only; compiled only under `cfg(test)` so it can drive the seedable
@@ -134,6 +143,11 @@ pub use proof::{Attestation, CollaborativeProof, ProofStatement};
 pub use oblivious::{
     shuffle, sort_by, sort_with_keys, AccessPattern, Comparator, SecretColumn, ShuffleCost,
     SortByResult, SortCost, SortWithKeysResult, SortingNetwork, Switch, WaksmanNetwork,
+};
+// [OPUS-4.8] sq-jnkm: the oblivious set-returning output path surface.
+pub use oblivious_join::{
+    oblivious_join_output, oblivious_set_output, oblivious_set_output_hidden_keys, Candidate,
+    MatchBit, ObliviousOutput, ObliviousOutputCost, OutputSlot,
 };
 pub use rng::{MpcRng, SecureRng};
 pub use robust::reconstruct_robust;
