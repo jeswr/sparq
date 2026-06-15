@@ -104,8 +104,8 @@ standard it implements.
   [JavaScript build](skills/javascript-wasm/SKILL.md), and a
   [Python package](skills/python/SKILL.md).
 
-> Agent skills (how to use sparq from Claude Code and other AI agents) are
-> [here](skills/SKILL.md).
+> Agent skills — how to use sparq from Claude Code and other AI agents — are
+> in the [usage-skills router](skills/SKILL.md).
 
 See [`AGENTS.md`](AGENTS.md) for the full crate map and what each one does.
 
