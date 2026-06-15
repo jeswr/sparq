@@ -17,6 +17,27 @@
 # self-deadlock). It waits until the discovered set of sibling check names has
 # stabilised AND every one of them is terminal, bounded by the job timeout. A
 # stable-empty set passes (e.g. a docs-only change that triggers no other workflow).
+#
+# ADVISORY/INFORMATIONAL checks are NON-GATING (bead sq-wjth). [OPUS-4.8] A check
+# whose NAME contains the WHOLE WORD "advisory" or "informational" (case-insensitive,
+# `\b(advisory|informational)\b`) is excluded from the gating set entirely — its
+# conclusion (even `failure`) can never fail the gate. This is a rule, not a hard-
+# coded name list, so it adapts as advisory jobs are added/renamed. The word-boundary
+# match excludes the standalone words (incl. hyphen-/paren-/comma-delimited) but NOT a
+# word that merely contains them as a substring — notably "cargo-deny (advisories, …)"
+# (plural) is REQUIRED and is NOT excluded. It currently covers, by name:
+#   • "unsafe report (cargo-geiger, informational)"   (ci.yml `geiger`)
+#   • "markdownlint-advisory (whole repo)"            (docs-quality.yml)
+#   • "external-links (lychee online, advisory)"      (docs-quality.yml)
+#   • "vale (prose, advisory)"                        (docs-quality.yml)
+#   • "custom-checks (… advisory)"                    (docs-quality.yml)
+# REQUIRED checks (gate / build+test / clippy / coverage / the conformance + perf
+# ratchets / wasm / MSRV / supply-chain / …) do NOT contain those words, so they
+# still gate normally. Rationale: an advisory job that concludes `failure` (e.g.
+# cargo-geiger erroring on the virtual workspace manifest) must never block a merge —
+# the step-level `continue-on-error`/`|| true` in those jobs is a best-effort first
+# line, and THIS name-rule is the load-bearing backstop that makes advisory failures
+# strictly non-gating regardless of how the job concludes.
 name: ci-summary
 
 on:
@@ -101,18 +122,40 @@ jobs:
                   | tee -a "$GITHUB_STEP_SUMMARY"
                 exit 0
               fi
-              failed=$(printf '%s\n' "$runs" | jq -rs '[.[]
+              # [OPUS-4.8] sq-wjth: a non-passing conclusion gates ONLY for a check
+              # that is NOT advisory/informational. The (.name|ascii_downcase) test
+              # drops any check whose name contains the WHOLE WORD "advisory" or
+              # "informational" (case-insensitive) from the gating set — its failure
+              # can never block the merge. The \b…\b word boundaries make the rule
+              # precise: it matches the standalone words (incl. hyphen-/paren-/comma-
+              # delimited, e.g. "markdownlint-advisory", "(…, advisory)", "(…,
+              # informational)") but NOT a word that merely CONTAINS them as a
+              # substring — so "cargo-deny (advisories, …)" (plural) and any
+              # hypothetical required check like "advisories audit" are NOT excluded.
+              # See the ADVISORY/INFORMATIONAL note in the header for the exact names
+              # this covers and why required checks are unaffected.
+              ADVISORY_RE='\b(advisory|informational)\b'
+              # Partition the settled, terminal sibling set into GATING vs EXCLUDED
+              # (advisory/informational). `total` counts ALL siblings; the gate only
+              # judges the GATING subset, so the summary reports gating counts and
+              # states how many advisory checks were excluded — it does not claim the
+              # advisory ones were counted toward the verdict.
+              gating=$(printf '%s\n' "$runs" | jq -rs --arg re "$ADVISORY_RE" \
+                '[.[] | select((.name | ascii_downcase | test($re)) | not)] | length')
+              excluded=$((total - gating))
+              failed=$(printf '%s\n' "$runs" | jq -rs --arg re "$ADVISORY_RE" '[.[]
+                | select((.name | ascii_downcase | test($re)) | not)
                 | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")]')
               n=$(printf '%s' "$failed" | jq 'length')
               if [ "$n" -gt 0 ]; then
                 {
-                  echo "### ci-summary: FAILED — $n non-passing check(s) of $total"
+                  echo "### ci-summary: FAILED — $n non-passing gating check(s) of $gating gating ($excluded advisory check(s) excluded)"
                   printf '%s' "$failed" | jq -r '.[] | "- ✗ \(.name): \(.conclusion // "incomplete")"'
                 } | tee -a "$GITHUB_STEP_SUMMARY"
-                echo "::error::ci-summary failed — see the non-passing checks above."
+                echo "::error::ci-summary failed — see the non-passing gating checks above."
                 exit 1
               fi
-              echo "### ci-summary: PASSED — all $total sibling checks green (or skipped/neutral), set stable." \
+              echo "### ci-summary: PASSED — all $gating gating check(s) green (or skipped/neutral); $excluded advisory check(s) excluded; set stable." \
                 | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
