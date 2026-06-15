@@ -407,16 +407,27 @@ adapter_recipe_of() { # the engine's `.adapter` recipe object as compact JSON
 shacl_shape_files() { # <shapes-path> -> one path per line (the file itself, or dir/*.ttl)
   local p="$1"
   if [ -d "$p" ]; then
-    find "$p" -maxdepth 1 -type f -name '*.ttl' | LC_ALL=C sort
+    # [OPUS-4.8] sq-8dp3: fail CLOSED if a shapes dir expands to zero *.ttl files.
+    # A silently-empty expansion makes the per-shape loop a no-op and produces ZERO
+    # result envelopes — exactly the "0 violations / missing-shapes" apples-to-oranges
+    # class of bug this expansion exists to prevent. Better to die loudly than to
+    # emit no comparison at all.
+    local files; files="$(find "$p" -maxdepth 1 -type f -name '*.ttl' | LC_ALL=C sort)"
+    [ -n "$files" ] || die "SHACL_SHAPES dir '$p' contains no *.ttl shape files — refusing to run a no-op comparison"
+    printf '%s\n' "$files"
   else
     printf '%s\n' "$p"
   fi
 }
 shacl_workload_of() { # <shape-path> -> workload stem (basename minus .ttl), or "" for a non-dir single file
-  case "${SHACL_SHAPES:-}" in
-    "$1") printf '' ;;                              # single-file shapes: no per-workload split
-    *) local b; b="$(basename "$1")"; printf '%s' "${b%.ttl}" ;;
-  esac
+  # [OPUS-4.8] sq-8dp3: use a literal string comparison, NOT `case` — `case` performs
+  # glob matching, so a single-file shapes path containing glob metacharacters
+  # (e.g. '[', '*', '?') could mis-match the pattern. `[ x = y ]` is an exact match.
+  if [ "${SHACL_SHAPES:-}" = "$1" ]; then
+    printf ''                                       # single-file shapes: no per-workload split
+  else
+    local b; b="$(basename "$1")"; printf '%s' "${b%.ttl}"
+  fi
 }
 
 run_report_cli_engine() { # <id>
@@ -446,7 +457,10 @@ run_report_cli_engine() { # <id>
         || { rm -f "$errf"; die "report-cli adapter failed for $id (shape $shape)"; }
       PAYLOAD="$(tail -n1 "$errf" | jq -c --arg w "$workload" '{engine,version,conforms,violations,validate_us,workload:$w}' 2>/dev/null)"
       rm -f "$errf"
-      [ -n "$PAYLOAD" ] || PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,v,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"violations":int(v),"validate_us":int(u)}))')"
+      # [OPUS-4.8] sq-8dp3: the fallback (when the --json sidecar can't be parsed) must
+      # ALSO carry the workload field, so a parse-failure result is still attributed to
+      # its shape/workload — matching the primary path above. Pass $workload as argv[1].
+      [ -n "$PAYLOAD" ] || PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,v,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"violations":int(v),"validate_us":int(u),"workload":sys.argv[1]}))' "$workload")"
       [ -n "$rcver" ] || rcver="$(printf '%s' "$PAYLOAD" | jq -r '.version // empty' 2>/dev/null)"
       [ -n "$rcver" ] || rcver="$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")"
       write_result "$id" "shacl-validate-bench${workload:+-$workload}" "$rcver" "$PAYLOAD"

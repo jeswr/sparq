@@ -73,7 +73,12 @@ AMI=$(aws ec2 describe-images --region "$REGION" --owners 099720109477 \
   --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
 VPC=$(aws ec2 describe-vpcs --region "$REGION" --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
 SUBNET=$(aws ec2 describe-subnets --region "$REGION" --filters Name=vpc-id,Values="$VPC" "Name=default-for-az,Values=true" --query 'Subnets[0].SubnetId' --output text)
-MYIP=$(curl -s https://checkip.amazonaws.com)
+# [OPUS-4.8] sq-8dp3: checkip.amazonaws.com returns a trailing newline, and curl -s
+# can yield an empty string on failure without a non-zero exit. Strip ALL whitespace so
+# "${MYIP}/32" is a valid CIDR, then fail fast if empty (a bad/empty CIDR would make
+# authorize-security-group-ingress fail or misconfigure the SG).
+MYIP=$(curl -s https://checkip.amazonaws.com | tr -d '[:space:]')
+[ -n "$MYIP" ] || die "could not determine public IP (checkip returned empty)"
 log "AMI=$AMI VPC=$VPC SUBNET=$SUBNET MYIP=$MYIP"
 
 log "keypair + locked-down security group (ssh from $MYIP/32 only)"
