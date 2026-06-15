@@ -113,6 +113,18 @@ SHACL_RUN=bench/shacl/run.sh
 # (text_*_us/text_build_s, trend-only, NOT in scripts/perf-gate.py). The integer bytes-per-doc
 # additionally gets a mode:auto ratchet in bench/perf-baseline.json (fts_bytes_per_doc).
 FTS_RUN=bench/fts/run.sh
+# [OPUS-4.8] VECTOR / ANN suite (sq-v02y, design §3.3). Exercises sparq-vectors (mmap'd .spqv
+# vector store + HNSW / Vamana / PQ ANN). Like FTS the corpus is SYNTHETIC + generated in-process
+# by examples/bench_vectors from a deterministic seed — NO external generator. run.sh is the
+# self-asserting entry point: it runs bench_vectors on the pinned corpus, asserts each workload's
+# recall DEFICIT (recall@10 vs nearest_exact, emitted as round((1-recall)*1000) so it slots into
+# the smaller-is-better mode:auto ratchet — design G4) vs expected.tsv (exit 1 on drift; diskann/pq
+# EXACT-gated, hnsw FLOOR-gated as its build is rayon-parallel), and prints the
+# `<workload>\t<deficit>\t<us>` contract on stdout. The deficits are the HARD gate (in run.sh);
+# the timings harvested below are ADVISORY (vectors_*_query_us/vectors_build_s, trend-only, NOT in
+# scripts/perf-gate.py). The deterministic diskann/pq deficits additionally get a mode:auto ratchet
+# in bench/perf-baseline.json (vectors_diskann_recall_at10 / vectors_pq_recall_at10).
+VECTOR_RUN=bench/vector/run.sh
 # [OPUS-4.8] GeoSPARQL suite (sq-tf8n, design §3.5). A FIXED ~100k-point CRS84 corpus
 # (bench/geo/gen.sh -> bench_geo gen; pure Rust, no javac/rapper/Docker) x within/nearest/
 # geof: workloads. Like LUBM/SHACL, run.sh is the self-asserting entry point: it asserts each
@@ -575,6 +587,52 @@ else
   # Reached only on the MAIN/local tier (the PR tier is handled by the skip branch above) when
   # cargo or the run.sh entry point is missing.
   echo "note: fts skipped (cargo not on PATH or $FTS_RUN missing)" >&2
+fi
+
+# [OPUS-4.8] VECTOR / ANN per-commit hook (sq-v02y). Like FTS, bench_vectors only needs `cargo`
+# (sparq-vectors is the ISOLATED ANN crate, not a sparq-cli dependency), which is ALWAYS present —
+# so to match the main-only-toolchain skip the LUBM/SHACL hooks get for free (and keep the vector
+# index BUILD + corpus off per-PR CI), we PIN this hook to the MAIN tier: it runs on push-to-main
+# (GITHUB_REF=refs/heads/main) and on a LOCAL run (GITHUB_REF unset, so devs/bench/vector/run.sh
+# still work), but is SKIPPED on the PR tier — copying the FTS GITHUB_REF guard verbatim.
+VECTOR_BIN=target/release/examples/bench_vectors
+VECTOR_REF="${GITHUB_REF:-}"
+if [ -n "$VECTOR_REF" ] && [ "$VECTOR_REF" != "refs/heads/main" ]; then
+  echo "note: vector skipped (PR tier — ANN example build/run is main-only, like the javac/rapper suites)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$VECTOR_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
+  # Let cargo's staleness detection decide (a no-op rebuild is cheap); do NOT swallow a real
+  # compile failure (it must fail the gate, not silently skip the ANN recall check).
+  if ! cargo build --release -q -p sparq-vectors --example bench_vectors; then
+    echo "ERROR: bench_vectors example failed to build" >&2
+    exit 1
+  fi
+  if BENCH_VECTORS="$VECTOR_BIN" ITERS=3 bash "$VECTOR_RUN" > "$TMP/vector.tsv" 2>"$TMP/vector.err"; then
+    while IFS=$'\t' read -r name count us; do
+      [ "${count:-}" = "ERROR" ] && continue
+      if [ "$name" = "build_s" ]; then
+        # us here is the advisory HNSW index BUILD time (microseconds -> seconds for the trend);
+        # the sentinel-0 count carries no gate.
+        [ -n "${us:-}" ] && add vectors_build_s s "$(awk -v u="$us" 'BEGIN{printf "%.6f", u/1e6}')"
+      else
+        # DETERMINISTIC recall DEFICIT: vectors_<workload>_recall_at10. The value is a MILLI-scaled
+        # deficit — round((1-recall)*1000) — so the emitted unit is `milli` (matching metric-labels.json),
+        # NOT a bare `deficit` (which would mis-state the value's scale on the dashboard). The diskann/pq
+        # deficits are mode:auto ratcheted in bench/perf-baseline.json; hnsw is floor-gated in run.sh
+        # only (rayon-parallel build jitter), so its deficit is harvested as TREND-only here.
+        [ -n "${count:-}" ] && add "vectors_${name}" milli "$count"
+        # ADVISORY per-query latency (microseconds): vectors_<searcher>_query_us, trend-only.
+        # name is `<searcher>_recall_at10`; strip the `_recall_at10` suffix for the timing stem.
+        [ -n "${us:-}" ] && add "vectors_${name%_recall_at10}_query_us" us "$us"
+      fi
+    done < "$TMP/vector.tsv"
+  else
+    echo "ERROR: vector run.sh failed (recall regression)" >&2
+    cat "$TMP/vector.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: vector skipped (cargo not on PATH or $VECTOR_RUN missing)" >&2
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.

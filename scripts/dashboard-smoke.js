@@ -122,6 +122,12 @@ ok(D.featuredSuiteOf('load_s') === null, 'pipeline metric is NOT featured');
 // Deep Taxonomy isn't in the label map yet (sq-1hgz) — name-token fallback must still recognise it.
 eq(D.featuredSuiteOf('deeptax_d5_count_us') && D.featuredSuiteOf('deeptax_d5_count_us').key, 'Deep Taxonomy',
    'unlabelled deep-taxonomy metric is featured via name fallback');
+// [OPUS-4.8] sq-v02y: the 4th capability-surface suite — Vector / ANN recall-deficit metrics are
+// featured (via the label-map suite "Vector / ANN" AND the `vectors`/`vector` name-token alias).
+eq(D.featuredSuiteOf('vectors_hnsw_recall_at10') && D.featuredSuiteOf('vectors_hnsw_recall_at10').key, 'Vector / ANN',
+   'vector ANN recall metric is featured under Vector / ANN');
+eq(D.featuredSuiteOf('vectors_diskann_query_us') && D.featuredSuiteOf('vectors_diskann_query_us').key, 'Vector / ANN',
+   'vector ANN advisory-latency metric is featured under Vector / ANN');
 
 // buildFeatured: groups by suite, latest value per metric, competitor SEAM present.
 const featEntries = [{

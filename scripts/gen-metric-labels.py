@@ -462,7 +462,42 @@ def build():
         "mode": "bytes", "unit": "bytes",
     }
 
-    # 12) GeoSPARQL suite (sq-tf8n, design §3.5). The ci-bench hook emits `geo_<name>_us`
+    # 12) Vector / ANN suite (sq-v02y, design §3.3) -> per-searcher recall-DEFICIT gate metrics
+    # (vectors_<searcher>_recall_at10) + advisory per-query latency (vectors_<searcher>_query_us;
+    # the dashboard strips the _us for the label key) + the HNSW index build time (vectors_build_s).
+    # The corpus is synthetic (in-process), so the searcher names are FIXED (not file stems). Recall
+    # is emitted as a DEFICIT (round((1-recall)*1000)) so it slots into the smaller-is-better
+    # mode:auto ratchet (gap G4). diskann/pq are EXACT-gated + mode:auto ratcheted; hnsw is
+    # floor-gated in bench/vector/run.sh (rayon-parallel build jitter).
+    VEC_DATASET = ("synthetic ANN corpus — 50k 32-d vectors from a seeded splitmix64 PRNG "
+                   "(PQ on a fixed 10k clustered set); recall@10 vs nearest_exact (bench/vector/gen.sh)")
+    VEC_DESC = {
+        "hnsw": ("in-RAM HNSW (instant-distance), recall@10 floor 0.95 (floor-gated)",
+                 "in-RAM HNSW approximate kNN"),
+        "diskann": ("on-disk Vamana (.spqg), recall@10 floor 0.90 (exact-gated + ratchet)",
+                    "on-disk Vamana (DiskANN) kNN"),
+        "pq": ("PQ codes + full-precision re-rank, recall@10 floor 0.95 (exact-gated + ratchet)",
+               "product-quantized kNN + re-rank"),
+    }
+    for s, (gate_desc, q_desc) in VEC_DESC.items():
+        labels["vectors_%s_recall_at10" % s] = {
+            "label": "Vector / ANN %s — recall@10 deficit, gate" % s,
+            "suite": "Vector / ANN", "dataset": VEC_DATASET,
+            "query": gate_desc, "mode": "recall_deficit", "unit": "milli",
+        }
+        labels["vectors_%s_query" % s] = {
+            "label": "Vector / ANN %s — query latency" % s,
+            "suite": "Vector / ANN", "dataset": VEC_DATASET,
+            "query": q_desc, "mode": "query", "unit": "µs",
+        }
+    labels["vectors_build_s"] = {
+        "label": "Vector / ANN — HNSW index build time",
+        "suite": "Vector / ANN", "dataset": VEC_DATASET,
+        "query": "build the in-RAM HNSW index over the corpus (advisory)",
+        "mode": "build", "unit": "s",
+    }
+
+    # 13) GeoSPARQL suite (sq-tf8n, design §3.5). The ci-bench hook emits `geo_<name>_us`
     # (ADVISORY trend timing) per bench_geo workload — the dashboard strips `_us` for the
     # label key. The deterministic gates (result-set sizes) live in bench/geo/run.sh's
     # self-assertion; the compliance ratchet is the HARD-gated DEFICIT geo_compliance_deficit

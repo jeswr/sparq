@@ -394,6 +394,42 @@ adapter_recipe_of() { # the engine's `.adapter` recipe object as compact JSON
   jq -c --arg id "$1" 'first(.competitors[]|select(.id==$id)).adapter // {}' "$REGISTRY"
 }
 
+# [OPUS-4.8] sq-8dp3: SHACL_SHAPES is a DIRECTORY in the committed suite
+# (bench/shacl/shapes/ — five hand-authored shape graphs, one workload each).
+# sparq-shacl validates the data against EACH shape file separately and
+# expected.tsv records a per-workload (conforms,violations,focus_nodes). An
+# external engine handed the *directory* as a single graph arg loads NO shapes and
+# reports conforms:true / 0 violations — the apples-to-oranges bug the prior gather
+# hit. So: when SHACL_SHAPES is a directory, expand it per `*.ttl` shape file and
+# run the adapter once per workload (the SAME per-shape decomposition sparq uses),
+# keyed by the shape-file stem; when it is a single file, run it once (workload="").
+# Echoes each chosen shape path so the apples-to-apples expansion is auditable.
+shacl_shape_files() { # <shapes-path> -> one path per line (the file itself, or dir/*.ttl)
+  local p="$1"
+  if [ -d "$p" ]; then
+    # [OPUS-4.8] sq-8dp3: fail CLOSED if a shapes dir expands to zero *.ttl files.
+    # A silently-empty expansion makes the per-shape loop a no-op and produces ZERO
+    # result envelopes — exactly the "0 violations / missing-shapes" apples-to-oranges
+    # class of bug this expansion exists to prevent. Better to die loudly than to
+    # emit no comparison at all.
+    local files; files="$(find "$p" -maxdepth 1 -type f -name '*.ttl' | LC_ALL=C sort)"
+    [ -n "$files" ] || die "SHACL_SHAPES dir '$p' contains no *.ttl shape files — refusing to run a no-op comparison"
+    printf '%s\n' "$files"
+  else
+    printf '%s\n' "$p"
+  fi
+}
+shacl_workload_of() { # <shape-path> -> workload stem (basename minus .ttl), or "" for a non-dir single file
+  # [OPUS-4.8] sq-8dp3: use a literal string comparison, NOT `case` — `case` performs
+  # glob matching, so a single-file shapes path containing glob metacharacters
+  # (e.g. '[', '*', '?') could mis-match the pattern. `[ x = y ]` is an exact match.
+  if [ "${SHACL_SHAPES:-}" = "$1" ]; then
+    printf ''                                       # single-file shapes: no per-workload split
+  else
+    local b; b="$(basename "$1")"; printf '%s' "${b%.ttl}"
+  fi
+}
+
 run_report_cli_engine() { # <id>
   local id="$1" recipe; recipe="$(adapter_recipe_of "$id")"
   hdr "$id (report-cli)"
@@ -401,22 +437,34 @@ run_report_cli_engine() { # <id>
   log "  recipe: $recipe"
   if [ "$DO_RUN" -eq 1 ]; then
     have python3 || die "python3 needed for the report-cli adapter"
+    have jq || die "jq needed for the report-cli adapter (to parse the --json sidecar)"  # [OPUS-4.8] match js-lib's jq guard
     python3 -c 'import rdflib' 2>/dev/null || die "report-cli adapter needs rdflib (pip install rdflib)"
     { [ -n "${SHACL_DATA:-}" ] && [ -n "${SHACL_SHAPES:-}" ]; } || die "report-cli --run needs SHACL_DATA + SHACL_SHAPES"
-    # [OPUS-4.8] The adapter's --json sidecar (stderr) carries the RESOLVED engine
-    # version + the conforms bit; capture it (not /dev/null) so the results
-    # envelope records what the engine actually reported, per the script header
-    # and the adapter design — rather than the pinned_version placeholder.
-    local errf; errf="$(mktemp)"
-    OUT="$(python3 "$ADAPTERS_DIR/report_cli_adapter.py" --recipe "$recipe" \
-            --data "$SHACL_DATA" --shapes "$SHACL_SHAPES" --engine "$id" --iters "$ITERS" --json 2>"$errf")" \
-      || { rm -f "$errf"; die "report-cli adapter failed for $id"; }
-    PAYLOAD="$(tail -n1 "$errf" | jq -c '{engine,version,conforms,violations,validate_us}' 2>/dev/null)"
-    rm -f "$errf"
-    [ -n "$PAYLOAD" ] || PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,v,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"violations":int(v),"validate_us":int(u)}))')"
-    local rcver; rcver="$(printf '%s' "$PAYLOAD" | jq -r '.version // empty' 2>/dev/null)"
-    [ -n "$rcver" ] || rcver="$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")"
-    write_result "$id" "shacl-validate-bench" "$rcver" "$PAYLOAD"
+    [ -d "$SHACL_SHAPES" ] && log "  SHACL_SHAPES is a directory — expanding per shape file (one workload each, matching sparq-shacl)"
+    local rcver=""
+    local shape workload
+    while IFS= read -r shape; do
+      [ -n "$shape" ] || continue
+      workload="$(shacl_workload_of "$shape")"
+      log "  shape: $shape  (workload=${workload:-<single>})"
+      # [OPUS-4.8] The adapter's --json sidecar (stderr) carries the RESOLVED engine
+      # version + the conforms bit; capture it (not /dev/null) so the results
+      # envelope records what the engine actually reported, per the script header
+      # and the adapter design — rather than the pinned_version placeholder.
+      local errf; errf="$(mktemp)"
+      OUT="$(python3 "$ADAPTERS_DIR/report_cli_adapter.py" --recipe "$recipe" \
+              --data "$SHACL_DATA" --shapes "$shape" --engine "$id" --iters "$ITERS" --json 2>"$errf")" \
+        || { rm -f "$errf"; die "report-cli adapter failed for $id (shape $shape)"; }
+      PAYLOAD="$(tail -n1 "$errf" | jq -c --arg w "$workload" '{engine,version,conforms,violations,validate_us,workload:$w}' 2>/dev/null)"
+      rm -f "$errf"
+      # [OPUS-4.8] sq-8dp3: the fallback (when the --json sidecar can't be parsed) must
+      # ALSO carry the workload field, so a parse-failure result is still attributed to
+      # its shape/workload — matching the primary path above. Pass $workload as argv[1].
+      [ -n "$PAYLOAD" ] || PAYLOAD="$(printf '%s' "$OUT" | python3 -c 'import json,sys; e,v,u=sys.stdin.read().split(); print(json.dumps({"engine":e,"violations":int(v),"validate_us":int(u),"workload":sys.argv[1]}))' "$workload")"
+      [ -n "$rcver" ] || rcver="$(printf '%s' "$PAYLOAD" | jq -r '.version // empty' 2>/dev/null)"
+      [ -n "$rcver" ] || rcver="$(jq -r --arg id "$id" 'first(.competitors[]|select(.id==$id)).pinned_version//"unknown"' "$REGISTRY")"
+      write_result "$id" "shacl-validate-bench${workload:+-$workload}" "$rcver" "$PAYLOAD"
+    done < <(shacl_shape_files "$SHACL_SHAPES")
     check_df
   fi
 }
@@ -431,19 +479,26 @@ run_js_lib_engine() { # <id>
     have jq || die "jq needed for the js-lib adapter (to build the result payload)"
     { [ -n "${SHACL_DATA:-}" ] && [ -n "${SHACL_SHAPES:-}" ]; } || die "js-lib --run needs SHACL_DATA + SHACL_SHAPES"
     local mdir; mdir="${JS_MODULES_DIR:-$PWD}"
-    # [OPUS-4.8] Build the payload from the adapter's --json sidecar (stderr,
-    # well-formed JSON) via jq — not a python3 TSV reparse (python3 was never
-    # required for js-lib) and not a printf %s of raw $OUT (whose unescaped
-    # trailing newline/tab would emit invalid JSON and fail write_result's
-    # validation under set -euo pipefail).
-    local errf; errf="$(mktemp)"
-    OUT="$(node "$ADAPTERS_DIR/js_shacl_adapter.mjs" --data "$SHACL_DATA" --shapes "$SHACL_SHAPES" \
-            --engine "$jsengine" --modules-dir "$mdir" --iters "$ITERS" --json 2>"$errf")" \
-      || { rm -f "$errf"; die "js-lib adapter failed for $id (npm i $jsengine in $mdir?)"; }
-    PAYLOAD="$(tail -n1 "$errf" | jq -c '{engine,conforms,violations,validate_us}' 2>/dev/null)"
-    rm -f "$errf"
-    [ -n "$PAYLOAD" ] || die "js-lib adapter produced no parseable --json sidecar for $id"
-    write_result "$id" "shacl-validate-bench" "$jsengine" "$PAYLOAD"
+    [ -d "$SHACL_SHAPES" ] && log "  SHACL_SHAPES is a directory — expanding per shape file (one workload each, matching sparq-shacl)"
+    local shape workload
+    while IFS= read -r shape; do
+      [ -n "$shape" ] || continue
+      workload="$(shacl_workload_of "$shape")"
+      log "  shape: $shape  (workload=${workload:-<single>})"
+      # [OPUS-4.8] Build the payload from the adapter's --json sidecar (stderr,
+      # well-formed JSON) via jq — not a python3 TSV reparse (python3 was never
+      # required for js-lib) and not a printf %s of raw $OUT (whose unescaped
+      # trailing newline/tab would emit invalid JSON and fail write_result's
+      # validation under set -euo pipefail).
+      local errf; errf="$(mktemp)"
+      OUT="$(node "$ADAPTERS_DIR/js_shacl_adapter.mjs" --data "$SHACL_DATA" --shapes "$shape" \
+              --engine "$jsengine" --modules-dir "$mdir" --iters "$ITERS" --json 2>"$errf")" \
+        || { rm -f "$errf"; die "js-lib adapter failed for $id (npm i $jsengine in $mdir? shape $shape)"; }
+      PAYLOAD="$(tail -n1 "$errf" | jq -c --arg w "$workload" '{engine,conforms,violations,validate_us,workload:$w}' 2>/dev/null)"
+      rm -f "$errf"
+      [ -n "$PAYLOAD" ] || die "js-lib adapter produced no parseable --json sidecar for $id (shape $shape)"
+      write_result "$id" "shacl-validate-bench${workload:+-$workload}" "$jsengine" "$PAYLOAD"
+    done < <(shacl_shape_files "$SHACL_SHAPES")
     check_df
   fi
 }

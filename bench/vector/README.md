@@ -1,0 +1,124 @@
+<!-- [OPUS-4.8] sq-v02y — vector / ANN benchmark suite. Design: research/capability-benchmark-program.md §3.3. -->
+# Vector / ANN suite
+
+The ANN analogue of the LUBM / SHACL / FTS template: an **overview** dashboard row, a
+**self-asserting deterministic gate** (regression alerts), and a **competitor** comparison
+surface. It exercises `sparq-vectors` — the opt-in mmap'd f32 vector store (`.spqv`) + three
+approximate-nearest-neighbour searchers: in-RAM **HNSW** (`VectorIndex`), on-disk **Vamana**
+(`DiskAnnIndex`, `.spqg`), and **product-quantized** codes + full-precision re-rank (the DiskANN
+search loop).
+
+It does not invent a new gate — it **promotes the recall asserts the crate already gates on**
+(`crates/sparq-vectors/tests/{recall,diskann,quant}.rs`) into a TRACKED METRIC the dashboard and
+the cross-commit perf-gate can ratchet.
+
+## The recall-deficit metric (design §4 / gap G4)
+
+ANN recall is *larger-is-better*, but the `mode:"auto"` perf-gate ratchet is *smaller-is-better*.
+So every recall metric is emitted as a **DEFICIT** — `recall_deficit_milli = round((1 - recall@10)
+* 1000)` — measured against the `nearest_exact` brute-force ground truth. A recall regression then
+shows as the deficit GROWING, which the integer `mode:"auto"` ratchet catches with **zero
+`perf-gate.py` change** (the gate is data-driven from each metric's `mode`). This is the same
+trick `scripts/bench-adapters/vector_lib_adapter.py` uses for the external ann-benchmarks harness.
+
+| Workload | Searcher | Crate-gate floor | Gate metric |
+|---|---|---|---|
+| `hnsw_recall_at10` | in-RAM HNSW (`VectorIndex`) | recall@10 ≥ 0.95 | `vectors_hnsw_recall_at10` |
+| `diskann_recall_at10` | on-disk Vamana (`DiskAnnIndex`) | recall@10 ≥ 0.90 | `vectors_diskann_recall_at10` |
+| `pq_recall_at10` | PQ + full-precision re-rank | recall@10 ≥ 0.95 | `vectors_pq_recall_at10` |
+
+All three measured vs exact-kNN ground truth — recall@k is a fair, standard, deterministic
+comparator (the strongest honest-competition surface; see Competitors).
+
+## Data substrate
+
+`bench/vector/gen.sh [N] [seed]` is a thin **parameter source** (like the FTS suite) — the corpus
+is synthetic and generated **in-process** by `examples/bench_vectors` from a deterministic
+splitmix64 seed, so there is no external generator and nothing to materialise on disk. It echoes
+the two pinned parameters (N then seed).
+
+- Per-commit tier: `N=50000, seed=0` — the same 50k × 32 set the crate recall gate tests use
+  (sub-second at release opt-level).
+- The HNSW / DiskANN substrate scales with `N`; the PQ workload uses a **fixed 10k clustered set**
+  (40 clusters × 250, spread 0.15) — PQ's design regime, matching `tests/quant.rs`.
+- The big published ANN datasets (**SIFT1M / GloVe-100-angular**) drive the **gather-tier**
+  `ann-benchmarks` recall-QPS Pareto harness — too heavy per-commit (tracked as a follow-up bead).
+
+## Deterministic gate (HARD) vs timing (ADVISORY)
+
+`run.sh` is the self-asserting entry point (the LUBM pattern). It runs `bench_vectors` on the
+pinned corpus and gates each workload's recall deficit (exit 1 on any drift):
+
+- **`diskann_recall_at10` / `pq_recall_at10` — EXACT-gated** vs `expected.tsv`. The Vamana graph
+  build (`src/diskann.rs`) and PQ k-means (`src/quant.rs`) are single-threaded with fixed seeds,
+  so they are byte-deterministic — the deficit must equal the committed constant AND clear its
+  floor.
+- **`hnsw_recall_at10` — FLOOR-gated only.** The in-RAM HNSW build (`instant-distance`) is
+  **rayon-parallel**: the graph is seeded (`HnswConfig::seed`) and reproducible, but parallel
+  float-sum reduction order can flip a single boundary neighbour (recall 0.999 vs 1.000 = ±1 in the
+  deficit). Pinning HNSW to an exact deficit would be a **flaky** gate, which is dishonest — so it
+  is gated on its floor (deficit ≤ 50 ⇔ recall@10 ≥ 0.95, the `tests/recall.rs` floor) instead.
+  The floor gate is **INCLUSIVE**: `run.sh` fails only on `deficit > floor`, so a deficit of
+  exactly 50 (exactly recall@10 = 0.95) PASSES — matching the crate's `recall@10 >= 0.95` condition.
+
+The constants in `expected.tsv` were **derived by running `bench_vectors`** on the pinned corpus
+(not guessed). The deterministic deficits (`vectors_*_recall_at10`) also have `mode:"auto"` entries
+in `bench/perf-baseline.json` so a recall regression cross-commit is ratcheted in addition to the
+per-commit `expected.tsv` diff.
+
+**Timing is ADVISORY** (`mode:noise`, trend-only, **never hard-gated** — and this dev box is
+non-canonical): the ci-bench hook harvests one `vectors_<workload>_query_us` per workload plus
+`vectors_build_s` (HNSW index build time) into the dashboard; they are **not** in
+`scripts/perf-gate.py`. The hard gate lives in `run.sh`.
+
+## Running it
+
+```sh
+cargo build --release -p sparq-vectors --example bench_vectors
+bench/vector/run.sh                    # self-asserting: exit 1 on any recall regression
+# heavier substrate (advisory timing; HNSW/DiskANN scale with N):
+VEC_N=200000 bench/vector/run.sh
+```
+
+`bench_vectors` emits, per workload, the same `name<TAB>count<TAB>us` 3-column contract the
+ci-bench hook consumes (`sparq-vectors` is the *isolated* ANN crate — not a `sparq-cli` dependency
+— so the runner is a crate `--example`, not a CLI subcommand). Proving the gate gates:
+
+```sh
+# perturb a deterministic deficit in expected.tsv (e.g. diskann 34 -> 0) => run.sh exits 1.
+```
+
+## Competitors (honest)
+
+The **strongest surface for honest competition** — recall@k vs exact-kNN is a fair, standard,
+deterministic comparator. The competitor harness is **ann-benchmarks-style**, reporting the
+**recall–QPS Pareto at MATCHED recall** (NEVER a single latency number — a faster engine at lower
+recall is not "faster"). Registered in `bench/competitors.json` with the `engines`/`values`
+dashboard seam **empty** in git (AGENTS.md — no hard-coded perf):
+
+| Engine | Lang | License | Adapter kind | Role |
+|---|---|---|---|---|
+| **hnswlib** | C++/py | Apache-2.0 | `python-lib` (`vector_lib_adapter.py`) | Primary canonical in-RAM HNSW peer. Recall–QPS Pareto. |
+| **FAISS** | C++/py | MIT | `python-lib` | Quantizer/GPU + brute-force ground-truth oracle. |
+| **ScaNN** | C++/py | Apache-2.0 | `python-lib` | The SOTA recall–QPS bar. |
+| **DiskANN reference impl** | C++ | MIT | `python-lib` | Oracle for sparq's Vamana `.spqg`. |
+| Qdrant / Milvus / Weaviate | mixed | OSS | (loose) | Full vector DBs — *more* than sparq; **loose-only**, apples-to-oranges in the opposite direction. |
+
+The kernel peers (hnswlib/FAISS/ScaNN/DiskANN-ref) use the `python-lib` adapter
+(`scripts/bench-adapters/vector_lib_adapter.py`) + an **exact-kNN oracle** (numpy), emitting the
+same recall-deficit metric (G4). **No competitor does ANN-inside-SPARQL over dict-encoded entity
+ids** — that surface value is **uncontested** (sparq's ANN is keyed by the store's dictionary term
+ids, joinable directly into a SPARQL plan; the kernel libraries are standalone index structures).
+
+Scope the kernel comparison to what `sparq-vectors` implements (cosine/L2 top-k, HNSW + Vamana +
+PQ) or it is unfair. A real `scripts/gather-competitors.sh --run --only <id>` writes git-ignored
+`bench/competitor-results/`; the big-corpus (SIFT1M / GloVe) recall-QPS Pareto is gather-tier (no
+recurring CI cost — nightly + git-ignored results).
+
+## Follow-up
+
+The big published-dataset recall–QPS Pareto (SIFT1M / GloVe-100-angular via the `ann-benchmarks`
+harness) is captured as a bead — it needs a download/gather step (corpora not redistributable
+in-repo) before it can run, so it is gather/nightly, not a per-PR gate. Until then the per-commit
+gate is the deterministic recall-deficit structure (HNSW / DiskANN / PQ on the synthetic corpus)
+above.

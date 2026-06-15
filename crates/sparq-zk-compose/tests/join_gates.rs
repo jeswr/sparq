@@ -262,6 +262,20 @@ fn honest_join_passes_structural_bind_joins() {
     prefilter(&m).expect("honest cross-scan join must pass the structural bind_joins gate");
 }
 
+/// [OPUS-4.8] sq-y2wy: `ProofManifest::canonicalize` sorts the edge vectors, and
+/// the STRUCTURAL gate (`bind_joins` + the binding-edge stage) still ACCEPTS the
+/// canonicalised manifest — proving edge-vector sorting preserves the edges' scan
+/// references (each edge is self-contained; the verifier resolves by the edge's
+/// own indices, not its position). A no-op on a single-edge manifest's CONTENTS,
+/// but it exercises the build → canonicalise → verify round-trip end to end.
+#[test]
+fn canonicalised_join_manifest_still_passes_structural_bind_joins() {
+    let mut m = join_manifest();
+    m.canonicalize();
+    prefilter(&m)
+        .expect("a canonicalised honest join manifest must still pass the structural gate");
+}
+
 // === ACCEPT (multi-scan-per-pattern): a pattern answered by TWO scans ========
 //
 // sq-sfsi soundness fix. A query pattern may LEGITIMATELY be answered by more than

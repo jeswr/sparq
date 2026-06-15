@@ -1,0 +1,42 @@
+# [OPUS-4.8] (sq-v02y) Vector / ANN DETERMINISTIC golden values for the pinned synthetic
+# corpus (bench/vector/gen.sh => N=50000 32-d vectors, seed=0) + the FIXED 100-query set
+# (drawn from an independent seed inside examples/bench_vectors). Format: <workload>\t<count>.
+#
+#   count   the integer recall DEFICIT the run.sh self-gate asserts (exit 1 on any drift):
+#     recall_deficit_milli = round((1 - recall@10) * 1000), measured vs the nearest_exact
+#     brute-force ground truth. Emitted as a DEFICIT (smaller-is-better) so it slots into the
+#     mode:"auto" ratchet with ZERO perf-gate.py change (design §4 / gap G4). A recall
+#     REGRESSION => the deficit GROWS => the gate fails. This is the ANN analogue of LUBM's
+#     row-count diff and the FTS hit-count diff, adapted for an APPROXIMATE surface.
+#
+#   GATE MODE per workload (the one nuance vs FTS — see run.sh):
+#     diskann_recall_at10  EXACT-gated. The Vamana build (src/diskann.rs) is single-threaded
+#                          with a fixed seed => byte-deterministic; the deficit is asserted ==
+#                          this value AND below its floor (a regression in either direction
+#                          fails). tests/diskann.rs regime (floor 0.90 => deficit <= 100).
+#     pq_recall_at10       EXACT-gated. The PQ k-means (src/quant.rs) is single-threaded with a
+#                          fixed seed => byte-deterministic. PQ + full-precision re-rank (the
+#                          DiskANN search loop) on a FIXED 10k clustered set, tests/quant.rs
+#                          regime (re-rank floor 0.95 => deficit <= 50).
+#     hnsw_recall_at10     FLOOR-gated only (count below = the typical baseline, advisory). The
+#                          in-RAM HNSW build (instant-distance) is rayon-PARALLEL: the graph is
+#                          seeded (HnswConfig::seed) and reproducible, but parallel float-sum
+#                          reduction order can flip a single boundary neighbour (recall 0.999 vs
+#                          1.000 = +/-1 in the deficit). So HNSW is gated on its FLOOR (deficit
+#                          <= 50 == recall@10 >= 0.95, the tests/recall.rs floor), NOT exact
+#                          equality — exact-equality would be a flaky gate, which is dishonest.
+#
+# These are DERIVED by RUNNING examples/bench_vectors on the pinned corpus (not guessed);
+# run.sh re-runs it every commit and applies the per-workload gate. The us column bench_vectors
+# also emits is ADVISORY (wall-clock query latency; non-canonical dev box) and is NEVER asserted.
+# The advisory build_s row is forwarded by run.sh but has no expected.tsv entry (sentinel-0 count).
+#
+# Floor headroom (must always hold, all three workloads, independent of the exact deficit).
+# The gate is INCLUSIVE: run.sh fails only on `deficit > floor`, so `deficit == floor` (exactly the
+# floor recall) PASSES — matching the crate's `recall@10 >= floor` condition. Hence `<=` below:
+#   hnsw_recall_at10    <= 50   (HNSW recall@10 >= 0.95, the tests/recall.rs floor)
+#   diskann_recall_at10 <= 100  (DiskANN recall@10 >= 0.90, the tests/diskann.rs floor)
+#   pq_recall_at10      <= 50   (PQ+re-rank recall@10 >= 0.95, the tests/quant.rs re-rank floor)
+hnsw_recall_at10	1
+diskann_recall_at10	34
+pq_recall_at10	22
