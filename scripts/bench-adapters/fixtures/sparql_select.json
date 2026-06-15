@@ -1,0 +1,13 @@
+{
+  "head": { "vars": [ "person", "name" ] },
+  "results": {
+    "bindings": [
+      { "person": { "type": "uri", "value": "http://example.org/alice" },
+        "name": { "type": "literal", "value": "Alice" } },
+      { "person": { "type": "uri", "value": "http://example.org/carol" },
+        "name": { "type": "literal", "value": "Carol" } },
+      { "person": { "type": "uri", "value": "http://example.org/dave" },
+        "name": { "type": "literal", "value": "Dave" } }
+    ]
+  }
+}

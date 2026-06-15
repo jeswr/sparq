@@ -1,0 +1,28 @@
+# [OPUS-4.8] sq-eifd cross-engine SHACL fixture — SHAPES graph.
+# A minimal shapes graph designed to produce a KNOWN, engine-stable violation
+# count over fixtures/data.ttl, used by the adapter unit tests to prove that
+# sparq-shacl, pySHACL and rdf-validate-shacl all agree on (conforms, #violations).
+# Deliberately uses only CORE constraints (sh:minCount, sh:datatype, sh:nodeKind)
+# whose semantics are unambiguous and NOT subject to per-engine result dedup.
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:   <http://example.org/> .
+
+ex:PersonShape a sh:NodeShape ;
+    sh:targetClass ex:Person ;
+    # exactly one ex:name, a string
+    sh:property [
+        sh:path ex:name ;
+        sh:minCount 1 ;
+        sh:datatype xsd:string ;
+    ] ;
+    # age must be an integer if present
+    sh:property [
+        sh:path ex:age ;
+        sh:datatype xsd:integer ;
+    ] ;
+    # knows must point at an IRI (not a literal/bnode)
+    sh:property [
+        sh:path ex:knows ;
+        sh:nodeKind sh:IRI ;
+    ] .

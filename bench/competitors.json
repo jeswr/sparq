@@ -103,6 +103,45 @@
       "version_env_metadata": "gather records `eye --version`, the SWI-Prolog version, and the host env block; the cited third-party EYE measurements + machine spec live in bench/inference/eye-comparison.md.",
       "quiet_box_sensitive": true,
       "dashboard_engine_id": "eye"
+    },
+    {
+      "id": "pyshacl",
+      "name": "pySHACL",
+      "kind": "report-cli",
+      "role": "[OPUS-4.8 sq-eifd] W3C SHACL reference implementation; the 'correct-but-slow' SHACL anchor. Adapter kind `report-cli` (file-in / validation-report-out), reusing scripts/bench-adapters/shacl_report_count.py (count sh:result, read sh:conforms) so #violations is directly comparable to sparq's report.results.len().",
+      "pinned_version": "pyshacl (pin the exact version at gather time; `pyshacl --version` is the authoritative reported version)",
+      "version_source": "`pyshacl --version` at run time, recorded in the gather results file.",
+      "install_recipe": "pip install pyshacl rdflib  (gather-only — NOT a committed dependency of the repo; engines stay out of git per AGENTS.md). The adapter also needs rdflib for the shared report->count parser.",
+      "run_recipe": "scripts/gather-competitors.sh --run --only pyshacl  with SHACL_DATA=<data.ttl> SHACL_SHAPES=<shapes.ttl> set; the dispatch calls scripts/bench-adapters/report_cli_adapter.py with the `adapter` recipe below.",
+      "adapter": {
+        "cmd": ["pyshacl", "-s", "{shapes}", "-f", "turtle", "-o", "{report}", "{data}"],
+        "report_format": "turtle",
+        "report_to": "file",
+        "version_cmd": ["pyshacl", "--version"]
+      },
+      "comparable_suites": [
+        { "sparq_suite": "shacl-validate-bench", "note": "same data x shapes; cross-check #violations/conforms (per-engine expected counts — engines that dedup results differ from sparq, which does not) before trusting any timing" }
+      ],
+      "version_env_metadata": "gather records `pyshacl --version`, rdflib version, and the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "pyshacl"
+    },
+    {
+      "id": "rdf-validate-shacl",
+      "name": "Zazuko rdf-validate-shacl",
+      "kind": "js-lib",
+      "role": "[OPUS-4.8 sq-eifd] JS-ecosystem SHACL validator (MIT); the WASM-peer datapoint for sparq's browser SHACL story. Adapter kind `js-lib` (in-process Node/RDF-JS), run in the SAME Node runtime that can also bench sparq's own @jeswr/sparq WASM SHACL. Counts `report.results` / reads `report.conforms` — the identical reduction the shared report->count parser performs over the report graph.",
+      "pinned_version": "rdf-validate-shacl (pin the exact npm version at gather time)",
+      "version_source": "the resolved npm version in the gather box's node_modules, recorded in the results file.",
+      "install_recipe": "npm i rdf-validate-shacl @rdfjs/data-model @rdfjs/dataset @rdfjs/term-map @rdfjs/namespace @rdfjs/parser-n3 @rdfjs/environment clownface  (gather-only — NOT committed; set JS_MODULES_DIR to the node_modules parent). Optionally `npm i shacl-engine` for the shacl-engine variant (set adapter.js_engine).",
+      "run_recipe": "scripts/gather-competitors.sh --run --only rdf-validate-shacl  with SHACL_DATA + SHACL_SHAPES (+ JS_MODULES_DIR) set; the dispatch calls scripts/bench-adapters/js_shacl_adapter.mjs.",
+      "adapter": { "js_engine": "rdf-validate-shacl" },
+      "comparable_suites": [
+        { "sparq_suite": "shacl-validate-bench", "note": "same data x shapes; cross-check #violations/conforms (per-engine expected counts) before trusting timing; also the harness for sparq's own WASM SHACL in-runtime comparison" }
+      ],
+      "version_env_metadata": "gather records the resolved npm version + node --version + the host env block.",
+      "quiet_box_sensitive": true,
+      "dashboard_engine_id": "rdf-validate-shacl"
     }
   ],
 

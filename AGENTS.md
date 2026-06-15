@@ -52,6 +52,11 @@ Then edit the corresponding `skills/<surface>/SKILL.md` (sparql-query / data-for
 
 If you add a brand-new public surface, add a new `skills/<surface>/` (dir name == the skill's `name` frontmatter) and link it from the list above and from the README.
 
+## Fix a shared issue everywhere it applies — cross-crate/cross-surface parity
+
+<!-- [OPUS-4.8] charter cross-poll from PSS #173 -->
+When a bug or review finding describes a **class** of problem affecting more than one place — a parser edge case in Turtle that also hits TriG, an operator bug whose sibling operators share a code path, a `pub`-surface footgun repeated across the CLI / HTTP / Python / JS-WASM bindings — it must **eventually be addressed in every instance, not patched only where it surfaced.** **Prefer fixing the pattern ONCE in the shared place** (the common code path, or a `sparq-core` helper) so all surfaces inherit it; if a shared fix isn't feasible, fix each instance to the **same spec** and file a bead for the consolidation. Either way, when you fix one instance, **file a bead** (see *Task tracking* below) covering the other affected crates/surfaces so the parity work is tracked, not lost. This is the cross-crate analogue of the differential-fuzz philosophy (a finding in one path implies checking the others — see the *Post-batch re-evaluation checklist*).
+
 ## Task tracking — beads, not markdown TODOs
 
 This repo tracks work in **beads** (`bd`, a git-native dependency-graph issue tracker; the committed source-of-record is `.beads/issues.jsonl`). Rules for any agent working here:
