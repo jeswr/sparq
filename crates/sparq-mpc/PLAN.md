@@ -94,11 +94,16 @@ First concrete secret-sharing impl behind the trait + the hidden-value join,
 detect-and-abort / robust-correct on every reconstruction path, surfaced via the
 `MaliciousSecurity` enum. See the "Security model" bullet below and the
 "Deferred malicious-security seams" subsection for what remains beyond v1.
-- **Q2 RESOLVED for v1: honest-majority, semi-honest** (Jesse's decision:
+- **Q2 RESOLVED for v1: honest-majority trust model** (Jesse's decision:
   honest-majority now, configurable long-term). The four flatmates *cooperate*
-  among themselves (honest-but-curious) to prove an aggregate to an external
-  landlord — the regime Shamir serves. LAN secret-sharing chosen (the aggregate
-  is linear → zero-round under Shamir; WAN garbled-circuit unneeded for v1).
+  among themselves to prove an aggregate to an external landlord — the regime
+  Shamir serves. LAN secret-sharing chosen (the aggregate is linear → zero-round
+  under Shamir; WAN garbled-circuit unneeded for v1). The *adversary model* is no
+  longer purely semi-honest on integrity: tamper-detection / robust-correction
+  (guarantee (D)) is now wired through the reconstruction layer (see the "Security
+  model" bullet), so the exact integrity guarantee a given `(n, t)` delivers is
+  reported by the `MaliciousSecurity` enum rather than asserted as a blanket
+  "semi-honest" label here.
 - **Scheme: Shamir `t`-of-`n` over `F_p`** (`p = 2^61-1` Mersenne, dependency-
   free `u128` reduction). Chosen over **replicated 3PC** because the use case is
   "any N cooperating flatmates" (replicated is n=3-only) and the secured
@@ -107,8 +112,11 @@ detect-and-abort / robust-correct on every reconstruction path, surfaced via the
 - **Implemented (REAL, in-process multi-party simulation):**
   - `MpcBackend` for `ShamirBackend`: `share_private_input` (Shamir-share a
     holder's private salary), `run_secure` (cumulative sum — zero rounds),
-    `reconstruct_disclosed` (Lagrange at 0 → the disclosed integer; the verifier
-    recomputes `> £100k` OUTSIDE the crypto, M5).
+    `reconstruct_disclosed` (checked/robust reconstruction at x=0 when redundancy
+    is present — RS / Berlekamp–Welch via `robust.rs`, detect-and-abort or
+    correct, see the "Security model" bullet; reduces to Lagrange at 0 only at the
+    no-redundancy `t+1` boundary → the disclosed integer; the verifier recomputes
+    `> £100k` OUTSIDE the crypto, M5).
   - Secret-shared **equality test** (`secure_equal`): `d=a-b`, mask by fresh
     nonzero `r`, one Shamir multiplication (`mul_shares_raw`, degree 2t), open
     `m=d·r`; `m==0 ⇔ a==b`, leaking ONLY the match bit. Keys never reconstructed.
