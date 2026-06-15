@@ -296,6 +296,100 @@ fn differential_alternation_range_one_two() {
 }
 
 // =====================================================================
+// 5b. SEQUENCE WITH A BOUNDED-REPETITION / ALTERNATION ELEMENT
+//     — the trickiest eval_sequence branch (per-part dedup before compose)
+// =====================================================================
+
+/// `Sequence` whose FIRST element is a bounded repetition: `(ex:p){1,2}/ex:q`.
+/// This exercises `eval_sequence` composing a multi-length sub-form (which can
+/// reach the same mid node by two different lengths) with a plain hop — the
+/// per-part dedup in `eval_sequence` must collapse the mid multiplicity before
+/// the join so the composition is not inflated. Differential against the
+/// engine's `(ex:p{1,2})/ex:q`, written as the union of fixed-length chains the
+/// standard carries: `(ex:p | ex:p/ex:p)/ex:q`.
+#[test]
+fn differential_sequence_with_repetition_element() {
+    // a->b->c via p (so a reaches c by p{1,2}: directly is absent, but a->b->c
+    // is length 2, and we also add a->c direct p so a reaches c by BOTH len1+len2)
+    // then c->d via q. The repetition sub-form yields (a,c) by two lengths; after
+    // dedup it is one mid pair, composed with c->q->d gives (a,d) once.
+    let h1 = "ex:a ex:p ex:b . ex:b ex:p ex:c . ex:a ex:p ex:c .";
+    let h2 = "ex:c ex:q ex:d .";
+    let edges = disclosed_edges(&[
+        (h1, &["http://ex/p"]),
+        (h2, &["http://ex/q"]),
+    ]);
+
+    let form = PathForm::Sequence(vec![
+        PathForm::range(nn("http://ex/p"), 1, 2),
+        PathForm::exact(nn("http://ex/q"), 1),
+    ]);
+    let got = federated_pairs(&edges, &form);
+    let want = clear_text_pairs(&[h1, h2], "(ex:p | ex:p/ex:p)/ex:q");
+    assert_eq!(
+        got, want,
+        "sequence with a repetition element must equal eval_path"
+    );
+    // p{1,2} mid-relation reaches c from BOTH a (a->b->c len2 AND a->c len1) and
+    // b (b->c len1); only c has a q out-edge (c->d). So composing with c->q->d
+    // gives {(a,d),(b,d)}. The key property under test: c is reached from a by
+    // TWO p-lengths, but the per-part dedup collapses that mid multiplicity so
+    // (a,d) is produced once, not twice.
+    assert_eq!(got.len(), 2, "{got:?}");
+    // (a,d) must appear exactly once despite c being reached from a by two p-lengths.
+    let ad_rows = got
+        .iter()
+        .filter(|(a, b)| {
+            *a == format!("{:?}", Term::from(nn("http://ex/a")))
+                && *b == format!("{:?}", Term::from(nn("http://ex/d")))
+        })
+        .count();
+    assert_eq!(ad_rows, 1, "(a,d) must be a single pair after per-part dedup");
+}
+
+/// `Sequence` whose FIRST element is a bounded ALTERNATION repetition:
+/// `(ex:p|ex:q){2}/ex:r`. Exercises `eval_sequence` composing an
+/// alternation-expanded sub-form (which itself unrolls to a^ℓ chains, possibly
+/// reaching the same mid node by several alternation branches) with a trailing
+/// hop. Differential against `(ex:p|ex:q)/(ex:p|ex:q)/ex:r`.
+#[test]
+fn differential_sequence_with_alternation_repetition_element() {
+    // a reaches m by p/p AND by q/q (two branches to the same mid m), then m->z
+    // via r. The two branches to m must dedup to one mid before composition.
+    let h1 = "ex:a ex:p ex:k . ex:a ex:q ex:j .";
+    let h2 = "ex:k ex:p ex:m . ex:j ex:q ex:m . ex:m ex:r ex:z .";
+    let edges = disclosed_edges(&[
+        (h1, &["http://ex/p", "http://ex/q"]),
+        (h2, &["http://ex/p", "http://ex/q", "http://ex/r"]),
+    ]);
+
+    let step = PathStep::alternation([nn("http://ex/p"), nn("http://ex/q")]);
+    let form = PathForm::Sequence(vec![
+        PathForm::repeat_step(step, 2, 2),
+        PathForm::exact(nn("http://ex/r"), 1),
+    ]);
+    let got = federated_pairs(&edges, &form);
+    let want = clear_text_pairs(&[h1, h2], "(ex:p|ex:q)/(ex:p|ex:q)/ex:r");
+    assert_eq!(
+        got, want,
+        "sequence with an alternation-repetition element must equal eval_path"
+    );
+    // (p|q){2} from a: a-p-k-p-m and a-q-j-q-m both reach m; then m-r-z. => {(a,z)}.
+    assert_eq!(got.len(), 1, "{got:?}");
+    let az_rows = got
+        .iter()
+        .filter(|(a, b)| {
+            *a == format!("{:?}", Term::from(nn("http://ex/a")))
+                && *b == format!("{:?}", Term::from(nn("http://ex/z")))
+        })
+        .count();
+    assert_eq!(
+        az_rows, 1,
+        "(a,z) must be a single pair despite two alternation branches reaching m"
+    );
+}
+
+// =====================================================================
 // 6. DEDUP across lengths — a pair reachable by two lengths appears ONCE
 // =====================================================================
 

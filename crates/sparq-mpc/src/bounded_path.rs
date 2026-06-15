@@ -218,6 +218,39 @@ impl DisclosedEdges {
                     part.vars.len()
                 )));
             }
+            // Soundness: the disclosed-key regime joins on GLOBAL IRIs. Both
+            // endpoints of every disclosed edge MUST be NamedNodes. A blank node
+            // would be unsound — blank-node labels are only document-scoped, so two
+            // holders emitting the same label do NOT denote the same term, yet the
+            // disclosed-key equi-join would treat equal labels as equal terms
+            // (a false cross-holder join). A literal endpoint is outside the
+            // global-IRI key regime entirely. Reject either at ingest (fail fast)
+            // rather than silently producing unsound joins (design §2.1 DISCLOSED
+            // regime boundary).
+            for row in &part.rows {
+                if row.len() != 2 {
+                    return Err(MpcError::Protocol(format!(
+                        "disclosed edge row for <{}> must have width 2; got {}",
+                        pred.as_str(),
+                        row.len()
+                    )));
+                }
+                for (col, slot) in row.iter().enumerate() {
+                    match slot {
+                        Some(Term::NamedNode(_)) => {}
+                        other => {
+                            return Err(MpcError::Protocol(format!(
+                                "disclosed edge for <{}> has a non-IRI endpoint in \
+                                 column {col} ({other:?}); the disclosed-key regime \
+                                 requires global-IRI (NamedNode) endpoints — blank \
+                                 nodes are document-scoped (unsound to join across \
+                                 holders) and literals are out of regime",
+                                pred.as_str()
+                            )));
+                        }
+                    }
+                }
+            }
             // Re-key onto the canonical (?__pp_edge_s, ?__pp_edge_o) schema so the
             // holder's chosen variable names cannot influence the join.
             let rekeyed = PartialResult {
@@ -376,8 +409,13 @@ fn eval_repetition(
 fn alternation_chains(step: &PathStep, length: usize) -> Vec<Vec<NamedNode>> {
     let mut chains: Vec<Vec<NamedNode>> = vec![Vec::new()];
     for _ in 0..length {
-        let mut next: Vec<Vec<NamedNode>> =
-            Vec::with_capacity(chains.len() * step.alternatives.len());
+        // Grow the chain set WITHOUT a `chains.len() * alternatives.len()`
+        // `with_capacity`: that product is `alternatives^length`, which can
+        // overflow `usize` or request an enormous allocation for large unrolls,
+        // turning a should-be-controlled protocol error into a panic/abort on a
+        // public API surface. Let the `Vec` grow amortised instead; any genuine
+        // unroll-size limit belongs to a higher-level guard, not here.
+        let mut next: Vec<Vec<NamedNode>> = Vec::new();
         for prefix in &chains {
             for alt in &step.alternatives {
                 let mut extended = prefix.clone();
@@ -434,7 +472,7 @@ fn eval_fixed_chain(
     }
 
     // Project onto (subject, object), dropping the intermediate columns.
-    Ok(project_endpoints(&acc, subject, object))
+    project_endpoints(&acc, subject, object)
 }
 
 /// `f1 / f2 / ... / fn` → relational composition of the sub-forms' pair
@@ -481,33 +519,51 @@ fn eval_sequence(
             key_disclosed: true,
         };
         acc = join.join(&[acc_dedup, part_rel], &plan)?;
-        acc = project_endpoints(&acc, subject, &this_end);
+        acc = project_endpoints(&acc, subject, &this_end)?;
         prev_end = this_end;
     }
 
-    Ok(project_endpoints(&acc, subject, object))
+    project_endpoints(&acc, subject, object)
 }
 
 /// Project a partial onto exactly `[subject, object]`, dropping every other
-/// (intermediate) column. The endpoint vars must be present.
-fn project_endpoints(part: &PartialResult, subject: &Variable, object: &Variable) -> PartialResult {
+/// (intermediate) column. Both endpoint vars MUST be present: this is an
+/// internal-invariant projection (the unroller always constructs relations that
+/// carry the endpoint columns it asks to project), so a missing endpoint var
+/// indicates a logic/protocol violation inside this module — NOT a "no results"
+/// situation. We FAIL FAST with a Protocol error rather than silently returning
+/// an empty relation, which would mask the bug by turning it into "no path
+/// found" and undermine soundness reasoning.
+fn project_endpoints(
+    part: &PartialResult,
+    subject: &Variable,
+    object: &Variable,
+) -> Result<PartialResult, MpcError> {
     let s_idx = part.vars.iter().position(|v| v == subject);
     let o_idx = part.vars.iter().position(|v| v == object);
-    let rows = match (s_idx, o_idx) {
-        (Some(si), Some(oi)) => part
-            .rows
-            .iter()
-            .map(|r| vec![r[si].clone(), r[oi].clone()])
-            .collect(),
-        // A degenerate single-endpoint relation (not expected on the disclosed
-        // endpoint-pair path) — keep nothing rather than guess a schema.
-        _ => Vec::new(),
+    let (si, oi) = match (s_idx, o_idx) {
+        (Some(si), Some(oi)) => (si, oi),
+        _ => {
+            return Err(MpcError::Protocol(format!(
+                "project_endpoints: endpoint var(s) missing from relation schema \
+                 (subject {subject:?} present: {}, object {object:?} present: {}; \
+                 actual vars: {:?}) — internal unroll invariant violated",
+                s_idx.is_some(),
+                o_idx.is_some(),
+                part.vars
+            )));
+        }
     };
-    PartialResult {
+    let rows = part
+        .rows
+        .iter()
+        .map(|r| vec![r[si].clone(), r[oi].clone()])
+        .collect();
+    Ok(PartialResult {
         holder: HolderId::new("federation"),
         vars: vec![subject.clone(), object.clone()],
         rows,
-    }
+    })
 }
 
 /// DEDUP the endpoint pairs to a SET (design §2.2/§2.5): each distinct `(a,b)`
@@ -520,15 +576,20 @@ fn dedup_endpoint_pairs(
     subject: &Variable,
     object: &Variable,
 ) -> PartialResult {
+    // Compute each row's canonical key ONCE (one allocation per row), then use it
+    // for both dedup and ordering. The previous `sort_by` re-`format!`-ed both
+    // operands on every comparison — O(n log n) string allocations — which gets
+    // expensive on large result sets; keying first is O(n) allocations.
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
+    let mut keyed: Vec<(String, Vec<Option<Term>>)> = Vec::new();
     for row in part.rows {
         let key = format!("{row:?}");
-        if seen.insert(key) {
-            rows.push(row);
+        if seen.insert(key.clone()) {
+            keyed.push((key, row));
         }
     }
-    rows.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let rows: Vec<Vec<Option<Term>>> = keyed.into_iter().map(|(_, row)| row).collect();
     PartialResult {
         holder: HolderId::new("federation"),
         vars: vec![subject.clone(), object.clone()],
