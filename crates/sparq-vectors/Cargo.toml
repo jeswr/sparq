@@ -27,6 +27,15 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
+# [OPUS-4.8] sq-k6ex (epic sq-3183): the `vec:` magic predicates — vector KNN
+# search expressed INSIDE plain SPARQL, mirroring sparq-text's `text:` rewrite.
+# OPT-IN and OFF by default: only this feature pulls `sparq-engine` (+ spargebra)
+# into this crate's dependency graph, so the default `sparq-vectors` build — and the
+# `sparq-core`/`sparq-engine` base query path — carry ZERO `vec:`-predicate code and
+# gain no new required deps. Like `text:`, the rewrite runs entirely at the
+# spargebra-algebra level through the engine's prepared-query seam, so the engine —
+# planner, executor, wasm bundle — is completely unaware of vector search.
+vec-predicate = ["dep:sparq-engine", "dep:spargebra"]
 # API shape for a live OpenAI-compatible `/v1/embeddings` provider. The HTTP transport
 # is supplied by the CALLER (a `Transport` impl over their HTTP client of choice);
 # this crate never opens a socket. Pulls in serde_json for request/response bodies.
@@ -51,6 +60,14 @@ memmap2.workspace = true
 # cleaner fit for an in-RAM index rebuilt from the mmap'd store on open.
 instant-distance.workspace = true
 serde_json = { version = "1", optional = true }
+# [OPUS-4.8] sq-k6ex: the `vec:` magic-predicate rewrite executes through the engine's
+# prepared-query seam (`PreparedQuery: From<spargebra::Query>`). Both deps are OPTIONAL
+# and ONLY pulled in by the `vec-predicate` feature — the default build (and anything
+# that does not opt in) never compiles the engine, so `sparq-core`/`sparq-engine` stay
+# lean and this crate stays a pure storage+ANN crate by default. `spargebra` walks/edits
+# the parsed algebra; it is already in the workspace tree via sparq-engine.
+sparq-engine = { path = "../sparq-engine", version = "0.1.0", optional = true }
+spargebra = { workspace = true, optional = true }
 # [OPUS-4.8] Concrete HTTP transport for the non-default `embeddings` feature only.
 # Blocking by design (the embed call is synchronous and this crate must not drag an
 # async runtime into the tree) — mirrors sparq-nlq's `live` reqwest dependency exactly.

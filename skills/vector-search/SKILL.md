@@ -1,6 +1,6 @@
 ---
 name: vector-search
-description: "Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, and fuse with another ranked signal (RRF / score blend) for hybrid retrieval. Use when adding embedding/semantic-search/nearest-neighbour over a sparq Graph in the sparq-vectors crate."
+description: "Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, fuse with another ranked signal (RRF / score blend) for hybrid retrieval, and — behind the opt-in `vec-predicate` feature — run k-NN INSIDE plain SPARQL via the `vec:nearest` / `vec:search` magic predicates. Use when adding embedding/semantic-search/nearest-neighbour over a sparq Graph in the sparq-vectors crate."
 ---
 
 # sparq-vector-search
@@ -128,6 +128,14 @@ fuse_scores(a: &[(T,f64)], b: &[(T,f64)], alpha /*1.0=a only*/, top_k) -> Vec<(T
 // one-call hybrid: run N retriever closures on one query, fuse by item via RRF, dedup
 hybrid_search(query: &Q, top_k, k /*RRF_K*/, &mut [Retriever<'_, Q, T>]) -> Vec<(T, f64)>   // [OPUS-4.8] lifetime on alias use
 //   Retriever<'r, Q, T> = &'r mut dyn FnMut(&Q) -> Vec<(T, f64)>  (e.g. nearest_term / most_similar closures)
+
+// --- `vec:` magic predicate (src/rewrite.rs) --- feature = "vec-predicate" ONLY; pulls sparq-engine [OPUS-4.8] sq-k6ex
+query_vec(&Graph, sparql: &str, &VectorStore) -> Result<QueryResult, String>      // parse + rewrite + evaluate
+query_vec_with_budget(&Graph, &str, &VectorStore, &QueryBudget) -> Result<QueryResult, String>
+prepare_vec(&Graph, &str, &VectorStore) -> Result<PreparedQuery, String>          // compose with engine *_prepared entry points
+rewrite_query(Query, &Graph, &VectorStore) -> Result<Query, String>              // spargebra-algebra rewrite only
+// re-exported when the feature is on: PreparedQuery, QueryBudget, QueryResult (no direct sparq-engine dep needed)
+// vocab: vec::{VEC_NS, NEAREST, SEARCH}  (http://sparq.dev/vec#)  — exact-scan (nearest_exact) KNN
 ```
 
 ## Common recipes
@@ -302,12 +310,58 @@ malformed/oversized `.npy` header is an `Err` — never a silent reinterpretatio
 length and declared shape are bounded against the actual file size before any body allocation
 (sq-tzwa hardening). `import_*` need `std::fs` and are compiled off the wasm target.
 
+### 8. k-NN INSIDE SPARQL — the `vec:` magic predicate (opt-in, feature = `vec-predicate`)
+
+Express nearest-neighbour search in plain SPARQL, mirroring `sparq-text`'s `text:` predicate:
+the rewrite runs the k-NN, inlines the hit nodes as a `VALUES` table at the spargebra-algebra
+level, and evaluates through the engine's prepared-query seam — so the **engine, planner,
+executor and wasm bundle are unchanged**. This is the **only** SPARQL-level hook, and it is
+**OFF by default**: the feature is the only thing that pulls `sparq-engine` into this crate, so
+without it `sparq-vectors` is a pure storage+ANN crate and the base query path carries zero
+`vec:` code (`cargo tree -p sparq-vectors` lists no `sparq-engine`/`spargebra`).
+
+```toml
+sparq-vectors = { path = "../sparq-vectors", features = ["vec-predicate"] }
+```
+
+```rust
+use sparq_vectors::{query_vec, VectorStore};   // query_vec only exists with the feature on
+// store built/finalized as above, keyed by the SAME graph's dict ids.
+
+// vec:nearest — bind ?node to the k nearest neighbours of a query.
+//   query = a node IRI (its stored vector; the seed is excluded) OR a "f1,f2,…" vector literal.
+let r = query_vec(&graph,
+    "PREFIX vec: <http://sparq.dev/vec#>
+     SELECT ?label WHERE {
+       ?node vec:nearest ( <http://example.org/bolt> 5 ) .   # 5 neighbours of bolt
+       ?node rdfs:label ?label .                              # join to ordinary triples
+     }", &store)?;
+
+// vec:search — also bind a cosine score; ORDER BY DESC recovers best-first (VALUES is unordered).
+let r = query_vec(&graph,
+    "PREFIX vec: <http://sparq.dev/vec#>
+     SELECT ?node ?score WHERE {
+       ( ?node ?score ) vec:search ( \"0.1,0.9,…\" 10 )
+     } ORDER BY DESC(?score)", &store)?;
+```
+
+The argument lists `( … )` are ordinary SPARQL RDF collections (spargebra lowers them to
+`rdf:first`/`rdf:rest`, which the rewrite walks). Hard query errors (not silent mismatches):
+the neighbour position(s) must be variables; `query`/`k` must be constants; the object list must
+be exactly `( query k )` and the `vec:search` subject exactly `( ?node ?score )`; a query-vector
+literal's dimension must match the store; any other `vec:` IRI is unknown. An absent/unembedded
+seed IRI yields no rows. Search is the **exact** `nearest_exact` scan (deterministic, the HNSW/
+DiskANN approximate indexes are not yet wired into the predicate — recorded follow-up).
+
 ## Gotchas / feature flags / prerequisites
 
-- **Opt-in, no SPARQL hook.** Nothing in the workspace depends on `sparq-vectors`; the
-  default engine build does not compile it. There is **no** SPARQL-level integration (no
-  `SERVICE`, function, or graph binding to vectors) — this is a standalone Rust library
-  over sparq-core's public read API. You wire vectors into application code yourself.
+- **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
+  build does not compile it. The core Rust flow (store/ANN/embed) is a standalone library
+  over sparq-core's public read API — you wire it into application code yourself. The **one**
+  SPARQL-level integration is the optional `vec:` magic predicate (recipe 8 below), behind
+  the **non-default `vec-predicate`** feature; with it OFF this crate has zero `sparq-engine`
+  dependency and the base engine/core query path is byte-identical (see recipe 8). There is
+  still no `SERVICE`/function binding.
 - **`HashEmbedder` is TEST-ONLY.** It is lexical n-gram hashing with **no semantics**
   ("car" and "automobile" are unrelated). Use it to exercise the store/ANN/pipeline; bring
   a real `Embedder` for actual retrieval.
