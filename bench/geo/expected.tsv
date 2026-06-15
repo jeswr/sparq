@@ -1,0 +1,24 @@
+# [OPUS-4.8] (sq-tf8n) GeoSPARQL benchmark DETERMINISTIC golden COUNTS over the FIXED
+# CRS84 point corpus (bench/geo/gen.sh -> 100000 seeded POINT literals, seed 20260615,
+# 8°x8° France-ish window). Format: <workload>\t<count>.
+#
+# COUNTS-NOT-COORDINATES: floating-point geometry is NOT bit-stable, so this gate asserts
+# only result-set SIZES and the compliance PASS COUNT — NEVER a coordinate value. The
+# counts are DERIVED by running bench_geo on the pinned corpus (not guessed); run.sh
+# asserts each and exits 1 on any drift (a correctness regression).
+#
+#   within10km           #entities within 10 km great-circle of (0, 51)        (geof:within)
+#   within50km           #entities within 50 km great-circle of (0, 51)
+#   nearest_k10          k=10 nearest entities to (0, 51) (invariant: == k)     (nearest-k)
+#   nearest_k100         k=100 nearest entities to (0, 51) (invariant: == k)
+#   geof_within          #corpus points satisfying geof:sfWithin(point, 1°x1° box at (0,51))
+#   geo_compliance_pass  #OGC topology fixtures (sf/eh/rcc8) matching the spec truth value;
+#                        the COMPLIANCE RATCHET numerator (max GEO_COMPLIANCE_MAX=25 in
+#                        run.sh; gated as the DEFICIT max-passed via geo_compliance_deficit,
+#                        mode:auto in bench/perf-baseline.json — coverage only TIGHTENS).
+within10km	51
+within50km	1547
+nearest_k10	10
+nearest_k100	100
+geof_within	1526
+geo_compliance_pass	25

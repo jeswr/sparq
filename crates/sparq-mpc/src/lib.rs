@@ -100,6 +100,15 @@
 // docs and research/mpc-malicious-security-design.md §2.1–2.2.
 pub mod authenticated;
 pub mod backend;
+// [OPUS-4.8] sq-dwb5: batched / vector secret sharing — generalise the
+// single-scalar `share_private_input` to a holder sharing a `Vec<Fp>` (per-row
+// hidden values / a salary vector / per-graph commitments) under a DOCUMENTED
+// row-binding (`RowBinding::Positional` / `Keyed`), so the secure aggregate +
+// hidden-value join can range over more than one value per source. Carries the
+// `BatchedShares` / `BatchedAuthShares` types, element-wise reconstruct, and the
+// multi-row `per_row_sum` secure aggregate (the demonstrated end-to-end path).
+// See the module docs for the row-binding contract.
+pub mod batched;
 // [OPUS-4.8] sq-rrz4: secure secret-shared greater-than / threshold over Fp that
 // opens ONLY the boolean verdict bit, never the operands. Bit-decomposition
 // MSB-first comparison chaining multiplications via mul_shares_raw + the landed
@@ -193,6 +202,8 @@ pub use backend::{
     MaliciousSecurity, MpcBackend, OperatorClass, OutputGuarantee, PublicVerifiability,
     SecurityDescriptor, SecurityRequirement, TrustModel,
 };
+// [OPUS-4.8] sq-dwb5: the batched / vector secret-sharing surface + row-binding.
+pub use batched::{per_row_sum, BatchedAuthShares, BatchedShares, RowBinding};
 // [OPUS-4.8] sq-sxm: the benchmark-matrix harness surface (in-process counting tier).
 pub use bench::{
     cell, run_matrix, CellSecurity, MatrixCell, MatrixResults, QueryClass, DEFAULT_PARTIES,

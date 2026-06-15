@@ -349,8 +349,31 @@ def evaluate(current, baseline, allow=frozenset()):
         if floor is None:
             lines.append(f"  - {name}: SKIP (no floor yet — establishes floor = {cur:g})")
             continue
-        if floor <= 0:
-            lines.append(f"  - {name}: SKIP (non-positive floor {floor:g})")
+        if floor < 0:
+            lines.append(f"  - {name}: SKIP (negative floor {floor:g})")
+            continue
+        # [OPUS-4.8] (sq-tf8n) A floor of EXACTLY 0 is a LEGITIMATE best-ever for a DEFICIT / count
+        # metric (geo_compliance_deficit = MAX - passed: zero deficit == perfect coverage, the
+        # tightest possible ratchet). It must HARD-GATE — any positive value is a regression — not
+        # be skipped. We special-case it because floor*(1+thr)=0 (so cur>0 already trips) but the
+        # percentage `delta` would divide by zero. A floor of 0 only ever makes sense for a
+        # DETERMINISTIC metric (a "noise" timing can't be exactly 0, and gating one against 0 with a
+        # multiplicative band is meaningless), so a 0-floor noise metric is still skipped safely.
+        if floor == 0:
+            if is_timing(cfg):
+                lines.append(f"  - {name}: SKIP (zero floor on a noise/timing metric — band is meaningless)")
+                continue
+            tag = "ratchet"
+            if cur > 0:
+                if name in allow:
+                    status = (f"ALLOWED-REGRESSION (PERF_GATE_ALLOW), {cur:g} > 0 (zero-deficit floor) "
+                              f"[{tag}] — floor will be RAISED to {cur:g}")
+                else:
+                    status = f"REGRESSION {cur:g} > 0 (any deficit above the zero-deficit floor) [{tag}]"
+                    regressions.append((name, floor, cur, 0.0, thr))
+            else:
+                status = f"OK {cur:g} == 0 (at the zero-deficit floor) [{tag}]"
+            lines.append(f"  - {name}: floor=0 cur={cur:g} -> {status}")
             continue
         limit = floor * (1 + thr)
         delta = (cur - floor) / floor * 100
@@ -608,8 +631,26 @@ def self_test():
     assert evaluate({"wasm_bundle_bytes": 1020.0}, base7)[0] == []          # exactly +2% -> OK
     assert [r[0] for r in evaluate({"wasm_bundle_bytes": 1021.0}, base7)[0]] == ["wasm_bundle_bytes"]
 
-    # 8) non-positive / None floor is skipped safely (no div-by-zero).
+    # 8) non-positive / None floor is skipped safely (no div-by-zero). A NOISE/timing metric with a
+    #    zero floor is skipped (a multiplicative band against 0 is meaningless); a NEGATIVE floor on
+    #    any metric is skipped as invalid.
     assert evaluate({"parse_ns_per_byte": 5.0}, mk({"parse_ns_per_byte": 0.0}))[0] == []
+    assert evaluate({"store_bytes_per_triple": 5.0}, mk({"store_bytes_per_triple": -1.0}))[0] == []
+
+    # 8b) [OPUS-4.8] (sq-tf8n) ZERO-FLOOR DETERMINISTIC HARD GATE — geo_compliance_deficit. A floor of
+    #     EXACTLY 0 is the tightest best-ever for a DEFICIT metric (0 == perfect coverage): it must
+    #     HARD-GATE, not be skipped. Any positive value is a regression; exactly 0 passes (at floor).
+    baseZ = {"geo_compliance_deficit": {"floor": 0, "threshold": 0.02, "mode": "auto"}}
+    assert evaluate({"geo_compliance_deficit": 0}, baseZ)[0] == [], "zero deficit must PASS (at floor)"
+    regsZ, _ = evaluate({"geo_compliance_deficit": 1}, baseZ)
+    assert [r[0] for r in regsZ] == ["geo_compliance_deficit"], regsZ  # any deficit HARD-FAILS
+    regsZ3, _ = evaluate({"geo_compliance_deficit": 3}, baseZ)
+    assert [r[0] for r in regsZ3] == ["geo_compliance_deficit"], regsZ3
+    # PERF_GATE_ALLOW lets a zero-floor deficit regress this run (deliberate re-pin), like any metric.
+    assert evaluate({"geo_compliance_deficit": 2}, baseZ, allow={"geo_compliance_deficit"})[0] == []
+    # a zero-floor deficit never loosens on its own: update_baseline keeps floor=0 (cur can't beat 0).
+    _, chZ = update_baseline({"geo_compliance_deficit": 0}, baseZ)
+    assert chZ == [], chZ
 
     # 9) metric CLASSIFICATION is data-driven from `mode` (sq-dzfu), not a hard-coded name list.
     assert is_timing({"mode": "noise"}) and not is_deterministic({"mode": "noise"})
