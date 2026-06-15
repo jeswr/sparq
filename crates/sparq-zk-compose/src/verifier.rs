@@ -3620,6 +3620,128 @@ mod tests {
         assert_eq!(got, bb, "scan reconstruction must byte-match bb");
     }
 
+    /// [OPUS-4.8] sq-f9tl (re-audit NEW-1): EMPIRICAL anchor for the
+    /// `filter_f64_d{d}` family — the re-audit flagged it as relying on layout
+    /// reasoning with NO captured golden vector. `filter_f64_d2` over:
+    /// challenge=0x2a, operand_enc=0x1a9c…c990 ("25"^^xsd:double), op=Ge(3),
+    /// b_bits=0x4032000000000000 (18.0 IEEE-754), expected=true. 5 fields * 32 =
+    /// 160 bytes. Captured verbatim by `probe_filter_f64_public_inputs_hex`
+    /// (e2e.rs, ignored) from a real `bb prove`; a toolchain bump that changes
+    /// the f64 serialization breaks this test loudly.
+    #[test]
+    fn reconstruct_filter_f64_matches_real_bb_public_inputs() {
+        let bb = hex_decode(concat!(
+            // challenge
+            "000000000000000000000000000000000000000000000000000000000000002a",
+            // operand_enc ("25"^^xsd:double)
+            "1a9cfccd1a2354f0e79fefda14e00216260fce60b75bd34cace5606856c3c990",
+            // op = Ge (3)
+            "0000000000000000000000000000000000000000000000000000000000000003",
+            // b_bits = 18.0_f64 = 0x4032000000000000
+            "0000000000000000000000000000000000000000000000004032000000000000",
+            // expected = true
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ))
+        .unwrap();
+        let inputs = ProofInputs::FilterF64 {
+            id: CircuitId::FilterF64 { d: 2 },
+            operand_enc: fh("0x1a9cfccd1a2354f0e79fefda14e00216260fce60b75bd34cace5606856c3c990"),
+            op: FilterOp::Ge,
+            b_bits: 18.0_f64.to_bits(),
+            expected: true,
+        };
+        let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
+        assert_eq!(got.len(), 160);
+        assert_eq!(got, bb, "filter_f64 reconstruction must byte-match bb");
+    }
+
+    /// [OPUS-4.8] sq-f9tl (re-audit NEW-1): EMPIRICAL anchor for the k=2 scan
+    /// family (`scan_k2_n16_r8`) — the other un-anchored member the re-audit
+    /// flagged. Two named-graph credentials, each with 3 matching `ex:age`
+    /// triples (6 active rows, padded to r=8) and BOTH contributing (audit #8
+    /// attribution = [true, true]). 36 fields * 32 = 1152 bytes; this exercises
+    /// the k=2 commitment array, the trailing two-bit attribution word group, and
+    /// the r=8 pad path that the k=1 anchor cannot. Captured verbatim by
+    /// `probe_scan_k2_public_inputs_hex` (e2e.rs, ignored) from a real `bb prove`.
+    #[test]
+    fn reconstruct_scan_k2_matches_real_bb_public_inputs() {
+        let bb = hex_decode(concat!(
+            // challenge
+            "000000000000000000000000000000000000000000000000000000000000002a",
+            // commitments[0], commitments[1]
+            "3009ad0a7a02313686bfb8e9224a7a9a5d2f90653b3905243ffc826f8b1c4baf",
+            "1e182eccb67380e0a29dfbdd337b27daee9b2bc0c6d35e9dbc55be67b2acfa90",
+            // pattern_is_const [false,true,false]
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // pattern_const_enc [0, ex:age, 0]
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "057914fc592ade7b970f92e4992958ea8a6a265caeb012b5b63903257eef5b61",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // rows[0..6] = the 6 active matched rows (row-major s,p,o)
+            "067d8d75b405117a4cce58d59db1cbe420dabf0ff8d4c0fa50d80ccf0ed4a713",
+            "057914fc592ade7b970f92e4992958ea8a6a265caeb012b5b63903257eef5b61",
+            "08a387a1d4e98da1fcf28c25bc413f88d5ff771682c18f432f0f03971fad9602",
+            "067d8d75b405117a4cce58d59db1cbe420dabf0ff8d4c0fa50d80ccf0ed4a713",
+            "057914fc592ade7b970f92e4992958ea8a6a265caeb012b5b63903257eef5b61",
+            "1aff50a8f430c8288c8a386adefff02a20c75db111a6ef0dcb71e3d63c36e39e",
+            "067d8d75b405117a4cce58d59db1cbe420dabf0ff8d4c0fa50d80ccf0ed4a713",
+            "057914fc592ade7b970f92e4992958ea8a6a265caeb012b5b63903257eef5b61",
+            "1e76b7d5b462137832e8c482bf0e84cd27acff5af29ab19f584b7e4e5279c3c6",
+            "067d8d75b405117a4cce58d59db1cbe420dabf0ff8d4c0fa50d80ccf0ed4a713",
+            "057914fc592ade7b970f92e4992958ea8a6a265caeb012b5b63903257eef5b61",
+            "132fa587351bf3f12fd3cbed64d5526f28791099d1d40870f94595873c78fa72",
+            "067d8d75b405117a4cce58d59db1cbe420dabf0ff8d4c0fa50d80ccf0ed4a713",
+            "057914fc592ade7b970f92e4992958ea8a6a265caeb012b5b63903257eef5b61",
+            "30202cbdd89765b9370d4790b6f7f073a95ef2ffbd731b53ce49cd2eb86614f0",
+            "067d8d75b405117a4cce58d59db1cbe420dabf0ff8d4c0fa50d80ccf0ed4a713",
+            "057914fc592ade7b970f92e4992958ea8a6a265caeb012b5b63903257eef5b61",
+            "16cd94467389dbde075372360eadb589f417d9e8c79507a34293ef3478b2d68b",
+            // rows[6..8] = 2 zero rows (6 zero words) padding to r=8
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            // row_count = 6
+            "0000000000000000000000000000000000000000000000000000000000000006",
+            // attribution[0], attribution[1] = both true (audit #8)
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        ))
+        .unwrap();
+        // [OPUS-4.8] sq-f9tl (Copilot review): each closure is named for the (s,p,o)
+        // COLUMN it fills, so the anchor rows read in triple order — `subj` is the
+        // subject (ex:alice), `age` the predicate (ex:age), `z` a zero field.
+        let z = || fh("0x0");
+        let subj = || fh("0x067d8d75b405117a4cce58d59db1cbe420dabf0ff8d4c0fa50d80ccf0ed4a713");
+        let age = || fh("0x057914fc592ade7b970f92e4992958ea8a6a265caeb012b5b63903257eef5b61");
+        let inputs = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 2, n: 16, r: 8 },
+            commitments: vec![
+                fh("0x3009ad0a7a02313686bfb8e9224a7a9a5d2f90653b3905243ffc826f8b1c4baf"),
+                fh("0x1e182eccb67380e0a29dfbdd337b27daee9b2bc0c6d35e9dbc55be67b2acfa90"),
+            ],
+            pattern_is_const: [false, true, false],
+            pattern_const_enc: [z(), age(), z()],
+            rows: vec![
+                [subj(), age(), fh("0x08a387a1d4e98da1fcf28c25bc413f88d5ff771682c18f432f0f03971fad9602")],
+                [subj(), age(), fh("0x1aff50a8f430c8288c8a386adefff02a20c75db111a6ef0dcb71e3d63c36e39e")],
+                [subj(), age(), fh("0x1e76b7d5b462137832e8c482bf0e84cd27acff5af29ab19f584b7e4e5279c3c6")],
+                [subj(), age(), fh("0x132fa587351bf3f12fd3cbed64d5526f28791099d1d40870f94595873c78fa72")],
+                [subj(), age(), fh("0x30202cbdd89765b9370d4790b6f7f073a95ef2ffbd731b53ce49cd2eb86614f0")],
+                [subj(), age(), fh("0x16cd94467389dbde075372360eadb589f417d9e8c79507a34293ef3478b2d68b")],
+            ],
+            row_count: 6,
+            attribution: vec![true, true],
+        };
+        let got = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
+        assert_eq!(got.len(), 1152);
+        assert_eq!(got, bb, "scan_k2 reconstruction must byte-match bb");
+    }
+
     /// A different declared statement (a single mutated field) must produce a
     /// different vector — the property the byte-compare relies on (audit #1).
     #[test]

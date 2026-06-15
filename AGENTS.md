@@ -88,7 +88,7 @@ After a batch of changes, re-run only the evaluations whose inputs changed — o
 | a public API (`pub` item / CLI flag / HTTP route / Py/JS binding) | update the matching `skills/<surface>/SKILL.md` (REQUIRED, same change); the surface's tests |
 | `sparq-wasm` / the wasm graph | `scripts/wasm-deps-guard.sh`; `wasm-pack test --node`; the `wasm_bundle_bytes` size gate |
 | Cargo dependencies (`Cargo.toml`/`Cargo.lock`) | `cargo audit` + `cargo deny check` + regenerate the SBOM (supply-chain gate) |
-| the ZK verifier / circuits (`sparq-zk`, `sparq-zk-compose`) | `forge_gates` + `differential_fuzz`; the gate-count snapshot; re-open the soundness audit |
+| the ZK verifier / circuits (`sparq-zk`, `sparq-zk-compose`) | `forge_gates` + `differential_fuzz`; the gate-count snapshot; re-open the soundness audit; the **`zk-toolchain` lane** (`.github/workflows/zk-toolchain.yml`) — runs the `#[ignore]`d real-`bb` forge/anchor suite under the pinned Noir toolchain (nightly + `workflow_dispatch` + on ZK-path PRs). If you change the public-input serialization (`verifier.rs::reconstruct_public_inputs`) re-capture the empirical bb anchors via the `probe_*_public_inputs_hex` e2e probes |
 | SHACL (`sparq-shacl`) | the W3C SHACL conformance ratchet (core ≥98, sparql ≥5) |
 | storage/encoding (`sparq-core` store/dict/compress, mmap, dict-spill) | the deterministic perf-gate metrics; byte-identity differentials; coverage with `--features dict-spill` |
 | anything merged | the per-crate coverage ratchet + test-presence gate (`scripts/coverage*.py`) |
