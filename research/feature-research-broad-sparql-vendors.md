@@ -16,11 +16,13 @@ The candidate table at the end uses the **same format as the sibling agents**: e
 
 ## 0. What sparq already ships (grounding — do NOT re-propose)
 
-Established from `crates/`, the 16 `skills/*/SKILL.md`, and `research/ARCHITECTURE.md`:
+Established from `crates/`, the 15 `skills/*/SKILL.md` (plus the root `skills/SKILL.md`),
+and `research/ARCHITECTURE.md`:
 
 - **SPARQL 1.1 query + update**, plus **SPARQL 1.2 / RDF 1.2** triple-terms and
-  `langdir`/base-direction (`json.rs` emits SPARQL-1.2 JSON `its:dir`; `dataset.rs`
-  carries `TripleTerm`s; SERVICE handles 1.2 triple terms). RDF-star quoted triples.
+  `langdir`/base-direction (`crates/sparq-engine/src/json.rs` emits SPARQL-1.2 JSON
+  `its:dir`; `crates/sparq-engine/src/dataset.rs` carries `TripleTerm`s; SERVICE handles
+  1.2 triple terms). RDF-star quoted triples.
 - **Property paths**, aggregates/GROUP BY/HAVING, subqueries, BIND/VALUES,
   OPTIONAL/MINUS/UNION, DISTINCT, named-graph dataset views, EXISTS.
 - **Custom extension functions** (SPARQL 17.6) via `FunctionRegistry` /
@@ -321,7 +323,7 @@ Impact 1–5 (5 = closes a broad table-stakes gap vs many vendors). Effort S/M/L
 | 1 | **RDF serializer matrix** (Turtle/TriG/N-Quads/N-Triples writers, prefix-compacted) + CLI `serialize`/`convert` | `clear-fit:sparq-core` (+ CLI/HTTP/Py/JS) | 5 | M | Parsers exist; the data-formats skill admits "no text serializer." Every peer round-trips RDF. Closes the most embarrassing baseline gap. [Oxigraph](https://github.com/oxigraph/oxigraph), [Jena](https://en.wikipedia.org/wiki/Apache_Jena) |
 | 2 | **JSON-LD 1.1** parse + serialize | `clear-fit:sparq-core` | 4 | M | Dominant web-facing RDF format; Jena/RDF4J/Oxigraph all support it; sparq has none. [RDF4J](https://rdf4j.org/) |
 | 3 | **SPARQL 1.2 Service Description** endpoint (capabilities/functions/formats/graphs) | `clear-fit:sparq-server` | 4 | S | Machine-readable endpoint discovery; shipped by QLever/GraphDB/Virtuoso; agents rely on it. [SD spec](https://www.w3.org/TR/sparql12-service-description) |
-| 4 | **RDFC-1.0 canonicalization** as a public API + CLI (`canonicalize`, dataset hash, isomorphism check) | `clear-fit:sparq-core` (lift from `sparq-zk`) | 4 | S | W3C **REC** (May 2024); code already exists inside `sparq-zk/trace.rs`. Unlocks dataset diff/dedup/signing outside ZK. [RDFC-1.0](https://www.w3.org/TR/2024/PR-rdf-canon-20240326/) |
+| 4 | **RDFC-1.0 canonicalization** as a public API + CLI (`canonicalize`, dataset hash, isomorphism check) | `clear-fit:sparq-core` (lift from `sparq-zk`) | 4 | S | W3C **REC** (May 2024); code already exists inside `crates/sparq-zk/src/canon.rs` (consumed by `trace.rs`). Unlocks dataset diff/dedup/signing outside ZK. [RDFC-1.0](https://www.w3.org/TR/2024/PR-rdf-canon-20240326/) |
 | 5 | **Window functions** (`ROW_NUMBER`/`RANK`/moving aggregates, "limit per resource") | `clear-fit:sparq-engine` | 4 | M | #1 SPARQL expressivity ask (w3c/sparql-dev #47); AnzoGraph/Stardog ship it; no spec blocker. [sparql-dev #47](https://github.com/w3c/sparql-dev/issues/47) |
 | 6 | **SHACL-AF rules** (`sh:rule`/`sh:SPARQLRule`/`sh:TripleRule` execution + node expressions) | `clear-fit:sparq-shacl` (+ reasoner seam) | 4 | M | Turns the existing SHACL crate into a rule/inference engine; W3C-defined; Stardog/AllegroGraph parity. [SHACL-AF](https://www.w3.org/TR/shacl-af/) |
 | 7 | **Custom aggregates** registry (pluggable, like custom scalar fns) | `clear-fit:sparq-engine` | 3 | S | SPARQL's aggregate set is closed; Stardog + Jena/ARQ both extend it; sparq already has `FunctionRegistry` to mirror. [Jena](https://jena.apache.org/documentation/query/custom_aggregates.html), [Stardog](https://docs.stardog.com/developing/extending-stardog/aggregates) |
