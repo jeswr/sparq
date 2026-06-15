@@ -1,0 +1,5 @@
+# sq-eifd vector fixture: EXACT-kNN ground truth. <qid>\t<ranked neighbour ids, csv>
+# 3 queries, k=4. Pairs with knn_approx.tsv to give a KNOWN recall@4 = 11/12.
+q0	10,11,12,13
+q1	20,21,22,23
+q2	30,31,32,33

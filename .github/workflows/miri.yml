@@ -1,0 +1,120 @@
+# miri — undefined-behaviour lane over sparq-core's pure-Rust `unsafe` surface (bead sq-fo28).
+# [OPUS-4.8] authored while Fable unavailable — re-review when Fable returns.
+#
+# WHY: `sparq-core` is the repo's only crate with `unsafe` (threat-model boundary B5 —
+# `research/threat-model.md`). The closed sq-ky2a corruption sweep + the `fuzz` lane catch
+# slice-bound PANICS / OOM on a hostile on-disk index, but they do NOT detect UNDEFINED
+# BEHAVIOUR — aliasing / pointer-provenance violations / data races. Miri does. This lane
+# interprets `cargo test -p sparq-core` under Miri so a regression that introduces UB in the
+# pure-Rust unsafe paths (the parallel dict-build scatter writes in `dict.rs`, the POD↔bytes
+# transmutes, the `from_utf8_unchecked` over in-memory buffers, the `set_len`-after-
+# `MaybeUninit` fill) fails a standing check. NOTE: the dict-spill scatter writes
+# (`dictspill.rs`) are NOT in scope here — that module is `#[cfg(feature = "dict-spill")]`,
+# which pulls in `mmap`, and neither feature is enabled in this lane (see below).
+#
+# WHAT MIRI COVERS vs CAN'T (measured — see the PR for sq-fo28):
+#   • COVERED (default features = `parallel`): the pure-Rust unsafe sites reachable WITHOUT
+#     `mmap`/`dict-spill` — the rayon `par_iter_mut` dict-build raw-pointer scatter writes in
+#     `dict.rs` (NOT `dictspill.rs`, which is `#[cfg(feature = "dict-spill")]` and is not
+#     compiled here), the `&[POD]`↔`&[u8]` reinterprets over in-memory Vec/slice,
+#     `str::from_utf8_unchecked` over in-process buffers, and the parallel `MaybeUninit` +
+#     `set_len` remap. These RUN.
+#   • STRUCTURALLY CANNOT RUN under Miri: the 16 mmap-backed sites (every `memmap2::Mmap::map`
+#     / `MmapMut::map_mut` / `madvise`, the libc `sysconf`/`statvfs` FFI in dict-spill, and
+#     every slice reinterpret whose provenance is a live `Mmap`). Miri rejects file-backed
+#     memory mappings outright ("Miri does not support file-backed memory mappings"), so the
+#     `mmap` / `dict-spill` features are NOT enabled here — they would only abort on the first
+#     `Mmap::map`. That mmap B5 surface is covered instead by the DETERMINISTIC
+#     `mmap_corruption_oracle` test (run in ci.yml under `--features mmap,dict-spill`) + the
+#     `fuzz` lane's mmap-loader target, and is the intended target of a future ASan lane
+#     (deferred — bead noted in the sq-fo28 PR; ASan needs `-Zsanitizer=address` + a non-musl
+#     target and is left out here to keep this lane clean + non-flaky).
+#
+# MIRIFLAGS (documented, load-bearing):
+#   -Zmiri-tree-borrows  : `rayon` pulls in `crossbeam-epoch`, which violates the default
+#                          STACKED-Borrows aliasing model (a known upstream incompatibility —
+#                          the crate is written against the more permissive TREE-Borrows
+#                          aliasing model). Without this flag Miri aborts inside
+#                          crossbeam-epoch's `internal.rs`, NOT in sparq-core code. Tree
+#                          Borrows is the correct aliasing model for this dependency graph
+#                          and still detects real UB in sparq-core's own unsafe.
+#   -Zmiri-ignore-leaks  : `rayon`'s global thread pool keeps daemon worker threads alive at
+#                          process exit; Miri otherwise fails the run with "the main thread
+#                          terminated without waiting for all remaining threads". This is a
+#                          thread-pool lifecycle artefact, not a sparq-core leak.
+#   -Zmiri-disable-isolation : a handful of in-memory tests touch the clock / temp paths;
+#                          isolation off lets them run. (No mmap/FS-index test is compiled in
+#                          under the default feature set, so this only unblocks incidental
+#                          host access, never the unsupported mmap path.)
+#
+# TRIGGER (deliberately OFF the per-PR critical path — Miri interprets every instruction, so
+# the suite is ~100× slower than native and is NOT something to pay on every PR):
+#   • schedule (nightly) — the standing UB safety net.
+#   • workflow_dispatch  — on demand.
+# There is intentionally NO `pull_request` / `merge_group` / `push` trigger: this workflow
+# therefore creates NO check-run on a PR head or merge-queue ref, so the required
+# `ci-summary / gate` aggregator (which POLLS sibling check-runs on the head commit) never
+# discovers it and never waits on it — exactly the "nightly safety net, not a per-PR tax"
+# posture of the zk-toolchain / fuzz-nightly lanes.
+#
+# Third-party actions are pinned by full commit SHA (supply-chain hardening); the trailing
+# `# vX.Y.Z` comment is what Dependabot follows to bump the pin.
+name: miri
+
+on:
+  workflow_dispatch:
+  # Nightly safety net at 05:11 UTC — offset from ci.yml (03:17), fuzz/zk-toolchain (04:23)
+  # so the heavy nightly lanes do not contend for the same runner window.
+  schedule:
+    - cron: "11 5 * * *"
+
+# Least-privilege: this lane only reads the repo + runs tests.
+permissions:
+  contents: read
+
+concurrency:
+  group: miri-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # See the header for why each flag is load-bearing. Kept in one place so a future toolchain
+  # bump only edits here.
+  MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation"
+
+jobs:
+  miri:
+    name: miri (sparq-core unsafe surface, UB)
+    runs-on: ubuntu-latest
+    # Miri interprets every instruction; the parallel dict-build tests are the long pole.
+    # Generous ceiling so a regression that hangs fails with a clear timeout, not a runaway.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Miri ships ONLY on nightly. Pin the nightly channel by DATE so the lane is
+      # reproducible and a future nightly regression cannot silently break it; bump the date
+      # deliberately (same pinned dtolnay action + nightly the `fuzz` lane uses). The `miri`
+      # + `rust-src` components are required: `cargo miri` builds a Miri sysroot from source.
+      - name: Install Rust (nightly, pinned) + miri
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly via toolchain input
+        with:
+          toolchain: nightly-2026-06-11
+          components: miri, rust-src
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Miri uses its own `target/miri` tree + a built-from-source sysroot; key the cache
+          # so it is not confused with the stable workspace build in ci.yml.
+          key: miri
+      # Build the Miri sysroot once up front so a sysroot/toolchain problem is reported
+      # distinctly from a test failure, and the test run below reuses it.
+      - name: Build Miri sysroot
+        run: cargo +nightly-2026-06-11 miri setup
+      # Default features (= `parallel`). The `mmap` / `dict-spill` features are deliberately
+      # NOT enabled: Miri cannot run file-backed memory mappings (see the header), so they
+      # would only abort on the first `Mmap::map`. This run exercises the pure-Rust unsafe
+      # surface — the parallel scatter writes, POD transmutes, `from_utf8_unchecked`, and the
+      # `MaybeUninit`+`set_len` remap — for aliasing / provenance / data-race UB.
+      - name: cargo miri test -p sparq-core
+        run: cargo +nightly-2026-06-11 miri test -p sparq-core

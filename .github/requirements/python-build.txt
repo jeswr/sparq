@@ -1,0 +1,50 @@
+# Hash-pinned build/test tools for the Python-bindings CI (python.yml). [OPUS-4.8]
+#
+# Scorecard PinnedDependenciesID requires CI pip installs be pinned by HASH, not
+# just `==` version. Installed with `pip install --require-hashes -r`, which
+# verifies the sha256 of EVERY artifact — including transitive deps — before use.
+#
+# maturin and pytest DO pull transitive deps, so the full closure (iniconfig,
+# packaging, pluggy, pygments) is hash-pinned here too; --require-hashes rejects
+# any unlisted dependency.
+#
+# Generated (do not hand-edit the body below) — regenerate after a version bump:
+#   printf 'maturin==1.14.0\npytest==9.1.0\n' > python-build.in
+#   pip-compile --generate-hashes --allow-unsafe --no-header \
+#       --output-file=.github/requirements/python-build.txt python-build.in
+iniconfig==2.3.0 \
+    --hash=sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730 \
+    --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
+    # via pytest
+maturin==1.14.0 \
+    --hash=sha256:019ea3ec7e71f4c9759a367d4d21022ed5a3a621a2ce123abf3fb114ab3711ca \
+    --hash=sha256:095714b2a904927e3c868a1c5d078257ff0443c5049f7623777352966768306e \
+    --hash=sha256:107f84110d890090a01bb1ecd01761fdfae925c23c659ba492c9b83dd179eab4 \
+    --hash=sha256:1506e86b1e273a98074a62e281b13f27ac96f8cdef85f7f98d3e3589a9387a23 \
+    --hash=sha256:20229d332f87166b930e4ca07cdbee8a1726f2eea87a337610aa25bba3ddf4b4 \
+    --hash=sha256:2d123337e817f8dfe23755d6760139c01104137bb63e9e20c289c547e25ec857 \
+    --hash=sha256:4ba1e3c3f33609f461d587b7549104c81a15fd6d42ba63a73cea9376a1e9876e \
+    --hash=sha256:6948a10f5f3470b791f79319be51debdd8bfd1778b36f2409f98e1314bc3859b \
+    --hash=sha256:75bcd4468a7fe597652cc2980c6bb16ce4bb8c411e3eb85dac2c4418cef0e95a \
+    --hash=sha256:8c1a8188195f5b6ce1aab99ae2d92e342900298f901456b43ca028947fd3b288 \
+    --hash=sha256:9a84277aa907961cd47ad26fef1539e79efa30611972eaf7499606e773e991b2 \
+    --hash=sha256:cb09a313f097adeb4dda0082277871a28d1bd26615dbadab42e6234b6df6fe69 \
+    --hash=sha256:df10ce4f7ba97fd3423f624f39b94c888ae3e5b470642a91918e1ccec81282fd \
+    --hash=sha256:f7f82a6aca4a6c402bf00b99200be199d4874d04b9b9e74e825726a3478bba7f
+    # via -r python-build.in
+packaging==26.2 \
+    --hash=sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e \
+    --hash=sha256:ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661
+    # via pytest
+pluggy==1.6.0 \
+    --hash=sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3 \
+    --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
+    # via pytest
+pygments==2.20.0 \
+    --hash=sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f \
+    --hash=sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176
+    # via pytest
+pytest==9.1.0 \
+    --hash=sha256:41dd9148c08072446394cefd3d79701701335a9f4cae69ba92e39f6c7f5c061c \
+    --hash=sha256:8ebb0e7888bdf2bdfc602ec51f8f62d50200af37356c74e503c79a94f5c81f32
+    # via -r python-build.in

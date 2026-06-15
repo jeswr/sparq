@@ -1,0 +1,27 @@
+# [OPUS-4.8] sq-eifd cross-engine SHACL fixture — DATA graph.
+# Four ex:Person focus nodes, hand-authored so the violation set is unambiguous:
+#   ex:alice   — VALID    (name string, age integer, knows an IRI)            0 viol
+#   ex:bob     — missing ex:name                                  -> minCount  1 viol
+#   ex:carol   — ex:age is a string not integer                   -> datatype  1 viol
+#   ex:dave    — ex:knows points at a literal not an IRI          -> nodeKind  1 viol
+# Total: 3 violations, does NOT conform. No constraint can fire twice on one node
+# here, so engines that dedup vs not agree on the count (3).
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:  <http://example.org/> .
+
+ex:alice a ex:Person ;
+    ex:name "Alice" ;
+    ex:age 30 ;
+    ex:knows ex:bob .
+
+ex:bob a ex:Person ;
+    ex:age 25 ;
+    ex:knows ex:carol .
+
+ex:carol a ex:Person ;
+    ex:name "Carol" ;
+    ex:age "twenty-six" .
+
+ex:dave a ex:Person ;
+    ex:name "Dave" ;
+    ex:knows "not-an-iri" .

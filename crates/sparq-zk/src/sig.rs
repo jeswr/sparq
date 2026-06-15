@@ -367,6 +367,43 @@ pub fn status_index_commitment(index: u64, blinding: &Fr) -> Fr {
     ])
 }
 
+/// `SIG_DOMAIN_JOIN` — domain-separation tag for the hidden cross-credential
+/// join value commitment (`research/zk-hidden-join-design.md` §2.4). Distinct
+/// from every other `SIG_DOMAIN_*` tag so a join commitment can never be
+/// cross-substituted for a status/index/holder/credential commitment. (The
+/// Noir-side circuit exposes the identical byte tag under the name
+/// `JOIN_DOMAIN`.)
+// [OPUS-4.8] sq-bwwl / sq-sco0: hidden-join value-commitment domain tag.
+pub const SIG_DOMAIN_JOIN: u64 = 0x5a4b_5349_475f_4a4e; // "ZKSIG_JN"
+
+/// A HIDING commitment to a hidden cross-credential join VALUE
+/// (`research/zk-hidden-join-design.md` §2.4 / bead `sq-bwwl`). The single-prover
+/// analogue of [`status_index_commitment`]: where that hides a status-list index,
+/// this hides the JOINED TERM ENCODING of a cross-credential join (the `?p`
+/// shared across two issuer credentials), so the privacy-sensitive joined entity
+/// never enters any public input.
+///
+/// `value` is the Poseidon2 term encoding of the join key. `blinding` is a
+/// per-PRESENTATION random field element. Two presentations of the same join
+/// value produce UNLINKABLE commitments, and — load-bearing — a verifier cannot
+/// dictionary-attack a low-entropy join key by enumerating candidate encodings
+/// (design §1.4 R4): a bare deterministic encoding would be brute-forceable, the
+/// blinded commitment is hiding.
+///
+/// # Cross-binding (load-bearing for soundness)
+/// This commitment is recomputed IN-CIRCUIT by the `join_eq` member from the SAME
+/// private join value the in-circuit equality (`a_val == b_val`) uses (design
+/// §2.2 step 5) and a private `blinding`, and exposed as a PUBLIC input. For a
+/// multi-way (N-way) join the same `join_commitment` is shared across each
+/// pairwise `join_eq`, composing pairwise equalities into an N-way join without
+/// ever disclosing the value. Issuer/verifier/circuit all compute it identically
+/// (single source of truth), so a drift cannot make a wrong commitment verify.
+// [OPUS-4.8] sq-bwwl / sq-sco0: hidden-join value commitment (mirrors the Noir
+// `join::join_value_commitment` gadget — h3(SIG_DOMAIN_JOIN, value, blinding)).
+pub fn join_value_commitment(value: &Fr, blinding: &Fr) -> Fr {
+    poseidon2::hash(&[Fr::from(SIG_DOMAIN_JOIN), *value, *blinding])
+}
+
 /// A domain-separated digest of a credential's status-list reference that binds a
 /// COMMITMENT to the index (sq-ayv) instead of the clear index — the
 /// index-hiding analogue of [`status_ref_digest`]. The issuer folds
@@ -1568,5 +1605,32 @@ mod tests {
             holder_key_digest(&real).is_ok(),
             "a non-identity holder key must still digest successfully"
         );
+    }
+
+    // [OPUS-4.8] sq-bwwl / sq-sco0: hidden-join value commitment.
+    #[test]
+    fn join_value_commitment_is_deterministic_and_domain_separated() {
+        let value = Fr::from(0x1234u64);
+        let blinding = Fr::from(0xb1u64);
+        // Determinism / single-source-of-truth: matches the raw Poseidon2 the Noir
+        // `join::join_value_commitment` gadget computes (same tag, same preimage
+        // order) — the host half of the cross-vector the Noir test
+        // `join_value_commitment_matches_host` pins.
+        let c = join_value_commitment(&value, &blinding);
+        assert_eq!(
+            c,
+            poseidon2::hash(&[Fr::from(SIG_DOMAIN_JOIN), value, blinding]),
+            "join_value_commitment must be h3(SIG_DOMAIN_JOIN, value, blinding)"
+        );
+        // The tag bytes are "ZKSIG_JN" (matches the Noir global JOIN_DOMAIN).
+        assert_eq!(SIG_DOMAIN_JOIN, u64::from_be_bytes(*b"ZKSIG_JN"));
+        // The blinder is HIDING: same value, different blinder => unlinkable.
+        let c2 = join_value_commitment(&value, &Fr::from(0xb2u64));
+        assert_ne!(c, c2, "different blinders must yield unlinkable commitments");
+        // Domain separation: a join commitment must never collide with the
+        // status-index commitment over the same (value-as-index, blinding) — the
+        // distinct tag prevents cross-substitution.
+        let idx_c = status_index_commitment(0x1234u64, &blinding);
+        assert_ne!(c, idx_c, "join commitment must be domain-separated from the index commitment");
     }
 }

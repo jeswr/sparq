@@ -355,6 +355,18 @@ impl ShamirDealer {
         self.rng.next_nonzero_fp()
     }
 
+    /// [OPUS-4.8] sq-g7t5 — draw one **exactly-unbiased** uniform random bit
+    /// (`0` or `1`) directly from the masking RNG. Takes the LSB of a raw
+    /// `next_u64()` draw, which is uniform because the CSPRNG output is uniform
+    /// over all `2^64` words (so its low bit is `Pr[0] = Pr[1] = 1/2`). This is
+    /// the source the bit-decomposition mask needs; it deliberately does NOT go
+    /// through [`draw_fp`](Self::draw_fp), whose `[0, p)` output (`p = 2^61−1`
+    /// odd) has a `~2^{-61}`-biased LSB — negligible, but the bit-mask soundness
+    /// argument is cleaner when the source is *exactly* uniform.
+    pub fn draw_bit(&mut self) -> u64 {
+        self.rng.next_u64() & 1
+    }
+
     /// Secret-share one field element into `n` shares on a fresh degree-`t`
     /// polynomial `f` with `f(0) = secret`. Free coefficients are uniform random
     /// from the masking RNG (a CSPRNG in production — sq-1vt).

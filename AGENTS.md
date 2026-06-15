@@ -52,6 +52,11 @@ Then edit the corresponding `skills/<surface>/SKILL.md` (sparql-query / data-for
 
 If you add a brand-new public surface, add a new `skills/<surface>/` (dir name == the skill's `name` frontmatter) and link it from the list above and from the README.
 
+## Fix a shared issue everywhere it applies — cross-crate/cross-surface parity
+
+<!-- [OPUS-4.8] charter cross-poll from PSS #173 -->
+When a bug or review finding describes a **class** of problem affecting more than one place — a parser edge case in Turtle that also hits TriG, an operator bug whose sibling operators share a code path, a `pub`-surface footgun repeated across the CLI / HTTP / Python / JS-WASM bindings — it must **eventually be addressed in every instance, not patched only where it surfaced.** **Prefer fixing the pattern ONCE in the shared place** (the common code path, or a `sparq-core` helper) so all surfaces inherit it; if a shared fix isn't feasible, fix each instance to the **same spec** and file a bead for the consolidation. Either way, when you fix one instance, **file a bead** (see *Task tracking* below) covering the other affected crates/surfaces so the parity work is tracked, not lost. This is the cross-crate analogue of the differential-fuzz philosophy (a finding in one path implies checking the others — see the *Post-batch re-evaluation checklist*).
+
 ## Task tracking — beads, not markdown TODOs
 
 This repo tracks work in **beads** (`bd`, a git-native dependency-graph issue tracker; the committed source-of-record is `.beads/issues.jsonl`). Rules for any agent working here:
@@ -76,6 +81,24 @@ If you are an ORCHESTRATING agent (driving multi-step work on this repo), three 
 
 Each sub-agent brief must: work in its own worktree, NOT push/merge (the orchestrator does), gate in-worktree (scope tests to affected crates; the orchestrator does the authoritative full-workspace gate at merge), create beads for any discovered work (`bd create`, never edit `.beads/`), and report a concise result. See the per-batch re-evaluation checklist below to decide which gates a given change must re-run.
 
+### Worktree isolation — every MUTATING agent gets its own worktree+branch
+
+<!-- [OPUS-4.8] worktree-isolation race rule -->
+Rule #1 says "isolated git worktree"; this is the non-negotiable mechanics. **Any sub-agent that WRITES files, runs `git checkout -b`, or commits MUST work in an isolated git worktree** — give it `isolation: "worktree"` on the Agent tool, or `git worktree add` its own directory + branch — **NEVER the shared main checkout.** Read-only agents (search, analysis, review) may share the main checkout.
+
+Why this is mandatory, not advisory: a git working tree has **one** branch, index, and working directory. Two mutating agents on the **same** checkout therefore race — one agent's `git checkout -b` switches the branch out from under the other, and uncommitted edits leak onto the wrong branch (this bit us this session). A separate worktree gives each agent its own branch + index + working dir, so they cannot collide.
+
+The **orchestrator keeps the main checkout for itself** — it is single-threaded glue: `bd` operations (the Dolt DB is branch-independent, so `bd` is safe from the main checkout regardless of which branch is out), bead re-export on a dedicated `chore-beads-resync-*` branch, and PR review/merge. Keep `.beads/*` and otherwise-unrelated files **out of feature PRs** — a `bd export` re-export lands on its own `chore-beads-resync-*` branch, never folded into a feature branch (it conflicts at merge; see *Merge discipline*).
+
+### Worktree lifecycle — remove every worktree the moment its task is done
+
+<!-- [OPUS-4.8] charter cross-poll from PSS: worktree disk hygiene -->
+Worktrees and their build artifacts (`target/`) are a large disk sink and accumulate fast. Standing requirements (cross-pollinated from the PSS sibling charter, adapted to Rust):
+
+- **Remove every worktree the moment its task is done** — once its branch has merged (or its work is captured/abandoned), `git worktree remove --force <path>`. The **branch persists in `.git`**, so removal loses nothing; only the working copy + its `target/` go. The orchestrator owns this — remove the worktree in the same step that closes the bead / lands the merge. Don't leave worktrees lying around "in case."
+- **Don't spawn a worktree you don't need.** Read-only or single-stream work uses the main checkout (per the isolation rule above); a worktree is justified only for *concurrent* mutating work. Reuse one scratch worktree for serial tasks rather than churning fresh ones.
+- **Periodic sweep:** `git worktree prune` + remove stale worktrees; if disk is tight this is the first lever (before launching EC2 — see *Maximise parallelism* — or asking the user). Safe to delete: `target/` dirs, and the *git-ignored* benchmark outputs (per `.gitignore`: `bench/native-qlever/`, `bench/competitor-results/`) plus generated datasets, which suites write **outside the tree** — e.g. `bench/bsbm/gen.sh` defaults its output to `/tmp/bsbm/…` — and are regenerable. But **most of `bench/` is tracked** (~300 files): generators/runners (`gen.sh`/`run.sh`), queries (`*.rq`), expected results (`*.tsv`) and baselines like `bench/perf-baseline.json` are committed — never delete tracked bench assets, scripts, or `.gitignore`. When in doubt, `git ls-files bench/` shows what's tracked.
+
 ## Post-batch re-evaluation checklist — what to re-run after a change
 
 After a batch of changes, re-run only the evaluations whose inputs changed — on top of the base gate, which is always required. The base gate is full-workspace `clippy -D warnings` **plus full-workspace `cargo test`**: a sub-agent may scope its in-worktree test run to the affected crates for speed, but the orchestrator's authoritative pre-merge gate runs `cargo test` across the **whole workspace** (feature-unification and cross-crate regressions only surface workspace-wide). Map change → evaluation:
@@ -89,7 +112,7 @@ After a batch of changes, re-run only the evaluations whose inputs changed — o
 | `sparq-wasm` / the wasm graph | `scripts/wasm-deps-guard.sh`; `wasm-pack test --node`; the `wasm_bundle_bytes` size gate |
 | Cargo dependencies (`Cargo.toml`/`Cargo.lock`) | `cargo audit` + `cargo deny check` + regenerate the SBOM (supply-chain gate) |
 | the ZK verifier / circuits (`sparq-zk`, `sparq-zk-compose`) | `forge_gates` + `differential_fuzz`; the gate-count snapshot; re-open the soundness audit; the **`zk-toolchain` lane** (`.github/workflows/zk-toolchain.yml`) — runs the `#[ignore]`d real-`bb` forge/anchor suite under the pinned Noir toolchain (nightly + `workflow_dispatch` + on ZK-path PRs). If you change the public-input serialization (`verifier.rs::reconstruct_public_inputs`) re-capture the empirical bb anchors via the `probe_*_public_inputs_hex` e2e probes |
-| SHACL (`sparq-shacl`) | the W3C SHACL conformance ratchet (core ≥98, sparql ≥5) |
+| SHACL (`sparq-shacl`) | the W3C SHACL conformance ratchet (core ≥98, sparql ≥5); the differential-fuzz nightly lane (`shacl-diff-fuzz.yml`, sparq-shacl vs pySHACL) for correctness drift |
 | storage/encoding (`sparq-core` store/dict/compress, mmap, dict-spill) | the deterministic perf-gate metrics; byte-identity differentials; coverage with `--features dict-spill`; the **`fuzz` lane**'s `graph_open` target (`.github/workflows/fuzz.yml`) — corrupts the on-disk store files (`perm*.bin` / `dict-meta.bin` / sidecars / `named.bin`) and asserts `Graph::open` returns `Err`, never a panic/OOM/UB (T-MMAP-FUZZ) |
 | anything merged | the per-crate coverage ratchet + test-presence gate (`scripts/coverage*.py`) |
 | this `AGENTS.md` / any "how we work" convention | ask whether it's portable to a sibling repo's charter — if so, file it there (see *Cross-pollinate the charter with sibling repos*) |
