@@ -34,9 +34,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install maturin + pytest
-        # [OPUS-4.8] Version-pinned (Scorecard PinnedDependencies): a small, fixed build-tool
-        # set, so `==` pinning is non-brittle. Bump deliberately when adopting a newer maturin.
-        run: pip install maturin==1.14.0 pytest==9.1.0
+        # [OPUS-4.8] HASH-pinned (Scorecard PinnedDependenciesID): a `==` version pin still
+        # trusts whatever PyPI serves, so --require-hashes verifies every artifact's sha256
+        # — including the full transitive closure — against .github/requirements/python-build.txt
+        # before use. See that file's header to bump versions / regenerate the hash set.
+        run: pip install --require-hashes -r .github/requirements/python-build.txt
       - name: Build wheel (abi3, python-release profile — unwinding panics)
         run: maturin build --manifest-path crates/sparq-py/Cargo.toml --profile python-release --out dist
       - name: Install wheel
