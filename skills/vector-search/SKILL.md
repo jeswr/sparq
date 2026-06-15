@@ -125,6 +125,9 @@ EncodedStore::rank_pq(&self, &DistanceTable, k) -> Vec<(Id, f32)>;  cosine_from_
 fuse_rrf(lists: &[&[(T, f64)]], k: f64 /*RRF_K=60.0*/, top_k) -> Vec<(T, f64)>
 fuse_rrf_weighted(lists: &[(&[(T, f64)], f64)], k, top_k) -> Vec<(T, f64)>      // weight 0.0 mutes a list entirely
 fuse_scores(a: &[(T,f64)], b: &[(T,f64)], alpha /*1.0=a only*/, top_k) -> Vec<(T, f64)>
+// one-call hybrid: run N retriever closures on one query, fuse by item via RRF, dedup
+hybrid_search(query: &Q, top_k, k /*RRF_K*/, &mut [Retriever<Q,T>]) -> Vec<(T, f64)>
+//   Retriever<'_, Q, T> = &mut dyn FnMut(&Q) -> Vec<(T, f64)>  (e.g. nearest_term / most_similar closures)
 ```
 
 ## Common recipes
@@ -237,6 +240,20 @@ let structural: Vec<(oxrdf::Term, f64)> = Sim::new(&graph).most_similar(&query, 
 
 let hybrid  = fuse_rrf(&[&text, &structural], RRF_K, 10);   // rank-only; right default for differing score scales
 let blended = fuse_scores(&text, &structural, 0.7, 10);     // min-max normalize then blend; alpha 1.0 = text only
+```
+
+`hybrid_search` packages the common RRF case — drive N retriever closures off one query
+`Term` and fuse by `Term` in a single call (dedups; a term in only one list still surfaces;
+RRF ignores the score scales). Widen `nearest_term`'s `f32` to `f64` so both lists share the
+`(Term, f64)` shape:
+
+```rust
+use sparq_vectors::{hybrid_search, RRF_K};
+let fused = hybrid_search(&query, 10, RRF_K, &mut [
+    &mut |t: &oxrdf::Term| index.nearest_term(t, &graph, &store, 50)
+        .into_iter().map(|(t, s)| (t, s as f64)).collect(),   // ANN (cosine)
+    &mut |t: &oxrdf::Term| Sim::new(&graph).most_similar(t, 50),  // structural (Jaccard)
+]);
 ```
 
 ### 6. Out-of-RAM build / filesystem-less open
