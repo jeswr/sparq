@@ -30,7 +30,8 @@ assert_eq!(count, 1);
 ## ✨ Features
 
 - **RDF parsing & ingest** — load Turtle, N-Triples, N-Quads, and TriG from a `&str` or any
-  `Read`, with transparent `.gz` / `.bz2` / `.zst` decompression
+  `Read`. `load_reader*` accepts any `Read`, so you can wrap a `gzip` / `bzip2` / `zstd`
+  decoder around your file and stream it in — sparq does not content-sniff or auto-decompress
   ([guide](../../skills/data-formats/SKILL.md)).
 - **Triple-pattern scans** — look up any triple pattern over the loaded graph.
 - **Incremental updates** — insert and delete triples in place, with an optional
