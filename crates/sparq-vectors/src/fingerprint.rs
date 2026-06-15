@@ -27,8 +27,11 @@
 //!      length/count is still rejected. `FxHasher` is used because it is **deterministic with no
 //!      seed** (the same property the core dictionary relies on for its own content hashing), so a
 //!      fingerprint computed at build time on one machine matches one recomputed at open time on
-//!      another. The cost is O(dict_len) over already-resident term parts — a small fraction of the
-//!      embed/build work that produced the store in the first place.
+//!      another. [OPUS-4.8] (sq-32i5) Every hashed input is **fixed-width** — lengths/counts as
+//!      `u64`, ids as `u32`, tags as `u8`, never `usize` — so the folded byte sequence (and thus
+//!      the hash) is identical on 32-bit wasm32 and 64-bit native; the cross-machine guarantee
+//!      holds by construction. The cost is O(dict_len) over already-resident term parts — a small
+//!      fraction of the embed/build work that produced the store in the first place.
 //!
 //! `content_hash` is a **collision-resistance-irrelevant integrity check**, not a security MAC: it
 //! exists to catch accidental staleness, not to defend against an adversary crafting a colliding
@@ -114,10 +117,16 @@ impl Fingerprint {
 /// variant, so distinct terms cannot alias by concatenation. We do not depend on the core's hash
 /// VALUE (it is private); we only need a self-consistent fold that distinguishes terms here.
 fn fold_parts(h: &mut rustc_hash::FxHasher, parts: &TermParts<'_>) {
+    // [OPUS-4.8] (sq-32i5) All length prefixes are hashed as fixed-width `u64`, NOT `usize`:
+    // `usize` is 32-bit on wasm32 and 64-bit on native, so `write_usize` would fold a different
+    // byte sequence on each and the on-disk fingerprint would mismatch between a store built on
+    // 64-bit native and the same graph opened on 32-bit wasm — silently breaking the documented
+    // "build/open fingerprints match across machines" guarantee. `as u64` is lossless on both
+    // (lengths fit in 32 bits) and produces an architecture-independent fingerprint by construction.
     match parts {
         TermParts::Iri { prefix, suffix } => {
             h.write_u8(0);
-            h.write_usize(prefix.len());
+            h.write_u64(prefix.len() as u64);
             h.write(prefix.as_bytes());
             h.write(suffix.as_bytes());
         }
@@ -127,9 +136,9 @@ fn fold_parts(h: &mut rustc_hash::FxHasher, parts: &TermParts<'_>) {
             lang,
         } => {
             h.write_u8(1);
-            h.write_usize(value.len());
+            h.write_u64(value.len() as u64);
             h.write(value.as_bytes());
-            h.write_usize(datatype.len());
+            h.write_u64(datatype.len() as u64);
             h.write(datatype.as_bytes());
             match lang {
                 Some(l) => {
@@ -157,15 +166,45 @@ fn fold_parts(h: &mut rustc_hash::FxHasher, parts: &TermParts<'_>) {
 /// message naming the mismatch so a stale store can never be queried silently.
 pub type CheckResult = Result<(), String>;
 
+/// [OPUS-4.8] (sq-32i5) Identifies which kind of artifact a [`check_against`] call is guarding, so
+/// the error text is accurate at both call sites (a `.spqv` [`VectorStore`](crate::store::VectorStore)
+/// and a `.spqg` [`DiskAnnIndex`](crate::diskann::DiskAnnIndex)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Artifact {
+    /// A `.spqv` vector store.
+    Store,
+    /// A `.spqg` ANN index.
+    Index,
+}
+
+impl Artifact {
+    /// The noun used in error messages ("store" / "index").
+    fn noun(self) -> &'static str {
+        match self {
+            Artifact::Store => "store",
+            Artifact::Index => "index",
+        }
+    }
+}
+
 /// Compares a `stored` fingerprint (read from a header) against the live `graph`, returning a
-/// descriptive `Err` on any mismatch. `stored` is `None` for a pre-fingerprint (version-1) file:
-/// such a file cannot be certified, so the check fails with a clear "unverified format" message
-/// rather than silently passing. `origin` names the file for the error.
-pub fn check_against(stored: Option<Fingerprint>, graph: &Graph, origin: &str) -> CheckResult {
+/// descriptive `Err` on any mismatch. `stored` is `None` when the artifact carries no fingerprint —
+/// either a pre-fingerprinting (version-1) file, or a current-format file finalized without a graph
+/// binding (`with_fingerprint`); in both cases it cannot be certified, so the check fails with a
+/// clear "unverified" message rather than silently passing. `artifact` selects the noun used in the
+/// message (store vs. index) so it is accurate at both call sites; `origin` names the file.
+pub fn check_against(
+    stored: Option<Fingerprint>,
+    graph: &Graph,
+    artifact: Artifact,
+    origin: &str,
+) -> CheckResult {
+    let kind = artifact.noun();
     let Some(stored) = stored else {
         return Err(format!(
-            "{origin}: this store predates graph-fingerprinting (legacy format) and cannot be \
-             verified against the graph; rebuild it to enable the staleness check"
+            "{origin}: this {kind} carries no graph fingerprint (either a legacy file that predates \
+             graph-fingerprinting, or one finalized without binding it to a graph) and so cannot be \
+             verified against the graph; rebuild it with a graph binding to enable the staleness check"
         ));
     };
     let live = Fingerprint::of(graph);
@@ -173,9 +212,9 @@ pub fn check_against(stored: Option<Fingerprint>, graph: &Graph, origin: &str) -
         Ok(())
     } else {
         Err(format!(
-            "{origin}: graph fingerprint mismatch — the store was built against a DIFFERENT graph \
+            "{origin}: graph fingerprint mismatch — this {kind} was built against a DIFFERENT graph \
              (stored {}, this graph {}); querying it would silently return wrong results. Rebuild \
-             the store against the current graph.",
+             the {kind} against the current graph.",
             stored.describe(),
             live.describe()
         ))
@@ -252,14 +291,14 @@ mod tests {
     #[test]
     fn check_against_matching_is_ok() {
         let f = Fingerprint::of(&graph(A));
-        assert!(check_against(Some(f), &graph(A), "t").is_ok());
+        assert!(check_against(Some(f), &graph(A), Artifact::Store, "t").is_ok());
     }
 
     #[test]
     fn check_against_mismatch_is_descriptive_err() {
         let f = Fingerprint::of(&graph(A));
-        let err =
-            check_against(Some(f), &graph(B), "t").expect_err("must reject a different graph");
+        let err = check_against(Some(f), &graph(B), Artifact::Store, "t")
+            .expect_err("must reject a different graph");
         assert!(err.contains("fingerprint mismatch"), "err was: {err}");
         assert!(
             err.contains("wrong results"),
@@ -269,10 +308,77 @@ mod tests {
 
     #[test]
     fn check_against_legacy_none_is_unverifiable_err() {
-        let err = check_against(None, &graph(A), "t").expect_err("legacy file must not pass");
+        let err = check_against(None, &graph(A), Artifact::Store, "t")
+            .expect_err("legacy/unbound file must not pass");
         assert!(
-            err.contains("predates graph-fingerprinting"),
+            err.contains("carries no graph fingerprint"),
             "err was: {err}"
         );
     }
+
+    #[test]
+    fn check_against_error_text_names_the_artifact_kind() {
+        // [OPUS-4.8] (sq-32i5) The same routine guards BOTH a `.spqv` store and a `.spqg` index;
+        // the error noun must follow the artifact kind, not hard-code "store" at an index call site.
+        let f = Fingerprint::of(&graph(A));
+
+        // Mismatch path.
+        let store_err = check_against(Some(f), &graph(B), Artifact::Store, "t")
+            .expect_err("mismatch must error");
+        assert!(
+            store_err.contains("this store was built"),
+            "err: {store_err}"
+        );
+        let index_err = check_against(Some(f), &graph(B), Artifact::Index, "t")
+            .expect_err("mismatch must error");
+        assert!(
+            index_err.contains("this index was built"),
+            "err: {index_err}"
+        );
+        // The index error must not call the artifact a "store" (the original hard-coded bug).
+        // ("stored …" from describe() is fine; we forbid the *noun* phrasings.)
+        assert!(
+            !index_err.contains(" store") && !index_err.contains("store "),
+            "index error must not call the artifact a 'store': {index_err}"
+        );
+
+        // Unverifiable (None) path.
+        let index_none =
+            check_against(None, &graph(A), Artifact::Index, "t").expect_err("None must error");
+        assert!(
+            index_none.contains("this index carries no"),
+            "err: {index_none}"
+        );
+        assert!(
+            !index_none.contains(" store") && !index_none.contains("store "),
+            "index error must not call the artifact a 'store': {index_none}"
+        );
+    }
+
+    #[test]
+    fn golden_fingerprint_is_architecture_independent() {
+        // [OPUS-4.8] (sq-32i5) Regression guard against any width/endianness drift in the
+        // fingerprint computation. The fingerprint of graph A is fixed by construction:
+        //   * lengths/counts are hashed as fixed-width `u64` (never `usize`), so wasm32 (32-bit
+        //     usize) and native (64-bit usize) fold the SAME bytes;
+        //   * `FxHasher` is deterministic and seedless;
+        //   * ids/tags are hashed at fixed widths (`u32`/`u8`).
+        // The golden value below was produced by running this test once and pasting the output. If
+        // the byte sequence ever becomes architecture-dependent again (e.g. a stray `write_usize`),
+        // this assertion fails loudly on at least one target. dict_len / triple_count are stable
+        // properties of graph A; content_hash is the FxHash of the documented fold.
+        let f = Fingerprint::of(&graph(A));
+        // Graph A: 4 IRIs (ex:alice, ex:knows, ex:bob, ex:carol), 2 triples.
+        assert_eq!(f.dict_len, 4, "dict_len of graph A");
+        assert_eq!(f.triple_count, 2, "triple_count of graph A");
+        assert_eq!(
+            f.content_hash, GOLDEN_A_CONTENT_HASH,
+            "content_hash drifted — a width/endianness/fold change broke the cross-machine guarantee"
+        );
+    }
+
+    /// [OPUS-4.8] (sq-32i5) Golden content hash of graph `A`, architecture-independent by
+    /// construction (all hashed inputs are fixed-width; `FxHasher` is seedless & deterministic).
+    /// Produced by running `golden_fingerprint_is_architecture_independent` once.
+    const GOLDEN_A_CONTENT_HASH: u64 = 8_668_627_031_413_789_344;
 }

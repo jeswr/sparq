@@ -700,7 +700,7 @@ impl DiskAnnIndex {
     /// as well because [`nearest_term`](Self::nearest_term) resolves the query vector through it.
     pub fn check_graph(&self, store: &VectorStore, graph: &Graph) -> fingerprint::CheckResult {
         let origin = "<.spqg index>";
-        fingerprint::check_against(self.fingerprint, graph, origin)?;
+        fingerprint::check_against(self.fingerprint, graph, fingerprint::Artifact::Index, origin)?;
         store.check_graph(graph)
     }
 

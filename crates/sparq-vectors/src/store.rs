@@ -434,7 +434,7 @@ impl VectorStore {
         } else {
             self.path.display().to_string()
         };
-        fingerprint::check_against(self.fingerprint, graph, &origin)
+        fingerprint::check_against(self.fingerprint, graph, fingerprint::Artifact::Store, &origin)
     }
 
     /// Iterates all `(id, vector)` pairs in insertion-slot order (the dense data
