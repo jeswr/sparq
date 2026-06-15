@@ -366,6 +366,101 @@ pub fn status_ref_commit_digest(list_id: &Fr, index_commitment: &Fr, version: u6
     ])
 }
 
+/// [OPUS-4.8] sq-6qe: a hiding COMMITMENT to a credential's status-list
+/// `(list_id, version)` reference — the IRI/version-hiding analogue of the clear
+/// `list_id` + `version` that [`status_ref_commit_digest`] still folds in the
+/// clear. The fully-hidden committed-index revocation path (sq-6qe) signs over
+/// THIS commitment instead of the clear list/version, so a hidden-revocation
+/// presentation discloses neither the list IRI nor the publication epoch.
+///
+/// `ref_blinding` is a per-credential random field element (the holder's secret)
+/// that makes the commitment hiding: two credentials on the same list+version
+/// commit to different values, closing the linkability channel the clear IRI +
+/// version open. Domain-separated and binding under the Poseidon2
+/// collision/hiding assumption.
+///
+/// # Future in-circuit use (sq-6qe, see `research/zk-statuslist-hide-iri-version.md`)
+/// The deferred fully-hidden circuit recomputes this commitment IN-CIRCUIT from
+/// the SAME private `(list_id, version)` it (a) proves member of the relying
+/// party's accepted `(list, version, status_list_root)` set and (b) freshness-checks
+/// (`version >= public min_version`), exposing it so the verifier byte-matches it
+/// against the ISSUER-SIGNED value — exactly the cross-binding discipline
+/// [`status_index_commitment`] uses for the index. So `list_id` and `version` are
+/// disclosed in NEITHER the signed object NOR any clear field, yet the proof is
+/// bound to a list/version the issuer attested and the relying party accepts.
+///
+/// Maps to a Noir `Poseidon2::hash([DOMAIN, list_id, version, ref_blinding], 4)`.
+// [OPUS-4.8] sq-6qe: hiding (list, version) reference commitment.
+pub fn status_ref_commitment(list_id: &Fr, version: u64, ref_blinding: &Fr) -> Fr {
+    const SIG_DOMAIN_STATUS_REF_COMMITMENT: u64 = 0x5a4b_5349_475f_5243; // "ZKSIG_RC"
+    poseidon2::hash(&[
+        Fr::from(SIG_DOMAIN_STATUS_REF_COMMITMENT),
+        *list_id,
+        Fr::from(version),
+        *ref_blinding,
+    ])
+}
+
+/// [OPUS-4.8] sq-6qe: a domain-separated digest of a credential's status-list
+/// reference that binds a COMMITMENT to BOTH the `(list, version)` reference AND
+/// the index — the fully-hidden analogue of [`status_ref_commit_digest`] (which
+/// still folds the clear `list_id` + `version`). The issuer folds
+/// `(ref_commitment, index_commitment)`, so NEITHER the list IRI, the version, NOR
+/// the index ever enters the signed object. A DISTINCT domain tag from both
+/// [`status_ref_digest`] (clear index) and [`status_ref_commit_digest`]
+/// (committed index, clear list/version), so no cross-substitution between the
+/// three disclosure modes is possible.
+///
+/// `ref_commitment` is [`status_ref_commitment`]`(list_id, version, ref_blinding)`
+/// and `index_commitment` is [`status_index_commitment`]`(index, blinding)`. The
+/// verifier (in the deferred sq-6qe path) recomputes this digest from the disclosed
+/// commitments to check the issuer signature; the fully-hidden revocation proof
+/// then cross-binds BOTH commitments in-circuit (the proven-unset index to
+/// `index_commitment`, and the membership-resolved `(list, version)` to
+/// `ref_commitment`), so the disclosure floor is "some accepted (list, version) in
+/// the RP's committed set, version >= public min_version, my hidden index unset".
+///
+/// Maps to a Noir `Poseidon2::hash([DOMAIN, ref_commitment, index_commitment], 3)`.
+// [OPUS-4.8] sq-6qe: fully-committed (list+version+index hidden) status-reference digest.
+pub fn status_ref_fully_committed_digest(ref_commitment: &Fr, index_commitment: &Fr) -> Fr {
+    const SIG_DOMAIN_STATUS_REF_FULL_COMMIT: u64 = 0x5a4b_5349_475f_4643; // "ZKSIG_FC"
+    poseidon2::hash(&[
+        Fr::from(SIG_DOMAIN_STATUS_REF_FULL_COMMIT),
+        *ref_commitment,
+        *index_commitment,
+    ])
+}
+
+/// [OPUS-4.8] sq-6qe: the relying party's ACCEPTED-SET Merkle LEAF for a
+/// `(list_id, version, status_list_root)` triple (sub-option A of the sq-6qe
+/// design — see `research/zk-statuslist-hide-iri-version.md`). The fully-hidden
+/// revocation circuit proves membership of the credential's hidden `(list_id,
+/// version)` in the relying party's accepted set committed as a Poseidon2 Merkle
+/// root over these leaves — which ALSO privately binds the corresponding
+/// `status_list_root` the bit-unset fold then runs against, so the verifier
+/// publishes only the accepted-SET root and never learns which list/version/root.
+///
+/// Binding all three in ONE leaf is load-bearing: a prover cannot pair list₁'s
+/// identity with list₂'s root, because the leaf hash commits the triple atomically
+/// and the membership fold must recompute the public accepted-set root (the same
+/// atomic-binding discipline [`crate::sig::status_index_commitment`] +
+/// `revoke_unset_check_committed` use). The relying party builds this set from its
+/// OWN authoritative, freshness-curated snapshots (the audit-#12 trust anchor,
+/// moved behind a commitment — no new trust assumption).
+///
+/// Maps to the in-circuit leaf `Poseidon2::hash([DOMAIN, list_id, version,
+/// status_list_root], 4)` (the accepted-set analogue of `issuer.nr`'s `key_leaf`).
+// [OPUS-4.8] sq-6qe: accepted (list, version, root)-set Merkle leaf.
+pub fn accepted_status_leaf(list_id: &Fr, version: u64, status_list_root: &Fr) -> Fr {
+    const SIG_DOMAIN_ACCEPTED_STATUS_LEAF: u64 = 0x5a4b_5349_475f_414c; // "ZKSIG_AL"
+    poseidon2::hash(&[
+        Fr::from(SIG_DOMAIN_ACCEPTED_STATUS_LEAF),
+        *list_id,
+        Fr::from(version),
+        *status_list_root,
+    ])
+}
+
 /// Hash a status-list IRI string to a field element (domain-separated), so the
 /// in-the-clear `manifest.revocation.status_list` IRI can be bound under the
 /// issuer signature. Issuer and verifier both call this, so a drift cannot make
@@ -954,6 +1049,95 @@ mod tests {
         let clear = status_ref_digest(&list_id, 94, 7);
         let committed = status_ref_commit_digest(&list_id, &idx_commit, 7);
         assert_ne!(clear, committed, "clear-index and committed-index digests are domain-separated");
+    }
+
+    /// [OPUS-4.8] sq-6qe: the `(list, version)` reference commitment is HIDING
+    /// (a different blinding => a different commitment for the same list+version,
+    /// so two presentations are unlinkable on the reference) and BINDING (a
+    /// different list OR a different version => a different commitment).
+    #[test]
+    fn status_ref_commitment_is_hiding_and_binding() {
+        let list_a = status_list_id_to_field("https://dmv.example/status/3");
+        let list_b = status_list_id_to_field("https://dmv.example/status/4");
+        let rc = status_ref_commitment(&list_a, 7, &Fr::from(0xb11du64));
+
+        // Hiding: same (list, version) under different blinding commits differently.
+        let rc_other_blinding = status_ref_commitment(&list_a, 7, &Fr::from(0x1234u64));
+        assert_ne!(rc, rc_other_blinding, "different blinding => different commitment");
+
+        // Binding: a different version OR a different list changes the commitment.
+        let rc_other_version = status_ref_commitment(&list_a, 8, &Fr::from(0xb11du64));
+        assert_ne!(rc, rc_other_version, "different version => different commitment");
+        let rc_other_list = status_ref_commitment(&list_b, 7, &Fr::from(0xb11du64));
+        assert_ne!(rc, rc_other_list, "different list => different commitment");
+    }
+
+    /// [OPUS-4.8] sq-6qe: a FULLY-HIDDEN status-bound signature binds BOTH the
+    /// reference commitment and the index commitment (neither list, version, nor
+    /// index in the clear), and its digest domain is distinct from BOTH the
+    /// clear-index (audit #12) and committed-index-clear-list (sq-ayv) digests, so
+    /// no disclosure-mode substitution is possible.
+    #[test]
+    fn fully_committed_status_signature_binds_both_commitments() {
+        let sk = SecretKey::from_seed(41);
+        let pk = sk.public_key();
+        let c = Fr::from(0xc0ffeeu64);
+        let salt = Fr::from(0x5a17u64);
+        let list_id = status_list_id_to_field("https://dmv.example/status/3");
+        let ref_commit = status_ref_commitment(&list_id, 7, &Fr::from(0x5efb10u64));
+        let idx_commit = status_index_commitment(94, &Fr::from(0xbeefu64));
+        let sref = status_ref_fully_committed_digest(&ref_commit, &idx_commit);
+        let hex = sk.sign_commitment_with_status(&c, &salt, &sref);
+        let sig = signature_from_hex(&hex).expect("round-trips");
+        let msg = commitment_message_with_status(&c, &salt, &sref);
+        assert!(verify(&pk, &msg, &sig), "honest fully-hidden signature verifies");
+
+        // A different reference commitment (e.g. a different list/version/blinding)
+        // => different digest => signature fails.
+        let ref_commit2 = status_ref_commitment(&list_id, 8, &Fr::from(0x5efb10u64));
+        let sref2 = status_ref_fully_committed_digest(&ref_commit2, &idx_commit);
+        let msg2 = commitment_message_with_status(&c, &salt, &sref2);
+        assert!(!verify(&pk, &msg2, &sig), "a different reference commitment must not verify");
+
+        // A different index commitment => different digest => signature fails.
+        let idx_commit2 = status_index_commitment(95, &Fr::from(0xbeefu64));
+        let sref3 = status_ref_fully_committed_digest(&ref_commit, &idx_commit2);
+        let msg3 = commitment_message_with_status(&c, &salt, &sref3);
+        assert!(!verify(&pk, &msg3, &sig), "a different index commitment must not verify");
+
+        // Domain separation from the two other disclosure modes: even with
+        // numerically-equal inputs the three digests differ (distinct domain tags).
+        let clear = status_ref_digest(&list_id, 94, 7);
+        let committed_clear_list = status_ref_commit_digest(&list_id, &idx_commit, 7);
+        assert_ne!(sref, clear, "fully-hidden vs clear-index digests are domain-separated");
+        assert_ne!(
+            sref, committed_clear_list,
+            "fully-hidden vs committed-index-clear-list digests are domain-separated"
+        );
+    }
+
+    /// [OPUS-4.8] sq-6qe: the accepted `(list, version, status_list_root)`-set leaf
+    /// binds all three atomically — any one differing changes the leaf, so a prover
+    /// cannot pair one list's identity with another list's root (the sub-option-A
+    /// soundness property). Also distinct from the reference commitment's domain.
+    #[test]
+    fn accepted_status_leaf_binds_triple_atomically() {
+        let list_id = status_list_id_to_field("https://dmv.example/status/3");
+        let root = Fr::from(0x12345678u64);
+        let leaf = accepted_status_leaf(&list_id, 7, &root);
+
+        let other_list = status_list_id_to_field("https://dmv.example/status/4");
+        assert_ne!(leaf, accepted_status_leaf(&other_list, 7, &root), "list binds");
+        assert_ne!(leaf, accepted_status_leaf(&list_id, 8, &root), "version binds");
+        assert_ne!(
+            leaf,
+            accepted_status_leaf(&list_id, 7, &Fr::from(0x87654321u64)),
+            "root binds"
+        );
+
+        // Distinct domain from the reference commitment (no leaf/commitment confusion).
+        let rc = status_ref_commitment(&list_id, 7, &root); // same inputs, different role
+        assert_ne!(leaf, rc, "accepted-set leaf and ref commitment are domain-separated");
     }
 
     /// [OPUS-4.8] audit #12: the list-id hash is collision-resistant on distinct
