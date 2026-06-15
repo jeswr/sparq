@@ -1,7 +1,8 @@
 # Supply-chain gate (sq-0sye / sq-2abm / sq-jfer) — practices mapped from
 # prod-solid-server onto this Rust workspace.
 #
-#   audit : cargo-deny over advisories + bans + sources + licenses. GATING.
+#   audit : cargo-deny over advisories + bans + sources + licenses. ALL GATING
+#           (advisories un-degraded — sq-toze.2/GX-1; CVSS-4.0 blocker sq-q8de resolved).
 #   sbom  : cargo-cyclonedx -> CycloneDX JSON SBOM, uploaded as an artifact.
 #
 # Third-party actions are pinned by full commit SHA (supply-chain hardening);
@@ -49,18 +50,46 @@ jobs:
       # [OPUS-4.8] GATING: integrity checks that don't read the RustSec advisory DB.
       - name: cargo-deny check (bans + sources + licenses) — GATING
         run: cargo deny check bans sources licenses
-      # [OPUS-4.8] sq-q8de: `advisories` is temporarily NON-gating. cargo-deny 0.19.8
-      # (the latest) can't parse RustSec advisories that use CVSS v4.0 (e.g.
-      # RUSTSEC-2026-0124) — it fails LOADING the freshly-cloned advisory DB
-      # ("unsupported CVSS version: 4.0"), a DB-wide parse error before any per-advisory
-      # `ignore` applies, so it can't be configured around. This is an upstream tooling
-      # lag (not a vulnerability in our tree). Keep it reported (continue-on-error) so the
-      # advisory output is still visible; the REAL advisory gate is the daily cargo-audit
-      # monitor (dependency-monitoring.yml). Flip back to gating once cargo-deny ships
-      # CVSS-4.0 support (sq-q8de tracks it).
-      - name: cargo-deny check (advisories) — informational until CVSS-4.0 support lands
-        continue-on-error: true
+      # [OPUS-4.8] sq-toze.2 (GX-1): advisories is GATING again. The CVSS-4.0 parse
+      # blocker (sq-q8de) that forced `continue-on-error` is RESOLVED — cargo-deny >= 0.19
+      # parses CVSS v4.0 advisories, so the freshly-cloned RustSec DB loads and the
+      # per-advisory `ignore` rules apply as intended. The deny.toml policy is fail-closed:
+      # `yanked = "deny"` and (advisories v2) every unignored advisory FAILS the check;
+      # only the two justified `unmaintained` ignores (paste / rustls-pemfile, each with a
+      # documented reason + tracking bead) are tolerated. A REAL vulnerability or a yanked
+      # crate now blocks the PR. Verified: removing either justified ignore makes
+      # `cargo deny check advisories` exit non-zero ("advisories FAILED"); with the ignores
+      # in place it is "advisories ok". This is the PR-time gate; the daily watchdog
+      # (dependency-monitoring.yml) remains as defence-in-depth for advisories disclosed
+      # between PRs.
+      - name: cargo-deny check (advisories) — GATING
         run: cargo deny check advisories
+
+  # ---- cargo-vet: per-dependency audit attestations ----
+  # [OPUS-4.8] sq-toze.8 (GX-7): GATING. `cargo vet` verifies every crate in the tree is
+  # either (a) audited by us, (b) covered by an imported trusted audit set (Mozilla,
+  # Google, Bytecode Alliance, ISRG, Embark, Zcash — see supply-chain/config.toml
+  # [imports.*]), or (c) carries an explicit `[[exemptions.*]]` entry in
+  # supply-chain/config.toml. The bootstrap exemption set (the tree at adoption time) makes
+  # this PASS today; the gate's value is the RATCHET — a NEW dependency added in a PR fails
+  # `cargo vet` until it is audited or a deliberate exemption is added, so unaudited supply
+  # cannot enter silently. Run `cargo vet` locally to reproduce; `cargo vet suggest` lists
+  # what to audit to shrink the exemption set. NOTE: the job name has NO "advisory"/
+  # "informational" word, so ci-summary treats it as GATING (intentional).
+  vet:
+    name: cargo-vet (per-dependency audit attestations) — GATING
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cargo-vet
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-vet
+      # `--locked` so vet evaluates the committed Cargo.lock, not a freshly-resolved tree.
+      - name: cargo-vet check — GATING
+        run: cargo vet --locked
 
   # ---- CycloneDX SBOM ----
   sbom:
