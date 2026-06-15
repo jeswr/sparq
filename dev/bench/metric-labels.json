@@ -677,6 +677,78 @@
       "mode": "materialize",
       "unit": "µs"
     },
+    "deeptax_d100000_closure_s": {
+      "label": "Deep Taxonomy dt100k — N3 forward-closure time",
+      "suite": "Deep Taxonomy",
+      "dataset": "DeepTaxonomy dt100k — 1 instance, 100000-deep :sc chain, 1 transitivity meta-rule (reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = 200001 triples",
+      "query": "materialize the N3 forward closure (transitivity meta-rule)",
+      "mode": "closure",
+      "unit": "s"
+    },
+    "deeptax_d100000_closure_triples": {
+      "label": "Deep Taxonomy dt100k — materialized closure size",
+      "suite": "Deep Taxonomy",
+      "dataset": "DeepTaxonomy dt100k — 1 instance, 100000-deep :sc chain, 1 transitivity meta-rule (reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = 200001 triples",
+      "query": "deterministic closure triple-count (self-asserting gate; = 2·depth+1 = 200001)",
+      "mode": "closure",
+      "unit": "triples"
+    },
+    "deeptax_d100000_query": {
+      "label": "Deep Taxonomy dt100k — class-membership query over the closure",
+      "suite": "Deep Taxonomy",
+      "dataset": "DeepTaxonomy dt100k — 1 instance, 100000-deep :sc chain, 1 transitivity meta-rule (reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = 200001 triples",
+      "query": "SELECT ?c WHERE { :i a ?c } (returns depth+1 = 100001 rows)",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "deeptax_d10000_closure_s": {
+      "label": "Deep Taxonomy dt10k — N3 forward-closure time",
+      "suite": "Deep Taxonomy",
+      "dataset": "DeepTaxonomy dt10k — 1 instance, 10000-deep :sc chain, 1 transitivity meta-rule (reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = 20001 triples",
+      "query": "materialize the N3 forward closure (transitivity meta-rule)",
+      "mode": "closure",
+      "unit": "s"
+    },
+    "deeptax_d10000_closure_triples": {
+      "label": "Deep Taxonomy dt10k — materialized closure size",
+      "suite": "Deep Taxonomy",
+      "dataset": "DeepTaxonomy dt10k — 1 instance, 10000-deep :sc chain, 1 transitivity meta-rule (reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = 20001 triples",
+      "query": "deterministic closure triple-count (self-asserting gate; = 2·depth+1 = 20001)",
+      "mode": "closure",
+      "unit": "triples"
+    },
+    "deeptax_d10000_query": {
+      "label": "Deep Taxonomy dt10k — class-membership query over the closure",
+      "suite": "Deep Taxonomy",
+      "dataset": "DeepTaxonomy dt10k — 1 instance, 10000-deep :sc chain, 1 transitivity meta-rule (reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = 20001 triples",
+      "query": "SELECT ?c WHERE { :i a ?c } (returns depth+1 = 10001 rows)",
+      "mode": "count",
+      "unit": "µs"
+    },
+    "deeptax_d1000_closure_s": {
+      "label": "Deep Taxonomy dt1k — N3 forward-closure time",
+      "suite": "Deep Taxonomy",
+      "dataset": "DeepTaxonomy dt1k — 1 instance, 1000-deep :sc chain, 1 transitivity meta-rule (reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = 2001 triples",
+      "query": "materialize the N3 forward closure (transitivity meta-rule)",
+      "mode": "closure",
+      "unit": "s"
+    },
+    "deeptax_d1000_closure_triples": {
+      "label": "Deep Taxonomy dt1k — materialized closure size",
+      "suite": "Deep Taxonomy",
+      "dataset": "DeepTaxonomy dt1k — 1 instance, 1000-deep :sc chain, 1 transitivity meta-rule (reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = 2001 triples",
+      "query": "deterministic closure triple-count (self-asserting gate; = 2·depth+1 = 2001)",
+      "mode": "closure",
+      "unit": "triples"
+    },
+    "deeptax_d1000_query": {
+      "label": "Deep Taxonomy dt1k — class-membership query over the closure",
+      "suite": "Deep Taxonomy",
+      "dataset": "DeepTaxonomy dt1k — 1 instance, 1000-deep :sc chain, 1 transitivity meta-rule (reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = 2001 triples",
+      "query": "SELECT ?c WHERE { :i a ?c } (returns depth+1 = 1001 rows)",
+      "mode": "count",
+      "unit": "µs"
+    },
     "dict_bytes_per_term": {
       "label": "Dictionary size — bytes per term",
       "suite": "Memory / Size",
