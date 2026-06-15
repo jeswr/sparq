@@ -278,10 +278,13 @@ The methodology below extends the exact machinery already proven for the QLever 
    entry + endpoint URL, reusing the existing `df` watchdog / `/tmp` cleanup / `--run --only`
    guards.
 
-> Note on the dashboard path: the brief and earlier notes reference
-> `bench/dashboard/competitors.json`; the file actually lives at **`bench/competitors.json`**
-> (the dashboard at `bench/dashboard/dashboard.js` reads its `engines`/`values` keys, currently
-> empty by design). New engines are added to `bench/competitors.json`.
+> Note on the two `competitors.json` files (don't update the wrong one): **`bench/competitors.json`**
+> is the gather **registry** (the `competitors` array) plus the optional seam for injected competitor
+> values, and is the source-of-record for `scripts/gather-competitors.sh`. **`bench/dashboard/competitors.json`**
+> is the canonical, human-reviewable **static dashboard snapshot**, mirrored byte-for-meaning into
+> `bench/dashboard/dashboard.js` as `COMPETITORS_DATA` (and read via `window.COMPETITORS`); its per-metric
+> cells ship **empty by design** until gathered on a quiet box. New engines are registered in
+> `bench/competitors.json`; the dashboard's static numbers live in `bench/dashboard/competitors.json`.
 
 ---
 
@@ -323,8 +326,12 @@ HTTP-SPARQL adapter in `scripts/gather-competitors.sh` (write once, both engines
 
 ## Repo seam (paths)
 
-- `bench/competitors.json` — registry (`competitors` array) + dashboard seam (`engines`/`values`,
-  empty by design). Tracks Oxigraph, QLever, EYE today. **Add Fuseki + Virtuoso here.**
+- `bench/competitors.json` — gather **registry** (`competitors` array) + optional seam for injected
+  competitor values; source-of-record for `scripts/gather-competitors.sh`. Tracks Oxigraph, QLever,
+  EYE today. **Add Fuseki + Virtuoso here.**
+- `bench/dashboard/competitors.json` — canonical, human-reviewable **static dashboard snapshot**
+  (mirrored into `bench/dashboard/dashboard.js` as `COMPETITORS_DATA`); per-metric cells empty by
+  design until gathered on a quiet box. **Update the dashboard's static competitor numbers here.**
 - `scripts/gather-competitors.sh` — gather orchestrator (dry-run by default; `--run --only`).
   **Add the HTTP-SPARQL adapter here.**
 - `bench/CATALOG.md` — QUIET-BOX note + cold/warm conventions (the discipline this plan extends).
