@@ -121,6 +121,14 @@ pub fn prepare_vec(
     sparql: &str,
     store: &VectorStore,
 ) -> Result<PreparedQuery, String> {
+    // [OPUS-4.8] Opportunistic staleness guard: the store is keyed by `graph`'s
+    // dictionary ids, so a store built against a DIFFERENT graph would silently
+    // mis-resolve neighbours. If the store carries a graph fingerprint, verify
+    // it now (hard error on mismatch). Unbound / legacy (version-1) stores carry
+    // no fingerprint and are left to work as before — we only check when we can.
+    if store.fingerprint().is_some() {
+        store.check_graph(graph)?;
+    }
     let query = spargebra::SparqlParser::new()
         .parse_query(sparql)
         .map_err(|e| e.to_string())?;
@@ -209,11 +217,20 @@ fn rewrite_bgp(
 
     let mut rest: Vec<TriplePattern> = Vec::with_capacity(patterns.len());
     let mut reqs: Vec<KnnReq> = Vec::new();
+    // [OPUS-4.8] Blank-node-subject rdf:first/rdf:rest cells are the lowered
+    // form of `( … )` argument lists. They are only an implementation detail of
+    // a `vec:` predicate, so we *defer* the decision to drop them: they are
+    // consumed (removed) ONLY if this BGP actually contains a `vec:` request.
+    // If no `vec:` predicate is present the BGP passes through unchanged —
+    // including any legitimate RDF-collection query — and these deferred cells
+    // are restored into `rest` below. User-authored `rdf:first`/`rest` patterns
+    // with variable/IRI subjects are never deferred (they fall through to
+    // `rest` like any other ordinary pattern).
+    let mut deferred_lists: Vec<&TriplePattern> = Vec::new();
 
     for tp in &patterns {
-        // The collection-cell triples are an implementation detail of the
-        // argument lists; once consumed they must not survive into the engine.
-        if is_list_triple(tp) {
+        if is_list_cell(tp) {
+            deferred_lists.push(tp);
             continue;
         }
         let NamedNodePattern::NamedNode(pred) = &tp.predicate else {
@@ -234,6 +251,13 @@ fn rewrite_bgp(
                 ))
             }
         }
+    }
+
+    // No `vec:` request in this BGP: it (and any RDF-collection cells in it)
+    // must pass through completely unchanged.
+    if reqs.is_empty() {
+        rest.extend(deferred_lists.into_iter().cloned());
+        return Ok(GraphPattern::Bgp { patterns: rest });
     }
 
     // Join the hit tables onto the remaining ordinary patterns.
@@ -275,10 +299,17 @@ fn rewrite_bgp(
     Ok(out)
 }
 
-/// True for the `rdf:first`/`rdf:rest` triples spargebra emits for a `( … )`
-/// collection — these are consumed by the rewrite, not passed to the engine.
-fn is_list_triple(tp: &TriplePattern) -> bool {
-    matches!(&tp.predicate, NamedNodePattern::NamedNode(p) if p.as_str() == RDF_FIRST || p.as_str() == RDF_REST)
+/// True for a *synthetic* list-cell triple — a `rdf:first`/`rdf:rest` triple
+/// with a **blank-node subject**, the exact shape spargebra emits when it lowers
+/// a `( … )` collection. [OPUS-4.8] The blank-node-subject restriction is
+/// load-bearing: it means user-authored collection patterns with variable or
+/// IRI subjects (e.g. `?x rdf:first ?y`) are NOT treated as argument-list cells
+/// and survive into the engine. (Combined with the caller only dropping these
+/// when a `vec:` predicate is present, a query with no `vec:` pattern is left
+/// entirely unchanged.)
+fn is_list_cell(tp: &TriplePattern) -> bool {
+    matches!(&tp.subject, TermPattern::BlankNode(_))
+        && matches!(&tp.predicate, NamedNodePattern::NamedNode(p) if p.as_str() == RDF_FIRST || p.as_str() == RDF_REST)
 }
 
 /// The `rdf:first`/`rdf:rest` cells of every collection in a BGP, keyed by the

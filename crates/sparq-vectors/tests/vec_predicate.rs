@@ -217,3 +217,30 @@ fn no_vec_predicate_passes_through() {
     .unwrap();
     assert_eq!(iris(&r, 0), vec!["http://ex/a".to_string()], "{r:?}");
 }
+
+/// [OPUS-4.8] Regression: a query that legitimately uses the RDF collection
+/// vocabulary (`rdf:first`/`rdf:rest`) but NO `vec:` predicate must pass through
+/// unchanged — the rewrite must not strip those triples (it previously did,
+/// unconditionally). Here we query an actual `rdf:first` cell and expect the
+/// element back.
+#[test]
+fn rdf_collection_without_vec_predicate_is_preserved() {
+    let g = Graph::load_str(
+        r#"
+        <http://ex/list> <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://ex/elem> .
+        <http://ex/list> <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> .
+        "#,
+        "ntriples",
+    )
+    .unwrap();
+    // An empty store (no fingerprint) — exercises the unbound/legacy path too.
+    let store = VectorStore::create(tmp_path("collection_passthrough"), 2).unwrap();
+    let r = query_vec(
+        &g,
+        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n\
+         SELECT ?elem WHERE { <http://ex/list> rdf:first ?elem }",
+        &store,
+    )
+    .unwrap();
+    assert_eq!(iris(&r, 0), vec!["http://ex/elem".to_string()], "{r:?}");
+}
