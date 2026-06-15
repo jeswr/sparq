@@ -105,8 +105,8 @@ pub mod rng;
 // Shamir layer (parent bead sq-uu0u). See the module docs for the threat model.
 pub mod robust;
 pub mod shamir;
-// [OPUS-4.8] sq-18lk: oblivious shuffle (AS-Waksman) + sort (Batcher odd-even
-// mergesort) substrate over Shamir Fp — the keystone hidden-regime primitive
+// [OPUS-4.8] sq-18lk: oblivious shuffle (Waksman/Benes net) + sort (Batcher
+// odd-even mergesort) substrate over Shamir Fp — the keystone hidden-regime primitive
 // (ORQ SOSP'25). DISTINCT / ORDER BY / GROUP BY-over-hidden / MIN-MAX /
 // OPTIONAL-MINUS / the set-returning oblivious-join output path / ~linear joins
 // all reduce to it. The shuffle is sound today; the sort NETWORK + its
