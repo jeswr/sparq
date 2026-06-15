@@ -3295,8 +3295,8 @@ mod durable_degrade_tests {
     use super::{update_rejection_response, ServerConfig, DURABLE_UNAVAILABLE_PREFIX};
     use axum::http::StatusCode;
 
-    #[test]
-    fn durable_unavailable_maps_to_503_and_hides_marker() {
+    #[tokio::test]
+    async fn durable_unavailable_maps_to_503_and_hides_marker() {
         let cfg = ServerConfig::default();
         let tagged = format!("{DURABLE_UNAVAILABLE_PREFIX}injected ENOSPC");
         let resp = update_rejection_response(&tagged, &cfg);
@@ -3304,6 +3304,27 @@ mod durable_degrade_tests {
             resp.status(),
             StatusCode::SERVICE_UNAVAILABLE,
             "a durable-write refusal must be a retryable 503, not a 400/500",
+        );
+
+        // The internal marker must NEVER reach the client: assert it is absent from the
+        // BODY (not just that the status is right). A future leak of the prefix into the
+        // client-facing JSON — raw OR JSON-escaped (`json_error` escapes the U+0001 control
+        // chars to ``) — is caught here. The human-readable detail after the marker
+        // is expected to survive; only the marker bytes must be stripped.
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !body.contains(DURABLE_UNAVAILABLE_PREFIX),
+            "raw internal marker leaked into the client-facing body: {body:?}",
+        );
+        // The JSON-escaped form of the marker's control bytes (U+0001 -> ).
+        assert!(
+            !body.contains("\\u0001"),
+            "JSON-escaped internal marker leaked into the client-facing body: {body:?}",
+        );
+        assert!(
+            body.contains("injected ENOSPC"),
+            "the human-readable detail must still be reported to the client: {body:?}",
         );
     }
 

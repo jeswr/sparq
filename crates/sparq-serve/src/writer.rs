@@ -470,16 +470,22 @@ fn commit<A: ApplyUpdates>(
 
     // [OPUS-4.8] (sq-vpx4) Seal is the durable-commit point for an applier with a
     // `--persist` mirror. On `Err` the batch did NOT durably commit: publish NOTHING
-    // (so no reader ever sees it), ack NOTHING with success, and fail every pending
-    // submitter with `Unavailable` (a retryable 503-class refusal). We then `return`
-    // — the writer thread survives the failure, so reads keep flowing from the last
-    // published generation and a subsequent batch is tried once durability recovers.
-    // This turns a transient durable-write error from a process-killing panic into a
-    // refused-but-honest write, WITHOUT weakening fail-closed: a write that didn't
-    // durably commit is still never acked 2xx nor published.
+    // (so no reader ever sees it) and ack NOTHING with success. We then `return` — the
+    // writer thread survives the failure, so reads keep flowing from the last published
+    // generation and a subsequent batch is tried once durability recovers. This turns a
+    // transient durable-write error from a process-killing panic into a refused-but-honest
+    // write, WITHOUT weakening fail-closed: a write that didn't durably commit is still
+    // never acked 2xx nor published.
+    //
+    // Failure semantics are per-submitter, NOT batch-wide: only submitters whose writes
+    // were actually pending durable commit (they applied cleanly — `errs[i] == None`) get
+    // the retryable `Unavailable` (503-class). Submitters already rejected during `apply`
+    // (`errs[i] == Some(_)`, e.g. a malformed/unauthorized update) keep their original
+    // `Rejected` reason — a deterministic 400-class error must NOT be masked as a retryable
+    // 503 just because an unrelated peer in the same batch failed to seal.
     let snapshot = match applier.seal(working) {
         Ok(s) => s,
-        Err(e) => return fail_all_unavailable(batch, &e),
+        Err(e) => return fail_batch_after_seal_error(batch, errs, &e),
     };
     let touched = applied.iter().flat_map(|&i| batch[i].touched.iter().cloned());
     let number = ring.publish(snapshot, touched).number();
@@ -531,15 +537,25 @@ fn fail_all<U>(batch: Vec<Msg<U>>, reason: &str) {
     }
 }
 
-/// [OPUS-4.8] (sq-vpx4) Fails every pending submitter with [`WriteError::Unavailable`]
-/// — used when [`ApplyUpdates::seal`] could not make the batch durable. Distinct from
-/// [`fail_all`] (a `Rejected`/400-class application error): `Unavailable` is a retryable
-/// 503-class refusal of an otherwise-valid write, and crucially the writer thread does
-/// NOT exit, so reads stay served and later writes can recover.
-fn fail_all_unavailable<U>(batch: Vec<Msg<U>>, reason: &str) {
-    for msg in batch {
+/// [OPUS-4.8] (sq-vpx4) Resolves a batch when [`ApplyUpdates::seal`] could not make it
+/// durable. Failure semantics are per-submitter, preserving the rejected-vs-pending
+/// distinction:
+///   * a submitter rejected during `apply` (`errs[i] == Some(reason)`) keeps that
+///     original `Rejected` reason — a deterministic 400-class error is NOT laundered into
+///     a retryable 503 just because an unrelated peer failed to seal;
+///   * a submitter that applied cleanly (`errs[i] == None`) was pending durable commit, so
+///     it gets [`WriteError::Unavailable`] (a retryable 503-class refusal of an otherwise
+///     valid write).
+///
+/// Crucially the writer thread does NOT exit, so reads stay served and later writes can
+/// recover, and fail-closed is preserved: nothing was published or acked 2xx.
+fn fail_batch_after_seal_error<U>(batch: Vec<Msg<U>>, mut errs: Vec<Option<String>>, reason: &str) {
+    for (i, msg) in batch.into_iter().enumerate() {
         if let Some(ack) = msg.ack {
-            let _ = ack.send(Err(WriteError::Unavailable(reason.to_string())));
+            let _ = ack.send(match errs[i].take() {
+                Some(rejected) => Err(WriteError::Rejected(rejected)),
+                None => Err(WriteError::Unavailable(reason.to_string())),
+            });
         }
     }
 }

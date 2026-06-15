@@ -456,6 +456,59 @@ fn transient_seal_failure_refuses_then_recovers() {
     assert!(seals.load(Ordering::SeqCst) >= 3, "writer must have re-attempted seal after refusal");
 }
 
+/// [OPUS-4.8] (sq-vpx4) Per-submitter failure semantics when `seal` fails on a MIXED
+/// batch: one update is rejected during `apply` (a deterministic 400-class error) and one
+/// applies cleanly (pending durable commit). The seal then fails. The rejected submitter
+/// must keep its ORIGINAL `Rejected` reason (NOT laundered into a retryable 503), while the
+/// clean-but-undurable submitter gets `Unavailable`. Fail-closed holds: nothing publishes.
+#[test]
+fn seal_failure_keeps_apply_rejection_distinct_from_unavailable() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let seal_fails = Arc::new(AtomicUsize::new(0));
+    let seals = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::new(Log::new()));
+    // One wide window so both staggered submitters land in the SAME batch.
+    let writer = Arc::new(Writer::spawn(
+        ring.clone(),
+        MockApplier::with_seal_control(&forks, &seal_fails, &seals),
+        WriterConfig { window: Duration::from_millis(300), max_batch: 64, ..WriterConfig::default() },
+    ));
+
+    // Arm ONE seal failure: it fires when the writer seals this batch.
+    seal_fails.store(1, Ordering::SeqCst);
+
+    let spawn_submit = |update: &str, pod: &str, delay_ms: u64| {
+        let writer = writer.clone();
+        let update = update.to_string();
+        let pod = PodId::from(pod);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            writer.submit(update, [pod])
+        })
+    };
+    // A rejected-during-apply update + a valid one, both inside the open window.
+    let rejected = spawn_submit("fail:bad-request", "pod:bad", 0);
+    let valid = spawn_submit("ok", "pod:ok", 60);
+
+    // The to-be-rejected update keeps ITS 400-class reason, not a 503 Unavailable.
+    assert_eq!(
+        rejected.join().unwrap().unwrap_err(),
+        WriteError::Rejected("bad-request".into()),
+        "an update rejected during apply must keep its original Rejected reason after a seal failure",
+    );
+    // The valid-but-undurable update is refused with the retryable Unavailable.
+    assert!(
+        matches!(valid.join().unwrap(), Err(WriteError::Unavailable(_))),
+        "a clean update that was pending durable commit must get Unavailable when seal fails",
+    );
+
+    // FAIL-CLOSED: nothing published; the writer survived and recovers on the next write.
+    assert_eq!(ring.current().number(), 0, "a seal-failed batch must publish no generation");
+    assert!(ring.current().snapshot().is_empty());
+    let g = writer.submit("ok-after".to_string(), pods(&["pod:ok"])).unwrap();
+    assert_eq!(g, 1, "writer must keep running and publish once durability recovers");
+}
+
 /// [OPUS-4.8] (sq-vpx4) A PERSISTENT durable-write error → every write is refused with
 /// `Unavailable` (no panic, no publish), the writer stays alive across all of them, and
 /// reads keep being served from the last published snapshot the whole time (degraded
