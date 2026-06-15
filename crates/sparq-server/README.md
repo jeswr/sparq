@@ -72,9 +72,13 @@ and the server warns that reads remain open. Loopback binds are always allowed.
   / `SPARQ_SERVICE_ALLOW`). This is an SSRF guard — a `SERVICE` clause turns attacker-supplied
   query text into an outbound request from the server host (worst case cloud-metadata). The
   allowlist is enforced before any socket opens, on the resolved IP (DNS-rebinding-safe).
-- DoS guards that ARE on by default: query timeout (`503`), body cap (`413`), concurrency
-  load-shedding (`429`), panic→`500`. There is **no rate limit**, and `--max-results` is
-  unlimited by default — set both in the gateway / flags if you expose the port.
+- DoS guards that ARE on by default: query timeout (`503` — now on the UPDATE path too),
+  body cap (`413`), concurrency load-shedding (`429`), a 20× gzip-body decompression-ratio
+  cap (`413` zip-bomb guard, `sq-ebii`), panic→`500`. OFF by default (opt in if you expose
+  the port): the coarse **memory cap** `--max-query-rows` (working-set row ceiling on every
+  form → `413`, `sq-ebii`) and `--max-results`. There is **no rate limit** — add one in the
+  gateway. See the four-limit "Server hardening" section in the SKILL for the precise
+  (honest) semantics of each cap.
 
 ## 🚀 Quickstart
 
@@ -98,7 +102,10 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   (constant-time compared; mirrors QLever's `-a`), with an optional `--auth-token-read` gate
   for reads. Off by default (back-compat). See "Security posture".
 - **Hardening flags** — `--query-timeout` / `--max-body-bytes` / `--max-concurrent` /
-  `--max-results` / `--max-subscriptions*`, each with a `SPARQ_*` env override.
+  `--max-results` / `--max-query-rows` (coarse memory cap) / `--max-decompress-ratio`
+  (zip-bomb guard) / `--service-allow*` (SERVICE SSRF egress) / `--max-subscriptions*`, each
+  with a `SPARQ_*` env override. The four DoS/SSRF limits are documented together (with their
+  honest semantics) in the SKILL's "Server hardening" section.
 - **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket
   subscriptions** (live SELECT diffs).
 - **Opt-in features** — `time-travel` (`?generation=N` snapshot pinning), `geo` (sparq-geo
