@@ -94,6 +94,11 @@ fn check_error_display_covers_structural_reject_reasons() {
         &CheckError::JoinSlotMismatch { edge: 5 },
         &["join edge", "5", "slot"],
     );
+    // [OPUS-4.8] sq-r2s8: N-way join chain commitment-equality reject reason.
+    assert_display_carries(
+        &CheckError::JoinCommitmentChainMismatch { edge: 6 },
+        &["join edge", "6", "N-way"],
+    );
 }
 
 #[test]
