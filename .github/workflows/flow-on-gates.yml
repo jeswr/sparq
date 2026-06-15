@@ -1,0 +1,99 @@
+# [OPUS-4.8] Proactive maintenance merge-gates G1/G2 (beads sq-ncvq.4 + sq-ncvq.5,
+# epic sq-ncvq). Authored by Opus 4.8 (Fable unavailable; flag for re-review when
+# Fable returns).
+#
+# This is the PROACTIVE / merge-time half of the maintenance flow-on system
+# (research/maintenance-flow-on-automation-design.md §2.1). It is the COMPLEMENT of
+# the REACTIVE engine in flow-on.yml + scripts/flow-on*.{py,toml} (PR #220): that
+# engine mints follow-on ISSUES after a PR merges; THESE gates BLOCK a PR before it
+# merges when it would create maintenance debt. The two mechanisms are deliberately
+# consistent — G2's suppression mirrors flow-on.py's SKILL_PATHS exactly, so a PR a
+# gate lets through is also a PR the reactive engine would not re-flag.
+#
+# GATING (not advisory): the job NAMES here contain NO "advisory"/"informational"/
+# "non-blocking" token, so the `ci-summary / gate` aggregator (ci-summary.yml) — the
+# SINGLE required check on `main` — treats them as REQUIRED gating checks and folds
+# their conclusions into the merge verdict. There is NO branch-protection edit and
+# NO ci.yml/ci-summary.yml edit needed: the aggregator discovers every sibling
+# check-run on the head commit by name, so adding this workflow is enough to make
+# the gates required. (A gate that should ever soft-launch would run with the
+# scripts' `--advisory` flag OR be renamed to carry the "advisory" word; these run
+# HARD because the back-catalogue is already clean — verified by running each gate
+# against current HEAD with no violation.)
+#
+# Each gate reads the PR diff via `git diff --name-only origin/<base>...HEAD` (the
+# scripts derive added vs changed from `--name-status`) and exits non-zero with a
+# clear, actionable message on violation.
+name: flow-on-gates
+
+on:
+  pull_request:
+  # Required checks must also run on the merge-queue ref so ci-summary finds the
+  # identical sibling set there (mirrors ci-summary.yml's merge_group handling).
+  merge_group:
+
+# Read-only: the gates only read the diff against the base ref.
+permissions:
+  contents: read
+
+concurrency:
+  group: flow-on-gates-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  new-crate-completeness:
+    name: new-crate-completeness (G1)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for the merge-base diff)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: G1 — new crate ships bench + README (+ SKILL if public)
+        env:
+          # On pull_request github.base_ref is the bare target branch ('main'); on
+          # merge_group it is empty, so fall back to merge_group.base_ref (a full
+          # 'refs/heads/main' ref — the scripts normalize the refs/heads/ prefix).
+          GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
+        run: python3 scripts/gate-new-crate.py --base "$GATE_BASE_REF"
+
+  public-api-skill:
+    name: public-api-skill (G2)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for the merge-base diff)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Read PR labels (for the skill-not-needed escape hatch)
+        id: labels
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --json labels --jq '.labels[].name' > pr-labels.txt || : > pr-labels.txt
+          echo "have_labels=1" >> "$GITHUB_OUTPUT"
+      - name: G2 — public-surface change requires a SKILL.md edit
+        env:
+          # On pull_request github.base_ref is the bare target branch ('main'); on
+          # merge_group it is empty, so fall back to merge_group.base_ref (a full
+          # 'refs/heads/main' ref — the scripts normalize the refs/heads/ prefix).
+          GATE_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          if [ -f pr-labels.txt ]; then
+            python3 scripts/gate-api-skill.py --base "$GATE_BASE_REF" --labels-file pr-labels.txt
+          else
+            python3 scripts/gate-api-skill.py --base "$GATE_BASE_REF"
+          fi
