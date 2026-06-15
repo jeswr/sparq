@@ -186,6 +186,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // [OPUS-4.8] sq-zcby: ALSO gate reads with the same token (QLever-style; only
             // meaningful alongside --auth-token).
             "--auth-token-read" => config.auth_token_read = true,
+            // [OPUS-4.8] sq-d3d8 (epic sq-3183): OPT-IN federation discovery descriptors —
+            // serve a W3C VoID at /.well-known/void and a SPARQL Service Description for a
+            // GET /sparql with no query. Off by default (env SPARQ_FEDERATION_DESCRIPTORS=1).
+            #[cfg(feature = "federation-descriptors")]
+            "--federation-descriptors" => config.federation_descriptors = true,
             // [OPUS-4.8] sq-4w18: SERVICE egress allowlist. Repeatable: each value adds one
             // host (`sparql.example.org`) or suffix wildcard (`*.example.org`). With NO
             // allowlist (the default) every SERVICE clause is refused (default-DENY-all).

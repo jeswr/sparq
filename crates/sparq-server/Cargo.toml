@@ -81,6 +81,18 @@ service = ["server", "sparq-engine/service"]
 # server compiles without sparq-geo or the georust stack and every engine call is
 # the registry-free one (zero cost, byte-identical behaviour).
 geo = ["dep:sparq-geo"]
+# [OPUS-4.8] (sq-d3d8, epic sq-3183) `federation-descriptors` (default OFF) makes the
+# server a *discoverable* federation node: it serves a W3C VoID dataset description at
+# `GET /.well-known/void` and a SPARQL 1.1 Service Description for a `GET /sparql` with no
+# `query` parameter. The descriptor generation lives in `sparq-introspect`
+# (`Introspection::to_void`); this feature pulls that crate (light: it depends only on
+# sparq-core + serde, no async/heavy deps) and mounts the routes. STILL OFF AT RUNTIME by
+# default even when compiled in — the operator must additionally set
+# `--federation-descriptors` / `SPARQ_FEDERATION_DESCRIPTORS=1` (config flag
+# `ServerConfig::federation_descriptors`), so discovery is never exposed unless deliberately
+# turned on. Without the feature, zero cost: no sparq-introspect dependency, no routes,
+# byte-identical to before; sparq-core/sparq-engine untouched either way.
+federation-descriptors = ["server", "dep:sparq-introspect"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -93,6 +105,11 @@ sparq-engine = { path = "../sparq-engine", version = "0.1.0" }
 # and the wasm graph never see it (`cargo tree -p sparq-wasm -e normal | grep -c
 # serve` must stay 0).
 sparq-serve = { path = "../sparq-serve", version = "0.1.0", optional = true }
+# [OPUS-4.8] (sq-d3d8) Behind the opt-in `federation-descriptors` feature only: the VoID /
+# Service-Description generator (`Introspection::to_void`). Light — it depends only on
+# sparq-core + serde (no async, no heavy deps), and is already in the workspace tree
+# (sparq-engine / sparq-nlq use it). OFF by default, so it adds nothing to the standard build.
+sparq-introspect = { path = "../sparq-introspect", version = "0.1.0", optional = true }
 # Behind the opt-in `geo` feature only (geof_registry; its own default `engine`
 # feature is this same sparq-engine, so the graph gains just the georust stack).
 sparq-geo = { path = "../sparq-geo", version = "0.1.0", optional = true }

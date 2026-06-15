@@ -20,6 +20,14 @@ pub mod service_config;
 #[cfg(feature = "server")]
 pub mod http;
 
+/// [OPUS-4.8] (sq-d3d8, epic sq-3183) OPT-IN federation discovery descriptors — the W3C
+/// VoID dataset description (`GET /.well-known/void`) and the SPARQL 1.1 Service Description
+/// (a `GET /sparql` with no `query`). Compiled only behind the `federation-descriptors`
+/// feature, and served only when [`ServerConfig::federation_descriptors`] is also set. See
+/// the module docs for the OPT-IN posture (feature + flag, both OFF by default).
+#[cfg(feature = "federation-descriptors")]
+pub mod descriptors;
+
 /// Prometheus metrics — hand-rolled text exposition at `GET /metrics` (T22).
 #[cfg(feature = "server")]
 pub mod metrics;
