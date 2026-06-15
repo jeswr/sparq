@@ -465,17 +465,28 @@ fi
 
 # [OPUS-4.8] FULL-TEXT-SEARCH suite per-commit (sq-ustq). The corpus is SYNTHETIC (generated
 # in-process by examples/bench_text from a seed), so there is NO external-toolchain guard like
-# the LUBM/SHACL javac/rapper — the only requirement is the bench_text example binary, built on
-# demand (sparq-text is isolated — not a sparq-cli dependency). run.sh is the self-asserting
-# entry point: it runs bench_text on the pinned N=100000/seed=0 corpus and asserts each
-# workload's hit count + the integer index bytes-per-doc vs expected.tsv internally (exit 1 on
-# any drift), failing the whole ci-bench run on a regression exactly like LUBM/SHACL. We harvest
-# run.sh's `<workload>\t<count>\t<us>` stdout: the `bytes_per_doc` row feeds the DETERMINISTIC
+# the LUBM/SHACL javac/rapper — bench_text only needs `cargo`, which is ALWAYS present (incl. on
+# PRs). The other suites avoid per-PR cost because their toolchains (javac/rapper/g++/JRE) are
+# main-only (bench.yml installs them only on `github.ref == refs/heads/main`), so their
+# `command -v` guard skips them on PRs. To match that discipline — and keep the FTS example
+# build+run (release compile of bench_text + N=100000 corpus) OFF the per-PR path — we gate this
+# hook to the MAIN tier: it runs on push-to-main (GITHUB_REF=refs/heads/main) and on a LOCAL run
+# (GITHUB_REF unset, so devs/`bench/fts/run.sh` still work), but is SKIPPED on the PR tier. The
+# deterministic correctness gate therefore runs once per merge to main (alongside the other
+# example-building suites), not on every PR build. run.sh is the self-asserting entry point: it
+# runs bench_text on the pinned N=100000/seed=0 corpus and asserts each workload's hit count +
+# the integer index bytes-per-doc vs expected.tsv internally (exit 1 on any drift), failing the
+# whole ci-bench run on a regression exactly like LUBM/SHACL. We harvest run.sh's
+# `<workload>\t<count>\t<us>` stdout: the `bytes_per_doc` row feeds the DETERMINISTIC
 # fts_bytes_per_doc ratchet (mode:auto, scripts/perf-gate.py), and the query rows feed ADVISORY
-# timings (text_<workload>_us, trend-only, NOT in perf-gate). Build is guarded so a missing
-# cargo/toolchain skips gracefully (PRs build no examples ⇒ zero PR cost).
+# timings (text_<workload>_us, trend-only, NOT in perf-gate).
 FTS_BIN=target/release/examples/bench_text
-if command -v cargo >/dev/null 2>&1 && [ -x "$FTS_RUN" ]; then
+# PR-tier skip: run only on main (or locally, where GITHUB_REF is unset) — mirrors the
+# main-only-toolchain skip the LUBM/SHACL hooks get for free, keeping the FTS example build off PRs.
+FTS_REF="${GITHUB_REF:-}"
+if [ -n "$FTS_REF" ] && [ "$FTS_REF" != "refs/heads/main" ]; then
+  echo "note: fts skipped (PR tier — FTS example build/run is main-only, like the javac/rapper suites)" >&2
+elif command -v cargo >/dev/null 2>&1 && [ -x "$FTS_RUN" ]; then
   # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE
   # bench_text. Let cargo's staleness detection decide (a no-op rebuild is cheap); do NOT
   # swallow a real compile failure (it must fail the gate, not silently skip the FTS check).
@@ -502,7 +513,9 @@ if command -v cargo >/dev/null 2>&1 && [ -x "$FTS_RUN" ]; then
     exit 1
   fi
 else
-  echo "note: fts skipped (cargo not on PATH)" >&2
+  # Reached only on the MAIN/local tier (the PR tier is handled by the skip branch above) when
+  # cargo or the run.sh entry point is missing.
+  echo "note: fts skipped (cargo not on PATH or $FTS_RUN missing)" >&2
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.

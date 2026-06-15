@@ -13,6 +13,10 @@
 //!    asserts against `expected.tsv`.
 //!
 //! ```sh
+//! # No args reproduces the PINNED per-commit corpus (N=100000, seed=0) that
+//! # bench/fts/gen.sh + expected.tsv are derived from — so a casual `cargo run`
+//! # reproduces the gated counts. The heavy/latency 1M tier is opt-in via the first arg.
+//! cargo run -p sparq-text --release --example bench_text              # N=100000 seed=0 iters=3
 //! cargo run -p sparq-text --release --example bench_text -- [N] [seed] [iters]
 //! ```
 //!
@@ -47,10 +51,17 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use sparq_core::Graph;
 use sparq_text::TextIndex;
 
-/// The seed for the corpus RNG (distinct from the query-set seed so the two are
-/// independent — the query set never shifts when the corpus generation changes its
-/// RNG consumption, which is what makes the hit counts a STABLE gate).
-const CORPUS_SEED: u64 = 20260612;
+/// The DEFAULT corpus RNG seed — pinned to match `bench/fts/gen.sh` (seed 0) so a no-arg
+/// `cargo run --example bench_text` reproduces EXACTLY the committed `bench/fts/expected.tsv`
+/// corpus. (Distinct from the query-set seed below so the two are independent — the query
+/// set never shifts when corpus generation changes its RNG consumption, which is what makes
+/// the hit counts a STABLE gate.)
+const CORPUS_SEED: u64 = 0;
+
+/// The DEFAULT corpus size — pinned to match `bench/fts/gen.sh` (N=100000, the per-commit
+/// tier) so a no-arg run reproduces the gated `expected.tsv` counts. The heavy/latency
+/// 1M-literal tier is opt-in via the first arg (`cargo run --example bench_text -- 1000000`).
+const CORPUS_N: usize = 100_000;
 
 const STEMS: [&str; 20] = [
     "data", "graph", "query", "index", "store", "term", "literal", "token", "search", "join",
@@ -81,7 +92,7 @@ fn fixed_queries(n: usize) -> Vec<(String, String)> {
 const QUERIES: usize = 200;
 
 fn main() {
-    let n: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(1_000_000);
+    let n: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_N);
     let seed: u64 = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(CORPUS_SEED);
     let iters: usize = std::env::args().nth(3).and_then(|a| a.parse().ok()).unwrap_or(3);
     let iters = iters.max(1);

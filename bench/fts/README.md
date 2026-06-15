@@ -71,9 +71,11 @@ These deterministic metrics also have `mode:"auto"` entries in
 ratcheted in addition to the per-commit `expected.tsv` diff.
 
 **Timing is ADVISORY** (`mode:noise`, trend-only, **never hard-gated** — and this dev box is
-non-canonical, so its timings are advisory only): the ci-bench hook harvests
-`text_and_us` / `text_prefix_us` / `text_build_s` into the dashboard; they are **not** in
-`scripts/perf-gate.py`. The hard gate lives in `run.sh`'s `expected.tsv` diff.
+non-canonical, so its timings are advisory only): the ci-bench hook harvests one
+`text_<workload>_us` per query workload (`text_and_terms_us` / `text_or_terms_us` /
+`text_prefix4_us` / `text_phrase_us` / `text_near_slop2_us`) plus `text_build_s` into the
+dashboard; they are **not** in `scripts/perf-gate.py`. The hard gate lives in `run.sh`'s
+`expected.tsv` diff.
 
 ## Running it
 
