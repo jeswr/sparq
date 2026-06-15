@@ -436,7 +436,14 @@ impl VectorStore {
         reader
             .seek(SeekFrom::Start(header.data_offset as u64))
             .map_err(|e| format!("seek {}: {e}", npy_path.display()))?;
-        let row_bytes = header.dim * elem;
+        // Checked: validate the per-row buffer size BEFORE allocating it. `want_body` above only
+        // bounds `rows*dim*elem`; with `rows == 0` an absurd `dim` would never have been multiplied
+        // in, so guard `dim*elem` directly so a malicious header can't overflow or force a huge
+        // allocation here. Fail closed. [OPUS-4.8] sq-3jc8
+        let row_bytes = header
+            .dim
+            .checked_mul(elem)
+            .ok_or("npy: dim*elem_size overflows usize")?;
         let mut raw = vec![0u8; row_bytes];
         let npy_path_owned = npy_path.to_path_buf();
         stream_store(
@@ -524,9 +531,20 @@ impl VectorStore {
         let file = std::fs::File::open(dump_path)
             .map_err(|e| format!("open {}: {e}", dump_path.display()))?;
         let mut reader = BufReader::new(file);
-        let row_bytes = spec.dim * 4;
+        // Checked: validate the per-row buffer size BEFORE allocating it. `expect` above only bounds
+        // `rows*dim*4`; with `rows == 0` an absurd `dim` would never have been multiplied in, so guard
+        // `dim*4` directly so it can't overflow or force a huge allocation here. Fail closed. sq-3jc8
+        let row_bytes = spec
+            .dim
+            .checked_mul(4)
+            .ok_or("dump: dim*4 overflows usize")?;
         let mut raw = vec![0u8; row_bytes];
         let dump_path_owned = dump_path.to_path_buf();
+        // Detect a metadata→read GROW race: bytes appended after the length check would otherwise be
+        // silently ignored (we stop after `rows` rows). On the LAST row, confirm the reader is at EOF
+        // so trailing bytes are rejected — restoring the pre-streaming `bytes.len() != expect`
+        // fail-closed semantics for growth (shrink is already caught by the `read_exact` below). sq-3jc8
+        let mut rows_read = 0usize;
         stream_store(
             spec.spqv_path,
             spec.dim,
@@ -541,6 +559,24 @@ impl VectorStore {
                     .map_err(|e| format!("read {}: {e}", dump_path_owned.display()))?;
                 for chunk in raw.chunks_exact(4) {
                     out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+                }
+                rows_read += 1;
+                if rows_read == rows {
+                    // After the final declared row there must be nothing left; a non-empty read means
+                    // the file grew (trailing bytes) since the length check — fail closed.
+                    let mut extra = [0u8; 1];
+                    match reader.read(&mut extra) {
+                        Ok(0) => {}
+                        Ok(_) => {
+                            return Err(format!(
+                                "dump: {} grew past its declared {expect} bytes (trailing data) after the size check",
+                                dump_path_owned.display()
+                            ))
+                        }
+                        Err(e) => {
+                            return Err(format!("read {}: {e}", dump_path_owned.display()))
+                        }
+                    }
                 }
                 Ok(())
             },

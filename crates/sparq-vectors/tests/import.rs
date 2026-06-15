@@ -288,6 +288,29 @@ fn dump_wrong_length_fails_closed() {
     .is_err());
 }
 
+/// [OPUS-4.8] sq-3jc8 — an absurd `dim` whose per-row byte size (`dim * 4`) overflows `usize` must be
+/// rejected with a clean error BEFORE any allocation — never overflow/panic in debug or attempt a huge
+/// `Vec<u8>`. With zero rows the `rows*dim*4` expected-length check is `0` (a 0-byte file passes it), so
+/// the per-row `dim*4` checked-multiply guard is the one that has to catch it.
+#[test]
+fn dump_absurd_dim_overflow_fails_closed() {
+    let dump = tmp("absurd-dim.f32");
+    std::fs::write(&dump, Vec::<u8>::new()).unwrap(); // 0 rows -> expected length 0, passes the size check
+    let ids: [u32; 0] = [];
+    let Err(err) = VectorStore::import_numeric_dump(
+        ImportSpec {
+            spqv_path: tmp("absurd-dim.spqv"),
+            dim: usize::MAX, // dim * 4 overflows usize
+            ids: &ids,
+            binding: ImportBinding::Unbound,
+        },
+        &dump,
+    ) else {
+        panic!("absurd dim must fail closed, not overflow/OOM");
+    };
+    assert!(err.contains("overflow"), "err: {err}");
+}
+
 #[test]
 fn npy_malformed_header_fails_closed_bounded() {
     let ids = [1u32, 2, 3];
