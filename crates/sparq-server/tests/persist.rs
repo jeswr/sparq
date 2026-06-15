@@ -360,7 +360,7 @@ async fn pss_combined_multiop_body_accepted_and_atomic() {
 /// gh-48 all-or-nothing. A multi-op request whose LATER operation is invalid must leave NO
 /// partial write — the request fails (non-2xx) and the valid prefix is NOT committed (not in
 /// memory, and — on `--persist` — not on disk after a restart). This is the engine's
-/// request-level atomicity: the serve writer applies the body to a private fork and seals
+/// request-level atomicity: the server writer applies the body to a private fork and seals
 /// (and durably commits) ONLY on full success, so a rejected body never publishes or persists
 /// a prefix. (A non-SILENT `LOAD` of an unfetchable source is the reliable mid-body failure.)
 #[tokio::test]

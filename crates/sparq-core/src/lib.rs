@@ -1373,14 +1373,25 @@ impl Graph {
         // multi-op UPDATE body's resolved per-slot quad-delta is one atomic `txn.log` frame; if a
         // crash interrupted materialisation after that single fsync, the per-graph WALs hold only a
         // PREFIX of the body — replaying the frame heals the desync. Re-applying records the WALs
-        // already materialised is a no-op: `apply_delta_mem` is set-semantic (re-inserting a present
-        // triple / deleting an absent one changes nothing) and `ensure_named` is find-or-create.
-        // ORDER: read the frame, apply it in memory, THEN truncate the on-disk journal — so a crash
-        // before truncation simply redoes the (idempotent) frame again on the next open.
+        // already materialised is a no-op: `apply_delta` replays with set semantics (re-inserting a
+        // present triple / deleting an absent one changes nothing) and `ensure_named` is
+        // find-or-create.
+        //
+        // [OPUS-4.8] (Copilot #135) DURABILITY ORDER (load-bearing): the records MUST be
+        // MATERIALISED INTO THE DURABLE PER-GRAPH WAL (`redo_txn_record` -> `apply_delta`, which
+        // appends + fsyncs) BEFORE the `txn.log` is truncated. The earlier code applied them with
+        // `apply_delta_mem` (IN-MEMORY only) and then truncated the journal, so a record that lived
+        // ONLY in `txn.log` — the precise crash window the journal exists for — was applied to this
+        // process's memory but written nowhere durable, then ERASED by the truncation, so it did NOT
+        // survive the NEXT restart. Re-logging into the WAL first (then truncate) makes the recovered
+        // state durable across any number of restarts; a re-crash between WAL-redo and truncation
+        // simply redoes the (idempotent) frame again on the next open.
         let txn_records = TxnJournal::replay(dir)?;
         for (insert, slot, t) in txn_records {
             g.redo_txn_record(insert, slot, t).map_err(std::io::Error::other)?;
         }
+        // Every committed record is now durably in a per-graph WAL (fsync'd by `apply_delta`); only
+        // NOW is it safe to truncate the journal that was the sole durable home of those records.
         let mut journal = TxnJournal::open(dir)?;
         journal.truncate()?;
         g.txn = Some(journal);
@@ -1392,14 +1403,24 @@ impl Graph {
     /// named sub-graph (find-or-create via [`ensure_named`](Self::ensure_named), so a frame whose
     /// child-graph creation crashed before materialisation still rebuilds the graph). Set-semantic:
     /// re-applying a change the per-graph WAL already materialised is a no-op.
+    ///
+    /// [OPUS-4.8] (Copilot #135) DURABILITY: the redo goes through the WAL-logged + fsync'd
+    /// [`apply_delta`](Self::apply_delta) (NOT the in-memory-only `apply_delta_mem`), so a record
+    /// that lived ONLY in `txn.log` — the exact crash window the journal exists for (crash AFTER
+    /// `commit_txn` fsync, BEFORE per-graph WAL materialisation) — is MATERIALISED into the durable
+    /// per-graph WAL on recovery. The caller truncates `txn.log` only AFTER every record has been
+    /// re-logged this way (see [`open`](Self::open)), so the recovered state survives ANY number of
+    /// subsequent restarts. Re-logging a record the per-graph WAL already holds is harmless: the WAL
+    /// replays with set semantics (re-inserting a present triple / deleting an absent one is a
+    /// no-op), so a re-crash mid-redo simply redoes the (idempotent) frame again.
     #[cfg(feature = "mmap")]
     fn redo_txn_record(&mut self, insert: bool, slot: Option<Term>, t: [Term; 3]) -> Result<(), String> {
         match slot {
             None => {
                 if insert {
-                    self.apply_delta_mem(&[t], &[]);
+                    self.apply_delta(&[t], &[])?;
                 } else {
-                    self.apply_delta_mem(&[], &[t]);
+                    self.apply_delta(&[], &[t])?;
                 }
             }
             Some(name) => {
@@ -1412,9 +1433,9 @@ impl Graph {
                 };
                 if let Some(i) = idx {
                     if insert {
-                        self.named[i].1.apply_delta_mem(&[t], &[]);
+                        self.named[i].1.apply_delta(&[t], &[])?;
                     } else {
-                        self.named[i].1.apply_delta_mem(&[], &[t]);
+                        self.named[i].1.apply_delta(&[], &[t])?;
                     }
                 }
             }
@@ -2850,10 +2871,15 @@ fn decode_slot(bytes: &[u8], pos: usize) -> Result<(Option<Term>, usize), String
 /// the per-graph WAL appends still happen but are now materialisation, not the commit point.
 ///
 /// On [`open`](Graph::open), AFTER the per-graph WALs are replayed, any committed `txn.log` frame
-/// is replayed idempotently and then the journal is truncated. Idempotency holds because
-/// [`apply_delta_mem`](Graph::apply_delta_mem) is set-semantic (re-inserting a present triple /
-/// deleting an absent one is a no-op) and [`ensure_named`](Graph::ensure_named) is find-or-create —
-/// so re-applying records the per-graph WALs already materialised changes nothing.
+/// is replayed idempotently and then the journal is truncated. [OPUS-4.8] (Copilot #135) The redo
+/// goes through the DURABLE [`apply_delta`](Graph::apply_delta) (WAL-logged + fsync'd), NOT the
+/// in-memory-only `apply_delta_mem`, and the truncation happens only AFTER every record is durably
+/// in a per-graph WAL — so a record that lived ONLY in `txn.log` (the crash-after-commit /
+/// before-materialisation window) is moved into durable storage on recovery and survives the NEXT
+/// restart, instead of being applied in-memory once and then erased by the truncation. Idempotency
+/// holds because [`apply_delta`](Graph::apply_delta) replays with set semantics (re-inserting a
+/// present triple / deleting an absent one is a no-op) and [`ensure_named`](Graph::ensure_named) is
+/// find-or-create — so re-applying records the per-graph WALs already materialised changes nothing.
 ///
 /// Frame layout (byte-identical write+fsync discipline to [`Wal::append_batch`]):
 ///
@@ -6247,6 +6273,119 @@ mod tests {
             "journal redo must materialise the containment under <parent>"
         );
         assert_eq!(std::fs::read(TxnJournal::path(&dir)).unwrap().len(), 0, "journal truncated after redo");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (Copilot #135) DOUBLE-RESTART DURABILITY (default graph): the load-bearing
+    /// regression test for the recovery-durability fix. A committed `txn.log` frame with NO
+    /// per-graph WAL materialisation (the crash-after-commit-fsync / before-materialisation window)
+    /// must be REDONE INTO THE DURABLE WAL on the first reopen and then SURVIVE a SECOND reopen.
+    ///
+    /// Under the OLD behaviour (`apply_delta_mem` then truncate) the first reopen applied the record
+    /// only IN MEMORY and erased `txn.log`, so the data was present after the first open but GONE
+    /// after the second — exactly the durability defect this asserts against. The second reopen is
+    /// what distinguishes "durable" from "in-memory-on-first-open".
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn txn_default_redo_survives_double_restart() {
+        let dir = txn_tmp_dir("double_default");
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_str("<http://ex/base> <http://ex/p> <http://ex/o> .", "ntriples").unwrap().save(&dir).unwrap();
+
+        // Two default-graph inserts committed to the journal with NO materialisation, then dropped
+        // — simulating a crash right after the single commit fsync, before any per-graph WAL write.
+        let a = [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")];
+        let b = [term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")];
+        let records: Vec<(bool, Option<Term>, [Term; 3])> = vec![(true, None, a.clone()), (true, None, b.clone())];
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            g.commit_txn(&records).unwrap(); // THE commit point — NO materialisation follows.
+            assert!(TxnJournal::path(&dir).metadata().unwrap().len() > 0, "frame must be on disk");
+        }
+
+        let want = |g: &Graph| {
+            let d = dump_terms(g);
+            assert!(d.iter().any(|(s, _, _)| s.contains("/s1")), "record a must be present");
+            assert!(d.iter().any(|(s, _, _)| s.contains("/s2")), "record b must be present");
+            assert!(d.iter().any(|(s, _, _)| s.contains("/base")), "base must be present");
+        };
+
+        // First reopen: recovery REDOES the frame INTO THE DURABLE WAL, then truncates `txn.log`.
+        {
+            let g = Graph::open(&dir).unwrap();
+            want(&g);
+            assert_eq!(std::fs::read(TxnJournal::path(&dir)).unwrap().len(), 0, "journal truncated after redo");
+            // The WAL — not the (now empty) journal — must now hold the recovered records.
+            assert!(Wal::path(&dir).metadata().unwrap().len() > 0, "records must be durably in the per-graph WAL");
+        }
+        // SECOND reopen: `txn.log` is empty, so the data can ONLY come from the durable WAL. This is
+        // the assertion the OLD in-memory-only redo failed.
+        {
+            let g = Graph::open(&dir).unwrap();
+            want(&g);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (Copilot #135) DOUBLE-RESTART DURABILITY (named graphs): the named-graph twin of
+    /// `txn_default_redo_survives_double_restart` — the PSS `INSERT DATA { GRAPH <r> ... ; GRAPH
+    /// <parent> contains <r> }` shape. A committed frame that CREATES a named graph and writes a
+    /// containment triple under another, with NO materialisation, must be redone into the durable
+    /// per-graph WALs on the first reopen and STILL be present after a SECOND reopen (`txn.log`
+    /// empty → the data must come from each sub-graph's own WAL).
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn txn_named_redo_survives_double_restart() {
+        let dir = txn_tmp_dir("double_named");
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_str("", "ntriples").unwrap().save(&dir).unwrap();
+
+        let r = named("r");
+        let parent = named("parent");
+        let child = [
+            term_iri(1, "x"),
+            Term::NamedNode(NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")),
+            named("Resource"),
+        ];
+        let contains = [
+            parent.clone(),
+            Term::NamedNode(NamedNode::new_unchecked("http://www.w3.org/ns/ldp#contains")),
+            r.clone(),
+        ];
+        let records: Vec<(bool, Option<Term>, [Term; 3])> =
+            vec![(true, Some(r.clone()), child.clone()), (true, Some(parent.clone()), contains.clone())];
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            g.commit_txn(&records).unwrap(); // THE commit point — NO materialisation follows.
+            assert!(TxnJournal::path(&dir).metadata().unwrap().len() > 0, "frame must be on disk");
+        }
+
+        let want = |g: &Graph| {
+            let r_sub = g.named.iter().find(|(n, _)| n == &r).map(|(_, s)| dump_terms(s));
+            let p_sub = g.named.iter().find(|(n, _)| n == &parent).map(|(_, s)| dump_terms(s));
+            assert_eq!(
+                r_sub,
+                Some(vec![(child[0].to_string(), child[1].to_string(), child[2].to_string())]),
+                "child graph <r> must be present"
+            );
+            assert_eq!(
+                p_sub,
+                Some(vec![(contains[0].to_string(), contains[1].to_string(), contains[2].to_string())]),
+                "containment under <parent> must be present"
+            );
+        };
+
+        // First reopen: recovery redoes the frame into each sub-graph's DURABLE WAL, then truncates.
+        {
+            let g = Graph::open(&dir).unwrap();
+            want(&g);
+            assert_eq!(std::fs::read(TxnJournal::path(&dir)).unwrap().len(), 0, "journal truncated after redo");
+        }
+        // SECOND reopen: `txn.log` empty → both records must come from the per-graph WALs (durable).
+        {
+            let g = Graph::open(&dir).unwrap();
+            want(&g);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
