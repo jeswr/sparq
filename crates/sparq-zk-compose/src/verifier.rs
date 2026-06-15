@@ -1309,6 +1309,32 @@ pub enum CheckError {
     /// `derivation` module; until then only the disclosed base grounds a step.)
     // [OPUS-4.8] sq-314.
     UngroundedDerivationAntecedent { step: usize, antecedent: usize },
+    /// [OPUS-4.8] sq-sfsi (hidden JOIN, step 4): a `JoinEdge` references a
+    /// non-existent sub-proof index (`scan_a`/`scan_b`/`join_proof`) or a
+    /// committed-graph index (`graph_a`/`graph_b`) outside the referenced scan's
+    /// `commitments`. The hidden-key analogue of [`Self::DanglingEdge`]. Rejected
+    /// fail-closed — a join cannot bind a proof/graph the manifest does not carry.
+    JoinDanglingEdge { edge: usize },
+    /// [OPUS-4.8] sq-sfsi (hidden JOIN, step 4): a `JoinEdge`'s `scan_a`/`scan_b`
+    /// do not point at `Scan` sub-proofs, or `join_proof` does not point at a
+    /// `JoinEq` sub-proof. The hidden-key analogue of [`Self::EdgeKindMismatch`]:
+    /// a join edge must tie two scans to a `join_eq` proof. Rejected fail-closed.
+    JoinEdgeKindMismatch { edge: usize },
+    /// [OPUS-4.8] sq-sfsi (hidden JOIN, step 4): the `join_eq` proof's PUBLIC
+    /// `commit_a`/`commit_b` do NOT byte-equal the two referenced scans' bound
+    /// `commitments[graph_a]`/`commitments[graph_b]` (design §2.3 / §4.2, the
+    /// anti-A2 binding). The scan commitments are audit-#1 byte-bound into the scan
+    /// proofs AND issuer-signed (audit #3), so this ties the join to two genuine,
+    /// attested credentials. A `join_eq` pointed at a graph the scans do not attest
+    /// (cross-scan forgery) is rejected here fail-closed.
+    JoinCommitmentMismatch { edge: usize },
+    /// [OPUS-4.8] sq-sfsi (hidden JOIN, step 4): the `join_eq` proof's PUBLIC
+    /// `slot_a`/`slot_b` do NOT equal the query-derived slots the shared join
+    /// variable occupies in the two patterns the referenced scans answer (design
+    /// §4.4 slot binding — the one genuinely new soundness obligation). A prover
+    /// that proved the equality over the wrong column (the salary-slot-for-age
+    /// analogue, audit #6) is rejected fail-closed.
+    JoinSlotMismatch { edge: usize },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
 }
@@ -1553,6 +1579,22 @@ impl std::fmt::Display for CheckError {
             CheckError::UngroundedDerivationAntecedent { step, antecedent } => write!(
                 f,
                 "derivation step {step} antecedent {antecedent} is ungrounded (sq-314: it is neither an earlier step's derived triple nor a disclosed scan row — a derived triple cannot rest on an antecedent the proof does not establish)"
+            ),
+            CheckError::JoinDanglingEdge { edge } => write!(
+                f,
+                "join edge {edge} references a non-existent sub-proof or committed-graph index (sq-sfsi: a hidden join cannot bind a proof/graph the manifest does not carry — fail-closed)"
+            ),
+            CheckError::JoinEdgeKindMismatch { edge } => write!(
+                f,
+                "join edge {edge} does not connect two scan sub-proofs to a join_eq sub-proof (sq-sfsi: scan_a/scan_b must be scans and join_proof a join_eq — fail-closed)"
+            ),
+            CheckError::JoinCommitmentMismatch { edge } => write!(
+                f,
+                "join edge {edge}: the join_eq proof's public commit_a/commit_b do not byte-equal the referenced scans' bound commitments[graph_a]/commitments[graph_b] (sq-sfsi §2.3/§4.2 anti-A2: the join is not bound to the two attested credentials — cross-scan forgery, fail-closed)"
+            ),
+            CheckError::JoinSlotMismatch { edge } => write!(
+                f,
+                "join edge {edge}: the join_eq proof's public slot_a/slot_b do not equal the query-derived slots the shared join variable occupies (sq-sfsi §4.4 slot binding: the equality was proved over the wrong column — fail-closed)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
         }
@@ -1828,6 +1870,24 @@ pub fn prefilter_manifest_structure(
     // within the relying party's freshness window. A revoked bit, a stale
     // snapshot, or a missing snapshot all REJECT (fail-closed).
     bind_revocation(manifest, revocation_policy)?;
+
+    // --- Stage 2g: hidden cross-credential JOIN binding (sq-sfsi, step 4). ---
+    // The hidden-key analogue of the binding-edge + query-correctness stages: for
+    // each DECLARED `JoinEdge`, require the `join_eq` proof's public commit_a/commit_b
+    // to byte-equal the two referenced scans' bound commitments[graph_*] (anti-A2,
+    // §2.3/§4.2) and require its public slot_a/slot_b to equal the query-derived
+    // slots a variable SHARED across the two answered patterns occupies (§4.4 slot
+    // binding — which doubles as the anti-spurious-join check). A query cross-scan
+    // shared variable WITHOUT a hidden JoinEdge is discharged by the disclosed-row
+    // path (`recheck`/`join_obligations`, stage 1a), NOT demanded here — the hidden
+    // join is the opt-in privacy alternative (see bind_joins' scope docs). The
+    // `join_eq` proof itself is cryptographically
+    // verified in `verify_manifest`'s per-sub-proof loop (canonical vk by re-derived
+    // CircuitId::JoinEq, audit-#1 public-input byte-compare, bb verify) — this is the
+    // structural gate that ties those bound public inputs to the attested scans and
+    // the query. Placed AFTER bind_issuer_attestations so the commitments it
+    // byte-matches are already known issuer-attested + in K (design §3.3 step 3).
+    bind_joins(manifest)?;
 
     Ok(required)
 }
@@ -3005,6 +3065,220 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
         }
     }
     Ok(())
+}
+
+/// [OPUS-4.8] sq-sfsi (hidden cross-credential JOIN, step 4 of sq-bwwl): the
+/// `bind_joins` verifier gate — the hidden-key analogue of `bind_query_correctness`
+/// + the `binding_edges` consistency stage, for `ProofManifest::join_edges`.
+///
+/// `bind_joins` enforces THREE properties; a manifest whose join proof,
+/// commitments, or query binding do not line up is REJECTED:
+///
+/// 1. **Commitment-matching (anti-A2, design §2.3/§4.2).** For each [`JoinEdge`],
+///    the referenced `join_eq` sub-proof's PUBLIC `commit_a`/`commit_b` MUST
+///    byte-equal the two referenced SCAN sub-proofs' bound
+///    `commitments[graph_a]`/`commitments[graph_b]`. The scan commitments are
+///    audit-#1 byte-bound into the scan proofs AND issuer-attested+in-`K` (audit
+///    #3, `bind_issuer_attestations`, run in the same structural stage), so the
+///    join is provably over two genuine, attested credentials. A `join_eq` pointed
+///    at a commitment no referenced scan attests (cross-scan forgery) is rejected
+///    ([`CheckError::JoinCommitmentMismatch`]). The byte-comparison is over the
+///    SAME canonical big-endian field bytes the audit-#1 reconstruction uses (so
+///    `0x`-padding spelling differences do not spuriously diverge).
+///
+/// 2. **Canonical VK (anti-A1, design §4.1) — enforced by the sub-proof loop.** The
+///    `join_eq` proof itself is cryptographically verified in
+///    [`verify_manifest`]'s per-sub-proof loop EXACTLY like every other member:
+///    [`reconstruct_public_inputs`] rebuilds `[challenge, commit_a, commit_b,
+///    join_commitment, slot_a, slot_b]` (verifier nonce as field 0) and
+///    byte-equals it against the proof's public inputs; the vk is recomputed
+///    verifier-side from the re-derived [`CircuitId::JoinEq`] (NEVER the prover's
+///    vk, audit #2); and `bb verify` runs. So the equality is cryptographically
+///    proved, not JSON-asserted, and a forged proof / attacker vk / mismatched
+///    public inputs all reject there. `bind_joins` is the STRUCTURAL gate that ties
+///    those already-bound public inputs to the scans and the query; it does not
+///    re-run bb (the structural stage is reachable without the toolchain, exactly
+///    like `bind_query_correctness`). Because the slots/commitments this gate reads
+///    off the `join_eq` `ProofInputs` are the SAME values the sub-proof loop
+///    byte-binds into the proof, a manifest that passes BOTH stages has its join
+///    commitments + slots simultaneously (a) equal to the attested scans / query
+///    and (b) bound into a valid `join_eq` proof.
+///
+/// 3. **UnboundJoin query binding — slot binding (design §3.3 step 5 / §4.4).**
+///    The `join_eq` proof's PUBLIC `slot_a`/`slot_b` MUST equal the query-derived
+///    slots a variable SHARED across the two patterns the referenced scans answer
+///    occupies (`variable_slots`). A join proved over the wrong column (the §4.4 /
+///    audit-#6 analogue) — OR a SPURIOUS join edge whose two scans share no query
+///    variable at the declared slots at all — is rejected
+///    ([`CheckError::JoinSlotMismatch`]): the slots are PUBLIC by design (the query
+///    already reveals which column a shared variable occupies, §4.4), so this is a
+///    plain public-input equality, and it doubles as the anti-spurious-join check
+///    (a prover cannot inject a `join_eq` over an unrelated column pair). The
+///    "patterns the referenced scans answer" is resolved by MEMBERSHIP against the
+///    SPECIFIC `edge.scan_a`/`edge.scan_b` (not a first-match `position`), so a
+///    query pattern legitimately answered by MORE THAN ONE scan (the same triple
+///    pattern satisfied by two credentials) is handled correctly: the join binds
+///    against whichever scan the edge names, neither spuriously rejected nor bound
+///    to the wrong scan via `sub_proofs` ordering. [OPUS-4.8] sq-sfsi multi-scan.
+///
+/// # Scope / honesty boundary (the disclosed-vs-hidden distinction — load-bearing)
+/// `bind_joins` rigorously validates every DECLARED hidden `JoinEdge`. It does NOT
+/// *demand* a hidden join for every query cross-scan shared variable: a
+/// cross-credential shared variable can ALSO be discharged by the DISCLOSED-row
+/// path — the existing `join_obligations` / `verify::recheck` non-bnode obligation
+/// gate (stage 1a) + the disclosed scan rows, which is the default mechanism and is
+/// verified SEPARATELY. The hidden `JoinEdge` is the OPT-IN privacy alternative
+/// (the joined value is hidden instead of disclosed in the rows). So a "dropped"
+/// hidden join is NOT a soundness hole — it falls back to the disclosed path, which
+/// `recheck` still enforces; demanding a hidden join would WRONGLY break disclosed
+/// joins. The completeness obligation the design's `UnboundJoin` names is therefore
+/// discharged by the disclosed-row gate for non-hidden joins; for a join the prover
+/// CHOSE to make hidden, this gate forbids forging it (point 1) or binding it to
+/// the wrong column / an unrelated scan pair (point 3).
+///
+/// This gate does NOT verify the join_commitment opening (the value stays hidden —
+/// the privacy win) and does NOT itself prove `a_val == b_val` (that is the
+/// in-circuit equality, verified by the sub-proof loop's `bb verify`, point 2).
+/// Multi-way (N-way) join commitment-equality across a chain (design §2.4) is NOT
+/// yet enforced here — a single pairwise join is the v1 scope; the join_eq PROVING
+/// path + a FULL-bb accept test (sq-r2s8) and the forge-and-verify regression suite
+/// (sq-hlul) are the follow-ups. What IS enforced is the security-critical
+/// direction: a forged / cross-scan / wrong-slot / spurious hidden join is rejected.
+// [OPUS-4.8] sq-sfsi: bind_joins gate (commitment-matching + query slot binding).
+fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
+    if manifest.join_edges.is_empty() {
+        // No hidden joins declared: nothing for this gate to validate. A query
+        // cross-scan shared variable WITHOUT a hidden JoinEdge is discharged by the
+        // disclosed-row path (`recheck`/`join_obligations`, stage 1a) — not here.
+        return Ok(());
+    }
+
+    let patterns = fragment_patterns(&manifest.query)?;
+    let consts = fragment_pattern_consts(&patterns);
+    let var_slots = variable_slots(&patterns);
+
+    // Does the SPECIFIC scan sub-proof `scan_idx` answer query pattern `pi`?
+    // A pattern is answered by a scan iff the scan's bound `pattern_const_enc`
+    // matches the pattern's constants (audit #10). Crucially this is a
+    // MEMBERSHIP test against the referenced scan — NOT a first-match
+    // `position(..)` lookup. A query pattern may LEGITIMATELY be answered by
+    // MORE THAN ONE scan (the same triple pattern satisfied by two different
+    // credentials / graph commitments); the disclosed-row path
+    // (`bind_query_correctness`, `.any(..)` + the per-scan FILTER loop) already
+    // treats multi-scan-per-pattern as a first-class configuration. A
+    // first-match `position` here would (a) REJECT a valid join whose edge
+    // points at a non-first scan answering the pattern, and (b) — worse for
+    // soundness — let a prover order `sub_proofs` so the slot binding validates
+    // against a DIFFERENT (first-match) scan than the one the edge actually
+    // references. Binding against the specific `edge.scan_a`/`edge.scan_b`
+    // closes both. [OPUS-4.8] sq-sfsi multi-scan fix.
+    let pattern_answered_by_scan = |pi: usize, scan_idx: usize| -> bool {
+        consts
+            .get(pi)
+            .zip(manifest.sub_proofs.get(scan_idx))
+            .is_some_and(|(c, sp)| scan_matches_pattern(&sp.inputs, c))
+    };
+
+    // --- (1)+(3a): per-edge commitment-matching + slot binding. ---
+    for (e, edge) in manifest.join_edges.iter().enumerate() {
+        // Resolve the three referenced sub-proofs (dangling => reject).
+        let scan_a = manifest
+            .sub_proofs
+            .get(edge.scan_a)
+            .ok_or(CheckError::JoinDanglingEdge { edge: e })?;
+        let scan_b = manifest
+            .sub_proofs
+            .get(edge.scan_b)
+            .ok_or(CheckError::JoinDanglingEdge { edge: e })?;
+        let join = manifest
+            .sub_proofs
+            .get(edge.join_proof)
+            .ok_or(CheckError::JoinDanglingEdge { edge: e })?;
+
+        // Kinds: scan_a/scan_b must be scans; join_proof must be a join_eq.
+        let commit_a_scan = match &scan_a.inputs {
+            ProofInputs::Scan { commitments, .. } => commitments
+                .get(edge.graph_a)
+                .ok_or(CheckError::JoinDanglingEdge { edge: e })?,
+            _ => return Err(CheckError::JoinEdgeKindMismatch { edge: e }),
+        };
+        let commit_b_scan = match &scan_b.inputs {
+            ProofInputs::Scan { commitments, .. } => commitments
+                .get(edge.graph_b)
+                .ok_or(CheckError::JoinDanglingEdge { edge: e })?,
+            _ => return Err(CheckError::JoinEdgeKindMismatch { edge: e }),
+        };
+        let (commit_a_join, commit_b_join, slot_a, slot_b) = match &join.inputs {
+            ProofInputs::JoinEq { commit_a, commit_b, slot_a, slot_b, .. } => {
+                (commit_a, commit_b, *slot_a, *slot_b)
+            }
+            _ => return Err(CheckError::JoinEdgeKindMismatch { edge: e }),
+        };
+
+        // (1) Commitment-matching (anti-A2). Compare on the canonical big-endian
+        // field bytes (so spelling/padding differences do not spuriously diverge);
+        // a malformed commitment hex on EITHER side fails closed (the audit-#1
+        // reconstruction also rejects it as MalformedField in the bb stage).
+        if !field_hex_eq(commit_a_join, commit_a_scan)
+            || !field_hex_eq(commit_b_join, commit_b_scan)
+        {
+            return Err(CheckError::JoinCommitmentMismatch { edge: e });
+        }
+
+        // (3a) Slot binding (§4.4). The edge's two scans answer two query
+        // patterns; the shared join variable must occupy slot_a in pattern A and
+        // slot_b in pattern B. We require, for the SPECIFIC scans `edge.scan_a` /
+        // `edge.scan_b` the edge references (NOT a first-match scan that merely
+        // happens to answer the pattern earlier in `sub_proofs`), that there
+        // exist patterns pi (answered by scan_a) and pj (answered by scan_b)
+        // carrying a SHARED variable at exactly the proof's public (slot_a,
+        // slot_b). A join_eq whose public slots are not a real shared variable's
+        // query-derived positions over the referenced scans is rejected. This is
+        // multi-scan-safe: with two scans answering one pattern, the binding
+        // validates against whichever scan the edge actually names, so it can
+        // neither be spuriously rejected nor bound to the wrong scan.
+        let bound = patterns.iter().enumerate().any(|(pi, _)| {
+            // pattern pi is answered by THE REFERENCED scan_a, slot_a is a var.
+            if !pattern_answered_by_scan(pi, edge.scan_a) {
+                return false;
+            }
+            let Some(var_a) = var_at(&var_slots, pi, slot_a as usize) else {
+                return false;
+            };
+            // The SAME variable occupies slot_b in some pattern answered by the
+            // REFERENCED scan_b.
+            patterns.iter().enumerate().any(|(pj, _)| {
+                pj != pi
+                    && pattern_answered_by_scan(pj, edge.scan_b)
+                    && var_at(&var_slots, pj, slot_b as usize).as_deref() == Some(var_a.as_str())
+            })
+        });
+        if !bound {
+            return Err(CheckError::JoinSlotMismatch { edge: e });
+        }
+    }
+
+    Ok(())
+}
+
+/// The variable occupying `(pattern, slot)` in the `variable_slots` table, if any
+/// (a constant slot returns `None`). [OPUS-4.8] sq-sfsi.
+fn var_at(var_slots: &[(String, usize, usize)], pattern: usize, slot: usize) -> Option<String> {
+    var_slots
+        .iter()
+        .find(|(_, p, s)| *p == pattern && *s == slot)
+        .map(|(v, _, _)| v.clone())
+}
+
+/// Byte-equality of two [`FieldHex`] commitment values over their canonical
+/// big-endian field representation (so `0x`-padding / case differences do not
+/// spuriously diverge). A malformed hex on either side returns `false`
+/// (fail-closed — a non-parseable commitment is never "equal"). [OPUS-4.8] sq-sfsi.
+fn field_hex_eq(a: &FieldHex, b: &FieldHex) -> bool {
+    match (a.to_field(), b.to_field()) {
+        (Some(fa), Some(fb)) => field_to_be_bytes_32(&fa) == field_to_be_bytes_32(&fb),
+        _ => false,
+    }
 }
 
 /// Stage 2e: bind the prover's `manifest.attributions` (which drives the Q6
