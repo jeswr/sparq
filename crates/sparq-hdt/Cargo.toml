@@ -51,7 +51,7 @@ zlib-ng = ["flate2/zlib-ng"]
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
 # Read path uses NO features (id-level translation, no sophia adapter). The `write`
 # feature (above) turns on `hdt/sophia` to reach `Hdt::read_nt` + `Hdt::write`.
-hdt = { version = "0.4", default-features = false }
+hdt = { version = "0.6", default-features = false }
 # GZipped-HDT auto-detection (`.hdt.gz`): magic-byte sniff + streaming decode.
 # The default backend (miniz_oxide) is pure Rust; flate2 is already used
 # elsewhere in the workspace (sparq-cli, and previously this crate's dev-deps).
@@ -72,4 +72,4 @@ crc = "3"
 # The `sophia` feature provides hdt's (experimental) N-Triples -> HDT writer
 # (`Hdt::read_nt`), used ONLY to build .hdt round-trip fixtures / benchmark inputs
 # from N-Triples ground truth in-process.
-hdt = { version = "0.4", features = ["sophia"] }
+hdt = { version = "0.6", features = ["sophia"] }
