@@ -331,7 +331,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@91534edaf9fd796a162759d80d49cdff574bff2c # cargo-llvm-cov
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # cargo-llvm-cov
       - name: Test-presence gate (fast, no compile)
         run: python3 scripts/coverage-presence.py --check
       - name: Measure + enforce per-crate coverage (per-commit tier, max-remeasure gate)
@@ -417,7 +417,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@91534edaf9fd796a162759d80d49cdff574bff2c # cargo-llvm-cov
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # cargo-llvm-cov
       - name: Test-presence gate
         run: python3 scripts/coverage-presence.py --check
       - name: Measure + enforce per-crate coverage (FULL tier, max-remeasure gate)

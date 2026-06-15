@@ -34,7 +34,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-deny
-        uses: taiki-e/install-action@e03236526ace47fa2e04bebcfc6da471ebd4690c # v2.49.0
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: cargo-deny
       # Run advisories only; capture the human-readable report. `|| true` so we
