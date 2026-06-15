@@ -1107,13 +1107,26 @@ fn extract_integer_vector(p: &PartialResult) -> Result<Vec<u64>, MpcError> {
     }
     p.rows
         .iter()
-        .map(|row| match row.first() {
-            Some(Some(oxrdf::Term::Literal(l))) => l.value().parse::<u64>().map_err(|e| {
-                MpcError::Protocol(format!("batched private input not a u64 integer: {e}"))
-            }),
-            other => Err(MpcError::Protocol(format!(
-                "batched private input must be an integer literal in each row, got {other:?}"
-            ))),
+        .map(|row| {
+            // Fail closed on a malformed row shape: the column COUNT is checked
+            // once via `p.vars.len()`, but a hand-built / adversarial
+            // `PartialResult` can desync the per-row arity from `vars`. Require
+            // each row to carry exactly one cell so a multi-column row can't
+            // silently mis-extract by ignoring the trailing columns.
+            if row.len() != 1 {
+                return Err(MpcError::Protocol(format!(
+                    "batched private input row must have exactly one column, got {}",
+                    row.len()
+                )));
+            }
+            match row.first() {
+                Some(Some(oxrdf::Term::Literal(l))) => l.value().parse::<u64>().map_err(|e| {
+                    MpcError::Protocol(format!("batched private input not a u64 integer: {e}"))
+                }),
+                other => Err(MpcError::Protocol(format!(
+                    "batched private input must be an integer literal in each row, got {other:?}"
+                ))),
+            }
         })
         .collect()
 }
@@ -1599,5 +1612,36 @@ mod tests {
         // Value-sorted: alice = [1000,2000,3000], bob = [500,1500,2500] → per-row
         // sums [1500, 3500, 5500].
         assert_eq!(got, vec![Fp::new(1500), Fp::new(3500), Fp::new(5500)]);
+    }
+
+    /// [OPUS-4.8] sq-dwb5 — `extract_integer_vector` must fail CLOSED on a row
+    /// whose arity desyncs from `vars`: a malformed/adversarial `PartialResult`
+    /// can claim one column in `vars` yet carry rows with extra cells. We must
+    /// reject (not silently use the first column and drop the rest).
+    #[test]
+    fn extract_integer_vector_rejects_multi_column_row() {
+        use crate::partial::PartialResult;
+        use oxrdf::{Literal, Term, Variable};
+        let int = |n: u64| Some(Term::Literal(Literal::from(n as i64)));
+        let p = PartialResult {
+            holder: crate::partial::HolderId::new("mallory"),
+            // `vars` claims a single column...
+            vars: vec![Variable::new("salary").unwrap()],
+            // ...but a row sneaks in a second cell.
+            rows: vec![vec![int(1000)], vec![int(2000), int(9999)]],
+        };
+        let err = extract_integer_vector(&p).unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m) if m.contains("exactly one column")),
+            "expected per-row arity rejection, got {err:?}"
+        );
+
+        // A well-formed single-column partial still extracts in row order.
+        let ok = PartialResult {
+            holder: crate::partial::HolderId::new("alice"),
+            vars: vec![Variable::new("salary").unwrap()],
+            rows: vec![vec![int(1000)], vec![int(2000)]],
+        };
+        assert_eq!(extract_integer_vector(&ok).unwrap(), vec![1000, 2000]);
     }
 }

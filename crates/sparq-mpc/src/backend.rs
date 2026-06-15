@@ -733,13 +733,17 @@ pub trait MpcBackend {
     /// secure aggregate / hidden-value join can range over many rows per holder.
     ///
     /// **Row-binding contract.** The binding is POSITIONAL: every holder evaluates
-    /// the SAME `fragment` projecting one integer column, ordered DETERMINISTICALLY
-    /// (the implementation sorts the holder's rows by their disclosed value so two
-    /// holders' batches line up by position regardless of local row order — see
-    /// [`crate::shamir::ShamirBackend::share_private_inputs`]). Downstream
-    /// (per-row secure aggregate, hidden join) correlate across holders by output
-    /// index. For a KEYED binding (element `i` ↔ a disclosed row id), pair the
-    /// returned batch with the holder's disclosed key column out-of-band.
+    /// the SAME `fragment` projecting one integer column, ordered DETERMINISTICALLY.
+    /// Nothing about the column is disclosed — the values ARE the secret inputs. The
+    /// implementation imposes the deterministic order by **sorting the holder's rows
+    /// by their (secret) value LOCALLY, before any sharing**, so two holders' batches
+    /// line up by position regardless of local row order; the values themselves never
+    /// leave the holder — only their shares do (see
+    /// [`crate::shamir::ShamirBackend::share_private_inputs`]). Downstream (per-row
+    /// secure aggregate, hidden join) correlate across holders by output index. For a
+    /// KEYED binding (element `i` ↔ a row id that IS disclosed), the caller pairs the
+    /// returned batch with the holder's disclosed key column out-of-band and uses that
+    /// public key — not the secret value — to define the cross-holder order.
     ///
     /// Returns one trait-`Share` PER ROW (so a single-scalar contribution is the
     /// `k = 1` case). Each `Self::Share` is the per-party sharing of one private
