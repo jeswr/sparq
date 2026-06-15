@@ -1820,46 +1820,163 @@ impl Graph {
         chunk: usize,
     ) -> Result<(), String> {
         use oxrdf::{GraphName, TripleRef};
-        use std::io::{BufWriter, Write};
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        // Stale-state hygiene mirroring `save_named`: a re-build into the same directory must
-        // not inherit a previous build's named subtree/manifest.
-        std::fs::remove_dir_all(dir.join(NAMED_SUBDIR)).ok();
-        std::fs::remove_file(dir.join(NAMED_MANIFEST)).ok();
+        use std::io::Write;
 
-        // Per-graph N-Triples spill directory (deleted at the end). Each graph gets one file
-        // of canonical N-Triples lines; the default graph is the special slot.
+        // VALIDATE CHEAP PRECONDITIONS BEFORE ANY DESTRUCTIVE FILESYSTEM MUTATION.
+        // The stale-state hygiene below removes a prior build's named subtree/manifest; if we
+        // did that first and only THEN rejected an unsupported `format`, we would have already
+        // destroyed an existing dataset at `dir` (data loss) while returning `Err`. So the
+        // format check happens up-front, before `create_dir_all`/`remove_dir_all`.
+        if !matches!(
+            format,
+            "nquads" | "n-quads" | "trig" | "application/trig"
+        ) {
+            return Err(format!(
+                "build_external_quads: unsupported quad format {format:?} (expected nquads or trig)"
+            ));
+        }
+
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+
+        // Per-graph N-Triples spill directory. A scope guard removes it on EVERY exit path
+        // (parse error, IO error, per-graph build error, or success) so a huge spill is never
+        // leaked when the build aborts mid-way. `disarm()` is called only after the manifest
+        // is committed, at which point the explicit removal below is the normal cleanup.
         let spill_dir = dir.join("quads-spill");
         std::fs::remove_dir_all(&spill_dir).ok();
         std::fs::create_dir_all(&spill_dir).map_err(|e| e.to_string())?;
+        struct SpillGuard {
+            dir: std::path::PathBuf,
+            armed: bool,
+        }
+        impl SpillGuard {
+            fn disarm(&mut self) {
+                self.armed = false;
+            }
+        }
+        impl Drop for SpillGuard {
+            fn drop(&mut self) {
+                if self.armed {
+                    std::fs::remove_dir_all(&self.dir).ok();
+                }
+            }
+        }
+        let mut spill_guard = SpillGuard { dir: spill_dir.clone(), armed: true };
 
-        // First-occurrence order of named-graph names, and a writer per graph. The default
-        // graph is `default.nt`; named graph `i` (in first-occurrence order) is `g<i>.nt`.
+        // Stale-state hygiene mirroring `save_named`: a re-build into the same directory must
+        // not inherit a previous build's named subtree/manifest. This is destructive, so it
+        // runs AFTER the format validation above.
+        std::fs::remove_dir_all(dir.join(NAMED_SUBDIR)).ok();
+        std::fs::remove_file(dir.join(NAMED_MANIFEST)).ok();
+
+        // First-occurrence order of named-graph names, and a BOUNDED pool of open writers.
+        // The default graph is `default.nt`; named graph `i` (in first-occurrence order) is
+        // `g<i>.nt`.
+        //
+        // FD BOUNDING: the out-of-core use case is "many named graphs", and holding one
+        // `BufWriter<File>` open per graph would exhaust the process file-descriptor limit
+        // (`ulimit -n`) on a large dataset. Instead `WriterPool` keeps at most `cap` files
+        // open at once: routing to an evicted graph flushes+closes the least-recently-used
+        // writer and REOPENS the target in APPEND mode, so every quad is still routed to the
+        // right per-graph spill (correctness preserved) with O(cap) FDs regardless of graph
+        // count. The default graph shares the same pool under slot `usize::MAX`.
+        const DEFAULT_SLOT: usize = usize::MAX;
         let mut names: Vec<Term> = Vec::new();
         let mut index: std::collections::HashMap<Term, usize> = std::collections::HashMap::new();
-        let mut default_w: Option<BufWriter<std::fs::File>> = None;
-        let mut named_w: Vec<BufWriter<std::fs::File>> = Vec::new();
         // The N-Triples low-level serializer is STATELESS (it just writes one canonical line
         // per triple to the writer it is handed), so a single instance serves every graph.
         let mut ser = oxttl::NTriplesSerializer::new().low_level();
+
+        // A bounded LRU pool of open per-graph spill writers. `slot_path` maps a slot id to
+        // its spill file; `open` lazily (re)opens it in append mode, evicting the LRU writer
+        // when at capacity. A slot's file is `create`d on first open (truncating any stale
+        // file) and `append`ed on every subsequent reopen.
+        struct WriterPool {
+            spill_dir: std::path::PathBuf,
+            cap: usize,
+            // (slot, writer) in LRU order: front = least-recently-used, back = most-recent.
+            open: std::collections::VecDeque<(usize, std::io::BufWriter<std::fs::File>)>,
+            // Slots that have been created at least once (so reopen uses append, not create).
+            seen: std::collections::HashSet<usize>,
+        }
+        impl WriterPool {
+            fn new(spill_dir: std::path::PathBuf, cap: usize) -> Self {
+                WriterPool {
+                    spill_dir,
+                    cap: cap.max(1),
+                    open: std::collections::VecDeque::new(),
+                    seen: std::collections::HashSet::new(),
+                }
+            }
+            fn slot_path(&self, slot: usize) -> std::path::PathBuf {
+                if slot == DEFAULT_SLOT {
+                    self.spill_dir.join("default.nt")
+                } else {
+                    self.spill_dir.join(format!("g{slot}.nt"))
+                }
+            }
+            /// Make `slot`'s writer the most-recently-used open writer and return a mutable
+            /// reference to it, evicting (flush+close) the LRU writer if at capacity.
+            fn writer(
+                &mut self,
+                slot: usize,
+            ) -> Result<&mut std::io::BufWriter<std::fs::File>, String> {
+                // Already open: move to the back (most-recently-used).
+                if let Some(pos) = self.open.iter().position(|(s, _)| *s == slot) {
+                    let entry = self.open.remove(pos).expect("position just found");
+                    self.open.push_back(entry);
+                    return Ok(&mut self.open.back_mut().expect("just pushed").1);
+                }
+                // Not open: evict LRU if full.
+                if self.open.len() >= self.cap {
+                    if let Some((_, mut w)) = self.open.pop_front() {
+                        w.flush().map_err(|e| e.to_string())?;
+                        // `w` (the File) is dropped here, releasing its FD.
+                    }
+                }
+                let path = self.slot_path(slot);
+                let f = if self.seen.insert(slot) {
+                    // First time we touch this slot: truncate/create.
+                    std::fs::File::create(&path).map_err(|e| e.to_string())?
+                } else {
+                    // Reopen a previously-evicted slot: append so prior lines survive.
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .map_err(|e| e.to_string())?
+                };
+                self.open.push_back((slot, std::io::BufWriter::new(f)));
+                Ok(&mut self.open.back_mut().expect("just pushed").1)
+            }
+            /// Flush+close every open writer (final flush before the per-graph builds).
+            fn flush_all(&mut self) -> Result<(), String> {
+                while let Some((_, mut w)) = self.open.pop_front() {
+                    w.flush().map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            }
+        }
+        // Default open-writer budget. Generous enough to avoid thrashing on typical datasets
+        // yet a small constant, so FD usage is O(1) in the graph count. Tests override this
+        // via the env hook below to force eviction with only a few graphs.
+        let pool_cap: usize = std::env::var("SPARQ_QUADS_SPILL_MAX_OPEN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&c| c > 0)
+            .unwrap_or(256);
+        let mut pool = WriterPool::new(spill_dir.clone(), pool_cap);
+        // Whether the default graph ever received a quad (decides whether `default.nt` exists).
+        let mut have_default = false;
 
         macro_rules! route {
             ($q:expr) => {{
                 let q = $q.map_err(|e| e.to_string())?;
                 let triple =
                     TripleRef::new(&q.subject, q.predicate.as_ref(), q.object.as_ref());
-                match q.graph_name {
+                let slot = match q.graph_name {
                     GraphName::DefaultGraph => {
-                        let w = match default_w.as_mut() {
-                            Some(w) => w,
-                            None => {
-                                let f = std::fs::File::create(spill_dir.join("default.nt"))
-                                    .map_err(|e| e.to_string())?;
-                                default_w = Some(BufWriter::new(f));
-                                default_w.as_mut().expect("just set")
-                            }
-                        };
-                        ser.serialize_triple(triple, &mut *w).map_err(|e| e.to_string())?;
+                        have_default = true;
+                        DEFAULT_SLOT
                     }
                     other => {
                         let name = match other {
@@ -1867,21 +1984,19 @@ impl Graph {
                             GraphName::BlankNode(b) => Term::BlankNode(b),
                             GraphName::DefaultGraph => unreachable!("matched above"),
                         };
-                        let slot = match index.get(&name) {
+                        match index.get(&name) {
                             Some(&i) => i,
                             None => {
                                 let i = names.len();
-                                let f = std::fs::File::create(spill_dir.join(format!("g{i}.nt")))
-                                    .map_err(|e| e.to_string())?;
-                                named_w.push(BufWriter::new(f));
                                 index.insert(name.clone(), i);
                                 names.push(name);
                                 i
                             }
-                        };
-                        ser.serialize_triple(triple, &mut named_w[slot]).map_err(|e| e.to_string())?;
+                        }
                     }
-                }
+                };
+                let w = pool.writer(slot)?;
+                ser.serialize_triple(triple, &mut *w).map_err(|e| e.to_string())?;
             }};
         }
 
@@ -1896,32 +2011,23 @@ impl Graph {
                     route!(q);
                 }
             }
-            other => {
-                return Err(format!(
-                    "build_external_quads: unsupported quad format {other:?} (expected nquads or trig)"
-                ));
-            }
+            // Unsupported formats are rejected up-front (before any mutation); unreachable here.
+            _ => unreachable!("format validated above"),
         }
 
         // Flush every spill writer so the per-graph files are complete before we build them.
-        if let Some(mut w) = default_w.take() {
-            w.flush().map_err(|e| e.to_string())?;
-        }
-        for mut w in named_w {
-            w.flush().map_err(|e| e.to_string())?;
-        }
+        pool.flush_all()?;
 
         // Build the DEFAULT graph in `dir` itself (even when empty — an empty `default.nt`
         // streams to a valid empty store, matching a default-graph-only `save`).
         let default_path = spill_dir.join("default.nt");
-        let default_file = std::fs::File::open(&default_path).or_else(|_| {
-            std::fs::File::create(&default_path)?;
-            std::fs::File::open(&default_path)
-        });
-        match default_file {
-            Ok(f) => Self::build_external(f, "ntriples", dir, chunk)?,
-            Err(e) => return Err(e.to_string()),
+        if !have_default {
+            // No default-graph quad was seen, so the file was never created — make an empty
+            // one so the default store is a valid (empty) store.
+            std::fs::File::create(&default_path).map_err(|e| e.to_string())?;
         }
+        let default_file = std::fs::File::open(&default_path).map_err(|e| e.to_string())?;
+        Self::build_external(default_file, "ntriples", dir, chunk)?;
 
         // Build each NAMED graph into `dir/named/<i>/` (first-occurrence order = manifest
         // order), then commit the manifest LAST — the same ordering + commit point as
@@ -1936,6 +2042,8 @@ impl Graph {
             write_named_manifest(dir, &names).map_err(|e| e.to_string())?;
         }
 
+        // Success: disarm the guard and remove the spill dir explicitly.
+        spill_guard.disarm();
         std::fs::remove_dir_all(&spill_dir).ok();
         Ok(())
     }
@@ -6020,6 +6128,117 @@ mod tests {
         let ext = Graph::open(&ext_dir).unwrap();
         let mem = Graph::load_dataset(trig, "trig").unwrap();
         assert_eq!(dump_quads(&mem), dump_quads(&ext), "TriG out-of-core build not lossless");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (sq-5atq, PR #187 review) DATA-LOSS regression: `build_external_quads` must
+    /// VALIDATE the `format` BEFORE any destructive filesystem mutation. A caller that passes
+    /// an unsupported format must get an `Err` and find any EXISTING dataset at `dir` fully
+    /// intact — the function must not have deleted the prior store's named subtree/manifest
+    /// (or anything else) before rejecting the format.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn build_external_quads_unsupported_format_preserves_dir() {
+        let base = std::env::temp_dir().join(format!("sparq_extq_badfmt_{}", std::process::id()));
+        let ext_dir = base.join("ext");
+
+        // First build a real dataset with named graphs (so `named/` + `named.bin` exist).
+        let nq = "<http://ex/a> <http://ex/b> <http://ex/c> <http://ex/g1> .\n\
+                  <http://ex/d> <http://ex/e> <http://ex/f> <http://ex/g2> .\n\
+                  <http://ex/x> <http://ex/y> <http://ex/z> .\n";
+        Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64).unwrap();
+        assert!(ext_dir.join("named.bin").exists(), "precondition: manifest present");
+        assert!(ext_dir.join("named").exists(), "precondition: named subtree present");
+        let before = dump_quads(&Graph::open(&ext_dir).unwrap());
+
+        // Now call with an UNSUPPORTED format. It must return Err and leave `dir` untouched.
+        let err = Graph::build_external_quads(b"whatever".as_slice(), "turtle", &ext_dir, 64)
+            .expect_err("unsupported quad format must be rejected");
+        assert!(err.contains("unsupported"), "unexpected error: {err}");
+
+        // The prior dataset's on-disk artefacts must STILL be present and still open losslessly.
+        assert!(ext_dir.join("named.bin").exists(), "manifest was destroyed before format check");
+        assert!(ext_dir.join("named").exists(), "named subtree was destroyed before format check");
+        assert!(!ext_dir.join("quads-spill").exists(), "a spill dir leaked from the rejected call");
+        let after = dump_quads(&Graph::open(&ext_dir).unwrap());
+        assert_eq!(before, after, "existing dataset corrupted by a rejected-format call");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (sq-5atq, PR #187 review) RESOURCE-LEAK regression: an error MID-BUILD (here
+    /// a parse error after some quads have already spilled) must leave NO `quads-spill/` behind
+    /// — the scope guard cleans the spill directory on every error/early-return path, not only
+    /// on success.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn build_external_quads_error_cleans_spill_dir() {
+        let base = std::env::temp_dir().join(format!("sparq_extq_leak_{}", std::process::id()));
+        let ext_dir = base.join("ext");
+
+        // Valid quads first (forcing spill files to be created across several graphs), then a
+        // MALFORMED line that makes the N-Quads parser yield an Err mid-stream.
+        let mut nq = String::new();
+        for i in 0..10u32 {
+            nq.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> <http://ex/o> <http://ex/g{i}> .\n"
+            ));
+        }
+        nq.push_str("this is not valid n-quads !!!\n");
+
+        let res = Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64);
+        assert!(res.is_err(), "a malformed quad stream must produce an Err");
+        assert!(
+            !ext_dir.join("quads-spill").exists(),
+            "spill dir leaked after a mid-build parse error"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// [OPUS-4.8] (sq-5atq, PR #187 review) FD-EXHAUSTION regression: with MANY more named
+    /// graphs than the open-writer budget, the partition pass must NOT hold one FD per graph.
+    /// We pin the budget to a tiny cap via `SPARQ_QUADS_SPILL_MAX_OPEN` and feed many graphs
+    /// with INTERLEAVED quads (so most routes hit an evicted, reopened writer) — the build
+    /// must still succeed and round-trip losslessly, proving the bounded-pool reopen-in-append
+    /// path routes every quad to the right per-graph spill while capping open FDs.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn build_external_quads_bounded_open_writers() {
+        const N_GRAPHS: u32 = 200;
+        // Interleave: round-robin across all graphs many times so writers are evicted and
+        // reopened repeatedly (append path), not written once contiguously.
+        let mut nq = String::new();
+        for round in 0..6u32 {
+            for g in 0..N_GRAPHS {
+                nq.push_str(&format!(
+                    "<http://ex/s{round}> <http://ex/p{}> <http://ex/o{}> <http://ex/g{g}> .\n",
+                    g % 3,
+                    round
+                ));
+            }
+        }
+        // Plus some default-graph quads interleaved (the default slot shares the same pool).
+        for round in 0..6u32 {
+            nq.push_str(&format!("<http://ex/d{round}> <http://ex/dp> <http://ex/do> .\n"));
+        }
+
+        let base = std::env::temp_dir().join(format!("sparq_extq_fd_{}", std::process::id()));
+        let ext_dir = base.join("ext");
+
+        // Force a tiny open-writer budget (4) although there are 200 graphs.
+        // SAFETY: single-threaded test; we restore/remove the var before returning.
+        unsafe { std::env::set_var("SPARQ_QUADS_SPILL_MAX_OPEN", "4") };
+        let build = Graph::build_external_quads(nq.as_bytes(), "nquads", &ext_dir, 64);
+        unsafe { std::env::remove_var("SPARQ_QUADS_SPILL_MAX_OPEN") };
+        build.expect("bounded-writer-pool build must succeed with a tiny FD budget");
+
+        let ext = Graph::open(&ext_dir).unwrap();
+        let mem = Graph::load_dataset(&nq, "nquads").unwrap();
+        assert_eq!(
+            dump_quads(&mem),
+            dump_quads(&ext),
+            "bounded-writer-pool build not lossless (a reopen must append, not truncate)"
+        );
+        assert_eq!(ext.named.len(), N_GRAPHS as usize, "all named graphs must be present");
         std::fs::remove_dir_all(&base).ok();
     }
 
