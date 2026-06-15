@@ -13,8 +13,13 @@
 # timestamp). The VEX states the exploitability of every advisory cargo-deny is configured to
 # ignore (kept 1:1 in sync with deny.toml [advisories].ignore).
 #
-# cargo-cyclonedx processes the whole workspace and writes <crate>.cdx.json next to each
-# member's Cargo.toml; we collect the two released-binary crates and discard the rest.
+# cargo-cyclonedx (`--all`) processes every workspace member and writes <crate>.cdx.json
+# next to each member's Cargo.toml; we collect the two released-binary crates and discard the
+# rest. `--all` is required here: the root is a virtual workspace (no [package]), so a bare
+# `cargo cyclonedx` has no package to resolve. We use the **default** feature set (no
+# --all-features) so each SBOM matches the actually-shipped binary — the release builds
+# (release.yml / Dockerfile) build `-p sparq-cli`/`-p sparq-server` without --all-features,
+# and the CI SBOM job (supply-chain.yml) likewise uses `cargo cyclonedx --all`.
 #
 # Requires: cargo, cargo-cyclonedx, python3. Usage:
 #   VERSION=v1.2.3 scripts/gen-sbom-vex.sh            # explicit version
@@ -29,7 +34,7 @@ OUT_DIR="${OUT_DIR:-sbom}"
 mkdir -p "$OUT_DIR"
 
 echo "==> generating CycloneDX SBOMs (whole workspace, sparq ${VERSION})"
-cargo cyclonedx --format json --all-features
+cargo cyclonedx --all --format json
 
 for crate in sparq-cli sparq-server; do
   src="crates/${crate}/${crate}.cdx.json"

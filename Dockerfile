@@ -58,7 +58,9 @@ COPY . .
 
 # [OPUS-4.8] sq-toze.8 (GX-7): cargo-auditable embeds the dependency manifest into the
 # server binary so the shipped image is self-describing for post-build audit
-# (`cargo audit bin /usr/local/bin/sparq-server`). `--locked` keeps it pinned to Cargo.lock.
+# (`cargo audit bin /usr/local/bin/sparq-server`). `--locked` here uses cargo-auditable's
+# OWN crates.io lockfile (a reproducible tool install) — it does NOT pin to this workspace's
+# Cargo.lock; the server binary itself is pinned by the `--locked` on the build step below.
 RUN cargo install --locked cargo-auditable
 
 # --locked: build exactly the committed Cargo.lock. The workspace release profile is
