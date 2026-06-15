@@ -56,8 +56,11 @@ Top-level re-exports (`use sparq_mpc::...`):
 - `GlobalJoin` trait + `DisclosedKeyJoin` — `fn join(&self, partials: &[PartialResult], plan: &JoinPlan) -> Result<PartialResult, MpcError>`. SPARQL compatible-mapping inner join over shared columns; independently checks the planner-named key is present (does not trust the planner for soundness). `key_disclosed == false` returns `NotYetImplemented` (use `HiddenValueJoin` instead).
 - `JoinPlan { join_var: oxrdf::Variable, key_disclosed: bool }`.
 - `MpcBackend` trait — the secret-sharing primitive seam. `type Share`; `info() -> BackendInfo`; `share_private_input(&self, &Holder) -> Result<Vec<Self::Share>, MpcError>`; `run_secure(&self, &[Self::Share]) -> Result<Vec<Self::Share>, MpcError>`; `reconstruct_disclosed(&self, &[Self::Share]) -> Result<PartialResult, MpcError>`.
-- `BackendInfo { name: &'static str, trust_model: TrustModel, malicious_security: MaliciousSecurity }` — the guarantees a federation inspects **before** trusting a backend. `BackendInfo::malicious_secure() -> bool` is a coarse "hardened at all?" accessor (`!= None`).
-- `TrustModel { HonestMajority, DishonestMajority }` — the majority axis.
+- `BackendInfo { name: &'static str, security: SecurityDescriptor, trust_model: TrustModel, malicious_security: MaliciousSecurity }` — the guarantees a federation inspects **before** trusting a backend. The three-axis `security` descriptor is the source of truth; `trust_model` / `malicious_security` are kept as back-compat projections of it. Build via `BackendInfo::new(name, security, robust_cheaters)` so the projections can't drift. `BackendInfo::malicious_secure() -> bool` is a coarse "hardened at all?" accessor (`malicious_security != MaliciousSecurity::SemiHonestOnly` — `malicious_security` is the `MaliciousSecurity` enum, not an `Option`).
+- `SecurityDescriptor { adversary: AdversaryModel, output_guarantee: OutputGuarantee, threshold: CorruptionThreshold, public_verifiability: PublicVerifiability }` — the **three orthogonal axes** a backend (or one operator) advertises. `AdversaryModel { SemiHonest, Covert{..}, Malicious }` (build covert via `AdversaryModel::covert(num, den)`); `OutputGuarantee { Abort(AbortKind), Fairness, GuaranteedOutput }` with `AbortKind { Selective, Unanimous, Identifiable }` (the honest-majority-only `Fairness`/`GuaranteedOutput` are constructible ONLY via `OutputGuarantee::fairness(threshold)` / `::guaranteed_output(threshold)` — Cleve's impossibility as a type-level invariant); `CorruptionThreshold { DishonestMajority{t}, HonestMajority{t}, SuperHonestMajority{t} }`; `PublicVerifiability(bool)`.
+- `OperatorClass { LinearAggregate, EqualityJoin, Comparison }` + `MpcBackend::operator_security(op) -> SecurityDescriptor` — guarantees differ **per operator** (the Shamir degree-`t` aggregate is robust while the degree-`2t` equality open is semi-honest-only at `n = 2t+1`), so query the per-operator descriptor, not just the headline `info().security`.
+- **Selection / fail-closed negotiation (sq-a6p1).** `SecurityRequirement { min_adversary, min_output_guarantee, max_corruption, require_cheater_attribution, require_public_verifiability }` — a federation's security floor, stated UP FRONT. `req.satisfies(&BackendInfo) -> bool` checks a backend against every axis. `BackendRegistry<B: MpcBackend>` holds the backends a federation will run: `register(B)`, then `select(&req) -> Result<&B, MpcError>` returns the STRONGEST registered backend meeting `req` or **fails closed** with `MpcError::NoBackendSatisfies` (a dishonest-majority-malicious request over the shipped semi-honest set is truthfully REFUSED, never downgraded). `select_for_operator(&req, op)` matches against the per-operator guarantee. Convenience floors: `SecurityRequirement::v1_honest_majority_semi_honest()` and `::dishonest_majority_malicious()` (the request that is refused fail-closed today).
+- `TrustModel { HonestMajority, DishonestMajority }` — the majority axis (back-compat projection of `CorruptionThreshold`).
 - `MaliciousSecurity { SemiHonestOnly, HonestMajorityAbort, HonestMajorityRobust { max_cheaters: usize } }` — the active-security axis (guarantee D), surfaced from the real RS reconstruction redundancy. `SemiHonestOnly` = semi-honest only, an active deviation is undetected (named so it cannot be confused with `Option::None`); `HonestMajorityAbort` = tampering is detected and the protocol aborts (no guaranteed output); `HonestMajorityRobust { max_cheaters }` = guaranteed-correct output even when up to `max_cheaters` parties actively cheat. Derives `Copy`/`Eq`.
 - `ShamirBackend` — the only concrete backend (honest-majority Shamir `t`-of-`n`; its reconstruction reports tamper detect-and-abort or robust correction per the `(n, t)` redundancy via `BackendInfo.malicious_security`, falling back to `SemiHonestOnly` only where no redundancy exists).
   - `ShamirBackend::new(n: usize) -> Result<ShamirBackend, MpcError>` — `n >= 2`, threshold `t = (n-1)/2`; masks come from an OS-seeded ChaCha20 CSPRNG. **No seed parameter** by design.
@@ -67,7 +70,7 @@ Top-level re-exports (`use sparq_mpc::...`):
 - `HiddenKeyedRows { holder: HolderId, payload_vars: Vec<Variable>, rows: Vec<(Fp, Vec<Option<Term>>)> }` — caller encodes each private key into `Fp` (must be injective; see Gotchas).
 - `Fp` — field element over `F_p`, `p = 2^61 - 1`. `Fp::new(u64)`, `Fp::value() -> u64`, `Fp::zero()`, `Fp::one()`.
 - `Share { x: u64, y: Fp }`; field/share helpers in `sparq_mpc::shamir` (`add_shares`, `sub_shares`, `mul_shares_raw`, `add_constant`, `scale`, `reconstruct_degree`).
-- `MpcError::{ LocalEval { holder, message }, Protocol(String), NotYetImplemented { what, gated_on } }` — the single honest channel for deferred crypto.
+- `MpcError::{ LocalEval { holder, message }, Protocol(String), NotYetImplemented { what, gated_on }, Tampered { detail, cheaters }, NoBackendSatisfies { requirement, considered } }` — the honest error channels: `NotYetImplemented` for deferred crypto, `Tampered` for a detected active deviation on a redundant reconstruction, and `NoBackendSatisfies` for a fail-closed selection refusal.
 - `CollaborativeProof<B: MpcBackend>`, `Attestation`, `ProofStatement`, `Proof`, `AttestationShare` — **interface only**; every method is a stub returning `NotYetImplemented`.
 - `SecureRng` / `MpcRng` — the CSPRNG masking seam (you rarely touch these directly).
 
@@ -137,6 +140,25 @@ assert_eq!(info.trust_model, TrustModel::HonestMajority);
 // redundancy (n>=4) it becomes HonestMajorityRobust { max_cheaters }.
 assert_eq!(info.malicious_security, MaliciousSecurity::HonestMajorityAbort);
 assert!(info.malicious_secure());           // coarse "hardened at all?" bit
+# Ok::<(), sparq_mpc::MpcError>(())
+```
+
+State the requirement UP FRONT and let a **fail-closed registry** match it — an
+over-strong request is truthfully REFUSED, never silently downgraded:
+
+```rust
+use sparq_mpc::{ShamirBackend, BackendRegistry, SecurityRequirement, MpcError};
+
+let mut registry: BackendRegistry<ShamirBackend> = BackendRegistry::new();
+registry.register(ShamirBackend::new(3)?);
+
+// A requirement the shipped (honest-majority, semi-honest) backend meets → returns it.
+let backend = registry.select(&SecurityRequirement::v1_honest_majority_semi_honest())?;
+assert_eq!(backend.parties(), 3);
+
+// A dishonest-majority-malicious request has NO satisfying backend → fail-closed.
+let refused = registry.select(&SecurityRequirement::dishonest_majority_malicious());
+assert!(matches!(refused, Err(MpcError::NoBackendSatisfies { .. })));
 # Ok::<(), sparq_mpc::MpcError>(())
 ```
 

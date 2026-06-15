@@ -743,6 +743,428 @@ pub trait MpcBackend {
 }
 
 // =============================================================================
+// [OPUS-4.8] sq-a6p1 — SECURITY-MODEL SELECTION / NEGOTIATION API + a FAIL-CLOSED
+// backend registry (Fable unavailable; re-review when Fable returns).
+//
+// Background: sq-mq8q (above) gave every backend a three-axis
+// [`SecurityDescriptor`] and per-operator reporting, but a caller could only
+// inspect a chosen backend's [`BackendInfo`] *post-hoc*. There was no way for a
+// federation to state its security requirement UP FRONT and have a backend
+// MATCHED against it — and, crucially, no way for an over-strong request (e.g.
+// dishonest-majority-malicious over the SPARQL pipeline, which NO shipped backend
+// can honour — research §1.3 honesty-anchor (e)) to be *truthfully refused*
+// instead of silently downgraded onto the one semi-honest Shamir backend.
+//
+// This module adds exactly that, the "configurable long-term" deliverable from
+// research §1.3(b): a [`SecurityRequirement`] (the federation's stated floor on
+// each axis + the attribution / public-verifiability flags), its
+// [`SecurityRequirement::satisfies`] predicate against a [`BackendInfo`], and a
+// [`BackendRegistry`] whose [`BackendRegistry::select`] returns the STRONGEST
+// registered backend meeting the requirement or, FAILING CLOSED, the typed
+// [`MpcError::NoBackendSatisfies`] — mirroring the crate's
+// [`MpcError::NotYetImplemented`] honesty discipline (no fake crypto; here, no
+// fake security level). It composes with the existing descriptor + per-operator
+// reporting: [`BackendRegistry::select_for_operator`] matches against
+// [`MpcBackend::operator_security`] so the degree-`2t` equality open is judged on
+// ITS guarantee, not the backend's headline degree-`t` aggregate bit.
+//
+// Scope (sq-a6p1): stays in `backend.rs` + the one new `MpcError` variant. The
+// registry is GENERIC over a concrete backend type `B: MpcBackend` rather than
+// `&dyn MpcBackend` (as the research sketch wrote it) because [`MpcBackend`] has
+// an associated `Share` type and is therefore NOT object-safe — a `dyn` form
+// would force every backend in one registry to share one `Share`, which is
+// exactly the cross-scheme heterogeneity a federation does NOT have at v1 (it
+// runs ONE scheme family). Generic-over-`B` is the honest, compiling shape.
+// =============================================================================
+
+/// Rank of an [`AdversaryModel`] on its weakest→strongest axis, for the
+/// "satisfies a *minimum*" comparison. A backend secure against a STRONGER
+/// adversary also satisfies a requirement for a weaker one (a malicious-secure
+/// backend trivially meets a semi-honest floor). Covert sits strictly between
+/// semi-honest and malicious regardless of its ε (the ε refines *how strong*
+/// covert is, but every covert tier still ranks below full malicious security).
+/// `[OPUS-4.8]`
+fn adversary_rank(a: AdversaryModel) -> u8 {
+    match a {
+        AdversaryModel::SemiHonest => 0,
+        AdversaryModel::Covert { .. } => 1,
+        AdversaryModel::Malicious => 2,
+    }
+}
+
+/// Rank of an [`AbortKind`] on its weakest→strongest axis (selective < unanimous
+/// < identifiable). `[OPUS-4.8]`
+fn abort_rank(k: AbortKind) -> u8 {
+    match k {
+        AbortKind::Selective => 0,
+        AbortKind::Unanimous => 1,
+        AbortKind::Identifiable => 2,
+    }
+}
+
+/// Total rank of an [`OutputGuarantee`] on its weakest→strongest axis, flattening
+/// the abort sub-tiers below fairness below guaranteed-output:
+/// `Abort(Selective) < Abort(Unanimous) < Abort(Identifiable) < Fairness < GuaranteedOutput`.
+/// Used so a requirement's `min_output_guarantee` is met by any backend guarantee
+/// that ranks at least as high. `[OPUS-4.8]`
+fn output_guarantee_rank(g: OutputGuarantee) -> u8 {
+    match g {
+        OutputGuarantee::Abort(k) => abort_rank(k), // 0..=2
+        OutputGuarantee::Fairness(_) => 3,
+        OutputGuarantee::GuaranteedOutput(_) => 4,
+    }
+}
+
+/// Rank of a [`CorruptionThreshold`] by **how adverse a corruption setting the
+/// regime survives** — the more corruption tolerated, the stronger the backend.
+/// Dishonest-majority (up to `n−1` corrupt) is the strongest regime to operate
+/// under, super-honest-majority (needs `> 2/3` honest) the weakest:
+/// `SuperHonestMajority < HonestMajority < DishonestMajority`.
+///
+/// This ranks the *regime*, deliberately ignoring the concrete `t`: a requirement
+/// is "the backend must remain secure under AT LEAST this adverse a corruption
+/// setting", and the regime is what determines reachable guarantees (Cleve). A
+/// backend that works under a dishonest majority therefore satisfies a
+/// requirement that only needs an honest majority. `[OPUS-4.8]`
+fn threshold_rank(c: CorruptionThreshold) -> u8 {
+    match c {
+        CorruptionThreshold::SuperHonestMajority { .. } => 0,
+        CorruptionThreshold::HonestMajority { .. } => 1,
+        CorruptionThreshold::DishonestMajority { .. } => 2,
+    }
+}
+
+/// `true` iff `desc` advertises a SOUND cheater-attribution guarantee — i.e. its
+/// output guarantee is an [`AbortKind::Identifiable`] abort (identifiable abort:
+/// the honest parties AGREE on a cheater). A robust GOD backend corrects cheaters
+/// rather than attributing them, and a heuristic `Tampered{cheaters}` set is
+/// explicitly NOT sound IA (see [`AbortKind`] docs), so neither is treated as
+/// attribution here. `[OPUS-4.8]`
+fn provides_cheater_attribution(desc: &SecurityDescriptor) -> bool {
+    matches!(
+        desc.output_guarantee,
+        OutputGuarantee::Abort(AbortKind::Identifiable)
+    )
+}
+
+/// FAIL-CLOSED adversary-axis check: does a backend whose adversary model is
+/// `desc` meet a requirement floor of `req`? Strength is the coarse
+/// weakest→strongest rank ([`adversary_rank`]) AND — when BOTH are covert —
+/// the backend's deterrence ε must be at least the required ε.
+///
+/// The coarse rank alone is unsound for the covert tier: every `Covert{..}` ranks
+/// 1 regardless of its ε, so a requirement of covert(ε=1/2) would otherwise be
+/// satisfied by a much weaker covert(ε=1/100) backend — silently accepting a
+/// lower deterrence than asked for (Copilot review #92). When both sides are
+/// covert we additionally require `desc_ε >= req_ε`, compared as exact rationals
+/// via cross-multiplication (`desc_num·req_den >= req_num·desc_den`, both
+/// denominators `> 0` by the [`AdversaryModel::covert`] invariant) so no float
+/// enters a security decision. A strictly stronger adversary model (malicious)
+/// outranks any covert floor and needs no ε comparison; a covert backend never
+/// satisfies a malicious floor (rank 1 < 2). The products are widened to `u64`
+/// so the `u32 × u32` cross-multiply cannot overflow. `[OPUS-4.8]`
+fn adversary_satisfies(desc: AdversaryModel, req: AdversaryModel) -> bool {
+    if adversary_rank(desc) > adversary_rank(req) {
+        // Strictly stronger adversary model dominates (e.g. malicious >= covert).
+        return true;
+    }
+    if adversary_rank(desc) < adversary_rank(req) {
+        return false;
+    }
+    // Equal rank. For the covert tier the rank is ε-blind, so compare ε exactly.
+    match (desc.deterrence(), req.deterrence()) {
+        (Some((d_num, d_den)), Some((r_num, r_den))) => {
+            // desc_ε >= req_ε  ⇔  d_num/d_den >= r_num/r_den
+            //                  ⇔  d_num·r_den >= r_num·d_den   (denominators > 0)
+            u64::from(d_num) * u64::from(r_den) >= u64::from(r_num) * u64::from(d_den)
+        }
+        // Same non-covert rank (both semi-honest or both malicious): rank suffices.
+        _ => true,
+    }
+}
+
+/// FAIL-CLOSED corruption-axis check: does a backend at corruption threshold
+/// `desc` meet a requirement of `req`? The backend must survive AT LEAST as
+/// adverse a *regime* ([`threshold_rank`]) AND tolerate AT LEAST as many corrupt
+/// parties (`desc.t >= req.t`).
+///
+/// The coarse regime rank alone is unsound: it deliberately ignores the concrete
+/// `t`, so a requirement of `HonestMajority{t=3}` (stay secure with up to 3
+/// corrupt parties) would otherwise be satisfied by a backend at
+/// `HonestMajority{t=1}` that a *second* corrupt party already breaks — silently
+/// accepting a weaker concrete threshold than asked for (Copilot review #92).
+/// Requiring `desc.t >= req.t` closes that: a backend must tolerate at least the
+/// requested corruption count in addition to surviving at least the requested
+/// regime. (A higher-rank regime with a lower `t` is therefore NOT accepted for a
+/// higher-`t` floor — correctly, since it tolerates fewer corruptions.)
+/// `[OPUS-4.8]`
+fn corruption_satisfies(desc: CorruptionThreshold, req: CorruptionThreshold) -> bool {
+    threshold_rank(desc) >= threshold_rank(req) && desc.threshold() >= req.threshold()
+}
+
+/// A federation's **security requirement**, stated UP FRONT, that a backend must
+/// meet before it is allowed to run any part of the SPARQL pipeline (research
+/// §1.3(b)). Each field is a *floor* on one axis of the three-axis
+/// [`SecurityDescriptor`]; [`SecurityRequirement::satisfies`] checks a concrete
+/// [`BackendInfo`] against all of them at once.
+///
+/// The whole point is **fail-closed negotiation**: a federation can REQUEST any
+/// requirement — including one no shipped backend can honour (dishonest-majority
+/// malicious over the SPARQL operator pipeline, which has zero published
+/// instances — research §1.3(e)) — and [`BackendRegistry::select`] will
+/// truthfully refuse it with [`MpcError::NoBackendSatisfies`] rather than
+/// silently serve a weaker backend. `[OPUS-4.8]`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecurityRequirement {
+    /// Minimum adversary model the backend must withstand (AXIS-1). A backend
+    /// whose [`AdversaryModel`] ranks at least this high satisfies it (malicious
+    /// ≥ covert ≥ semi-honest).
+    pub min_adversary: AdversaryModel,
+    /// Minimum output guarantee the backend must deliver (AXIS-2), ordered
+    /// `Abort(Selective) < Abort(Unanimous) < Abort(Identifiable) < Fairness <
+    /// GuaranteedOutput`. Construct the honest-majority-only variants via
+    /// [`OutputGuarantee::fairness`] / [`OutputGuarantee::guaranteed_output`].
+    pub min_output_guarantee: OutputGuarantee,
+    /// The MOST adverse corruption setting the backend must remain secure under
+    /// (AXIS-3). A backend whose regime tolerates at least this much corruption
+    /// satisfies it (`DishonestMajority` ≥ `HonestMajority` ≥
+    /// `SuperHonestMajority`). The concrete `t` is informational here — the
+    /// *regime* is what gates reachable guarantees (Cleve). Named `max_corruption`
+    /// to read as "I need security up to this much corruption".
+    pub max_corruption: CorruptionThreshold,
+    /// Require SOUND cheater attribution (identifiable abort), not the heuristic
+    /// best-effort `Tampered{cheaters}` set. Only an
+    /// [`OutputGuarantee::Abort`]`(`[`AbortKind::Identifiable`]`)` descriptor
+    /// satisfies this.
+    pub require_cheater_attribution: bool,
+    /// Require [`PublicVerifiability`] — a cheat / the computation must be
+    /// verifiable by an external party who did not run it (PVC certificate or a
+    /// publicly-verifiable collaborative-zk proof).
+    pub require_public_verifiability: bool,
+}
+
+impl SecurityRequirement {
+    /// The v1 honest-majority, semi-honest floor — the requirement the shipped
+    /// Shamir backend (cooperating holders, LAN) is built to meet: a semi-honest
+    /// adversary, a detect-and-abort-or-better output guarantee on the redundant
+    /// reconstruction (so `Abort(Unanimous)` as the floor), honest-majority
+    /// corruption, and NO attribution / public-verifiability demand. A federation
+    /// that accepts the v1 envelope can `select` with this and get the Shamir
+    /// backend; tightening any field is how it asks for more. `[OPUS-4.8]`
+    pub fn v1_honest_majority_semi_honest() -> Self {
+        SecurityRequirement {
+            min_adversary: AdversaryModel::SemiHonest,
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Unanimous),
+            max_corruption: CorruptionThreshold::HonestMajority { t: 1 },
+            require_cheater_attribution: false,
+            require_public_verifiability: false,
+        }
+    }
+
+    /// The hardest realistic ask: **dishonest-majority, malicious**, identifiable
+    /// abort. This is the requirement the research honesty-anchor (§1.3(e)) says
+    /// has ZERO published instances for SPARQL/graph query evaluation — a
+    /// federation MAY state it, and [`BackendRegistry::select`] MUST refuse it
+    /// fail-closed for the shipped backend set. Provided as a named constructor so
+    /// the "this is the request we truthfully refuse" intent is explicit at call
+    /// sites and in tests. (GOD is Cleve-impossible under a dishonest majority, so
+    /// the strongest floor reachable in that regime is identifiable abort; flooring
+    /// any weaker would let a semi-honest backend through.) `[OPUS-4.8]`
+    pub fn dishonest_majority_malicious() -> Self {
+        SecurityRequirement {
+            min_adversary: AdversaryModel::Malicious,
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Identifiable),
+            max_corruption: CorruptionThreshold::DishonestMajority { t: 1 },
+            require_cheater_attribution: true,
+            require_public_verifiability: false,
+        }
+    }
+
+    /// Check a backend's [`SecurityDescriptor`] against every axis of this
+    /// requirement. `true` iff the descriptor meets the floor on ALL of:
+    /// adversary, output guarantee, corruption regime, plus the attribution and
+    /// public-verifiability flags. This is the per-descriptor core shared by
+    /// [`SecurityRequirement::satisfies`] (backend-level) and the per-operator
+    /// path. `[OPUS-4.8]`
+    pub fn satisfied_by(&self, desc: &SecurityDescriptor) -> bool {
+        // AXIS-1 honours the covert deterrence ε (not just the coarse tier rank)
+        // and AXIS-3 honours the concrete corruption count `t` (not just the
+        // regime rank), so neither axis can silently accept a weaker guarantee
+        // than requested — see [`adversary_satisfies`] / [`corruption_satisfies`]
+        // (Copilot review #92). `[OPUS-4.8]`
+        adversary_satisfies(desc.adversary, self.min_adversary)
+            && output_guarantee_rank(desc.output_guarantee)
+                >= output_guarantee_rank(self.min_output_guarantee)
+            && corruption_satisfies(desc.threshold, self.max_corruption)
+            && (!self.require_cheater_attribution || provides_cheater_attribution(desc))
+            && (!self.require_public_verifiability || desc.public_verifiability.0)
+    }
+
+    /// Check a backend's [`BackendInfo`] (its PRIMARY/headline reconstruction
+    /// path) against this requirement. Equivalent to
+    /// [`SecurityRequirement::satisfied_by`] on `info.security`. For an operator
+    /// whose guarantee differs from the headline (the Shamir degree-`2t` equality
+    /// open), match against [`MpcBackend::operator_security`] instead — see
+    /// [`BackendRegistry::select_for_operator`]. `[OPUS-4.8]`
+    pub fn satisfies(&self, info: &BackendInfo) -> bool {
+        self.satisfied_by(&info.security)
+    }
+
+    /// A compact human-readable rendering of the requirement, for the
+    /// [`MpcError::NoBackendSatisfies`] message on a fail-closed refusal.
+    /// `[OPUS-4.8]`
+    fn describe(&self) -> String {
+        let adversary = match self.min_adversary {
+            AdversaryModel::SemiHonest => "semi-honest".to_string(),
+            AdversaryModel::Covert { .. } => match self.min_adversary.deterrence() {
+                Some((num, den)) => format!("covert(ε={num}/{den})"),
+                None => "covert".to_string(),
+            },
+            AdversaryModel::Malicious => "malicious".to_string(),
+        };
+        let guarantee = match self.min_output_guarantee {
+            OutputGuarantee::Abort(AbortKind::Selective) => "abort(selective)",
+            OutputGuarantee::Abort(AbortKind::Unanimous) => "abort(unanimous)",
+            OutputGuarantee::Abort(AbortKind::Identifiable) => "abort(identifiable)",
+            OutputGuarantee::Fairness(_) => "fairness",
+            OutputGuarantee::GuaranteedOutput(_) => "guaranteed-output",
+        };
+        // Include the concrete corruption count `t`: now that `satisfied_by`
+        // ENFORCES `desc.t >= req.t` (Copilot review #92), two requirements that
+        // differ only in `t` are genuinely different floors, so the refusal
+        // message must distinguish them or it is ambiguous to debug. `[OPUS-4.8]`
+        let regime = match self.max_corruption {
+            CorruptionThreshold::DishonestMajority { t } => format!("dishonest-majority(t={t})"),
+            CorruptionThreshold::HonestMajority { t } => format!("honest-majority(t={t})"),
+            CorruptionThreshold::SuperHonestMajority { t } => {
+                format!("super-honest-majority(t={t})")
+            }
+        };
+        format!(
+            "adversary>={adversary}, output>={guarantee}, corruption<={regime}, \
+             attribution={}, public-verifiability={}",
+            self.require_cheater_attribution, self.require_public_verifiability
+        )
+    }
+}
+
+/// A **fail-closed registry** of MPC backends, all of one scheme family
+/// `B: MpcBackend` (research §1.3(b)). A federation registers the backends it is
+/// willing to run, then states a [`SecurityRequirement`];
+/// [`BackendRegistry::select`] returns the STRONGEST registered backend that
+/// meets it, or refuses with [`MpcError::NoBackendSatisfies`] — it NEVER returns
+/// a backend that fails the requirement.
+///
+/// Generic over the concrete backend type `B` (not `dyn MpcBackend`): the trait
+/// carries an associated `Share` type and so is not object-safe, and at v1 a
+/// federation runs ONE scheme family anyway (the crate ships exactly one,
+/// [`crate::shamir::ShamirBackend`]). When a second family lands, a federation
+/// uses a second registry per family — selection is a per-family decision because
+/// the `Share` type, round model, and preprocessing differ (module-level docs).
+/// `[OPUS-4.8]`
+#[derive(Debug)]
+pub struct BackendRegistry<B: MpcBackend> {
+    backends: Vec<B>,
+}
+
+impl<B: MpcBackend> Default for BackendRegistry<B> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<B: MpcBackend> BackendRegistry<B> {
+    /// An empty registry.
+    pub fn new() -> Self {
+        BackendRegistry {
+            backends: Vec::new(),
+        }
+    }
+
+    /// Register a backend the federation is willing to run. Returns `&mut self`
+    /// for chaining. `[OPUS-4.8]`
+    pub fn register(&mut self, backend: B) -> &mut Self {
+        self.backends.push(backend);
+        self
+    }
+
+    /// Number of registered backends.
+    pub fn len(&self) -> usize {
+        self.backends.len()
+    }
+
+    /// `true` iff no backend is registered.
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
+    }
+
+    /// **Select the strongest registered backend that satisfies `req`, or FAIL
+    /// CLOSED.** Matches each backend's headline [`BackendInfo`] against `req`
+    /// (research §1.3(b)); among those that pass, returns the one whose
+    /// descriptor ranks highest (so a federation that asks only for the minimum
+    /// still gets the best available). If NONE passes — e.g. a
+    /// dishonest-majority-malicious request when only the semi-honest Shamir
+    /// backend is registered — returns [`MpcError::NoBackendSatisfies`] carrying
+    /// the unmet requirement and the number of backends rejected. It NEVER
+    /// downgrades: an unsatisfiable request is refused, not silently served.
+    /// `[OPUS-4.8]`
+    pub fn select(&self, req: &SecurityRequirement) -> Result<&B, MpcError> {
+        self.select_by(req, |b| b.info().security)
+    }
+
+    /// Like [`BackendRegistry::select`] but matches against the per-operator
+    /// guarantee for `operator` ([`MpcBackend::operator_security`]) instead of the
+    /// headline [`BackendInfo`]. This is the correct path when a federation cares
+    /// about a specific operator whose guarantee differs from the backend's
+    /// primary one — e.g. the Shamir degree-`2t` [`OperatorClass::EqualityJoin`]
+    /// open is semi-honest-only at `n = 2t+1` even though the degree-`t`
+    /// [`OperatorClass::LinearAggregate`] is robust, so a robustness requirement
+    /// that the aggregate meets may be (correctly) refused for the equality join.
+    /// Same fail-closed contract. `[OPUS-4.8]`
+    pub fn select_for_operator(
+        &self,
+        req: &SecurityRequirement,
+        operator: OperatorClass,
+    ) -> Result<&B, MpcError> {
+        self.select_by(req, |b| b.operator_security(operator))
+    }
+
+    /// Shared selection core: pick the registered backend whose descriptor (as
+    /// extracted by `descriptor_of`) satisfies `req` and ranks strongest, or fail
+    /// closed. Strength is the lexicographic
+    /// `(output_guarantee, adversary, corruption)` rank — output guarantee first
+    /// because it is the property a federation feels most directly (does it get a
+    /// guaranteed answer?). `[OPUS-4.8]`
+    fn select_by(
+        &self,
+        req: &SecurityRequirement,
+        descriptor_of: impl Fn(&B) -> SecurityDescriptor,
+    ) -> Result<&B, MpcError> {
+        let mut best: Option<(&B, (u8, u8, u8))> = None;
+        for b in &self.backends {
+            let desc = descriptor_of(b);
+            if !req.satisfied_by(&desc) {
+                continue;
+            }
+            let rank = (
+                output_guarantee_rank(desc.output_guarantee),
+                adversary_rank(desc.adversary),
+                threshold_rank(desc.threshold),
+            );
+            match &best {
+                Some((_, best_rank)) if *best_rank >= rank => {}
+                _ => best = Some((b, rank)),
+            }
+        }
+        best.map(|(b, _)| b)
+            .ok_or_else(|| MpcError::NoBackendSatisfies {
+                requirement: req.describe(),
+                considered: self.backends.len(),
+            })
+    }
+}
+
+// =============================================================================
 // [OPUS-4.8] sq-mq8q — three-axis security descriptor tests: the axes construct
 // correctly; the Cleve impossibility is a type-level invariant (a
 // DishonestMajority + GuaranteedOutput is UNREPRESENTABLE — the constructor
@@ -981,5 +1403,469 @@ mod axis_tests {
             desc_budget.malicious_security(1),
             MaliciousSecurity::SemiHonestOnly
         );
+    }
+}
+
+// =============================================================================
+// [OPUS-4.8] sq-a6p1 — SELECTION / NEGOTIATION + FAIL-CLOSED registry tests.
+// The matrix the bead pins: a semi-honest backend is REFUSED for a malicious
+// requirement; an honest-majority backend is REFUSED for a dishonest-majority
+// requirement; a satisfiable request RETURNS the backend; NoBackendSatisfies on
+// impossible requests. Fail-closed is the load-bearing property. Fable
+// unavailable — flag for re-review.
+// =============================================================================
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::holder::Holder;
+
+    /// A configurable stub backend that reports a caller-supplied
+    /// [`SecurityDescriptor`] from `info()` (and the same from `operator_security`
+    /// for every operator). Its crypto methods are honest `NotYetImplemented`
+    /// stubs — selection NEVER runs crypto, it only inspects descriptors, so the
+    /// stub is sufficient to exercise the whole matrix without standing up real
+    /// Shamir parties. `[OPUS-4.8]`
+    #[derive(Debug)]
+    struct DescBackend {
+        name: &'static str,
+        desc: SecurityDescriptor,
+        robust_cheaters: usize,
+    }
+
+    impl DescBackend {
+        fn new(name: &'static str, desc: SecurityDescriptor) -> Self {
+            DescBackend {
+                name,
+                desc,
+                robust_cheaters: 0,
+            }
+        }
+    }
+
+    impl MpcBackend for DescBackend {
+        type Share = ();
+        fn info(&self) -> BackendInfo {
+            BackendInfo::new(self.name, self.desc, self.robust_cheaters)
+        }
+        fn share_private_input(&self, _h: &Holder) -> Result<Vec<()>, MpcError> {
+            Err(MpcError::not_yet("secret-share private input", "stub"))
+        }
+        fn run_secure(&self, _s: &[()]) -> Result<Vec<()>, MpcError> {
+            Err(MpcError::not_yet("run secure computation", "stub"))
+        }
+        fn reconstruct_disclosed(&self, _s: &[()]) -> Result<PartialResult, MpcError> {
+            Err(MpcError::not_yet("reconstruct disclosed output", "stub"))
+        }
+    }
+
+    // --- Descriptor fixtures spanning the axes. -----------------------------
+
+    /// Honest-majority, semi-honest, detect-and-abort (unanimous) — the shipped
+    /// v1 Shamir aggregate's headline guarantee.
+    fn honest_semi_abort() -> SecurityDescriptor {
+        SecurityDescriptor {
+            adversary: AdversaryModel::SemiHonest,
+            output_guarantee: OutputGuarantee::Abort(AbortKind::Unanimous),
+            threshold: CorruptionThreshold::HonestMajority { t: 1 },
+            public_verifiability: PublicVerifiability(false),
+        }
+    }
+
+    /// Honest-majority, MALICIOUS, robust guaranteed-output — a hypothetical
+    /// hardened honest-majority backend (Goyal-Liu-Song "free" malicious compiler).
+    fn honest_malicious_god() -> SecurityDescriptor {
+        SecurityDescriptor {
+            adversary: AdversaryModel::Malicious,
+            output_guarantee: OutputGuarantee::guaranteed_output(
+                CorruptionThreshold::HonestMajority { t: 1 },
+            )
+            .expect("honest majority admits GOD"),
+            threshold: CorruptionThreshold::HonestMajority { t: 1 },
+            public_verifiability: PublicVerifiability(false),
+        }
+    }
+
+    /// Dishonest-majority, malicious, identifiable abort + public verifiability —
+    /// a hypothetical SPDZ-with-PVC backend (NOT shipped; used to prove that when
+    /// such a backend IS registered the demanding request is satisfied, i.e. the
+    /// registry is not refusing by accident).
+    fn dishonest_malicious_ia_pvc() -> SecurityDescriptor {
+        SecurityDescriptor {
+            adversary: AdversaryModel::Malicious,
+            output_guarantee: OutputGuarantee::Abort(AbortKind::Identifiable),
+            threshold: CorruptionThreshold::DishonestMajority { t: 2 },
+            public_verifiability: PublicVerifiability(true),
+        }
+    }
+
+    // === satisfies() per-axis matrix ========================================
+
+    #[test]
+    fn satisfies_semi_honest_backend_refused_for_malicious_requirement() {
+        let info = BackendInfo::new("semi", honest_semi_abort(), 0);
+        let req = SecurityRequirement {
+            min_adversary: AdversaryModel::Malicious,
+            ..SecurityRequirement::v1_honest_majority_semi_honest()
+        };
+        assert!(
+            !req.satisfies(&info),
+            "a semi-honest backend must NOT satisfy a malicious-adversary requirement"
+        );
+        // A malicious backend DOES satisfy it (sanity: the floor is real, not vacuous).
+        let mal = BackendInfo::new("mal", honest_malicious_god(), 1);
+        assert!(req.satisfies(&mal));
+    }
+
+    #[test]
+    fn satisfies_honest_majority_backend_refused_for_dishonest_majority_requirement() {
+        // A backend that only holds under an HONEST majority cannot satisfy a
+        // requirement that demands security under a DISHONEST majority.
+        let honest = BackendInfo::new("honest", honest_malicious_god(), 1);
+        let req = SecurityRequirement {
+            min_adversary: AdversaryModel::SemiHonest,
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Selective),
+            max_corruption: CorruptionThreshold::DishonestMajority { t: 1 },
+            require_cheater_attribution: false,
+            require_public_verifiability: false,
+        };
+        assert!(
+            !req.satisfies(&honest),
+            "an honest-majority backend must NOT satisfy a dishonest-majority requirement"
+        );
+        // A genuine dishonest-majority backend satisfies it.
+        let dishonest = BackendInfo::new("dis", dishonest_malicious_ia_pvc(), 0);
+        assert!(req.satisfies(&dishonest));
+    }
+
+    #[test]
+    fn satisfies_output_guarantee_floor_is_ordered() {
+        // Floor = unanimous abort. Selective < unanimous (refused); unanimous,
+        // identifiable, fairness all >= unanimous (accepted).
+        let req = SecurityRequirement {
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Unanimous),
+            ..SecurityRequirement::v1_honest_majority_semi_honest()
+        };
+        let mk = |g| {
+            BackendInfo::new(
+                "x",
+                SecurityDescriptor {
+                    output_guarantee: g,
+                    ..honest_semi_abort()
+                },
+                0,
+            )
+        };
+        assert!(!req.satisfies(&mk(OutputGuarantee::Abort(AbortKind::Selective))));
+        assert!(req.satisfies(&mk(OutputGuarantee::Abort(AbortKind::Unanimous))));
+        assert!(req.satisfies(&mk(OutputGuarantee::Abort(AbortKind::Identifiable))));
+        let fairness =
+            OutputGuarantee::fairness(CorruptionThreshold::HonestMajority { t: 1 }).unwrap();
+        assert!(req.satisfies(&mk(fairness)));
+    }
+
+    #[test]
+    fn satisfies_attribution_and_public_verifiability_flags() {
+        let base = SecurityRequirement {
+            min_adversary: AdversaryModel::SemiHonest,
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Selective),
+            max_corruption: CorruptionThreshold::HonestMajority { t: 1 },
+            require_cheater_attribution: false,
+            require_public_verifiability: false,
+        };
+        // Without the flags, the plain semi-honest backend passes.
+        let plain = BackendInfo::new("plain", honest_semi_abort(), 0);
+        assert!(base.satisfies(&plain));
+
+        // require_cheater_attribution: only an identifiable-abort descriptor passes.
+        let need_attr = SecurityRequirement {
+            require_cheater_attribution: true,
+            ..base
+        };
+        assert!(
+            !need_attr.satisfies(&plain),
+            "unanimous abort is not sound IA"
+        );
+        let ia = BackendInfo::new(
+            "ia",
+            SecurityDescriptor {
+                output_guarantee: OutputGuarantee::Abort(AbortKind::Identifiable),
+                ..honest_semi_abort()
+            },
+            0,
+        );
+        assert!(need_attr.satisfies(&ia));
+
+        // require_public_verifiability: only a PV descriptor passes.
+        let need_pv = SecurityRequirement {
+            require_public_verifiability: true,
+            ..base
+        };
+        assert!(!need_pv.satisfies(&plain));
+        let pv = BackendInfo::new(
+            "pv",
+            SecurityDescriptor {
+                public_verifiability: PublicVerifiability(true),
+                ..honest_semi_abort()
+            },
+            0,
+        );
+        assert!(need_pv.satisfies(&pv));
+    }
+
+    // === registry.select() fail-closed contract =============================
+
+    #[test]
+    fn select_returns_backend_for_satisfiable_request() {
+        let mut reg: BackendRegistry<DescBackend> = BackendRegistry::new();
+        reg.register(DescBackend::new("shamir-like", honest_semi_abort()));
+        let chosen = reg
+            .select(&SecurityRequirement::v1_honest_majority_semi_honest())
+            .expect("the v1 floor is satisfiable by the registered backend");
+        assert_eq!(chosen.info().name, "shamir-like");
+    }
+
+    #[test]
+    fn select_fails_closed_on_dishonest_majority_malicious_over_shipped_set() {
+        // The shipped set = one honest-majority semi-honest backend. The hardest
+        // realistic ask (dishonest-majority malicious) MUST be refused, never
+        // downgraded onto the semi-honest backend. THIS is the load-bearing
+        // property of the whole deliverable.
+        let mut reg: BackendRegistry<DescBackend> = BackendRegistry::new();
+        reg.register(DescBackend::new("shamir-like", honest_semi_abort()));
+        let req = SecurityRequirement::dishonest_majority_malicious();
+        let err = reg
+            .select(&req)
+            .expect_err("a dishonest-majority-malicious request must be refused fail-closed");
+        match err {
+            MpcError::NoBackendSatisfies {
+                considered,
+                requirement,
+            } => {
+                assert_eq!(
+                    considered, 1,
+                    "the one registered backend was inspected and rejected"
+                );
+                assert!(
+                    requirement.contains("malicious") && requirement.contains("dishonest-majority"),
+                    "the refusal names the unmet requirement: {requirement}"
+                );
+            }
+            other => panic!("expected NoBackendSatisfies, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_fails_closed_on_empty_registry() {
+        let reg: BackendRegistry<DescBackend> = BackendRegistry::new();
+        let err = reg
+            .select(&SecurityRequirement::v1_honest_majority_semi_honest())
+            .expect_err("an empty registry satisfies nothing");
+        assert!(matches!(
+            err,
+            MpcError::NoBackendSatisfies { considered: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn select_satisfied_once_a_qualifying_backend_is_registered() {
+        // The SAME demanding request that fails closed over the shipped set
+        // succeeds the moment a backend that genuinely meets it is registered —
+        // proving the refusal above is HONEST (capability gap), not a bug.
+        let mut reg: BackendRegistry<DescBackend> = BackendRegistry::new();
+        reg.register(DescBackend::new("shamir-like", honest_semi_abort()));
+        reg.register(DescBackend::new("spdz-pvc", dishonest_malicious_ia_pvc()));
+        let chosen = reg
+            .select(&SecurityRequirement::dishonest_majority_malicious())
+            .expect("the dishonest-majority PVC backend satisfies the demanding request");
+        assert_eq!(chosen.info().name, "spdz-pvc");
+    }
+
+    #[test]
+    fn select_returns_strongest_among_satisfiers() {
+        // Two backends both clear a minimal floor; select returns the STRONGER
+        // (higher output-guarantee rank), so asking for the minimum still yields
+        // the best available.
+        let mut reg: BackendRegistry<DescBackend> = BackendRegistry::new();
+        reg.register(DescBackend::new("weak", honest_semi_abort())); // unanimous abort
+        reg.register(DescBackend {
+            name: "strong",
+            desc: honest_malicious_god(),
+            robust_cheaters: 1,
+        }); // GOD
+        let req = SecurityRequirement {
+            min_adversary: AdversaryModel::SemiHonest,
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Selective),
+            max_corruption: CorruptionThreshold::HonestMajority { t: 1 },
+            require_cheater_attribution: false,
+            require_public_verifiability: false,
+        };
+        let chosen = reg.select(&req).expect("both satisfy the minimal floor");
+        assert_eq!(
+            chosen.info().name,
+            "strong",
+            "select returns the strongest satisfier"
+        );
+    }
+
+    // === per-operator selection (composes with operator_security) ===========
+
+    #[test]
+    fn select_for_operator_judges_each_operator_on_its_own_guarantee() {
+        // Real Shamir backend at n = 3, t = 1. The degree-`t` LinearAggregate has
+        // one redundant share (RS budget e = ⌊(3−1−1)/2⌋ = 0) → detect-and-abort
+        // (`Abort(Unanimous)`); the degree-`2t` EqualityJoin open has ZERO
+        // redundancy at n = 2t+1 → semi-honest-only (`Abort(Selective)`). A
+        // requirement demanding BETTER than selective abort is met for the
+        // aggregate but REFUSED for the equality join — the registry judges each
+        // operator on its OWN descriptor via operator_security, not the headline
+        // bit. (For robust GOD on the aggregate you need n >= 4, e >= 1.)
+        let mut reg: BackendRegistry<crate::shamir::ShamirBackend> = BackendRegistry::new();
+        reg.register(crate::shamir::ShamirBackend::new(3).expect("n=3 backend"));
+
+        // Sanity: pin the exact per-operator guarantees this test depends on.
+        let agg = reg.backends[0].operator_security(OperatorClass::LinearAggregate);
+        let eqj = reg.backends[0].operator_security(OperatorClass::EqualityJoin);
+        assert_eq!(
+            agg.output_guarantee,
+            OutputGuarantee::Abort(AbortKind::Unanimous),
+            "n=3 aggregate: one redundant share → detect-and-abort"
+        );
+        assert_eq!(
+            eqj.output_guarantee,
+            OutputGuarantee::Abort(AbortKind::Selective),
+            "n=3 degree-2t equality open: no redundancy → semi-honest-only"
+        );
+
+        let req = SecurityRequirement {
+            min_adversary: AdversaryModel::SemiHonest,
+            // Demand BETTER than selective abort (i.e. some real detection).
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Unanimous),
+            max_corruption: CorruptionThreshold::HonestMajority { t: 1 },
+            require_cheater_attribution: false,
+            require_public_verifiability: false,
+        };
+
+        // Aggregate: satisfied (unanimous-abort meets the unanimous-abort floor).
+        assert!(
+            reg.select_for_operator(&req, OperatorClass::LinearAggregate)
+                .is_ok(),
+            "the degree-t aggregate meets the detect-or-better floor"
+        );
+        // Equality join: refused fail-closed (selective abort < unanimous floor).
+        let err = reg
+            .select_for_operator(&req, OperatorClass::EqualityJoin)
+            .expect_err("the degree-2t equality open is semi-honest-only at n=2t+1");
+        assert!(matches!(err, MpcError::NoBackendSatisfies { .. }));
+    }
+
+    #[test]
+    fn requirement_describe_is_human_readable() {
+        let s = SecurityRequirement::dishonest_majority_malicious().describe();
+        assert!(s.contains("malicious"));
+        assert!(s.contains("dishonest-majority"));
+        assert!(s.contains("attribution=true"));
+    }
+
+    // === FAIL-CLOSED on the covert-ε and concrete-`t` sub-axes (Copilot #92) ===
+
+    /// A requirement for covert(ε=1/2) must NOT be satisfied by a weaker
+    /// covert(ε=1/100) backend — the coarse tier rank is ε-blind, so the ε must
+    /// be compared exactly. A stronger covert ε, an equal ε, and a malicious
+    /// backend all satisfy it; a weaker covert ε and a semi-honest backend do not.
+    /// `[OPUS-4.8]`
+    #[test]
+    fn satisfies_covert_epsilon_is_not_silently_downgraded() {
+        let req = SecurityRequirement {
+            min_adversary: AdversaryModel::covert(1, 2).expect("ε=1/2 valid"),
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Selective),
+            max_corruption: CorruptionThreshold::HonestMajority { t: 1 },
+            require_cheater_attribution: false,
+            require_public_verifiability: false,
+        };
+        let mk = |adv| {
+            BackendInfo::new(
+                "x",
+                SecurityDescriptor {
+                    adversary: adv,
+                    ..honest_semi_abort()
+                },
+                0,
+            )
+        };
+        // Weaker deterrence ε = 1/100 < 1/2 → REFUSED (the bug this fix closes).
+        assert!(
+            !req.satisfies(&mk(AdversaryModel::covert(1, 100).unwrap())),
+            "covert(ε=1/100) must NOT satisfy a covert(ε=1/2) floor"
+        );
+        // Equal ε = 1/2 (and an equivalent 2/4) → accepted.
+        assert!(req.satisfies(&mk(AdversaryModel::covert(1, 2).unwrap())));
+        assert!(req.satisfies(&mk(AdversaryModel::covert(2, 4).unwrap())));
+        // Stronger ε = 3/4 > 1/2 → accepted.
+        assert!(req.satisfies(&mk(AdversaryModel::covert(3, 4).unwrap())));
+        // Strictly stronger adversary model (malicious) → accepted (rank dominates).
+        assert!(req.satisfies(&mk(AdversaryModel::Malicious)));
+        // Weaker adversary model (semi-honest) → refused (rank 0 < 1).
+        assert!(!req.satisfies(&mk(AdversaryModel::SemiHonest)));
+    }
+
+    /// A requirement to tolerate up to `t=3` corruptions must NOT be satisfied by
+    /// a backend that tolerates only `t=1`, even in the same (or a stronger)
+    /// regime — the coarse regime rank ignores the concrete `t`. `[OPUS-4.8]`
+    #[test]
+    fn satisfies_concrete_threshold_t_is_not_silently_downgraded() {
+        let req = SecurityRequirement {
+            min_adversary: AdversaryModel::SemiHonest,
+            min_output_guarantee: OutputGuarantee::Abort(AbortKind::Selective),
+            max_corruption: CorruptionThreshold::HonestMajority { t: 3 },
+            require_cheater_attribution: false,
+            require_public_verifiability: false,
+        };
+        let mk = |threshold| {
+            BackendInfo::new(
+                "x",
+                SecurityDescriptor {
+                    threshold,
+                    ..honest_semi_abort()
+                },
+                0,
+            )
+        };
+        // Same regime but fewer tolerated corruptions (t=1 < 3) → REFUSED.
+        assert!(
+            !req.satisfies(&mk(CorruptionThreshold::HonestMajority { t: 1 })),
+            "honest-majority(t=1) must NOT satisfy an honest-majority(t=3) floor"
+        );
+        // Same regime, t=3 → accepted.
+        assert!(req.satisfies(&mk(CorruptionThreshold::HonestMajority { t: 3 })));
+        // Stronger regime AND enough t (dishonest-majority tolerates more corruption,
+        // t=3 >= 3) → accepted.
+        assert!(req.satisfies(&mk(CorruptionThreshold::DishonestMajority { t: 3 })));
+        // Stronger regime but too few corruptions (dishonest-majority{t=1}) → REFUSED:
+        // a higher regime rank does not excuse a lower concrete threshold.
+        assert!(
+            !req.satisfies(&mk(CorruptionThreshold::DishonestMajority { t: 1 })),
+            "a stronger regime with t=1 still fails a t=3 floor"
+        );
+    }
+
+    /// The fail-closed refusal message distinguishes requirements that differ
+    /// ONLY in the concrete `t` — otherwise the `NoBackendSatisfies` string would
+    /// be ambiguous to debug now that `t` is enforced (Copilot #92). `[OPUS-4.8]`
+    #[test]
+    fn describe_distinguishes_requirements_by_concrete_t() {
+        let r1 = SecurityRequirement {
+            max_corruption: CorruptionThreshold::HonestMajority { t: 1 },
+            ..SecurityRequirement::v1_honest_majority_semi_honest()
+        };
+        let r3 = SecurityRequirement {
+            max_corruption: CorruptionThreshold::HonestMajority { t: 3 },
+            ..SecurityRequirement::v1_honest_majority_semi_honest()
+        };
+        assert_ne!(
+            r1.describe(),
+            r3.describe(),
+            "requirements differing only in t must render differently"
+        );
+        assert!(r3.describe().contains("honest-majority(t=3)"));
     }
 }

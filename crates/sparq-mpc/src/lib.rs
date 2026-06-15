@@ -134,8 +134,9 @@ pub mod oblivious;
 mod adversarial_tests;
 
 pub use backend::{
-    AbortKind, AdversaryModel, BackendInfo, CorruptionThreshold, MaliciousSecurity, MpcBackend,
-    OperatorClass, OutputGuarantee, PublicVerifiability, SecurityDescriptor, TrustModel,
+    AbortKind, AdversaryModel, BackendInfo, BackendRegistry, CorruptionThreshold,
+    MaliciousSecurity, MpcBackend, OperatorClass, OutputGuarantee, PublicVerifiability,
+    SecurityDescriptor, SecurityRequirement, TrustModel,
 };
 // [OPUS-4.8] sq-sxm: the benchmark-matrix harness surface (in-process counting tier).
 pub use bench::{
