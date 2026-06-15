@@ -16,6 +16,221 @@
 use crate::dict::{Dict, Id};
 use std::borrow::Cow;
 
+/// [OPUS-4.8] (sq-25r3) The identity of an N-Quads quad's GRAPH field (4th term): an absolute
+/// IRI or a blank-node label, decoded (escapes resolved) so two byte-different-but-equal graph
+/// references route to the SAME graph. `None` (the default graph) is represented by the absence
+/// of a key, not a variant here. Used purely as a routing key by the chunk-parallel N-Quads
+/// loader — the graph name itself never enters any per-graph dictionary; it becomes the
+/// `oxrdf::Term` stored in the parent graph's `named` vec. `Ord`/`Hash` give a deterministic
+/// per-graph grouping independent of parse order.
+#[cfg(feature = "parallel")]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GraphKey {
+    Iri(String),
+    Blank(String),
+}
+
+#[cfg(feature = "parallel")]
+impl GraphKey {
+    /// Rebuilds the `oxrdf::Term` for the parent graph's `named` entry. `new_unchecked` is sound:
+    /// these strings came straight out of a successful parse (the same path the serial loader's
+    /// `Term::NamedNode`/`Term::BlankNode` take).
+    pub fn to_term(&self) -> oxrdf::Term {
+        match self {
+            GraphKey::Iri(s) => oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s)),
+            GraphKey::Blank(s) => oxrdf::Term::BlankNode(oxrdf::BlankNode::new_unchecked(s)),
+        }
+    }
+}
+
+/// [OPUS-4.8] (sq-25r3) Relabels an error raised by the SHARED N-Triples term parsers (`term`,
+/// `object_term`, `scan_delim`, `decode`, …) so it reads `N-Quads:` when surfaced from the
+/// N-Quads fast path — the shared code emits the `N-Triples:` prefix, which is misleading to a
+/// caller that handed in N-Quads. Only the leading prefix is rewritten; the byte offset and the
+/// rest of the message are preserved.
+#[cfg(feature = "parallel")]
+fn as_nquads_err(e: String) -> String {
+    match e.strip_prefix("N-Triples:") {
+        Some(rest) => format!("N-Quads:{rest}"),
+        None => e,
+    }
+}
+
+/// [OPUS-4.8] (sq-25r3) Parses a slice of complete N-QUADS lines, ROUTING each quad's triple to a
+/// per-graph partial bucket keyed by its 4th (graph) field — the byte-level analogue of
+/// [`parse_chunk`] for datasets. N-Quads is one statement per line, so a byte buffer can be split
+/// at newline boundaries and each range parsed independently; this is the per-range worker.
+///
+/// Returns, IN FIRST-OCCURRENCE ORDER within this byte range, `(Option<GraphKey>, Dict, triples)`
+/// buckets — `None` is the default graph. Each bucket carries its OWN partial dict (S/P/O interned
+/// locally), mirroring the serial loader's one-dict-per-graph construction; the graph NAME is the
+/// routing key and is never interned into any of these dicts. Errors carry the byte offset.
+///
+/// Cross-range correctness: blank-node labels (subject/object AND graph) are kept verbatim, so the
+/// dataset-scoped merge (per graph, by label, exactly as [`parse_chunk`]) unifies them across
+/// ranges — see the loader (`load_nquads_parallel`).
+#[cfg(feature = "parallel")]
+#[allow(clippy::type_complexity)]
+pub fn parse_quads_chunk(bytes: &[u8]) -> Result<Vec<(Option<GraphKey>, Dict, Vec<[Id; 3]>)>, String> {
+    // `buckets` is in first-occurrence order of graph keys (push-on-first-sight); `index` maps a
+    // key to its slot so repeated references to the same graph append to the one existing bucket.
+    use std::collections::HashMap;
+    let mut buckets: Vec<(Option<GraphKey>, Dict, Vec<[Id; 3]>)> = Vec::new();
+    let mut index: HashMap<Option<GraphKey>, usize> = HashMap::new();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        i = skip_ws(bytes, i);
+        if i >= n {
+            break;
+        }
+        if bytes[i] == b'#' {
+            i = next_line(bytes, i);
+            continue;
+        }
+        // We must know the GRAPH (which bucket dict to intern into) before interning S/P/O, but the
+        // graph is the LAST field. So first locate the optional graph term by SPAN-scanning S/P/O
+        // (a no-intern walk, the same cost as a parse), resolve the bucket, THEN intern S/P/O into
+        // that bucket's dict by re-scanning from their start offsets. The span walk avoids any
+        // throwaway interning into a wrong dict.
+        let s_start = i;
+        let j = span_term(bytes, i)?;
+        i = skip_ws(bytes, j);
+        let p_start = i;
+        let j = span_term(bytes, i)?;
+        i = skip_ws(bytes, j);
+        let o_start = i;
+        let j = span_object(bytes, i)?;
+        i = skip_ws(bytes, j);
+        // Optional graph term, then the mandatory `.`.
+        let graph = if i < n && bytes[i] == b'.' {
+            i += 1;
+            None
+        } else {
+            let g = graph_key(bytes, i)?;
+            let jg = span_term(bytes, i)?;
+            i = skip_ws(bytes, jg);
+            if i >= n || bytes[i] != b'.' {
+                return Err(format!("N-Quads: expected '.' at byte {i}"));
+            }
+            i += 1;
+            Some(g)
+        };
+        // Resolve (or create) the bucket for this graph, then intern S/P/O into ITS dict.
+        let slot = *index.entry(graph.clone()).or_insert_with(|| {
+            buckets.push((graph.clone(), Dict::new(), Vec::new()));
+            buckets.len() - 1
+        });
+        let (_, dict, triples) = &mut buckets[slot];
+        // S/P/O were already span-validated above; the only errors the shared (re-scanning)
+        // intern path can still raise here are escape/UTF-8 decode failures, which carry the
+        // N-Triples prefix from the shared term parser. Relabel them to N-Quads so a caller of
+        // the N-Quads fast path never sees a misleading `N-Triples:` message (sq-25r3).
+        let (s, _) = term(bytes, s_start, dict).map_err(as_nquads_err)?;
+        let (p, _) = term(bytes, p_start, dict).map_err(as_nquads_err)?;
+        let (o, _) = object_term(bytes, o_start, dict).map_err(as_nquads_err)?;
+        triples.push([s, p, o]);
+    }
+    Ok(buckets)
+}
+
+/// [OPUS-4.8] (sq-25r3) Parses just the graph (4th) field of an N-Quads quad into a [`GraphKey`]
+/// (an absolute IRI or a blank-node label), decoding escapes so the key is the graph's true
+/// identity. Literals are NOT valid in graph position and are rejected.
+#[cfg(feature = "parallel")]
+fn graph_key(b: &[u8], i: usize) -> Result<GraphKey, String> {
+    match b.get(i) {
+        Some(b'<') => {
+            let (start, end, esc, _next) = scan_delim(b, i, b'>').map_err(as_nquads_err)?;
+            Ok(GraphKey::Iri(decode(&b[start..end], esc).map_err(as_nquads_err)?.into_owned()))
+        }
+        Some(b'_') => {
+            if b.get(i + 1) != Some(&b':') {
+                return Err(format!("N-Quads: bad blank node graph at byte {i}"));
+            }
+            let start = i + 2;
+            let j = blank_label_end(b, start);
+            Ok(GraphKey::Blank(str_of(&b[start..j])?.to_owned()))
+        }
+        _ => Err(format!("N-Quads: graph name must be an IRI or blank node at byte {i}")),
+    }
+}
+
+/// [OPUS-4.8] (sq-25r3) Returns the index just past a term WITHOUT interning — used to locate the
+/// optional graph field before deciding which bucket dict to intern S/P/O into (the caller then
+/// re-scans from the start offset to intern). Mirrors [`term`]'s grammar.
+#[cfg(feature = "parallel")]
+fn span_term(b: &[u8], i: usize) -> Result<usize, String> {
+    match b.get(i) {
+        Some(b'<') => {
+            let (_s, _e, _esc, next) = scan_delim(b, i, b'>')?;
+            Ok(next)
+        }
+        Some(b'_') => {
+            if b.get(i + 1) != Some(&b':') {
+                return Err(format!("N-Quads: bad blank node at byte {i}"));
+            }
+            Ok(blank_label_end(b, i + 2))
+        }
+        Some(b'"') => span_literal(b, i),
+        _ => Err(format!("N-Quads: unexpected term start at byte {i}")),
+    }
+}
+
+/// [OPUS-4.8] (sq-25r3) Index just past an OBJECT-position term (which may be an RDF 1.2 triple
+/// term `<<( … )>>`). Mirrors [`object_term`]'s grammar.
+#[cfg(feature = "parallel")]
+fn span_object(b: &[u8], i: usize) -> Result<usize, String> {
+    if b.get(i) == Some(&b'<') && b.get(i + 1) == Some(&b'<') && b.get(i + 2) == Some(&b'(') {
+        span_triple_term(b, i)
+    } else {
+        span_term(b, i)
+    }
+}
+
+/// [OPUS-4.8] (sq-25r3) Index just past an RDF 1.2 triple term `<<( s p o )>>`, recursing through
+/// its nested object. Mirrors [`triple_term`].
+#[cfg(feature = "parallel")]
+fn span_triple_term(b: &[u8], i: usize) -> Result<usize, String> {
+    let mut j = skip_ws(b, i + 3);
+    let k = span_term(b, j)?;
+    j = skip_ws(b, k);
+    let k = span_term(b, j)?;
+    j = skip_ws(b, k);
+    let k = span_object(b, j)?;
+    j = skip_ws(b, k);
+    if b.get(j) == Some(&b')') && b.get(j + 1) == Some(&b'>') && b.get(j + 2) == Some(&b'>') {
+        Ok(j + 3)
+    } else {
+        Err(format!("N-Quads: expected ')>>' closing triple term at byte {j}"))
+    }
+}
+
+/// [OPUS-4.8] (sq-25r3) Span of a literal (value + optional `^^<dt>` / `@lang`), returning the
+/// index just past it. Mirrors [`literal`]'s grammar without interning.
+#[cfg(feature = "parallel")]
+fn span_literal(b: &[u8], i: usize) -> Result<usize, String> {
+    let (_vs, _ve, _vesc, after) = scan_delim(b, i, b'"')?;
+    match b.get(after) {
+        Some(b'^') if b.get(after + 1) == Some(&b'^') => {
+            let open = after + 2;
+            if b.get(open) != Some(&b'<') {
+                return Err(format!("N-Quads: bad datatype at byte {open}"));
+            }
+            let (_ds, _de, _desc, next) = scan_delim(b, open, b'>')?;
+            Ok(next)
+        }
+        Some(b'@') => {
+            let mut j = after + 1;
+            while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'-') {
+                j += 1;
+            }
+            Ok(j)
+        }
+        _ => Ok(after),
+    }
+}
+
 /// Parses a slice of complete N-Triples lines, interning each term and returning the
 /// id-triples. Errors carry the byte offset.
 pub fn parse_chunk(bytes: &[u8], dict: &mut Dict) -> Result<Vec<[Id; 3]>, String> {
@@ -146,15 +361,31 @@ fn iri(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     Ok((dict.intern_iri(&s), next))
 }
 
+/// [OPUS-4.8] (sq-25r3) End index (exclusive) of a `BLANK_NODE_LABEL` body starting at `start`
+/// (the byte after `_:`). Per the N-Triples/N-Quads grammar a label may contain INTERIOR `.`
+/// (`(PN_CHARS | '.')* PN_CHARS`) but must not END in `.`, so the scan runs to the next
+/// whitespace and then backs the cursor over any trailing `.` bytes — which are the statement
+/// terminator, not part of the label. This matches the serial oxttl reference exactly
+/// (`_:a.b` → label `a.b`; `_:abc.` → label `abc`, `.` is the terminator) and is the SINGLE
+/// source of truth shared by [`blank`] (interning), [`span_term`] (no-intern span), and
+/// [`graph_key`] (graph field) so the three never diverge on dotted labels.
+fn blank_label_end(b: &[u8], start: usize) -> usize {
+    let mut j = start;
+    while j < b.len() && !matches!(b[j], b' ' | b'\t' | b'\r' | b'\n') {
+        j += 1;
+    }
+    while j > start && b[j - 1] == b'.' {
+        j -= 1;
+    }
+    j
+}
+
 fn blank(b: &[u8], i: usize, dict: &mut Dict) -> Result<(Id, usize), String> {
     if b.get(i + 1) != Some(&b':') {
         return Err(format!("N-Triples: bad blank node at byte {i}"));
     }
     let start = i + 2;
-    let mut j = start;
-    while j < b.len() && !matches!(b[j], b' ' | b'\t' | b'\r' | b'\n' | b'.') {
-        j += 1;
-    }
+    let j = blank_label_end(b, start);
     Ok((dict.intern_blank(str_of(&b[start..j])?), j))
 }
 

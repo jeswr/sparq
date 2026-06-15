@@ -198,7 +198,9 @@ matrix under "Security posture".
 - **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket
   subscriptions** (live SELECT diffs).
 - **Opt-in features** — `time-travel` (`?generation=N` snapshot pinning), `geo` (sparq-geo
-  `geof:` functions), `service` (SERVICE federation, default-deny).
+  `geof:` functions), `service` (SERVICE federation, default-deny), `zlib-ng` (native-only
+  faster zlib-ng C backend for `Content-Encoding: gzip` request inflate; off by default,
+  pure-Rust `miniz_oxide` otherwise; never in the wasm build).
 
 ## 📚 Learn more
 

@@ -25,6 +25,12 @@ readme = "README.md"
 # stays default and sophia-free; only writers pay for it.
 [features]
 write = ["hdt/sophia"]
+# [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
+# gzip backend (zlib-ng C library via flate2) for `.hdt.gz` inflate — a measured 1.5–3×
+# at ~zero code change. SAFE because sparq-hdt is native-only and never in the sparq-wasm
+# graph (`cargo tree -p sparq-wasm -e normal` shows no sparq-hdt), so the C dep can never
+# reach the wasm bundle. The default flate2 backend stays pure-Rust miniz_oxide.
+zlib-ng = ["flate2/zlib-ng"]
 
 # Opt-in HDT ingestion (T24a). This is a SEPARATE crate so the core engine — and in
 # particular the wasm build — carries zero HDT code or dependencies; HDT support is

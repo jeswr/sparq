@@ -43,6 +43,14 @@ default = ["server"]
 # so the WAL-durable `apply_delta` path is live on the shared graph. Without `--persist` the server
 # is in-memory exactly as before (the flag, not the feature, selects durability).
 server = ["dep:sparq-serve", "dep:axum", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
+# [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
+# gzip backend (zlib-ng C library) for the server's `Content-Encoding: gzip` request
+# inflate (MultiGzDecoder) — a measured 1.5–3× at ~zero code change. The weak
+# `flate2?/zlib-ng` only applies when flate2 is present (i.e. the `server` feature is on);
+# with `--no-default-features` (pure serializer library) it is a no-op. SAFE because this
+# crate is never in the sparq-wasm graph, so the C dep can never reach the wasm bundle.
+# The default flate2 backend stays pure-Rust miniz_oxide.
+zlib-ng = ["flate2?/zlib-ng"]
 # `time-travel` (default OFF — opt-in is the contract, user-approved) lets a query pin
 # a RETAINED generation: `?generation=N` on /sparql serves the store as of generation N
 # (410 Gone once it ages out of the retention window), every /sparql response carries

@@ -39,7 +39,10 @@
 //!    typed error that names its gate — never `Ok` with a fabricated/plaintext
 //!    value. This is what stops the scaffold being mistaken for finished crypto.
 
-use crate::backend::{BackendInfo, MaliciousSecurity, MpcBackend, TrustModel};
+use crate::backend::{
+    AbortKind, AdversaryModel, BackendInfo, CorruptionThreshold, MaliciousSecurity, MpcBackend,
+    OperatorClass, OutputGuarantee, PublicVerifiability, SecurityDescriptor, TrustModel,
+};
 use crate::field::{Fp, P};
 use crate::holder::Holder;
 use crate::join::{DisclosedKeyJoin, GlobalJoin, HiddenValueJoin, JoinPlan};
@@ -1161,11 +1164,24 @@ mod no_fake_crypto {
     impl MpcBackend for StubBackend {
         type Share = ();
         fn info(&self) -> BackendInfo {
-            BackendInfo {
-                name: "stub-deferred",
-                trust_model: TrustModel::DishonestMajority,
-                malicious_security: MaliciousSecurity::SemiHonestOnly,
-            }
+            // [OPUS-4.8] sq-mq8q — a dishonest-majority, semi-honest-only stub
+            // built from the three-axis descriptor. `BackendInfo::new` derives the
+            // back-compat `trust_model = DishonestMajority` / `malicious_security =
+            // SemiHonestOnly` projection. Under a dishonest majority the ONLY
+            // representable output guarantee is `Abort` — Cleve forbids
+            // fairness/GOD — which the type system enforces (the
+            // `OutputGuarantee::guaranteed_output` constructor would return `None`
+            // for this threshold).
+            BackendInfo::new(
+                "stub-deferred",
+                SecurityDescriptor {
+                    adversary: AdversaryModel::SemiHonest,
+                    output_guarantee: OutputGuarantee::Abort(AbortKind::Selective),
+                    threshold: CorruptionThreshold::DishonestMajority { t: 2 },
+                    public_verifiability: PublicVerifiability(false),
+                },
+                0,
+            )
         }
         fn share_private_input(&self, _h: &Holder) -> Result<Vec<()>, MpcError> {
             Err(MpcError::not_yet("secret-share private input", "M3 + Q2"))
@@ -1413,6 +1429,108 @@ mod no_fake_crypto {
             ShamirBackend::new(9).unwrap().malicious_security(),
             MaliciousSecurity::HonestMajorityRobust { max_cheaters: 2 },
             "n=9,t=4: redundancy admits robust correction of 2 cheaters"
+        );
+    }
+
+    // === ROW 6b [OPUS-4.8] sq-mq8q: PER-OPERATOR security reporting. =========
+    // The degree-`t` linear aggregate and the degree-`2t` equality open deliver
+    // DIFFERENT guarantees for the SAME backend `(n, t)`. One backend-level bit
+    // would lie: at n=3,t=1 the aggregate is detect-and-abort (one redundant
+    // share) but the equality open is SEMI-HONEST-ONLY (degree 2t=2 has zero RS
+    // redundancy at n=2t+1=3). `operator_security` must report each precisely.
+    #[test]
+    fn row6b_per_operator_security_differs_aggregate_vs_equality_open() {
+        // n=3, t=1 — the canonical honest-majority odd-n case (n = 2t+1).
+        let b = ShamirBackend::new(3).unwrap();
+
+        // LINEAR AGGREGATE (degree t=1): one redundant share, e = ⌊(3−1−1)/2⌋ = 0
+        // → detect-and-abort. Honest-majority threshold; abort output guarantee.
+        let agg = b.operator_security(OperatorClass::LinearAggregate);
+        assert_eq!(agg.adversary, AdversaryModel::SemiHonest);
+        assert_eq!(agg.threshold, CorruptionThreshold::HonestMajority { t: 1 });
+        assert_eq!(
+            agg.output_guarantee,
+            OutputGuarantee::Abort(AbortKind::Unanimous),
+            "n=3,t=1 aggregate: detect-and-abort (e=0)"
+        );
+
+        // EQUALITY JOIN (degree 2t=2): n = 2t+1 = 3, so degree-2t has NO RS
+        // redundancy → SEMI-HONEST-ONLY. This is the per-operator difference the
+        // single backend-level bit would have hidden.
+        let eq = b.operator_security(OperatorClass::EqualityJoin);
+        assert_eq!(
+            eq.malicious_security(0),
+            MaliciousSecurity::SemiHonestOnly,
+            "n=3,t=1 equality open at degree 2t has zero redundancy → semi-honest-only"
+        );
+        assert_eq!(
+            eq.output_guarantee,
+            OutputGuarantee::Abort(AbortKind::Selective),
+            "no-redundancy open is selective-abort/no-detection (the SemiHonestOnly projection)"
+        );
+
+        // They genuinely DIFFER for the same backend — the load-bearing point.
+        assert_ne!(
+            agg.output_guarantee, eq.output_guarantee,
+            "aggregate (detect-and-abort) and equality open (semi-honest-only) must NOT collapse to one bit"
+        );
+
+        // The backend-level `info().security` tracks the PRIMARY (aggregate) path,
+        // and its back-compat projection is unchanged (== the old value).
+        let info = b.info();
+        assert_eq!(info.security.output_guarantee, agg.output_guarantee);
+        assert_eq!(
+            info.malicious_security,
+            MaliciousSecurity::HonestMajorityAbort
+        );
+
+        // n=4, t=1 — degree 2t=2 now has redundancy (n=4 > 2t+1=3): the equality
+        // open becomes detect-and-abort (e = ⌊(4−2−1)/2⌋ = 0), while the
+        // aggregate at degree t=1 is ROBUST (e = ⌊(4−1−1)/2⌋ = 1). Still differ.
+        let b4 = ShamirBackend::new(4).unwrap();
+        assert_eq!(
+            b4.operator_security(OperatorClass::LinearAggregate)
+                .malicious_security(1),
+            MaliciousSecurity::HonestMajorityRobust { max_cheaters: 1 },
+            "n=4 aggregate is robust (e=1)"
+        );
+        assert_eq!(
+            b4.operator_security(OperatorClass::EqualityJoin)
+                .malicious_security(0),
+            MaliciousSecurity::HonestMajorityAbort,
+            "n=4 equality open at degree 2t has one redundant share → detect-and-abort"
+        );
+
+        // Comparison is not realized in-crypto → honest no-guarantee baseline
+        // (no over-claim), reported rather than silently omitted.
+        assert_eq!(
+            b.operator_security(OperatorClass::Comparison)
+                .malicious_security(0),
+            MaliciousSecurity::SemiHonestOnly
+        );
+    }
+
+    // === ROW 6c [OPUS-4.8] sq-mq8q: the dishonest-majority stub cannot advertise
+    // a Cleve-forbidden guarantee. The three-axis descriptor it returns has a
+    // DishonestMajority threshold, under which fairness/GOD are unconstructible —
+    // so its honest output guarantee can only be Abort. ======================
+    #[test]
+    fn row6c_dishonest_majority_stub_is_abort_only_cleve() {
+        let b = StubBackend;
+        let info = b.info();
+        assert_eq!(info.trust_model, TrustModel::DishonestMajority);
+        assert_eq!(
+            info.security.threshold,
+            CorruptionThreshold::DishonestMajority { t: 2 }
+        );
+        // Cleve: under this threshold the descriptor's guarantee is an abort, and
+        // the type system would refuse to construct anything stronger.
+        assert!(info.security.output_guarantee.is_abort());
+        assert!(!info.security.output_guarantee.requires_honest_majority());
+        assert_eq!(
+            OutputGuarantee::guaranteed_output(info.security.threshold),
+            None,
+            "Cleve: a dishonest-majority backend cannot mint a GOD guarantee"
         );
     }
 

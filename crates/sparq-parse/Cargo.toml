@@ -16,6 +16,15 @@ publish = false
 # enter the sparq-wasm dependency graph (guard: `cargo tree -p sparq-wasm -e
 # normal` shows no sparq-parse/zstd/flate2). Same flate2/zstd versions the CLI
 # pins, so the lockfile stays single-versioned.
+
+# [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY
+# faster gzip backend (zlib-ng C library via flate2) — a measured 1.5–3× inflate at
+# ~zero code change. SAFE here because this crate is never in the sparq-wasm graph
+# (`cargo tree -p sparq-wasm -e normal` shows no sparq-parse), so the C dep can never
+# reach the wasm bundle. The default flate2 backend stays pure-Rust miniz_oxide.
+[features]
+zlib-ng = ["flate2/zlib-ng"]
+
 [dependencies]
 # Multi-member gzip (one RFC 1952 member per result chunk).
 flate2 = "1"

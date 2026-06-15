@@ -145,6 +145,259 @@ pub mod provider {
         }
     }
 
+    // [OPUS-4.8] Concrete reqwest blocking transport + env-driven constructor
+    // (non-default `embeddings` feature, sq-fg9y). This is the piece that makes the
+    // crate usable for real retrieval WITHOUT caller glue: with the feature on, a
+    // `RemoteEmbedder` can be built straight from environment variables and embeds
+    // against a live OpenAI-compatible `/v1/embeddings` endpoint. Mirrors
+    // `sparq-nlq`'s `live` feature (`AnthropicLlm::from_env`): blocking reqwest, key
+    // from env, a hard per-request timeout, status->error mapping. The DEFAULT build
+    // pulls none of this (no reqwest), so it stays socket-free and wasm-safe.
+    #[cfg(feature = "embeddings")]
+    pub use live::{ReqwestTransport, DEFAULT_ENDPOINT, DEFAULT_MODEL};
+
+    #[cfg(feature = "embeddings")]
+    mod live {
+        use super::{ProviderConfig, RemoteEmbedder, Transport};
+
+        /// Default endpoint when `SPARQ_EMBEDDINGS_BASE_URL` is unset — OpenAI's
+        /// `/v1/embeddings`. Any OpenAI-compatible server works (point the base URL
+        /// at it).
+        pub const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/embeddings";
+        /// Default model when `SPARQ_EMBEDDINGS_MODEL` is unset.
+        pub const DEFAULT_MODEL: &str = "text-embedding-3-small";
+
+        /// Hard wall-clock cap on one `/v1/embeddings` round trip — `Embedder::embed`
+        /// must never hang on a stalled connection. Matches `sparq-nlq`'s live client.
+        const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+        /// A blocking [`reqwest`] [`Transport`]: one `POST` with the JSON body the
+        /// caller built, returning the response body on 2xx and an error string
+        /// (status + provider message when JSON) otherwise. Blocking by design — the
+        /// embed loop is synchronous and this crate must not drag in an async runtime.
+        pub struct ReqwestTransport {
+            client: reqwest::blocking::Client,
+        }
+
+        impl ReqwestTransport {
+            /// Builds the blocking client with the standard request timeout.
+            pub fn new() -> Result<ReqwestTransport, String> {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(REQUEST_TIMEOUT)
+                    .build()
+                    .map_err(|e| format!("cannot build HTTP client: {e}"))?;
+                Ok(ReqwestTransport { client })
+            }
+        }
+
+        impl Transport for ReqwestTransport {
+            fn post_json(
+                &self,
+                url: &str,
+                headers: &[(String, String)],
+                body: &str,
+            ) -> Result<String, String> {
+                let mut req = self.client.post(url).body(body.to_owned());
+                for (k, v) in headers {
+                    req = req.header(k, v);
+                }
+                let resp = req
+                    .send()
+                    .map_err(|e| format!("embeddings request failed: {e}"))?;
+                let status = resp.status();
+                let text = resp
+                    .text()
+                    .map_err(|e| format!("cannot read embeddings response body: {e}"))?;
+                if !status.is_success() {
+                    // Surface the provider's `error.message` when the body is JSON,
+                    // else a truncated raw body — same shape as the nlq live client.
+                    let message = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
+                        .unwrap_or_else(|| text.chars().take(200).collect());
+                    return Err(format!("embeddings API error ({status}): {message}"));
+                }
+                Ok(text)
+            }
+        }
+
+        impl RemoteEmbedder<ReqwestTransport> {
+            /// Build a live embedder entirely from the environment, mirroring
+            /// `sparq-nlq`'s `AnthropicLlm::from_env`:
+            ///
+            /// - `SPARQ_EMBEDDINGS_API_KEY` (**required**) → `Authorization: Bearer …`;
+            /// - `SPARQ_EMBEDDINGS_BASE_URL` (optional) → endpoint, default
+            ///   [`DEFAULT_ENDPOINT`];
+            /// - `SPARQ_EMBEDDINGS_MODEL` (optional) → model, default [`DEFAULT_MODEL`].
+            ///
+            /// `dim` is passed explicitly because it must match the
+            /// [`VectorStore`](crate::VectorStore) it will write into — every response
+            /// vector is checked against it (a mismatch is an error, never silently
+            /// truncated). Returns `Err` if the key is unset or the HTTP client cannot
+            /// be built.
+            pub fn from_env(dim: usize) -> Result<RemoteEmbedder<ReqwestTransport>, String> {
+                let api_key = std::env::var("SPARQ_EMBEDDINGS_API_KEY")
+                    .map_err(|_| "SPARQ_EMBEDDINGS_API_KEY is not set".to_string())?;
+                let endpoint = std::env::var("SPARQ_EMBEDDINGS_BASE_URL")
+                    .unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string());
+                let model = std::env::var("SPARQ_EMBEDDINGS_MODEL")
+                    .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+                let cfg = ProviderConfig {
+                    endpoint,
+                    model,
+                    api_key: Some(api_key),
+                    dim,
+                };
+                Ok(RemoteEmbedder::new(cfg, ReqwestTransport::new()?))
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::super::Embedder; // RemoteEmbedder::dim is from the Embedder trait
+            use super::*;
+
+            // Env vars are process-global; serialize every test that reads OR mutates
+            // them so they don't race when the binary runs them in parallel.
+            static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+            // [OPUS-4.8] The full set of SPARQ_EMBEDDINGS_* vars any test in this
+            // module reads or writes — the guard snapshots/restores exactly these.
+            const ENV_VARS: [&str; 4] = [
+                "SPARQ_EMBEDDINGS_API_KEY",
+                "SPARQ_EMBEDDINGS_BASE_URL",
+                "SPARQ_EMBEDDINGS_MODEL",
+                "SPARQ_EMBEDDINGS_DIM",
+            ];
+
+            /// [OPUS-4.8] RAII env guard: on construction it takes [`ENV_LOCK`] (so all
+            /// env-touching tests are serialized — including the live round-trip, which
+            /// only *reads* the vars) and snapshots the current value of every
+            /// [`ENV_VARS`] entry; on drop it restores each to exactly what it was —
+            /// re-`set_var` if it had a value, `remove_var` if it was unset. Restore
+            /// runs on the unwinding path too, so a panicking test never leaks mutated
+            /// (or removed) `SPARQ_EMBEDDINGS_*` state into the rest of the process or a
+            /// developer's shell. Replaces the old destructive `clear_env()` helper that
+            /// wiped pre-existing values without restoring them.
+            struct EnvGuard {
+                _lock: std::sync::MutexGuard<'static, ()>,
+                saved: Vec<(&'static str, Option<String>)>,
+            }
+
+            impl EnvGuard {
+                /// Acquire the lock + snapshot. Does NOT mutate the environment — call
+                /// [`EnvGuard::clear`] for the cleared-state unit tests; the live test
+                /// keeps the user-set opt-in vars and just relies on the lock + restore.
+                fn acquire() -> EnvGuard {
+                    // `.unwrap_or_else(|e| e.into_inner())` so a panic in a prior test
+                    // (which poisons the mutex) doesn't cascade-fail every other one;
+                    // we still serialize and the restore-on-drop keeps state clean.
+                    let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                    let saved =
+                        ENV_VARS.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+                    EnvGuard { _lock: lock, saved }
+                }
+
+                /// Remove every `SPARQ_EMBEDDINGS_*` var, for tests that need a known
+                /// empty starting point. The originals are still restored on drop.
+                fn clear(&self) {
+                    for &k in &ENV_VARS {
+                        std::env::remove_var(k);
+                    }
+                }
+            }
+
+            impl Drop for EnvGuard {
+                fn drop(&mut self) {
+                    for (k, v) in &self.saved {
+                        match v {
+                            Some(val) => std::env::set_var(k, val),
+                            None => std::env::remove_var(k),
+                        }
+                    }
+                }
+            }
+
+            /// No key set → a clear error, and crucially NO network/socket touched
+            /// (the client is never even built). This is the default-CI path.
+            #[test]
+            fn from_env_errors_without_key() {
+                let g = EnvGuard::acquire();
+                g.clear();
+                // RemoteEmbedder isn't Debug, so unwrap the Result by hand rather than
+                // `expect_err`.
+                let err = match RemoteEmbedder::from_env(8) {
+                    Ok(_) => panic!("missing key must be an error"),
+                    Err(e) => e,
+                };
+                assert!(
+                    err.contains("SPARQ_EMBEDDINGS_API_KEY"),
+                    "error names the missing var, got: {err}"
+                );
+            }
+
+            /// Key only → defaults for endpoint + model; `dim` is honored.
+            #[test]
+            fn from_env_uses_defaults_for_base_url_and_model() {
+                let g = EnvGuard::acquire();
+                g.clear();
+                std::env::set_var("SPARQ_EMBEDDINGS_API_KEY", "sk-test");
+                let e = RemoteEmbedder::from_env(1536).expect("builds with just a key");
+                assert_eq!(e.dim(), 1536);
+                assert_eq!(e.cfg.endpoint, DEFAULT_ENDPOINT);
+                assert_eq!(e.cfg.model, DEFAULT_MODEL);
+                assert_eq!(e.cfg.api_key.as_deref(), Some("sk-test"));
+            }
+
+            /// All three env vars set → all three are read (point at a self-hosted
+            /// OpenAI-compatible server).
+            #[test]
+            fn from_env_reads_base_url_and_model_overrides() {
+                let g = EnvGuard::acquire();
+                g.clear();
+                std::env::set_var("SPARQ_EMBEDDINGS_API_KEY", "sk-x");
+                std::env::set_var("SPARQ_EMBEDDINGS_BASE_URL", "http://localhost:8080/v1/embeddings");
+                std::env::set_var("SPARQ_EMBEDDINGS_MODEL", "bge-small");
+                let e = RemoteEmbedder::from_env(384).expect("builds with overrides");
+                assert_eq!(e.cfg.endpoint, "http://localhost:8080/v1/embeddings");
+                assert_eq!(e.cfg.model, "bge-small");
+                assert_eq!(e.dim(), 384);
+            }
+
+            /// LIVE network test — opt-in only. `#[ignore]` by default (mirrors
+            /// `sparq-nlq`'s live-model test), and additionally a no-op unless
+            /// `SPARQ_EMBEDDINGS_API_KEY` is set, so it never hits the network in CI
+            /// even if explicitly un-ignored. Run with:
+            ///   `SPARQ_EMBEDDINGS_API_KEY=… cargo test -p sparq-vectors \
+            ///       --features embeddings -- --ignored embeddings_live`
+            #[test]
+            #[ignore = "hits a live /v1/embeddings endpoint; needs SPARQ_EMBEDDINGS_API_KEY"]
+            fn embeddings_live_round_trip() {
+                // [OPUS-4.8] Take ENV_LOCK (via the guard) so this serializes against
+                // the env-parsing unit tests when run together under `--ignored`; do NOT
+                // `clear()`, the user-set SPARQ_EMBEDDINGS_* opt-in vars are the input.
+                let _g = EnvGuard::acquire();
+                if std::env::var("SPARQ_EMBEDDINGS_API_KEY").is_err() {
+                    eprintln!("skipping: SPARQ_EMBEDDINGS_API_KEY not set");
+                    return;
+                }
+                // Dimension of OpenAI text-embedding-3-small; override the model/dim
+                // via env if you point at a different server.
+                let dim = std::env::var("SPARQ_EMBEDDINGS_DIM")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1536usize);
+                let e = RemoteEmbedder::from_env(dim).expect("from_env");
+                let vecs = e
+                    .embed(&["the quick brown fox", "a slow green turtle"])
+                    .expect("live embed call");
+                assert_eq!(vecs.len(), 2);
+                assert!(vecs.iter().all(|v| v.len() == dim));
+                assert!(vecs.iter().all(|v| v.iter().any(|x| *x != 0.0)));
+            }
+        }
+    }
+
     impl<T: Transport> Embedder for RemoteEmbedder<T> {
         fn dim(&self) -> usize {
             self.cfg.dim

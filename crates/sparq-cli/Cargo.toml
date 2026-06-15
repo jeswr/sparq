@@ -36,6 +36,14 @@ mimalloc = ["dep:mimalloc"]
 # for the common load-and-query paths. Enable with
 # `cargo build -p sparq-cli --features hdt`.
 hdt = ["dep:sparq-hdt"]
+# [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
+# gzip backend (zlib-ng C library via flate2) — a measured 1.5–3× inflate on every gzip
+# ingest path (`.nt.gz` etc.) at ~zero code change. The weak `sparq-hdt?/zlib-ng` dep
+# extends the speedup to the `.hdt.gz` path too, but ONLY when the `hdt` feature is also
+# enabled (so `--features hdt,zlib-ng`); with `hdt` off it is a no-op and pulls nothing.
+# SAFE because the CLI is native-only and never in the sparq-wasm graph, so the C dep can
+# never reach the wasm bundle. The default flate2 backend stays pure-Rust miniz_oxide.
+zlib-ng = ["flate2/zlib-ng", "sparq-hdt?/zlib-ng"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the
