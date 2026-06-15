@@ -1,0 +1,6 @@
+# sq-eifd vector fixture: an ANN engine's APPROX neighbours. <qid>\t<csv ids>
+# q0,q1 perfect; q2 has one wrong neighbour (99 instead of 33) -> recall@4 = 3/4.
+# Mean recall@4 = (4 + 4 + 3) / 12 = 11/12 = 0.91666...  -> deficit_milli = 83.
+q0	10,11,12,13
+q1	20,21,22,23
+q2	30,31,32,99
