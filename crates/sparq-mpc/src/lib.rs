@@ -117,6 +117,15 @@ pub mod compare;
 // sq-hoaj. See the module docs for the critical-honesty constraint (no
 // single-process wall-clock masquerading as an MPC latency).
 pub mod bench;
+// [OPUS-4.8] sq-py8h.1: bounded property-path over DISCLOSED global-IRI keys —
+// the crypto-free "headline federation" regime. Unrolls a bounded path
+// `?a (p){m,k} ?b` (sequence / exact {k} / range {m,k} / reflexive {0,k} /
+// alternation) into a finite set of fixed BGP chains, evaluates each as a fold
+// of DisclosedKeyJoin OUTSIDE the cryptographic core, then UNION + DEDUP of the
+// endpoint pairs. NO MPC round runs. The HIDDEN-intermediate regime (secret
+// ?z_i) is the separate sq-py8h.2 and is NOT here. See the module docs for the
+// regime + semantic boundary statement.
+pub mod bounded_path;
 pub mod field;
 pub mod holder;
 pub mod join;
@@ -187,6 +196,10 @@ pub use backend::{
 // [OPUS-4.8] sq-sxm: the benchmark-matrix harness surface (in-process counting tier).
 pub use bench::{
     cell, run_matrix, CellSecurity, MatrixCell, MatrixResults, QueryClass, DEFAULT_PARTIES,
+};
+// [OPUS-4.8] sq-py8h.1: the disclosed-key bounded property-path surface.
+pub use bounded_path::{
+    eval_bounded_path_disclosed, BoundedRepetition, DisclosedEdges, PathForm, PathStep,
 };
 // [OPUS-4.8] sq-rrz4 + sq-g7t5: the secure-comparison surface (verdict-only
 // disclosure). sq-g7t5 adds the in-MPC bit-decomposition magnitude-bound constants
