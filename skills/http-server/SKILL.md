@@ -243,6 +243,24 @@ feature), AND its **auth gate** (a GSP write is as powerful as an UPDATE, so `PU
 `DELETE` are gated by `--auth-token` exactly like an UPDATE; `GET`/`HEAD` are reads). A
 malformed body → `400`; an unsupported body Content-Type → `415`.
 
+**5b. Container (ghcr.io).** Published on every release tag (`ghcr.io/jeswr/sparq-server`,
+distroless). The image sets `SPARQ_ALLOW_REMOTE=1` so the `0.0.0.0` bind it needs (loopback
+is unreachable through Docker's port map) boots out of the box — running the container is the
+operator's explicit choice to publish a surface. **This default has NO auth.** Because every
+`SPARQ_*` var is read from the environment, secure it with `-e` (no flag wiring):
+
+```sh
+docker run --rm -p 3030:3030 ghcr.io/jeswr/sparq-server                       # empty graph, no auth
+docker run --rm -p 3030:3030 -v "$PWD/data:/data:ro" \
+  ghcr.io/jeswr/sparq-server --format turtle /data/dataset.ttl                # serve a dataset
+docker run --rm -p 3030:3030 \
+  -e SPARQ_AUTH_TOKEN="$TOK" -e SPARQ_AUTH_TOKEN_READ=1 \
+  ghcr.io/jeswr/sparq-server                                                  # fully Bearer-gated
+```
+
+Deliver the token over TLS (terminate at a proxy). See `crates/sparq-server/README.md` →
+"Running the container image".
+
 **6. Hardening — flags / env / library.** Each flag overrides its `SPARQ_*` env var; the
 env overrides the default.
 
