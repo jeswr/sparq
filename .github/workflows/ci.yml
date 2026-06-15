@@ -32,14 +32,51 @@ env:
 
 jobs:
   test:
+    # [OPUS-4.8] SHARDED test matrix (merge-queue-drain speed — @jeswr). The
+    # bottleneck of this job was test EXECUTION, not the build: MEASURED ~526s =
+    # build 131s + `cargo nextest run` 395s + doctests 12s. Deps are ALREADY cached
+    # (Swatinem/rust-cache) and we ALREADY use nextest, so the remaining win is
+    # PARALLELISM: split the 395s test-exec across 4 runners with nextest's
+    # DETERMINISTIC `--partition count:K/4`. Each shard runs a disjoint ~1/4 of the
+    # tests and the four partitions cover EVERY test exactly once (verified locally:
+    # 1/4+2/4+3/4+4/4 == the full set, no overlap), so COVERAGE IS UNCHANGED — no
+    # test is dropped, the suite is just distributed.
+    #
+    # WHY 4 SHARDS (not 3): each shard still compiles the workspace itself (the 131s
+    # floor — rust-cache makes the *deps* cheap but sparq's own crates recompile per
+    # runner), so wall-clock ≈ 131 + 395/N. N=4 drives test-exec (~99s) just under
+    # the 131s build floor, so the build floor dominates and further shards only
+    # shave the already-subdominant test term (N=3 ≈ 263s; N=4 ≈ 230s; N=5 ≈ 210s for
+    # 25% more runner cost). 4 is the knee where test-exec ≈ build floor — the
+    # efficient point. The deeper win (build once on a single job, fan out N
+    # test-only shards via `cargo nextest archive` + `--archive-file` so the shards
+    # skip the 131s rebuild) is a follow-up — it needs artifact upload/download
+    # plumbing; the partition matrix is the simpler, self-contained step.
+    #
+    # fail-fast: false so one shard's failure does not cancel the others (we want the
+    # full failure picture across the suite, not just the first shard to break).
     name: build + test (workspace)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-4.8] CRITICAL for the matrix: by default rust-cache folds the
+          # matrix value (`shard`) into the cache key, which would give each of the
+          # 4 shards its OWN cache and force every shard to cold-build dependencies.
+          # A fixed `shared-key` makes all 4 shards RESTORE (and the first to finish
+          # SAVE) the SAME dep cache, so deps are built at most once across the
+          # matrix — the whole point of the caching. The four shards' build+test
+          # workloads are identical apart from the partition filter, so a shared
+          # cache is exactly correct here.
+          shared-key: "test-workspace"
       # [OPUS-4.8] sq-x4jy: run the unit/integration suite under cargo-nextest with
       # --retries 2. nextest runs each test in its OWN process (so a stray abort can't
       # take the whole binary down), reports a test BINARY that "was never executed" as a
@@ -54,9 +91,21 @@ jobs:
           tool: nextest
       - name: Build
         run: cargo build --workspace --all-targets
-      - name: Test (nextest, retry transient binary races)
-        run: cargo nextest run --workspace --retries 2
-      - name: Doctests (nextest does not run these)
+      # [OPUS-4.8] DETERMINISTIC sharding: `--partition count:${{ matrix.shard }}/4`
+      # assigns each test to exactly one of the 4 shards by a stable count over the
+      # discovered test set. Across shards 1..4 every test runs exactly once — no test
+      # is skipped, so coverage is identical to the un-sharded `cargo nextest run
+      # --workspace`. --retries 2 is preserved per shard.
+      - name: Test (nextest, shard ${{ matrix.shard }}/4, retry transient binary races)
+        run: cargo nextest run --workspace --partition count:${{ matrix.shard }}/4 --retries 2
+      # [OPUS-4.8] Doctests run ONCE (not per-shard): nextest does not execute
+      # doctests, and `--partition` does not apply to them, so we run the full
+      # `cargo test --workspace --doc` on shard 1 ONLY. Guarding with `if:` keeps the
+      # 12s doctest coverage intact while avoiding the 3× redundant re-runs a
+      # per-shard step would cause. (Shard 1 always exists in the matrix, so the
+      # doctests always run.)
+      - name: Doctests (nextest does not run these; run once on shard 1)
+        if: matrix.shard == 1
         run: cargo test --workspace --doc
 
   wasm:
