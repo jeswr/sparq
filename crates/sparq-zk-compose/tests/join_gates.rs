@@ -542,7 +542,10 @@ fn chain_manifest(shared_commitment: bool) -> ProofManifest {
         *join_commitment = if shared_commitment {
             shared.clone()
         } else {
-            FieldHex("0xdiff".to_string())
+            // Valid but DIFFERENT field element from `shared` (0x0c): the
+            // rejection is specifically due to divergent commitments, not a
+            // malformed-hex parse failure.
+            FieldHex("0xdeadbeef".to_string())
         };
     }
 
