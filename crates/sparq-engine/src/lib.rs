@@ -24,6 +24,10 @@ pub use service::with_service_egress_allow;
 // so federation is restricted to operator-configured endpoints. [OPUS-4.8] (sq-4w18)
 #[cfg(feature = "service")]
 pub use service::with_service_egress_policy;
+// Bind-join (VALUES pushdown) block-size knob — the only OPT-IN tunable for the
+// SERVICE bound-join pushdown (on-by-default, correctness-preserving). [OPUS-4.8] (sq-sjkj)
+#[cfg(feature = "service")]
+pub use service::with_service_bound_join_block_size;
 // [OPUS-4.8] (sq-678h) RDF serializer matrix (Turtle / TriG / N-Quads writers). NON-DEFAULT
 // `serialize-rdf` feature — when off, zero serializer code compiles and the default build's
 // dependency graph is unchanged (the writers add no new deps). The always-on N-Triples writer

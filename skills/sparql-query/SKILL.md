@@ -211,6 +211,18 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   so DNS rebinding can't bypass it). To federate to a trusted internal endpoint, allowlist its host
   for the scope: `with_service_egress_allow([host.to_string()], || query(&g, q))`. Public endpoints
   need no opt-in.
+- **`SERVICE` bind-join (`VALUES` pushdown)** — when a `SERVICE` sub-query is the right side of a
+  join (or `OPTIONAL`) whose join variables are already bound by the left side, sparq pushes a
+  *block* of those bindings into the remote query as a `VALUES` clause (the brTPF/FedX "bound join")
+  instead of fetching the whole remote relation and joining locally. For a selective join this slashes
+  the rows the endpoint returns and the data transferred. It is **on by default** — a
+  correctness-preserving optimisation of the existing `SERVICE` path (the answer is identical to the
+  unbound-then-local-join path; `SILENT`, `OPTIONAL`/left-join, multi-var and empty-binding edge cases
+  are all preserved) — and **falls back to the verbatim forward** when it can't apply (variable
+  endpoint, no bound join var, a join key bound to a blank node). The only tuning knob is the block
+  size (distinct binding tuples per remote request): **opt-in** via
+  `with_service_bound_join_block_size(n, || query(&g, q))` or the `SPARQ_SERVICE_BIND_BLOCK` env var
+  (default ~50). The knob never changes results — only the remote-request count vs per-request size.
 - **Default cargo features** (`parallel`, `regex`, `digest`): `regex` powers REGEX/REPLACE; `digest`
   powers MD5/SHA*; `parallel` enables rayon scan/join/sort/aggregate. The **wasm** crate
   (`sparq-wasm`) disables defaults, so on `wasm32-unknown-unknown` REGEX/hash builtins and

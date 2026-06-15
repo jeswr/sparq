@@ -1863,6 +1863,26 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         }
         GraphPattern::Join { left, right } => {
             let l = eval_graph_pattern(graph, local, left)?;
+            // Bind-join pushdown: if the RIGHT side is a SERVICE and the left has
+            // already bound its join variables, push those bindings to the remote as a
+            // VALUES block instead of materialising the whole remote relation. Join is
+            // symmetric, so try either side as the SERVICE. [OPUS-4.8] (sq-sjkj)
+            #[cfg(feature = "service")]
+            {
+                if let Some(r) = try_bound_join_service(graph, local, &l, right)? {
+                    return Ok(join_bindings(l, r));
+                }
+                // Symmetric: SERVICE on the left, bindings produced by the right.
+                if matches!(left.as_ref(), GraphPattern::Service { .. }) {
+                    let r = eval_graph_pattern(graph, local, right)?;
+                    if let Some(sl) = try_bound_join_service(graph, local, &r, left)? {
+                        return Ok(join_bindings(r, sl));
+                    }
+                    // Fall through with the already-evaluated right; recompute left verbatim.
+                    let l2 = eval_graph_pattern(graph, local, left)?;
+                    return Ok(join_bindings(l2, r));
+                }
+            }
             let r = eval_graph_pattern(graph, local, right)?;
             Ok(join_bindings(l, r))
         }
@@ -1874,6 +1894,15 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
             #[cfg(feature = "zk")]
             let _zk = crate::zk::op_scope(crate::zk::Op::Optional);
             let l = eval_graph_pattern(graph, local, left)?;
+            // Bind-join pushdown for `… OPTIONAL { SERVICE { … } }`: the SERVICE may
+            // only be the RIGHT (preserved) side of a left join — pushing the left's
+            // bound join vars restricts the remote relation, then the SAME
+            // `left_outer_join` reattaches it, so OPTIONAL semantics are unchanged
+            // (a left row with no remote match still survives, unbound). [OPUS-4.8] (sq-sjkj)
+            #[cfg(feature = "service")]
+            if let Some(r) = try_bound_join_service(graph, local, &l, right)? {
+                return left_outer_join(graph, local, l, r, expression.as_ref());
+            }
             let r = eval_graph_pattern(graph, local, right)?;
             left_outer_join(graph, local, l, r, expression.as_ref())
         }
@@ -1923,13 +1952,19 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
     }
 }
 
-/// SPARQL 1.1 federated query (`SERVICE`). [OPUS-4.8]
+/// SPARQL 1.1 federated query (`SERVICE`) — the VERBATIM path. [OPUS-4.8]
 ///
 /// Forwards `SELECT * WHERE { <inner> }` to the remote `endpoint`, parses the
 /// SPARQL-Results-JSON response (see [`crate::service`]) and turns it into a
 /// [`Bindings`] relation interned against this query's dictionaries — exactly as
 /// `VALUES` does — so the caller joins it with the surrounding group via the normal
 /// `join_bindings` path.
+///
+/// This is the fallback path: when the SERVICE is the right side of a join whose join
+/// vars are already bound, [`try_bound_join_service`] instead pushes those bindings as
+/// a `VALUES` block (the bind-join, bead sq-sjkj) and this verbatim forward is skipped.
+/// `eval_service` still runs for a top-level / unbound SERVICE and for every case the
+/// bind-join declines (variable endpoint, no bound join var, blank-node join key).
 ///
 /// * `name` is a `NamedNodePattern`: a concrete IRI endpoint is evaluated; a
 ///   `?var` (variable) endpoint is OUT OF SCOPE (it requires a per-solution remote
@@ -1983,6 +2018,19 @@ fn eval_service(
         Err(e) => return Err(e),
     };
 
+    Ok(service_relation_to_bindings(graph, local, rel))
+}
+
+/// Intern a remote [`ServiceRelation`](crate::service::ServiceRelation) into id-level
+/// [`Bindings`] against this query's dictionaries — exactly as `VALUES` does — so it
+/// joins with local BGP results. Shared by the verbatim and bound-join paths.
+/// [OPUS-4.8] (sq-sjkj)
+#[cfg(feature = "service")]
+fn service_relation_to_bindings(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    rel: crate::service::ServiceRelation,
+) -> Bindings {
     // Intern each remote term against the graph dictionary (so it joins with local
     // BGP results) or the local vocab (terms absent from the data can still match
     // other remote/VALUES rows) — identical to `values_bindings`.
@@ -1998,7 +2046,156 @@ fn eval_service(
                 .collect()
         })
         .collect();
-    Ok(Bindings::unsorted(rel.vars, rows))
+    Bindings::unsorted(rel.vars, rows)
+}
+
+/// Attempt a bind-join (`VALUES` pushdown) of a SERVICE sub-query against the
+/// already-evaluated `left` bindings. [OPUS-4.8] (sq-sjkj — research candidate C1)
+///
+/// Returns:
+/// * `Ok(Some(service_bindings))` — the bound-join applied: a remote relation
+///   restricted to `left`'s bound join-key tuples, ready for the caller to join (or
+///   left-outer-join) with `left` exactly as it would the verbatim relation. The
+///   answer is identical to the unbound-then-local-join path.
+/// * `Ok(None)` — the pushdown does NOT apply (the right side is not a concrete-IRI
+///   SERVICE, there is no shared bound join var, a join key is bound to a blank node,
+///   or the left side is empty). The caller falls back to the verbatim SERVICE path.
+/// * `Err(_)` — a non-SILENT remote failure (propagated, same as the verbatim path).
+///
+/// ## Why it preserves semantics
+///
+/// Injecting `VALUES (?j…) { (v…)… }` for the join variables restricts the remote
+/// pattern to exactly the tuples `left` already binds (SPARQL 1.1 §10.2.1 inner-joins
+/// the VALUES relation with the pattern). The remote therefore returns a SUBSET of
+/// the unbound relation — precisely the rows that can survive the local join — and we
+/// reattach them with the SAME `join_bindings` / `left_outer_join`. For a left-outer
+/// join, a left row whose key has no remote match simply finds no compatible remote
+/// row and survives unbound, identical to the verbatim path. SILENT is honoured: a
+/// failed block degrades to the join identity (empty remote relation) so the
+/// surrounding bindings are kept, exactly as the verbatim SILENT path does.
+#[cfg(feature = "service")]
+fn try_bound_join_service(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    left: &Bindings,
+    right: &GraphPattern,
+) -> Result<Option<Bindings>, String> {
+    let GraphPattern::Service { name, inner, silent } = right else {
+        return Ok(None);
+    };
+    let silent = *silent;
+
+    // Only a concrete-IRI endpoint can be bound-joined; a variable endpoint is the
+    // documented scope-out handled by the verbatim path.
+    let endpoint = match name {
+        NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+        NamedNodePattern::Variable(_) => return Ok(None),
+    };
+
+    // The remote pattern's in-scope variables; the join keys are the ones ALSO bound
+    // by `left`. We must intersect with `left.vars` (textual) so the VALUES we push
+    // names variables the remote pattern actually mentions.
+    let mut inner_vars: Vec<Variable> = Vec::new();
+    inner.on_in_scope_variable(|v| {
+        if !inner_vars.contains(v) {
+            inner_vars.push(v.clone());
+        }
+    });
+    // Join keys: variables shared between the left relation and the remote pattern,
+    // in `left`-column order (so we can read each left row's tuple positionally).
+    let join_vars: Vec<Variable> = left
+        .vars
+        .iter()
+        .filter(|v| inner_vars.contains(v))
+        .cloned()
+        .collect();
+    if join_vars.is_empty() {
+        // No bound join variable to push — the verbatim path is the correct (and only)
+        // evaluation.
+        return Ok(None);
+    }
+    if left.rows.is_empty() {
+        // Nothing to push. An empty left makes the whole join empty anyway, but the
+        // verbatim path also handles SILENT/error uniformly, so defer to it.
+        return Ok(None);
+    }
+
+    // Column indices of the join vars in the left relation.
+    let key_cols: Vec<usize> = join_vars.iter().map(|v| left.col(v).expect("join var is a left var")).collect();
+
+    // Collect the DISTINCT, fully-bound, pushable join-key tuples from the left side.
+    // A row with any unbound (`NO_ID`) join key, or a key bound to a non-pushable
+    // term (blank node / triple term), means we cannot faithfully constrain the
+    // remote — abandon the pushdown for the verbatim path to keep exact semantics.
+    let mut seen: FxHashSet<Row> = FxHashSet::default();
+    let mut tuples: Vec<Vec<Term>> = Vec::new();
+    for row in &left.rows {
+        let mut key: Row = SmallVec::new();
+        for &c in &key_cols {
+            key.push(row[c]);
+        }
+        if key.contains(&NO_ID) {
+            return Ok(None); // an unbound join key — wildcard; cannot push.
+        }
+        if !seen.insert(key.clone()) {
+            continue; // already pushed this tuple
+        }
+        let mut terms: Vec<Term> = Vec::with_capacity(key.len());
+        for &id in &key {
+            match term_of(graph, local, id) {
+                Some(t) if crate::service::pushable_term(&t) => terms.push(t),
+                _ => return Ok(None), // blank node / triple term / missing — fall back.
+            }
+        }
+        tuples.push(terms);
+    }
+    if tuples.is_empty() {
+        return Ok(None);
+    }
+
+    // Render the inner pattern once; each block re-uses it with a fresh VALUES head.
+    let inner_sparql = format!("{inner}");
+    let block = crate::service::bind_block_size();
+
+    // Accumulate the union of the per-block remote relations. All blocks share the
+    // remote `head.vars`, so we keep the first block's var list and concatenate rows.
+    let mut acc_vars: Option<Vec<Variable>> = None;
+    let mut acc_rows: Vec<Vec<Option<oxrdf::Term>>> = Vec::new();
+
+    for chunk in tuples.chunks(block) {
+        let values = crate::service::render_values_block(&join_vars, chunk);
+        // Inject the VALUES inside the SELECT * group, alongside the inner pattern, so
+        // the remote inner-joins the pushed bindings with its pattern.
+        let query = format!("SELECT * WHERE {{ {values} {inner_sparql} }}");
+        match service_transport::with(|t| crate::service::eval_remote(t, &endpoint, &query)) {
+            Ok(rel) => {
+                acc_rows.extend(rel.rows);
+                if acc_vars.is_none() {
+                    acc_vars = Some(rel.vars);
+                }
+            }
+            // SILENT: a failed block means the SERVICE as a whole must behave EXACTLY
+            // as the verbatim single-request SILENT path — which yields the JOIN
+            // IDENTITY (a single empty solution) so the surrounding bindings are KEPT
+            // unchanged. We therefore discard any partial block results and hand the
+            // caller the identity relation (one zero-column row); joining / left-outer
+            // joining `left` with it leaves `left` exactly as it was. This matches the
+            // unbound-then-local-join path's SILENT semantics precisely. [OPUS-4.8]
+            Err(_) if silent => {
+                return Ok(Some(Bindings::unsorted(Vec::new(), vec![Row::new()])));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Vars: a non-empty `tuples` always produced at least one successful block above
+    // (failures returned early), so `acc_vars` is set unless every block returned an
+    // EMPTY result with no head — in which case the join vars are a safe head (the
+    // relation has zero rows, so the var list only names columns that, being the join
+    // keys, always exist on both sides). [OPUS-4.8]
+    let vars = acc_vars.unwrap_or_else(|| join_vars.clone());
+    let rel = crate::service::ServiceRelation { vars, rows: acc_rows };
+    Ok(Some(service_relation_to_bindings(graph, local, rel)))
 }
 
 /// Test/embedder seam for the SERVICE HTTP transport. By default `with` runs the
@@ -9578,6 +9775,159 @@ mod service_exec_tests {
              { ?s a ex:T . SERVICE <http://remote/> { ?s ex:p ?o } }",
         );
         assert!(eval_select(&g, &p).is_err());
+    }
+
+    // ---------------------------------------------------------------------
+    // Bind-join (VALUES pushdown) differential: bound == verbatim. [OPUS-4.8]
+    // (bead sq-sjkj). A mock transport that evaluates the RECEIVED query (VALUES
+    // and all) against a real remote `Graph`, so the injected pushdown is
+    // genuinely executed and we can assert the bound path's results are IDENTICAL
+    // to the verbatim path's — plus count remote requests.
+    // ---------------------------------------------------------------------
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A transport backed by a remote `Graph`: it runs each received query through
+    /// the engine (`query_json`) and records the query strings it served.
+    struct RemoteGraph {
+        remote: Graph,
+        seen: Rc<RefCell<Vec<String>>>,
+    }
+    impl Transport for RemoteGraph {
+        fn fetch(&self, _e: &str, q: &str) -> Result<String, String> {
+            self.seen.borrow_mut().push(q.to_string());
+            crate::query_json(&self.remote, q)
+        }
+    }
+
+    /// Sort a result's rows into a canonical multiset for order-independent equality.
+    fn canon(res: &QueryResult) -> Vec<Vec<Option<String>>> {
+        let mut rows: Vec<Vec<Option<String>>> = res
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    fn three_persons() -> Graph {
+        Graph::load_str(
+            "@prefix ex: <http://ex/> . \
+             ex:alice a ex:Person . ex:bob a ex:Person . ex:carol a ex:Person .",
+            "turtle",
+        )
+        .unwrap()
+    }
+
+    fn remote_names() -> Graph {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        ttl.push_str("ex:alice ex:name \"Alice\" . ex:bob ex:name \"Bob\" .\n");
+        for i in 0..60 {
+            ttl.push_str(&format!("ex:noise{i} ex:name \"N{i}\" .\n"));
+        }
+        Graph::load_str(&ttl, "turtle").unwrap()
+    }
+
+    /// Run a federated query with a remote-graph mock, returning (result, n_requests).
+    fn run_fed(local: &Graph, q: &str, remote: Graph) -> (QueryResult, usize) {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteGraph { remote, seen: Rc::clone(&seen) }));
+        let p = pattern(q);
+        let res = eval_select(local, &p).unwrap();
+        let n = seen.borrow().len();
+        (res, n)
+    }
+
+    #[test]
+    fn bound_join_equals_verbatim_basic() {
+        // Same query, same mock: the bound-join path (default, ON) must match the
+        // verbatim path (forced by a single-tuple block can't disable it, so we
+        // compare against an explicit local-join reconstruction via VALUES-free mock).
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s a ex:Person . SERVICE <http://r/> { ?s ex:name ?name } }";
+        let (bound, n) = run_fed(&three_persons(), q, remote_names());
+        // alice + bob match; carol + 60 noise do not contribute to the join.
+        assert_eq!(bound.rows.len(), 2, "only alice/bob have remote names");
+        assert_eq!(n, 1, "3 distinct subjects < block 50 => one request");
+        let got = canon(&bound);
+        // The verbatim equivalent: no SERVICE, just the remote relation joined.
+        // Reconstruct it locally to pin the expected multiset.
+        let expect: Vec<Vec<Option<String>>> = {
+            let mut v = vec![
+                vec![Some("<http://ex/alice>".to_string()), Some("\"Alice\"".to_string())],
+                vec![Some("<http://ex/bob>".to_string()), Some("\"Bob\"".to_string())],
+            ];
+            v.sort();
+            v
+        };
+        assert_eq!(got, expect, "bound-join result multiset");
+    }
+
+    #[test]
+    fn bound_join_block_boundary_unions_all_blocks() {
+        // Block size 1 => one request per distinct subject; the union must still be
+        // the SAME result as a single block. Proves block-boundary correctness.
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _g = service_transport::install(Box::new(RemoteGraph {
+            remote: remote_names(),
+            seen: Rc::clone(&seen),
+        }));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s a ex:Person . SERVICE <http://r/> { ?s ex:name ?name } }";
+        let res = crate::service::with_service_bound_join_block_size(1, || {
+            eval_select(&three_persons(), &pattern(q)).unwrap()
+        });
+        assert_eq!(res.rows.len(), 2);
+        assert_eq!(seen.borrow().len(), 3, "block size 1 over 3 subjects => 3 requests");
+    }
+
+    #[test]
+    fn bound_join_optional_keeps_unmatched() {
+        let q = "PREFIX ex: <http://ex/> SELECT ?s ?name WHERE \
+                 { ?s a ex:Person . OPTIONAL { SERVICE <http://r/> { ?s ex:name ?name } } }";
+        let (res, _n) = run_fed(&three_persons(), q, remote_names());
+        assert_eq!(res.rows.len(), 3, "left-join: carol survives with an unbound name");
+        let name_i = res.vars.iter().position(|v| v.as_str() == "name").unwrap();
+        let bound_names = res.rows.iter().filter(|r| r[name_i].is_some()).count();
+        assert_eq!(bound_names, 2, "only alice/bob got a name");
+    }
+
+    #[test]
+    fn bound_join_silent_block_failure_keeps_left() {
+        // A transport that fails => under SILENT, the bound-join degrades to the join
+        // identity (empty remote relation), so the local rows survive unchanged —
+        // identical to the verbatim SILENT path.
+        let _g = service_transport::install(Box::new(Boom));
+        let q = "PREFIX ex: <http://ex/> SELECT ?s WHERE \
+                 { ?s a ex:Person . SERVICE SILENT <http://r/> { ?s ex:name ?name } }";
+        let res = eval_select(&three_persons(), &pattern(q)).unwrap();
+        assert_eq!(res.rows.len(), 3, "SILENT remote failure keeps all local persons");
+    }
+
+    #[test]
+    fn bound_join_unbound_join_var_falls_back_to_verbatim() {
+        // Here ?s is NOT bound on the left of the SERVICE (the left binds only ?p),
+        // so there is no bound join var to push — the verbatim path runs. The remote
+        // returns its whole relation, joined locally. Still correct.
+        let local = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:alice ex:knows ex:bob .",
+            "turtle",
+        )
+        .unwrap();
+        let remote = Graph::load_str(
+            "@prefix ex: <http://ex/> . ex:bob ex:name \"Bob\" . ex:zzz ex:name \"Z\" .",
+            "turtle",
+        )
+        .unwrap();
+        // The SERVICE binds ?o/?name; the left binds ?s/?o (via ex:knows). ?o is shared
+        // and bound => this actually DOES bind-join on ?o. Use a genuinely unshared var.
+        let q = "PREFIX ex: <http://ex/> SELECT ?name WHERE \
+                 { ex:alice ex:knows ?x . SERVICE <http://r/> { ?y ex:name ?name } }";
+        let (res, _n) = run_fed(&local, q, remote);
+        // No shared var => cross product of {?x=bob} with remote {bob,zzz} => 2 rows.
+        assert_eq!(res.rows.len(), 2, "no bound join var => verbatim cross-join");
     }
 
     #[test]
