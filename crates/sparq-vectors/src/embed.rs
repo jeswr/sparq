@@ -257,17 +257,64 @@ pub mod provider {
             use super::super::Embedder; // RemoteEmbedder::dim is from the Embedder trait
             use super::*;
 
-            // Env vars are process-global; serialize the tests that mutate them so
-            // they don't race when the binary runs them in parallel.
+            // Env vars are process-global; serialize every test that reads OR mutates
+            // them so they don't race when the binary runs them in parallel.
             static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-            fn clear_env() {
-                for k in [
-                    "SPARQ_EMBEDDINGS_API_KEY",
-                    "SPARQ_EMBEDDINGS_BASE_URL",
-                    "SPARQ_EMBEDDINGS_MODEL",
-                ] {
-                    std::env::remove_var(k);
+            // [OPUS-4.8] The full set of SPARQ_EMBEDDINGS_* vars any test in this
+            // module reads or writes — the guard snapshots/restores exactly these.
+            const ENV_VARS: [&str; 4] = [
+                "SPARQ_EMBEDDINGS_API_KEY",
+                "SPARQ_EMBEDDINGS_BASE_URL",
+                "SPARQ_EMBEDDINGS_MODEL",
+                "SPARQ_EMBEDDINGS_DIM",
+            ];
+
+            /// [OPUS-4.8] RAII env guard: on construction it takes [`ENV_LOCK`] (so all
+            /// env-touching tests are serialized — including the live round-trip, which
+            /// only *reads* the vars) and snapshots the current value of every
+            /// [`ENV_VARS`] entry; on drop it restores each to exactly what it was —
+            /// re-`set_var` if it had a value, `remove_var` if it was unset. Restore
+            /// runs on the unwinding path too, so a panicking test never leaks mutated
+            /// (or removed) `SPARQ_EMBEDDINGS_*` state into the rest of the process or a
+            /// developer's shell. Replaces the old destructive `clear_env()` helper that
+            /// wiped pre-existing values without restoring them.
+            struct EnvGuard {
+                _lock: std::sync::MutexGuard<'static, ()>,
+                saved: Vec<(&'static str, Option<String>)>,
+            }
+
+            impl EnvGuard {
+                /// Acquire the lock + snapshot. Does NOT mutate the environment — call
+                /// [`EnvGuard::clear`] for the cleared-state unit tests; the live test
+                /// keeps the user-set opt-in vars and just relies on the lock + restore.
+                fn acquire() -> EnvGuard {
+                    // `.unwrap_or_else(|e| e.into_inner())` so a panic in a prior test
+                    // (which poisons the mutex) doesn't cascade-fail every other one;
+                    // we still serialize and the restore-on-drop keeps state clean.
+                    let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                    let saved =
+                        ENV_VARS.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+                    EnvGuard { _lock: lock, saved }
+                }
+
+                /// Remove every `SPARQ_EMBEDDINGS_*` var, for tests that need a known
+                /// empty starting point. The originals are still restored on drop.
+                fn clear(&self) {
+                    for &k in &ENV_VARS {
+                        std::env::remove_var(k);
+                    }
+                }
+            }
+
+            impl Drop for EnvGuard {
+                fn drop(&mut self) {
+                    for (k, v) in &self.saved {
+                        match v {
+                            Some(val) => std::env::set_var(k, val),
+                            None => std::env::remove_var(k),
+                        }
+                    }
                 }
             }
 
@@ -275,8 +322,8 @@ pub mod provider {
             /// (the client is never even built). This is the default-CI path.
             #[test]
             fn from_env_errors_without_key() {
-                let _g = ENV_LOCK.lock().unwrap();
-                clear_env();
+                let g = EnvGuard::acquire();
+                g.clear();
                 // RemoteEmbedder isn't Debug, so unwrap the Result by hand rather than
                 // `expect_err`.
                 let err = match RemoteEmbedder::from_env(8) {
@@ -292,23 +339,22 @@ pub mod provider {
             /// Key only → defaults for endpoint + model; `dim` is honored.
             #[test]
             fn from_env_uses_defaults_for_base_url_and_model() {
-                let _g = ENV_LOCK.lock().unwrap();
-                clear_env();
+                let g = EnvGuard::acquire();
+                g.clear();
                 std::env::set_var("SPARQ_EMBEDDINGS_API_KEY", "sk-test");
                 let e = RemoteEmbedder::from_env(1536).expect("builds with just a key");
                 assert_eq!(e.dim(), 1536);
                 assert_eq!(e.cfg.endpoint, DEFAULT_ENDPOINT);
                 assert_eq!(e.cfg.model, DEFAULT_MODEL);
                 assert_eq!(e.cfg.api_key.as_deref(), Some("sk-test"));
-                clear_env();
             }
 
             /// All three env vars set → all three are read (point at a self-hosted
             /// OpenAI-compatible server).
             #[test]
             fn from_env_reads_base_url_and_model_overrides() {
-                let _g = ENV_LOCK.lock().unwrap();
-                clear_env();
+                let g = EnvGuard::acquire();
+                g.clear();
                 std::env::set_var("SPARQ_EMBEDDINGS_API_KEY", "sk-x");
                 std::env::set_var("SPARQ_EMBEDDINGS_BASE_URL", "http://localhost:8080/v1/embeddings");
                 std::env::set_var("SPARQ_EMBEDDINGS_MODEL", "bge-small");
@@ -316,7 +362,6 @@ pub mod provider {
                 assert_eq!(e.cfg.endpoint, "http://localhost:8080/v1/embeddings");
                 assert_eq!(e.cfg.model, "bge-small");
                 assert_eq!(e.dim(), 384);
-                clear_env();
             }
 
             /// LIVE network test — opt-in only. `#[ignore]` by default (mirrors
@@ -328,6 +373,10 @@ pub mod provider {
             #[test]
             #[ignore = "hits a live /v1/embeddings endpoint; needs SPARQ_EMBEDDINGS_API_KEY"]
             fn embeddings_live_round_trip() {
+                // [OPUS-4.8] Take ENV_LOCK (via the guard) so this serializes against
+                // the env-parsing unit tests when run together under `--ignored`; do NOT
+                // `clear()`, the user-set SPARQ_EMBEDDINGS_* opt-in vars are the input.
+                let _g = EnvGuard::acquire();
                 if std::env::var("SPARQ_EMBEDDINGS_API_KEY").is_err() {
                     eprintln!("skipping: SPARQ_EMBEDDINGS_API_KEY not set");
                     return;
