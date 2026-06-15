@@ -221,10 +221,16 @@ matrix under "Security posture".
   honest semantics) in the SKILL's "Server hardening" section.
 - **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, and SEPA-style **WebSocket
   subscriptions** (live SELECT diffs).
+- **Federation discovery** — opt-in (`federation-descriptors` feature + `--federation-descriptors`
+  flag, both off by default): a [W3C VoID](https://www.w3.org/TR/void/) dataset description at
+  `GET /.well-known/void` and a [SPARQL 1.1 Service Description](https://www.w3.org/TR/sparql11-service-description/)
+  for a `GET /sparql` with no `query`. Content-negotiated RDF. See the SKILL's "Federation
+  discovery" section.
 - **Opt-in features** — `time-travel` (`?generation=N` snapshot pinning), `geo` (sparq-geo
-  `geof:` functions), `service` (SERVICE federation, default-deny), `zlib-ng` (native-only
-  faster zlib-ng C backend for `Content-Encoding: gzip` request inflate; off by default,
-  pure-Rust `miniz_oxide` otherwise; never in the wasm build).
+  `geof:` functions), `service` (SERVICE federation, default-deny), `federation-descriptors`
+  (VoID + Service Description discovery endpoints — see "Federation discovery"), `zlib-ng`
+  (native-only faster zlib-ng C backend for `Content-Encoding: gzip` request inflate; off by
+  default, pure-Rust `miniz_oxide` otherwise; never in the wasm build).
 
 ## 📚 Learn more
 

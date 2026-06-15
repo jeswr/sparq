@@ -239,6 +239,19 @@ pub struct ServerConfig {
     /// ALL updates. `None` (the default) is the historical purely in-memory server — updates are
     /// lost on restart. Set by the binary's `--persist <DIR>` flag / `SPARQ_PERSIST_DIR` env.
     pub persist_dir: Option<std::path::PathBuf>,
+    /// [OPUS-4.8] (sq-d3d8, epic sq-3183) OPT-IN federation discovery descriptors. When
+    /// `true`, the server serves a W3C VoID dataset description at `GET /.well-known/void`
+    /// and a SPARQL 1.1 Service Description for a `GET /sparql` with no `query` parameter
+    /// (advertising the endpoint, supported languages, result formats and the default
+    /// dataset). `false` (the default) leaves both off: `/.well-known/void` is `404` and a
+    /// `GET /sparql` with no `query` returns the historical `400 missing 'query'`.
+    ///
+    /// This field exists only with the `federation-descriptors` cargo feature (like
+    /// [`time_travel_generations`](Self::time_travel_generations) under `time-travel`); a
+    /// build without that feature compiles no descriptor code and pays zero cost. Set by the
+    /// binary's `--federation-descriptors` flag / `SPARQ_FEDERATION_DESCRIPTORS=1` env.
+    #[cfg(feature = "federation-descriptors")]
+    pub federation_descriptors: bool,
 }
 
 impl Default for ServerConfig {
@@ -269,6 +282,10 @@ impl Default for ServerConfig {
             service_allow: crate::service_config::ServiceAllowlist::default(),
             // [OPUS-4.8] sq-7cxr: safe default — no persistence dir = in-memory (back-compat).
             persist_dir: None,
+            // [OPUS-4.8] sq-d3d8: safe default — federation discovery descriptors OFF even
+            // when the feature is compiled in (the operator opts in deliberately).
+            #[cfg(feature = "federation-descriptors")]
+            federation_descriptors: false,
         }
     }
 }
@@ -360,6 +377,13 @@ impl ServerConfig {
         // directory (the binary's --persist flag overrides it). An empty value is "unset".
         if let Ok(v) = std::env::var("SPARQ_PERSIST_DIR") {
             cfg.persist_dir = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+        }
+        // [OPUS-4.8] sq-d3d8: SPARQ_FEDERATION_DESCRIPTORS truthy ("1"/"true"/"yes"/"on")
+        // serves the VoID + Service-Description discovery endpoints. Off by default. Only
+        // present with the `federation-descriptors` feature.
+        #[cfg(feature = "federation-descriptors")]
+        if let Ok(v) = std::env::var("SPARQ_FEDERATION_DESCRIPTORS") {
+            cfg.federation_descriptors = env_truthy(&v);
         }
         Ok(cfg)
     }
@@ -1279,8 +1303,15 @@ pub fn router(state: AppState) -> Router {
         // Liveness.
         .route("/health", get(|| async { "ok" }))
         // Prometheus metrics (T22).
-        .route("/metrics", get(metrics_endpoint))
-        .with_state(state.clone());
+        .route("/metrics", get(metrics_endpoint));
+    // [OPUS-4.8] sq-d3d8 (epic sq-3183): OPT-IN federation discovery — the VoID dataset
+    // description at /.well-known/void. Compiled only with the `federation-descriptors`
+    // feature; even then the handler refuses (404) unless the config flag is set. The SD is
+    // served on the existing /sparql GET path (no extra route — it is the protocol's
+    // "GET with no query" response). See [`crate::descriptors`].
+    #[cfg(feature = "federation-descriptors")]
+    let routes = routes.route("/.well-known/void", get(well_known_void));
+    let routes = routes.with_state(state.clone());
     // The metrics middleware wraps the WHOLE hardened stack so shed requests
     // (429), body-limit rejections (413) and panics (500) are counted with the
     // status the client actually saw.
@@ -1294,6 +1325,95 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Response {
     let subs = state.subs.active_count();
     let body = state.metrics().render(subs, triples);
     text_response(StatusCode::OK, "text/plain; version=0.0.4; charset=utf-8", body, false)
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-4.8] sq-d3d8 (epic sq-3183) — OPT-IN federation discovery descriptors
+// ---------------------------------------------------------------------------
+
+/// [OPUS-4.8] sq-d3d8: derives the base URL (`scheme://host`) this server is reached at,
+/// from the request `Host` header. Used to name the VoID dataset, the `sd:Service`/endpoint
+/// and the `dcterms:source` link in the descriptors, so they self-describe the URL a client
+/// actually used to fetch them.
+///
+/// Scheme is `http` (the server terminates plain HTTP; a TLS-terminating reverse proxy
+/// forwarding `X-Forwarded-Proto` is out of scope for this minimal discovery surface). If
+/// there is no usable `Host` header (HTTP/1.0 without one), falls back to `http://localhost`
+/// so the descriptor is always well-formed RDF rather than a 500.
+#[cfg(feature = "federation-descriptors")]
+fn request_base(headers: &HeaderMap) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("localhost");
+    let base = format!("http://{host}");
+    // The Host header is attacker-controlled; a value that makes `http://{host}` an
+    // invalid IRI (spaces, control chars, `<`/`>`, …) would otherwise propagate into the
+    // descriptor IRIs and yield malformed RDF → a 500. Validate here and fall back to a
+    // fixed safe base so the descriptor is always well-formed RDF, as the doc promises.
+    if oxrdf::NamedNode::new(&base).is_ok() {
+        base
+    } else {
+        "http://localhost".to_string()
+    }
+}
+
+/// [OPUS-4.8] sq-d3d8: `GET /.well-known/void` — the W3C VoID dataset description (read-only).
+///
+/// OPT-IN: returns `404` unless [`ServerConfig::federation_descriptors`] is set (the route is
+/// mounted only with the `federation-descriptors` feature, and the handler refuses unless the
+/// operator also turned the flag on). Reads a pinned snapshot and delegates generation to
+/// [`crate::descriptors::void_descriptor`] (`Introspection::to_void`). Content-negotiates
+/// Turtle (default) / N-Triples / RDF-XML from `Accept`. As a read, it is gated by
+/// `--auth-token-read` like any other GET.
+#[cfg(feature = "federation-descriptors")]
+async fn well_known_void(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !state.config().federation_descriptors {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    let base = request_base(&headers);
+    let dataset_iri = format!("{base}/.well-known/void#dataset");
+    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
+    // Pin the current generation; generate against its immutable snapshot.
+    let pin = state.current();
+    match crate::descriptors::void_descriptor(pin.snapshot(), &dataset_iri, accept) {
+        Ok(d) => text_response(StatusCode::OK, d.content_type, d.body, false),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+/// [OPUS-4.8] sq-d3d8: the SPARQL 1.1 Service Description served for a `GET /sparql` with no
+/// `query` parameter (SPARQL Protocol §2.1.2 / Service Description §2). Returns `Some(resp)`
+/// when the descriptor should be served (the feature is compiled in AND the config flag is
+/// set), or `None` to fall through to the historical `400 missing 'query'`.
+///
+/// Advertises the endpoint, the supported query languages, the supported result formats and
+/// the default dataset (linked to the VoID document). Content-negotiates from `Accept`.
+#[cfg(feature = "federation-descriptors")]
+fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    if !state.config().federation_descriptors {
+        return None;
+    }
+    let base = request_base(headers);
+    let endpoint_iri = format!("{base}/sparql");
+    let dataset_iri = format!("{base}/.well-known/void#dataset");
+    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
+    Some(
+        match crate::descriptors::service_description(
+            &endpoint_iri,
+            &endpoint_iri,
+            &dataset_iri,
+            accept,
+        ) {
+            Ok(d) => text_response(StatusCode::OK, d.content_type, d.body, false),
+            Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        },
+    )
 }
 
 /// Applies the T15 hardening middleware stack to a router (outermost first):
@@ -1497,6 +1617,17 @@ async fn sparql_endpoint(
                     };
                     let explain = explain_mode(&url_params, None, &headers);
                     run_query(&state, q, &headers, method == Method::HEAD, explain, pin).await
+                }
+                // [OPUS-4.8] sq-d3d8: per SPARQL Protocol §2.1.2, a GET with no `query` may
+                // serve the endpoint's Service Description (OPT-IN — only when the
+                // `federation-descriptors` feature is compiled in AND the config flag is set).
+                // Otherwise the historical 400.
+                #[cfg(feature = "federation-descriptors")]
+                None if method != Method::HEAD => {
+                    match service_description_response(&state, &headers) {
+                        Some(resp) => resp,
+                        None => bad_request("missing 'query' parameter"),
+                    }
                 }
                 None => bad_request("missing 'query' parameter"),
             }
