@@ -81,18 +81,29 @@ embed_entities(&Graph, &mut VectorStore, &impl Embedder, &EntityTextConfig) -> R
 // EntityTextConfig{ groups: Vec<PropertyGroup>, languages, naming_predicates, separator, max_chars, batch }
 // PropertyGroup::literal(preds) / ::entity_label(preds) .with_prefix("a ") .with_max_values(3); ObjectKind::{Literal, EntityLabel}
 
+// --- graph-staleness guard (src/fingerprint.rs) --- store is keyed by dict id; a rebuild can shift ids
+VectorStore::create(p, dim)?.with_fingerprint(&Graph)   // bind store to its graph; finalize embeds it in the .spqv header
+StreamingWriter::create_with_fingerprint(p, dim, &Graph) // same for the streaming builder
+store.fingerprint() -> Option<Fingerprint>;  store.check_graph(&Graph) -> Result<(), String>   // None / mismatch -> Err
+// fingerprint = dict_len + triple_count + content_hash over id-ordered dict terms; legacy v1 files open but check_graph errs
+
 // --- search (src/ann.rs) --- all return cosine in [-1,1], best first; zero query -> empty
 nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan
-nearest_term_exact(&VectorStore, &Graph, &Term, k) -> Vec<(Term, f32)>
+nearest_term_exact(&VectorStore, &Graph, &Term, k) -> Vec<(Term, f32)>          // UNCHECKED: stale store -> silently wrong
+nearest_term_exact_checked(&VectorStore, &Graph, &Term, k) -> Result<Vec<(Term, f32)>, String>  // errs on stale store
 cosine(a: &[f32], b: &[f32]) -> f32
 VectorIndex::build(&store) / ::build_with(&store, HnswConfig{ef_search, ef_construction, seed})
 impl VectorIndex { fn nearest(&self, query: &[f32], k) -> Vec<(Id, f32)>;
-                   fn nearest_term(&self, &Term, &Graph, &VectorStore, k) -> Vec<(Term, f32)> }
+                   fn nearest_term(&self, &Term, &Graph, &VectorStore, k) -> Vec<(Term, f32)>;
+                   fn nearest_term_checked(..) -> Result<Vec<(Term, f32)>, String> }
 
 // --- persistent on-disk ANN (src/diskann.rs) ---
 DiskAnnIndex::build(&VectorStore, path) / ::build_with(&store, path, VamanaConfig{degree, build_beam, search_beam, alpha, seed})
+DiskAnnIndex::build_for(&store, path, &Graph) / ::build_with_for(&store, path, cfg, &Graph)  // embeds the graph fingerprint
 DiskAnnIndex::open(path) -> Result<DiskAnnIndex, String>                        // mmap + header check, NO rebuild
-impl DiskAnnIndex { fn nearest(&self, &[f32], k) -> Vec<(Id, f32)>; fn nearest_term(..) -> Vec<(Term, f32)>; fn len()/dim() }
+impl DiskAnnIndex { fn nearest(&self, &[f32], k) -> Vec<(Id, f32)>; fn nearest_term(..) -> Vec<(Term, f32)>; fn len()/dim();
+                    fn fingerprint() -> Option<Fingerprint>; fn check_graph(&store, &Graph) -> Result<(), String>;
+                    fn nearest_term_checked(&Term, &Graph, &store, k) -> Result<Vec<(Term, f32)>, String> }
 sibling_graph_path(&Path) -> PathBuf                                            // foo.spqv -> foo.spqg
 
 // --- quantization for large stores (src/quant.rs) ---

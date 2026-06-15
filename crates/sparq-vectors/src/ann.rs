@@ -71,6 +71,11 @@ pub fn nearest_exact(store: &VectorStore, query: &[f32], k: usize) -> Vec<(Id, f
 /// dictionary, looks its vector up in the store, excludes the term itself from the
 /// results and maps neighbor ids back to [`Term`]s. Empty if the term is absent from
 /// the dictionary or has no vector.
+///
+/// [OPUS-4.8] (sq-32i5) This does NOT verify `store` matches `graph` — a store keyed by a
+/// stale graph generation silently mis-resolves `term`. Use
+/// [`nearest_term_exact_checked`] (or call [`VectorStore::check_graph`] once) to make a
+/// mismatch a hard error.
 pub fn nearest_term_exact(
     store: &VectorStore,
     graph: &Graph,
@@ -85,6 +90,19 @@ pub fn nearest_term_exact(
         .take(k)
         .map(|(n, s)| (graph.dict.term(n), s))
         .collect()
+}
+
+/// [OPUS-4.8] (sq-32i5) [`nearest_term_exact`] with the staleness check: returns `Err` if
+/// `store` was built against a different graph generation than `graph` (which would otherwise
+/// return silently-wrong neighbours), else `Ok` with the neighbours.
+pub fn nearest_term_exact_checked(
+    store: &VectorStore,
+    graph: &Graph,
+    term: &Term,
+    k: usize,
+) -> Result<Vec<(Term, f32)>, String> {
+    store.check_graph(graph)?;
+    Ok(nearest_term_exact(store, graph, term, k))
 }
 
 /// HNSW construction/search parameters (passed through to `instant-distance`).
@@ -200,5 +218,20 @@ impl VectorIndex {
             .take(k)
             .map(|(n, s)| (graph.dict.term(n), s))
             .collect()
+    }
+
+    /// [OPUS-4.8] (sq-32i5) [`nearest_term`](Self::nearest_term) with the staleness check: returns
+    /// `Err` if `store` was built against a different graph generation than `graph` (which would
+    /// otherwise return silently-wrong neighbours), else `Ok` with the neighbours. The HNSW index
+    /// is rebuilt from `store` on open, so checking the store covers the index too.
+    pub fn nearest_term_checked(
+        &self,
+        term: &Term,
+        graph: &Graph,
+        store: &VectorStore,
+        k: usize,
+    ) -> Result<Vec<(Term, f32)>, String> {
+        store.check_graph(graph)?;
+        Ok(self.nearest_term(term, graph, store, k))
     }
 }

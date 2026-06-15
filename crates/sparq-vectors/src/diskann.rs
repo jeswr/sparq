@@ -23,17 +23,19 @@
 //! L2-normalized at build time and Euclidean-on-unit-vectors is rank-equivalent to cosine
 //! (`cos = 1 − d²/2`), so reported scores and rankings match the exact/HNSW searchers.
 //!
-//! # On-disk format (`.spqg`, version 1, little-endian)
+//! # On-disk format (`.spqg`, version 2, little-endian)
 //!
 //! ```text
-//! offset 0    magic     b"SPQG"                         4 bytes
-//! offset 4    version   u32 = 1                         4 bytes
-//! offset 8    dim       u32                             4 bytes
-//! offset 12   degree R  u32   (max out-neighbours)      4 bytes
-//! offset 16   count     u64   (nodes = store vectors)   8 bytes
-//! offset 24   medoid    u32   (entry-point slot)        4 bytes
-//! offset 28   reserved  zero  (encoding tag etc.)       4 bytes
-//! offset 32   nodes     [count × NODE_RECORD]           count·record bytes
+//! offset 0    magic       b"SPQG"                       4 bytes
+//! offset 4    version     u32 = 2                       4 bytes
+//! offset 8    dim         u32                           4 bytes
+//! offset 12   degree R    u32   (max out-neighbours)    4 bytes
+//! offset 16   count       u64   (nodes = store vectors) 8 bytes
+//! offset 24   medoid      u32   (entry-point slot)      4 bytes
+//! offset 28   reserved    zero  (encoding tag etc.)     4 bytes
+//! offset 32   fingerprint graph fingerprint            24 bytes
+//!             (dict_len: u64, triple_count: u64, content_hash: u64)
+//! offset 56   nodes       [count × NODE_RECORD]         count·record bytes
 //!
 //! one NODE_RECORD (all fields little-endian, 4-byte aligned):
 //!   id        u32                  the store's dictionary term id
@@ -63,7 +65,15 @@
 //! fits in page cache (the regime this unblocks: skip the per-process rebuild) the two are
 //! equivalent; PQ matters only when the vectors themselves exceed RAM. The `.spqg` header
 //! reserves 4 bytes for an encoding tag so a PQ variant lands as a backwards-compatible bump.
+//!
+//! [OPUS-4.8] (sq-32i5) The header also carries a **graph fingerprint** (offset 32..56) binding
+//! the index to the graph it was built against — see [`crate::fingerprint`] and
+//! [`DiskAnnIndex::check_graph`]. A query by term resolves through the caller's graph dictionary,
+//! so an index built against a different graph generation would silently mis-resolve; the checked
+//! query entry points reject that. Version-1 files (no fingerprint, 32-byte header) still open but
+//! are reported as unverifiable.
 
+use crate::fingerprint::{self, Fingerprint, FINGERPRINT_LEN};
 use crate::store::VectorStore;
 use memmap2::Mmap;
 use oxrdf::Term;
@@ -75,9 +85,13 @@ use std::path::{Path, PathBuf};
 
 /// First four bytes of every `.spqg` file.
 pub const SPQG_MAGIC: [u8; 4] = *b"SPQG";
-/// Current on-disk graph format version.
-pub const SPQG_VERSION: u32 = 1;
-const HEADER_LEN: usize = 32;
+/// Current on-disk graph format version. [OPUS-4.8] (sq-32i5) v2 adds the 24-byte graph
+/// fingerprint block at offset 32; v1 files (32-byte header) still open but cannot be verified.
+pub const SPQG_VERSION: u32 = 2;
+/// Header length of a version-1 file (no fingerprint block).
+const HEADER_LEN_V1: usize = 32;
+/// Header length of the current (version-2) format: the v1 header + the fingerprint block.
+const HEADER_LEN: usize = HEADER_LEN_V1 + FINGERPRINT_LEN;
 
 /// Vamana build/search parameters. Defaults follow the DiskANN paper's small-graph regime
 /// and are tuned to clear [`ann`](crate::ann)'s recall@10 ≥ 0.95 gate on the same synthetic
@@ -343,8 +357,9 @@ const fn record_len(dim: usize, degree: usize) -> usize {
     8 + dim * 4 + degree * 4
 }
 
-/// Writes the built graph to `path` as a `.spqg` file (one node record per node).
-fn write_graph(b: &Builder, path: &Path) -> Result<(), String> {
+/// Writes the built graph to `path` as a `.spqg` file (one node record per node). `fingerprint`
+/// (offset 32..56) binds the index to its graph; `None` writes an unverifiable (all-zero) block.
+fn write_graph(b: &Builder, path: &Path, fingerprint: Option<Fingerprint>) -> Result<(), String> {
     if cfg!(target_endian = "big") {
         return Err(".spqg is a little-endian format; big-endian targets are unsupported".into());
     }
@@ -357,6 +372,11 @@ fn write_graph(b: &Builder, path: &Path) -> Result<(), String> {
     header[12..16].copy_from_slice(&(r as u32).to_le_bytes());
     header[16..24].copy_from_slice(&(count as u64).to_le_bytes());
     header[24..28].copy_from_slice(&b.medoid.to_le_bytes());
+    // [OPUS-4.8] (sq-32i5) Graph fingerprint at offset 32..56 (offset 28..32 stays the reserved
+    // encoding tag). `None` leaves a zeroed block, which `check_graph` treats as unverifiable.
+    if let Some(fp) = fingerprint {
+        header[HEADER_LEN_V1..HEADER_LEN].copy_from_slice(&fp.to_bytes());
+    }
 
     let file = std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
     let mut w = std::io::BufWriter::new(file);
@@ -401,21 +421,62 @@ pub struct DiskAnnIndex {
     medoid: u32,
     record_len: usize,
     search_beam: usize,
+    /// [OPUS-4.8] (sq-32i5) The graph fingerprint this index was built against, or `None` for a
+    /// legacy version-1 file / an index built without a graph. See [`check_graph`](Self::check_graph).
+    fingerprint: Option<Fingerprint>,
+    /// Byte offset where node records begin: [`HEADER_LEN`] (v2) or [`HEADER_LEN_V1`] (legacy v1).
+    /// Every record read keys off this so both versions are read correctly by the same code.
+    data_offset: usize,
 }
 
 impl DiskAnnIndex {
     /// Builds the Vamana graph over `store` with default parameters and writes it to `path`,
-    /// then opens it. Equivalent to `build_with(store, path, VamanaConfig::default())`.
+    /// then opens it. Equivalent to `build_with(store, path, VamanaConfig::default())`. The index
+    /// is written WITHOUT a graph fingerprint (unverifiable — [`check_graph`](Self::check_graph)
+    /// errors); use [`build_for`](Self::build_for) to bind it to its graph.
     pub fn build<P: AsRef<Path>>(store: &VectorStore, path: P) -> Result<DiskAnnIndex, String> {
         Self::build_with(store, path, VamanaConfig::default())
     }
 
     /// Builds the Vamana graph over `store` with `cfg`, writes the `.spqg` file at `path`, and
     /// opens it memory-mapped. The build is in RAM (one-off); the open is cheap forever after.
+    /// Written without a fingerprint — see [`build`](Self::build) / [`build_with_for`](Self::build_with_for).
     pub fn build_with<P: AsRef<Path>>(
         store: &VectorStore,
         path: P,
         cfg: VamanaConfig,
+    ) -> Result<DiskAnnIndex, String> {
+        Self::build_inner(store, path, cfg, None)
+    }
+
+    /// [OPUS-4.8] (sq-32i5) Like [`build`](Self::build) but binds the index to `graph` (embeds its
+    /// fingerprint), so [`check_graph`](Self::check_graph) / [`nearest_term_checked`](Self::nearest_term_checked)
+    /// can reject a query against a different graph generation. Pass the graph whose term ids `store`
+    /// is keyed by.
+    pub fn build_for<P: AsRef<Path>>(
+        store: &VectorStore,
+        path: P,
+        graph: &Graph,
+    ) -> Result<DiskAnnIndex, String> {
+        Self::build_with_for(store, path, VamanaConfig::default(), graph)
+    }
+
+    /// [OPUS-4.8] (sq-32i5) Like [`build_with`](Self::build_with) but binds the index to `graph`'s
+    /// fingerprint (see [`build_for`](Self::build_for)).
+    pub fn build_with_for<P: AsRef<Path>>(
+        store: &VectorStore,
+        path: P,
+        cfg: VamanaConfig,
+        graph: &Graph,
+    ) -> Result<DiskAnnIndex, String> {
+        Self::build_inner(store, path, cfg, Some(Fingerprint::of(graph)))
+    }
+
+    fn build_inner<P: AsRef<Path>>(
+        store: &VectorStore,
+        path: P,
+        cfg: VamanaConfig,
+        fingerprint: Option<Fingerprint>,
     ) -> Result<DiskAnnIndex, String> {
         if cfg.build_beam < cfg.degree {
             return Err(format!(
@@ -424,7 +485,7 @@ impl DiskAnnIndex {
             ));
         }
         let b = build_graph(store, &cfg);
-        write_graph(&b, path.as_ref())?;
+        write_graph(&b, path.as_ref(), fingerprint)?;
         let mut idx = Self::open(path)?;
         idx.search_beam = cfg.search_beam;
         Ok(idx)
@@ -433,6 +494,10 @@ impl DiskAnnIndex {
     /// Opens a `.spqg` file memory-mapped, **without rebuilding** — the whole point of this
     /// index. Validates the header and that the file size matches `count` records so no later
     /// search can read out of bounds; the records themselves page in on access.
+    ///
+    /// [OPUS-4.8] (sq-32i5) A version-2 file's graph fingerprint is read for
+    /// [`check_graph`](Self::check_graph). A legacy version-1 file (32-byte header, no fingerprint)
+    /// still opens — its fingerprint is `None`, so `check_graph` reports it as unverifiable.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<DiskAnnIndex, String> {
         let path = path.as_ref();
         if cfg!(target_endian = "big") {
@@ -443,16 +508,26 @@ impl DiskAnnIndex {
         // stance as `.spqv` and sparq-core's mmap'd indexes).
         let map = unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
         let origin = path.display().to_string();
-        if map.len() < HEADER_LEN {
+        if map.len() < HEADER_LEN_V1 {
             return Err(format!("{origin}: truncated header"));
         }
         if map[0..4] != SPQG_MAGIC {
             return Err(format!("{origin}: not a .spqg file (bad magic)"));
         }
         let version = u32::from_le_bytes(map[4..8].try_into().unwrap());
-        if version != SPQG_VERSION {
-            return Err(format!("{origin}: unsupported .spqg version {version}"));
-        }
+        // [OPUS-4.8] (sq-32i5) Both v1 (no fingerprint, 32-byte header) and v2 (fingerprint,
+        // 56-byte header) open; the offset where node records begin depends on the version, so
+        // every record read keys off `data_offset` below.
+        let (data_offset, fingerprint): (usize, Option<Fingerprint>) = match version {
+            1 => (HEADER_LEN_V1, None),
+            2 => {
+                if map.len() < HEADER_LEN {
+                    return Err(format!("{origin}: truncated version-2 header (fingerprint block)"));
+                }
+                (HEADER_LEN, Some(Fingerprint::from_bytes(&map[HEADER_LEN_V1..HEADER_LEN])))
+            }
+            v => return Err(format!("{origin}: unsupported .spqg version {v}")),
+        };
         let dim = u32::from_le_bytes(map[8..12].try_into().unwrap()) as usize;
         let degree = u32::from_le_bytes(map[12..16].try_into().unwrap()) as usize;
         let count: usize = u64::from_le_bytes(map[16..24].try_into().unwrap())
@@ -466,7 +541,7 @@ impl DiskAnnIndex {
         // Checked size arithmetic — reject a malformed header before it wraps past the bounds check.
         let expect = count
             .checked_mul(record_len)
-            .and_then(|body| body.checked_add(HEADER_LEN))
+            .and_then(|body| body.checked_add(data_offset))
             .ok_or_else(|| {
                 format!("{origin}: dim={dim} degree={degree} count={count} overflows the file size")
             })?;
@@ -487,6 +562,8 @@ impl DiskAnnIndex {
             medoid,
             record_len,
             search_beam: VamanaConfig::default().search_beam,
+            fingerprint,
+            data_offset,
         })
     }
 
@@ -504,24 +581,24 @@ impl DiskAnnIndex {
 
     /// The normalized vector stored in `slot`'s record, read directly from the map.
     fn node_vector(&self, slot: u32) -> &[f32] {
-        let start = HEADER_LEN + slot as usize * self.record_len + 8;
+        let start = self.data_offset + slot as usize * self.record_len + 8;
         let bytes = &self.map[start..start + self.dim * 4];
         debug_assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<f32>(), 0);
-        // SAFETY: a memory map is page-aligned and `start` is a multiple of 4 (HEADER_LEN=32 +
-        // slot·record_len[a multiple of 4] + 8), so the pointer is f32-aligned; the range is in
-        // bounds (validated in `open`); f32 accepts any bit pattern; the slice borrows the map.
+        // SAFETY: a memory map is page-aligned and `start` is a multiple of 4 (data_offset
+        // [32 or 56] + slot·record_len[a multiple of 4] + 8), so the pointer is f32-aligned; the
+        // range is in bounds (validated in `open`); f32 accepts any bit pattern; slice borrows map.
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, self.dim) }
     }
 
     /// `slot`'s dictionary term id (record field 0).
     fn node_id(&self, slot: u32) -> Id {
-        let start = HEADER_LEN + slot as usize * self.record_len;
+        let start = self.data_offset + slot as usize * self.record_len;
         u32::from_le_bytes(self.map[start..start + 4].try_into().unwrap())
     }
 
     /// `slot`'s valid out-neighbour slots (the first `degree` neighbour entries).
     fn node_neighbours(&self, slot: u32) -> impl Iterator<Item = u32> + '_ {
-        let start = HEADER_LEN + slot as usize * self.record_len;
+        let start = self.data_offset + slot as usize * self.record_len;
         let deg = u32::from_le_bytes(self.map[start + 4..start + 8].try_into().unwrap()) as usize;
         let nbr_off = start + 8 + self.dim * 4;
         (0..deg.min(self.degree)).map(move |i| {
@@ -584,6 +661,11 @@ impl DiskAnnIndex {
     /// looks its vector up in `store`, excludes the term itself and maps neighbour ids back to
     /// [`Term`]s. Empty if the term is absent or unembedded. Mirrors
     /// [`VectorIndex::nearest_term`](crate::ann::VectorIndex::nearest_term).
+    ///
+    /// [OPUS-4.8] (sq-32i5) This does NOT verify the index/store match `graph` — pass a graph
+    /// whose ids have shifted since build and the results are silently WRONG. Use
+    /// [`nearest_term_checked`](Self::nearest_term_checked) (or call [`check_graph`](Self::check_graph)
+    /// once after open) to make a mismatch a hard error.
     pub fn nearest_term(
         &self,
         term: &Term,
@@ -600,6 +682,41 @@ impl DiskAnnIndex {
             .map(|(n, s)| (graph.dict.term(n), s))
             .collect()
     }
+
+    /// [OPUS-4.8] (sq-32i5) The graph fingerprint this index was built against, or `None` for a
+    /// legacy version-1 file / an index built without a graph. See [`check_graph`](Self::check_graph).
+    pub fn fingerprint(&self) -> Option<Fingerprint> {
+        self.fingerprint
+    }
+
+    /// [OPUS-4.8] (sq-32i5) **Checked open guard**: verifies this index was built against `graph`
+    /// (and, since the index is queried alongside the store, that `store` matches it too) by
+    /// recomputing `graph`'s fingerprint and comparing it to BOTH stored fingerprints. Returns a
+    /// descriptive `Err` on any mismatch — the index and store are keyed by `graph`'s dictionary
+    /// ids, so a mismatch means a query would silently resolve to the WRONG vectors. A legacy
+    /// version-1 index/store (no stored fingerprint) also errors, as "unverifiable".
+    ///
+    /// Call once after [`open`](Self::open) (it is O(dict_len), not per-query). The store is checked
+    /// as well because [`nearest_term`](Self::nearest_term) resolves the query vector through it.
+    pub fn check_graph(&self, store: &VectorStore, graph: &Graph) -> fingerprint::CheckResult {
+        let origin = "<.spqg index>";
+        fingerprint::check_against(self.fingerprint, graph, origin)?;
+        store.check_graph(graph)
+    }
+
+    /// [OPUS-4.8] (sq-32i5) [`nearest_term`](Self::nearest_term) with the staleness check: returns
+    /// `Err` if this index or `store` was built against a different graph generation than `graph`
+    /// (which would otherwise return silently-wrong neighbours), else `Ok` with the neighbours.
+    pub fn nearest_term_checked(
+        &self,
+        term: &Term,
+        graph: &Graph,
+        store: &VectorStore,
+        k: usize,
+    ) -> Result<Vec<(Term, f32)>, String> {
+        self.check_graph(store, graph)?;
+        Ok(self.nearest_term(term, graph, store, k))
+    }
 }
 
 /// Default path for a store's sibling `.spqg` graph artifact: the store path with its extension
@@ -607,4 +724,130 @@ impl DiskAnnIndex {
 /// "graph lives next to the store" layout; any path works with [`DiskAnnIndex::build_with`].
 pub fn sibling_graph_path(store_path: &Path) -> PathBuf {
     store_path.with_extension("spqg")
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    // [OPUS-4.8] (sq-32i5) Checked-open tests for the `.spqg` on-disk index: build against graph A
+    // then (1) query against A → OK + correct neighbours, (2) query against a DIFFERENT graph B →
+    // descriptive Err, (3) fingerprint survives reopen, (4) a legacy version-1 `.spqg` opens (and
+    // searches) but reports as unverifiable.
+    use super::*;
+    use crate::Fingerprint;
+    use oxrdf::NamedNode;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn tmp(tag: &str, ext: &str) -> PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("sparq_fpg_{tag}_{}_{n}.{ext}", std::process::id()))
+    }
+
+    fn graph(ttl: &str) -> Graph {
+        Graph::load_str(ttl, "turtle").expect("load test turtle")
+    }
+
+    fn iri(s: &str) -> Term {
+        Term::NamedNode(NamedNode::new(s).unwrap())
+    }
+
+    const A: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:alice ex:knows ex:bob .
+        ex:bob ex:knows ex:carol .
+    "#;
+    const B: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:dave ex:likes ex:eve .
+        ex:eve ex:likes ex:frank .
+    "#;
+
+    fn build_store(g: &Graph, path: &std::path::Path) -> VectorStore {
+        let alice = g.id_of(&iri("http://example.org/alice")).unwrap();
+        let bob = g.id_of(&iri("http://example.org/bob")).unwrap();
+        let carol = g.id_of(&iri("http://example.org/carol")).unwrap();
+        let mut s = VectorStore::create(path, 4).unwrap().with_fingerprint(g);
+        s.put(alice, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        s.put(bob, &[0.9, 0.1, 0.0, 0.0]).unwrap();
+        s.put(carol, &[0.0, 0.0, 0.0, 1.0]).unwrap();
+        s.finalize().unwrap();
+        s
+    }
+
+    #[test]
+    fn build_for_then_query_against_build_graph_ok_and_correct() {
+        let ga = graph(A);
+        let store_path = tmp("ok", "spqv");
+        let store = build_store(&ga, &store_path);
+        let idx_path = tmp("ok", "spqg");
+        let idx = DiskAnnIndex::build_for(&store, &idx_path, &ga).unwrap();
+        // (1) Checked against the build graph → OK, and bob is alice's nearest.
+        assert!(idx.check_graph(&store, &ga).is_ok());
+        let got = idx
+            .nearest_term_checked(&iri("http://example.org/alice"), &ga, &store, 1)
+            .expect("checked query against the build graph must succeed");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, iri("http://example.org/bob"));
+        std::fs::remove_file(&store_path).ok();
+        std::fs::remove_file(&idx_path).ok();
+    }
+
+    #[test]
+    fn query_against_different_graph_errs() {
+        let ga = graph(A);
+        let store_path = tmp("mm", "spqv");
+        let store = build_store(&ga, &store_path);
+        let idx_path = tmp("mm", "spqg");
+        let idx = DiskAnnIndex::build_for(&store, &idx_path, &ga).unwrap();
+        let gb = graph(B);
+        // (2) Against a DIFFERENT graph → descriptive Err, not silently wrong neighbours.
+        assert!(idx.check_graph(&store, &gb).is_err());
+        let qerr = idx
+            .nearest_term_checked(&iri("http://example.org/dave"), &gb, &store, 1)
+            .expect_err("a checked query against a mismatched graph must error");
+        assert!(qerr.contains("mismatch") || qerr.contains("wrong results"), "err: {qerr}");
+        std::fs::remove_file(&store_path).ok();
+        std::fs::remove_file(&idx_path).ok();
+    }
+
+    #[test]
+    fn fingerprint_survives_reopen() {
+        let ga = graph(A);
+        let store_path = tmp("rt", "spqv");
+        let store = build_store(&ga, &store_path);
+        let idx_path = tmp("rt", "spqg");
+        DiskAnnIndex::build_for(&store, &idx_path, &ga).unwrap();
+        // (3) Reopen the .spqg and confirm the stored fingerprint equals the live one.
+        let reopened = DiskAnnIndex::open(&idx_path).unwrap();
+        assert_eq!(reopened.fingerprint(), Some(Fingerprint::of(&ga)));
+        std::fs::remove_file(&store_path).ok();
+        std::fs::remove_file(&idx_path).ok();
+    }
+
+    #[test]
+    fn legacy_v1_spqg_opens_but_is_unverifiable() {
+        // (4) A version-1 `.spqg`: build the default (no-fingerprint) v2 file, then rewrite its
+        // header to a genuine v1 (version=1, fingerprint block dropped) so the legacy open path is
+        // exercised. It still opens and searches; check_graph reports it unverifiable.
+        let ga = graph(A);
+        let store_path = tmp("legacy", "spqv");
+        let store = build_store(&ga, &store_path);
+        let idx_path = tmp("legacy", "spqg");
+        DiskAnnIndex::build(&store, &idx_path).unwrap();
+        let mut bytes = std::fs::read(&idx_path).unwrap();
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        bytes.drain(HEADER_LEN_V1..HEADER_LEN); // remove the 24-byte fingerprint block
+        std::fs::write(&idx_path, &bytes).unwrap();
+
+        let idx = DiskAnnIndex::open(&idx_path).expect("a legacy v1 .spqg must still open");
+        assert!(idx.fingerprint().is_none());
+        // It still searches correctly against the build graph (data layout is offset-32).
+        let got = idx.nearest_term(&iri("http://example.org/alice"), &ga, &store, 1);
+        assert_eq!(got[0].0, iri("http://example.org/bob"));
+        // ...but cannot be verified.
+        assert!(idx.check_graph(&store, &ga).is_err());
+        std::fs::remove_file(&store_path).ok();
+        std::fs::remove_file(&idx_path).ok();
+    }
 }
