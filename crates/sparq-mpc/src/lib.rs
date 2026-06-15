@@ -59,6 +59,21 @@
 //!   Shamir-backed secret-shared equality test, disclosing only the result
 //!   payload — the capability M2 could not provide. (The crypto-free path
 //!   remains the default where the key is a public global IRI, convention #4.)
+//! - [`oblivious`] — **(§3 the substrate gap; §4.1 L2; §8 step 1) — sq-18lk, the
+//!   keystone hidden-regime primitive.** Oblivious **shuffle** (Waksman/Beneš
+//!   permutation network over secret-shared columns — sound today; the in-process
+//!   simulation routes via cleartext control bits held by the dealer, so each
+//!   switch is a local swap costing **0 multiplications**, while the *deployed*
+//!   protocol uses **secret** control bits and pays **1 multiplication per
+//!   switch** for the arithmetic conditional swap — surfaced via
+//!   [`oblivious::ShuffleCost`]) + oblivious **sort** (Batcher odd-even mergesort
+//!   network
+//!   whose compare-exchange access pattern is data-independent — the obliviousness
+//!   substrate). DISTINCT / ORDER BY / GROUP BY-over-hidden / MIN-MAX /
+//!   OPTIONAL-MINUS / the set-returning oblivious-join output path / ~linear joins
+//!   all reduce to it. The disclosed-key sort is sound; the secret-key comparator
+//!   is honestly gated on degree reduction (no fake secure comparison). See the
+//!   module docs for the per-primitive security/leakage statement.
 //! - [`proof`] — **(§4.3 step 5; §4.4; §5.1 hard dependency; §5.2 Q1)** The
 //!   [`CollaborativeProof`] / [`Attestation`] boundary that will emit the ZKP
 //!   that the result is correct AND issuer-attested. Interface + doc; impl
@@ -90,6 +105,14 @@ pub mod rng;
 // Shamir layer (parent bead sq-uu0u). See the module docs for the threat model.
 pub mod robust;
 pub mod shamir;
+// [OPUS-4.8] sq-18lk: oblivious shuffle (Waksman/Benes net) + sort (Batcher
+// odd-even mergesort) substrate over Shamir Fp — the keystone hidden-regime primitive
+// (ORQ SOSP'25). DISTINCT / ORDER BY / GROUP BY-over-hidden / MIN-MAX /
+// OPTIONAL-MINUS / the set-returning oblivious-join output path / ~linear joins
+// all reduce to it. The shuffle is sound today; the sort NETWORK + its
+// data-independent access pattern (the substrate) are sound, with the secret-key
+// comparator honestly gated on degree reduction. See the module docs.
+pub mod oblivious;
 
 // [OPUS-4.8] sq-nuok: adversarial-share negative suite + 'no fake crypto' stub
 // gate. Test-only; compiled only under `cfg(test)` so it can drive the seedable
@@ -108,6 +131,10 @@ pub use holder::{Holder, HolderResult};
 pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, JoinPlan};
 pub use partial::{HolderId, MpcError, PartialResult};
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
+pub use oblivious::{
+    shuffle, sort_by, sort_with_keys, AccessPattern, Comparator, SecretColumn, ShuffleCost,
+    SortByResult, SortCost, SortWithKeysResult, SortingNetwork, Switch, WaksmanNetwork,
+};
 pub use rng::{MpcRng, SecureRng};
 pub use robust::reconstruct_robust;
 pub use shamir::{ShamirBackend, Share};
