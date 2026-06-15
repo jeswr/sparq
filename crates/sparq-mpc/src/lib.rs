@@ -91,9 +91,20 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 pub mod backend;
+// [OPUS-4.8] sq-sxm: the (security model × N × query class) benchmark MATRIX
+// harness + its deterministic communication/round/multiplication counter — the
+// IN-PROCESS counting tier (Tier 1). New modules, isolated from the protocol
+// primitives so they do not conflict with sibling beads editing backend.rs
+// (sq-a6p1) / oblivious.rs (sq-jnkm): `metrics` is the counter, `bench` drives the
+// matrix and reads the per-cell ACTUAL security off `operator_descriptor`. The
+// real network transport + tc/netem (Tier 2/3) is bead sq-tg6b; EC2 scale-out is
+// sq-hoaj. See the module docs for the critical-honesty constraint (no
+// single-process wall-clock masquerading as an MPC latency).
+pub mod bench;
 pub mod field;
 pub mod holder;
 pub mod join;
+pub mod metrics;
 pub mod partial;
 pub mod proof;
 // [OPUS-4.8] sq-1vt: the CSPRNG masking seam (production SecureRng + test-only
@@ -126,6 +137,11 @@ pub use backend::{
     AbortKind, AdversaryModel, BackendInfo, CorruptionThreshold, MaliciousSecurity, MpcBackend,
     OperatorClass, OutputGuarantee, PublicVerifiability, SecurityDescriptor, TrustModel,
 };
+// [OPUS-4.8] sq-sxm: the benchmark-matrix harness surface (in-process counting tier).
+pub use bench::{
+    cell, run_matrix, CellSecurity, MatrixCell, MatrixResults, QueryClass, DEFAULT_PARTIES,
+};
+pub use metrics::{CommCounter, FIELD_BYTES};
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{DisclosedKeyJoin, GlobalJoin, HiddenKeyedRows, HiddenValueJoin, JoinPlan};
