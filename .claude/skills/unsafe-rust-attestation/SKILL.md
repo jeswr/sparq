@@ -6,7 +6,7 @@ description: How sparq attests memory safety — the forbid(unsafe_code) posture
 # Unsafe-Rust attestation (sparq)
 
 sparq's headline safety claim is memory safety. This skill is how to *attest* it
-honestly for the `memsafety` certification worktree — the `forbid(unsafe)`
+honestly for the `memsafety` certification worktree — the `forbid(unsafe_code)`
 posture, the concentrated `sparq-core` unsafe surface (threat-model boundary
 **B5**), and the verification estate (Miri + fuzz + the deterministic oracle).
 
@@ -19,9 +19,15 @@ posture, the concentrated `sparq-core` unsafe surface (threat-model boundary
   others — `grep -rl "forbid(unsafe_code)" crates/`). `forbid` (not `deny`) means
   the lint can't even be locally `#[allow]`-ed away — a hard compile error if any
   `unsafe` is introduced. **This is the strongest attestable claim and it's free.**
-- **`sparq-core` is the *only* crate with `unsafe`.** All memory-safety risk is
-  concentrated there by design, which is what makes attestation tractable: the
-  audit surface is one crate, not the whole tree.
+- **`sparq-core` carries the *vast majority* of the `unsafe`, and all of the B5
+  (untrusted-input) risk.** A few other crates have small, non-B5 unsafe surfaces
+  (e.g. `sparq-vectors` mmap/raw-slice casts, `sparq-cli`'s loader mmap in
+  `main.rs`, `sparq-zk-compose`'s `libc::flock` FFI in `verifier.rs`, one
+  `sparq-bench` block) — these do **not** carry `forbid(unsafe_code)`, so the
+  audit surface is "the crates without `forbid` " not "one crate". Verify the
+  live set with `grep -rL "forbid(unsafe_code)" $(git ls-files 'crates/*/src/lib.rs')`.
+  Attestation stays tractable because the *dangerous* (hostile-input → unsafe)
+  risk is still concentrated in `sparq-core`'s B5 boundary, enumerated below.
 
 When scoring, the honest statement is: *"N of M crates forbid unsafe; the residual
 unsafe is concentrated in sparq-core's B5 boundary, enumerated and verified
@@ -31,7 +37,8 @@ below."* Verify the live count with grep before quoting it — don't hard-code i
 
 B5 = **hostile on-disk index file → mmap loader → unsafe code** — an
 *untrusted-input → unsafe-code* boundary, the most dangerous class in the system.
-`grep -rn "unsafe" crates/sparq-core/src` returns ~39 sites across five files:
+`grep -rn "unsafe" crates/sparq-core/src` enumerates the sites — concentrated
+across five files (run it for the live count; don't hard-code one here):
 
 | File | Nature of the unsafe |
 |---|---|
@@ -60,7 +67,7 @@ the attestation doesn't overstate the threat there.
 
 | Verifier | Wired in | Reaches | Does NOT reach |
 |---|---|---|---|
-| **Miri** (UB) | `.github/workflows/miri.yml`, nightly | pure-Rust unsafe with default features (`parallel`): the `par_iter_mut` scatter writes in `dict.rs`, POD↔bytes reinterprets, `from_utf8_unchecked` over in-memory buffers, `MaybeUninit`+`set_len` remap | the ~16 **mmap-backed** sites — Miri rejects file-backed mappings ("Miri does not support file-backed memory mappings"), so `mmap`/`dict-spill` features are **off** in this lane |
+| **Miri** (UB) | `.github/workflows/miri.yml`, nightly | pure-Rust unsafe with default features (`parallel`): the `par_iter_mut` scatter writes in `dict.rs`, POD↔bytes reinterprets, `from_utf8_unchecked` over in-memory buffers, `MaybeUninit`+`set_len` remap | the **mmap-backed** sites — Miri rejects file-backed mappings ("Miri does not support file-backed memory mappings"), so `mmap`/`dict-spill` features are **off** in this lane |
 | **mmap_corruption_oracle** (deterministic) | `ci.yml` under `--features mmap,dict-spill` | the mmap B5 sites Miri can't reach | non-determinism (it's a fixed oracle, not a fuzzer) |
 | **fuzz** lane (cargo-fuzz) | `fuzz.yml`, PR smoke + nightly | hostile-input panics/OOM on the loader | UB detection (panics ≠ UB) |
 | **cargo-geiger** | `ci.yml` `geiger` job, **informational** | counts unsafe sites (sparq-core, via `--manifest-path`; can't run the virtual root) | nothing gates on it yet (GX-5) |
