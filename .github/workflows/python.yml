@@ -34,7 +34,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install maturin + pytest
-        run: pip install maturin pytest
+        # [OPUS-4.8] Version-pinned (Scorecard PinnedDependencies): a small, fixed build-tool
+        # set, so `==` pinning is non-brittle. Bump deliberately when adopting a newer maturin.
+        run: pip install maturin==1.14.0 pytest==9.1.0
       - name: Build wheel (abi3, python-release profile — unwinding panics)
         run: maturin build --manifest-path crates/sparq-py/Cargo.toml --profile python-release --out dist
       - name: Install wheel
