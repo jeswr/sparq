@@ -1,8 +1,10 @@
 # sparq-py (T21): Python bindings for the sparq RDF engine, built with pyo3 + maturin.
 #
-# This crate ships to PyPI (package name `sparq`) — NOT to crates.io — hence
-# `publish = false`. It is a thin wrapper over the public APIs of sparq-core /
-# sparq-engine / sparq-reason; it contains no engine logic of its own.
+# This crate ships to PyPI as the distribution `sparq-rdf` (the import name stays
+# `sparq` — see [lib] name below and pyproject.toml `[tool.maturin] module-name`) —
+# NOT to crates.io — hence `publish = false`. It is a thin wrapper over the public
+# APIs of sparq-core / sparq-engine / sparq-reason; it contains no engine logic of
+# its own.
 #
 # abi3-py39: one wheel per platform works on every CPython >= 3.9 (the stable ABI),
 # instead of one wheel per Python minor version.
@@ -14,13 +16,16 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Python bindings for the sparq RDF + SPARQL engine (PyPI package: sparq)"
+description = "Python bindings for the sparq RDF + SPARQL engine (PyPI distribution: sparq-rdf; import name: sparq)"
 repository.workspace = true
 homepage.workspace = true
 
 [lib]
-# The cdylib IS the Python module (maturin renames it to sparq.<abi3>.so). The lib
-# name matches the `#[pymodule] fn sparq` so no [tool.maturin] module-name is needed.
+# The cdylib IS the Python *import* module (maturin renames it to sparq.<abi3>.so).
+# The lib name matches the `#[pymodule] fn sparq`. [OPUS-4.8] sq-8slf: the PyPI
+# *distribution* name is `sparq-rdf` (pyproject `[project] name`), which differs from
+# this import name; pyproject `[tool.maturin] module-name = "sparq"` pins the import
+# name so maturin does not derive `sparq_rdf` from the distribution name.
 name = "sparq"
 crate-type = ["cdylib"]
 # No Rust tests live here (the test suite is tests/test_basic.py, run via maturin/pytest).

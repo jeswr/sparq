@@ -2,9 +2,14 @@
 requires = ["maturin>=1.14.0,<2.0"]
 build-backend = "maturin"
 
+# [OPUS-4.8] sq-8slf: the PyPI *distribution* name is `sparq-rdf` (owner-approved):
+# the bare `sparq` distribution name is taken by an unrelated package (see docs/release.md
+# §0a). This is the wheel / `pip install <name>` name ONLY. The *import* name stays `sparq`
+# (pinned by [tool.maturin] module-name + the cdylib [lib] name + `#[pymodule] fn sparq`),
+# so users still write `import sparq`. maturin keeps these two names independent.
 [project]
-name = "sparq"
-description = "Python bindings for the sparq RDF + SPARQL engine (dictionary-encoded triplestore, SPARQL 1.1 query/update, opt-in RDFS/OWL-RL/N3 reasoning)"
+name = "sparq-rdf"
+description = "Python bindings for the sparq RDF + SPARQL engine (dictionary-encoded triplestore, SPARQL 1.1 query/update, opt-in RDFS/OWL-RL/N3 reasoning). Distributed on PyPI as `sparq-rdf`; the import name is `sparq` (`import sparq`)."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -32,8 +37,14 @@ Issues = "https://github.com/jeswr/sparq/issues"
 test = ["pytest>=8.4.2"]
 
 [tool.maturin]
-# The cdylib's lib name and #[pymodule] are both `sparq`, so no module-name
-# override is needed. abi3 (set in Cargo.toml) makes the wheel one-per-platform.
+# [OPUS-4.8] sq-8slf: pin the IMPORT/module name to `sparq` independently of the
+# `[project] name` (the PyPI *distribution* name, now `sparq-rdf`). maturin derives
+# the module name from `module-name` first, then the cdylib `[lib] name`, then the
+# distribution name; without this pin it would normalise `sparq-rdf` → `sparq_rdf`
+# and the build would fail because the cdylib `[lib] name` / `#[pymodule] fn` is
+# `sparq`. With it pinned, `pip install sparq-rdf` installs an importable `sparq`.
+module-name = "sparq"
+# abi3 (set in Cargo.toml) makes the wheel one-per-platform.
 # For RELEASE wheels use `maturin build --profile python-release` (release
 # optimisation + unwinding panics; the workspace's plain release profile is
 # panic=abort, which would turn any Rust panic into a hard interpreter abort).
