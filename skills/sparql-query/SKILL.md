@@ -112,6 +112,18 @@ sparq_engine::query(&g,
     "SELECT ?s WHERE { { SELECT ?s WHERE { ?s <http://ex/age> ?a } ORDER BY DESC(?a) LIMIT 1 } }").unwrap();
 ```
 
+*Aggregates over an EMPTY result* (SPARQL 1.1 §18.5.1, pinned by the engine's
+`aggregate_empty_semantics` tests and the W3C `agg-empty-group-*` conformance cases):
+
+- **No `GROUP BY`** ⇒ the whole result is ONE implicit group, so you get exactly **one** row
+  even when nothing matched. In it: `COUNT(*)`/`COUNT(?x)`/`SUM(?x)`/`AVG(?x)` are
+  **`"0"^^xsd:integer`** (a *bound* `0`), `GROUP_CONCAT(?x)` is the empty string `""`, and
+  `MIN`/`MAX`/`SAMPLE` are **unbound** (an empty-set error surfaces as an unbound cell).
+  Mind the split: `SUM`/`AVG` over empty are `0`, not unbound — so `COALESCE(SUM(?x), 0)`
+  returns `0` because `SUM` already returned a bound `0`.
+- **With `GROUP BY`** ⇒ an empty input has **zero groups**, so you get **zero** rows (the
+  single-implicit-group rule applies only when no `GROUP BY` is written).
+
 **Property paths** (all 8 operators: `/  | ^  *  +  ?` and `!(…)` negated sets) — write them inline:
 
 ```rust
