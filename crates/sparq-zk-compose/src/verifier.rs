@@ -3113,7 +3113,13 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
 ///    ([`CheckError::JoinSlotMismatch`]): the slots are PUBLIC by design (the query
 ///    already reveals which column a shared variable occupies, §4.4), so this is a
 ///    plain public-input equality, and it doubles as the anti-spurious-join check
-///    (a prover cannot inject a `join_eq` over an unrelated column pair).
+///    (a prover cannot inject a `join_eq` over an unrelated column pair). The
+///    "patterns the referenced scans answer" is resolved by MEMBERSHIP against the
+///    SPECIFIC `edge.scan_a`/`edge.scan_b` (not a first-match `position`), so a
+///    query pattern legitimately answered by MORE THAN ONE scan (the same triple
+///    pattern satisfied by two credentials) is handled correctly: the join binds
+///    against whichever scan the edge names, neither spuriously rejected nor bound
+///    to the wrong scan via `sub_proofs` ordering. [OPUS-4.8] sq-sfsi multi-scan.
 ///
 /// # Scope / honesty boundary (the disclosed-vs-hidden distinction — load-bearing)
 /// `bind_joins` rigorously validates every DECLARED hidden `JoinEdge`. It does NOT
@@ -3151,16 +3157,26 @@ fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
     let consts = fragment_pattern_consts(&patterns);
     let var_slots = variable_slots(&patterns);
 
-    // For each pattern, which scan sub-proof (if any) answers it (constants
-    // match the scan's bound `pattern_const_enc`, audit #10). A pattern may be
-    // answered by exactly one scan in the v1 fragment; we take the first.
-    let scan_for_pattern = |pi: usize| -> Option<usize> {
-        consts.get(pi).and_then(|c| {
-            manifest
-                .sub_proofs
-                .iter()
-                .position(|sp| scan_matches_pattern(&sp.inputs, c))
-        })
+    // Does the SPECIFIC scan sub-proof `scan_idx` answer query pattern `pi`?
+    // A pattern is answered by a scan iff the scan's bound `pattern_const_enc`
+    // matches the pattern's constants (audit #10). Crucially this is a
+    // MEMBERSHIP test against the referenced scan — NOT a first-match
+    // `position(..)` lookup. A query pattern may LEGITIMATELY be answered by
+    // MORE THAN ONE scan (the same triple pattern satisfied by two different
+    // credentials / graph commitments); the disclosed-row path
+    // (`bind_query_correctness`, `.any(..)` + the per-scan FILTER loop) already
+    // treats multi-scan-per-pattern as a first-class configuration. A
+    // first-match `position` here would (a) REJECT a valid join whose edge
+    // points at a non-first scan answering the pattern, and (b) — worse for
+    // soundness — let a prover order `sub_proofs` so the slot binding validates
+    // against a DIFFERENT (first-match) scan than the one the edge actually
+    // references. Binding against the specific `edge.scan_a`/`edge.scan_b`
+    // closes both. [OPUS-4.8] sq-sfsi multi-scan fix.
+    let pattern_answered_by_scan = |pi: usize, scan_idx: usize| -> bool {
+        consts
+            .get(pi)
+            .zip(manifest.sub_proofs.get(scan_idx))
+            .is_some_and(|(c, sp)| scan_matches_pattern(&sp.inputs, c))
     };
 
     // --- (1)+(3a): per-edge commitment-matching + slot binding. ---
@@ -3211,22 +3227,29 @@ fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
 
         // (3a) Slot binding (§4.4). The edge's two scans answer two query
         // patterns; the shared join variable must occupy slot_a in pattern A and
-        // slot_b in pattern B. Find the patterns each referenced scan answers and
-        // require a SHARED variable whose slots are exactly the proof's public
-        // (slot_a, slot_b). A join_eq whose public slots are not a real shared
-        // variable's query-derived positions is rejected.
+        // slot_b in pattern B. We require, for the SPECIFIC scans `edge.scan_a` /
+        // `edge.scan_b` the edge references (NOT a first-match scan that merely
+        // happens to answer the pattern earlier in `sub_proofs`), that there
+        // exist patterns pi (answered by scan_a) and pj (answered by scan_b)
+        // carrying a SHARED variable at exactly the proof's public (slot_a,
+        // slot_b). A join_eq whose public slots are not a real shared variable's
+        // query-derived positions over the referenced scans is rejected. This is
+        // multi-scan-safe: with two scans answering one pattern, the binding
+        // validates against whichever scan the edge actually names, so it can
+        // neither be spuriously rejected nor bound to the wrong scan.
         let bound = patterns.iter().enumerate().any(|(pi, _)| {
-            // pattern pi is answered by scan_a, and slot_a there is a variable.
-            if scan_for_pattern(pi) != Some(edge.scan_a) {
+            // pattern pi is answered by THE REFERENCED scan_a, slot_a is a var.
+            if !pattern_answered_by_scan(pi, edge.scan_a) {
                 return false;
             }
             let Some(var_a) = var_at(&var_slots, pi, slot_a as usize) else {
                 return false;
             };
-            // The SAME variable occupies slot_b in some pattern answered by scan_b.
+            // The SAME variable occupies slot_b in some pattern answered by the
+            // REFERENCED scan_b.
             patterns.iter().enumerate().any(|(pj, _)| {
                 pj != pi
-                    && scan_for_pattern(pj) == Some(edge.scan_b)
+                    && pattern_answered_by_scan(pj, edge.scan_b)
                     && var_at(&var_slots, pj, slot_b as usize).as_deref() == Some(var_a.as_str())
             })
         });

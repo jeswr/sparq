@@ -140,6 +140,19 @@ fn graph_b() -> GraphCommitment {
     commit_triples(&g, salt_from_bytes(&[32u8; 32])).unwrap()
 }
 
+/// A SECOND credential answering pattern A (`?a <ex/knows> ?p`), from a different
+/// committed graph (distinct salt => distinct commitment). Used to construct a
+/// multi-scan-per-pattern manifest: TWO scans legitimately answer pattern A, the
+/// same triple pattern satisfied by two different credentials. [OPUS-4.8] sq-sfsi.
+fn graph_a2() -> GraphCommitment {
+    let g = vec![Triple::new(
+        NamedOrBlankNode::NamedNode(iri("http://ex/a2")),
+        iri("http://ex/knows"),
+        Term::NamedNode(iri("http://ex/p")),
+    )];
+    commit_triples(&g, salt_from_bytes(&[33u8; 32])).unwrap()
+}
+
 fn scan_inputs(c: &GraphCommitment, pattern: Pattern) -> ProofInputs {
     build_scan(std::slice::from_ref(c), &pattern).expect("scan builds").inputs
 }
@@ -247,6 +260,118 @@ fn prefilter(m: &ProofManifest) -> Result<(), CheckError> {
 fn honest_join_passes_structural_bind_joins() {
     let m = join_manifest();
     prefilter(&m).expect("honest cross-scan join must pass the structural bind_joins gate");
+}
+
+// === ACCEPT (multi-scan-per-pattern): a pattern answered by TWO scans ========
+//
+// sq-sfsi soundness fix. A query pattern may LEGITIMATELY be answered by more than
+// one scan (the same triple pattern satisfied by two different credentials). The
+// old `bind_joins` used `position(..)` (FIRST match), which would (a) REJECT a
+// valid join whose edge points at the SECOND scan answering the pattern, or worse
+// (b) let scan ordering decide which scan the slot binding validates against. The
+// fix binds the slot check to the SPECIFIC `edge.scan_a`/`edge.scan_b`, so the join
+// is validated against the referenced scan regardless of `sub_proofs` order.
+
+/// Build a multi-scan-per-pattern manifest. sub_proofs =
+/// [scan_a (graph_a), scan_a2 (graph_a2, SAME pattern A), scan_b, join_eq].
+/// The join edge references scan_a2 (index 1) — the SECOND scan answering pattern
+/// A — for `scan_a`, and scan_b (index 2). The join_eq carries scan_a2's commitment.
+fn multi_scan_manifest() -> ProofManifest {
+    let (ca, sa) = {
+        let c = graph_a();
+        (c.commitment, c.salt)
+    };
+    let (ca2, sa2) = {
+        let c = graph_a2();
+        (c.commitment, c.salt)
+    };
+    let (cb, sb) = {
+        let c = graph_b();
+        (c.commitment, c.salt)
+    };
+    let scan_a = scan_a_inputs(&graph_a());
+    let scan_a2 = scan_a_inputs(&graph_a2());
+    let scan_b = scan_b_inputs(&graph_b());
+    // The join binds scan_a2 (the SECOND scan answering pattern A) to scan_b.
+    let commit_a2 = commitment_hex(&scan_a2);
+    let commit_b = commitment_hex(&scan_b);
+    let join = join_eq_inputs(commit_a2, commit_b, SLOT_A, SLOT_B);
+    let sk = test_issuer_sk(1);
+    ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: JOIN_QUERY.into(),
+        issuers: vec![],
+        key_set: vec![public_key_to_hex(&sk.public_key())],
+        commitment_attestations: vec![
+            attest_full(ca, sa, &sk),
+            attest_full(ca2, sa2, &sk),
+            attest_full(cb, sb, &sk),
+        ],
+        attributions: vec![vec![0], vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex(CHALLENGE_HEX.into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot()],
+        sub_proofs: vec![
+            SubProof { inputs: scan_a, proof_hex: String::new() },
+            SubProof { inputs: scan_a2, proof_hex: String::new() },
+            SubProof { inputs: scan_b, proof_hex: String::new() },
+            SubProof { inputs: join, proof_hex: String::new() },
+        ],
+        binding_edges: vec![],
+        // scan_a -> sub-proof 1 (scan_a2, the SECOND scan answering pattern A),
+        // scan_b -> sub-proof 2, join_proof -> sub-proof 3.
+        join_edges: vec![JoinEdge { scan_a: 1, graph_a: 0, scan_b: 2, graph_b: 0, join_proof: 3 }],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+    }
+}
+
+/// A join edge pointing at the SECOND of two scans answering a pattern passes the
+/// structural `bind_joins` gate. With the old first-match `position(..)` this was
+/// WRONGLY rejected (`scan_for_pattern(pattern_a)` resolved to scan-0, not the
+/// referenced scan-1). The membership-based fix accepts it. [OPUS-4.8] sq-sfsi.
+#[test]
+fn multi_scan_join_edge_points_at_second_scan_passes() {
+    let m = multi_scan_manifest();
+    prefilter(&m).expect(
+        "a join edge referencing the SECOND scan answering a pattern must pass bind_joins \
+         (multi-scan-per-pattern is a legitimate configuration)",
+    );
+}
+
+/// Anti-forgery preserved under multi-scan: re-point the edge's `scan_a` at scan_b
+/// (sub-proof 2), which does NOT answer pattern A at slot_a. The slot binding has
+/// no pattern answered by the referenced scan with `?p` at SLOT_A => REJECT
+/// (`JoinSlotMismatch`). Confirms the fix did not weaken the binding: the edge
+/// still must reference a scan that genuinely answers the right pattern at the
+/// right slot, not merely SOME scan answering the pattern. [OPUS-4.8] sq-sfsi.
+#[test]
+fn multi_scan_join_edge_points_at_non_answering_scan_rejected() {
+    let mut m = multi_scan_manifest();
+    // sub-proof 2 (scan_b, pattern B) does not answer pattern A at SLOT_A; but its
+    // commitment must still match commit_a or we'd trip the commitment gate first.
+    // Point scan_a at scan_b AND set the join_eq's commit_a to scan_b's commitment
+    // so we reach (and exercise) the slot gate specifically.
+    m.join_edges[0].scan_a = 2;
+    let commit_b = match &m.sub_proofs[2].inputs {
+        ProofInputs::Scan { commitments, .. } => commitments[0].clone(),
+        _ => unreachable!("scan_b inputs"),
+    };
+    if let ProofInputs::JoinEq { commit_a, .. } = &mut m.sub_proofs[3].inputs {
+        *commit_a = commit_b;
+    } else {
+        unreachable!("join_eq inputs");
+    }
+    match prefilter(&m) {
+        Err(CheckError::JoinSlotMismatch { edge: 0 }) => {}
+        other => panic!(
+            "an edge whose scan_a does not answer pattern A at slot_a must be \
+             JoinSlotMismatch, got {other:?}"
+        ),
+    }
 }
 
 // === REJECT 1: commitment-matching (cross-scan forgery, anti-A2) ============
