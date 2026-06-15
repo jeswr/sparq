@@ -41,7 +41,7 @@ use crate::batched::{BatchedShares, RowBinding};
 use crate::field::Fp;
 use crate::oblivious_join::{self, Candidate, MatchBit, ObliviousOutputCost};
 use crate::partial::{HolderId, MpcError, PartialResult};
-use crate::shamir::{self, ShamirBackend, ShamirDealer};
+use crate::shamir::{self, ShamirBackend, ShamirDealer, Share};
 use oxrdf::{Term, Variable};
 use std::collections::BTreeMap;
 
@@ -411,6 +411,30 @@ impl HiddenValueJoin {
     /// deferred WI-4 / bead sq-6d6g). Detection at `n > 2t + 1` thus requires
     /// running the equality test on MORE than the minimal party count.
     fn secure_equal(&self, dealer: &mut ShamirDealer, a: Fp, b: Fp) -> Result<bool, MpcError> {
+        // Secret-share both keys, then run the shared-input core. The scalar path
+        // deals its own shares; the batched path deals a whole key COLUMN up front
+        // (a `BatchedShares`) and passes the per-row sharings straight in.
+        let sa = dealer.share(a);
+        let sb = dealer.share(b);
+        self.secure_equal_shared(dealer, &sa, &sb)
+    }
+
+    /// The match-bit core of [`Self::secure_equal`], over keys that are ALREADY
+    /// secret-shared. This is the entry point the batched join uses so the
+    /// `BatchedShares` dealt up front by [`BatchedHiddenInput::shared_keys`] are the
+    /// actual sharings compared — the keys are dealt ONCE, not re-shared per
+    /// candidate. `sa` / `sb` must be degree-`t` sharings on the dealer's `n`-party
+    /// points (exactly what `share` / `share_batch` produce).
+    ///
+    /// `m = (a - b)·r` is opened at degree `2t`; `m == 0 ⇔ a == b`, and for unequal
+    /// keys `m` is uniform nonzero — so ONLY the match bit is revealed, never either
+    /// key or their difference.
+    fn secure_equal_shared(
+        &self,
+        dealer: &mut ShamirDealer,
+        sa: &[Share],
+        sb: &[Share],
+    ) -> Result<bool, MpcError> {
         let t = dealer.threshold();
         // Honest-majority headroom: one multiplication needs 2t+1 <= n parties.
         if dealer.parties() < 2 * t + 1 {
@@ -420,16 +444,13 @@ impl HiddenValueJoin {
                 t
             )));
         }
-        // Secret-share both keys and a fresh nonzero mask.
-        let sa = dealer.share(a);
-        let sb = dealer.share(b);
         // Fresh nonzero mask r from the masking RNG (a CSPRNG in production —
         // sq-1vt). Zero is rejected inside `draw_nonzero_fp`: masking by zero
         // would make m=0 even for unequal keys (a false match).
         let mask_value = dealer.draw_nonzero_fp();
         let r = dealer.share(mask_value);
         // d = a - b (local, degree t).
-        let d = shamir::sub_shares(&sa, &sb)?;
+        let d = shamir::sub_shares(sa, sb)?;
         // m = d * r (one multiplication, degree 2t).
         let m_shares = shamir::mul_shares_raw(&d, &r)?;
         // Open m at degree 2t. m == 0  <=>  d == 0  <=>  a == b.
@@ -503,10 +524,11 @@ impl HiddenValueJoin {
 /// row's key gets its OWN fresh degree-`t` masking polynomial and any `≤ t`
 /// parties' shares of the whole key column are jointly independent of every key
 /// (the batched-Shamir hiding property). This is the structural reason the keys
-/// never leak: the cleartext column is consumed only to deal the batch, exactly as
-/// the four-flatmates aggregate does for its salary column. The DISCLOSED payload
-/// columns ride alongside in the clear (disclosure-minimisation, convention #4 —
-/// only the *key* is hidden).
+/// never leak: the cleartext keys are used ONLY as the local inputs to Shamir
+/// sharing and to the secure-equality test ([`HiddenValueJoin::secure_equal_shared`]),
+/// and are NEVER reconstructed from shares — exactly as the four-flatmates aggregate
+/// uses its salary column. The DISCLOSED payload columns ride alongside in the clear
+/// (disclosure-minimisation, convention #4 — only the *key* is hidden).
 #[derive(Debug, Clone)]
 pub struct BatchedHiddenInput {
     /// The holder that owns this column.
@@ -653,23 +675,29 @@ impl HiddenValueJoin {
         let mut dealer = self.backend.dealer();
 
         // (1) Secret-share each holder's private key column as a BatchedShares (the
-        // sq-dwb5 primitive). We do not need to OPEN these — `secure_equal` shares
-        // the keys it compares internally — but dealing the batch here exercises the
-        // documented primitive + validates the keyed-binding key counts, and is the
-        // structural point at which the cleartext keys are consumed into shares.
-        let _l_shared = left.shared_keys(&mut dealer)?;
-        let _r_shared = right.shared_keys(&mut dealer)?;
+        // sq-dwb5 primitive): each row's key gets its OWN fresh degree-`t` masking
+        // polynomial, the cleartext column is consumed ONCE into the batch, and the
+        // keyed-binding key counts are validated. These are the SAME sharings the
+        // comparisons below consume — the keys are dealt once, never re-shared per
+        // candidate.
+        let l_shared = left.shared_keys(&mut dealer)?;
+        let r_shared = right.shared_keys(&mut dealer)?;
 
         // (2) Enumerate the candidate row pairs the RowBinding permits.
         let pairs = candidate_pairs(&left.binding, &right.binding, left.len(), right.len())?;
 
         // (3) Decide each candidate's match with the secure-equal primitive lifted to
-        // the row dimension. The join KEY/VALUE is never opened — only the match bit.
+        // the row dimension — over the BATCHED shares dealt in (1), NOT a per-row
+        // re-share. The join KEY/VALUE is never opened — only the match bit.
         let mut candidates: Vec<Candidate> = Vec::with_capacity(pairs.len());
         for (li, rj) in pairs {
-            let (lkey, lpay) = &left.rows[li];
-            let (rkey, rpay) = &right.rows[rj];
-            let matched = self.secure_equal(&mut dealer, *lkey, *rkey)?;
+            let (_lkey, lpay) = &left.rows[li];
+            let (_rkey, rpay) = &right.rows[rj];
+            let matched = self.secure_equal_shared(
+                &mut dealer,
+                &l_shared.elements()[li],
+                &r_shared.elements()[rj],
+            )?;
             let mut payload = lpay.clone();
             payload.extend(rpay.iter().cloned());
             // Pad / validate to the uniform output arity so the oblivious output's
@@ -1542,57 +1570,83 @@ mod batched_hidden_value_tests {
 
     // ============================== Privacy ==============================
 
-    /// PRIVACY (L1 at the OUTPUT): two candidate sets with DIFFERENT true match
-    /// counts but the SAME candidate count + bound reveal the IDENTICAL number of
-    /// output SLOTS — the oblivious output bounds the revealed cardinality to B, so
-    /// the protocol/parties learn B, not the true count. (The recipient who filters
-    /// dummies learns the true count; that is inherent and documented.)
+    /// PRIVACY (L1 at the OUTPUT — substantive, not the bound echo): two scenarios
+    /// with DIFFERENT true match counts (1 vs 3) but the SAME candidate count + bound
+    /// reveal the IDENTICAL number of output SLOTS — exactly `B`, ALL of which are
+    /// observed as a flat slot vector whose LENGTH is `B` regardless of the true
+    /// count. We go through the lower-level `oblivious_set_output` (which exposes the
+    /// SLOTS that `batched_join` filters) so the obliviousness is asserted on the
+    /// actual revealed structure, not just the `cost.bound` the input echoes. We also
+    /// assert the hidden join KEY never appears in any revealed slot.
     #[test]
     fn output_cardinality_is_bounded_to_b_not_true_count() {
-        // Same B and candidate count, different number of true matches.
-        let one = positional(
-            "L",
-            &["a"],
-            &[
-                (1u64, vec![lit("p")]),
-                (2, vec![lit("q")]),
-                (3, vec![lit("r")]),
-            ],
-        );
-        let one_r = positional(
-            "R",
-            &["b"],
-            &[
-                (1u64, vec![lit("p")]),
-                (9, vec![lit("q")]),
-                (8, vec![lit("r")]),
-            ],
-        ); // 1 match
-        let three_r = positional(
-            "R",
-            &["b"],
-            &[
-                (1u64, vec![lit("p")]),
-                (2, vec![lit("q")]),
-                (3, vec![lit("r")]),
-            ],
-        ); // 3 matches
+        use crate::oblivious_join::oblivious_set_output;
 
-        let join = HiddenValueJoin::new(ShamirBackend::new_seeded(3, 0x5217).unwrap());
-        // Use the lower-level oblivious set output via batched_join's transform by
-        // counting revealed slots: re-run the transform with a padded bound B=5.
-        // batched_join returns the FILTERED PartialResult, so to observe the SLOT
-        // count we go through the candidate path with the same B and compare the
-        // transform's `cost.bound` (the revealed count) — identical regardless of
-        // true matches.
-        let (_, c1) = join.batched_join(&one, &one_r, 5).unwrap();
-        let (_, c3) = join.batched_join(&one, &three_r, 5).unwrap();
+        // A SECRET join key the parties must never see in the output, used in the
+        // matching rows of both scenarios.
+        let secret_key = 0x5EC5_E700u64;
+        // Build the candidates a batched positional join would produce, deciding each
+        // match with the SAME secure-equal core, for `n_matches` of 3 rows.
+        let candidates_for = |n_matches: usize, backend: &ShamirBackend| -> Vec<Candidate> {
+            let join = HiddenValueJoin::new(backend.clone());
+            let mut dealer = backend.dealer();
+            // Left column: 3 rows, all keyed on the secret key.
+            let left = [secret_key, secret_key, secret_key];
+            // Right column: the first `n_matches` rows share the secret key (a true
+            // match); the rest carry distinct non-matching keys.
+            let right: Vec<u64> = (0..3)
+                .map(|i| {
+                    if i < n_matches {
+                        secret_key
+                    } else {
+                        0xD15 + i as u64
+                    }
+                })
+                .collect();
+            (0..3)
+                .map(|i| {
+                    let matched = join
+                        .secure_equal(&mut dealer, Fp::new(left[i]), Fp::new(right[i]))
+                        .unwrap();
+                    Candidate {
+                        // Payload discloses only the row index, NEVER the key.
+                        payload: vec![lit(&format!("L{i}")), lit(&format!("R{i}"))],
+                        matched: MatchBit::Public(matched),
+                    }
+                })
+                .collect()
+        };
+
+        let b = 5usize; // public bound padded above the 3 candidates
+        let backend = ShamirBackend::new_seeded(3, 0x5217).unwrap();
+        let (slots1, c1) =
+            oblivious_set_output(&backend, &candidates_for(1, &backend), 2, b).unwrap();
+        let (slots3, c3) =
+            oblivious_set_output(&backend, &candidates_for(3, &backend), 2, b).unwrap();
+
+        // (a) The REVEALED SLOT VECTOR has length exactly B in BOTH cases — the
+        // parties observe the same output cardinality whether 1 or 3 rows truly
+        // matched. This is the substantive obliviousness, not the bound echo.
+        assert_eq!(slots1.len(), b, "1-match: parties see exactly B slots");
+        assert_eq!(slots3.len(), b, "3-match: parties see exactly B slots");
         assert_eq!(
-            c1.bound, c3.bound,
-            "revealed slot bound must not depend on true match count"
+            slots1.len(),
+            slots3.len(),
+            "revealed slot count is independent of the true match count"
         );
-        assert_eq!(c1.bound, 5);
-        assert_eq!(c1.select_mults, 5);
+        // The modelled cost (slot count / selects) is likewise B-driven, not count-driven.
+        assert_eq!(c1.bound, b);
+        assert_eq!((c1.bound, c1.select_mults), (c3.bound, c3.select_mults));
+
+        // (b) The hidden join KEY never appears in ANY revealed slot of either run —
+        // only the disclosed payload is ever materialised.
+        for slots in [&slots1, &slots3] {
+            let rendered = format!("{slots:?}");
+            assert!(
+                !rendered.contains(&secret_key.to_string()),
+                "the hidden join key {secret_key} must NOT appear in any revealed slot: {rendered}"
+            );
+        }
     }
 
     /// PRIVACY (key never opened): the batched join discloses ONLY the payload
@@ -1691,10 +1745,9 @@ mod batched_hidden_value_tests {
         for n in [3usize, 5, 7] {
             let join =
                 HiddenValueJoin::new(ShamirBackend::new_seeded(n, 0xF0F0 + n as u64).unwrap());
-            // Left claims key 42; right has only 7 and 8 — no honest match exists.
+            // Control: both sides claim key 42 — a GENUINELY equal key DOES match.
             let l = positional("L", &["a"], &[(42u64, vec![lit("forged")])]);
             let r = positional("R", &["b"], &[(42u64, vec![lit("real")])]);
-            // Sanity: with a GENUINELY equal key it DOES match (control).
             let (ok, _) = join.batched_join(&l, &r, 1).unwrap();
             assert_eq!(
                 ok.rows.len(),
