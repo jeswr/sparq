@@ -169,11 +169,14 @@ fn any_bit_set(snapshot: &StatusListSnapshot, lo: u64, hi: u64) -> bool {
         let take = bits_left_in_byte.min(bits_to_hi);
         // Mask the `take` bits starting at `off` and test them in one shot.
         let mask: u8 = (((1u16 << take) - 1) as u8) << off;
-        // The covered-region guarantee means the byte exists; treat a missing byte
-        // as all-zero defensively (it cannot make a false negative — a missing byte
-        // would read as `1` via `bit()`, but the caller only invokes this for the
-        // covered region where bytes are present).
-        let b = snapshot.bits.get(byte).copied().unwrap_or(0);
+        // The covered-region guarantee means the byte exists, so this fallback is
+        // unreachable on the real call site. It is FAIL-CLOSED nonetheless: a
+        // missing byte reads as all-ones (`0xFF`), matching `StatusListSnapshot::bit`
+        // / `leaf`, which define out-of-range bits as `1` (revoked). So if this
+        // helper is ever called on a range that touches a missing byte, it reports
+        // the region as set (returns `true`) rather than letting `sparse_subtree_root`
+        // misclassify an unknown/padding region as an all-zero subtree.
+        let b = snapshot.bits.get(byte).copied().unwrap_or(0xFF);
         if b & mask != 0 {
             return true;
         }
@@ -448,6 +451,26 @@ mod tests {
                     "any_bit_set disagreed on [{lo}, {hi})"
                 );
             }
+        }
+    }
+
+    // [OPUS-4.8] sq-6qe: the real caller never invokes any_bit_set past the covered
+    // region, but the missing-byte fallback must be FAIL-CLOSED: a range touching a
+    // byte beyond `bits` reads as revoked (`1`), matching `bit()`, so the helper
+    // reports the region as set (`true`) and never lets the sparse builder
+    // misclassify an unknown/padding region as an all-zero subtree.
+    #[test]
+    fn any_bit_set_is_fail_closed_on_missing_bytes() {
+        let s = snap(vec![0b0000_0000u8]); // one covered byte, all active
+        // Range entirely in the missing/padding region (bytes 1..) must read as set.
+        assert!(any_bit_set(&s, 8, 24), "padding region must be fail-closed (set)");
+        // Range straddling covered (active) + missing also reports set via the tail.
+        assert!(any_bit_set(&s, 0, 16), "straddling range must be fail-closed (set)");
+        // Sanity: a fully-covered all-active range is correctly NOT set.
+        assert!(!any_bit_set(&s, 0, 8), "covered all-active range is not set");
+        // And the missing-byte reads agree with the per-index `bit()` oracle.
+        for i in 8u64..24 {
+            assert!(s.bit(i), "out-of-range bit {i} must be revoked");
         }
     }
 
