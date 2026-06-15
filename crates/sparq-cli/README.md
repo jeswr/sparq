@@ -37,6 +37,11 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
 - **`bench`** — run a directory of `*.rq` queries N times each, one TSV timing line per query.
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
 - **Transparent decompression** — `.gz` / `.bz2` / `.zst` inputs detected by content.
+  The gzip path defaults to the pure-Rust `miniz_oxide` backend; the opt-in, native-only
+  `zlib-ng` cargo feature (`cargo build -p sparq-cli --features zlib-ng`, or
+  `--features hdt,zlib-ng` to extend it to `.hdt.gz`) swaps in the faster zlib-ng C
+  backend for gzip inflate at zero code change. Off by default; native-only, so it never
+  reaches the wasm build.
 
 ## 📚 Learn more
 
