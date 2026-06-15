@@ -103,14 +103,33 @@
 //!
 //! [`ObliviousOutputCost`] reports what a real deployment would pay: `B` select
 //! multiplications (one round, all in parallel), the shuffle's switch count +
-//! depth ([`crate::oblivious::ShuffleCost`]), and `B` degree-`2t` opens. No
-//! hard-coded numbers: derived from `B` and the built network (AGENTS.md).
+//! depth ([`crate::oblivious::ShuffleCost`]) — with the switch count scaled by the
+//! packed-entry WIDTH (tag + payload limbs), since a real secret-control shuffle
+//! pays a conditional swap per field element per switch and the payloads ride
+//! through the shuffle as secret limbs (Copilot review #93) — and `B` degree-`2t`
+//! opens. No hard-coded numbers: derived from `B`, the payload width, and the
+//! built network (AGENTS.md).
 
 use crate::field::Fp;
 use crate::oblivious::{shuffle, SecretColumn, ShuffleCost};
 use crate::partial::{HolderId, MpcError, PartialResult};
 use crate::shamir::{self, ShamirBackend, ShamirDealer, Share};
 use oxrdf::{Term, Variable};
+use std::str::FromStr;
+
+/// Bytes packed per `Fp` limb when a payload term is encoded into the secret
+/// domain to be carried THROUGH the oblivious shuffle (Copilot review #93,
+/// thread 1). `Fp` is the Mersenne prime `2^61 − 1` ([`crate::field::P`]), so a
+/// field element holds any 60-bit value; we pack 7 bytes (56 bits) per limb,
+/// well under the modulus, so every limb is a canonical residue with no reduction
+/// and the byte→limb→byte round-trip is exact. `[OPUS-4.8]`
+const BYTES_PER_LIMB: usize = 7;
+
+/// The fixed value packed into padding limbs (the limbs that bring a short
+/// entry up to the uniform width). The exact byte length is carried in an explicit
+/// LENGTH-PREFIX limb (see [`bytes_to_limbs`]), so padding content is irrelevant to
+/// decoding — `0` is used purely for determinism. `[OPUS-4.8]`
+const PAD_LIMB: u64 = 0;
 
 /// One disclosed payload row — a column vector of nullable `oxrdf` terms, the same
 /// row shape `sparq_engine::QueryResult` / [`PartialResult`] use (`None` = unbound).
@@ -169,7 +188,12 @@ pub struct ObliviousOutputCost {
     pub select_mults: usize,
     /// Degree-`2t` opens performed at reveal (one per slot).
     pub opens: usize,
-    /// The shuffle's cost over `B` slots (switch count + network depth).
+    /// The shuffle's cost over `B` slots (switch count + network depth). The
+    /// `switches` count is scaled by the packed-entry WIDTH (tag + payload limbs):
+    /// a real secret-control shuffle pays a conditional swap per field element per
+    /// switch, and the payloads now ride through the shuffle as secret limbs, so a
+    /// single-element switch count would understate the work (Copilot review #93,
+    /// thread 2). `[OPUS-4.8]`
     pub shuffle: ShuffleCost,
 }
 
@@ -211,12 +235,14 @@ pub type ObliviousOutput = (Vec<OutputSlot>, ObliviousOutputCost);
 ///    revealed count is exactly `B` regardless of input.
 /// 3. **Oblivious-select** each slot's selector against a real-tag sharing:
 ///    `tag_out = sel · real_tag` (one multiplication; a non-match has `sel = 0` so
-///    the tag opens to the dummy sentinel `0`). The cleartext payload travels
-///    alongside, co-permuted, and is only emitted when the opened tag says "real".
-/// 4. **Oblivious-shuffle** the (tag, payload) column together so output position
-///    is independent of input position (substrate `shuffle`).
-/// 5. **Open exactly `B` tags** at degree `2t`; emit [`OutputSlot::Row`] where the
-///    tag is the real sentinel and [`OutputSlot::Dummy`] otherwise.
+///    the tag opens to the dummy sentinel `0`). The payload is encoded into
+///    secret-shared `Fp` limbs that travel THROUGH the shuffle locked to the tag
+///    (so the permutation is never opened — Copilot review #93).
+/// 4. **Oblivious-shuffle** the (tag, payload-limbs) entry together so output
+///    position is independent of input position (substrate `shuffle`).
+/// 5. **Open exactly `B` tags** at degree `2t` (and the payload limbs in the same
+///    shuffled order); emit [`OutputSlot::Row`] where the tag is the real sentinel,
+///    [`OutputSlot::Dummy`] where it is `0`, and FAIL CLOSED on any other value.
 ///
 /// ## Fail-closed bound contract
 ///
@@ -291,21 +317,36 @@ pub fn oblivious_set_output(
     }
 
     // --- Step 4: oblivious-shuffle the tag column AND co-permute the payloads. ---
+    // Payloads ride THROUGH the shuffle as secret shares (the permutation is never
+    // opened) — see `shuffle_with_payloads` (Copilot review #93, thread 1).
     let (shuffled_tags, shuffled_payloads, shuffle_cost) =
-        shuffle_with_payloads(&mut dealer, tag_col, payloads)?;
+        shuffle_with_payloads(&mut dealer, tag_col, payloads, payload_arity)?;
 
     // --- Step 5: open exactly `B` tags at degree 2t; classify each slot. ---
+    // FAIL CLOSED on an unexpected tag (Copilot review #93, thread 3): the only
+    // legitimate opened values are `REAL_TAG` (a match) and `0` (a non-match /
+    // dummy). Any other value means a malformed selector (a `MatchBit` that was not
+    // a sharing of exactly 0/1) or share corruption that slipped past the robust
+    // open's detection budget — silently treating it as a dummy could drop a real
+    // match without a word. The tag is already opened here, so refusing costs
+    // nothing and leaks nothing extra; we surface it as a typed `Tampered` error.
     let mut out: Vec<OutputSlot> = Vec::with_capacity(bound);
     for (tag_share, payload) in shuffled_tags.iter().zip(shuffled_payloads) {
         let tag = shamir::reconstruct_degree(tag_share, 2 * t)?;
         if tag == real_tag {
             out.push(OutputSlot::Row(payload));
-        } else {
-            // tag == 0 (non-match or pure dummy). Defensive: any other value would
-            // indicate a corrupted/tampered tag share; treat as a dummy (the open
-            // already routes through the robust checker, which aborts on detectable
-            // tampering before we get here).
+        } else if tag == Fp::zero() {
             out.push(OutputSlot::Dummy);
+        } else {
+            return Err(MpcError::Tampered {
+                detail: format!(
+                    "oblivious_set_output: opened slot tag {} is neither REAL_TAG ({}) nor 0 — \
+                     malformed selector or corrupted share; refusing rather than dropping a match",
+                    tag.value(),
+                    real_tag.value()
+                ),
+                cheaters: Vec::new(),
+            });
         }
     }
 
@@ -342,72 +383,245 @@ fn selector_sharing(dealer: &mut ShamirDealer, bit: &MatchBit) -> Result<Vec<Sha
     }
 }
 
-/// Oblivious-shuffle a tag column AND co-permute its cleartext payloads by the
-/// SAME random permutation. The substrate [`shuffle`] permutes a [`SecretColumn`]
-/// by an internal secret permutation; to drag the payloads along we attach a
-/// secret-shared position index to each slot, shuffle the packed (tag, index)
-/// entries with the same call, then open the shuffled indices to learn where each
-/// original slot landed and reorder the payloads to match.
+/// Encode one payload row (`payload_arity` nullable terms) into a byte stream that
+/// round-trips back to the SAME row via [`decode_payload_row`]. Layout, per column:
+/// a 1-byte presence flag (`0` = unbound `None`, `1` = bound `Some`), and for a
+/// bound column the term's canonical N-Triples serialization (`Term::to_string`)
+/// as UTF-8, NUL-terminated. The N-Triples form escapes control characters
+/// (including NUL → ` `), so a raw `0x00` never appears inside a term and is
+/// an unambiguous field terminator. `[OPUS-4.8]`
+fn encode_payload_row(row: &[Option<Term>]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for cell in row {
+        match cell {
+            None => bytes.push(0u8),
+            Some(term) => {
+                bytes.push(1u8);
+                bytes.extend_from_slice(term.to_string().as_bytes());
+                bytes.push(0u8); // NUL terminator (never occurs inside the term)
+            }
+        }
+    }
+    bytes
+}
+
+/// Inverse of [`encode_payload_row`]: parse a byte stream back into `arity`
+/// nullable terms. Fails closed ([`MpcError::Protocol`]) on any malformed encoding
+/// (truncated stream, non-UTF-8, unparseable term) — a corrupted shuffle entry must
+/// not silently yield a wrong or partial row. `[OPUS-4.8]`
+fn decode_payload_row(bytes: &[u8], arity: usize) -> Result<Vec<Option<Term>>, MpcError> {
+    let mut out = Vec::with_capacity(arity);
+    let mut pos = 0usize;
+    for col in 0..arity {
+        let flag = *bytes.get(pos).ok_or_else(|| {
+            MpcError::Protocol(format!(
+                "decode_payload_row: truncated stream at column {col} (missing presence flag)"
+            ))
+        })?;
+        pos += 1;
+        match flag {
+            0 => out.push(None),
+            1 => {
+                let end = bytes[pos..]
+                    .iter()
+                    .position(|&b| b == 0u8)
+                    .map(|rel| pos + rel)
+                    .ok_or_else(|| {
+                        MpcError::Protocol(format!(
+                            "decode_payload_row: column {col} term not NUL-terminated (corrupt entry)"
+                        ))
+                    })?;
+                let s = std::str::from_utf8(&bytes[pos..end]).map_err(|e| {
+                    MpcError::Protocol(format!(
+                        "decode_payload_row: column {col} term is not valid UTF-8: {e}"
+                    ))
+                })?;
+                let term = Term::from_str(s).map_err(|e| {
+                    MpcError::Protocol(format!(
+                        "decode_payload_row: column {col} term {s:?} did not re-parse: {e}"
+                    ))
+                })?;
+                out.push(Some(term));
+                pos = end + 1; // skip the NUL
+            }
+            other => {
+                return Err(MpcError::Protocol(format!(
+                    "decode_payload_row: column {col} has invalid presence flag {other} (corrupt entry)"
+                )))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Pack a byte stream into `Fp` limbs with an explicit LENGTH PREFIX so the decode
+/// is exact regardless of where the last chunk falls. Layout: `limb[0]` = the byte
+/// length, then `⌈len / 7⌉` data limbs of [`BYTES_PER_LIMB`] bytes each (little-
+/// endian within a limb), each `< 2^56`. The length prefix removes the trailing-
+/// zero ambiguity a sentinel/implicit-length scheme has (a final partial limb is
+/// zero-padded to 7 bytes; the prefix tells the decoder exactly how many to keep).
+/// `[OPUS-4.8]`
+fn bytes_to_limbs(bytes: &[u8]) -> Vec<Fp> {
+    let mut limbs = Vec::with_capacity(1 + bytes.len().div_ceil(BYTES_PER_LIMB));
+    limbs.push(Fp::new(bytes.len() as u64));
+    for chunk in bytes.chunks(BYTES_PER_LIMB) {
+        let mut v = 0u64;
+        for (k, &b) in chunk.iter().enumerate() {
+            v |= (b as u64) << (8 * k);
+        }
+        limbs.push(Fp::new(v));
+    }
+    limbs
+}
+
+/// The number of limbs [`bytes_to_limbs`] produces for a `byte_len`-byte stream:
+/// one length-prefix limb plus `⌈byte_len / 7⌉` data limbs. `[OPUS-4.8]`
+fn limb_count_for(byte_len: usize) -> usize {
+    1 + byte_len.div_ceil(BYTES_PER_LIMB)
+}
+
+/// Inverse of [`bytes_to_limbs`]: reassemble the original bytes from a limb block,
+/// reading the byte length from `limbs[0]` and keeping exactly that many bytes.
+/// Fails closed ([`MpcError::Protocol`]) if the length prefix is missing, if it
+/// claims more bytes than the data limbs can supply, or if a data limb's value
+/// exceeds the 7-byte range — any of which signals a corrupted shuffle entry rather
+/// than a recoverable payload. `[OPUS-4.8]`
+fn limbs_to_bytes(limbs: &[Fp]) -> Result<Vec<u8>, MpcError> {
+    let len_limb = limbs.first().ok_or_else(|| {
+        MpcError::Protocol("limbs_to_bytes: empty limb block (missing length prefix)".to_string())
+    })?;
+    let byte_len = len_limb.value() as usize;
+    let available = (limbs.len() - 1) * BYTES_PER_LIMB;
+    if byte_len > available {
+        return Err(MpcError::Protocol(format!(
+            "limbs_to_bytes: length prefix {byte_len} exceeds available {available} bytes \
+             (corrupt shuffle entry)"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(byte_len);
+    for limb in &limbs[1..] {
+        let v = limb.value();
+        if v >= (1u64 << (8 * BYTES_PER_LIMB)) {
+            return Err(MpcError::Protocol(format!(
+                "limbs_to_bytes: data limb {v} exceeds the 7-byte range (corrupt shuffle entry)"
+            )));
+        }
+        for k in 0..BYTES_PER_LIMB {
+            bytes.push(((v >> (8 * k)) & 0xff) as u8);
+        }
+    }
+    bytes.truncate(byte_len);
+    Ok(bytes)
+}
+
+/// Oblivious-shuffle the tag column AND its payloads by the SAME secret
+/// permutation — carrying the payloads THROUGH the shuffle as secret shares, so the
+/// permutation is NEVER opened (Copilot review #93, thread 1).
 ///
-/// Opening the indices leaks NOTHING about matches: the indices are exactly the
-/// public set `0..n` (every slot has a distinct index), so their shuffled values
-/// reveal only the permutation — which is uniformly random and independent of the
-/// data. This is the standard "shuffle then reveal the routing of a public tag"
-/// trick; the payload contents and the match bits never enter the open.
+/// ## Why the old "open the indices" trick leaked (and this does not)
+///
+/// The previous implementation attached a secret-shared *position index* `i` to
+/// each slot, shuffled, then OPENED the shuffled indices to learn the permutation
+/// and reorder cleartext payloads. That reveals the permutation π to the protocol
+/// transcript; composed with the step-5 per-slot tag opens (which are
+/// position-aligned to the SAME shuffled order), an observer maps each opened tag
+/// back to its originating candidate `π(k)` and recovers the per-candidate match
+/// pattern — exactly the L2 match-graph / fan-out leak this module exists to close.
+/// Cleartext payloads cannot be co-permuted by a secret permutation without either
+/// revealing the permutation or carrying the payload INSIDE the secret domain;
+/// this function does the latter.
+///
+/// ## Mechanism
+///
+/// Each payload row is serialized ([`encode_payload_row`]) and packed into a
+/// FIXED number of `Fp` limbs (`limb_capacity`, the max over all rows so every
+/// entry has identical width — required by the shuffle network and revealing only
+/// the public max payload length), with [`LIMB_END`] padding. Each limb is
+/// secret-shared and packed into the shuffle entry AFTER the tag shares:
+/// `[tag shares | limb₁ shares | … | limb_C shares]`. The substrate [`shuffle`]
+/// permutes whole entries by a secret permutation; the limbs ride along locked to
+/// their tag. At reveal, the caller opens the tag AND the payload limbs IN
+/// SHUFFLED ORDER (never the permutation), then decodes the limbs back to the
+/// row — so the only thing the transcript learns is the shuffled multiset of
+/// (tag, payload), with no position→candidate linkage. Opening the payload at a
+/// shuffled position discloses no more than the step-5 row open already does.
 fn shuffle_with_payloads(
     dealer: &mut ShamirDealer,
     tag_col: SecretColumn,
     payloads: Vec<PayloadRow>,
+    payload_arity: usize,
 ) -> Result<ShuffledColumn, MpcError> {
     let n = tag_col.len();
     debug_assert_eq!(payloads.len(), n);
     let t = dealer.threshold();
     let nparties = dealer.parties();
 
-    // Attach a degree-`t` sharing of the public index i to each slot, packed as a
-    // wider per-slot column entry: [tag shares..., index shares...]. The shuffle
-    // swaps whole entries, so tag and index stay locked together through routing.
+    // Serialize every payload row and size a UNIFORM limb capacity = the max limb
+    // count (length prefix + data limbs) over all rows. Uniform width is required
+    // by the shuffle network and leaks only the public maximum payload length (all
+    // candidate payloads are cleartext to the protocol builder anyway).
+    let encoded: Vec<Vec<u8>> = payloads.iter().map(|p| encode_payload_row(p)).collect();
+    let limb_capacity = encoded
+        .iter()
+        .map(|b| limb_count_for(b.len()))
+        .max()
+        .unwrap_or(0);
+
+    // Pack each entry: [tag shares | limb shares...], every limb a degree-`t`
+    // sharing, padded to `limb_capacity` with shared PAD_LIMB so all entries are
+    // identical width (the explicit length prefix makes padding content irrelevant).
     let mut packed: SecretColumn = Vec::with_capacity(n);
-    for (i, tag) in tag_col.into_iter().enumerate() {
-        let idx = dealer.share(Fp::new(i as u64));
+    for (tag, enc) in tag_col.into_iter().zip(&encoded) {
         let mut entry = tag; // tag shares first
-        entry.extend(idx); // then index shares
+        let limbs = bytes_to_limbs(enc);
+        for limb in &limbs {
+            entry.extend(dealer.share(*limb));
+        }
+        // Pad to uniform width with shared pad limbs.
+        for _ in limbs.len()..limb_capacity {
+            entry.extend(dealer.share(Fp::new(PAD_LIMB)));
+        }
         packed.push(entry);
     }
 
-    // One oblivious shuffle over the packed entries (the substrate primitive).
-    let (shuffled, cost) = shuffle(dealer, packed)?;
+    // One oblivious shuffle over the packed entries (the substrate primitive). It
+    // permutes whole entries by a SECRET permutation that is never revealed.
+    let (shuffled, base_cost) = shuffle(dealer, packed)?;
 
-    // Split each shuffled entry back into (tag shares, index shares). Every entry
-    // has the same width = n_parties tag shares + n_parties index shares.
+    // The real secret-control shuffle pays a conditional swap per FIELD ELEMENT per
+    // switch; the packed entry is `entry_width` field elements wide (tag + limbs),
+    // so the modelled switch count must scale by the width (Copilot review #93,
+    // thread 2). `ShuffleCost::model` counts one element per item, so widen it here.
+    let entry_width = 1 + limb_capacity; // tag + payload limbs (per secret value)
+    let cost = ShuffleCost {
+        items: base_cost.items,
+        switches: base_cost.switches.saturating_mul(entry_width),
+        depth_rounds: base_cost.depth_rounds,
+    };
+
+    // Split each shuffled entry into (tag shares, limb shares...) and decode the
+    // payload from the OPENED limbs — in shuffled order, never opening the
+    // permutation. Every entry has the same width = nparties·(1 + limb_capacity).
+    let expect_width = nparties * (1 + limb_capacity);
     let mut shuffled_tags: SecretColumn = Vec::with_capacity(n);
-    let mut shuffled_idx_shares: Vec<Vec<Share>> = Vec::with_capacity(n);
-    for entry in shuffled {
-        if entry.len() != 2 * nparties {
-            return Err(MpcError::Protocol(format!(
-                "shuffle_with_payloads: packed entry width {} != 2*n_parties {}",
-                entry.len(),
-                2 * nparties
-            )));
-        }
-        let (tag_part, idx_part) = entry.split_at(nparties);
-        shuffled_tags.push(tag_part.to_vec());
-        shuffled_idx_shares.push(idx_part.to_vec());
-    }
-
-    // Open the shuffled indices (degree `t`) to learn the applied permutation, then
-    // co-permute the payloads. The indices are the public set 0..n, so this open
-    // reveals only the permutation, never any secret (see fn doc).
     let mut shuffled_payloads: Vec<Vec<Option<Term>>> = Vec::with_capacity(n);
-    for idx_shares in &shuffled_idx_shares {
-        let idx_fp = shamir::reconstruct_degree(idx_shares, t)?;
-        let i = idx_fp.value() as usize;
-        if i >= n {
+    for entry in shuffled {
+        if entry.len() != expect_width {
             return Err(MpcError::Protocol(format!(
-                "shuffle_with_payloads: opened index {i} out of range 0..{n} (corrupted index share)"
+                "shuffle_with_payloads: packed entry width {} != n_parties*(1+limbs) {expect_width}",
+                entry.len(),
             )));
         }
-        shuffled_payloads.push(payloads[i].clone());
+        let (tag_part, limb_part) = entry.split_at(nparties);
+        shuffled_tags.push(tag_part.to_vec());
+
+        // Open each limb sharing (degree `t`) IN SHUFFLED ORDER and decode.
+        let mut limbs: Vec<Fp> = Vec::with_capacity(limb_capacity);
+        for limb_shares in limb_part.chunks(nparties) {
+            limbs.push(shamir::reconstruct_degree(limb_shares, t)?);
+        }
+        let row_bytes = limbs_to_bytes(&limbs)?;
+        shuffled_payloads.push(decode_payload_row(&row_bytes, payload_arity)?);
     }
 
     Ok((shuffled_tags, shuffled_payloads, cost))
@@ -793,5 +1007,111 @@ mod tests {
         assert!(slots.is_empty());
         assert_eq!(cost.bound, 0);
         assert_eq!(cost.select_mults, 0);
+    }
+
+    // ---- Payload-through-shuffle round-trip (Copilot #93, thread 1) --------------
+
+    fn iri(s: &str) -> Option<Term> {
+        Some(Term::NamedNode(oxrdf::NamedNode::new(s).unwrap()))
+    }
+
+    fn typed(value: &str, dt: &str) -> Option<Term> {
+        Some(Term::Literal(oxrdf::Literal::new_typed_literal(
+            value,
+            oxrdf::NamedNode::new(dt).unwrap(),
+        )))
+    }
+
+    /// The encode→limbs→bytes→decode pipeline round-trips a mix of IRIs, simple
+    /// and typed literals, special characters, and unbound `None` cells exactly.
+    /// `[OPUS-4.8]`
+    #[test]
+    fn payload_row_encode_decode_round_trips() {
+        let rows: Vec<Vec<Option<Term>>> = vec![
+            vec![iri("http://ex/x"), lit("Alice")],
+            vec![None, typed("42", "http://www.w3.org/2001/XMLSchema#integer")],
+            vec![lit("comma, and \"quote\" and \\backslash"), None],
+            vec![lit(""), lit("")], // empty literals
+        ];
+        for row in &rows {
+            let bytes = encode_payload_row(row);
+            let limbs = bytes_to_limbs(&bytes);
+            let back = limbs_to_bytes(&limbs).unwrap();
+            assert_eq!(back, bytes, "byte<->limb round-trip changed bytes");
+            let decoded = decode_payload_row(&back, row.len()).unwrap();
+            assert_eq!(&decoded, row, "term round-trip changed the row");
+        }
+    }
+
+    /// End-to-end: IRIs, typed literals, and unbound cells survive the FULL
+    /// oblivious output path (carried through the shuffle as secret limbs), and the
+    /// real multiset is shuffle-invariant across seeds. This is the regression test
+    /// for the L2-leak fix — payloads no longer ride as cleartext reordered by an
+    /// opened permutation. `[OPUS-4.8]`
+    #[test]
+    fn rich_payloads_survive_shuffle_without_opening_permutation() {
+        let cands = public_candidates(&[
+            (true, vec![iri("http://ex/alice"), typed("30", "http://www.w3.org/2001/XMLSchema#integer")]),
+            (false, vec![iri("http://ex/bob"), typed("40", "http://www.w3.org/2001/XMLSchema#integer")]),
+            (true, vec![lit("Carol \"C\""), None]),
+        ]);
+        let mut expected = vec![
+            format!("{:?}", vec![iri("http://ex/alice"), typed("30", "http://www.w3.org/2001/XMLSchema#integer")]),
+            format!("{:?}", vec![lit("Carol \"C\""), None]),
+        ];
+        expected.sort();
+        for seed in 0..16u64 {
+            let backend = ShamirBackend::new_seeded(5, seed).unwrap();
+            let (slots, _) = oblivious_set_output(&backend, &cands, 2, 5).unwrap();
+            assert_eq!(real_multiset(&slots), expected, "seed {seed}: rich payload changed");
+        }
+    }
+
+    /// The modelled shuffle switch count scales with the packed-entry width
+    /// (tag + payload limbs), not one element per item (Copilot #93, thread 2).
+    /// A wider payload (more limbs) yields a strictly larger switch count than a
+    /// narrow one at the same slot count. `[OPUS-4.8]`
+    #[test]
+    fn shuffle_cost_scales_with_payload_width() {
+        let backend = ShamirBackend::new_seeded(3, 5).unwrap();
+        // Narrow: one short literal. Wide: one long literal (many limbs).
+        let narrow = public_candidates(&[(true, vec![lit("x")])]);
+        let wide = public_candidates(&[(true, vec![lit(&"y".repeat(200))])]);
+        let (_, c_narrow) = oblivious_set_output(&backend, &narrow, 1, 4).unwrap();
+        let (_, c_wide) = oblivious_set_output(&backend, &wide, 1, 4).unwrap();
+        assert_eq!(c_narrow.shuffle.items, c_wide.shuffle.items, "same slot count");
+        assert!(
+            c_wide.shuffle.switches > c_narrow.shuffle.switches,
+            "wider payload must cost more switches (width-scaled): wide={}, narrow={}",
+            c_wide.shuffle.switches,
+            c_narrow.shuffle.switches
+        );
+    }
+
+    // ---- Fail-closed on an out-of-set opened tag (Copilot #93, thread 3) ---------
+
+    /// A `MatchBit::SecretShared` selector that is NOT a sharing of 0/1 makes the
+    /// opened tag fall outside `{0, REAL_TAG}`; rather than silently dropping it as
+    /// a dummy, the path FAILS CLOSED with a typed `Tampered` error. `[OPUS-4.8]`
+    #[test]
+    fn out_of_set_tag_fails_closed() {
+        let backend = ShamirBackend::new_seeded(3, 7).unwrap();
+        let mut dealer = backend.dealer();
+        // A malformed selector: a sharing of 5 (not 0 or 1). tag = 5*1 = 5.
+        let five = dealer.share(Fp::new(5));
+        let cands = vec![Candidate {
+            payload: vec![lit("x")],
+            matched: MatchBit::SecretShared(five),
+        }];
+        let err = oblivious_set_output(&backend, &cands, 1, 2).unwrap_err();
+        match err {
+            MpcError::Tampered { detail, .. } => {
+                assert!(
+                    detail.contains("neither REAL_TAG") || detail.contains("malformed selector"),
+                    "must name the out-of-set tag: {detail}"
+                );
+            }
+            other => panic!("expected Tampered on an out-of-set tag, got {other:?}"),
+        }
     }
 }
