@@ -42,7 +42,7 @@ register distinguishes two trust classes of `unsafe`:
 | `mmap_corruption_oracle` test (`crates/sparq-core/tests/`, run under `--features mmap,dict-spill`) + `fuzz` lane's mmap-loader target | the **B5** mmap sites Miri structurally cannot run (file-backed mappings): hostile/corrupt index → loader must reject or stay in-bounds, never UB. |
 | `#![forbid(unsafe_code)]` on 20 crates (sq-emay) | proves the unsafe surface is *confined* to the 5 crates below; a new `unsafe` anywhere else fails to compile. |
 | `scripts/unsafe-gate.py --check` (this PR, GX-5) | the count **ratchet** — a PR cannot add `unsafe` without updating this register + re-seeding the snapshot. |
-| `// SAFETY:` comment required on every site (CONTRIBUTING) | the per-site argument lives next to the code; clippy `undocumented_unsafe_blocks` is the local enforcement. |
+| `// SAFETY:` / adjacent-comment argument on every site (CONTRIBUTING) | the per-site argument lives next to the code. Enforcement is the **register + review + the count ratchet** (a new `unsafe` cannot land without a register row, a source comment, and a re-seed). `clippy::undocumented_unsafe_blocks` (which would mechanically require the literal `// SAFETY:` token) is **recommended but NOT yet enabled on the first-party unsafe crates** — tracked as gap MS-G2 in [`gap-register.md`](./gap-register.md). [OPUS-4.8] |
 
 ## Register
 
@@ -143,8 +143,12 @@ Recurring invariant shorthands used below:
 
 ## NEEDS-REVIEW
 
-**None.** Every one of the 56 sites has a clear, sound safety argument and a
-corresponding `// SAFETY:` comment in source. Should a future site lack one, mark it
+**None.** Every one of the 56 sites has a clear, sound safety argument in source: 50
+via the literal `// SAFETY:` token, and 6 via an adjacent justification block comment
+(the `from_utf8_unchecked` TRUSTED fast path `dict.rs:483`, and the two `unsafe impl
+Send`/`Sync for SlotPtr` pairs `dict.rs:2192-93` + `dictspill.rs:720-21`). Normalising
+those 6 to the literal token — and enabling `clippy::undocumented_unsafe_blocks` to keep
+them there — is gap MS-G2. Should a future site lack any argument, mark it
 `NEEDS-REVIEW` here and open a bead (`bd create`) rather than fabricating a
 justification — do **not** re-seed the snapshot over an unjustified `unsafe`.
 
