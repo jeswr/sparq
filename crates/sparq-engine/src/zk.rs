@@ -23,8 +23,8 @@
 //! # Cost model when armed (and only when armed)
 //!
 //! The per-row path records **dictionary ids, never terms**: one id-set probe
-//! per matched row ([`record_scan_ids`]) or one memo probe per filter operand
-//! cell ([`OperandMemo`]). Terms are materialized **once per unique input
+//! per matched row (`record_scan_ids`) or one memo probe per filter operand
+//! cell (`OperandMemo`). Terms are materialized **once per unique input
 //! triple / unique operand value** — the floor for a term-carrying trace —
 //! at record time, against the graph that produced the ids (correct for
 //! `GRAPH` sub-graphs and FROM-assembled datasets, whose dictionaries do not

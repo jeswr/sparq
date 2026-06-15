@@ -91,8 +91,8 @@ async fn empty_allowlist_refuses_service_before_any_network_call() {
     // Default config + a SHORT query timeout: if the strict pre-DNS refusal ever
     // regresses and the server actually dials the (live) endpoint, the request must not
     // hang on the 30s default and slow CI — the timeout bounds the failure.
-    let mut config = ServerConfig::default();
-    config.query_timeout = Some(std::time::Duration::from_secs(2)); // empty allowlist => deny ALL SERVICE
+    // empty allowlist => deny ALL SERVICE
+    let config = ServerConfig { query_timeout: Some(std::time::Duration::from_secs(2)), ..ServerConfig::default() };
     let base = spawn_with(config).await;
     let q = format!(
         "PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <http://{host}/> {{ ?s ex:name ?name }} }}"
@@ -153,8 +153,8 @@ async fn silent_service_under_deny_yields_identity() {
     // 30s default. (SILENT swallows the refusal either way, but the timeout bounds it.)
     let (remote, _accepts) = serve(remote_body(), 1);
     let host = remote.trim_start_matches("http://").trim_end_matches('/');
-    let mut config = ServerConfig::default(); // empty allowlist => deny ALL SERVICE
-    config.query_timeout = Some(std::time::Duration::from_secs(2));
+    // empty allowlist => deny ALL SERVICE
+    let config = ServerConfig { query_timeout: Some(std::time::Duration::from_secs(2)), ..ServerConfig::default() };
     let base = spawn_with(config).await;
     let q = format!(
         "PREFIX ex: <http://ex/> SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <http://{host}/> {{ ?s ex:name ?name }} }}"

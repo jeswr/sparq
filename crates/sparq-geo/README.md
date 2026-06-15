@@ -78,10 +78,12 @@ same sphere as `geo`'s haversine):
 ## Library use
 
 ```rust
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 use geo_types::Point;
 use sparq_core::Graph;
 use sparq_geo::{geof, GeoIndex, Unit, parse_wkt_literal};
 
+# let ttl = "<http://ex/london> <http://ex/loc> \"POINT(-0.1276 51.5074)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral> .";
 let graph = Graph::load_str(ttl, "turtle")?;
 
 // geof: functions over wktLiteral lexical forms (the engine-builtin shape):
@@ -95,6 +97,9 @@ let index = GeoIndex::build(&graph);
 let nearby = index.within_distance(Point::new(-0.1276, 51.5074), 250_000.0, None);
 let top10  = index.nearest(Point::new(-0.1276, 51.5074), 10);
 let hits   = index.intersects_wkt("POLYGON((1 48, 3 48, 3 49.5, 1 49.5, 1 48))")?;
+# let _ = (km, yes, nearby, top10, hits, &graph);
+# Ok(())
+# }
 ```
 
 ## Running `geof:` inside SPARQL
@@ -105,10 +110,12 @@ implemented `geof:` function as a
 sparq-engine's SPARQL 17.6 extension-function mechanism:
 
 ```rust
+# fn main() -> Result<(), String> {
 use sparq_core::Graph;
 use sparq_engine::query_with_functions;
 use sparq_geo::geof_registry;
 
+# let ttl = "<http://ex/london> <http://ex/loc> \"POINT(-0.1276 51.5074)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral> .\n<http://ex/paris> <http://ex/loc> \"POINT(2.3496 48.8530)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral> .";
 let g = Graph::load_str(ttl, "turtle")?;
 let r = query_with_functions(&g, r#"
     PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
@@ -118,6 +125,9 @@ let r = query_with_functions(&g, r#"
       ?city <http://ex/loc> ?there .
       FILTER(geof:distance(?here, ?there, uom:kilometre) < 400)
     }"#, &geof_registry())?;
+# let _ = r;
+# Ok(())
+# }
 ```
 
 Registered IRIs (35, all under `http://www.opengis.net/def/function/geosparql/`):

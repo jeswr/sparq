@@ -102,13 +102,15 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
 - `AppState::at(&self, number: u64) -> Option<PinnedGen>` — pin a retained generation
   (**`time-travel` feature only**).
 - `struct ServerConfig { query_timeout: Option<Duration>, max_body_bytes: usize,
-  max_concurrent: usize, max_results: Option<usize>, max_subscriptions: usize,
-  max_subscriptions_per_conn: usize, verbose: bool, allow_remote: bool,
-  auth_token: Option<String>, auth_token_read: bool, /* + time_travel_* under feature */ }`
-  with `ServerConfig::default()` and `ServerConfig::from_env()`. `auth_token` (set: gates the
-  write surface with a Bearer token, constant-time compared; `None`: no write auth) and
-  `auth_token_read` (gate reads too) are honoured by the library `router` itself — embedders
-  get the gate for free.
+  max_concurrent: usize, max_results: Option<usize>, max_query_rows: Option<usize>,
+  max_decompress_ratio: usize, max_subscriptions: usize, max_subscriptions_per_conn: usize,
+  verbose: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
+  service_allow: ServiceAllowlist, /* + time_travel_* under feature */ }` with
+  `ServerConfig::default()` and `ServerConfig::from_env()`.
+  (`max_query_rows` = coarse memory cap; `max_decompress_ratio` = zip-bomb guard — `sq-ebii`.)
+  `auth_token` (set: gates the write surface with a Bearer token, constant-time compared;
+  `None`: no write auth) and `auth_token_read` (gate reads too) are honoured by the library
+  `router` itself — embedders get the gate for free (`sq-zcby`).
 - `fn bind_posture(addr: &SocketAddr, allow_remote: bool, auth: AuthPosture) -> BindPosture`
   — the bind gate the binary applies: `Loopback` (proceed), `RemoteAllowed { warning }`
   (proceed + log), or `RemoteRefused { message }` (refuse). `AuthPosture::{None, WriteOnly,
@@ -249,7 +251,9 @@ env overrides the default.
 | `--query-timeout SECS` | `SPARQ_QUERY_TIMEOUT` | `30` (`0`=off) | per-request timeout → `503` |
 | `--max-body-bytes N` | `SPARQ_MAX_BODY_BYTES` | `1048576` | body cap → `413` |
 | `--max-concurrent N` | `SPARQ_MAX_CONCURRENT` | `32` | in-flight cap, load-shed → `429` |
-| `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0`=off) | SELECT row cap → honest `413` (not truncation) |
+| `--max-results N` | `SPARQ_MAX_RESULTS` | unlimited (`0`=off) | result/solution cap (SELECT + CONSTRUCT/DESCRIBE WHERE-solutions + EXPLAIN ANALYZE; not ASK/GSP-read/UPDATE) → honest `413` (not truncation) |
+| `--max-query-rows N` | `SPARQ_MAX_QUERY_ROWS` | unlimited (`0`=off) | **memory cap** (coarse): working-set row ceiling on **every** form → honest `413` (`sq-ebii`) |
+| `--max-decompress-ratio N` | `SPARQ_MAX_DECOMPRESS_RATIO` | `20` (`0`=refuse gzip) | **zip-bomb guard**: cap on decompressed:compressed for a `Content-Encoding: gzip` body → `413` (`sq-ebii`) |
 | `--max-subscriptions N` | `SPARQ_MAX_SUBSCRIPTIONS` | `256` | server-wide subs |
 | `--max-subscriptions-per-conn N` | `SPARQ_MAX_SUBSCRIPTIONS_PER_CONN` | `16` | per-socket subs |
 | `--verbose` | — | off | TraceLayer request logging (respects `RUST_LOG`) |
@@ -263,6 +267,67 @@ env overrides the default.
 
 In a library: `AppState::with_config(graph, ServerConfig { max_concurrent: 64, ..Default::default() })`
 then `router(state)`, or `harden(my_router, &config)`.
+
+### Server hardening — the four DoS/SSRF limits (`sq-ebii` + `sq-4w18`)
+
+The threat model (a public, unauthenticated endpoint behind a gateway) calls for four
+distinct limits. **Be precise about what each bounds** — only the body-size and ratio caps
+are byte-hard; the timeout and memory cap are *cooperative* (approximate in time), and the
+memory cap is a *cardinality* ceiling, not an RSS quota:
+
+1. **Query timeout** (`--query-timeout`, `SPARQ_QUERY_TIMEOUT`, default `30s`, `0`=off).
+   The engine's cooperative `QueryBudget.deadline` stops the worker at its next coarse check
+   (operator entry / per outer loop iteration); a wall-clock hard cap of `timeout + 2s` grace
+   guarantees the HTTP `503` even if the engine is mid-stretch. Applies to **all** forms now
+   — SELECT / ASK / CONSTRUCT / DESCRIBE / GSP-read **and** SPARQL Update
+   (`application/sparql-update` + GSP `PUT`/`POST`/`DELETE`): the update path runs under the
+   same cooperative budget on the writer thread *and* the same wall-clock await cap on the
+   HTTP side. *Bounds:* wall-clock per request, approximately (next-check granularity).
+   *Caveat:* updates are sequenced on a single writer, so a long update blocks the queue
+   behind it until it finishes — the cap bounds the **client's wait**, the writer still runs
+   the WHERE to its cooperative stop.
+2. **Memory cap** (`--max-query-rows`, `SPARQ_MAX_QUERY_ROWS`, default **off**, `0`=off).
+   A coarse OOM circuit-breaker: an upper bound on the **row count** of any *materialised
+   intermediate or final* result the engine builds, on **every** form (including
+   CONSTRUCT/DESCRIBE and an UPDATE's `DELETE/INSERT … WHERE`), via the engine's
+   `QueryBudget.max_rows` working-set bound. A join blow-up aborts with an honest `413`
+   instead of OOMing; the speculative cross-product allocation is also capped up-front.
+   *Bounds:* **cardinality (rows), not bytes.* Peak heap ≈ `rows × per-row term cost`, so a
+   query with few but very wide rows (many vars / huge literals) can still exceed the implied
+   memory; dictionary growth, sort/group scratch and a CONSTRUCT template are outside it. It
+   is also approximate in time (coarse checks). Treat it as a blunt anti-OOM breaker, **not**
+   an RSS quota. Distinct from `--max-results` (the result/solution cap, folded into the
+   budget on SELECT / CONSTRUCT/DESCRIBE / EXPLAIN ANALYZE — but not ASK / GSP-read / UPDATE);
+   on a path where both apply, the effective cap is the tighter of the two. A true
+   byte-accounted allocator cap is deferred
+   (`sq-s5is`); writer-queue head-of-line blocking from a slow UPDATE is deferred (`sq-nulp`).
+3. **Decompression-ratio cap** (`--max-decompress-ratio`, `SPARQ_MAX_DECOMPRESS_RATIO`,
+   default `20`×, `0`=refuse gzip). When a GSP write body arrives `Content-Encoding: gzip`
+   the server inflates it with a hard ceiling of
+   `min(ratio × compressed_len, max_body_bytes)`, checked **during** inflate (bounded
+   `Read::take`), and refuses with `413` the moment the decompressed output would cross it —
+   so a tiny but pathologically compressible body cannot inflate into an OOM. `0` refuses
+   gzip bodies outright (fail-closed). *Bounds:* the bodies **the server itself** inflates
+   (GSP `PUT`/`POST`). An unknown `Content-Encoding` is a `415`. *Caveat:* it does **not**
+   cover a compressed payload the *engine* fetches behind a SPARQL `LOAD <url>` / `SERVICE`
+   — those use their own ingest; `SERVICE` egress is bounded separately by limit 4. The
+   compressed bytes pass the `--max-body-bytes` gate first, and the decompressed ceiling is
+   `min(ratio × compressed_len, max_body_bytes)` — so the decompressed output is itself capped
+   at `max_body_bytes`, never `max_body_bytes × ratio`.
+4. **SERVICE-SSRF egress allowlist** (`--service-allow` / `--service-allow-file` /
+   `SPARQ_SERVICE_ALLOW`, default **deny ALL**, feature `service`) — shipped in `sq-4w18`,
+   see "SERVICE federation (egress allowlist)" below. A `SERVICE <iri>` turns
+   attacker-controlled query text into an outbound request from the server host (textbook
+   SSRF; worst case the `169.254.169.254` cloud-metadata IP), so it reaches **nothing**
+   unless its host is allowlisted, enforced on the *resolved* IP before any socket opens
+   (DNS-rebinding-safe), uniformly across queries / ASK / CONSTRUCT/DESCRIBE / subscriptions
+   / federated `INSERT … WHERE`.
+
+Library callers set all four on `ServerConfig` (`query_timeout`, `max_query_rows`,
+`max_decompress_ratio`, `service_allow`). Embedders driving the engine directly thread a
+`sparq_engine::QueryBudget { deadline, max_rows }` into `*_with_budget` query entry points
+and `update_in_place_with_budget`, and wrap calls in
+`sparq_engine::with_service_egress_policy(strict, [host], || …)`.
 
 ## Gotchas / feature flags / prerequisites
 
@@ -280,9 +345,11 @@ then `router(state)`, or `harden(my_router, &config)`.
   whole surface is authenticated (`--auth-token` AND `--auth-token-read`); even then it warns.
   A write-token alone still leaves reads open, so it does NOT by itself make a remote bind
   safe. Deliver the token over TLS (terminate at a proxy). For per-user authz front it with a
-  reverse proxy / gateway (or `sparq-solid`). No rate limit and `--max-results` is unlimited by
-  default — set caps + a gateway rate limiter if exposing it (beads `sq-zcby`, `sq-o4qf`,
-  `sq-ebii`).
+  reverse proxy / gateway (or `sparq-solid`). The token is authentication, NOT a resource
+  cap: it is orthogonal to the DoS caps. No rate limit; `--max-results` / `--max-query-rows`
+  are unlimited by default — set the four hardening caps (timeout, memory, decompression-ratio,
+  SERVICE allowlist; see "Server hardening — the four DoS/SSRF limits") **plus** a gateway
+  rate limiter before exposing it (beads `sq-zcby`, `sq-o4qf`, `sq-ebii`, `sq-4w18`).
 - **SERVICE federation (egress allowlist).** `SERVICE` is OFF in the default build (build
   with `--features service` to enable it). Even enabled, the server is **default-DENY-all
   SERVICE**: a `SERVICE <iri>` clause reaches **nothing** unless its host is allowlisted —
