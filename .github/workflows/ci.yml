@@ -52,10 +52,12 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-4.8] Shared with the `test` shards' restore-only cache: the build
-          # happens here, the shards reuse the SAME dep cache key on the chance they
-          # need any host-side cargo metadata. Kept stable so this branch's cache
-          # survives renames of the (now removed) per-shard build.
+          # [OPUS-4.8] Dep cache for THIS build-once job. The `test` shards no longer
+          # restore a rust-cache entry at all — they download the prebuilt
+          # `nextest.tar.zst` artifact and run it with `--archive-file`, so there is no
+          # shared cache key with them (the earlier per-shard build that did share this
+          # key is removed). A stable `shared-key` is still worth keeping so this job's
+          # dep cache survives across this branch's runs.
           shared-key: "test-workspace"
       # [OPUS-4.8] sq-x4jy: cargo-nextest is the test runner — each test in its OWN
       # process (a stray abort can't take the whole binary down), a never-executed
@@ -73,12 +75,8 @@ jobs:
       # on another runner with `--archive-file`), so the shards never recompile.
       - name: Build + archive test binaries (nextest archive)
         run: cargo nextest archive --workspace --all-targets --archive-file nextest.tar.zst
-      # [OPUS-4.8] Doctests run ONCE here (nextest does not execute or archive them,
-      # and --partition does not apply to them). Running them in THIS job — which is
-      # already warm from the archive build — preserves the ~12s doctest coverage with
-      # zero extra build, and keeps it off the (now build-less) test shards.
-      - name: Doctests (nextest does not run these; run once, off the warm build)
-        run: cargo test --workspace --doc
+      # [OPUS-4.8] Upload the archive immediately after the build, BEFORE doctests, so
+      # the shards' input artifact is produced even if the doctest step later fails.
       - name: Upload nextest archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -86,6 +84,20 @@ jobs:
           path: nextest.tar.zst
           retention-days: 1
           if-no-files-found: error
+      # [OPUS-4.8] Doctests run ONCE here (nextest neither executes nor archives them,
+      # and --partition does not apply to them), off the warm archive build for ~12s at
+      # ZERO extra build cost — the whole point of build-once (sq-vyxy). Tradeoff (raised
+      # in #159 review): the shards `need: build-archive`, so a doctest failure here reds
+      # this job and SKIPS the shards, costing the cross-shard "full failure picture" for
+      # that run. We accept it deliberately: the only alternatives are (a) a separate
+      # doctest job, which re-pays the ~131s workspace build this PR exists to amortise,
+      # or (b) `if: always()` on the shards to decouple them, which muddies the gate
+      # (shards then must distinguish "build failed, no artifact" from "doctests failed,
+      # artifact present"). A doctest failure is rare and itself a hard, independent
+      # blocking signal; archive-then-doctest above at least guarantees the artifact
+      # exists. Re-open this if doctest flakiness ever makes the masked picture costly.
+      - name: Doctests (nextest does not run these; run once, off the warm build)
+        run: cargo test --workspace --doc
 
   test:
     # [OPUS-4.8] LOAD-AWARE sharded test matrix (merge-queue-drain speed — @jeswr).
