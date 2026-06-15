@@ -1,0 +1,10 @@
+# [OPUS-4.8] Deep Taxonomy DETERMINISTIC expected sizes per depth tier (sq-1hgz). run.sh asserts
+# BOTH columns; any mismatch is a sparq-reason regression and fails the run loudly. These are
+# STRUCTURAL facts of the DT closure, not perf measurements:
+#   closure_triples = 2*depth + 1   (depth :sc edges + depth derived `:i a :nK` + the seed `:i a :n0`)
+#   query_rows      =   depth + 1   (:i is a member of every class :n0 .. :n{depth} after closure)
+# Cross-checked against bench/inference/eye-comparison.md (dt1k 2,001; dt10k 20,001; dt100k 200,001
+# — engines agree). Columns: depth<TAB>closure_triples<TAB>query_rows
+1000	2001	1001
+10000	20001	10001
+100000	200001	100001

@@ -177,6 +177,19 @@ records_to  = "stdout (TSV); CI emits lubm_<query>_count_us into benchmark-data 
 status      = "ok"
 
 [[benchmark]]
+id          = "deep-taxonomy"
+name        = "Deep Taxonomy (DeepTaxonomy) — rule-heavy N3 forward-closure reasoning"
+category    = "inference"
+measures    = "per depth tier (default dt1k+dt10k per-commit; dt100k EC2/nightly): N3 forward-closure time (deeptax_d<DEPTH>_closure_s), a class-membership query over the closure (deeptax_d<DEPTH>_query_us), and the materialized closure triple-count (deeptax_d<DEPTH>_closure_triples). run.sh carries a SELF-ASSERTING closure-size gate: closure_triples (= 2·depth+1) AND query rows (= depth+1) are asserted vs expected.tsv (deterministic) so a sparq-reason regression fails LOUDLY. This is the canonical workload where naive forward chaining blows up O(N^2) and semi-naive + indexing is linear"
+invoke      = "cargo build --release -p sparq-cli && bench/deep-taxonomy/run.sh   # self-contained: reuse gen_deeptaxonomy.py, materialize the N3 closure per depth tier, query.rq over it, assert expected.tsv; CI runs it via scripts/ci-bench.sh -> deeptax_d<DEPTH>_{closure_s,query_us,closure_triples}. Tiers via DEEPTAX_DEPTHS"
+source      = "bench/deep-taxonomy/{gen.sh,run.sh,query.rq,expected.tsv,README.md} (gen.sh REUSES bench/inference/gen_deeptaxonomy.py — generator NOT rewritten); scripts/ci-bench.sh (deeptax hook); crates/sparq-cli/src/main.rs (cmd_reason n3)"
+dataset     = "DeepTaxonomy from the existing bench/inference/gen_deeptaxonomy.py: 1 instance fact + a DEPTH-deep :sc chain + 1 transitivity meta-rule; pure-Python stdlib, NO network/toolchain, byte-deterministic. Per-commit depths 1000 + 10000 (N3 closures 2,001 / 20,001 triples, ~0.1 s total); depth 100000 (closure 200,001) is opt-in via DEEPTAX_DEPTHS for EC2/nightly. Closure sizes cross-checked with bench/inference/eye-comparison.md. gitignored + regenerable (/tmp/deep-taxonomy)"
+quiet_box_sensitive = true  # closure_s/query_us wall-clock trend-only, NOT in scripts/perf-gate.py; the closure-triple-count + query-row assertions ARE a hard correctness gate (deterministic, load-robust; catches reasoner regressions). EYE head-to-head wall numbers live in bench/inference/eye-comparison.md (cited, NOT re-run per commit)
+pinning     = "gen_deeptaxonomy.py is a deterministic pure function of depth (no RNG, byte-identical); expected.tsv pins the structural closure sizes (2·depth+1) + query rows (depth+1) per tier; metric `d<DEPTH>` token is numeric so the dashboard derives the depth-scaling axis"
+records_to  = "stdout (TSV); CI emits deeptax_d<DEPTH>_{closure_s,query_us,closure_triples} into benchmark-data (dev/bench) via scripts/ci-bench.sh; expected sizes in bench/deep-taxonomy/expected.tsv; EYE comparison numbers in bench/inference/eye-comparison.md + the dashboard external-reference baselines (bench/dashboard/competitors.json)"
+status      = "ok"
+
+[[benchmark]]
 id          = "selective-bindjoin"
 name        = "Selective (index-nested-loop / bind) join"
 category    = "query"

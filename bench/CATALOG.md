@@ -63,7 +63,7 @@ conventions first, then a per-category map that points at the registry, then a
 | **ingest** | load + dict + external-memory build throughput | `cli-ingest`, `cli-save-build`, `cli-bench-remap`, `hdt-load-bench`, `wikidata-8b` |
 | **compression** | index / result-serialization footprint tradeoffs | `cli-probe-compress`, `cli-compare-compress`, `compress-bench` |
 | **scaling** | parallel thread sweep + cross-commit/hardware tracking | `cli-scaling`, `ci-bench`, `ci-bench-ec2`, `hw-bench` |
-| **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `solid-wac-bench` |
+| **inference** | N3 / RDFS / OWL closure + incremental maintenance | `inference-eye-comparison`, `inference-owl-bench`, `inference-incremental`, `deep-taxonomy`, `solid-wac-bench` |
 | **zk** | commitment pipeline, trace seam, circuit gates, prove/verify | `zk-commit-throughput`, `zk-trace-overhead`, `zk-compose-gates`, `zk-compose-prove-verify` |
 | **serve** | concurrent-serving + memory-tiering research spikes | `serve-spikes`, `memtier-spikes` |
 | **conformance** | W3C SPARQL + reasoning suites (correctness, not perf) | `sparql-conformance`, `inference-conformance` |
@@ -113,6 +113,18 @@ Notes on a few that need care:
   asserting BOTH tiers' counts vs `expected-rows.tsv`. CI emits `lubm_<query>_count_us`
   (trend-only) and fails on any count mismatch (reasoner OR engine regression). Full-scale
   **LUBM(1000)** (~133M triples) is the EC2/nightly tier (`bench/lubm/gen.sh 1000 0`).
+- **`deep-taxonomy` (DeepTaxonomy) is the rule-heavy N3 REASONING suite** — see
+  [`bench/deep-taxonomy/README.md`](./deep-taxonomy/README.md). `run.sh` is self-asserting and
+  REUSES the existing generator `bench/inference/gen_deeptaxonomy.py` (1 instance + a depth-deep
+  `:sc` chain + 1 transitivity meta-rule): per depth tier it materializes the **N3 forward
+  closure** (`sparq-cli reason … n3`), runs a class-membership `query.rq` over it, and asserts
+  BOTH the closure triple-count (`= 2·depth+1`) AND the query rows (`= depth+1`) vs `expected.tsv`
+  — a deterministic, load-robust gate that fails LOUDLY on a reasoner regression. Needs only
+  `python3` (no g++/javac), so it runs on the per-commit tier at a SMALL depth pair (dt1k+dt10k);
+  dt100k is opt-in via `DEEPTAX_DEPTHS` for EC2/nightly. CI emits
+  `deeptax_d<DEPTH>_{closure_s,query_us,closure_triples}` (trend-only). The dashboard features it
+  as a scaling suite (depth axis) with EYE external-reference baselines (cited from
+  `bench/inference/eye-comparison.md`; dt100k = n/a, EYE not run).
 - **`wikidata-8b` is external-cost and gated.** It builds the full Wikidata
   truthy dump (~8-9.4B triples) on a 16 GB EC2 box (~$5-17). It is **blocked
   until dict-spill merges to public main** — see
@@ -139,7 +151,7 @@ Notes on a few that need care:
   Comparable-suite map (registry-driven): **Oxigraph** ↔ `sparq-bench-compare`,
   `sp2b`, `watdiv`, `bsbm`, `dbpsb`, `lubm` (extensional only); **QLever** ↔
   `qlever-olympics`, `qlever-synthetic-10m/100m`, `watdiv`, `bsbm`, `lubm`
-  (extensional); **eye** ↔ `inference-eye-comparison` (DeepTaxonomy/anc500/grid30).
+  (extensional); **eye** ↔ `inference-eye-comparison` + `deep-taxonomy` (DeepTaxonomy/anc500/grid30).
   HONESTY NOTE (per parent `sq-i0nm`): a gh-runner gather is noisy and not
   comparable to the EC2/quiet-box reference band — the recorded `env.quiet_box`
   flag lets the dashboard label it distinctly (see the QUIET-BOX convention above).
@@ -161,6 +173,7 @@ CUT=$(bench/dbpsb/fetch.sh 750000)   && ./target/release/sparq-cli bench "$CUT" 
 bench/watdiv/run.sh 1                 # WatDiv SF=1 (g++ + Boost): gen + count/materialize/json + row diff
 bench/bsbm/run.sh                     # BSBM Explore -pc 300 (JRE + unzip): gen + materialize + row diff
 bench/lubm/run.sh                     # LUBM(1) (javac + rapper): gen + OWL-RL closure + both tiers + row diff
+bench/deep-taxonomy/run.sh            # DeepTaxonomy (python3 only): N3 closure per depth tier + closure-size + query-row gate
 
 # --- selective bind-join + u64 value-id probes ---
 python3 bench/selective/gen.py 500000 > bench/selective/selective.nt

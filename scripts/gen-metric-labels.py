@@ -226,6 +226,34 @@ def stems(subdir):
     return sorted(f[:-3] for f in os.listdir(d) if f.endswith(".rq"))
 
 
+def deeptax_depths():
+    """The Deep Taxonomy depth tiers, read from bench/deep-taxonomy/expected.tsv (the ground
+    truth the suite asserts against). Each line is `depth<TAB>closure_triples<TAB>query_rows`;
+    `#`/blank lines are skipped. Sorted ascending. So adding a tier to expected.tsv + the run
+    set automatically labels its metrics here (and `--check` flags the resulting drift)."""
+    path = os.path.join(BENCH, "deep-taxonomy", "expected.tsv")
+    if not os.path.isfile(path):
+        return []
+    out = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if parts and parts[0].isdigit():
+                out.append(int(parts[0]))
+    return sorted(out)
+
+
+def deeptax_tier_name(depth):
+    """Human "dtNk"/"dtN" tier label for a depth (matches bench/inference/eye-comparison.md +
+    the EYE reference scales: 1000->dt1k, 10000->dt10k, 100000->dt100k)."""
+    if depth and depth % 1000 == 0:
+        return "dt%dk" % (depth // 1000)
+    return "dt%d" % depth
+
+
 def mode_records(stem_key, base_label, suite, dataset, query_desc, modes=MODES):
     """Emit one {label,...} record per mode for a query stem, keyed `<stem>_<mode>`.
 
@@ -324,6 +352,37 @@ def build():
                     "raw ABox" if regime == "extensional" else "OWL-RL closure"),
                 "query": desc, "mode": "count", "regime": regime, "unit": "µs",
             }
+
+    # 9) Deep Taxonomy reasoning suite (sq-1hgz) -> three metrics per depth tier. The metric
+    # NAMES carry a numeric `d<DEPTH>` token (so the dashboard derives the depth axis for its
+    # scaling chart, and `deeptax` routes it to the featured "Deep Taxonomy" suite). One depth
+    # tier per row of bench/deep-taxonomy/expected.tsv. Keys match the dashboard's lookup (stem =
+    # name minus `_us`, else the raw name), so the `_s`/`_triples` metrics are keyed by raw name
+    # and the `_us` latency by its `_query` stem. (See bench/deep-taxonomy/README.md.)
+    for depth in deeptax_depths():
+        tier = deeptax_tier_name(depth)
+        dataset = ("DeepTaxonomy %s — 1 instance, %d-deep :sc chain, 1 transitivity meta-rule "
+                   "(reuses bench/inference/gen_deeptaxonomy.py); N3 forward closure = %d triples"
+                   % (tier, depth, 2 * depth + 1))
+        labels["deeptax_d%d_closure_s" % depth] = {
+            "label": "Deep Taxonomy %s — N3 forward-closure time" % tier,
+            "suite": "Deep Taxonomy", "dataset": dataset,
+            "query": "materialize the N3 forward closure (transitivity meta-rule)",
+            "mode": "closure", "unit": "s",
+        }
+        labels["deeptax_d%d_query" % depth] = {
+            "label": "Deep Taxonomy %s — class-membership query over the closure" % tier,
+            "suite": "Deep Taxonomy", "dataset": dataset,
+            "query": "SELECT ?c WHERE { :i a ?c } (returns depth+1 = %d rows)" % (depth + 1),
+            "mode": "count", "unit": "µs",
+        }
+        labels["deeptax_d%d_closure_triples" % depth] = {
+            "label": "Deep Taxonomy %s — materialized closure size" % tier,
+            "suite": "Deep Taxonomy", "dataset": dataset,
+            "query": "deterministic closure triple-count (self-asserting gate; = 2·depth+1 = %d)"
+                     % (2 * depth + 1),
+            "mode": "closure", "unit": "triples",
+        }
 
     return labels
 
