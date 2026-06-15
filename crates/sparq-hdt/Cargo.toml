@@ -62,7 +62,7 @@ flate2 = "1"
 #   zstd  — `.hdt.zst` (magic 28 B5 2F FD). `zstd::stream::read::Decoder`.
 #   bzip2 — `.hdt.bz2` (magic "BZh").       `bzip2::read::MultiBzDecoder`.
 zstd = "0.13"
-bzip2 = "0.4"
+bzip2 = "0.5"
 # [OPUS-4.8] CRC8/CRC32-C verification in the direct decoder (decode.rs). Same
 # crate (and the same CRC params) the wrapped `hdt` reader uses for the bitmap /
 # sequence sections, so the direct path validates byte-for-byte identically.
