@@ -512,6 +512,12 @@ mod differential_writeset_tests {
     /// observed via the engine's own resolved effect log (`UpdateEffect::Delta { slot, … }`
     /// records every graph slot the engine touched). Default-graph writes (slot `None`) are
     /// reported separately via the bool — none of these PSS shapes target the default graph.
+    ///
+    /// Blank-node graph slots ARE included in the named set (keyed by their `_:id`): a graph
+    /// name is, per RDF, a NamedNode OR a BlankNode, so dropping the blank-node case could mask
+    /// a real engine write and defeat the differential guard. Any OTHER `Some(term)` shape (a
+    /// literal or triple-term graph name) is malformed for a graph slot — we fail loudly so a
+    /// regression that starts emitting such a slot is caught immediately rather than swallowed.
     fn engine_write_set(graph: &mut Graph, sparql: &str) -> (BTreeSet<String>, bool) {
         let effects = update_in_place_capturing(graph, sparql, &QueryBudget::unlimited())
             .expect("engine applies the update");
@@ -523,8 +529,15 @@ mod differential_writeset_tests {
                     Some(Term::NamedNode(n)) => {
                         named.insert(n.as_str().to_owned());
                     }
-                    Some(Term::BlankNode(_)) => {} // not authorizable; not exercised here
-                    Some(_) => {}
+                    // A blank-node graph name is a valid graph slot; record it (keyed by its
+                    // blank-node label) so a write here cannot silently slip past the diff.
+                    Some(Term::BlankNode(b)) => {
+                        named.insert(format!("_:{}", b.as_str()));
+                    }
+                    // Literal / triple-term graph slots are malformed — never expected.
+                    Some(other) => {
+                        panic!("engine emitted a non-graph-name slot in a Delta effect: {other:?}")
+                    }
                     None => touched_default = true,
                 }
             }
@@ -692,7 +705,18 @@ mod differential_writeset_tests {
             .collect();
 
         let mut applied = pss_dataset();
-        let (written, _default) = engine_write_set(&mut applied, upd);
+        let (written, default) = engine_write_set(&mut applied, upd);
+
+        // WITH re-scopes the operation's DEFAULT graph, but EVERY quad pattern in the DELETE,
+        // INSERT and WHERE templates here is explicitly `GRAPH ?g { … }`-scoped, so no triple
+        // lands in (or is read from) the default graph: the WITH target is never written. Assert
+        // that signal rather than dropping it — a regression that started routing writes to the
+        // WITH default graph would otherwise pass the subset check below unnoticed.
+        assert!(
+            !default,
+            "WITH default-graph re-scope must NOT produce a default-graph write when every \
+             template quad is explicitly GRAPH ?g-scoped"
+        );
 
         // SECURITY invariant in the safe direction: the authorization target (all store
         // graphs) is a SUPERSET of the engine's actual write set — never an under-approximation
