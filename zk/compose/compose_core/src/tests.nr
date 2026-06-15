@@ -82,13 +82,29 @@ global O2: Field = 202;
 global P_OTHER: Field = 8;
 
 fn test_graphs() -> ([[[Field; 3]; 4]; 2], [u32; 2], [Field; 2]) {
-    // Graph 0: { (S1, P, O1), (S1, P_OTHER, O2) } -- 2 active slots.
-    // Graph 1: { (S2, P, O2) }                    -- 1 active slot.
+    // [OPUS-4.8] sq-7p9c: the fixture's per-graph witnesses are laid out in
+    // CANONICAL ascending-commitment order, the same canonicalisation a real host
+    // builder performs (scan.nr step 1b / plan S2.5): `scan_check` now requires the
+    // PUBLIC `commitments` array STRICTLY INCREASING (`commitments[0] < ...`, the
+    // distinct-graph guard added by #95 that closes the duplicate-inclusion / COUNT
+    // forgery class). `commit_fold` is hash-like, so a graph's commitment value is
+    // unrelated to its content "size" -- the single-triple graph { (S2,P,O2) }
+    // happens to commit to the SMALLER field element than the two-triple graph
+    // { (S1,P,O1), (S1,P_OTHER,O2) }, so the single-triple graph is graph 0 and the
+    // two-triple graph is graph 1. Graphs are an unordered set keyed by commitment,
+    // so reordering them (with the matching `counts` and disclosed `rows`) does NOT
+    // change the proved statement -- only the now-canonical index assignment, which
+    // every per-test attribution array below tracks. The trailing assert pins the
+    // ordering invariant so this fixture fails LOUDLY (not the circuit's strict-order
+    // assert silently) if an encoding edit ever flips the natural order again.
+    //
+    // Graph 0: { (S2, P, O2) }                    -- 1 active slot.
+    // Graph 1: { (S1, P, O1), (S1, P_OTHER, O2) } -- 2 active slots.
     let enc: [[[Field; 3]; 4]; 2] = [
-        [[S1, P, O1], [S1, P_OTHER, O2], [0, 0, 0], [0, 0, 0]],
         [[S2, P, O2], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+        [[S1, P, O1], [S1, P_OTHER, O2], [0, 0, 0], [0, 0, 0]],
     ];
-    let counts: [u32; 2] = [2, 1];
+    let counts: [u32; 2] = [1, 2];
     let mut commitments: [Field; 2] = [0, 0];
     for g in 0..2 {
         let mut leaves: [Field; 4] = [0; 4];
@@ -97,6 +113,12 @@ fn test_graphs() -> ([[[Field; 3]; 4]; 2], [u32; 2], [Field; 2]) {
         }
         commitments[g] = commit_fold(leaves, counts[g]);
     }
+    // [OPUS-4.8] Canonical-order invariant: the public commitments this fixture
+    // hands to `scan_check` MUST already be strictly increasing (the circuit's
+    // step-1b contract). If a future encoding change flips the natural order, this
+    // asserts HERE -- a clear fixture bug -- rather than tripping the circuit's
+    // "per-graph commitments not strictly increasing" guard inside an unrelated test.
+    assert(commitments[0].lt(commitments[1]), "test_graphs fixture not in canonical ascending-commitment order");
     (enc, counts, commitments)
 }
 
@@ -112,8 +134,10 @@ global ATTR_BOTH: [bool; 2] = [true, true];
 #[test]
 fn scan_accepts_complete_match_set() {
     let (enc, counts, commitments) = test_graphs();
-    // Pattern ?s P ?o matches (S1,P,O1) in graph 0 and (S2,P,O2) in graph 1.
-    let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
+    // Pattern ?s P ?o matches (S2,P,O2) in graph 0 and (S1,P,O1) in graph 1
+    // (canonical ascending-commitment order, see test_graphs). Disclosed rows are
+    // listed in that same graph order: graph-0 row first, then graph-1.
+    let rows: [[Field; 3]; 2] = [[S2, P, O2], [S1, P, O1]];
     scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, ATTR_BOTH, counts, enc);
 }
 
@@ -121,11 +145,12 @@ fn scan_accepts_complete_match_set() {
 fn scan_accepts_constant_only_pattern_with_padding_rows() {
     let (enc, counts, commitments) = test_graphs();
     // Fully-constant pattern (an ASK-shaped membership): one matching row,
-    // second row slot padded. (S2,P,O2) lives only in graph 1, so the bound
-    // attribution is [false, true].
+    // second row slot padded. (S2,P,O2) lives only in graph 0 (canonical
+    // ascending-commitment order, see test_graphs), so the bound attribution is
+    // [true, false].
     let pattern = PatternSpec { is_const: [true, true, true], const_enc: [S2, P, O2] };
     let rows: [[Field; 3]; 2] = [[S2, P, O2], [0, 0, 0]];
-    scan_check::<2, 4, 2>(commitments, pattern, rows, 1, [false, true], counts, enc);
+    scan_check::<2, 4, 2>(commitments, pattern, rows, 1, [true, false], counts, enc);
 }
 
 // [OPUS-4.8] audit #8: the per-graph attribution is constrained to the true
@@ -133,8 +158,9 @@ fn scan_accepts_constant_only_pattern_with_padding_rows() {
 #[test(should_fail_with = "attribution does not match the proved source graphs")]
 fn scan_rejects_attribution_understated() {
     // The [[0],[0]] collapse-two-graphs lie at the circuit level: the pattern
-    // matches in graph 1 too, but the prover claims attribution[1] = false to
-    // hide the cross-graph source.
+    // matches in graph 1 too (it holds (S1,P,O1)), but the prover claims
+    // attribution[1] = false to hide the cross-graph source. The true attribution
+    // is [true, true]; [true, false] understates the genuinely-matching graph 1.
     let (enc, counts, commitments) = test_graphs();
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [S2, P, O2]];
     scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 2, [true, false], counts, enc);
@@ -143,7 +169,9 @@ fn scan_rejects_attribution_understated() {
 #[test(should_fail_with = "attribution does not match the proved source graphs")]
 fn scan_rejects_attribution_overstated() {
     // Claiming a graph contributes when it does not is also rejected (exact
-    // matched set, not a superset).
+    // matched set, not a superset). (S2,P,O2) lives only in graph 0, so the true
+    // attribution is [true, false]; [true, true] overstates the non-matching
+    // graph 1.
     let (enc, counts, commitments) = test_graphs();
     let pattern = PatternSpec { is_const: [true, true, true], const_enc: [S2, P, O2] };
     let rows: [[Field; 3]; 2] = [[S2, P, O2], [0, 0, 0]];
@@ -162,16 +190,19 @@ fn scan_rejects_tampered_commitment() {
 fn scan_rejects_tampered_graph_content() {
     let (mut enc, counts, commitments) = test_graphs();
     // Suppress a committed triple by overwriting an active slot ("license:
-    // suspended" hiding, plan S1.1) -- the fold no longer reproduces C.
-    enc[0][0] = [S1, P_OTHER, O1];
+    // suspended" hiding, plan S1.1) -- the fold no longer reproduces C. Here we
+    // overwrite graph 1's first active slot (S1,P,O1); the step-1 recompute of
+    // graph 1's commitment then mismatches BEFORE any row/attribution check.
+    enc[1][0] = [S1, P_OTHER, O1];
     let rows: [[Field; 3]; 2] = [[S2, P, O2], [0, 0, 0]];
-    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, [false, true], counts, enc);
+    scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, [true, false], counts, enc);
 }
 
 #[test(should_fail_with = "matching triple missing from disclosed rows")]
 fn scan_rejects_suppressed_row() {
     let (enc, counts, commitments) = test_graphs();
-    // Graph 1's match is suppressed: completeness sweep must catch it.
+    // Graph 0's match (S2,P,O2) is suppressed (only (S1,P,O1) disclosed):
+    // completeness sweep must catch the undisclosed matching slot.
     let rows: [[Field; 3]; 2] = [[S1, P, O1], [0, 0, 0]];
     scan_check::<2, 4, 2>(commitments, p_pattern(), rows, 1, ATTR_BOTH, counts, enc);
 }
