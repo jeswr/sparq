@@ -24,7 +24,7 @@ shipped a **challenge-bound Schnorr HolderPoP** that proves the presenter
 possesses a holder key the relying party *already trusts*. The assumption this
 design must remove is stated, in the code, in three places:
 
-1. **`crates/sparq-zk-compose/src/verifier.rs:2911-2921`** — the
+1. **`crates/sparq-zk-compose/src/verifier.rs:2965-2975`** — the
    `bind_holder_pop` "honest deferral" doc block, verbatim:
 
    > *"It does NOT bind that key to the SPECIFIC credential the scan/filter
@@ -33,7 +33,7 @@ design must remove is stated, in the code, in three places:
    > to authorised holders, which is the meaningful interim guarantee; the
    > per-credential binding is the documented next step."*
 
-   The function (`crates/sparq-zk-compose/src/verifier.rs:2923-2964`) checks
+   The function (`crates/sparq-zk-compose/src/verifier.rs:2977-3018`) checks
    exactly four things: registry non-empty, `holder ∈ HolderRegistry`, known
    cryptosuite + parseable bytes, and `sig_verify(holder_pk, holder_pop_message(challenge), pop)`.
    **None of the four reads any commitment, attestation, or issuer signature.**
@@ -47,7 +47,7 @@ design must remove is stated, in the code, in three places:
    (`manifest.rs:111-124`) carries only `{ challenge, holder, pop, cryptosuite }`.
    There is **no field linking `holder` to any `CommitmentAttestation`.**
 
-3. **`crates/sparq-zk-compose/src/verifier.rs:256-282`** — `HolderRegistry`'s doc:
+3. **`crates/sparq-zk-compose/src/verifier.rs:264-290`** — `HolderRegistry`'s doc:
    *"Membership here means 'this holder key is authorised to present' — it does
    NOT bind the key to a SPECIFIC credential."* The registry is the *interim*
    trust anchor; it is a coarse allow-list, not a per-credential subject binding.
@@ -64,7 +64,7 @@ and nothing checks that the issuer ever bound A (or B) to `C(G)`. **A presents B
 credential.** This is the trusted-holder gap.
 
 > Note the audit-#3/#9/#12 issuer-signature gates *are* sound and *are* checked
-> (`bind_issuer_attestations`, `crates/sparq-zk-compose/src/verifier.rs:1709`),
+> (`bind_issuer_attestations`, `crates/sparq-zk-compose/src/verifier.rs:1700`),
 > so A genuinely cannot forge `C(G)` or the issuer signature. The gap is narrowly
 > the **subject binding**: who the credential was issued *to*. Closing it converts
 > the holder check from "is the presenter on my allow-list" to "is the presenter
@@ -316,19 +316,19 @@ the freshness PoP (G2).
 
 ### 3.3 Verifier layer (`crates/sparq-zk-compose/src/verifier.rs`)
 
-- **B1:** upgrade `bind_holder_pop` (`verifier.rs:2923-2964`) so it, **in addition
+- **B1:** upgrade `bind_holder_pop` (`verifier.rs:2977-3018`) so it, **in addition
   to** the existing registry+PoP checks, requires that the credential's
   `CommitmentAttestation` carries a `holder` binding whose `holder_pk_digest`
   equals `holder_key_digest(disclosed hpk)`, **and** that the issuer signature on
   that attestation verified over `commitment_message_with_holder(...)` (this last
-  check folds into `bind_issuer_attestations`, `verifier.rs:1709`, which already
+  check folds into `bind_issuer_attestations`, `verifier.rs:1763`, which already
   selects the signed-message variant from which optional fields are present —
   e.g. the salt/status selection at :1733-1745, :96 of the audit doc). New
   `CheckError` variants: `HolderBindingMissing` (a `holder-pop` presentation over
   an attestation with no `holder` binding — fail-closed, no silent bearer
   fallback) and `HolderKeyMismatch` (disclosed `hpk` ≠ issuer-attested digest).
 - **B2:** add `bind_holder_pok`, the analogue of `bind_hidden_issuer_attestations`
-  (`verifier.rs:2474`): bind the public `holder_pk_digest` to the attestation, bind
+  (`verifier.rs:2528`): bind the public `holder_pk_digest` to the attestation, bind
   the verifier's fresh `challenge` (the audit-#4 nonce, already reconstructed into
   public-input field 0), select the canonical vk for the `holder_pok` member by
   re-derived `CircuitId` (audit-#2 discipline), reconstruct the public-input
@@ -513,7 +513,7 @@ forge-and-verify tests.
    message variant, cross-check disclosed `hpk` ↔ attested digest, and require it
    fail-closed; add `HolderBindingMissing`/`HolderKeyMismatch` + a
    `HolderBindingPolicy`. Closes G1 for the clear tier. (Deps: 1, 2.)
-4. **[tests B1] Forge-and-verify regression suite.** One test per §4.4 failure
+4. **[tests B1] Forge-and-verify regression suite.** One test per §4.3(4) failure
    mode in `crates/sparq-zk-compose/tests/` (extend `forge_*`/`e2e`/`verifier_errors`).
    Asserts A-presents-B's-credential is REJECTED. (Deps: 3.)
 5. **[circuit B2] `holder.nr` + `holder_pok` member.** Implement the PoK relation
