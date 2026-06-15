@@ -787,7 +787,29 @@ fn update_in_place_core(
 /// Effects are applied in capture order, which is the order the in-memory side committed them
 /// (deletes before inserts within a DELETE/INSERT … WHERE), so order-sensitive sequences
 /// reproduce faithfully.
+///
+/// [OPUS-4.8] (sq-ycle) ATOMICITY: a multi-op body materialises through MANY independent
+/// `apply_delta` fsyncs across DIFFERENT files (the per-slot `wal.log`s + the `named.bin`
+/// manifest), so a crash between them used to leave a PARTIAL durable write (e.g. a `<parent>
+/// ldp:contains <r>` containment present without the `<r>` graph it points at). To make the WHOLE
+/// body ONE all-or-nothing durable commit we are now JOURNAL-FIRST, in four steps.
+///
+/// 1. RESOLVE every effect into a flat ordered quad-delta against the CURRENT graph state, so
+///    CLEAR/DROP expand to the concrete retractions of the triples present NOW.
+/// 2. [`Graph::commit_txn`] writes that delta as ONE fsync'd `txn.log` frame — THE commit point
+///    (a no-op for an in-memory graph and for an empty delta).
+/// 3. MATERIALISE via the existing per-effect loop; the per-graph WAL fsyncs here are now
+///    redundant-on-crash, not the commit point — correct, since `open` redoes the journal frame.
+/// 4. [`Graph::clear_txn`] empties the journal so the next body starts fresh.
+///
+/// For an IN-MEMORY graph (no journal/WAL) steps 2 & 4 are no-ops, so its behaviour is byte-for-byte
+/// unchanged. `DROP`'s manifest/sub-dir removal stays a materialisation concern (already crash-safe
+/// via `recover_named_drop`); the journal only carries the DATA retraction needed for atomicity.
 pub fn apply_effects(graph: &mut Graph, effects: &[UpdateEffect]) -> Result<(), String> {
+    // [OPUS-4.8] (sq-ycle) (1) RESOLVE + (2) COMMIT: the single durable commit point for the body.
+    let records = resolve_effect_records(graph, effects);
+    graph.commit_txn(&records)?;
+    // (3) MATERIALISE: the per-effect loop (unchanged from the pre-journal `apply_effects`).
     for effect in effects {
         match effect {
             UpdateEffect::Delta { slot, inserts, deletes } => {
@@ -827,7 +849,76 @@ pub fn apply_effects(graph: &mut Graph, effects: &[UpdateEffect]) -> Result<(), 
             }
         }
     }
+    // [OPUS-4.8] (sq-ycle) (4) The body is fully materialised into the per-graph state — clear the
+    // redo journal so the next body starts fresh and a clean reopen is a no-op (no-op in-memory).
+    graph.clear_txn()?;
     Ok(())
+}
+
+/// [OPUS-4.8] (sq-ycle) RESOLVE a captured `&[UpdateEffect]` into the flat, ORDERED quad-delta
+/// that the atomic redo journal commits in ONE fsync — computed against the CURRENT `graph` state
+/// so structural ops are concrete:
+///   * `Delta { slot, inserts, deletes }` -> the deletes (false) then the inserts (true), the same
+///     per-slot order [`apply_effects`] materialises them in.
+///   * `Clear`/`Drop` -> scan the affected slot(s) NOW and emit a delete record (false) for every
+///     triple PRESENT (default graph: scan `graph`; a NamedNode: scan that named sub-graph if it
+///     exists; NamedGraphs: every named slot; AllGraphs: every named slot PLUS the default). The
+///     data retraction is all the journal needs for atomicity — `Drop`'s manifest/sub-dir removal
+///     stays a materialisation concern (already crash-safe via `recover_named_drop`).
+///   * `Create(_)` -> nothing (an empty graph carries no triples).
+///
+/// The result is the per-slot quad-delta whose single-frame commit makes the WHOLE body atomic.
+fn resolve_effect_records(graph: &Graph, effects: &[UpdateEffect]) -> Vec<(bool, GraphSlot, TripleTerms)> {
+    let mut records: Vec<(bool, GraphSlot, TripleTerms)> = Vec::new();
+    // Retract every triple currently present in the named sub-graph called `name` (if any).
+    let push_named_clear = |records: &mut Vec<(bool, GraphSlot, TripleTerms)>, name: &Term| {
+        if let Some((_, sub)) = graph.named.iter().find(|(n, _)| n == name) {
+            for t in decode_triples(sub) {
+                records.push((false, Some(name.clone()), t));
+            }
+        }
+    };
+    // Retract every triple currently present in the DEFAULT graph.
+    let push_default_clear = |records: &mut Vec<(bool, GraphSlot, TripleTerms)>| {
+        for t in decode_triples(graph) {
+            records.push((false, None, t));
+        }
+    };
+    for effect in effects {
+        match effect {
+            UpdateEffect::Delta { slot, inserts, deletes } => {
+                for t in deletes {
+                    records.push((false, slot.clone(), t.clone()));
+                }
+                for t in inserts {
+                    records.push((true, slot.clone(), t.clone()));
+                }
+            }
+            // CLEAR and DROP retract the SAME data set (every present triple of the target); they
+            // differ only in DROP also removing the slot, which is a manifest/sub-dir concern, not
+            // a journalled DATA change. So both resolve to the present-triple retractions.
+            UpdateEffect::Clear(target) | UpdateEffect::Drop(target) => match target {
+                GraphTarget::DefaultGraph => push_default_clear(&mut records),
+                GraphTarget::NamedNode(n) => push_named_clear(&mut records, &Term::NamedNode(n.clone())),
+                GraphTarget::NamedGraphs => {
+                    let names: Vec<Term> = graph.named.iter().map(|(n, _)| n.clone()).collect();
+                    for name in &names {
+                        push_named_clear(&mut records, name);
+                    }
+                }
+                GraphTarget::AllGraphs => {
+                    push_default_clear(&mut records);
+                    let names: Vec<Term> = graph.named.iter().map(|(n, _)| n.clone()).collect();
+                    for name in &names {
+                        push_named_clear(&mut records, name);
+                    }
+                }
+            },
+            // CREATE adds an empty graph — no triples to journal.
+            UpdateEffect::Create(_) => {}
+        }
+    }
+    records
 }
 
 /// [OPUS-4.8] (review 1593) DURABLY empties the default graph, preserving the named graphs

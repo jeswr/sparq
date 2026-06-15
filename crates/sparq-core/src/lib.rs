@@ -50,6 +50,15 @@ pub struct Graph {
     /// incremental updates. `None` for in-memory graphs (updates are overlay-only).
     #[cfg(feature = "mmap")]
     wal: Option<Wal>,
+    /// [OPUS-4.8] (sq-ycle) The parent-level REDO JOURNAL (`dir/txn.log`) for a DIRECTORY-BACKED
+    /// graph — the SINGLE atomic commit point for a whole multi-operation SPARQL UPDATE body. The
+    /// resolved per-slot quad-delta of one `apply_effects` call is recorded here as ONE fsync'd
+    /// frame BEFORE it is materialised across the per-graph WALs, so a crash mid-body can never
+    /// leave a PARTIAL durable write (e.g. parent containment without the child graph). On the next
+    /// `open` a committed frame is redone idempotently and the journal truncated. `None` for
+    /// in-memory graphs (the per-`apply_effects` commit/clear are then no-ops). See [`TxnJournal`].
+    #[cfg(feature = "mmap")]
+    txn: Option<TxnJournal>,
 }
 
 /// [OPUS-4.8] (sq-5lf) An IMMUTABLE, logically-independent point-in-time view of a
@@ -1062,6 +1071,9 @@ impl Graph {
             named: Vec::new(),
             #[cfg(feature = "mmap")]
             wal: None,
+            // [OPUS-4.8] (sq-ycle) In-memory graph: no parent-level redo journal.
+            #[cfg(feature = "mmap")]
+            txn: None,
         }
     }
 
@@ -1093,6 +1105,10 @@ impl Graph {
             named: self.named,
             #[cfg(feature = "mmap")]
             wal: self.wal,
+            // [OPUS-4.8] (sq-ycle) Re-encoding keeps the directory association — carry the redo
+            // journal handle with the WAL, so a compressed graph stays atomically durable.
+            #[cfg(feature = "mmap")]
+            txn: self.txn,
         }
     }
 
@@ -1340,7 +1356,7 @@ impl Graph {
         // with its own per-graph WAL) so a save→open round-trip is lossless for the whole
         // dataset. Empty for a default-graph-only / pre-named-graph directory.
         let named = Self::open_named(dir)?;
-        let mut g = Graph { dict, store, numerics, temporals, named, wal: None };
+        let mut g = Graph { dict, store, numerics, temporals, named, wal: None, txn: None };
         // Replay any write-ahead log into the delta-overlay (recovery after a crash or a
         // plain not-yet-compacted close), stopping cleanly at the first torn record and
         // truncating the log there — then keep the log open for further appends.
@@ -1352,7 +1368,58 @@ impl Graph {
             }
         }
         g.wal = Some(Wal::open(dir)?);
+        // [OPUS-4.8] (sq-ycle) AFTER the per-graph WALs are replayed (above + per named graph in
+        // `open_named`), redo any committed parent-level transaction frame, idempotently. A
+        // multi-op UPDATE body's resolved per-slot quad-delta is one atomic `txn.log` frame; if a
+        // crash interrupted materialisation after that single fsync, the per-graph WALs hold only a
+        // PREFIX of the body — replaying the frame heals the desync. Re-applying records the WALs
+        // already materialised is a no-op: `apply_delta_mem` is set-semantic (re-inserting a present
+        // triple / deleting an absent one changes nothing) and `ensure_named` is find-or-create.
+        // ORDER: read the frame, apply it in memory, THEN truncate the on-disk journal — so a crash
+        // before truncation simply redoes the (idempotent) frame again on the next open.
+        let txn_records = TxnJournal::replay(dir)?;
+        for (insert, slot, t) in txn_records {
+            g.redo_txn_record(insert, slot, t).map_err(std::io::Error::other)?;
+        }
+        let mut journal = TxnJournal::open(dir)?;
+        journal.truncate()?;
+        g.txn = Some(journal);
         Ok(g)
+    }
+
+    /// [OPUS-4.8] (sq-ycle) Idempotently re-apply one redo-journal record on `open`. A default-slot
+    /// record goes to this graph's default store; a named-slot record is routed to the matching
+    /// named sub-graph (find-or-create via [`ensure_named`](Self::ensure_named), so a frame whose
+    /// child-graph creation crashed before materialisation still rebuilds the graph). Set-semantic:
+    /// re-applying a change the per-graph WAL already materialised is a no-op.
+    #[cfg(feature = "mmap")]
+    fn redo_txn_record(&mut self, insert: bool, slot: Option<Term>, t: [Term; 3]) -> Result<(), String> {
+        match slot {
+            None => {
+                if insert {
+                    self.apply_delta_mem(&[t], &[]);
+                } else {
+                    self.apply_delta_mem(&[], &[t]);
+                }
+            }
+            Some(name) => {
+                // An insert into an absent named graph must materialise the graph (find-or-create);
+                // a delete from an absent one is a no-op (nothing to retract).
+                let idx = if insert {
+                    Some(self.ensure_named(&name)?)
+                } else {
+                    self.named.iter().position(|(n, _)| *n == name)
+                };
+                if let Some(i) = idx {
+                    if insert {
+                        self.named[i].1.apply_delta_mem(&[t], &[]);
+                    } else {
+                        self.named[i].1.apply_delta_mem(&[], &[t]);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// EXTERNAL-MEMORY build: streams an RDF document and writes the on-disk permutation
@@ -1829,6 +1896,10 @@ impl Graph {
             named: self.named.iter().map(|(name, g)| (name.clone(), g.fork())).collect(),
             #[cfg(feature = "mmap")]
             wal: None,
+            // [OPUS-4.8] (sq-ycle) A fork/snapshot is a logically-independent in-memory copy with
+            // NO directory association — no WAL and no redo journal (like `wal: None`).
+            #[cfg(feature = "mmap")]
+            txn: None,
         }
     }
 
@@ -1883,6 +1954,37 @@ impl Graph {
             w.append_batch(inserts, deletes).map_err(|e| format!("WAL append failed: {e}"))?;
         }
         self.apply_delta_mem(inserts, deletes);
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-ycle) Commit a whole multi-operation UPDATE body's resolved per-slot
+    /// quad-delta as ONE atomic, all-or-nothing durable frame — the SINGLE commit point for
+    /// `sparq_engine::apply_effects`. `records` is `(is_insert, slot, triple)` quads computed
+    /// against the CURRENT graph state (so CLEAR/DROP have already been expanded to concrete
+    /// retraction records by the caller). One `write_all` + one `sync_data()` makes the body
+    /// durable as a unit BEFORE it is materialised across the per-graph WALs; if a crash interrupts
+    /// materialisation, [`open`](Self::open) redoes this frame idempotently. A NO-OP (returns `Ok`)
+    /// for an IN-MEMORY graph (no journal) and for an empty record set, so the in-memory live
+    /// update path is byte-for-byte unchanged.
+    pub fn commit_txn(&mut self, records: &[(bool, Option<Term>, [Term; 3])]) -> Result<(), String> {
+        #[cfg(feature = "mmap")]
+        if let Some(j) = &mut self.txn {
+            return j.append(records).map_err(|e| format!("txn journal commit failed: {e}"));
+        }
+        #[cfg(not(feature = "mmap"))]
+        let _ = records;
+        Ok(())
+    }
+
+    /// [OPUS-4.8] (sq-ycle) Clear the redo journal after its frame has been fully materialised into
+    /// the per-graph state (the second half of `sparq_engine::apply_effects`'s journal-first
+    /// protocol), so the next body starts from an empty journal and a clean reopen is a no-op. A
+    /// NO-OP for an in-memory graph (no journal).
+    pub fn clear_txn(&mut self) -> Result<(), String> {
+        #[cfg(feature = "mmap")]
+        if let Some(j) = &mut self.txn {
+            return j.truncate().map_err(|e| format!("txn journal clear failed: {e}"));
+        }
         Ok(())
     }
 
@@ -2689,6 +2791,218 @@ impl Wal {
                 break; // body record count disagreed with the header — corrupt
             }
             ops.extend(batch_ops);
+            good = trailer_end;
+        }
+        if good < bytes.len() {
+            let f = std::fs::OpenOptions::new().write(true).open(&path)?;
+            f.set_len(good as u64)?;
+            f.sync_data()?;
+        }
+        Ok(ops)
+    }
+}
+
+/// [OPUS-4.8] (sq-ycle) One resolved redo-journal record: `(is_insert, slot, triple)` — an
+/// insert/delete flag, the graph slot (`None` = default graph, `Some` = that named graph) and the
+/// term-triple. The unit the parent-level [`TxnJournal`] commits and [`Graph::commit_txn`] takes.
+#[cfg(feature = "mmap")]
+type TxnRecord = (bool, Option<Term>, [Term; 3]);
+
+/// [OPUS-4.8] (sq-ycle) Serialise a journal SLOT — the graph a record targets — into `buf`.
+/// A named slot reuses the manifest's [`encode_graph_name`] (kind 0 NamedNode / 1 BlankNode);
+/// the DEFAULT graph (`None`) gets a distinct marker byte (kind 2, no payload) so [`decode_slot`]
+/// can tell "default graph" apart from "named graph" unambiguously on replay.
+#[cfg(feature = "mmap")]
+fn encode_slot(buf: &mut Vec<u8>, slot: &Option<Term>) {
+    match slot {
+        Some(name) => encode_graph_name(buf, name),
+        // Default-graph marker: kind 2, no length/value (kinds 0/1 are NamedNode/BlankNode).
+        None => buf.push(2),
+    }
+}
+
+/// [OPUS-4.8] (sq-ycle) Inverse of [`encode_slot`]: decode a slot at `pos`, returning it plus the
+/// offset just past it. Kind 2 (no payload) is the default graph; 0/1 defer to [`decode_graph_name`]
+/// for a NamedNode/BlankNode. Bounds-checked — a truncated record is a clean `Err`, never a panic.
+#[cfg(feature = "mmap")]
+fn decode_slot(bytes: &[u8], pos: usize) -> Result<(Option<Term>, usize), String> {
+    match bytes.get(pos) {
+        Some(2) => Ok((None, pos + 1)),
+        Some(0) | Some(1) => {
+            let (term, end) = decode_graph_name(bytes, pos)?;
+            Ok((Some(term), end))
+        }
+        Some(k) => Err(format!("unknown txn slot kind byte {k}")),
+        None => Err("truncated txn record (missing slot kind byte)".to_string()),
+    }
+}
+
+/// [OPUS-4.8] (sq-ycle) A parent-level REDO JOURNAL — the single durable COMMIT POINT for a
+/// whole multi-operation SPARQL UPDATE body — at `dir/txn.log`, a sibling of the per-graph [`Wal`].
+///
+/// The problem it fixes: a multi-op body like `DROP SILENT GRAPH <r> ; INSERT DATA { GRAPH <r> ... ;
+/// GRAPH <parent> ldp:contains <r> }` materialises through [`apply_effects`] as N independent
+/// `apply_delta` calls across DIFFERENT files (the `<r>` per-graph `wal.log`, the `<parent>`
+/// per-graph `wal.log`, the `named.bin` manifest), each fsync'd on its own. A crash between them
+/// leaves a PARTIAL durable write (parent containment present but child graph missing, or vice
+/// versa). This journal records the WHOLE resolved per-slot quad-delta of one `apply_effects` call
+/// as ONE framed, checksummed, single-`sync_data()` frame. That single fsync is THE commit point;
+/// the per-graph WAL appends still happen but are now materialisation, not the commit point.
+///
+/// On [`open`](Graph::open), AFTER the per-graph WALs are replayed, any committed `txn.log` frame
+/// is replayed idempotently and then the journal is truncated. Idempotency holds because
+/// [`apply_delta_mem`](Graph::apply_delta_mem) is set-semantic (re-inserting a present triple /
+/// deleting an absent one is a no-op) and [`ensure_named`](Graph::ensure_named) is find-or-create —
+/// so re-applying records the per-graph WALs already materialised changes nothing.
+///
+/// Frame layout (byte-identical write+fsync discipline to [`Wal::append_batch`]):
+///
+/// ```text
+/// [TXN_MAGIC u32][n_records u32][body_len u32]   <- header
+/// <body_len bytes of records>                     <- each: [op u8][slot ...][nt_len u32][N-Triples]
+/// [checksum u64][COMMIT_MARKER u32]               <- commit trailer (written last)
+/// ```
+///
+/// where a record's SLOT is [`encode_slot`]'s `[kind u8]( [len u32][value] )?` and the triple is
+/// the N-Triples line + `u32` length, exactly as [`Wal::push_record`] frames it (so the same
+/// [`parse_nt_record`] decodes it). The FNV-1a [`Wal::checksum`] over header+body plus the trailing
+/// [`Wal::COMMIT_MARKER`] form the commit point: [`replay`](TxnJournal::replay) applies only frames
+/// whose trailer is present AND whose checksum matches, and truncates at the first torn/corrupt
+/// frame — so a torn frame is discarded WHOLE, never partially applied.
+#[cfg(feature = "mmap")]
+struct TxnJournal {
+    file: std::fs::File,
+}
+
+#[cfg(feature = "mmap")]
+impl TxnJournal {
+    const INSERT: u8 = 0;
+    const DELETE: u8 = 1;
+    /// Frame magic ("WTX1" little-endian) — distinct from `Wal::BATCH_MAGIC` so a `txn.log` frame
+    /// can never be mistaken for a `wal.log` batch (and vice versa) on a misdirected read.
+    const TXN_MAGIC: u32 = 0x31_58_54_57;
+
+    fn path(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join("txn.log")
+    }
+
+    fn open(dir: &std::path::Path) -> std::io::Result<TxnJournal> {
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(Self::path(dir))?;
+        Ok(TxnJournal { file })
+    }
+
+    /// Frames `records` (each `(is_insert, slot, triple)`) into ONE checksummed frame and fsyncs —
+    /// THE single commit point for one `apply_effects` body. A crash mid-append leaves an
+    /// uncommitted tail that [`replay`](Self::replay) discards entirely. An empty record set is a
+    /// no-op (an UPDATE that resolves to no data change carries no atomicity obligation).
+    fn append(&mut self, records: &[TxnRecord]) -> std::io::Result<()> {
+        use std::io::Write;
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut body = Vec::new();
+        for (insert, slot, t) in records {
+            let op = if *insert { Self::INSERT } else { Self::DELETE };
+            body.push(op);
+            encode_slot(&mut body, slot);
+            // The triple as N-Triples + u32 length — byte-identical to `Wal::push_record`'s line
+            // form (minus the op byte, which we wrote before the slot above), so the same
+            // `parse_nt_record` decodes it on replay.
+            let line = format!("{} {} {} .\n", t[0], t[1], t[2]);
+            body.extend_from_slice(&(line.len() as u32).to_le_bytes());
+            body.extend_from_slice(line.as_bytes());
+        }
+        let mut buf = Vec::with_capacity(body.len() + 24);
+        buf.extend_from_slice(&Self::TXN_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&(records.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&body);
+        // Checksum covers header + body; the commit marker is appended AFTER it so a torn write
+        // can't produce a valid-looking trailer (identical discipline to `Wal::append_batch`).
+        let crc = Wal::checksum(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&Wal::COMMIT_MARKER.to_le_bytes());
+        self.file.write_all(&buf)?;
+        self.file.sync_data()
+    }
+
+    /// Empties the journal (after its frame has been materialised into the per-graph state).
+    fn truncate(&mut self) -> std::io::Result<()> {
+        self.file.set_len(0)?;
+        self.file.sync_data()
+    }
+
+    /// Reads `dir`'s journal into `(is_insert, slot, triple)` records in append order, frame by
+    /// frame. Only fully-COMMITTED frames (intact header + body + matching checksum + commit
+    /// marker) are returned; the file is TRUNCATED at the start of the first incomplete/corrupt
+    /// frame — the torn tail of an interrupted append — so a partial frame is NEVER partially
+    /// applied. EXACT clone of [`Wal::replay`]'s torn-tail logic, extended with the per-record slot.
+    fn replay(dir: &std::path::Path) -> std::io::Result<Vec<TxnRecord>> {
+        let path = Self::path(dir);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut ops = Vec::new();
+        let mut good = 0usize; // end of the last fully-committed frame
+        'frames: while good < bytes.len() {
+            let bstart = good;
+            // Header: magic + n_records + body_len (12 bytes).
+            if bstart + 12 > bytes.len() {
+                break; // torn header
+            }
+            let rd = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            if rd(bstart) != Self::TXN_MAGIC {
+                break; // not a txn frame (corruption / torn tail)
+            }
+            let n_records = rd(bstart + 4) as usize;
+            let body_len = rd(bstart + 8) as usize;
+            let body_start = bstart + 12;
+            let Some(body_end) = body_start.checked_add(body_len).filter(|&e| e <= bytes.len()) else {
+                break; // torn body
+            };
+            // Commit trailer: checksum (8) + marker (4).
+            let Some(trailer_end) = body_end.checked_add(12).filter(|&e| e <= bytes.len()) else {
+                break; // trailer not yet written — uncommitted frame
+            };
+            let stored_crc = u64::from_le_bytes(bytes[body_end..body_end + 8].try_into().expect("8 bytes"));
+            let marker = rd(body_end + 8);
+            if marker != Wal::COMMIT_MARKER || Wal::checksum(&bytes[bstart..body_end]) != stored_crc {
+                break; // uncommitted / corrupt frame — discard the tail
+            }
+            // The frame is committed: parse its records. A parse failure here means a
+            // committed-but-corrupt body — treat it as a torn tail and stop, conservatively.
+            let mut pos = body_start;
+            let mut frame_ops = Vec::with_capacity(n_records);
+            for _ in 0..n_records {
+                if pos >= body_end {
+                    break 'frames;
+                }
+                let op = bytes[pos];
+                pos += 1;
+                let Ok((slot, after_slot)) = decode_slot(&bytes[..body_end], pos) else {
+                    break 'frames;
+                };
+                pos = after_slot;
+                if pos + 4 > body_end {
+                    break 'frames;
+                }
+                let len = rd(pos) as usize;
+                let start = pos + 4;
+                let Some(end) = start.checked_add(len).filter(|&e| e <= body_end) else {
+                    break 'frames;
+                };
+                let Some(t) = parse_nt_record(&bytes[start..end]) else {
+                    break 'frames;
+                };
+                frame_ops.push((op == Self::INSERT, slot, t));
+                pos = end;
+            }
+            if frame_ops.len() != n_records {
+                break; // body record count disagreed with the header — corrupt
+            }
+            ops.extend(frame_ops);
             good = trailer_end;
         }
         if good < bytes.len() {
@@ -5806,6 +6120,209 @@ mod tests {
         // NONE of the three records may have applied — only the base triple remains.
         assert_eq!(dump_terms(&g).len(), 1, "uncommitted multi-record batch must apply nothing");
         assert_eq!(std::fs::read(&wal_path).unwrap().len(), 0, "the torn batch is the whole log → truncated empty");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // [OPUS-4.8] (sq-ycle) ---- atomic multi-op UPDATE redo journal (`txn.log`) -----------------
+
+    /// A unique temp dir per test (pid + a process-local counter) so the journal tests never
+    /// collide when run in parallel; cleaned with `remove_dir_all` at the end of each test.
+    #[cfg(feature = "mmap")]
+    fn txn_tmp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("sparq_txn_{tag}_{}_{n}", std::process::id()))
+    }
+
+    /// [OPUS-4.8] (sq-ycle) The named-graph term used by the journal tests.
+    #[cfg(feature = "mmap")]
+    fn named(n: &str) -> Term {
+        Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/{n}")))
+    }
+
+    /// [OPUS-4.8] (sq-ycle) The single named-graph triple the torn-tail test starts with.
+    #[cfg(feature = "mmap")]
+    fn base_named() -> Vec<(String, String, String)> {
+        vec![("<http://ex/n0>".into(), "<http://ex/p>".into(), "<http://ex/o0>".into())]
+    }
+
+    /// [OPUS-4.8] (sq-ycle) TORN-TAIL guarantee: a multi-slot redo frame (a default-graph record
+    /// PLUS a named-graph record) whose commit trailer + part of the last record were severed by a
+    /// crash must apply NOTHING on `open`, and the torn `txn.log` must be truncated to empty.
+    /// Mirrors `wal_torn_multi_record_batch_is_all_or_nothing` for the parent-level journal.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn txn_journal_torn_tail_is_all_or_nothing() {
+        let dir = txn_tmp_dir("torn");
+        std::fs::remove_dir_all(&dir).ok();
+        // Base graph with one default triple + one named graph holding one triple — so a torn
+        // frame redo would, if it leaked, change BOTH slots (and the assert below would fire).
+        Graph::load_dataset(
+            "<http://ex/base> <http://ex/p> <http://ex/o> .\n\
+             <http://ex/n0> <http://ex/p> <http://ex/o0> <http://ex/g> .",
+            "nquads",
+        )
+        .unwrap()
+        .save(&dir)
+        .unwrap();
+        let base = dump_terms(&Graph::open(&dir).unwrap());
+
+        // Write ONE valid frame with a default-slot insert AND a named-slot insert.
+        let records: Vec<(bool, Option<Term>, [Term; 3])> = vec![
+            (true, None, [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")]),
+            (true, Some(named("g")), [term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")]),
+        ];
+        {
+            let mut j = TxnJournal::open(&dir).unwrap();
+            j.append(&records).unwrap();
+        }
+        let path = TxnJournal::path(&dir);
+        let full = std::fs::read(&path).unwrap();
+        assert!(full.len() > 24, "frame must have a header + body + trailer");
+        // Sever the commit trailer (last 12 bytes) AND part of the last record (a torn append).
+        let torn = &full[..full.len() - 12 - 5];
+        std::fs::write(&path, torn).unwrap();
+
+        let g = Graph::open(&dir).unwrap();
+        // NONE of the journaled records applied: the state equals the pre-frame base, and neither
+        // the default `s1` triple nor the named `s2` triple is present.
+        assert_eq!(dump_terms(&g), base, "torn frame must apply nothing to the default graph");
+        let gnamed = g.named.iter().find(|(n, _)| n == &named("g")).map(|(_, sub)| dump_terms(sub));
+        assert_eq!(gnamed, Some(base_named()), "torn frame must apply nothing to the named graph");
+        assert_eq!(std::fs::read(&path).unwrap().len(), 0, "torn journal is truncated to empty on open");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-ycle) The PURE journal guarantee that underwrites atomicity: a committed
+    /// `txn.log` frame ALONE — with NO per-graph WAL materialisation at all — reconstructs the
+    /// FULL all-or-nothing record set on `open`, across BOTH the default graph and a named graph
+    /// (the PSS `INSERT DATA { GRAPH <r> ... ; GRAPH <parent> contains <r> }` shape). This is the
+    /// reliable simulation of "a crash after the single commit fsync but before materialisation":
+    /// the journal redo heals the desync. The journal is truncated afterwards.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn apply_effects_multi_slot_is_atomic_via_journal() {
+        let dir = txn_tmp_dir("multislot");
+        std::fs::remove_dir_all(&dir).ok();
+        // Empty base default graph; no named graphs yet (the frame must CREATE the named graph).
+        Graph::load_str("", "ntriples").unwrap().save(&dir).unwrap();
+
+        // The PSS body resolved to records: a child-graph triple under <r>, and a containment
+        // triple under <parent>. Commit them to the journal with NO materialisation, then close.
+        let r = named("r");
+        let parent = named("parent");
+        let child = [
+            term_iri(1, "x"),
+            Term::NamedNode(NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")),
+            named("Resource"),
+        ];
+        let contains = [
+            parent.clone(),
+            Term::NamedNode(NamedNode::new_unchecked("http://www.w3.org/ns/ldp#contains")),
+            r.clone(),
+        ];
+        let records: Vec<(bool, Option<Term>, [Term; 3])> = vec![
+            (true, Some(r.clone()), child.clone()),
+            (true, Some(parent.clone()), contains.clone()),
+        ];
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            g.commit_txn(&records).unwrap(); // THE commit point — NO materialisation follows.
+            assert!(TxnJournal::path(&dir).metadata().unwrap().len() > 0, "frame must be on disk");
+            // Drop without materialising: simulates a crash right after the commit fsync.
+        }
+        // Reopen: the journal redo must reconstruct BOTH slots (child + containment), all-or-nothing.
+        let g = Graph::open(&dir).unwrap();
+        let r_sub = g.named.iter().find(|(n, _)| n == &r).map(|(_, s)| dump_terms(s));
+        let p_sub = g.named.iter().find(|(n, _)| n == &parent).map(|(_, s)| dump_terms(s));
+        assert_eq!(
+            r_sub,
+            Some(vec![(child[0].to_string(), child[1].to_string(), child[2].to_string())]),
+            "journal redo must materialise the child graph <r>"
+        );
+        assert_eq!(
+            p_sub,
+            Some(vec![(contains[0].to_string(), contains[1].to_string(), contains[2].to_string())]),
+            "journal redo must materialise the containment under <parent>"
+        );
+        assert_eq!(std::fs::read(TxnJournal::path(&dir)).unwrap().len(), 0, "journal truncated after redo");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-ycle) An UNCOMMITTED frame (no commit trailer written — the crash landed
+    /// before the single fsync completed the trailer) must apply NOTHING and leave the pre-body
+    /// state intact; the torn tail is truncated.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn txn_uncommitted_frame_applies_nothing() {
+        let dir = txn_tmp_dir("uncommitted");
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_str("<http://ex/base> <http://ex/p> <http://ex/o> .", "ntriples").unwrap().save(&dir).unwrap();
+        let base = dump_terms(&Graph::open(&dir).unwrap());
+
+        // A valid frame, then strip JUST the commit trailer (the last 12 bytes) — header + body
+        // present, no commit marker → an uncommitted frame.
+        let records: Vec<(bool, Option<Term>, [Term; 3])> =
+            vec![(true, None, [term_iri(9, "s"), term_iri(9, "p"), term_iri(9, "o")])];
+        {
+            let mut j = TxnJournal::open(&dir).unwrap();
+            j.append(&records).unwrap();
+        }
+        let path = TxnJournal::path(&dir);
+        let full = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &full[..full.len() - 12]).unwrap(); // drop the commit trailer
+
+        let g = Graph::open(&dir).unwrap();
+        assert_eq!(dump_terms(&g), base, "uncommitted frame must apply nothing");
+        assert_eq!(std::fs::read(&path).unwrap().len(), 0, "uncommitted tail truncated to empty");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// [OPUS-4.8] (sq-ycle) IDEMPOTENCY: a committed `txn.log` frame whose records were ALSO
+    /// already materialised into the per-graph WALs (the normal, crash-free case) must, on `open`,
+    /// yield EXACTLY the committed set — no duplicate triples (set semantics) — and truncate the
+    /// journal. This is what guarantees the redundant-on-crash redo is harmless in the happy path.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn txn_idempotent_when_already_materialized() {
+        let dir = txn_tmp_dir("idempotent");
+        std::fs::remove_dir_all(&dir).ok();
+        Graph::load_dataset(
+            "<http://ex/base> <http://ex/p> <http://ex/o> .\n\
+             <http://ex/n0> <http://ex/p> <http://ex/o0> <http://ex/g> .",
+            "nquads",
+        )
+        .unwrap()
+        .save(&dir)
+        .unwrap();
+
+        let g_default = [term_iri(1, "s"), term_iri(1, "p"), term_iri(1, "o")];
+        let g_named = [term_iri(2, "s"), term_iri(2, "p"), term_iri(2, "o")];
+        let records: Vec<(bool, Option<Term>, [Term; 3])> =
+            vec![(true, None, g_default.clone()), (true, Some(named("g")), g_named.clone())];
+        {
+            let mut g = Graph::open(&dir).unwrap();
+            // Commit the frame AND materialise the SAME records into the per-graph WALs (the
+            // crash-free path: both the journal and the per-graph WALs hold the change).
+            g.commit_txn(&records).unwrap();
+            g.apply_delta(std::slice::from_ref(&g_default), &[]).unwrap();
+            let i = g.ensure_named(&named("g")).unwrap();
+            g.named[i].1.apply_delta(std::slice::from_ref(&g_named), &[]).unwrap();
+        }
+        // Reopen: the per-graph WALs replay the records, THEN the journal redoes the SAME records —
+        // set semantics means no duplicates; the committed set is present exactly once.
+        let g = Graph::open(&dir).unwrap();
+        let mut def = dump_terms(&g);
+        def.retain(|(s, _, _)| s.contains("/s1"));
+        assert_eq!(def.len(), 1, "the default record is present exactly once (no duplicate)");
+        let nsub = g.named.iter().find(|(n, _)| n == &named("g")).map(|(_, s)| {
+            let mut v = dump_terms(s);
+            v.retain(|(x, _, _)| x.contains("/s2"));
+            v
+        });
+        assert_eq!(nsub.map(|v| v.len()), Some(1), "the named record is present exactly once");
+        assert_eq!(std::fs::read(TxnJournal::path(&dir)).unwrap().len(), 0, "journal truncated after idempotent redo");
         std::fs::remove_dir_all(&dir).ok();
     }
 
