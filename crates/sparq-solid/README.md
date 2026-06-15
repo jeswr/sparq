@@ -18,7 +18,9 @@ crate is a dependency of nothing in the workspace).
 ## 🚀 Quickstart
 
 ```rust
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# // [OPUS-4.8] hidden main returns Result<(), String>: the engine's API errors are
+# // `String`, which does not impl std::error::Error, so `?` cannot widen to Box<dyn Error>.
+# fn main() -> Result<(), String> {
 use sparq_core::Graph;
 use sparq_solid::{Mode, PodStore, Session};
 
