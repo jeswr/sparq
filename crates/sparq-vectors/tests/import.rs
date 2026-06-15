@@ -372,3 +372,211 @@ fn npy_duplicate_id_fails_closed() {
         "err: {err}"
     );
 }
+
+// ----------------------------------------------------------- streaming (sq-3jc8)
+//
+// [OPUS-4.8] (sq-3jc8) The import path is now streaming: it parses only the `.npy` header prefix, then
+// reads + feeds the body row-by-row through `StreamingWriter` — peak heap is O(dim + index), not 2× the
+// matrix. These tests pin (a) EQUIVALENCE — the streamed `.spqv` is byte-identical to a buffered
+// `VectorStore::create`+`put`+`finalize` build of the same vectors; (b) multi-chunk correctness (n large
+// enough that the row loop runs many times); and (c) the edge shapes (single row, d=1, empty).
+
+/// Build a reference `.spqv` the buffered way: `create` + per-row `put` + `finalize`. This is the path
+/// the old non-streaming import used (`write_store`), so a byte-identical streamed file proves the
+/// memory optimisation did NOT change semantics. Both writers document byte-identical output.
+fn buffered_reference(path: &std::path::Path, dim: usize, ids: &[u32], data: &[f32]) {
+    let mut store = VectorStore::create(path, dim).unwrap();
+    for (row, &id) in ids.iter().enumerate() {
+        store.put(id, &data[row * dim..(row + 1) * dim]).unwrap();
+    }
+    store.finalize().unwrap();
+}
+
+/// A deterministic, finite, non-zero matrix (each component derived from its flat index so every row is
+/// distinct and no row is all-zero — `put` rejects zero vectors).
+fn synth_matrix(rows: usize, dim: usize) -> Vec<f32> {
+    (0..rows * dim)
+        .map(|i| 0.5 + (i % 17) as f32 * 0.125 - (i % 5) as f32 * 0.1)
+        .collect()
+}
+
+#[test]
+fn npy_stream_is_byte_identical_to_buffered_build() {
+    // A multi-chunk matrix: 257 rows (a prime, deliberately not a round number) × dim 13.
+    let (rows, dim) = (257usize, 13usize);
+    let data = synth_matrix(rows, dim);
+    let ids: Vec<u32> = (0..rows as u32).map(|i| i * 3 + 1).collect(); // sparse, sorted, unique
+
+    let npy = tmp("eq.npy");
+    write_npy_f32(&npy, rows, dim, &data);
+    let streamed = tmp("eq-streamed.spqv");
+    VectorStore::import_npy(
+        ImportSpec {
+            spqv_path: &streamed,
+            dim,
+            ids: &ids,
+            binding: ImportBinding::Unbound,
+        },
+        &npy,
+    )
+    .expect("streamed npy import");
+
+    let reference = tmp("eq-reference.spqv");
+    buffered_reference(&reference, dim, &ids, &data);
+
+    let a = std::fs::read(&streamed).unwrap();
+    let b = std::fs::read(&reference).unwrap();
+    assert_eq!(
+        a, b,
+        "streamed .spqv must be byte-identical to the buffered build"
+    );
+
+    // ...and the reopened store returns every row's exact vector in order.
+    let store = VectorStore::open(&streamed).unwrap();
+    assert_eq!(store.len(), rows);
+    for (row, &id) in ids.iter().enumerate() {
+        assert_eq!(store.get(id), Some(&data[row * dim..(row + 1) * dim]));
+    }
+}
+
+#[test]
+fn numeric_dump_stream_is_byte_identical_to_buffered_build() {
+    let (rows, dim) = (200usize, 8usize);
+    let data = synth_matrix(rows, dim);
+    let ids: Vec<u32> = (0..rows as u32).map(|i| i * 2 + 5).collect();
+
+    let dump = tmp("eqdump.f32");
+    let mut bytes = Vec::with_capacity(rows * dim * 4);
+    for &x in &data {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    std::fs::write(&dump, &bytes).unwrap();
+    let streamed = tmp("eqdump-streamed.spqv");
+    VectorStore::import_numeric_dump(
+        ImportSpec {
+            spqv_path: &streamed,
+            dim,
+            ids: &ids,
+            binding: ImportBinding::Unbound,
+        },
+        &dump,
+    )
+    .expect("streamed dump import");
+
+    let reference = tmp("eqdump-reference.spqv");
+    buffered_reference(&reference, dim, &ids, &data);
+    assert_eq!(
+        std::fs::read(&streamed).unwrap(),
+        std::fs::read(&reference).unwrap(),
+        "streamed dump .spqv must be byte-identical to the buffered build"
+    );
+}
+
+#[test]
+fn npy_f64_stream_equals_buffered_f32_build() {
+    // f8 input narrowed to f32 must match a buffered build of the SAME (already-f32-exact) values.
+    let (rows, dim) = (130usize, 6usize);
+    let data = synth_matrix(rows, dim);
+    let ids: Vec<u32> = (0..rows as u32).collect();
+
+    let npy = tmp("eq64.npy");
+    write_npy_f64(&npy, rows, dim, &data);
+    let streamed = tmp("eq64-streamed.spqv");
+    VectorStore::import_npy(
+        ImportSpec {
+            spqv_path: &streamed,
+            dim,
+            ids: &ids,
+            binding: ImportBinding::Unbound,
+        },
+        &npy,
+    )
+    .expect("streamed f64 npy import");
+
+    let reference = tmp("eq64-reference.spqv");
+    buffered_reference(&reference, dim, &ids, &data);
+    assert_eq!(
+        std::fs::read(&streamed).unwrap(),
+        std::fs::read(&reference).unwrap(),
+        "streamed f8→f32 .spqv must be byte-identical to the buffered f32 build"
+    );
+}
+
+#[test]
+fn npy_stream_edge_shapes() {
+    // Single row.
+    {
+        let data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let npy = tmp("edge-1row.npy");
+        write_npy_f32(&npy, 1, 4, &data);
+        let spqv = tmp("edge-1row.spqv");
+        let store = VectorStore::import_npy(
+            ImportSpec {
+                spqv_path: &spqv,
+                dim: 4,
+                ids: &[42u32],
+                binding: ImportBinding::Unbound,
+            },
+            &npy,
+        )
+        .expect("single-row import");
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get(42), Some(&data[..]));
+    }
+
+    // d = 1 (one component per row), several rows.
+    {
+        let data = vec![1.0f32, -2.0, 3.0, -4.0, 5.0];
+        let npy = tmp("edge-d1.npy");
+        write_npy_f32(&npy, 5, 1, &data);
+        let ids = [1u32, 2, 3, 4, 5];
+        let spqv = tmp("edge-d1.spqv");
+        let store = VectorStore::import_npy(
+            ImportSpec {
+                spqv_path: &spqv,
+                dim: 1,
+                ids: &ids,
+                binding: ImportBinding::Unbound,
+            },
+            &npy,
+        )
+        .expect("d=1 import");
+        assert_eq!(store.len(), 5);
+        for (i, &id) in ids.iter().enumerate() {
+            assert_eq!(store.get(id), Some(&data[i..i + 1]));
+        }
+        // ...and byte-identical to the buffered build.
+        let reference = tmp("edge-d1-ref.spqv");
+        buffered_reference(&reference, 1, &ids, &data);
+        assert_eq!(
+            std::fs::read(&spqv).unwrap(),
+            std::fs::read(&reference).unwrap()
+        );
+    }
+
+    // Empty matrix: 0 rows, no ids. A valid header, empty body, empty store.
+    {
+        let npy = tmp("edge-empty.npy");
+        write_npy_f32(&npy, 0, 4, &[]);
+        let spqv = tmp("edge-empty.spqv");
+        let store = VectorStore::import_npy(
+            ImportSpec {
+                spqv_path: &spqv,
+                dim: 4,
+                ids: &[],
+                binding: ImportBinding::Unbound,
+            },
+            &npy,
+        )
+        .expect("empty import");
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
+        assert_eq!(store.get(0), None);
+        let reference = tmp("edge-empty-ref.spqv");
+        buffered_reference(&reference, 4, &[], &[]);
+        assert_eq!(
+            std::fs::read(&spqv).unwrap(),
+            std::fs::read(&reference).unwrap()
+        );
+    }
+}
