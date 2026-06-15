@@ -1062,8 +1062,11 @@ impl ProofManifest {
     /// on the struct itself).
     // [OPUS-4.8] sq-y2wy: canonical edge ordering for binding_edges + join_edges.
     pub fn canonicalize(&mut self) {
-        self.binding_edges.sort();
-        self.join_edges.sort();
+        // [OPUS-4.8] sq-y2wy: edges are distinct under derived total `Ord`
+        // (no equal elements), so an unstable sort is deterministic here and
+        // avoids the auxiliary allocation a stable sort may perform.
+        self.binding_edges.sort_unstable();
+        self.join_edges.sort_unstable();
     }
 
     /// Serialise to canonical pretty JSON. The edge vectors are canonicalised
