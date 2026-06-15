@@ -866,6 +866,54 @@ pub fn in_circuit_witness(pk: &PublicKey, m: &Fr, sig: &Signature) -> Option<InC
     })
 }
 
+/// The in-circuit witness for a HOLDER Proof-of-Possession (sq-xqfg, HolderPoP
+/// T5 / design §2.B/B2): the holder secret `hsk` mapped into the base field, the
+/// holder public key `hpk = hsk·G` affine coordinates, and the issuer-attested
+/// holder-key digest `holder_pk_digest = Poseidon2([ZKSIG_HK, hpk.x, hpk.y])`
+/// ([`holder_key_digest`]). These are exactly the inputs the `holder_pok` circuit
+/// member proves over: `hsk` and `(hpk_x, hpk_y)` are its PRIVATE witness, and
+/// `holder_pk_digest` is the PUBLIC input the verifier (T6/sq-i1dt) binds to the
+/// issuer attestation. All as base-field [`Fr`] elements (= Noir `Field`).
+///
+/// The `hsk` embedding mirrors the issuer-witness scalar embedding
+/// ([`in_circuit_witness`]'s `s`/`e`): a canonical Baby-JubJub scalar (`< L`)
+/// maps injectively into the larger base field via its big-endian bytes, so the
+/// in-circuit `hsk·G` is computed over the same integer the holder signs with.
+// [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InCircuitHolderPokWitness {
+    /// Holder secret scalar `hsk` (canonical, `< L`), embedded in the base field.
+    pub hsk: Fr,
+    /// Holder public-key `hpk = hsk·G` affine coordinates.
+    pub hpk_x: Fr,
+    pub hpk_y: Fr,
+    /// The holder-key digest `Poseidon2([ZKSIG_HK, hpk.x, hpk.y])` — the PUBLIC
+    /// input the verifier binds to the issuer attestation (single source of truth
+    /// with [`holder_key_digest`] and the in-circuit `holder::holder_key_digest`).
+    pub holder_pk_digest: Fr,
+}
+
+/// Build the [`InCircuitHolderPokWitness`] for the holder key pair `hsk` (and its
+/// derived `hpk = hsk·G`). Returns `None` if the public key is the identity (no
+/// affine coordinates) — which the in-circuit gadget rejects anyway (fail-closed).
+///
+/// ISSUANCE/PROVER-SIDE helper: it lays out the witness fields the `holder_pok`
+/// member proves over; it does not itself prove anything (the circuit does). The
+/// digest it returns is exactly [`holder_key_digest`]`(hsk.public_key())`, so the
+/// host and circuit agree bit-for-bit (the cross-check T6 relies on).
+// [OPUS-4.8] sq-xqfg (HolderPoP T5).
+pub fn in_circuit_holder_witness(hsk: &SecretKey) -> Option<InCircuitHolderPokWitness> {
+    let hpk = hsk.public_key();
+    let (hpk_x, hpk_y) = hpk.coords()?;
+    let digest = holder_key_digest(&hpk).ok()?;
+    Some(InCircuitHolderPokWitness {
+        hsk: jj_scalar_to_base(&hsk.0),
+        hpk_x,
+        hpk_y,
+        holder_pk_digest: digest,
+    })
+}
+
 // --- serialization (registry literals + manifest fields) ------------------
 
 /// Serialize a public key to lowercase hex (compressed Baby-JubJub point). The

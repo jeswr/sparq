@@ -18,5 +18,7 @@ pub mod filter_int;
 pub mod filter_float;
 pub mod revoke;
 pub mod issuer;
+// [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder Proof-of-Possession (B2).
+pub mod holder;
 
 mod tests;

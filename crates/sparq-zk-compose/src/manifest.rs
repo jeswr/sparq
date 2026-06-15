@@ -551,6 +551,21 @@ pub enum CircuitId {
     /// [`crate::verifier::bind_issuer_attestations`] check.
     // [OPUS-4.8] sq-z9l: hidden-issuer-attestation circuit member.
     HiddenIssuer { depth: u32 },
+    /// `holder_pok` — in-circuit holder Proof-of-Possession (sq-xqfg, HolderPoP
+    /// T5, the B2 hidden-key tier). The proof's PUBLIC inputs are `challenge` +
+    /// the issuer-attested `holder_pk_digest`; the holder secret `hsk` and the
+    /// holder public key `(hpk_x, hpk_y)` are PRIVATE, so the proof proves
+    /// "I possess the holder secret whose key the issuer bound into this
+    /// credential" without disclosing the secret OR the key. The relation is
+    /// `hpk = hsk·G` (Baby-JubJub, ONE scalar-mul — cheaper than the
+    /// [`HiddenIssuer`] Schnorr's two) AND
+    /// `Poseidon2([ZKSIG_HK, hpk.x, hpk.y]) == holder_pk_digest`, reusing
+    /// `issuer.nr`'s scalar-mul / on-curve / `< L` gadgets verbatim. A single
+    /// depth-free member (no Merkle parameterisation — the clear-digest tier).
+    /// The verifier gate that binds `holder_pk_digest` to the issuer attestation
+    /// is `bind_holder_pok` (T6/sq-i1dt), SEPARATE from this member registration.
+    // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK circuit member.
+    HolderPok,
 }
 
 impl CircuitId {
@@ -562,6 +577,8 @@ impl CircuitId {
             CircuitId::FilterF64 { d } => format!("filter_f64_d{d}"),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
             CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
+            // [OPUS-4.8] sq-xqfg (HolderPoP T5): depth-free single member.
+            CircuitId::HolderPok => "holder_pok".to_string(),
         }
     }
 }

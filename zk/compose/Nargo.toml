@@ -15,4 +15,5 @@ members = [
     "filter_f64_d4",
     "revoke_unset_d10",
     "hidden_issuer_d4",
+    "holder_pok",
 ]
