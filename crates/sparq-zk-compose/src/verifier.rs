@@ -3176,16 +3176,29 @@ fn bind_holder_pop(
 /// nonce-PoP together bind THIS holder to THIS credential).
 ///
 /// # What it checks (design `research/zk-holder-pop-design.md` §3.3 B1 / §4.1)
-/// 1. **Locate the issuer-attested binding.** Scan
-///    `manifest.commitment_attestations` for an entry carrying an
-///    [`crate::manifest::AttestedHolderBinding`]. (A credential has at most one
-///    holder binding; if several attestations carry one, ALL must agree with the
-///    presented key — a disagreement is a `HolderKeyMismatch`.)
-/// 2. **Bearer policy (fail-closed, no silent fallback).** If NO attestation
-///    carries a holder binding, the credential is BEARER. Under
-///    [`HolderBindingPolicy::require_binding`] this is rejected
-///    ([`CheckError::HolderBindingMissing`]); under the back-compatible default it
-///    is accepted (the sq-cwq registry + nonce-PoP guarantee stands).
+/// 1. **Scope to the COVERING attestation, never any attestation (sq-z8s7 Copilot
+///    scoping fix).** The binding is checked on the attestation that COVERS a
+///    SCAN-REFERENCED commitment — i.e. the credential the presentation actually
+///    uses — reusing the EXACT attestation→commitment mapping
+///    [`bind_issuer_attestations`] uses (`a.commitment.to_field() == c_field` over
+///    the per-graph `commitments` of every scan sub-proof). The earlier "ANY
+///    `manifest.commitment_attestations` entry has `holder: Some(_)`" shortcut was
+///    a SECURITY hole: a holder binding on an UNRELATED attestation (one covering
+///    no scan-referenced commitment) could satisfy the check while the credential
+///    genuinely presented was bearer/mismatched — the A-presents-B closure this
+///    function exists to enforce would silently lapse. We now iterate the
+///    scan-referenced commitments and look up THEIR covering attestation. (If
+///    several scans reference the same commitment, it is checked once; a credential
+///    has at most one covering attestation per commitment.)
+/// 2. **Bearer policy (fail-closed, no silent fallback), per covering attestation.**
+///    A scan-referenced commitment whose COVERING attestation carries no holder
+///    binding (or that has no clear covering attestation at all — hidden-issuer or
+///    unattested) is BEARER for this credential. Under
+///    [`HolderBindingPolicy::require_binding`] that is rejected
+///    ([`CheckError::HolderBindingMissing`] — bearer-where-binding-required);
+///    under the back-compatible default it is accepted (the sq-cwq registry +
+///    nonce-PoP guarantee stands). When NO holder binding covers ANY presented
+///    credential the whole presentation is bearer (same policy split).
 /// 3. **Anchor the digest in the issuer signature (NEVER the manifest alone).**
 ///    For a holder-bound attestation, the issuer signed
 ///    [`sparq_zk::sig::commitment_message_with_holder`]`(C(G), salt, status_ref, holder_pk_digest)`
@@ -3216,20 +3229,78 @@ fn bind_holder_binding(
     holder_binding_policy: &HolderBindingPolicy,
     presented_pk: &PublicKey,
 ) -> Result<(), CheckError> {
-    // (1) Locate every attestation carrying an issuer-attested holder binding.
-    let bound: Vec<&crate::manifest::CommitmentAttestation> = manifest
-        .commitment_attestations
-        .iter()
-        .filter(|att| att.holder.is_some())
+    // (1) [OPUS-4.8] sq-z8s7 (Copilot scoping fix): collect the attestations that
+    // COVER a SCAN-REFERENCED commitment — the credential(s) the presentation
+    // actually uses — using the EXACT attestation→commitment mapping
+    // `bind_issuer_attestations` uses (`a.commitment.to_field() == c_field` over
+    // the per-graph `commitments` of every scan sub-proof). This REPLACES the
+    // earlier "ANY attestation has `holder: Some(_)`" shortcut, which was a
+    // SECURITY hole: a holder binding on an UNRELATED attestation could satisfy the
+    // check while the genuinely-presented credential was bearer/mismatched. We
+    // build the covering set so a credential's bearer/holder-bound status is judged
+    // on ITS OWN attestation, not on a stray sibling. Keyed by canonical commitment
+    // hex so a commitment referenced by several scans is checked once; the value is
+    // whether THAT commitment's covering attestation carries a holder binding (and,
+    // if so, the binding itself for the cross-check below).
+    let mut covering: std::collections::BTreeMap<
+        String,
+        Option<&crate::manifest::CommitmentAttestation>,
+    > = std::collections::BTreeMap::new();
+    for sp in &manifest.sub_proofs {
+        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
+            continue;
+        };
+        for c in commitments {
+            let Some(c_field) = c.to_field() else {
+                // A non-field commitment can carry no valid attestation. It is
+                // already rejected upstream by `bind_issuer_attestations`
+                // (`bind_holder_binding` runs after the issuer gate via
+                // `verify_manifest`); skip it here so a malformed commitment cannot
+                // mask a real scoping decision.
+                continue;
+            };
+            // The covering attestation = the same lookup `bind_issuer_attestations`
+            // uses (compare as field elements so 0x-padding cannot slip a mismatch).
+            let att = manifest.commitment_attestations.iter().find(|a| {
+                a.commitment.to_field().is_some() && a.commitment.to_field() == Some(c_field)
+            });
+            covering.insert(field_to_hex(&c_field), att);
+        }
+    }
+
+    // The set of covering attestations that DO carry a holder binding — the only
+    // attestations whose binding this credential's presentation must satisfy.
+    let bound: Vec<&crate::manifest::CommitmentAttestation> = covering
+        .values()
+        .filter_map(|a| a.filter(|att| att.holder.is_some()))
         .collect();
 
-    // (2) Bearer credential (no holder binding). Fail-closed iff the relying party
-    // mandates binding; otherwise keep the back-compatible sq-cwq behaviour.
+    // (2) Bearer policy, scoped to the COVERING attestations. A presentation is
+    // bearer iff NO scan-referenced commitment's covering attestation carries a
+    // holder binding (a holder binding on an unrelated attestation no longer
+    // counts). Under `require_binding` that is rejected fail-closed
+    // (`HolderBindingMissing` — bearer-where-binding-required); under the
+    // back-compatible default it is accepted (sq-cwq registry + nonce-PoP stands).
     if bound.is_empty() {
         if holder_binding_policy.requires_binding() {
             return Err(CheckError::HolderBindingMissing);
         }
         return Ok(());
+    }
+
+    // [OPUS-4.8] sq-z8s7 (Copilot scoping fix): under `require_binding`, EVERY
+    // presented credential must be holder-bound — a scan-referenced commitment whose
+    // covering attestation lacks a binding (or has no clear covering attestation at
+    // all) is bearer-where-binding-required, rejected even though a SIBLING
+    // commitment is bound. (Under the back-compatible default a mix is allowed: the
+    // bound credentials are still cross-checked below; the bearer ones rely on the
+    // registry + nonce-PoP.)
+    if holder_binding_policy.requires_binding()
+        && covering
+            .values()
+            .any(|a| a.is_none_or(|att| att.holder.is_none()))
+    {
+        return Err(CheckError::HolderBindingMissing);
     }
 
     // The presented key's digest (T1). The identity key has no usable digest and is

@@ -1791,6 +1791,102 @@ fn holder_binding_bearer_policy_required_vs_allowed() {
     }
 }
 
+/// sq-z8s7 (B1 — THE LOAD-BEARING SCOPING TEST, Copilot review on #142): a holder
+/// binding on an UNRELATED attestation (one covering NO scan-referenced commitment)
+/// must NOT satisfy the holder-binding check for the credential actually presented.
+///
+/// The earlier `bind_holder_binding` treated the presentation as "bound" if ANY
+/// `manifest.commitment_attestations` entry carried `holder: Some(_)`, regardless of
+/// whether that attestation covered a scan-referenced commitment. So a holder
+/// binding on a stray, unrelated attestation could pass the check while the
+/// credential genuinely presented (the scan's covering attestation) was bearer — the
+/// A-presents-B closure would silently lapse. THE FIX ties the binding to the
+/// attestation that COVERS the scan-referenced commitment (the same
+/// attestation→commitment mapping `bind_issuer_attestations` uses).
+///
+/// This fixture builds a manifest whose ONLY scan-referenced commitment has a BEARER
+/// (status-only, `holder: None`) covering attestation, then ADDS an UNRELATED
+/// holder-bound attestation over a DIFFERENT commitment value bound to the
+/// presenter's own key. Under the buggy "any attestation" path the unrelated binding
+/// (whose digest == the presenter) would PASS; under the scoped fix the scan's
+/// covering attestation is bearer, so under `require_binding` the presentation is
+/// REJECTED `HolderBindingMissing` (bearer-where-binding-required). The loose
+/// "any attestation" path is closed. No toolchain needed.
+#[test]
+fn holder_binding_unrelated_attestation_does_not_satisfy_scoped_check() {
+    let prover = CircuitProver::from_crate_root();
+    let salt = salt_from_bytes(&[9u8; 32]);
+    let holder_sk = SecretKey::from_seed(777); // the presenter (trusted)
+    let holder_hex = public_key_to_hex(&holder_sk.public_key());
+    let registry = HolderRegistry::from_hex_keys([holder_hex.clone()]);
+    let issuer = test_issuer_sk(1);
+
+    // A BEARER HolderPop manifest: the scan's covering attestation is status-only
+    // (`holder: None`) via `attest_all`, and the presented key + PoP are the
+    // trusted holder's (so registry + nonce-PoP succeed; only the credential↔holder
+    // binding is at issue).
+    let mut m = holder_pop_manifest(
+        &holder_hex,
+        &holder_pop_over_2a(&holder_sk),
+        SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri(),
+    );
+
+    // Sanity: the scan's covering attestation must really be BEARER (no holder
+    // binding) — the precondition the scoping bug would otherwise let an unrelated
+    // binding paper over.
+    let scan_commitment = scan_commitments(&m)[0];
+    let scan_hex = sparq_zk::field::field_to_hex(&scan_commitment);
+    assert!(
+        m.commitment_attestations
+            .iter()
+            .filter(|a| a.commitment.to_field() == Some(scan_commitment))
+            .all(|a| a.holder.is_none()),
+        "fixture precondition: the scan's covering attestation is bearer (holder: None)"
+    );
+
+    // ADD an UNRELATED holder-bound attestation over a DIFFERENT commitment value
+    // (NOT any scan-referenced commitment), bound to the PRESENTER'S OWN key — the
+    // exact shape that would falsely satisfy the buggy "any attestation has a
+    // holder" shortcut. Its commitment is a distinct field element (scan + 1), so it
+    // covers no scan sub-proof.
+    let unrelated_commitment = scan_commitment + Fr::from(1u64);
+    assert_ne!(
+        sparq_zk::field::field_to_hex(&unrelated_commitment),
+        scan_hex,
+        "the unrelated attestation must cover a DIFFERENT commitment than the scan"
+    );
+    m.commitment_attestations.push(attest_with_holder(
+        unrelated_commitment,
+        salt,
+        &holder_sk.public_key(),
+        true,
+        &issuer,
+    ));
+
+    // Under `require_binding`: the SCAN-REFERENCED commitment's covering attestation
+    // is bearer, so the presentation is bearer-where-binding-required and REJECTED —
+    // the unrelated holder binding does NOT rescue it (the scoping bug is closed).
+    match verify_manifest(
+        &m,
+        &prover,
+        &scratch("holder_binding_unrelated_scope"),
+        &trusted_k(&issuer),
+        &fresh_policy(),
+        &registry,
+        &HolderBindingPolicy::require_binding(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::HolderBindingMissing) => {}
+        other => panic!(
+            "a holder binding on an UNRELATED attestation must NOT satisfy the scoped \
+             check for a bearer scan-referenced credential under require_binding \
+             (expected HolderBindingMissing — the scoping bug is closed), got {other:?}"
+        ),
+    }
+}
+
 /// sq-cwq (POSITIVE, end-to-end): a HolderPop with a trusted holder + a VALID PoP
 /// over the verifier nonce, atop a real scan+filter proof, verifies end-to-end.
 /// Toolchain-gated (full bb prove of the sub-proof). This is the "implemented"
