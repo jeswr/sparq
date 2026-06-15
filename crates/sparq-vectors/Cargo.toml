@@ -56,3 +56,11 @@ serde_json = { version = "1", optional = true }
 # async runtime into the tree) — mirrors sparq-nlq's `live` reqwest dependency exactly.
 # rustls-tls so there is no system-OpenSSL build dependency.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+
+# [OPUS-4.8] sq-88c6: DEV-only. The `hybrid_search` example/tests fuse this crate's ANN
+# (`VectorIndex::nearest_term`) with `sparq-sim`'s structural similarity
+# (`Sim::most_similar`) by `Term`. The fusion helper itself is generic over retriever
+# closures, so the LIBRARY stays decoupled — `sparq-sim` is a test/example dependency
+# only and never enters the published dependency graph.
+[dev-dependencies]
+sparq-sim = { path = "../sparq-sim" }

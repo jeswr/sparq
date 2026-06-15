@@ -17,6 +17,30 @@
 //!   `[0, 1]`, then blends `alpha·a + (1 − alpha)·b`. Preserves score *magnitudes*
 //!   (a runaway top hit stays a runaway), at the cost of an `alpha` to tune.
 //!
+//! For the common case — fuse this crate's ANN with another `Term` retriever — reach
+//! for [`hybrid_search`], which drives N retriever closures off one query `Term` and
+//! fuses their ranked `Term` lists by [`fuse_rrf`], deduplicating by `Term`:
+//!
+//! ```no_run
+//! # use sparq_core::Graph;
+//! # use sparq_vectors::{VectorStore, VectorIndex, hybrid_search, RRF_K};
+//! # use oxrdf::Term;
+//! # fn demo(graph: &Graph, store: &VectorStore, index: &VectorIndex,
+//! #         sim: &sparq_sim::Sim, query: &Term) {
+//! // Fuse the embedding ANN with sparq-sim's structural similarity, BY `Term`. The ANN's
+//! // f32 cosine scores are widened to f64 so both lists share the fused `(Term, f64)`
+//! // shape — RRF ignores the scores anyway, only the ranks matter.
+//! let fused = hybrid_search(query, 10, RRF_K, &mut [
+//!     &mut |t: &Term| index.nearest_term(t, graph, store, 50)   // ANN (cosine)
+//!         .into_iter().map(|(t, s)| (t, s as f64)).collect(),
+//!     &mut |t: &Term| sim.most_similar(t, 50),                  // semantic (Jaccard)
+//! ]);
+//! // `fused` is one ranked `Vec<(Term, f64)>`, each `Term` appearing once. A term ranked
+//! // high in BOTH retrievers outranks one ranked high in only one — consensus wins.
+//! # let _ = fused;
+//! # }
+//! ```
+//!
 //! ```
 //! use sparq_vectors::{fuse_rrf, fuse_scores, RRF_K};
 //!
@@ -98,6 +122,50 @@ pub fn fuse_rrf_weighted<T: Clone + Eq + Hash>(
         }
     }
     top_n(acc, top_k)
+}
+
+/// [OPUS-4.8] sq-88c6 — a borrowed retriever for [`hybrid_search`]: maps a query of type
+/// `Q` to a ranked `Vec<(T, f64)>` (best first). `&mut dyn` so heterogeneous retrievers
+/// (a `VectorIndex::nearest_term` closure, a `Sim::most_similar` closure, …) share one
+/// slice. Construct as `&mut |q: &Q| { … }`.
+pub type Retriever<'r, Q, T> = &'r mut dyn FnMut(&Q) -> Vec<(T, f64)>;
+
+/// [OPUS-4.8] sq-88c6 — **Hybrid retrieval over one query item, fused by [`fuse_rrf`].**
+///
+/// Drives every `retriever` off the same `query` (typically a [`Term`](oxrdf::Term)),
+/// then fuses the resulting ranked lists by item with Reciprocal Rank Fusion, returning
+/// the fused top `top_k` (best first). Each retriever is `FnMut(&Q) -> Vec<(T, f64)>`
+/// (best first), so any `Term` source plugs in WITHOUT this crate depending on it — pass
+/// closures over the producers you already have:
+///
+/// - this crate's ANN: `&mut |t| index.nearest_term(t, graph, store, n)` (cosine);
+/// - structural similarity: `&mut |t| sim.most_similar(t, n)` (`sparq-sim`, weighted
+///   Jaccard);
+/// - a lexical/BM25 list, a SPARQL-derived candidate set, …
+///
+/// Fusion is RRF, so the retrievers' score *scales never need reconciling* (cosine in
+/// `[-1, 1]` vs Jaccard in `[0, 1]`) — only their ranks matter. The returned scores are
+/// fused RRF scores, NOT either retriever's. An item is deduplicated to a single entry
+/// whose score sums the `1/(k + rank)` contributions of every list that ranks it; an item
+/// in only one list still appears (with that one contribution). A retriever returning an
+/// empty list contributes nothing, so a partly-unembedded query degrades gracefully.
+///
+/// Use [`RRF_K`] for `k` unless you have a reason not to. To down-weight a noisier
+/// retriever, collect its list and call [`fuse_rrf_weighted`] directly. `top_k == 0`,
+/// no retrievers, or all-empty results yield an empty `Vec`.
+///
+/// # Panics
+/// If `k ≤ 0` (propagated from [`fuse_rrf`]).
+pub fn hybrid_search<Q, T: Clone + Eq + Hash>(
+    query: &Q,
+    top_k: usize,
+    k: f64,
+    retrievers: &mut [Retriever<'_, Q, T>],
+) -> Vec<(T, f64)> {
+    // Run each retriever once on the shared query, keeping its rank order.
+    let lists: Vec<Vec<(T, f64)>> = retrievers.iter_mut().map(|r| r(query)).collect();
+    let refs: Vec<&[(T, f64)]> = lists.iter().map(|l| l.as_slice()).collect();
+    fuse_rrf(&refs, k, top_k)
 }
 
 /// **Relative score fusion** of two ranked lists: min-max normalizes each list's
@@ -290,5 +358,113 @@ mod tests {
     fn weighted_rrf_rejects_negative_weight() {
         let a: Vec<(&str, f64)> = vec![("x", 1.0)];
         fuse_rrf_weighted(&[(&a, -0.1)], 60.0, 1);
+    }
+
+    // [OPUS-4.8] sq-88c6 — hybrid_search: two retriever closures fused by RRF.
+
+    #[test]
+    fn hybrid_search_fuses_two_retrievers_consensus_wins() {
+        // Stand-ins for the two retrievers (e.g. `index.nearest_term` and
+        // `sim.most_similar`), each keyed on a query string and returning ranked items.
+        // "b" is rank 2 in ANN and rank 1 in semantic → consensus; "a" is rank 1 in ANN
+        // only; "d" is rank 2 in semantic only. Query type `Q = &str`, so each retriever
+        // receives `&Q = &&str`.
+        let ann = |_q: &&str| -> Vec<(&'static str, f64)> {
+            vec![("a", 0.92), ("b", 0.85), ("c", 0.20)] // cosine scale
+        };
+        let semantic = |_q: &&str| -> Vec<(&'static str, f64)> {
+            vec![("b", 0.61), ("d", 0.55), ("a", 0.10)] // Jaccard scale
+        };
+        let mut r0 = ann;
+        let mut r1 = semantic;
+        let fused =
+            hybrid_search(&"query", 10, 60.0, &mut [&mut r0 as &mut dyn FnMut(&&str) -> _, &mut r1]);
+
+        // Consensus (high in BOTH) beats high-in-only-one: b = rank2 ANN + rank1 semantic
+        // = 1/62 + 1/61.
+        assert_eq!(fused[0].0, "b");
+        assert!((fused[0].1 - (1.0 / 62.0 + 1.0 / 61.0)).abs() < 1e-12);
+        // a: rank1 (ANN) + rank3 (semantic) = 1/61 + 1/63 — beats single-list items.
+        assert_eq!(fused[1].0, "a");
+        assert!((fused[1].1 - (1.0 / 61.0 + 1.0 / 63.0)).abs() < 1e-12);
+        // Every item is deduplicated by key: a, b, c, d each appear once.
+        assert_eq!(fused.len(), 4);
+        let keys: Vec<&str> = fused.iter().map(|(t, _)| *t).collect();
+        for want in ["a", "b", "c", "d"] {
+            assert_eq!(keys.iter().filter(|&&t| t == want).count(), 1, "{want} deduped");
+        }
+        // RRF ignores raw scores: a term in ONE list still appears (d, from semantic only).
+        assert!(keys.contains(&"d"));
+        // top_k truncates the fused list.
+        let truncated =
+            hybrid_search(&"q", 2, 60.0, &mut [&mut r0 as &mut dyn FnMut(&&str) -> _, &mut r1]);
+        assert_eq!(truncated.len(), 2);
+    }
+
+    #[test]
+    fn hybrid_search_high_in_both_outranks_high_in_one() {
+        // "shared" is rank 1 in retriever A and rank 1 in retriever B. "soloA" is strong
+        // in A only; "soloB" strong in B only.
+        let mut a = |_q: &i32| vec![("soloA", 9.9), ("shared", 0.0)];
+        let mut b = |_q: &i32| vec![("soloB", 9.9), ("shared", 0.0)];
+        let fused = hybrid_search(&0, 10, 60.0, &mut [&mut a as &mut dyn FnMut(&i32) -> _, &mut b]);
+        // shared: 1/62 + 1/62 ≈ 0.03226 beats soloA/soloB at 1/61 ≈ 0.01639.
+        assert_eq!(fused[0].0, "shared");
+        assert!(fused[0].1 > fused[1].1, "consensus item must strictly outrank single-list items");
+    }
+
+    #[test]
+    fn hybrid_search_edge_cases() {
+        // (1) No retrievers → empty.
+        let empty: Vec<(&str, f64)> = hybrid_search::<i32, &str>(&0, 10, 60.0, &mut []);
+        assert!(empty.is_empty());
+
+        // (2) One retriever empty, the other not: degrades to the non-empty list, in order.
+        let mut none = |_q: &i32| Vec::<(&'static str, f64)>::new();
+        let mut some = |_q: &i32| vec![("x", 1.0), ("y", 0.5)];
+        let fused =
+            hybrid_search(&0, 10, 60.0, &mut [&mut none as &mut dyn FnMut(&i32) -> _, &mut some]);
+        assert_eq!(fused.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec!["x", "y"]);
+
+        // (3) Both empty → empty.
+        let mut none2 = |_q: &i32| Vec::<(&'static str, f64)>::new();
+        let both_empty =
+            hybrid_search(&0, 10, 60.0, &mut [&mut none as &mut dyn FnMut(&i32) -> _, &mut none2]);
+        assert!(both_empty.is_empty());
+
+        // (4) top_k == 0 → empty even with results.
+        let zero = hybrid_search(&0, 0, 60.0, &mut [&mut some as &mut dyn FnMut(&i32) -> _]);
+        assert!(zero.is_empty());
+    }
+
+    #[test]
+    fn hybrid_search_term_in_one_list_only() {
+        // "only_b" appears solely in retriever b; it must surface (one contribution), but
+        // below any item ranked by both. "both" is rank 2 in a and rank 1 in b.
+        let mut a = |_q: &i32| vec![("top_a", 1.0), ("both", 0.9)];
+        let mut b = |_q: &i32| vec![("both", 0.8), ("only_b", 0.7)];
+        let fused = hybrid_search(&0, 10, 60.0, &mut [&mut a as &mut dyn FnMut(&i32) -> _, &mut b]);
+        // both: 1/62 + 1/61; top_a: 1/61; only_b: 1/62. Consensus first.
+        assert_eq!(fused[0].0, "both");
+        assert_eq!(fused[1].0, "top_a"); // single list, but rank 1 (1/61) > only_b's 1/62
+        assert_eq!(fused[2].0, "only_b");
+        assert!(
+            (fused[2].1 - 1.0 / 62.0).abs() < 1e-12,
+            "single-list item keeps its lone contribution"
+        );
+    }
+
+    #[test]
+    fn hybrid_search_identical_lists_double_every_contribution() {
+        // Two identical retrievers: each item's fused score is exactly 2× its single
+        // contribution, and the order is preserved.
+        let list = || vec![("p", 1.0), ("q", 0.5), ("r", 0.1)];
+        let mut a = |_q: &i32| list();
+        let mut b = |_q: &i32| list();
+        let fused = hybrid_search(&0, 10, 60.0, &mut [&mut a as &mut dyn FnMut(&i32) -> _, &mut b]);
+        assert_eq!(fused.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec!["p", "q", "r"]);
+        assert!((fused[0].1 - 2.0 / 61.0).abs() < 1e-12);
+        assert!((fused[1].1 - 2.0 / 62.0).abs() < 1e-12);
+        assert!((fused[2].1 - 2.0 / 63.0).abs() < 1e-12);
     }
 }

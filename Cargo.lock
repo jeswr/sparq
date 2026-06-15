@@ -3555,6 +3555,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde_json",
  "sparq-core",
+ "sparq-sim",
 ]
 
 [[package]]

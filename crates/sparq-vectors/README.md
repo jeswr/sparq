@@ -70,7 +70,8 @@ let _neighbours = index.nearest_term(&some_term, &graph, &store, 10);
   works against a real endpoint with **no caller glue** (see below). Mirrors `sparq-nlq`'s
   `live` feature; never enters the wasm bundle.
 - **Hybrid fusion** — `fuse_rrf` / `fuse_rrf_weighted` / `fuse_scores` combine text vectors
-  with another ranked signal (e.g. [`sparq-sim`](../sparq-sim) structural similarity).
+  with another ranked signal (e.g. [`sparq-sim`](../sparq-sim) structural similarity);
+  `hybrid_search` runs N retriever closures off one query and fuses by item with RRF.
 
 ## 🔌 Live embeddings (opt-in `embeddings` feature)
 
