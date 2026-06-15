@@ -1,0 +1,26 @@
+# [OPUS-4.8] (sq-ustq) Full-text-search DETERMINISTIC golden values for the pinned
+# synthetic corpus (bench/fts/gen.sh => N=100000 literals, seed=0; ~10k-term Zipf vocab,
+# 8-word sentences) and the FIXED 200-query set (drawn from an independent seed inside
+# examples/bench_text). Format: <workload>\t<count>.
+#   count   the integer the run.sh self-gate asserts (exit 1 on any drift):
+#     and_terms / or_terms / prefix4 / phrase / near_slop2  => TOTAL hit count summed over
+#         the 200 fixed two-term queries (text:matches / text:matchesAny / prefix /
+#         text:phrase / text:near slop=2). This is the FTS analogue of LUBM's row-count diff.
+#     bytes_per_doc => index heap_bytes() / len() truncated to an integer — the FTS
+#         analogue of store_bytes_per_triple (runner-noise-immune, integer-exact).
+# These are DERIVED by RUNNING examples/bench_text on the pinned corpus (not guessed);
+# run.sh re-runs it every commit and exits 1 on any mismatch. The us column bench_text also
+# emits is ADVISORY (wall-clock, non-canonical dev box) and is NEVER asserted here.
+#
+# Monotonicity cross-checks (independent of the exact RNG):
+#   and_terms <= phrase <= near_slop2 is FALSE in general, but for THIS query set the
+#     adjacency/proximity counts are a SUBSET of the AND count (a phrase/near match implies
+#     both terms co-occur), so phrase <= near_slop2 <= and_terms must always hold.
+#   or_terms >= and_terms (OR admits a superset of AND).
+#   prefix4 >> or_terms (a 4-char prefix matches a whole stem family => far more docs).
+and_terms	52
+near_slop2	21
+or_terms	71643
+phrase	6
+prefix4	6727493
+bytes_per_doc	371

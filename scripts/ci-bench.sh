@@ -103,6 +103,16 @@ DEEPTAX_DEPTHS="${DEEPTAX_DEPTHS:-1000 10000}"
 # `shacl_<workload>_validate_us` (trend-only, NOT in scripts/perf-gate.py). Registry:
 # bench/benchmarks.toml (shacl-validate-bench); details: bench/shacl/README.md.
 SHACL_RUN=bench/shacl/run.sh
+# [OPUS-4.8] FULL-TEXT-SEARCH suite (sq-ustq, design §3.4). Exercises sparq-text (BM25 inverted
+# index + text: magic predicates). Unlike LUBM/SHACL the corpus is SYNTHETIC + generated
+# in-process by examples/bench_text from a deterministic seed — NO external generator (no
+# rapper/javac). run.sh is the self-asserting entry point: it runs bench_text on the pinned
+# corpus, asserts each workload's hit count + the integer index bytes-per-doc vs expected.tsv
+# (exit 1 on drift), and prints the `<workload>\t<count>\t<us>` contract on stdout. The hit
+# counts/bytes_per_doc are the HARD gate (in run.sh); the timings harvested below are ADVISORY
+# (text_*_us/text_build_s, trend-only, NOT in scripts/perf-gate.py). The integer bytes-per-doc
+# additionally gets a mode:auto ratchet in bench/perf-baseline.json (fts_bytes_per_doc).
+FTS_RUN=bench/fts/run.sh
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 RES="$TMP/res.tsv"; : > "$RES"
 add() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$RES"; }
@@ -451,6 +461,48 @@ if command -v javac >/dev/null 2>&1 && command -v rapper >/dev/null 2>&1 && [ -x
   fi
 else
   echo "note: shacl skipped (javac/rapper not on PATH)" >&2
+fi
+
+# [OPUS-4.8] FULL-TEXT-SEARCH suite per-commit (sq-ustq). The corpus is SYNTHETIC (generated
+# in-process by examples/bench_text from a seed), so there is NO external-toolchain guard like
+# the LUBM/SHACL javac/rapper — the only requirement is the bench_text example binary, built on
+# demand (sparq-text is isolated — not a sparq-cli dependency). run.sh is the self-asserting
+# entry point: it runs bench_text on the pinned N=100000/seed=0 corpus and asserts each
+# workload's hit count + the integer index bytes-per-doc vs expected.tsv internally (exit 1 on
+# any drift), failing the whole ci-bench run on a regression exactly like LUBM/SHACL. We harvest
+# run.sh's `<workload>\t<count>\t<us>` stdout: the `bytes_per_doc` row feeds the DETERMINISTIC
+# fts_bytes_per_doc ratchet (mode:auto, scripts/perf-gate.py), and the query rows feed ADVISORY
+# timings (text_<workload>_us, trend-only, NOT in perf-gate). Build is guarded so a missing
+# cargo/toolchain skips gracefully (PRs build no examples ⇒ zero PR cost).
+FTS_BIN=target/release/examples/bench_text
+if command -v cargo >/dev/null 2>&1 && [ -x "$FTS_RUN" ]; then
+  # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE
+  # bench_text. Let cargo's staleness detection decide (a no-op rebuild is cheap); do NOT
+  # swallow a real compile failure (it must fail the gate, not silently skip the FTS check).
+  if ! cargo build --release -q -p sparq-text --example bench_text; then
+    echo "ERROR: bench_text example failed to build" >&2
+    exit 1
+  fi
+  if BENCH_TEXT="$FTS_BIN" ITERS=3 bash "$FTS_RUN" > "$TMP/fts.tsv" 2>"$TMP/fts.err"; then
+    while IFS=$'\t' read -r name count us; do
+      [ "${count:-}" = "ERROR" ] && continue
+      if [ "$name" = "bytes_per_doc" ]; then
+        # DETERMINISTIC (integer, runner-noise-immune) — the mode:auto ratchet metric.
+        [ -n "${count:-}" ] && add fts_bytes_per_doc bytes "$count"
+        # us here is the advisory index BUILD time (microseconds -> seconds for the trend).
+        [ -n "${us:-}" ] && add text_build_s s "$(awk -v u="$us" 'BEGIN{printf "%.6f", u/1e6}')"
+      else
+        # ADVISORY per-query latency (microseconds): text_<workload>_us, trend-only.
+        [ -n "${us:-}" ] && add "text_${name}_us" us "$us"
+      fi
+    done < "$TMP/fts.tsv"
+  else
+    echo "ERROR: fts run.sh failed (correctness/structure regression)" >&2
+    cat "$TMP/fts.err" >&2 || true
+    exit 1
+  fi
+else
+  echo "note: fts skipped (cargo not on PATH)" >&2
 fi
 
 # RDFS inference (seconds) — instance-heavy: SCALE individuals under a depth-20 class hierarchy.
