@@ -60,6 +60,9 @@ pub fn load_str_with_base(text: &str, format: &str, base: &str) -> Result<Graph,
 
 // Dataset load (N-Quads / TriG) preserving NAMED GRAPHS as separate sub-graphs
 // (so `GRAPH ?g {…}` works). Other formats defer to load_str. In-memory only.
+// N-Quads is parallel-chunked (per-graph routing + sharded-dict merge) when the
+// `parallel` feature is on (default native); TriG uses the serial path. Named
+// graphs come out in first-occurrence document order (deterministic).
 pub fn load_dataset(text: &str, format: &str) -> Result<Graph, String>
 
 // Streaming from any reader (e.g. a decompression stream) — serial.
