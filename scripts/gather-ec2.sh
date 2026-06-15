@@ -172,6 +172,13 @@ INSTANCE_ID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --insta
   --tag-specifications "$TAGSPEC" \
   --user-data "$USERDATA" \
   --query 'Instances[0].InstanceId' --output text)
+# [OPUS-4.8] run-instances can return ""/"None" on a failed launch (e.g. VcpuLimitExceeded,
+# no capacity). Without this guard the script would `wait`/poll/terminate against a bogus
+# id for ~50 min and try to clean up nothing. Validate it is a real i-... id and ABORT.
+case "$INSTANCE_ID" in
+  i-*) ;;
+  *) INSTANCE_ID=""; log "ERROR: run-instances did not return a valid instance id (launch failed) — aborting"; exit 1 ;;
+esac
 log "launched INSTANCE_ID=$INSTANCE_ID"
 aws ec2 wait instance-running --region "$REGION" --instance-ids "$INSTANCE_ID"
 IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)

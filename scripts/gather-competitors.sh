@@ -426,6 +426,7 @@ run_report_cli_engine() { # <id>
   log "  recipe: $recipe"
   if [ "$DO_RUN" -eq 1 ]; then
     have python3 || die "python3 needed for the report-cli adapter"
+    have jq || die "jq needed for the report-cli adapter (to parse the --json sidecar)"  # [OPUS-4.8] match js-lib's jq guard
     python3 -c 'import rdflib' 2>/dev/null || die "report-cli adapter needs rdflib (pip install rdflib)"
     { [ -n "${SHACL_DATA:-}" ] && [ -n "${SHACL_SHAPES:-}" ]; } || die "report-cli --run needs SHACL_DATA + SHACL_SHAPES"
     [ -d "$SHACL_SHAPES" ] && log "  SHACL_SHAPES is a directory — expanding per shape file (one workload each, matching sparq-shacl)"
