@@ -733,7 +733,21 @@ dependencies = [
  "libfuzzer-sys",
  "sparq-core",
  "sparq-engine",
+ "sparq-shacl",
  "tempfile",
+]
+
+[[package]]
+name = "sparq-shacl"
+version = "0.1.0"
+dependencies = [
+ "oxrdf",
+ "oxttl",
+ "regex",
+ "rustc-hash",
+ "spargebra",
+ "sparq-core",
+ "sparq-engine",
 ]
 
 [[package]]
