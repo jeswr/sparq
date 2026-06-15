@@ -145,10 +145,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install PyYAML
-        # [OPUS-4.8] Version-pinned (Scorecard PinnedDependencies), matching the `==`
-        # style used for the Python build tools in python.yml (maturin/pytest). A single
-        # fixed dep, so `==` pinning is non-brittle; bump deliberately.
-        run: pip install pyyaml==6.0.2
+        # [OPUS-4.8] HASH-pinned (Scorecard PinnedDependenciesID): a `==` version pin
+        # still trusts whatever PyPI serves, so --require-hashes verifies every artifact's
+        # sha256 against .github/requirements/docs-quality.txt before use. PyYAML has no
+        # runtime deps, so that file is the full closure. See its header to bump/regenerate.
+        run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Validate SKILL.md frontmatter
         run: python3 scripts/check-skill-frontmatter.py
 
