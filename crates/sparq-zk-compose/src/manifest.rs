@@ -1087,9 +1087,22 @@ mod holder_binding_tests {
         let json = serde_json::to_string(&att).expect("serializes");
         // `holder: None` serializes (no skip on the field) but a JSON missing it
         // must still parse via #[serde(default)].
-        let stripped = json
-            .replace(",\"holder\":null", "")
-            .replace("\"holder\":null,", "");
+        //
+        // [OPUS-4.8] Drop the `holder` key STRUCTURALLY (parse → remove key on the
+        // attestation object → re-serialize) rather than via brittle raw-string
+        // `.replace()`, so this back-compat test survives field-order, whitespace,
+        // and future-field changes to the serialized form.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&json).expect("attestation JSON is a value");
+        assert!(
+            value
+                .as_object_mut()
+                .expect("attestation serializes as a JSON object")
+                .remove("holder")
+                .is_some(),
+            "the serialized attestation carries a `holder` key to remove"
+        );
+        let stripped = serde_json::to_string(&value).expect("re-serializes");
         assert!(
             !stripped.contains("\"holder\""),
             "stripped the holder field"
