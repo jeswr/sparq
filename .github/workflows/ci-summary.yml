@@ -101,7 +101,9 @@ jobs:
           # change. With a matrix, the N shard check-runs register at DIFFERENT times, so
           # every late arrival reset the 4-poll window — convergence crawled (≈7 min on
           # the first 4-shard PR, worst case toward the cap), and the identical logic
-          # runs on `merge_group`, so the MERGE QUEUE's gate would be slow/fragile too.
+          # WILL also run on `merge_group` once a merge queue is enabled (this workflow
+          # currently triggers only on `pull_request` + `push`), so the MERGE QUEUE's
+          # gate would be slow/fragile too.
           #
           # WHY pending==0 is the right primary signal: a check-run that is still
           # registering/running is NOT `completed`, so it counts in `pending`. We only
@@ -145,7 +147,15 @@ jobs:
             names=$(printf '%s\n' "$runs" | jq -rs '[.[].name] | unique | join("\n")')
             pending=$(printf '%s\n' "$runs" | jq -rs '[.[] | select(.status != "completed")] | length')
             total=$(printf '%s\n' "$runs" | jq -rs 'length')
-            if [ "$names" = "$prev_names" ]; then stable=$((stable + 1)); else stable=1; prev_names="$names"; fi
+            # The settle window must be a POST-TERMINAL window: only advance `stable`
+            # while pending==0 AND the name set is unchanged. If anything is still
+            # pending — OR the name set just changed — reset to 0 so the SETTLE_POLLS
+            # window genuinely runs AFTER the last sibling finishes (otherwise `stable`
+            # would already be >= SETTLE_POLLS from the busy phase and the gate could
+            # render a verdict on the very first pending==0 poll, with no settle).
+            if [ "$names" != "$prev_names" ]; then prev_names="$names"; stable=0;
+            elif [ "$pending" -eq 0 ]; then stable=$((stable + 1));
+            else stable=0; fi
             echo "attempt $attempt: $total check-run(s), $pending running, name-set stable for $stable/$SETTLE_POLLS poll(s)"
             # Converge once every discovered sibling is terminal (pending == 0) AND the
             # name set has held unchanged for the short settle — but never before the
