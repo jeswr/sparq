@@ -490,7 +490,7 @@ if command -v cargo >/dev/null 2>&1 && [ -x "$GEO_RUN" ]; then
       # Route the compliance pass count to the HARD-gated deficit (max - passed): a
       # smaller-is-better integer that mode:auto ratchets DOWN, so coverage only tightens (G4).
       if [ "$name" = "geo_compliance_pass" ]; then
-        add geo_compliance_deficit count "$((GEO_COMPLIANCE_MAX - count))"
+        add geo_compliance_deficit fixtures "$((GEO_COMPLIANCE_MAX - count))"
       fi
     done < "$TMP/geo.tsv"
   else
