@@ -40,6 +40,7 @@
   var COMPETITORS_DATA = {
     schema_version: 1,
     gathered_at_utc: '2026-06-15',
+    gathered_by: 'static curation from in-repo sources (no live gather); see `source` on each engine/reference',
     engines: [
       { id: 'qlever', label: 'QLever', version: '0.5.47',
         env: '2020 MacBook Air M1, 16GB, native', source: 'bench/qlever-baselines.md' },
