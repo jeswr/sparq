@@ -142,7 +142,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # WebSocket client for the /subscriptions integration tests (T23) — same version axum's
 # `ws` feature resolves to, so the dependency tree gains nothing new.
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 # `StreamExt::next` / `SinkExt::send` on the test client's WebSocket stream.
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 # [OPUS-4.8] (sq-ebii) The decompression-ratio-cap test gzips a request body (a high-ratio
