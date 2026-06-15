@@ -31,6 +31,13 @@ default = []
 # is supplied by the CALLER (a `Transport` impl over their HTTP client of choice);
 # this crate never opens a socket. Pulls in serde_json for request/response bodies.
 provider = ["dep:serde_json"]
+# [OPUS-4.8] `embeddings` ships a CONCRETE reqwest blocking `Transport` + an
+# env-driven constructor so the crate works against a real /v1/embeddings endpoint
+# WITHOUT caller glue (sq-fg9y). Mirrors sparq-nlq's `live` feature: blocking reqwest,
+# rustls-tls, key/base-url/model from env, a hard request timeout. OFF by default — the
+# default build stays socket-free (no reqwest) and wasm-safe (nothing depends on this
+# crate, and reqwest is not in the default feature set so it never enters a wasm bundle).
+embeddings = ["provider", "dep:reqwest"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -44,3 +51,8 @@ memmap2.workspace = true
 # cleaner fit for an in-RAM index rebuilt from the mmap'd store on open.
 instant-distance.workspace = true
 serde_json = { version = "1", optional = true }
+# [OPUS-4.8] Concrete HTTP transport for the non-default `embeddings` feature only.
+# Blocking by design (the embed call is synchronous and this crate must not drag an
+# async runtime into the tree) — mirrors sparq-nlq's `live` reqwest dependency exactly.
+# rustls-tls so there is no system-OpenSSL build dependency.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }

@@ -243,10 +243,19 @@ let store2 = VectorStore::open_from_bytes(bytes)?;           // identical valida
 - **`HashEmbedder` is TEST-ONLY.** It is lexical n-gram hashing with **no semantics**
   ("car" and "automobile" are unrelated). Use it to exercise the store/ANN/pipeline; bring
   a real `Embedder` for actual retrieval.
-- **`provider` feature** for a live OpenAI-compatible `/v1/embeddings` endpoint: it builds
-  the request body and parses the response but **never opens a socket** — you supply a
-  `Transport` impl over your HTTP client (reqwest/ureq/recorded cassette). `cargo build -p
-  sparq-vectors --features provider`.
+- **Live embeddings — two opt-in tiers, default build is socket-free.** For a real
+  OpenAI-compatible `/v1/embeddings` endpoint:
+  - **`provider`** (non-default) carries the API shape only — it builds the request body and
+    parses the response but **never opens a socket**; you supply a `Transport` impl over your
+    HTTP client (reqwest/ureq/recorded cassette). `cargo build -p sparq-vectors --features provider`.
+  - **`embeddings`** (non-default; enables `provider` + a blocking reqwest `Transport`) needs
+    **no caller glue**: `RemoteEmbedder::from_env(dim)` reads `SPARQ_EMBEDDINGS_API_KEY`
+    (required), `SPARQ_EMBEDDINGS_BASE_URL` (default `https://api.openai.com/v1/embeddings`),
+    and `SPARQ_EMBEDDINGS_MODEL` (default `text-embedding-3-small`), then `embed_entities`
+    works against the live endpoint. Mirrors `sparq-nlq`'s `live` feature; requests carry a
+    hard timeout. `cargo build -p sparq-vectors --features embeddings`.
+  The **default build pulls no HTTP client** (no reqwest) and the crate never enters the wasm
+  bundle, so neither tier affects the default or wasm builds.
 - **Keys are dictionary term ids** (`sparq_core::dict::Id`, a `u32`). Resolve a `Term` with
   `graph.id_of(&term) -> Option<Id>` and an `Id` back with `graph.dict.term(id)`. Coverage
   is **sparse by design** — only entities get vectors, not every literal.
