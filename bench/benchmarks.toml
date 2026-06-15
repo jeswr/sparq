@@ -697,3 +697,27 @@ quiet_box_sensitive = true
 pinning     = "scale; run per target (Apple Silicon, Intel Mac, x86-64 v2/v3/v4, Graviton, Windows); tier-cpu auto-detected"
 records_to  = "appended to hw-bench-results.csv; research/hw-bench-results.md"
 status      = "ok"
+
+# =============================================================================
+# COMPETITORS — versioned external-engine comparison scaffold (sq-t0c3)
+# =============================================================================
+# [OPUS-4.8] The competitor REGISTRY (pinned versions, install/run recipes, and
+# the per-engine map of which sparq suites each is comparable on) lives in
+# bench/competitors.json — the machine-readable source-of-record. This entry is
+# the orchestrator that gathers numbers against those competitors and records
+# each one's VERSION + ENV alongside its result. It is SAFE-by-default (dry-run);
+# heavy gathers are guarded behind --run --only <id>. See bench/CATALOG.md
+# (Competitor comparison) for the human guide.
+
+[[benchmark]]
+id          = "competitor-gather"
+name        = "Versioned competitor comparison (Oxigraph / QLever / eye)"
+category    = "query"
+measures    = "per-competitor results + recorded version + host env block; oxigraph: sparq-bench compare latency/correctness; eye: N3-closure wall seconds; qlever: cold compute/endtoend ms via compare.py. NO numbers are committed by the script."
+invoke      = "scripts/gather-competitors.sh                              # dry-run (safe; runs nothing)\n              scripts/gather-competitors.sh --list                       # show the registry\n              scripts/gather-competitors.sh --run --only oxigraph --scale 50000 --iters 4\n              scripts/gather-competitors.sh --run --only eye             # needs EYE=/path/to/eye\n              scripts/gather-competitors.sh --run --only qlever --suite olympics  # needs a running QLever server"
+source      = "scripts/gather-competitors.sh; registry bench/competitors.json; delegates to crates/sparq-bench (oxigraph), bench/inference/eye-comparison.sh (eye), bench/qlever-*/compare.py (qlever)"
+dataset     = "per engine: oxigraph = in-process synthetic social graph (--scale, capped at MAX_SCALE); eye = generated N3 closures (DeepTaxonomy/anc500/grid30); qlever = the chosen bench/qlever-<suite> corpus (olympics/synthetic/100m)"
+quiet_box_sensitive = true
+pinning     = "oxigraph version from Cargo.lock; qlever image DIGEST resolved+recorded at run time (Qleverfile IMAGE is :latest — pin a digest for a fixed reference); eye = pinned binary version in bench/inference/eye-comparison.md; QUIET_BOX=true only on a dedicated quiet box"
+records_to  = "bench/competitor-results/<engine>-<suite>-<UTC>.json (git-ignored, regenerable); a maintainer maps a reviewed result into the dashboard seam (engines/values) of bench/competitors.json deliberately"
+status      = "ok"

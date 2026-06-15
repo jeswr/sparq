@@ -1,6 +1,8 @@
 /target
 /.qlever-venv
 /bench/native-qlever/
+# Competitor gather output (scripts/gather-competitors.sh) — regenerable, never committed.
+/bench/competitor-results/
 /dist
 # Local AWS hwbench scratch (keys/results) — never committed.
 /.sparq-hwbench/
