@@ -393,6 +393,100 @@
     return competitors.references.filter(function (r) { return r.suite === suiteKey; });
   }
 
+  // ---- suite FAMILIES (sq-rltn) --------------------------------------------
+  // [OPUS-4.8] sq-rltn: the dashboard must VISIBLY COVER ALL QUERY TYPES, not feel SPARQL-only.
+  // The published data is dominated (~16k points) by the SPARQL suites (SP2Bench/WatDiv/LUBM/BSBM/
+  // DBPSB), which buries the capability surfaces (SHACL / GeoSPARQL / Full-Text / Vector-ANN /
+  // Reasoning). FAMILIES groups the fine-grained suiteFor() suites into a small set of TOP-LEVEL
+  // capability families, in a fixed display order, so every family renders as its own prominent
+  // section + appears in the family nav — even a family with NO data yet shows as "not yet
+  // reported" (HONEST coverage, never a fabricated row). `suites` are matched against suiteFor()
+  // (normalised lower-case); `prefixes` are a structural fallback matched against the raw metric
+  // name's leading token so a not-yet-labelled metric (e.g. a future `vectors_*`) still lands in
+  // the right family. Pure + node-testable.
+  var FAMILIES = [
+    { key: 'core',     title: 'Core (load · dict · memory)', kind: 'core',
+      suites: ['pipeline', 'memory / size'],
+      prefixes: ['load', 'parse', 'store', 'dict', 'wasm', 'rdfs'] },
+    { key: 'sparql',   title: 'SPARQL query suites', kind: 'sparql',
+      suites: ['sp2bench', 'watdiv', 'lubm (reasoning)', 'bsbm', 'dbpsb',
+               'synthetic (qlever-style)', 'operators'],
+      prefixes: ['sp2b', 'watdiv', 'lubm', 'bsbm', 'dbpsb', 'op', 'q01', 'q02', 'q03', 'q04',
+                 'q05', 'q06', 'q07', 'q08', 'q09', 'q10', 'q11', 'q12'] },
+    { key: 'shacl',    title: 'SHACL validation', kind: 'capability',
+      suites: ['shacl validation', 'shacl'], prefixes: ['shacl'] },
+    { key: 'geo',      title: 'GeoSPARQL', kind: 'capability',
+      suites: ['geosparql', 'geo'], prefixes: ['geo'] },
+    { key: 'fts',      title: 'Full-Text search', kind: 'capability',
+      suites: ['full-text', 'fulltext', 'fts', 'text'], prefixes: ['text', 'fts'] },
+    { key: 'vector',   title: 'Vector / ANN', kind: 'capability',
+      suites: ['vector', 'vector / ann', 'vectors', 'ann'],
+      prefixes: ['vector', 'vectors', 'vec', 'ann', 'knn', 'hnsw', 'diskann'] },
+    { key: 'reasoning', title: 'Reasoning (Deep Taxonomy)', kind: 'capability',
+      suites: ['deep taxonomy', 'deeptax', 'deep-taxonomy', 'deeptaxonomy'],
+      prefixes: ['deeptax', 'deep'] }
+  ];
+
+  // The top-level family a metric belongs to. Consults suiteFor() (label-map driven) FIRST, then a
+  // leading-token prefix match on the raw name (so an unlabelled capability metric still lands).
+  // Returns a FAMILIES entry; falls back to the SPARQL family only if a metric truly matches no
+  // family AND looks query-shaped, else 'core' — so nothing is orphaned. Pure + node-testable.
+  function familyOf(name) {
+    var suite = (suiteFor(name) || '').toLowerCase();
+    var token = (name || '').toLowerCase().split('_')[0];
+    // suite match first (the source of truth)
+    for (var i = 0; i < FAMILIES.length; i++) {
+      if (FAMILIES[i].suites.indexOf(suite) !== -1) return FAMILIES[i];
+    }
+    // structural prefix fallback. We must check CAPABILITY families (shacl/geo/fts/vector/
+    // reasoning) BEFORE core+sparql so a capability metric is never mis-bucketed into SPARQL by a
+    // generic `op`/`q` prefix. FAMILIES is declared in DISPLAY order (core, sparql, then the
+    // capability families), so a single forward pass would hit sparql first; do an explicit
+    // two-pass scan — capability families first (kind === 'capability'), then the rest.
+    for (var j = 0; j < FAMILIES.length; j++) {
+      if (FAMILIES[j].kind === 'capability' && FAMILIES[j].prefixes.indexOf(token) !== -1) return FAMILIES[j];
+    }
+    for (var k = 0; k < FAMILIES.length; k++) {
+      if (FAMILIES[k].kind !== 'capability' && FAMILIES[k].prefixes.indexOf(token) !== -1) return FAMILIES[k];
+    }
+    // last resort: query-shaped -> SPARQL, else core.
+    if (/^(q\d+|op)_/.test((name || '').toLowerCase())) return FAMILIES[1];
+    return FAMILIES[0];
+  }
+
+  // Build the FAMILY view from the latest commit: one entry per family in FAMILIES order, each with
+  // its rows (latest value per metric + Δ-vs-best) sorted by suite then label, and a `suites` list
+  // of the distinct sub-suites present. A family with NO metrics is KEPT (empty rows) so the family
+  // nav + "not yet reported" section make coverage visible. Pure + node-testable — this is what the
+  // synchronous summary-first first-paint renders (NO charts, NO label fetch needed). sq-rltn.
+  function buildFamilies(entries) {
+    var byKey = {};
+    FAMILIES.forEach(function (f) { byKey[f.key] = { family: f, rows: [], suites: {} }; });
+    // [OPUS-4.8] Empty/absent series: keep the docstring promise (every family kept, zero-count)
+    // instead of throwing on entries[-1]. Return the same shape with empty rows.
+    var latest = (entries && entries.length) ? entries[entries.length - 1] : null;
+    (latest ? latest.benches : []).forEach(function (b) {
+      var f = familyOf(b.name);
+      var best = bestOf(entries, b.name);
+      var suite = suiteFor(b.name);
+      byKey[f.key].rows.push({
+        name: b.name, label: labelFor(b.name), title: titleFor(b.name),
+        value: b.value, unit: b.unit || '', suite: suite,
+        best: best, delta: deltaVsBest(b.value, best)
+      });
+      byKey[f.key].suites[suite] = true;
+    });
+    return FAMILIES.map(function (f) {
+      var g = byKey[f.key];
+      g.rows.sort(function (a, b) {
+        if (a.suite !== b.suite) return a.suite < b.suite ? -1 : 1;
+        return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
+      });
+      return { key: f.key, title: f.title, kind: f.kind, rows: g.rows,
+               count: g.rows.length, suites: Object.keys(g.suites).sort() };
+    });
+  }
+
   // ---- scaling comparison charts (sq-viby) ---------------------------------
   // [OPUS-4.8] sq-viby (design sq-i0nm): for SIZE-PARAMETRISED benchmarks (Deep Taxonomy at
   // increasing depth; WatDiv at increasing scale factor; any family whose metrics differ only by a
@@ -484,6 +578,8 @@
                        FEATURED_SUITES: FEATURED_SUITES, featuredSuiteOf: featuredSuiteOf,
                        buildFeatured: buildFeatured, competitorsFor: competitorsFor,
                        competitorEngines: competitorEngines,
+                       // sq-rltn (top-level capability families + summary-first family view)
+                       FAMILIES: FAMILIES, familyOf: familyOf, buildFamilies: buildFamilies,
                        // sq-i0nm (embedded versioned competitor data + per-suite references)
                        COMPETITORS_DATA: COMPETITORS_DATA, referencesForSuite: referencesForSuite,
                        // sq-viby (scaling comparison)
@@ -512,102 +608,81 @@
       title: 'vs all-time best' });
   }
 
-  function renderSummary(summary) {
-    var host = document.getElementById('summary');
-    host.innerHTML = '';
-    var c = summary.commit;
-    var shortId = c.id.slice(0, 7);
-    var msg = (c.message || '').split('\n')[0];
-    host.appendChild(el('div', { 'class': 'commit-meta' }, [
-      el('a', { 'class': 'sha', href: c.url, target: '_blank', text: shortId }),
-      el('span', { 'class': 'msg', text: msg, title: c.message || '' }),
-      el('span', { 'class': 'when', text: new Date(summary.date).toLocaleString() })
-    ]));
-
-    var table = el('table', { 'class': 'summary-table' });
-    var thead = el('thead', null, [el('tr', null, [
-      el('th', { text: 'Metric' }), el('th', { 'class': 'num', text: 'Latest' }),
-      el('th', { text: 'Unit' }), el('th', { 'class': 'num', text: 'Δ vs best' })
-    ])]);
-    table.appendChild(thead);
-    var tbody = el('tbody');
-    summary.groups.forEach(function (g) {
-      tbody.appendChild(el('tr', { 'class': 'group-row' }, [
-        el('th', { 'class': 'group', colspan: '4', text: g.group })
-      ]));
-      g.rows.forEach(function (r) {
-        // Readable label + a muted raw stem (transparency); the full title attr (raw stem +
-        // dataset + query) shows on hover. sq-ocuf.
-        var metricCell = el('td', { 'class': 'metric', title: r.title }, [
-          el('span', { 'class': 'metric-label', text: r.label }),
-          el('code', { 'class': 'metric-stem', text: r.name })
-        ]);
-        var tr = el('tr', null, [
-          metricCell,
-          el('td', { 'class': 'num', text: fmtNum(r.value) }),
-          el('td', { 'class': 'unit', text: r.unit }),
-          el('td', { 'class': 'num delta' })
-        ]);
-        tr.lastChild.appendChild(pill(r.delta));
-        tbody.appendChild(tr);
-      });
-    });
-    table.appendChild(tbody);
-    host.appendChild(table);
-  }
-
   var PALETTE = ['#2563eb', '#16a34a', '#dc2626', '#9333ea', '#ea580c', '#0891b2', '#ca8a04', '#db2777'];
 
-  function renderCharts(entries, summary) {
-    var host = document.getElementById('charts');
-    host.innerHTML = '';
+  function themeColors() {
     var darkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    var grid = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)';
-    var tick = darkMode ? '#9aa4b2' : '#586069';
-    summary.groups.forEach(function (g) {
-      var section = el('section', { 'class': 'chart-group' }, [el('h3', { text: g.group })]);
-      var gridEl = el('div', { 'class': 'chart-grid' });
-      g.rows.forEach(function (r, i) {
-        // Chart title = readable label; raw stem on a second muted line + full title-attr hover.
-        var card = el('div', { 'class': 'chart-card' }, [
-          el('div', { 'class': 'chart-title', title: r.title, text: r.label + ' (' + r.unit + ')' }),
-          el('code', { 'class': 'chart-stem', title: r.title, text: r.name })
-        ]);
-        var canvas = el('canvas');
-        card.appendChild(canvas);
-        gridEl.appendChild(card);
-        var color = PALETTE[i % PALETTE.length];
-        var pts = trendPoints(entries, r.name);
-        // eslint-disable-next-line no-new
-        new Chart(canvas.getContext('2d'), {
-          type: 'line',
-          data: { datasets: [{
-            label: r.label, data: pts, borderColor: color,
-            backgroundColor: color + '22', borderWidth: 2, pointRadius: 0,
-            pointHoverRadius: 4, fill: true, lineTension: 0.2
-          }] },
-          options: {
-            responsive: true, maintainAspectRatio: false,
-            legend: { display: false },
-            tooltips: {
-              mode: 'index', intersect: false,
-              callbacks: {
-                title: function (items) { return new Date(items[0].xLabel).toLocaleDateString(); },
-                label: function (item) { return fmtNum(item.yLabel) + ' ' + r.unit; }
-              }
-            },
-            scales: {
-              xAxes: [{ type: 'time', time: { tooltipFormat: 'll' },
-                        gridLines: { color: grid }, ticks: { fontColor: tick, maxTicksLimit: 4 } }],
-              yAxes: [{ gridLines: { color: grid },
-                        ticks: { fontColor: tick, maxTicksLimit: 4, callback: function (v) { return fmtNum(v); } } }]
+    return { grid: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)',
+             tick: darkMode ? '#9aa4b2' : '#586069' };
+  }
+
+  // [OPUS-4.8] sq-rltn: build ONE trend chart card for a metric row. Factored out of renderCharts so
+  // the same card can be created LAZILY (one metric at a time as a section scrolls into view) — the
+  // first paint never instantiates thousands of Chart.js series. The actual Chart() is only built
+  // when `mountChart` is invoked (deferred by the IntersectionObserver), keeping first paint cheap.
+  function trendCard(entries, r, i) {
+    var card = el('div', { 'class': 'chart-card' }, [
+      el('div', { 'class': 'chart-title', title: r.title, text: r.label + ' (' + r.unit + ')' }),
+      el('code', { 'class': 'chart-stem', title: r.title, text: r.name })
+    ]);
+    var canvas = el('canvas');
+    card.appendChild(canvas);
+    card._mountChart = function () {
+      if (card._mounted || typeof Chart === 'undefined') return;
+      card._mounted = true;
+      var t = themeColors();
+      var color = PALETTE[i % PALETTE.length];
+      var pts = trendPoints(entries, r.name);
+      // eslint-disable-next-line no-new
+      new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { datasets: [{
+          label: r.label, data: pts, borderColor: color,
+          backgroundColor: color + '22', borderWidth: 2, pointRadius: 0,
+          pointHoverRadius: 4, fill: true, lineTension: 0.2
+        }] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          legend: { display: false },
+          tooltips: {
+            mode: 'index', intersect: false,
+            callbacks: {
+              title: function (items) { return new Date(items[0].xLabel).toLocaleDateString(); },
+              label: function (item) { return fmtNum(item.yLabel) + ' ' + r.unit; }
             }
+          },
+          scales: {
+            xAxes: [{ type: 'time', time: { tooltipFormat: 'll' },
+                      gridLines: { color: t.grid }, ticks: { fontColor: t.tick, maxTicksLimit: 4 } }],
+            yAxes: [{ gridLines: { color: t.grid },
+                      ticks: { fontColor: t.tick, maxTicksLimit: 4, callback: function (v) { return fmtNum(v); } } }]
           }
-        });
+        }
       });
-      section.appendChild(gridEl);
-      host.appendChild(section);
-    });
+    };
+    return card;
+  }
+
+  // [OPUS-4.8] sq-rltn: lazily mount a chart card when it scrolls into view. A shared
+  // IntersectionObserver mounts each card's chart the first time it is ~visible; if IO is
+  // unavailable (old browser / node), we mount eagerly so behaviour degrades gracefully.
+  var _chartObserver = null;
+  function chartObserver() {
+    if (_chartObserver || typeof IntersectionObserver === 'undefined') return _chartObserver;
+    _chartObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting && en.target._mountChart) {
+          en.target._mountChart();
+          _chartObserver.unobserve(en.target);
+        }
+      });
+    }, { rootMargin: '200px' });
+    return _chartObserver;
+  }
+  function observeChartCard(card) {
+    var obs = chartObserver();
+    if (obs) obs.observe(card);
+    else if (card._mountChart) card._mountChart();  // graceful fallback (no IO)
   }
 
   // ---- featured well-known suites: DOM (sq-xvow / sq-i0nm) -----------------
@@ -782,48 +857,204 @@
     host.appendChild(gridEl);
   }
 
-  function render() {
-    var data = window.BENCHMARK_DATA;
-    if (!data || !data.entries || !data.entries[SERIES] || !data.entries[SERIES].length) {
-      document.getElementById('summary').textContent =
-        'No benchmark data yet — the chart populates after the first push to main.';
-      return;
-    }
-    var entries = data.entries[SERIES];
-    var summary = buildSummary(entries);
-    // [OPUS-4.8] sq-i0nm: competitor data comes from window.COMPETITORS. Prefer an EXTERNALLY
-    // injected object (a future competitors.js/fetch can override), else fall back to the EMBEDDED
-    // versioned COMPETITORS_DATA (the byte-for-meaning mirror of bench/dashboard/competitors.json) —
-    // embedded because the Pages seed step doesn't serve a separate JSON. This populates the
-    // competitor reference COLUMNS (with explicit versions) + per-suite external-reference baselines;
-    // per-metric cells stay "n/a (not gathered)" until a same-scale gather fills `values`.
-    var competitors = (typeof window !== 'undefined' && window.COMPETITORS) || COMPETITORS_DATA;
-    if (typeof window !== 'undefined' && !window.COMPETITORS) window.COMPETITORS = competitors;
-    var featured = buildFeatured(entries, competitors);
-    var families = buildScalingFamilies(entries);
-    document.getElementById('updated').textContent =
-      'last updated ' + new Date(data.lastUpdate).toLocaleString() +
-      ' · ' + entries.length + ' commits';
-    var repo = el('a', { href: data.repoUrl, target: '_blank', text: data.repoUrl.replace(/^https?:\/\//, '') });
-    document.getElementById('repo').appendChild(repo);
-    renderFeatured(featured);                 // sq-xvow — TOP
-    renderSummary(summary);
-    if (typeof Chart !== 'undefined') renderCharts(entries, summary);
-    renderScaling(families);                  // sq-viby — BOTTOM
+  // ---- summary-first capability families: DOM (sq-rltn) --------------------
+  // [OPUS-4.8] sq-rltn. The PRIMARY render. It paints SYNCHRONOUSLY from BENCHMARK_DATA (no
+  // Chart.js, no metric-labels.json fetch needed) so the user sees the WHOLE picture immediately:
+  //   1) a family NAV (one chip per capability family) so all query types are visible at a glance;
+  //   2) one collapsible SECTION per family with a latest-value-per-metric SUMMARY TABLE.
+  // Trend CHARTS are NOT built here — each section carries a lazily-mounted chart grid that fills
+  // only when the section is expanded / scrolls into view (IntersectionObserver). A family with NO
+  // metrics in the latest commit still renders (nav chip + a "not yet reported" section) so the
+  // coverage is honest and never SPARQL-only-feeling, even though SPARQL dominates the data volume.
+  function renderFamilies(familyView, entries) {
+    var host = document.getElementById('families');
+    if (!host) return;
+    host.innerHTML = '';
+
+    // family nav: a chip per family with its metric count. The chip is an anchor (href="#fam-…") so
+    // it scrolls to the section AND a click handler OPENS that family's <details> trends disclosure
+    // (so the chip both jumps to and reveals the trends, the intended UX). The anchor href keeps it
+    // keyboard/middle-click friendly; the handler is purely additive enhancement.
+    var nav = el('nav', { 'class': 'family-nav', 'aria-label': 'benchmark families' });
+    familyView.forEach(function (fam) {
+      var chip = el('a', { 'class': 'family-chip' + (fam.count ? '' : ' family-chip-empty'),
+        href: '#fam-' + fam.key,
+        title: fam.count ? fam.suites.join(' · ') : 'not yet reported' }, [
+        el('span', { 'class': 'family-chip-name', text: fam.title }),
+        el('span', { 'class': 'family-chip-count', text: fam.count ? String(fam.count) : '—' })
+      ]);
+      chip.addEventListener('click', function () {
+        // open the target section's <details> Trends disclosure so the chip reveals, not just jumps.
+        var sec = document.getElementById('fam-' + fam.key);
+        var det = sec && typeof sec.querySelector === 'function' && sec.querySelector('details.family-trends');
+        if (det) det.open = true;
+      });
+      nav.appendChild(chip);
+    });
+    host.appendChild(nav);
+
+    familyView.forEach(function (fam) {
+      var section = el('section', { 'class': 'family-section family-' + fam.kind, id: 'fam-' + fam.key });
+      var head = el('div', { 'class': 'family-head' }, [
+        el('h3', { 'class': 'family-title', text: fam.title }),
+        el('span', { 'class': 'family-meta',
+          text: fam.count
+            ? fam.count + ' metric' + (fam.count === 1 ? '' : 's') +
+              (fam.suites.length > 1 ? ' · ' + fam.suites.length + ' suites' : '')
+            : 'not yet reported' })
+      ]);
+      section.appendChild(head);
+
+      if (!fam.count) {
+        section.appendChild(el('p', { 'class': 'hint family-empty',
+          text: 'No metrics for this family in the latest commit yet — the section fills in once '
+              + 'the suite reports to the dashboard.' }));
+        host.appendChild(section);
+        return;
+      }
+
+      // summary table (synchronous first paint) — latest value per metric + Δ-vs-best.
+      var table = el('table', { 'class': 'summary-table' });
+      table.appendChild(el('thead', null, [el('tr', null, [
+        el('th', { text: 'Metric' }), el('th', { 'class': 'num', text: 'Latest' }),
+        el('th', { text: 'Unit' }), el('th', { 'class': 'num', text: 'Δ vs best' })
+      ])]));
+      var tbody = el('tbody');
+      fam.rows.forEach(function (r) {
+        var metricCell = el('td', { 'class': 'metric', title: r.title }, [
+          el('span', { 'class': 'metric-label', text: r.label }),
+          el('code', { 'class': 'metric-stem', text: r.name })
+        ]);
+        var tr = el('tr', null, [
+          metricCell,
+          el('td', { 'class': 'num', text: fmtNum(r.value) }),
+          el('td', { 'class': 'unit', text: r.unit }),
+          el('td', { 'class': 'num delta' })
+        ]);
+        tr.lastChild.appendChild(pill(r.delta));
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      section.appendChild(table);
+
+      // lazy trend charts: a <details> whose chart grid is built ON FIRST EXPAND (cheap first paint;
+      // also wired to the IntersectionObserver so an in-view open section mounts as it scrolls).
+      var details = el('details', { 'class': 'family-trends' });
+      details.appendChild(el('summary', { text: 'Trends (' + fam.count + ')' }));
+      var gridEl = el('div', { 'class': 'chart-grid' });
+      details.appendChild(gridEl);
+      var built = false;
+      function buildGrid() {
+        if (built) return; built = true;
+        fam.rows.forEach(function (r, i) {
+          var card = trendCard(entries, r, i);
+          gridEl.appendChild(card);
+          observeChartCard(card);
+        });
+      }
+      details.addEventListener('toggle', function () { if (details.open) buildGrid(); });
+      section.appendChild(details);
+      host.appendChild(section);
+    });
   }
 
-  // [OPUS-4.8] sq-ocuf: load metric-labels.json (readable labels) BEFORE rendering. The file is
-  // the canonical, committed artifact (generated by scripts/gen-metric-labels.py); we fetch it at
-  // boot so there is no build/codegen step in the Pages job. The fetch is GRACEFUL — if it 404s
-  // or fails (e.g. opened over file:// with no server), render() still runs with humanize()
-  // fallback labels and structural grouping, so the dashboard never breaks on a missing file.
+  // [OPUS-4.8] sq-rltn: the synchronous FIRST PAINT — family nav + summary tables, drawn from
+  // BENCHMARK_DATA alone. Does NOT touch metric-labels.json or Chart.js, so it is instant even with
+  // a multi-MB data.js. Re-runnable: enhance() re-invokes it once readable labels land.
+  function paintSummary() {
+    var data = window.BENCHMARK_DATA;
+    var sumHost = document.getElementById('families') || document.getElementById('summary');
+    if (!data || !data.entries || !data.entries[SERIES] || !data.entries[SERIES].length) {
+      if (sumHost) sumHost.textContent =
+        'No benchmark data yet — the capability-family summary populates after the first push to main.';
+      return null;
+    }
+    var entries = data.entries[SERIES];
+    // [OPUS-4.8] Preserve user state across a REPAINT (e.g. when metric-labels.json resolves and we
+    // re-run to swap in readable labels). renderFamilies() does host.innerHTML = '' which wipes any
+    // expanded <details> + scroll. Capture which family sections were open BEFORE the rebuild so we
+    // can restore them AFTER, so a relabel doesn't collapse what the user opened.
+    var openFams = {};
+    if (sumHost && typeof sumHost.querySelectorAll === 'function') {
+      var openDetails = sumHost.querySelectorAll('section.family-section[id] > details.family-trends[open]');
+      for (var oi = 0; oi < openDetails.length; oi++) {
+        var parentSec = openDetails[oi].parentNode;
+        if (parentSec && parentSec.id) openFams[parentSec.id] = true;
+      }
+    }
+    var updated = document.getElementById('updated');
+    if (updated) updated.textContent =
+      'last updated ' + new Date(data.lastUpdate).toLocaleString() + ' · ' + entries.length + ' commits';
+    var repoHost = document.getElementById('repo');
+    if (repoHost && !repoHost.firstChild) repoHost.appendChild(
+      el('a', { href: data.repoUrl, target: '_blank', text: data.repoUrl.replace(/^https?:\/\//, '') }));
+    renderFamilies(buildFamilies(entries), entries);   // <-- summary-first, lazy charts
+    // [OPUS-4.8] Restore the <details> the user had expanded before this repaint (state preserved
+    // across the relabel repaint). Setting .open fires the `toggle` listener, which lazily builds
+    // that section's trend chart grid — so re-opened sections re-mount their charts too.
+    if (sumHost && typeof sumHost.querySelector === 'function') {
+      Object.keys(openFams).forEach(function (secId) {
+        var sec = document.getElementById(secId);
+        var det = sec && typeof sec.querySelector === 'function' && sec.querySelector('details.family-trends');
+        if (det) det.open = true;
+      });
+    }
+    return entries;
+  }
+
+  // [OPUS-4.8] sq-rltn: the featured-suites + scaling cards (these read competitor data). Split out
+  // so they can render once competitors.json resolves, without re-blocking the summary first paint.
+  function paintFeaturedAndScaling(entries, competitors) {
+    if (!entries) return;
+    renderFeatured(buildFeatured(entries, competitors));  // sq-xvow
+    renderScaling(buildScalingFamilies(entries));         // sq-viby
+  }
+
+  // ---- boot: summary-first, then enhance off the critical path (sq-rltn) ---
+  // [OPUS-4.8] sq-rltn. ORDER OF OPERATIONS for a fast, all-coverage page:
+  //   (1) PAINT the family summary IMMEDIATELY from BENCHMARK_DATA — structural labels, no fetch,
+  //       no charts. The user sees every query-type family at once.
+  //   (2) FETCH metric-labels.json (~100KB) OFF the critical path; when it resolves, REPAINT the
+  //       summary with readable labels (graceful: a 404/file:// failure just keeps structural labels).
+  //   (3) FETCH competitors.json (the SINGLE competitor sink — replacing the embedded mirror as the
+  //       PREFERRED source); fall back to the embedded COMPETITORS_DATA if the fetch fails. Then
+  //       render the featured-suites + scaling cards. Keeps the embedded copy ONLY as a fallback so
+  //       the live Pages page still works if the JSON is not served.
   function boot() {
-    if (typeof window === 'undefined' || typeof window.fetch !== 'function') { render(); return; }
+    var entries = paintSummary();                        // (1) instant first paint
+
+    if (typeof window === 'undefined' || typeof window.fetch !== 'function') {
+      // node/old-browser: no fetch — render featured/scaling from the embedded mirror, eagerly.
+      paintFeaturedAndScaling(entries, COMPETITORS_DATA);
+      return;
+    }
+
+    // (2) readable labels — deferred; repaint the summary when they arrive.
     window.fetch('metric-labels.json', { cache: 'no-cache' })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (json) { if (json) window.METRIC_LABELS = json; })
-      .catch(function () { /* graceful: fall back to humanize()/structural grouping */ })
-      .then(render);
+      .then(function (json) { if (json) { window.METRIC_LABELS = json; paintSummary(); } })
+      .catch(function () { /* graceful: keep structural labels */ });
+
+    // (3) competitors — fetch competitors.json (single sink), fall back to the embedded mirror.
+    window.fetch('competitors.json', { cache: 'no-cache' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (json) {
+        var competitors = json || window.COMPETITORS || COMPETITORS_DATA;
+        window.COMPETITORS = competitors;
+        paintFeaturedAndScaling(entries, competitors);
+      })
+      .catch(function () {
+        var competitors = window.COMPETITORS || COMPETITORS_DATA;
+        window.COMPETITORS = competitors;
+        paintFeaturedAndScaling(entries, competitors);
+      });
+  }
+
+  // [OPUS-4.8] Copilot #200: test-only hook so the node smoke-test can drive the REAL relabel
+  // repaint (paintSummary re-run) and assert user state (expanded <details>) survives — exercising
+  // the actual code path, not a copy. Guarded by an explicit flag, so it is inert in production.
+  if (typeof window !== 'undefined' && window.__SPARQ_DASHBOARD_TEST__) {
+    window.__sparqDashboardTest = { paintSummary: paintSummary };
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

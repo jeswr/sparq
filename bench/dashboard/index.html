@@ -50,18 +50,23 @@
       <div id="featured">loading…</div>
     </section>
 
-    <section class="card" id="summary-card">
-      <h2>Latest commit</h2>
-      <div id="summary">loading…</div>
-    </section>
-
-    <section class="card" id="charts-card">
-      <h2>Trends</h2>
-      <p class="hint">Metrics are grouped by suite and shown with readable labels; hover any label
-         (or the raw <code>stem_us</code> beneath it) for the dataset + query it measures.
-         Every metric is smaller-is-better (<code>customSmallerIsBetter</code>); the Δ-vs-best pill
-         compares the latest commit against the all-time minimum for that metric.</p>
-      <div id="charts"></div>
+    <!-- [OPUS-4.8] sq-rltn: capability FAMILIES — the primary, summary-first view. dashboard.js
+         paints #families SYNCHRONOUSLY from window.BENCHMARK_DATA (no Chart.js, no label fetch) so
+         the WHOLE picture appears immediately and visibly covers ALL query types: a family nav chip
+         row, then one section per family (Core · SPARQL query suites · SHACL validation · GeoSPARQL ·
+         Full-Text · Vector/ANN · Reasoning), each with a latest-value-per-metric summary table.
+         Trend charts inside each section are LAZY — built only when the section's "Trends" disclosure
+         is expanded / scrolls into view (IntersectionObserver), so first paint never instantiates the
+         thousands of SPARQL series. A family with no data yet still shows ("not yet reported") so the
+         coverage is honest. -->
+    <section class="card" id="families-card">
+      <h2>Benchmark families</h2>
+      <p class="hint">Every query type sparq benchmarks, grouped into capability families. The table
+         shows each metric's <strong>latest</strong> value (smaller is better —
+         <code>customSmallerIsBetter</code>) with a Δ-vs-best pill. Expand <em>Trends</em> in a family
+         to load its history charts (loaded on demand to keep the page fast). Hover any label or the
+         raw <code>stem_us</code> beneath it for the dataset + query it measures.</p>
+      <div id="families">loading…</div>
     </section>
 
     <!-- [OPUS-4.8] sq-viby: scaling comparison charts at the BOTTOM. dashboard.js fills #scaling
