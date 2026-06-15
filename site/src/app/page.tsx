@@ -23,7 +23,7 @@ export default function HomePage() {
       {/* Hero */}
       <section className="space-y-4">
         <Badge variant="success" className="h-6 px-3">
-          Everything below runs in your browser tab
+          The live REPL below runs in your browser tab
         </Badge>
         <h1 className="text-3xl font-semibold tracking-tight md:text-4xl">
           A state-of-the-art RDF + SPARQL engine,{" "}

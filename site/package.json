@@ -9,7 +9,7 @@
     "sync-wasm": "node scripts/sync-wasm.mjs",
     "prebuild": "node scripts/sync-wasm.mjs",
     "build": "next build",
-    "start": "next start",
+    "start": "npx --yes serve out",
     "lint": "next lint"
   },
   "dependencies": {
