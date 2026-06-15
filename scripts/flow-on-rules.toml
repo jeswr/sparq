@@ -1,0 +1,181 @@
+# [OPUS-4.8] Flow-on rule table (bead sq-ncvq.1, epic sq-ncvq). Authored by
+# Opus 4.8 (Fable unavailable; flag for re-review when Fable returns).
+#
+# This is the REACTIVE half of the maintenance flow-on engine
+# (research/maintenance-flow-on-automation-design.md §2.2 / §3). It captures the
+# *un-gateable* follow-on work — the maintenance that cannot be enforced as a
+# merge gate because the artifact is produced out-of-band (a dashboard row, a
+# competitor gather, a cert plan) or because it is judgment/research work.
+#
+# Each rule fires on a MERGED PR. scripts/flow-on.py reads the merged PR's
+# changed-file list + labels + title, evaluates every rule, and for each match
+# opens ONE GitHub issue (labelled `flow-on` + `auto`) per `create` template.
+# The orchestrator later reconciles those issues into beads (`bd create`) — we do
+# NOT touch `bd`/`.beads/` from CI because the dolt DB lives only in the
+# orchestrator's checkout and is gitignored.
+#
+# Idempotency: every `create` template has a `dedup_key`. flow-on.py searches for
+# an OPEN issue carrying a hidden marker `<!-- flow-on-key: <expanded-key> -->`;
+# if one exists the create is skipped. So re-running the workflow (or re-merging)
+# never duplicates a follow-on.
+#
+# ---------------------------------------------------------------------------
+# Rule schema
+# ---------------------------------------------------------------------------
+#   [[rule]]
+#   id          = "stable-slug"            # required; used in issue body for audit
+#   description = "what this rule is for"  # optional human note
+#
+#   # Trigger predicates (a rule fires when ALL present predicates pass; an
+#   # absent predicate is ignored). At least one must be present.
+#   when_paths      = ["glob", ...]   # fnmatch-style globs over changed files (ANY match)
+#   when_new_paths  = ["glob", ...]   # like when_paths but only counts ADDED files (status "A")
+#   when_label      = "label"          # PR must carry this label (opt-in rules)
+#   when_title      = "regex"          # case-insensitive regex over the PR title
+#
+#   # One or more follow-on issue templates. Placeholders expanded from the match:
+#   #   {pr}        merged PR number
+#   #   {pr_title}  merged PR title
+#   #   {crate}     crate dir name, when a crates/<crate>/... path matched
+#   #   {suite}     bench suite dir name, when a bench/<suite>/... path matched
+#   #   {surface}   skill surface dir name, when a skills/<surface>/... path matched
+#   [[rule.create]]
+#   dedup_key = "kind-{crate}"            # required; expanded, then used as the idempotency key
+#   title     = "..."                      # required; issue title (placeholders expanded)
+#   body      = "..."                       # required; issue body (placeholders expanded)
+#   labels    = ["extra", "labels"]         # optional; `flow-on` + `auto` are ALWAYS added
+# ---------------------------------------------------------------------------
+
+# --- New crate / public surface → benchmark + README + SKILL.md ----------------
+# Trigger: a brand-new `crates/<x>/Cargo.toml` is ADDED. A new crate must ship a
+# registered benchmark and (if it is a public surface) a SKILL.md. The gateable
+# subset (README template) is handled by check-readme-template.py; this flow-on
+# captures the out-of-band bench registration + SKILL authoring.
+[[rule]]
+id = "new-crate-bench-and-skill"
+description = "A new crate landed; ensure it has a registered benchmark and (if public) a SKILL.md."
+when_new_paths = ["crates/*/Cargo.toml"]
+
+[[rule.create]]
+dedup_key = "new-crate-bench-{crate}"
+title = "bench: register a benchmark for new crate {crate}"
+labels = ["bench"]
+body = """
+Merged PR #{pr} ({pr_title}) added a new crate `crates/{crate}`.
+
+Per the maintenance flow-on rules, a new crate must have a registered benchmark
+so it is visible to CATALOG / CI / the dashboard. Add a `[[benchmark]]` entry in
+`bench/benchmarks.toml` (with `source = crates/{crate}`), or — if the crate is an
+intentional stub — mark it `publish = false` and record an exemption bead.
+"""
+
+[[rule.create]]
+dedup_key = "new-crate-skill-{crate}"
+title = "docs: add a SKILL.md surface for new crate {crate}"
+labels = ["docs", "cert"]
+body = """
+Merged PR #{pr} ({pr_title}) added a new crate `crates/{crate}`.
+
+If `crates/{crate}` exposes a public surface (CLI / HTTP route / Py·JS binding /
+public Rust API), it needs a `skills/<surface>/SKILL.md` and a conformance/cert
+plan (cf. the sparq-shacl crate-local W3C ratchet). If it is internal-only,
+record that decision explicitly so the gap is not re-flagged.
+"""
+
+# --- Changed public feature → docs / SKILL.md update ---------------------------
+# Trigger: a change under a published crate's surface, the CLI, the HTTP server,
+# or the Py/WASM bindings, WITHOUT a corresponding SKILL.md edit. (flow-on.py only
+# fires this when no skills/** file is in the same diff — see SKILL_PATHS in
+# flow-on.py.) Keeps the AGENTS.md public-API→SKILL.md norm from silently drifting.
+[[rule]]
+id = "changed-public-feature-docs"
+description = "A public surface changed without a SKILL.md update in the same PR."
+when_paths = [
+  "crates/sparq-cli/src/**",
+  "crates/sparq-server/src/**",
+  "crates/sparq-py/src/**",
+  "crates/sparq-wasm/src/**",
+]
+
+[[rule.create]]
+dedup_key = "skill-sync-pr-{pr}"
+title = "docs: sync SKILL.md after public-surface change in PR #{pr}"
+labels = ["docs"]
+body = """
+Merged PR #{pr} ({pr_title}) changed a public surface (CLI / HTTP / Py / WASM)
+but did not touch any `skills/**/SKILL.md` in the same diff.
+
+Per the AGENTS.md public-API → SKILL.md rule, update the matching
+`skills/<surface>/SKILL.md` (and crate README / `llms.txt` if relevant) so the
+docs match the shipped surface. If no doc change is warranted, note why and close.
+"""
+
+# --- New bench suite → dashboard row -------------------------------------------
+# Trigger: a brand-new `bench/<suite>/` directory (detected via an added
+# benchmarks.toml or run.sh under it). A capability suite should get a
+# FEATURED_SUITES row in the dashboard (produced out-of-band, so un-gateable).
+[[rule]]
+id = "new-bench-dashboard-row"
+description = "A new bench suite landed; add a dashboard FEATURED_SUITES row (or flag it unfeatured)."
+when_new_paths = ["bench/*/benchmarks.toml", "bench/*/run.sh"]
+
+[[rule.create]]
+dedup_key = "dashboard-row-{suite}"
+title = "dashboard: add a FEATURED_SUITES row for bench suite {suite}"
+labels = ["docs", "dashboard"]
+body = """
+Merged PR #{pr} ({pr_title}) added a new bench suite `bench/{suite}`.
+
+Add a `FEATURED_SUITES` entry for it in `bench/dashboard/dashboard.js` (with the
+correct `key`/`title`/`aliases`) so its metrics surface on the dashboard, or flag
+it `featured = false` in its `benchmarks.toml` entry if it is intentionally
+unfeatured (e.g. a research spike).
+"""
+
+# --- Competitor-relevant engine change → gather follow-up ----------------------
+# Opt-in via the `competitor-relevant` label (the author marks engine/store work
+# that moves us against a competitor). Triggers an out-of-band gather refresh.
+[[rule]]
+id = "competitor-feature-gather"
+description = "A competitor-relevant engine/store change merged; refresh competitor baselines."
+when_paths = [
+  "crates/sparq-engine/src/exec/**",
+  "crates/sparq-core/src/store/**",
+]
+when_label = "competitor-relevant"
+
+[[rule.create]]
+dedup_key = "gather-pr-{pr}"
+title = "gather: refresh competitor baselines after PR #{pr}"
+labels = ["bench", "gather"]
+body = """
+Merged PR #{pr} ({pr_title}) touched a competitor-relevant engine/store path and
+was labelled `competitor-relevant`.
+
+Re-run the competitor gather (`bench/` competitor harness) and refresh
+`bench/competitors.json` so the dashboard's competitive deltas reflect this
+change. This is out-of-band work that cannot be gated at merge time.
+"""
+
+# --- New ZK circuit member → gate-count baseline note --------------------------
+# The compose-member gate-count snapshot is enforced in-tree
+# (snapshot_covers_every_member). This flow-on covers NEW top-level `zk/` circuits
+# (outside zk/compose/), which that test does not yet reach — a baseline must be
+# added so the circuit's gate count is tracked.
+[[rule]]
+id = "new-zk-circuit-gatecount"
+description = "A new top-level ZK circuit landed; record a gate-count baseline."
+when_new_paths = ["zk/*/Nargo.toml", "zk/*/src/main.nr"]
+
+[[rule.create]]
+dedup_key = "zk-gatecount-{suite}"
+title = "zk: add a gate-count baseline for new circuit {suite}"
+labels = ["zk", "bench"]
+body = """
+Merged PR #{pr} ({pr_title}) added a new top-level ZK circuit `zk/{suite}`.
+
+Record a gate-count baseline for it (run the gate-count harness and add the row),
+so circuit bloat is caught by the regression gate. Compose members are already
+covered by `snapshot_covers_every_member`; top-level circuits are not yet, so
+this needs a baseline.
+"""

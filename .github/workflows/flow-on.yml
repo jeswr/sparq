@@ -1,0 +1,41 @@
+# [OPUS-4.8] Merge-triggered flow-on engine (bead sq-ncvq.3, epic sq-ncvq).
+# Authored by Opus 4.8 (Fable unavailable; flag for re-review when Fable returns).
+#
+# On every MERGED pull request, evaluate scripts/flow-on-rules.toml against the
+# PR's changed files / labels / title and open a GitHub issue (labelled
+# `flow-on` + `auto`, idempotent) for each triggered follow-on. The orchestrator
+# reconciles those issues into beads — we do NOT touch `bd` / `.beads/` in CI.
+#
+# This is NOT a gate: it never blocks a merge (it runs AFTER merge) and the job
+# name carries no `advisory`/`informational` token so it stays visible. It only
+# mints follow-on issues.
+name: flow-on
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: flow-on-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  flow-on:
+    name: flow-on
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Run flow-on engine
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/flow-on.py --pr "${{ github.event.pull_request.number }}"
