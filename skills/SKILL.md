@@ -9,7 +9,7 @@ metadata:
 
 # sparq — usage skills (router)
 
-sparq is a high-performance RDF + SPARQL engine (Rust workspace; also shipped as a CLI, a W3C SPARQL HTTP server, a Python package `sparq`, and a WASM/JS package). These skills teach an agent how to **use** sparq. (Skills under `.claude/skills/` are different — those are for developers working *on* this repo.)
+sparq is a high-performance RDF + SPARQL engine (Rust workspace; also shipped as a CLI, a W3C SPARQL HTTP server, a Python package — PyPI `sparq-rdf`, `import sparq` — and a WASM/JS package). These skills teach an agent how to **use** sparq. (Skills under `.claude/skills/` are different — those are for developers working *on* this repo.)
 
 Pick the surface that matches the task:
 
