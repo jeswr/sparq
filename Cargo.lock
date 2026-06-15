@@ -3557,7 +3557,9 @@ dependencies = [
  "reqwest",
  "rustc-hash 2.1.2",
  "serde_json",
+ "spargebra",
  "sparq-core",
+ "sparq-engine",
  "sparq-sim",
 ]
 
