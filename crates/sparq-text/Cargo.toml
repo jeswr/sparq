@@ -48,4 +48,4 @@ unicode-segmentation = "1"
 
 [dev-dependencies]
 # Deterministic random literals/deltas for the differential test + the benchmark example.
-rand = "0.9"
+rand = "0.10"

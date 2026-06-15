@@ -484,6 +484,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "chacha20"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1028,6 +1039,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+ "rand_core 0.10.1",
  "wasip2",
  "wasip3",
 ]
@@ -1999,6 +2011,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "oxrdfio",
  "oxsdatatypes",
+ "rand 0.8.6",
  "rand 0.9.4",
  "rustc-hash 2.1.2",
  "siphasher",
@@ -2058,7 +2071,7 @@ dependencies = [
  "oxilangtag",
  "oxiri",
  "oxsdatatypes",
- "rand 0.9.4",
+ "rand 0.8.6",
  "sha2 0.10.9",
  "thiserror 2.0.18",
 ]
@@ -2465,6 +2478,8 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
+ "chacha20",
+ "getrandom 0.4.2",
  "rand_core 0.10.1",
 ]
 
@@ -3205,7 +3220,7 @@ dependencies = [
  "oxiri",
  "oxrdf 0.3.3",
  "oxsdatatypes",
- "rand 0.9.4",
+ "rand 0.8.6",
  "regex",
  "rustc-hash 2.1.2",
  "sha1 0.10.6",
@@ -3235,7 +3250,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aed7a854b8ea67618f8ce69aabb0e904d7704226060e9d5a2930eb3136c3fa3b"
 dependencies = [
  "oxrdf 0.3.3",
- "rand 0.9.4",
+ "rand 0.8.6",
  "spargebra",
 ]
 
@@ -3331,7 +3346,7 @@ dependencies = [
  "oxrdf 0.3.3",
  "proj4rs",
  "quick-xml 0.40.1",
- "rand 0.9.4",
+ "rand 0.10.1",
  "rstar 0.13.0",
  "rustc-hash 2.1.2",
  "sparq-core",
@@ -3378,7 +3393,7 @@ name = "sparq-mpc"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
- "rand 0.9.4",
+ "rand 0.10.1",
  "rand_chacha 0.9.0",
  "sparq-core",
  "sparq-engine",
@@ -3518,7 +3533,7 @@ name = "sparq-text"
 version = "0.1.0"
 dependencies = [
  "oxrdf 0.3.3",
- "rand 0.9.4",
+ "rand 0.10.1",
  "rayon",
  "rustc-hash 2.1.2",
  "spargebra",
