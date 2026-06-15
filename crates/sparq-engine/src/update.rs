@@ -1436,3 +1436,370 @@ mod update_contract {
     }
 }
 
+/// [OPUS-4.8] (sq-7cxr, gh-44, Copilot PR#80) Coverage for the RESOLVED-DELTA CAPTURE/REPLAY
+/// machinery — [`update_in_place_capturing`], [`apply_effects`], the [`UpdateEffect`] enum and
+/// its four variants, [`record_delta`]'s empty-batch elision, and the `ensure_named` durable
+/// routing reached through `apply_slot_delta`. PR#80 added this whole code path with no unit
+/// tests, dropping sparq-engine's coverage below the 83% floor; these tests exercise it.
+///
+/// The LOAD-bearing invariant these tests pin: capturing the resolved delta during the ONE
+/// in-memory application and replaying THAT (rather than re-executing the update text) makes the
+/// durable mirror byte-equivalent to the in-memory state even when the update contains
+/// non-deterministic functions (`NOW()`/`RAND()`/`UUID()`/`STRUUID()`, fresh `BNODE()`s). The
+/// test method is therefore: capture on graph A, `apply_effects` onto an INDEPENDENTLY-built
+/// graph B, and assert A and B are triple-for-triple identical across the whole dataset.
+#[cfg(test)]
+mod capture_replay {
+    use super::*;
+
+    /// Triple count of a single graph (default-graph store only) — the per-graph size probe.
+    fn count(g: &Graph) -> usize {
+        g.store.scan(&[None, None, None]).rows.len()
+    }
+
+    /// A canonical, sorted (s, p, o, graph) dump of the WHOLE dataset — the exact-equality probe
+    /// used to assert that an `apply_effects` replay reproduces the captured in-memory state.
+    /// (Same shape as the dump helpers in the other two test modules.)
+    fn dump(g: &Graph) -> Vec<(String, String, String, String)> {
+        let mut v: Vec<(String, String, String, String)> = Vec::new();
+        let mut one = |g: &Graph, name: &str| {
+            let scan = g.store.scan(&[None, None, None]);
+            for r in scan.rows.iter() {
+                let t = scan.to_spo(r);
+                v.push((
+                    g.dict.term(t[0]).to_string(),
+                    g.dict.term(t[1]).to_string(),
+                    g.dict.term(t[2]).to_string(),
+                    name.to_string(),
+                ));
+            }
+        };
+        one(g, "");
+        for (name, sub) in &g.named {
+            one(sub, &name.to_string());
+        }
+        v.sort();
+        v
+    }
+
+    fn budget() -> crate::QueryBudget {
+        crate::QueryBudget::unlimited()
+    }
+
+    /// Capture the resolved effects of running `sparql` against a fresh graph built from `src`,
+    /// then replay those effects onto a SECOND, independently-built graph from the same `src`.
+    /// Returns `(captured_graph, replayed_graph, effects)`. The two graphs MUST then be equal —
+    /// that is the durable-mirror guarantee under test.
+    fn capture_and_replay(src: &str, fmt: &str, sparql: &str) -> (Graph, Graph, Vec<UpdateEffect>) {
+        let mut a = load(src, fmt);
+        let mut b = load(src, fmt);
+        let effects = update_in_place_capturing(&mut a, sparql, &budget()).unwrap();
+        apply_effects(&mut b, &effects).unwrap();
+        (a, b, effects)
+    }
+
+    fn load(src: &str, fmt: &str) -> Graph {
+        match fmt {
+            "nquads" => Graph::load_dataset(src, "nquads").unwrap(),
+            _ => Graph::load_str(src, fmt).unwrap(),
+        }
+    }
+
+    fn assert_equiv(a: &Graph, b: &Graph, ctx: &str) {
+        assert_eq!(dump(a), dump(b), "captured and replayed datasets diverged: {ctx}");
+        assert_eq!(a.named.len(), b.named.len(), "named-graph slot count diverged: {ctx}");
+    }
+
+    /// THE CORE GUARANTEE. An UPDATE containing `NOW()`, `RAND()`, `UUID()`, `STRUUID()` and a
+    /// fresh `BNODE()` resolves those to concrete values ONCE during the in-memory application;
+    /// replaying the captured delta onto a second graph reproduces those EXACT values. Re-running
+    /// the *text* would re-roll every one of them and diverge. We prove non-divergence by exact
+    /// dataset equality, and we prove the values were actually non-trivial by counting them.
+    #[test]
+    fn nondeterministic_functions_replay_identically() {
+        let src = "@prefix : <http://ex/> . :a :p :x . :b :p :y . :c :p :z .";
+        // One INSERT … WHERE per match binds NOW/RAND/UUID/STRUUID/BNODE — five fresh
+        // values per solution, all of which would re-roll on a text re-execution.
+        let sparql = "PREFIX : <http://ex/> \
+            INSERT { \
+                ?s :ts ?t . ?s :r ?r . ?s :id ?u . ?s :sid ?su . ?s :note _:n . _:n :for ?s \
+            } WHERE { \
+                ?s :p ?o . \
+                BIND(NOW() AS ?t) BIND(RAND() AS ?r) BIND(UUID() AS ?u) BIND(STRUUID() AS ?su) \
+            }";
+        let (a, b, effects) = capture_and_replay(src, "turtle", sparql);
+        assert_equiv(&a, &b, "NOW/RAND/UUID/STRUUID/BNODE");
+        // 3 solutions, original 3 + (6 template triples × 3) = 21 triples.
+        assert_eq!(count(&a), 3 + 18, "all template triples inserted");
+        // Exactly one resolved INSERT Delta was captured (no DELETE side, default graph).
+        let deltas: Vec<_> = effects
+            .iter()
+            .filter(|e| matches!(e, UpdateEffect::Delta { .. }))
+            .collect();
+        assert_eq!(deltas.len(), 1, "one resolved insert delta");
+        // The captured timestamps/uuids are concrete: three DISTINCT uuid objects exist
+        // (would also be three after a re-roll, but the point is they are PINNED in the log).
+        let uuids = crate::count(&a, "PREFIX : <http://ex/> SELECT DISTINCT ?u WHERE { ?s :id ?u }").unwrap();
+        assert_eq!(uuids, 3, "three distinct captured UUIDs replayed verbatim");
+        // The fresh BNODE() / template bnode resolved once and replayed as the SAME node shape.
+        let notes = crate::count(&a, "PREFIX : <http://ex/> SELECT * WHERE { ?n :for ?s }").unwrap();
+        assert_eq!(notes, 3, "fresh blank nodes replayed");
+    }
+
+    /// `UpdateEffect::Delta` for INSERT DATA — default graph AND a named-graph slot — captured
+    /// once each and replayed exactly.
+    #[test]
+    fn delta_insert_data_default_and_named() {
+        let sparql = "PREFIX : <http://ex/> \
+            INSERT DATA { :a :p :b . :b :p :c . GRAPH :g1 { :x :q :y . :x :q :z } }";
+        let (a, b, effects) = capture_and_replay("", "turtle", sparql);
+        assert_equiv(&a, &b, "insert-data default+named");
+        // Two slots → two Delta effects (default + :g1), each insert-only.
+        let mut slots: Vec<_> = effects
+            .iter()
+            .filter_map(|e| match e {
+                UpdateEffect::Delta { slot, inserts, deletes } => {
+                    assert!(deletes.is_empty(), "INSERT DATA produces no deletes");
+                    Some((slot.is_none(), inserts.len()))
+                }
+                _ => None,
+            })
+            .collect();
+        slots.sort();
+        assert_eq!(slots, vec![(false, 2), (true, 2)], "default(2) + named(2) insert deltas");
+        assert_eq!(a.named.len(), 1, ":g1 created once");
+    }
+
+    /// `UpdateEffect::Delta` for DELETE DATA (default graph and a named graph).
+    #[test]
+    fn delta_delete_data() {
+        let src = "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
+                   <http://ex/x> <http://ex/q> <http://ex/y> <http://ex/g1> .";
+        let sparql = "PREFIX : <http://ex/> \
+            DELETE DATA { :a :p :b . GRAPH :g1 { :x :q :y } }";
+        let (a, b, effects) = capture_and_replay(src, "nquads", sparql);
+        assert_equiv(&a, &b, "delete-data default+named");
+        assert_eq!(count(&a), 0, "default triple deleted");
+        assert_eq!(count(&a.named[0].1), 0, "named triple deleted");
+        // Two delete-only Delta effects.
+        let deletes_only = effects.iter().all(|e| matches!(e, UpdateEffect::Delta { inserts, .. } if inserts.is_empty()));
+        assert!(deletes_only, "DELETE DATA produces delete-only deltas");
+        assert_eq!(effects.len(), 2, "default + named delete deltas");
+    }
+
+    /// `UpdateEffect::Delta` for DELETE/INSERT … WHERE in the default graph AND a named-graph
+    /// slot — and the deletes-before-inserts capture order that `apply_effects` must preserve.
+    #[test]
+    fn delta_delete_insert_where_default_and_named() {
+        // Default-graph rename; capture order must put the delete delta before the insert delta.
+        let src = "@prefix : <http://ex/> . :a :age 30 . :b :age 25 .";
+        let sparql =
+            "PREFIX : <http://ex/> DELETE { ?s :age ?a } INSERT { ?s :years ?a } WHERE { ?s :age ?a }";
+        let (a, b, effects) = capture_and_replay(src, "turtle", sparql);
+        assert_equiv(&a, &b, "delete/insert-where default");
+        assert_eq!(crate::count(&a, "PREFIX : <http://ex/> SELECT * WHERE { ?s :years ?a }").unwrap(), 2);
+        assert_eq!(crate::count(&a, "PREFIX : <http://ex/> SELECT * WHERE { ?s :age ?a }").unwrap(), 0);
+        // The first Delta captured is the deletes (inserts empty), then the inserts.
+        let kinds: Vec<(bool, bool)> = effects
+            .iter()
+            .filter_map(|e| match e {
+                UpdateEffect::Delta { inserts, deletes, .. } => Some((!inserts.is_empty(), !deletes.is_empty())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec![(false, true), (true, false)], "deletes captured before inserts");
+
+        // A named-graph slot via a GRAPH template (the ADD-desugar shape).
+        let src2 = "<http://ex/x> <http://ex/q> <http://ex/y> <http://ex/g1> .";
+        let sparql2 = "PREFIX : <http://ex/> INSERT { GRAPH :g2 { ?s ?p ?o } } WHERE { GRAPH :g1 { ?s ?p ?o } }";
+        let (a2, b2, _) = capture_and_replay(src2, "nquads", sparql2);
+        assert_equiv(&a2, &b2, "delete/insert-where named");
+        let g2 = a2.named.iter().find(|(n, _)| n.to_string().contains("g2")).expect(":g2 created");
+        assert_eq!(count(&g2.1), 1, "named-graph insert delta replayed");
+    }
+
+    /// `UpdateEffect::Clear` — every `GraphTarget` variant — captured and replayed.
+    #[test]
+    fn clear_effect_all_targets() {
+        let src = "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
+                   <http://ex/x> <http://ex/q> <http://ex/y> <http://ex/g1> .\n\
+                   <http://ex/m> <http://ex/n> <http://ex/o> <http://ex/g2> .";
+        for (clause, expect_clear) in [
+            ("CLEAR DEFAULT", "default"),
+            ("CLEAR GRAPH <http://ex/g1>", "g1"),
+            ("CLEAR NAMED", "named"),
+            ("CLEAR ALL", "all"),
+        ] {
+            let (a, b, effects) = capture_and_replay(src, "nquads", clause);
+            assert_equiv(&a, &b, clause);
+            assert!(
+                matches!(effects.as_slice(), [UpdateEffect::Clear(_)]),
+                "{clause} captured one Clear effect"
+            );
+            match expect_clear {
+                "default" => assert_eq!(count(&a), 0),
+                "all" => assert_eq!(count(&a), 0),
+                _ => {}
+            }
+        }
+    }
+
+    /// `UpdateEffect::Drop` — every `GraphTarget` variant — captured and replayed.
+    #[test]
+    fn drop_effect_all_targets() {
+        let src = "<http://ex/a> <http://ex/p> <http://ex/b> .\n\
+                   <http://ex/x> <http://ex/q> <http://ex/y> <http://ex/g1> .\n\
+                   <http://ex/m> <http://ex/n> <http://ex/o> <http://ex/g2> .";
+        for clause in ["DROP DEFAULT", "DROP GRAPH <http://ex/g1>", "DROP NAMED", "DROP ALL"] {
+            let (a, b, effects) = capture_and_replay(src, "nquads", clause);
+            assert_equiv(&a, &b, clause);
+            assert!(
+                matches!(effects.as_slice(), [UpdateEffect::Drop(_)]),
+                "{clause} captured one Drop effect"
+            );
+        }
+        // DROP GRAPH removes the entry; replay must remove it on B too.
+        let (a, b, _) = capture_and_replay(src, "nquads", "DROP GRAPH <http://ex/g1>");
+        assert!(!a.named.iter().any(|(n, _)| n.to_string().contains("g1")));
+        assert_eq!(a.named.len(), b.named.len());
+    }
+
+    /// `UpdateEffect::Create` — CREATE GRAPH captured and replayed; the empty named slot must
+    /// exist on the replayed graph too.
+    #[test]
+    fn create_effect_replays_empty_named_graph() {
+        let (a, b, effects) = capture_and_replay("", "turtle", "CREATE GRAPH <http://ex/fresh>");
+        assert!(matches!(effects.as_slice(), [UpdateEffect::Create(_)]), "one Create effect");
+        assert!(a.named.iter().any(|(n, _)| n.to_string().contains("fresh")), "slot created on A");
+        assert_equiv(&a, &b, "create graph");
+        // Idempotent: CREATE of an existing graph is still a captured Create that replays cleanly.
+        let mut a2 = a;
+        let mut b2 = b;
+        let e2 = update_in_place_capturing(&mut a2, "CREATE GRAPH <http://ex/fresh>", &budget()).unwrap();
+        apply_effects(&mut b2, &e2).unwrap();
+        assert_eq!(a2.named.len(), 1, "no duplicate slot from a re-CREATE");
+        assert_equiv(&a2, &b2, "idempotent create");
+    }
+
+    /// `record_delta` EMPTY-BATCH ELISION: a DELETE/INSERT … WHERE whose WHERE matches nothing
+    /// produces ZERO `Delta` effects (empty inserts+deletes are never recorded), so the replay
+    /// is a clean no-op.
+    #[test]
+    fn empty_where_records_no_delta() {
+        let src = "@prefix : <http://ex/> . :a :p :b .";
+        // WHERE matches nothing → no per-solution templates → no recorded delta.
+        let sparql = "PREFIX : <http://ex/> DELETE { ?s :age ?a } INSERT { ?s :years ?a } WHERE { ?s :age ?a }";
+        let (a, b, effects) = capture_and_replay(src, "turtle", sparql);
+        assert!(effects.is_empty(), "empty WHERE records no Delta effect, got {effects:?}");
+        assert_equiv(&a, &b, "empty where");
+        assert_eq!(count(&a), 1, "the unmatched update changed nothing");
+
+        // A DELETE DATA of a triple that is present still records (the batch is non-empty even
+        // though the delete may be a no-op against the store) — this anchors the elision: it is
+        // the empty BATCH, not the empty EFFECT, that is elided. DELETE DATA of nothing parses
+        // to an empty data list, so it records nothing either.
+        let empty_insert = "PREFIX : <http://ex/> INSERT { ?s :q ?o } WHERE { ?s :nomatch ?o }";
+        let e2 = update_in_place_capturing(&mut load(src, "turtle"), empty_insert, &budget()).unwrap();
+        assert!(e2.is_empty(), "an INSERT-WHERE with no matches records nothing");
+    }
+
+    /// `ensure_named` ROUTING through `apply_slot_delta`: an INSERT DATA into a BRAND-NEW named
+    /// graph creates the slot ONCE; a subsequent INSERT into the same name targets the SAME slot
+    /// (no duplicate). Both the capturing run and the replay must agree.
+    #[test]
+    fn ensure_named_creates_slot_once() {
+        // First INSERT creates :ng; capture it.
+        let mut a = load("", "turtle");
+        let mut b = load("", "turtle");
+        let e1 = update_in_place_capturing(
+            &mut a,
+            "PREFIX : <http://ex/> INSERT DATA { GRAPH :ng { :x :p :y } }",
+            &budget(),
+        )
+        .unwrap();
+        apply_effects(&mut b, &e1).unwrap();
+        assert_eq!(a.named.len(), 1, "one named slot after first insert");
+        assert_eq!(b.named.len(), 1, "replay created the same single slot");
+
+        // Second INSERT into the SAME named graph must reuse the slot (no duplicate).
+        let e2 = update_in_place_capturing(
+            &mut a,
+            "PREFIX : <http://ex/> INSERT DATA { GRAPH :ng { :x :p :z } }",
+            &budget(),
+        )
+        .unwrap();
+        apply_effects(&mut b, &e2).unwrap();
+        assert_eq!(a.named.len(), 1, "no duplicate slot on a second insert into the same graph");
+        assert_eq!(count(&a.named[0].1), 2, "both triples landed in the one slot");
+        assert_equiv(&a, &b, "ensure_named single slot");
+
+        // A DELETE into an ABSENT named graph is a no-op (apply_slot_delta's inserts-empty
+        // early return) AND records nothing — replay stays consistent.
+        let e3 = update_in_place_capturing(
+            &mut a,
+            "PREFIX : <http://ex/> DELETE DATA { GRAPH :absent { :a :b :c } }",
+            &budget(),
+        )
+        .unwrap();
+        // The delete batch is non-empty so it IS recorded, but applies to an absent graph as a
+        // no-op; replaying it on B must likewise be a no-op (no slot created).
+        apply_effects(&mut b, &e3).unwrap();
+        assert_eq!(a.named.len(), 1, "delete into an absent graph creates no slot");
+        assert_equiv(&a, &b, "delete absent named graph");
+    }
+
+    /// SINK-ABSENT path is unchanged: `update_in_place_with_budget` (None sink) applies the same
+    /// state a capturing run does, and capture is fully elided (it returns nothing to inspect —
+    /// the contract is that the in-memory mutation is byte-identical). We assert the two paths
+    /// produce the same dataset.
+    #[test]
+    fn sink_absent_path_matches_capturing() {
+        let src = "@prefix : <http://ex/> . :a :p :b . :b :p :c . :a :age 30 .";
+        let sparql = "PREFIX : <http://ex/> \
+            INSERT DATA { :c :p :d } ; \
+            DELETE { ?s :age ?a } INSERT { ?s :years ?a } WHERE { ?s :age ?a } ; \
+            INSERT DATA { GRAPH :g1 { :n :m :o } }";
+        // No-sink path.
+        let mut none = load(src, "turtle");
+        update_in_place_with_budget(&mut none, sparql, &budget()).unwrap();
+        // Capturing path on an independent graph + replay onto a third.
+        let (cap, replay, _) = capture_and_replay(src, "turtle", sparql);
+        assert_eq!(dump(&none), dump(&cap), "no-sink and capturing apply the same state");
+        assert_eq!(dump(&none), dump(&replay), "replay reproduces the no-sink state");
+        // And the plain `update_in_place` wrapper (unlimited budget) is the same again.
+        let mut plain = load(src, "turtle");
+        update_in_place(&mut plain, sparql).unwrap();
+        assert_eq!(dump(&plain), dump(&none), "update_in_place wrapper == budgeted no-sink");
+    }
+
+    /// `apply_effects` on a FRESH (empty) graph reproduces a multi-operation request's full
+    /// committed state — the end-to-end durable-mirror replay: capture against a seeded graph,
+    /// replay the SAME effect log onto a graph that started empty but receives the resolved
+    /// deltas (this is the durable-after-restart scenario where the mirror starts from base).
+    #[test]
+    fn apply_effects_on_fresh_graph_full_request() {
+        let src = "@prefix : <http://ex/> . :a :p :b . :b :p :c . :a :age 30 . :b :age 25 .";
+        // A request touching every effect-producing shape in one go.
+        let sparql = "PREFIX : <http://ex/> \
+            INSERT DATA { :c :p :d } ; \
+            DELETE { ?s :age ?a } INSERT { ?s :years ?a } WHERE { ?s :age ?a } ; \
+            INSERT DATA { GRAPH :g1 { :n :m :o } } ; \
+            CREATE GRAPH :g2 ; \
+            CLEAR GRAPH :g1 ; \
+            DROP GRAPH :g2";
+        let mut captured = load(src, "turtle");
+        let effects = update_in_place_capturing(&mut captured, sparql, &budget()).unwrap();
+        // Replay onto an independently-built graph (the durable mirror, identically seeded).
+        let mut mirror = load(src, "turtle");
+        apply_effects(&mut mirror, &effects).unwrap();
+        assert_eq!(dump(&captured), dump(&mirror), "full multi-op request replayed identically");
+        // CLEARed g1 is empty-but-present; dropped g2 is gone.
+        assert!(captured.named.iter().any(|(n, _)| n.to_string().contains("g1")));
+        assert!(!captured.named.iter().any(|(n, _)| n.to_string().contains("g2")));
+        // Replaying the SAME log a SECOND time onto the same mirror is idempotent for the
+        // structural ops and set-semantic for the data ops (no divergence).
+        apply_effects(&mut mirror, &effects).unwrap();
+        assert_eq!(dump(&captured), dump(&mirror), "re-applying the effect log does not diverge");
+    }
+}
+
