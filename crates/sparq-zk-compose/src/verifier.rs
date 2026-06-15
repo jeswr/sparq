@@ -1300,7 +1300,11 @@ impl std::fmt::Display for CheckError {
             CheckError::ScanCommitmentsNotStrictlyIncreasing { proof, at } => write!(
                 f,
                 "scan sub-proof {proof}: per-graph commitments are not strictly increasing at index {at} (commitments[{at}] <= commitments[{at_prev}]) (plan S2.5 / sq-vxq8: distinct-graph strict ordering — a duplicate or out-of-order commitment is the duplicate-inclusion / COUNT forgery, e.g. the same credential included twice to claim 'I hold >=2 tickets')",
-                at_prev = at - 1
+                // [OPUS-4.8] `Display` must be panic-free for every constructible value
+                // (Copilot PR #95): the sole constructor sets `at` from `1..len()`, so
+                // `at >= 1` in practice, but `saturating_sub` avoids an `at - 1` underflow
+                // (debug panic / release wrap) should `at == 0` ever reach here.
+                at_prev = at.saturating_sub(1)
             ),
             CheckError::NonceReplay => write!(
                 f,
