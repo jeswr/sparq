@@ -46,7 +46,7 @@ register distinguishes two trust classes of `unsafe`:
 
 ## Register
 
-**54 `unsafe` sites** across 5 crates (the other 20 crates are `#![forbid(unsafe_code)]`).
+**56 `unsafe` sites** across 5 crates (the other 20 crates are `#![forbid(unsafe_code)]`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
 must equal `bench/unsafe-snapshot.json`.
 
@@ -60,7 +60,7 @@ Recurring invariant shorthands used below:
   borrow's duration and is not mutated by us; external concurrent mutation is explicitly
   out of contract (documented stance, same as the rest of the mmap surface).
 
-### `sparq-core` — 40 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
+### `sparq-core` — 42 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
@@ -80,6 +80,8 @@ Recurring invariant shorthands used below:
 | `src/lib.rs:4235` | ptr `add` (prefetch arg) | `id-1 < remap.len()` | same as 3548 (other build path). |
 | `src/lib.rs:4392` | `MmapMut::map_mut` | own-for-lifetime; freshly-written perm file | read-write map of a perm file of whole `[u32;3]` rows we just wrote. |
 | `src/lib.rs:4393` | mut slice reinterpret | page-align; POD-bytes | `len/4` u32; exclusively owned (the `MmapMut`); rayon writes are disjoint by index. |
+| `src/lib.rs:6229` | `std::env::set_var` | single-threaded test; var restored before return | TEST-only (`#[test] external_quads_fd_*`): sets `SPARQ_QUADS_SPILL_MAX_OPEN` to exercise the bounded-writer-pool path; no other thread reads the env in the test. Edition-2024 made `set_var` `unsafe`. |
+| `src/lib.rs:6231` | `std::env::remove_var` | same test; restores the env | TEST-only: removes the var set at 6229 before returning so the process env is left clean. Edition-2024 `unsafe`. |
 | `src/store.rs:106` | slice reinterpret (read) | page-align; whole `[u32;3]` triples | `n = len/12`; mmap base ≥ 4-byte u32 align. |
 | `src/store.rs:375` | slice reinterpret (write) | POD-bytes | reinterpret contiguous `[u32;3]` rows as bytes for `std::fs::write`. |
 | `src/store.rs:459` | `Mmap::map` | own-for-lifetime | per-permutation file; empty (size 0) skipped; format auto-detected after. **B5**. |
@@ -141,7 +143,7 @@ Recurring invariant shorthands used below:
 
 ## NEEDS-REVIEW
 
-**None.** Every one of the 54 sites has a clear, sound safety argument and a
+**None.** Every one of the 56 sites has a clear, sound safety argument and a
 corresponding `// SAFETY:` comment in source. Should a future site lack one, mark it
 `NEEDS-REVIEW` here and open a bead (`bd create`) rather than fabricating a
 justification — do **not** re-seed the snapshot over an unjustified `unsafe`.

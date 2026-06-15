@@ -64,15 +64,40 @@ SCAN_ROOT = os.path.join(REPO_ROOT, "crates")
 _KW = re.compile(r"\bunsafe\b(\s*\{|\s+fn\b|\s+impl\b|\s+trait\b|\s+extern\b)")
 
 
-def _strip_line_comment(line: str) -> str:
-    """Drop a trailing `//` comment, but not a `//` that sits inside a string."""
+def _mask_line(line: str, in_block: bool):
+    """Single-pass blank-out of comments and string contents on one line.
+
+    Returns (masked_line, still_in_block). All four lexical contexts are tracked
+    SIMULTANEOUSLY in source order, so the bugs of order-dependent stripping are
+    avoided: a `/*` inside a `//` line comment (e.g. `// a/* = ...`) does NOT open
+    a block comment; a `//` or `/*` inside a `"..."` string does NOT start a
+    comment; and `*/` only closes a block when we are actually in one. Masked-out
+    characters become spaces so column positions (and thus the `unsafe` keyword
+    regex) stay faithful to the surviving code. Block-comment state carries across
+    lines via `in_block`.
+
+    Rust raw strings (r"...", r#"..."#) are NOT specially handled, but the keyword
+    regex only fires on `unsafe` directly followed by `{`/`fn`/`impl`/`trait`/
+    `extern`, which raw-string payloads in this codebase do not contain, so this is
+    conservative for the count.
+    """
     out = []
     in_str = esc = False
     i = 0
-    while i < len(line):
+    n = len(line)
+    while i < n:
         c = line[i]
+        if in_block:
+            if c == "*" and i + 1 < n and line[i + 1] == "/":
+                in_block = False
+                out.append("  ")
+                i += 2
+                continue
+            out.append(" ")
+            i += 1
+            continue
         if in_str:
-            out.append(c)
+            out.append(" ")  # blank out string contents (incl. any // or /*)
             if esc:
                 esc = False
             elif c == "\\":
@@ -83,14 +108,19 @@ def _strip_line_comment(line: str) -> str:
             continue
         if c == '"':
             in_str = True
-            out.append(c)
+            out.append(" ")
             i += 1
             continue
-        if c == "/" and i + 1 < len(line) and line[i + 1] == "/":
-            break
+        if c == "/" and i + 1 < n and line[i + 1] == "/":
+            break  # rest of line is a `//` comment — drop it (even if it has /*)
+        if c == "/" and i + 1 < n and line[i + 1] == "*":
+            in_block = True
+            out.append("  ")
+            i += 2
+            continue
         out.append(c)
         i += 1
-    return "".join(out)
+    return "".join(out), in_block
 
 
 def enumerate_sites():
@@ -105,22 +135,8 @@ def enumerate_sites():
             in_block = False
             with open(path, errors="replace") as fh:
                 for lineno, raw in enumerate(fh, 1):
-                    line = raw
-                    if in_block:
-                        if "*/" in line:
-                            line = line.split("*/", 1)[1]
-                            in_block = False
-                        else:
-                            continue
-                    while "/*" in line:
-                        pre, rest = line.split("/*", 1)
-                        if "*/" in rest:
-                            line = pre + rest.split("*/", 1)[1]
-                        else:
-                            line = pre
-                            in_block = True
-                            break
-                    if _KW.search(_strip_line_comment(line)):
+                    masked, in_block = _mask_line(raw, in_block)
+                    if _KW.search(masked):
                         yield crate, rel, lineno, raw.rstrip()
 
 
