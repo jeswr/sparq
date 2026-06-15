@@ -1,6 +1,6 @@
 ---
 name: python
-description: Use the sparq RDF + SPARQL engine from Python (PyPI distribution `sparq-rdf`; `import sparq`). Reach for this when an agent or developer needs to load RDF (Turtle/N-Triples/N-Quads/TriG), run SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE, apply SPARQL Update, do opt-in RDFS/OWL-RL/Notation3 reasoning + OWL inconsistency checks, run BM25 full-text search (text: magic predicates), or persist/memory-map a triplestore — all via the pyo3 sparq.Graph class.
+description: "Use the sparq RDF + SPARQL engine from Python (PyPI distribution `sparq-rdf`; `import sparq`). Reach for this when an agent or developer needs to load RDF (Turtle/N-Triples/N-Quads/TriG), run SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE, apply SPARQL Update, do opt-in RDFS/OWL-RL/Notation3 reasoning + OWL inconsistency checks, run BM25 full-text search (text: magic predicates), or persist/memory-map a triplestore — all via the pyo3 sparq.Graph class."
 ---
 
 # sparq (Python)
